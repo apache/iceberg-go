@@ -17,7 +17,7 @@
 
 //go:build integration
 
-package gocloud_test
+package azure_test
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
+	_ "github.com/apache/iceberg-go/io/gocloud/azure"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 	"gocloud.dev/blob/azureblob"

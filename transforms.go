@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -35,11 +34,6 @@ import (
 	"github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 	"github.com/twmb/murmur3"
-)
-
-var (
-	bucketTransformRegex   = regexp.MustCompile(`^bucket\[(\d+)\]$`)
-	truncateTransformRegex = regexp.MustCompile(`^truncate\[(\d+)\]$`)
 )
 
 // ParseTransform takes the string representation of a transform as
@@ -55,45 +49,158 @@ func ParseTransform(s string) (Transform, error) {
 		return nil, fmt.Errorf("%w: empty transform", ErrInvalidTransform)
 	}
 
-	lower := strings.ToLower(s)
+	if transform, ok := parseSimpleTransform(s); ok {
+		return transform, nil
+	}
 
-	if matches := bucketTransformRegex.FindStringSubmatch(lower); len(matches) == 2 {
-		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
+	if n, matched := parseTransformWidth(s, "bucket["); matched {
+		if n == 0 {
 			return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 		}
 
 		return BucketTransform{NumBuckets: n}, nil
 	}
 
-	if matches := truncateTransformRegex.FindStringSubmatch(lower); len(matches) == 2 {
-		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
+	if n, matched := parseTransformWidth(s, "truncate["); matched {
+		if n == 0 {
 			return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 		}
 
 		return TruncateTransform{Width: n}, nil
 	}
 
-	switch lower {
-	case "identity":
-		return IdentityTransform{}, nil
-	case "void":
-		return VoidTransform{}, nil
-	case "year":
-		return YearTransform{}, nil
-	case "month":
-		return MonthTransform{}, nil
-	case "day":
-		return DayTransform{}, nil
-	case "hour":
-		return HourTransform{}, nil
+	if hasASCIICaseDifference(s) {
+		if transform, ok := parseSimpleTransformFold(s); ok {
+			return transform, nil
+		}
+
+		if n, matched := parseTransformWidthFold(s, "bucket["); matched {
+			if n == 0 {
+				return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
+			}
+
+			return BucketTransform{NumBuckets: n}, nil
+		}
+
+		if n, matched := parseTransformWidthFold(s, "truncate["); matched {
+			if n == 0 {
+				return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
+			}
+
+			return TruncateTransform{Width: n}, nil
+		}
 	}
 
 	// Unknown transform: v3 readers must load these and ignore them when
 	// filtering instead of failing. Keep the original string, case and all, so it
 	// round-trips; Equals stays byte-for-byte, matching Java's UnknownTransform.
 	return UnknownTransform{name: s}, nil
+}
+
+func hasASCIICaseDifference(s string) bool {
+	for i := range s {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			return true
+		}
+	}
+
+	return false
+}
+
+func parseSimpleTransformFold(s string) (Transform, bool) {
+	switch {
+	case strings.EqualFold(s, "identity"):
+		return IdentityTransform{}, true
+	case strings.EqualFold(s, "void"):
+		return VoidTransform{}, true
+	case strings.EqualFold(s, "year"):
+		return YearTransform{}, true
+	case strings.EqualFold(s, "month"):
+		return MonthTransform{}, true
+	case strings.EqualFold(s, "day"):
+		return DayTransform{}, true
+	case strings.EqualFold(s, "hour"):
+		return HourTransform{}, true
+	default:
+		return nil, false
+	}
+}
+
+func parseSimpleTransform(s string) (Transform, bool) {
+	switch s {
+	case "identity":
+		return IdentityTransform{}, true
+	case "void":
+		return VoidTransform{}, true
+	case "year":
+		return YearTransform{}, true
+	case "month":
+		return MonthTransform{}, true
+	case "day":
+		return DayTransform{}, true
+	case "hour":
+		return HourTransform{}, true
+	default:
+		return nil, false
+	}
+}
+
+func parseTransformWidth(s, prefix string) (int, bool) {
+	if !strings.HasPrefix(s, prefix) || len(s) <= len(prefix)+1 || s[len(s)-1] != ']' {
+		return 0, false
+	}
+
+	width := s[len(prefix) : len(s)-1]
+	for i := range width {
+		if width[i] < '0' || width[i] > '9' {
+			return 0, false
+		}
+	}
+
+	n, err := strconv.Atoi(width)
+	if err != nil || n <= 0 || n > math.MaxInt32 {
+		return 0, true
+	}
+
+	return n, true
+}
+
+func parseTransformWidthFold(s, prefix string) (int, bool) {
+	if !hasPrefixFold(s, prefix) || len(s) <= len(prefix)+1 || s[len(s)-1] != ']' {
+		return 0, false
+	}
+
+	width := s[len(prefix) : len(s)-1]
+	for i := range width {
+		if width[i] < '0' || width[i] > '9' {
+			return 0, false
+		}
+	}
+
+	n, err := strconv.Atoi(width)
+	if err != nil || n <= 0 || n > math.MaxInt32 {
+		return 0, true
+	}
+
+	return n, true
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+
+	for i := range prefix {
+		got := s[i]
+		if got >= 'A' && got <= 'Z' {
+			got += 'a' - 'A'
+		}
+		if got != prefix[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Transform is an interface for the various Transformation types

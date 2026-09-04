@@ -17,7 +17,7 @@
 
 //go:build integration
 
-package gocloud_test
+package s3_test
 
 import (
 	"context"
@@ -29,7 +29,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
+	_ "github.com/apache/iceberg-go/io/gocloud/s3"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )

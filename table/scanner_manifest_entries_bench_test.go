@@ -60,31 +60,63 @@ func BenchmarkManifestEntryCollection(b *testing.B) {
 		{name: "data", content: iceberg.ManifestContentData},
 		{name: "deletes", content: iceberg.ManifestContentDeletes},
 	} {
-		for _, benchmarkCase := range benchmarkCases {
-			name := fmt.Sprintf("content=%s/manifests=%d/concurrency=%d/entries=%d",
-				workload.name, benchmarkCase.manifestCount, benchmarkCase.concurrency, benchmarkCase.entryCount)
-			b.Run(name, func(b *testing.B) {
-				entries := benchmarkManifestEntries(benchmarkCase.entryCount, workload.content)
-				b.ReportAllocs()
-				b.ResetTimer()
-				b.ReportMetric(float64(benchmarkCase.manifestCount*benchmarkCase.entryCount), "entries/op")
+		for _, method := range []struct {
+			name    string
+			collect func([]iceberg.ManifestEntry, int, int) *manifestEntries
+		}{
+			{name: "merge", collect: collectManifestEntryBatchesWithMerge},
+			{name: "flatten", collect: collectManifestEntryBatches},
+		} {
+			for _, benchmarkCase := range benchmarkCases {
+				name := fmt.Sprintf("method=%s/content=%s/manifests=%d/concurrency=%d/entries=%d",
+					method.name, workload.name, benchmarkCase.manifestCount, benchmarkCase.concurrency, benchmarkCase.entryCount)
+				b.Run(name, func(b *testing.B) {
+					entries := benchmarkManifestEntries(benchmarkCase.entryCount, workload.content)
+					b.ReportAllocs()
+					b.ResetTimer()
+					b.ReportMetric(float64(benchmarkCase.manifestCount*benchmarkCase.entryCount), "entries/op")
 
-				var result *manifestEntries
-				for range b.N {
-					result = collectManifestEntryBatches(entries, benchmarkCase.manifestCount, benchmarkCase.concurrency)
-				}
+					var result *manifestEntries
+					for range b.N {
+						result = method.collect(entries, benchmarkCase.manifestCount, benchmarkCase.concurrency)
+					}
 
-				if got, want := len(result.dataEntries)+len(result.positionalDeleteEntries)+
-					len(result.equalityDeleteEntries)+len(result.dvEntries), benchmarkCase.manifestCount*benchmarkCase.entryCount; got != want {
-					b.Fatalf("collected %d entries, want %d", got, want)
-				}
-				runtime.KeepAlive(result)
-			})
+					if got, want := len(result.dataEntries)+len(result.positionalDeleteEntries)+
+						len(result.equalityDeleteEntries)+len(result.dvEntries), benchmarkCase.manifestCount*benchmarkCase.entryCount; got != want {
+						b.Fatalf("collected %d entries, want %d", got, want)
+					}
+					runtime.KeepAlive(result)
+				})
+			}
 		}
 	}
 }
 
 func collectManifestEntryBatches(entries []iceberg.ManifestEntry, manifestCount, concurrency int) *manifestEntries {
+	results := make([]classifiedManifestEntries, manifestCount)
+	var g errgroup.Group
+	g.SetLimit(min(concurrency, manifestCount))
+	for manifestIndex := range manifestCount {
+		g.Go(func() error {
+			manifestEntries := append(make([]iceberg.ManifestEntry, 0, len(entries)), entries...)
+			classified, err := classifyManifestEntries(manifestEntries)
+			if err != nil {
+				return err
+			}
+			results[manifestIndex] = classified
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		panic(err)
+	}
+
+	return flattenClassifiedManifestEntries(results)
+}
+
+func collectManifestEntryBatchesWithMerge(entries []iceberg.ManifestEntry, manifestCount, concurrency int) *manifestEntries {
 	collected := newManifestEntries()
 	var g errgroup.Group
 	g.SetLimit(min(concurrency, manifestCount))

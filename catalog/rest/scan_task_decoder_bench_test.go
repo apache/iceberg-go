@@ -84,3 +84,28 @@ func deletionVectorScanTasksWire(taskCount int, explicitOwner bool) ScanTasks {
 
 	return wire
 }
+
+func BenchmarkDecodeScanTasks(b *testing.B) {
+	metadata := newScanTaskDecoderMetadata()
+	base := validScanTasksWire().FileScanTasks[0].DataFile
+
+	for _, taskCount := range []int{1, 64, 1024} {
+		b.Run(fmt.Sprintf("%d_tasks", taskCount), func(b *testing.B) {
+			wire := ScanTasks{FileScanTasks: make([]RESTFileScanTask, taskCount)}
+			for i := range wire.FileScanTasks {
+				dataFile := *base
+				wire.FileScanTasks[i] = RESTFileScanTask{
+					DataFile: &dataFile,
+				}
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if _, err := DecodeScanTasks(wire, metadata, metadata.schema, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

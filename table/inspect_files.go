@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
@@ -297,7 +298,13 @@ func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.
 // union of partition fields from every spec, which lets metadata tables
 // represent live files written before partition evolution.
 func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
-	currentSchema := metadata.CurrentSchema()
+	return inspectPartitionTypeWithSchema(metadata, metadata.CurrentSchema())
+}
+
+func inspectPartitionTypeWithSchema(
+	metadata Metadata,
+	currentSchema *iceberg.Schema,
+) (*iceberg.StructType, error) {
 	specs := metadata.PartitionSpecs()
 	sort.Slice(specs, func(left, right int) bool {
 		return specs[left].ID() > specs[right].ID()
@@ -317,7 +324,10 @@ func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
 		for idx, field := range spec.Fields() {
 			active := true
 			for _, sourceID := range field.SourceIDs {
-				if _, ok := currentSchema.FindTypeByID(sourceID); !ok {
+				// This is an existence check only. FindTypeByID clones the
+				// complete nested type on every call, which is wasteful while
+				// building the union of position-delete partition fields.
+				if _, ok := currentSchema.FindFieldByIDRef(sourceID, iceinternal.SchemaRef{}); !ok {
 					active = false
 
 					break

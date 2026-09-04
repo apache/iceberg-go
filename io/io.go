@@ -24,9 +24,9 @@
 //
 //	import _ "github.com/apache/iceberg-go/io/gocloud"
 //
-// Will register cloud storage implementations for S3, GCS, Azure, and in-memory
-// blob storage. The local filesystem (file:// and empty scheme) is registered
-// by default.
+// Will register S3, GCS and Azure, and link all three cloud SDKs.
+// Importing io/gocloud/s3, io/gocloud/gcs or io/gocloud/azure instead registers only that backend.
+// The local filesystem (file:// and empty scheme) is always registered.
 package io
 
 import (
@@ -341,9 +341,9 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 // (file:// or empty scheme) is registered by default.
 //
 // Additional schemes can be registered by importing subpackages.
-// For S3, GCS, Azure and in-memory support, import:
+// Import the backend for each cloud in use, or io/gocloud for all of them:
 //
-//	import _ "github.com/apache/iceberg-go/io/gocloud"
+//	import _ "github.com/apache/iceberg-go/io/gocloud/s3"
 func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]

@@ -21,5 +21,5 @@ import "github.com/apache/arrow-go/v18/parquet/pqarrow"
 
 // WrapParquetFileReader exposes wrapPqArrowReader for testing.
 func WrapParquetFileReader(fr *pqarrow.FileReader) FileReader {
-	return wrapPqArrowReader{fr}
+	return wrapPqArrowReader{FileReader: fr}
 }

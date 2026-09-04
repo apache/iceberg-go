@@ -22,9 +22,11 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -115,7 +117,202 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 	}
 }
 
-func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.RecordBatch, buildDel func(int) *equalityDeleteSet) {
+var equalityDeleteLoadingBenchmarkSink int
+
+type equalityDeleteLoadingBenchmarkInput struct {
+	fs          *countingEqualityDeleteOpenFS
+	tableSchema *iceberg.Schema
+	tasks       []FileScanTask
+	deleteFiles int
+}
+
+func BenchmarkLazyEqualityDeleteLoading(b *testing.B) {
+	input := newEqualityDeleteLoadingBenchmarkInput(b)
+
+	b.Run("eager/all_tasks", func(b *testing.B) {
+		input.fs.opens.Store(0)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			perTask, err := readAllEqualityDeleteFiles(
+				b.Context(), input.fs, input.tableSchema, nil, input.tasks, 16)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			totalKeys := 0
+			for _, sets := range perTask {
+				for _, deleteSet := range sets {
+					totalKeys += len(deleteSet.keys)
+				}
+			}
+			equalityDeleteLoadingBenchmarkSink = totalKeys
+		}
+		b.StopTimer()
+		b.ReportMetric(float64(input.deleteFiles), "delete_files/op")
+		b.ReportMetric(float64(input.fs.opens.Load())/float64(b.N), "opens/op")
+	})
+
+	for _, benchmark := range []struct {
+		name      string
+		taskCount int
+	}{
+		{name: "lazy/unread", taskCount: 0},
+		{name: "lazy/first_task", taskCount: 1},
+		{name: "lazy/ten_tasks", taskCount: 10},
+		{name: "lazy/full_scan", taskCount: len(input.tasks)},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			input.fs.opens.Store(0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				loader, err := newLazyEqualityDeleteLoader(
+					input.fs, input.tableSchema, nil, nil, input.tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				totalKeys, err := loadEqualityDeleteTasksConcurrently(
+					b.Context(), loader, input.tasks[:benchmark.taskCount], 16)
+				if err != nil {
+					b.Fatal(err)
+				}
+				equalityDeleteLoadingBenchmarkSink = totalKeys
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(input.deleteFiles), "delete_files/op")
+			b.ReportMetric(float64(input.fs.opens.Load())/float64(b.N), "opens/op")
+		})
+	}
+}
+
+func loadEqualityDeleteTasksConcurrently(
+	ctx context.Context,
+	loader *lazyEqualityDeleteLoader,
+	tasks []FileScanTask,
+	concurrency int,
+) (int, error) {
+	if len(tasks) == 0 {
+		return 0, nil
+	}
+
+	taskChan := make(chan FileScanTask, len(tasks))
+	for _, task := range tasks {
+		taskChan <- task
+	}
+	close(taskChan)
+	totals := make(chan int, len(tasks))
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	workerCount := min(concurrency, len(tasks))
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				sets, err := loader.load(ctx, task)
+				if err != nil {
+					select {
+					case errs <- err:
+					default:
+					}
+
+					return
+				}
+
+				total := 0
+				for _, deleteSet := range sets {
+					total += len(deleteSet.keys)
+				}
+				totals <- total
+			}
+		}()
+	}
+	wg.Wait()
+	close(totals)
+
+	total := 0
+	for count := range totals {
+		total += count
+	}
+
+	select {
+	case err := <-errs:
+		return total, err
+	default:
+		return total, nil
+	}
+}
+
+func newEqualityDeleteLoadingBenchmarkInput(b *testing.B) equalityDeleteLoadingBenchmarkInput {
+	b.Helper()
+
+	const (
+		deleteFileCount = 1_000
+		taskCount       = 10_000
+	)
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	fs := &countingEqualityDeleteOpenFS{MemFS: iceio.NewMemFS()}
+	firstPath := "mem://benchmark-lazy-equality/delete-0000.parquet"
+	writeEqualityDeleteParquetToMemFS(b, fs.MemFS, firstPath,
+		`[{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9}]`)
+	file, err := fs.MemFS.Open(firstPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	contents, err := io.ReadAll(file)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	deleteFiles := make([]iceberg.DataFile, deleteFileCount)
+	for i := range deleteFileCount {
+		path := fmt.Sprintf("mem://benchmark-lazy-equality/delete-%04d.parquet", i)
+		if i > 0 {
+			if err := fs.WriteFile(path, contents); err != nil {
+				b.Fatal(err)
+			}
+		}
+		deleteFiles[i] = newEqualityDeleteSetAssemblyTestFile(b, path, []int{1})
+	}
+
+	tasks := make([]FileScanTask, taskCount)
+	for i := range tasks {
+		tasks[i] = FileScanTask{
+			EqualityDeleteFiles: []iceberg.DataFile{deleteFiles[i%deleteFileCount]},
+		}
+	}
+
+	return equalityDeleteLoadingBenchmarkInput{
+		fs:          fs,
+		tableSchema: tableSchema,
+		tasks:       tasks,
+		deleteFiles: deleteFileCount,
+	}
+}
+
+func benchEqDeletes(
+	b *testing.B,
+	buildRec func(memory.Allocator, int) arrow.RecordBatch,
+	buildDel func(int) *equalityDeleteSet,
+	fileSchema *iceberg.Schema,
+) {
+	b.Helper()
+	benchEqDeletesForFile(b, buildRec, buildDel, fileSchema)
+}
+
+func benchEqDeletesForFile(
+	b *testing.B,
+	buildRec func(memory.Allocator, int) arrow.RecordBatch,
+	buildDel func(int) *equalityDeleteSet,
+	fileSchema *iceberg.Schema,
+) {
 	b.Helper()
 
 	dataRows := []int{1_000, 100_000, 1_000_000}
@@ -133,12 +330,8 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 				rec := buildRec(mem, nData)
 				defer rec.Release()
 
-				delSet := buildDel(nDel)
-				fileSchema := iceberg.NewSchema(0,
-					iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int64},
-					iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int64},
-				)
-				filterFn, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{delSet}, fileSchema, "data.parquet")
+				delSets := []*equalityDeleteSet{buildDel(nDel)}
+				filterFn, err := processEqualityDeletesColumnarForFile(ctx, delSets, fileSchema, "bench.parquet")
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -158,6 +351,20 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 			})
 		}
 	}
+}
+
+func benchIntFileSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.Int64},
+	)
+}
+
+func benchStringFileSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+	)
 }
 
 func buildBenchRecordInt(mem memory.Allocator, numRows int) arrow.RecordBatch {
@@ -187,9 +394,9 @@ func buildBenchDeleteSetInt(numDeletes int) *equalityDeleteSet {
 	for i := range numDeletes {
 		buf.Reset()
 		buf.WriteByte(1)
-		binary.Write(&buf, binary.BigEndian, int64(i*3))
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
 		buf.WriteByte(1)
-		binary.Write(&buf, binary.BigEndian, int64((i*3)%100))
+		_ = binary.Write(&buf, binary.BigEndian, int64((i*3)%100))
 		keys[buf.String()] = struct{}{}
 	}
 
@@ -227,10 +434,10 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	for i := range numDeletes {
 		buf.Reset()
 		buf.WriteByte(1)
-		binary.Write(&buf, binary.BigEndian, int64(i*3))
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
 		buf.WriteByte(1)
 		s := fmt.Sprintf("user-%08d", i*3)
-		binary.Write(&buf, binary.BigEndian, int32(len(s)))
+		_ = binary.Write(&buf, binary.BigEndian, int32(len(s)))
 		buf.WriteString(s)
 		keys[buf.String()] = struct{}{}
 	}
@@ -242,10 +449,166 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	}
 }
 
+func buildBenchDeleteSetIntNoMatch(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string])
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64((i*3+1)%100))
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1, 2},
+		colNames: []string{"id", "category"},
+	}
+}
+
+func buildBenchDeleteSetStringNoMatch(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string])
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
+		buf.WriteByte(1)
+		name := fmt.Sprintf("user-%08d", i*3+1)
+		_ = binary.Write(&buf, binary.BigEndian, int32(len(name)))
+		buf.WriteString(name)
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1, 2},
+		colNames: []string{"id", "name"},
+	}
+}
+
 func BenchmarkProcessEqualityDeletesInt(b *testing.B) {
-	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetInt)
+	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetInt, benchIntFileSchema())
 }
 
 func BenchmarkProcessEqualityDeletesString(b *testing.B) {
-	benchEqDeletes(b, buildBenchRecordString, buildBenchDeleteSetString)
+	benchEqDeletes(b, buildBenchRecordString, buildBenchDeleteSetString, benchStringFileSchema())
+}
+
+func BenchmarkProcessEqualityDeletesNoMatchInt(b *testing.B) {
+	benchEqDeletesForFile(b, buildBenchRecordInt, buildBenchDeleteSetIntNoMatch, benchIntFileSchema())
+}
+
+func BenchmarkProcessEqualityDeletesNoMatchString(b *testing.B) {
+	benchEqDeletesForFile(b, buildBenchRecordString, buildBenchDeleteSetStringNoMatch, benchStringFileSchema())
+}
+
+func BenchmarkResolveEqualityDeleteFieldPaths(b *testing.B) {
+	for _, fieldCount := range []int{32, 256, 2_048} {
+		for _, keySize := range []int{1, 2, 8} {
+			for _, position := range []string{"front", "middle", "end"} {
+				b.Run(fmt.Sprintf("fields=%d/key=%d/position=%s", fieldCount, keySize, position), func(b *testing.B) {
+					schema := benchmarkEqualityDeleteSchema(fieldCount)
+					fieldIDs := benchmarkEqualityDeleteFieldIDs(fieldCount, keySize, position)
+
+					b.ReportAllocs()
+					b.ReportMetric(float64(fieldCount), "schema_fields")
+					b.ReportMetric(float64(keySize), "equality_fields")
+					b.ResetTimer()
+
+					for b.Loop() {
+						refs := resolveArrowFieldsByID(schema, fieldIDs)
+						metadataBuilderBenchmarkSink = len(refs) + len(refs[fieldIDs[0]])
+					}
+				})
+			}
+		}
+	}
+}
+
+func BenchmarkResolveEqualityDeleteNestedFieldPaths(b *testing.B) {
+	schema, fieldID := benchmarkNestedEqualityDeleteSchema(8, 3)
+	fieldIDs := []int{fieldID}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		refs := resolveArrowFieldsByID(schema, fieldIDs)
+		metadataBuilderBenchmarkSink = len(refs) + len(refs[fieldID][0].path)
+	}
+}
+
+func benchmarkEqualityDeleteSchema(fieldCount int) *iceberg.Schema {
+	fields := make([]iceberg.NestedField, fieldCount)
+	for i := range fields {
+		fields[i] = iceberg.NestedField{
+			ID:       i + 1,
+			Name:     fmt.Sprintf("field_%d", i+1),
+			Type:     iceberg.PrimitiveTypes.Int64,
+			Required: true,
+		}
+	}
+
+	return iceberg.NewSchema(0, fields...)
+}
+
+func benchmarkEqualityDeleteFieldIDs(fieldCount, keySize int, position string) []int {
+	start := 1
+	switch position {
+	case "middle":
+		start = (fieldCount-keySize)/2 + 1
+	case "end":
+		start = fieldCount - keySize + 1
+	}
+
+	fieldIDs := make([]int, keySize)
+	for i := range fieldIDs {
+		fieldIDs[i] = start + i
+	}
+
+	return fieldIDs
+}
+
+func benchmarkNestedEqualityDeleteSchema(width, depth int) (*iceberg.Schema, int) {
+	nextID := 1
+	lastLeafID := 0
+	var buildStruct func(int) *iceberg.StructType
+	buildStruct = func(level int) *iceberg.StructType {
+		fields := make([]iceberg.NestedField, width)
+		for i := range fields {
+			fieldID := nextID
+			nextID++
+			field := iceberg.NestedField{
+				ID:   fieldID,
+				Name: fmt.Sprintf("nested_%d", fieldID),
+			}
+			if level == 0 {
+				field.Type = iceberg.PrimitiveTypes.Int64
+				lastLeafID = fieldID
+			} else {
+				field.Type = buildStruct(level - 1)
+			}
+			fields[i] = field
+		}
+
+		return &iceberg.StructType{FieldList: fields}
+	}
+
+	fields := make([]iceberg.NestedField, width)
+	for i := range fields {
+		fieldID := nextID
+		nextID++
+		fields[i] = iceberg.NestedField{
+			ID:   fieldID,
+			Name: fmt.Sprintf("root_%d", fieldID),
+			Type: buildStruct(depth - 1),
+		}
+	}
+
+	return iceberg.NewSchema(0, fields...), lastLeafID
 }

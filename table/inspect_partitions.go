@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -42,7 +43,6 @@ type inspectPartitionAggregate struct {
 	equalityDeleteFiles int32
 	lastUpdatedAt       *int64
 	lastUpdatedSnapshot *int64
-	partitionRecord     partitionRecord
 	orderingKey         string
 }
 
@@ -70,6 +70,25 @@ func (t *inspectPartitionAggregateTree) lookup(record partitionRecord) *inspectP
 	return node.aggregate
 }
 
+func (t *inspectPartitionAggregateTree) lookupPartition(
+	partition map[int]any,
+	partitionType *iceberg.StructType,
+) *inspectPartitionAggregate {
+	node := t
+	for _, field := range partitionType.FieldList {
+		child, ok := node.children[comparablePartitionKey(partition[field.ID])]
+		if !ok {
+			return nil
+		}
+		node = child
+	}
+
+	return node.aggregate
+}
+
+// insert walks the positional record, while lookupPartition walks partition
+// field IDs. Build records with the same partition type so their field order
+// stays aligned.
 func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate *inspectPartitionAggregate) {
 	node := t
 	for _, value := range record {
@@ -152,14 +171,14 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 				return nil, err
 			}
 			file := entry.DataFile()
-			partition := inspectCoercePartition(file.Partition(), partitionType)
-			record := newPartitionRecord(partition, partitionType)
-			aggregate := aggregateTree.lookup(record)
+			partitionValues := dataFilePartition(file)
+			aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
 			if aggregate == nil {
+				partition := inspectCoercePartition(partitionValues, partitionType)
+				record := newPartitionRecord(partition, partitionType)
 				aggregate = &inspectPartitionAggregate{
-					partition:       cloneInspectPartition(partition),
-					partitionRecord: record,
-					orderingKey:     inspectPartitionKey(partition),
+					partition:   cloneInspectPartition(partition),
+					orderingKey: inspectPartitionKey(partition),
 				}
 				aggregates = append(aggregates, aggregate)
 				aggregateTree.insert(record, aggregate)
@@ -253,6 +272,9 @@ func cloneInspectPartition(partition map[int]any) map[int]any {
 	}
 	returnMap := make(map[int]any, len(partition))
 	for id, value := range partition {
+		if bytes, ok := value.([]byte); ok {
+			value = slices.Clone(bytes)
+		}
 		returnMap[id] = value
 	}
 

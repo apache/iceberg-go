@@ -29,6 +29,7 @@ import (
 var (
 	removeSnapshotsBenchmarkSink int
 	metadataBuilderBenchmarkSink int
+	bulkRemovalBenchmarkSink     int
 )
 
 var removeSnapshotsBenchmarkCases = []struct {
@@ -43,6 +44,76 @@ var removeSnapshotsBenchmarkCases = []struct {
 	{snapshotCount: 10_000, removedCount: 8},
 	{snapshotCount: 10_000, removedCount: 64},
 	{snapshotCount: 10_000, removedCount: 5_000},
+}
+
+var bulkRemovalBenchmarkCases = []struct {
+	entryCount   int
+	removedCount int
+}{
+	{entryCount: 8, removedCount: 1},
+	{entryCount: 8, removedCount: 2},
+	{entryCount: 8, removedCount: 4},
+	{entryCount: 32, removedCount: 8},
+	{entryCount: 32, removedCount: 9},
+	{entryCount: 32, removedCount: 16},
+	{entryCount: 128, removedCount: 16},
+	{entryCount: 128, removedCount: 17},
+	{entryCount: 128, removedCount: 32},
+	{entryCount: 128, removedCount: 64},
+	{entryCount: 1_024, removedCount: 512},
+	{entryCount: 8_192, removedCount: 4_096},
+}
+
+func BenchmarkRemovePartitionSpecs(b *testing.B) {
+	for _, tc := range bulkRemovalBenchmarkCases {
+		b.Run(fmt.Sprintf("specs=%d/removed=%d", tc.entryCount, tc.removedCount), func(b *testing.B) {
+			template := benchmarkPartitionSpecBuilder(tc.entryCount)
+			removed := benchmarkRemovedIDs(tc.removedCount)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.ReportMetric(float64(tc.entryCount), "spec_entries")
+			b.ReportMetric(float64(len(removed)), "removed_specs")
+
+			for range b.N {
+				b.StopTimer()
+				builder := template
+				builder.specs = slices.Clone(template.specs)
+				b.StartTimer()
+
+				if err := builder.RemovePartitionSpecs(removed); err != nil {
+					b.Fatal(err)
+				}
+				bulkRemovalBenchmarkSink = len(builder.specs)
+			}
+		})
+	}
+}
+
+func BenchmarkRemoveSchemas(b *testing.B) {
+	for _, tc := range bulkRemovalBenchmarkCases {
+		b.Run(fmt.Sprintf("schemas=%d/removed=%d", tc.entryCount, tc.removedCount), func(b *testing.B) {
+			template := benchmarkSchemaBuilder(tc.entryCount)
+			removed := benchmarkRemovedIDs(tc.removedCount)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.ReportMetric(float64(tc.entryCount), "schema_entries")
+			b.ReportMetric(float64(len(removed)), "removed_schemas")
+
+			for range b.N {
+				b.StopTimer()
+				builder := template
+				builder.schemaList = slices.Clone(template.schemaList)
+				b.StartTimer()
+
+				if err := builder.RemoveSchemas(removed); err != nil {
+					b.Fatal(err)
+				}
+				bulkRemovalBenchmarkSink = len(builder.schemaList)
+			}
+		})
+	}
 }
 
 func BenchmarkRemoveSnapshots(b *testing.B) {
@@ -300,4 +371,31 @@ func benchmarkSnapshots(snapshotCount int) []Snapshot {
 	}
 
 	return snapshots
+}
+
+func benchmarkPartitionSpecBuilder(entryCount int) MetadataBuilder {
+	specs := make([]iceberg.PartitionSpec, entryCount)
+	for i := range specs {
+		specs[i] = iceberg.NewPartitionSpecID(i)
+	}
+
+	return MetadataBuilder{specs: specs, defaultSpecID: -1}
+}
+
+func benchmarkSchemaBuilder(entryCount int) MetadataBuilder {
+	schemas := make([]*iceberg.Schema, entryCount)
+	for i := range schemas {
+		schemas[i] = iceberg.NewSchema(i)
+	}
+
+	return MetadataBuilder{schemaList: schemas, currentSchemaID: -1}
+}
+
+func benchmarkRemovedIDs(removedCount int) []int {
+	removed := make([]int, removedCount)
+	for i := range removed {
+		removed[i] = i * 2
+	}
+
+	return removed
 }

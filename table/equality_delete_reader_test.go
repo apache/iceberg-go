@@ -143,27 +143,41 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows with id=2 and id=4 deleted")
 
-	resultSchema, itr, err := tbl.Scan(table.WithSelectedFields("data")).ToArrowRecords(t.Context())
-	require.NoError(t, err)
-	require.Len(t, resultSchema.Fields(), 1)
-	assert.Equal(t, "data", resultSchema.Fields()[0].Name)
-
-	var data []string
-	for rec, err := range itr {
+	scanData := func(tbl *table.Table) []string {
+		resultSchema, itr, err := tbl.Scan(table.WithSelectedFields("data")).ToArrowRecords(t.Context())
 		require.NoError(t, err)
-		require.EqualValues(t, 1, rec.NumCols())
-		col := rec.Column(0).(*array.String)
-		for i := range col.Len() {
-			data = append(data, col.Value(i))
+		require.Len(t, resultSchema.Fields(), 1)
+		assert.Equal(t, "data", resultSchema.Fields()[0].Name)
+
+		var data []string
+		for rec, err := range itr {
+			require.NoError(t, err)
+			require.EqualValues(t, 1, rec.NumCols())
+			col := rec.Column(0).(*array.String)
+			for i := range col.Len() {
+				data = append(data, col.Value(i))
+			}
+			rec.Release()
 		}
-		rec.Release()
+
+		return data
 	}
 
-	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, data,
+	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, scanData(tbl),
 		"expected equality deletes to apply when the equality field is not projected")
+
+	tx3 := tbl.NewTransaction()
+	require.NoError(t, tx3.UpdateSchema(true, false).DeleteColumn([]string{"id"}).Commit())
+	tbl, err = tx3.Commit(t.Context())
+	require.NoError(t, err)
+	_, currentHasEqualityField := tbl.Schema().FindFieldByID(1)
+	require.False(t, currentHasEqualityField)
+
+	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, scanData(tbl),
+		"expected equality deletes to apply when the equality field exists only in schema history")
 }
 
-func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.T) {
+func TestEqualityDeleteReadPrunesNonOverlappingDeleteFiles(t *testing.T) {
 	ctx := t.Context()
 	tbl := newEqDeleteReadTestTable(t)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
@@ -218,8 +232,15 @@ func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
 	for _, task := range tasks {
-		require.Len(t, task.EqualityDeleteFiles, 2,
-			"each task must use the same multi-file equality-delete union")
+		require.Len(t, task.EqualityDeleteFiles, 1)
+		switch {
+		case strings.HasSuffix(task.File.FilePath(), "/data-001.parquet"):
+			assert.Equal(t, deleteTwoFiles[0].FilePath(), task.EqualityDeleteFiles[0].FilePath())
+		case strings.HasSuffix(task.File.FilePath(), "/data-002.parquet"):
+			assert.Equal(t, deleteThreeFiles[0].FilePath(), task.EqualityDeleteFiles[0].FilePath())
+		default:
+			t.Errorf("unexpected data file %s", task.File.FilePath())
+		}
 	}
 
 	_, records, err := scan.ReadTasks(ctx, tasks)
@@ -465,8 +486,21 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	_, _, err = tbl.Scan().ToArrowRecords(t.Context())
-	require.ErrorIs(t, err, table.ErrAmbiguousEqualityColumn)
+	_, records, err := tbl.Scan().ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var scanErr error
+	for record, err := range records {
+		if record != nil {
+			record.Release()
+		}
+		if err != nil {
+			scanErr = err
+
+			break
+		}
+	}
+	require.ErrorIs(t, scanErr, table.ErrAmbiguousEqualityColumn)
 }
 
 func TestEqualityDeleteMatchingAcrossPartitionSpecEvolution(t *testing.T) {

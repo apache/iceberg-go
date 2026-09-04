@@ -19,6 +19,7 @@ package internal_test
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go/internal"
@@ -162,6 +163,35 @@ func TestReverseBinPackingLookback(t *testing.T) {
 			assert.Equal(t, tt.expected, bins)
 		})
 	}
+}
+
+func TestPackEndDoesNotMutateInput(t *testing.T) {
+	items := []int{1, 2, 3, 4, 5}
+	wantItems := slices.Clone(items)
+	p := &internal.SlicePacker[int]{
+		TargetWeight: 3,
+		Lookback:     1,
+	}
+
+	p.PackEnd(items, func(i int) int64 {
+		return int64(i)
+	})
+
+	assert.Equal(t, wantItems, items)
+}
+
+func TestPackEndEmptyResultIsNonNil(t *testing.T) {
+	p := &internal.SlicePacker[int]{
+		TargetWeight: 3,
+		Lookback:     1,
+	}
+
+	result := p.PackEnd(nil, func(int) int64 {
+		return 1
+	})
+
+	assert.NotNil(t, result)
+	assert.Empty(t, result)
 }
 
 func TestDifference(t *testing.T) {

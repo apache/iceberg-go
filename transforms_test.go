@@ -110,8 +110,12 @@ func TestParseTransform(t *testing.T) {
 		{"truncate no brackets", "truncate"},
 		{"bucket extra suffix", "bucketx[5]"},
 		{"bucket extra token", "bucket_extra[5]"},
+		{"bucket trailing data", "bucket[5]x"},
+		{"bucket plus sign", "bucket[+5]"},
 		{"truncate extra suffix", "truncatefoo[10]"},
 		{"truncate extra token", "truncate_garbage[4]"},
+		{"truncate trailing data", "truncate[10]x"},
+		{"truncate whitespace", "truncate[ 10]"},
 		{"preserves original case", "Custom_V2[3]"},
 		// Java's width pattern is (\w+)\[(\d+)\], so a reserved name with a
 		// missing/negative/non-numeric width simply doesn't match and becomes an

@@ -19,7 +19,7 @@ package hadoop
 
 import (
 	icebergio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud"
+	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 )
 
 // HadoopCatalogFS represents all the interfaces that a filesystem implementation
@@ -39,4 +39,4 @@ type HadoopCatalogFS interface {
 var _ HadoopCatalogFS = (*icebergio.LocalFS)(nil)
 
 // BlobFileIO can be used to implement a Hadoop catalog with a blob storage bucket.
-var _ HadoopCatalogFS = (*gocloud.BlobFileIO)(nil)
+var _ HadoopCatalogFS = (*blobfs.FileIO)(nil)

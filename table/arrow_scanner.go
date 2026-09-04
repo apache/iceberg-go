@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -43,8 +44,10 @@ import (
 )
 
 const (
-	ScanOptionArrowUseLargeTypes              = "arrow.use_large_types"
-	ScanOptionRowLineageEnabled               = "row_lineage.enabled"
+	ScanOptionArrowUseLargeTypes = "arrow.use_large_types"
+	ScanOptionRowLineageEnabled  = "row_lineage.enabled"
+	// This must stay a power of two because appendFilePathChunk uses a bit mask
+	// for periodic cancellation checks.
 	positionalDeleteCancellationCheckInterval = 16 * 1024
 )
 
@@ -361,110 +364,209 @@ func (c *posDeleteCursor) next() (int64, bool) {
 	return pos, true
 }
 
-func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if filePathCol.NullN() > 0 {
-		return nil, fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
-	}
-	if filePathValueType(filePathCol.DataType()).ID() == arrow.STRING_VIEW {
-		return nil, fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
-			iceberg.ErrInvalidSchema, filePathCol.DataType())
-	}
-	if posCol.NullN() > 0 {
-		return nil, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
-	}
-	if posCol.DataType().ID() != arrow.INT64 {
-		return nil, fmt.Errorf("%w: unsupported pos column type %s in position delete file",
-			iceberg.ErrInvalidSchema, posCol.DataType())
-	}
-	if filePathCol.Len() != posCol.Len() {
-		return nil, fmt.Errorf("%w: file_path and pos columns have different lengths: %d and %d",
-			iceberg.ErrInvalidSchema, filePathCol.Len(), posCol.Len())
-	}
+type posDeleteAccumulator struct {
+	mem      memory.Allocator
+	builders map[string]*array.Int64Builder
+}
 
-	mem := compute.GetAllocator(ctx)
-	posCursor, err := newPosDeleteCursor(posCol)
-	if err != nil {
-		return nil, err
+func newPosDeleteAccumulator(ctx context.Context) *posDeleteAccumulator {
+	return &posDeleteAccumulator{
+		mem:      compute.GetAllocator(ctx),
+		builders: make(map[string]*array.Int64Builder),
+	}
+}
+
+func (a *posDeleteAccumulator) release() {
+	for _, builder := range a.builders {
+		builder.Release()
+	}
+	a.builders = nil
+}
+
+func (a *posDeleteAccumulator) finish() map[string]*arrow.Chunked {
+	if a.builders == nil {
+		panic("position delete accumulator is already finished or released")
 	}
 
-	builders := make(map[string]*array.Int64Builder)
-	defer func() {
-		if err != nil {
-			for _, builder := range builders {
-				builder.Release()
-			}
-		}
-	}()
-
-	for _, filePathChunk := range filePathCol.Chunks() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		paths, pathErr := filePathValues(filePathChunk)
-		if pathErr != nil {
-			return nil, pathErr
-		}
-
-		var dictionary arrow.Array
-		var indices *array.Dictionary
-		if dict, ok := filePathChunk.(*array.Dictionary); ok && dict.Dictionary().NullN() > 0 {
-			dictionary = dict.Dictionary()
-			indices = dict
-		}
-
-		for i := range filePathChunk.Len() {
-			if i&(positionalDeleteCancellationCheckInterval-1) == 0 {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-			}
-
-			pos, ok := posCursor.next()
-			if !ok {
-				return nil, fmt.Errorf("%w: position delete columns ended before file_path column",
-					iceberg.ErrInvalidSchema)
-			}
-			if pos < 0 {
-				return nil, fmt.Errorf("%w: negative pos %d in position delete file",
-					iceberg.ErrInvalidSchema, pos)
-			}
-			if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
-				return nil, fmt.Errorf("%w: null file_path dictionary value in position delete file",
-					iceberg.ErrInvalidSchema)
-			}
-
-			path := paths.Value(i)
-			builder, ok := builders[path]
-			if !ok {
-				path = strings.Clone(path)
-				builder = array.NewInt64Builder(mem)
-				builders[path] = builder
-			}
-			builder.Append(pos)
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	results = make(map[string]*arrow.Chunked, len(builders))
-	for path, builder := range builders {
+	results := make(map[string]*arrow.Chunked, len(a.builders))
+	for path, builder := range a.builders {
 		positions := builder.NewInt64Array()
 		builder.Release()
 
 		results[path] = arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{positions})
 		positions.Release()
 	}
+	a.builders = nil
 
-	return results, nil
+	return results
 }
 
+func validatePosDeleteColumns(filePathType arrow.DataType, filePathNulls int,
+	posType arrow.DataType, posNulls int,
+) error {
+	if filePathNulls > 0 {
+		return fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
+	}
+	if filePathValueType(filePathType).ID() == arrow.STRING_VIEW {
+		return fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
+			iceberg.ErrInvalidSchema, filePathType)
+	}
+	if posNulls > 0 {
+		return fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
+	}
+	if posType.ID() != arrow.INT64 {
+		return fmt.Errorf("%w: unsupported pos column type %s in position delete file",
+			iceberg.ErrInvalidSchema, posType)
+	}
+
+	return nil
+}
+
+func validatePosDeleteColumnLengths(filePathLen, posLen int) error {
+	if filePathLen != posLen {
+		return fmt.Errorf("%w: file_path and pos columns have different lengths: %d and %d",
+			iceberg.ErrInvalidSchema, filePathLen, posLen)
+	}
+
+	return nil
+}
+
+func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePathChunk arrow.Array,
+	posCursor *posDeleteCursor,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	paths, err := filePathValues(filePathChunk)
+	if err != nil {
+		return err
+	}
+
+	var dictionary arrow.Array
+	var indices *array.Dictionary
+	if dict, ok := filePathChunk.(*array.Dictionary); ok && dict.Dictionary().NullN() > 0 {
+		dictionary = dict.Dictionary()
+		indices = dict
+	}
+
+	for i := range filePathChunk.Len() {
+		if i&(positionalDeleteCancellationCheckInterval-1) == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+
+		pos, ok := posCursor.next()
+		if !ok {
+			return fmt.Errorf("%w: position delete columns ended before file_path column",
+				iceberg.ErrInvalidSchema)
+		}
+		if pos < 0 {
+			return fmt.Errorf("%w: negative pos %d in position delete file",
+				iceberg.ErrInvalidSchema, pos)
+		}
+		if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
+			return fmt.Errorf("%w: null file_path dictionary value in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+
+		path := paths.Value(i)
+		builder, ok := a.builders[path]
+		if !ok {
+			path = strings.Clone(path)
+			builder = array.NewInt64Builder(a.mem)
+			a.builders[path] = builder
+		}
+		builder.Append(pos)
+	}
+
+	return nil
+}
+
+func (a *posDeleteAccumulator) appendChunked(ctx context.Context, filePathCol, posCol *arrow.Chunked) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(),
+		posCol.DataType(), posCol.NullN()); err != nil {
+		return err
+	}
+	if err := validatePosDeleteColumnLengths(filePathCol.Len(), posCol.Len()); err != nil {
+		return err
+	}
+
+	posCursor, err := newPosDeleteCursor(posCol)
+	if err != nil {
+		return err
+	}
+
+	for _, filePathChunk := range filePathCol.Chunks() {
+		if err := a.appendFilePathChunk(ctx, filePathChunk, &posCursor); err != nil {
+			return err
+		}
+	}
+
+	return ctx.Err()
+}
+
+func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.RecordBatch) error {
+	if record.NumCols() != 2 {
+		return fmt.Errorf("%w: projected position delete record has %d columns, expected 2",
+			iceberg.ErrInvalidSchema, record.NumCols())
+	}
+
+	filePathCol := record.Column(0)
+	posCol := record.Column(1)
+	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(),
+		posCol.DataType(), posCol.NullN()); err != nil {
+		return err
+	}
+
+	posArr := posCol.(*array.Int64)
+	posCursor := posDeleteCursor{chunks: []*array.Int64{posArr}}
+	if err := a.appendFilePathChunk(ctx, filePathCol, &posCursor); err != nil {
+		return err
+	}
+
+	return ctx.Err()
+}
+
+func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
+	acc := newPosDeleteAccumulator(ctx)
+	defer func() {
+		if err != nil {
+			acc.release()
+		}
+	}()
+
+	if err := acc.appendChunked(ctx, filePathCol, posCol); err != nil {
+		return nil, err
+	}
+
+	return acc.finish(), nil
+}
+
+const maxPositionalDeletePreallocation = 64 * 1024
+
 func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], error) {
-	deletes := set[int64]{}
+	totalPositions := 0
+	for _, chunk := range positionalDeletes {
+		if chunk == nil {
+			continue
+		}
+		// The set only reserves a bounded hint. Stop summing once that
+		// hint is reached so a large collection of chunks cannot overflow
+		// int before the cap is applied.
+		if chunk.Len() >= maxPositionalDeletePreallocation-totalPositions {
+			totalPositions = maxPositionalDeletePreallocation
+
+			break
+		}
+		totalPositions += chunk.Len()
+	}
+
+	deletes := make(set[int64], min(totalPositions, maxPositionalDeletePreallocation))
 	for _, chunk := range positionalDeletes {
 		if chunk == nil {
 			return nil, fmt.Errorf("%w: nil pos column chunk in position delete file",
@@ -517,29 +619,70 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
 
-	tbl, err := rdr.ReadTable(ctx)
+	schema, err := rdr.Schema()
 	if err != nil {
 		return nil, err
 	}
-	defer tbl.Release()
 
-	tbl, err = array.UnifyTableDicts(compute.GetAllocator(ctx), tbl)
+	columns, err := positionDeleteProjectionIndices(schema, rdr)
 	if err != nil {
 		return nil, err
 	}
-	defer tbl.Release()
 
-	filePathIndex, posIndex, err := positionDeleteColumnIndices(tbl.Schema())
+	records, err := rdr.GetRecords(ctx, columns, nil)
 	if err != nil {
 		return nil, err
 	}
-	filePathCol := tbl.Column(filePathIndex).Data()
-	posCol := tbl.Column(posIndex).Data()
-	if posCol.NullN() > 0 {
-		return nil, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
+	// Do not unify dictionaries here: appendFilePathChunk decodes each batch to
+	// string values, so independent dictionaries across batches are safe.
+	defer records.Release()
+
+	acc := newPosDeleteAccumulator(ctx)
+	defer func() {
+		// Returning an error assigns the named return value before deferred
+		// functions run, which releases builders on every error path.
+		if err != nil {
+			acc.release()
+		}
+	}()
+
+	for records.Next() {
+		if err := acc.appendRecord(ctx, records.RecordBatch()); err != nil {
+			return nil, err
+		}
+	}
+	if err := records.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	return groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	return acc.finish(), nil
+}
+
+func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(schema)
+	if err != nil {
+		return nil, err
+	}
+	fileMetadata, ok := reader.Metadata().(*metadata.FileMetaData)
+	if !ok {
+		return nil, fmt.Errorf("%w: position delete reader does not expose Parquet metadata", iceberg.ErrInvalidSchema)
+	}
+
+	// Parquet projection uses leaf indices. A nested row column can shift
+	// those indices relative to the top-level Arrow fields.
+	columns := make([]int, 2)
+	for i, fieldIndex := range []int{filePathIndex, posIndex} {
+		name := schema.Field(fieldIndex).Name
+		columns[i] = fileMetadata.Schema.ColumnIndexByName(name)
+		if columns[i] < 0 {
+			return nil, fmt.Errorf("%w: position delete column %q must be a primitive column", iceberg.ErrInvalidSchema, name)
+		}
+	}
+
+	return columns, nil
 }
 
 func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
@@ -788,15 +931,54 @@ type arrowScan struct {
 	// rowGroupFilter is used only for Parquet statistics and bloom-filter
 	// pruning. It lets callers keep boundRowFilter as AlwaysTrue while they
 	// must evaluate the real row filter after position-dependent enrichment.
-	rowGroupFilter  iceberg.BooleanExpression
-	filterSchema    *iceberg.Schema
-	caseSensitive   bool
-	rowLimit        int64
-	options         iceberg.Properties
-	filterPlanCache compiledFileFilterPlanCache
+	rowGroupFilter    iceberg.BooleanExpression
+	filterSchema      *iceberg.Schema
+	caseSensitive     bool
+	rowLimit          int64
+	options           iceberg.Properties
+	filterPlanCache   compiledFileFilterPlanCache
+	fileReadPlanCache preparedFileReadPlanCache
+	cacheFileReadPlan bool
 
 	useLargeTypes bool
 	concurrency   int
+}
+
+// preparedFileRead contains the physical schema projection shared by all
+// tasks reading the same data file during one scan. The actual FileReader is
+// intentionally not shared: split tasks may run concurrently and each reader
+// owns its column readers and input handle.
+type preparedFileRead struct {
+	schema     *iceberg.Schema
+	colIndices []int
+}
+
+type preparedFileReadEntry struct {
+	once sync.Once
+	plan *preparedFileRead
+	err  error
+}
+
+type preparedFileReadPlanCache struct {
+	mu      sync.Mutex
+	entries map[string]*preparedFileReadEntry
+}
+
+func (c *preparedFileReadPlanCache) entry(path string) *preparedFileReadEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.entries == nil {
+		c.entries = make(map[string]*preparedFileReadEntry)
+	}
+	if entry, ok := c.entries[path]; ok {
+		return entry
+	}
+
+	entry := &preparedFileReadEntry{}
+	c.entries[path] = entry
+
+	return entry
 }
 
 // arrowScanInvariants holds metadata-derived values that cannot change during
@@ -869,7 +1051,10 @@ func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression, equa
 }
 
 func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowScanInvariants, error) {
-	projectedIDs, err := as.projectedFieldIDs(as.boundRowFilter, nil)
+	// Filter columns are added per task below. A local task may have a
+	// partition-elided residual that no longer references the original filter
+	// fields.
+	projectedIDs, err := as.projectedFieldIDs(nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -883,6 +1068,18 @@ func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowS
 }
 
 func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, tasks []FileScanTask) error {
+	// Tasks without a residual still use the scan's original filter. Add those
+	// fields once, then add only the actual residual fields for other tasks.
+	for _, task := range tasks {
+		if task.Residual == nil {
+			if err := addFilterFieldIDs(invariants.projectedIDs, as.boundRowFilter); err != nil {
+				return err
+			}
+
+			break
+		}
+	}
+
 	for _, task := range tasks {
 		if task.Residual == nil {
 			continue
@@ -901,52 +1098,81 @@ func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, t
 	return nil
 }
 
-func addEqualityDeleteFieldIDs(invariants *arrowScanInvariants, eqDeleteSets map[int][]*equalityDeleteSet) {
-	for _, deleteSets := range eqDeleteSets {
-		for _, deleteSet := range deleteSets {
-			for _, id := range deleteSet.fieldIDs {
-				invariants.projectedIDs[id] = struct{}{}
-			}
-		}
-	}
-}
-
 type enumeratedRecord struct {
 	Record tblutils.Enumerated[arrow.RecordBatch]
 	Task   tblutils.Enumerated[FileScanTask]
 	Err    error
 }
 
-func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (*iceberg.Schema, []int, tblutils.FileReader, error) {
+func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (iceSchema *iceberg.Schema, colIndices []int, rdr tblutils.FileReader, err error) {
 	src, err := tblutils.GetFile(ctx, as.fs, file, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	rdr, err := src.GetReader(ctx)
+	rdr, err = src.GetReader(ctx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	keepReader := false
+	defer func(reader tblutils.FileReader) {
+		if !keepReader {
+			_ = reader.Close()
+		}
+	}(rdr)
 
-	fileSchema, colIndices, err := rdr.PrunedSchema(invariants.projectedIDs, invariants.nameMapping)
-	if err != nil {
-		rdr.Close()
+	if !as.cacheFileReadPlan {
+		var fileSchema *arrow.Schema
+		fileSchema, colIndices, err = rdr.PrunedSchema(
+			invariants.projectedIDs, invariants.nameMapping)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 
-		return nil, nil, nil, err
+		iceSchema, err = ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
+			NameMapping:     invariants.nameMapping,
+			TableSchema:     invariants.tableSchema,
+			TableProperties: invariants.tableProperties,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		keepReader = true
+
+		return iceSchema, colIndices, rdr, nil
 	}
 
-	iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
-		NameMapping:     invariants.nameMapping,
-		TableSchema:     invariants.tableSchema,
-		TableProperties: invariants.tableProperties,
+	entry := as.fileReadPlanCache.entry(file.FilePath())
+	entry.once.Do(func() {
+		var fileSchema *arrow.Schema
+		var colIndices []int
+		fileSchema, colIndices, entry.err = rdr.PrunedSchema(
+			invariants.projectedIDs, invariants.nameMapping)
+		if entry.err != nil {
+			return
+		}
+
+		var iceSchema *iceberg.Schema
+		iceSchema, entry.err = ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
+			NameMapping:     invariants.nameMapping,
+			TableSchema:     invariants.tableSchema,
+			TableProperties: invariants.tableProperties,
+		})
+		if entry.err == nil {
+			entry.plan = &preparedFileRead{
+				schema:     iceSchema,
+				colIndices: colIndices,
+			}
+		}
 	})
-	if err != nil {
-		rdr.Close()
-
-		return nil, nil, nil, err
+	if entry.err != nil {
+		return nil, nil, nil, entry.err
 	}
 
-	return iceSchema, colIndices, rdr, nil
+	keepReader = true
+
+	return entry.plan.schema, entry.plan.colIndices, rdr, nil
 }
 
 func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema, rowFilter iceberg.BooleanExpression) (recProcessFn, bool, error) {
@@ -1318,6 +1544,23 @@ func (as *arrowScan) processRecords(
 	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, out, nil)
 }
 
+// adjustParquetTaskRange keeps a planned range within the physical file when
+// manifest and footer sizes differ. It only clamps ranges that run past the
+// physical end; caller-owned task boundaries must never be extended.
+func adjustParquetTaskRange(task FileScanTask, physicalFileSize int64) (start, length int64) {
+	start, length = task.Start, task.Length
+	if task.File == nil || physicalFileSize <= 0 || start < 0 || start > physicalFileSize {
+		return start, length
+	}
+
+	maxLength := physicalFileSize - start
+	if length > maxLength {
+		length = maxLength
+	}
+
+	return start, length
+}
+
 func (as *arrowScan) processRecordsWithPlans(
 	ctx context.Context,
 	task tblutils.Enumerated[FileScanTask],
@@ -1404,6 +1647,17 @@ func (as *arrowScan) processRecordsWithPlans(
 				StatsFn:    statsFn,
 				BloomPreds: bloomPreds,
 			}
+		}
+		// A complete task already reads every row group. Leave its byte range
+		// unset so malformed or legacy row-group offsets cannot change the
+		// historical full-file behavior. A zero-value task is also treated as
+		// complete for callers that omit the range. Split and remote partial
+		// tasks carry their range through to the reader.
+		if task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes()) {
+			tester.RangeSet = true
+			tester.Start, tester.Length = adjustParquetTaskRange(task.Value, rdr.SourceFileSize())
+			tester.PlanningSplitOffsets = task.Value.File.SplitOffsets()
 		}
 		if posSource != nil {
 			tester.Survivors = &posSource.spans
@@ -1726,7 +1980,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 		return batch.Task.Index < 0
 	}
 
-	sequenced := tblutils.MakeSequencedChan(uint(numWorkers), records,
+	sequenced := tblutils.MakeSequencedChanWithDiscard(uint(numWorkers), records,
 		func(left, right *enumeratedRecord) bool {
 			switch {
 			case isBeforeAny(*left):
@@ -1752,7 +2006,11 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 				return next.Task.Index == prev.Task.Index+1 &&
 					prev.Record.Last && next.Record.Index == 0
 			}
-		}, enumeratedRecord{Task: tblutils.Enumerated[FileScanTask]{Index: -1}})
+		}, enumeratedRecord{Task: tblutils.Enumerated[FileScanTask]{Index: -1}}, func(rec enumeratedRecord) {
+			if rec.Record.Value != nil {
+				rec.Record.Value.Release()
+			}
+		})
 
 	totalRowCount := int64(0)
 
@@ -1819,59 +2077,78 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, dvBitmaps perFileDVBitmaps, eqDeleteSets map[int][]*equalityDeleteSet, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
-	extSet := substrait.NewExtensionSet()
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, dvBitmaps perFileDVBitmaps, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		extSet := substrait.NewExtensionSet()
 
-	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
-	taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
+		scanCtx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
+		taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
 
-	// numWorkers := 1
-	numWorkers := min(as.concurrency, len(tasks))
-	records := make(chan enumeratedRecord, numWorkers)
+		// numWorkers := 1
+		numWorkers := min(as.concurrency, len(tasks))
+		records := make(chan enumeratedRecord, numWorkers)
 
-	var wg sync.WaitGroup
-	wg.Add(numWorkers)
-	for range numWorkers {
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+		for range numWorkers {
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-scanCtx.Done():
+						return
+					case task, ok := <-taskChan:
+						if !ok {
+							return
+						}
+						if scanCtx.Err() != nil {
+							return
+						}
+
+						filePath := task.Value.File.FilePath()
+						eqDeleteSets, err := equalityDeleteLoader.load(scanCtx, task.Value)
+						if err != nil {
+							records <- enumeratedRecord{Task: task, Err: err}
+							cancel(err)
+
+							return
+						}
+
+						if err := as.recordsFromTask(scanCtx, task, records,
+							deletesPerFile[filePath],
+							dvBitmaps[filePath],
+							eqDeleteSets,
+							invariants); err != nil {
+							cancel(err)
+
+							return
+						}
+					}
+				}
+			}()
+		}
+
 		go func() {
-			defer wg.Done()
-			for {
+			defer func() {
+				close(taskChan)
+				wg.Wait()
+				close(records)
+			}()
+
+			for i, t := range tasks {
 				select {
-				case <-ctx.Done():
+				case <-scanCtx.Done():
 					return
-				case task, ok := <-taskChan:
-					if !ok {
-						return
-					}
-
-					filePath := task.Value.File.FilePath()
-					if err := as.recordsFromTask(ctx, task, records,
-						deletesPerFile[filePath],
-						dvBitmaps[filePath],
-						eqDeleteSets[task.Index],
-						invariants); err != nil {
-						cancel(err)
-
-						return
-					}
+				case taskChan <- tblutils.Enumerated[FileScanTask]{
+					Value: t, Index: i, Last: i == len(tasks)-1,
+				}:
 				}
 			}
 		}()
+
+		createIterator(scanCtx, uint(numWorkers), records, deletesPerFile,
+			cancel, as.rowLimit)(yield)
 	}
-
-	go func() {
-		for i, t := range tasks {
-			taskChan <- tblutils.Enumerated[FileScanTask]{
-				Value: t, Index: i, Last: i == len(tasks)-1,
-			}
-		}
-		close(taskChan)
-
-		wg.Wait()
-		close(records)
-	}()
-
-	return createIterator(ctx, uint(numWorkers), records, deletesPerFile,
-		cancel, as.rowLimit)
 }
 
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
@@ -1894,6 +2171,13 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 
 	if as.rowLimit == 0 {
 		return resultSchema, func(yield func(arrow.RecordBatch, error) bool) {}, nil
+	}
+
+	if len(tasks) > 1 {
+		as.cacheFileReadPlan = true
+		ctx = tblutils.WithParquetMetadataCache(ctx)
+	} else {
+		as.cacheFileReadPlan = false
 	}
 
 	invariants, err := as.scanInvariants(tableProperties)
@@ -1925,15 +2209,29 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		return nil, nil, err
 	}
 
-	eqDeleteSets, err := readAllEqualityDeleteFiles(ctx, as.fs,
-		invariants.tableSchema, invariants.nameMapping, tasks, as.concurrency)
+	var tableSchemas []*iceberg.Schema
+
+loadSchemaHistory:
+	for _, task := range tasks {
+		for _, deleteFile := range task.EqualityDeleteFiles {
+			for _, fieldID := range deleteFile.EqualityFieldIDs() {
+				if _, found := invariants.tableSchema.FindFieldByID(fieldID); !found {
+					tableSchemas = as.metadata.Schemas()
+
+					break loadSchemaHistory
+				}
+			}
+		}
+	}
+	equalityDeleteLoader, err := newLazyEqualityDeleteLoader(
+		as.fs, invariants.tableSchema, tableSchemas, invariants.nameMapping, tasks)
 	if err != nil {
-		// Positional deletes were fully loaded; release them before aborting.
 		releasePerFilePosDeletes(deletesPerFile)
 
 		return nil, nil, err
 	}
-	addEqualityDeleteFieldIDs(invariants, eqDeleteSets)
+	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 
-	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks, deletesPerFile, dvBitmaps, eqDeleteSets, invariants), nil
+	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks,
+		deletesPerFile, dvBitmaps, equalityDeleteLoader, invariants), nil
 }

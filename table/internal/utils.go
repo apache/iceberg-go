@@ -83,11 +83,27 @@ func (pq *pqueue[T]) Pop() any {
 // based on the comesAfter and isNext functions. The values are read in from
 // the provided source and then re-ordered before being sent to the output.
 func MakeSequencedChan[T any](bufferSize uint, source <-chan T, comesAfter, isNext func(a, b *T) bool, initial T) <-chan T {
+	return MakeSequencedChanWithDiscard(bufferSize, source, comesAfter, isNext, initial, nil)
+}
+
+// MakeSequencedChanWithDiscard is MakeSequencedChan with a callback for values
+// that remain in the reorder queue when the source is closed. Values already
+// sent to the output are not passed to discard.
+func MakeSequencedChanWithDiscard[T any](bufferSize uint, source <-chan T, comesAfter, isNext func(a, b *T) bool, initial T, discard func(T)) <-chan T {
 	pq := pqueue[T]{queue: make([]*T, 0), compare: comesAfter}
 	heap.Init(&pq)
 	previous, out := &initial, make(chan T, bufferSize)
 	go func() {
 		defer close(out)
+		defer func() {
+			if discard == nil {
+				return
+			}
+
+			for _, val := range pq.queue {
+				discard(*val)
+			}
+		}()
 		for val := range source {
 			heap.Push(&pq, &val)
 			for pq.Len() > 0 && isNext(previous, pq.queue[0]) {
@@ -624,7 +640,7 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 		if result[i] < 255 {
 			result[i]++
 
-			return result
+			return result[:i+1]
 		}
 	}
 

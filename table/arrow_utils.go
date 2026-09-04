@@ -2143,7 +2143,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	// V3+ tables write deletion vectors via Puffin regardless of partitioning,
 	// matching the Java reference implementation, which hardcodes DV for v3 and
 	// does not expose a property to opt out. The DV path threads each data
-	// file's spec id and partition record through DVWriter.Add so partitioned
+	// file's spec id and partition record through DVWriter so partitioned
 	// outputs carry the correct manifest-entry partition.
 	if latestMetadata.Version() >= 3 {
 		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args, latestMetadata, partitionContextByFilePath)
@@ -2201,7 +2201,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 // positionDeleteRecordsToDataFilesDV produces deletion-vector Puffin output
 // for v3+ tables. Each row's data file path must have an entry in
 // partitionContextByFilePath: the (specID, partitionData) is captured on
-// DVWriter.Add and lands on the output DataFile manifest entry, mirroring
+// DVWriter.Load/AddPosition and lands on the output DataFile manifest entry, mirroring
 // Java's BaseDVFileWriter, which keys deletes by (path, spec, partition).
 // A missing entry is a programming error (the caller failed to pre-register
 // every data file targeted by the delete) and surfaces as an error rather
@@ -2253,7 +2253,7 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 					return
 				}
-				if err := writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData); err != nil {
+				if err := writer.AddPosition(filePath, positions.Value(int(i)), pCtx.specID, pCtx.partitionData); err != nil {
 					yield(nil, err)
 
 					return

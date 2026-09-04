@@ -315,6 +315,41 @@ func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
 	return err
 }
 
+func flattenClassifiedManifestEntries(results []classifiedManifestEntries) *manifestEntries {
+	var counts [manifestEntryKindCount]int
+	for _, result := range results {
+		counts[manifestEntryData] += len(result.dataEntries)
+		counts[manifestEntryPositionalDelete] += len(result.positionalDeleteEntries)
+		counts[manifestEntryEqualityDelete] += len(result.equalityDeleteEntries)
+		counts[manifestEntryDV] += len(result.dvEntries)
+	}
+
+	flattened := &manifestEntries{
+		dataEntries:             make([]iceberg.ManifestEntry, counts[manifestEntryData]),
+		positionalDeleteEntries: make([]iceberg.ManifestEntry, counts[manifestEntryPositionalDelete]),
+		equalityDeleteEntries:   make([]iceberg.ManifestEntry, counts[manifestEntryEqualityDelete]),
+		dvEntries:               make([]iceberg.ManifestEntry, counts[manifestEntryDV]),
+	}
+
+	var offsets [manifestEntryKindCount]int
+	for _, result := range results {
+		offsets[manifestEntryData] += copy(
+			flattened.dataEntries[offsets[manifestEntryData]:], result.dataEntries,
+		)
+		offsets[manifestEntryPositionalDelete] += copy(
+			flattened.positionalDeleteEntries[offsets[manifestEntryPositionalDelete]:], result.positionalDeleteEntries,
+		)
+		offsets[manifestEntryEqualityDelete] += copy(
+			flattened.equalityDeleteEntries[offsets[manifestEntryEqualityDelete]:], result.equalityDeleteEntries,
+		)
+		offsets[manifestEntryDV] += copy(
+			flattened.dvEntries[offsets[manifestEntryDV]:], result.dvEntries,
+		)
+	}
+
+	return flattened
+}
+
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
@@ -340,30 +375,53 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 ) ([]iceberg.ManifestEntry, error) {
 	// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
 	out := make([]iceberg.ManifestEntry, 0, max(0, int(manifest.AddedDataFiles())+int(manifest.ExistingDataFiles())))
-	for entry, err := range manifest.Entries(io, true) {
-		if err != nil {
-			return nil, err
-		}
+	if err := streamManifest(io, manifest, partitionFilter, metricsEval, func(entry iceberg.ManifestEntry) error {
+		out = append(out, entry)
 
-		p, err := partitionFilter(entry.DataFile())
-		if err != nil {
-			return nil, err
-		}
-		if !p {
-			continue
-		}
-
-		m, err := metricsEval(entry.DataFile())
-		if err != nil {
-			return nil, err
-		}
-
-		if m {
-			out = append(out, entry)
-		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	return out, nil
+}
+
+// streamManifest reads live entries from a manifest, applying partition and
+// metrics filters before passing each match to visit. It deliberately does not
+// retain the entries, so callers can choose the smallest representation needed
+// for the next planning step.
+func streamManifest(manifestIO io.IO, manifest iceberg.ManifestFile,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
+	visit func(iceberg.ManifestEntry) error,
+) error {
+	for entry, err := range manifest.Entries(manifestIO, true) {
+		if err != nil {
+			return err
+		}
+
+		dataFile := entry.DataFile()
+		use, err := partitionFilter(dataFile)
+		if err != nil {
+			return err
+		}
+		if !use {
+			continue
+		}
+
+		use, err = metricsEval(dataFile)
+		if err != nil {
+			return err
+		}
+		if !use {
+			continue
+		}
+
+		if err := visit(entry); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // IsDeletionVector reports whether df is a deletion vector: a Puffin file with
@@ -374,6 +432,35 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 func IsDeletionVector(df iceberg.DataFile) bool {
 	return df.FileFormat() == iceberg.PuffinFile &&
 		df.ContentType() == iceberg.EntryContentPosDeletes
+}
+
+type dataFileKind int
+
+const (
+	dataFileKindData dataFileKind = iota
+	dataFileKindPosDeletes
+	dataFileKindEqDeletes
+	dataFileKindDeletionVector
+)
+
+// classifyDataFile buckets a file by content type. Deletion vectors are
+// Puffin position-delete files and are split out from regular pos-deletes.
+func classifyDataFile(f iceberg.DataFile) (dataFileKind, error) {
+	switch f.ContentType() {
+	case iceberg.EntryContentData:
+		return dataFileKindData, nil
+	case iceberg.EntryContentPosDeletes:
+		if IsDeletionVector(f) {
+			return dataFileKindDeletionVector, nil
+		}
+
+		return dataFileKindPosDeletes, nil
+	case iceberg.EntryContentEqDeletes:
+		return dataFileKindEqDeletes, nil
+	default:
+		return 0, fmt.Errorf("%w: unknown DataFileContent type (%s)",
+			ErrInvalidMetadata, f.ContentType())
+	}
 }
 
 // Scan represents a table scan. It implements [io.Closer]; callers should
@@ -855,37 +942,40 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	if err != nil {
 		return nil, err
 	}
+	snap, err := scan.ResolveSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// This path has no reporter behind it, so the manifest counts recorded into
 	// this accumulator are intentionally discarded. A future caller that needs
 	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
 	// pass in an accumulator it actually reads.
-	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, &scanMetricsAccumulator{})
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(
+		snap, fs, schema, &scanMetricsAccumulator{}, scan.partitionFiltersForSchema(schema))
 }
 
-// fetchPartitionSpecFilteredManifestsWithSchema filters the snapshot's manifests
-// using the given schema. It records total/scanned/skipped manifest counts
-// (split by data vs delete content) into acc.
-func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
-	snap, err := scan.ResolveSnapshot()
-	if err != nil {
-		return nil, err
-	}
-	if snap == nil {
-		return nil, nil
-	}
-
-	afs, err := scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
+// fetchPartitionSpecFilteredManifestsWithSchema loads the snapshot's manifests
+// with fs and filters them using the given schema. It records
+// total/scanned/skipped manifest counts (split by data vs delete content) into acc.
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(
+	snap *Snapshot,
+	fs io.IO,
+	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+) ([]iceberg.ManifestFile, error) {
 	// Fetch all manifests for the current snapshot.
-	manifestList, err := snap.Manifests(afs)
+	manifestList, err := snap.Manifests(fs)
 	if err != nil {
 		return nil, err
 	}
 
-	return scan.filterManifestsWithSchema(manifestList, schema, acc)
+	return scan.filterManifestsWithSchema(manifestList, schema, acc, partitionFilters)
 }
 
 // filterManifestsWithSchema applies partition-summary pruning to an existing
@@ -895,9 +985,9 @@ func (scan *Scan) filterManifestsWithSchema(
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
 	acc *scanMetricsAccumulator,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) ([]iceberg.ManifestFile, error) {
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
-	partitionFilters := scan.partitionFiltersForSchema(schema)
 	manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
 		return buildManifestEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
@@ -918,6 +1008,17 @@ func (scan *Scan) filterManifestsWithSchema(
 		if err != nil {
 			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
 		}
+		// Has*Files returns true for unknown counts, so this only skips manifests
+		// known to contain no added or existing (live) entries.
+		if use && !mf.HasAddedFiles() && !mf.HasExistingFiles() {
+			if isDelete {
+				acc.skippedDeleteManifests++
+			} else {
+				acc.skippedDataManifests++
+			}
+
+			continue
+		}
 		if use {
 			if isDelete {
 				acc.scannedDeleteManifests++
@@ -935,6 +1036,46 @@ func (scan *Scan) filterManifestsWithSchema(
 	return filtered, nil
 }
 
+// manifestIOBatch shares a FileIO within a concurrency-sized batch. A new
+// batch loads through the factory again so factories that renew credentials
+// still get regular checkpoints without rebuilding the backend for every
+// manifest.
+type manifestIOBatch struct {
+	factory FSysF
+	limit   int
+
+	mu        sync.Mutex
+	fs        io.IO
+	remaining int
+}
+
+func newManifestIOBatch(factory FSysF, limit int) *manifestIOBatch {
+	return &manifestIOBatch{factory: factory, limit: max(limit, 1)}
+}
+
+func (b *manifestIOBatch) acquire(ctx context.Context) (io.IO, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if b.remaining == 0 {
+		fs, err := b.factory(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		b.fs = fs
+		b.remaining = b.limit
+	}
+
+	b.remaining--
+
+	return b.fs, nil
+}
+
 // collectManifestEntries concurrently opens manifests, applies partition and metrics
 // filters, and accumulates both data entries and positional-delete entries.
 func (scan *Scan) collectManifestEntries(
@@ -946,13 +1087,26 @@ func (scan *Scan) collectManifestEntries(
 		return nil, err
 	}
 
-	return scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	return scan.collectManifestEntriesWithSchema(
+		ctx, manifestList, schema, scan.partitionFiltersForSchema(schema))
 }
 
 func (scan *Scan) collectManifestEntriesWithSchema(
 	ctx context.Context,
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+) (*manifestEntries, error) {
+	return scan.collectManifestEntriesWithSchemaMinSequenceNum(
+		ctx, manifestList, schema, partitionFilters, minSequenceNum(manifestList))
+}
+
+func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+	minSeqNum int64,
 ) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
 		schema,
@@ -964,25 +1118,24 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		return nil, err
 	}
 
-	minSeqNum := minSequenceNum(manifestList)
 	concurrencyLimit := min(scan.concurrency, len(manifestList))
+	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 
-	entries := newManifestEntries()
-	g, _ := errgroup.WithContext(ctx)
+	manifestResults := make([]classifiedManifestEntries, len(manifestList))
+	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
-	partitionFilters := scan.partitionFiltersForSchema(schema)
 	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
 
-	for _, mf := range manifestList {
+	for manifestIndex, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {
 			continue
 		}
 
 		g.Go(func() error {
-			fs, err := scan.ioF(ctx)
+			fs, err := manifestIO.acquire(gctx)
 			if err != nil {
 				return err
 			}
@@ -994,9 +1147,11 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 			if err != nil {
 				return err
 			}
-			if err := entries.merge(manifestEntries); err != nil {
+			classified, err := classifyManifestEntries(manifestEntries)
+			if err != nil {
 				return err
 			}
+			manifestResults[manifestIndex] = classified
 
 			return nil
 		})
@@ -1006,7 +1161,239 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		return nil, err
 	}
 
-	return entries, nil
+	return flattenClassifiedManifestEntries(manifestResults), nil
+}
+
+func splitManifestList(manifestList []iceberg.ManifestFile) (dataManifests, deleteManifests []iceberg.ManifestFile) {
+	dataManifests = make([]iceberg.ManifestFile, 0, len(manifestList))
+	deleteManifests = make([]iceberg.ManifestFile, 0, len(manifestList))
+	for _, manifest := range manifestList {
+		if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
+			deleteManifests = append(deleteManifests, manifest)
+		} else {
+			dataManifests = append(dataManifests, manifest)
+		}
+	}
+
+	return dataManifests, deleteManifests
+}
+
+func manifestTaskCapacity(manifest iceberg.ManifestFile) (int, bool) {
+	addedFiles, existingFiles := manifest.AddedDataFiles(), manifest.ExistingDataFiles()
+	if addedFiles < 0 || existingFiles < 0 {
+		return 0, false
+	}
+
+	capacity := int64(addedFiles) + int64(existingFiles)
+	if capacity > int64(^uint(0)>>1) {
+		return 0, false
+	}
+
+	return int(capacity), true
+}
+
+// planDataManifestTasks streams filtered data entries into task batches. The
+// batches are kept per manifest while reads run concurrently, then flattened
+// in manifest-list order so task ordering does not depend on read completion.
+// Manifests with reliable live-entry counts share one task buffer; manifests
+// with unknown counts use independent batches and the same final flattening.
+func (scan *Scan) planDataManifestTasks(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	minSeqNum int64,
+	posDeleteIndex *positionalDeleteIndex,
+	dvIndex map[string]iceberg.ManifestEntry,
+	eqDeleteIndex *equalityDeleteIndex,
+) ([]FileScanTask, error) {
+	metricsEval, err := newInclusiveMetricsEvaluator(
+		schema,
+		scan.rowFilter,
+		scan.caseSensitive,
+		scan.options["include_empty_files"] == "true",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	taskBatches := make([][]FileScanTask, len(manifestList))
+	taskCapacities := make([]int, len(manifestList))
+	taskOffsets := make([]int, len(manifestList))
+	directBuffer := scan.rowFilter == nil || scan.rowFilter.Equals(iceberg.AlwaysTrue{})
+	totalCapacity := 0
+	maxInt := int(^uint(0) >> 1)
+	if directBuffer {
+		for index, manifest := range manifestList {
+			if !scan.checkSequenceNumber(minSeqNum, manifest) {
+				continue
+			}
+
+			capacity, ok := manifestTaskCapacity(manifest)
+			if !ok || capacity > maxInt-totalCapacity {
+				directBuffer = false
+
+				break
+			}
+			taskCapacities[index] = capacity
+			taskOffsets[index] = totalCapacity
+			totalCapacity += capacity
+		}
+	}
+	var taskBuffer []FileScanTask
+	if directBuffer {
+		taskBuffer = make([]FileScanTask, totalCapacity)
+	}
+
+	concurrencyLimit := min(scan.concurrency, len(manifestList))
+	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrencyLimit)
+
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
+		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
+	})
+
+	for index, manifest := range manifestList {
+		if !scan.checkSequenceNumber(minSeqNum, manifest) {
+			continue
+		}
+
+		g.Go(func() error {
+			fs, err := manifestIO.acquire(gctx)
+			if err != nil {
+				return err
+			}
+			partEval, err := partitionEvaluators.Get(int(manifest.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", manifest.PartitionSpecID(), err)
+			}
+
+			var tasks []FileScanTask
+			if directBuffer {
+				offset := taskOffsets[index]
+				capacity := taskCapacities[index]
+				tasks = taskBuffer[offset : offset+capacity : offset+capacity]
+				tasks = tasks[:0]
+			} else {
+				tasks = make([]FileScanTask, 0,
+					max(0, int(manifest.AddedDataFiles())+int(manifest.ExistingDataFiles())))
+			}
+			err = streamManifest(fs, manifest, partEval, metricsEval, func(entry iceberg.ManifestEntry) error {
+				dataFile := entry.DataFile()
+				if dataFile.ContentType() != iceberg.EntryContentData {
+					return fmt.Errorf("%w: data manifest contains %s file %q",
+						ErrInvalidMetadata, dataFile.ContentType(), dataFile.FilePath())
+				}
+
+				task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex)
+				if err != nil {
+					return err
+				}
+				tasks = append(tasks, task)
+
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			taskBatches[index] = tasks
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	if directBuffer {
+		overflowed := false
+		for index, tasks := range taskBatches {
+			if len(tasks) > taskCapacities[index] {
+				overflowed = true
+
+				break
+			}
+		}
+		if !overflowed {
+			writeIndex := 0
+			for index, tasks := range taskBatches {
+				count := len(tasks)
+				if count > 0 {
+					sourceOffset := taskOffsets[index]
+					copy(taskBuffer[writeIndex:writeIndex+count],
+						taskBuffer[sourceOffset:sourceOffset+count])
+					writeIndex += count
+				}
+				taskBatches[index] = nil
+			}
+
+			return taskBuffer[:writeIndex:writeIndex], nil
+		}
+	}
+
+	totalTasks := 0
+	for _, tasks := range taskBatches {
+		totalTasks += len(tasks)
+	}
+	results := make([]FileScanTask, 0, totalTasks)
+	for i, tasks := range taskBatches {
+		results = append(results, tasks...)
+		// Release the per-manifest backing array as soon as it has been copied
+		// into the final result slice.
+		taskBatches[i] = nil
+	}
+
+	return results, nil
+}
+
+func fileScanTaskForDataEntry(
+	entry iceberg.ManifestEntry,
+	posDeleteIndex *positionalDeleteIndex,
+	dvIndex map[string]iceberg.ManifestEntry,
+	eqDeleteIndex *equalityDeleteIndex,
+) (FileScanTask, error) {
+	// Spec §Scan Planning: when a deletion vector applies to a data file,
+	// positional-delete files must NOT be applied. The DV is guaranteed to
+	// encode all prior pos-delete positions; reading the pos-delete Parquet too
+	// would be wasteful I/O, and on a buggy writer whose DV omits prior
+	// positions, applying both would over-delete. Mirrors Java's
+	// DeleteFileIndex.forDataFile.
+	dvFiles := matchDVToData(entry, dvIndex)
+	var deleteFiles []iceberg.DataFile
+	if len(dvFiles) == 0 {
+		var err error
+		deleteFiles, err = posDeleteIndex.forDataFile(entry)
+		if err != nil {
+			return FileScanTask{}, err
+		}
+	}
+	eqDeleteFiles, err := eqDeleteIndex.forDataFile(entry)
+	if err != nil {
+		return FileScanTask{}, err
+	}
+
+	dataFile := entry.DataFile()
+	task := FileScanTask{
+		File:                dataFile,
+		DeleteFiles:         deleteFiles,
+		EqualityDeleteFiles: eqDeleteFiles,
+		DeletionVectorFiles: dvFiles,
+		Start:               0,
+		Length:              dataFile.FileSizeBytes(),
+	}
+	// Row lineage constants: readers use these to synthesize _row_id and
+	// _last_updated_sequence_number when requested. Per spec the synthesized
+	// _last_updated_sequence_number is the manifest entry's data sequence
+	// number (field id 3), not file sequence number (field id 4).
+	task.FirstRowID = dataFile.FirstRowID()
+	if seq := entry.SequenceNum(); seq >= 0 {
+		task.DataSequenceNumber = &seq
+	}
+
+	return task, nil
 }
 
 // PlanFiles orchestrates the fetching and filtering of manifests, building a
@@ -1098,8 +1485,25 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		}
 	}()
 
+	snap, err := scan.ResolveSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Keep the manifest-list load separate from manifest workers. Workers reuse
+	// one FileIO within each concurrent batch, while the next batch loads again
+	// so credential-renewing factories retain their checkpoints.
+
+	// Keep the projection cache alive across both local planning phases. The
+	// manifest and data-file evaluators need the same per-spec projections.
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
+		snap, fs, schema, acc, partitionFilters)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
@@ -1111,76 +1515,92 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		}
 	}
 
-	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
-	if err != nil {
-		return nil, err
-	}
-
-	// Step 3: Index positional deletes and match them to data files.
-	posDeleteIndex, err := buildPositionalDeleteIndex(entries.positionalDeleteEntries)
-	if err != nil {
-		return nil, err
-	}
-
-	dvIndex, err := buildDVIndex(entries.dvEntries)
-	if err != nil {
-		return nil, err
-	}
-	eqDeleteIndex, err := buildEqualityDeleteIndex(entries.equalityDeleteEntries, scan.metadata)
-	if err != nil {
-		return nil, err
-	}
-
-	results = make([]FileScanTask, 0, len(entries.dataEntries))
-	for _, e := range entries.dataEntries {
-		// Spec §Scan Planning: when a deletion vector applies to a data
-		// file, positional-delete files must NOT be applied. The DV is
-		// guaranteed to encode all prior pos-delete positions; reading the
-		// pos-delete Parquet too would be wasteful I/O, and on a buggy
-		// writer whose DV omits prior positions, applying both would
-		// over-delete. Mirrors Java's DeleteFileIndex.forDataFile.
-		dvFiles := matchDVToData(e, dvIndex)
-		var deleteFiles []iceberg.DataFile
-		if len(dvFiles) == 0 {
-			deleteFiles, err = posDeleteIndex.forDataFile(e)
-			if err != nil {
-				return nil, err
-			}
-		}
-		eqDeleteFiles, err := eqDeleteIndex.forDataFile(e)
+	// Step 2: Read delete manifests first so data entries can be turned into
+	// tasks immediately after their delete indexes are ready.
+	dataManifests, deleteManifests := splitManifestList(manifestList)
+	minSeqNum := minSequenceNum(manifestList)
+	deleteEntries := newManifestEntries()
+	if len(deleteManifests) > 0 {
+		deleteEntries, err = scan.collectManifestEntriesWithSchemaMinSequenceNum(
+			ctx, deleteManifests, schema, partitionFilters, minSeqNum)
 		if err != nil {
 			return nil, err
 		}
-
-		task := FileScanTask{
-			File:                e.DataFile(),
-			DeleteFiles:         deleteFiles,
-			EqualityDeleteFiles: eqDeleteFiles,
-			DeletionVectorFiles: dvFiles,
-			Start:               0,
-			Length:              e.DataFile().FileSizeBytes(),
-		}
-		// Row lineage constants: readers use these to synthesize _row_id and
-		// _last_updated_sequence_number when requested. Per spec the
-		// synthesized _last_updated_sequence_number is the manifest entry's
-		// data sequence number (field id 3), not file sequence number
-		// (field id 4); back-dated EXISTING entries can have the two
-		// diverge and Java/iceberg-rust use the data sequence number.
-		task.FirstRowID = e.DataFile().FirstRowID()
-		if seq := e.SequenceNum(); seq >= 0 {
-			s := seq
-			task.DataSequenceNumber = &s
-		}
-		results = append(results, task)
-		acc.totalFileSize += e.DataFile().FileSizeBytes()
+	}
+	// Step 3: Index positional deletes and match them to data files.
+	posDeleteIndex, err := buildPositionalDeleteIndex(deleteEntries.positionalDeleteEntries)
+	if err != nil {
+		return nil, err
 	}
 
-	acc.resultDataFiles = int64(len(results))
-	// Delete-file metrics are derived from the planned tasks so they are
-	// result-scoped, consistent with result-data-files and total-file-size (a
-	// DV-suppressed positional delete never lands on a task, so it is excluded).
-	acc.applyResultDeleteMetrics(results)
+	dvIndex, err := buildDVIndex(deleteEntries.dvEntries)
+	if err != nil {
+		return nil, err
+	}
+	eqDeleteIndex, err := buildEqualityDeleteIndex(deleteEntries.equalityDeleteEntries, scan.metadata, schema)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 4: Stream data entries into per-manifest task batches, then flatten
+	// them in manifest order.
+	plannedTasks, err := scan.planDataManifestTasks(
+		ctx, dataManifests, schema, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	var boundRowFilter iceberg.BooleanExpression
+	if scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}) {
+		boundRowFilter, err = iceberg.BindExpr(schema, scan.rowFilter, scan.caseSensitive)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var residualEvaluators map[int]*partitionResidualEvaluator
+	if boundRowFilter != nil {
+		residualEvaluators = make(map[int]*partitionResidualEvaluator)
+	}
+
+	// Apply residuals, metrics, and parquet range splitting in manifest order.
+	// These operations stay outside the concurrent manifest workers so the
+	// residual evaluator cache and scan metrics remain race-free.
+	results = make([]FileScanTask, 0, len(plannedTasks))
+	splitTargetSize := scan.metadata.Properties().GetInt64(
+		ReadSplitTargetSizeKey, ReadSplitTargetSizeDefault)
+	acc.resultDataFiles = int64(len(plannedTasks))
+	for _, task := range plannedTasks {
+		if boundRowFilter != nil {
+			specID := int(task.File.SpecID())
+			residualEvaluator, found := residualEvaluators[specID]
+			if !found {
+				residualEvaluator, err = newPartitionResidualEvaluator(
+					schema, scan.metadata.PartitionSpecByID(specID), boundRowFilter, scan.caseSensitive)
+				if err != nil {
+					return nil, fmt.Errorf("build partition residual evaluator for spec %d: %w", specID, err)
+				}
+				residualEvaluators[specID] = residualEvaluator
+			}
+			if residualEvaluator != nil {
+				var simplified bool
+				task.Residual, simplified, err = residualEvaluator.residual(dataFilePartition(task.File))
+				if err != nil {
+					return nil, fmt.Errorf("evaluate partition residual for %s: %w", task.File.FilePath(), err)
+				}
+				if !simplified {
+					task.Residual = nil
+				}
+			}
+		}
+
+		acc.addResultDeleteMetrics(task)
+		acc.totalFileSize += task.File.FileSizeBytes()
+		if splitTasks, split := splitParquetScanTask(task, splitTargetSize); split {
+			results = append(results, splitTasks...)
+		} else {
+			results = append(results, task)
+		}
+	}
 
 	return results, nil
 }
@@ -1435,7 +1855,7 @@ type FileScanTask struct {
 	DeletionVectorFiles []iceberg.DataFile // deletion vectors (puffin files)
 	Start, Length       int64
 	// Residual is the portion of the scan filter that must still be evaluated
-	// for this task. Remote planners may simplify the original filter using
+	// for this task. Local and remote planners may simplify the original filter using
 	// file metadata; nil means the caller did not provide a task residual.
 	// ReadTasks applies the scan's original row filter and each task residual.
 	Residual iceberg.BooleanExpression

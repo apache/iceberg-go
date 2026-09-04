@@ -175,16 +175,29 @@ func newDecodeEntry(version int) (any, *dataFile) {
 	return &manifestEntry{Data: df}, df
 }
 
+var dataFileAvroFieldIndexes = avroFieldIndexes(reflect.TypeOf(dataFile{}))
+
+func avroFieldIndexes(t reflect.Type) []int {
+	indexes := make([]int, 0, t.NumField())
+	for i := range t.NumField() {
+		if _, hasAvroTag := t.Field(i).Tag.Lookup("avro"); hasAvroTag {
+			indexes = append(indexes, i)
+		}
+	}
+
+	return indexes
+}
+
 // cloneDataFileAvroFields returns a fresh *dataFile populated with src's
 // avro-tagged fields. Internal state (sync.Once, lazy-init caches,
 // specID, the field-id lookup maps) is intentionally left at zero
 // values because the avro encoder reads only the avro-tagged fields.
 //
-// Using reflection over the tag set means a new avro-tagged field
-// upstream is auto-copied without an update here — the dataFile struct
-// remains the single source of truth for the wire shape. It also
-// sidesteps the go-vet copies-lock warning that would fire on a
-// struct-literal copy of *dataFile (it embeds sync.Once).
+// The avro-tagged field indexes are discovered once when the package is
+// initialized. This keeps dataFile as the single source of truth for the
+// wire shape while avoiding a reflect.Type and StructTag lookup for every
+// encoded manifest entry. It also sidesteps the go-vet copies-lock warning
+// that would fire on a struct-literal copy of *dataFile (it embeds sync.Once).
 //
 // Note: this is a shallow copy. Pointer-typed avro fields (ColSizes,
 // LowerBounds, etc.) share their backing storage with the source.
@@ -196,11 +209,8 @@ func cloneDataFileAvroFields(src *dataFile) *dataFile {
 	out := &dataFile{}
 	srcVal := reflect.ValueOf(src).Elem()
 	outVal := reflect.ValueOf(out).Elem()
-	t := srcVal.Type()
-	for i := range t.NumField() {
-		if _, hasAvroTag := t.Field(i).Tag.Lookup("avro"); hasAvroTag {
-			outVal.Field(i).Set(srcVal.Field(i))
-		}
+	for _, i := range dataFileAvroFieldIndexes {
+		outVal.Field(i).Set(srcVal.Field(i))
 	}
 
 	return out

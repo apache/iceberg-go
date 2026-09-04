@@ -71,12 +71,19 @@ type trackingOpenFile struct {
 	*bytes.Reader
 	closeErr error
 	closed   bool
+	readAt   int
 }
 
 func (f *trackingOpenFile) Close() error {
 	f.closed = true
 
 	return f.closeErr
+}
+
+func (f *trackingOpenFile) ReadAt(p []byte, off int64) (int, error) {
+	f.readAt++
+
+	return f.Reader.ReadAt(p, off)
 }
 
 func (f *trackingOpenFile) Stat() (iofs.FileInfo, error) {
@@ -331,6 +338,42 @@ func TestParquetGetReaderClosesFileOnNewFileReaderFailure(t *testing.T) {
 	_, err = fileSource.GetReader(context.Background())
 	require.Error(t, err)
 	assert.True(t, mockFile.closed)
+}
+
+func TestParquetGetReaderReusesMetadataWithinContext(t *testing.T) {
+	data := buildBloomTestParquet(t, 2)
+	mockFile := &trackingOpenFile{Reader: bytes.NewReader(data)}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"data.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		4,
+		int64(len(data)),
+	)
+	require.NoError(t, err)
+
+	fileSource, err := internal.GetFile(context.Background(), mockIO, builder.Build(), false)
+	require.NoError(t, err)
+
+	ctx := internal.WithParquetMetadataCache(context.Background())
+	first, err := fileSource.GetReader(ctx)
+	require.NoError(t, err)
+	firstReadAt := mockFile.readAt
+	require.Positive(t, firstReadAt)
+
+	second, err := fileSource.GetReader(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, firstReadAt, mockFile.readAt,
+		"the second reader should reuse the parsed footer metadata")
+
+	require.NoError(t, first.Close())
+	require.NoError(t, second.Close())
 }
 
 func assertBounds[T iceberg.LiteralType](t *testing.T, bound []byte, typ iceberg.Type, expected T) {
@@ -2166,6 +2209,270 @@ func TestBloomFilterRowGroupPruning(t *testing.T) {
 
 		assert.Equal(t, int64(2*rgSize), countRecords(t, rr), "all rows expected when field ID unknown")
 	})
+}
+
+func TestParquetRowGroupRangeSelection(t *testing.T) {
+	const rgSize = 100
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer pqReader.Close()
+
+	meta := pqReader.MetaData()
+	offsets := []int64{meta.RowGroup(0).FileOffset(), meta.RowGroup(1).FileOffset()}
+	require.Less(t, offsets[0], offsets[1])
+
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+
+	tests := []struct {
+		name          string
+		start         int64
+		length        int64
+		rangeSet      bool
+		bloomPreds    []internal.RowGroupBloomPred
+		wantRows      int64
+		wantSurvivors []internal.RowGroupSpan
+	}{
+		{
+			name:          "first row group",
+			start:         offsets[0],
+			length:        offsets[1] - offsets[0],
+			rangeSet:      true,
+			wantRows:      rgSize,
+			wantSurvivors: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}},
+		},
+		{
+			name:          "second row group",
+			start:         offsets[1],
+			length:        int64(len(data)) - offsets[1],
+			rangeSet:      true,
+			wantRows:      rgSize,
+			wantSurvivors: []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}},
+		},
+		{
+			name:     "range and bloom pruning combine",
+			start:    offsets[0],
+			length:   offsets[1] - offsets[0],
+			rangeSet: true,
+			bloomPreds: []internal.RowGroupBloomPred{{
+				FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(150)},
+			}},
+			wantRows: 0,
+		},
+		{
+			name:          "whole file range",
+			start:         offsets[0],
+			length:        int64(len(data)) - offsets[0],
+			rangeSet:      true,
+			wantRows:      2 * rgSize,
+			wantSurvivors: nil,
+		},
+		{
+			name:          "nonzero range fields without explicit range keep legacy behavior",
+			start:         offsets[0],
+			length:        offsets[1] - offsets[0],
+			wantRows:      2 * rgSize,
+			wantSurvivors: nil,
+		},
+		{
+			name:     "unset range keeps legacy whole file behavior",
+			start:    0,
+			length:   0,
+			wantRows: 2 * rgSize,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdr := openBloomTestReader(t, data)
+			defer rdr.Close()
+
+			var survivors []internal.RowGroupSpan
+			tester := &internal.ParquetRowGroupTester{
+				StatsFn:    alwaysKeep,
+				BloomPreds: tt.bloomPreds,
+				RangeSet:   tt.rangeSet,
+				Start:      tt.start,
+				Length:     tt.length,
+				Survivors:  &survivors,
+			}
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantRows, countRecords(t, rr))
+			assert.Equal(t, tt.wantSurvivors, survivors)
+		})
+	}
+}
+
+func TestParquetRowGroupRangeSelectionRejectsInvalidRanges(t *testing.T) {
+	const rgSize = 100
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	meta := pqReader.MetaData()
+	firstOffset := meta.RowGroup(0).FileOffset()
+	fileSize := int64(len(data))
+	require.NoError(t, pqReader.Close())
+
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+	tests := []struct {
+		name   string
+		start  int64
+		length int64
+	}{
+		{name: "negative start", start: -1, length: 1},
+		{name: "zero length", start: firstOffset, length: 0},
+		{name: "zero length at file start", start: 0, length: 0},
+		{name: "negative length", start: 0, length: -1},
+		{name: "start beyond file", start: fileSize + 1, length: 1},
+		{name: "length beyond file", start: firstOffset, length: fileSize - firstOffset + 1},
+		{name: "range end overflows", start: math.MaxInt64, length: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdr := openBloomTestReader(t, data)
+			defer rdr.Close()
+
+			tester := &internal.ParquetRowGroupTester{
+				StatsFn:  alwaysKeep,
+				RangeSet: true,
+				Start:    tt.start,
+				Length:   tt.length,
+			}
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			assert.Nil(t, rr)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
+func TestParquetRowGroupRangeSelectionUsesPlanningOffsets(t *testing.T) {
+	const rgSize = 100
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	meta := pqReader.MetaData()
+	actualOffsets := make([]int64, meta.NumRowGroups())
+	for i := range actualOffsets {
+		rg := meta.RowGroup(i)
+		column, columnErr := rg.ColumnChunk(0)
+		require.NoError(t, columnErr)
+		actualOffsets[i] = column.DataPageOffset()
+		if column.HasDictionaryPage() && column.DictionaryPageOffset() < actualOffsets[i] {
+			actualOffsets[i] = column.DictionaryPageOffset()
+		}
+	}
+	require.Less(t, actualOffsets[1]+1, int64(len(data)))
+	require.NoError(t, pqReader.Close())
+
+	// A writer may record a row-group split offset that differs from the
+	// first data page offset used by the reader. The planning offsets must win
+	// when they are complete, otherwise a boundary can move a row group into
+	// the wrong split.
+	planningOffsets := append([]int64(nil), actualOffsets...)
+	planningOffsets[1]++
+
+	splitReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	arrReader, err := pqarrow.NewFileReader(
+		splitReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	rdr := internal.WrapParquetFileReader(arrReader)
+	defer rdr.Close()
+
+	tests := []struct {
+		name      string
+		start     int64
+		length    int64
+		wantRows  int64
+		wantSpans []internal.RowGroupSpan
+	}{
+		{
+			name:      "first planned range",
+			start:     0,
+			length:    planningOffsets[1],
+			wantRows:  rgSize,
+			wantSpans: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}},
+		},
+		{
+			name:      "second planned range",
+			start:     planningOffsets[1],
+			length:    int64(len(data)) - planningOffsets[1],
+			wantRows:  rgSize,
+			wantSpans: []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var survivors []internal.RowGroupSpan
+			tester := &internal.ParquetRowGroupTester{
+				StatsFn:              alwaysKeep,
+				RangeSet:             true,
+				Start:                tt.start,
+				Length:               tt.length,
+				PlanningSplitOffsets: planningOffsets,
+				Survivors:            &survivors,
+			}
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantRows, countRecords(t, rr))
+			assert.Equal(t, tt.wantSpans, survivors)
+		})
+	}
+}
+
+func TestParquetRowGroupRangeSelectionFallsBackToFirstColumnOffset(t *testing.T) {
+	const rgSize = 100
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer pqReader.Close()
+
+	meta := pqReader.MetaData()
+	offsets := make([]int64, meta.NumRowGroups())
+	for i := range offsets {
+		rg := meta.RowGroup(i)
+		column, columnErr := rg.ColumnChunk(0)
+		require.NoError(t, columnErr)
+		offsets[i] = column.DataPageOffset()
+		if column.HasDictionaryPage() && column.DictionaryPageOffset() < offsets[i] {
+			offsets[i] = column.DictionaryPageOffset()
+		}
+	}
+
+	// RowGroup.file_offset is optional. Removing it reproduces a valid file
+	// where the old range check saw offset zero instead of the planned split
+	// offset for the second group.
+	meta.RowGroups[1].FileOffset = nil
+
+	arrReader, err := pqarrow.NewFileReader(pqReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	rdr := internal.WrapParquetFileReader(arrReader)
+	defer rdr.Close()
+
+	tester := &internal.ParquetRowGroupTester{
+		StatsFn:  func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) { return true, nil },
+		RangeSet: true,
+		Start:    offsets[1],
+		Length:   int64(len(data)) - offsets[1],
+	}
+	rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+	require.NoError(t, err)
+	assert.Equal(t, int64(rgSize), countRecords(t, rr))
 }
 
 func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {

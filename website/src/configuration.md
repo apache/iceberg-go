@@ -151,16 +151,20 @@ Operations that create or update tables/views accept these (`catalog/catalog.go`
 iceberg-go registers the local file system (`file://`) automatically. Cloud schemes are *not* registered until you add a blank import:
 
 ```go
-import _ "github.com/apache/iceberg-go/io/gocloud"
+import _ "github.com/apache/iceberg-go/io/gocloud/s3"    // s3, s3a, s3n, oss
+import _ "github.com/apache/iceberg-go/io/gocloud/gcs"   // gs
+import _ "github.com/apache/iceberg-go/io/gocloud/azure" // abfs, abfss, wasb, wasbs
 ```
 
-The `init()` function in [`io/gocloud/register.go`](https://github.com/apache/iceberg-go/blob/main/io/gocloud/register.go) registers `s3`, `s3a`, `s3n`, `oss`, `gs`, `abfs`, `abfss`, `wasb`, and `wasbs`. Without the blank import, these schemes return `ErrIOSchemeNotFound` with a hint to add the import.
+Each backend package links its own cloud SDK. Importing `io/gocloud` registers all three at once and links all cloud SDKs.
+
+Without a matching blank import, these schemes return `ErrIOSchemeNotFound` with a hint naming the package to import.
 
 All credential and tuning property keys are constants in [`io/config.go`](https://github.com/apache/iceberg-go/blob/main/io/config.go). They can be supplied through table properties, catalog properties, or per-call `iceberg.Properties` arguments depending on context.
 
 ### S3
 
-Authentication is resolved in this order (`io/gocloud/s3.go`):
+Authentication is resolved in this order (`io/gocloud/s3/s3.go`):
 
 1. Static credentials in properties: `s3.access-key-id` + `s3.secret-access-key` (+ optional `s3.session-token`).
 2. The standard AWS SDK v2 default credential chain - environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), `~/.aws/credentials`, container/IAM role.
@@ -182,7 +186,7 @@ Tuning properties:
 
 ### Google Cloud Storage
 
-Authentication resolution (`io/gocloud/gcs.go`):
+Authentication resolution (`io/gocloud/gcs/gcs.go`):
 
 1. Explicit JSON key bytes via `gcs.jsonkey` or path via `gcs.keypath`.
 2. Optional `gcs.credtype` selecting one of `service_account`, `authorized_user`, `impersonated_service_account`, `external_account`.
@@ -200,7 +204,7 @@ Tuning properties:
 
 ### Azure Data Lake Storage / Blob
 
-Authentication is selected based on the property keys present (`io/gocloud/azure.go`):
+Authentication is selected based on the property keys present (`io/gocloud/azure/azure.go`):
 
 1. Shared key: both `adls.auth.shared-key.account.name` and `adls.auth.shared-key.account.key` set.
 2. Per-host SAS token: `adls.sas-token.<hostname>` (prefix-matched against the storage account host).
@@ -228,7 +232,7 @@ iceberg-go reads only a small set of environment variables directly. AWS / GCP /
 |---|---|---|
 | `GOICEBERG_HOME` | Directory containing `.iceberg-go.yaml`. Defaults to the user's home directory. | `config/config.go:87` |
 | `ICEBERG_SQL_DEBUG` | SQL catalog query logging - `1` (failed queries), `2` (all queries). | `catalog/sql/sql.go:206` |
-| `AWS_S3_ENDPOINT` | Fallback S3 endpoint when `s3.endpoint` is unset. | `io/gocloud/s3.go:193` |
+| `AWS_S3_ENDPOINT` | Fallback S3 endpoint when `s3.endpoint` is unset. | `io/gocloud/s3/s3.go` |
 
 There is no `PYICEBERG_*`-style env var convention. Use the YAML config file or pass `iceberg.Properties` to overrides programmatically.
 
@@ -264,7 +268,8 @@ func init() {
 }
 ```
 
-`io.Register` panics on `nil` factory or duplicate scheme. Built-in schemes: `file`, `""` (the empty scheme). Cloud schemes (`s3`, `gs`, `abfs`, etc.) are registered by `io/gocloud` only when its package is blank-imported.
+`io.Register` panics on `nil` factory or duplicate scheme. Built-in schemes: `file`, `""` (the empty scheme).
+Cloud schemes (`s3`, `gs`, `abfs`, etc.) are registered only when the matching backend package under `io/gocloud` is blank-imported.
 
 `io.GetRegisteredSchemes()` returns the current scheme list; `io.Unregister(scheme)` removes one.
 
@@ -307,6 +312,16 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 |---|---|---|
 | `write.format.default` | `parquet` | File format used when writing data files. Read in `table/writer.go` and `table/rolling_data_writer.go`. |
 | `write.target-file-size-bytes` | (set by writer) | Target size for newly written data files. Read in `table/arrow_utils.go` and `table/equality_delete_writer.go`. |
+
+### Scan reads
+
+| Key | Default | Description |
+|---|---|---|
+| `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
+
+The Java-compatible `read.split.planning-lookback` and `read.split.open-file-cost`
+names and defaults are also exported by the Go API for shared configuration,
+but are reserved for future task-group planning and are not currently read.
 
 ### Metrics and metadata lifecycle
 

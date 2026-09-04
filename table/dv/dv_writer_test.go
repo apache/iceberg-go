@@ -193,6 +193,31 @@ func TestDVWriterDeduplicatesPositions(t *testing.T) {
 	verifyDVReadBack(t, fs, dataFiles[0])
 }
 
+func TestDVWriterAddPosition(t *testing.T) {
+	fs := newTestFS()
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "region",
+		Transform: iceberg.IdentityTransform{},
+	})
+	w := NewDVWriter(fs, specMapResolver(spec))
+	dataPath := "s3://bucket/region=EU/file.parquet"
+	partition := map[int]any{1000: "EU"}
+
+	require.NoError(t, w.AddPosition(dataPath, 1, 0, partition))
+	partition[1000] = "MUTATED"
+	require.NoError(t, w.AddPosition(dataPath, 3, 0, partition))
+	require.NoError(t, w.AddPosition(dataPath, 1, 0, map[int]any{1000: "US"}))
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/add-position.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+	assert.Equal(t, int64(2), dataFiles[0].Count())
+	assert.Equal(t, map[int]any{1000: "EU"}, dataFiles[0].Partition())
+	verifyDVReadBack(t, fs, dataFiles[0])
+}
+
 func TestDVWriterAddRejectsNegativePositions(t *testing.T) {
 	fs := newTestFS()
 	w := NewDVWriter(fs, unpartitionedResolver())
@@ -216,6 +241,39 @@ func TestDVWriterAddRejectsNegativePositions(t *testing.T) {
 	assert.False(t, bm.Contains(5))
 	assert.False(t, bm.Contains(7))
 
+	assert.Equal(t, dataFiles[0].Count(), bm.Cardinality())
+}
+
+func TestDVWriterAddPositionRejectsNegativePosition(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs, unpartitionedResolver())
+
+	dataPath := "s3://bucket/data/file-001.parquet"
+	err := w.AddPosition(dataPath, -1, 0, nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/negative-position.puffin")
+	require.NoError(t, err)
+	assert.Nil(t, dataFiles)
+}
+
+func TestDVWriterAddPositionRejectsNegativeAfterValidPosition(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs, unpartitionedResolver())
+
+	dataPath := "s3://bucket/data/file-001.parquet"
+	require.NoError(t, w.AddPosition(dataPath, 1, 0, nil))
+	require.ErrorIs(t, w.AddPosition(dataPath, -1, 0, nil), iceberg.ErrInvalidArgument)
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/negative-position-after-valid.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+	assert.Equal(t, int64(1), dataFiles[0].Count(),
+		"negative AddPosition should not mutate prior valid state")
+
+	bm, err := ReadDV(fs, dataFiles[0])
+	require.NoError(t, err)
+	assert.True(t, bm.Contains(1))
 	assert.Equal(t, dataFiles[0].Count(), bm.Cardinality())
 }
 
