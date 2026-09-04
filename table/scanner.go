@@ -758,12 +758,12 @@ func splitLineageMetadataFields(selectedFields []string, caseSensitive bool) (us
 // appended only if no field with that ID is already present. Idempotent so
 // callers can pass schemas that already declare the reserved fields.
 func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.NestedField) *iceberg.Schema {
-	existing := make(map[int]struct{}, len(s.Fields()))
-	for _, f := range s.Fields() {
+	fields := s.Fields()
+	existing := make(map[int]struct{}, len(fields))
+	for _, f := range fields {
 		existing[f.ID] = struct{}{}
 	}
 
-	fields := slices.Clone(s.Fields())
 	for _, f := range lineageFields {
 		if _, ok := existing[f.ID]; ok {
 			continue

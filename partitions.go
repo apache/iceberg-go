@@ -543,6 +543,16 @@ func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	return ret
 }
 
+func (ps PartitionSpec) Clone() PartitionSpec {
+	clone := PartitionSpec{id: ps.id, fields: make([]PartitionField, len(ps.fields))}
+	for i, field := range ps.fields {
+		clone.fields[i] = clonePartitionField(field)
+	}
+	clone.initialize()
+
+	return clone
+}
+
 // CompatibleWith returns true if this partition spec is considered
 // compatible with the passed in partition spec. This means that the two
 // specs have equivalent field lists regardless of the spec id.

@@ -123,6 +123,23 @@ func TestNewPartitionSpecIDCopiesFields(t *testing.T) {
 	assert.Equal(t, []int{1}, restored.SourceIDs)
 }
 
+func TestPartitionSpecCloneCopiesFields(t *testing.T) {
+	transform := &iceberg.BucketTransform{NumBuckets: 16}
+	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: transform,
+	})
+
+	clone := spec.Clone()
+	field := clone.Field(0)
+	field.SourceIDs[0] = 2
+	field.Transform.(*iceberg.BucketTransform).NumBuckets = 32
+
+	assert.True(t, spec.Equals(clone))
+	assert.Equal(t, []int{1}, spec.Field(0).SourceIDs)
+	assert.Equal(t, 16, spec.Field(0).Transform.(*iceberg.BucketTransform).NumBuckets)
+	assert.Len(t, clone.FieldsBySourceID(1), 1)
+}
+
 func TestPartitionSpecCompatibleWithUsesTransformEquals(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1001, Name: "id",

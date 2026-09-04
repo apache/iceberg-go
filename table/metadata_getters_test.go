@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,7 +43,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 			WriteDefault:   iceberg.FixedLiteral{3, 4},
 		})},
 		Specs: []iceberg.PartitionSpec{iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
-			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: &iceberg.BucketTransform{NumBuckets: 16},
 		})},
 		SnapshotList: []Snapshot{{
 			SnapshotID:       2,
@@ -87,7 +88,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 			orderID: 1,
 			fields: []SortField{{
 				SourceIDs: []int{10},
-				Transform: iceberg.IdentityTransform{},
+				Transform: &iceberg.BucketTransform{NumBuckets: 16},
 			}},
 		}},
 	}
@@ -111,7 +112,9 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	partitionField := partitionSpecs[0].Field(0)
 	partitionField.SourceIDs[0] = 99
 	partitionField.Name = "mutated"
+	partitionField.Transform.(*iceberg.BucketTransform).NumBuckets = 32
 	require.Equal(t, []int{1}, metadata.Specs[0].Field(0).SourceIDs)
+	require.Equal(t, 16, metadata.Specs[0].Field(0).Transform.(*iceberg.BucketTransform).NumBuckets)
 
 	currentSchema := metadata.CurrentSchema()
 	currentSchema.ID = 100
@@ -158,10 +161,73 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	fields := sortOrders[0].Fields()
 	for _, field := range fields {
 		field.SourceIDs[0] = 99
+		field.Transform.(*iceberg.BucketTransform).NumBuckets = 32
 	}
 	require.Equal(t, []int{10}, metadata.SortOrderList[0].fields[0].SourceIDs)
+	require.Equal(t, 16, metadata.SortOrderList[0].fields[0].Transform.(*iceberg.BucketTransform).NumBuckets)
 
 	got, err := json.Marshal(metadata)
 	require.NoError(t, err)
 	require.JSONEq(t, string(original), string(got))
+}
+
+func TestMetadataSchemaGetterCopiesNestedValues(t *testing.T) {
+	schema := nestedSchemaWithMutableDefaults()
+	metadata := commonMetadata{
+		CurrentSchemaID: schema.ID,
+		SchemaList:      []*iceberg.Schema{schema},
+	}
+	originalFields := schema.Fields()
+
+	cloned := metadata.CurrentSchema()
+	cloned.IdentifierFieldIDs[0] = 99
+	fields := cloned.FieldsRef(iceinternal.SchemaRef{})
+	payload := fields[0].Type.(*iceberg.StructType)
+	payload.FieldList[0].InitialDefault.([]byte)[0] = 99
+	payload.FieldList[0].WriteDefault.(iceberg.BinaryLiteral)[0] = 99
+	payload.FieldList[1].Name = "changed"
+	payload.FieldList[1].Type.(*iceberg.ListType).Element.(*iceberg.StructType).FieldList[0].InitialDefault.([]any)[0].(map[string]any)["bytes"].([]byte)[0] = 99
+	payload.FieldList[2].Type.(*iceberg.MapType).ValueType.(*iceberg.StructType).FieldList[0].WriteDefault.(map[string]any)["values"].([]any)[0] = "changed"
+
+	require.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	require.Equal(t, originalFields, schema.Fields())
+}
+
+var cloneSchemaBenchmarkSink *iceberg.Schema
+
+func BenchmarkCloneSchemaWithNestedDefaults(b *testing.B) {
+	schema := nestedSchemaWithMutableDefaults()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		cloneSchemaBenchmarkSink = cloneSchema(schema)
+	}
+}
+
+func nestedSchemaWithMutableDefaults() *iceberg.Schema {
+	listElement := &iceberg.StructType{FieldList: []iceberg.NestedField{{
+		ID: 5, Name: "element", Type: iceberg.PrimitiveTypes.String,
+		InitialDefault: []any{map[string]any{"bytes": []byte{7, 8}}},
+	}}}
+	mapValue := &iceberg.StructType{FieldList: []iceberg.NestedField{{
+		ID: 9, Name: "value", Type: iceberg.PrimitiveTypes.String,
+		WriteDefault: map[string]any{"values": []any{iceberg.FixedLiteral{10, 11}}},
+	}}}
+	payload := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{
+			ID: 2, Name: "binary", Type: iceberg.PrimitiveTypes.Binary,
+			InitialDefault: []byte{1, 2, 3}, WriteDefault: iceberg.BinaryLiteral{4, 5, 6},
+		},
+		{ID: 3, Name: "list", Type: &iceberg.ListType{
+			ElementID: 4, Element: listElement, ElementRequired: true,
+		}},
+		{ID: 6, Name: "map", Type: &iceberg.MapType{
+			KeyID: 7, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 8, ValueType: mapValue, ValueRequired: false,
+		}},
+	}}
+
+	return iceberg.NewSchemaWithIdentifiers(1, []int{1}, iceberg.NestedField{
+		ID: 1, Name: "payload", Type: payload,
+	})
 }
