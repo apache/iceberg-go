@@ -1904,39 +1904,6 @@ func TestStripExtractPredicatesOrAnd(t *testing.T) {
 	assert.True(t, isFalse, "AlwaysFalse passes through unchanged, got %T", falseStripped)
 }
 
-// TestBuildExtractColumnNameFallback: a variant column whose Arrow field lacks
-// PARQUET:field_id (name-mapping reads) is still resolved by name.
-func TestBuildExtractColumnNameFallback(t *testing.T) {
-	mem := memory.DefaultAllocator
-	iceSchema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
-	)
-	arrNoIDs, err := SchemaToArrowSchema(iceSchema, nil, false, false) // includeFieldIDs=false
-	require.NoError(t, err)
-
-	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
-	defer vb.Release()
-	var b variant.Builder
-	require.NoError(t, b.Append(map[string]any{"a": int64(42)}))
-	v, err := b.Build()
-	require.NoError(t, err)
-	vb.Append(v)
-	pArr := vb.NewArray()
-	defer pArr.Release()
-	rec := array.NewRecordBatch(arrNoIDs, []arrow.Array{pArr}, 1)
-	defer rec.Release()
-
-	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
-	require.NoError(t, err)
-	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: "payload"}
-
-	arr, _, err := buildExtractColumn(col, rec, mem)
-	require.NoError(t, err)
-	defer arr.Release()
-	require.Equal(t, 1, arr.Len())
-	assert.EqualValues(t, 42, arr.(*array.Int64).Value(0), "column resolved by name despite missing field id")
-}
-
 func TestBuildExtractColumnRenamedSource(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -1960,13 +1927,78 @@ func TestBuildExtractColumnRenamedSource(t *testing.T) {
 
 	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
 	require.NoError(t, err)
-	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: "old_payload"}
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"old_payload"}}
 
 	arr, _, err := buildExtractColumn(col, rec, mem)
 	require.NoError(t, err)
 	defer arr.Release()
 	require.Equal(t, 1, arr.Len())
 	assert.EqualValues(t, 7, arr.(*array.Int64).Value(0), "resolved by file-schema physical path after rename")
+}
+
+func TestBuildExtractColumnResolvesByFieldID(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(5)}))
+	v, err := b.Build()
+	require.NoError(t, err)
+	vb.Append(v)
+	pArr := vb.NewArray()
+	defer pArr.Release()
+
+	md := arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"2"})
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "old_payload", Type: pArr.DataType(), Nullable: true, Metadata: md}}, nil)
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{pArr}, 1)
+	defer rec.Release()
+
+	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	// SourcePath deliberately mismatches the physical name, so only the field-id match can resolve it.
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
+
+	arr, _, err := buildExtractColumn(col, rec, mem)
+	require.NoError(t, err)
+	defer arr.Release()
+	require.Equal(t, 1, arr.Len())
+	assert.EqualValues(t, 5, arr.(*array.Int64).Value(0), "resolved by field id, not name")
+}
+
+func TestBuildExtractColumnDottedName(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "a.b", Type: iceberg.VariantType{}},
+	)
+
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(3)}))
+	v, err := b.Build()
+	require.NoError(t, err)
+	vb.Append(v)
+	pArr := vb.NewArray()
+	defer pArr.Release()
+
+	// Column literally named "a.b", id-less file: must resolve as ONE segment, not split into a->b.
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "a.b", Type: pArr.DataType(), Nullable: true}}, nil)
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{pArr}, 1)
+	defer rec.Release()
+
+	term, err := iceberg.Extract("a.b", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"a.b"}}
+
+	arr, _, err := buildExtractColumn(col, rec, mem)
+	require.NoError(t, err)
+	defer arr.Release()
+	require.Equal(t, 1, arr.Len())
+	assert.EqualValues(t, 3, arr.(*array.Int64).Value(0), "dotted column name resolved as a single segment")
 }
 
 func TestBuildExtractColumnNested(t *testing.T) {
@@ -2006,7 +2038,7 @@ func TestBuildExtractColumnNested(t *testing.T) {
 
 	term, err := iceberg.Extract("wrapper.payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
 	require.NoError(t, err)
-	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: "wrapper.payload"}
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"wrapper", "payload"}}
 
 	arr, _, err := buildExtractColumn(col, rec, mem)
 	require.NoError(t, err)

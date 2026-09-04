@@ -663,7 +663,7 @@ type VariantExtractColumn struct {
 	Term       BoundExtract
 	FieldID    int
 	Name       string
-	SourcePath string
+	SourcePath []string
 }
 
 // TranslateColumnNamesForScan translates a bound filter to the file schema, mapping variant extract terms to synthetic reference columns.
@@ -718,7 +718,7 @@ func (t *scanTranslator) extractRef(ext BoundExtract) Reference {
 	key := ext.String()
 	idx, ok := t.byKey[key]
 	if !ok {
-		sourcePath, _ := t.fileSchema.FindColumnName(ext.Ref().Field().ID)
+		sourcePath := t.fileSchema.columnPathSegments(ext.Ref().Field().ID)
 		idx = len(t.columns)
 		t.columns = append(t.columns, VariantExtractColumn{
 			Term:       ext,
@@ -903,6 +903,7 @@ type sanitizeVisitor struct{}
 func (sanitizeVisitor) VisitTrue() sanitizedResult  { return sanitizedResult{expr: AlwaysTrue{}} }
 func (sanitizeVisitor) VisitFalse() sanitizedResult { return sanitizedResult{expr: AlwaysFalse{}} }
 func (sanitizeVisitor) VisitNot(child sanitizedResult) sanitizedResult {
+	// Over-broad but never AlwaysFalse: a NOT over any unserializable descendant collapses the whole subtree, dropping serializable siblings from the report.
 	if child.hasUnserializable {
 		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
 	}

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -106,38 +105,21 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 	return bldr.NewArray(), field, nil
 }
 
-// resolveVariantSource locates the extract's source array by field id, descending
-// nested structs; it falls back to the file-schema path when field ids are absent.
-func resolveVariantSource(rec arrow.RecordBatch, fieldID int, sourcePath string) arrow.Array {
+// resolveVariantSource locates the extract's source array by top-level field id
+// (rename-proof), falling back to the file-schema path segments when ids are absent.
+func resolveVariantSource(rec arrow.RecordBatch, fieldID int, sourcePath []string) arrow.Array {
 	for i, f := range rec.Schema().Fields() {
-		if a := descendByFieldID(f, rec.Column(i), fieldID); a != nil {
-			return a
+		if v, ok := f.Metadata.GetValue(ArrowParquetFieldIDKey); ok {
+			if id, err := strconv.Atoi(v); err == nil && id == fieldID {
+				return rec.Column(i)
+			}
 		}
 	}
-	if sourcePath == "" {
+	if len(sourcePath) == 0 {
 		return nil
 	}
 
-	return descendByPath(rec.Schema(), rec.Columns(), strings.Split(sourcePath, "."))
-}
-
-func descendByFieldID(f arrow.Field, col arrow.Array, fieldID int) arrow.Array {
-	if v, ok := f.Metadata.GetValue(ArrowParquetFieldIDKey); ok {
-		if id, err := strconv.Atoi(v); err == nil && id == fieldID {
-			return col
-		}
-	}
-	st, ok := col.(*array.Struct)
-	if !ok {
-		return nil
-	}
-	for i, cf := range f.Type.(*arrow.StructType).Fields() {
-		if a := descendByFieldID(cf, st.Field(i), fieldID); a != nil {
-			return a
-		}
-	}
-
-	return nil
+	return descendByPath(rec.Schema(), rec.Columns(), sourcePath)
 }
 
 func descendByPath(schema *arrow.Schema, cols []arrow.Array, path []string) arrow.Array {
