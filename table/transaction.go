@@ -1018,26 +1018,61 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
-// validateDataFilePartitionData verifies that DataFile partition values match
-// the given partition spec's fields by ID without reading file contents.
-func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
+type partitionValidationField struct {
+	id   int
+	name string
+}
+
+// partitionValidationPlan contains the immutable metadata needed to validate
+// a data file's partition tuple against one partition spec. The field slice
+// preserves spec order for deterministic missing-field errors, while the map
+// makes unknown-field checks independent of the number of partition fields.
+type partitionValidationPlan struct {
+	specID           int
+	fields           []partitionValidationField
+	expectedFieldIDs map[int]string
+}
+
+func newPartitionValidationPlan(spec *iceberg.PartitionSpec) *partitionValidationPlan {
+	plan := &partitionValidationPlan{
+		specID:           spec.ID(),
+		fields:           make([]partitionValidationField, 0, spec.NumFields()),
+		expectedFieldIDs: make(map[int]string, spec.NumFields()),
+	}
+
+	for _, field := range spec.Fields() {
+		plan.fields = append(plan.fields, partitionValidationField{
+			id:   field.FieldID,
+			name: field.Name,
+		})
+		plan.expectedFieldIDs[field.FieldID] = field.Name
+	}
+
+	return plan
+}
+
+func (p *partitionValidationPlan) validate(df iceberg.DataFile) error {
 	partitionData := dataFilePartition(df)
 
-	expectedFieldIDs := make(map[int]string)
-	for _, field := range spec.Fields() {
-		expectedFieldIDs[field.FieldID] = field.Name
-		if _, ok := partitionData[field.FieldID]; !ok {
-			return fmt.Errorf("missing partition value for field id %d (%s)", field.FieldID, field.Name)
+	for _, field := range p.fields {
+		if _, ok := partitionData[field.id]; !ok {
+			return fmt.Errorf("missing partition value for field id %d (%s)", field.id, field.name)
 		}
 	}
 
 	for fieldID := range partitionData {
-		if _, ok := expectedFieldIDs[fieldID]; !ok {
-			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, spec.ID())
+		if _, ok := p.expectedFieldIDs[fieldID]; !ok {
+			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, p.specID)
 		}
 	}
 
 	return nil
+}
+
+// validateDataFilePartitionData verifies that DataFile partition values match
+// the given partition spec's fields by ID without reading file contents.
+func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
+	return newPartitionValidationPlan(spec).validate(df)
 }
 
 // validateDataFilesToAdd performs metadata-only validation for caller-provided
@@ -1071,9 +1106,9 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 
 	// A data file may target any partition spec registered in the table
 	// metadata, not just the default: its manifest is written with that
-	// spec (see snapshotProducer.manifestProducer). Cache lookups since
-	// files typically share a handful of specs.
-	specsByID := make(map[int32]*iceberg.PartitionSpec)
+	// spec (see snapshotProducer.manifestProducer). Cache validation plans
+	// since files typically share a handful of specs.
+	validationPlansByID := make(map[int32]*partitionValidationPlan)
 
 	setToAdd := make(map[string]struct{}, len(dataFiles))
 
@@ -1102,9 +1137,9 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid file format %s for %s", path, df.FileFormat(), operation)
 		}
 
-		spec, ok := specsByID[df.SpecID()]
+		plan, ok := validationPlansByID[df.SpecID()]
 		if !ok {
-			spec, err = meta.GetSpecByID(int(df.SpecID()))
+			spec, err := meta.GetSpecByID(int(df.SpecID()))
 			if err != nil || spec == nil {
 				return nil, fmt.Errorf("data file %s has unregistered partition spec id %d for %s",
 					path, df.SpecID(), operation)
@@ -1112,10 +1147,11 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			if err := checkNoUnknownTransform(spec); err != nil {
 				return nil, fmt.Errorf("data file %s for %s: %w", path, operation, err)
 			}
-			specsByID[df.SpecID()] = spec
+			plan = newPartitionValidationPlan(spec)
+			validationPlansByID[df.SpecID()] = plan
 		}
 
-		if err := validateDataFilePartitionData(df, spec); err != nil {
+		if err := plan.validate(df); err != nil {
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
@@ -1166,6 +1202,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 	if meta.formatVersion < 2 {
 		return nil, fmt.Errorf("delete files require table format version >= 2, got v%d", meta.formatVersion)
 	}
+	validationPlansByID := make(map[int32]*partitionValidationPlan)
 
 	for i, addition := range deleteFiles {
 		df := addition.file
@@ -1188,14 +1225,19 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			return nil, fmt.Errorf("adding non-delete file %s has content type %s for %s", path, df.ContentType(), operation)
 		}
 
-		spec, err := meta.GetSpecByID(int(df.SpecID()))
-		if err != nil {
-			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+		plan, ok := validationPlansByID[df.SpecID()]
+		if !ok {
+			spec, err := meta.GetSpecByID(int(df.SpecID()))
+			if err != nil {
+				return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+			}
+			if spec == nil {
+				return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
+			}
+			plan = newPartitionValidationPlan(spec)
+			validationPlansByID[df.SpecID()] = plan
 		}
-		if spec == nil {
-			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
-		}
-		if err := validateDataFilePartitionData(df, spec); err != nil {
+		if err := plan.validate(df); err != nil {
 			return nil, fmt.Errorf("delete file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
