@@ -1291,7 +1291,7 @@ func TestTransactionApplyDefersMetadataBuildForNoopRequirements(t *testing.T) {
 	})
 }
 
-func TestTransactionStagedTableBuildsOnePreviousMetadataLogEntry(t *testing.T) {
+func TestTransactionStagedTableBuildsSinglePreviousMetadataLogEntryAfterNoRequirementApplies(t *testing.T) {
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
 
 	for range 3 {
