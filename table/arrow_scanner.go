@@ -167,7 +167,7 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 	for _, t := range tasks {
 		for _, d := range t.DeletionVectorFiles {
 			_, _, ref, contentOffset, contentSize := iceinternal.BorrowedDataFilePointers(d)
-			if ref == nil {
+			if ref == nil || *ref == "" {
 				return nil, fmt.Errorf("deletion vector %s missing referenced_data_file", d.FilePath())
 			}
 			if contentOffset == nil || contentSize == nil {
@@ -270,9 +270,9 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 }
 
 // sameDVBlob reports whether two DV manifest entries point at the same puffin
-// blob — identical puffin file path and content offset. Different of either
-// means two distinct DVs for the same data file, the over-deletion case
-// readAllDeletionVectors rejects.
+// blob — identical puffin file path, content offset, and content size.
+// Different metadata means two distinct DVs for the same data file, the
+// over-deletion case readAllDeletionVectors rejects.
 //
 // Java's DeleteFileIndex is stricter: any second DV for the same data file is
 // rejected with ValidationException("Can't index multiple DVs for %s"), even
@@ -285,10 +285,10 @@ func sameDVBlob(a, b iceberg.DataFile) bool {
 		return false
 	}
 
-	_, _, _, aOffset, _ := iceinternal.BorrowedDataFilePointers(a)
-	_, _, _, bOffset, _ := iceinternal.BorrowedDataFilePointers(b)
+	_, _, _, aOffset, aSize := iceinternal.BorrowedDataFilePointers(a)
+	_, _, _, bOffset, bSize := iceinternal.BorrowedDataFilePointers(b)
 
-	return *aOffset == *bOffset
+	return *aOffset == *bOffset && *aSize == *bSize
 }
 
 func filePathValueType(dt arrow.DataType) arrow.DataType {

@@ -264,6 +264,25 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		assert.Contains(t, err.Error(), "missing referenced_data_file")
 	})
 
+	t.Run("DV empty referenced_data_file is rejected", func(t *testing.T) {
+		puffinPath, offset, length, _ := writeDVPuffinFixture(t, []uint64{0}, "file:///placeholder.parquet")
+
+		dvFile := &dvMockDataFile{
+			mockDataFile: mockDataFile{
+				path:        puffinPath,
+				contentType: iceberg.EntryContentPosDeletes,
+				format:      iceberg.PuffinFile,
+			},
+			referencedDataFile: strPtr(""),
+			contentOffset:      int64Ptr(offset),
+			contentSizeInBytes: int64Ptr(length),
+		}
+
+		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing referenced_data_file")
+	})
+
 	t.Run("DV identity mismatch propagates from ReadDV", func(t *testing.T) {
 		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{0}, "file:///table/data/data-001.parquet")
 		dvFile := newDVMockDataFile(puffinPath, "file:///table/data/data-002.parquet", offset, length, card)
@@ -310,6 +329,19 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		}}}
 
 		_, err := readAllDeletionVectors(ctx, fs, tasks, 1)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple deletion vectors for data file")
+	})
+
+	t.Run("same puffin path and offset with different sizes are rejected", func(t *testing.T) {
+		const dataFilePath = "file:///table/data/data-005.parquet"
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{5}, dataFilePath)
+		first := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
+		second := newDVMockDataFile(puffinPath, dataFilePath, offset, length+1, card)
+
+		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
+			first, second,
+		}}}, 1)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "multiple deletion vectors for data file")
 	})

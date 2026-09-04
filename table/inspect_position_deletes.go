@@ -605,7 +605,7 @@ func appendDeletionVectorRows(
 	appendRow appendPositionDeleteRow,
 ) (bool, error) {
 	referencedDataFile := file.ReferencedDataFile()
-	if referencedDataFile == nil {
+	if referencedDataFile == nil || *referencedDataFile == "" {
 		return false, fmt.Errorf("%w: deletion vector is missing referenced_data_file",
 			iceberg.ErrInvalidSchema)
 	}

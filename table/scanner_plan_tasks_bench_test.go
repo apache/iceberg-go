@@ -84,7 +84,7 @@ func BenchmarkPlanDataManifestTasks(b *testing.B) {
 func newPlanTasksBenchmarkFixture(
 	b testing.TB,
 	manifestCount, entryCount int,
-) (*Scan, *iceberg.Schema, []iceberg.ManifestFile, *positionalDeleteIndex, map[string]iceberg.ManifestEntry, *equalityDeleteIndex) {
+) (*Scan, *iceberg.Schema, []iceberg.ManifestFile, *positionalDeleteIndex, map[string]deleteFileIndexEntry, *equalityDeleteIndex) {
 	b.Helper()
 
 	fs := newTrackingIO()
@@ -171,7 +171,7 @@ func planBufferedDataManifestTasks(
 	manifests []iceberg.ManifestFile,
 	schema *iceberg.Schema,
 	posDeleteIndex *positionalDeleteIndex,
-	dvIndex map[string]iceberg.ManifestEntry,
+	dvIndex map[string]deleteFileIndexEntry,
 	eqDeleteIndex *equalityDeleteIndex,
 ) ([]FileScanTask, error) {
 	entries, err := scan.collectManifestEntriesWithSchema(

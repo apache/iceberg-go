@@ -167,6 +167,56 @@ func TestAnalyze_AllOptimal(t *testing.T) {
 	assert.Empty(t, plan.Groups)
 }
 
+func TestPlanCompaction_BoundsScopedPositionalDeleteRatioFromScan(t *testing.T) {
+	tbl := newAnalyzeTestTable(t)
+	dataPath := tbl.Location() + "/data/data.parquet"
+
+	dataBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		dataPath, iceberg.ParquetFile, nil, nil, nil, 100, 100)
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddRows(dataBuilder.Build()).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/delete.parquet", iceberg.ParquetFile, nil, nil, nil, 40, 100)
+	require.NoError(t, err)
+	filePathField, ok := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	require.True(t, ok)
+	deleteFile := deleteBuilder.
+		LowerBoundValues(map[int][]byte{filePathField.ID: []byte(dataPath)}).
+		UpperBoundValues(map[int][]byte{filePathField.ID: []byte(dataPath)}).
+		Build()
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(deleteFile).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeleteFiles, 1)
+	require.NotNil(t, tasks[0].DeleteFiles[0].ReferencedDataFile())
+	assert.Equal(t, dataPath, *tasks[0].DeleteFiles[0].ReferencedDataFile())
+
+	cfg := compaction.Config{
+		TargetFileSizeBytes:  100,
+		MinFileSizeBytes:     50,
+		MaxFileSizeBytes:     150,
+		MinInputFiles:        1,
+		DeleteFileThreshold:  2,
+		DeleteRatioThreshold: 0.3,
+		PackingLookback:      compaction.DefaultPackingLookback,
+	}
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	require.Len(t, plan.Groups, 1)
+	assert.Len(t, plan.Groups[0].Tasks, 1)
+}
+
 func TestAnalyze_EmptyTable(t *testing.T) {
 	tbl := newAnalyzeTestTable(t)
 
