@@ -1672,41 +1672,6 @@ type arrowStatsCollector struct {
 	columnModeErrors map[string]error
 }
 
-func (a *arrowStatsCollector) Schema(_ *iceberg.Schema, results func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	return results()
-}
-
-func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	result := make([]tblutils.StatisticsCollector, 0, len(results))
-	for _, res := range results {
-		result = append(result, res()...)
-	}
-
-	return result
-}
-
-func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	a.fieldID = field.ID
-
-	return fieldRes()
-}
-
-func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	a.fieldID = list.ElementID
-
-	return elemResult()
-}
-
-func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult, valResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	a.fieldID = m.KeyID
-	keyRes := keyResult()
-
-	a.fieldID = m.ValueID
-	valRes := valResult()
-
-	return append(keyRes, valRes...)
-}
-
 func (a *arrowStatsCollector) resolveColumnMetricsMode(colName string) tblutils.MetricsMode {
 	if a.defaultModeError != nil {
 		panic(a.defaultModeError)
@@ -1751,20 +1716,6 @@ func (a *arrowStatsCollector) primitiveCollector(dt iceberg.PrimitiveType, isNes
 	}, true
 }
 
-func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.StatisticsCollector {
-	colName, ok := a.schema.FindColumnName(a.fieldID)
-	if !ok {
-		return []tblutils.StatisticsCollector{}
-	}
-
-	collector, ok := a.primitiveCollector(dt, strings.Contains(colName, "."))
-	if !ok {
-		return []tblutils.StatisticsCollector{}
-	}
-
-	return []tblutils.StatisticsCollector{collector}
-}
-
 func (a *arrowStatsCollector) variantCollector() (tblutils.StatisticsCollector, bool) {
 	colName, ok := a.schema.FindColumnName(a.fieldID)
 	if !ok {
@@ -1776,15 +1727,6 @@ func (a *arrowStatsCollector) variantCollector() (tblutils.StatisticsCollector, 
 		ColName: colName,
 		Mode:    a.resolveColumnMetricsMode(colName),
 	}, true
-}
-
-func (a *arrowStatsCollector) Variant(_ iceberg.VariantType) []tblutils.StatisticsCollector {
-	collector, ok := a.variantCollector()
-	if !ok {
-		return []tblutils.StatisticsCollector{}
-	}
-
-	return []tblutils.StatisticsCollector{collector}
 }
 
 func statsPlanFieldCount(field iceberg.NestedField) int {
@@ -1849,6 +1791,13 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (result map[
 
 	defaultMode, defaultModeErr := tblutils.MatchMetricsMode(
 		props.Get(DefaultWriteMetricsModeKey, DefaultWriteMetricsModeDefault))
+	overrideCount := 0
+	for key := range props {
+		if strings.HasPrefix(key, MetricsModeColumnConfPrefix+".") {
+			overrideCount++
+		}
+	}
+
 	var columnModes map[string]tblutils.MetricsMode
 	var columnModeErrors map[string]error
 	for key, rawMode := range props {
@@ -1860,7 +1809,7 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (result map[
 		mode, err := tblutils.MatchMetricsMode(rawMode)
 		if err != nil {
 			if columnModeErrors == nil {
-				columnModeErrors = make(map[string]error, len(props))
+				columnModeErrors = make(map[string]error, overrideCount)
 			}
 
 			columnModeErrors[colName] = err
@@ -1868,7 +1817,7 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (result map[
 			continue
 		}
 		if columnModes == nil {
-			columnModes = make(map[string]tblutils.MetricsMode, len(props))
+			columnModes = make(map[string]tblutils.MetricsMode, overrideCount)
 		}
 		columnModes[colName] = mode
 	}

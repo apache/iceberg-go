@@ -19,10 +19,8 @@ package table
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/json"
 	"math"
-	"slices"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -428,51 +426,143 @@ var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 )
 
 func TestStatsTypes(t *testing.T) {
-	statsCols, err := iceberg.PreOrderVisit(tableSchemaNested,
-		&arrowStatsCollector{
-			schema:      tableSchemaNested,
-			defaultMode: internal.MetricsMode{Typ: internal.MetricModeFull},
-		})
-
-	require.NoError(t, err)
-
-	// field ids should be sorted
-	assert.True(t, slices.IsSortedFunc(statsCols, func(a, b internal.StatisticsCollector) int {
-		return cmp.Compare(a.FieldID, b.FieldID)
-	}))
-
-	actual := make([]iceberg.Type, len(statsCols))
-	for i, col := range statsCols {
-		actual[i] = col.IcebergTyp
-	}
-
-	assert.Equal(t, []iceberg.Type{
-		iceberg.PrimitiveTypes.String,
-		iceberg.PrimitiveTypes.Int32,
-		iceberg.PrimitiveTypes.Bool,
-		iceberg.PrimitiveTypes.String,
-		iceberg.PrimitiveTypes.String,
-		iceberg.PrimitiveTypes.String,
-		iceberg.PrimitiveTypes.Int32,
-		iceberg.PrimitiveTypes.Float32,
-		iceberg.PrimitiveTypes.Float32,
-		iceberg.PrimitiveTypes.String,
-		iceberg.PrimitiveTypes.Int32,
-	}, actual)
-}
-
-func TestComputeStatsPlanTraversesNestedFields(t *testing.T) {
 	plan, err := computeStatsPlan(tableSchemaNested, iceberg.Properties{
 		DefaultWriteMetricsModeKey: string(internal.MetricModeFull),
 	})
 	require.NoError(t, err)
 
-	assert.Len(t, plan, 11)
-	for _, fieldID := range []int{1, 2, 3, 5, 7, 9, 10, 13, 14, 16, 17} {
-		assert.Contains(t, plan, fieldID)
+	full := internal.MetricsMode{Typ: internal.MetricModeFull}
+	counts := internal.MetricsMode{Typ: internal.MetricModeCounts}
+	assert.Equal(t, map[int]internal.StatisticsCollector{
+		1:  {FieldID: 1, IcebergTyp: iceberg.PrimitiveTypes.String, ColName: "foo", Mode: full},
+		2:  {FieldID: 2, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "bar", Mode: full},
+		3:  {FieldID: 3, IcebergTyp: iceberg.PrimitiveTypes.Bool, ColName: "baz", Mode: full},
+		5:  {FieldID: 5, IcebergTyp: iceberg.PrimitiveTypes.String, ColName: "qux.element", Mode: counts},
+		7:  {FieldID: 7, IcebergTyp: iceberg.PrimitiveTypes.String, ColName: "quux.key", Mode: counts},
+		9:  {FieldID: 9, IcebergTyp: iceberg.PrimitiveTypes.String, ColName: "quux.value.key", Mode: counts},
+		10: {FieldID: 10, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "quux.value.value", Mode: counts},
+		13: {FieldID: 13, IcebergTyp: iceberg.PrimitiveTypes.Float32, ColName: "location.element.latitude", Mode: counts},
+		14: {FieldID: 14, IcebergTyp: iceberg.PrimitiveTypes.Float32, ColName: "location.element.longitude", Mode: counts},
+		16: {FieldID: 16, IcebergTyp: iceberg.PrimitiveTypes.String, ColName: "person.name", Mode: counts},
+		17: {FieldID: 17, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "person.age", Mode: counts},
+	}, plan)
+}
+
+func TestComputeStatsPlanMetricsModes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "text", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "binary", Type: iceberg.PrimitiveTypes.Binary},
+		iceberg.NestedField{ID: 3, Name: "number", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "variant", Type: iceberg.VariantType{}},
+		iceberg.NestedField{ID: 5, Name: "dotted.name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 6, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 7, Name: "text", Type: iceberg.PrimitiveTypes.String},
+			{ID: 8, Name: "variant", Type: iceberg.VariantType{}},
+		}}},
+	)
+	full := internal.MetricsMode{Typ: internal.MetricModeFull}
+	counts := internal.MetricsMode{Typ: internal.MetricModeCounts}
+	none := internal.MetricsMode{Typ: internal.MetricModeNone}
+	truncate := internal.MetricsMode{Typ: internal.MetricModeTruncate, Len: 16}
+	truncateTwo := internal.MetricsMode{Typ: internal.MetricModeTruncate, Len: 2}
+
+	for _, tt := range []struct {
+		name     string
+		props    iceberg.Properties
+		expected map[int]internal.MetricsMode
+	}{
+		{
+			name:     "default",
+			expected: map[int]internal.MetricsMode{1: truncate, 2: truncate, 3: full, 4: truncate, 5: counts, 7: counts, 8: truncate},
+		},
+		{
+			name:     "full",
+			props:    iceberg.Properties{DefaultWriteMetricsModeKey: "full"},
+			expected: map[int]internal.MetricsMode{1: full, 2: full, 3: full, 4: full, 5: counts, 7: counts, 8: full},
+		},
+		{
+			name:     "counts",
+			props:    iceberg.Properties{DefaultWriteMetricsModeKey: "counts"},
+			expected: map[int]internal.MetricsMode{1: counts, 2: counts, 3: counts, 4: counts, 5: counts, 7: counts, 8: counts},
+		},
+		{
+			name:     "none",
+			props:    iceberg.Properties{DefaultWriteMetricsModeKey: "none"},
+			expected: map[int]internal.MetricsMode{1: none, 2: none, 3: none, 4: none, 5: none, 7: none, 8: none},
+		},
+		{
+			name:     "custom truncation",
+			props:    iceberg.Properties{DefaultWriteMetricsModeKey: " TRUNCATE(2) "},
+			expected: map[int]internal.MetricsMode{1: truncateTwo, 2: truncateTwo, 3: full, 4: truncateTwo, 5: counts, 7: counts, 8: truncateTwo},
+		},
+		{
+			name: "column overrides",
+			props: iceberg.Properties{
+				DefaultWriteMetricsModeKey:                      "none",
+				MetricsModeColumnConfPrefix + ".text":           "truncate(2)",
+				MetricsModeColumnConfPrefix + ".binary":         "full",
+				MetricsModeColumnConfPrefix + ".number":         "truncate(2)",
+				MetricsModeColumnConfPrefix + ".variant":        "counts",
+				MetricsModeColumnConfPrefix + ".dotted.name":    "full",
+				MetricsModeColumnConfPrefix + ".nested.text":    "full",
+				MetricsModeColumnConfPrefix + ".nested.variant": "truncate(2)",
+				MetricsModeColumnConfPrefix + ".not_present":    "truncate(0)",
+				"unrelated.property":                            "truncate(0)",
+			},
+			expected: map[int]internal.MetricsMode{1: truncateTwo, 2: full, 3: full, 4: counts, 5: counts, 7: counts, 8: truncateTwo},
+		},
+		{
+			name: "nested none overrides",
+			props: iceberg.Properties{
+				DefaultWriteMetricsModeKey:                      "full",
+				MetricsModeColumnConfPrefix + ".nested.text":    "none",
+				MetricsModeColumnConfPrefix + ".nested.variant": "none",
+			},
+			expected: map[int]internal.MetricsMode{1: full, 2: full, 3: full, 4: full, 5: counts, 7: none, 8: none},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := computeStatsPlan(schema, tt.props)
+			require.NoError(t, err)
+			require.Len(t, plan, len(tt.expected))
+			for fieldID, expected := range tt.expected {
+				require.Contains(t, plan, fieldID)
+				assert.Equal(t, expected, plan[fieldID].Mode, "field %d", fieldID)
+			}
+			assert.Nil(t, plan[4].IcebergTyp)
+			assert.Nil(t, plan[8].IcebergTyp)
+			assert.Equal(t, "variant", plan[4].ColName)
+			assert.Equal(t, "nested.variant", plan[8].ColName)
+		})
 	}
-	for _, fieldID := range []int{4, 6, 8, 11, 15} {
-		assert.NotContains(t, plan, fieldID)
+}
+
+func TestComputeStatsPlanInvalidModes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "text", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "variant", Type: iceberg.VariantType{}},
+	)
+	for _, tt := range []struct {
+		name  string
+		props iceberg.Properties
+	}{
+		{name: "invalid default", props: iceberg.Properties{DefaultWriteMetricsModeKey: "truncate(0)"}},
+		{name: "invalid primitive override", props: iceberg.Properties{MetricsModeColumnConfPrefix + ".text": "truncate(0)"}},
+		{name: "invalid variant override", props: iceberg.Properties{MetricsModeColumnConfPrefix + ".variant": "truncate(0)"}},
+		{
+			name: "invalid default with valid overrides",
+			props: iceberg.Properties{
+				DefaultWriteMetricsModeKey:               "truncate(0)",
+				MetricsModeColumnConfPrefix + ".text":    "full",
+				MetricsModeColumnConfPrefix + ".variant": "counts",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := computeStatsPlan(schema, tt.props)
+			require.ErrorContains(t, err, "invalid truncate length: 0")
+			assert.Nil(t, plan)
+		})
 	}
 }
 

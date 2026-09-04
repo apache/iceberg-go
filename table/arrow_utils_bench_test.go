@@ -27,18 +27,23 @@ import (
 func BenchmarkComputeStatsPlan(b *testing.B) {
 	for _, fieldCount := range []int{100, 1000, 10000} {
 		for _, benchmarkCase := range []struct {
-			name           string
-			defaultMode    string
-			overrideFields int
+			name                string
+			defaultMode         string
+			overrideStride      int
+			unrelatedProperties int
 		}{
 			{name: "default", defaultMode: "truncate(16)"},
-			{name: "one_percent_overrides", defaultMode: "truncate(16)", overrideFields: 100},
+			{name: "one_percent_overrides", defaultMode: "truncate(16)", overrideStride: 100},
+			{name: "one_percent_overrides_many_properties", defaultMode: "truncate(16)", overrideStride: 100, unrelatedProperties: 1000},
 		} {
 			b.Run(fmt.Sprintf("fields=%d/%s", fieldCount, benchmarkCase.name), func(b *testing.B) {
 				schema := benchmarkMetricsSchema(fieldCount)
 				props := iceberg.Properties{DefaultWriteMetricsModeKey: benchmarkCase.defaultMode}
-				for i := 0; benchmarkCase.overrideFields > 0 && i < fieldCount; i += benchmarkCase.overrideFields {
+				for i := 0; benchmarkCase.overrideStride > 0 && i < fieldCount; i += benchmarkCase.overrideStride {
 					props[MetricsModeColumnConfPrefix+fmt.Sprintf(".field_%d", i)] = "counts"
+				}
+				for i := range benchmarkCase.unrelatedProperties {
+					props[fmt.Sprintf("unrelated.property.%d", i)] = "value"
 				}
 
 				b.ReportAllocs()
