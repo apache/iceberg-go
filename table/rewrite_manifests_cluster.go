@@ -200,8 +200,8 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 			// The counter advances when the Avro writer flushes a block, so a
 			// manifest can exceed targetSizeBytes by nearly one block.
 			if writer.writer != nil && writer.hasEntries && m.targetSizeBytes > 0 && writer.counter.Count >= m.targetSizeBytes {
-				if entryErr := closeWriter(writer); entryErr != nil {
-					return nil, entryErr
+				if closeErr := closeWriter(writer); closeErr != nil {
+					return nil, closeErr
 				}
 			}
 			if writer.writer == nil {
@@ -229,7 +229,7 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 		if writer.writer == nil || !writer.hasEntries {
 			writer.abort()
 
-			continue
+			return nil, fmt.Errorf("cluster writer for key %v is incomplete", key.value)
 		}
 		if err := closeWriter(writer); err != nil {
 			return nil, err
