@@ -75,6 +75,7 @@ type partitionExtractionPlan struct {
 	schema       *iceberg.Schema
 	recordSchema *arrow.Schema
 	fields       []partitionFieldInfo
+	pathPlan     partitionPathPlan
 }
 
 type (
@@ -154,7 +155,7 @@ func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *ice
 }
 
 func (p *partitionedFanoutWriter) partitionPath(data partitionRecord) string {
-	return p.partitionSpec.PartitionToPath(data, p.schema)
+	return p.plan.pathPlan.format(data)
 }
 
 // Write writes the Arrow records to the specified location using a fanout pattern with
@@ -355,6 +356,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Schema, recordSchema *arrow.Schema) (*partitionExtractionPlan, error) {
 	partitionFields := spec.PartitionType(schema).FieldList
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
+	pathPlan := partitionPathPlan{fields: make([]partitionPathField, len(partitionFields))}
 	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
 	for _, field := range spec.Fields() {
 		specFieldsByID[field.FieldID] = field
@@ -366,6 +368,13 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		if !ok {
 			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
 		}
+		pathField := partitionPathField{
+			escapedName: sourceField.EscapedName(),
+			transform:   sourceField.Transform,
+			resultType:  partitionField.Type,
+		}
+		pathPlan.fields[i] = pathField
+		pathPlan.estimatedSize += len(pathField.escapedName) + 20
 		partitionFieldsInfo[i].fieldID = partitionField.ID
 		colName, ok := schema.FindColumnName(sourceField.SourceID())
 		if !ok {
@@ -394,6 +403,7 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		schema:       schema,
 		recordSchema: recordSchema,
 		fields:       partitionFieldsInfo,
+		pathPlan:     pathPlan,
 	}, nil
 }
 
