@@ -114,7 +114,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 			g.Go(func() error {
 				deletes, err := readDeletes(gctx, fs, v)
 				if err != nil {
-					return err
+					return fmt.Errorf("read position deletes from %s: %w", v.FilePath(), err)
 				}
 				if deletes == nil {
 					return nil
