@@ -68,7 +68,7 @@ func TestOpenManifestWithProjectionDropsStatsAfterFiltering(t *testing.T) {
 	fs := iceio.NewMemFS()
 	require.NoError(t, fs.WriteFile(manifestPath, manifestBytes.Bytes()))
 
-	projection := iceberg.ManifestEntryProjection{IncludeColumnStats: true}
+	projection := iceberg.ManifestEntryProjection{IncludePruningStats: true}
 	entries, err := openManifestWithProjection(
 		fs,
 		manifest,
@@ -93,39 +93,29 @@ func TestOpenManifestWithProjectionDropsStatsAfterFiltering(t *testing.T) {
 	assert.Empty(t, entries[0].DataFile().LowerBoundValues())
 }
 
-func TestManifestProjectionRetainsDataFileStatsForDeleteScans(t *testing.T) {
-	scan := &Scan{rowFilter: iceberg.AlwaysTrue{}}
-	dataManifest := iceberg.NewManifestFile(
-		2, "data-manifest.avro", 100, 0, 1,
-	).Build()
-	deleteManifest := iceberg.NewManifestFile(
-		2, "delete-manifest.avro", 100, 0, 1,
-	).Content(iceberg.ManifestContentDeletes).Build()
+func TestDataManifestProjection(t *testing.T) {
+	for _, filter := range []struct {
+		name       string
+		expression iceberg.BooleanExpression
+		needsStats bool
+	}{
+		{name: "nil"},
+		{name: "always true", expression: iceberg.AlwaysTrue{}},
+		{name: "row filter", expression: iceberg.EqualTo(iceberg.Reference("id"), int64(1)), needsStats: true},
+	} {
+		t.Run(filter.name, func(t *testing.T) {
+			scan := &Scan{rowFilter: filter.expression}
+			projection, dropStats := scan.dataManifestProjection(false)
+			assert.Equal(t, filter.needsStats, projection.IncludePruningStats)
+			assert.Equal(t, filter.needsStats, dropStats,
+				"row-filter stats can be dropped after filtering when no equality delete needs them")
 
-	projection, dropStats := scan.manifestProjectionForManifest(dataManifest, false)
-	assert.False(t, projection.IncludeColumnStats)
-	assert.False(t, dropStats)
-
-	retainDataStats := scan.manifestProjectionRetainsDataStats(
-		[]iceberg.ManifestFile{dataManifest, deleteManifest})
-	assert.True(t, retainDataStats)
-
-	projection, dropStats = scan.manifestProjectionForManifest(dataManifest, retainDataStats)
-	assert.True(t, projection.IncludeColumnStats)
-	assert.False(t, dropStats,
-		"data-file stats must survive planning for equality-delete pruning")
-
-	projection, dropStats = scan.manifestProjectionForManifest(deleteManifest, retainDataStats)
-	assert.True(t, projection.IncludeColumnStats)
-	assert.False(t, dropStats)
-
-	filteredScan := &Scan{
-		rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
+			projection, dropStats = scan.dataManifestProjection(true)
+			assert.True(t, projection.IncludePruningStats)
+			assert.False(t, dropStats,
+				"data-file stats must survive filtering for equality-delete pruning")
+		})
 	}
-	projection, dropStats = filteredScan.manifestProjectionForManifest(dataManifest, false)
-	assert.True(t, projection.IncludeColumnStats)
-	assert.True(t, dropStats,
-		"row-filter stats should be dropped after filtering when no delete scan needs them")
 }
 
 func TestDataFilesWithoutColumnStatsReusesSharedFiles(t *testing.T) {
@@ -240,13 +230,6 @@ func TestPlanDataManifestTasksWithProjectionRetainsEqualityDeletePruning(t *test
 		deleteEntry("mem://projection-planning/delete-2.parquet", 2),
 		deleteEntry("mem://projection-planning/delete-3.parquet", 3),
 	}
-	eqDeleteIndex, err := buildEqualityDeleteIndex(deleteEntries, meta, schema)
-	require.NoError(t, err)
-	posDeleteIndex, err := buildPositionalDeleteIndex(nil)
-	require.NoError(t, err)
-	dvIndex, err := buildDVIndex(nil)
-	require.NoError(t, err)
-
 	scan := &Scan{
 		metadata:      meta,
 		ioF:           testFSF(fs),
@@ -254,6 +237,32 @@ func TestPlanDataManifestTasksWithProjectionRetainsEqualityDeletePruning(t *test
 		caseSensitive: true,
 		concurrency:   2,
 	}
+	var deleteBytes bytes.Buffer
+	deleteWriter, err := iceberg.NewManifestWriter(2, &deleteBytes, *iceberg.UnpartitionedSpec,
+		schema, 2, iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+	for _, entry := range deleteEntries {
+		require.NoError(t, deleteWriter.Add(entry))
+	}
+	deleteManifest, err := deleteWriter.ToManifestFile("mem://projection-planning/deletes.avro", int64(deleteBytes.Len()))
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(deleteManifest.FilePath(), deleteBytes.Bytes()))
+	deleteManifest = iceberg.NewManifestFile(2, deleteManifest.FilePath(), int64(deleteBytes.Len()), 0, 2).
+		Content(iceberg.ManifestContentDeletes).SequenceNum(2, 2).AddedFiles(2).AddedRows(2).Build()
+	classified, err := scan.collectManifestEntriesWithSchemaMinSequenceNum(t.Context(),
+		[]iceberg.ManifestFile{deleteManifest}, schema, scan.partitionFiltersForSchema(schema), 0, true)
+	require.NoError(t, err)
+	require.Len(t, classified.equalityDeleteEntries, 2)
+	for _, entry := range classified.equalityDeleteEntries {
+		assert.NotEmpty(t, entry.DataFile().LowerBoundValues(), "delete bounds must survive projected collection")
+	}
+	eqDeleteIndex, err := buildEqualityDeleteIndex(classified.equalityDeleteEntries, meta, schema)
+	require.NoError(t, err)
+	posDeleteIndex, err := buildPositionalDeleteIndex(nil)
+	require.NoError(t, err)
+	dvIndex, err := buildDVIndex(nil)
+	require.NoError(t, err)
+
 	tasks, err := scan.planDataManifestTasksWithOptions(
 		t.Context(),
 		[]iceberg.ManifestFile{manifest},

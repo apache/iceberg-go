@@ -40,7 +40,7 @@ func BenchmarkManifestEntryProjection(b *testing.B) {
 				benchmarkManifestEntryRead(b, fixture, &ManifestEntryProjection{})
 			})
 			b.Run("scan_with_stats", func(b *testing.B) {
-				benchmarkManifestEntryRead(b, fixture, &ManifestEntryProjection{IncludeColumnStats: true})
+				benchmarkManifestEntryRead(b, fixture, &ManifestEntryProjection{IncludePruningStats: true})
 			})
 		})
 	}

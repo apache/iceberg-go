@@ -1148,7 +1148,6 @@ func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
 	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
-	retainDataFileStats := scan.manifestProjectionRetainsDataStats(manifestList)
 
 	for manifestIndex, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {
@@ -1165,14 +1164,13 @@ func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
 			}
 			var projection *iceberg.ManifestEntryProjection
-			dropColumnStats := false
 			if projectScanColumns {
-				var p iceberg.ManifestEntryProjection
-				p, dropColumnStats = scan.manifestProjectionForManifest(mf, retainDataFileStats)
-				projection = &p
+				// Projected collection reads delete manifests before classification.
+				// Keep pruning stats until equality and positional deletes are indexed.
+				projection = &iceberg.ManifestEntryProjection{IncludePruningStats: true}
 			}
 			manifestEntries, err := openManifestWithProjection(
-				fs, mf, partEval, metricsEval, projection, dropColumnStats)
+				fs, mf, partEval, metricsEval, projection, false)
 			if err != nil {
 				return err
 			}
@@ -1193,32 +1191,12 @@ func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
 	return flattenClassifiedManifestEntries(manifestResults), nil
 }
 
-func (scan *Scan) manifestProjectionForManifest(
-	manifest iceberg.ManifestFile,
-	retainDataFileStats bool,
-) (iceberg.ManifestEntryProjection, bool) {
-	// Manifest-list metadata does not distinguish equality from positional
-	// deletes, so delete manifests retain their stats while they are being
-	// classified. Once classification is complete, retainDataFileStats is set
-	// only when an equality delete actually needs data-file metrics for pruning.
-	includeColumnStats := manifest.ManifestContent() == iceberg.ManifestContentDeletes ||
-		retainDataFileStats ||
+func (scan *Scan) dataManifestProjection(retainDataFileStats bool) (iceberg.ManifestEntryProjection, bool) {
+	includePruningStats := retainDataFileStats ||
 		(scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}))
-	dropColumnStats := includeColumnStats &&
-		manifest.ManifestContent() == iceberg.ManifestContentData &&
-		!retainDataFileStats
+	dropColumnStats := includePruningStats && !retainDataFileStats
 
-	return iceberg.ManifestEntryProjection{IncludeColumnStats: includeColumnStats}, dropColumnStats
-}
-
-func (scan *Scan) manifestProjectionRetainsDataStats(manifestList []iceberg.ManifestFile) bool {
-	for _, manifest := range manifestList {
-		if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
-			return true
-		}
-	}
-
-	return false
+	return iceberg.ManifestEntryProjection{IncludePruningStats: includePruningStats}, dropColumnStats
 }
 
 func splitManifestList(manifestList []iceberg.ManifestFile) (dataManifests, deleteManifests []iceberg.ManifestFile) {
@@ -1356,8 +1334,8 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 			stripTaskColumnStats := false
 			if projectScanColumns {
 				var p iceberg.ManifestEntryProjection
-				p, dropColumnStats = scan.manifestProjectionForManifest(manifest, retainDataFileStats)
-				stripTaskColumnStats = p.IncludeColumnStats && !dropColumnStats
+				p, dropColumnStats = scan.dataManifestProjection(retainDataFileStats)
+				stripTaskColumnStats = p.IncludePruningStats && !dropColumnStats
 				projection = &p
 			}
 			err = streamManifest(fs, manifest, partEval, metricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {

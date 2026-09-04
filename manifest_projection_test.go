@@ -23,6 +23,7 @@ import (
 	"sync"
 	"testing"
 
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -167,7 +168,7 @@ func TestManifestEntryProjectionDropsTransientStats(t *testing.T) {
 	assert.Empty(t, projected.DataFile().UpperBoundValues())
 
 	statsReader, err := NewManifestReaderWithProjection(
-		manifest, bytes.NewReader(manifestBytes.Bytes()), ManifestEntryProjection{IncludeColumnStats: true},
+		manifest, bytes.NewReader(manifestBytes.Bytes()), ManifestEntryProjection{IncludePruningStats: true},
 	)
 	require.NoError(t, err)
 	withStats, err := statsReader.ReadEntry()
@@ -213,6 +214,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			require.NoError(t, err)
 			builder.
 				BlockSizeInBytes(64 * 1024).
+				ColumnSizes(map[int]int64{1: 64}).
 				ValueCounts(map[int]int64{1: 1}).
 				NullValueCounts(map[int]int64{1: 0}).
 				NaNValueCounts(map[int]int64{1: 0}).
@@ -253,6 +255,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 				manifest, bytes.NewReader(manifestBytes.Bytes()), ManifestEntryProjection{},
 			)
 			require.NoError(t, err)
+			assert.Equal(t, tt.version == 1, reader.isFallback)
 			projected, err := reader.ReadEntry()
 			require.NoError(t, err)
 			require.NoError(t, reader.Close())
@@ -272,7 +275,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			}
 
 			statsReader, err := NewManifestReaderWithProjection(
-				manifest, bytes.NewReader(manifestBytes.Bytes()), ManifestEntryProjection{IncludeColumnStats: true},
+				manifest, bytes.NewReader(manifestBytes.Bytes()), ManifestEntryProjection{IncludePruningStats: true},
 			)
 			require.NoError(t, err)
 			withStats, err := statsReader.ReadEntry()
@@ -284,6 +287,75 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			assert.Equal(t, map[int][]byte{1: {0x01}}, withStats.DataFile().LowerBoundValues())
 			assert.Equal(t, map[int][]byte{1: {0x01}}, withStats.DataFile().UpperBoundValues())
 			assert.Empty(t, withStats.DataFile().ColumnSizes())
+
+			fullReader, err := NewManifestReader(manifest, bytes.NewReader(manifestBytes.Bytes()))
+			require.NoError(t, err)
+			full, err := fullReader.ReadEntry()
+			require.NoError(t, err)
+			require.NoError(t, fullReader.Close())
+			assert.Equal(t, map[int]int64{1: 64}, full.DataFile().ColumnSizes())
+
+			fs := iceio.NewMemFS()
+			require.NoError(t, fs.WriteFile(manifest.FilePath(), manifestBytes.Bytes()))
+			projectedEntries := map[string]ManifestEntry{
+				"reader":                    projected,
+				"reader with pruning stats": withStats,
+				"entry without stats":       ManifestEntryWithoutColumnStats(full),
+				"data file without stats": NewManifestEntry(EntryStatusADDED, &snapshotID,
+					&sequenceNumber, nil, DataFileWithoutColumnStats(full.DataFile())),
+				"repeated projection": ManifestEntryWithoutColumnStats(projected),
+			}
+			for entry, err := range EntriesWithProjection(fs, manifest, false, ManifestEntryProjection{}) {
+				require.NoError(t, err)
+				projectedEntries["iterator"] = entry
+			}
+			require.Len(t, projectedEntries, 6)
+			for name, projectedEntry := range projectedEntries {
+				t.Run(name, func(t *testing.T) {
+					for _, operation := range []string{"add", "existing", "delete"} {
+						t.Run(operation, func(t *testing.T) {
+							var output bytes.Buffer
+							writer, err := NewManifestWriter(tt.version, &output, *UnpartitionedSpec,
+								schema, snapshotID, WithManifestWriterContent(tt.manifestContent))
+							require.NoError(t, err)
+							writeEntry := map[string]func(ManifestEntry) error{
+								"add": writer.Add, "existing": writer.Existing, "delete": writer.Delete,
+							}[operation]
+							err = writeEntry(projectedEntry)
+							require.ErrorIs(t, err, ErrInvalidArgument)
+							require.ErrorContains(t, err, "projected data file")
+
+							// Rejection must leave the writer usable and its counts unchanged.
+							require.NoError(t, writer.Add(full))
+							rewritten, err := writer.ToManifestFile("rewritten.avro", int64(output.Len()))
+							require.NoError(t, err)
+							assert.EqualValues(t, 1, rewritten.AddedDataFiles())
+							assert.Zero(t, rewritten.ExistingDataFiles())
+							assert.Zero(t, rewritten.DeletedDataFiles())
+							reader, err := NewManifestReader(rewritten, bytes.NewReader(output.Bytes()))
+							require.NoError(t, err)
+							roundTrip, err := reader.ReadEntry()
+							require.NoError(t, err)
+							require.NoError(t, reader.Close())
+							assert.Equal(t, full.DataFile().ColumnSizes(), roundTrip.DataFile().ColumnSizes())
+						})
+					}
+					if tt.manifestContent == ManifestContentData {
+						var output bytes.Buffer
+						_, err := WriteManifest("rewritten.avro", &output, tt.version,
+							*UnpartitionedSpec, schema, snapshotID, []ManifestEntry{projectedEntry})
+						require.ErrorIs(t, err, ErrInvalidArgument)
+						if tt.version == 3 {
+							_, _, err = WriteManifestV3("rewritten-v3.avro", &output, 0,
+								*UnpartitionedSpec, schema, snapshotID, []ManifestEntry{projectedEntry})
+							require.ErrorIs(t, err, ErrInvalidArgument)
+						}
+					}
+					_, err := projectedEntry.DataFile().(AvroEntryMarshaler).MarshalAvroEntry(
+						*UnpartitionedSpec, schema, tt.version)
+					require.ErrorIs(t, err, ErrInvalidArgument)
+				})
+			}
 		})
 	}
 }

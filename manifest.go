@@ -677,6 +677,7 @@ type ManifestReader struct {
 	file           ManifestFile
 	formatVersion  int
 	isFallback     bool
+	projected      bool
 	content        ManifestContent
 	fieldNameToID  map[string]int
 	fieldIDToType  map[int]string
@@ -711,7 +712,8 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 // as in NewManifestReader; fields omitted by the projection retain their zero
 // values in the returned DataFile. Entries returned by this reader are
 // read-only planning values and must not be passed to a ManifestWriter, because
-// omitted statistics cannot be recovered on rewrite.
+// omitted statistics cannot be recovered on rewrite. ManifestWriter and the
+// DataFile Avro codec reject these values with ErrInvalidArgument.
 func NewManifestReaderWithProjection(
 	file ManifestFile,
 	in io.Reader,
@@ -833,6 +835,7 @@ func newManifestReader(
 		file:           file,
 		formatVersion:  formatVersion,
 		isFallback:     isFallback,
+		projected:      projection != nil,
 		content:        content,
 		fieldNameToID:  fieldMaps.nameToID,
 		fieldIDToType:  fieldMaps.idToType,
@@ -933,6 +936,7 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.isFallback {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
+	tmp.DataFile().(*dataFile).projected = c.projected
 	switch tmp.Status() {
 	case EntryStatusEXISTING, EntryStatusADDED, EntryStatusDELETED:
 	default:
@@ -1969,6 +1973,9 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	var partition map[int]any
 	entryToEncode := *entry
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		if err := dataFile.validateForWrite(); err != nil {
+			return err
+		}
 		partition = dataFile.DataFilePartitionRef(internal.DataFileRef{})
 		encodeDataFile := cloneDataFileAvroFields(dataFile)
 		encodePartition, err := avroEncodePartitionData(
@@ -2598,7 +2605,8 @@ func fitDecimalBytes(bytes []byte, size int) ([]byte, error) {
 }
 
 type dataFile struct {
-	Content                 ManifestEntryContent   `avro:"content"`
+	Content                 ManifestEntryContent `avro:"content"`
+	projected               bool
 	Path                    string                 `avro:"file_path"`
 	Format                  FileFormat             `avro:"file_format"`
 	PartitionData           map[string]any         `avro:"partition"`

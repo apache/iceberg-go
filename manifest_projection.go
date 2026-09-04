@@ -30,7 +30,7 @@ import (
 
 // ManifestEntryProjection selects the optional data-file fields decoded while
 // reading a manifest. The fields needed to build a scan task are always read.
-// When IncludeColumnStats is true, the metric maps used for pruning are also
+// When IncludePruningStats is true, the metric maps used for pruning are also
 // read: value_counts, null_value_counts, nan_value_counts, lower_bounds, and
 // upper_bounds. column_sizes and deprecated distinct_counts remain omitted.
 //
@@ -39,15 +39,17 @@ import (
 // ManifestFile.Entries or ReadManifest instead.
 // Projected entries are read-only planning values and must not be passed to a
 // ManifestWriter, because omitted statistics cannot be recovered on rewrite.
+// ManifestWriter and the DataFile Avro codec reject projected files with
+// ErrInvalidArgument, even when IncludePruningStats is true.
 type ManifestEntryProjection struct {
-	IncludeColumnStats bool
+	IncludePruningStats bool
 }
 
 const manifestEntryProjectionCacheSize = 256
 
 type manifestEntryProjectionCacheKey struct {
-	writerSchema       string
-	includeColumnStats bool
+	writerSchema        string
+	includePruningStats bool
 }
 
 var manifestEntryProjectionCache = func() *lru.Cache[manifestEntryProjectionCacheKey, *avro.Schema] {
@@ -63,7 +65,8 @@ var manifestEntryProjectionCache = func() *lru.Cache[manifestEntryProjectionCach
 // projection. It is the projected counterpart to ManifestFile.Entries and is
 // useful when a caller needs only the fields required for scan planning.
 // The returned entries must not be passed to a ManifestWriter, because the
-// projection may omit statistics that would be silently lost on rewrite.
+// projection may omit statistics that would be lost on rewrite.
+// ManifestWriter and the DataFile Avro codec reject them with ErrInvalidArgument.
 func EntriesWithProjection(
 	fs iceio.IO,
 	m ManifestFile,
@@ -111,8 +114,8 @@ func projectedManifestEntrySchema(
 		// avro.Schema.String returns the original header JSON; it is an O(1)
 		// accessor, not a serialization. The bounded cache retains at most one
 		// copy of each writer-schema string per projection mode.
-		writerSchema:       writerSchema.String(),
-		includeColumnStats: projection.IncludeColumnStats,
+		writerSchema:        writerSchema.String(),
+		includePruningStats: projection.IncludePruningStats,
 	}
 	if cached, ok := manifestEntryProjectionCache.Get(key); ok {
 		return cached, nil
@@ -137,7 +140,7 @@ func projectedManifestEntrySchema(
 
 		fields := make([]avro.SchemaField, 0, len(dataFile.Fields))
 		for _, field := range dataFile.Fields {
-			if manifestScanDataFileField(field.Name, projection.IncludeColumnStats) {
+			if manifestScanDataFileField(field.Name, projection.IncludePruningStats) {
 				fields = append(fields, field)
 			}
 		}
@@ -159,7 +162,7 @@ func projectedManifestEntrySchema(
 	return projected, nil
 }
 
-func manifestScanDataFileField(name string, includeColumnStats bool) bool {
+func manifestScanDataFileField(name string, includePruningStats bool) bool {
 	switch name {
 	case "content", "file_path", "file_format", "partition", "record_count",
 		"file_size_in_bytes", "block_size_in_bytes", "key_metadata", "split_offsets", "equality_ids",
@@ -167,7 +170,7 @@ func manifestScanDataFileField(name string, includeColumnStats bool) bool {
 		"content_size_in_bytes":
 		return true
 	case "value_counts", "null_value_counts", "nan_value_counts", "lower_bounds", "upper_bounds":
-		return includeColumnStats
+		return includePruningStats
 	default:
 		// column_sizes and distinct_counts are not needed to build or read a
 		// FileScanTask.
@@ -180,6 +183,7 @@ func manifestScanDataFileField(name string, includeColumnStats bool) bool {
 // returned unchanged because the package cannot safely clone their private
 // state. The returned value is for read-only planning and must not be passed
 // to a ManifestWriter, because the omitted statistics cannot be recovered.
+// ManifestWriter and the DataFile Avro codec reject the copy with ErrInvalidArgument.
 func DataFileWithoutColumnStats(file DataFile) DataFile {
 	d, ok := file.(*dataFile)
 	if !ok {
@@ -187,6 +191,7 @@ func DataFileWithoutColumnStats(file DataFile) DataFile {
 	}
 
 	out := cloneDataFileAvroFields(d)
+	out.projected = true
 	out.ColSizes = nil
 	out.ValCounts = nil
 	out.NullCounts = nil
@@ -206,7 +211,8 @@ func DataFileWithoutColumnStats(file DataFile) DataFile {
 // ManifestEntryWithoutColumnStats returns a copy of an entry whose built-in
 // DataFile has had transient column statistics removed.
 // The returned entry must not be passed to a ManifestWriter, because omitted
-// statistics would be silently lost on rewrite.
+// statistics would be lost on rewrite. ManifestWriter and the DataFile Avro
+// codec reject entries containing these copies with ErrInvalidArgument.
 func ManifestEntryWithoutColumnStats(entry ManifestEntry) ManifestEntry {
 	m, ok := entry.(*manifestEntry)
 	if !ok {
@@ -217,4 +223,12 @@ func ManifestEntryWithoutColumnStats(entry ManifestEntry) ManifestEntry {
 	out.Data = DataFileWithoutColumnStats(m.Data)
 
 	return &out
+}
+
+func (d *dataFile) validateForWrite() error {
+	if d.projected {
+		return fmt.Errorf("%w: cannot encode projected data file %q; read complete metadata before writing", ErrInvalidArgument, d.Path)
+	}
+
+	return nil
 }
