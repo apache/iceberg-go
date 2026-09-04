@@ -51,6 +51,7 @@ func BenchmarkPartitionValidationPlans(b *testing.B) {
 								b.Fatal(err)
 							}
 							partitionValidationBenchmarkSink = len(files)
+
 							continue
 						}
 
