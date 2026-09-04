@@ -57,6 +57,14 @@ func TestPartitionValidationPlanPreservesPartitionValidationErrors(t *testing.T)
 			wantError: "missing partition value for field id 1001 (second)",
 		},
 		{
+			name: "missing field with unknown field",
+			partition: map[int]any{
+				1000: int32(1),
+				9999: int32(3),
+			},
+			wantError: "missing partition value for field id 1001 (second)",
+		},
+		{
 			name: "unknown field",
 			partition: map[int]any{
 				1000: int32(1),

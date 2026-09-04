@@ -1060,6 +1060,10 @@ func (p *partitionValidationPlan) validate(df iceberg.DataFile) error {
 		}
 	}
 
+	if len(partitionData) == len(p.expectedFieldIDs) {
+		return nil
+	}
+
 	for fieldID := range partitionData {
 		if _, ok := p.expectedFieldIDs[fieldID]; !ok {
 			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, p.specID)
