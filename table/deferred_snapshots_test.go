@@ -246,6 +246,32 @@ func TestDeferredSnapshotsValidationMatchesEagerJSONSemantics(t *testing.T) {
 	}
 }
 
+func TestDeferredSnapshotsMissingLastSequenceNumberErrorParity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "v2", data: ExampleTableMetadataV2},
+		{name: "v3", data: ExampleTableMetadataV3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(tc.data), &fields))
+			delete(fields, "last-sequence-number")
+			data, err := json.Marshal(fields)
+			require.NoError(t, err)
+
+			_, eagerErr := ParseMetadataBytes(data)
+			_, deferredErr := ParseMetadataBytesDeferredSnapshots(data)
+			require.ErrorIs(t, eagerErr, ErrInvalidMetadata)
+			require.ErrorIs(t, deferredErr, ErrInvalidMetadata)
+			assert.EqualError(t, deferredErr, eagerErr.Error())
+			assert.ErrorContains(t, deferredErr,
+				"last-sequence-number is required for format versions greater than 1")
+		})
+	}
+}
+
 func TestSplitJSONArrayOffsetsReferToOriginalInput(t *testing.T) {
 	raw := []byte(" \n [ {\"id\":1}, [\"comma,brace}\"] ] \t")
 	spans, err := splitJSONArray(raw)
@@ -253,6 +279,19 @@ func TestSplitJSONArrayOffsetsReferToOriginalInput(t *testing.T) {
 	require.Len(t, spans, 2)
 	assert.Equal(t, `{"id":1}`, string(raw[spans[0].start:spans[0].end]))
 	assert.Equal(t, `["comma,brace}"]`, string(raw[spans[1].start:spans[1].end]))
+}
+
+func TestSplitJSONArrayPreservesMissingNullAndEmptyDistinction(t *testing.T) {
+	for _, raw := range [][]byte{nil, []byte(" \n\t"), []byte(" \n null\t")} {
+		spans, err := splitJSONArray(raw)
+		require.NoError(t, err)
+		assert.Nil(t, spans)
+	}
+
+	spans, err := splitJSONArray([]byte(" \n []\t"))
+	require.NoError(t, err)
+	assert.NotNil(t, spans)
+	assert.Empty(t, spans)
 }
 
 func TestDeferredSnapshotsMarshalMetadataValues(t *testing.T) {

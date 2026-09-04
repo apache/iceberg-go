@@ -310,6 +310,9 @@ type rawJSONSpan struct {
 
 func splitJSONArray(raw []byte) ([]rawJSONSpan, error) {
 	arrayStart, arrayEnd := trimJSONSpan(raw, 0, len(raw))
+	if arrayStart == arrayEnd || bytes.Equal(raw[arrayStart:arrayEnd], []byte("null")) {
+		return nil, nil
+	}
 	if arrayEnd-arrayStart < 2 || raw[arrayStart] != '[' || raw[arrayEnd-1] != ']' {
 		return nil, errors.New("expected JSON array")
 	}
@@ -447,14 +450,18 @@ func finishDeferredMetadataUnmarshal(metadata Metadata) error {
 }
 
 func prepareDeferredSnapshots(rawSnapshots json.RawMessage, common *commonMetadata, metadata Metadata) (*deferredSnapshotState, []Snapshot, error) {
-	rawSnapshots = bytes.TrimSpace(rawSnapshots)
-	if len(rawSnapshots) == 0 || bytes.Equal(rawSnapshots, []byte("null")) {
-		return nil, nil, nil
+	if metadata.Version() > 1 {
+		if err := requireLastSequenceNumber(metadata); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	rawEntries, err := splitJSONArray(rawSnapshots)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: snapshots: %w", ErrInvalidMetadata, err)
+	}
+	if rawEntries == nil {
+		return nil, nil, nil
 	}
 	if len(rawEntries) == 0 {
 		return nil, []Snapshot{}, nil
