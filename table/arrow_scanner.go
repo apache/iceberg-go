@@ -1185,7 +1185,22 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 		return nil, false, err
 	}
 
-	return plan.recordProcessor(ctx), plan.dropFile, nil
+	return as.recordProcessorWithExtracts(ctx, plan), plan.dropFile, nil
+}
+
+// recordProcessorWithExtracts returns the plan's record filter, wrapped with the
+// per-batch variant extract residual when the plan carries extract terms.
+func (as *arrowScan) recordProcessorWithExtracts(ctx context.Context, plan *compiledFileFilterPlan) recProcessFn {
+	base := plan.recordProcessor(ctx)
+	if base == nil {
+		// No record filter (nil plan or filter folded to AlwaysTrue): keep every row, no residual.
+		return nil
+	}
+	if len(plan.extracts) == 0 {
+		return base
+	}
+
+	return as.extractResidualFilter(ctx, plan.extracts, base)
 }
 
 func (as *arrowScan) getRecordFilterFromPlan(ctx context.Context, plan *compiledFileFilterPlan) (recProcessFn, bool, error) {
@@ -1193,7 +1208,7 @@ func (as *arrowScan) getRecordFilterFromPlan(ctx context.Context, plan *compiled
 		return nil, false, nil
 	}
 
-	return plan.recordProcessor(ctx), plan.dropFile, nil
+	return as.recordProcessorWithExtracts(ctx, plan), plan.dropFile, nil
 }
 
 type filterBindingState struct {
@@ -1601,6 +1616,11 @@ func (as *arrowScan) processRecordsWithPlans(
 				// initial-default because Iceberg materializes the default on read.
 				// Keep the actual row filter, but conservatively skip early pruning.
 				pruningFilter = iceberg.AlwaysTrue{}
+			}
+
+			pruningFilter, err = stripExtractPredicates(pruningFilter)
+			if err != nil {
+				return err
 			}
 
 			filePruningFilter, err := iceberg.TranslateColumnNames(pruningFilter, fileSchema)
