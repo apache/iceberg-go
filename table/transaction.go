@@ -172,10 +172,10 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return errors.New("cannot apply updates to nil metadata")
 	}
 
-	current, err := stagedMeta.Build()
-	if err != nil {
-		return err
-	}
+	// Only new requirement validation needs the immutable metadata view.
+	// Updates can be applied directly to the staged builder, and duplicate
+	// requirements only need conflict checks.
+	var current Metadata
 
 	// Deduplicate requirements by semantic key, rejecting pairs that
 	// share a key but cannot both hold (see checkRequirementConflict).
@@ -183,36 +183,50 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	// staged metadata: a deduplicated twin re-asserts base state the
 	// staged metadata has intentionally moved past, and its kept twin
 	// was validated when first added.
-	existing := make(map[string]Requirement, len(t.reqs))
-	stagedReqs := make([]Requirement, 0, len(t.reqs)+len(reqs))
-	for _, r := range t.reqs {
-		key, err := requirementSemanticKey(r)
-		if err != nil {
-			return err
-		}
-
-		existing[key] = r
-		stagedReqs = append(stagedReqs, r)
-	}
-
-	for _, r := range reqs {
-		key, err := requirementSemanticKey(r)
-		if err != nil {
-			return err
-		}
-
-		if prev, ok := existing[key]; ok {
-			if err := checkRequirementConflict(prev, r); err != nil {
+	stagedReqs := t.reqs
+	if len(reqs) > 0 {
+		existing := make(map[string]Requirement, len(t.reqs))
+		for _, r := range t.reqs {
+			key, err := requirementSemanticKey(r)
+			if err != nil {
 				return err
 			}
 
-			continue
+			existing[key] = r
 		}
-		if err := r.Validate(current); err != nil {
-			return err
+
+		copiedReqs := false
+		for _, r := range reqs {
+			key, err := requirementSemanticKey(r)
+			if err != nil {
+				return err
+			}
+
+			if prev, ok := existing[key]; ok {
+				if err := checkRequirementConflict(prev, r); err != nil {
+					return err
+				}
+
+				continue
+			}
+			if current == nil {
+				built, err := stagedMeta.Build()
+				if err != nil {
+					return err
+				}
+				current = built
+			}
+			if err := r.Validate(current); err != nil {
+				return err
+			}
+			if !copiedReqs {
+				stagedReqs = make([]Requirement, len(t.reqs), len(t.reqs)+len(reqs))
+				copy(stagedReqs, t.reqs)
+				copiedReqs = true
+			}
+			existing[key] = r
+			stagedReqs = append(stagedReqs, r)
 		}
-		existing[key] = r
-		stagedReqs = append(stagedReqs, r)
 	}
 
 	prevUpdates, prevLastUpdated := len(stagedMeta.updates), stagedMeta.lastUpdatedMS
@@ -3257,6 +3271,10 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 	}, nil
 }
 
+// Commit persists the transaction's staged changes. Metadata validation may be
+// deferred when applying an operation adds no new requirement to the transaction.
+// The staged metadata is validated when a later transaction operation needs an
+// immutable metadata view, or while the catalog applies the commit.
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	if err := t.checkNotNil(); err != nil {
 		return nil, err
