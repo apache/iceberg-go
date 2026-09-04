@@ -763,6 +763,7 @@ func deleteFilesSequential(ctx context.Context, fs iceio.IO, orphanFiles []strin
 	return deletedFiles, errors.Join(result, cancellationErr)
 }
 
+// wrapError must return a non-nil error for each failed deletion.
 func deleteFilesParallel(
 	ctx context.Context,
 	files []string,
@@ -807,12 +808,7 @@ func deleteFilesParallel(
 					}
 
 					if err := deleteFunc(files[index]); err != nil {
-						wrappedErr := wrapError(files[index], err)
-						if wrappedErr == nil {
-							// Keep failed deletions observable even if the wrapper suppresses the error.
-							wrappedErr = err
-						}
-						deleteErrors[index] = wrappedErr
+						deleteErrors[index] = wrapError(files[index], err)
 					} else {
 						deleted[index] = true
 					}

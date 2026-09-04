@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -1626,32 +1627,21 @@ func (m mockFileInfo) Sys() any             { return nil }
 type purgeDeleteTrackingIO struct {
 	mockListableIO
 
-	targetActive int
-	reached      chan struct{}
-	release      chan struct{}
+	release chan struct{}
 
-	mu          sync.Mutex
-	active      int
-	maxActive   int
-	removed     []string
-	reachedOnce sync.Once
-	releaseOnce sync.Once
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	removed   []string
 }
 
 func (m *purgeDeleteTrackingIO) Remove(name string) error {
 	m.mu.Lock()
 	m.active++
-	if m.active > m.maxActive {
-		m.maxActive = m.active
-	}
-	if m.targetActive > 0 && m.active >= m.targetActive {
-		m.reachedOnce.Do(func() { close(m.reached) })
-	}
+	m.maxActive = max(m.maxActive, m.active)
 	m.mu.Unlock()
 
-	if m.targetActive > 0 {
-		<-m.release
-	}
+	<-m.release
 
 	m.mu.Lock()
 	m.active--
@@ -1666,10 +1656,6 @@ func (m *purgeDeleteTrackingIO) MaxActive() int {
 	defer m.mu.Unlock()
 
 	return m.maxActive
-}
-
-func (m *purgeDeleteTrackingIO) Release() {
-	m.releaseOnce.Do(func() { close(m.release) })
 }
 
 func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
@@ -1733,31 +1719,6 @@ func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestDeleteFilesParallelPreservesErrorWithNilWrapper(t *testing.T) {
-	deleteErr := errors.New("delete failed")
-	files := []string{
-		"s3://bucket/table/ok.parquet",
-		"s3://bucket/table/failed.parquet",
-	}
-
-	deleted, err := deleteFilesParallel(
-		context.Background(),
-		files,
-		2,
-		func(path string) error {
-			if path == files[1] {
-				return deleteErr
-			}
-
-			return nil
-		},
-		func(string, error) error { return nil },
-	)
-
-	assert.Equal(t, []string{files[0]}, deleted)
-	require.ErrorIs(t, err, deleteErr)
-}
-
 func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1781,96 +1742,123 @@ func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 	assert.False(t, called)
 }
 
+// gatedErrContext lets a test cancel after a job is received, before Err returns.
+type gatedErrContext struct {
+	context.Context
+	checks <-chan struct{}
+}
+
+func (c gatedErrContext) Err() error {
+	<-c.checks
+
+	return c.Context.Err()
+}
+
 func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T) {
-	const (
-		fileCount      = 50
-		maxConcurrency = 4
-	)
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			fileCount      = 50
+			maxConcurrency = 4
+		)
 
-	files := make([]string, fileCount)
-	for i := range files {
-		files[i] = fmt.Sprintf("s3://bucket/table/file-%02d.parquet", i)
-	}
+		files := make([]string, fileCount)
+		for i := range files {
+			files[i] = fmt.Sprintf("s3://bucket/table/file-%02d.parquet", i)
+		}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	var calls atomic.Int32
-	release := make(chan struct{})
-	deleted, err := deleteFilesParallel(
-		ctx,
-		files,
-		maxConcurrency,
-		func(string) error {
-			call := calls.Add(1)
-			if call == maxConcurrency {
-				cancel()
-				close(release)
-			} else if call < maxConcurrency {
-				<-release
-			}
+		checks := make(chan struct{}, maxConcurrency)
+		for range maxConcurrency {
+			checks <- struct{}{}
+		}
+		var calls atomic.Int32
+		release := make(chan struct{})
+		var deleted []string
+		var err error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			deleted, err = deleteFilesParallel(
+				gatedErrContext{Context: ctx, checks: checks},
+				files,
+				maxConcurrency,
+				func(string) error {
+					calls.Add(1)
+					<-release
 
-			return nil
-		},
-		func(path string, err error) error {
-			return fmt.Errorf("failed to remove %s: %w", path, err)
-		},
-	)
+					return nil
+				},
+				func(path string, err error) error {
+					return fmt.Errorf("failed to remove %s: %w", path, err)
+				},
+			)
+		}()
 
-	require.ErrorIs(t, err, context.Canceled)
-	assert.Equal(t, int32(maxConcurrency), calls.Load())
-	assert.Less(t, len(deleted), fileCount)
+		synctest.Wait()
+		assert.Equal(t, int32(maxConcurrency), calls.Load())
+
+		// Let one worker receive another job, then cancel while its Err check is paused.
+		release <- struct{}{}
+		synctest.Wait()
+		cancel()
+		close(checks)
+		close(release)
+		<-done
+
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int32(maxConcurrency), calls.Load())
+		assert.Equal(t, files[:maxConcurrency], deleted)
+	})
 }
 
 func TestPurgeFilesDeletesNonBulkFilesConcurrently(t *testing.T) {
-	const maxWorkers = defaultPurgeMaxConcurrency
-	const fileCount = maxWorkers * 2
-	entries := make([]mockWalkEntry, 0, fileCount)
-	for i := range fileCount {
-		entries = append(entries, mockWalkEntry{
-			path: fmt.Sprintf("s3://bucket/table/data/file-%02d.parquet", i),
-			info: mockFileInfo{name: fmt.Sprintf("file-%02d.parquet", i)},
-		})
-	}
+	synctest.Test(t, func(t *testing.T) {
+		const maxWorkers = defaultPurgeMaxConcurrency
+		const fileCount = maxWorkers * 2
+		entries := make([]mockWalkEntry, 0, fileCount)
+		for i := range fileCount {
+			entries = append(entries, mockWalkEntry{
+				path: fmt.Sprintf("s3://bucket/table/data/file-%02d.parquet", i),
+				info: mockFileInfo{name: fmt.Sprintf("file-%02d.parquet", i)},
+			})
+		}
 
-	fsys := &purgeDeleteTrackingIO{
-		mockListableIO: mockListableIO{entries: entries},
-		targetActive:   2,
-		reached:        make(chan struct{}),
-		release:        make(chan struct{}),
-	}
+		fsys := &purgeDeleteTrackingIO{
+			mockListableIO: mockListableIO{entries: entries},
+			release:        make(chan struct{}),
+		}
 
-	meta, err := NewMetadata(
-		iceberg.NewSchema(0),
-		iceberg.UnpartitionedSpec,
-		UnsortedSortOrder,
-		"s3://bucket/table",
-		iceberg.Properties{},
-	)
-	require.NoError(t, err)
-	tbl := New(
-		Identifier{"db", "tbl"},
-		meta,
-		"s3://bucket/table/metadata/v1.metadata.json",
-		testFSF(fsys),
-		nil,
-	)
+		meta, err := NewMetadata(
+			iceberg.NewSchema(0),
+			iceberg.UnpartitionedSpec,
+			UnsortedSortOrder,
+			"s3://bucket/table",
+			iceberg.Properties{},
+		)
+		require.NoError(t, err)
+		tbl := New(
+			Identifier{"db", "tbl"},
+			meta,
+			"s3://bucket/table/metadata/v1.metadata.json",
+			testFSF(fsys),
+			nil,
+		)
 
-	done := make(chan error, 1)
-	go func() { done <- tbl.PurgeFiles(context.Background()) }()
+		done := make(chan error, 1)
+		go func() { done <- tbl.PurgeFiles(context.Background()) }()
 
-	select {
-	case <-fsys.reached:
-	case <-time.After(5 * time.Second):
-		fsys.Release()
-		<-done
-		t.Fatal("non-bulk purge deletion did not reach two concurrent removals")
-	}
-	fsys.Release()
+		// Every worker remains blocked in Remove until the full pool is observable.
+		synctest.Wait()
+		assert.Greater(t, maxWorkers, 1)
+		assert.Equal(t, maxWorkers, fsys.MaxActive())
+		close(fsys.release)
 
-	require.NoError(t, <-done)
-	assert.Greater(t, fsys.MaxActive(), 1)
-	assert.LessOrEqual(t, fsys.MaxActive(), maxWorkers)
+		require.NoError(t, <-done)
+		assert.Equal(t, maxWorkers, fsys.MaxActive())
+		assert.Len(t, fsys.removed, fileCount+2) // Data files, metadata, and version hint.
+	})
 }
 
 func TestPurgeFilesSkipsDataFilesForMalformedGCEnabled(t *testing.T) {
