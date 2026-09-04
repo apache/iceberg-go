@@ -3620,9 +3620,10 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 // shares with the original instead of copying. Keep this in sync with clone();
 // both the drift guard and its filler consult it.
 var sharedCloneFields = map[string]struct{}{
-	"base":          {}, // immutable snapshot, shared by design.
-	"schemaIndex":   {}, // immutable schema references, copied on schema mutation.
-	"snapshotIndex": {}, // immutable index positions, copied on snapshot mutation.
+	"base":               {}, // immutable snapshot, shared by design.
+	"schemaIndex":        {}, // immutable schema references, copied on schema mutation.
+	"partitionSpecIndex": {}, // immutable index positions, copied on spec mutation.
+	"snapshotIndex":      {}, // immutable index positions, copied on snapshot mutation.
 }
 
 // TestMetadataBuilderCloneCoversAllFields guards clone() against field drift:
