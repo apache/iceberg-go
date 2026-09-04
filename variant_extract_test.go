@@ -197,3 +197,13 @@ func TestUnboundExtractAccessors(t *testing.T) {
 	assert.True(t, e.Equals(Extract("payload", "$.a", PrimitiveTypes.Int64)))
 	assert.False(t, e.Equals(Extract("payload", "$.b", PrimitiveTypes.Int64)), "different path is not equal")
 }
+
+func TestColumnPathSegments(t *testing.T) {
+	topLevel := NewSchema(0, NestedField{ID: 2, Name: "a.b", Type: VariantType{}})
+	assert.Equal(t, []string{"a.b"}, topLevel.columnPathSegments(2))
+
+	nested := NewSchema(0, NestedField{ID: 2, Name: "wrap.per", Type: &StructType{
+		FieldList: []NestedField{{ID: 3, Name: "pay.load", Type: VariantType{}}},
+	}})
+	assert.Equal(t, []string{"wrap.per", "pay.load"}, nested.columnPathSegments(3))
+}
