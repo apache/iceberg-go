@@ -1284,8 +1284,8 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, insertErr)
 		}
 
-		// Only Postgres aborts the whole tx on a failed insert, so only it needs a
-		// savepoint to keep the re-check runnable; Oracle has no RELEASE SAVEPOINT.
+		// Postgres aborts the whole tx on a failed insert, so only it needs the
+		// savepoint for the re-check; SQLite/MySQL don't, and Oracle can't RELEASE it.
 		if tx.Dialect().Name() == dialect.PG {
 			sp, err := tx.BeginTx(ctx, nil)
 			if err != nil {

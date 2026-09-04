@@ -1981,6 +1981,9 @@ const (
 	// failUnrelated: insert fails for an unrelated reason and the namespace does
 	// not exist -- the original error must survive, not become "already exists".
 	failUnrelated
+	// insertSucceeds: the insert commits, exercising the savepoint happy path
+	// (SAVEPOINT -> insert -> RELEASE SAVEPOINT) on the Postgres branch.
+	insertSucceeds
 )
 
 var (
@@ -2046,12 +2049,18 @@ func (c *pgAbortConn) ExecContext(ctx context.Context, query string, args []driv
 
 	if isNamespaceInsert(query) {
 		c.drv.insertAttempted.Store(true)
-		c.drv.aborted.Store(true)
-		if c.drv.mode == failUnique {
+		switch c.drv.mode {
+		case insertSucceeds:
+			return execer.ExecContext(ctx, query, args)
+		case failUnrelated:
+			c.drv.aborted.Store(true)
+
+			return nil, errEmulatedUnrelated
+		default:
+			c.drv.aborted.Store(true)
+
 			return nil, errEmulatedUnique
 		}
-
-		return nil, errEmulatedUnrelated
 	}
 
 	return execer.ExecContext(ctx, query, args)
@@ -2148,6 +2157,117 @@ func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) (*sqlcat.Ca
 	s.Require().NoError(err)
 
 	return cat, drv
+}
+
+// dupInsertDriver emulates a dialect that rolls back only the failing statement
+// (SQLite): the namespace insert trips a unique violation without poisoning the
+// tx, so the re-check runs on the same tx and recovers the sentinel.
+type dupInsertDriver struct {
+	base            driver.Driver
+	insertAttempted atomic.Bool
+}
+
+func (d *dupInsertDriver) Open(dsn string) (driver.Conn, error) {
+	conn, err := d.base.Open(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	return &dupInsertConn{Conn: conn, drv: d}, nil
+}
+
+type dupInsertConn struct {
+	driver.Conn
+	drv *dupInsertDriver
+}
+
+func (c *dupInsertConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	execer, ok := c.Conn.(driver.ExecerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	if isNamespaceInsert(query) {
+		c.drv.insertAttempted.Store(true)
+
+		return nil, errEmulatedUnique
+	}
+
+	return execer.ExecContext(ctx, query, args)
+}
+
+func (c *dupInsertConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	queryer, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	// After the insert, the namespace exists on the re-check; before it, absent.
+	if isNamespaceExistsProbe(query) {
+		return &boolRows{val: c.drv.insertAttempted.Load()}, nil
+	}
+
+	return queryer.QueryContext(ctx, query, args)
+}
+
+func (c *dupInsertConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	beginTx, ok := c.Conn.(driver.ConnBeginTx)
+	if !ok {
+		return nil, driver.ErrBadConn
+	}
+
+	return beginTx.BeginTx(ctx, opts)
+}
+
+func (c *dupInsertConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	prepCtx, ok := c.Conn.(driver.ConnPrepareContext)
+	if !ok {
+		return nil, driver.ErrBadConn
+	}
+
+	return prepCtx.PrepareContext(ctx, query)
+}
+
+func (s *SqliteCatalogTestSuite) newDupCatalog() (*sqlcat.Catalog, *dupInsertDriver) {
+	base, err := sql.Open(sqliteshim.ShimName, ":memory:")
+	s.Require().NoError(err)
+	s.Require().NoError(base.Close())
+
+	drvName := "sqlite-dupinsert-" + databaseName()
+	drv := &dupInsertDriver{base: base.Driver()}
+	sql.Register(drvName, drv)
+
+	sqldb, err := sql.Open(drvName, s.catalogUri())
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = sqldb.Close() })
+	sqldb.SetMaxOpenConns(1)
+
+	// SQLite dialect so the non-Postgres recovery branch (plain insert + re-check)
+	// runs; the driver rolls back only the failing statement, so no savepoint.
+	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	s.Require().NoError(err)
+
+	return cat, drv
+}
+
+// Pins the non-Postgres branch: on SQLite a lost insert race recovers the
+// sentinel via the re-check without a savepoint.
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceLosesInsertRaceSQLite() {
+	namespace := table.Identifier{databaseName()}
+	cat, drv := s.newDupCatalog()
+
+	err := cat.CreateNamespace(context.Background(), namespace, nil)
+	s.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+	s.Contains(err.Error(), namespace[0])
+	s.True(drv.insertAttempted.Load(), "the emulated insert must have run")
+}
+
+// Exercises the Postgres savepoint happy path: SAVEPOINT -> insert -> RELEASE.
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceSucceedsThroughSavepoint() {
+	namespace := table.Identifier{databaseName()}
+	cat, drv := s.newAbortCatalog(insertSucceeds)
+
+	err := cat.CreateNamespace(context.Background(), namespace, nil)
+	s.Require().NoError(err)
+	s.True(drv.insertAttempted.Load(), "the emulated insert must have run")
 }
 
 // Emulates Postgres aborting the transaction: only passes if the savepoint let
