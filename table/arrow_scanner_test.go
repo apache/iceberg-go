@@ -305,12 +305,11 @@ func mustLoadRecordBatchFromJSON(schema *arrow.Schema, content string) arrow.Rec
 
 func writePosDeleteParquetToMemFS(t *testing.T, memFS *iceio.MemFS, path, content string) {
 	t.Helper()
-
 	writePosDeleteParquetToMemFSWithSchema(t, memFS, path, PositionalDeleteArrowSchema, content)
 }
 
 func writePosDeleteParquetToMemFSWithSchema(t *testing.T, memFS *iceio.MemFS, path string,
-	schema *arrow.Schema, content string,
+	schema *arrow.Schema, content string, props ...parquet.WriterProperty,
 ) {
 	t.Helper()
 
@@ -323,8 +322,12 @@ func writePosDeleteParquetToMemFSWithSchema(t *testing.T, memFS *iceio.MemFS, pa
 	fw, err := memFS.Create(path)
 	require.NoError(t, err)
 
+	props = append([]parquet.WriterProperty{
+		parquet.WithDictionaryDefault(true),
+		parquet.WithStats(true),
+	}, props...)
 	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
-		parquet.NewWriterProperties(parquet.WithDictionaryDefault(true), parquet.WithStats(true)),
+		parquet.NewWriterProperties(props...),
 		pqarrow.DefaultWriterProps()))
 	require.NoError(t, fw.Close())
 }
@@ -430,7 +433,7 @@ func TestReleasePerFilePosDeletes(t *testing.T) {
 	t.Run("nil chunk in slice does not panic", func(t *testing.T) {
 		// Defensive: production code paths never insert a nil *arrow.Chunked
 		// into the map. This subtest pins the guard so a future caller (the
-		// in-flight readAllDeletionVectors merger, or a refactor of readDeletes)
+		// in-flight readAllDeletionVectors merger, or a refactor of readDeletesForPaths)
 		// can't silently NPE the cleanup path.
 		mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 		defer mem.AssertSize(t, 0)
