@@ -45,12 +45,17 @@ type countingOpenMemFS struct {
 	opens        atomic.Int64
 	trackedPath  string
 	trackedOpens atomic.Int64
+	blockPath    string
+	unblock      <-chan struct{}
 }
 
 func (f *countingOpenMemFS) Open(name string) (iceio.File, error) {
 	f.opens.Add(1)
 	if name == f.trackedPath {
 		f.trackedOpens.Add(1)
+	}
+	if name == f.blockPath && f.unblock != nil {
+		<-f.unblock
 	}
 
 	return f.MemFS.Open(name)
@@ -209,7 +214,7 @@ func TestLazyPositionDeleteLoaderCachesErrors(t *testing.T) {
 	first, err := loader.load(context.Background(), task)
 	require.Error(t, err)
 	assert.Nil(t, first)
-	assert.Contains(t, err.Error(), deleteFile.FilePath())
+	assert.ErrorContains(t, err, "read position deletes from "+deleteFile.FilePath())
 	assert.Equal(t, int64(1), fs.opens.Load())
 
 	second, secondErr := loader.load(context.Background(), task)
@@ -218,6 +223,22 @@ func TestLazyPositionDeleteLoaderCachesErrors(t *testing.T) {
 	assert.ErrorIs(t, secondErr, err)
 	assert.Equal(t, int64(1), fs.opens.Load(), "a failed delete file must not be retried by other tasks")
 
+	loader.release()
+}
+
+func TestLazyPositionDeleteLoaderWrapsErrorsWithoutFilePath(t *testing.T) {
+	fs := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
+	deletePath := "mem://bucket/deletes/corrupt.parquet"
+	require.NoError(t, fs.WriteFile(deletePath, []byte("not a parquet file")))
+	task := FileScanTask{
+		File:        newLazyDataFile(t, "mem://bucket/data/a.parquet"),
+		DeleteFiles: []iceberg.DataFile{newPosDeleteFile(t, deletePath, 1, 128)},
+	}
+	loader := newLazyPositionDeleteLoader(fs, []FileScanTask{task})
+
+	_, err := loader.load(context.Background(), task)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "read position deletes from "+deletePath)
 	loader.release()
 }
 
@@ -361,6 +382,64 @@ func TestArrowScanReleasesLazyPositionDeletesOnEarlyStop(t *testing.T) {
 		"all workers must share one lazily-loaded positional-delete file")
 }
 
+func TestArrowScanRowLimitStopsBeforeLazyPositionDeleteError(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int64,
+	})
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec,
+		UnsortedSortOrder, "mem://bucket/table", nil)
+	require.NoError(t, err)
+
+	const corruptDeletePath = "mem://bucket/deletes/corrupt.parquet"
+	unblock := make(chan struct{})
+	memFS := &countingOpenMemFS{
+		MemFS:     iceio.NewMemFS(),
+		blockPath: corruptDeletePath,
+		unblock:   unblock,
+	}
+	const taskCount = 4
+	tasks := make([]FileScanTask, taskCount)
+	for i := range tasks {
+		dataPath := fmt.Sprintf("mem://bucket/data/data-%d.parquet", i)
+		tasks[i].File = writeLazyDataParquetToMemFS(t, memFS.MemFS, dataPath, i, 4)
+	}
+	require.NoError(t, memFS.WriteFile(corruptDeletePath, []byte("not a parquet file")))
+	tasks[taskCount-1].DeleteFiles = []iceberg.DataFile{
+		newPosDeleteFile(t, corruptDeletePath, 1, 128),
+	}
+
+	scan := &arrowScan{
+		metadata:        metadata,
+		fs:              memFS,
+		scanSchema:      schema,
+		projectedSchema: schema,
+		boundRowFilter:  iceberg.AlwaysTrue{},
+		rowLimit:        1,
+		concurrency:     2,
+	}
+	_, records, err := scan.GetRecords(ctx, tasks)
+	require.NoError(t, err)
+
+	var releaseBlockedDelete sync.Once
+	release := func() { releaseBlockedDelete.Do(func() { close(unblock) }) }
+	defer release()
+	var rows int64
+	for record, err := range records {
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		rows += record.NumRows()
+		record.Release()
+		release()
+	}
+
+	assert.Equal(t, int64(1), rows,
+		"a row limit may finish before a later task's positional-delete error")
+}
+
 func TestLazyPositionDeleteLoaderReleasesChunksWhenIteratorStops(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer mem.AssertSize(t, 0)
@@ -393,6 +472,18 @@ func TestLazyPositionDeleteLoaderReleasesChunksWhenIteratorStops(t *testing.T) {
 
 		break
 	}
+
+	for _, cached := range loader.files {
+		assert.Nil(t, cached.deletes, "release must clear cached delete chunks")
+	}
+}
+
+func TestLazyPositionDeleteLoaderRejectsLoadAfterRelease(t *testing.T) {
+	loader := &lazyPositionDeleteLoader{}
+	loader.release()
+
+	_, err := loader.load(context.Background(), FileScanTask{})
+	require.ErrorIs(t, err, errPositionDeleteLoaderReleased)
 }
 
 func TestArrowScanPreCancelledIteratorTearsDownProducer(t *testing.T) {

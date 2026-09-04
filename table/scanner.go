@@ -1644,9 +1644,11 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
 // scan's projection, per-task residual filters, and delete handling. This is useful
 // when the caller has already planned or selected specific tasks to read.
-// Positional- and equality-delete read errors are returned by the iterator during
-// iteration; deletion-vector read errors are returned by ReadTasks before it returns
-// an iterator. The returned iterator is single-use.
+// Positional- and equality-delete read errors are delivered through the iterator
+// only if iteration reaches the task that encounters the error; a row limit or
+// early termination may finish the scan before the error is observed.
+// Deletion-vector read errors are returned by ReadTasks before it returns an
+// iterator. The returned iterator is single-use.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)

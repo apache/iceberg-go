@@ -126,8 +126,6 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 			}
 			releasePerFilePosDeletes(deletes)
 		}
-		b.ReportMetric(lazyPositionDeleteBenchmarkFileCount, "delete_files/op")
-		b.ReportMetric(lazyPositionDeleteBenchmarkFileCount, "delete_files_before_first/op")
 	})
 
 	b.Run("lazy_unread_iterator", func(b *testing.B) {
@@ -141,8 +139,6 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 			}
 			loader.release()
 		}
-		b.ReportMetric(0, "delete_files/op")
-		b.ReportMetric(0, "delete_files_before_first/op")
 	})
 
 	b.Run("lazy_first_task", func(b *testing.B) {
@@ -159,7 +155,5 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 			}
 			loader.release()
 		}
-		b.ReportMetric(1, "delete_files/op")
-		b.ReportMetric(1, "delete_files_before_first/op")
 	})
 }
