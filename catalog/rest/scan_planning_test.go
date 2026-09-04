@@ -1231,6 +1231,7 @@ func TestPlanFilesPollsSubmittedPlan(t *testing.T) {
 func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 	t.Parallel()
 
+	var mu sync.Mutex
 	var fetched []string
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
@@ -1240,7 +1241,9 @@ func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			var body FetchScanTasksRequest
 			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			mu.Lock()
 			fetched = append(fetched, body.PlanTask)
+			mu.Unlock()
 			switch body.PlanTask {
 			case "h1":
 				_, err := w.Write([]byte(`{"plan-tasks":["h2"]}`))
@@ -1255,6 +1258,8 @@ func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 	result, err := cat.PlanFiles(context.Background(), planFilesReq())
 	require.NoError(t, err)
 	assert.Empty(t, result.Tasks)
+	mu.Lock()
+	defer mu.Unlock()
 	assert.Equal(t, []string{"h1", "h2"}, fetched)
 }
 
@@ -1297,9 +1302,9 @@ func TestCollectScanTasksFetchesFrontierConcurrentlyInOrder(t *testing.T) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		envelopes, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+		envelopes, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
 			PlanTasks: []string{"h1", "h2"},
-		})
+		}, 2)
 		done <- outcome{envelopes: envelopes, err: err}
 	}()
 
@@ -1375,9 +1380,9 @@ func TestCollectScanTasksReturnsFirstErrorInHandleOrder(t *testing.T) {
 		planTaskReturned: make(chan struct{}),
 	}}
 
-	envelopes, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+	envelopes, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
 		PlanTasks: []string{"table", "plan-task"},
-	})
+	}, 2)
 	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
 	assert.Contains(t, err.Error(), `handle "table"`)
 	assert.NotErrorIs(t, err, ErrNoSuchPlanTask)
@@ -1931,9 +1936,9 @@ func TestCollectScanTasksDeduplicatesAcrossFrontiers(t *testing.T) {
 		})
 	})
 
-	envelopes, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+	envelopes, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
 		PlanTasks: []string{"a", "a", "b"},
-	})
+	}, 2)
 	require.NoError(t, err)
 	require.Len(t, envelopes, 6)
 	for i, name := range []string{"a", "b", "c", "d", "e"} {
@@ -1979,9 +1984,9 @@ func TestCollectScanTasksCancelsSiblingRequestsOnFailure(t *testing.T) {
 		})
 	})
 
-	envelopes, err := cat.collectScanTasks(ctx, table.Identifier{"db", "tbl"}, ScanTasks{
+	envelopes, err := cat.collectScanTasksWithConcurrency(ctx, table.Identifier{"db", "tbl"}, ScanTasks{
 		PlanTasks: []string{"failed", "slow"},
-	})
+	}, 2)
 	require.ErrorIs(t, err, ErrBadRequest)
 	assert.Nil(t, envelopes)
 	select {

@@ -296,20 +296,16 @@ func (r *Catalog) planIOBaseProps(req table.ScanPlanningRequest) iceberg.Propert
 	return props
 }
 
-// collectScanTasks expands plan-task handles into their task envelopes, walking
-// the fanout: a fetchScanTasks response can itself return more plan-tasks. Each
+// collectScanTasksWithConcurrency expands plan-task handles into their task
+// envelopes, walking the fanout: a response can itself return more plan-tasks. Each
 // frontier is fetched concurrently, but its responses are appended in handle
 // order so completion timing cannot change the result order. A handle is
 // fetched at most once; a server that re-issues one would otherwise loop
 // forever. The envelope boundaries are retained because delete-file references
 // are local to each response.
-func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]ScanTasks, error) {
-	return r.collectScanTasksWithConcurrency(ctx, ident, tasks, runtime.GOMAXPROCS(0))
-}
-
-// collectScanTasksWithConcurrency expands plan-task handles using the
-// requested maximum number of concurrent fetches. A non-positive limit uses
-// runtime.GOMAXPROCS. On a fetch error, at most the configured number of
+//
+// maxConcurrency bounds the number of concurrent fetches. A non-positive limit
+// uses runtime.GOMAXPROCS. On a fetch error, at most the configured number of
 // requests can already be in flight when cancellation reaches their contexts.
 func (r *Catalog) collectScanTasksWithConcurrency(
 	ctx context.Context,
