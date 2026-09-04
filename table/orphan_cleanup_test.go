@@ -22,10 +22,14 @@ import (
 	"errors"
 	"fmt"
 	stdfs "io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -1567,6 +1571,7 @@ func TestDeleteFilesEmpty(t *testing.T) {
 
 // mockPlainIO implements only IO, without optional delete or listing capabilities.
 type mockPlainIO struct {
+	mu      sync.Mutex
 	removed []string
 }
 
@@ -1575,6 +1580,9 @@ func (m *mockPlainIO) Open(string) (io.File, error) {
 }
 
 func (m *mockPlainIO) Remove(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.removed = append(m.removed, name)
 
 	return nil
@@ -1615,6 +1623,243 @@ func (m mockFileInfo) Mode() stdfs.FileMode { return m.mode }
 func (m mockFileInfo) ModTime() time.Time   { return m.modTime }
 func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
 func (m mockFileInfo) Sys() any             { return nil }
+
+type purgeDeleteTrackingIO struct {
+	mockListableIO
+
+	release chan struct{}
+
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	removed   []string
+}
+
+func (m *purgeDeleteTrackingIO) Remove(name string) error {
+	m.mu.Lock()
+	m.active++
+	m.maxActive = max(m.maxActive, m.active)
+	m.mu.Unlock()
+
+	<-m.release
+
+	m.mu.Lock()
+	m.active--
+	m.removed = append(m.removed, name)
+	m.mu.Unlock()
+
+	return nil
+}
+
+func (m *purgeDeleteTrackingIO) MaxActive() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.maxActive
+}
+
+func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
+	const (
+		firstPath   = "s3://bucket/table/first.parquet"
+		missingPath = "s3://bucket/table/missing.parquet"
+		slowPath    = "s3://bucket/table/slow.parquet"
+		fastPath    = "s3://bucket/table/fast.parquet"
+	)
+
+	slowErr := errors.New("slow removal failed")
+	fastErr := errors.New("fast removal failed")
+	files := []string{firstPath, missingPath, slowPath, fastPath}
+	var mu sync.Mutex
+	calls := make(map[string]int)
+
+	deleted, err := deleteFilesParallel(
+		context.Background(),
+		files,
+		4,
+		func(path string) error {
+			mu.Lock()
+			calls[path]++
+			mu.Unlock()
+
+			var err error
+			switch path {
+			case missingPath:
+				err = stdfs.ErrNotExist
+			case slowPath:
+				time.Sleep(10 * time.Millisecond)
+
+				err = slowErr
+			case fastPath:
+				err = fastErr
+			}
+			if os.IsNotExist(err) {
+				return nil
+			}
+
+			return err
+		},
+		func(path string, err error) error {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		},
+	)
+
+	assert.Equal(t, []string{firstPath, missingPath}, deleted)
+	require.ErrorIs(t, err, slowErr)
+	require.ErrorIs(t, err, fastErr)
+	assert.NotContains(t, err.Error(), missingPath)
+	assert.Less(t, strings.Index(err.Error(), slowPath), strings.Index(err.Error(), fastPath))
+
+	mu.Lock()
+	assert.Equal(t, map[string]int{
+		firstPath:   1,
+		missingPath: 1,
+		slowPath:    1,
+		fastPath:    1,
+	}, calls)
+	mu.Unlock()
+}
+
+func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	called := false
+	_, err := deleteFilesParallel(
+		ctx,
+		[]string{"s3://bucket/table/file.parquet"},
+		4,
+		func(string) error {
+			called = true
+
+			return nil
+		},
+		func(path string, err error) error {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called)
+}
+
+// gatedErrContext lets a test cancel after a job is received, before Err returns.
+type gatedErrContext struct {
+	context.Context
+	checks <-chan struct{}
+}
+
+func (c gatedErrContext) Err() error {
+	<-c.checks
+
+	return c.Context.Err()
+}
+
+func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			fileCount      = 50
+			maxConcurrency = 4
+		)
+
+		files := make([]string, fileCount)
+		for i := range files {
+			files[i] = fmt.Sprintf("s3://bucket/table/file-%02d.parquet", i)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		checks := make(chan struct{}, maxConcurrency)
+		for range maxConcurrency {
+			checks <- struct{}{}
+		}
+		var calls atomic.Int32
+		release := make(chan struct{})
+		var deleted []string
+		var err error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			deleted, err = deleteFilesParallel(
+				gatedErrContext{Context: ctx, checks: checks},
+				files,
+				maxConcurrency,
+				func(string) error {
+					calls.Add(1)
+					<-release
+
+					return nil
+				},
+				func(path string, err error) error {
+					return fmt.Errorf("failed to remove %s: %w", path, err)
+				},
+			)
+		}()
+
+		synctest.Wait()
+		assert.Equal(t, int32(maxConcurrency), calls.Load())
+
+		// Let one worker receive another job, then cancel while its Err check is paused.
+		release <- struct{}{}
+		synctest.Wait()
+		cancel()
+		close(checks)
+		close(release)
+		<-done
+
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int32(maxConcurrency), calls.Load())
+		assert.Equal(t, files[:maxConcurrency], deleted)
+	})
+}
+
+func TestPurgeFilesDeletesNonBulkFilesConcurrently(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const maxWorkers = defaultPurgeMaxConcurrency
+		const fileCount = maxWorkers * 2
+		entries := make([]mockWalkEntry, 0, fileCount)
+		for i := range fileCount {
+			entries = append(entries, mockWalkEntry{
+				path: fmt.Sprintf("s3://bucket/table/data/file-%02d.parquet", i),
+				info: mockFileInfo{name: fmt.Sprintf("file-%02d.parquet", i)},
+			})
+		}
+
+		fsys := &purgeDeleteTrackingIO{
+			mockListableIO: mockListableIO{entries: entries},
+			release:        make(chan struct{}),
+		}
+
+		meta, err := NewMetadata(
+			iceberg.NewSchema(0),
+			iceberg.UnpartitionedSpec,
+			UnsortedSortOrder,
+			"s3://bucket/table",
+			iceberg.Properties{},
+		)
+		require.NoError(t, err)
+		tbl := New(
+			Identifier{"db", "tbl"},
+			meta,
+			"s3://bucket/table/metadata/v1.metadata.json",
+			testFSF(fsys),
+			nil,
+		)
+
+		done := make(chan error, 1)
+		go func() { done <- tbl.PurgeFiles(context.Background()) }()
+
+		// Every worker remains blocked in Remove until the full pool is observable.
+		synctest.Wait()
+		assert.Greater(t, maxWorkers, 1)
+		assert.Equal(t, maxWorkers, fsys.MaxActive())
+		close(fsys.release)
+
+		require.NoError(t, <-done)
+		assert.Equal(t, maxWorkers, fsys.MaxActive())
+		assert.Len(t, fsys.removed, fileCount+2) // Data files, metadata, and version hint.
+	})
+}
 
 func TestPurgeFilesSkipsDataFilesForMalformedGCEnabled(t *testing.T) {
 	const orphanDataPath = "s3://bucket/table/data/orphan.parquet"

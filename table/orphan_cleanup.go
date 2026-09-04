@@ -91,6 +91,8 @@ type orphanCleanupConfig struct {
 	validationErr      error
 }
 
+const defaultPurgeMaxConcurrency = 32
+
 type OrphanCleanupOption func(*orphanCleanupConfig)
 
 func WithLocation(location string) OrphanCleanupOption {
@@ -712,14 +714,27 @@ func deleteFiles(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *or
 		}
 	}
 
-	if cfg.maxConcurrency == 1 {
-		return deleteFilesSequential(fs, orphanFiles, cfg)
+	if cfg.maxConcurrency <= 1 {
+		return deleteFilesSequential(ctx, fs, orphanFiles, cfg)
 	}
 
-	return deleteFilesParallel(fs, orphanFiles, cfg)
+	deleteFunc := fs.Remove
+	if cfg.deleteFunc != nil {
+		deleteFunc = cfg.deleteFunc
+	}
+
+	return deleteFilesParallel(
+		ctx,
+		orphanFiles,
+		cfg.maxConcurrency,
+		deleteFunc,
+		func(file string, err error) error {
+			return fmt.Errorf("failed to delete orphan file %s: %w", file, err)
+		},
+	)
 }
 
-func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFilesSequential(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	var deletedFiles []string
 
 	deleteFunc := fs.Remove
@@ -727,8 +742,16 @@ func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *orphanCleanup
 		deleteFunc = cfg.deleteFunc
 	}
 
-	var result error
+	var (
+		result          error
+		cancellationErr error
+	)
 	for _, file := range orphanFiles {
+		if err := ctx.Err(); err != nil {
+			cancellationErr = err
+
+			break
+		}
 		if err := deleteFunc(file); err != nil {
 			result = errors.Join(result, fmt.Errorf("failed to delete orphan file %s: %w", file, err))
 
@@ -737,58 +760,91 @@ func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *orphanCleanup
 		deletedFiles = append(deletedFiles, file)
 	}
 
-	return deletedFiles, result
+	return deletedFiles, errors.Join(result, cancellationErr)
 }
 
-func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
-	deleteFunc := fs.Remove
-	if cfg.deleteFunc != nil {
-		deleteFunc = cfg.deleteFunc
+// wrapError must return a non-nil error for each failed deletion.
+func deleteFilesParallel(
+	ctx context.Context,
+	files []string,
+	maxConcurrency int,
+	deleteFunc func(string) error,
+	wrapError func(string, error) error,
+) ([]string, error) {
+	workers := min(max(maxConcurrency, 1), len(files))
+	jobs := make(chan int)
+	deleted := make([]bool, len(files))
+	deleteErrors := make([]error, len(files))
+
+	var cancellationErr error
+	var cancellationOnce sync.Once
+	recordCancellation := func(err error) {
+		cancellationOnce.Do(func() {
+			cancellationErr = err
+		})
 	}
-
-	in := make(chan string, cfg.maxConcurrency)
-	out := make(chan string, cfg.maxConcurrency)
-	errList := make([][]error, cfg.maxConcurrency)
-
-	go func() {
-		defer close(in)
-		for _, file := range orphanFiles {
-			in <- file
-		}
-	}()
 
 	var wg sync.WaitGroup
-	wg.Add(cfg.maxConcurrency)
-	for i := range cfg.maxConcurrency {
-		go func(workerID int) {
+	wg.Add(workers)
+	for range workers {
+		go func() {
 			defer wg.Done()
-			for file := range in {
-				if err := deleteFunc(file); err != nil {
-					errList[workerID] = append(errList[workerID], fmt.Errorf("failed to delete orphan file %s: %w", file, err))
-				} else {
-					out <- file
+			for {
+				select {
+				case <-ctx.Done():
+					recordCancellation(ctx.Err())
+
+					return
+				case index, ok := <-jobs:
+					if !ok {
+						return
+					}
+					// Both cases can be ready after cancellation, so check the context
+					// again before starting the deletion.
+					if err := ctx.Err(); err != nil {
+						recordCancellation(err)
+
+						return
+					}
+
+					if err := deleteFunc(files[index]); err != nil {
+						deleteErrors[index] = wrapError(files[index], err)
+					} else {
+						deleted[index] = true
+					}
 				}
 			}
-		}(i)
+		}()
 	}
 
-	go func() {
-		wg.Wait()
-		close(out)
-	}()
+send:
+	for index := range files {
+		select {
+		case jobs <- index:
+		case <-ctx.Done():
+			recordCancellation(ctx.Err())
 
-	deletedFiles := make([]string, 0, len(orphanFiles))
-	for file := range out {
-		deletedFiles = append(deletedFiles, file)
+			break send
+		}
 	}
+	close(jobs)
+	wg.Wait()
 
+	deletedFiles := make([]string, 0, len(files))
 	var allErrors []error
-	for _, workerErrors := range errList {
-		allErrors = append(allErrors, workerErrors...)
+	for index, file := range files {
+		if deleted[index] {
+			deletedFiles = append(deletedFiles, file)
+		}
+		if deleteErrors[index] != nil {
+			allErrors = append(allErrors, deleteErrors[index])
+		}
 	}
-	err := errors.Join(allErrors...)
+	if cancellationErr != nil {
+		allErrors = append(allErrors, cancellationErr)
+	}
 
-	return deletedFiles, err
+	return deletedFiles, errors.Join(allErrors...)
 }
 
 // normalizeFilePath normalizes file paths for comparison by handling different
@@ -1257,10 +1313,12 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 // or write.metadata.path properties).
 //
 // It operates on a best-effort basis. Errors from individual file deletions are
-// collected and returned together. If files cannot be deleted (e.g. due to
-// permission errors or missing paths), the errors are logged but the overall
-// catalog drop operation should typically proceed so the catalog does not
-// get out of sync with storage.
+// collected and returned together as a joined error. If files cannot be deleted
+// (e.g. due to permission errors or missing paths), the errors are logged but
+// the overall catalog drop operation should typically proceed so the catalog
+// does not get out of sync with storage. Non-bulk deletion invokes Remove
+// concurrently and is bounded to defaultPurgeMaxConcurrency operations because
+// it is typically I/O-bound.
 func (t Table) PurgeFiles(ctx context.Context) error {
 	gcEnabled := isGCEnabled(t.Metadata().Properties())
 
@@ -1334,15 +1392,23 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("bulk deletion failed: %w", bulkErr))
 			}
 		} else {
-			for _, file := range files {
-				if err := ctx.Err(); err != nil {
-					errs = append(errs, err)
+			_, removeErr := deleteFilesParallel(
+				ctx,
+				files,
+				defaultPurgeMaxConcurrency,
+				func(file string) error {
+					if err := fs.Remove(file); err != nil && !os.IsNotExist(err) {
+						return err
+					}
 
-					break
-				}
-				if rmErr := fs.Remove(file); rmErr != nil && !os.IsNotExist(rmErr) {
-					errs = append(errs, fmt.Errorf("failed to remove %s: %w", file, rmErr))
-				}
+					return nil
+				},
+				func(file string, err error) error {
+					return fmt.Errorf("failed to remove %s: %w", file, err)
+				},
+			)
+			if removeErr != nil {
+				errs = append(errs, removeErr)
 			}
 		}
 	}
