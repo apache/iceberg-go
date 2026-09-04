@@ -2422,12 +2422,7 @@ func cloneSchemas(schemas []*iceberg.Schema) []*iceberg.Schema {
 }
 
 func clonePartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
-	fields := make([]iceberg.PartitionField, spec.NumFields())
-	for i := range fields {
-		fields[i] = spec.Field(i)
-	}
-
-	return iceberg.NewPartitionSpecID(spec.ID(), fields...)
+	return spec.Clone()
 }
 
 func clonePartitionSpecs(specs []iceberg.PartitionSpec) []iceberg.PartitionSpec {
