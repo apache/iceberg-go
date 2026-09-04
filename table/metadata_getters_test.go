@@ -43,7 +43,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 			WriteDefault:   iceberg.FixedLiteral{3, 4},
 		})},
 		Specs: []iceberg.PartitionSpec{iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
-			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: &iceberg.BucketTransform{NumBuckets: 16},
 		})},
 		SnapshotList: []Snapshot{{
 			SnapshotID:       2,
@@ -88,7 +88,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 			orderID: 1,
 			fields: []SortField{{
 				SourceIDs: []int{10},
-				Transform: iceberg.IdentityTransform{},
+				Transform: &iceberg.BucketTransform{NumBuckets: 16},
 			}},
 		}},
 	}
@@ -112,7 +112,9 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	partitionField := partitionSpecs[0].Field(0)
 	partitionField.SourceIDs[0] = 99
 	partitionField.Name = "mutated"
+	partitionField.Transform.(*iceberg.BucketTransform).NumBuckets = 32
 	require.Equal(t, []int{1}, metadata.Specs[0].Field(0).SourceIDs)
+	require.Equal(t, 16, metadata.Specs[0].Field(0).Transform.(*iceberg.BucketTransform).NumBuckets)
 
 	currentSchema := metadata.CurrentSchema()
 	currentSchema.ID = 100
@@ -159,8 +161,10 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	fields := sortOrders[0].Fields()
 	for _, field := range fields {
 		field.SourceIDs[0] = 99
+		field.Transform.(*iceberg.BucketTransform).NumBuckets = 32
 	}
 	require.Equal(t, []int{10}, metadata.SortOrderList[0].fields[0].SourceIDs)
+	require.Equal(t, 16, metadata.SortOrderList[0].fields[0].Transform.(*iceberg.BucketTransform).NumBuckets)
 
 	got, err := json.Marshal(metadata)
 	require.NoError(t, err)

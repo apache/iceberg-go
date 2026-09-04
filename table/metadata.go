@@ -2541,8 +2541,7 @@ func cloneSortOrder(order SortOrder) SortOrder {
 	clone := order
 	clone.fields = make([]SortField, len(order.fields))
 	for i, field := range order.fields {
-		clone.fields[i] = field
-		clone.fields[i].SourceIDs = slices.Clone(field.SourceIDs)
+		clone.fields[i] = cloneSortField(field)
 	}
 
 	return clone
