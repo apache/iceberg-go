@@ -3224,7 +3224,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		metadata:         updatedMeta,
 		metadataLocation: t.tbl.metadataLocation,
 		ioF:              t.tbl.fsF,
-		manifestCache:    newSnapshotManifestCache(),
+		manifestCache:    newSnapshotManifestCacheForMetadata(updatedMeta),
 		// Catalog planners can only see committed table state, not metadata
 		// staged inside this transaction. Keep transaction scans local so auto
 		// mode cannot silently return stale tasks.

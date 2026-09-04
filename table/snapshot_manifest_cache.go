@@ -35,8 +35,8 @@ import (
 const snapshotManifestCacheSize = 64
 
 // snapshotManifestCacheManifestLimit bounds the total number of manifest
-// descriptors retained by the cache. This keeps a small number of unusually
-// large snapshots from consuming an unbounded amount of memory.
+// descriptors retained by the cache. Memory per descriptor also depends on
+// paths, partition summaries, and key metadata; this is not a byte limit.
 const snapshotManifestCacheManifestLimit = 32 * 1024
 
 // snapshotManifestSet keeps the complete manifest list and data partition
@@ -78,7 +78,7 @@ func (s snapshotManifestSet) dataManifests() []iceberg.ManifestFile {
 }
 
 func snapshotManifestSetSize(set snapshotManifestSet) int {
-	return len(set.all) + len(set.data)
+	return len(set.all)
 }
 
 type snapshotManifestCacheKey struct {
@@ -113,6 +113,7 @@ type snapshotManifestCacheEntry struct {
 	readyOnce sync.Once
 	manifests snapshotManifestSet
 	err       error
+	canceled  bool
 }
 
 type snapshotManifestLoader func(context.Context) (snapshotManifestSet, error)
@@ -147,6 +148,14 @@ func newSnapshotManifestCache() *snapshotManifestCache {
 	return cache
 }
 
+func newSnapshotManifestCacheForMetadata(meta Metadata) *snapshotManifestCache {
+	if meta != nil && !meta.Properties().GetBool(ReadManifestListCacheEnabledKey, ReadManifestListCacheEnabledDefault) {
+		return nil
+	}
+
+	return newSnapshotManifestCache()
+}
+
 func (c *snapshotManifestCache) get(
 	ctx context.Context,
 	snapshot Snapshot,
@@ -155,37 +164,54 @@ func (c *snapshotManifestCache) get(
 	if c == nil {
 		return load(ctx)
 	}
-	if err := ctx.Err(); err != nil {
-		return snapshotManifestSet{}, err
-	}
-
 	key := snapshotManifestCacheKeyFor(snapshot)
-	c.mu.Lock()
-	if manifests, ok := c.complete.Get(key); ok {
-		c.mu.Unlock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return snapshotManifestSet{}, err
+		}
 
-		return manifests, nil
-	}
-	if entry, ok := c.entries[key]; ok {
-		c.mu.Unlock()
+		c.mu.Lock()
+		if manifests, ok := c.complete.Get(key); ok {
+			c.mu.Unlock()
 
-		select {
-		case <-entry.ready:
-			return entry.manifests, entry.err
-		default:
+			return manifests, nil
+		}
+		if entry, ok := c.entries[key]; ok {
+			c.mu.Unlock()
+
 			select {
 			case <-entry.ready:
-				return entry.manifests, entry.err
-			case <-ctx.Done():
-				return snapshotManifestSet{}, ctx.Err()
+			default:
+				select {
+				case <-entry.ready:
+				case <-ctx.Done():
+					return snapshotManifestSet{}, ctx.Err()
+				}
 			}
+			// A failed read owned by a canceled caller must not fail an
+			// independent scan. Retry with this caller's context and FileIO.
+			if entry.canceled {
+				continue
+			}
+
+			return entry.manifests, entry.err
 		}
+
+		entry := &snapshotManifestCacheEntry{ready: make(chan struct{})}
+		c.entries[key] = entry
+		c.mu.Unlock()
+
+		return c.load(ctx, snapshot, key, entry, load)
 	}
+}
 
-	entry := &snapshotManifestCacheEntry{ready: make(chan struct{})}
-	c.entries[key] = entry
-	c.mu.Unlock()
-
+func (c *snapshotManifestCache) load(
+	ctx context.Context,
+	snapshot Snapshot,
+	key snapshotManifestCacheKey,
+	entry *snapshotManifestCacheEntry,
+	load snapshotManifestLoader,
+) (snapshotManifestSet, error) {
 	var (
 		value snapshotManifestSet
 		err   error
@@ -197,12 +223,13 @@ func (c *snapshotManifestCache) get(
 			panic(recovered)
 		}
 
+		entry.canceled = err != nil && ctx.Err() != nil
 		c.finish(key, entry, value, err)
 	}()
 
-	// The read is shared with callers whose contexts may outlive this one. Do
-	// not let the producer's cancellation abort a healthy waiter's read.
-	value, err = load(context.WithoutCancel(ctx))
+	// Both factory resolution and context-bound IO must stop with the caller.
+	// Healthy waiters retry a canceled load instead of inheriting its error.
+	value, err = load(ctx)
 
 	return value, err
 }
@@ -219,9 +246,6 @@ func (c *snapshotManifestCache) finish(
 	if current, ok := c.entries[key]; ok && current == entry {
 		delete(c.entries, key)
 		if err == nil {
-			if c.complete.Contains(key) {
-				c.complete.Remove(key)
-			}
 			c.complete.Add(key, value)
 			c.completeManifestCount += snapshotManifestSetSize(value)
 			for c.completeManifestCount > snapshotManifestCacheManifestLimit {
@@ -249,11 +273,11 @@ func readSnapshotManifestSet(
 		return snapshotManifestSet{}, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
 	}
 
-	// Resolve the IO inside the producer so context-aware factories bind the
-	// detached producer context to the underlying manifest-list read.
+	// Keep factory resolution and the resulting FileIO on the same cancellable
+	// context, including backends that capture it for subsequent reads.
 	fio, err := fsF(ctx)
 	if err != nil {
-		return snapshotManifestSet{}, err
+		return snapshotManifestSet{}, fmt.Errorf("get file IO: %w", err)
 	}
 	manifests, err := snapshot.Manifests(fio)
 	if err != nil {

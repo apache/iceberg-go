@@ -318,6 +318,13 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | Key | Default | Description |
 |---|---|---|
 | `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
+| `read.manifest-list-cache.enabled` | `true` | Reuse decoded snapshot manifest lists across scans of a table handle. Set to `false` to disable retention and shared in-flight reads. Applied when loading or refreshing a table, and when creating a transaction scan. |
+
+The manifest-list cache retains at most 64 snapshots and 32,768 manifest
+descriptors in total per table handle. These are count limits, not byte limits:
+memory use also depends on manifest paths, partition summaries, and key metadata.
+Refreshing the table replaces its cache. This caches decoded manifest lists;
+it does not implement Java's `io.manifest.cache.*` file-content cache settings.
 
 The Java-compatible `read.split.planning-lookback` and `read.split.open-file-cost`
 names and defaults are also exported by the Go API for shared configuration,

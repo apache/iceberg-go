@@ -40,6 +40,12 @@ const (
 	ReadSplitTargetSizeKey     = "read.split.target-size"
 	ReadSplitTargetSizeDefault = 128 * 1024 * 1024 // 128 MiB
 
+	// ReadManifestListCacheEnabledKey controls reuse of decoded snapshot
+	// manifest lists across scans of a table handle. Disable it to avoid
+	// retaining manifest descriptors between operations.
+	ReadManifestListCacheEnabledKey     = "read.manifest-list-cache.enabled"
+	ReadManifestListCacheEnabledDefault = true
+
 	// These Java-compatible properties are reserved for future task-group
 	// planning. They are exported so applications can share configuration
 	// names across Iceberg implementations.

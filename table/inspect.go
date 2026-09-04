@@ -30,7 +30,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
 )
 
 // InspectTable exposes a table's metadata (snapshots, history, manifests, and
@@ -452,14 +451,7 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 		return nil, errors.New("table file IO is not configured")
 	}
 
-	manifestSet, err := i.tbl.manifestSetWithFSF(ctx, *snapshot, func(loadCtx context.Context) (iceio.IO, error) {
-		fs, err := i.tbl.fsF(loadCtx)
-		if err != nil {
-			return nil, fmt.Errorf("get file IO: %w", err)
-		}
-
-		return fs, nil
-	})
+	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
 	if err != nil {
 		return nil, err
 	}

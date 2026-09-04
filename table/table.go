@@ -236,10 +236,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
-	t.manifestCache = fresh.manifestCache
-	if t.manifestCache == nil {
-		t.manifestCache = newSnapshotManifestCache()
-	}
+	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
@@ -376,6 +373,8 @@ func (t Table) manifestSetWithFSF(
 	})
 }
 
+// AllManifests returns the manifests referenced by the table's snapshots.
+// Tables without snapshots return an empty sequence without resolving file IO.
 func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
 	snapshots := t.metadata.Snapshots()
@@ -1413,7 +1412,7 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
-		manifestCache:    newSnapshotManifestCache(),
+		manifestCache:    newSnapshotManifestCacheForMetadata(meta),
 		cat:              cat,
 		planner:          planner,
 		reporter:         metrics.NopReporter{},
