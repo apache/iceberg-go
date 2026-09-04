@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -677,6 +678,42 @@ func TestSerializeSchema(t *testing.T) {
 		"schema-id": 1,
 		"identifier-field-ids": [2]
 	}`, string(data))
+}
+
+func TestMarshalSchemaIncludesExportedFields(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(17, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	data, err := json.Marshal(schema)
+	require.NoError(t, err)
+	var marshaled map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &marshaled))
+
+	require.Contains(t, marshaled, "type")
+	require.Contains(t, marshaled, "fields")
+	wantKeys := 2
+	value := reflect.ValueOf(schema).Elem()
+	for i := range value.NumField() {
+		field := value.Type().Field(i)
+		tag, tagged := field.Tag.Lookup("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if !field.IsExported() || !tagged || name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		wantKeys++
+
+		// A nonzero fixture catches omitted assignments even when the alias
+		// still emits the field's key with a zero value. Extend it for new fields.
+		require.False(t, value.Field(i).IsZero(), "populate Schema.%s in the fixture", field.Name)
+		want, err := json.Marshal(value.Field(i).Interface())
+		require.NoError(t, err)
+		require.Contains(t, marshaled, name)
+		assert.JSONEq(t, string(want), string(marshaled[name]), "Schema.%s", field.Name)
+	}
+	assert.Len(t, marshaled, wantKeys)
 }
 
 func TestUnmarshalSchema(t *testing.T) {
