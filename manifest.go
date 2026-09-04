@@ -3318,7 +3318,8 @@ type DataFile interface {
 // ManifestEntry is an interface for both v1 and v2 manifest entries.
 type ManifestEntry interface {
 	// Status returns the type of the file tracked by this entry.
-	// Deletes are informational only and not used in scans.
+	// Whether entries with EntryStatusDELETED are returned depends on the
+	// caller's discardDeleted option.
 	Status() ManifestEntryStatus
 	// SnapshotID is the id where the file was added, or deleted,
 	// if null it is inherited from the manifest list.
