@@ -104,6 +104,7 @@ type Table struct {
 	metadataLocation string
 	cat              CatalogIO
 	fsF              FSysF
+	manifestCache    *snapshotManifestCache
 	planner          ScanPlanner
 	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
 	// catalog load response. They are separate from metadata properties because
@@ -235,6 +236,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
+	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
@@ -357,14 +359,23 @@ func (t Table) Delete(ctx context.Context, filter iceberg.BooleanExpression, sna
 	return txn.Commit(ctx)
 }
 
-func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
-	fs, err := t.fsF(ctx)
-	if err != nil {
-		return func(yield func(iceberg.ManifestFile, error) bool) {
-			yield(nil, err)
-		}
-	}
+func (t Table) manifestSet(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
+	return t.manifestSetWithFSF(ctx, snapshot, t.fsF)
+}
 
+func (t Table) manifestSetWithFSF(
+	ctx context.Context,
+	snapshot Snapshot,
+	fsF FSysF,
+) (snapshotManifestSet, error) {
+	return t.manifestCache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
+		return readSnapshotManifestSet(loadCtx, snapshot, fsF)
+	})
+}
+
+// AllManifests returns the manifests referenced by the table's snapshots.
+// Tables without snapshots return an empty sequence without resolving file IO.
+func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
 	snapshots := t.metadata.Snapshots()
 	n := len(snapshots)
@@ -376,6 +387,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	ch := make(chan list, allManifestsWorkerCount(n))
 	workers := allManifestsWorkerCount(n)
 	g, groupCtx := errgroup.WithContext(workCtx)
+	manifestFS := sharedSnapshotManifestFSF(t.fsF)
 
 	for range workers {
 		g.Go(func() error {
@@ -388,10 +400,11 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 						return nil
 					}
 
-					manifests, err := snapshots[i].Manifests(fs)
+					manifestSet, err := t.manifestSetWithFSF(groupCtx, snapshots[i], manifestFS)
 					if err != nil {
 						return err
 					}
+					manifests := manifestSet.allManifests()
 
 					select {
 					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:
@@ -1310,6 +1323,7 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		metadata:            t.metadata,
 		metadataLocation:    t.metadataLocation,
 		ioF:                 t.fsF,
+		manifestCache:       t.manifestCache,
 		planner:             t.planner,
 		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
 		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
@@ -1398,6 +1412,7 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
+		manifestCache:    newSnapshotManifestCacheForMetadata(meta),
 		cat:              cat,
 		planner:          planner,
 		reporter:         metrics.NopReporter{},

@@ -451,12 +451,12 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 		return nil, errors.New("table file IO is not configured")
 	}
 
-	fs, err := i.tbl.fsF(ctx)
+	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
 	if err != nil {
-		return nil, fmt.Errorf("get file IO: %w", err)
+		return nil, err
 	}
 
-	return snapshot.Manifests(fs)
+	return manifestSet.allManifests(), nil
 }
 
 func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transform iceberg.Transform, bound *[]byte) error {

@@ -43,12 +43,14 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 		if i.tbl.fsF == nil {
 			return nil, errors.New("inspect all manifests: table file IO is not configured")
 		}
-		fs, err := i.tbl.fsF(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("inspect all manifests: %w", err)
-		}
+		manifestFS := sharedSnapshotManifestFSF(i.tbl.fsF)
 		readSnapshotManifests = func(snapshot Snapshot) ([]iceberg.ManifestFile, error) {
-			return snapshot.Manifests(fs)
+			manifestSet, err := i.tbl.manifestSetWithFSF(ctx, snapshot, manifestFS)
+			if err != nil {
+				return nil, err
+			}
+
+			return manifestSet.allManifests(), nil
 		}
 	}
 
