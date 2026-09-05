@@ -3101,6 +3101,21 @@ func TestManifestEvaluatorKeepsTransformedTerms(t *testing.T) {
 	assert.True(t, keep)
 }
 
+func TestPrepareBatchFilterRejectsTransformedTerms(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	term := iceberg.NewUnboundTransform(
+		iceberg.TruncateTransform{Width: 3},
+		iceberg.Reference("category"),
+	)
+
+	_, err := prepareBatchFilter(iceberg.EqualTo(term, "boo"), schema, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	assert.Contains(t, err.Error(), "transformed terms")
+}
+
 func TestGetCmpLiteralRejectsGeo(t *testing.T) {
 	// Little-endian float64 X,Y - a valid geospatial single-value bound that
 	// must never be routed into an ordering comparison.
