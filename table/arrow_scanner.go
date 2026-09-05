@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -2159,6 +2160,13 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	}
 
 	tableProperties := as.metadata.Properties()
+	if batchSize := as.options.Get(ParquetBatchSizeKey, ""); batchSize != "" {
+		tableProperties = maps.Clone(tableProperties)
+		if tableProperties == nil {
+			tableProperties = iceberg.Properties{}
+		}
+		tableProperties[ParquetBatchSizeKey] = batchSize
+	}
 	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{

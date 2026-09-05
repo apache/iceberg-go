@@ -31,6 +31,7 @@ import (
 	"math/rand/v2"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1301,6 +1302,27 @@ func WithReporter(r metrics.Reporter) ScanOption {
 func WithRowLineage() ScanOption {
 	return func(scan *Scan) {
 		scan.includeRowLineage = true
+	}
+}
+
+// WithArrowBatchSize caps the number of rows decoded per Arrow record
+// batch when reading data files, overriding the table's
+// read.parquet.batch-size property for this scan. Smaller batches bound
+// the memory a scan holds per decoded batch, which matters when the
+// consumer buffers batches (e.g. a compaction's read+write pipeline).
+// A non-positive value is ignored.
+func WithArrowBatchSize(n int64) ScanOption {
+	if n <= 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		opts := maps.Clone(scan.options)
+		if opts == nil {
+			opts = iceberg.Properties{}
+		}
+		opts[ParquetBatchSizeKey] = strconv.FormatInt(n, 10)
+		scan.options = opts
 	}
 }
 
