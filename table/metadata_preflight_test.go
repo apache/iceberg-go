@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,6 +94,15 @@ func TestParseMetadataBytesNormalizesStaleLastPartitionID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, parsed.LastPartitionSpecID())
 	assert.Equal(t, 1000, *parsed.LastPartitionSpecID())
+
+	update := NewUpdateSpec(New(nil, parsed, "", nil, nil).NewTransaction(), false).
+		AddField("x", iceberg.BucketTransform{NumBuckets: 16}, "x_bucket")
+	_, _, err = update.BuildUpdates()
+	require.NoError(t, err)
+	updated, err := update.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 2, updated.NumFields())
+	assert.Equal(t, 1001, updated.Field(1).FieldID)
 }
 
 func TestAssignMissingPartitionFieldIDsPreservesConsistentMetadata(t *testing.T) {
@@ -143,6 +153,19 @@ func TestAssignMissingPartitionFieldIDsNormalizesStaleCounter(t *testing.T) {
 	require.Len(t, parsed.Specs, 1)
 	require.Len(t, parsed.Specs[0].Fields, 2)
 	assert.Equal(t, 1001, parsed.Specs[0].Fields[1].FieldID)
+}
+
+func TestAssignMissingPartitionFieldIDsNormalizesLegacyStaleCounter(t *testing.T) {
+	input := []byte(`{"last-updated-ms":0,"last-partition-id":8,"partition-specs":[{"spec-id":0,"fields":[{"field-id":9}]}]}`)
+
+	normalized, err := assignMissingPartitionFieldIDs(input)
+	require.NoError(t, err)
+
+	var parsed struct {
+		LastPartitionID int `json:"last-partition-id"`
+	}
+	require.NoError(t, json.Unmarshal(normalized, &parsed))
+	assert.Equal(t, 9, parsed.LastPartitionID)
 }
 
 func TestParseMetadataBytesRejectsCaseFoldedFormatVersionCollision(t *testing.T) {
