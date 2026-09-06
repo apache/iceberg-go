@@ -21,25 +21,28 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go/encryption"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 )
 
-func newTestStandardManager(t *testing.T, opts ...encryption.StandardManagerOption) (*encryption.StandardEncryptionManager, *encryption.InMemoryKeyManagementClient) {
+func newTestGoEnvelopeManager(t *testing.T, opts ...encryption.GoEnvelopeManagerOption) (*encryption.GoEnvelopeEncryptionManager, *encryption.InMemoryKeyManagementClient) {
 	t.Helper()
 	kms := encryption.NewInMemoryKeyManagementClient()
 	require.NoError(t, kms.AddKey("kek-1", bytes.Repeat([]byte{0x42}, 32)))
 
-	return encryption.NewStandardEncryptionManager(kms, opts...), kms
+	return encryption.NewGoEnvelopeEncryptionManager(kms, opts...), kms
 }
 
-func encryptAll(t *testing.T, mgr *encryption.StandardEncryptionManager, keyID string, plaintext []byte) (ciphertext []byte, keyMetadata encryption.EncryptionKeyMetadata) {
+func encryptAll(t *testing.T, mgr *encryption.GoEnvelopeEncryptionManager, keyID string, plaintext []byte) (ciphertext []byte, keyMetadata encryption.EncryptionKeyMetadata) {
 	t.Helper()
 	fw := &memFileWriter{}
 	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, keyID)
@@ -51,7 +54,7 @@ func encryptAll(t *testing.T, mgr *encryption.StandardEncryptionManager, keyID s
 	return fw.Bytes(), out.KeyMetadata()
 }
 
-func decryptAll(t *testing.T, mgr *encryption.StandardEncryptionManager, ciphertext []byte, keyMetadata encryption.EncryptionKeyMetadata) []byte {
+func decryptAll(t *testing.T, mgr *encryption.GoEnvelopeEncryptionManager, ciphertext []byte, keyMetadata encryption.EncryptionKeyMetadata) []byte {
 	t.Helper()
 	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
 	require.NoError(t, err)
@@ -61,8 +64,8 @@ func decryptAll(t *testing.T, mgr *encryption.StandardEncryptionManager, ciphert
 	return data
 }
 
-func TestStandardEncryptionManager_RoundTrip_SmallerThanBlock(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_RoundTrip_SmallerThanBlock(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	plaintext := []byte("hello iceberg")
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
@@ -73,8 +76,8 @@ func TestStandardEncryptionManager_RoundTrip_SmallerThanBlock(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
-func TestStandardEncryptionManager_RoundTrip_MultiBlock(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_RoundTrip_MultiBlock(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 10)
 	plaintext = append(plaintext, []byte("partial-tail")...)
 
@@ -83,8 +86,8 @@ func TestStandardEncryptionManager_RoundTrip_MultiBlock(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
-func TestStandardEncryptionManager_RoundTrip_ExactBlockMultiple(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_RoundTrip_ExactBlockMultiple(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4)
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
@@ -92,16 +95,16 @@ func TestStandardEncryptionManager_RoundTrip_ExactBlockMultiple(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
-func TestStandardEncryptionManager_RoundTrip_Empty(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_RoundTrip_Empty(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", nil)
 	got := decryptAll(t, mgr, ciphertext, keyMetadata)
 	assert.Empty(t, got)
 }
 
-func TestStandardEncryptionManager_RandomAccess(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_RandomAccess(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 10)
 	plaintext = append(plaintext, []byte("tail-bytes")...)
 
@@ -125,8 +128,8 @@ func TestStandardEncryptionManager_RandomAccess(t *testing.T) {
 	assert.Equal(t, plaintext[5:], rest)
 }
 
-func TestStandardEncryptionManager_TamperedBlockFailsAuthentication(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_TamperedBlockFailsAuthentication(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4)
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
@@ -143,8 +146,8 @@ func TestStandardEncryptionManager_TamperedBlockFailsAuthentication(t *testing.T
 	assert.True(t, errors.Is(err, encryption.ErrAuthenticationFailed))
 }
 
-func TestStandardEncryptionManager_ReorderedBlocksFailAuthentication(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_ReorderedBlocksFailAuthentication(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 2) // exactly two full 16-byte blocks
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
@@ -167,8 +170,8 @@ func TestStandardEncryptionManager_ReorderedBlocksFailAuthentication(t *testing.
 	assert.True(t, errors.Is(err, encryption.ErrAuthenticationFailed), "swapping blocks must be detected: the AAD binds each block to its position")
 }
 
-func TestStandardEncryptionManager_StreamHeaderMagicMismatchRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_StreamHeaderMagicMismatchRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
 	copy(ciphertext[:4], "XXXX")
 
@@ -177,8 +180,8 @@ func TestStandardEncryptionManager_StreamHeaderMagicMismatchRejected(t *testing.
 	assert.True(t, errors.Is(err, encryption.ErrInvalidStreamHeader))
 }
 
-func TestStandardEncryptionManager_StreamHeaderZeroBlockLengthRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_StreamHeaderZeroBlockLengthRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
 	binary.LittleEndian.PutUint32(ciphertext[4:8], 0)
 
@@ -187,8 +190,8 @@ func TestStandardEncryptionManager_StreamHeaderZeroBlockLengthRejected(t *testin
 	assert.True(t, errors.Is(err, encryption.ErrInvalidStreamHeader))
 }
 
-func TestStandardEncryptionManager_StreamHeaderBlockLengthExceedsMaxRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_StreamHeaderBlockLengthExceedsMaxRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
 	binary.LittleEndian.PutUint32(ciphertext[4:8], math.MaxUint32)
 
@@ -197,72 +200,92 @@ func TestStandardEncryptionManager_StreamHeaderBlockLengthExceedsMaxRejected(t *
 	assert.True(t, errors.Is(err, encryption.ErrInvalidStreamHeader))
 }
 
-func TestStandardEncryptionManager_OutputFile_EmptyKeyIDRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
+func TestGoEnvelopeEncryptionManager_OutputFile_EmptyKeyIDRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
 	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrKeyIDRequired))
 }
 
-func TestStandardEncryptionManager_InputFile_EmptyKeyMetadataRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
+func TestGoEnvelopeEncryptionManager_InputFile_EmptyKeyMetadataRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrKeyMetadataRequired))
 }
 
-func TestStandardEncryptionManager_UnknownKeyIDPropagatesFromKMS(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
+func TestGoEnvelopeEncryptionManager_UnknownKeyIDPropagatesFromKMS(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
 	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "does-not-exist")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrUnknownKeyID))
 }
 
-func TestStandardEncryptionManager_MalformedKeyMetadataRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
+func TestGoEnvelopeEncryptionManager_MalformedKeyMetadataRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), encryption.EncryptionKeyMetadata("not json"))
 	require.Error(t, err)
 }
 
-func TestStandardEncryptionManager_ZeroBlockSizeRejectedOnWrite(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(0))
+func TestGoEnvelopeEncryptionManager_ZeroBlockSizeRejectedOnWrite(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(0))
 	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidBlockSize))
 }
 
-func TestStandardEncryptionManager_NegativeBlockSizeRejectedOnWrite(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(-1))
+func TestGoEnvelopeEncryptionManager_NegativeBlockSizeRejectedOnWrite(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(-1))
 	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidBlockSize))
 }
 
-func TestStandardEncryptionManager_BlockSizeExceedingMaxRejectedOnWrite(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(encryption.StandardMaxBlockSize+1))
+func TestGoEnvelopeEncryptionManager_BlockSizeExceedingMaxRejectedOnWrite(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(encryption.GoEnvelopeMaxBlockSize+1))
 	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidBlockSize))
 }
 
-func TestStandardEncryptionManager_NegativePlaintextLengthMetadataRejectedOnRead(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
-	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","aad-prefix":"MTIzNDU2Nzg5MDEyMzQ1Ng==","plaintext-length":-1}`)
+func TestGoEnvelopeEncryptionManager_NegativePlaintextLengthMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":16,"aad-prefix":"MTIzNDU2Nzg5MDEyMzQ1Ng==","plaintext-length":-1}`)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+	assert.ErrorContains(t, err, "plaintext-length must be non-negative")
 }
 
-func TestStandardEncryptionManager_EmptyAADPrefixMetadataRejectedOnRead(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
-	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","aad-prefix":"","plaintext-length":10}`)
+func TestGoEnvelopeEncryptionManager_EmptyAADPrefixMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":16,"aad-prefix":"","plaintext-length":10}`)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+	assert.ErrorContains(t, err, "aad-prefix must not be empty")
 }
 
-func TestStandardEncryptionManager_InvalidDEKLengthRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithDEKLength(15))
+func TestGoEnvelopeEncryptionManager_ZeroBlockSizeMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":0,"aad-prefix":"MTIzNDU2Nzg5MDEyMzQ1Ng==","plaintext-length":10}`)
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+	assert.ErrorContains(t, err, "block-size must be positive")
+}
+
+func TestGoEnvelopeEncryptionManager_BlockSizeExceedingMaxMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
+	meta := []byte(fmt.Sprintf(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":%d,"aad-prefix":"MTIzNDU2Nzg5MDEyMzQ1Ng==","plaintext-length":10}`, encryption.GoEnvelopeMaxBlockSize+1))
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+	assert.ErrorContains(t, err, "block-size must be positive")
+}
+
+func TestGoEnvelopeEncryptionManager_InvalidDEKLengthRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithDEKLength(15))
 	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyLength))
@@ -293,8 +316,8 @@ func (f *shortReadFile) ReadAt(p []byte, off int64) (int, error) {
 	return n, err
 }
 
-func TestStandardEncryptionManager_TruncatedBackendReadReportsCiphertextTooShort(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_TruncatedBackendReadReportsBlockTruncated(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4)
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
@@ -305,12 +328,13 @@ func TestStandardEncryptionManager_TruncatedBackendReadReportsCiphertextTooShort
 
 	_, err = io.ReadAll(in)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, encryption.ErrCiphertextTooShort))
+	assert.True(t, errors.Is(err, encryption.ErrBlockTruncated))
+	assert.False(t, errors.Is(err, encryption.ErrCiphertextTooShort), "a truncated block read is distinct from a too-short KMS-wrapped key/payload")
 	assert.False(t, errors.Is(err, encryption.ErrAuthenticationFailed), "a truncated read must not be misreported as tampering")
 }
 
-func TestStandardEncryptionManager_EmptyFile_ZeroLengthReadAt(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_EmptyFile_ZeroLengthReadAt(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", nil)
 
 	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
@@ -347,8 +371,8 @@ func (w *failAfterNWriter) Close() error {
 	return w.memFileWriter.Close()
 }
 
-func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(4))
+func TestGoEnvelopeEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(4))
 	// Write call 1 is the AES GCM Stream header written by
 	// NewEncryptedOutputFile; call 2 flushes the first (4-byte) block;
 	// call 3 flushes the second block and fails.
@@ -378,8 +402,8 @@ func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.
 	assert.Equal(t, 1, fw.closes, "a retried Close must not close the underlying writer again")
 }
 
-func TestStandardEncryptionManager_WriteAfterCloseRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
+func TestGoEnvelopeEncryptionManager_WriteAfterCloseRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
 	out, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
 	require.NoError(t, err)
 	require.NoError(t, out.Close())
@@ -390,14 +414,14 @@ func TestStandardEncryptionManager_WriteAfterCloseRejected(t *testing.T) {
 	assert.True(t, errors.Is(err, fs.ErrClosed))
 }
 
-func TestNewStandardEncryptionManager_NilKMSPanics(t *testing.T) {
-	assert.PanicsWithValue(t, "encryption: NewStandardEncryptionManager: kms must not be nil", func() {
-		encryption.NewStandardEncryptionManager(nil)
+func TestNewGoEnvelopeEncryptionManager_NilKMSPanics(t *testing.T) {
+	assert.PanicsWithValue(t, "encryption: NewGoEnvelopeEncryptionManager: kms must not be nil", func() {
+		encryption.NewGoEnvelopeEncryptionManager(nil)
 	})
 }
 
-func TestStandardEncryptionManager_StreamHeaderBlockLengthMismatchRejected(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+func TestGoEnvelopeEncryptionManager_StreamHeaderBlockLengthMismatchRejected(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
 	// A header block length that is itself in-range, but does not match the
 	// (trusted) block-size recorded in key metadata.
@@ -422,8 +446,8 @@ func (f *countingReadAtFile) ReadAt(p []byte, off int64) (int, error) {
 	return f.memFile.ReadAt(p, off)
 }
 
-func TestStandardEncryptionManager_RepeatedSmallReadsReuseDecryptedBlockCache(t *testing.T) {
-	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(4096))
+func TestGoEnvelopeEncryptionManager_RepeatedSmallReadsReuseDecryptedBlockCache(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(4096))
 	plaintext := bytes.Repeat([]byte("x"), 5000) // spans exactly two blocks (4096 + 904)
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
@@ -441,4 +465,133 @@ func TestStandardEncryptionManager_RepeatedSmallReadsReuseDecryptedBlockCache(t 
 	}
 
 	assert.LessOrEqual(t, counting.reads-baseline, 2, "5000 one-byte reads across two blocks must decrypt each block at most once")
+}
+
+func TestGoEnvelopeEncryptionManager_RoundTrip_DefaultBlockSize(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t) // exercises GoEnvelopeDefaultBlockSize (64 KiB), not an explicit small size
+	plaintext := bytes.Repeat([]byte("iceberg-default-block-size-test-"), 4000)
+	require.Greater(t, len(plaintext), 64*1024, "plaintext must span multiple default-size blocks")
+
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
+	got := decryptAll(t, mgr, ciphertext, keyMetadata)
+	assert.Equal(t, plaintext, got)
+}
+
+func TestGoEnvelopeEncryptionManager_ReadFrom(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(4))
+	fw := &memFileWriter{}
+	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, "kek-1")
+	require.NoError(t, err)
+
+	plaintext := []byte("hello iceberg world")
+	n, err := out.ReadFrom(bytes.NewReader(plaintext))
+	require.NoError(t, err)
+	assert.EqualValues(t, len(plaintext), n)
+	require.NoError(t, out.Close())
+
+	got := decryptAll(t, mgr, fw.Bytes(), out.KeyMetadata())
+	assert.Equal(t, plaintext, got)
+}
+
+func TestGoEnvelopeEncryptionManager_Stat(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(16))
+	plaintext := []byte("hello iceberg world, this is a stat test")
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
+
+	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
+	require.NoError(t, err)
+
+	info, err := in.Stat()
+	require.NoError(t, err)
+	assert.EqualValues(t, len(plaintext), info.Size(), "Stat must report the plaintext length, not the on-disk ciphertext length")
+	assert.Less(t, info.Size(), int64(len(ciphertext)), "ciphertext must be larger than plaintext due to per-block nonce/tag overhead")
+}
+
+// closeFailWriter is an icebergio.FileWriter stub whose Close always fails
+// even though every Write succeeds, simulating a backend where the final
+// flush/commit (e.g. an S3 multipart completion) fails independently of the
+// preceding writes.
+type closeFailWriter struct {
+	memFileWriter
+	closes int
+}
+
+func (w *closeFailWriter) Close() error {
+	w.closes++
+
+	return errors.New("simulated close failure")
+}
+
+func TestGoEnvelopeEncryptionManager_UnderlyingCloseFailurePoisonsWriter(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
+	fw := &closeFailWriter{}
+	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, "kek-1")
+	require.NoError(t, err)
+
+	_, err = out.Write([]byte("hello"))
+	require.NoError(t, err)
+
+	closeErr := out.Close()
+	require.Error(t, closeErr)
+	assert.Nil(t, out.KeyMetadata(), "key metadata must not be finalized when the underlying Close fails")
+
+	// A retried Close must keep reporting the same error, not nil, and must
+	// not attempt to close the underlying writer again.
+	closeErr2 := out.Close()
+	require.Error(t, closeErr2)
+	assert.ErrorIs(t, closeErr2, closeErr)
+	assert.Equal(t, 1, fw.closes, "a retried Close must not re-close the underlying writer")
+
+	_, err = out.Write([]byte("late"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, closeErr, "a subsequent Write must report the same sticky error")
+}
+
+// slowReadFile wraps a memFile and sleeps before every ReadAt, simulating a
+// remote backend (e.g. S3) with real network latency. It is used to prove
+// that concurrent ReadAt calls for distinct blocks actually overlap rather
+// than being serialized by readBlock's internal cache lock.
+type slowReadFile struct {
+	*memFile
+	delay time.Duration
+}
+
+func (f *slowReadFile) ReadAt(p []byte, off int64) (int, error) {
+	time.Sleep(f.delay)
+
+	return f.memFile.ReadAt(p, off)
+}
+
+func TestGoEnvelopeEncryptionManager_ConcurrentReadAtOverlaps(t *testing.T) {
+	const (
+		numBlocks = 8
+		blockSize = 16
+		delay     = 20 * time.Millisecond
+	)
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(blockSize))
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), numBlocks)
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
+
+	slow := &slowReadFile{memFile: newMemFile(ciphertext), delay: delay}
+	in, err := mgr.NewDecryptedInputFile(t.Context(), slow, keyMetadata) // reads the header; not timed below
+	require.NoError(t, err)
+
+	start := time.Now()
+	var g errgroup.Group
+	for i := range numBlocks {
+		g.Go(func() error {
+			buf := make([]byte, blockSize)
+			_, err := in.ReadAt(buf, int64(i*blockSize))
+
+			return err
+		})
+	}
+	require.NoError(t, g.Wait())
+	elapsed := time.Since(start)
+
+	// Serial execution (the pre-fix behavior, holding cacheMu across ReadAt)
+	// would take roughly numBlocks*delay. True concurrency keeps it close to
+	// a single delay; the threshold below is generous to stay robust on
+	// slow or loaded CI machines while still failing on a serialized regression.
+	assert.Less(t, elapsed, numBlocks/2*delay, "concurrent ReadAt calls for distinct blocks must overlap, not serialize")
 }
