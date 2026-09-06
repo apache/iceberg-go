@@ -1479,6 +1479,53 @@ func TestGlueRenameTable(t *testing.T) {
 	assert.True(testSchema.Equals(renamedTable.Schema()))
 }
 
+func TestGlueRenameTable_CreateTableFailureUsesDestinationName(t *testing.T) {
+	assert := require.New(t)
+
+	mockGluesvc := &mockGlueClient{}
+
+	mockGluesvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("new_test_database"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{
+		Database: &types.Database{
+			Name: aws.String("new_test_database"),
+		},
+	}, nil).Once()
+
+	mockGluesvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &types.Table{
+			Name:      aws.String("test_table"),
+			TableType: aws.String("EXTERNAL_TABLE"),
+			VersionId: aws.String("v1"),
+			Parameters: map[string]string{
+				tableParamTableType:        glueTypeIceberg,
+				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abvc123-123.metadata.json",
+			},
+			StorageDescriptor: &types.StorageDescriptor{},
+		},
+	}, nil).Once()
+
+	mockGluesvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, errors.New("create table failed")).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGluesvc,
+	}
+
+	renamedTable, err := glueCatalog.RenameTable(
+		context.TODO(),
+		TableIdentifier("test_database", "test_table"),
+		TableIdentifier("new_test_database", "new_test_table"),
+	)
+
+	assert.ErrorContains(err, "failed to create the table new_test_database.new_test_table")
+	assert.Nil(renamedTable)
+	mockGluesvc.AssertExpectations(t)
+}
+
 func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 	assert := require.New(t)
 
