@@ -2084,7 +2084,12 @@ func (c *pgAbortConn) QueryContext(ctx context.Context, query string, args []dri
 
 	// The namespace exists on the re-check only in the unique-violation case: a
 	// concurrent winner committed the row. An unrelated failure leaves it absent.
+	// In the success case the insert is real, so let the probe read true persistence.
 	if isNamespaceExistsProbe(query) {
+		if c.drv.mode == insertSucceeds {
+			return queryer.QueryContext(ctx, query, args)
+		}
+
 		return &boolRows{val: c.drv.insertAttempted.Load() && c.drv.mode == failUnique}, nil
 	}
 
@@ -2265,9 +2270,15 @@ func (s *SqliteCatalogTestSuite) TestCreateNamespaceSucceedsThroughSavepoint() {
 	namespace := table.Identifier{databaseName()}
 	cat, drv := s.newAbortCatalog(insertSucceeds)
 
-	err := cat.CreateNamespace(context.Background(), namespace, nil)
+	ctx := context.Background()
+	err := cat.CreateNamespace(ctx, namespace, nil)
 	s.Require().NoError(err)
 	s.True(drv.insertAttempted.Load(), "the emulated insert must have run")
+
+	// The row must survive RELEASE SAVEPOINT; a ROLLBACK there would persist none.
+	exists, err := cat.CheckNamespaceExists(ctx, namespace)
+	s.Require().NoError(err)
+	s.True(exists, "the namespace must persist through the savepoint commit")
 }
 
 // Emulates Postgres aborting the transaction: only passes if the savepoint let
