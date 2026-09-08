@@ -141,6 +141,9 @@ func unmarshalAvroDataFileEntry(data []byte, spec PartitionSpec, schema *Schema,
 	if _, err := s.Decode(data, entry); err != nil {
 		return nil, fmt.Errorf("iceberg: unmarshalAvroDataFileEntry: %w", err)
 	}
+	if err := df.normalizeFormat(); err != nil {
+		return nil, fmt.Errorf("iceberg: unmarshalAvroDataFileEntry: %w", err)
+	}
 	df.specID = int32(spec.ID())
 	df.fieldNameToID = maps.nameToID
 	df.fieldIDToLogicalType = maps.idToType
