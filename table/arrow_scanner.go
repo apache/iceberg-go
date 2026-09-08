@@ -943,6 +943,10 @@ type arrowScan struct {
 
 	useLargeTypes bool
 	concurrency   int
+
+	// arrowBatchSize, when positive, overrides the table's
+	// read.parquet.batch-size property for this scan's reads.
+	arrowBatchSize int
 }
 
 // preparedFileRead contains the physical schema projection shared by all
@@ -2140,7 +2144,11 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	}
 
 	tableProperties := as.metadata.Properties()
-	if batchSize := as.options.Get(ParquetBatchSizeKey, ""); batchSize != "" {
+	batchSize := as.options.Get(ParquetBatchSizeKey, "")
+	if as.arrowBatchSize > 0 {
+		batchSize = strconv.Itoa(as.arrowBatchSize)
+	}
+	if batchSize != "" {
 		tableProperties = maps.Clone(tableProperties)
 		if tableProperties == nil {
 			tableProperties = iceberg.Properties{}
