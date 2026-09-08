@@ -588,6 +588,8 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 		return nil, err
 	}
 	// fast case optimizations
+	// An extract term's Ref() is the variant column, not the addressed sub-path; skip the required-field fast path.
+	_, isExtract := bound.(BoundExtract)
 	switch up.op {
 	case OpIsNull:
 		if transform, ok := bound.(*BoundTransform); ok {
@@ -595,7 +597,7 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 				return AlwaysTrue{}, nil
 			}
 		}
-		if ref, ok := bound.(BoundReference); ok &&
+		if ref, ok := bound.(BoundReference); ok && !isExtract &&
 			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysFalse{}, nil
 		}
@@ -605,7 +607,7 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 				return AlwaysFalse{}, nil
 			}
 		}
-		if ref, ok := bound.(BoundReference); ok &&
+		if ref, ok := bound.(BoundReference); ok && !isExtract &&
 			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysTrue{}, nil
 		}
@@ -1395,7 +1397,7 @@ type BoundBBoxPredicate interface {
 // as a generic unary predicate (it would reach substrait and error, or be
 // dropped to AlwaysFalse when a column is absent). It has no record-filter or
 // REST-JSON form at all, so the two visitors that would otherwise rebuild a bound
-// predicate - columnNameTranslator.VisitBound and sanitizeVisitor.VisitBound -
+// predicate - scanTranslator.VisitBound and sanitizeVisitor.VisitBound -
 // special-case *boundBBoxPredicate and collapse it to AlwaysTrue. Data-file
 // pruning is done separately by inclusiveMetricsEval.
 type boundBBoxPredicate struct {

@@ -33,12 +33,16 @@ func validatePlanningTaskEnvelope(data []byte, status PlanStatus, tasks ScanTask
 		return err
 	}
 
-	if status != PlanStatusCompleted {
-		for _, name := range []string{"plan-tasks", "file-scan-tasks", "delete-files"} {
-			raw, ok := fields[name]
-			if ok && !isJSONNull(raw) {
-				return fmt.Errorf("%w: %s response includes %s for status %q", ErrRESTError, endpoint, name, status)
-			}
+	for _, name := range []string{"plan-tasks", "file-scan-tasks", "delete-files"} {
+		raw, ok := fields[name]
+		if !ok {
+			continue
+		}
+		if isJSONNull(raw) {
+			return fmt.Errorf("%w: %s response field %s must not be null", ErrRESTError, endpoint, name)
+		}
+		if status != PlanStatusCompleted {
+			return fmt.Errorf("%w: %s response includes %s for status %q", ErrRESTError, endpoint, name, status)
 		}
 	}
 

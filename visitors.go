@@ -647,11 +647,47 @@ func (expressionFieldIDs) VisitBound(pred BoundPredicate) map[int]struct{} {
 // the field IDs in the file schema. If columns don't exist they are replaced with
 // AlwaysFalse or AlwaysTrue depending on the operator.
 func TranslateColumnNames(expr BooleanExpression, fileSchema *Schema) (BooleanExpression, error) {
-	return VisitExpr(expr, columnNameTranslator{fileSchema: fileSchema})
+	res, extracts, err := TranslateColumnNamesForScan(expr, fileSchema)
+	if err != nil {
+		return nil, err
+	}
+	if len(extracts) > 0 {
+		return nil, fmt.Errorf("%w: variant extract terms require TranslateColumnNamesForScan", ErrNotImplemented)
+	}
+
+	return res, nil
 }
 
-type columnNameTranslator struct {
+// VariantExtractColumn describes a synthetic column that materializes one variant extract term for filtering.
+type VariantExtractColumn struct {
+	Term       BoundExtract
+	FieldID    int
+	Name       string
+	SourcePath []string
+}
+
+// TranslateColumnNamesForScan translates a bound filter to the file schema, mapping variant extract terms to synthetic reference columns.
+func TranslateColumnNamesForScan(expr BooleanExpression, fileSchema *Schema) (BooleanExpression, []VariantExtractColumn, error) {
+	tr := &scanTranslator{
+		fileSchema: fileSchema,
+		nextID:     fileSchema.HighestFieldID() + 1,
+		byKey:      map[string]int{},
+	}
+
+	res, err := VisitExpr(expr, tr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return res, tr.columns, nil
+}
+
+type scanTranslator struct {
 	fileSchema *Schema
+	nextID     int
+	nameSeq    int
+	byKey      map[string]int
+	columns    []VariantExtractColumn
 }
 
 type defaultValueStruct []any
@@ -660,22 +696,52 @@ func (s defaultValueStruct) Size() int            { return len(s) }
 func (s defaultValueStruct) Get(pos int) any      { return s[pos] }
 func (s defaultValueStruct) Set(pos int, val any) { s[pos] = val }
 
-func (columnNameTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
-func (columnNameTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
-func (columnNameTranslator) VisitNot(child BooleanExpression) BooleanExpression {
+func (*scanTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
+func (*scanTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
+func (*scanTranslator) VisitNot(child BooleanExpression) BooleanExpression {
 	return NewNot(child)
 }
 
-func (columnNameTranslator) VisitAnd(left, right BooleanExpression) BooleanExpression {
+func (*scanTranslator) VisitAnd(left, right BooleanExpression) BooleanExpression {
 	return NewAnd(left, right)
 }
 
-func (columnNameTranslator) VisitOr(left, right BooleanExpression) BooleanExpression {
+func (*scanTranslator) VisitOr(left, right BooleanExpression) BooleanExpression {
 	return NewOr(left, right)
 }
 
-func (columnNameTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+func (*scanTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpression {
 	panic(fmt.Errorf("%w: expected bound predicate, got: %s", ErrInvalidArgument, pred.Term()))
+}
+
+func (t *scanTranslator) extractRef(ext BoundExtract) Reference {
+	key := ext.String()
+	idx, ok := t.byKey[key]
+	if !ok {
+		sourcePath := t.fileSchema.columnPathSegments(ext.Ref().Field().ID)
+		idx = len(t.columns)
+		t.columns = append(t.columns, VariantExtractColumn{
+			Term:       ext,
+			FieldID:    t.nextID,
+			Name:       t.syntheticName(),
+			SourcePath: sourcePath,
+		})
+		t.nextID++
+		t.byKey[key] = idx
+	}
+
+	return Reference(t.columns[idx].Name)
+}
+
+// syntheticName returns a derived-column name absent from the file schema.
+func (t *scanTranslator) syntheticName() string {
+	for {
+		name := fmt.Sprintf("_variant_extract_%d", t.nameSeq)
+		t.nameSeq++
+		if _, found := t.fileSchema.FindFieldByName(name); !found {
+			return name
+		}
+	}
 }
 
 func unbindPredicate(pred BoundPredicate, ref Reference) UnboundPredicate {
@@ -725,7 +791,7 @@ func initialDefaultLiteral(field NestedField) (Literal, error) {
 	return decodeValue(data, field.Type)
 }
 
-func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
+func (t *scanTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
 	// A bbox predicate has no substrait/record-filter form; it is evaluated only
 	// during metrics-based file pruning, so the record filter must conservatively
 	// keep every row.
@@ -733,55 +799,71 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 		return AlwaysTrue{}
 	}
 
-	fileColName, found := c.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
-	if !found {
-		// in the case of schema evolution, the column might not be present
-		// in the file schema when reading older data
-		field := pred.Ref().Field()
-		// A nested field can still be null when an optional parent is null, so
-		// its default is not a file-wide constant. Preserve the existing
-		// missing-column behavior until translation has row-level parent state.
-		if field.InitialDefault == nil || len(pred.Ref().PosPath()) > 1 {
+	var ref Reference
+	if ext, ok := pred.Term().(BoundExtract); ok {
+		// If the variant column is absent from this file, the extracted path is null
+		// for every row: IsNull matches, everything else cannot. Handle it here rather
+		// than fabricating an all-null derived column downstream.
+		if _, found := t.fileSchema.FindColumnName(ext.Ref().Field().ID); !found {
 			if pred.Op() == OpIsNull {
 				return AlwaysTrue{}
 			}
 
 			return AlwaysFalse{}
 		}
-		// The spec requires geo defaults to be null, but fail open for metadata
-		// written by non-conforming V3 writers rather than aborting the scan.
-		switch field.Type.(type) {
-		case GeometryType, GeographyType:
-			return AlwaysTrue{}
-		}
+		ref = t.extractRef(ext)
+	} else {
+		fileColName, found := t.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
+		if !found {
+			// in the case of schema evolution, the column might not be present
+			// in the file schema when reading older data
+			field := pred.Ref().Field()
+			// A nested field can still be null when an optional parent is null, so
+			// its default is not a file-wide constant. Preserve the existing
+			// missing-column behavior until translation has row-level parent state.
+			if field.InitialDefault == nil || len(pred.Ref().PosPath()) > 1 {
+				if pred.Op() == OpIsNull {
+					return AlwaysTrue{}
+				}
 
-		withContext := func(err error) error {
-			return fmt.Errorf("initial-default for column %q (id %d): %w",
-				field.Name, field.ID, err)
-		}
-		eval, err := ExpressionEvaluator(NewSchema(0, field),
-			unbindPredicate(pred, Reference(field.Name)), true)
-		if err != nil {
-			panic(withContext(err))
-		}
+				return AlwaysFalse{}
+			}
+			// The spec requires geo defaults to be null, but fail open for metadata
+			// written by non-conforming V3 writers rather than aborting the scan.
+			switch field.Type.(type) {
+			case GeometryType, GeographyType:
+				return AlwaysTrue{}
+			}
 
-		lit, err := initialDefaultLiteral(field)
-		if err != nil {
-			panic(withContext(err))
-		}
+			withContext := func(err error) error {
+				return fmt.Errorf("initial-default for column %q (id %d): %w",
+					field.Name, field.ID, err)
+			}
+			eval, err := ExpressionEvaluator(NewSchema(0, field),
+				unbindPredicate(pred, Reference(field.Name)), true)
+			if err != nil {
+				panic(withContext(err))
+			}
 
-		matches, err := eval(defaultValueStruct{lit.Any()})
-		if err != nil {
-			panic(withContext(err))
-		}
-		if matches {
-			return AlwaysTrue{}
-		}
+			lit, err := initialDefaultLiteral(field)
+			if err != nil {
+				panic(withContext(err))
+			}
 
-		return AlwaysFalse{}
+			matches, err := eval(defaultValueStruct{lit.Any()})
+			if err != nil {
+				panic(withContext(err))
+			}
+			if matches {
+				return AlwaysTrue{}
+			}
+
+			return AlwaysFalse{}
+		}
+		ref = Reference(fileColName)
 	}
 
-	return unbindPredicate(pred, Reference(fileColName))
+	return unbindPredicate(pred, ref)
 }
 
 // sanitizedLiteralMask is the placeholder substituted for every literal value in
@@ -802,54 +884,80 @@ const sanitizedLiteralMask = "(redacted)"
 // predicates (IN / NOT IN) keep their arity so the operation is not
 // misrepresented, but the members are masked.
 func SanitizeExpression(expr BooleanExpression) (BooleanExpression, error) {
-	return VisitExpr(expr, sanitizeVisitor{})
+	res, err := VisitExpr(expr, sanitizeVisitor{})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.expr, nil
+}
+
+// sanitizedResult is the masked expression plus whether its subtree held a non-serializable term.
+type sanitizedResult struct {
+	expr              BooleanExpression
+	hasUnserializable bool
 }
 
 type sanitizeVisitor struct{}
 
-func (sanitizeVisitor) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
-func (sanitizeVisitor) VisitFalse() BooleanExpression { return AlwaysFalse{} }
-func (sanitizeVisitor) VisitNot(child BooleanExpression) BooleanExpression {
-	return NewNot(child)
+func (sanitizeVisitor) VisitTrue() sanitizedResult  { return sanitizedResult{expr: AlwaysTrue{}} }
+func (sanitizeVisitor) VisitFalse() sanitizedResult { return sanitizedResult{expr: AlwaysFalse{}} }
+func (sanitizeVisitor) VisitNot(child sanitizedResult) sanitizedResult {
+	// Over-broad but never AlwaysFalse: a NOT over any unserializable descendant collapses the whole subtree, dropping serializable siblings from the report.
+	if child.hasUnserializable {
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
+	}
+
+	return sanitizedResult{expr: NewNot(child.expr)}
 }
 
-func (sanitizeVisitor) VisitAnd(left, right BooleanExpression) BooleanExpression {
-	return NewAnd(left, right)
+func (sanitizeVisitor) VisitAnd(left, right sanitizedResult) sanitizedResult {
+	return sanitizedResult{expr: NewAnd(left.expr, right.expr), hasUnserializable: left.hasUnserializable || right.hasUnserializable}
 }
 
-func (sanitizeVisitor) VisitOr(left, right BooleanExpression) BooleanExpression {
-	return NewOr(left, right)
+func (sanitizeVisitor) VisitOr(left, right sanitizedResult) sanitizedResult {
+	return sanitizedResult{expr: NewOr(left.expr, right.expr), hasUnserializable: left.hasUnserializable || right.hasUnserializable}
 }
 
-func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) sanitizedResult {
+	// An extract term has no REST expression-JSON form; keeping it would fail json.Marshal. Collapse it like bbox (mirrors VisitBound).
+	if _, ok := pred.Term().(*unboundExtract); ok {
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
+	}
+
 	switch p := pred.(type) {
 	case *unboundBBoxPredicate:
 		// A bbox predicate carries query-box coordinates, not a per-row user
 		// literal, and has no REST expression-JSON form (see MarshalJSON).
 		// Collapse it to always-true so the surrounding expression still
 		// sanitizes and serializes; nothing user-provided leaks.
-		return AlwaysTrue{}
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
 	case *unboundUnaryPredicate:
 		// No literal to mask; the op and term are safe to keep as-is.
-		return pred
+		return sanitizedResult{expr: pred}
 	case *unboundLiteralPredicate:
-		return sanitizeLiteralPredicate(p.op, p.term)
+		return sanitizedResult{expr: sanitizeLiteralPredicate(p.op, p.term)}
 	case *unboundSetPredicate:
-		return sanitizeSetPredicate(p.op, p.term, p.lits.Len())
+		return sanitizedResult{expr: sanitizeSetPredicate(p.op, p.term, p.lits.Len())}
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
 }
 
-func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
+func (sanitizeVisitor) VisitBound(pred BoundPredicate) sanitizedResult {
 	// A bbox predicate carries query-box coordinates, not a per-row user literal,
 	// and has no REST expression-JSON form (see MarshalJSON), so it cannot be
 	// rebuilt as a reference predicate like the cases below. Collapse it to
 	// always-true so the surrounding expression still sanitizes and serializes;
 	// nothing user-provided leaks. Matched before ref is taken and on the exported
-	// BoundBBoxPredicate interface (mirrors columnNameTranslator).
+	// BoundBBoxPredicate interface (mirrors scanTranslator).
 	if _, ok := pred.(BoundBBoxPredicate); ok {
-		return AlwaysTrue{}
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
+	}
+
+	// An extract term has no reference form; rebuilding over its Ref() would leak the whole variant column name. Collapse it like bbox.
+	if _, ok := pred.Term().(BoundExtract); ok {
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
 	}
 
 	// Rebuild over the column name as an unbound reference: the sanitized form is
@@ -859,11 +967,11 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	term := unboundTermForBound(pred.Term(), ref)
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
-		return UnaryPredicate(p.Op(), term)
+		return sanitizedResult{expr: UnaryPredicate(p.Op(), term)}
 	case BoundLiteralPredicate:
-		return sanitizeLiteralPredicate(p.Op(), term)
+		return sanitizedResult{expr: sanitizeLiteralPredicate(p.Op(), term)}
 	case BoundSetPredicate:
-		return sanitizeSetPredicate(p.Op(), term, boundSetLiteralsForVisit(p).Len())
+		return sanitizedResult{expr: sanitizeSetPredicate(p.Op(), term, boundSetLiteralsForVisit(p).Len())}
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}

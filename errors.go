@@ -44,4 +44,8 @@ var (
 	// contract/not-implemented condition, not a bad caller argument - matching
 	// how the substrait backstop surfaces the same predicate.
 	ErrBBoxNotSerializable = fmt.Errorf("%w: geospatial bbox predicates cannot be serialized to REST expression JSON", ErrNotImplemented)
+	// ErrExtractNotSerializable is returned when marshaling a variant extract term
+	// to REST expression JSON: extract terms have no representation in the REST
+	// expression grammar and would otherwise encode to an empty object.
+	ErrExtractNotSerializable = fmt.Errorf("%w: variant extract terms cannot be serialized to REST expression JSON", ErrNotImplemented)
 )

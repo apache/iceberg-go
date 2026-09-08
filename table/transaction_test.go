@@ -616,6 +616,33 @@ func (s *SparkIntegrationTestSuite) TestShreddedVariantSparkWriteGoRead() {
 		s.Require().Contains(out, "1000")
 		s.Require().Contains(out, "R1000")
 	})
+
+	s.Run("extract predicate pushdown over spark-shredded data", func() {
+		matchingIDs := func(filter iceberg.BooleanExpression) []int64 {
+			res, err := tbl.Scan(table.WithRowFilter(filter)).ToArrowTable(ctx)
+			s.Require().NoError(err)
+			defer res.Release()
+			var ids []int64
+			for _, ch := range res.Column(0).Data().Chunks() {
+				c := ch.(*array.Int64)
+				for i := 0; i < c.Len(); i++ {
+					ids = append(ids, c.Value(i))
+				}
+			}
+
+			return ids
+		}
+
+		// $.a == 99: only the bulk row with a=99 matches (scalar/array/null rows have no $.a).
+		s.Equal([]int64{99}, matchingIDs(iceberg.EqualTo(
+			iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64), int64(99))),
+			"$.a == 99 selects exactly the a=99 row over Spark-shredded data")
+
+		// Nested $.c.y == "y150": exercises a nested shredded string leaf.
+		s.Equal([]int64{150}, matchingIDs(iceberg.EqualTo(
+			iceberg.Extract("payload", "$.c.y", iceberg.PrimitiveTypes.String), "y150")),
+			"nested $.c.y == y150 selects exactly id 150")
+	})
 }
 
 // variantField returns the Go value of an object field, failing if absent.

@@ -19,11 +19,16 @@ package table
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -89,6 +94,64 @@ func TestManifestActiveFilesCountsEntriesWhenHeaderCountsAbsent(t *testing.T) {
 	require.EqualValues(t, n, got)
 }
 
+// TestManifestMergeClusterRollsAfterAvroBlockFlush uses enough incompressible
+// per-entry metadata to cross the Avro writer's 64 KiB block boundary. The
+// target is below one flushed block, so the test exercises the documented
+// block-granularity roll rather than a header-only threshold.
+func TestManifestMergeClusterRollsAfterAvroBlockFlush(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{})
+
+	const entryCount = 96
+	entries := make([]iceberg.ManifestEntry, 0, entryCount)
+	snapshotID := prod.snapshotID
+	sequenceNumber := int64(1)
+	for i := range entryCount {
+		metadata := make([]byte, 2<<10)
+		for offset := 0; offset < len(metadata); offset += sha256.Size {
+			var seed [16]byte
+			binary.LittleEndian.PutUint64(seed[:8], uint64(i))
+			binary.LittleEndian.PutUint64(seed[8:], uint64(offset))
+			digest := sha256.Sum256(seed[:])
+			copy(metadata[offset:], digest[:])
+		}
+
+		builder, err := iceberg.NewDataFileBuilder(
+			spec,
+			iceberg.EntryContentData,
+			"file://data-"+strconv.Itoa(i)+".parquet",
+			iceberg.ParquetFile,
+			nil, nil, nil, 1, 100,
+		)
+		require.NoError(t, err)
+		entries = append(entries, iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, &snapshotID, &sequenceNumber, nil,
+			builder.KeyMetadata(metadata).Build(),
+		))
+	}
+
+	path := "table-location/metadata/block-boundary-input.avro"
+	var buf bytes.Buffer
+	input, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+
+	mgr := manifestMergeManager{
+		targetSizeBytes:  input.Length() / 4,
+		mergeEnabled:     true,
+		mergeConcurrency: 1,
+		clusterBy:        func(iceberg.DataFile) any { return "same" },
+		snap:             prod,
+	}
+	merged, err := mgr.mergeManifests([]iceberg.ManifestFile{input})
+	require.NoError(t, err)
+	require.Greater(t, len(merged), 1,
+		"a flushed Avro block must roll the clustered writer once it crosses the target")
+}
+
 // memKeys snapshots the set of paths a memIO currently holds.
 func memKeys(m *memIO) map[string]struct{} {
 	m.mu.Lock()
@@ -116,10 +179,11 @@ func TestRewriteManifestsCleansOrphanOnValidationError(t *testing.T) {
 	// Two real manifests, each holding one entry. A two-manifest bin forces a
 	// real merge; a one-manifest bin would pass through untouched.
 	inputs := make([]iceberg.ManifestFile, 2)
+	sequenceNumber := int64(1)
 	for i := range inputs {
 		df := newTestDataFile(t, spec, "file://data-"+string(rune('a'+i))+".parquet", nil)
 		entries := []iceberg.ManifestEntry{
-			iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &prod.snapshotID, nil, nil, df),
+			iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &prod.snapshotID, &sequenceNumber, nil, df),
 		}
 		path := "table-location/metadata/input-" + string(rune('a'+i)) + ".avro"
 		var buf bytes.Buffer
@@ -142,6 +206,118 @@ func TestRewriteManifestsCleansOrphanOnValidationError(t *testing.T) {
 		_, preexisting := before[path]
 		require.Truef(t, preexisting, "merged manifest %s written before validation must be cleaned up", path)
 	}
+}
+
+// TestManifestMergeClusterCleansOrphanOnWriterConstructionError checks that
+// a manifest path created before writer construction fails is removed.
+func TestManifestMergeClusterCleansOrphanOnWriterConstructionError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{})
+	input := writeTestManifestFile(t, mem, spec, simpleSchema(), prod.snapshotID, 0)
+
+	// Make the writer factory fail after it has created its output path.
+	prod.txn.meta.formatVersion = 4
+	before := memKeys(mem)
+	mgr := manifestMergeManager{
+		mergeEnabled: true,
+		clusterBy:    func(iceberg.DataFile) any { return "same" },
+		snap:         prod,
+	}
+
+	_, err := mgr.mergeManifests([]iceberg.ManifestFile{input})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported manifest version")
+	assert.Equal(t, before, memKeys(mem), "writer construction failure must not leave an orphan")
+}
+
+// TestRewriteManifestsCleansOrphansOnInvalidClusterKey checks that a writer
+// opened for an earlier key is removed when a later callback returns an invalid
+// key.
+func TestRewriteManifestsCleansOrphansOnInvalidClusterKey(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{
+		targetSizeBytes: 8 << 20,
+	})
+
+	inputs := make([]iceberg.ManifestFile, 2)
+	sequenceNumber := int64(1)
+	for i := range inputs {
+		df := newTestDataFile(t, spec, "file://data-"+string(rune('a'+i))+".parquet", nil)
+		entries := []iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &prod.snapshotID, &sequenceNumber, nil, df),
+		}
+		path := "table-location/metadata/cluster-input-" + string(rune('a'+i)) + ".avro"
+		var buf bytes.Buffer
+		mf, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
+		require.NoError(t, err)
+		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		inputs[i] = mf
+	}
+
+	before := memKeys(mem)
+	mgr := manifestMergeManager{
+		targetSizeBytes: 8 << 20,
+		mergeEnabled:    true,
+		clusterBy: func(df iceberg.DataFile) any {
+			if strings.HasSuffix(df.FilePath(), "data-a.parquet") {
+				return "valid"
+			}
+
+			return []string{"not-comparable"}
+		},
+		snap: prod,
+	}
+	_, err := mgr.mergeManifests(inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not comparable")
+
+	for path := range memKeys(mem) {
+		_, preexisting := before[path]
+		assert.Truef(t, preexisting, "invalid cluster key left orphaned manifest %s", path)
+	}
+}
+
+// TestManifestMergeClusterSeparatesSpecsWithSameKey verifies that a key is
+// scoped to its partition spec, just like the manifest writer's schema.
+func TestManifestMergeClusterSeparatesSpecsWithSameKey(t *testing.T) {
+	spec0 := iceberg.NewPartitionSpec()
+	spec1 := iceberg.NewPartitionSpecID(1)
+	schema := simpleSchema()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec0)
+	txn.meta.specs = append(txn.meta.specs, spec1)
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{
+		targetSizeBytes: 8 << 20,
+	})
+
+	inputs := make([]iceberg.ManifestFile, 0, 2)
+	sequenceNumber := int64(1)
+	for i, spec := range []iceberg.PartitionSpec{spec0, spec1} {
+		df := newTestDataFile(t, spec, "file://spec-"+string(rune('a'+i))+".parquet", nil)
+		entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &prod.snapshotID, &sequenceNumber, nil, df)
+		path := "table-location/metadata/spec-cluster-" + string(rune('a'+i)) + ".avro"
+		var buf bytes.Buffer
+		mf, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, []iceberg.ManifestEntry{entry})
+		require.NoError(t, err)
+		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		inputs = append(inputs, mf)
+	}
+
+	mgr := manifestMergeManager{
+		targetSizeBytes: 8 << 20,
+		mergeEnabled:    true,
+		clusterBy:       func(iceberg.DataFile) any { return "same" },
+		snap:            prod,
+	}
+	merged, err := mgr.mergeManifests(inputs)
+	require.NoError(t, err)
+	require.Len(t, merged, 2)
+	assert.ElementsMatch(t, []int32{0, 1}, []int32{merged[0].PartitionSpecID(), merged[1].PartitionSpecID()})
 }
 
 // failSecondCreateIO fails every Create after the first, so a concurrent merge
