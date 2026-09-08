@@ -226,7 +226,7 @@ type CompactionGroupOption func(*compactionGroupConfig)
 type compactionGroupConfig struct {
 	targetFileSize        int64
 	scanConcurrency       int
-	readBatchSize         int64
+	arrowBatchSize        int
 	recordBatchBufferSize int
 	parquetRowGroupLimit  int
 }
@@ -255,17 +255,19 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 	}
 }
 
-// WithCompactionReadBatchSize caps the number of rows decoded per Arrow
-// record batch while reading the group's tasks, forwarded to the scan
-// as [WithArrowBatchSize]. Together with
+// WithCompactionArrowBatchSize caps the number of rows decoded per
+// Arrow record batch while reading the group's tasks, forwarded to the
+// scan as [WithArrowBatchSize]. Together with
 // [WithCompactionRecordBatchBufferSize] it bounds the memory held by
-// the compaction's read+write pipeline: buffered batches times rows per
-// batch. A non-positive value keeps the table's
-// read.parquet.batch-size property.
-func WithCompactionReadBatchSize(n int64) CompactionGroupOption {
+// the record pipeline specifically: buffered batches times rows per
+// batch. Delete-side memory is not covered — positional deletes and
+// deletion-vector bitmaps for the group's tasks are materialized up
+// front and sized by delete volume, not by these knobs. A non-positive
+// value keeps the table's read.parquet.batch-size property.
+func WithCompactionArrowBatchSize(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		if n > 0 {
-			c.readBatchSize = n
+			c.arrowBatchSize = n
 		}
 	}
 }
@@ -420,8 +422,8 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	if cfg.scanConcurrency > 0 {
 		scanOpts = append(scanOpts, WithMaxConcurrency(cfg.scanConcurrency))
 	}
-	if cfg.readBatchSize > 0 {
-		scanOpts = append(scanOpts, WithArrowBatchSize(cfg.readBatchSize))
+	if cfg.arrowBatchSize > 0 {
+		scanOpts = append(scanOpts, WithArrowBatchSize(cfg.arrowBatchSize))
 	}
 
 	// Preserve row lineage only when every source file in the group carries
