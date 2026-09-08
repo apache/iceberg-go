@@ -1821,6 +1821,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		SelectedFields:    selectedFields,
 		RowFilter:         scan.rowFilter,
 		MinRowsRequested:  minRowsRequested,
+		MaxConcurrency:    scan.concurrency,
 		CaseSensitive:     &caseSensitive,
 		UseSnapshotSchema: &useSnapshotSchema,
 	})

@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -213,9 +214,15 @@ func TestPlanTableScanResponseRejectsInvalidStatusEnvelope(t *testing.T) {
 
 	for i, payload := range []string{
 		`{"status":"submitted","plan-id":"abc","file-scan-tasks":[]}`,
+		`{"status":"submitted","plan-id":"abc","file-scan-tasks":null}`,
 		`{"status":"submitted","plan-id":"abc","delete-files":[]}`,
+		`{"status":"submitted","plan-id":"abc","delete-files":null}`,
 		`{"status":"failed","plan-tasks":[]}`,
+		`{"status":"failed","plan-tasks":null}`,
 		`{"status":"completed","plan-id":"abc","delete-files":[{}]}`,
+		`{"status":"completed","plan-id":"abc","plan-tasks":null}`,
+		`{"status":"completed","plan-id":"abc","file-scan-tasks":null}`,
+		`{"status":"completed","plan-id":"abc","delete-files":null}`,
 		`{"status":"failed","plan-id":"abc"}`,
 	} {
 		t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
@@ -315,9 +322,15 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 
 		for i, payload := range []string{
 			`{"status":"submitted","plan-tasks":[]}`,
+			`{"status":"submitted","plan-tasks":null}`,
 			`{"status":"submitted","delete-files":[]}`,
+			`{"status":"submitted","delete-files":null}`,
 			`{"status":"cancelled","file-scan-tasks":[]}`,
+			`{"status":"cancelled","file-scan-tasks":null}`,
 			`{"status":"completed","delete-files":[{}]}`,
+			`{"status":"completed","plan-tasks":null}`,
+			`{"status":"completed","file-scan-tasks":null}`,
+			`{"status":"completed","delete-files":null}`,
 		} {
 			t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
 				t.Parallel()
@@ -1218,6 +1231,7 @@ func TestPlanFilesPollsSubmittedPlan(t *testing.T) {
 func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 	t.Parallel()
 
+	var mu sync.Mutex
 	var fetched []string
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
@@ -1227,7 +1241,9 @@ func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			var body FetchScanTasksRequest
 			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			mu.Lock()
 			fetched = append(fetched, body.PlanTask)
+			mu.Unlock()
 			switch body.PlanTask {
 			case "h1":
 				_, err := w.Write([]byte(`{"plan-tasks":["h2"]}`))
@@ -1242,7 +1258,210 @@ func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 	result, err := cat.PlanFiles(context.Background(), planFilesReq())
 	require.NoError(t, err)
 	assert.Empty(t, result.Tasks)
+	mu.Lock()
+	defer mu.Unlock()
 	assert.Equal(t, []string{"h1", "h2"}, fetched)
+}
+
+func TestCollectScanTasksFetchesFrontierConcurrentlyInOrder(t *testing.T) {
+	t.Parallel()
+
+	h1Started := make(chan struct{})
+	h2Started := make(chan struct{})
+	releaseH1 := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseH1) }) }
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+
+			switch body.PlanTask {
+			case "h1":
+				close(h1Started)
+				<-releaseH1
+				_, _ = w.Write([]byte(`{"file-scan-tasks":[{"data-file":{"file-path":"h1"}}]}`))
+			case "h2":
+				close(h2Started)
+				_, _ = w.Write([]byte(`{"file-scan-tasks":[{"data-file":{"file-path":"h2"}}]}`))
+			default:
+				http.Error(w, "unexpected plan task", http.StatusBadRequest)
+			}
+		})
+	})
+	t.Cleanup(release)
+
+	type outcome struct {
+		envelopes []ScanTasks
+		err       error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		envelopes, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+			PlanTasks: []string{"h1", "h2"},
+		}, 2)
+		done <- outcome{envelopes: envelopes, err: err}
+	}()
+
+	for name, started := range map[string]<-chan struct{}{
+		"h1": h1Started,
+		"h2": h2Started,
+	} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s to start", name)
+		}
+	}
+
+	release()
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		require.Len(t, result.envelopes, 3)
+		require.Len(t, result.envelopes[1].FileScanTasks, 1)
+		require.Len(t, result.envelopes[2].FileScanTasks, 1)
+		require.NotNil(t, result.envelopes[1].FileScanTasks[0].DataFile)
+		require.NotNil(t, result.envelopes[2].FileScanTasks[0].DataFile)
+		assert.Equal(t, "h1", result.envelopes[1].FileScanTasks[0].DataFile.FilePath)
+		assert.Equal(t, "h2", result.envelopes[2].FileScanTasks[0].DataFile.FilePath)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for frontier fetches")
+	}
+}
+
+type orderedScanTaskErrorTransport struct {
+	planTaskReturned chan struct{}
+}
+
+func (t *orderedScanTaskErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body FetchScanTasksRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+
+	var errType string
+	switch body.PlanTask {
+	case "table":
+		select {
+		case <-t.planTaskReturned:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+		errType = errTypeNoSuchTable
+	case "plan-task":
+		close(t.planTaskReturned)
+		errType = errTypeNoSuchPlanTask
+	default:
+		return nil, fmt.Errorf("unexpected plan task %q", body.PlanTask)
+	}
+
+	data := fmt.Sprintf(`{"error":{"message":%q,"type":%q,"code":404}}`, errType, errType)
+
+	return &http.Response{
+		StatusCode:    http.StatusNotFound,
+		Header:        http.Header{"Content-Type": {"application/json"}},
+		Body:          io.NopCloser(strings.NewReader(data)),
+		ContentLength: int64(len(data)),
+		Request:       req,
+	}, nil
+}
+
+func TestCollectScanTasksReturnsFirstErrorInHandleOrder(t *testing.T) {
+	t.Parallel()
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, nil)
+	cat.cl = &http.Client{Transport: &orderedScanTaskErrorTransport{
+		planTaskReturned: make(chan struct{}),
+	}}
+
+	envelopes, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+		PlanTasks: []string{"table", "plan-task"},
+	}, 2)
+	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	assert.Contains(t, err.Error(), `handle "table"`)
+	assert.NotErrorIs(t, err, ErrNoSuchPlanTask)
+	assert.Nil(t, envelopes)
+}
+
+func TestCollectScanTasksBoundsFrontierConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const maxConcurrency = 8
+	const handleCount = maxConcurrency + 1
+	started := make(chan string, handleCount)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	finish := func() { releaseOnce.Do(func() { close(release) }) }
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+
+			started <- body.PlanTask
+			<-release
+			_, _ = w.Write([]byte(`{"file-scan-tasks":[]}`))
+		})
+	})
+	t.Cleanup(finish)
+
+	handles := make([]string, handleCount)
+	for i := range handles {
+		handles[i] = fmt.Sprintf("h%d", i)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+			PlanTasks: handles,
+		}, maxConcurrency)
+		done <- err
+	}()
+
+	for range maxConcurrency {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for bounded frontier workers")
+		}
+	}
+
+	select {
+	case handle := <-started:
+		t.Fatalf("frontier exceeded concurrency limit with %s", handle)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	finishOne := func() {
+		select {
+		case release <- struct{}{}:
+		case <-time.After(time.Second):
+			t.Fatal("timed out releasing a frontier worker")
+		}
+	}
+	finishOne()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out starting the queued frontier handle")
+	}
+	finish()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bounded frontier fetches")
+	}
 }
 
 // TestPlanFilesFanoutCycleTerminates guards the seen-set: a server that re-issues
@@ -1684,4 +1903,95 @@ func TestPlanFilesPropagatesFailure(t *testing.T) {
 
 	_, err := cat.PlanFiles(context.Background(), planFilesReq())
 	require.ErrorIs(t, err, ErrPlanFailed)
+}
+
+func TestCollectScanTasksDeduplicatesAcrossFrontiers(t *testing.T) {
+	t.Parallel()
+
+	children := map[string][]string{
+		"a": {"c", "d", "a"},
+		"b": {"d", "e"},
+		"c": {"b"},
+	}
+	var mu sync.Mutex
+	calls := make(map[string]int)
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+			mu.Lock()
+			calls[body.PlanTask]++
+			mu.Unlock()
+			response := ScanTasks{
+				PlanTasks: children[body.PlanTask],
+				FileScanTasks: []RESTFileScanTask{{DataFile: &RESTDataFile{
+					RESTContentFile: RESTContentFile{FilePath: body.PlanTask},
+				}}},
+			}
+			_ = json.NewEncoder(w).Encode(response)
+		})
+	})
+
+	envelopes, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+		PlanTasks: []string{"a", "a", "b"},
+	}, 2)
+	require.NoError(t, err)
+	require.Len(t, envelopes, 6)
+	for i, name := range []string{"a", "b", "c", "d", "e"} {
+		require.Len(t, envelopes[i+1].FileScanTasks, 1)
+		assert.Equal(t, name, envelopes[i+1].FileScanTasks[0].DataFile.FilePath)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, map[string]int{"a": 1, "b": 1, "c": 1, "d": 1, "e": 1}, calls)
+}
+
+func TestCollectScanTasksCancelsSiblingRequestsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+			switch body.PlanTask {
+			case "slow":
+				close(started)
+				<-req.Context().Done()
+				close(cancelled)
+			case "failed":
+				select {
+				case <-started:
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":{"message":"invalid handle","type":"BadRequestException","code":400}}`))
+				case <-req.Context().Done():
+				}
+			default:
+				http.Error(w, "unexpected handle", http.StatusBadRequest)
+			}
+		})
+	})
+
+	envelopes, err := cat.collectScanTasksWithConcurrency(ctx, table.Identifier{"db", "tbl"}, ScanTasks{
+		PlanTasks: []string{"failed", "slow"},
+	}, 2)
+	require.ErrorIs(t, err, ErrBadRequest)
+	assert.Nil(t, envelopes)
+	select {
+	case <-cancelled:
+	case <-ctx.Done():
+		t.Fatal("sibling request was not cancelled after a fetch failure")
+	}
 }
