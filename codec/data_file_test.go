@@ -311,3 +311,20 @@ func (stubDataFile) FirstRowID() *int64                        { return nil }
 func (stubDataFile) ReferencedDataFile() *string               { return nil }
 func (stubDataFile) ContentOffset() *int64                     { return nil }
 func (stubDataFile) ContentSizeInBytes() *int64                { return nil }
+
+func TestEncodeDataFileRejectsProjectedMetadata(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			spec, schema, original := fullyPopulatedDataFile(t, version)
+			projected := iceberg.DataFileWithoutColumnStats(original)
+			encoded, err := codec.EncodeDataFile(projected, spec, schema, version)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.Nil(t, encoded)
+			require.ErrorContains(t, err, "projected data file")
+
+			encoded, err = codec.EncodeDataFile(original, spec, schema, version)
+			require.NoError(t, err)
+			require.NotEmpty(t, encoded)
+		})
+	}
+}
