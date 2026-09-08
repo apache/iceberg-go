@@ -22,6 +22,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet/variant"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 )
 
@@ -200,7 +201,7 @@ func castVariantDecimal(raw any, typ DecimalType) (any, bool) {
 func castVariantToMicros(pt variant.Type, raw any, tz bool) (any, bool) {
 	switch {
 	case tz && pt == variant.TimestampNanos, !tz && pt == variant.TimestampNanosNTZ:
-		return Timestamp(floorDiv(int64(raw.(arrow.Timestamp)), nanosPerMicro)), true
+		return Timestamp(internal.FloorDiv(int64(raw.(arrow.Timestamp)), nanosPerMicro)), true
 	case !tz && pt == variant.Date:
 		if micros, ok := mulNoOverflow(int64(raw.(arrow.Date32)), microsPerDay); ok {
 			return Timestamp(micros), true
@@ -230,22 +231,12 @@ func castVariantToNanos(pt variant.Type, raw any, tz bool) (any, bool) {
 func castVariantToDate(pt variant.Type, raw any) (any, bool) {
 	switch pt {
 	case variant.TimestampMicrosNTZ:
-		return Date(floorDiv(int64(raw.(arrow.Timestamp)), microsPerDay)), true
+		return Date(internal.FloorDiv(int64(raw.(arrow.Timestamp)), microsPerDay)), true
 	case variant.TimestampNanosNTZ:
-		return Date(floorDiv(int64(raw.(arrow.Timestamp)), nanosPerDay)), true
+		return Date(internal.FloorDiv(int64(raw.(arrow.Timestamp)), nanosPerDay)), true
 	}
 
 	return nil, false
-}
-
-// floorDiv divides rounding toward negative infinity.
-func floorDiv(a, b int64) int64 {
-	q := a / b
-	if (a%b != 0) && ((a < 0) != (b < 0)) {
-		q--
-	}
-
-	return q
 }
 
 // mulNoOverflow returns a*b, reporting false if the product overflows int64.
