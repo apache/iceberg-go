@@ -19,6 +19,7 @@ package table
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +28,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -80,17 +83,34 @@ func TestWithArrowBatchSizeIgnoresNonPositive(t *testing.T) {
 	tbl := buildV3TableWithRows(t, manyRowsJSON(3))
 
 	scan := tbl.Scan(WithArrowBatchSize(0), WithArrowBatchSize(-5))
-	assert.Empty(t, scan.options.Get(ParquetBatchSizeKey, ""))
+	assert.Zero(t, scan.arrowBatchSize)
 }
 
-func TestWithArrowBatchSizeDoesNotMutateCallerOptions(t *testing.T) {
-	tbl := buildV3TableWithRows(t, manyRowsJSON(3))
+func TestWithArrowBatchSizeSurvivesWithOptionsOrdering(t *testing.T) {
+	const numRows = 40
+	const batchSize = 9
+	tbl := buildV3TableWithRows(t, manyRowsJSON(numRows))
 
 	callerOpts := iceberg.Properties{"include_empty_files": "true"}
-	scan := tbl.Scan(WithOptions(callerOpts), WithArrowBatchSize(9))
-	assert.Equal(t, "9", scan.options.Get(ParquetBatchSizeKey, ""))
+	scan := tbl.Scan(WithArrowBatchSize(batchSize), WithOptions(callerOpts))
+	assert.Equal(t, batchSize, scan.arrowBatchSize)
 	assert.Empty(t, callerOpts[ParquetBatchSizeKey])
 	assert.Equal(t, "true", scan.options.Get("include_empty_files", ""))
+
+	// The cap must apply even though WithOptions replaced the options
+	// map after WithArrowBatchSize ran.
+	_, records, err := scan.ToArrowRecords(t.Context())
+	require.NoError(t, err)
+	var totalRows, batches int64
+	for rec, err := range records {
+		require.NoError(t, err)
+		assert.LessOrEqual(t, rec.NumRows(), int64(batchSize))
+		totalRows += rec.NumRows()
+		batches++
+		rec.Release()
+	}
+	assert.Equal(t, int64(numRows), totalRows)
+	assert.Greater(t, batches, int64(1))
 }
 
 func TestRecordQueueCapacityDefaultAndOverride(t *testing.T) {
@@ -102,6 +122,54 @@ func TestRecordQueueCapacityDefaultAndOverride(t *testing.T) {
 
 	f.recordBufferSize = -1
 	assert.Equal(t, rollingDataWriterQueueCapacity, f.recordQueueCapacity())
+}
+
+func newTuningTestWriterFactory(t *testing.T, bufferSize int) *writerFactory {
+	t.Helper()
+
+	loc := filepath.ToSlash(t.TempDir())
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, nil)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	writeUUID := uuid.New()
+	factory, err := newWriterFactory(loc, recordWritingArgs{
+		fs:        iceio.LocalFS{},
+		writeUUID: &writeUUID,
+		counter: func(yield func(int) bool) {
+			for i := 0; ; i++ {
+				if !yield(i) {
+					return
+				}
+			}
+		},
+		recordBatchBufferSize: bufferSize,
+	}, builder, schema, 1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, factory.closeAll())
+	})
+
+	return factory
+}
+
+// TestRecordBatchBufferSizeReachesRollingWriter pins the full chain from
+// recordWritingArgs through the writer factory to the rolling writer's
+// channel capacity, which is the bound the option exists to control.
+func TestRecordBatchBufferSizeReachesRollingWriter(t *testing.T) {
+	outputCh := make(chan iceberg.DataFile, 1)
+
+	overridden := newTuningTestWriterFactory(t, 3)
+	w := overridden.newRollingDataWriter(t.Context(), "", nil, outputCh)
+	assert.Equal(t, 3, cap(w.recordCh))
+	w.abortAndWait()
+
+	defaulted := newTuningTestWriterFactory(t, 0)
+	dw := defaulted.newRollingDataWriter(t.Context(), "", nil, outputCh)
+	assert.Equal(t, rollingDataWriterQueueCapacity, cap(dw.recordCh))
+	dw.abortAndWait()
 }
 
 func TestWriteRecordTuningOptions(t *testing.T) {
@@ -120,24 +188,24 @@ func TestWriteRecordTuningOptions(t *testing.T) {
 func TestCompactionGroupTuningOptions(t *testing.T) {
 	var cfg compactionGroupConfig
 	for _, opt := range []CompactionGroupOption{
-		WithCompactionReadBatchSize(1024),
+		WithCompactionArrowBatchSize(1024),
 		WithCompactionRecordBatchBufferSize(4),
 		WithCompactionParquetRowGroupLimit(500),
 	} {
 		opt(&cfg)
 	}
-	assert.Equal(t, int64(1024), cfg.readBatchSize)
+	assert.Equal(t, 1024, cfg.arrowBatchSize)
 	assert.Equal(t, 4, cfg.recordBatchBufferSize)
 	assert.Equal(t, 500, cfg.parquetRowGroupLimit)
 
 	for _, opt := range []CompactionGroupOption{
-		WithCompactionReadBatchSize(0),
+		WithCompactionArrowBatchSize(0),
 		WithCompactionRecordBatchBufferSize(-2),
 		WithCompactionParquetRowGroupLimit(0),
 	} {
 		opt(&cfg)
 	}
-	assert.Equal(t, int64(1024), cfg.readBatchSize, "non-positive values are ignored")
+	assert.Equal(t, 1024, cfg.arrowBatchSize, "non-positive values are ignored")
 	assert.Equal(t, 4, cfg.recordBatchBufferSize)
 	assert.Equal(t, 500, cfg.parquetRowGroupLimit)
 }
