@@ -108,6 +108,7 @@ func TestUnmarshalAvroDataFileEntryNormalizesFileFormat(t *testing.T) {
 		{name: "uppercase", written: ParquetFile, expected: ParquetFile},
 		{name: "lowercase orc", written: "orc", expected: OrcFile},
 		{name: "unknown format", written: "csv", errorContains: "unknown file format: csv"},
+		{name: "empty format", written: "", errorContains: "unknown file format: "},
 	}
 
 	for _, tt := range tests {

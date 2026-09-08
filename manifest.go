@@ -2783,7 +2783,7 @@ func (d *dataFile) setFieldIDToDecimalScaleMap(m map[int]int) {
 func (d *dataFile) normalizeFormat() error {
 	format, err := FileFormatFromString(string(d.Format))
 	if err != nil {
-		return fmt.Errorf("data file %q has invalid file format: %w", d.FilePath(), err)
+		return fmt.Errorf("data file %q: %w", d.FilePath(), err)
 	}
 	d.Format = format
 
