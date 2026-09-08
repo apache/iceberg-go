@@ -42,6 +42,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -51,6 +52,26 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+func TestStaticCredsFromProps(t *testing.T) {
+	creds, ok := staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		iceio.S3SessionToken:    "ST",
+	})
+	require.True(t, ok)
+	got, err := creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID)
+	require.Equal(t, "SK", got.SecretAccessKey)
+	require.Equal(t, "ST", got.SessionToken)
+
+	_, ok = staticCredsFromProps(iceberg.Properties{iceio.S3AccessKeyID: "AK"})
+	require.False(t, ok, "a lone access key must not produce a provider")
+
+	_, ok = staticCredsFromProps(iceberg.Properties{})
+	require.False(t, ok, "no creds must not produce a provider")
+}
 
 func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}

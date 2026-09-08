@@ -49,6 +49,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"golang.org/x/sync/semaphore"
@@ -1114,6 +1115,11 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 
 				return nil, nil, err
 			}
+			// Sign with the S3 credentials carried in the catalog properties when
+			// present, rather than only the AWS default credential chain.
+			if creds, ok := staticCredsFromProps(opts.additionalProps); ok {
+				cfg.Credentials = creds
+			}
 		}
 		if opts.sigv4Region != "" {
 			cfg.Region = opts.sigv4Region
@@ -1124,6 +1130,17 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 
 	return cl, cleanup, nil
+}
+
+// staticCredsFromProps returns a static credentials provider built from the S3
+// access-key properties, or ok=false when no key pair is present.
+func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, bool) {
+	accessKey, secretKey := props[iceio.S3AccessKeyID], props[iceio.S3SecretAccessKey]
+	if accessKey == "" || secretKey == "" {
+		return nil, false
+	}
+
+	return credentials.NewStaticCredentialsProvider(accessKey, secretKey, props[iceio.S3SessionToken]), true
 }
 
 func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
