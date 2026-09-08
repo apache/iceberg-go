@@ -355,7 +355,7 @@ func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorIdentity(t *testing.T
 		assert.Contains(t, err.Error(), "blob identity must be unique")
 	})
 
-	t.Run("distinct blobs may share a Puffin path", func(t *testing.T) {
+	t.Run("distinct blobs may share a new or existing Puffin path", func(t *testing.T) {
 		sharedTbl := appendTwoDataFiles(t, newReplaceFilesTestTable(t))
 		sourceDelete := newPosDeleteFile(t, sharedTbl.Location()+"/data/source-pos-delete.parquet")
 		tx := sharedTbl.NewTransaction()
@@ -373,15 +373,116 @@ func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorIdentity(t *testing.T
 		require.Len(t, tasks, 2)
 
 		sharedPath := sharedTbl.Location() + "/data/shared.puffin"
+		vectorA := newRewriteDeletionVector(t, sharedPath, tasks[0].File.FilePath(), &offsetA, &length)
+		vectorB := newRewriteDeletionVector(t, sharedPath, tasks[1].File.FilePath(), &offsetB, &length)
 		tx = sharedTbl.NewTransaction()
 		err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
 			[]iceberg.DataFile{sourceDelete},
 			[]table.DeleteFileAddition{
-				{File: newRewriteDeletionVector(t, sharedPath, tasks[0].File.FilePath(), &offsetA, &length), DataSequenceNumber: sequence},
-				{File: newRewriteDeletionVector(t, sharedPath, tasks[1].File.FilePath(), &offsetB, &length), DataSequenceNumber: sequence},
+				{File: vectorA, DataSequenceNumber: sequence},
+				{File: vectorB, DataSequenceNumber: sequence},
 			}, nil)
 		require.NoError(t, err, "distinct DV blobs in one Puffin container must be accepted")
+		sharedTbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		offsetC := offsetB + length
+		tx = sharedTbl.NewTransaction()
+		err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+			[]iceberg.DataFile{vectorA},
+			[]table.DeleteFileAddition{{
+				File:               newRewriteDeletionVector(t, sharedPath, tasks[0].File.FilePath(), &offsetC, &length),
+				DataSequenceNumber: sequence,
+			}}, nil)
+		require.NoError(t, err, "a new DV blob may reuse an existing container path while a sibling survives")
 	})
+}
+
+func TestReplaceFilesWithDeleteFilesRejectsDuplicatePaths(t *testing.T) {
+	const path = "shared-delete-file"
+	offset, length := int64(8), int64(16)
+	pos := newPosDeleteFile(t, path)
+	eq := newEqDeleteFile(t, path)
+	vector := newRewriteDeletionVector(t, path, "data.parquet", &offset, &length)
+	conflictError := "delete file path " + path +
+		" cannot identify both a deletion vector container and a regular delete file for ReplaceFiles"
+
+	for _, tt := range []struct {
+		name      string
+		version   int
+		files     []iceberg.DataFile
+		wantError string
+	}{
+		{"position deletes", 2, []iceberg.DataFile{pos, newPosDeleteFile(t, path)}, "add delete file paths must be unique for ReplaceFiles"},
+		{"equality deletes v2", 2, []iceberg.DataFile{eq, newEqDeleteFile(t, path)}, "add delete file paths must be unique for ReplaceFiles"},
+		{"equality deletes v3", 3, []iceberg.DataFile{eq, newEqDeleteFile(t, path)}, "add delete file paths must be unique for ReplaceFiles"},
+		{"position then equality", 2, []iceberg.DataFile{pos, eq}, "add delete file paths must be unique for ReplaceFiles"},
+		{"equality then position", 2, []iceberg.DataFile{eq, pos}, "add delete file paths must be unique for ReplaceFiles"},
+		{"deletion vector then equality", 3, []iceberg.DataFile{vector, eq}, conflictError},
+		{"equality then deletion vector", 3, []iceberg.DataFile{eq, vector}, conflictError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := newReplaceFilesTestTableVersion(t, tt.version)
+			additions := make([]table.DeleteFileAddition, len(tt.files))
+			for i, file := range tt.files {
+				additions[i] = table.DeleteFileAddition{File: file, DataSequenceNumber: 0}
+			}
+
+			err := tbl.NewTransaction().ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+				[]iceberg.DataFile{newEqDeleteFile(t, "old-equality-delete.parquet")}, additions, nil)
+			require.EqualError(t, err, tt.wantError)
+		})
+	}
+}
+
+func TestReplaceFilesWithDeleteFilesValidatesExistingPaths(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			tbl := newReplaceFilesTestTable(t)
+			data := newDataFile(t, tbl.Location()+"/data/data.parquet")
+			source := newEqDeleteFile(t, tbl.Location()+"/data/source.parquet")
+			other := newEqDeleteFile(t, tbl.Location()+"/data/other.parquet")
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{data}, nil))
+			tbl, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			tx = tbl.NewTransaction()
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(source).AddDeletes(other).Commit(t.Context()))
+			if version == 3 {
+				require.NoError(t, tx.UpgradeFormatVersion(3))
+			}
+			tbl, err = tx.Commit(t.Context())
+			require.NoError(t, err)
+			sequence := deleteFileSequence(t, tbl, source.FilePath())
+
+			for _, tt := range []struct {
+				name string
+				path string
+			}{
+				{"existing data file", data.FilePath()},
+				{"surviving delete file", other.FilePath()},
+				{"delete file being replaced", source.FilePath()},
+				{"new delete file", tbl.Location() + "/data/replacement.parquet"},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					tx := tbl.NewTransaction()
+					err := tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+						[]iceberg.DataFile{source},
+						[]table.DeleteFileAddition{{
+							File:               newEqDeleteFile(t, tt.path),
+							DataSequenceNumber: sequence,
+						}}, nil)
+					if tt.name == "new delete file" {
+						require.NoError(t, err)
+
+						return
+					}
+					require.EqualError(t, err, "cannot add files that are already referenced by table, files: "+tt.path)
+				})
+			}
+		})
+	}
 }
 
 func TestReplaceFilesWithDeleteFilesRejectsPartialPositionDeleteToDVRewrite(t *testing.T) {
