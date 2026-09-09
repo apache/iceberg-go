@@ -109,20 +109,27 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	nestedFields[0].WriteDefault.(iceberg.FixedLiteral)[0] = 99
 
 	partitionSpecs := metadata.PartitionSpecs()
-	partitionField := partitionSpecs[0].Field(0)
-	partitionField.SourceIDs[0] = 99
-	partitionField.Name = "mutated"
-	require.Equal(t, []int{1}, metadata.Specs[0].Field(0).SourceIDs)
+	partitionFields := partitionSpecs[0].FieldsRef(iceinternal.PartitionSpecRef{})
+	partitionFields[0].SourceIDs[0] = 99
+	partitionFields[0].Name = "mutated"
+
+	sourceFields := metadata.Specs[0].FieldsRef(iceinternal.PartitionSpecRef{})
+	require.Equal(t, []int{1}, sourceFields[0].SourceIDs)
+	require.Equal(t, "id", sourceFields[0].Name)
 
 	currentSchema := metadata.CurrentSchema()
 	currentSchema.ID = 100
 	defaultSpec := metadata.PartitionSpec()
-	defaultSpecField := defaultSpec.Field(0)
-	defaultSpecField.SourceIDs[0] = 100
+	defaultFields := defaultSpec.FieldsRef(iceinternal.PartitionSpecRef{})
+	defaultFields[0].SourceIDs[0] = 100
+	defaultFields[0].Name = "default-mutated"
 	byIDSpec := metadata.PartitionSpecByID(1)
 	require.NotNil(t, byIDSpec)
-	byIDField := byIDSpec.Field(0)
-	byIDField.SourceIDs[0] = 101
+	byIDFields := byIDSpec.FieldsRef(iceinternal.PartitionSpecRef{})
+	byIDFields[0].SourceIDs[0] = 101
+	byIDFields[0].Name = "by-id-mutated"
+	require.Equal(t, []int{1}, sourceFields[0].SourceIDs)
+	require.Equal(t, "id", sourceFields[0].Name)
 
 	snapshots := metadata.Snapshots()
 	snapshots[0].ParentSnapshotID = new(int64)

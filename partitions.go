@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/apache/iceberg-go/internal"
 )
 
 const (
@@ -593,6 +595,13 @@ func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
 			}
 		}
 	}
+}
+
+// FieldsRef returns the partition fields owned by this spec for trusted
+// internal callers. The returned slice and everything reachable through the
+// fields must be treated as read-only.
+func (ps *PartitionSpec) FieldsRef(_ internal.PartitionSpecRef) []PartitionField {
+	return ps.fields
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
