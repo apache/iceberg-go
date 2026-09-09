@@ -86,23 +86,31 @@ func TestParseMetadataBytesAssignsMissingPartitionFieldIDs(t *testing.T) {
 	}
 }
 
-func TestParseMetadataBytesNormalizesStaleLastPartitionID(t *testing.T) {
+func TestParseMetadataBytesPreservesStaleLastPartitionIDForCommit(t *testing.T) {
 	data := strings.Replace(ExampleTableMetadataV2,
 		`"last-partition-id": 1000`, `"last-partition-id": 999`, 1)
+	data = strings.Replace(data,
+		`"default-spec-id": 0,`, `"default-spec-id": 1,`, 1)
+	data = strings.Replace(data,
+		`"partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}],`,
+		`"partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}, {"spec-id": 1, "fields": []}],`, 1)
+	require.Contains(t, data, `"last-partition-id": 999`)
+	require.Contains(t, data, `"spec-id": 1`)
 
 	parsed, err := ParseMetadataBytes([]byte(data))
 	require.NoError(t, err)
 	require.NotNil(t, parsed.LastPartitionSpecID())
-	assert.Equal(t, 1000, *parsed.LastPartitionSpecID())
+	assert.Equal(t, 999, *parsed.LastPartitionSpecID())
 
 	update := NewUpdateSpec(New(nil, parsed, "", nil, nil).NewTransaction(), false).
 		AddField("x", iceberg.BucketTransform{NumBuckets: 16}, "x_bucket")
-	_, _, err = update.BuildUpdates()
+	_, requirements, err := update.BuildUpdates()
 	require.NoError(t, err)
+	assert.Equal(t, []int{999}, lastAssignedPartitionAssertions(requirements))
 	updated, err := update.Apply()
 	require.NoError(t, err)
-	require.Equal(t, 2, updated.NumFields())
-	assert.Equal(t, 1001, updated.Field(1).FieldID)
+	require.Equal(t, 1, updated.NumFields())
+	assert.Equal(t, 1001, updated.Field(0).FieldID)
 }
 
 func TestAssignMissingPartitionFieldIDsPreservesConsistentMetadata(t *testing.T) {
@@ -125,47 +133,6 @@ func TestAssignMissingPartitionFieldIDsPreservesConsistentMetadata(t *testing.T)
 			assert.Equal(t, tt.input, string(normalized))
 		})
 	}
-}
-
-func TestAssignMissingPartitionFieldIDsNormalizesStaleCounter(t *testing.T) {
-	input := []byte(`{
-		"last-updated-ms": 0,
-		"last-partition-id": 999,
-		"partition-specs": [{
-			"spec-id": 0,
-			"fields": [{"field-id": 1000}, {}]
-		}]
-	}`)
-
-	normalized, err := assignMissingPartitionFieldIDs(input)
-	require.NoError(t, err)
-
-	var parsed struct {
-		LastPartitionID int `json:"last-partition-id"`
-		Specs           []struct {
-			Fields []struct {
-				FieldID int `json:"field-id"`
-			} `json:"fields"`
-		} `json:"partition-specs"`
-	}
-	require.NoError(t, json.Unmarshal(normalized, &parsed))
-	assert.Equal(t, 1001, parsed.LastPartitionID)
-	require.Len(t, parsed.Specs, 1)
-	require.Len(t, parsed.Specs[0].Fields, 2)
-	assert.Equal(t, 1001, parsed.Specs[0].Fields[1].FieldID)
-}
-
-func TestAssignMissingPartitionFieldIDsNormalizesLegacyStaleCounter(t *testing.T) {
-	input := []byte(`{"last-updated-ms":0,"last-partition-id":8,"partition-specs":[{"spec-id":0,"fields":[{"field-id":9}]}]}`)
-
-	normalized, err := assignMissingPartitionFieldIDs(input)
-	require.NoError(t, err)
-
-	var parsed struct {
-		LastPartitionID int `json:"last-partition-id"`
-	}
-	require.NoError(t, json.Unmarshal(normalized, &parsed))
-	assert.Equal(t, 9, parsed.LastPartitionID)
 }
 
 func TestParseMetadataBytesRejectsCaseFoldedFormatVersionCollision(t *testing.T) {
