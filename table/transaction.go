@@ -1032,22 +1032,55 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
-// validateDataFilePartitionData verifies that DataFile partition values match
-// the given partition spec's fields by ID without reading file contents.
-func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
+type partitionValidationField struct {
+	id   int
+	name string
+}
+
+// partitionValidationPlan contains the metadata needed to validate
+// a data file's partition tuple against one partition spec. The field slice
+// preserves spec order for deterministic missing-field errors. The plan is
+// immutable after construction and can be reused for concurrent validation.
+type partitionValidationPlan struct {
+	specID           int
+	fields           []partitionValidationField
+	expectedFieldIDs map[int]struct{}
+}
+
+func newPartitionValidationPlan(spec *iceberg.PartitionSpec) *partitionValidationPlan {
+	plan := &partitionValidationPlan{
+		specID:           spec.ID(),
+		fields:           make([]partitionValidationField, 0, spec.NumFields()),
+		expectedFieldIDs: make(map[int]struct{}, spec.NumFields()),
+	}
+
+	for _, field := range spec.Fields() {
+		plan.expectedFieldIDs[field.FieldID] = struct{}{}
+		plan.fields = append(plan.fields, partitionValidationField{
+			id:   field.FieldID,
+			name: field.Name,
+		})
+	}
+
+	return plan
+}
+
+func (p *partitionValidationPlan) validate(df iceberg.DataFile) error {
 	partitionData := dataFilePartition(df)
 
-	expectedFieldIDs := make(map[int]string)
-	for _, field := range spec.Fields() {
-		expectedFieldIDs[field.FieldID] = field.Name
-		if _, ok := partitionData[field.FieldID]; !ok {
-			return fmt.Errorf("missing partition value for field id %d (%s)", field.FieldID, field.Name)
+	for _, field := range p.fields {
+		if _, ok := partitionData[field.id]; !ok {
+			return fmt.Errorf("missing partition value for field id %d (%s)", field.id, field.name)
 		}
 	}
 
+	if len(partitionData) == len(p.expectedFieldIDs) {
+		return nil
+	}
+
 	for fieldID := range partitionData {
-		if _, ok := expectedFieldIDs[fieldID]; !ok {
-			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, spec.ID())
+		if _, ok := p.expectedFieldIDs[fieldID]; !ok {
+			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, p.specID)
 		}
 	}
 
@@ -1085,9 +1118,9 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 
 	// A data file may target any partition spec registered in the table
 	// metadata, not just the default: its manifest is written with that
-	// spec (see snapshotProducer.manifestProducer). Cache lookups since
-	// files typically share a handful of specs.
-	specsByID := make(map[int32]*iceberg.PartitionSpec)
+	// spec (see snapshotProducer.manifestProducer). Cache validation plans
+	// since files typically share a handful of specs.
+	validationPlansByID := make(map[int32]*partitionValidationPlan)
 
 	setToAdd := make(map[string]struct{}, len(dataFiles))
 
@@ -1116,9 +1149,9 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid file format %s for %s", path, df.FileFormat(), operation)
 		}
 
-		spec, ok := specsByID[df.SpecID()]
+		plan, ok := validationPlansByID[df.SpecID()]
 		if !ok {
-			spec, err = meta.GetSpecByID(int(df.SpecID()))
+			spec, err := meta.GetSpecByID(int(df.SpecID()))
 			if err != nil || spec == nil {
 				return nil, fmt.Errorf("data file %s has unregistered partition spec id %d for %s",
 					path, df.SpecID(), operation)
@@ -1126,10 +1159,11 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			if err := checkNoUnknownTransform(spec); err != nil {
 				return nil, fmt.Errorf("data file %s for %s: %w", path, operation, err)
 			}
-			specsByID[df.SpecID()] = spec
+			plan = newPartitionValidationPlan(spec)
+			validationPlansByID[df.SpecID()] = plan
 		}
 
-		if err := validateDataFilePartitionData(df, spec); err != nil {
+		if err := plan.validate(df); err != nil {
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
@@ -1151,11 +1185,10 @@ type deletionVectorBlobKey struct {
 }
 
 type deleteFilesToAddSet struct {
-	paths        map[string]struct{}
-	regularPaths map[string]struct{}
-	dvPaths      map[string]struct{}
-	dvBlobs      map[deletionVectorBlobKey]struct{}
-	dvsByRef     map[string]rewriteDeleteFileAddition
+	paths    map[string]struct{}
+	dvPaths  map[string]struct{}
+	dvBlobs  map[deletionVectorBlobKey]struct{}
+	dvsByRef map[string]rewriteDeleteFileAddition
 }
 
 // validateDeleteFilesToAdd performs metadata-only validation for delete files
@@ -1168,11 +1201,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		return nil, err
 	}
 	setToAdd := &deleteFilesToAddSet{
-		paths:        make(map[string]struct{}, len(deleteFiles)),
-		regularPaths: make(map[string]struct{}, len(deleteFiles)),
-		dvPaths:      make(map[string]struct{}, len(deleteFiles)),
-		dvBlobs:      make(map[deletionVectorBlobKey]struct{}, len(deleteFiles)),
-		dvsByRef:     make(map[string]rewriteDeleteFileAddition, len(deleteFiles)),
+		paths: make(map[string]struct{}, len(deleteFiles)),
 	}
 	if len(deleteFiles) == 0 {
 		return setToAdd, nil
@@ -1180,6 +1209,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 	if meta.formatVersion < 2 {
 		return nil, fmt.Errorf("delete files require table format version >= 2, got v%d", meta.formatVersion)
 	}
+	validationPlansByID := make(map[int32]*partitionValidationPlan)
 
 	for i, addition := range deleteFiles {
 		df := addition.file
@@ -1194,6 +1224,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		if path == "" {
 			return nil, fmt.Errorf("delete file path cannot be empty for %s", operation)
 		}
+		_, pathAlreadyAdded := setToAdd.paths[path]
 		setToAdd.paths[path] = struct{}{}
 
 		switch df.ContentType() {
@@ -1202,14 +1233,19 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			return nil, fmt.Errorf("adding non-delete file %s has content type %s for %s", path, df.ContentType(), operation)
 		}
 
-		spec, err := meta.GetSpecByID(int(df.SpecID()))
-		if err != nil {
-			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+		plan, ok := validationPlansByID[df.SpecID()]
+		if !ok {
+			spec, err := meta.GetSpecByID(int(df.SpecID()))
+			if err != nil {
+				return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+			}
+			if spec == nil {
+				return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
+			}
+			plan = newPartitionValidationPlan(spec)
+			validationPlansByID[df.SpecID()] = plan
 		}
-		if spec == nil {
-			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
-		}
-		if err := validateDataFilePartitionData(df, spec); err != nil {
+		if err := plan.validate(df); err != nil {
 			return nil, fmt.Errorf("delete file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
@@ -1228,14 +1264,14 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 				return nil, fmt.Errorf("position delete file %s must be a deletion vector for v%d table for %s",
 					path, meta.formatVersion, operation)
 			}
-			if _, ok := setToAdd.regularPaths[path]; ok {
+			if pathAlreadyAdded {
+				if _, ok := setToAdd.dvPaths[path]; ok {
+					return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+						path, operation)
+				}
+
 				return nil, fmt.Errorf("add delete file paths must be unique for %s", operation)
 			}
-			if _, ok := setToAdd.dvPaths[path]; ok {
-				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
-					path, operation)
-			}
-			setToAdd.regularPaths[path] = struct{}{}
 
 			continue
 		}
@@ -1265,6 +1301,9 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			}
 
 			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
+			if setToAdd.dvBlobs == nil {
+				setToAdd.dvBlobs = make(map[deletionVectorBlobKey]struct{}, len(deleteFiles))
+			}
 			if _, ok := setToAdd.dvBlobs[blob]; ok {
 				return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
 					operation, path, *offset, *length)
@@ -1273,9 +1312,17 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 				return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
 					operation, *ref)
 			}
-			if _, ok := setToAdd.regularPaths[path]; ok {
-				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
-					path, operation)
+			if pathAlreadyAdded {
+				if _, ok := setToAdd.dvPaths[path]; !ok {
+					return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+						path, operation)
+				}
+			}
+			if setToAdd.dvPaths == nil {
+				setToAdd.dvPaths = make(map[string]struct{}, len(deleteFiles))
+			}
+			if setToAdd.dvsByRef == nil {
+				setToAdd.dvsByRef = make(map[string]rewriteDeleteFileAddition, len(deleteFiles))
 			}
 			setToAdd.dvPaths[path] = struct{}{}
 			setToAdd.dvBlobs[blob] = struct{}{}
@@ -1917,8 +1964,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
 		}
-		if _, ok := setDeleteFilesToAdd.regularPaths[path]; ok {
-			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+		if _, ok := setDeleteFilesToAdd.paths[path]; ok {
+			if _, isDeletionVector := setDeleteFilesToAdd.dvPaths[path]; !isDeletionVector {
+				return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+			}
 		}
 		if _, ok := setDeleteFilesToAdd.dvPaths[path]; ok && isLive {
 			if !IsDeletionVector(df) {

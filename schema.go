@@ -352,6 +352,8 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 
 	type Alias Schema
 
+	// Keep this literal in sync with every JSON-marshaled Schema field. Copying
+	// the whole Schema would also copy its lazy atomic caches after they are used.
 	aliasCopy := Alias{ID: s.ID, IdentifierFieldIDs: ids}
 
 	return json.Marshal(struct {

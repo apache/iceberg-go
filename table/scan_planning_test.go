@@ -399,12 +399,14 @@ func TestScanPlanningRemoteResolvesDefaultProjectionAndSchema(t *testing.T) {
 	planner := &fakeScanPlanner{supports: true}
 	scan := (&Table{metadata: metadata}).Scan(
 		WithScanPlanningMode(ScanPlanningRemote),
+		WithMaxConcurrency(3),
 	)
 	scan.planner = planner
 
 	_, err = scan.PlanFiles(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"id"}, planner.receivedRequest.SelectedFields)
+	assert.Equal(t, 3, planner.receivedRequest.MaxConcurrency)
 	assert.True(t, planner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
 	require.NotNil(t, planner.receivedRequest.UseSnapshotSchema)
 	assert.False(t, *planner.receivedRequest.UseSnapshotSchema)
