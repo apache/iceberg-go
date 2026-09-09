@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -736,13 +737,14 @@ func TestCloneSchemaCopiesNestedValues(t *testing.T) {
 
 	cloned := cloneSchema(schema)
 	cloned.IdentifierFieldIDs[0] = 99
-	structField := cloned.Field(0).Type.(*iceberg.StructType)
+	fields := cloned.FieldsRef(iceinternal.SchemaRef{})
+	structField := fields[0].Type.(*iceberg.StructType)
 	structField.FieldList[0].Name = "changed"
 	structField.FieldList[0].InitialDefault.([]byte)[0] = 9
 	structField.FieldList[0].WriteDefault.(iceberg.BinaryLiteral)[0] = 9
-	listField := cloned.Field(1).Type.(*iceberg.ListType)
+	listField := fields[1].Type.(*iceberg.ListType)
 	listField.Element.(*iceberg.StructType).FieldList[0].Name = "changed"
-	mapField := cloned.Field(2).Type.(*iceberg.MapType)
+	mapField := fields[2].Type.(*iceberg.MapType)
 	mapField.ValueType.(*iceberg.StructType).FieldList[0].Name = "changed"
 
 	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)

@@ -2473,17 +2473,17 @@ func (c *commonMetadata) PartitionSpec() iceberg.PartitionSpec {
 	index := c.partitionSpecIndexForLookup()
 
 	if i, ok := partitionSpecIndexPosition(index, c.Specs, c.DefaultSpecID); ok {
-		return clonePartitionSpec(c.Specs[i])
+		return c.Specs[i].Clone()
 	}
 
-	return clonePartitionSpec(*iceberg.UnpartitionedSpec)
+	return iceberg.UnpartitionedSpec.Clone()
 }
 
 func (c *commonMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
 	index := c.partitionSpecIndexForLookup()
 
 	if i, ok := partitionSpecIndexPosition(index, c.Specs, id); ok {
-		clone := clonePartitionSpec(c.Specs[i])
+		clone := c.Specs[i].Clone()
 
 		return &clone
 	}
@@ -2632,10 +2632,6 @@ func cloneSchemas(schemas []*iceberg.Schema) []*iceberg.Schema {
 	return clones
 }
 
-func clonePartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
-	return spec.Clone()
-}
-
 func clonePartitionSpecs(specs []iceberg.PartitionSpec) []iceberg.PartitionSpec {
 	if specs == nil {
 		return nil
@@ -2643,7 +2639,7 @@ func clonePartitionSpecs(specs []iceberg.PartitionSpec) []iceberg.PartitionSpec 
 
 	clones := make([]iceberg.PartitionSpec, len(specs))
 	for i, spec := range specs {
-		clones[i] = clonePartitionSpec(spec)
+		clones[i] = spec.Clone()
 	}
 
 	return clones

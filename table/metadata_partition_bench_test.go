@@ -46,7 +46,7 @@ func partitionSpecCloneBenchmarkFields(count int) []iceberg.PartitionField {
 	for i := range fields {
 		fields[i] = iceberg.PartitionField{
 			SourceIDs: []int{i + 1}, FieldID: i + 1000,
-			Name: "field", Transform: iceberg.IdentityTransform{},
+			Name: strconv.Itoa(i), Transform: iceberg.IdentityTransform{},
 		}
 	}
 
