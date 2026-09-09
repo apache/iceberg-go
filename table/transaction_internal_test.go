@@ -31,6 +31,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPrepareBatchFilterRejectsTransformedTerms(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	term := iceberg.NewUnboundTransform(
+		iceberg.TruncateTransform{Width: 3},
+		iceberg.Reference("category"),
+	)
+
+	_, err := prepareBatchFilter(iceberg.EqualTo(term, "boo"), schema, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	assert.Contains(t, err.Error(), "transformed terms")
+}
+
 func TestTransactionApplyKeepsDistinctRequirementsOfSameType(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 
