@@ -1719,6 +1719,31 @@ func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestDeleteFilesParallelPreservesErrorWithNilWrapper(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	files := []string{
+		"s3://bucket/table/ok.parquet",
+		"s3://bucket/table/failed.parquet",
+	}
+
+	deleted, err := deleteFilesParallel(
+		context.Background(),
+		files,
+		2,
+		func(path string) error {
+			if path == files[1] {
+				return deleteErr
+			}
+
+			return nil
+		},
+		func(string, error) error { return nil },
+	)
+
+	assert.Equal(t, []string{files[0]}, deleted)
+	require.ErrorIs(t, err, deleteErr)
+}
+
 func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1745,10 +1770,12 @@ func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 // gatedErrContext lets a test cancel after a job is received, before Err returns.
 type gatedErrContext struct {
 	context.Context
-	checks <-chan struct{}
+	checks   <-chan struct{}
+	errCalls chan<- struct{}
 }
 
 func (c gatedErrContext) Err() error {
+	c.errCalls <- struct{}{}
 	<-c.checks
 
 	return c.Context.Err()
@@ -1773,6 +1800,8 @@ func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T)
 		for range maxConcurrency {
 			checks <- struct{}{}
 		}
+		errCalls := make(chan struct{}, fileCount)
+		extraCalls := make(chan struct{}, 1)
 		var calls atomic.Int32
 		release := make(chan struct{})
 		var deleted []string
@@ -1781,11 +1810,13 @@ func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T)
 		go func() {
 			defer close(done)
 			deleted, err = deleteFilesParallel(
-				gatedErrContext{Context: ctx, checks: checks},
+				gatedErrContext{Context: ctx, checks: checks, errCalls: errCalls},
 				files,
 				maxConcurrency,
 				func(string) error {
-					calls.Add(1)
+					if calls.Add(1) > maxConcurrency {
+						extraCalls <- struct{}{}
+					}
 					<-release
 
 					return nil
@@ -1798,14 +1829,27 @@ func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T)
 
 		synctest.Wait()
 		assert.Equal(t, int32(maxConcurrency), calls.Load())
+		for range maxConcurrency {
+			<-errCalls
+		}
 
-		// Let one worker receive another job, then cancel while its Err check is paused.
+		// Let one worker receive another job and wait until its Err check is paused.
 		release <- struct{}{}
 		synctest.Wait()
-		cancel()
-		close(checks)
-		close(release)
-		<-done
+
+		cleanup := func() {
+			cancel()
+			close(checks)
+			close(release)
+			<-done
+		}
+		select {
+		case <-errCalls:
+		case <-extraCalls:
+			cleanup()
+			t.Fatal("worker started a deletion before checking cancellation")
+		}
+		cleanup()
 
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Equal(t, int32(maxConcurrency), calls.Load())
