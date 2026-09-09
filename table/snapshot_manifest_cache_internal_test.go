@@ -424,6 +424,20 @@ func TestSnapshotManifestCacheKeepsCompletedReadAfterCancellation(t *testing.T) 
 	assert.Equal(t, set, cached)
 }
 
+func TestReadSnapshotManifestSetRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	fsCalls := 0
+
+	_, err := readSnapshotManifestSet(ctx, Snapshot{}, func(context.Context) (iceio.IO, error) {
+		fsCalls++
+
+		return nil, nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, fsCalls)
+}
+
 func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T) {
 	const listPath = "mem://snapshot-manifest-cache/canceled-waiter.avro"
 	base := iceio.NewMemFS()
@@ -705,6 +719,7 @@ type contextBoundSnapshotManifestIO struct {
 	iceio.IO
 	ctx         context.Context
 	started     chan struct{}
+	startedOnce *sync.Once
 	release     chan struct{}
 	blockedPath string
 }
@@ -713,7 +728,7 @@ func (fs *contextBoundSnapshotManifestIO) Open(name string) (iceio.File, error) 
 	if fs.blockedPath != "" && name != fs.blockedPath {
 		return fs.IO.Open(name)
 	}
-	close(fs.started)
+	fs.startedOnce.Do(func() { close(fs.started) })
 	select {
 	case <-fs.ctx.Done():
 		return nil, fs.ctx.Err()
@@ -728,6 +743,7 @@ func TestPlanFilesRetriesCanceledSnapshotManifestProducer(t *testing.T) {
 			t.Run(source+"/"+phase, func(t *testing.T) {
 				scan, fs := scanWithManifestCount(t, 1)
 				started := make(chan struct{})
+				var startedOnce sync.Once
 				release := make(chan struct{})
 				t.Cleanup(func() { close(release) })
 				factory := func(ctx context.Context) (iceio.IO, error) {
@@ -735,7 +751,9 @@ func TestPlanFilesRetriesCanceledSnapshotManifestProducer(t *testing.T) {
 						return fs, nil
 					}
 					if phase == "read" {
-						return &contextBoundSnapshotManifestIO{IO: fs, ctx: ctx, started: started, release: release}, nil
+						return &contextBoundSnapshotManifestIO{
+							IO: fs, ctx: ctx, started: started, startedOnce: &startedOnce, release: release,
+						}, nil
 					}
 					close(started)
 					select {
@@ -871,12 +889,14 @@ func TestAllManifestsEarlyStopDoesNotFailConcurrentScan(t *testing.T) {
 	require.NoError(t, err)
 
 	started := make(chan struct{})
+	var startedOnce sync.Once
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	tbl := New(Identifier{"db", "early-stop"}, meta, "metadata.json", func(ctx context.Context) (iceio.IO, error) {
 		if ctx.Value(producerContextKey{}) == true {
 			return &contextBoundSnapshotManifestIO{
-				IO: fs, ctx: ctx, started: started, release: release, blockedPath: currentList,
+				IO: fs, ctx: ctx, started: started, startedOnce: &startedOnce,
+				release: release, blockedPath: currentList,
 			}, nil
 		}
 
