@@ -156,10 +156,15 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	}
 
 	sortOrders := metadata.SortOrders()
+	cloneTransform, ok := sortOrders[0].fields[0].Transform.(*iceberg.BucketTransform)
+	require.True(t, ok)
+	sourceTransform, ok := metadata.SortOrderList[0].fields[0].Transform.(*iceberg.BucketTransform)
+	require.True(t, ok)
+	require.NotSame(t, sourceTransform, cloneTransform)
 	sortOrders[0].fields[0].SourceIDs[0] = 99
-	sortOrders[0].fields[0].Transform.(*iceberg.BucketTransform).NumBuckets = 32
+	cloneTransform.NumBuckets = 32
 	require.Equal(t, []int{10}, metadata.SortOrderList[0].fields[0].SourceIDs)
-	require.Equal(t, 16, metadata.SortOrderList[0].fields[0].Transform.(*iceberg.BucketTransform).NumBuckets)
+	require.Equal(t, 16, sourceTransform.NumBuckets)
 
 	got, err := json.Marshal(metadata)
 	require.NoError(t, err)

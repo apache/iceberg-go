@@ -31,15 +31,20 @@ func TestPartitionSpecCloneCopiesFields(t *testing.T) {
 
 	clone := spec.Clone()
 	require.Len(t, clone.FieldsBySourceID(1), 1)
+	sourceTransform, ok := spec.fields[0].Transform.(*BucketTransform)
+	require.True(t, ok)
+	cloneTransform, ok := clone.fields[0].Transform.(*BucketTransform)
+	require.True(t, ok)
+	require.NotSame(t, sourceTransform, cloneTransform)
 
 	clone.fields[0].SourceIDs[0] = 2
 	clone.fields[0].Name = "mutated"
-	clone.fields[0].Transform.(*BucketTransform).NumBuckets = 32
+	cloneTransform.NumBuckets = 32
 
 	require.Equal(t, []int{1}, spec.fields[0].SourceIDs)
 	require.Equal(t, "id", spec.fields[0].Name)
-	require.Equal(t, 16, spec.fields[0].Transform.(*BucketTransform).NumBuckets)
+	require.Equal(t, 16, sourceTransform.NumBuckets)
 	require.Equal(t, []int{2}, clone.fields[0].SourceIDs)
 	require.Equal(t, "mutated", clone.fields[0].Name)
-	require.Equal(t, 32, clone.fields[0].Transform.(*BucketTransform).NumBuckets)
+	require.Equal(t, 32, cloneTransform.NumBuckets)
 }

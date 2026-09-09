@@ -546,7 +546,9 @@ func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	return ret
 }
 
-func (ps PartitionSpec) Clone() PartitionSpec {
+// Clone returns a deep copy of the partition spec, including mutable transform
+// values and the source-ID lookup index.
+func (ps *PartitionSpec) Clone() PartitionSpec {
 	clone := PartitionSpec{id: ps.id, fields: make([]PartitionField, len(ps.fields))}
 	for i, field := range ps.fields {
 		clone.fields[i] = clonePartitionField(field)
