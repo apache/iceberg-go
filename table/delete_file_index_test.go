@@ -179,132 +179,140 @@ func TestCompactDeleteFileForIndexKeepsExternalFallback(t *testing.T) {
 }
 
 func TestDeleteIndexesRetainOnlyRequiredStats(t *testing.T) {
-	partitionedSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
-		SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: iceberg.IdentityTransform{},
+	t.Run("positional", func(t *testing.T) {
+		partitionedSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: iceberg.IdentityTransform{},
+		})
+		partition := map[int]any{1000: "us"}
+		pathLower, pathUpper := []byte("data-a.parquet"), []byte("data-z.parquet")
+		positionDelete := newDeleteIndexStatsFile(
+			t,
+			partitionedSpec,
+			iceberg.EntryContentPosDeletes,
+			iceberg.ParquetFile,
+			"position-delete.parquet",
+			partition,
+			1,
+			100,
+			map[int]int64{filePathFieldID: 1, 1: 1, 2: 1},
+			map[int]int64{filePathFieldID: 0, 1: 0, 2: 0},
+			map[int]int64{filePathFieldID: 0, 1: 0, 2: 0},
+			map[int][]byte{filePathFieldID: pathLower, 1: []byte("unused")},
+			map[int][]byte{filePathFieldID: pathUpper, 1: []byte("unused")},
+			nil,
+		)
+		positionEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, positionDelete)
+		positionIndex, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{positionEntry})
+		require.NoError(t, err)
+		dataEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
+			newDeleteIndexStatsFile(t, partitionedSpec, iceberg.EntryContentData, iceberg.ParquetFile,
+				"data-m.parquet", partition, 1, 100, nil, nil, nil, nil, nil, nil))
+		matched, err := positionIndex.forDataFile(dataEntry)
+		require.NoError(t, err)
+		require.Len(t, matched, 1)
+		assert.Equal(t, map[int]int64{filePathFieldID: 1}, matched[0].ValueCounts())
+		assert.Nil(t, matched[0].ColumnSizes())
+
+		path := "data-m.parquet"
+		pathBuilder, err := iceberg.NewDataFileBuilder(
+			partitionedSpec,
+			iceberg.EntryContentPosDeletes,
+			"path-delete.parquet",
+			iceberg.ParquetFile,
+			partition,
+			nil,
+			nil,
+			1,
+			100,
+		)
+		require.NoError(t, err)
+		pathBuilder.ValueCounts(map[int]int64{1: 1})
+		pathBuilder.LowerBoundValues(map[int][]byte{1: []byte("unused")})
+		pathBuilder.ReferencedDataFile(path)
+		pathIndex, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(
+				iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, pathBuilder.Build()),
+		})
+		require.NoError(t, err)
+		matched, err = pathIndex.forDataFile(dataEntry)
+		require.NoError(t, err)
+		require.Len(t, matched, 1)
+		assert.Equal(t, path, *matched[0].ReferencedDataFile())
+		assert.Nil(t, matched[0].ValueCounts())
+		assert.Nil(t, matched[0].LowerBoundValues())
 	})
-	partition := map[int]any{1000: "us"}
-	pathLower, pathUpper := []byte("data-a.parquet"), []byte("data-z.parquet")
-	positionDelete := newDeleteIndexStatsFile(
-		t,
-		partitionedSpec,
-		iceberg.EntryContentPosDeletes,
-		iceberg.ParquetFile,
-		"position-delete.parquet",
-		partition,
-		1,
-		100,
-		map[int]int64{filePathFieldID: 1, 1: 1, 2: 1},
-		map[int]int64{filePathFieldID: 0, 1: 0, 2: 0},
-		map[int]int64{filePathFieldID: 0, 1: 0, 2: 0},
-		map[int][]byte{filePathFieldID: pathLower, 1: []byte("unused")},
-		map[int][]byte{filePathFieldID: pathUpper, 1: []byte("unused")},
-		nil,
-	)
-	positionEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, positionDelete)
-	positionIndex, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{positionEntry})
-	require.NoError(t, err)
-	dataEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
-		newDeleteIndexStatsFile(t, partitionedSpec, iceberg.EntryContentData, iceberg.ParquetFile,
-			"data-m.parquet", partition, 1, 100, nil, nil, nil, nil, nil, nil))
-	matched, err := positionIndex.forDataFile(dataEntry)
-	require.NoError(t, err)
-	require.Len(t, matched, 1)
-	assert.Equal(t, map[int]int64{filePathFieldID: 1}, matched[0].ValueCounts())
-	assert.Nil(t, matched[0].ColumnSizes())
 
-	path := "data-m.parquet"
-	pathBuilder, err := iceberg.NewDataFileBuilder(
-		partitionedSpec,
-		iceberg.EntryContentPosDeletes,
-		"path-delete.parquet",
-		iceberg.ParquetFile,
-		partition,
-		nil,
-		nil,
-		1,
-		100,
-	)
-	require.NoError(t, err)
-	pathBuilder.ValueCounts(map[int]int64{1: 1})
-	pathBuilder.LowerBoundValues(map[int][]byte{1: []byte("unused")})
-	pathBuilder.ReferencedDataFile(path)
-	pathIndex, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{
-		iceberg.NewManifestEntry(
-			iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, pathBuilder.Build()),
+	t.Run("equality", func(t *testing.T) {
+		partition := map[int]any{1000: "us"}
+		equalitySpec := equalityDeleteIndexTestSpecs()[1]
+		equalityDelete := newDeleteIndexStatsFile(
+			t,
+			equalitySpec,
+			iceberg.EntryContentEqDeletes,
+			iceberg.ParquetFile,
+			"equality-delete.parquet",
+			partition,
+			1,
+			100,
+			map[int]int64{1: 1, 2: 1, 3: 1},
+			map[int]int64{1: 0, 2: 0, 3: 0},
+			map[int]int64{1: 0, 2: 0, 3: 0},
+			map[int][]byte{1: []byte("a"), 2: []byte("b"), 3: []byte("c")},
+			map[int][]byte{1: []byte("z"), 2: []byte("y"), 3: []byte("x")},
+			[]int{1, 2},
+		)
+		equalityEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, equalityDelete)
+		equalityIndex, err := buildEqualityDeleteIndex(
+			[]iceberg.ManifestEntry{equalityEntry}, equalityDeleteIndexTestSpecs(), nil)
+		require.NoError(t, err)
+		equalityDataEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
+			newDeleteIndexStatsFile(t, equalitySpec, iceberg.EntryContentData, iceberg.ParquetFile,
+				"data.parquet", partition, 1, 100, nil, nil, nil, nil, nil, nil))
+		matched, err := equalityIndex.forDataFile(equalityDataEntry)
+		require.NoError(t, err)
+		require.Len(t, matched, 1)
+		assert.Equal(t, map[int]int64{1: 1, 2: 1}, matched[0].ValueCounts())
+		assert.NotContains(t, matched[0].ValueCounts(), 3)
 	})
-	require.NoError(t, err)
-	matched, err = pathIndex.forDataFile(dataEntry)
-	require.NoError(t, err)
-	require.Len(t, matched, 1)
-	assert.Equal(t, path, *matched[0].ReferencedDataFile())
-	assert.Nil(t, matched[0].ValueCounts())
-	assert.Nil(t, matched[0].LowerBoundValues())
 
-	equalitySpec := equalityDeleteIndexTestSpecs()[1]
-	equalityDelete := newDeleteIndexStatsFile(
-		t,
-		equalitySpec,
-		iceberg.EntryContentEqDeletes,
-		iceberg.ParquetFile,
-		"equality-delete.parquet",
-		partition,
-		1,
-		100,
-		map[int]int64{1: 1, 2: 1, 3: 1},
-		map[int]int64{1: 0, 2: 0, 3: 0},
-		map[int]int64{1: 0, 2: 0, 3: 0},
-		map[int][]byte{1: []byte("a"), 2: []byte("b"), 3: []byte("c")},
-		map[int][]byte{1: []byte("z"), 2: []byte("y"), 3: []byte("x")},
-		[]int{1, 2},
-	)
-	equalityEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, equalityDelete)
-	equalityIndex, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{equalityEntry}, equalityDeleteIndexTestSpecs(), nil)
-	require.NoError(t, err)
-	equalityDataEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
-		newDeleteIndexStatsFile(t, equalitySpec, iceberg.EntryContentData, iceberg.ParquetFile,
-			"data.parquet", partition, 1, 100, nil, nil, nil, nil, nil, nil))
-	matched, err = equalityIndex.forDataFile(equalityDataEntry)
-	require.NoError(t, err)
-	require.Len(t, matched, 1)
-	assert.Equal(t, map[int]int64{1: 1, 2: 1}, matched[0].ValueCounts())
-	assert.NotContains(t, matched[0].ValueCounts(), 3)
-
-	dvBuilder, err := iceberg.NewDataFileBuilder(
-		*iceberg.UnpartitionedSpec,
-		iceberg.EntryContentPosDeletes,
-		"deletion-vector.puffin",
-		iceberg.PuffinFile,
-		nil,
-		nil,
-		nil,
-		1,
-		100,
-	)
-	require.NoError(t, err)
-	dvBuilder.ReferencedDataFile("data.parquet")
-	dvBuilder.ContentOffset(10)
-	dvBuilder.ContentSizeInBytes(20)
-	dvFile := dvBuilder.Build()
-	dvEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, dvFile)
-	dvIndex, err := buildDVIndex([]iceberg.ManifestEntry{dvEntry})
-	require.NoError(t, err)
-	dvDataEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
-		newDeleteIndexStatsFile(t, *iceberg.UnpartitionedSpec, iceberg.EntryContentData,
-			iceberg.ParquetFile, "data.parquet", nil, 1, 100, nil, nil, nil, nil, nil, nil))
-	matched = matchDVToData(dvDataEntry, dvIndex)
-	require.Len(t, matched, 1)
-	assert.Same(t, dvFile, matched[0])
-	assert.Nil(t, matched[0].ValueCounts())
-	assert.Equal(t, "data.parquet", *matched[0].ReferencedDataFile())
-	assert.Equal(t, int64(10), *matched[0].ContentOffset())
-	assert.Equal(t, int64(20), *matched[0].ContentSizeInBytes())
+	t.Run("deletion vector", func(t *testing.T) {
+		dvBuilder, err := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentPosDeletes,
+			"deletion-vector.puffin",
+			iceberg.PuffinFile,
+			nil,
+			nil,
+			nil,
+			1,
+			100,
+		)
+		require.NoError(t, err)
+		dvBuilder.ReferencedDataFile("data.parquet")
+		dvBuilder.ContentOffset(10)
+		dvBuilder.ContentSizeInBytes(20)
+		dvFile := dvBuilder.Build()
+		dvEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, dvFile)
+		dvIndex, err := buildDVIndex([]iceberg.ManifestEntry{dvEntry})
+		require.NoError(t, err)
+		dvDataEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
+			newDeleteIndexStatsFile(t, *iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+				iceberg.ParquetFile, "data.parquet", nil, 1, 100, nil, nil, nil, nil, nil, nil))
+		matched, err := matchDVToData(dvDataEntry, dvIndex)
+		require.NoError(t, err)
+		require.Len(t, matched, 1)
+		assert.Same(t, dvFile, matched[0])
+		assert.Nil(t, matched[0].ValueCounts())
+		assert.Equal(t, "data.parquet", *matched[0].ReferencedDataFile())
+		assert.Equal(t, int64(10), *matched[0].ContentOffset())
+		assert.Equal(t, int64(20), *matched[0].ContentSizeInBytes())
+	})
 }
 
 func TestDeleteIndexesRetainMatchingParity(t *testing.T) {
@@ -353,6 +361,19 @@ func TestDeleteIndexesRetainMatchingParity(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, fullMatches)
 		assert.Empty(t, compactMatches)
+
+		includedDataEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
+			newDeleteIndexStatsFile(t, spec, iceberg.EntryContentData, iceberg.ParquetFile,
+				"data-m.parquet", map[int]any{1000: "us"}, 1, 100, nil, nil, nil, nil, nil, nil),
+		)
+		fullMatches, err = fullIndex.forDataFile(includedDataEntry)
+		require.NoError(t, err)
+		compactMatches, err = compactIndex.forDataFile(includedDataEntry)
+		require.NoError(t, err)
+		require.Len(t, fullMatches, 1)
+		require.Len(t, compactMatches, 1)
+		assert.Equal(t, fullMatches[0].FilePath(), compactMatches[0].FilePath())
 	})
 
 	t.Run("equality", func(t *testing.T) {
@@ -399,5 +420,20 @@ func TestDeleteIndexesRetainMatchingParity(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, fullMatches)
 		assert.Empty(t, compactMatches)
+
+		includedLower, includedUpper := equalityDeleteMetricsTestBounds(t, int32(110), int32(120))
+		includedDataEntry := iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
+			newDeleteIndexStatsFile(t, spec, iceberg.EntryContentData, iceberg.ParquetFile,
+				"data-included.parquet", nil, 1, 100, map[int]int64{1: 1}, map[int]int64{1: 0}, nil,
+				map[int][]byte{1: includedLower}, map[int][]byte{1: includedUpper}, nil),
+		)
+		fullMatches, err = fullIndex.forDataFile(includedDataEntry)
+		require.NoError(t, err)
+		compactMatches, err = compactIndex.forDataFile(includedDataEntry)
+		require.NoError(t, err)
+		require.Len(t, fullMatches, 1)
+		require.Len(t, compactMatches, 1)
+		assert.Equal(t, fullMatches[0].FilePath(), compactMatches[0].FilePath())
 	})
 }

@@ -36,8 +36,10 @@ type deleteFileIndexEntry struct {
 // DataFile interface, plus only the selected statistics fields.
 //
 // Positional-delete indexes select file_pathFieldID because partition-scoped
-// position deletes use those bounds for candidate pruning. Equality-delete
-// indexes select their equality field IDs. Deletion vectors select no stats.
+// position deletes use those bounds for candidate pruning; file-scoped
+// position deletes carry their explicit referenced path instead. Equality-
+// delete indexes select their equality field IDs. Deletion vectors retain
+// their Puffin metadata directly because their range is read during planning.
 func compactDeleteFileForIndex(
 	file iceberg.DataFile,
 	partition map[int]any,

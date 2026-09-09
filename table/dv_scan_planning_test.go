@@ -23,6 +23,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // dvMockDataFile extends mockDataFile with the DV-specific fields
@@ -282,14 +283,16 @@ func TestDVMatchingToDataFiles(t *testing.T) {
 	// Match DVs against data-001 — should only get dv-001
 	dataEntry1 := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
-	matched := matchDVToData(dataEntry1, dvIndex)
+	matched, err := matchDVToData(dataEntry1, dvIndex)
+	assert.NoError(t, err)
 	assert.Len(t, matched, 1)
 	assert.Equal(t, dvForData1.path, matched[0].FilePath())
 
 	// Match DVs against data-002 — should only get dv-002
 	dataEntry2 := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: otherDataFilePath, contentType: iceberg.EntryContentData})
-	matched2 := matchDVToData(dataEntry2, dvIndex)
+	matched2, err := matchDVToData(dataEntry2, dvIndex)
+	assert.NoError(t, err)
 	assert.Len(t, matched2, 1)
 	assert.Equal(t, dvForData2.path, matched2[0].FilePath())
 }
@@ -317,7 +320,8 @@ func TestDVMatchingNoMatch(t *testing.T) {
 
 	dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: "s3://bucket/data/data-001.parquet", contentType: iceberg.EntryContentData})
-	matched := matchDVToData(dataEntry, dvIndex)
+	matched, err := matchDVToData(dataEntry, dvIndex)
+	assert.NoError(t, err)
 	assert.Empty(t, matched)
 }
 
@@ -376,7 +380,9 @@ func TestMatchDVToData_RequiresMatchingPartition(t *testing.T) {
 			dataEntry := iceberg.NewManifestEntry(
 				iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dataFile)
 
-			assert.Empty(t, matchDVToData(dataEntry, dvIndex))
+			matched, err := matchDVToData(dataEntry, dvIndex)
+			require.ErrorIs(t, err, ErrInvalidMetadata)
+			assert.Nil(t, matched)
 		})
 	}
 }
@@ -486,7 +492,8 @@ func TestMatchDVToData_SequenceNumberGuard(t *testing.T) {
 			seqNum := tt.dataSeqNum
 			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 				&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
-			matched := matchDVToData(dataEntry, dvIndex)
+			matched, err := matchDVToData(dataEntry, dvIndex)
+			require.NoError(t, err)
 			if tt.expectDV {
 				assert.Len(t, matched, 1)
 				assert.Equal(t, dvFile.path, matched[0].FilePath())
@@ -540,7 +547,8 @@ func TestMatchDVToData_NilDVSequenceNumber(t *testing.T) {
 			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, tt.dataSeq, nil,
 				&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
 
-			matched := matchDVToData(dataEntry, dvIndex)
+			matched, err := matchDVToData(dataEntry, dvIndex)
+			require.NoError(t, err)
 			if tt.expectDV {
 				assert.Len(t, matched, 1)
 				assert.Equal(t, dvFile.path, matched[0].FilePath())
