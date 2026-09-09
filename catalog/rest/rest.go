@@ -1107,8 +1107,13 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	if opts.enableSigv4 {
 		cfg := opts.awsConfig
 		if !opts.awsConfigSet {
+			creds, err := staticCredsFromProps(opts.additionalProps)
+			if err != nil {
+				cleanup()
+
+				return nil, nil, err
+			}
 			// If no config provided, load defaults from environment.
-			var err error
 			cfg, err = config.LoadDefaultConfig(ctx)
 			if err != nil {
 				cleanup()
@@ -1117,7 +1122,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 			}
 			// Sign with the S3 credentials carried in the catalog properties when
 			// present, rather than only the AWS default credential chain.
-			if creds, ok := staticCredsFromProps(opts.additionalProps); ok {
+			if creds != nil {
 				cfg.Credentials = creds
 			}
 		}
@@ -1133,14 +1138,19 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 }
 
 // staticCredsFromProps returns a static credentials provider built from the S3
-// access-key properties, or ok=false when no key pair is present.
-func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, bool) {
+// access-key properties. It returns (nil, nil) when neither key is set, so the
+// caller falls back to the default credential chain, and an error when only one
+// of the pair is set rather than silently signing as a different identity.
+func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, error) {
 	accessKey, secretKey := props[iceio.S3AccessKeyID], props[iceio.S3SecretAccessKey]
-	if accessKey == "" || secretKey == "" {
-		return nil, false
+	switch {
+	case accessKey == "" && secretKey == "":
+		return nil, nil
+	case accessKey == "" || secretKey == "":
+		return nil, fmt.Errorf("rest: incomplete S3 credentials: both %s and %s are required for SigV4 signing", iceio.S3AccessKeyID, iceio.S3SecretAccessKey)
+	default:
+		return credentials.NewStaticCredentialsProvider(accessKey, secretKey, props[iceio.S3SessionToken]), nil
 	}
-
-	return credentials.NewStaticCredentialsProvider(accessKey, secretKey, props[iceio.S3SessionToken]), true
 }
 
 func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
