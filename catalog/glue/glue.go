@@ -372,8 +372,7 @@ func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName s
 		return nil, fmt.Errorf("failed to allocate S3 Tables storage for %s.%s: %w", database, tableName, err)
 	}
 
-	tbl, err := c.commitS3TablesTable(ctx, database, tableName, identifier, schema, opts...)
-	if err != nil {
+	if err := c.commitS3TablesTable(ctx, database, tableName, identifier, schema, opts...); err != nil {
 		if _, delErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
 			CatalogId:    c.catalogId,
 			DatabaseName: aws.String(database),
@@ -385,29 +384,33 @@ func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName s
 		return nil, err
 	}
 
-	return tbl, nil
+	// The table is committed; load it outside the rollback scope so a transient
+	// read failure does not delete an already-created table.
+	return c.LoadTable(ctx, identifier)
 }
 
 // commitS3TablesTable reads the service-assigned location, writes the Iceberg
-// metadata to it, and points the Glue entry at that metadata.
-func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+// metadata to it, and points the Glue entry at that metadata. It does not reload
+// the table: the caller does that only after a successful commit, so a read
+// failure never triggers a rollback of an already-created table.
+func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) error {
 	allocated, err := c.glueSvc.GetTable(ctx, &glue.GetTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
 		Name:         aws.String(tableName),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load allocated S3 Tables table %s.%s: %w", database, tableName, err)
+		return fmt.Errorf("failed to load allocated S3 Tables table %s.%s: %w", database, tableName, err)
 	}
 	if allocated == nil || allocated.Table == nil || allocated.Table.StorageDescriptor == nil {
-		return nil, fmt.Errorf("S3 Tables did not return a storage descriptor for %s.%s", database, tableName)
+		return fmt.Errorf("S3 Tables did not return a storage descriptor for %s.%s", database, tableName)
 	}
 	managedLocation := aws.ToString(allocated.Table.StorageDescriptor.Location)
 	if managedLocation == "" {
-		return nil, fmt.Errorf("S3 Tables did not assign a storage location for %s.%s", database, tableName)
+		return fmt.Errorf("S3 Tables did not assign a storage location for %s.%s", database, tableName)
 	}
 	if allocated.Table.VersionId == nil {
-		return nil, fmt.Errorf("cannot commit table %s.%s: because Glue table version id is missing", database, tableName)
+		return fmt.Errorf("cannot commit table %s.%s: because Glue table version id is missing", database, tableName)
 	}
 
 	// Copy rather than append onto the caller's opts, whose backing array may
@@ -418,13 +421,15 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 
 	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, stagedOpts...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
-		return nil, err
+		return err
 	}
 
+	// constructTableInput sends TableType=EXTERNAL_TABLE; S3 Tables keeps its own
+	// service type (e.g. "customer") on read, which getRawTable accepts.
 	_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
@@ -433,10 +438,10 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 		SkipArchive:  aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to commit S3 Tables table %s.%s: %w", database, tableName, err)
+		return fmt.Errorf("failed to commit S3 Tables table %s.%s: %w", database, tableName, err)
 	}
 
-	return c.LoadTable(ctx, identifier)
+	return nil
 }
 
 // RegisterTable registers a new table using existing metadata.

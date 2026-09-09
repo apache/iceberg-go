@@ -2895,3 +2895,40 @@ func TestGlueCreateTableS3TablesRollbackOnUpdateFailure(t *testing.T) {
 	require.ErrorContains(t, err, "failed to commit S3 Tables table")
 	mockGlueSvc.AssertExpectations(t)
 }
+
+// TestGlueCreateTableS3TablesNoRollbackOnLoadFailure verifies that a transient
+// failure of the final reload does not delete an already-committed table.
+func TestGlueCreateTableS3TablesNoRollbackOnLoadFailure(t *testing.T) {
+	ctx := context.Background()
+	managedLocation := "file://" + t.TempDir()
+	schema := s3TablesTestSchema()
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_database"),
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, nil).Once()
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &types.Table{
+		Name:              aws.String("test_table"),
+		DatabaseName:      aws.String("test_database"),
+		VersionId:         aws.String("1"),
+		StorageDescriptor: &types.StorageDescriptor{Location: aws.String(managedLocation)},
+	}}, nil).Once()
+	mockGlueSvc.On("UpdateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.UpdateTableOutput{}, nil).Once()
+	// The trailing reload (LoadTable -> GetTable) fails transiently.
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return((*glue.GetTableOutput)(nil), errors.New("load boom")).Once()
+
+	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: &aws.Config{}}
+	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema)
+	require.ErrorContains(t, err, "load boom")
+	mockGlueSvc.AssertNotCalled(t, "DeleteTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertExpectations(t)
+}
