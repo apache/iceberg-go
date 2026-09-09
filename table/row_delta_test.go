@@ -1108,6 +1108,107 @@ func TestRowDeltaRemoveDeletesFailsInsteadOfReplaying(t *testing.T) {
 		"the data file must carry exactly one live DV: the peer's")
 }
 
+func buildPuffinPosDeleteWithoutRef(t *testing.T, path string) iceberg.DataFile {
+	t.Helper()
+
+	b, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		path, iceberg.PuffinFile, nil, nil, nil, 2, 128)
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func TestRowDeltaRejectsDeletionVectorBelowV3(t *testing.T) {
+	const (
+		dataPath = "s3://bucket/data/insert.parquet"
+		dvPath   = "s3://bucket/data/dv-001.puffin"
+	)
+
+	tests := []struct {
+		name          string
+		formatVersion int
+		rows          []iceberg.DataFile
+		deletes       func(*testing.T) []iceberg.DataFile
+		errContains   string
+	}{
+		{
+			name:          "deletion vector alone on v2",
+			formatVersion: 2,
+			deletes: func(t *testing.T) []iceberg.DataFile {
+				return []iceberg.DataFile{buildDVFile(t, dvPath, dataPath)}
+			},
+			errContains: "requires table format version >= 3",
+		},
+		{
+			name:          "deletion vector beside valid files on v2",
+			formatVersion: 2,
+			rows:          []iceberg.DataFile{buildDataFile(t, dataPath)},
+			deletes: func(t *testing.T) []iceberg.DataFile {
+				return []iceberg.DataFile{
+					buildPosDeleteFile(t, "s3://bucket/data/pos-del.parquet"),
+					buildEqDeleteFile(t, "s3://bucket/data/eq-del.parquet", []int{1}),
+					buildDVFile(t, dvPath, dataPath),
+				}
+			},
+			errContains: "requires table format version >= 3",
+		},
+		{
+			name:          "deletion vector without referenced data file on v2",
+			formatVersion: 2,
+			deletes: func(t *testing.T) []iceberg.DataFile {
+				return []iceberg.DataFile{buildPuffinPosDeleteWithoutRef(t, dvPath)}
+			},
+			errContains: "requires table format version >= 3",
+		},
+		{
+			// v1 rejects every delete file before the DV check is reached.
+			name:          "deletion vector on v1",
+			formatVersion: 1,
+			deletes: func(t *testing.T) []iceberg.DataFile {
+				return []iceberg.DataFile{buildDVFile(t, dvPath, dataPath)}
+			},
+			errContains: "format version >= 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := newRowDeltaCommitTestTableVersion(t, tt.formatVersion)
+
+			rd := tbl.NewTransaction().NewRowDelta(nil).AddRows(tt.rows...).AddDeletes(tt.deletes(t)...)
+
+			err := rd.Commit(t.Context())
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.errContains)
+			assert.Empty(t, writtenManifests(t, tbl.Location()), "a rejected row delta must not leave manifests behind")
+
+			validTx := tbl.NewTransaction()
+			require.NoError(t, validTx.NewRowDelta(nil).AddRows(buildDataFile(t, dataPath)).Commit(t.Context()))
+			assert.NotEmpty(t, writtenManifests(t, tbl.Location()), "the same probe must observe the manifests a successful commit writes")
+		})
+	}
+}
+
+func TestRowDeltaAcceptsDeletionVectorOnV3(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	dataPath := tbl.Location() + "/data/insert.parquet"
+	dvPath := tbl.Location() + "/data/dv-001.puffin"
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(buildDVFile(t, dvPath, dataPath)).Commit(t.Context()))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	snap := tbl.CurrentSnapshot()
+	require.NotNil(t, snap)
+
+	live, removed := snapshotDeleteEntryFiles(t, snap, iceio.LocalFS{})
+	assert.Empty(t, removed)
+	require.Len(t, live, 1)
+	assert.Equal(t, dvPath, live[0].FilePath())
+	assert.Equal(t, dataPath, refOf(live[0]))
+}
+
 // Why: deletion vectors exist only in format v3; a v2 table cannot
 // carry the entries RemoveDeletes targets, and the error should say so
 // instead of failing resolution with a confusing lookup error.
