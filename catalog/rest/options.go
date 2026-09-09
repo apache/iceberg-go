@@ -88,6 +88,10 @@ func WithMetadataLocation(loc string) Option {
 	}
 }
 
+// WithSigV4 enables AWS SigV4 request signing for the REST catalog. The signing
+// identity is resolved in order: an explicit WithAwsConfig, then the s3.* catalog
+// credential properties (s3.access-key-id / s3.secret-access-key / s3.session-token),
+// then the AWS default credential chain.
 func WithSigV4() Option {
 	return func(o *options) {
 		o.enableSigv4 = true
