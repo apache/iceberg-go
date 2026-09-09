@@ -2551,9 +2551,11 @@ func TestGlueCreateTableS3TablesFederated(t *testing.T) {
 	// LoadTable at the end reads this entry; UpdateTable's Run below fills in the
 	// iceberg parameters (including the metadata pointer) before it is read.
 	loaded := &types.Table{
-		Name:              aws.String("test_table"),
-		DatabaseName:      aws.String("test_database"),
-		TableType:         aws.String(glueTableType),
+		Name:         aws.String("test_table"),
+		DatabaseName: aws.String("test_database"),
+		// S3 Tables reports its own service TableType, exercising the relaxed
+		// getRawTable gate on the create success path.
+		TableType:         aws.String("customer"),
 		Parameters:        map[string]string{},
 		StorageDescriptor: &types.StorageDescriptor{Location: aws.String(managedLocation)},
 	}
