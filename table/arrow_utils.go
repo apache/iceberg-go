@@ -436,7 +436,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		switch dt.ExtensionName() {
 		case "arrow.uuid":
 			result.Type = iceberg.PrimitiveTypes.UUID
-		case "parquet.variant":
+		case extensions.VariantExtensionName, extensions.LegacyVariantExtensionName:
 			result.Type = iceberg.VariantType{}
 		case "geoarrow.wkb":
 			wkb, ok := dt.(*geoarrow.WKBType)

@@ -86,7 +86,7 @@ func TestShreddedVariantTableScan(t *testing.T) {
 
 	ext, ok := scanned.Schema().Field(0).Type.(arrow.ExtensionType)
 	require.True(t, ok, "payload must be Variant extension type, got %T", scanned.Schema().Field(0).Type)
-	assert.Equal(t, "parquet.variant", ext.ExtensionName())
+	assert.Equal(t, extensions.VariantExtensionName, ext.ExtensionName())
 
 	// Scan order is not guaranteed; check the set of "a" values is {0..nData-1}.
 	col := scanned.Column(0).Data()

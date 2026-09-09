@@ -711,7 +711,33 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.Wri
 		wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
 	}
 
+	// Match Iceberg Java: apply parquet-mr's cost-based dictionary fallback to every leaf
+	// column so high-cardinality columns fall back to PLAIN rather than keeping a dictionary.
+	// arrow-go otherwise enables it only for uncompressed columns, so zstd (our default) would
+	// retain dictionaries on all-distinct columns and roughly double their size.
+	costFallback, err := dictCostFallbackProps(arrowSchema, wp)
+	if err != nil {
+		return nil, err
+	}
+	wp = append(wp, costFallback...)
+
 	return parquet.NewWriterProperties(wp...), nil
+}
+
+// dictCostFallbackProps returns a WithDictionaryCostFallbackFor(true) property for every leaf
+// column of arrowSchema, resolving parquet leaf paths through arrow-go's own schema conversion.
+func dictCostFallbackProps(arrowSchema *arrow.Schema, base []parquet.WriterProperty) ([]parquet.WriterProperty, error) {
+	parquetSchema, err := pqarrow.ToParquet(arrowSchema, parquet.NewWriterProperties(base...), pqarrow.DefaultWriterProps())
+	if err != nil {
+		return nil, err
+	}
+
+	props := make([]parquet.WriterProperty, 0, parquetSchema.NumColumns())
+	for i := range parquetSchema.NumColumns() {
+		props = append(props, parquet.WithDictionaryCostFallbackFor(parquetSchema.Column(i).Path(), true))
+	}
+
+	return props, nil
 }
 
 // Write appends a record batch to the Parquet file.
@@ -2371,7 +2397,7 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 
 	// Variant is an extension type wrapping a struct (metadata + value).
 	// Select the entire field including all children.
-	if ext, ok := field.Field.Type.(arrow.ExtensionType); ok && ext.ExtensionName() == "parquet.variant" {
+	if ext, ok := field.Field.Type.(arrow.ExtensionType); ok && extensions.IsVariantExtensionName(ext.ExtensionName()) {
 		return p.projectVariant(field)
 	}
 

@@ -25,9 +25,11 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 )
@@ -46,18 +48,15 @@ func augmentSchemaWithExtracts(fileSchema *iceberg.Schema, cols []iceberg.Varian
 	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs, fields...)
 }
 
-// buildExtractColumn materializes one variant extract term into a typed Arrow array over rec.
-func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch, mem memory.Allocator) (arrow.Array, arrow.Field, error) {
+// buildExtractColumn materializes one variant extract term into a typed Arrow array over rec,
+// navigating columnarly via compute.VariantGet with a per-row fallback when the path can't be followed.
+func buildExtractColumn(ctx context.Context, col iceberg.VariantExtractColumn, rec arrow.RecordBatch, mem memory.Allocator) (arrow.Array, arrow.Field, error) {
 	typ := col.Term.Type().(iceberg.PrimitiveType)
 	dt, err := TypeToArrowType(typ, false, false)
 	if err != nil {
 		return nil, arrow.Field{}, err
 	}
 
-	bldr := array.NewBuilder(mem, dt)
-	defer bldr.Release()
-
-	n := int(rec.NumRows())
 	varName := col.Term.Ref().Field().Name
 	arr := resolveVariantSource(rec, col.Term.Ref().Field().ID, col.SourcePath)
 	if arr == nil {
@@ -68,7 +67,84 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 		return nil, arrow.Field{}, fmt.Errorf("%w: variant extract column %q is not a VariantArray (got %T)", iceberg.ErrInvalidArgument, varName, arr)
 	}
 
-	for i := range n {
+	out, err := extractColumnValues(ctx, varr, col, typ, dt, mem)
+	if err != nil {
+		return nil, arrow.Field{}, err
+	}
+
+	field := arrow.Field{
+		Name:     col.Name,
+		Type:     dt,
+		Nullable: true,
+		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{strconv.Itoa(col.FieldID)}),
+	}
+
+	return out, field, nil
+}
+
+// extractColumnValues navigates columnarly then casts each leaf with iceberg's cast; a VariantGet
+// navigation error (arrow-rs errors where the residual filter wants null-on-miss) falls back to per-row.
+func extractColumnValues(ctx context.Context, varr *extensions.VariantArray, col iceberg.VariantExtractColumn, typ iceberg.PrimitiveType, dt arrow.DataType, mem memory.Allocator) (arrow.Array, error) {
+	if fast := tryShreddedTypedColumn(varr, col.Term.VariantPath(), dt, mem); fast != nil {
+		return fast, nil
+	}
+	if !varr.IsShredded() {
+		return extractColumnValuesPerRow(varr, col, dt, mem)
+	}
+
+	extracted, err := compute.VariantGet(ctx, varr, compute.VariantGetOptions{Path: col.Term.VariantPath()})
+	if err != nil {
+		return extractColumnValuesPerRow(varr, col, dt, mem)
+	}
+	defer extracted.Release()
+
+	leaves, ok := extracted.(*extensions.VariantArray)
+	if !ok {
+		return extractColumnValuesPerRow(varr, col, dt, mem)
+	}
+
+	bldr := array.NewBuilder(mem, dt)
+	defer bldr.Release()
+
+	varName := col.Term.Ref().Field().Name
+	for i := range leaves.Len() {
+		if leaves.IsNull(i) {
+			bldr.AppendNull()
+
+			continue
+		}
+
+		leaf, verr := leaves.Value(i)
+		if verr != nil {
+			slog.Warn("variant extract: skipping undecodable variant value", "column", varName, "row", i, "err", verr)
+			bldr.AppendNull()
+
+			continue
+		}
+
+		lit, ok := iceberg.CastVariantLiteral(leaf, typ)
+		if !ok {
+			bldr.AppendNull()
+
+			continue
+		}
+
+		if aerr := appendExtractLiteral(bldr, lit); aerr != nil {
+			return nil, aerr
+		}
+	}
+
+	return bldr.NewArray(), nil
+}
+
+// extractColumnValuesPerRow is the row-by-row walk used when columnar navigation cannot follow
+// the path; col.Term.ExtractValue navigates and casts, treating any path miss as null.
+func extractColumnValuesPerRow(varr *extensions.VariantArray, col iceberg.VariantExtractColumn, dt arrow.DataType, mem memory.Allocator) (arrow.Array, error) {
+	bldr := array.NewBuilder(mem, dt)
+	defer bldr.Release()
+
+	varName := col.Term.Ref().Field().Name
+	for i := range varr.Len() {
 		if varr.IsNull(i) {
 			bldr.AppendNull()
 
@@ -91,18 +167,124 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 		}
 
 		if aerr := appendExtractLiteral(bldr, lit); aerr != nil {
-			return nil, arrow.Field{}, aerr
+			return nil, aerr
 		}
 	}
 
-	field := arrow.Field{
-		Name:     col.Name,
-		Type:     dt,
-		Nullable: true,
-		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{strconv.Itoa(col.FieldID)}),
+	return bldr.NewArray(), nil
+}
+
+// tryShreddedTypedColumn returns the field's typed leaf column when it is shredded to exactly dt, else nil.
+func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantPath, dt arrow.DataType, mem memory.Allocator) arrow.Array {
+	if path.Len() == 0 || varr.Data().Offset() != 0 {
+		return nil
+	}
+	tv := varr.Shredded()
+	if tv == nil || rootResidualHidesRows(varr, tv) {
+		return nil
+	}
+	n := varr.Len()
+
+	var mask *memory.Buffer
+	mergeValidity := func(arr arrow.Array) {
+		if arr.NullN() == 0 {
+			return
+		}
+		vb := arr.Data().Buffers()[0]
+		if vb == nil {
+			return
+		}
+		if mask == nil {
+			mask = bitutil.BitmapAndAlloc(mem, vb.Bytes(), vb.Bytes(), 0, 0, int64(n), 0)
+
+			return
+		}
+		merged := bitutil.BitmapAndAlloc(mem, mask.Bytes(), vb.Bytes(), 0, 0, int64(n), 0)
+		mask.Release()
+		mask = merged
+	}
+	bail := func() arrow.Array {
+		if mask != nil {
+			mask.Release()
+		}
+
+		return nil
 	}
 
-	return bldr.NewArray(), field, nil
+	mergeValidity(varr.Storage())
+
+	cur := tv
+	for i := range path.Len() {
+		name, _, isField := path.StepAt(i)
+		if !isField {
+			return bail()
+		}
+		st, ok := cur.(*array.Struct)
+		if !ok {
+			return bail()
+		}
+		mergeValidity(st)
+		idx, ok := st.DataType().(*arrow.StructType).FieldIdx(name)
+		if !ok {
+			return bail()
+		}
+		field, ok := st.Field(idx).(*array.Struct)
+		if !ok {
+			return bail()
+		}
+		fty := field.DataType().(*arrow.StructType)
+		if vIdx, ok := fty.FieldIdx("value"); ok {
+			if v := field.Field(vIdx); v.NullN() != v.Len() {
+				return bail()
+			}
+		}
+		tvIdx, ok := fty.FieldIdx("typed_value")
+		if !ok {
+			return bail()
+		}
+		cur = field.Field(tvIdx)
+	}
+
+	if !arrow.TypeEqual(cur.DataType(), dt) {
+		return bail()
+	}
+
+	// no ancestor/row nulls: the leaf's own validity already describes the result, return it zero-copy
+	if mask == nil {
+		cur.Retain()
+
+		return cur
+	}
+
+	mergeValidity(cur)
+	curData := cur.Data()
+	buffers := append([]*memory.Buffer(nil), curData.Buffers()...)
+	buffers[0] = mask
+	nullCount := n - bitutil.CountSetBits(mask.Bytes(), 0, n)
+	d := array.NewData(cur.DataType(), n, buffers, curData.Children(), nullCount, 0)
+	mask.Release()
+	out := array.MakeFromData(d)
+	d.Release()
+
+	return out
+}
+
+// rootResidualHidesRows reports whether any row's whole object lives in the root residual (value present, typed_value null) - not representable by the typed tree, so the fast path must fall back.
+func rootResidualHidesRows(varr *extensions.VariantArray, tv arrow.Array) bool {
+	uv := varr.UntypedValues()
+	if uv == nil || tv.NullN() == 0 || uv.NullN() == uv.Len() {
+		return false
+	}
+	tvb := tv.Data().Buffers()[0]
+	uvb := uv.Data().Buffers()[0]
+	for i := range varr.Len() {
+		valuePresent := uvb == nil || bitutil.BitIsSet(uvb.Bytes(), i)
+		if valuePresent && !bitutil.BitIsSet(tvb.Bytes(), i) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // resolveVariantSource locates the extract's source array by top-level field id
@@ -263,7 +445,7 @@ func (as *arrowScan) extractResidualFilter(ctx context.Context, cols []iceberg.V
 		derived := make([]arrow.Array, 0, len(cols))
 		fields := make([]arrow.Field, 0, len(cols))
 		for _, c := range cols {
-			arr, field, err := buildExtractColumn(c, rec, mem)
+			arr, field, err := buildExtractColumn(ctx, c, rec, mem)
 			if err != nil {
 				for _, a := range derived {
 					a.Release()

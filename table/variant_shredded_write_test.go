@@ -1323,9 +1323,10 @@ func TestShreddedVariantExtractResidualNoLeak(t *testing.T) {
 	require.NoError(t, err)
 	defer f.Close()
 
-	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	// read rec on the checked allocator so the fast-path zero-copy leaf is leak-tracked
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, checked)
 	require.NoError(t, err)
-	defer tbl.Release()
 
 	fileSchema, err := ArrowSchemaToIceberg(tbl.Schema(), false, nil)
 	require.NoError(t, err)
@@ -1342,7 +1343,6 @@ func TestShreddedVariantExtractResidualNoLeak(t *testing.T) {
 	bound, err := iceberg.BindExpr(fileSchema, pred, true)
 	require.NoError(t, err)
 
-	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	ctx := compute.WithAllocator(context.Background(), checked)
 
 	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
@@ -1354,6 +1354,7 @@ func TestShreddedVariantExtractResidualNoLeak(t *testing.T) {
 	require.NoError(t, err)
 	out.Release()
 
+	tbl.Release()
 	checked.AssertSize(t, 0)
 }
 
@@ -1929,7 +1930,7 @@ func TestBuildExtractColumnRenamedSource(t *testing.T) {
 	require.NoError(t, err)
 	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"old_payload"}}
 
-	arr, _, err := buildExtractColumn(col, rec, mem)
+	arr, _, err := buildExtractColumn(context.Background(), col, rec, mem)
 	require.NoError(t, err)
 	defer arr.Release()
 	require.Equal(t, 1, arr.Len())
@@ -1962,7 +1963,7 @@ func TestBuildExtractColumnResolvesByFieldID(t *testing.T) {
 	// SourcePath deliberately mismatches the physical name, so only the field-id match can resolve it.
 	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
 
-	arr, _, err := buildExtractColumn(col, rec, mem)
+	arr, _, err := buildExtractColumn(context.Background(), col, rec, mem)
 	require.NoError(t, err)
 	defer arr.Release()
 	require.Equal(t, 1, arr.Len())
@@ -1994,7 +1995,7 @@ func TestBuildExtractColumnDottedName(t *testing.T) {
 	require.NoError(t, err)
 	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"a.b"}}
 
-	arr, _, err := buildExtractColumn(col, rec, mem)
+	arr, _, err := buildExtractColumn(context.Background(), col, rec, mem)
 	require.NoError(t, err)
 	defer arr.Release()
 	require.Equal(t, 1, arr.Len())
@@ -2040,7 +2041,7 @@ func TestBuildExtractColumnNested(t *testing.T) {
 	require.NoError(t, err)
 	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"wrapper", "payload"}}
 
-	arr, _, err := buildExtractColumn(col, rec, mem)
+	arr, _, err := buildExtractColumn(context.Background(), col, rec, mem)
 	require.NoError(t, err)
 	defer arr.Release()
 	require.Equal(t, 1, arr.Len())
@@ -2068,8 +2069,122 @@ func TestBuildExtractColumnWrongType(t *testing.T) {
 	require.NoError(t, err)
 	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x"}
 
-	_, _, err = buildExtractColumn(col, rec, mem)
+	_, _, err = buildExtractColumn(context.Background(), col, rec, mem)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}
+
+// TestBuildExtractColumnShreddedColumnar exercises the compute.VariantGet fast path over a
+// shredded column and asserts per-row values match.
+func TestBuildExtractColumnShreddedColumnar(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	iceSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}})
+
+	shredded := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
+	))
+	vb := extensions.NewVariantBuilder(mem, shredded)
+	for i := range 4 {
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"a": int64(i * 10), "city": "NYC"}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	pArr := vb.NewArray()
+	vb.Release()
+
+	md := arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"2"})
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: pArr.DataType(), Nullable: true, Metadata: md}}, nil)
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{pArr}, int64(pArr.Len()))
+	pArr.Release()
+	defer rec.Release()
+
+	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
+
+	arr, _, err := buildExtractColumn(ctx, col, rec, mem)
+	require.NoError(t, err)
+	defer arr.Release()
+	require.Equal(t, 4, arr.Len())
+	got := arr.(*array.Int64)
+	for i := range 4 {
+		require.EqualValues(t, i*10, got.Value(i), "row %d", i)
+	}
+}
+
+// TestBuildExtractColumnKeepsIcebergCast guards that the columnar path casts with iceberg's
+// restrictive CastVariantLiteral, not arrow-go's permissive cast: an int64 extracted as float64
+// is null under iceberg's cast (no int->float coercion), whereas arrow-go's cast would yield 5.0.
+func TestBuildExtractColumnKeepsIcebergCast(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	iceSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}})
+
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(5)}))
+	v, err := b.Build()
+	require.NoError(t, err)
+	vb.Append(v)
+	pArr := vb.NewArray()
+	vb.Release()
+
+	md := arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"2"})
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: pArr.DataType(), Nullable: true, Metadata: md}}, nil)
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{pArr}, 1)
+	pArr.Release()
+	defer rec.Release()
+
+	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Float64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
+
+	arr, _, err := buildExtractColumn(ctx, col, rec, mem)
+	require.NoError(t, err)
+	defer arr.Release()
+	require.Equal(t, 1, arr.Len())
+	require.True(t, arr.IsNull(0), "int64 must not cast to float64 under iceberg's cast")
+}
+
+// TestBuildExtractColumnFieldIntoScalarFallsBack: "$.a.b" steps into a scalar, so compute.VariantGet
+// errors and buildExtractColumn falls back to the per-row walk, which yields null (no error).
+func TestBuildExtractColumnFieldIntoScalarFallsBack(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	iceSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}})
+
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(5)}))
+	v, err := b.Build()
+	require.NoError(t, err)
+	vb.Append(v)
+	pArr := vb.NewArray()
+	vb.Release()
+
+	md := arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"2"})
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: pArr.DataType(), Nullable: true, Metadata: md}}, nil)
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{pArr}, 1)
+	pArr.Release()
+	defer rec.Release()
+
+	term, err := iceberg.Extract("payload", "$.a.b", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
+
+	arr, _, err := buildExtractColumn(ctx, col, rec, mem)
+	require.NoError(t, err)
+	defer arr.Release()
+	require.Equal(t, 1, arr.Len())
+	require.True(t, arr.IsNull(0), "field step into a scalar yields null via the per-row fallback")
 }
 
 // TestInclusiveProjectionExtractAlwaysTrue covers the manifest-eval projection path
