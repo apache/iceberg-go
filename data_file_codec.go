@@ -61,6 +61,8 @@ func init() {
 // The encoded bytes are the same bytes a manifest carries for this
 // data file. Implementations must produce output that the iceberg
 // package's manifest-entry Avro decoder accepts.
+// The built-in DataFile implementation rejects projected or stat-stripped files
+// with ErrInvalidArgument because omitted metadata cannot be recovered.
 type AvroEntryMarshaler interface {
 	MarshalAvroEntry(spec PartitionSpec, schema *Schema, version int) ([]byte, error)
 }
@@ -99,6 +101,9 @@ type AvroEntryMarshaler interface {
 // carry the field on the wire still decode through the matching
 // reader. New DataFiles should not set distinct counts.
 func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version int) ([]byte, error) {
+	if err := d.validateForWrite(); err != nil {
+		return nil, err
+	}
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("iceberg: MarshalAvroEntry: unsupported format version %d", version)
 	}

@@ -30,6 +30,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +42,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -247,7 +249,8 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 			"%w: unexpected plan status %q from planTableScan", ErrRESTError, resp.Status)
 	}
 
-	envelopes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
+	envelopes, err := r.collectScanTasksWithConcurrency(
+		ctx, req.Identifier, completed.ScanTasks, req.MaxConcurrency)
 	if err != nil {
 		cleanup()
 
@@ -293,33 +296,151 @@ func (r *Catalog) planIOBaseProps(req table.ScanPlanningRequest) iceberg.Propert
 	return props
 }
 
-// collectScanTasks expands plan-task handles into their task envelopes, walking
-// the fanout: a fetchScanTasks response can itself return more plan-tasks. A
-// handle is fetched at most once; a server that re-issues one would otherwise
-// loop forever. The envelope boundaries are retained because delete-file
-// references are local to each response.
-func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]ScanTasks, error) {
+// collectScanTasksWithConcurrency expands plan-task handles into their task
+// envelopes, walking the fanout: a response can itself return more plan-tasks. Each
+// frontier is fetched concurrently, but its responses are appended in handle
+// order so completion timing cannot change the result order. A handle is
+// fetched at most once; a server that re-issues one would otherwise loop
+// forever. The envelope boundaries are retained because delete-file references
+// are local to each response.
+//
+// maxConcurrency bounds the number of concurrent fetches. A non-positive limit
+// uses runtime.GOMAXPROCS. On a fetch error, at most the configured number of
+// requests can already be in flight when cancellation reaches their contexts.
+func (r *Catalog) collectScanTasksWithConcurrency(
+	ctx context.Context,
+	ident table.Identifier,
+	tasks ScanTasks,
+	maxConcurrency int,
+) ([]ScanTasks, error) {
+	if maxConcurrency <= 0 {
+		maxConcurrency = runtime.GOMAXPROCS(0)
+	}
+
 	envelopes := []ScanTasks{tasks}
 
-	queue := append([]string(nil), tasks.PlanTasks...)
-	seen := make(map[string]bool, len(queue))
-	for len(queue) > 0 {
-		handle := queue[0]
-		queue = queue[1:]
-		if seen[handle] {
-			continue
+	frontier := append([]string(nil), tasks.PlanTasks...)
+	seen := make(map[string]bool, len(frontier))
+	for len(frontier) > 0 {
+		handles := make([]string, 0, len(frontier))
+		for _, handle := range frontier {
+			if seen[handle] {
+				continue
+			}
+			seen[handle] = true
+			handles = append(handles, handle)
 		}
-		seen[handle] = true
+		if len(handles) == 0 {
+			break
+		}
 
-		resp, err := r.FetchScanTasks(ctx, ident, FetchScanTasksRequest{PlanTask: handle})
+		responses, err := r.fetchScanTaskFrontier(ctx, ident, handles, maxConcurrency)
 		if err != nil {
 			return nil, err
 		}
-		envelopes = append(envelopes, resp.ScanTasks)
-		queue = append(queue, resp.PlanTasks...)
+
+		var nextFrontier []string
+		for _, response := range responses {
+			envelopes = append(envelopes, response.ScanTasks)
+			nextFrontier = append(nextFrontier, response.PlanTasks...)
+		}
+		frontier = nextFrontier
 	}
 
 	return envelopes, nil
+}
+
+// fetchScanTaskFrontier fetches one breadth-first frontier concurrently while
+// placing responses back into handle order. When a handle fails, unfinished
+// later handles are canceled, but earlier handles are allowed to finish so the
+// first error in the old serial handle order remains deterministic.
+func (r *Catalog) fetchScanTaskFrontier(
+	ctx context.Context,
+	ident table.Identifier,
+	handles []string,
+	maxConcurrency int,
+) ([]FetchScanTasksResponse, error) {
+	responses := make([]FetchScanTasksResponse, len(handles))
+	errs := make([]error, len(handles))
+	if len(handles) == 0 {
+		return responses, nil
+	}
+	if maxConcurrency <= 0 {
+		maxConcurrency = runtime.GOMAXPROCS(0)
+	}
+	maxConcurrency = min(maxConcurrency, len(handles))
+
+	requestCtxs := make([]context.Context, len(handles))
+	requestCancels := make([]context.CancelFunc, len(handles))
+	for i := range handles {
+		requestCtxs[i], requestCancels[i] = context.WithCancel(ctx)
+	}
+	defer func() {
+		for _, cancel := range requestCancels {
+			cancel()
+		}
+	}()
+
+	var (
+		mu               sync.Mutex
+		completed        = make([]bool, len(handles))
+		siblingCanceled  = make([]bool, len(handles))
+		lowestFailureIdx = -1
+	)
+
+	var group errgroup.Group
+	group.SetLimit(maxConcurrency)
+
+	for i, handle := range handles {
+		group.Go(func() error {
+			response, fetchErr := r.FetchScanTasks(requestCtxs[i], ident, FetchScanTasksRequest{PlanTask: handle})
+
+			mu.Lock()
+			defer mu.Unlock()
+			completed[i] = true
+			if fetchErr == nil {
+				responses[i] = response
+
+				return nil
+			}
+
+			errs[i] = fmt.Errorf("fetching scan tasks for handle %q: %w", handle, fetchErr)
+			if siblingCanceled[i] || (lowestFailureIdx >= 0 && i > lowestFailureIdx) {
+				return fetchErr
+			}
+
+			if lowestFailureIdx < 0 || i < lowestFailureIdx {
+				lowestFailureIdx = i
+				for j := i + 1; j < len(handles); j++ {
+					if completed[j] || siblingCanceled[j] {
+						continue
+					}
+					siblingCanceled[j] = true
+					requestCancels[j]()
+				}
+			}
+
+			return fetchErr
+		})
+	}
+
+	if waitErr := group.Wait(); waitErr != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		for i, err := range errs {
+			if err != nil && !siblingCanceled[i] {
+				return nil, err
+			}
+		}
+
+		return nil, waitErr
+	}
+
+	return responses, nil
 }
 
 // remoteScanTasks decodes each server task envelope into domain FileScanTasks.

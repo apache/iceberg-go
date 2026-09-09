@@ -43,6 +43,10 @@ type compiledFileFilterPlan struct {
 	recordFilter      expr.Expression
 	extensionRegistry *expr.ExtensionRegistry
 	dropFile          bool
+
+	// extracts are variant sub-path terms materialized as synthetic derived
+	// columns for the record filter; applied per-batch by extractResidualFilter.
+	extracts []iceberg.VariantExtractColumn
 }
 
 func (p *compiledFileFilterPlan) recordProcessor(ctx context.Context) recProcessFn {
@@ -271,22 +275,50 @@ func compileFileFilterPlan(
 		rowFilter = iceberg.AlwaysTrue{}
 	}
 
-	translatedFilter, err := iceberg.TranslateColumnNames(rowFilter, fileSchema)
+	translatedRecord, extracts, err := iceberg.TranslateColumnNamesForScan(rowFilter, fileSchema)
 	if err != nil {
 		return nil, err
 	}
 
-	boundFilter := translatedFilter
-	if !translatedFilter.Equals(iceberg.AlwaysFalse{}) {
-		boundFilter, err = iceberg.BindExpr(fileSchema, translatedFilter, caseSensitive)
+	// Variant extract terms become synthetic derived columns bound against an
+	// augmented schema for the record filter and residual.
+	recordSchema := fileSchema
+	if len(extracts) > 0 {
+		recordSchema = augmentSchemaWithExtracts(fileSchema, extracts)
+	}
+
+	boundFilter := translatedRecord
+	if !translatedRecord.Equals(iceberg.AlwaysFalse{}) {
+		boundFilter, err = iceberg.BindExpr(recordSchema, translatedRecord, caseSensitive)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	plan := &compiledFileFilterPlan{}
+	plan := &compiledFileFilterPlan{extracts: extracts}
 	if includePruning {
-		statsFilter, err := iceberg.RewriteNotExpr(boundFilter)
+		// Variant extract terms have no row-group statistics. The spec prunes them
+		// at the file level via variant bounds (format/spec.md "Bounds for Variant"),
+		// so they are excluded from the row-group stats/bloom filter here.
+		pruneFilter := boundFilter
+		if len(extracts) > 0 {
+			stripped, err := stripExtractPredicates(rowFilter)
+			if err != nil {
+				return nil, err
+			}
+			pruneFilter, err = iceberg.TranslateColumnNames(stripped, fileSchema)
+			if err != nil {
+				return nil, err
+			}
+			if !pruneFilter.Equals(iceberg.AlwaysFalse{}) && !pruneFilter.Equals(iceberg.AlwaysTrue{}) {
+				pruneFilter, err = iceberg.BindExpr(fileSchema, pruneFilter, caseSensitive)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		statsFilter, err := iceberg.RewriteNotExpr(pruneFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -310,7 +342,7 @@ func compileFileFilterPlan(
 		return plan, nil
 	}
 
-	extSet, recordFilter, err := substrait.ConvertExpr(fileSchema, boundFilter, caseSensitive)
+	extSet, recordFilter, err := substrait.ConvertExpr(recordSchema, boundFilter, caseSensitive)
 	if err != nil {
 		return nil, err
 	}
@@ -318,4 +350,58 @@ func compileFileFilterPlan(
 	plan.extensionRegistry = extSet
 
 	return plan, nil
+}
+
+// stripExtractPredicates replaces variant extract predicates, and any NOT over them, with AlwaysTrue for stats/bloom pruning.
+func stripExtractPredicates(expr iceberg.BooleanExpression) (iceberg.BooleanExpression, error) {
+	res, err := iceberg.VisitExpr(expr, extractStripper{})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.expr, nil
+}
+
+// strippedResult is the rewritten expression plus whether its subtree referenced an extract.
+type strippedResult struct {
+	expr       iceberg.BooleanExpression
+	hasExtract bool
+}
+
+type extractStripper struct{}
+
+func (extractStripper) VisitTrue() strippedResult {
+	return strippedResult{expr: iceberg.AlwaysTrue{}}
+}
+
+func (extractStripper) VisitFalse() strippedResult {
+	return strippedResult{expr: iceberg.AlwaysFalse{}}
+}
+
+func (extractStripper) VisitNot(child strippedResult) strippedResult {
+	if child.hasExtract {
+		return strippedResult{expr: iceberg.AlwaysTrue{}, hasExtract: true}
+	}
+
+	return strippedResult{expr: iceberg.NewNot(child.expr)}
+}
+
+func (extractStripper) VisitAnd(left, right strippedResult) strippedResult {
+	return strippedResult{expr: iceberg.NewAnd(left.expr, right.expr), hasExtract: left.hasExtract || right.hasExtract}
+}
+
+func (extractStripper) VisitOr(left, right strippedResult) strippedResult {
+	return strippedResult{expr: iceberg.NewOr(left.expr, right.expr), hasExtract: left.hasExtract || right.hasExtract}
+}
+
+func (extractStripper) VisitUnbound(pred iceberg.UnboundPredicate) strippedResult {
+	return strippedResult{expr: pred}
+}
+
+func (extractStripper) VisitBound(pred iceberg.BoundPredicate) strippedResult {
+	if _, ok := pred.Term().(iceberg.BoundExtract); ok {
+		return strippedResult{expr: iceberg.AlwaysTrue{}, hasExtract: true}
+	}
+
+	return strippedResult{expr: pred}
 }

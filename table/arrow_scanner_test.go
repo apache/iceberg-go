@@ -383,6 +383,7 @@ func TestReadAllDeleteFilesReturnsPartialDeletesOnError(t *testing.T) {
 	// the good worker closes first, then the bad worker returns its error.
 	deletesPerFile, err := readAllDeleteFiles(ctx, testFS, tasks, 2)
 	require.Error(t, err)
+	require.ErrorContains(t, err, "read position deletes from "+badDeletePath)
 	require.NotNil(t, deletesPerFile)
 	require.Contains(t, deletesPerFile, dataPath)
 	require.Len(t, deletesPerFile[dataPath], 1)

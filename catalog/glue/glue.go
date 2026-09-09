@@ -498,7 +498,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		TableInput:   glueTableInput(toTable, fromGlueTable),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create the table %s.%s: %w", fromDatabase, fromTable, err)
+		return nil, fmt.Errorf("failed to create the table %s.%s: %w", toDatabase, toTable, err)
 	}
 
 	// Claim the source with a conditional update before issuing Glue's

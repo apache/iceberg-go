@@ -352,6 +352,8 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 
 	type Alias Schema
 
+	// Keep this literal in sync with every JSON-marshaled Schema field. Copying
+	// the whole Schema would also copy its lazy atomic caches after they are used.
 	aliasCopy := Alias{ID: s.ID, IdentifierFieldIDs: ids}
 
 	return json.Marshal(struct {
@@ -522,6 +524,33 @@ func (s *Schema) accessorForField(id int) (accessor, bool) {
 	acc, ok := idx[id]
 
 	return acc, ok
+}
+
+// columnPathSegments returns the own-name path segments from the top-level column down to id, so a name containing '.' stays one segment.
+func (s *Schema) columnPathSegments(id int) []string {
+	idToField, err := s.lazyIDToField()
+	if err != nil {
+		return nil
+	}
+	parents, err := s.lazyIDToParent()
+	if err != nil {
+		return nil
+	}
+	var segs []string
+	for cur := id; ; {
+		f, ok := idToField[cur]
+		if !ok {
+			return nil
+		}
+		segs = append([]string{f.Name}, segs...)
+		p, ok := parents[cur]
+		if !ok {
+			break
+		}
+		cur = p
+	}
+
+	return segs
 }
 
 // Equals compares the fields and identifierIDs, but does not compare

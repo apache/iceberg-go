@@ -2094,6 +2094,26 @@ func TestParentDependentManifestsRejectsUnregisteredSpec(t *testing.T) {
 	assert.ErrorContains(t, err, "99")
 }
 
+func TestParentDependentManifestsCleansOrphanOnWriterConstructionError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec,
+		"mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 96, "writer-error", staleDV)
+
+	sp.txn.meta.formatVersion = 4
+	before := metadataFiles(t, wfs)
+	_, err := sp.parentDependentManifests(context.Background(), parent)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported manifest version")
+	assert.Equal(t, before, metadataFiles(t, wfs),
+		"writer construction failure must not leave an orphan")
+}
+
 func TestAccumulateSummaryDeltaRejectsUnregisteredSpec(t *testing.T) {
 	registered := partitionedSpec()
 	txn, wfs := createTestTransactionWithMemIO(t, registered)
