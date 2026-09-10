@@ -2352,8 +2352,6 @@ func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
 	}
 
 	for _, benchmark := range benchmarks {
-		benchmark := benchmark
-
 		b.Run(benchmark.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(data)))
