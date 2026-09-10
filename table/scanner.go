@@ -383,13 +383,47 @@ func openManifestWithProjection(
 	projection *iceberg.ManifestEntryProjection,
 	dropColumnStats bool,
 ) ([]iceberg.ManifestEntry, error) {
-	// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
-	out := make([]iceberg.ManifestEntry, 0, max(0, int(manifest.AddedDataFiles())+int(manifest.ExistingDataFiles())))
-	if err := streamManifest(io, manifest, partitionFilter, metricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
-		out = append(out, entry)
+	return openManifestWithReadOptions(
+		io, manifest, partitionFilter, metricsEval, projection, dropColumnStats, true, false)
+}
 
-		return nil
-	}); err != nil {
+func openManifestWithOptions(io io.IO, manifest iceberg.ManifestFile,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error), discardDeleted, discardExisting bool,
+) ([]iceberg.ManifestEntry, error) {
+	return openManifestWithReadOptions(
+		io, manifest, partitionFilter, metricsEval, nil, false, discardDeleted, discardExisting)
+}
+
+func openManifestWithReadOptions(
+	io io.IO,
+	manifest iceberg.ManifestFile,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
+	projection *iceberg.ManifestEntryProjection,
+	dropColumnStats, discardDeleted, discardExisting bool,
+) ([]iceberg.ManifestEntry, error) {
+	// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+	capacity := 0
+	if added := manifest.AddedDataFiles(); added > 0 {
+		capacity += int(added)
+	}
+	if !discardExisting {
+		if existing := manifest.ExistingDataFiles(); existing > 0 {
+			capacity += int(existing)
+		}
+	}
+	if !discardDeleted {
+		if deleted := manifest.DeletedDataFiles(); deleted > 0 {
+			capacity += int(deleted)
+		}
+	}
+	out := make([]iceberg.ManifestEntry, 0, capacity)
+	if err := streamManifestWithReadOptions(
+		io, manifest, partitionFilter, metricsEval, projection, dropColumnStats,
+		discardDeleted, discardExisting, func(entry iceberg.ManifestEntry) error {
+			out = append(out, entry)
+
+			return nil
+		}); err != nil {
 		return nil, err
 	}
 
@@ -406,13 +440,36 @@ func streamManifest(manifestIO io.IO, manifest iceberg.ManifestFile,
 	dropColumnStats bool,
 	visit func(iceberg.ManifestEntry) error,
 ) error {
-	entries := manifest.Entries(manifestIO, true)
+	return streamManifestWithReadOptions(
+		manifestIO, manifest, partitionFilter, metricsEval, projection, dropColumnStats,
+		true, false, visit)
+}
+
+func streamManifestWithOptions(manifestIO io.IO, manifest iceberg.ManifestFile,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error), discardDeleted, discardExisting bool,
+	visit func(iceberg.ManifestEntry) error,
+) error {
+	return streamManifestWithReadOptions(
+		manifestIO, manifest, partitionFilter, metricsEval, nil, false,
+		discardDeleted, discardExisting, visit)
+}
+
+func streamManifestWithReadOptions(manifestIO io.IO, manifest iceberg.ManifestFile,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
+	projection *iceberg.ManifestEntryProjection,
+	dropColumnStats, discardDeleted, discardExisting bool,
+	visit func(iceberg.ManifestEntry) error,
+) error {
+	entries := manifest.Entries(manifestIO, discardDeleted)
 	if projection != nil {
-		entries = iceberg.EntriesWithProjection(manifestIO, manifest, true, *projection)
+		entries = iceberg.EntriesWithProjection(manifestIO, manifest, discardDeleted, *projection)
 	}
 	for entry, err := range entries {
 		if err != nil {
 			return err
+		}
+		if discardExisting && entry.Status() == iceberg.EntryStatusEXISTING {
+			continue
 		}
 
 		dataFile := entry.DataFile()
@@ -1006,6 +1063,20 @@ func (scan *Scan) filterManifestsWithSchema(
 	acc *scanMetricsAccumulator,
 	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) ([]iceberg.ManifestFile, error) {
+	return scan.filterManifestsWithSchemaOptions(
+		manifestList, schema, acc, partitionFilters, false)
+}
+
+// filterManifestsWithSchemaOptions is filterManifestsWithSchema with an
+// option for changelog scans, which must retain data manifests containing
+// deleted entries even when they have no live entries.
+func (scan *Scan) filterManifestsWithSchemaOptions(
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+	includeDeleted bool,
+) ([]iceberg.ManifestFile, error) {
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
 	manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
 		return buildManifestEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
@@ -1028,8 +1099,12 @@ func (scan *Scan) filterManifestsWithSchema(
 			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
 		}
 		// Has*Files returns true for unknown counts, so this only skips manifests
-		// known to contain no added or existing (live) entries.
-		if use && !mf.HasAddedFiles() && !mf.HasExistingFiles() {
+		// known to contain no added or existing (live) entries. The deleted-file
+		// count follows the same rule: V1's -1 means unknown, while zero is the
+		// only known empty value. Changelog scans also retain manifests known to
+		// contain deleted entries.
+		if use && !mf.HasAddedFiles() && !mf.HasExistingFiles() &&
+			(!includeDeleted || mf.DeletedDataFiles() == 0) {
 			if isDelete {
 				acc.skippedDeleteManifests++
 			} else {
@@ -1128,6 +1203,31 @@ func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
 	minSeqNum int64,
 	projectScanColumns bool,
 ) (*manifestEntries, error) {
+	return scan.collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
+		ctx, manifestList, schema, partitionFilters, minSeqNum, projectScanColumns, true, false)
+}
+
+func (scan *Scan) collectManifestEntriesWithSchemaOptions(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+	discardDeleted, discardExisting bool,
+) (*manifestEntries, error) {
+	return scan.collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
+		ctx, manifestList, schema, partitionFilters,
+		minSequenceNum(manifestList), false, discardDeleted, discardExisting)
+}
+
+func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+	minSeqNum int64,
+	projectScanColumns bool,
+	discardDeleted, discardExisting bool,
+) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
 		schema,
 		scan.rowFilter,
@@ -1169,8 +1269,8 @@ func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
 				// Keep pruning stats until equality and positional deletes are indexed.
 				projection = &iceberg.ManifestEntryProjection{IncludePruningStats: true}
 			}
-			manifestEntries, err := openManifestWithProjection(
-				fs, mf, partEval, metricsEval, projection, false)
+			manifestEntries, err := openManifestWithReadOptions(
+				fs, mf, partEval, metricsEval, projection, false, discardDeleted, discardExisting)
 			if err != nil {
 				return err
 			}
