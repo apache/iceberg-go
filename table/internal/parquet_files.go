@@ -1956,6 +1956,11 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		if len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
 			fieldIDToColIdx = buildFieldIDToColIdx(fileMeta)
 		}
+		var dictionaryPredsByColumn map[int][]int
+		if len(rowGroupTester.DictionaryPreds) > 0 {
+			dictionaryPredsByColumn = groupRowGroupDictionaryPredicates(
+				fieldIDToColIdx, rowGroupTester.DictionaryPreds)
+		}
 		if len(rowGroupTester.BloomPreds) > 0 {
 			bfReader = w.ParquetReader().GetBloomFilterReader()
 		}
@@ -2007,7 +2012,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 			if use && len(rowGroupTester.DictionaryPreds) > 0 {
 				use = checkRowGroupDictionaries(
-					w.ParquetReader(), fileMeta, rg, fieldIDToColIdx, rowGroupTester.DictionaryPreds)
+					w.ParquetReader(), fileMeta, rg, dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
 			}
 
 			if use && bfReader != nil {
@@ -2039,23 +2044,10 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 	return w.GetRecordReader(ctx, cols, rgList)
 }
 
-// checkRowGroupDictionaries checks each dictionary predicate against the
-// complete dictionary for its column in row group rg. It returns false only
-// when the column metadata proves that every data page is dictionary encoded
-// and none of the predicate values occur in the dictionary. Missing encoding
-// metadata, dictionary pages, unsupported physical types, malformed pages, or
-// reader errors keep the row group so this optimisation cannot drop data.
-func checkRowGroupDictionaries(
-	rdr *file.Reader,
-	fileMeta *metadata.FileMetaData,
-	rg int,
+func groupRowGroupDictionaryPredicates(
 	fieldIDToColIdx map[int]int,
 	preds []RowGroupDictionaryPred,
-) bool {
-	if len(preds) == 0 {
-		return true
-	}
-
+) map[int][]int {
 	predsByColumn := make(map[int][]int)
 	for i, pred := range preds {
 		if len(pred.PhysBytes) == 0 {
@@ -2066,6 +2058,26 @@ func checkRowGroupDictionaries(
 		if ok {
 			predsByColumn[colIdx] = append(predsByColumn[colIdx], i)
 		}
+	}
+
+	return predsByColumn
+}
+
+// checkRowGroupDictionaries checks each dictionary predicate against the
+// complete dictionary for its column in row group rg. It returns false only
+// when the column metadata proves that every data page is dictionary encoded
+// and none of the predicate values occur in the dictionary. Missing encoding
+// metadata, dictionary pages, unsupported physical types, malformed pages, or
+// reader errors keep the row group so this optimisation cannot drop data.
+func checkRowGroupDictionaries(
+	rdr *file.Reader,
+	fileMeta *metadata.FileMetaData,
+	rg int,
+	predsByColumn map[int][]int,
+	preds []RowGroupDictionaryPred,
+) bool {
+	if len(preds) == 0 {
+		return true
 	}
 
 	for colIdx, predIndexes := range predsByColumn {

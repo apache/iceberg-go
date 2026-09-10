@@ -2337,15 +2337,24 @@ func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
 		return true, nil
 	}
 	cols := []int{0}
-	absent := int32PhysBytes(-1)
+	benchmarks := []struct {
+		name      string
+		physBytes [][]byte
+		wantRows  int64
+	}{
+		{name: "without dictionary", wantRows: int64(numRowGroups * rowsPerGroup)},
+		{name: "dictionary target absent", physBytes: [][]byte{int32PhysBytes(-1)}},
+		{
+			name:      "dictionary target in one group",
+			physBytes: [][]byte{int32PhysBytes(0)},
+			wantRows:  int64(rowsPerGroup),
+		},
+	}
 
-	for _, withDictionary := range []bool{false, true} {
-		name := "without dictionary"
-		if withDictionary {
-			name = "with dictionary"
-		}
+	for _, benchmark := range benchmarks {
+		benchmark := benchmark
 
-		b.Run(name, func(b *testing.B) {
+		b.Run(benchmark.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(data)))
 			b.ResetTimer()
@@ -2353,9 +2362,9 @@ func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
 			for range b.N {
 				rdr := openBloomTestReader(b, data)
 				tester := &internal.ParquetRowGroupTester{StatsFn: alwaysKeep}
-				if withDictionary {
+				if len(benchmark.physBytes) > 0 {
 					tester.DictionaryPreds = []internal.RowGroupDictionaryPred{
-						{FieldID: 1, PhysBytes: [][]byte{absent}},
+						{FieldID: 1, PhysBytes: benchmark.physBytes},
 					}
 				}
 
@@ -2364,11 +2373,8 @@ func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
 					b.Fatal(err)
 				}
 				rows := countRecords(b, rr)
-				if withDictionary && rows != 0 {
-					b.Fatalf("dictionary pruning returned %d rows, want 0", rows)
-				}
-				if !withDictionary && rows != int64(numRowGroups*rowsPerGroup) {
-					b.Fatalf("baseline returned %d rows, want %d", rows, numRowGroups*rowsPerGroup)
+				if rows != benchmark.wantRows {
+					b.Fatalf("returned %d rows, want %d", rows, benchmark.wantRows)
 				}
 				if err := rdr.Close(); err != nil {
 					b.Fatal(err)
