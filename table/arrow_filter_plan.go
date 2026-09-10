@@ -37,8 +37,9 @@ import (
 // from statsFilter for each file because inclusiveMetricsEval stores mutable
 // per-row-group maps.
 type compiledFileFilterPlan struct {
-	statsFilter iceberg.BooleanExpression
-	bloomPreds  []tblutils.RowGroupBloomPred
+	statsFilter     iceberg.BooleanExpression
+	bloomPreds      []tblutils.RowGroupBloomPred
+	dictionaryPreds []tblutils.RowGroupDictionaryPred
 
 	recordFilter      expr.Expression
 	extensionRegistry *expr.ExtensionRegistry
@@ -299,7 +300,7 @@ func compileFileFilterPlan(
 	if includePruning {
 		// Variant extract terms have no row-group statistics. The spec prunes them
 		// at the file level via variant bounds (format/spec.md "Bounds for Variant"),
-		// so they are excluded from the row-group stats/bloom filter here.
+		// so they are excluded from the row-group stats/dictionary/bloom filter here.
 		pruneFilter := boundFilter
 		if len(extracts) > 0 {
 			stripped, err := stripExtractPredicates(rowFilter)
@@ -326,9 +327,14 @@ func compileFileFilterPlan(
 		if err != nil {
 			return nil, err
 		}
+		dictionaryPreds, err := newDictionaryPredicatesFromRewritten(statsFilter)
+		if err != nil {
+			return nil, err
+		}
 
 		plan.statsFilter = statsFilter
 		plan.bloomPreds = bloomPreds
+		plan.dictionaryPreds = dictionaryPreds
 	}
 	if !includeRecordFilter {
 		return plan, nil
