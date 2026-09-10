@@ -52,7 +52,7 @@ type producerImpl interface {
 	// overwrites return them with removed data/delete files filtered out. It is
 	// re-evaluated against the fresh parent on every OCC retry, so it must read
 	// parent rather than the transaction's (stale) base snapshot.
-	existingManifests(parent *Snapshot) ([]iceberg.ManifestFile, error)
+	existingManifests(ctx context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error)
 	// deletedEntries returns the DELETE manifest entries for files this
 	// producer removes from parent (nil means none), re-evaluated against the
 	// fresh parent on every OCC retry.
@@ -113,7 +113,7 @@ func (fa *fastAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	return manifests, nil
 }
 
-func (fa *fastAppendFiles) existingManifests(parent *Snapshot) ([]iceberg.ManifestFile, error) {
+func (fa *fastAppendFiles) existingManifests(_ context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
 	if parent == nil {
 		return nil, nil
 	}
@@ -143,6 +143,10 @@ func (fa *fastAppendFiles) needsValidation() bool { return false }
 type overwriteFiles struct {
 	base *snapshotProducer
 
+	// manifestConcurrency bounds concurrent filtering and rewriting of
+	// inherited manifests. Zero uses the process-wide worker configuration.
+	manifestConcurrency int
+
 	// filter is the row-level predicate the caller declared for this
 	// overwrite (e.g. WithOverwriteFilter). Nil or AlwaysTrue means
 	// "overwrite everything" — any concurrent added data file is a
@@ -159,6 +163,17 @@ type overwriteFiles struct {
 	skipDefaultValidator bool
 }
 
+type overwriteManifestScan struct {
+	notDeleted []iceberg.ManifestEntry
+	deleted    []iceberg.ManifestEntry
+}
+
+type overwriteParentManifests struct {
+	existing  []iceberg.ManifestFile
+	deleted   []iceberg.ManifestEntry
+	rewritten []iceberg.ManifestFile
+}
+
 func newOverwriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
 	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
 	prod.producerImpl = &overwriteFiles{base: prod}
@@ -171,7 +186,7 @@ func (of *overwriteFiles) processManifests(manifests []iceberg.ManifestFile) ([]
 	return manifests, nil
 }
 
-func (of *overwriteFiles) existingManifests(parent *Snapshot) ([]iceberg.ManifestFile, error) {
+func (of *overwriteFiles) existingManifests(ctx context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
 	// determine if there are any existing manifest files
 	existingFiles := make([]iceberg.ManifestFile, 0)
 
@@ -184,82 +199,266 @@ func (of *overwriteFiles) existingManifests(parent *Snapshot) ([]iceberg.Manifes
 		return existingFiles, err
 	}
 
-	for _, m := range manifestList {
-		// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
-		capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
-		notDeleted := make([]iceberg.ManifestEntry, 0, max(0, capacity))
-		foundDeletedCount := 0
-		for entry, err := range of.base.iterManifestEntries(m, true) {
+	manifestResults := make([][]iceberg.ManifestFile, len(manifestList))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(min(of.manifestWorkerCount(), len(manifestList)))
+	for index, manifest := range manifestList {
+		g.Go(func() error {
+			result, err := of.filterManifest(gctx, manifest)
 			if err != nil {
-				return existingFiles, err
+				return err
 			}
-			path := entry.DataFile().FilePath()
-			content := entry.DataFile().ContentType()
-			_, isDeletedData := of.base.deletedFiles[path]
-			isDeletedDelete := of.base.deleteFileRemoved(entry.DataFile())
+			manifestResults[index] = result
 
-			isData := content == iceberg.EntryContentData
-			matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
-			if matched {
-				foundDeletedCount++
-			} else {
-				notDeleted = append(notDeleted, entry)
-			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		if cleanupErr := of.cleanupFilteredManifests(manifestList, manifestResults); cleanupErr != nil {
+			return existingFiles, errors.Join(err, cleanupErr)
 		}
 
-		if len(notDeleted) == 0 {
-			continue
-		}
+		return existingFiles, err
+	}
 
-		if foundDeletedCount == 0 {
-			existingFiles = append(existingFiles, m)
-
-			continue
-		}
-
-		// wrap in a function to ensure that the writer is closed even if a panic occurs
-		rewriteManifest := func(m iceberg.ManifestFile, notDeleted []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
-			spec, err := of.base.txn.meta.GetSpecByID(int(m.PartitionSpecID()))
-			if err != nil {
-				return nil, err
-			}
-
-			wr, path, counter, fileCloser, err := of.base.newManifestWriter(*spec, iceberg.WithManifestWriterContent(m.ManifestContent()))
-			if err != nil {
-				return nil, err
-			}
-			defer internal.CheckedClose(fileCloser, &retErr)
-			writerClosed := false
-			defer func() {
-				if !writerClosed {
-					internal.CheckedClose(wr, &retErr)
-				}
-			}()
-
-			for _, entry := range notDeleted {
-				if err := wr.Existing(entry); err != nil {
-					return nil, err
-				}
-			}
-
-			// close the writer to force a flush and ensure counter.Count is accurate
-			writerClosed = true
-			if err := wr.Close(); err != nil {
-				return nil, err
-			}
-
-			return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(m.ManifestContent()))
-		}
-
-		mf, err := rewriteManifest(m, notDeleted)
-		if err != nil {
-			return existingFiles, err
-		}
-
-		existingFiles = append(existingFiles, mf)
+	for _, manifests := range manifestResults {
+		existingFiles = append(existingFiles, manifests...)
 	}
 
 	return existingFiles, nil
+}
+
+func (of *overwriteFiles) manifestWorkerCount() int {
+	concurrency := of.manifestConcurrency
+	if concurrency <= 0 {
+		concurrency = config.EnvConfig.MaxWorkers
+	}
+
+	return manifestMergeConcurrencyLimit(concurrency)
+}
+
+func (of *overwriteFiles) filterManifest(ctx context.Context, m iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	scan, err := of.scanManifest(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	if len(scan.notDeleted) == 0 {
+		return nil, nil
+	}
+
+	if len(scan.deleted) == 0 {
+		return []iceberg.ManifestFile{m}, nil
+	}
+
+	filtered, err := of.rewriteManifest(ctx, m, scan.notDeleted)
+	if err != nil {
+		return nil, err
+	}
+
+	return []iceberg.ManifestFile{filtered}, nil
+}
+
+func (of *overwriteFiles) scanManifest(ctx context.Context, m iceberg.ManifestFile) (overwriteManifestScan, error) {
+	if err := context.Cause(ctx); err != nil {
+		return overwriteManifestScan{}, err
+	}
+
+	// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+	capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
+	scan := overwriteManifestScan{
+		notDeleted: make([]iceberg.ManifestEntry, 0, max(0, capacity)),
+	}
+	for entry, err := range of.base.iterManifestEntries(m, true) {
+		if err != nil {
+			return overwriteManifestScan{}, err
+		}
+		if err := context.Cause(ctx); err != nil {
+			return overwriteManifestScan{}, err
+		}
+
+		path := entry.DataFile().FilePath()
+		content := entry.DataFile().ContentType()
+		_, isDeletedData := of.base.deletedFiles[path]
+		isDeletedDelete := of.base.deleteFileRemoved(entry.DataFile())
+
+		isData := content == iceberg.EntryContentData
+		matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
+		if matched {
+			seqNum := entry.SequenceNum()
+			scan.deleted = append(scan.deleted,
+				iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
+					&of.base.snapshotID, &seqNum, entry.FileSequenceNum(),
+					entry.DataFile()))
+
+			continue
+		}
+
+		scan.notDeleted = append(scan.notDeleted, entry)
+	}
+
+	return scan, nil
+}
+
+// rewriteManifest writes the surviving entries from an inherited manifest.
+// The output is removed on any failure so a cancelled or failed worker cannot
+// leave a partial object behind.
+func (of *overwriteFiles) rewriteManifest(
+	ctx context.Context,
+	m iceberg.ManifestFile,
+	notDeleted []iceberg.ManifestEntry,
+) (_ iceberg.ManifestFile, retErr error) {
+	spec, err := of.base.txn.meta.GetSpecByID(int(m.PartitionSpecID()))
+	if err != nil {
+		return nil, err
+	}
+
+	wr, path, counter, fileCloser, err := of.base.newManifestWriter(*spec, iceberg.WithManifestWriterContent(m.ManifestContent()))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		if cleanupErr := of.base.io.Remove(path); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove failed manifest %s: %w", path, cleanupErr))
+		}
+	}()
+	defer internal.CheckedClose(fileCloser, &retErr)
+	writerClosed := false
+	defer func() {
+		if !writerClosed {
+			internal.CheckedClose(wr, &retErr)
+		}
+	}()
+
+	for _, entry := range notDeleted {
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
+		if err := wr.Existing(entry); err != nil {
+			return nil, err
+		}
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+
+	// close the writer to force a flush and ensure counter.Count is accurate
+	writerClosed = true
+	if err := wr.Close(); err != nil {
+		return nil, err
+	}
+
+	return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(m.ManifestContent()))
+}
+
+func (of *overwriteFiles) cleanupFilteredManifests(input []iceberg.ManifestFile, results [][]iceberg.ManifestFile) error {
+	inputPaths := make(map[string]struct{}, len(input))
+	for _, manifest := range input {
+		inputPaths[manifest.FilePath()] = struct{}{}
+	}
+
+	seen := make(map[string]struct{})
+	var cleanupErr error
+	for _, manifests := range results {
+		for _, manifest := range manifests {
+			path := manifest.FilePath()
+			if _, ok := inputPaths[path]; ok {
+				continue
+			}
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			if err := of.base.io.Remove(path); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove filtered manifest %s: %w", path, err))
+			}
+		}
+	}
+
+	return cleanupErr
+}
+
+// filterAndRewriteParentManifests scans each inherited manifest once, using the
+// same pass to collect tombstones and rewrite surviving entries. The old
+// producer path needed one full manifest read for each of those operations.
+func (of *overwriteFiles) filterAndRewriteParentManifests(
+	ctx context.Context,
+	parent *Snapshot,
+) (overwriteParentManifests, error) {
+	result := overwriteParentManifests{}
+	if parent == nil {
+		return result, nil
+	}
+
+	manifestList, err := parent.Manifests(of.base.io)
+	if err != nil {
+		return result, err
+	}
+
+	manifestResults := make([][]iceberg.ManifestFile, len(manifestList))
+	scanResults := make([]overwriteManifestScan, len(manifestList))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(min(of.manifestWorkerCount(), len(manifestList)))
+	for index, manifest := range manifestList {
+		g.Go(func() error {
+			scan, err := of.scanManifest(gctx, manifest)
+			if err != nil {
+				return err
+			}
+			scanResults[index] = scan
+
+			if len(scan.notDeleted) == 0 {
+				return nil
+			}
+			if len(scan.deleted) == 0 {
+				manifestResults[index] = []iceberg.ManifestFile{manifest}
+
+				return nil
+			}
+
+			filtered, err := of.rewriteManifest(gctx, manifest, scan.notDeleted)
+			if err != nil {
+				return err
+			}
+			manifestResults[index] = []iceberg.ManifestFile{filtered}
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		if cleanupErr := of.cleanupFilteredManifests(manifestList, manifestResults); cleanupErr != nil {
+			return result, errors.Join(err, cleanupErr)
+		}
+
+		return result, err
+	}
+
+	result.existing = make([]iceberg.ManifestFile, 0, len(manifestList))
+	result.deleted = make([]iceberg.ManifestEntry, 0, len(manifestList))
+	for index, manifests := range manifestResults {
+		result.existing = append(result.existing, manifests...)
+		result.deleted = append(result.deleted, scanResults[index].deleted...)
+		if len(scanResults[index].deleted) > 0 && len(scanResults[index].notDeleted) > 0 {
+			result.rewritten = append(result.rewritten, manifests...)
+		}
+	}
+
+	return result, nil
+}
+
+func (sp *snapshotProducer) cleanupGeneratedManifests(manifests []iceberg.ManifestFile) error {
+	var cleanupErr error
+	for _, manifest := range manifests {
+		if err := sp.io.Remove(manifest.FilePath()); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove generated manifest %s: %w", manifest.FilePath(), err))
+		}
+	}
+
+	return cleanupErr
 }
 
 // validate rejects the overwrite if a concurrent commit added data
@@ -317,33 +516,12 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context, parent *Snapshot) 
 	}
 
 	getEntries := func(m iceberg.ManifestFile) ([]iceberg.ManifestEntry, error) {
-		// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
-		capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
-		result := make([]iceberg.ManifestEntry, 0, max(0, capacity))
-		for entry, err := range of.base.iterManifestEntries(m, true) {
-			if err != nil {
-				return nil, err
-			}
-			path := entry.DataFile().FilePath()
-			content := entry.DataFile().ContentType()
+		scan, err := of.scanManifest(ctx, m)
 
-			_, isDeletedData := of.base.deletedFiles[path]
-			isDeletedDelete := of.base.deleteFileRemoved(entry.DataFile())
-
-			if (isDeletedData && content == iceberg.EntryContentData) ||
-				(isDeletedDelete && content != iceberg.EntryContentData) {
-				seqNum := entry.SequenceNum()
-				result = append(result,
-					iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
-						&of.base.snapshotID, &seqNum, entry.FileSequenceNum(),
-						entry.DataFile()))
-			}
-		}
-
-		return result, nil
+		return scan.deleted, err
 	}
 
-	nWorkers := config.EnvConfig.MaxWorkers
+	nWorkers := of.manifestWorkerCount()
 	finalResult := make([]iceberg.ManifestEntry, 0, len(previousManifests))
 	for entries, err := range tblutils.MapExec(ctx, nWorkers, slices.Values(previousManifests), getEntries) {
 		if err != nil {
@@ -912,6 +1090,24 @@ func (sp *snapshotProducer) assembleManifests(ctx context.Context, parent *Snaps
 // files are inherited and the removed files are actually dropped — grafting the
 // attempt-0 result onto a fresh parent would resurrect the removed files.
 func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent *Snapshot) (_ []iceberg.ManifestFile, err error) {
+	if of, ok := sp.producerImpl.(*overwriteFiles); ok {
+		parentManifests, err := of.filterAndRewriteParentManifests(ctx, parent)
+		if err != nil {
+			return nil, err
+		}
+
+		deletedManifests, err := sp.writeDeletedEntries(parentManifests.deleted)
+		if err != nil {
+			if cleanupErr := sp.cleanupGeneratedManifests(parentManifests.rewritten); cleanupErr != nil {
+				return nil, errors.Join(err, cleanupErr)
+			}
+
+			return nil, err
+		}
+
+		return slices.Concat(deletedManifests, parentManifests.existing), nil
+	}
+
 	deleted, err := sp.deletedEntries(ctx, parent)
 	if err != nil {
 		return nil, err
@@ -924,79 +1120,15 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 
 	if len(deleted) > 0 {
 		g.Go(func() error {
-			// Group deleted entries by (specID, contentType) to ensure data and
-			// delete file entries are written to separate manifests with the
-			// correct ManifestContent.
-			type groupKey struct {
-				specID  int
-				content iceberg.ManifestContent
-			}
-			groups := map[groupKey][]iceberg.ManifestEntry{}
-			for _, entry := range deleted {
-				content := iceberg.ManifestContentData
-				if entry.DataFile().ContentType() != iceberg.EntryContentData {
-					content = iceberg.ManifestContentDeletes
-				}
-				key := groupKey{specID: int(entry.DataFile().SpecID()), content: content}
-				groups[key] = append(groups[key], entry)
-			}
+			var err error
+			deletedFilesManifests, err = sp.writeDeletedEntries(deleted)
 
-			writeGroup := func(key groupKey, entries []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
-				spec, err := sp.spec(key.specID)
-				if err != nil {
-					return nil, err
-				}
-
-				wr, path, counter, out, err := sp.newManifestWriter(spec,
-					iceberg.WithManifestWriterContent(key.content))
-				if err != nil {
-					return nil, err
-				}
-				defer internal.CheckedClose(out, &retErr)
-
-				writerClosed := false
-				defer func() {
-					if !writerClosed {
-						internal.CheckedClose(wr, &retErr)
-					}
-				}()
-
-				for _, entry := range entries {
-					if err := wr.Delete(entry); err != nil {
-						return nil, err
-					}
-				}
-
-				writerClosed = true
-				if err := wr.Close(); err != nil {
-					return nil, err
-				}
-
-				return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(key.content))
-			}
-
-			keys := slices.SortedFunc(maps.Keys(groups), func(a, b groupKey) int {
-				if c := cmp.Compare(a.specID, b.specID); c != 0 {
-					return c
-				}
-
-				return cmp.Compare(a.content, b.content)
-			})
-
-			for _, key := range keys {
-				mf, err := writeGroup(key, groups[key])
-				if err != nil {
-					return err
-				}
-				deletedFilesManifests = append(deletedFilesManifests, mf)
-			}
-
-			return nil
+			return err
 		})
 	}
 
 	g.Go(func() error {
-		m, err := sp.existingManifests(parent)
+		m, err := sp.existingManifests(ctx, parent)
 		if err != nil {
 			return err
 		}
@@ -1010,6 +1142,93 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 	}
 
 	return slices.Concat(deletedFilesManifests, existingManifests), nil
+}
+
+func (sp *snapshotProducer) writeDeletedEntries(deleted []iceberg.ManifestEntry) (_ []iceberg.ManifestFile, retErr error) {
+	if len(deleted) == 0 {
+		return nil, nil
+	}
+
+	// Group deleted entries by (specID, contentType) to ensure data and delete
+	// file entries are written to separate manifests with the correct content.
+	type groupKey struct {
+		specID  int
+		content iceberg.ManifestContent
+	}
+	groups := map[groupKey][]iceberg.ManifestEntry{}
+	for _, entry := range deleted {
+		content := iceberg.ManifestContentData
+		if entry.DataFile().ContentType() != iceberg.EntryContentData {
+			content = iceberg.ManifestContentDeletes
+		}
+		key := groupKey{specID: int(entry.DataFile().SpecID()), content: content}
+		groups[key] = append(groups[key], entry)
+	}
+
+	writeGroup := func(key groupKey, entries []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
+		spec, err := sp.spec(key.specID)
+		if err != nil {
+			return nil, err
+		}
+
+		wr, path, counter, out, err := sp.newManifestWriter(spec,
+			iceberg.WithManifestWriterContent(key.content))
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if retErr == nil {
+				return
+			}
+			if cleanupErr := sp.io.Remove(path); cleanupErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("remove failed delete manifest %s: %w", path, cleanupErr))
+			}
+		}()
+		defer internal.CheckedClose(out, &retErr)
+
+		writerClosed := false
+		defer func() {
+			if !writerClosed {
+				internal.CheckedClose(wr, &retErr)
+			}
+		}()
+
+		for _, entry := range entries {
+			if err := wr.Delete(entry); err != nil {
+				return nil, err
+			}
+		}
+
+		writerClosed = true
+		if err := wr.Close(); err != nil {
+			return nil, err
+		}
+
+		return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(key.content))
+	}
+
+	keys := slices.SortedFunc(maps.Keys(groups), func(a, b groupKey) int {
+		if c := cmp.Compare(a.specID, b.specID); c != 0 {
+			return c
+		}
+
+		return cmp.Compare(a.content, b.content)
+	})
+
+	result := make([]iceberg.ManifestFile, 0, len(keys))
+	for _, key := range keys {
+		mf, err := writeGroup(key, groups[key])
+		if err != nil {
+			if cleanupErr := sp.cleanupGeneratedManifests(result); cleanupErr != nil {
+				return nil, errors.Join(err, cleanupErr)
+			}
+
+			return nil, err
+		}
+		result = append(result, mf)
+	}
+
+	return result, nil
 }
 
 func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, files []iceberg.DataFile, output *[]iceberg.ManifestFile) func() (err error) {
