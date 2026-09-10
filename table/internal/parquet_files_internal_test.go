@@ -144,3 +144,19 @@ func TestNewFileWriterUsesProvidedSchemaMetadata(t *testing.T) {
 	assert.Equal(t, variantFieldIDs, parquetWriter.variantFieldIDs)
 	assert.Equal(t, 99, parquetWriter.colMapping["provided"])
 }
+
+// getWriteProperties must enable the cost-based dictionary fallback for every leaf column
+// (parquet-mr parity); arrow-go leaves it off for compressed columns, and Iceberg writes zstd.
+func TestGetWritePropertiesEnablesDictCostFallback(t *testing.T) {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "s", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "n", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	}, nil)
+
+	format := parquetFormat{}
+	wp, err := getWriteProperties(format.GetWriteProperties(iceberg.Properties{}), arrowSchema)
+	require.NoError(t, err)
+
+	assert.True(t, wp.DictionaryCostFallbackEnabledFor("s"))
+	assert.True(t, wp.DictionaryCostFallbackEnabledFor("n"))
+}

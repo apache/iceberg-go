@@ -389,7 +389,7 @@ func TestVariantArrowConversion(t *testing.T) {
 		dataField := arrowSc.Field(1)
 		ext, ok := dataField.Type.(arrow.ExtensionType)
 		require.True(t, ok, "expected extension type, got %T", dataField.Type)
-		assert.Equal(t, "parquet.variant", ext.ExtensionName())
+		assert.Equal(t, extensions.VariantExtensionName, ext.ExtensionName())
 
 		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
 		require.NoError(t, err)
@@ -427,7 +427,7 @@ func TestVariantArrowConversion(t *testing.T) {
 		for _, idx := range []int{1, 2} {
 			ext, ok := arrowSc.Field(idx).Type.(arrow.ExtensionType)
 			require.True(t, ok, "field %d should be extension type", idx)
-			assert.Equal(t, "parquet.variant", ext.ExtensionName())
+			assert.Equal(t, extensions.VariantExtensionName, ext.ExtensionName())
 		}
 
 		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
@@ -1199,28 +1199,28 @@ func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.RecordBatch {
 	batch, _, err := array.RecordFromJSON(mem, ArrowSchemaWithAllTimestampPrec,
 		strings.NewReader(`[
 		{
-			"timestamp_s": "2023-01-01T19:25:00-05:00",
+			"timestamp_s": "2023-01-01T19:25:00",
 			"timestamptz_s": "2023-01-01T19:25:00Z",
-			"timestamp_ms": "2023-01-01T19:25:00.123-05:00",
+			"timestamp_ms": "2023-01-01T19:25:00.123",
 			"timestamptz_ms": "2023-01-01T19:25:00.123Z",
-			"timestamp_us": "2023-01-01T19:25:00.123456-05:00",
+			"timestamp_us": "2023-01-01T19:25:00.123456",
 			"timestamptz_us": "2023-01-01T19:25:00.123456Z",
-			"timestamp_ns": "2024-07-11T03:30:00.123456789-05:00",
+			"timestamp_ns": "2024-07-11T03:30:00.123456789",
 			"timestamptz_ns": "2023-01-01T19:25:00.123456789Z",
 			"timestamptz_us_etc_utc": "2023-01-01T19:25:00.123456Z",
 			"timestamptz_ns_z": "2024-07-11T03:30:00.123456789Z",
 			"timestamptz_s_0000": "2023-01-01T19:25:00Z"
 		}, {}, {
-			"timestamp_s": "2023-03-01T19:25:00-05:00",
+			"timestamp_s": "2023-03-01T19:25:00",
 			"timestamptz_s": "2023-03-01T19:25:00Z",
-			"timestamp_ms": "2023-03-01T19:25:00.123-05:00",
+			"timestamp_ms": "2023-03-01T19:25:00.123",
 			"timestamptz_ms": "2023-03-01T19:25:00.123Z",
-			"timestamp_us": "2023-03-01T19:25:00.123456-05:00",
+			"timestamp_us": "2023-03-01T19:25:00.123456",
 			"timestamptz_us": "2023-03-01T19:25:00.123456Z",
-			"timestamp_ns": "2024-07-11T03:30:00.9876543210-05:00",
-			"timestamptz_ns": "2023-03-01T19:25:00.9876543210Z",
+			"timestamp_ns": "2024-07-11T03:30:00.987654321",
+			"timestamptz_ns": "2023-03-01T19:25:00.987654321Z",
 			"timestamptz_us_etc_utc": "2023-03-01T19:25:00.123456Z",
-			"timestamptz_ns_z": "2024-07-11T03:30:00.9876543210Z",
+			"timestamptz_ns_z": "2024-07-11T03:30:00.987654321Z",
 			"timestamptz_s_0000": "2023-03-01T19:25:00Z"
 		}
 	]`))
