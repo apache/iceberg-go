@@ -282,8 +282,8 @@ var _ catalog.Closer = (*Catalog)(nil)
 // This function will create the metadata file in S3 using the catalog and table properties,
 // to determine the bucket and key for the metadata location.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	// Keep the missing-namespace contract that CreateStagedTable enforced when it
-	// ran first, before the federation probe below needed the database name early.
+	// A missing namespace is reported before touching Glue, matching the contract
+	// callers rely on (an identifier without a database is not a missing table).
 	if len(identifier) < 2 {
 		return nil, fmt.Errorf("%w: missing namespace or invalid identifier %v", catalog.ErrNoSuchNamespace, identifier)
 	}
@@ -293,32 +293,28 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	var cfg catalog.CreateTableCfg
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
-	federated, err := c.isS3TablesDatabase(ctx, database)
-	if err != nil {
-		return nil, err
-	}
-	if federated {
-		// S3 Tables assigns storage itself, so a caller-provided location can
-		// never be the managed path it will hand back.
-		if cfg.Location != "" {
-			return nil, fmt.Errorf("cannot specify a location for table %s.%s: S3 Tables manages storage automatically", database, tableName)
-		}
-
-		return c.createS3TablesTable(ctx, database, tableName, identifier, schema, opts...)
-	}
-
 	// The reporter is resolved once at construction (see NewCatalog), so a bad
 	// metrics-reporter-impl already failed there — no per-op guard is needed
 	// before mutating the catalog, and the trailing LoadTable reuses the cached
 	// reporter.
 	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
 	if err != nil {
-		return nil, err
+		// S3 Tables federated databases assign storage themselves, so client-side
+		// location resolution fails with ErrNoDefaultLocation. Only then probe for
+		// federation and retry via the S3 Tables path, keeping the extra
+		// GetDatabase off every other create.
+		if !errors.Is(err, internal.ErrNoDefaultLocation) {
+			return nil, err
+		}
+		federated, ferr := c.isS3TablesDatabase(ctx, database)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if !federated {
+			return nil, err
+		}
+
+		return c.createS3TablesTable(ctx, database, tableName, identifier, schema, opts...)
 	}
 
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
@@ -987,11 +983,17 @@ func (c *Catalog) getRawTable(ctx context.Context, database, tableName string) (
 		return nil, fmt.Errorf("failed to get table %s.%s: missing Glue table response", database, tableName)
 	}
 
-	// S3 Tables federated entries carry their own TableType (e.g. "customer") but
-	// are still Iceberg tables, marked by the table_type parameter.
+	// A standard Iceberg table is an EXTERNAL_TABLE. An S3 Tables federated entry
+	// instead carries the service's own TableType (e.g. "customer"), so accept it
+	// only when it is federated to S3 Tables and marked Iceberg — keeping the
+	// relaxation scoped to that case rather than every database.
 	tableType := tblRes.Table.Parameters[tableParamTableType]
 	isIceberg := strings.EqualFold(tableType, glueTypeIceberg) || tableType == glueTypeIcebergRenaming
-	if aws.ToString(tblRes.Table.TableType) != glueTableType && !isIceberg {
+	federated := tblRes.Table.FederatedTable != nil &&
+		strings.EqualFold(aws.ToString(tblRes.Table.FederatedTable.ConnectionType), s3TablesConnectionType)
+	isExternalTable := aws.ToString(tblRes.Table.TableType) == glueTableType
+	isFederatedIceberg := federated && isIceberg
+	if !isExternalTable && !isFederatedIceberg {
 		return nil, fmt.Errorf("table %s.%s is not an EXTERNAL_TABLE", database, tableName)
 	}
 

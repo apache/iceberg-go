@@ -2528,7 +2528,7 @@ func TestGlueCreateTableS3TablesFederated(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.MatchedBy(func(in *glue.CreateTableInput) bool {
 		return aws.ToString(in.TableInput.Name) == "test_table" &&
@@ -2553,9 +2553,10 @@ func TestGlueCreateTableS3TablesFederated(t *testing.T) {
 	loaded := &types.Table{
 		Name:         aws.String("test_table"),
 		DatabaseName: aws.String("test_database"),
-		// S3 Tables reports its own service TableType, exercising the relaxed
-		// getRawTable gate on the create success path.
+		// S3 Tables reports its own service TableType plus a FederatedTable marker,
+		// exercising the relaxed getRawTable gate on the create success path.
 		TableType:         aws.String("customer"),
+		FederatedTable:    &types.FederatedTable{ConnectionType: aws.String(s3TablesConnectionType)},
 		Parameters:        map[string]string{},
 		StorageDescriptor: &types.StorageDescriptor{Location: aws.String(managedLocation)},
 	}
@@ -2596,7 +2597,7 @@ func TestGlueCreateTableS3TablesCleanupOnFailure(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, nil).Once()
 	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
@@ -2627,7 +2628,7 @@ func TestGlueCreateTableS3TablesCleanupErrorWrapped(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, nil).Once()
 	mockGlueSvc.On("GetTable", mock.Anything, mock.Anything, mock.Anything).
@@ -2652,7 +2653,7 @@ func TestGlueCreateTableS3TablesAllocateError(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return((*glue.CreateTableOutput)(nil), errors.New("allocate boom")).Once()
 
@@ -2664,22 +2665,27 @@ func TestGlueCreateTableS3TablesAllocateError(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueCreateTableS3TablesRejectsExplicitLocation confirms an explicit
-// location is refused for a federated S3 Tables database, which manages storage.
-func TestGlueCreateTableS3TablesRejectsExplicitLocation(t *testing.T) {
+// TestGlueCreateTableExplicitLocationSkipsFederationProbe verifies a create with
+// an explicit location goes straight through the generic path without probing for
+// federation, so such creates never newly require glue:GetDatabase.
+func TestGlueCreateTableExplicitLocationSkipsFederationProbe(t *testing.T) {
 	ctx := context.Background()
+	location := "file://" + t.TempDir()
 	schema := s3TablesTestSchema()
 
 	mockGlueSvc := &mockGlueClient{}
-	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
-		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, nil).Once()
+	// The trailing reload is not the point here; fail it fast to avoid a full
+	// metadata round-trip. What matters is that GetDatabase is never called.
+	mockGlueSvc.On("GetTable", mock.Anything, mock.Anything, mock.Anything).
+		Return((*glue.GetTableOutput)(nil), errors.New("load boom")).Once()
 
 	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: &aws.Config{}}
 	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema,
-		catalog.WithLocation("s3://some-bucket/path"))
-	require.ErrorContains(t, err, "S3 Tables manages storage automatically")
-	mockGlueSvc.AssertNotCalled(t, "CreateTable", mock.Anything, mock.Anything, mock.Anything)
+		catalog.WithLocation(location))
+	require.ErrorContains(t, err, "load boom")
+	mockGlueSvc.AssertNotCalled(t, "GetDatabase", mock.Anything, mock.Anything, mock.Anything)
 	mockGlueSvc.AssertExpectations(t)
 }
 
@@ -2692,7 +2698,7 @@ func TestGlueCreateTableS3TablesMissingVersionId(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, nil).Once()
 	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
@@ -2777,6 +2783,7 @@ func TestGlueGetRawTableTableType(t *testing.T) {
 		name      string
 		tableType string
 		params    map[string]string
+		federated bool
 		wantErr   bool
 	}{
 		{
@@ -2788,11 +2795,19 @@ func TestGlueGetRawTableTableType(t *testing.T) {
 			name:      "s3 tables federated iceberg",
 			tableType: "customer",
 			params:    map[string]string{tableParamTableType: glueTypeIceberg},
+			federated: true,
 		},
 		{
 			name:      "s3 tables federated renaming",
 			tableType: "customer",
 			params:    map[string]string{tableParamTableType: glueTypeIcebergRenaming},
+			federated: true,
+		},
+		{
+			name:      "non-federated iceberg param unexpected type rejected",
+			tableType: "customer",
+			params:    map[string]string{tableParamTableType: glueTypeIceberg},
+			wantErr:   true,
 		},
 		{
 			name:      "non-iceberg unexpected type rejected",
@@ -2805,15 +2820,19 @@ func TestGlueGetRawTableTableType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockGlueSvc := &mockGlueClient{}
-			mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
-				DatabaseName: aws.String("test_database"),
-				Name:         aws.String("test_table"),
-			}, mock.Anything).Return(&glue.GetTableOutput{Table: &types.Table{
+			glueTable := &types.Table{
 				Name:         aws.String("test_table"),
 				DatabaseName: aws.String("test_database"),
 				TableType:    aws.String(tt.tableType),
 				Parameters:   tt.params,
-			}}, nil).Once()
+			}
+			if tt.federated {
+				glueTable.FederatedTable = &types.FederatedTable{ConnectionType: aws.String(s3TablesConnectionType)}
+			}
+			mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+				DatabaseName: aws.String("test_database"),
+				Name:         aws.String("test_table"),
+			}, mock.Anything).Return(&glue.GetTableOutput{Table: glueTable}, nil).Once()
 
 			cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: &aws.Config{}}
 			tbl, err := cat.getRawTable(context.Background(), "test_database", "test_table")
@@ -2838,7 +2857,7 @@ func TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, nil).Once()
 	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
@@ -2873,7 +2892,7 @@ func TestGlueCreateTableS3TablesRollbackOnUpdateFailure(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, nil).Once()
 	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
@@ -2908,7 +2927,7 @@ func TestGlueCreateTableS3TablesNoRollbackOnLoadFailure(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 		Name: aws.String("test_database"),
-	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, nil).Once()
 	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
