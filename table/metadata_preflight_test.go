@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,6 +82,55 @@ func TestParseMetadataBytesAssignsMissingPartitionFieldIDs(t *testing.T) {
 				require.NotNil(t, parsed.LastPartitionSpecID())
 				assert.Equal(t, tt.wantLastFieldID, *parsed.LastPartitionSpecID())
 			}
+		})
+	}
+}
+
+func TestParseMetadataBytesPreservesStaleLastPartitionIDForCommit(t *testing.T) {
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-partition-id": 1000`, `"last-partition-id": 999`, 1)
+	data = strings.Replace(data,
+		`"default-spec-id": 0,`, `"default-spec-id": 1,`, 1)
+	data = strings.Replace(data,
+		`"partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}],`,
+		`"partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}, {"spec-id": 1, "fields": []}],`, 1)
+	require.Contains(t, data, `"last-partition-id": 999`)
+	require.Contains(t, data, `"spec-id": 1`)
+
+	parsed, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
+	require.NotNil(t, parsed.LastPartitionSpecID())
+	assert.Equal(t, 999, *parsed.LastPartitionSpecID())
+
+	update := NewUpdateSpec(New(nil, parsed, "", nil, nil).NewTransaction(), false).
+		AddField("x", iceberg.BucketTransform{NumBuckets: 16}, "x_bucket")
+	_, requirements, err := update.BuildUpdates()
+	require.NoError(t, err)
+	assert.Equal(t, []int{999}, lastAssignedPartitionAssertions(requirements))
+	updated, err := update.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 1, updated.NumFields())
+	assert.Equal(t, 1001, updated.Field(0).FieldID)
+}
+
+func TestAssignMissingPartitionFieldIDsPreservesConsistentMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "counter below assignment floor with no fields",
+			input: `{"last-updated-ms":0,"last-partition-id":0,"partition-specs":[{"spec-id":0,"fields":[]}]}`,
+		},
+		{
+			name:  "counter above greatest field ID",
+			input: `{"last-updated-ms":0,"last-partition-id":1001,"partition-specs":[{"spec-id":0,"fields":[{"field-id":1000}]}]}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized, err := assignMissingPartitionFieldIDs([]byte(tt.input))
+			require.NoError(t, err)
+			assert.Equal(t, tt.input, string(normalized))
 		})
 	}
 }
