@@ -42,6 +42,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -51,6 +52,63 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+func TestStaticCredsFromProps(t *testing.T) {
+	creds, err := staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		iceio.S3SessionToken:    "ST",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	got, err := creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID)
+	require.Equal(t, "SK", got.SecretAccessKey)
+	require.Equal(t, "ST", got.SessionToken)
+
+	creds, err = staticCredsFromProps(iceberg.Properties{})
+	require.NoError(t, err, "no creds must fall back to the default chain")
+	require.Nil(t, creds)
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3AccessKeyID: "AK"})
+	require.Error(t, err, "a lone access key must be an error, not the ambient identity")
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SecretAccessKey: "SK"})
+	require.Error(t, err, "a lone secret key must be an error, not the ambient identity")
+}
+
+// TestSigV4SignsWithPropsCredentials pins the wiring: the SigV4 Authorization
+// header must be signed with the credentials carried in the catalog properties.
+func TestSigV4SignsWithPropsCredentials(t *testing.T) {
+	var authHeader string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithSigV4RegionSvc("us-east-1", "s3"),
+		WithAdditionalProps(iceberg.Properties{
+			iceio.S3AccessKeyID:     "AKIDEXAMPLEPROPS",
+			iceio.S3SecretAccessKey: "secretexample",
+		}))
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/test", nil)
+	require.NoError(t, err)
+	_, err = cat.cl.Do(req)
+	require.NoError(t, err)
+
+	require.Contains(t, authHeader, "Credential=AKIDEXAMPLEPROPS/",
+		"SigV4 must sign with the credentials from catalog properties, not the default chain")
+}
 
 func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}
