@@ -1273,9 +1273,46 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 			})
 		}
 
-		_, err := tx.NewInsert().Model(&toInsert).Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, err)
+		// A concurrent writer may have won the race; return the sentinel in the same
+		// form as the pre-check above. This must stay the first read on the outer tx
+		// so MySQL's REPEATABLE READ snapshot lands after the winner committed.
+		recheck := func(insertErr error) error {
+			_, exists, checkErr := c.resolveNamespaceKeyInTx(ctx, tx, namespace)
+			if checkErr == nil && exists {
+				return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(namespace, "."))
+			}
+			if checkErr != nil {
+				return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, errors.Join(insertErr, checkErr))
+			}
+
+			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, insertErr)
+		}
+
+		// Postgres aborts the whole tx on a failed insert, so only it needs the
+		// savepoint for the re-check; SQLite/MySQL don't, and Oracle can't RELEASE it.
+		if tx.Dialect().Name() == dialect.PG {
+			sp, err := tx.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("error creating savepoint for namespace '%s': %w", namespace, err)
+			}
+
+			if _, err = sp.NewInsert().Model(&toInsert).Exec(ctx); err != nil {
+				if rbErr := sp.Rollback(); rbErr != nil {
+					return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, errors.Join(err, rbErr))
+				}
+
+				return recheck(err)
+			}
+
+			if err = sp.Commit(); err != nil {
+				return fmt.Errorf("error releasing savepoint for namespace '%s': %w", namespace, err)
+			}
+
+			return nil
+		}
+
+		if _, err := tx.NewInsert().Model(&toInsert).Exec(ctx); err != nil {
+			return recheck(err)
 		}
 
 		return nil
