@@ -573,6 +573,13 @@ type Scan struct {
 
 	concurrency int
 
+	// arrowBatchSize, when positive, caps the rows decoded per Arrow
+	// record batch, overriding the table's read.parquet.batch-size
+	// property. Set via WithArrowBatchSize; kept as a dedicated field
+	// (like limit and concurrency) so WithOptions replacing the options
+	// map cannot silently drop it.
+	arrowBatchSize int
+
 	reporter metrics.Reporter
 }
 
@@ -2200,6 +2207,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		rowLimit:        scan.limit,
 		options:         scan.options,
 		concurrency:     scan.concurrency,
+		arrowBatchSize:  scan.arrowBatchSize,
 	}).GetRecords(ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so release here.

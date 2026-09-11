@@ -43,6 +43,11 @@ import (
 // streaming goroutine has already stopped.
 var ErrWriterClosed = errors.New("writer is closed")
 
+// rollingDataWriterQueueCapacity is the default capacity of a rolling
+// writer's record channel. Each buffered record batch is retained until
+// the stream goroutine writes it, so this bound is what caps the memory
+// a stalled writer can hold. Override per write with
+// [WithRecordBatchBufferSize].
 const rollingDataWriterQueueCapacity = 64
 
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
@@ -75,6 +80,10 @@ type writerFactory struct {
 	// Variant shredding: per-file inference over the first shredBufferRows rows.
 	shredEnabled    bool
 	shredBufferRows int
+
+	// recordBufferSize overrides the rolling writers' record channel
+	// capacity; non-positive uses rollingDataWriterQueueCapacity.
+	recordBufferSize int
 
 	writers               sync.Map
 	partitionLocProviders sync.Map
@@ -194,23 +203,24 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 
 	f := &writerFactory{
-		rootLocation:   rootLocation,
-		rootURL:        rootURL,
-		fs:             args.fs,
-		writeUUID:      args.writeUUID,
-		taskSchema:     taskSchema,
-		targetFileSize: targetFileSize,
-		locProvider:    locProvider,
-		tableProps:     meta.props,
-		fileSchema:     fileSchema,
-		arrowSchema:    arrowSchema,
-		writeProps:     format.GetWriteProperties(meta.props),
-		rowGroupBytes:  rowGroupTargetSizeBytes,
-		currentSpec:    *currentSpec,
-		fileFormat:     fileFormat,
-		format:         format,
-		nextCount:      nextCount,
-		stopCount:      stopCount,
+		rootLocation:     rootLocation,
+		rootURL:          rootURL,
+		fs:               args.fs,
+		writeUUID:        args.writeUUID,
+		taskSchema:       taskSchema,
+		targetFileSize:   targetFileSize,
+		locProvider:      locProvider,
+		tableProps:       meta.props,
+		fileSchema:       fileSchema,
+		arrowSchema:      arrowSchema,
+		writeProps:       format.GetWriteProperties(meta.props),
+		rowGroupBytes:    rowGroupTargetSizeBytes,
+		currentSpec:      *currentSpec,
+		fileFormat:       fileFormat,
+		format:           format,
+		nextCount:        nextCount,
+		stopCount:        stopCount,
+		recordBufferSize: args.recordBatchBufferSize,
 	}
 	for _, apply := range opts {
 		if err := apply(f); err != nil {
@@ -353,13 +363,21 @@ type RollingDataWriter struct {
 	noMoreSends bool
 }
 
+func (w *writerFactory) recordQueueCapacity() int {
+	if w.recordBufferSize > 0 {
+		return w.recordBufferSize
+	}
+
+	return rollingDataWriterQueueCapacity
+}
+
 func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
 	ctx, cancel := context.WithCancel(ctx)
 	partitionID := int(w.partitionIDCounter.Add(1) - 1)
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
 		partitionID:     partitionID,
-		recordCh:        make(chan arrow.RecordBatch, rollingDataWriterQueueCapacity),
+		recordCh:        make(chan arrow.RecordBatch, w.recordQueueCapacity()),
 		errorCh:         make(chan error, 1),
 		factory:         w,
 		partitionValues: partitionValues,

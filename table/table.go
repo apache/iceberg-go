@@ -1304,6 +1304,24 @@ func WithRowLineage() ScanOption {
 	}
 }
 
+// WithArrowBatchSize caps the number of rows decoded per Arrow record
+// batch when reading data files, overriding the table's
+// read.parquet.batch-size property for this scan. Smaller batches bound
+// the memory a scan holds per decoded batch, which matters when the
+// consumer buffers batches (e.g. a compaction's read+write pipeline).
+// The cap is stored on the scan itself rather than in the options map,
+// so it applies regardless of ordering relative to [WithOptions]. A
+// non-positive value is ignored.
+func WithArrowBatchSize(n int) ScanOption {
+	if n <= 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.arrowBatchSize = n
+	}
+}
+
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
 		identifier:          slices.Clone(t.identifier),
