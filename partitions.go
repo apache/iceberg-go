@@ -756,7 +756,13 @@ func (ps PartitionSpec) IsUnpartitioned() bool {
 	}
 
 	for _, f := range ps.fields {
-		if _, ok := f.Transform.(VoidTransform); !ok {
+		switch transform := f.Transform.(type) {
+		case VoidTransform:
+		case *VoidTransform:
+			if transform == nil {
+				return false
+			}
+		default:
 			return false
 		}
 	}
