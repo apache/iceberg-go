@@ -4088,6 +4088,22 @@ func TestInspectPositionDeletesDeletionVector(t *testing.T) {
 	require.Equal(t, []int64{size, size}, rec.Column(6).(*array.Int64).Int64Values())
 }
 
+func TestAppendDeletionVectorRowsRejectsMissingReferencedDataFile(t *testing.T) {
+	puffinPath, offset, length, card := writeDVPuffinFixture(
+		t, []uint64{1}, "file:///placeholder.parquet")
+
+	for _, ref := range []*string{nil, strPtr("")} {
+		file := newDVMockDataFile(puffinPath, "file:///placeholder.parquet", offset, length, card)
+		file.referencedDataFile = ref
+
+		keepGoing, err := appendDeletionVectorRows(
+			context.Background(), iceio.LocalFS{}, file,
+			positionDeleteFileMeta{contentOffset: &offset, contentSize: &length}, nil)
+		require.False(t, keepGoing)
+		require.ErrorContains(t, err, "missing referenced_data_file")
+	}
+}
+
 func TestPositionDeletesSchema(t *testing.T) {
 	v2 := PositionDeletesSchema(simpleSchema(), &iceberg.StructType{}, 2)
 	v2Fields := v2.Fields()
