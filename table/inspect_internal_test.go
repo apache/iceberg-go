@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -2191,6 +2192,72 @@ func TestInspectFilesTables(t *testing.T) {
 			paths, contents := inspectFileRows(t, rr)
 			require.Equal(t, tt.wantPaths, paths)
 			require.Equal(t, tt.wantContent, contents)
+		})
+	}
+}
+
+type inspectManifestListContextIO struct {
+	iceio.IO
+	rejectManifestList bool
+}
+
+func (fs inspectManifestListContextIO) Open(path string) (iceio.File, error) {
+	if fs.rejectManifestList && strings.Contains(path, "manifest-list") {
+		return nil, errors.New("manifest list opened with uncancellable IO")
+	}
+
+	return fs.IO.Open(path)
+}
+
+func TestInspectFilesKeepCallerContextForManifestListRead(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	baseFS, err := tbl.fsF(context.Background())
+	require.NoError(t, err)
+
+	var calls int
+	tbl.fsF = func(ctx context.Context) (iceio.IO, error) {
+		calls++
+
+		return inspectManifestListContextIO{
+			IO:                 baseFS,
+			rejectManifestList: ctx.Done() == nil,
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manifests, err := tbl.Inspect().Manifests(ctx)
+	require.NoError(t, err)
+	manifests.Release()
+	rr, err := tbl.Inspect().Files(ctx)
+	require.NoError(t, err)
+	paths, contents := inspectFileRows(t, rr)
+	require.Len(t, paths, 3)
+	require.Len(t, contents, 3)
+	require.Equal(t, 2, calls)
+}
+
+func TestInspectFilesReuseManifestListIO(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		t.Run(fmt.Sprintf("all=%t", all), func(t *testing.T) {
+			tbl := inspectAllFilesTable(t)
+			baseFS, err := tbl.fsF(t.Context())
+			require.NoError(t, err)
+			calls := 0
+			tbl.fsF = func(context.Context) (iceio.IO, error) {
+				calls++
+
+				return baseFS, nil
+			}
+			read := tbl.Inspect().Files
+			if all {
+				read = tbl.Inspect().AllFiles
+			}
+			rr, err := read(t.Context())
+			require.NoError(t, err)
+			paths, _ := inspectFileRows(t, rr)
+			require.NotEmpty(t, paths)
+			require.Equal(t, 1, calls, "manifest lists and entries should share the operation's IO")
 		})
 	}
 }
