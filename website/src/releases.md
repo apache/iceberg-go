@@ -40,6 +40,10 @@ To track `main`, use `@main` instead of a version tag.
 
 Per-release notes (highlights, breaking changes, contributors) are published on the [GitHub Releases page](https://github.com/apache/iceberg-go/releases). Iceberg Go does not maintain a curated `CHANGELOG.md` in the repository; the GitHub Releases page is the canonical source.
 
+### Unreleased compatibility notes
+
+- `Table.PurgeFiles` now calls `IO.Remove` concurrently, with up to 32 calls in flight, when the filesystem does not implement `BulkRemovableIO`. Custom IO implementations, including those registered with `io.Register`, must make `Remove` safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.
+
 ## Verifying and producing releases
 
 If you are validating an RC or cutting a new release, see:
