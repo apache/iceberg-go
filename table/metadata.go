@@ -252,9 +252,8 @@ type Metadata interface {
 	// DefaultPartitionSpec is the ID of the current spec that writerFactory should
 	// use by default.
 	DefaultPartitionSpec() int
-	// LastPartitionSpecID returns the persisted last assigned partition field ID.
-	// Allocation also scans partition spec history because metadata written by
-	// another client may contain a stale counter.
+	// LastPartitionSpecID returns the persisted last assigned partition field ID,
+	// which may be stale relative to partition spec history.
 	LastPartitionSpecID() *int
 	// Snapshots returns the list of valid snapshots. Valid snapshots are
 	// snapshots for which all data files exist in the file system. A data
@@ -700,8 +699,10 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	return nil
 }
 
+// partitionFieldIDFloor returns an allocation floor that accounts for the
+// persisted counter and all partition field IDs in spec history.
 func partitionFieldIDFloor(lastPartitionID *int, specs []iceberg.PartitionSpec) int {
-	floor := partitionFieldStartID - 1
+	floor := iceberg.PartitionDataIDStart - 1
 	if lastPartitionID != nil {
 		floor = max(floor, *lastPartitionID)
 	}
@@ -749,11 +750,7 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 
 	}
 
-	prev := partitionFieldStartID - 1
-	if b.lastPartitionID != nil {
-		prev = *b.lastPartitionID
-	}
-	lastPartitionID := max(maxFieldID, prev)
+	lastPartitionID := max(maxFieldID, fieldIDFloor)
 
 	var specs []iceberg.PartitionSpec
 	if initial {

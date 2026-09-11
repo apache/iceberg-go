@@ -364,24 +364,57 @@ func TestAddPartitionSpecAllocatesAfterHistoricalFieldID(t *testing.T) {
 
 	metadata, err := ParseMetadataBytes([]byte(data))
 	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name        string
+		dropCounter bool
+	}{
+		{name: "stale counter"},
+		{name: "nil counter", dropCounter: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			builder, err := MetadataBuilderFromBase(metadata, "")
+			require.NoError(t, err)
+			if tt.dropCounter {
+				builder.lastPartitionID = nil
+			}
+
+			addedSpec, err := iceberg.NewPartitionSpecOpts(
+				iceberg.WithSpecID(1),
+				iceberg.AddPartitionFieldBySourceID(1, "x_bucket", iceberg.BucketTransform{NumBuckets: 16}, builder.CurrentSchema(), nil),
+			)
+			require.NoError(t, err)
+			require.NoError(t, builder.AddPartitionSpec(&addedSpec, false))
+
+			rebuilt, err := builder.Build()
+			require.NoError(t, err)
+			added := rebuilt.PartitionSpecByID(1)
+			require.NotNil(t, added)
+			require.Equal(t, 1, added.NumFields())
+			assert.Equal(t, 1001, added.Field(0).FieldID)
+			require.NotNil(t, rebuilt.LastPartitionSpecID())
+			assert.Equal(t, 1001, *rebuilt.LastPartitionSpecID())
+		})
+	}
+}
+
+func TestAddEmptyPartitionSpecRepairsStaleLastPartitionID(t *testing.T) {
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-partition-id": 1000`, `"last-partition-id": 999`, 1)
+	require.Contains(t, data, `"last-partition-id": 999`)
+
+	metadata, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
 	builder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
 
-	addedSpec, err := iceberg.NewPartitionSpecOpts(
-		iceberg.WithSpecID(1),
-		iceberg.AddPartitionFieldBySourceID(1, "x_bucket", iceberg.BucketTransform{NumBuckets: 16}, builder.CurrentSchema(), nil),
-	)
-	require.NoError(t, err)
-	require.NoError(t, builder.AddPartitionSpec(&addedSpec, false))
+	emptySpec := iceberg.NewPartitionSpecID(1)
+	require.NoError(t, builder.AddPartitionSpec(&emptySpec, false))
 
 	rebuilt, err := builder.Build()
 	require.NoError(t, err)
-	added := rebuilt.PartitionSpecByID(1)
-	require.NotNil(t, added)
-	require.Equal(t, 1, added.NumFields())
-	assert.Equal(t, 1001, added.Field(0).FieldID)
 	require.NotNil(t, rebuilt.LastPartitionSpecID())
-	assert.Equal(t, 1001, *rebuilt.LastPartitionSpecID())
+	assert.Equal(t, 1000, *rebuilt.LastPartitionSpecID())
 }
 
 func TestRemovePartitionSpecsNoMatchDoesNotUpdate(t *testing.T) {
