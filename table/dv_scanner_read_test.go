@@ -138,51 +138,26 @@ func (c *countingDVOpenIO) Open(name string) (iceio.File, error) {
 	return f, err
 }
 
-// Compile-time assertion of readAllDeletionVectors' signature — pins the
-// `perFileDVBitmaps` return type so GetRecords' downstream wiring through
-// recordBatchesFromTasksAndDeletes can't silently shift to a different shape
-// without breaking the build first. Placed at package scope so the contract
-// is visible at the top of the file.
-var _ func(context.Context, iceio.IO, []FileScanTask, int) (perFileDVBitmaps, error) = readAllDeletionVectors
-
-// TestReadAllDeletionVectors verifies the scanner-side DV loader produces a
-// perFileDVBitmaps map keyed by referenced data-file path, with the spec-
-// correctness invariants the loader is the right place to enforce: dedup by
-// referenced data file (not by puffin path, which would silently drop blobs
-// from multi-DV puffin files), rejection of missing referenced_data_file /
-// content_offset, and rejection of two distinct DV blobs targeting the same
-// data file (over-deletion guard, matching Java's DeleteFileIndex
-// ValidationException behaviour for that case).
-//
-// End-to-end coverage (DV positions actually filtered out of GetRecords
-// output for a real Parquet data file) is deferred to a follow-up — would
-// need v3 table-metadata scaffolding that lives outside this PR's scope.
-func TestReadAllDeletionVectors(t *testing.T) {
+func TestLazyDeletionVectorLoaderReadPath(t *testing.T) {
 	ctx := context.Background()
 	fs := iceio.LocalFS{}
 
 	t.Run("decodes positions and keys by referenced data file", func(t *testing.T) {
 		const dataFilePath = "file:///table/data/data-001.parquet"
 		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1, 3, 5, 7, 9}, dataFilePath)
-
 		tasks := []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
 			newDVMockDataFile(puffinPath, dataFilePath, offset, length, card),
 		}}}
 
-		got, err := readAllDeletionVectors(ctx, fs, tasks, 1)
+		loader, err := newLazyDeletionVectorLoader(fs, tasks)
 		require.NoError(t, err)
-		require.Contains(t, got, dataFilePath,
-			"map must be keyed by the referenced data file, not by the DV puffin path")
-
-		// Bitmap should expose the spec-mandated positions via Contains
-		// (the lookup path filterByDeletionVector will use per batch).
-		bitmap := got[dataFilePath]
+		bitmap, err := loader.load(ctx, dataFilePath)
+		require.NoError(t, err)
 		require.NotNil(t, bitmap)
 		assert.Equal(t, int64(5), bitmap.Cardinality())
 		for _, pos := range []uint64{1, 3, 5, 7, 9} {
 			assert.True(t, bitmap.Contains(pos), "expected %d to be in bitmap", pos)
 		}
-		// Spot-check a non-deleted position too.
 		assert.False(t, bitmap.Contains(0))
 	})
 
@@ -190,94 +165,58 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		const dataFilePath = "file:///table/data/data-002.parquet"
 		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{2, 4}, dataFilePath)
 		dvFile := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
-
-		tasks := []FileScanTask{
+		loader, err := newLazyDeletionVectorLoader(fs, []FileScanTask{
 			{DeletionVectorFiles: []iceberg.DataFile{dvFile}},
 			{DeletionVectorFiles: []iceberg.DataFile{dvFile}},
-		}
-
-		got, err := readAllDeletionVectors(ctx, fs, tasks, 2)
+		})
 		require.NoError(t, err)
-		// Same (puffin path, content offset) across both tasks is the
-		// same blob — the second occurrence is a dedup no-op, so the
-		// single map entry stays a single bitmap (not a list of two).
-		require.NotNil(t, got[dataFilePath])
-		assert.Equal(t, int64(2), got[dataFilePath].Cardinality())
+
+		bitmap, err := loader.load(ctx, dataFilePath)
+		require.NoError(t, err)
+		require.NotNil(t, bitmap)
+		assert.Equal(t, int64(2), bitmap.Cardinality())
 	})
 
-	t.Run("opens a shared Puffin file once", func(t *testing.T) {
-		const count = 100
-		files := writeSharedDVPuffinFixture(t, count)
-		fs := &countingDVOpenIO{}
-
-		got, err := readAllDeletionVectors(ctx, fs,
-			[]FileScanTask{{DeletionVectorFiles: files}}, 8)
-		require.NoError(t, err)
-		require.Len(t, got, count)
-		assert.Equal(t, int64(1), fs.opens.Load())
-		for i := range count {
-			path := "file:///table/data/data-" + strconv.Itoa(i) + ".parquet"
-			bitmap := got[path]
-			require.NotNil(t, bitmap)
-			assert.True(t, bitmap.Contains(uint64(i)))
-			assert.True(t, bitmap.Contains(uint64(i+count)))
-		}
-	})
-
-	t.Run("canceled singleton read returns the context error", func(t *testing.T) {
+	t.Run("canceled load returns the context error", func(t *testing.T) {
 		const dataFilePath = "file:///table/data/data-canceled.parquet"
 		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1}, dataFilePath)
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
-
-		got, err := readAllDeletionVectors(canceledCtx, fs, []FileScanTask{{
+		loader, err := newLazyDeletionVectorLoader(fs, []FileScanTask{{
 			DeletionVectorFiles: []iceberg.DataFile{
 				newDVMockDataFile(puffinPath, dataFilePath, offset, length, card),
 			},
-		}}, 1)
-		require.ErrorIs(t, err, context.Canceled)
-		assert.Nil(t, got)
-	})
-
-	t.Run("no tasks -> empty map, no error", func(t *testing.T) {
-		got, err := readAllDeletionVectors(ctx, fs, nil, 1)
+		}})
 		require.NoError(t, err)
-		assert.Empty(t, got)
+
+		bitmap, err := loader.load(canceledCtx, dataFilePath)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, bitmap)
 	})
 
-	t.Run("DV missing referenced_data_file is rejected", func(t *testing.T) {
-		puffinPath, offset, length, _ := writeDVPuffinFixture(t, []uint64{0}, "file:///placeholder.parquet")
-
-		dvFile := &dvMockDataFile{
-			mockDataFile: mockDataFile{
-				path:        puffinPath,
-				contentType: iceberg.EntryContentPosDeletes,
-				format:      iceberg.PuffinFile,
-			},
-			referencedDataFile: nil, // spec violation
-			contentOffset:      int64Ptr(offset),
-			contentSizeInBytes: int64Ptr(length),
-		}
-
-		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "missing referenced_data_file")
+	t.Run("no tasks -> empty index, no error", func(t *testing.T) {
+		loader, err := newLazyDeletionVectorLoader(fs, nil)
+		require.NoError(t, err)
+		assert.Empty(t, loader.byDataFile)
+		bitmap, err := loader.load(ctx, "file:///table/data/missing.parquet")
+		require.NoError(t, err)
+		assert.Nil(t, bitmap)
 	})
 
-	t.Run("DV identity mismatch propagates from ReadDV", func(t *testing.T) {
+	t.Run("DV identity mismatch propagates from ReadDVs", func(t *testing.T) {
 		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{0}, "file:///table/data/data-001.parquet")
 		dvFile := newDVMockDataFile(puffinPath, "file:///table/data/data-002.parquet", offset, length, card)
+		loader, err := newLazyDeletionVectorLoader(fs, []FileScanTask{{
+			DeletionVectorFiles: []iceberg.DataFile{dvFile},
+		}})
+		require.NoError(t, err)
 
-		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
+		_, err = loader.load(ctx, "file:///table/data/data-002.parquet")
 		require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
 		assert.Contains(t, err.Error(), "manifest referenced_data_file")
 	})
 
 	t.Run("DV missing content_offset is rejected", func(t *testing.T) {
-		// content_offset is required by spec; without it ReadDV can't
-		// locate the blob. Pinned at the pre-pass so two such entries
-		// for the same data file don't silently collide as a misleading
-		// "multiple deletion vectors" dedup error.
 		dvFile := &dvMockDataFile{
 			mockDataFile: mockDataFile{
 				path:        "/irrelevant.puffin",
@@ -285,90 +224,48 @@ func TestReadAllDeletionVectors(t *testing.T) {
 				format:      iceberg.PuffinFile,
 			},
 			referencedDataFile: strPtr("file:///table/data/data.parquet"),
-			contentOffset:      nil, // spec violation
+			contentOffset:      nil,
 			contentSizeInBytes: int64Ptr(42),
 		}
 
-		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
-		require.Error(t, err)
+		_, err := newLazyDeletionVectorLoader(fs, []FileScanTask{{
+			DeletionVectorFiles: []iceberg.DataFile{dvFile},
+		}})
+		require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
 		assert.Contains(t, err.Error(), "missing content_offset")
 	})
 
 	t.Run("multiple distinct DV blobs for same data file are rejected", func(t *testing.T) {
-		// Two separate puffin files both claiming to be the DV for the same
-		// data file. Java surfaces this as a ValidationException; silently
-		// unioning the bitmaps would over-delete. The loader is also the
-		// right place to catch the case where two blobs share a puffin file
-		// but live at different content offsets — sameDVBlob compares both.
 		const dataFilePath = "file:///table/data/data-003.parquet"
 		puffinA, offsetA, lengthA, cardA := writeDVPuffinFixture(t, []uint64{1, 2}, dataFilePath)
 		puffinB, offsetB, lengthB, cardB := writeDVPuffinFixture(t, []uint64{3, 4}, dataFilePath)
-
-		tasks := []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
+		_, err := newLazyDeletionVectorLoader(fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
 			newDVMockDataFile(puffinA, dataFilePath, offsetA, lengthA, cardA),
 			newDVMockDataFile(puffinB, dataFilePath, offsetB, lengthB, cardB),
-		}}}
-
-		_, err := readAllDeletionVectors(ctx, fs, tasks, 1)
+		}}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "multiple deletion vectors for data file")
 	})
 
-	t.Run("nil referenced_data_file is rejected before any goroutine launches", func(t *testing.T) {
-		// The prior implementation validated inside the goroutine-dispatch
-		// loop, so a bad entry hit AFTER one or more g.Go() calls would
-		// defer-close the result channel while in-flight workers were still
-		// sending to it (panic: send on closed channel). The v2 structure
-		// makes the original buggy state unreachable by construction —
-		// uniqueDVs is fully built and validated before any goroutine fans
-		// out. This test pins the invariant: with both a valid and a
-		// nil-ref entry in the input, the call returns a clean error and
-		// does not panic, regardless of how concurrency is configured.
-		const dataFilePath = "file:///table/data/data-004.parquet"
-		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{42}, dataFilePath)
-		valid := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
+	t.Run("nil referenced_data_file is rejected before loading", func(t *testing.T) {
 		broken := &dvMockDataFile{
 			mockDataFile: mockDataFile{
 				path:        "/nonexistent.puffin",
 				contentType: iceberg.EntryContentPosDeletes,
 				format:      iceberg.PuffinFile,
 			},
-			referencedDataFile: nil,
 			contentOffset:      int64Ptr(0),
 			contentSizeInBytes: int64Ptr(0),
 		}
 
 		var err error
 		assert.NotPanics(t, func() {
-			_, err = readAllDeletionVectors(ctx, fs, []FileScanTask{
-				{DeletionVectorFiles: []iceberg.DataFile{valid}},
-				{DeletionVectorFiles: []iceberg.DataFile{broken}},
-			}, 4)
+			_, err = newLazyDeletionVectorLoader(fs, []FileScanTask{{
+				DeletionVectorFiles: []iceberg.DataFile{broken},
+			}})
 		})
-		require.Error(t, err)
+		require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
 	})
-}
-
-func BenchmarkReadAllDeletionVectorsSharedPuffin(b *testing.B) {
-	for _, count := range []int{1, 10, 100} {
-		b.Run(strconv.Itoa(count), func(b *testing.B) {
-			files := writeSharedDVPuffinFixture(b, count)
-			tasks := []FileScanTask{{DeletionVectorFiles: files}}
-			fs := iceio.LocalFS{}
-
-			b.ReportAllocs()
-			b.ResetTimer()
-			for b.Loop() {
-				bitmaps, err := readAllDeletionVectors(context.Background(), fs, tasks, 8)
-				if err != nil {
-					b.Fatal(err)
-				}
-				if len(bitmaps) != count {
-					b.Fatalf("got %d bitmaps, expected %d", len(bitmaps), count)
-				}
-			}
-		})
-	}
 }
 
 // TestFilterByDeletionVector pins the per-batch pipeline step that applies
