@@ -84,7 +84,7 @@ services:
       # static MinIO credentials used by the fixture's backing FileIO.
       - CATALOG_GCS_OAUTH2_TOKEN=scan-planning-integration-token
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio
     container_name: minio
     environment:
       - MINIO_ROOT_USER=admin
@@ -108,7 +108,7 @@ services:
   mc:
     depends_on:
       - minio
-    image: minio/mc
+    image: quay.io/minio/mc
     container_name: mc
     networks:
       iceberg_net:
