@@ -24,7 +24,9 @@ import (
 	"math"
 	"slices"
 
+	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
+	parquetschema "github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table/internal"
@@ -790,6 +792,24 @@ type inclusiveMetricsEval struct {
 	includeEmptyFiles bool
 }
 
+// intBackedDecimal reports whether a column's statistics are a decimal that
+// Parquet stores in an INT32 or INT64. Parquet's plain encoding for those is
+// little-endian, while an Iceberg bound is big-endian two's complement, so the
+// stat bytes have to be reversed before they can be used as a bound: 659 read
+// as-is would come back as -1828585472 and prune every row group that matches.
+// A FIXED_LEN_BYTE_ARRAY-backed decimal is big-endian in Parquet too, so its
+// bounds are already in Iceberg's form.
+func intBackedDecimal(descr *parquetschema.Column) bool {
+	switch descr.PhysicalType() {
+	case parquet.Types.Int32, parquet.Types.Int64:
+		_, ok := descr.LogicalType().(parquetschema.DecimalLogicalType)
+
+		return ok
+	default:
+		return false
+	}
+}
+
 func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
 	if !m.includeEmptyFiles && rgmeta.NumRows() == 0 {
 		return rowsCannotMatch, nil
@@ -843,8 +863,19 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 				m.lowerBounds = make(map[int][]byte, len(colIndices))
 				m.upperBounds = make(map[int][]byte, len(colIndices))
 			}
-			m.lowerBounds[fieldID] = stats.EncodeMin()
-			m.upperBounds[fieldID] = stats.EncodeMax()
+
+			lower, upper := stats.EncodeMin(), stats.EncodeMax()
+			if intBackedDecimal(stats.Descr()) {
+				// EncodeMin/EncodeMax hand back a freshly allocated buffer, so
+				// reversing in place cannot disturb the row group metadata.
+				// Iceberg does not require the minimum number of bytes, so the
+				// fixed 4- or 8-byte width decodes as-is.
+				slices.Reverse(lower)
+				slices.Reverse(upper)
+			}
+
+			m.lowerBounds[fieldID] = lower
+			m.upperBounds[fieldID] = upper
 		}
 	}
 
