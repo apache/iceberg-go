@@ -19,12 +19,14 @@ package internal
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -1794,11 +1796,21 @@ type RowGroupBloomPred struct {
 	PhysBytes [][]byte // one entry for EqualTo; one per value for In
 }
 
-// ParquetRowGroupTester combines stats-based and bloom filter row group pruning.
+// RowGroupDictionaryPred holds the physical-encoded bytes for each literal in
+// a dictionary-prunable predicate on one field. A row group can be skipped
+// when NONE of the bytes occur in its complete dictionary.
+type RowGroupDictionaryPred struct {
+	FieldID   int
+	PhysBytes [][]byte // one entry for EqualTo; one per value for In
+}
+
+// ParquetRowGroupTester combines stats-based, dictionary, and bloom filter row
+// group pruning.
 // Pass it as the tester argument to wrapPqArrowReader.GetRecords.
 type ParquetRowGroupTester struct {
-	StatsFn    func(*metadata.RowGroupMetaData, []int) (bool, error)
-	BloomPreds []RowGroupBloomPred // nil = no bloom filter pass
+	StatsFn         func(*metadata.RowGroupMetaData, []int) (bool, error)
+	BloomPreds      []RowGroupBloomPred      // nil = no bloom filter pass
+	DictionaryPreds []RowGroupDictionaryPred // nil = no dictionary filter pass
 	// RangeSet indicates that Start and Length came from an explicit scan task.
 	// Without it, the zero value keeps the historical full-file behavior for
 	// callers that construct a tester only for row-group pruning.
@@ -1927,7 +1939,8 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 	var rgList []int
 	if rowGroupTester != nil && (rangeSet ||
-		rowGroupTester.StatsFn != nil || len(rowGroupTester.BloomPreds) > 0) {
+		rowGroupTester.StatsFn != nil || len(rowGroupTester.DictionaryPreds) > 0 ||
+		len(rowGroupTester.BloomPreds) > 0) {
 		fileMeta := w.ParquetReader().MetaData()
 		numRg := w.ParquetReader().NumRowGroups()
 		planningOffsets := rowGroupTester.PlanningSplitOffsets
@@ -1940,8 +1953,15 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			bfReader        *metadata.BloomFilterReader
 		)
 
-		if len(rowGroupTester.BloomPreds) > 0 {
+		if len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
 			fieldIDToColIdx = buildFieldIDToColIdx(fileMeta)
+		}
+		var dictionaryPredsByColumn map[int][]int
+		if len(rowGroupTester.DictionaryPreds) > 0 {
+			dictionaryPredsByColumn = groupRowGroupDictionaryPredicates(
+				fieldIDToColIdx, rowGroupTester.DictionaryPreds)
+		}
+		if len(rowGroupTester.BloomPreds) > 0 {
 			bfReader = w.ParquetReader().GetBloomFilterReader()
 		}
 
@@ -1990,6 +2010,11 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				}
 			}
 
+			if use && len(rowGroupTester.DictionaryPreds) > 0 {
+				use = checkRowGroupDictionaries(
+					w.ParquetReader(), fileMeta, rg, dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
+			}
+
 			if use && bfReader != nil {
 				var err error
 				use, err = checkRowGroupBloomFilters(bfReader, rg, fieldIDToColIdx, rowGroupTester.BloomPreds)
@@ -2017,6 +2042,262 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 	}
 
 	return w.GetRecordReader(ctx, cols, rgList)
+}
+
+func groupRowGroupDictionaryPredicates(
+	fieldIDToColIdx map[int]int,
+	preds []RowGroupDictionaryPred,
+) map[int][]int {
+	predsByColumn := make(map[int][]int)
+	for i, pred := range preds {
+		if len(pred.PhysBytes) == 0 {
+			continue
+		}
+
+		colIdx, ok := fieldIDToColIdx[pred.FieldID]
+		if ok {
+			predsByColumn[colIdx] = append(predsByColumn[colIdx], i)
+		}
+	}
+
+	return predsByColumn
+}
+
+// checkRowGroupDictionaries checks each dictionary predicate against the
+// complete dictionary for its column in row group rg. It returns false only
+// when the column metadata proves that every data page is dictionary encoded
+// and none of the predicate values occur in the dictionary. Missing encoding
+// metadata, dictionary pages, unsupported physical types, malformed pages, or
+// reader errors keep the row group so this optimisation cannot drop data.
+func checkRowGroupDictionaries(
+	rdr *file.Reader,
+	fileMeta *metadata.FileMetaData,
+	rg int,
+	predsByColumn map[int][]int,
+	preds []RowGroupDictionaryPred,
+) bool {
+	if len(preds) == 0 {
+		return true
+	}
+
+	for colIdx, predIndexes := range predsByColumn {
+		chunk, err := fileMeta.RowGroup(rg).ColumnChunk(colIdx)
+		if err != nil || !parquetColumnUsesOnlyDictionaryData(chunk) {
+			continue
+		}
+
+		column := fileMeta.Schema.Column(colIdx)
+		pageRdr, err := rdr.RowGroup(rg).GetColumnPageReader(colIdx)
+		if err != nil {
+			continue
+		}
+
+		dictPage, dictErr := pageRdr.GetDictionaryPage()
+		if dictErr != nil || dictPage == nil {
+			if dictPage != nil {
+				dictPage.Release()
+			}
+			_ = pageRdr.Close()
+
+			continue
+		}
+
+		matches, known := dictionaryMatchesPredicates(
+			dictPage, column.PhysicalType(), column.TypeLength(), preds, predIndexes)
+		dictPage.Release()
+		closeErr := pageRdr.Close()
+		if closeErr != nil {
+			continue
+		}
+		if !known {
+			continue
+		}
+
+		for _, predIndex := range predIndexes {
+			if !matches[predIndex] {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// parquetColumnUsesOnlyDictionaryData verifies that the optional encoding
+// statistics identify a dictionary page and dictionary-encoded data pages,
+// with no PLAIN fallback pages. EncodingStats is deliberately required: the
+// column encoding list cannot distinguish the PLAIN dictionary page itself
+// from a later PLAIN data page in older files.
+func parquetColumnUsesOnlyDictionaryData(chunk *metadata.ColumnChunkMetaData) bool {
+	if !chunk.HasDictionaryPage() {
+		return false
+	}
+
+	stats := chunk.EncodingStats()
+	if len(stats) == 0 {
+		return false
+	}
+
+	var hasDictionaryPage, hasDictionaryData bool
+	for _, stat := range stats {
+		switch stat.PageType {
+		case file.PageTypeDictionaryPage:
+			if stat.Encoding != parquet.Encodings.Plain && stat.Encoding != parquet.Encodings.PlainDict {
+				return false
+			}
+			hasDictionaryPage = true
+		case file.PageTypeDataPage, file.PageTypeDataPageV2:
+			if stat.Encoding != parquet.Encodings.RLEDict && stat.Encoding != parquet.Encodings.PlainDict {
+				return false
+			}
+			hasDictionaryData = true
+		default:
+			return false
+		}
+	}
+
+	return hasDictionaryPage && hasDictionaryData
+}
+
+// dictionaryMatchesPredicates decodes a PLAIN dictionary page and records
+// which requested predicates have at least one matching value. The returned
+// known flag is false for unsupported or malformed input, which means the
+// caller must retain the row group.
+func dictionaryMatchesPredicates(
+	page *file.DictionaryPage,
+	physicalType parquet.Type,
+	typeLen int,
+	preds []RowGroupDictionaryPred,
+	predIndexes []int,
+) ([]bool, bool) {
+	pageEncoding := parquet.Encoding(page.Encoding())
+	if pageEncoding != parquet.Encodings.Plain && pageEncoding != parquet.Encodings.PlainDict {
+		return nil, false
+	}
+
+	width, variableWidth, ok := parquetDictionaryValueLayout(physicalType, typeLen)
+	if !ok {
+		return nil, false
+	}
+
+	for _, predIndex := range predIndexes {
+		usable := false
+		for _, candidate := range preds[predIndex].PhysBytes {
+			if variableWidth || len(candidate) == width {
+				usable = true
+
+				break
+			}
+		}
+		if !usable {
+			return nil, false
+		}
+	}
+
+	matches := make([]bool, len(preds))
+	data := page.Data()
+	offset := 0
+	numValues := page.NumValues()
+	if numValues < 0 {
+		return nil, false
+	}
+
+	for range numValues {
+		value, next, ok := nextParquetDictionaryValue(data, offset, physicalType, width)
+		if !ok {
+			return nil, false
+		}
+		offset = next
+
+		for _, predIndex := range predIndexes {
+			if matches[predIndex] {
+				continue
+			}
+
+			for _, candidate := range preds[predIndex].PhysBytes {
+				if parquetDictionaryValueEqual(physicalType, value, candidate) {
+					matches[predIndex] = true
+
+					break
+				}
+			}
+		}
+	}
+
+	if offset != len(data) {
+		return nil, false
+	}
+
+	return matches, true
+}
+
+func parquetDictionaryValueLayout(physicalType parquet.Type, typeLen int) (width int, variableWidth, ok bool) {
+	switch physicalType {
+	case parquet.Types.Int32, parquet.Types.Float:
+		return 4, false, true
+	case parquet.Types.Int64, parquet.Types.Double:
+		return 8, false, true
+	case parquet.Types.Int96:
+		return parquet.Int96SizeBytes, false, true
+	case parquet.Types.ByteArray:
+		return 0, true, true
+	case parquet.Types.FixedLenByteArray:
+		if typeLen > 0 {
+			return typeLen, false, true
+		}
+	}
+
+	return 0, false, false
+}
+
+func nextParquetDictionaryValue(data []byte, offset int, physicalType parquet.Type, width int) ([]byte, int, bool) {
+	if physicalType == parquet.Types.ByteArray {
+		if offset < 0 || offset > len(data) || len(data)-offset < 4 {
+			return nil, 0, false
+		}
+
+		valueLen := int(binary.LittleEndian.Uint32(data[offset:]))
+		valueStart := offset + 4
+		if valueLen > len(data)-valueStart {
+			return nil, 0, false
+		}
+
+		return data[valueStart : valueStart+valueLen], valueStart + valueLen, true
+	}
+
+	if offset < 0 || width < 0 || width > len(data)-offset {
+		return nil, 0, false
+	}
+
+	return data[offset : offset+width], offset + width, true
+}
+
+func parquetDictionaryValueEqual(physicalType parquet.Type, value, candidate []byte) bool {
+	if physicalType == parquet.Types.Float && len(value) == 4 && len(candidate) == 4 {
+		left := math.Float32frombits(binary.LittleEndian.Uint32(value))
+		right := math.Float32frombits(binary.LittleEndian.Uint32(candidate))
+		if math.IsNaN(float64(left)) || math.IsNaN(float64(right)) {
+			// Keep NaN-containing groups. This is conservative across the
+			// different equality treatments used by readers.
+			return true
+		}
+
+		return left == right
+	}
+
+	if physicalType == parquet.Types.Double && len(value) == 8 && len(candidate) == 8 {
+		left := math.Float64frombits(binary.LittleEndian.Uint64(value))
+		right := math.Float64frombits(binary.LittleEndian.Uint64(candidate))
+		if math.IsNaN(left) || math.IsNaN(right) {
+			// Keep NaN-containing groups. This is conservative across the
+			// different equality treatments used by readers.
+			return true
+		}
+
+		return left == right
+	}
+
+	return slices.Equal(value, candidate)
 }
 
 // buildFieldIDToColIdx maps each Iceberg field ID to its 0-based column index in

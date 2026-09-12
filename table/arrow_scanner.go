@@ -1717,7 +1717,7 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
-	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
+	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position
 	// deletes) recover it from posSource, which the tester seeds with each
@@ -1728,8 +1728,9 @@ func (as *arrowScan) processRecordsWithPlans(
 		var tester *tblutils.ParquetRowGroupTester
 		if plans != nil && plans.pruning != nil {
 			tester = &tblutils.ParquetRowGroupTester{
-				StatsFn:    plans.pruning.statsEvaluator(),
-				BloomPreds: plans.pruning.bloomPreds,
+				StatsFn:         plans.pruning.statsEvaluator(),
+				BloomPreds:      plans.pruning.bloomPreds,
+				DictionaryPreds: plans.pruning.dictionaryPreds,
 			}
 		} else {
 			logicalSchema := as.filterSchema
@@ -1775,9 +1776,15 @@ func (as *arrowScan) processRecordsWithPlans(
 				return err
 			}
 
+			dictionaryPreds, err := newDictionaryPredicates(filePruningFilter)
+			if err != nil {
+				return err
+			}
+
 			tester = &tblutils.ParquetRowGroupTester{
-				StatsFn:    statsFn,
-				BloomPreds: bloomPreds,
+				StatsFn:         statsFn,
+				BloomPreds:      bloomPreds,
+				DictionaryPreds: dictionaryPreds,
 			}
 		}
 		// A complete task already reads every row group. Leave its byte range
