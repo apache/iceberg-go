@@ -171,7 +171,7 @@ func (r *rewriteManifests) supersededManifests(committed bool) []string {
 	return paths
 }
 
-func (r *rewriteManifests) existingManifests(parent *Snapshot) ([]iceberg.ManifestFile, error) {
+func (r *rewriteManifests) existingManifests(_ context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
 	if parent == nil {
 		return nil, nil
 	}
