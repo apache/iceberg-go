@@ -24,7 +24,9 @@ import (
 	"math"
 	"slices"
 
+	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
+	parquetschema "github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table/internal"
@@ -790,6 +792,41 @@ type inclusiveMetricsEval struct {
 	includeEmptyFiles bool
 }
 
+// intBackedDecimal reports whether a column's statistics are a decimal that
+// Parquet stores in an INT32 or INT64. Parquet's plain encoding for those is
+// little-endian, while an Iceberg bound is big-endian two's complement, so the
+// stat bytes have to be reversed before they can be used as a bound. Read
+// as-is, they decode to an unrelated value and can prune row groups that match.
+// A FIXED_LEN_BYTE_ARRAY-backed decimal is big-endian in Parquet too, so its
+// bounds are already in Iceberg's form.
+func intBackedDecimal(descr *parquetschema.Column) bool {
+	switch descr.PhysicalType() {
+	case parquet.Types.Int32, parquet.Types.Int64:
+		_, ok := descr.LogicalType().(parquetschema.DecimalLogicalType)
+
+		return ok
+	default:
+		return false
+	}
+}
+
+// parquetStatsBounds converts a Parquet column chunk's min/max statistics into
+// Iceberg bound bytes. Any evaluator that populates bounds from raw Parquet
+// statistics must go through here rather than calling EncodeMin/EncodeMax
+// directly, or int-backed decimals silently prune rows that match.
+func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte) {
+	lower, upper = stats.EncodeMin(), stats.EncodeMax()
+	if intBackedDecimal(stats.Descr()) {
+		// EncodeMin/EncodeMax return fresh buffers, so reversing in place is safe.
+		// The spec wants minimum-width bounds, but these stay in memory and the
+		// decoder accepts any width, so the 4- or 8-byte form needs no trimming.
+		slices.Reverse(lower)
+		slices.Reverse(upper)
+	}
+
+	return lower, upper
+}
+
 func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
 	if !m.includeEmptyFiles && rgmeta.NumRows() == 0 {
 		return rowsCannotMatch, nil
@@ -843,8 +880,10 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 				m.lowerBounds = make(map[int][]byte, len(colIndices))
 				m.upperBounds = make(map[int][]byte, len(colIndices))
 			}
-			m.lowerBounds[fieldID] = stats.EncodeMin()
-			m.upperBounds[fieldID] = stats.EncodeMax()
+
+			lower, upper := parquetStatsBounds(stats)
+			m.lowerBounds[fieldID] = lower
+			m.upperBounds[fieldID] = upper
 		}
 	}
 
