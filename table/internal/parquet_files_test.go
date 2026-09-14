@@ -2067,13 +2067,14 @@ func buildBloomTestParquet(t testing.TB, rgSize int) []byte {
 func openBloomTestReader(t testing.TB, data []byte) internal.FileReader {
 	t.Helper()
 
-	pqRdr, err := file.NewParquetReader(bytes.NewReader(data))
+	source := bytes.NewReader(data)
+	pqRdr, err := file.NewParquetReader(source)
 	require.NoError(t, err)
 
 	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
 	require.NoError(t, err)
 
-	return internal.WrapParquetFileReader(arrRdr)
+	return internal.WrapParquetFileReaderWithDictionarySource(arrRdr, source)
 }
 
 func int32PhysBytes(v int32) []byte {

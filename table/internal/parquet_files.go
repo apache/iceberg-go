@@ -129,7 +129,11 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 		return nil, err
 	}
 
-	return wrapPqArrowReader{FileReader: arrRdr}, nil
+	return wrapPqArrowReader{
+		FileReader:       arrRdr,
+		dictionarySource: inputfile,
+		dictionaryMem:    alloc,
+	}, nil
 }
 
 func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
@@ -1842,6 +1846,10 @@ type RowGroupSpan struct {
 type wrapPqArrowReader struct {
 	*pqarrow.FileReader
 	rowGroupInfos []parquetRowGroupInfo
+	// dictionarySource is shared with FileReader. The temporary reader created
+	// from it uses section reads and never owns the source's Close method.
+	dictionarySource parquet.ReaderAtSeeker
+	dictionaryMem    memory.Allocator
 }
 
 func (w wrapPqArrowReader) Metadata() Metadata {
@@ -1951,8 +1959,9 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 
 		var (
-			fieldIDToColIdx map[int]int
-			bfReader        *metadata.BloomFilterReader
+			fieldIDToColIdx  map[int]int
+			bfReader         *metadata.BloomFilterReader
+			dictionaryReader *file.Reader
 		)
 
 		if len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
@@ -1962,6 +1971,16 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		if len(rowGroupTester.DictionaryPreds) > 0 {
 			dictionaryPredsByColumn = groupRowGroupDictionaryPredicates(
 				fieldIDToColIdx, rowGroupTester.DictionaryPreds)
+			if len(dictionaryPredsByColumn) > 0 && w.dictionarySource != nil {
+				// Dictionary inspection is an optional optimisation. If the
+				// section-read reader cannot be created, use the main reader and
+				// keep the existing conservative behaviour.
+				dictionaryReader, _ = newParquetDictionaryReader(
+					w.dictionarySource, fileMeta, w.dictionaryMem)
+			}
+			if len(dictionaryPredsByColumn) > 0 && dictionaryReader == nil {
+				dictionaryReader = w.ParquetReader()
+			}
 		}
 		if len(rowGroupTester.BloomPreds) > 0 {
 			bfReader = w.ParquetReader().GetBloomFilterReader()
@@ -1974,6 +1993,8 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		rangeStart := rowGroupTester.Start
 		rangeEnd := rangeStart + rowGroupTester.Length
 		rgList = make([]int, 0)
+		dictionaryKeepStreak := 0
+		dictionaryPruningActive := len(dictionaryPredsByColumn) > 0
 		var firstRowPos int64
 		for rg := range numRg {
 			pos := firstRowPos
@@ -2012,9 +2033,17 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				}
 			}
 
-			if use && len(rowGroupTester.DictionaryPreds) > 0 {
+			if use && dictionaryPruningActive {
 				use = checkRowGroupDictionaries(
-					w.ParquetReader(), fileMeta, rg, dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
+					dictionaryReader, fileMeta, rg, dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
+				if use {
+					dictionaryKeepStreak++
+					if dictionaryKeepStreak >= parquetDictionaryKeepStreakLimit {
+						dictionaryPruningActive = false
+					}
+				} else {
+					dictionaryKeepStreak = 0
+				}
 			}
 
 			if use && bfReader != nil {
@@ -2044,6 +2073,21 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 	}
 
 	return w.GetRecordReader(ctx, cols, rgList)
+}
+
+// Once a few consecutive row groups survive dictionary checks, further checks
+// are unlikely to pay for themselves. Stopping is fail-open: it can only leave
+// extra row groups to the normal reader, never drop matching data.
+const parquetDictionaryKeepStreakLimit = 2
+
+func newParquetDictionaryReader(
+	source parquet.ReaderAtSeeker, fileMeta *metadata.FileMetaData, mem memory.Allocator,
+) (*file.Reader, error) {
+	readProps := parquet.NewReaderProperties(mem)
+	readProps.BufferedStreamEnabled = true
+
+	return file.NewParquetReader(source,
+		file.WithMetadata(fileMeta), file.WithReadProps(readProps))
 }
 
 func groupRowGroupDictionaryPredicates(
@@ -2458,7 +2502,12 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		return nil, err
 	}
 
-	result = wrapPqArrowReader{FileReader: fr, rowGroupInfos: rowGroupInfos}
+	result = wrapPqArrowReader{
+		FileReader:       fr,
+		rowGroupInfos:    rowGroupInfos,
+		dictionarySource: pf,
+		dictionaryMem:    pfs.mem,
+	}
 
 	return result, nil
 }
