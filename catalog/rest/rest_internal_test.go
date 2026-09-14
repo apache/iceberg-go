@@ -42,6 +42,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -72,10 +73,13 @@ func TestStaticCredsFromProps(t *testing.T) {
 	require.Nil(t, creds)
 
 	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3AccessKeyID: "AK"})
-	require.Error(t, err, "a lone access key must be an error, not the ambient identity")
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone access key must be an error, not the ambient identity")
 
 	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SecretAccessKey: "SK"})
-	require.Error(t, err, "a lone secret key must be an error, not the ambient identity")
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone secret key must be an error, not the ambient identity")
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SessionToken: "ST"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone session token must be an error, not the ambient identity")
 }
 
 // TestSigV4SignsWithPropsCredentials pins the wiring: the SigV4 Authorization

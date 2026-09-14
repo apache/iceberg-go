@@ -92,6 +92,10 @@ func WithMetadataLocation(loc string) Option {
 // identity is resolved in order: an explicit WithAwsConfig, then the s3.* catalog
 // credential properties (s3.access-key-id / s3.secret-access-key / s3.session-token),
 // then the AWS default credential chain.
+//
+// Note: unlike the Java client, credentials are read from s3.* rather than
+// rest.access-key-id / rest.secret-access-key. Setting only the rest.* keys
+// falls through to the AWS default credential chain.
 func WithSigV4() Option {
 	return func(o *options) {
 		o.enableSigv4 = true

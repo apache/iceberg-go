@@ -41,6 +41,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
@@ -1138,19 +1139,20 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 }
 
 // staticCredsFromProps returns a static credentials provider built from the S3
-// access-key properties. It returns (nil, nil) when neither key is set, so the
-// caller falls back to the default credential chain, and an error when only one
-// of the pair is set rather than silently signing as a different identity.
+// access-key properties. It returns (nil, nil) when no credential property is
+// set, so the caller falls back to the default credential chain, and an
+// ErrIncompleteStaticCredentials error when the properties form an incomplete
+// pair rather than silently signing as a different identity.
 func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, error) {
-	accessKey, secretKey := props[iceio.S3AccessKeyID], props[iceio.S3SecretAccessKey]
-	switch {
-	case accessKey == "" && secretKey == "":
+	accessKey, secretKey, token := props[iceio.S3AccessKeyID], props[iceio.S3SecretAccessKey], props[iceio.S3SessionToken]
+	if accessKey == "" && secretKey == "" && token == "" {
 		return nil, nil
-	case accessKey == "" || secretKey == "":
-		return nil, fmt.Errorf("rest: incomplete S3 credentials: both %s and %s are required for SigV4 signing", iceio.S3AccessKeyID, iceio.S3SecretAccessKey)
-	default:
-		return credentials.NewStaticCredentialsProvider(accessKey, secretKey, props[iceio.S3SessionToken]), nil
 	}
+	if err := internalaws.ValidateStaticCredentials(iceio.S3AccessKeyID, iceio.S3SecretAccessKey, iceio.S3SessionToken, accessKey, secretKey, token); err != nil {
+		return nil, err
+	}
+
+	return credentials.NewStaticCredentialsProvider(accessKey, secretKey, token), nil
 }
 
 func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
