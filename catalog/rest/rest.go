@@ -94,6 +94,12 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
+	// keyRestAccessKeyID and friends are the Java-client property names for the
+	// SigV4 signing credentials. They are accepted as aliases for the s3.*
+	// properties; the s3.* keys take precedence when both are set.
+	keyRestAccessKeyID     = "rest.access-key-id"
+	keyRestSecretAccessKey = "rest.secret-access-key"
+	keyRestSessionToken    = "rest.session-token"
 	// keyOAuth2ServerURI is the portable, spec-aligned property for the OAuth2
 	// token endpoint used by Java, PyIceberg and iceberg-rust. It is the
 	// preferred key; keyAuthUrl is retained as a compatibility alias. When both
@@ -1138,13 +1144,25 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	return cl, cleanup, nil
 }
 
-// staticCredsFromProps returns a static credentials provider built from the S3
-// access-key properties. It returns (nil, nil) when no credential property is
-// set, so the caller falls back to the default credential chain, and an
-// ErrIncompleteStaticCredentials error when the properties form an incomplete
-// pair rather than silently signing as a different identity.
+// staticCredsFromProps returns a static credentials provider built from the
+// signing-credential properties. It reads the s3.* keys, falling back to the
+// Java-compatible rest.* aliases per field. It returns (nil, nil) when no
+// credential property is set, so the caller falls back to the default credential
+// chain, and an ErrIncompleteStaticCredentials error when the properties form an
+// incomplete pair rather than silently signing as a different identity.
 func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, error) {
-	accessKey, secretKey, token := props[iceio.S3AccessKeyID], props[iceio.S3SecretAccessKey], props[iceio.S3SessionToken]
+	firstNonEmpty := func(keys ...string) string {
+		for _, k := range keys {
+			if v := props[k]; v != "" {
+				return v
+			}
+		}
+
+		return ""
+	}
+	accessKey := firstNonEmpty(iceio.S3AccessKeyID, keyRestAccessKeyID)
+	secretKey := firstNonEmpty(iceio.S3SecretAccessKey, keyRestSecretAccessKey)
+	token := firstNonEmpty(iceio.S3SessionToken, keyRestSessionToken)
 	if accessKey == "" && secretKey == "" && token == "" {
 		return nil, nil
 	}

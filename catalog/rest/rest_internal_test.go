@@ -80,6 +80,34 @@ func TestStaticCredsFromProps(t *testing.T) {
 
 	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SessionToken: "ST"})
 	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone session token must be an error, not the ambient identity")
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		keyRestAccessKeyID:     "RAK",
+		keyRestSecretAccessKey: "RSK",
+		keyRestSessionToken:    "RST",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "RAK", got.AccessKeyID)
+	require.Equal(t, "RSK", got.SecretAccessKey)
+	require.Equal(t, "RST", got.SessionToken)
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		keyRestAccessKeyID:      "RAK",
+		keyRestSecretAccessKey:  "RSK",
+	})
+	require.NoError(t, err)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID, "s3.* keys take precedence over rest.* aliases")
+	require.Equal(t, "SK", got.SecretAccessKey)
+
+	_, err = staticCredsFromProps(iceberg.Properties{keyRestAccessKeyID: "RAK"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone rest.* access key must be an error")
 }
 
 // TestSigV4SignsWithPropsCredentials pins the wiring: the SigV4 Authorization
