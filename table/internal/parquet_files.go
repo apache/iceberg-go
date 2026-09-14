@@ -1798,7 +1798,9 @@ type RowGroupBloomPred struct {
 
 // RowGroupDictionaryPred holds the physical-encoded bytes for each literal in
 // a dictionary-prunable predicate on one field. A row group can be skipped
-// when NONE of the bytes occur in its complete dictionary.
+// when NONE of the bytes occur in its complete dictionary. It stays a distinct
+// type from RowGroupBloomPred so the two pruning contracts can evolve
+// independently even though they currently carry the same fields.
 type RowGroupDictionaryPred struct {
 	FieldID   int
 	PhysBytes [][]byte // one entry for EqualTo; one per value for In
@@ -2076,18 +2078,20 @@ func checkRowGroupDictionaries(
 	predsByColumn map[int][]int,
 	preds []RowGroupDictionaryPred,
 ) bool {
-	if len(preds) == 0 {
+	if len(preds) == 0 || len(predsByColumn) == 0 {
 		return true
 	}
 
+	rgMeta := fileMeta.RowGroup(rg)
+	rgReader := rdr.RowGroup(rg)
 	for colIdx, predIndexes := range predsByColumn {
-		chunk, err := fileMeta.RowGroup(rg).ColumnChunk(colIdx)
+		chunk, err := rgMeta.ColumnChunk(colIdx)
 		if err != nil || !parquetColumnUsesOnlyDictionaryData(chunk) {
 			continue
 		}
 
 		column := fileMeta.Schema.Column(colIdx)
-		pageRdr, err := rdr.RowGroup(rg).GetColumnPageReader(colIdx)
+		pageRdr, err := rgReader.GetColumnPageReader(colIdx)
 		if err != nil {
 			continue
 		}
@@ -2106,10 +2110,15 @@ func checkRowGroupDictionaries(
 			dictPage, column.PhysicalType(), column.TypeLength(), preds, predIndexes)
 		dictPage.Release()
 		closeErr := pageRdr.Close()
-		if closeErr != nil {
+		if !known {
 			continue
 		}
-		if !known {
+		if closeErr != nil {
+			// A close error makes an otherwise conclusive dictionary result
+			// unusable, so keep the row group conservatively.
+			slog.Warn("dictionary row-group pruning skipped after page reader close error",
+				"rowGroup", rg, "err", closeErr)
+
 			continue
 		}
 
@@ -2161,8 +2170,8 @@ func parquetColumnUsesOnlyDictionaryData(chunk *metadata.ColumnChunkMetaData) bo
 
 // dictionaryMatchesPredicates decodes a PLAIN dictionary page and records
 // which requested predicates have at least one matching value. The returned
-// known flag is false for unsupported or malformed input, which means the
-// caller must retain the row group.
+// known flag is false for unsupported or malformed input that prevents a
+// pruning decision, which means the caller must retain the row group.
 func dictionaryMatchesPredicates(
 	page *file.DictionaryPage,
 	physicalType parquet.Type,
@@ -2194,6 +2203,8 @@ func dictionaryMatchesPredicates(
 		}
 	}
 
+	// predIndexes contains indexes into the full preds slice, so matches keeps
+	// the global predicate indexes instead of remapping them per column.
 	matches := make([]bool, len(preds))
 	data := page.Data()
 	offset := 0
@@ -2202,7 +2213,12 @@ func dictionaryMatchesPredicates(
 		return nil, false
 	}
 
+	remaining := len(predIndexes)
 	for range numValues {
+		if remaining == 0 {
+			break
+		}
+
 		value, next, ok := nextParquetDictionaryValue(data, offset, physicalType, width)
 		if !ok {
 			return nil, false
@@ -2217,11 +2233,18 @@ func dictionaryMatchesPredicates(
 			for _, candidate := range preds[predIndex].PhysBytes {
 				if parquetDictionaryValueEqual(physicalType, value, candidate) {
 					matches[predIndex] = true
+					remaining--
 
 					break
 				}
 			}
 		}
+	}
+
+	if remaining == 0 {
+		// All predicates already match, so trailing dictionary entries cannot
+		// change the decision and do not need to be decoded or validated.
+		return matches, true
 	}
 
 	if offset != len(data) {
@@ -2237,8 +2260,6 @@ func parquetDictionaryValueLayout(physicalType parquet.Type, typeLen int) (width
 		return 4, false, true
 	case parquet.Types.Int64, parquet.Types.Double:
 		return 8, false, true
-	case parquet.Types.Int96:
-		return parquet.Int96SizeBytes, false, true
 	case parquet.Types.ByteArray:
 		return 0, true, true
 	case parquet.Types.FixedLenByteArray:
@@ -2276,10 +2297,13 @@ func parquetDictionaryValueEqual(physicalType parquet.Type, value, candidate []b
 	if physicalType == parquet.Types.Float && len(value) == 4 && len(candidate) == 4 {
 		left := math.Float32frombits(binary.LittleEndian.Uint32(value))
 		right := math.Float32frombits(binary.LittleEndian.Uint32(candidate))
-		if math.IsNaN(float64(left)) || math.IsNaN(float64(right)) {
-			// Keep NaN-containing groups. This is conservative across the
-			// different equality treatments used by readers.
+		if math.IsNaN(float64(right)) {
+			// Keep groups for NaN literals because reader equality semantics
+			// can differ.
 			return true
+		}
+		if math.IsNaN(float64(left)) {
+			return false
 		}
 
 		return left == right
@@ -2288,10 +2312,13 @@ func parquetDictionaryValueEqual(physicalType parquet.Type, value, candidate []b
 	if physicalType == parquet.Types.Double && len(value) == 8 && len(candidate) == 8 {
 		left := math.Float64frombits(binary.LittleEndian.Uint64(value))
 		right := math.Float64frombits(binary.LittleEndian.Uint64(candidate))
-		if math.IsNaN(left) || math.IsNaN(right) {
-			// Keep NaN-containing groups. This is conservative across the
-			// different equality treatments used by readers.
+		if math.IsNaN(right) {
+			// Keep groups for NaN literals because reader equality semantics
+			// can differ.
 			return true
+		}
+		if math.IsNaN(left) {
+			return false
 		}
 
 		return left == right

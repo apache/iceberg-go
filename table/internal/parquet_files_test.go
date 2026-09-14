@@ -2244,6 +2244,57 @@ func buildDictionaryTestParquet(t testing.TB, rowGroups ...[]int32) []byte {
 	return buf.Bytes()
 }
 
+type multiColumnDictionaryTestRowGroup struct {
+	ids        []int32
+	categories []string
+}
+
+func buildMultiColumnDictionaryTestParquet(
+	t testing.TB, rowGroups ...multiColumnDictionaryTestRowGroup,
+) []byte {
+	t.Helper()
+
+	idNode := schema.NewInt32Node("id", parquet.Repetitions.Required, 1)
+	categoryNode := schema.NewByteArrayNode("category", parquet.Repetitions.Required, 2)
+	rootNode, err := schema.NewGroupNode("schema", parquet.Repetitions.Required,
+		schema.FieldList{idNode, categoryNode}, -1)
+	require.NoError(t, err)
+
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithStats(true),
+		parquet.WithDictionaryDefault(true),
+	)
+
+	var buf bytes.Buffer
+	pw := file.NewParquetWriter(&buf, rootNode, file.WithWriterProps(writerProps))
+	for _, values := range rowGroups {
+		require.Len(t, values.categories, len(values.ids))
+
+		rgw, werr := pw.AppendRowGroupChecked()
+		require.NoError(t, werr)
+
+		idColumn, werr := rgw.NextColumn()
+		require.NoError(t, werr)
+		_, werr = idColumn.(*file.Int32ColumnChunkWriter).WriteBatch(values.ids, nil, nil)
+		require.NoError(t, werr)
+		require.NoError(t, idColumn.Close())
+
+		categoryColumn, werr := rgw.NextColumn()
+		require.NoError(t, werr)
+		categories := make([]parquet.ByteArray, len(values.categories))
+		for i, category := range values.categories {
+			categories[i] = parquet.ByteArray(category)
+		}
+		_, werr = categoryColumn.(*file.ByteArrayColumnChunkWriter).WriteBatch(categories, nil, nil)
+		require.NoError(t, werr)
+		require.NoError(t, categoryColumn.Close())
+		require.NoError(t, rgw.Close())
+	}
+	require.NoError(t, pw.Close())
+
+	return buf.Bytes()
+}
+
 // TestDictionaryRowGroupPruning verifies that dictionary-only row groups are
 // skipped when an EqualTo/In predicate has no value in the complete dictionary.
 func TestDictionaryRowGroupPruning(t *testing.T) {
@@ -2317,17 +2368,105 @@ func TestDictionaryRowGroupPruning(t *testing.T) {
 	})
 }
 
+func TestDictionaryRowGroupPruningMultiColumnAnd(t *testing.T) {
+	const rgSize = 1024
+
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+	repeatedIDs := func(first, second int32) []int32 {
+		values := make([]int32, rgSize)
+		for i := range values {
+			if i%2 == 0 {
+				values[i] = first
+			} else {
+				values[i] = second
+			}
+		}
+
+		return values
+	}
+	repeatedCategory := func(category string) []string {
+		values := make([]string, rgSize)
+		for i := range values {
+			values[i] = category
+		}
+
+		return values
+	}
+
+	tests := []struct {
+		name      string
+		rowGroups []multiColumnDictionaryTestRowGroup
+		preds     []internal.RowGroupDictionaryPred
+		wantRows  int64
+		survivors []internal.RowGroupSpan
+	}{
+		{
+			name: "id predicate prunes a group while category matches",
+			rowGroups: []multiColumnDictionaryTestRowGroup{
+				{ids: repeatedIDs(1, 3), categories: repeatedCategory("a")},
+				{ids: repeatedIDs(5, 7), categories: repeatedCategory("a")},
+			},
+			preds: []internal.RowGroupDictionaryPred{
+				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(5)}},
+				{FieldID: 2, PhysBytes: [][]byte{[]byte("a")}},
+			},
+			wantRows:  rgSize,
+			survivors: []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}},
+		},
+		{
+			name: "category predicate prunes a group while id matches",
+			rowGroups: []multiColumnDictionaryTestRowGroup{
+				{ids: repeatedIDs(1, 3), categories: repeatedCategory("a")},
+				{ids: repeatedIDs(1, 3), categories: repeatedCategory("b")},
+			},
+			preds: []internal.RowGroupDictionaryPred{
+				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(1)}},
+				{FieldID: 2, PhysBytes: [][]byte{[]byte("a")}},
+			},
+			wantRows:  rgSize,
+			survivors: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := buildMultiColumnDictionaryTestParquet(t, test.rowGroups...)
+			rdr := openBloomTestReader(t, data)
+			defer rdr.Close()
+
+			var survivors []internal.RowGroupSpan
+			tester := &internal.ParquetRowGroupTester{
+				StatsFn:         alwaysKeep,
+				DictionaryPreds: test.preds,
+				Survivors:       &survivors,
+			}
+			rr, err := rdr.GetRecords(context.Background(), []int{0, 1}, tester)
+			require.NoError(t, err)
+
+			assert.Equal(t, test.wantRows, countRecords(t, rr))
+			assert.Equal(t, test.survivors, survivors)
+		})
+	}
+}
+
 func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
 	const (
 		numRowGroups = 16
 		rowsPerGroup = 4096
 	)
 
+	const commonValue int32 = 1 << 30
 	rowGroups := make([][]int32, numRowGroups)
 	for group := range rowGroups {
 		values := make([]int32, rowsPerGroup)
 		for i := range values {
-			values[i] = int32(group*2 + i%2)
+			if i == 0 {
+				values[i] = commonValue
+			} else {
+				values[i] = int32(group*2 + i%2)
+			}
 		}
 		rowGroups[group] = values
 	}
@@ -2348,6 +2487,11 @@ func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
 			name:      "dictionary target in one group",
 			physBytes: [][]byte{int32PhysBytes(0)},
 			wantRows:  int64(rowsPerGroup),
+		},
+		{
+			name:      "dictionary target in every group",
+			physBytes: [][]byte{int32PhysBytes(commonValue)},
+			wantRows:  int64(numRowGroups * rowsPerGroup),
 		},
 	}
 
@@ -2456,6 +2600,7 @@ func TestDictionaryRowGroupPruningKeepsFallbackColumns(t *testing.T) {
 	require.True(t, hasPlainData, "expected a plain fallback data page")
 
 	rdr := openBloomTestReader(t, data)
+	defer rdr.Close()
 	tester := &internal.ParquetRowGroupTester{
 		DictionaryPreds: []internal.RowGroupDictionaryPred{
 			{FieldID: 1, PhysBytes: [][]byte{[]byte("plain-only-target")}},
@@ -2469,7 +2614,6 @@ func TestDictionaryRowGroupPruningKeepsFallbackColumns(t *testing.T) {
 
 	assert.Equal(t, int64(numRows), countRecords(t, rr),
 		"fallback data pages must keep the row group even when the target is absent from the dictionary")
-	require.NoError(t, rdr.Close())
 }
 
 func TestParquetRowGroupRangeSelection(t *testing.T) {

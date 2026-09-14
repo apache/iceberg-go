@@ -91,3 +91,112 @@ func TestDictionaryMatchesPredicatesTreatsSignedZeroAsEqual(t *testing.T) {
 	require.Len(t, matches, 1)
 	assert.True(t, matches[0])
 }
+
+func appendFloat32DictionaryValue(data []byte, value float32) []byte {
+	var encoded [4]byte
+	binary.LittleEndian.PutUint32(encoded[:], math.Float32bits(value))
+
+	return append(data, encoded[:]...)
+}
+
+func appendFloat64DictionaryValue(data []byte, value float64) []byte {
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], math.Float64bits(value))
+
+	return append(data, encoded[:]...)
+}
+
+func float32DictionaryBytes(values ...float32) []byte {
+	data := make([]byte, 0, len(values)*4)
+	for _, value := range values {
+		data = appendFloat32DictionaryValue(data, value)
+	}
+
+	return data
+}
+
+func float64DictionaryBytes(values ...float64) []byte {
+	data := make([]byte, 0, len(values)*8)
+	for _, value := range values {
+		data = appendFloat64DictionaryValue(data, value)
+	}
+
+	return data
+}
+
+func TestDictionaryMatchesPredicatesHandlesNaN(t *testing.T) {
+	tests := []struct {
+		name         string
+		physicalType parquet.Type
+		data         []byte
+		numValues    int32
+		candidate    []byte
+		wantMatch    bool
+	}{
+		{
+			name:         "Float dictionary NaN does not match a number",
+			physicalType: parquet.Types.Float,
+			data:         float32DictionaryBytes(float32(math.NaN()), 1, 2),
+			numValues:    3,
+			candidate:    float32BytesForTest(99),
+			wantMatch:    false,
+		},
+		{
+			name:         "Double dictionary NaN does not match a number",
+			physicalType: parquet.Types.Double,
+			data:         float64DictionaryBytes(math.NaN(), 1, 2),
+			numValues:    3,
+			candidate:    float64BytesForTest(99),
+			wantMatch:    false,
+		},
+		{
+			name:         "Float NaN candidate keeps the group",
+			physicalType: parquet.Types.Float,
+			data:         float32DictionaryBytes(1),
+			numValues:    1,
+			candidate:    appendFloat32DictionaryValue(nil, float32(math.NaN())),
+			wantMatch:    true,
+		},
+		{
+			name:         "Double NaN candidate keeps the group",
+			physicalType: parquet.Types.Double,
+			data:         float64DictionaryBytes(1),
+			numValues:    1,
+			candidate:    appendFloat64DictionaryValue(nil, math.NaN()),
+			wantMatch:    true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			page := file.NewDictionaryPage(memory.NewBufferBytes(test.data), test.numValues, parquet.Encodings.Plain)
+
+			matches, known := dictionaryMatchesPredicates(
+				page,
+				test.physicalType,
+				-1,
+				[]RowGroupDictionaryPred{{FieldID: 1, PhysBytes: [][]byte{test.candidate}}},
+				[]int{0},
+			)
+			page.Release()
+
+			require.True(t, known)
+			require.Len(t, matches, 1)
+			assert.Equal(t, test.wantMatch, matches[0])
+		})
+	}
+}
+
+func float32BytesForTest(value float32) []byte {
+	var encoded [4]byte
+	binary.LittleEndian.PutUint32(encoded[:], math.Float32bits(value))
+
+	return encoded[:]
+}
+
+func float64BytesForTest(value float64) []byte {
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], math.Float64bits(value))
+
+	return encoded[:]
+}
