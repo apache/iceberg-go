@@ -1452,7 +1452,7 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanHandlesReorderedRecor
 	}, nil)
 	plan, err := newPartitionExtractionPlan(spec, icebergSchema, originalSchema)
 	s.Require().NoError(err)
-	s.Equal(0, plan.fields[0].columnIndex)
+	s.Equal([]int{0}, plan.fields[0].columnPath)
 
 	reorderedSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "value", Type: arrow.BinaryTypes.String},
@@ -1469,6 +1469,59 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanHandlesReorderedRecor
 		partitions[1].partitionRec.Get(0).(int32),
 	}
 	s.ElementsMatch([]int32{7, 8}, values)
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanNestedSourceField() {
+	// "payload" is a struct column; the partition source field ("event_time",
+	// iceberg field ID 2) lives inside it rather than at the top level.
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+			},
+		}},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
+	})
+
+	structType := arrow.StructOf(arrow.Field{Name: "event_time", Type: arrow.PrimitiveTypes.Int32, Nullable: true})
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "payload", Type: structType, Nullable: true},
+	}, nil)
+
+	plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
+	s.Require().NoError(err)
+	s.Equal([]int{0, 0}, plan.fields[0].columnPath)
+
+	bldr := array.NewRecordBuilder(s.mem, arrowSchema)
+	defer bldr.Release()
+	structBldr := bldr.Field(0).(*array.StructBuilder)
+	eventTimeBldr := structBldr.FieldBuilder(0).(*array.Int32Builder)
+
+	structBldr.Append(true)
+	eventTimeBldr.Append(7)
+
+	structBldr.Append(true)
+	eventTimeBldr.Append(8)
+
+	structBldr.Append(false) // null struct row -> partition value should be nil
+	eventTimeBldr.AppendNull()
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+
+	partitions, err := plan.getRecordPartitions(record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	values := make(map[any][]int64)
+	for _, p := range partitions {
+		values[p.partitionRec.Get(0)] = p.rows
+	}
+	s.Equal([]int64{0}, values[int32(7)])
+	s.Equal([]int64{1}, values[int32(8)])
+	s.Equal([]int64{2}, values[nil])
 }
 
 func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {

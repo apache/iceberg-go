@@ -25,6 +25,7 @@ import (
 	"math"
 	"math/bits"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -66,7 +67,7 @@ type partitionFieldInfo struct {
 	sourceName  string
 	fieldID     int
 	sourceType  iceberg.Type
-	columnIndex int
+	columnPath  []int
 	valueAt     func(arrow.Array, int) (any, error)
 }
 
@@ -361,7 +362,6 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 	}
 
 	for i, partitionField := range partitionFields {
-		partitionFieldsInfo[i].columnIndex = -1
 		sourceField, ok := specFieldsByID[partitionField.ID]
 		if !ok {
 			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
@@ -371,8 +371,8 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		if !ok {
 			continue
 		}
-		colIndices := recordSchema.FieldIndices(colName)
-		if len(colIndices) == 0 {
+		columnPath, ok := resolveArrowColumnPath(recordSchema, colName)
+		if !ok {
 			return nil, fmt.Errorf("failed to find source column %q in record schema", colName)
 		}
 		sourceType, ok := schema.FindTypeByID(sourceField.SourceID())
@@ -384,7 +384,7 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 			sourceName:  colName,
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
-			columnIndex: colIndices[0],
+			columnPath:  columnPath,
 			valueAt:     bindPartitionValue(sourceField.Transform, sourceType),
 		}
 	}
@@ -395,6 +395,66 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		recordSchema: recordSchema,
 		fields:       partitionFieldsInfo,
 	}, nil
+}
+
+// resolveArrowColumnPath resolves a dot-joined nested field name into a path of Arrow field indices.
+func resolveArrowColumnPath(recordSchema *arrow.Schema, colName string) ([]int, bool) {
+	segments := strings.Split(colName, ".")
+
+	indices := recordSchema.FieldIndices(segments[0])
+	if len(indices) == 0 {
+		return nil, false
+	}
+
+	path := make([]int, 1, len(segments))
+	path[0] = indices[0]
+	fieldType := recordSchema.Field(indices[0]).Type
+
+	for _, segment := range segments[1:] {
+		structType, ok := fieldType.(*arrow.StructType)
+		if !ok {
+			return nil, false
+		}
+		fieldIdx, ok := structType.FieldIdx(segment)
+		if !ok {
+			return nil, false
+		}
+		path = append(path, fieldIdx)
+		fieldType = structType.Field(fieldIdx).Type
+	}
+
+	return path, true
+}
+
+// resolveColumnChain walks a resolved column path from the record's top-level column
+// down to the leaf, returning the array at each step of the path.
+func resolveColumnChain(record arrow.RecordBatch, path []int) []arrow.Array {
+	chain := make([]arrow.Array, len(path))
+	col := record.Column(path[0])
+	chain[0] = col
+	for i, fieldIdx := range path[1:] {
+		col = col.(*array.Struct).Field(fieldIdx)
+		chain[i+1] = col
+	}
+
+	return chain
+}
+
+// leafColumnAt returns the leaf array for a resolved column chain at the given row,
+// or false if the leaf or any ancestor struct is null at that row.
+func leafColumnAt(chain []arrow.Array, row int) (arrow.Array, bool) {
+	for _, col := range chain[:len(chain)-1] {
+		if col.IsNull(row) {
+			return nil, false
+		}
+	}
+
+	leaf := chain[len(chain)-1]
+	if leaf.IsNull(row) {
+		return nil, false
+	}
+
+	return leaf, true
 }
 
 func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
@@ -411,17 +471,38 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 
 	partitionMap := newPartitionMapNode()
 	partitionRec := make(partitionRecord, len(p.fields))
-	partitionColumns := make([]arrow.Array, len(p.fields))
+
+	// we track these separately to avoid traversing the chain for top level fields.
+	topLevelColumns := make([]arrow.Array, len(p.fields))
+	columnChains := make([][]arrow.Array, len(p.fields))
 	for i, fieldInfo := range p.fields {
-		if fieldInfo.columnIndex >= 0 {
-			partitionColumns[i] = record.Column(fieldInfo.columnIndex)
+		switch len(fieldInfo.columnPath) {
+		case 0:
+		case 1:
+			topLevelColumns[i] = record.Column(fieldInfo.columnPath[0])
+		default:
+			columnChains[i] = resolveColumnChain(record, fieldInfo.columnPath)
 		}
 	}
 
 	for row := range record.NumRows() {
 		for i, fieldInfo := range p.fields {
-			col := partitionColumns[i]
-			if col != nil && !col.IsNull(int(row)) {
+			var col arrow.Array
+			var ok bool
+
+			switch {
+			case topLevelColumns[i] != nil:
+				col = topLevelColumns[i]
+				ok = !col.IsNull(int(row))
+			case columnChains[i] != nil:
+				col, ok = leafColumnAt(columnChains[i], int(row))
+			default:
+				partitionRec[i] = nil
+
+				continue
+			}
+
+			if ok {
 				value, err := fieldInfo.valueAt(col, int(row))
 				if err != nil {
 					return nil, fmt.Errorf(
