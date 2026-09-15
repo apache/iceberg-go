@@ -193,6 +193,7 @@ type loadTableResponse struct {
 	RawMetadata        json.RawMessage     `json:"metadata"`
 	Config             iceberg.Properties  `json:"config"`
 	StorageCredentials []StorageCredential `json:"storage-credentials"`
+	Labels             *iceberg.Labels     `json:"labels,omitempty"`
 	Metadata           table.Metadata      `json:"-"`
 }
 
@@ -2456,6 +2457,7 @@ type loadViewResponse struct {
 	MetadataLoc string             `json:"metadata-location"`
 	RawMetadata json.RawMessage    `json:"metadata"`
 	Config      iceberg.Properties `json:"config"`
+	Labels      *iceberg.Labels    `json:"labels,omitempty"`
 }
 
 // RegisterView registers an existing view in the catalog using its metadata file location.
