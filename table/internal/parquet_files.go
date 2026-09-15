@@ -724,9 +724,36 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.Wri
 	return parquet.NewWriterProperties(wp...), nil
 }
 
-// dictCostFallbackProps returns a WithDictionaryCostFallbackFor(true) property for every leaf
-// column of arrowSchema, resolving parquet leaf paths through arrow-go's own schema conversion.
+// dictCostFallbackProps returns a WithDictionaryCostFallbackFor(true) property per leaf, walking the arrow schema directly (extensions unwrapped) and falling back to pqarrow.ToParquet for list/map schemas.
 func dictCostFallbackProps(arrowSchema *arrow.Schema, base []parquet.WriterProperty) ([]parquet.WriterProperty, error) {
+	if schemaHasListOrMap(arrowSchema) {
+		return dictCostFallbackViaParquet(arrowSchema, base)
+	}
+
+	var props []parquet.WriterProperty
+	var walk func(prefix string, dt arrow.DataType)
+	walk = func(prefix string, dt arrow.DataType) {
+		if ext, ok := dt.(arrow.ExtensionType); ok {
+			dt = ext.StorageType()
+		}
+		if st, ok := dt.(*arrow.StructType); ok {
+			for _, f := range st.Fields() {
+				walk(prefix+"."+f.Name, f.Type)
+			}
+
+			return
+		}
+		props = append(props, parquet.WithDictionaryCostFallbackFor(prefix, true))
+	}
+	for _, f := range arrowSchema.Fields() {
+		walk(f.Name, f.Type)
+	}
+
+	return props, nil
+}
+
+// dictCostFallbackViaParquet is the authoritative path for list/map schemas, whose parquet leaf naming the direct walk does not reproduce.
+func dictCostFallbackViaParquet(arrowSchema *arrow.Schema, base []parquet.WriterProperty) ([]parquet.WriterProperty, error) {
 	parquetSchema, err := pqarrow.ToParquet(arrowSchema, parquet.NewWriterProperties(base...), pqarrow.DefaultWriterProps())
 	if err != nil {
 		return nil, err
@@ -738,6 +765,35 @@ func dictCostFallbackProps(arrowSchema *arrow.Schema, base []parquet.WriterPrope
 	}
 
 	return props, nil
+}
+
+func schemaHasListOrMap(sc *arrow.Schema) bool {
+	var has func(dt arrow.DataType) bool
+	has = func(dt arrow.DataType) bool {
+		if ext, ok := dt.(arrow.ExtensionType); ok {
+			dt = ext.StorageType()
+		}
+		switch t := dt.(type) {
+		case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType,
+			*arrow.ListViewType, *arrow.LargeListViewType, *arrow.MapType:
+			return true
+		case *arrow.StructType:
+			for _, f := range t.Fields() {
+				if has(f.Type) {
+					return true
+				}
+			}
+		}
+
+		return false
+	}
+	for _, f := range sc.Fields() {
+		if has(f.Type) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Write appends a record batch to the Parquet file.

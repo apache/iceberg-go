@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -82,25 +83,48 @@ func buildExtractColumn(ctx context.Context, col iceberg.VariantExtractColumn, r
 	return out, field, nil
 }
 
+// variantPathOf returns the extract term's member-name path (kept off the public BoundExtract interface); false if the term has none.
+func variantPathOf(t iceberg.BoundExtract) (variant.VariantPath, bool) {
+	vp, ok := t.(interface {
+		VariantPath() variant.VariantPath
+	})
+	if !ok {
+		return variant.VariantPath{}, false
+	}
+
+	return vp.VariantPath(), true
+}
+
 // extractColumnValues navigates columnarly then casts each leaf with iceberg's cast; a VariantGet
 // navigation error (arrow-rs errors where the residual filter wants null-on-miss) falls back to per-row.
 func extractColumnValues(ctx context.Context, varr *extensions.VariantArray, col iceberg.VariantExtractColumn, typ iceberg.PrimitiveType, dt arrow.DataType, mem memory.Allocator) (arrow.Array, error) {
-	if fast := tryShreddedTypedColumn(varr, col.Term.VariantPath(), dt, mem); fast != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path, ok := variantPathOf(col.Term)
+	if !ok {
+		return extractColumnValuesPerRow(ctx, varr, col, dt, mem)
+	}
+	if fast := tryShreddedTypedColumn(varr, path, dt, mem); fast != nil {
 		return fast, nil
 	}
 	if !varr.IsShredded() {
-		return extractColumnValuesPerRow(varr, col, dt, mem)
+		return extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 	}
 
-	extracted, err := compute.VariantGet(ctx, varr, compute.VariantGetOptions{Path: col.Term.VariantPath()})
+	extracted, err := compute.VariantGet(ctx, varr, compute.VariantGetOptions{Path: path})
 	if err != nil {
-		return extractColumnValuesPerRow(varr, col, dt, mem)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+
+		return extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 	}
 	defer extracted.Release()
 
 	leaves, ok := extracted.(*extensions.VariantArray)
 	if !ok {
-		return extractColumnValuesPerRow(varr, col, dt, mem)
+		return extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 	}
 
 	bldr := array.NewBuilder(mem, dt)
@@ -139,12 +163,17 @@ func extractColumnValues(ctx context.Context, varr *extensions.VariantArray, col
 
 // extractColumnValuesPerRow is the row-by-row walk used when columnar navigation cannot follow
 // the path; col.Term.ExtractValue navigates and casts, treating any path miss as null.
-func extractColumnValuesPerRow(varr *extensions.VariantArray, col iceberg.VariantExtractColumn, dt arrow.DataType, mem memory.Allocator) (arrow.Array, error) {
+func extractColumnValuesPerRow(ctx context.Context, varr *extensions.VariantArray, col iceberg.VariantExtractColumn, dt arrow.DataType, mem memory.Allocator) (arrow.Array, error) {
 	bldr := array.NewBuilder(mem, dt)
 	defer bldr.Release()
 
 	varName := col.Term.Ref().Field().Name
 	for i := range varr.Len() {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if varr.IsNull(i) {
 			bldr.AppendNull()
 
@@ -186,7 +215,13 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 	n := varr.Len()
 
 	var mask *memory.Buffer
+	badOffset := false
 	mergeValidity := func(arr arrow.Array) {
+		if arr.Data().Offset() != 0 {
+			badOffset = true // child at a non-zero offset: our offset-0 bit indexing would be wrong
+
+			return
+		}
 		if arr.NullN() == 0 {
 			return
 		}
@@ -195,7 +230,9 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 			return
 		}
 		if mask == nil {
-			mask = bitutil.BitmapAndAlloc(mem, vb.Bytes(), vb.Bytes(), 0, 0, int64(n), 0)
+			mask = memory.NewResizableBuffer(mem)
+			mask.Resize(int(bitutil.BytesForBits(int64(n))))
+			copy(mask.Bytes(), vb.Bytes())
 
 			return
 		}
@@ -245,7 +282,7 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 		cur = field.Field(tvIdx)
 	}
 
-	if !arrow.TypeEqual(cur.DataType(), dt) {
+	if badOffset || !arrow.TypeEqual(cur.DataType(), dt) {
 		return bail()
 	}
 
@@ -257,6 +294,9 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 	}
 
 	mergeValidity(cur)
+	if badOffset {
+		return bail()
+	}
 	curData := cur.Data()
 	buffers := append([]*memory.Buffer(nil), curData.Buffers()...)
 	buffers[0] = mask
@@ -274,6 +314,9 @@ func rootResidualHidesRows(varr *extensions.VariantArray, tv arrow.Array) bool {
 	uv := varr.UntypedValues()
 	if uv == nil || tv.NullN() == 0 || uv.NullN() == uv.Len() {
 		return false
+	}
+	if tv.Data().Offset() != 0 || uv.Data().Offset() != 0 {
+		return true // non-zero child offset: can't safely bit-index; presume residual so the caller bails
 	}
 	tvb := tv.Data().Buffers()[0]
 	uvb := uv.Data().Buffers()[0]

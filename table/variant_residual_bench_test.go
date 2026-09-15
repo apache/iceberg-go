@@ -102,7 +102,7 @@ func BenchmarkVariantExtract(b *testing.B) {
 			dt, _ := TypeToArrowType(typ, false, false)
 
 			mode := "fallback"
-			if ref := tryShreddedTypedColumn(varr, col.Term.VariantPath(), dt, mem); ref != nil {
+			if ref := tryShreddedTypedColumn(varr, vpath(b, col.Term), dt, mem); ref != nil {
 				mode = "fastpath"
 				ref.Release()
 			}
@@ -120,7 +120,7 @@ func BenchmarkVariantExtract(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/%s/perrow", leaf.name, shape), func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
-					out, err := extractColumnValuesPerRow(varr, col, dt, mem)
+					out, err := extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 					if err != nil {
 						b.Fatal(err)
 					}

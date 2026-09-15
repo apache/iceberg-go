@@ -1325,8 +1325,10 @@ func TestShreddedVariantExtractResidualNoLeak(t *testing.T) {
 
 	// read rec on the checked allocator so the fast-path zero-copy leaf is leak-tracked
 	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer checked.AssertSize(t, 0)
 	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, checked)
 	require.NoError(t, err)
+	defer tbl.Release()
 
 	fileSchema, err := ArrowSchemaToIceberg(tbl.Schema(), false, nil)
 	require.NoError(t, err)
@@ -1352,10 +1354,7 @@ func TestShreddedVariantExtractResidualNoLeak(t *testing.T) {
 
 	out, err := fn(rec)
 	require.NoError(t, err)
-	out.Release()
-
-	tbl.Release()
-	checked.AssertSize(t, 0)
+	defer out.Release()
 }
 
 // TestVariantExtractResidualCombined exercises AND/OR filters over multiple extract terms.

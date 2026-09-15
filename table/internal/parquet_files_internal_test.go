@@ -23,6 +23,9 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/geoarrow/geoarrow-go"
@@ -159,4 +162,49 @@ func TestGetWritePropertiesEnablesDictCostFallback(t *testing.T) {
 
 	assert.True(t, wp.DictionaryCostFallbackEnabledFor("s"))
 	assert.True(t, wp.DictionaryCostFallbackEnabledFor("n"))
+}
+
+// TestDictCostFallbackWalkMatchesToParquet locks the arrow-leaf walk to pqarrow.ToParquet's leaf paths (flat, nested, variant, decimal).
+func TestDictCostFallbackWalkMatchesToParquet(t *testing.T) {
+	variantType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
+		arrow.Field{Name: "b", Type: arrow.BinaryTypes.String},
+	))
+	schemas := map[string]*arrow.Schema{
+		"flat": arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+			{Name: "s", Type: arrow.BinaryTypes.String},
+		}, nil),
+		"nested": arrow.NewSchema([]arrow.Field{
+			{Name: "w", Type: arrow.StructOf(
+				arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Int64},
+				arrow.Field{Name: "y", Type: arrow.StructOf(arrow.Field{Name: "z", Type: arrow.BinaryTypes.String})},
+			)},
+		}, nil),
+		"variant": arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+			{Name: "payload", Type: variantType},
+		}, nil),
+		"decimal": arrow.NewSchema([]arrow.Field{
+			{Name: "d", Type: &arrow.Decimal128Type{Precision: 10, Scale: 2}},
+		}, nil),
+	}
+
+	for name, sc := range schemas {
+		t.Run(name, func(t *testing.T) {
+			require.False(t, schemaHasListOrMap(sc), "walk path should apply")
+			ps, err := pqarrow.ToParquet(sc, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
+			require.NoError(t, err)
+
+			walk, err := dictCostFallbackProps(sc, nil)
+			require.NoError(t, err)
+			wp := parquet.NewWriterProperties(walk...)
+
+			require.Equal(t, ps.NumColumns(), len(walk), "leaf count differs from pqarrow")
+			for i := range ps.NumColumns() {
+				path := ps.Column(i).Path()
+				require.Truef(t, wp.DictionaryCostFallbackEnabledFor(path), "walk missing leaf path %q", path)
+			}
+		})
+	}
 }

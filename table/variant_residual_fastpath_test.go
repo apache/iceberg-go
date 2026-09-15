@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -70,6 +71,15 @@ func buildVariantExtractRec(t testing.TB, mem memory.Allocator, shreddedType *ex
 
 func shredStruct(fields ...arrow.Field) *extensions.VariantType {
 	return extensions.NewShreddedVariantType(arrow.StructOf(fields...))
+}
+
+// vpath fetches the extract term's member-name path (now off the public BoundExtract interface).
+func vpath(tb testing.TB, term iceberg.BoundExtract) variant.VariantPath {
+	tb.Helper()
+	p, ok := variantPathOf(term)
+	require.True(tb, ok)
+
+	return p
 }
 
 // TestExtractFastPathParity: fast-path output must match the per-row walk on every branch; wantFast asserts whether it fires.
@@ -207,14 +217,17 @@ func TestExtractFastPathParity(t *testing.T) {
 			dt, err := TypeToArrowType(tc.typ, false, false)
 			require.NoError(t, err)
 
-			ref := tryShreddedTypedColumn(varr, col.Term.VariantPath(), dt, mem)
+			ref := tryShreddedTypedColumn(varr, vpath(t, col.Term), dt, mem)
+			if ref != nil {
+				defer ref.Release()
+			}
 			require.Equal(t, tc.wantFast, ref != nil, "fast path firing")
 
 			got, _, err := buildExtractColumn(ctx, col, rec, mem)
 			require.NoError(t, err)
 			defer got.Release()
 
-			want, err := extractColumnValuesPerRow(varr, col, dt, mem)
+			want, err := extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 			require.NoError(t, err)
 			defer want.Release()
 
@@ -223,7 +236,6 @@ func TestExtractFastPathParity(t *testing.T) {
 
 			if ref != nil {
 				require.True(t, sharesDataBuffers(got, ref), "fast path must share the typed column's data (no per-row rebuild)")
-				ref.Release()
 			}
 		})
 	}
@@ -286,12 +298,12 @@ func TestFastPathRootResidualObjectFallsBack(t *testing.T) {
 	dt, err := TypeToArrowType(iceberg.PrimitiveTypes.Int64, false, false)
 	require.NoError(t, err)
 
-	require.Nil(t, tryShreddedTypedColumn(varr, col.Term.VariantPath(), dt, mem), "must not fast-path a root-residual object row")
+	require.Nil(t, tryShreddedTypedColumn(varr, vpath(t, col.Term), dt, mem), "must not fast-path a root-residual object row")
 
 	got, _, err := buildExtractColumn(ctx, col, rec, mem)
 	require.NoError(t, err)
 	defer got.Release()
-	want, err := extractColumnValuesPerRow(varr, col, dt, mem)
+	want, err := extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 	require.NoError(t, err)
 	defer want.Release()
 
@@ -348,12 +360,12 @@ func TestFastPathDecimalScaleNearMissFallsBack(t *testing.T) {
 	dt, err := TypeToArrowType(iceberg.DecimalTypeOf(10, 4), false, false)
 	require.NoError(t, err)
 
-	require.Nil(t, tryShreddedTypedColumn(varr, col.Term.VariantPath(), dt, mem), "scale near-miss must not fast-path")
+	require.Nil(t, tryShreddedTypedColumn(varr, vpath(t, col.Term), dt, mem), "scale near-miss must not fast-path")
 
 	got, _, err := buildExtractColumn(ctx, col, rec, mem)
 	require.NoError(t, err)
 	defer got.Release()
-	want, err := extractColumnValuesPerRow(varr, col, dt, mem)
+	want, err := extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 	require.NoError(t, err)
 	defer want.Release()
 	require.Truef(t, array.Equal(got, want), "got=%v want=%v", got, want)
@@ -407,12 +419,12 @@ func TestFastPathTimestampTzNearMissFallsBack(t *testing.T) {
 	dt, err := TypeToArrowType(iceberg.PrimitiveTypes.Timestamp, false, false)
 	require.NoError(t, err)
 
-	require.Nil(t, tryShreddedTypedColumn(varr, col.Term.VariantPath(), dt, mem), "tz near-miss must not fast-path")
+	require.Nil(t, tryShreddedTypedColumn(varr, vpath(t, col.Term), dt, mem), "tz near-miss must not fast-path")
 
 	got, _, err := buildExtractColumn(ctx, col, rec, mem)
 	require.NoError(t, err)
 	defer got.Release()
-	want, err := extractColumnValuesPerRow(varr, col, dt, mem)
+	want, err := extractColumnValuesPerRow(ctx, varr, col, dt, mem)
 	require.NoError(t, err)
 	defer want.Release()
 	require.Truef(t, array.Equal(got, want), "got=%v want=%v", got, want)
@@ -431,4 +443,156 @@ func sharesDataBuffers(a, b arrow.Array) bool {
 	}
 
 	return true
+}
+
+// TestFastPathWrapperFieldNullMatchesPerRow: arrow-go's per-row reassembly reads the live child under a null wrapper, so the fast path must match it (spec-undefined shape).
+func TestFastPathWrapperFieldNullMatchesPerRow(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	vt := extensions.NewShreddedVariantType(arrow.StructOf(arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64}))
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(1)}))
+	v, err := b.Build()
+	require.NoError(t, err)
+	meta := v.Metadata().Bytes()
+
+	storageType := vt.StorageType().(*arrow.StructType)
+	tvType := storageType.Field(2).Type.(*arrow.StructType) // struct<a>
+	aType := tvType.Field(0).Type.(*arrow.StructType)       // a: struct<value, typed_value>
+
+	binArr := func(vals [][]byte) arrow.Array {
+		bb := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+		defer bb.Release()
+		for _, x := range vals {
+			if x == nil {
+				bb.AppendNull()
+			} else {
+				bb.Append(x)
+			}
+		}
+
+		return bb.NewArray()
+	}
+
+	i64b := array.NewInt64Builder(mem)
+	defer i64b.Release()
+	i64b.Append(1)
+	i64b.Append(5) // row 1 typed_value stays live under the (about-to-be) null wrapper
+	aTyped := i64b.NewArray()
+	defer aTyped.Release()
+	aVal := binArr([][]byte{nil, nil})
+	defer aVal.Release()
+
+	// wrapper "a": row0 valid, row1 NULL (bit1=0), children left untouched -> non-cascaded shape
+	wrapValidity := memory.NewBufferBytes([]byte{0x01})
+	aData := array.NewData(aType, 2, []*memory.Buffer{wrapValidity}, []arrow.ArrayData{aVal.Data(), aTyped.Data()}, 1, 0)
+	defer aData.Release()
+	aStruct := array.NewStructData(aData)
+	defer aStruct.Release()
+
+	tvData := array.NewData(tvType, 2, []*memory.Buffer{nil}, []arrow.ArrayData{aStruct.Data()}, 0, 0)
+	defer tvData.Release()
+	tvStruct := array.NewStructData(tvData)
+	defer tvStruct.Release()
+
+	metaArr := binArr([][]byte{meta, meta})
+	defer metaArr.Release()
+	rootVal := binArr([][]byte{nil, nil})
+	defer rootVal.Release()
+
+	storageData := array.NewData(storageType, 2, []*memory.Buffer{nil}, []arrow.ArrayData{metaArr.Data(), rootVal.Data(), tvStruct.Data()}, 0, 0)
+	defer storageData.Release()
+	storage := array.NewStructData(storageData)
+	defer storage.Release()
+	varr := array.NewExtensionArrayWithStorage(vt, storage).(*extensions.VariantArray)
+	defer varr.Release()
+
+	md := arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"2"})
+	rec := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "payload", Type: vt, Nullable: true, Metadata: md}}, nil), []arrow.Array{varr}, 2)
+	defer rec.Release()
+
+	iceSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}})
+	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
+	dt, err := TypeToArrowType(iceberg.PrimitiveTypes.Int64, false, false)
+	require.NoError(t, err)
+
+	got, _, err := buildExtractColumn(ctx, col, rec, mem)
+	require.NoError(t, err)
+	defer got.Release()
+	want, err := extractColumnValuesPerRow(ctx, varr, col, dt, mem)
+	require.NoError(t, err)
+	defer want.Release()
+	require.Truef(t, array.Equal(got, want), "got=%v want=%v", got, want)
+	require.False(t, got.IsNull(1))
+	require.EqualValues(t, 5, got.(*array.Int64).Value(1))
+}
+
+// TestFastPathSlicedOffsetFallsBack: a VariantArray sliced to a non-zero offset must bail from the fast path and still match the per-row reference.
+func TestFastPathSlicedOffsetFallsBack(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	rec, col := buildVariantExtractRec(t, mem, shredStruct(arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64}),
+		"$.a", iceberg.PrimitiveTypes.Int64, []map[string]any{{"a": int64(1)}, {"a": int64(2)}, {"a": int64(3)}})
+	defer rec.Release()
+	full := resolveVariantSource(rec, col.Term.Ref().Field().ID, col.SourcePath).(*extensions.VariantArray)
+	sliced := array.NewSlice(full, 1, int64(full.Len())).(*extensions.VariantArray)
+	defer sliced.Release()
+	dt, err := TypeToArrowType(iceberg.PrimitiveTypes.Int64, false, false)
+	require.NoError(t, err)
+
+	require.Nil(t, tryShreddedTypedColumn(sliced, vpath(t, col.Term), dt, mem), "sliced (offset!=0) array must bail")
+
+	got, err := extractColumnValues(ctx, sliced, col, iceberg.PrimitiveTypes.Int64, dt, mem)
+	require.NoError(t, err)
+	defer got.Release()
+	want, err := extractColumnValuesPerRow(ctx, sliced, col, dt, mem)
+	require.NoError(t, err)
+	defer want.Release()
+	require.Truef(t, array.Equal(got, want), "got=%v want=%v", got, want)
+}
+
+// TestExtractColumnValuesContextCancelled: a cancelled context returns its error instead of a silent partial result.
+func TestExtractColumnValuesContextCancelled(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	base := compute.WithAllocator(context.Background(), mem)
+	ctx, cancel := context.WithCancel(base)
+	cancel()
+
+	rec, col := buildVariantExtractRec(t, mem, shredStruct(arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64}),
+		"$.a", iceberg.PrimitiveTypes.Int64, []map[string]any{{"a": int64(1)}})
+	defer rec.Release()
+
+	_, _, err := buildExtractColumn(ctx, col, rec, mem)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestMiddleTierColumnarCast drives the compute.VariantGet + iceberg-cast tier: an int32 leaf extracted as int64 bails the fast path and returns the promoted values.
+func TestMiddleTierColumnarCast(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	rec, col := buildVariantExtractRec(t, mem, shredStruct(arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int32}),
+		"$.a", iceberg.PrimitiveTypes.Int64, []map[string]any{{"a": int32(1)}, {"a": int32(2)}})
+	defer rec.Release()
+	varr := resolveVariantSource(rec, col.Term.Ref().Field().ID, col.SourcePath).(*extensions.VariantArray)
+	dt, err := TypeToArrowType(iceberg.PrimitiveTypes.Int64, false, false)
+	require.NoError(t, err)
+
+	require.Nil(t, tryShreddedTypedColumn(varr, vpath(t, col.Term), dt, mem), "int32 leaf as int64 must not fast-path")
+	require.True(t, varr.IsShredded(), "still shredded, so extractColumnValues uses the compute.VariantGet tier")
+
+	got, _, err := buildExtractColumn(ctx, col, rec, mem)
+	require.NoError(t, err)
+	defer got.Release()
+	require.False(t, got.IsNull(0))
+	require.EqualValues(t, 1, got.(*array.Int64).Value(0))
+	require.EqualValues(t, 2, got.(*array.Int64).Value(1))
 }

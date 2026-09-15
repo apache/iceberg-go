@@ -29,8 +29,6 @@ type BoundExtract interface {
 	BoundTerm
 
 	Path() string
-	// VariantPath returns the term's member-name path for columnar extraction via compute.VariantGet.
-	VariantPath() variant.VariantPath
 	// ExtractValue navigates v to this term's path and casts the leaf to the target type.
 	ExtractValue(v variant.Value) (Literal, bool)
 }
