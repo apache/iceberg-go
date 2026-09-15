@@ -375,9 +375,10 @@ func (c *Catalog) isS3TablesDatabase(ctx context.Context, database string) (bool
 // service assigns storage, so a minimal entry is created first to allocate the
 // location, then updated with the written metadata pointer; on any later
 // failure the minimal entry is removed so no half-created table is left behind.
-// Matching pyiceberg, two residual cases are left to the service: a commit
-// failure after WriteMetadata leaves the metadata object for S3 Tables to
-// reclaim, and a failed rollback leaves a minimal entry to clear out of band.
+// On a commit failure the minimal Glue entry is rolled back and the written
+// metadata object is best-effort deleted; if that delete fails (the managed
+// location may be unreachable) reclaiming it is left to S3 Tables. A failed
+// rollback leaves a minimal entry to clear out of band, matching pyiceberg.
 func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	_, err := c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
@@ -457,6 +458,12 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 		SkipArchive:  aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
 	})
 	if err != nil {
+		// Best-effort: drop the metadata object we just wrote; for S3 Tables the
+		// managed location may be unreachable, so leave any remainder to the service.
+		if fs, fsErr := staged.FS(ctx); fsErr == nil {
+			_ = fs.Remove(staged.MetadataLocation())
+		}
+
 		return fmt.Errorf("failed to commit S3 Tables table %s.%s: %w", database, tableName, err)
 	}
 

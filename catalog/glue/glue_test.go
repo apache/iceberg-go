@@ -2911,7 +2911,8 @@ func TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure(t *testing.T) {
 // allocated entry is rolled back.
 func TestGlueCreateTableS3TablesRollbackOnUpdateFailure(t *testing.T) {
 	ctx := context.Background()
-	managedLocation := "file://" + t.TempDir()
+	dir := t.TempDir()
+	managedLocation := "file://" + dir
 	schema := s3TablesTestSchema()
 
 	mockGlueSvc := &mockGlueClient{}
@@ -2940,6 +2941,10 @@ func TestGlueCreateTableS3TablesRollbackOnUpdateFailure(t *testing.T) {
 	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema)
 	require.ErrorContains(t, err, "failed to commit S3 Tables table")
 	mockGlueSvc.AssertExpectations(t)
+
+	// The best-effort cleanup should have removed the metadata object it wrote.
+	leftover, _ := filepath.Glob(filepath.Join(dir, "metadata", "*.metadata.json"))
+	require.Empty(t, leftover)
 }
 
 // TestGlueCreateTableS3TablesNoRollbackOnLoadFailure verifies that a transient
