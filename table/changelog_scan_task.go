@@ -35,6 +35,11 @@ const (
 
 // ChangelogScanTask is a unit of work that produces changelog rows.
 type ChangelogScanTask interface {
+	// Implementations are intentionally limited to the changelog task types
+	// provided by this package.
+	isChangelogScanTask()
+	// ScanTask returns the underlying file scan task for reading the data file.
+	ScanTask() FileScanTask
 	Operation() ChangelogOperation
 	ChangeOrdinal() int
 	CommitSnapshotID() int64
@@ -91,6 +96,8 @@ func NewAddedRowsScanTask(dataFile iceberg.DataFile, deletes []iceberg.DataFile,
 func (t AddedRowsScanTask) Operation() ChangelogOperation { return ChangelogOpInsert }
 func (t AddedRowsScanTask) ChangeOrdinal() int            { return t.changeOrdinal }
 func (t AddedRowsScanTask) CommitSnapshotID() int64       { return t.commitSnapshotID }
+func (t AddedRowsScanTask) ScanTask() FileScanTask        { return t.FileScanTask }
+func (AddedRowsScanTask) isChangelogScanTask()            {}
 
 // Deletes returns every delete file applied while reading the added data
 // file: position deletes, then equality deletes, then deletion vectors.
@@ -125,6 +132,8 @@ func NewDeletedDataFileScanTask(dataFile iceberg.DataFile, existingDeletes []ice
 func (t DeletedDataFileScanTask) Operation() ChangelogOperation { return ChangelogOpDelete }
 func (t DeletedDataFileScanTask) ChangeOrdinal() int            { return t.changeOrdinal }
 func (t DeletedDataFileScanTask) CommitSnapshotID() int64       { return t.commitSnapshotID }
+func (t DeletedDataFileScanTask) ScanTask() FileScanTask        { return t.FileScanTask }
+func (DeletedDataFileScanTask) isChangelogScanTask()            {}
 
 // ExistingDeletes returns delete files that applied before the data file was
 // removed.
@@ -168,6 +177,8 @@ func NewDeletedRowsScanTask(dataFile iceberg.DataFile, addedDeletes, existingDel
 func (t DeletedRowsScanTask) Operation() ChangelogOperation { return ChangelogOpDelete }
 func (t DeletedRowsScanTask) ChangeOrdinal() int            { return t.changeOrdinal }
 func (t DeletedRowsScanTask) CommitSnapshotID() int64       { return t.commitSnapshotID }
+func (t DeletedRowsScanTask) ScanTask() FileScanTask        { return t.FileScanTask }
+func (DeletedRowsScanTask) isChangelogScanTask()            {}
 
 // AddedDeletes returns delete files whose removals should appear in the
 // changelog.

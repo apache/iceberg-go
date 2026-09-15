@@ -122,15 +122,9 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		nameToField[partitionField.Name] = partitionField
 	}
 	us.schema = stagedMeta.CurrentSchema()
-	lastAssignedFieldId := us.meta.LastPartitionSpecID()
-	if lastAssignedFieldId == nil {
-		v := iceberg.PartitionDataIDStart - 1
-		lastAssignedFieldId = &v
-	}
-
 	us.nameToField = nameToField
 	us.transformToField = transformToField
-	us.lastAssignedFieldId = *lastAssignedFieldId
+	us.lastAssignedFieldId = partitionFieldIDFloor(us.meta.LastPartitionSpecID(), us.meta.PartitionSpecs())
 
 	return us
 }
