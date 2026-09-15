@@ -1029,6 +1029,35 @@ func TestGlueCreateNamespace(t *testing.T) {
 	assert.NoError(err)
 }
 
+func TestGlueCreateNamespaceAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("CreateDatabase", mock.Anything, &glue.CreateDatabaseInput{
+		DatabaseInput: &types.DatabaseInput{
+			Name:        aws.String("test_namespace"),
+			Description: aws.String("Test Description"),
+			LocationUri: aws.String("s3://test-location"),
+			Parameters:  map[string]string{},
+		},
+	}, mock.Anything).Return(&glue.CreateDatabaseOutput{}, &types.AlreadyExistsException{
+		Message: aws.String("Database already exists"),
+	}).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	props := map[string]string{
+		"comment":        "Test Description",
+		PropsKeyLocation: "s3://test-location",
+	}
+
+	err := glueCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("test_namespace"), props)
+	assert.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+}
+
 func TestGlueLoadNamespacePropertiesNormalizesDescription(t *testing.T) {
 	tests := []struct {
 		name        string

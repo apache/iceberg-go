@@ -653,6 +653,11 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		DatabaseInput: constructDatabaseInput(database, props),
 	})
 	if err != nil {
+		var alreadyExistsErr *types.AlreadyExistsException
+		if errors.As(err, &alreadyExistsErr) {
+			return fmt.Errorf("failed to create database %s: %w", database, catalog.ErrNamespaceAlreadyExists)
+		}
+
 		return fmt.Errorf("failed to create database %s: %w", database, err)
 	}
 
