@@ -36,6 +36,9 @@ type View struct {
 	identifier       table.Identifier
 	metadata         Metadata
 	metadataLocation string
+	// labels is transient catalog enrichment from the load response; nil when
+	// the catalog returned none. It is excluded from Equals.
+	labels *iceberg.Labels
 }
 
 func (t View) Equals(other View) bool {
@@ -54,12 +57,40 @@ func (t View) Location() string                 { return t.metadata.Location() }
 func (t View) Versions() []*Version             { return t.metadata.Versions() }
 func (t View) Schemas() map[int]*iceberg.Schema { return t.metadata.SchemasByID() }
 
-func New(ident table.Identifier, meta Metadata, metadataLocation string) *View {
-	return &View{
+// Labels returns the catalog-provided labels from the load response, or nil if
+// the catalog returned none. Labels are transient enrichment, not view state.
+func (t View) Labels() *iceberg.Labels { return t.labels }
+
+// Option configures a [View] at construction.
+type Option func(*View)
+
+// noopViewOption is the shared no-op [Option], returned when an option has
+// nothing to apply (e.g. WithLabels(nil)). It mirrors noopTableOption.
+func noopViewOption(*View) {}
+
+// WithLabels attaches catalog-provided labels from a load response to the view.
+// A nil value is ignored, leaving the view's labels nil.
+func WithLabels(l *iceberg.Labels) Option {
+	if l == nil {
+		return noopViewOption
+	}
+
+	return func(v *View) {
+		v.labels = l
+	}
+}
+
+func New(ident table.Identifier, meta Metadata, metadataLocation string, opts ...Option) *View {
+	v := &View{
 		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 	}
+	for _, opt := range opts {
+		opt(v)
+	}
+
+	return v
 }
 
 func NewFromLocation(

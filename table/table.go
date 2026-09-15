@@ -117,6 +117,9 @@ type Table struct {
 	// explicit NopReporter opt-out) from the construction-time default, so
 	// Refresh knows whether it may overwrite reporter with the catalog default.
 	reporterSet bool
+	// labels is transient catalog enrichment from the load response; nil when
+	// the catalog returned none. It is excluded from Equals.
+	labels *iceberg.Labels
 }
 
 func (t Table) Equals(other Table) bool {
@@ -133,6 +136,10 @@ func (t Table) Schema() *iceberg.Schema                      { return t.metadata
 func (t Table) Spec() iceberg.PartitionSpec                  { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                         { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties               { return t.metadata.Properties() }
+
+// Labels returns the catalog-provided labels from the load response, or nil if
+// the catalog returned none. Labels are transient enrichment, not table state.
+func (t Table) Labels() *iceberg.Labels { return t.labels }
 
 // MetricsReporter returns the table's metrics reporter, never nil.
 func (t Table) MetricsReporter() metrics.Reporter {
@@ -239,6 +246,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
+	t.labels = fresh.labels
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
 	// of their own. Refresh runs inside commit retry loops, so unconditionally
 	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
@@ -1395,6 +1403,18 @@ func WithScanPlanningIOProperties(props iceberg.Properties) Option {
 
 	return func(t *Table) {
 		t.scanPlanningIOProps = maps.Clone(props)
+	}
+}
+
+// WithLabels attaches catalog-provided labels from a load response to the
+// table. A nil value is ignored, leaving the table's labels nil.
+func WithLabels(l *iceberg.Labels) Option {
+	if l == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.labels = l
 	}
 }
 

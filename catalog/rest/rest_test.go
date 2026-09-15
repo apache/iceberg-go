@@ -1633,6 +1633,56 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 			},
 		},
 	}))
+
+	r.Nil(tbl.Labels(), "no labels in response should surface as nil")
+}
+
+func (r *RestCatalogSuite) TestLoadTableLabels() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
+			"metadata": {
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": "s3://warehouse/database/table",
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": {"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]},
+				"current-schema-id": 0,
+				"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]}],
+				"partition-spec": [],
+				"default-spec-id": 0,
+				"partition-specs": [{"spec-id":0,"fields":[]}],
+				"last-partition-id": 999,
+				"default-sort-order-id": 0,
+				"sort-orders": [{"order-id":0,"fields":[]}],
+				"properties": {}
+			},
+			"config": {},
+			"labels": {
+				"object-labels": {"owner": "data-eng", "cost-center": "42"},
+				"fields": [
+					{"field-id": 2, "labels": {"classification": "pii"}},
+					{"field-id": 99, "labels": {"classification": "dropped"}}
+				]
+			}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
+	r.Require().NoError(err)
+
+	labels := tbl.Labels()
+	r.Require().NotNil(labels)
+	r.False(labels.IsEmpty())
+	r.Equal(iceberg.Properties{"owner": "data-eng", "cost-center": "42"}, labels.Object())
+	r.Equal(iceberg.Properties{"classification": "pii"}, labels.Field(2))
+	r.Equal(iceberg.Properties{"classification": "dropped"}, labels.Field(99)) // dropped column still resolvable
+	r.Nil(labels.Field(1))                                                     // field present in schema but unlabeled
 }
 
 func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {
@@ -2039,6 +2089,46 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 	r.EqualValues(1, tbl.Metadata().Version())
 	r.Equal("d55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
 	r.Equal("bryan", tbl.Metadata().Properties()["owner"])
+}
+
+func (r *RestCatalogSuite) TestRegisterTableLabels() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/register", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
+			"metadata": {
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": "s3://warehouse/database/table",
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": {"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]},
+				"current-schema-id": 0,
+				"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]}],
+				"partition-spec": [],
+				"default-spec-id": 0,
+				"partition-specs": [{"spec-id":0,"fields":[]}],
+				"last-partition-id": 999,
+				"default-sort-order-id": 0,
+				"sort-orders": [{"order-id":0,"fields":[]}],
+				"properties": {}
+			},
+			"config": {},
+			"labels": {"object-labels": {"owner": "data-eng"}, "fields": [{"field-id": 2, "labels": {"classification": "pii"}}]}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	tbl, err := cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"),
+		"s3://warehouse/database/table/metadata/00001.metadata.json")
+	r.Require().NoError(err)
+
+	labels := tbl.Labels()
+	r.Require().NotNil(labels)
+	r.Equal(iceberg.Properties{"owner": "data-eng"}, labels.Object())
+	r.Equal(iceberg.Properties{"classification": "pii"}, labels.Field(2))
 }
 
 func (r *RestCatalogSuite) TestRegisterTable404() {
@@ -2568,6 +2658,55 @@ func (r *RestCatalogSuite) TestLoadView200() {
 	r.Len(currentVersion.Representations, 1)
 	r.Equal("sql", currentVersion.Representations[0].Type)
 	r.Equal("spark", currentVersion.Representations[0].Dialect)
+
+	r.Nil(v.Labels(), "no labels in response should surface as nil")
+}
+
+func (r *RestCatalogSuite) TestLoadViewLabels() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/myview", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		w.Write([]byte(`{
+			"metadata-location": "s3://bucket/warehouse/default.db/event_agg/metadata/00001.metadata.json",
+			"metadata": {
+				"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+				"format-version": 1,
+				"location": "s3://bucket/warehouse/default.db/event_agg",
+				"current-version-id": 1,
+				"properties": {},
+				"versions": [{
+					"version-id": 1,
+					"timestamp-ms": 1573518431292,
+					"schema-id": 1,
+					"default-catalog": "prod",
+					"default-namespace": ["default"],
+					"summary": {"engine-name": "Spark"},
+					"representations": [{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}]
+				}],
+				"schemas": [{"schema-id": 1, "type": "struct", "fields": [
+					{"id": 1, "name": "event_count", "required": false, "type": "int"},
+					{"id": 2, "name": "event_date", "required": false, "type": "date"}
+				]}],
+				"version-log": [{"timestamp-ms": 1573518431292, "version-id": 1}]
+			},
+			"config": {},
+			"labels": {
+				"object-labels": {"owner": "analytics"},
+				"fields": [{"field-id": 2, "labels": {"classification": "internal"}}]
+			}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	v, err := cat.LoadView(context.Background(), catalog.ToIdentifier("fokko", "myview"))
+	r.Require().NoError(err)
+
+	labels := v.Labels()
+	r.Require().NotNil(labels)
+	r.Equal(iceberg.Properties{"owner": "analytics"}, labels.Object())
+	r.Equal(iceberg.Properties{"classification": "internal"}, labels.Field(2))
+	r.Nil(labels.Field(1)) // field present in schema but unlabeled
 }
 
 func (r *RestCatalogSuite) TestLoadView404() {
@@ -2951,6 +3090,62 @@ func (r *RestCatalogSuite) TestRegisterView200() {
 	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), v.Metadata().ViewUUID())
 	r.EqualValues(1, v.Metadata().CurrentVersionID())
 	r.Equal(exampleViewSQL, v.Metadata().CurrentVersion().Representations[0].Sql)
+}
+
+func (r *RestCatalogSuite) TestRegisterViewLabels() {
+	const (
+		ns          = "fokko"
+		viewName    = "myview"
+		metadataLoc = "s3://bucket/warehouse/fokko.db/myview/metadata/00001.metadata.json"
+	)
+
+	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}, "labels": {"object-labels": {"owner": "analytics"}}}`,
+			metadataLoc, exampleViewMetadataJSON)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	v, err := cat.RegisterView(context.Background(), table.Identifier{ns, viewName}, metadataLoc)
+	r.Require().NoError(err)
+
+	labels := v.Labels()
+	r.Require().NotNil(labels)
+	r.Equal(iceberg.Properties{"owner": "analytics"}, labels.Object())
+}
+
+func (r *RestCatalogSuite) TestCreateViewLabels() {
+	ns := "ns"
+	viewName := "view"
+	identifier := table.Identifier{ns, viewName}
+	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1}, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	reprs := []view.Representation{view.NewRepresentation(exampleViewSQL, "default")}
+	version, err := view.NewVersion(1, 0, reprs, table.Identifier{ns},
+		view.WithDefaultViewCatalog("default-catalog"), view.WithTimestampMS(0))
+	r.Require().NoError(err)
+
+	r.mux.HandleFunc("/v1/namespaces/"+ns+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodPost, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}, "labels": {"object-labels": {"owner": "analytics"}, "fields": [{"field-id": 1, "labels": {"classification": "internal"}}]}}`,
+			"metadata-location", exampleViewMetadataJSON)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Require().NoError(err)
+
+	v, err := cat.CreateView(context.Background(), identifier, version, schema)
+	r.Require().NoError(err)
+
+	labels := v.Labels()
+	r.Require().NotNil(labels)
+	r.Equal(iceberg.Properties{"owner": "analytics"}, labels.Object())
+	r.Equal(iceberg.Properties{"classification": "internal"}, labels.Field(1))
 }
 
 func (r *RestCatalogSuite) TestRegisterView404() {
