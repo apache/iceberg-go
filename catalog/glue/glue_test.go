@@ -42,6 +42,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	"github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
@@ -2488,6 +2489,7 @@ func TestGlueIsS3TablesDatabase(t *testing.T) {
 		{name: "federated to another source", connectionType: "aws:redshift", want: false},
 		{name: "not federated", connectionType: "", want: false},
 		{name: "missing database is not federated", getErr: &types.EntityNotFoundException{}, want: false},
+		{name: "access denied is not federated", getErr: &smithy.GenericAPIError{Code: "AccessDeniedException"}, want: false},
 		{name: "get database error", getErr: errors.New("boom"), wantErr: true},
 	}
 
@@ -2665,19 +2667,41 @@ func TestGlueCreateTableS3TablesAllocateError(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueCreateTableExplicitLocationSkipsFederationProbe verifies a create with
-// an explicit location goes straight through the generic path without probing for
-// federation, so such creates never newly require glue:GetDatabase.
-func TestGlueCreateTableExplicitLocationSkipsFederationProbe(t *testing.T) {
+// TestGlueCreateTableS3TablesRejectsExplicitLocation verifies an explicit
+// location is refused for a federated S3 Tables database, which manages storage
+// itself; the table is never created.
+func TestGlueCreateTableS3TablesRejectsExplicitLocation(t *testing.T) {
+	ctx := context.Background()
+	schema := s3TablesTestSchema()
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_database"),
+	}, mock.Anything).Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+
+	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: &aws.Config{}}
+	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema,
+		catalog.WithLocation("file:///tmp/whatever"))
+	require.ErrorContains(t, err, "S3 Tables manages storage automatically")
+	mockGlueSvc.AssertNotCalled(t, "CreateTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+// TestGlueCreateTableExplicitLocationNonFederated confirms an explicit location
+// on a non-federated database still takes the generic path.
+func TestGlueCreateTableExplicitLocationNonFederated(t *testing.T) {
 	ctx := context.Background()
 	location := "file://" + t.TempDir()
 	schema := s3TablesTestSchema()
 
 	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_database"),
+	}, mock.Anything).Return(federatedDatabaseOutput(""), nil).Once()
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, nil).Once()
 	// The trailing reload is not the point here; fail it fast to avoid a full
-	// metadata round-trip. What matters is that GetDatabase is never called.
+	// metadata round-trip. What matters is that the generic create path runs.
 	mockGlueSvc.On("GetTable", mock.Anything, mock.Anything, mock.Anything).
 		Return((*glue.GetTableOutput)(nil), errors.New("load boom")).Once()
 
@@ -2685,7 +2709,6 @@ func TestGlueCreateTableExplicitLocationSkipsFederationProbe(t *testing.T) {
 	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema,
 		catalog.WithLocation(location))
 	require.ErrorContains(t, err, "load boom")
-	mockGlueSvc.AssertNotCalled(t, "GetDatabase", mock.Anything, mock.Anything, mock.Anything)
 	mockGlueSvc.AssertExpectations(t)
 }
 
@@ -2864,10 +2887,12 @@ func TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure(t *testing.T) {
 		DatabaseName: aws.String("test_database"),
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.GetTableOutput{Table: &types.Table{
-		Name:              aws.String("test_table"),
-		DatabaseName:      aws.String("test_database"),
-		VersionId:         aws.String("1"),
-		StorageDescriptor: &types.StorageDescriptor{Location: aws.String("s3://nonexistent-test-bucket")},
+		Name:         aws.String("test_table"),
+		DatabaseName: aws.String("test_database"),
+		VersionId:    aws.String("1"),
+		// An unregistered IO scheme fails deterministically at metadata write,
+		// proving the rollback is triggered by the write and not by a later step.
+		StorageDescriptor: &types.StorageDescriptor{Location: aws.String("unregisteredfs://bucket/table")},
 	}}, nil).Once()
 	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
 		DatabaseName: aws.String("test_database"),
@@ -2876,7 +2901,7 @@ func TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure(t *testing.T) {
 
 	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: &aws.Config{}}
 	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "scheme not registered")
 	mockGlueSvc.AssertNotCalled(t, "UpdateTable", mock.Anything, mock.Anything, mock.Anything)
 	mockGlueSvc.AssertExpectations(t)
 }

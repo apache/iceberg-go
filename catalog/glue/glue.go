@@ -42,6 +42,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -293,6 +294,23 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
+	var cfg catalog.CreateTableCfg
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// S3 Tables manages storage, so an explicit location is rejected up front
+	// (as pyiceberg does) rather than creating a table outside managed storage.
+	if cfg.Location != "" {
+		federated, ferr := c.isS3TablesDatabase(ctx, database)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if federated {
+			return nil, fmt.Errorf("cannot specify a location for table %s.%s: S3 Tables manages storage automatically", database, tableName)
+		}
+	}
+
 	// The reporter is resolved once at construction (see NewCatalog), so a bad
 	// metrics-reporter-impl already failed there — no per-op guard is needed
 	// before mutating the catalog, and the trailing LoadTable reuses the cached
@@ -338,9 +356,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 func (c *Catalog) isS3TablesDatabase(ctx context.Context, database string) (bool, error) {
 	db, err := c.getDatabase(ctx, database)
 	if err != nil {
-		// A missing database is not fatal here; let the generic create path
-		// surface it, so this probe never changes the error a caller already saw.
-		if errors.Is(err, catalog.ErrNoSuchNamespace) {
+		// Best-effort: a missing database or a caller lacking glue:GetDatabase
+		// is treated as "not federated" so the generic create path can proceed.
+		var apiErr smithy.APIError
+		if errors.Is(err, catalog.ErrNoSuchNamespace) ||
+			(errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException") {
 			return false, nil
 		}
 
@@ -355,6 +375,9 @@ func (c *Catalog) isS3TablesDatabase(ctx context.Context, database string) (bool
 // service assigns storage, so a minimal entry is created first to allocate the
 // location, then updated with the written metadata pointer; on any later
 // failure the minimal entry is removed so no half-created table is left behind.
+// Matching pyiceberg, two residual cases are left to the service: a commit
+// failure after WriteMetadata leaves the metadata object for S3 Tables to
+// reclaim, and a failed rollback leaves a minimal entry to clear out of band.
 func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	_, err := c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
