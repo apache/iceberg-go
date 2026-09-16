@@ -477,9 +477,9 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 		return err
 	}
 
-	// constructTableInput sends TableType=EXTERNAL_TABLE. Live testing against
-	// S3 Tables confirmed it accepts EXTERNAL_TABLE on this repoint and keeps its
-	// own service type (e.g. "customer") on read, which getRawTable tolerates.
+	// constructTableInput sends TableType=EXTERNAL_TABLE, but S3 Tables ignores the
+	// field on this repoint (verified live: any value passes) and keeps its own
+	// service type (e.g. "customer") on read, which getRawTable tolerates.
 	_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
