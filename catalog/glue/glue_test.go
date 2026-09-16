@@ -2565,9 +2565,11 @@ func TestGlueCreateTableS3TablesFederated(t *testing.T) {
 	}
 	var capturedMetadataLocation string
 	mockGlueSvc.On("UpdateTable", mock.Anything, mock.MatchedBy(func(in *glue.UpdateTableInput) bool {
+		// The repoint sends EXTERNAL_TABLE even though the allocated entry reports
+		// the service type "customer"; live testing confirmed S3 Tables accepts it.
 		return in.TableInput != nil && aws.ToString(in.VersionId) == "1" &&
 			in.TableInput.Parameters[tableParamTableType] == glueTypeIceberg &&
-			aws.ToString(in.TableInput.TableType) == "customer"
+			aws.ToString(in.TableInput.TableType) == glueTableType
 	}), mock.Anything).Run(func(args mock.Arguments) {
 		in := args.Get(1).(*glue.UpdateTableInput)
 		capturedMetadataLocation = in.TableInput.Parameters[tableParamMetadataLocation]
