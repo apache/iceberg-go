@@ -2542,6 +2542,7 @@ func TestGlueCreateTableS3TablesFederated(t *testing.T) {
 		Name:              aws.String("test_table"),
 		DatabaseName:      aws.String("test_database"),
 		VersionId:         aws.String("1"),
+		TableType:         aws.String("customer"),
 		Parameters:        map[string]string{glueParamFormat: glueTypeIceberg},
 		StorageDescriptor: &types.StorageDescriptor{Location: aws.String(managedLocation)},
 	}
@@ -2565,7 +2566,8 @@ func TestGlueCreateTableS3TablesFederated(t *testing.T) {
 	var capturedMetadataLocation string
 	mockGlueSvc.On("UpdateTable", mock.Anything, mock.MatchedBy(func(in *glue.UpdateTableInput) bool {
 		return in.TableInput != nil && aws.ToString(in.VersionId) == "1" &&
-			in.TableInput.Parameters[tableParamTableType] == glueTypeIceberg
+			in.TableInput.Parameters[tableParamTableType] == glueTypeIceberg &&
+			aws.ToString(in.TableInput.TableType) == "customer"
 	}), mock.Anything).Run(func(args mock.Arguments) {
 		in := args.Get(1).(*glue.UpdateTableInput)
 		capturedMetadataLocation = in.TableInput.Parameters[tableParamMetadataLocation]
@@ -2981,5 +2983,60 @@ func TestGlueCreateTableS3TablesNoRollbackOnLoadFailure(t *testing.T) {
 	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema)
 	require.ErrorContains(t, err, "load boom")
 	mockGlueSvc.AssertNotCalled(t, "DeleteTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+// TestGlueCreateTableS3TablesRollbackDetachesContext verifies the rollback
+// DeleteTable runs on a context detached from a cancelled create so the minimal
+// entry is still removed rather than leaked.
+func TestGlueCreateTableS3TablesRollbackDetachesContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	schema := s3TablesTestSchema()
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetDatabase", mock.Anything, mock.Anything, mock.Anything).
+		Return(federatedDatabaseOutput("aws:s3tables"), nil).Times(2)
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, nil).Once()
+	// The commit load fails and the create is cancelled at the same moment.
+	mockGlueSvc.On("GetTable", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) { cancel() }).
+		Return((*glue.GetTableOutput)(nil), errors.New("commit boom")).Once()
+	// The rollback must still see a live (detached) context, not the cancelled one.
+	mockGlueSvc.On("DeleteTable",
+		mock.MatchedBy(func(c context.Context) bool { return c.Err() == nil }),
+		mock.Anything, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: &aws.Config{}}
+	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema)
+	require.ErrorContains(t, err, "commit boom")
+	mockGlueSvc.AssertExpectations(t)
+}
+
+// TestGlueDropTableRemovesStrandedS3TablesEntry verifies DropTable can remove a
+// minimal federated entry (format=ICEBERG, no table_type) left by a failed
+// S3 Tables create, matching pyiceberg's direct delete_table cleanup.
+func TestGlueDropTableRemovesStrandedS3TablesEntry(t *testing.T) {
+	ctx := context.Background()
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &types.Table{
+		Name:           aws.String("test_table"),
+		DatabaseName:   aws.String("test_database"),
+		TableType:      aws.String("customer"),
+		FederatedTable: &types.FederatedTable{ConnectionType: aws.String(s3TablesConnectionType)},
+		Parameters:     map[string]string{glueParamFormat: glueTypeIceberg},
+	}}, nil).Once()
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: &aws.Config{}}
+	require.NoError(t, cat.DropTable(ctx, TableIdentifier("test_database", "test_table")))
 	mockGlueSvc.AssertExpectations(t)
 }

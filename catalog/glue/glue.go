@@ -366,19 +366,44 @@ func (c *Catalog) isS3TablesDatabase(ctx context.Context, database string) (bool
 
 		return false, err
 	}
+	if db == nil {
+		return false, nil
+	}
 
+	return isS3TablesFederatedDatabase(db), nil
+}
+
+func isS3TablesFederatedDatabase(db *types.Database) bool {
 	return db.FederatedDatabase != nil &&
-		strings.EqualFold(aws.ToString(db.FederatedDatabase.ConnectionType), s3TablesConnectionType), nil
+		strings.EqualFold(aws.ToString(db.FederatedDatabase.ConnectionType), s3TablesConnectionType)
+}
+
+func isS3TablesFederatedTable(tbl *types.Table) bool {
+	return tbl.FederatedTable != nil &&
+		strings.EqualFold(aws.ToString(tbl.FederatedTable.ConnectionType), s3TablesConnectionType)
+}
+
+// isS3TablesIcebergEntry reports whether a federated S3 Tables entry is Iceberg,
+// accepting the minimal format=ICEBERG entry left before the metadata repoint so
+// DropTable can clean it up after a failed create.
+func isS3TablesIcebergEntry(tbl *types.Table) bool {
+	if !isS3TablesFederatedTable(tbl) {
+		return false
+	}
+	tableType := tbl.Parameters[tableParamTableType]
+
+	return strings.EqualFold(tableType, glueTypeIceberg) ||
+		tableType == glueTypeIcebergRenaming ||
+		strings.EqualFold(tbl.Parameters[glueParamFormat], glueTypeIceberg)
 }
 
 // createS3TablesTable creates a table in an S3 Tables federated database. The
 // service assigns storage, so a minimal entry is created first to allocate the
 // location, then updated with the written metadata pointer; on any later
 // failure the minimal entry is removed so no half-created table is left behind.
-// On a commit failure the minimal Glue entry is rolled back and the written
-// metadata object is best-effort deleted; if that delete fails (the managed
-// location may be unreachable) reclaiming it is left to S3 Tables. A failed
-// rollback leaves a minimal entry to clear out of band, matching pyiceberg.
+// On a commit failure the minimal Glue entry is rolled back and its metadata
+// object best-effort deleted; a stranded minimal entry after a double failure is
+// still removable via DropTable, matching pyiceberg's direct delete_table.
 func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	_, err := c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
@@ -393,12 +418,16 @@ func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName s
 	}
 
 	if err := c.commitS3TablesTable(ctx, database, tableName, identifier, schema, opts...); err != nil {
-		if _, delErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
+		// Roll back with a detached context so a cancelled create still removes
+		// the minimal entry (S3 Tables enforces per-account table limits).
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), renameCleanupTimeout)
+		defer cancel()
+		if _, delErr := c.glueSvc.DeleteTable(cleanupCtx, &glue.DeleteTableInput{
 			CatalogId:    c.catalogId,
 			DatabaseName: aws.String(database),
 			Name:         aws.String(tableName),
 		}); delErr != nil {
-			return nil, fmt.Errorf("%w (failed to clean up allocated table %s.%s: %w)", err, database, tableName, delErr)
+			return nil, errors.Join(err, fmt.Errorf("failed to clean up allocated table %s.%s: %w", database, tableName, delErr))
 		}
 
 		return nil, err
@@ -448,12 +477,16 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 		return err
 	}
 
-	// constructTableInput sends TableType=EXTERNAL_TABLE; S3 Tables keeps its own
-	// service type (e.g. "customer") on read, which getRawTable accepts.
+	input := constructTableInput(tableName, staged.Table, allocated.Table)
+	// Preserve the service-assigned TableType (e.g. "customer") instead of
+	// forcing EXTERNAL_TABLE, which S3 Tables rejects on write.
+	if allocated.Table.TableType != nil {
+		input.TableType = allocated.Table.TableType
+	}
 	_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
-		TableInput:   constructTableInput(tableName, staged.Table, allocated.Table),
+		TableInput:   input,
 		VersionId:    allocated.Table.VersionId,
 		SkipArchive:  aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
 	})
@@ -588,7 +621,10 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 	tableType := glueTable.Parameters[tableParamTableType]
-	if !strings.EqualFold(tableType, glueTypeIceberg) && tableType != glueTypeIcebergRenaming {
+	isIceberg := strings.EqualFold(tableType, glueTypeIceberg) || tableType == glueTypeIcebergRenaming
+	// Also allow a minimal federated S3 Tables entry (format=ICEBERG, no
+	// table_type) so a failed create can be cleaned up through DropTable.
+	if !isIceberg && !isS3TablesIcebergEntry(glueTable) {
 		return fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
 	}
 
@@ -1015,15 +1051,10 @@ func (c *Catalog) getRawTable(ctx context.Context, database, tableName string) (
 
 	// A standard Iceberg table is an EXTERNAL_TABLE. An S3 Tables federated entry
 	// instead carries the service's own TableType (e.g. "customer"), so accept it
-	// only when it is federated to S3 Tables and marked Iceberg — keeping the
+	// when it is federated to S3 Tables and marked Iceberg — keeping the
 	// relaxation scoped to that case rather than every database.
-	tableType := tblRes.Table.Parameters[tableParamTableType]
-	isIceberg := strings.EqualFold(tableType, glueTypeIceberg) || tableType == glueTypeIcebergRenaming
-	federated := tblRes.Table.FederatedTable != nil &&
-		strings.EqualFold(aws.ToString(tblRes.Table.FederatedTable.ConnectionType), s3TablesConnectionType)
 	isExternalTable := aws.ToString(tblRes.Table.TableType) == glueTableType
-	isFederatedIceberg := federated && isIceberg
-	if !isExternalTable && !isFederatedIceberg {
+	if !isExternalTable && !isS3TablesIcebergEntry(tblRes.Table) {
 		return nil, fmt.Errorf("table %s.%s is not an EXTERNAL_TABLE", database, tableName)
 	}
 
