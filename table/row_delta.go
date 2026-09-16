@@ -98,6 +98,7 @@ func (rd *RowDelta) AddRows(files ...iceberg.DataFile) *RowDelta {
 // Equality delete files must have ContentType == EntryContentEqDeletes
 // and non-empty EqualityFieldIDs referencing valid schema columns.
 // Position delete files must have ContentType == EntryContentPosDeletes.
+// DVs are rejected by Commit unless the table is v3 or later.
 func (rd *RowDelta) AddDeletes(files ...iceberg.DataFile) *RowDelta {
 	rd.delFiles = append(rd.delFiles, files...)
 
@@ -150,6 +151,7 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // on one data file (a replacement added while the superseded live DV
 // is not removed, or two added replacements for one data file), or if
 // the table format version does not support delete files.
+// Deletes require v2 or later, DVs require v3 or later.
 //
 // With removals present the staged commit is non-replayable: an
 // optimistic-concurrency conflict fails the transaction's Commit with
@@ -194,6 +196,10 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		if ct != iceberg.EntryContentPosDeletes && ct != iceberg.EntryContentEqDeletes {
 			return fmt.Errorf("expected delete file, got content type %s: %s",
 				ct, f.FilePath())
+		}
+
+		if err := validateDeletionVectorFormatVersion(f, meta.formatVersion, "row delta"); err != nil {
+			return err
 		}
 
 		// Equality delete files must declare which columns form the delete key,
