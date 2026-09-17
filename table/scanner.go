@@ -1929,6 +1929,15 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return nil, err
 	}
 
+	// REST plans contain whole files and split offsets. Apply the same range
+	// policy as local planning; already-partial tasks from other planners are
+	// preserved by splitParquetScanTask.
+	targetSize := int64(ReadSplitTargetSizeDefault)
+	if scan.metadata != nil {
+		targetSize = scan.metadata.Properties().GetInt64(ReadSplitTargetSizeKey, targetSize)
+	}
+	result.Tasks = splitRemoteScanTasks(result.Tasks, targetSize)
+
 	// Replace the current plan only after the new plan is available. A planner
 	// failure or invalid PlanIO must not destroy a previously usable plan.
 	if scan.planIO != nil && scan.planIO.matches(result.IO) {
