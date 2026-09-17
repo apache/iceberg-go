@@ -98,8 +98,7 @@ func (rd *RowDelta) AddRows(files ...iceberg.DataFile) *RowDelta {
 // Equality delete files must have ContentType == EntryContentEqDeletes
 // and non-empty EqualityFieldIDs referencing valid schema columns.
 // Position delete files must have ContentType == EntryContentPosDeletes.
-// DVs are rejected by Commit unless the table is v3 or later and each DV sets
-// ReferencedDataFile, ContentOffset and ContentSizeInBytes.
+// DVs are rejected by Commit unless the table is v3 or later.
 func (rd *RowDelta) AddDeletes(files ...iceberg.DataFile) *RowDelta {
 	rd.delFiles = append(rd.delFiles, files...)
 
