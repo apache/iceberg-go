@@ -34,6 +34,25 @@ import (
 	"gocloud.dev/blob/memblob"
 )
 
+func TestProductionAzureCredentialFactories(t *testing.T) {
+	factories := productionAzureCredentialFactories()
+
+	t.Run("default credential", func(t *testing.T) {
+		// Avoid inheriting credential selection or loading credentials from the environment.
+		t.Setenv("AZURE_TOKEN_CREDENTIALS", "dev")
+
+		credential, err := factories.newDefaultCredential(nil)
+		require.NoError(t, err)
+		assert.IsType(t, &azidentity.DefaultAzureCredential{}, credential)
+	})
+
+	t.Run("managed identity credential", func(t *testing.T) {
+		credential, err := factories.newManagedIdentity(nil)
+		require.NoError(t, err)
+		assert.IsType(t, &azidentity.ManagedIdentityCredential{}, credential)
+	})
+}
+
 func TestCreateAzureBucketDefaultCredentialCalled(t *testing.T) {
 	ctx := context.Background()
 
