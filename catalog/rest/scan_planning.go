@@ -39,6 +39,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/internal/scanmetrics"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -594,7 +595,17 @@ func marshalScanFilter(req table.ScanPlanningRequest) ([]byte, error) {
 // Any other status — including the empty status of a 200 with no body, which
 // bypasses the response UnmarshalJSON validation — returns an ErrRESTError so a
 // malformed response cannot masquerade as an empty completed plan.
-func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (PlanTableScanResponse, error) {
+//
+// Transient HTTP responses (408, 429, 500, 502, 503, 504) are retried up to
+// three times with jittered backoff and the same idempotency key. Retry-After
+// is honored, capped at five seconds when ctx has no deadline. Transport
+// failures and malformed successful responses are not retried.
+func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (result PlanTableScanResponse, err error) {
+	ctx, finish := scanmetrics.Start(ctx, "plan")
+	defer func() {
+		finish(err)
+	}()
+
 	if err := r.endpoints.check(endpointPlanTableScan); err != nil {
 		return PlanTableScanResponse{}, err
 	}
@@ -609,10 +620,12 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 		return PlanTableScanResponse{}, err
 	}
 
-	resp, err := doPost[PlanTableScanRequest, PlanTableScanResponse](
-		ctx, r.baseURI, path, req, r.cl,
-		map[int]error{http.StatusNotFound: ErrRESTError},
-		withHeaders(headers), withErrorTypeOverride(planTableScanErrorTypes))
+	resp, err := retryScanPlanning(ctx, "plan", func() (PlanTableScanResponse, error) {
+		return doPost[PlanTableScanRequest, PlanTableScanResponse](
+			ctx, r.baseURI, path, req, r.cl,
+			map[int]error{http.StatusNotFound: ErrRESTError},
+			withHeaders(headers), withErrorTypeOverride(planTableScanErrorTypes))
+	})
 	if err != nil {
 		return PlanTableScanResponse{}, err
 	}
@@ -641,7 +654,15 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 // namespace is catalog.ErrNoSuchTable / catalog.ErrNoSuchNamespace, so the poller
 // can tell retry-with-a-new-plan from abort. A bare or unrecognized 404 stays an
 // ambiguous ErrRESTError rather than being guessed as an expiry.
-func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (FetchPlanningResultResponse, error) {
+func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (result FetchPlanningResultResponse, err error) {
+	ctx, finish := scanmetrics.Start(ctx, "fetch-result")
+	defer func() {
+		finish(err)
+		if errors.Is(err, ErrPlanExpired) || errors.Is(err, ErrNoSuchPlanTask) {
+			scanmetrics.Expired(ctx, "fetch-result")
+		}
+	}()
+
 	if err := r.endpoints.check(endpointFetchPlanResult); err != nil {
 		return FetchPlanningResultResponse{}, err
 	}
@@ -680,7 +701,9 @@ func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifie
 // the session-default access-delegation header (cancel vends no credentials). A
 // 404 (already-expired or unknown plan) is not special-cased: cancel is
 // best-effort, so the generic REST error is acceptable.
-func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) error {
+func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) (err error) {
+	ctx, finish := scanmetrics.Start(ctx, "cancel")
+	defer func() { finish(err) }()
 	if err := r.endpoints.check(endpointCancelPlanning); err != nil {
 		return err
 	}
@@ -705,7 +728,17 @@ func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, pl
 // vanishing. A bare or unrecognized 404 stays an ambiguous ErrRESTError. An
 // empty 200 body is rejected (requireBody) so a truncated response is not read
 // as a successfully completed empty task set.
-func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (FetchScanTasksResponse, error) {
+// Transient HTTP responses use the same retry policy as [Catalog.PlanTableScan],
+// retaining the idempotency key and plan-task handle across attempts.
+func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (result FetchScanTasksResponse, err error) {
+	ctx, finish := scanmetrics.Start(ctx, "fetch-tasks")
+	defer func() {
+		finish(err)
+		if errors.Is(err, ErrPlanExpired) || errors.Is(err, ErrNoSuchPlanTask) {
+			scanmetrics.Expired(ctx, "fetch-tasks")
+		}
+	}()
+
 	if err := r.endpoints.check(endpointFetchScanTasks); err != nil {
 		return FetchScanTasksResponse{}, err
 	}
@@ -720,11 +753,13 @@ func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, re
 		return FetchScanTasksResponse{}, err
 	}
 
-	return doPost[FetchScanTasksRequest, FetchScanTasksResponse](
-		ctx, r.baseURI, path, req, r.cl,
-		map[int]error{http.StatusNotFound: ErrRESTError},
-		withHeaders(headers), withSuppressedHeaders(headerIcebergAccessDelegation),
-		withErrorTypeOverride(fetchScanTasksErrorTypes), requireBody())
+	return retryScanPlanning(ctx, "fetch-tasks", func() (FetchScanTasksResponse, error) {
+		return doPost[FetchScanTasksRequest, FetchScanTasksResponse](
+			ctx, r.baseURI, path, req, r.cl,
+			map[int]error{http.StatusNotFound: ErrRESTError},
+			withHeaders(headers), withSuppressedHeaders(headerIcebergAccessDelegation),
+			withErrorTypeOverride(fetchScanTasksErrorTypes), requireBody())
+	})
 }
 
 // WaitForPlan polls a submitted plan to completion using jittered backoff. It
@@ -845,6 +880,9 @@ func (r *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planI
 
 			return CompletedPlanningResult{}, fmt.Errorf("waiting for plan %q on %v: %w", planID, ident, ctx.Err())
 		case <-timer.C:
+			if err != nil {
+				scanmetrics.Retry(ctx, "fetch-result")
+			}
 		}
 	}
 }
@@ -1056,8 +1094,8 @@ func idempotencyHeaderValue(idempotencyKey *string) (string, error) {
 		// Plan and task POSTs always send an idempotency key. The spec pins it
 		// to a UUIDv7 string (RFC 9562) so a server can key its dedup window off
 		// the embedded timestamp, matching Java's UUIDUtil.generateUuidV7(). A
-		// v4 key would be treated as undefined by such servers. There is no
-		// transport retry here, so nil means a fresh key for this call.
+		// v4 key would be treated as undefined by such servers. All automatic
+		// retries within this call reuse the generated key.
 		key, err := uuid.NewV7()
 		if err != nil {
 			return "", fmt.Errorf("generating idempotency key: %w", err)
@@ -1145,9 +1183,8 @@ type CompletedPlanningResult struct {
 type PlanTableScanRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
 	// If set, it must be a UUIDv7 string (RFC 9562). If nil, a fresh UUIDv7 is
-	// generated per call and not returned, so passing nil and retrying on a
-	// transient error sends a different key each attempt and defeats server-side
-	// dedup: pass an explicit key to get idempotency across retries.
+	// generated per call and reused for automatic retries. Supply an explicit
+	// key to preserve idempotency across separate calls.
 	IdempotencyKey *string `json:"-"`
 	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header, not
 	// in the JSON body. Nil uses the catalog default.
@@ -1286,9 +1323,8 @@ func decodePlanningError(raw json.RawMessage) *PlanningError {
 type FetchScanTasksRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
 	// If set, it must be a UUIDv7 string (RFC 9562). If nil, a fresh UUIDv7 is
-	// generated per call and not returned, so passing nil and retrying on a
-	// transient error sends a different key each attempt and defeats server-side
-	// dedup: pass an explicit key to get idempotency across retries.
+	// generated per call and reused for automatic retries. Supply an explicit
+	// key to preserve idempotency across separate calls.
 	IdempotencyKey *string `json:"-"`
 
 	PlanTask string `json:"plan-task"`

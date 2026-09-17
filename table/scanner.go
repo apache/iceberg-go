@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/scanmetrics"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"golang.org/x/sync/errgroup"
@@ -1609,8 +1610,11 @@ func (scan *Scan) planFiles(ctx context.Context, projectScanColumns bool) ([]Fil
 	case ScanPlanningRemote:
 		return scan.planFilesRemote(ctx)
 	case ScanPlanningAuto:
-		if supportsAutomaticRemotePlanning(scan.planner) &&
-			!scan.requiresLastUpdatedSequenceNumber() {
+		if !supportsAutomaticRemotePlanning(scan.planner) {
+			scanmetrics.Fallback(ctx, "capability")
+		} else if scan.requiresLastUpdatedSequenceNumber() {
+			scanmetrics.Fallback(ctx, "row-lineage")
+		} else {
 			return scan.planFilesRemote(ctx)
 		}
 	case ScanPlanningLocal:
