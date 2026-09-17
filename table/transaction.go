@@ -1191,9 +1191,27 @@ type deleteFilesToAddSet struct {
 	dvsByRef map[string]rewriteDeleteFileAddition
 }
 
-func validateDeletionVectorFormatVersion(df iceberg.DataFile, formatVersion int, operation string) error {
-	if IsDeletionVector(df) && formatVersion < 3 {
-		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", df.FilePath(), operation)
+func validateDeletionVectorToAdd(df iceberg.DataFile, formatVersion int, operation string) error {
+	path := df.FilePath()
+	if formatVersion < 3 {
+		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", path, operation)
+	}
+	if ref := df.ReferencedDataFile(); ref == nil || *ref == "" {
+		return fmt.Errorf("deletion vector %s is missing referenced_data_file for %s", path, operation)
+	}
+	offset := df.ContentOffset()
+	if offset == nil {
+		return fmt.Errorf("deletion vector %s is missing content_offset for %s", path, operation)
+	}
+	if *offset < 0 {
+		return fmt.Errorf("deletion vector %s has invalid content_offset %d for %s", path, *offset, operation)
+	}
+	length := df.ContentSizeInBytes()
+	if length == nil {
+		return fmt.Errorf("deletion vector %s is missing content_size_in_bytes for %s", path, operation)
+	}
+	if *length <= 0 {
+		return fmt.Errorf("deletion vector %s has invalid content_size_in_bytes %d for %s", path, *length, operation)
 	}
 
 	return nil
@@ -1275,10 +1293,6 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			}
 		}
 
-		if err := validateDeletionVectorFormatVersion(df, meta.formatVersion, operation); err != nil {
-			return nil, err
-		}
-
 		if !IsDeletionVector(df) {
 			if meta.formatVersion >= 3 && df.ContentType() == iceberg.EntryContentPosDeletes {
 				return nil, fmt.Errorf("position delete file %s must be a deletion vector for v%d table for %s",
@@ -1297,24 +1311,10 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		}
 
 		if IsDeletionVector(df) {
-			ref := df.ReferencedDataFile()
-			if ref == nil || *ref == "" {
-				return nil, fmt.Errorf("deletion vector to add is missing referenced_data_file for %s", operation)
+			if err := validateDeletionVectorToAdd(df, meta.formatVersion, operation); err != nil {
+				return nil, err
 			}
-			offset := df.ContentOffset()
-			if offset == nil {
-				return nil, fmt.Errorf("deletion vector %s is missing content_offset for %s", path, operation)
-			}
-			if *offset < 0 {
-				return nil, fmt.Errorf("deletion vector %s has invalid content_offset %d for %s", path, *offset, operation)
-			}
-			length := df.ContentSizeInBytes()
-			if length == nil {
-				return nil, fmt.Errorf("deletion vector %s is missing content_size_in_bytes for %s", path, operation)
-			}
-			if *length <= 0 {
-				return nil, fmt.Errorf("deletion vector %s has invalid content_size_in_bytes %d for %s", path, *length, operation)
-			}
+			ref, offset, length := df.ReferencedDataFile(), df.ContentOffset(), df.ContentSizeInBytes()
 
 			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
 			if setToAdd.dvBlobs == nil {
