@@ -445,8 +445,8 @@ func sharesDataBuffers(a, b arrow.Array) bool {
 	return true
 }
 
-// TestFastPathWrapperFieldNullMatchesPerRow: arrow-go's per-row reassembly reads the live child under a null wrapper, so the fast path must match it (spec-undefined shape).
-func TestFastPathWrapperFieldNullMatchesPerRow(t *testing.T) {
+// TestFastPathWrapperFieldNullIsAbsentKey: a null per-key wrapper is an absent key (shredding spec), so the fast path reads null even if the typed_value child is left live by a non-conformant writer.
+func TestFastPathWrapperFieldNullIsAbsentKey(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
 	ctx := compute.WithAllocator(t.Context(), mem)
@@ -517,18 +517,12 @@ func TestFastPathWrapperFieldNullMatchesPerRow(t *testing.T) {
 	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
 	require.NoError(t, err)
 	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
-	dt, err := TypeToArrowType(iceberg.PrimitiveTypes.Int64, false, false)
-	require.NoError(t, err)
 
 	got, _, err := buildExtractColumn(ctx, col, rec, mem)
 	require.NoError(t, err)
 	defer got.Release()
-	want, err := extractColumnValuesPerRow(ctx, varr, col, dt, mem)
-	require.NoError(t, err)
-	defer want.Release()
-	require.Truef(t, array.Equal(got, want), "got=%v want=%v", got, want)
-	require.False(t, got.IsNull(1))
-	require.EqualValues(t, 5, got.(*array.Int64).Value(1))
+	require.Truef(t, got.IsNull(1), "null wrapper is an absent key (spec): must read null, got=%v", got)
+	require.EqualValues(t, 1, got.(*array.Int64).Value(0))
 }
 
 // TestFastPathSlicedOffsetFallsBack: a VariantArray sliced to a non-zero offset must bail from the fast path and still match the per-row reference.

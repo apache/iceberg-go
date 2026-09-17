@@ -188,6 +188,9 @@ func TestDictCostFallbackWalkMatchesToParquet(t *testing.T) {
 		"decimal": arrow.NewSchema([]arrow.Field{
 			{Name: "d", Type: &arrow.Decimal128Type{Precision: 10, Scale: 2}},
 		}, nil),
+		"dict": arrow.NewSchema([]arrow.Field{
+			{Name: "c", Type: &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}},
+		}, nil),
 	}
 
 	for name, sc := range schemas {
@@ -206,5 +209,25 @@ func TestDictCostFallbackWalkMatchesToParquet(t *testing.T) {
 				require.Truef(t, wp.DictionaryCostFallbackEnabledFor(path), "walk missing leaf path %q", path)
 			}
 		})
+	}
+}
+
+// TestDictCostFallbackListSchemaUsesToParquet exercises the list/map branch (dictCostFallbackViaParquet).
+func TestDictCostFallbackListSchemaUsesToParquet(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "tags", Type: arrow.ListOf(arrow.BinaryTypes.String)},
+	}, nil)
+	require.True(t, schemaHasListOrMap(sc), "list schema must route to ToParquet")
+
+	ps, err := pqarrow.ToParquet(sc, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	props, err := dictCostFallbackProps(sc, nil)
+	require.NoError(t, err)
+	wp := parquet.NewWriterProperties(props...)
+
+	require.Equal(t, ps.NumColumns(), len(props))
+	for i := range ps.NumColumns() {
+		require.Truef(t, wp.DictionaryCostFallbackEnabledFor(ps.Column(i).Path()), "missing leaf path %q", ps.Column(i).Path())
 	}
 }

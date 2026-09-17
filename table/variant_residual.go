@@ -132,6 +132,11 @@ func extractColumnValues(ctx context.Context, varr *extensions.VariantArray, col
 
 	varName := col.Term.Ref().Field().Name
 	for i := range leaves.Len() {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if leaves.IsNull(i) {
 			bldr.AppendNull()
 
@@ -270,6 +275,7 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 			return bail()
 		}
 		fty := field.DataType().(*arrow.StructType)
+		mergeValidity(field) // a null wrapper is an absent key (spec): fold it so the row reads null
 		if vIdx, ok := fty.FieldIdx("value"); ok {
 			if v := field.Field(vIdx); v.NullN() != v.Len() {
 				return bail()
@@ -319,6 +325,9 @@ func rootResidualHidesRows(varr *extensions.VariantArray, tv arrow.Array) bool {
 		return true // non-zero child offset: can't safely bit-index; presume residual so the caller bails
 	}
 	tvb := tv.Data().Buffers()[0]
+	if tvb == nil {
+		return true // NullN()>0 with no validity buffer is non-canonical; bail conservatively
+	}
 	uvb := uv.Data().Buffers()[0]
 	for i := range varr.Len() {
 		valuePresent := uvb == nil || bitutil.BitIsSet(uvb.Bytes(), i)
