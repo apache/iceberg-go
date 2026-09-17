@@ -1217,14 +1217,6 @@ func validateDeletionVectorToAdd(df iceberg.DataFile, formatVersion int, operati
 	return nil
 }
 
-func validateDeletionVectorFormatVersion(df iceberg.DataFile, formatVersion int, operation string) error {
-	if IsDeletionVector(df) && formatVersion < 3 {
-		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", df.FilePath(), operation)
-	}
-
-	return nil
-}
-
 // validateDeleteFilesToAdd performs metadata-only validation for delete files
 // supplied to a rewrite. Delete files may use an older partition spec, so the
 // partition values are checked against the spec carried by each file rather
