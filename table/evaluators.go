@@ -1930,7 +1930,10 @@ func newDictionaryPredicatesFromRewritten(expr iceberg.BooleanExpression) ([]int
 
 	dictionaryPreds := make([]internal.RowGroupDictionaryPred, len(bloomPreds))
 	for i, pred := range bloomPreds {
-		dictionaryPreds[i] = internal.RowGroupDictionaryPred(pred)
+		dictionaryPreds[i] = internal.RowGroupDictionaryPred{
+			FieldID:   pred.FieldID,
+			PhysBytes: pred.PhysBytes,
+		}
 	}
 
 	return dictionaryPreds, nil

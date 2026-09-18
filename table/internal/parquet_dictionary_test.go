@@ -71,6 +71,21 @@ func TestDictionaryMatchesPredicatesRejectsMalformedPage(t *testing.T) {
 	assert.Nil(t, matches)
 }
 
+func TestDictionaryMatchesPredicatesRejectsEmptyPage(t *testing.T) {
+	page := file.NewDictionaryPage(memory.NewBufferBytes(nil), 0, parquet.Encodings.Plain)
+	matches, known := dictionaryMatchesPredicates(
+		page,
+		parquet.Types.Int32,
+		-1,
+		[]RowGroupDictionaryPred{{FieldID: 1, PhysBytes: [][]byte{int32BytesForTest(1)}}},
+		[]int{0},
+	)
+	page.Release()
+
+	assert.False(t, known)
+	assert.Nil(t, matches)
+}
+
 func TestDictionaryMatchesPredicatesTreatsSignedZeroAsEqual(t *testing.T) {
 	data := make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, math.Float32bits(float32(math.Copysign(0, -1))))
@@ -190,6 +205,13 @@ func TestDictionaryMatchesPredicatesHandlesNaN(t *testing.T) {
 func float32BytesForTest(value float32) []byte {
 	var encoded [4]byte
 	binary.LittleEndian.PutUint32(encoded[:], math.Float32bits(value))
+
+	return encoded[:]
+}
+
+func int32BytesForTest(value int32) []byte {
+	var encoded [4]byte
+	binary.LittleEndian.PutUint32(encoded[:], uint32(value))
 
 	return encoded[:]
 }

@@ -1802,9 +1802,9 @@ type RowGroupBloomPred struct {
 
 // RowGroupDictionaryPred holds the physical-encoded bytes for each literal in
 // a dictionary-prunable predicate on one field. A row group can be skipped
-// when NONE of the bytes occur in its complete dictionary. It stays a distinct
-// type from RowGroupBloomPred so the two pruning contracts can evolve
-// independently even though they currently carry the same fields.
+// when NONE of the bytes occur in its complete dictionary. It intentionally
+// mirrors RowGroupBloomPred because both predicates use the same physical
+// literal encoding.
 type RowGroupDictionaryPred struct {
 	FieldID   int
 	PhysBytes [][]byte // one entry for EqualTo; one per value for In
@@ -1847,7 +1847,7 @@ type wrapPqArrowReader struct {
 	*pqarrow.FileReader
 	rowGroupInfos []parquetRowGroupInfo
 	// dictionarySource is shared with FileReader. The temporary reader created
-	// from it uses section reads and never owns the source's Close method.
+	// from it wraps the source so it cannot close the main reader's input.
 	dictionarySource parquet.ReaderAtSeeker
 	dictionaryMem    memory.Allocator
 }
@@ -1977,6 +1977,11 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				// keep the existing conservative behaviour.
 				dictionaryReader, _ = newParquetDictionaryReader(
 					w.dictionarySource, fileMeta, w.dictionaryMem)
+				if dictionaryReader != nil {
+					// The temporary reader owns only its buffers. Its source is
+					// wrapped so this cannot close the main reader's input.
+					defer dictionaryReader.Close()
+				}
 			}
 			if len(dictionaryPredsByColumn) > 0 && dictionaryReader == nil {
 				dictionaryReader = w.ParquetReader()
@@ -2075,10 +2080,23 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 	return w.GetRecordReader(ctx, cols, rgList)
 }
 
-// Once a few consecutive row groups survive dictionary checks, further checks
-// are unlikely to pay for themselves. Stopping is fail-open: it can only leave
+// Once several consecutive row groups survive dictionary checks, further
+// checks are unlikely to pay for themselves. The limit is deliberately high
+// enough to keep checking after a short cluster of matching groups, since a
+// later group may still be prunable. Stopping is fail-open: it can only leave
 // extra row groups to the normal reader, never drop matching data.
-const parquetDictionaryKeepStreakLimit = 2
+const parquetDictionaryKeepStreakLimit = 8
+
+// nonClosingReaderAtSeeker gives a temporary Parquet reader access to a shared
+// source without allowing that reader's Close method to close the source owned
+// by the main Arrow reader.
+type nonClosingReaderAtSeeker struct {
+	parquet.ReaderAtSeeker
+}
+
+func (nonClosingReaderAtSeeker) Close() error {
+	return nil
+}
 
 func newParquetDictionaryReader(
 	source parquet.ReaderAtSeeker, fileMeta *metadata.FileMetaData, mem memory.Allocator,
@@ -2086,7 +2104,7 @@ func newParquetDictionaryReader(
 	readProps := parquet.NewReaderProperties(mem)
 	readProps.BufferedStreamEnabled = true
 
-	return file.NewParquetReader(source,
+	return file.NewParquetReader(nonClosingReaderAtSeeker{ReaderAtSeeker: source},
 		file.WithMetadata(fileMeta), file.WithReadProps(readProps))
 }
 
@@ -2254,6 +2272,9 @@ func dictionaryMatchesPredicates(
 	offset := 0
 	numValues := page.NumValues()
 	if numValues < 0 {
+		return nil, false
+	}
+	if numValues == 0 {
 		return nil, false
 	}
 

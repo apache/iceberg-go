@@ -2077,6 +2077,18 @@ func openBloomTestReader(t testing.TB, data []byte) internal.FileReader {
 	return internal.WrapParquetFileReaderWithDictionarySource(arrRdr, source)
 }
 
+func openTestReaderWithoutDictionarySource(t testing.TB, data []byte) internal.FileReader {
+	t.Helper()
+
+	pqRdr, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+
+	return internal.WrapParquetFileReader(arrRdr)
+}
+
 func int32PhysBytes(v int32) []byte {
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b, uint32(v))
@@ -2450,6 +2462,100 @@ func TestDictionaryRowGroupPruningMultiColumnAnd(t *testing.T) {
 			assert.Equal(t, test.survivors, survivors)
 		})
 	}
+}
+
+func TestDictionaryRowGroupPruningKeepsCheckingAfterKeepStreak(t *testing.T) {
+	const rgSize = 1024
+
+	present := make([]int32, rgSize)
+	absent := make([]int32, rgSize)
+	for i := range present {
+		present[i] = 7
+		absent[i] = 1
+	}
+
+	data := buildDictionaryTestParquet(t, present, present, absent, absent)
+	rdr := openBloomTestReader(t, data)
+	defer rdr.Close()
+
+	var survivors []internal.RowGroupSpan
+	tester := &internal.ParquetRowGroupTester{
+		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+			return true, nil
+		},
+		DictionaryPreds: []internal.RowGroupDictionaryPred{
+			{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(7)}},
+		},
+		Survivors: &survivors,
+	}
+	rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(2*rgSize), countRecords(t, rr))
+	assert.Equal(t, []internal.RowGroupSpan{
+		{FirstRowPos: 0, NumRows: rgSize},
+		{FirstRowPos: rgSize, NumRows: rgSize},
+	}, survivors)
+}
+
+func TestDictionaryRowGroupPruningFallbackUsesMainReader(t *testing.T) {
+	const rgSize = 1024
+	rg0 := make([]int32, rgSize)
+	rg1 := make([]int32, rgSize)
+	for i := range rg0 {
+		rg0[i] = 1
+		rg1[i] = 7
+	}
+
+	rdr := openTestReaderWithoutDictionarySource(t, buildDictionaryTestParquet(t, rg0, rg1))
+	defer rdr.Close()
+
+	tester := &internal.ParquetRowGroupTester{
+		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+			return true, nil
+		},
+		DictionaryPreds: []internal.RowGroupDictionaryPred{
+			{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(7)}},
+		},
+	}
+	rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(rgSize), countRecords(t, rr))
+}
+
+func TestDictionaryRowGroupPruningClosesTemporaryReaderWithoutClosingSource(t *testing.T) {
+	const rgSize = 1024
+	rg0 := make([]int32, rgSize)
+	rg1 := make([]int32, rgSize)
+	for i := range rg0 {
+		rg0[i] = 1
+		rg1[i] = 7
+	}
+	data := buildDictionaryTestParquet(t, rg0, rg1)
+
+	source := &trackingOpenFile{Reader: bytes.NewReader(data)}
+	pqRdr, err := file.NewParquetReader(source)
+	require.NoError(t, err)
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	rdr := internal.WrapParquetFileReaderWithDictionarySource(arrRdr, source)
+
+	tester := &internal.ParquetRowGroupTester{
+		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+			return true, nil
+		},
+		DictionaryPreds: []internal.RowGroupDictionaryPred{
+			{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(7)}},
+		},
+	}
+	rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+	require.NoError(t, err)
+	assert.Equal(t, int64(rgSize), countRecords(t, rr))
+	assert.False(t, source.closed, "temporary dictionary reader must not close the shared source")
+
+	require.NoError(t, rdr.Close())
+	assert.True(t, source.closed)
 }
 
 func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
