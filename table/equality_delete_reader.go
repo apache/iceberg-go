@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"sync"
@@ -719,12 +720,23 @@ func equalityDeleteSetCombinationKey(files []*equalityDeleteFileSet) string {
 }
 
 func mergeEqualityDeleteSets(files []*equalityDeleteFileSet) *equalityDeleteSet {
+	largest := 0
+	for i := 1; i < len(files); i++ {
+		if len(files[i].keys) > len(files[largest].keys) {
+			largest = i
+		}
+	}
+
 	deleteSet := &equalityDeleteSet{
-		keys:     make(set[string]),
+		keys:     maps.Clone(files[largest].keys),
 		fieldIDs: files[0].fieldIDs,
 		colNames: files[0].colNames,
 	}
-	for _, file := range files {
+	for i, file := range files {
+		if i == largest {
+			continue
+		}
+
 		for key := range file.keys {
 			deleteSet.keys[key] = struct{}{}
 		}

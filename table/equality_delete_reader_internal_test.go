@@ -1012,6 +1012,25 @@ func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
 	assert.Equal(t, set[string]{"a": {}, "c": {}}, perTask[5][0].keys)
 }
 
+func TestMergeEqualityDeleteSetsClonesLargestInput(t *testing.T) {
+	largest := &equalityDeleteFileSet{equalityDeleteSet: &equalityDeleteSet{
+		keys:     set[string]{"a": {}, "b": {}, "c": {}},
+		fieldIDs: []int{1},
+		colNames: []string{"id"},
+	}}
+	smaller := &equalityDeleteFileSet{equalityDeleteSet: &equalityDeleteSet{
+		keys:     set[string]{"d": {}},
+		fieldIDs: []int{1},
+		colNames: []string{"id"},
+	}}
+
+	merged := mergeEqualityDeleteSets([]*equalityDeleteFileSet{smaller, largest})
+	assert.Equal(t, set[string]{"a": {}, "b": {}, "c": {}, "d": {}}, merged.keys)
+
+	merged.keys["new"] = struct{}{}
+	assert.NotContains(t, largest.keys, "new")
+}
+
 func TestBuildEqualityDeleteSetsPerTaskKeepsFieldGroupsSeparate(t *testing.T) {
 	deleteID := newEqualityDeleteSetAssemblyTestFile(t, "delete-id.parquet", []int{1})
 	deleteIDAgain := newEqualityDeleteSetAssemblyTestFile(t, "delete-id-again.parquet", []int{1})
