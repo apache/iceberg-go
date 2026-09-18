@@ -49,6 +49,17 @@ type countingEqualityDeleteOpenFS struct {
 	opens    atomic.Int64
 }
 
+type countingEqualityFieldDataFile struct {
+	iceberg.DataFile
+	equalityFieldIDsCalls int
+}
+
+func (f *countingEqualityFieldDataFile) EqualityFieldIDs() []int {
+	f.equalityFieldIDsCalls++
+
+	return f.DataFile.EqualityFieldIDs()
+}
+
 func (f *countingEqualityDeleteOpenFS) Open(name string) (iceio.File, error) {
 	f.attempts.Add(1)
 	file, err := f.MemFS.Open(name)
@@ -263,6 +274,41 @@ func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 		[]FileScanTask{{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}})
 	require.ErrorIs(t, err, ErrEmptyEqualityFieldIDs)
 	require.ErrorContains(t, err, "empty-equality-fields.parquet")
+}
+
+func TestEqualityDeleteMetadataIsReadOncePerPath(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	base := newEqualityDeleteSetAssemblyTestFile(t, "mem://metadata-dedup/delete.parquet", []int{1})
+	deleteFile := &countingEqualityFieldDataFile{DataFile: base}
+	tasks := make([]FileScanTask, 100)
+	for i := range tasks {
+		tasks[i] = FileScanTask{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}
+	}
+
+	loader, err := newLazyEqualityDeleteLoader(iceio.NewMemFS(), schema, nil, nil, tasks)
+	require.NoError(t, err)
+	assert.Len(t, loader.files, 1)
+	assert.Equal(t, 1, deleteFile.equalityFieldIDsCalls)
+
+	fs := iceio.NewMemFS()
+	path := "mem://metadata-dedup/eager-delete.parquet"
+	writeEqualityDeleteParquetToMemFS(t, fs, path, `[{"id": 1}]`)
+	base = newEqualityDeleteSetAssemblyTestFile(t, path, []int{1})
+	deleteFile = &countingEqualityFieldDataFile{DataFile: base}
+	tasks = make([]FileScanTask, 100)
+	for i := range tasks {
+		tasks[i] = FileScanTask{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}
+	}
+
+	perTask, err := readAllEqualityDeleteFiles(t.Context(), fs, schema, nil, tasks, 1)
+	require.NoError(t, err)
+	assert.Len(t, perTask, len(tasks))
+	assert.Equal(t, 1, deleteFile.equalityFieldIDsCalls)
 }
 
 func TestLazyEqualityDeleteLoaderLoadsFilesOnDemand(t *testing.T) {
