@@ -1471,57 +1471,320 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanHandlesReorderedRecor
 	s.ElementsMatch([]int32{7, 8}, values)
 }
 
-func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanNestedSourceField() {
-	// "payload" is a struct column; the partition source field ("event_time",
-	// iceberg field ID 2) lives inside it rather than at the top level.
-	icebergSchema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "payload", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
-			},
-		}},
-	)
-	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
+func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanSourceFieldPaths() {
+	s.Run("nested struct field", func() {
+		// "payload" is a struct column; the partition source field ("event_time",
+		// iceberg field ID 2) lives inside it rather than at the top level.
+		icebergSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+				},
+			}},
+		)
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
+		})
+
+		structType := arrow.StructOf(arrow.Field{Name: "event_time", Type: arrow.PrimitiveTypes.Int32, Nullable: true})
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "payload", Type: structType, Nullable: true},
+		}, nil)
+
+		plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
+		s.Require().NoError(err)
+		s.Equal([]int{0, 0}, plan.fields[0].columnPath)
+
+		bldr := array.NewRecordBuilder(s.mem, arrowSchema)
+		defer bldr.Release()
+		structBldr := bldr.Field(0).(*array.StructBuilder)
+		eventTimeBldr := structBldr.FieldBuilder(0).(*array.Int32Builder)
+
+		structBldr.Append(true)
+		eventTimeBldr.Append(7)
+
+		structBldr.Append(true)
+		eventTimeBldr.Append(8)
+
+		structBldr.Append(false) // null struct row -> partition value should be nil
+		eventTimeBldr.AppendNull()
+
+		structBldr.Append(true) // non-null struct, null leaf -> partition value should still be nil
+		eventTimeBldr.AppendNull()
+
+		record := bldr.NewRecordBatch()
+		defer record.Release()
+
+		partitions, err := plan.getRecordPartitions(record)
+		s.Require().NoError(err)
+		s.Require().Len(partitions, 3)
+
+		values := make(map[any][]int64)
+		for _, p := range partitions {
+			values[p.partitionRec.Get(0)] = p.rows
+		}
+		s.Equal([]int64{0}, values[int32(7)])
+		s.Equal([]int64{1}, values[int32(8)])
+		s.Equal([]int64{2, 3}, values[nil])
 	})
 
-	structType := arrow.StructOf(arrow.Field{Name: "event_time", Type: arrow.PrimitiveTypes.Int32, Nullable: true})
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "payload", Type: structType, Nullable: true},
-	}, nil)
+	s.Run("literal dot in top-level name", func() {
+		icebergSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "user.name", Type: iceberg.PrimitiveTypes.String},
+		)
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "user.name",
+		})
 
-	plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
-	s.Require().NoError(err)
-	s.Equal([]int{0, 0}, plan.fields[0].columnPath)
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "user.name", Type: arrow.BinaryTypes.String},
+		}, nil)
 
-	bldr := array.NewRecordBuilder(s.mem, arrowSchema)
-	defer bldr.Release()
-	structBldr := bldr.Field(0).(*array.StructBuilder)
-	eventTimeBldr := structBldr.FieldBuilder(0).(*array.Int32Builder)
+		plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
+		s.Require().NoError(err)
+		s.Equal([]int{0}, plan.fields[0].columnPath)
 
-	structBldr.Append(true)
-	eventTimeBldr.Append(7)
+		record := s.createCustomTestRecord(arrowSchema, [][]any{{"alice"}, {"bob"}})
+		defer record.Release()
 
-	structBldr.Append(true)
-	eventTimeBldr.Append(8)
+		partitions, err := plan.getRecordPartitions(record)
+		s.Require().NoError(err)
+		s.Require().Len(partitions, 2)
+		values := []string{
+			partitions[0].partitionRec.Get(0).(string),
+			partitions[1].partitionRec.Get(0).(string),
+		}
+		s.ElementsMatch([]string{"alice", "bob"}, values)
+	})
 
-	structBldr.Append(false) // null struct row -> partition value should be nil
-	eventTimeBldr.AppendNull()
+	s.Run("mixed top-level, literal-dot, and nested sources", func() {
+		icebergSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 2, Name: "user.name", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 3, Name: "payload", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 4, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+				},
+			}},
+		)
+		spec := iceberg.NewPartitionSpec(
+			iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "region"},
+			iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Transform: iceberg.IdentityTransform{}, Name: "user.name"},
+			iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1002, Transform: iceberg.IdentityTransform{}, Name: "event_time"},
+		)
 
-	record := bldr.NewRecordBatch()
-	defer record.Release()
+		structType := arrow.StructOf(arrow.Field{Name: "event_time", Type: arrow.PrimitiveTypes.Int32, Nullable: true})
+		// Arrow field order deliberately differs from iceberg field order, so
+		// resolution must go by name rather than position.
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "user.name", Type: arrow.BinaryTypes.String},
+			{Name: "region", Type: arrow.BinaryTypes.String},
+			{Name: "payload", Type: structType, Nullable: true},
+		}, nil)
 
-	partitions, err := plan.getRecordPartitions(record)
-	s.Require().NoError(err)
-	s.Require().Len(partitions, 3)
+		plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
+		s.Require().NoError(err)
+		s.Require().Len(plan.fields, 3)
+		s.Equal([]int{1}, plan.fields[0].columnPath)
+		s.Equal([]int{0}, plan.fields[1].columnPath)
+		s.Equal([]int{2, 0}, plan.fields[2].columnPath)
 
-	values := make(map[any][]int64)
-	for _, p := range partitions {
-		values[p.partitionRec.Get(0)] = p.rows
-	}
-	s.Equal([]int64{0}, values[int32(7)])
-	s.Equal([]int64{1}, values[int32(8)])
-	s.Equal([]int64{2}, values[nil])
+		bldr := array.NewRecordBuilder(s.mem, arrowSchema)
+		defer bldr.Release()
+		userNameBldr := bldr.Field(0).(*array.StringBuilder)
+		regionBldr := bldr.Field(1).(*array.StringBuilder)
+		structBldr := bldr.Field(2).(*array.StructBuilder)
+		eventTimeBldr := structBldr.FieldBuilder(0).(*array.Int32Builder)
+
+		userNameBldr.Append("alice")
+		regionBldr.Append("us")
+		structBldr.Append(true)
+		eventTimeBldr.Append(7)
+
+		userNameBldr.Append("bob")
+		regionBldr.Append("eu")
+		structBldr.Append(true)
+		eventTimeBldr.Append(8)
+
+		record := bldr.NewRecordBatch()
+		defer record.Release()
+
+		partitions, err := plan.getRecordPartitions(record)
+		s.Require().NoError(err)
+		s.Require().Len(partitions, 2)
+
+		type key struct {
+			region    string
+			userName  string
+			eventTime int32
+		}
+		got := make(map[key][]int64)
+		for _, p := range partitions {
+			got[key{
+				region:    p.partitionRec.Get(0).(string),
+				userName:  p.partitionRec.Get(1).(string),
+				eventTime: p.partitionRec.Get(2).(int32),
+			}] = p.rows
+		}
+		s.Equal([]int64{0}, got[key{region: "us", userName: "alice", eventTime: 7}])
+		s.Equal([]int64{1}, got[key{region: "eu", userName: "bob", eventTime: 8}])
+	})
+
+	s.Run("three levels of nesting", func() {
+		icebergSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "a", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "b", Type: &iceberg.StructType{
+						FieldList: []iceberg.NestedField{
+							{ID: 3, Name: "c", Type: &iceberg.StructType{
+								FieldList: []iceberg.NestedField{
+									{ID: 4, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+								},
+							}},
+						},
+					}},
+				},
+			}},
+		)
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
+		})
+
+		cType := arrow.StructOf(arrow.Field{Name: "event_time", Type: arrow.PrimitiveTypes.Int32, Nullable: true})
+		bType := arrow.StructOf(arrow.Field{Name: "c", Type: cType, Nullable: true})
+		aType := arrow.StructOf(arrow.Field{Name: "b", Type: bType, Nullable: true})
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "a", Type: aType, Nullable: true},
+		}, nil)
+
+		plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
+		s.Require().NoError(err)
+		s.Equal([]int{0, 0, 0, 0}, plan.fields[0].columnPath)
+
+		bldr := array.NewRecordBuilder(s.mem, arrowSchema)
+		defer bldr.Release()
+		aBldr := bldr.Field(0).(*array.StructBuilder)
+		bBldr := aBldr.FieldBuilder(0).(*array.StructBuilder)
+		cBldr := bBldr.FieldBuilder(0).(*array.StructBuilder)
+		eventTimeBldr := cBldr.FieldBuilder(0).(*array.Int32Builder)
+
+		aBldr.Append(true)
+		bBldr.Append(true)
+		cBldr.Append(true)
+		eventTimeBldr.Append(7)
+
+		aBldr.Append(true)
+		bBldr.Append(true)
+		cBldr.Append(true)
+		eventTimeBldr.Append(8)
+
+		aBldr.Append(true) // middle struct ("b") is null -> partition value should be nil
+		bBldr.Append(false)
+		cBldr.Append(false)
+		eventTimeBldr.AppendNull()
+
+		record := bldr.NewRecordBatch()
+		defer record.Release()
+
+		partitions, err := plan.getRecordPartitions(record)
+		s.Require().NoError(err)
+		s.Require().Len(partitions, 3)
+
+		values := make(map[any][]int64)
+		for _, p := range partitions {
+			values[p.partitionRec.Get(0)] = p.rows
+		}
+		s.Equal([]int64{0}, values[int32(7)])
+		s.Equal([]int64{1}, values[int32(8)])
+		s.Equal([]int64{2}, values[nil])
+	})
+
+	s.Run("literal dot in nested field name", func() {
+		icebergSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "user.name", Type: iceberg.PrimitiveTypes.String},
+				},
+			}},
+		)
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "user.name",
+		})
+
+		structType := arrow.StructOf(arrow.Field{Name: "user.name", Type: arrow.BinaryTypes.String, Nullable: true})
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "payload", Type: structType, Nullable: true},
+		}, nil)
+
+		plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
+		s.Require().NoError(err)
+		s.Equal([]int{0, 0}, plan.fields[0].columnPath)
+
+		bldr := array.NewRecordBuilder(s.mem, arrowSchema)
+		defer bldr.Release()
+		structBldr := bldr.Field(0).(*array.StructBuilder)
+		nameBldr := structBldr.FieldBuilder(0).(*array.StringBuilder)
+
+		structBldr.Append(true)
+		nameBldr.Append("alice")
+
+		structBldr.Append(true)
+		nameBldr.Append("bob")
+
+		record := bldr.NewRecordBatch()
+		defer record.Release()
+
+		partitions, err := plan.getRecordPartitions(record)
+		s.Require().NoError(err)
+		s.Require().Len(partitions, 2)
+		values := []string{
+			partitions[0].partitionRec.Get(0).(string),
+			partitions[1].partitionRec.Get(0).(string),
+		}
+		s.ElementsMatch([]string{"alice", "bob"}, values)
+	})
+
+	s.Run("mistyped intermediate struct errors", func() {
+		icebergSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "a", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "b", Type: &iceberg.StructType{
+						FieldList: []iceberg.NestedField{
+							{ID: 3, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+						},
+					}},
+				},
+			}},
+		)
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{3}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
+		})
+
+		structTypeC := arrow.StructOf(arrow.Field{Name: "event_time", Type: arrow.PrimitiveTypes.Int32, Nullable: true})
+
+		leafBldr := array.NewInt32Builder(s.mem)
+		leafBldr.AppendValues([]int32{42, 43}, nil)
+		mistyped := leafBldr.NewInt32Array()
+		leafBldr.Release()
+		defer mistyped.Release()
+
+		// n.b. field "b" is *declared* as a struct, but the actual data contains an int32 array
+		structAType := arrow.StructOf(arrow.Field{Name: "b", Type: structTypeC, Nullable: true})
+		structAData := array.NewData(structAType, mistyped.Len(), []*memory.Buffer{nil}, []arrow.ArrayData{mistyped.Data()}, 0, 0)
+		defer structAData.Release()
+		structA := array.NewStructData(structAData)
+		defer structA.Release()
+
+		arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "a", Type: structAType, Nullable: true}}, nil)
+		record := array.NewRecordBatch(arrowSchema, []arrow.Array{structA}, int64(structA.Len()))
+		defer record.Release()
+
+		plan, err := newPartitionExtractionPlan(spec, icebergSchema, arrowSchema)
+		s.Require().NoError(err)
+
+		_, err = plan.getRecordPartitions(record)
+		s.Require().Error(err)
+	})
 }
 
 func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {

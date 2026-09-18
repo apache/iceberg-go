@@ -397,47 +397,60 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 	}, nil
 }
 
+// arrowFieldContainer is a proxy for both [arrow.Schema] and [arrow.StructType],
+type arrowFieldContainer interface {
+	FieldIndices(name string) []int
+	Field(i int) arrow.Field
+}
+
 // resolveArrowColumnPath resolves a dot-joined nested field name into a path of Arrow field indices.
 func resolveArrowColumnPath(recordSchema *arrow.Schema, colName string) ([]int, bool) {
-	segments := strings.Split(colName, ".")
+	// note that a pathological schema could lead to a stack overflow as this is recursive
+	return resolveArrowColumnPathIn(recordSchema, colName)
+}
 
-	indices := recordSchema.FieldIndices(segments[0])
-	if len(indices) == 0 {
-		return nil, false
+func resolveArrowColumnPathIn(container arrowFieldContainer, remaining string) ([]int, bool) {
+	// any field name COULD contain a literal `.` so we try the longest possible name and backtrack
+	for prefixEnd := len(remaining); prefixEnd > 0; prefixEnd = strings.LastIndex(remaining[:prefixEnd], ".") {
+		candidate := remaining[:prefixEnd]
+		indices := container.FieldIndices(candidate)
+		if indices == nil {
+			continue
+		}
+
+		if prefixEnd == len(remaining) {
+			return []int{indices[0]}, true
+		}
+
+		structType, ok := container.Field(indices[0]).Type.(*arrow.StructType)
+		if !ok {
+			continue
+		}
+
+		if subPath, ok := resolveArrowColumnPathIn(structType, remaining[prefixEnd+1:]); ok {
+			return append([]int{indices[0]}, subPath...), true
+		}
 	}
 
-	path := make([]int, 1, len(segments))
-	path[0] = indices[0]
-	fieldType := recordSchema.Field(indices[0]).Type
-
-	for _, segment := range segments[1:] {
-		structType, ok := fieldType.(*arrow.StructType)
-		if !ok {
-			return nil, false
-		}
-		fieldIdx, ok := structType.FieldIdx(segment)
-		if !ok {
-			return nil, false
-		}
-		path = append(path, fieldIdx)
-		fieldType = structType.Field(fieldIdx).Type
-	}
-
-	return path, true
+	return nil, false
 }
 
 // resolveColumnChain walks a resolved column path from the record's top-level column
 // down to the leaf, returning the array at each step of the path.
-func resolveColumnChain(record arrow.RecordBatch, path []int) []arrow.Array {
+func resolveColumnChain(record arrow.RecordBatch, path []int) ([]arrow.Array, error) {
 	chain := make([]arrow.Array, len(path))
 	col := record.Column(path[0])
 	chain[0] = col
 	for i, fieldIdx := range path[1:] {
-		col = col.(*array.Struct).Field(fieldIdx)
+		structCol, ok := col.(*array.Struct)
+		if !ok {
+			return nil, fmt.Errorf("expected struct array in column path, got %T", col)
+		}
+		col = structCol.Field(fieldIdx)
 		chain[i+1] = col
 	}
 
-	return chain
+	return chain, nil
 }
 
 // leafColumnAt returns the leaf array for a resolved column chain at the given row,
@@ -477,11 +490,16 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 	columnChains := make([][]arrow.Array, len(p.fields))
 	for i, fieldInfo := range p.fields {
 		switch len(fieldInfo.columnPath) {
-		case 0:
+		case 0: // an empty (nil) path means the source field isn't in the schema
 		case 1:
 			topLevelColumns[i] = record.Column(fieldInfo.columnPath[0])
 		default:
-			columnChains[i] = resolveColumnChain(record, fieldInfo.columnPath)
+			chain, err := resolveColumnChain(record, fieldInfo.columnPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve source column %q (field ID %d): %w",
+					fieldInfo.sourceName, fieldInfo.sourceField.SourceID(), err)
+			}
+			columnChains[i] = chain
 		}
 	}
 
