@@ -374,21 +374,21 @@ func newLazyEqualityDeleteLoader(
 			}
 
 			path := dataFile.FilePath()
-			if firstFile == nil {
-				fieldIDs := dataFileEqualityFieldIDs(dataFile)
-				if len(fieldIDs) == 0 {
-					return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
-				}
-
-				firstPath = path
-				firstFile = &lazyEqualityDeleteFile{
-					dataFile: dataFile,
-					fieldIDs: fieldIDs,
-				}
-
-				continue
-			}
 			if loader.files == nil {
+				if firstFile == nil {
+					fieldIDs := dataFileEqualityFieldIDs(dataFile)
+					if len(fieldIDs) == 0 {
+						return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
+					}
+
+					firstPath = path
+					firstFile = &lazyEqualityDeleteFile{
+						dataFile: dataFile,
+						fieldIDs: fieldIDs,
+					}
+
+					continue
+				}
 				if path == firstPath {
 					continue
 				}
