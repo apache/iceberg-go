@@ -2377,6 +2377,10 @@ go test -tags integration ./...
 <p>To track <code>main</code>, use <code>@main</code> instead of a version tag.</p>
 <h2 id="release-notes"><a class="header" href="#release-notes">Release notes</a></h2>
 <p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
+<h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
+<ul>
+<li><code>Table.PurgeFiles</code> now calls <code>IO.Remove</code> concurrently, with up to 32 calls in flight, when the filesystem does not implement <code>BulkRemovableIO</code>. Custom IO implementations, including those registered with <code>io.Register</code>, must make <code>Remove</code> safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.</li>
+</ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>
 <p>If you are validating an RC or cutting a new release, see:</p>
 <ul>
