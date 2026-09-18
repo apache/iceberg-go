@@ -493,11 +493,12 @@ func TestPlanFakeWaitCancellationBoundsStalledCleanup(t *testing.T) {
 	waitContext, cancelWait := context.WithCancel(t.Context())
 	defer cancelWait()
 	waitDone := make(chan error, 1)
+	// The grace bounds the whole DELETE, including reaching the fake, not just the stall.
 	go func() {
 		_, waitErr := catalog.WaitForPlan(waitContext, standardPlanFakeIdentifier(), *initial.PlanID, rest.WaitForPlanOptions{
 			MinDelay:          time.Hour,
 			MaxDelay:          time.Hour,
-			CancelGracePeriod: 100 * time.Millisecond,
+			CancelGracePeriod: time.Second,
 		})
 		waitDone <- waitErr
 	}()
