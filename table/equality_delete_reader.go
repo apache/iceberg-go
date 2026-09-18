@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"sync"
@@ -627,12 +628,20 @@ func buildEqualityDeleteSetsForTask(
 	if len(task.EqualityDeleteFiles) == 0 {
 		return nil
 	}
+	if len(task.EqualityDeleteFiles) == 1 {
+		fileSet, ok := perFile[task.EqualityDeleteFiles[0].FilePath()]
+		if !ok || len(fileSet.keys) == 0 {
+			return nil
+		}
+
+		return []*equalityDeleteSet{fileSet.equalityDeleteSet}
+	}
 
 	var (
-		groupKey   string
-		groupFiles []*equalityDeleteFileSet
-		groups     map[string][]*equalityDeleteFileSet
+		groupKey string
+		groups   map[string][]*equalityDeleteFileSet
 	)
+	groupFiles := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
 
 	for _, dataFile := range task.EqualityDeleteFiles {
 		fileSet, ok := perFile[dataFile.FilePath()]
@@ -700,6 +709,20 @@ func equalityDeleteSetForFiles(
 }
 
 func normalizeEqualityDeleteFiles(files []*equalityDeleteFileSet) []*equalityDeleteFileSet {
+	switch len(files) {
+	case 0, 1:
+		return files
+	case 2:
+		if files[0].id == files[1].id {
+			return files[:1]
+		}
+		if files[0].id > files[1].id {
+			files[0], files[1] = files[1], files[0]
+		}
+
+		return files
+	}
+
 	slices.SortFunc(files, func(a, b *equalityDeleteFileSet) int {
 		return cmp.Compare(a.id, b.id)
 	})
@@ -719,12 +742,23 @@ func equalityDeleteSetCombinationKey(files []*equalityDeleteFileSet) string {
 }
 
 func mergeEqualityDeleteSets(files []*equalityDeleteFileSet) *equalityDeleteSet {
+	largest := 0
+	for i := 1; i < len(files); i++ {
+		if len(files[i].keys) > len(files[largest].keys) {
+			largest = i
+		}
+	}
+
 	deleteSet := &equalityDeleteSet{
-		keys:     make(set[string]),
+		keys:     maps.Clone(files[largest].keys),
 		fieldIDs: files[0].fieldIDs,
 		colNames: files[0].colNames,
 	}
-	for _, file := range files {
+	for i, file := range files {
+		if i == largest {
+			continue
+		}
+
 		for key := range file.keys {
 			deleteSet.keys[key] = struct{}{}
 		}

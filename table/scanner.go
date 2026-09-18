@@ -547,6 +547,7 @@ type Scan struct {
 	metadata            Metadata
 	metadataLocation    string
 	ioF                 FSysF
+	manifestCache       *snapshotManifestCache
 	planner             ScanPlanner
 	scanPlanningIOProps iceberg.Properties
 	planningMode        ScanPlanningMode
@@ -834,12 +835,12 @@ func splitLineageMetadataFields(selectedFields []string, caseSensitive bool) (us
 // appended only if no field with that ID is already present. Idempotent so
 // callers can pass schemas that already declare the reserved fields.
 func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.NestedField) *iceberg.Schema {
-	existing := make(map[int]struct{}, len(s.Fields()))
-	for _, f := range s.Fields() {
+	fields := s.Fields()
+	existing := make(map[int]struct{}, len(fields))
+	for _, f := range fields {
 		existing[f.ID] = struct{}{}
 	}
 
-	fields := slices.Clone(s.Fields())
 	for _, f := range lineageFields {
 		if _, ok := existing[f.ID]; ok {
 			continue
@@ -1022,36 +1023,49 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	if err != nil || snap == nil {
 		return nil, err
 	}
-	fs, err := scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	// This path has no reporter behind it, so the manifest counts recorded into
 	// this accumulator are intentionally discarded. A future caller that needs
 	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
 	// pass in an accumulator it actually reads.
 	return scan.fetchPartitionSpecFilteredManifestsWithSchema(
-		snap, fs, schema, &scanMetricsAccumulator{}, scan.partitionFiltersForSchema(schema))
+		ctx, snap, schema, &scanMetricsAccumulator{}, scan.partitionFiltersForSchema(schema))
 }
 
 // fetchPartitionSpecFilteredManifestsWithSchema loads the snapshot's manifests
-// with fs and filters them using the given schema. It records
+// and filters them using the given schema. It records
 // total/scanned/skipped manifest counts (split by data vs delete content) into acc.
 func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(
+	ctx context.Context,
 	snap *Snapshot,
-	fs io.IO,
 	schema *iceberg.Schema,
 	acc *scanMetricsAccumulator,
 	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) ([]iceberg.ManifestFile, error) {
 	// Fetch all manifests for the current snapshot.
-	manifestList, err := snap.Manifests(fs)
+	manifestSet, err := scan.manifestSet(ctx, *snap)
 	if err != nil {
 		return nil, err
 	}
 
-	return scan.filterManifestsWithSchema(manifestList, schema, acc, partitionFilters)
+	return scan.filterManifestsWithSchema(manifestSet.allManifests(), schema, acc, partitionFilters)
+}
+
+func (scan *Scan) manifestSet(
+	ctx context.Context,
+	snapshot Snapshot,
+) (snapshotManifestSet, error) {
+	return scan.manifestSetWithFSF(ctx, snapshot, scan.ioF)
+}
+
+func (scan *Scan) manifestSetWithFSF(
+	ctx context.Context,
+	snapshot Snapshot,
+	fsF FSysF,
+) (snapshotManifestSet, error) {
+	return scan.manifestCache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
+		return readSnapshotManifestSet(loadCtx, snapshot, fsF)
+	})
 }
 
 // filterManifestsWithSchema applies partition-summary pruning to an existing
@@ -1680,21 +1694,13 @@ func (scan *Scan) planFilesLocal(
 	if err != nil || snap == nil {
 		return nil, err
 	}
-	fs, err := scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Keep the manifest-list load separate from manifest workers. Workers reuse
-	// one FileIO within each concurrent batch, while the next batch loads again
-	// so credential-renewing factories retain their checkpoints.
-
 	// Keep the projection cache alive across both local planning phases. The
 	// manifest and data-file evaluators need the same per-spec projections.
 	partitionFilters := scan.partitionFiltersForSchema(schema)
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
-		snap, fs, schema, acc, partitionFilters)
+		ctx, snap, schema, acc, partitionFilters)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
@@ -1928,6 +1934,15 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// REST plans contain whole files and split offsets. Apply the same range
+	// policy as local planning; already-partial tasks from other planners are
+	// preserved by splitParquetScanTask.
+	targetSize := int64(ReadSplitTargetSizeDefault)
+	if scan.metadata != nil {
+		targetSize = scan.metadata.Properties().GetInt64(ReadSplitTargetSizeKey, targetSize)
+	}
+	result.Tasks = splitRemoteScanTasks(result.Tasks, targetSize)
 
 	// Replace the current plan only after the new plan is available. A planner
 	// failure or invalid PlanIO must not destroy a previously usable plan.
