@@ -66,6 +66,11 @@ func DecodeDefaultBytes(value string, fixedLen int) ([]byte, error) {
 // It is restricted to packages within this module by Go's internal package rules.
 type SchemaRef struct{}
 
+// PartitionSpecRef marks partition-spec access that may return references to
+// internal state. It is restricted to packages within this module by Go's
+// internal package rules.
+type PartitionSpecRef struct{}
+
 // FloorDiv performs floored integer division, rounding toward negative infinity.
 // This matches Java's Math.floorDiv behavior for negative dividends.
 func FloorDiv[T constraints.Integer](a, b T) T {

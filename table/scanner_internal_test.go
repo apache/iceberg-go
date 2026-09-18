@@ -998,6 +998,19 @@ func TestSplitLineageMetadataFields(t *testing.T) {
 	}
 }
 
+func TestAppendMissingLineageFields(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1}, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64,
+	})
+
+	withLineage := appendMissingLineageFields(schema, []iceberg.NestedField{iceberg.RowID()})
+
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	assert.Len(t, schema.Fields(), 1)
+	assert.Len(t, withLineage.Fields(), 2)
+	assert.Equal(t, iceberg.RowIDColumnName, withLineage.Fields()[1].Name)
+}
+
 func TestKeyDefaultMapRaceCondition(t *testing.T) {
 	var factoryCallCount atomic.Int64
 	factory := func(key string) int {
