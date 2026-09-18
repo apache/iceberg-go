@@ -220,10 +220,10 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 	n := varr.Len()
 
 	var mask *memory.Buffer
-	badOffset := false
+	shouldBail := false
 	mergeValidity := func(arr arrow.Array) {
 		if arr.Data().Offset() != 0 {
-			badOffset = true // child at a non-zero offset: our offset-0 bit indexing would be wrong
+			shouldBail = true
 
 			return
 		}
@@ -232,6 +232,8 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 		}
 		vb := arr.Data().Buffers()[0]
 		if vb == nil {
+			shouldBail = true
+
 			return
 		}
 		if mask == nil {
@@ -288,7 +290,7 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 		cur = field.Field(tvIdx)
 	}
 
-	if badOffset || !arrow.TypeEqual(cur.DataType(), dt) {
+	if shouldBail || !arrow.TypeEqual(cur.DataType(), dt) {
 		return bail()
 	}
 
@@ -300,7 +302,7 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 	}
 
 	mergeValidity(cur)
-	if badOffset {
+	if shouldBail {
 		return bail()
 	}
 	curData := cur.Data()

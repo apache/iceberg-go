@@ -739,6 +739,9 @@ func dictCostFallbackProps(arrowSchema *arrow.Schema, base []parquet.WriterPrope
 		if d, ok := dt.(*arrow.DictionaryType); ok {
 			dt = d.ValueType
 		}
+		if r, ok := dt.(*arrow.RunEndEncodedType); ok {
+			dt = r.Encoded()
+		}
 		if st, ok := dt.(*arrow.StructType); ok {
 			for _, f := range st.Fields() {
 				walk(prefix+"."+f.Name, f.Type)
@@ -778,6 +781,9 @@ func schemaHasListOrMap(sc *arrow.Schema) bool {
 		}
 		if d, ok := dt.(*arrow.DictionaryType); ok {
 			dt = d.ValueType
+		}
+		if r, ok := dt.(*arrow.RunEndEncodedType); ok {
+			dt = r.Encoded()
 		}
 		switch t := dt.(type) {
 		case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType,

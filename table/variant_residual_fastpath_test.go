@@ -259,30 +259,51 @@ func TestFastPathRootResidualObjectFallsBack(t *testing.T) {
 	m0, _ := build(map[string]any{"a": int64(1)})
 	m1, v1 := build(map[string]any{"a": int64(5)})
 
-	sb := array.NewStructBuilder(mem, vt.StorageType().(*arrow.StructType))
-	defer sb.Release()
-	metaB := sb.FieldBuilder(0).(*array.BinaryBuilder)
-	valB := sb.FieldBuilder(1).(*array.BinaryBuilder)
-	tvB := sb.FieldBuilder(2).(*array.StructBuilder)
-	aB := tvB.FieldBuilder(0).(*array.StructBuilder)
-	aValB := aB.FieldBuilder(0).(*array.BinaryBuilder)
-	aTypedB := aB.FieldBuilder(1).(*array.Int64Builder)
+	storageType := vt.StorageType().(*arrow.StructType)
+	tvType := storageType.Field(2).Type.(*arrow.StructType)
+	aType := tvType.Field(0).Type.(*arrow.StructType)
 
-	// row 0: shredded {a:1}
-	sb.Append(true)
-	metaB.Append(m0)
-	valB.AppendNull()
-	tvB.Append(true)
-	aB.Append(true)
-	aValB.AppendNull()
-	aTypedB.Append(1)
-	// row 1: whole object {a:5} in the root residual, typed_value null
-	sb.Append(true)
-	metaB.Append(m1)
-	valB.Append(v1)
-	tvB.AppendNulls(1)
+	binArr := func(vals [][]byte) arrow.Array {
+		bb := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+		defer bb.Release()
+		for _, x := range vals {
+			if x == nil {
+				bb.AppendNull()
+			} else {
+				bb.Append(x)
+			}
+		}
 
-	storage := sb.NewStructArray()
+		return bb.NewArray()
+	}
+
+	i64b := array.NewInt64Builder(mem)
+	defer i64b.Release()
+	i64b.Append(1)
+	i64b.Append(0)
+	aTyped := i64b.NewArray()
+	defer aTyped.Release()
+	aVal := binArr([][]byte{nil, nil})
+	defer aVal.Release()
+	aData := array.NewData(aType, 2, []*memory.Buffer{nil}, []arrow.ArrayData{aVal.Data(), aTyped.Data()}, 0, 0)
+	defer aData.Release()
+	aStruct := array.NewStructData(aData)
+	defer aStruct.Release()
+
+	tvValidity := memory.NewBufferBytes([]byte{0x01})
+	tvData := array.NewData(tvType, 2, []*memory.Buffer{tvValidity}, []arrow.ArrayData{aStruct.Data()}, 1, 0)
+	defer tvData.Release()
+	tvStruct := array.NewStructData(tvData)
+	defer tvStruct.Release()
+
+	metaArr := binArr([][]byte{m0, m1})
+	defer metaArr.Release()
+	rootVal := binArr([][]byte{nil, v1})
+	defer rootVal.Release()
+
+	storageData := array.NewData(storageType, 2, []*memory.Buffer{nil}, []arrow.ArrayData{metaArr.Data(), rootVal.Data(), tvStruct.Data()}, 0, 0)
+	defer storageData.Release()
+	storage := array.NewStructData(storageData)
 	defer storage.Release()
 	varr := array.NewExtensionArrayWithStorage(vt, storage).(*extensions.VariantArray)
 	defer varr.Release()
@@ -563,6 +584,26 @@ func TestExtractColumnValuesContextCancelled(t *testing.T) {
 		"$.a", iceberg.PrimitiveTypes.Int64, []map[string]any{{"a": int64(1)}})
 	defer rec.Release()
 
+	_, _, err := buildExtractColumn(ctx, col, rec, mem)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestExtractColumnValuesCancelDuringLoop: cancelling mid-scan stops the VariantGet loop instead of finishing it.
+func TestExtractColumnValuesCancelDuringLoop(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	base := compute.WithAllocator(context.Background(), mem)
+	ctx, cancel := context.WithCancel(base)
+
+	rows := make([]map[string]any, 1<<17)
+	for i := range rows {
+		rows[i] = map[string]any{"a": int32(i)}
+	}
+	rec, col := buildVariantExtractRec(t, mem, shredStruct(arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int32}),
+		"$.a", iceberg.PrimitiveTypes.Int64, rows)
+	defer rec.Release()
+
+	go cancel()
 	_, _, err := buildExtractColumn(ctx, col, rec, mem)
 	require.ErrorIs(t, err, context.Canceled)
 }
