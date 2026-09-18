@@ -628,6 +628,14 @@ func buildEqualityDeleteSetsForTask(
 	if len(task.EqualityDeleteFiles) == 0 {
 		return nil
 	}
+	if len(task.EqualityDeleteFiles) == 1 {
+		fileSet, ok := perFile[task.EqualityDeleteFiles[0].FilePath()]
+		if !ok || len(fileSet.keys) == 0 {
+			return nil
+		}
+
+		return []*equalityDeleteSet{fileSet.equalityDeleteSet}
+	}
 
 	var (
 		groupKey string
@@ -701,6 +709,20 @@ func equalityDeleteSetForFiles(
 }
 
 func normalizeEqualityDeleteFiles(files []*equalityDeleteFileSet) []*equalityDeleteFileSet {
+	switch len(files) {
+	case 0, 1:
+		return files
+	case 2:
+		if files[0].id == files[1].id {
+			return files[:1]
+		}
+		if files[0].id > files[1].id {
+			files[0], files[1] = files[1], files[0]
+		}
+
+		return files
+	}
+
 	slices.SortFunc(files, func(a, b *equalityDeleteFileSet) int {
 		return cmp.Compare(a.id, b.id)
 	})
