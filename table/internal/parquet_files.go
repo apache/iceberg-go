@@ -19,12 +19,14 @@ package internal
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -127,7 +129,11 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 		return nil, err
 	}
 
-	return wrapPqArrowReader{FileReader: arrRdr}, nil
+	return wrapPqArrowReader{
+		FileReader:       arrRdr,
+		dictionarySource: inputfile,
+		dictionaryMem:    alloc,
+	}, nil
 }
 
 func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
@@ -1794,11 +1800,23 @@ type RowGroupBloomPred struct {
 	PhysBytes [][]byte // one entry for EqualTo; one per value for In
 }
 
-// ParquetRowGroupTester combines stats-based and bloom filter row group pruning.
+// RowGroupDictionaryPred holds the physical-encoded bytes for each literal in
+// a dictionary-prunable predicate on one field. A row group can be skipped
+// when NONE of the bytes occur in its complete dictionary. It intentionally
+// mirrors RowGroupBloomPred because both predicates use the same physical
+// literal encoding.
+type RowGroupDictionaryPred struct {
+	FieldID   int
+	PhysBytes [][]byte // one entry for EqualTo; one per value for In
+}
+
+// ParquetRowGroupTester combines stats-based, dictionary, and bloom filter row
+// group pruning.
 // Pass it as the tester argument to wrapPqArrowReader.GetRecords.
 type ParquetRowGroupTester struct {
-	StatsFn    func(*metadata.RowGroupMetaData, []int) (bool, error)
-	BloomPreds []RowGroupBloomPred // nil = no bloom filter pass
+	StatsFn         func(*metadata.RowGroupMetaData, []int) (bool, error)
+	BloomPreds      []RowGroupBloomPred      // nil = no bloom filter pass
+	DictionaryPreds []RowGroupDictionaryPred // nil = no dictionary filter pass
 	// RangeSet indicates that Start and Length came from an explicit scan task.
 	// Without it, the zero value keeps the historical full-file behavior for
 	// callers that construct a tester only for row-group pruning.
@@ -1828,6 +1846,10 @@ type RowGroupSpan struct {
 type wrapPqArrowReader struct {
 	*pqarrow.FileReader
 	rowGroupInfos []parquetRowGroupInfo
+	// dictionarySource is shared with FileReader. The temporary reader created
+	// from it wraps the source so it cannot close the main reader's input.
+	dictionarySource parquet.ReaderAtSeeker
+	dictionaryMem    memory.Allocator
 }
 
 func (w wrapPqArrowReader) Metadata() Metadata {
@@ -1927,7 +1949,8 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 	var rgList []int
 	if rowGroupTester != nil && (rangeSet ||
-		rowGroupTester.StatsFn != nil || len(rowGroupTester.BloomPreds) > 0) {
+		rowGroupTester.StatsFn != nil || len(rowGroupTester.DictionaryPreds) > 0 ||
+		len(rowGroupTester.BloomPreds) > 0) {
 		fileMeta := w.ParquetReader().MetaData()
 		numRg := w.ParquetReader().NumRowGroups()
 		planningOffsets := rowGroupTester.PlanningSplitOffsets
@@ -1936,12 +1959,35 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 
 		var (
-			fieldIDToColIdx map[int]int
-			bfReader        *metadata.BloomFilterReader
+			fieldIDToColIdx  map[int]int
+			bfReader         *metadata.BloomFilterReader
+			dictionaryReader *file.Reader
 		)
 
-		if len(rowGroupTester.BloomPreds) > 0 {
+		if len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
 			fieldIDToColIdx = buildFieldIDToColIdx(fileMeta)
+		}
+		var dictionaryPredsByColumn map[int][]int
+		if len(rowGroupTester.DictionaryPreds) > 0 {
+			dictionaryPredsByColumn = groupRowGroupDictionaryPredicates(
+				fieldIDToColIdx, rowGroupTester.DictionaryPreds)
+			if len(dictionaryPredsByColumn) > 0 && w.dictionarySource != nil {
+				// Dictionary inspection is an optional optimisation. If the
+				// section-read reader cannot be created, use the main reader and
+				// keep the existing conservative behaviour.
+				dictionaryReader, _ = newParquetDictionaryReader(
+					w.dictionarySource, fileMeta, w.dictionaryMem)
+				if dictionaryReader != nil {
+					// The temporary reader owns only its buffers. Its source is
+					// wrapped so this cannot close the main reader's input.
+					defer dictionaryReader.Close()
+				}
+			}
+			if len(dictionaryPredsByColumn) > 0 && dictionaryReader == nil {
+				dictionaryReader = w.ParquetReader()
+			}
+		}
+		if len(rowGroupTester.BloomPreds) > 0 {
 			bfReader = w.ParquetReader().GetBloomFilterReader()
 		}
 
@@ -1952,6 +1998,8 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		rangeStart := rowGroupTester.Start
 		rangeEnd := rangeStart + rowGroupTester.Length
 		rgList = make([]int, 0)
+		dictionaryKeepStreak := 0
+		dictionaryPruningActive := len(dictionaryPredsByColumn) > 0
 		var firstRowPos int64
 		for rg := range numRg {
 			pos := firstRowPos
@@ -1990,6 +2038,23 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				}
 			}
 
+			if use && dictionaryPruningActive {
+				if rgMeta == nil {
+					rgMeta = fileMeta.RowGroup(rg)
+				}
+				use = checkRowGroupDictionaries(
+					dictionaryReader, fileMeta, rgMeta, rg,
+					dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
+				if use {
+					dictionaryKeepStreak++
+					if dictionaryKeepStreak >= parquetDictionaryKeepStreakLimit {
+						dictionaryPruningActive = false
+					}
+				} else {
+					dictionaryKeepStreak = 0
+				}
+			}
+
 			if use && bfReader != nil {
 				var err error
 				use, err = checkRowGroupBloomFilters(bfReader, rg, fieldIDToColIdx, rowGroupTester.BloomPreds)
@@ -2017,6 +2082,396 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 	}
 
 	return w.GetRecordReader(ctx, cols, rgList)
+}
+
+// Once several consecutive row groups survive dictionary checks, further
+// checks are unlikely to pay for themselves. The limit is deliberately high
+// enough to keep checking after a short cluster of matching groups, since a
+// later group may still be prunable. Stopping is fail-open: it can only leave
+// extra row groups to the normal reader, never drop matching data.
+const parquetDictionaryKeepStreakLimit = 8
+
+// nonClosingReaderAtSeeker gives a temporary Parquet reader access to a shared
+// source without allowing that reader's Close method to close the source owned
+// by the main Arrow reader.
+type nonClosingReaderAtSeeker struct {
+	parquet.ReaderAtSeeker
+}
+
+func (nonClosingReaderAtSeeker) Close() error {
+	return nil
+}
+
+func newParquetDictionaryReader(
+	source parquet.ReaderAtSeeker, fileMeta *metadata.FileMetaData, mem memory.Allocator,
+) (*file.Reader, error) {
+	readProps := parquet.NewReaderProperties(mem)
+	readProps.BufferedStreamEnabled = true
+
+	return file.NewParquetReader(nonClosingReaderAtSeeker{ReaderAtSeeker: source},
+		file.WithMetadata(fileMeta), file.WithReadProps(readProps))
+}
+
+func groupRowGroupDictionaryPredicates(
+	fieldIDToColIdx map[int]int,
+	preds []RowGroupDictionaryPred,
+) map[int][]int {
+	predsByColumn := make(map[int][]int)
+	for i, pred := range preds {
+		if len(pred.PhysBytes) == 0 {
+			continue
+		}
+
+		colIdx, ok := fieldIDToColIdx[pred.FieldID]
+		if ok {
+			predsByColumn[colIdx] = append(predsByColumn[colIdx], i)
+		}
+	}
+
+	return predsByColumn
+}
+
+// checkRowGroupDictionaries checks each dictionary predicate against the
+// complete dictionary for its column in row group rg. It returns false only
+// when the column metadata proves that every data page is dictionary encoded
+// and none of the predicate values occur in the dictionary. Missing encoding
+// metadata, dictionary pages, unsupported physical types, malformed pages, or
+// reader errors keep the row group so this optimisation cannot drop data.
+func checkRowGroupDictionaries(
+	rdr *file.Reader,
+	fileMeta *metadata.FileMetaData,
+	rgMeta *metadata.RowGroupMetaData,
+	rg int,
+	predsByColumn map[int][]int,
+	preds []RowGroupDictionaryPred,
+) bool {
+	if len(preds) == 0 || len(predsByColumn) == 0 {
+		return true
+	}
+
+	rgReader := rdr.RowGroup(rg)
+	for colIdx, predIndexes := range predsByColumn {
+		chunk, err := rgMeta.ColumnChunk(colIdx)
+		if err != nil || !parquetColumnUsesOnlyDictionaryData(chunk) {
+			continue
+		}
+
+		column := fileMeta.Schema.Column(colIdx)
+		pageRdr, err := rgReader.GetColumnPageReader(colIdx)
+		if err != nil {
+			continue
+		}
+
+		dictPage, dictErr := pageRdr.GetDictionaryPage()
+		if dictErr != nil || dictPage == nil {
+			if dictPage != nil {
+				dictPage.Release()
+			}
+			_ = pageRdr.Close()
+
+			continue
+		}
+
+		matches, known := dictionaryMatchesPredicates(
+			dictPage, column.PhysicalType(), column.TypeLength(), preds, predIndexes)
+		dictPage.Release()
+		closeErr := pageRdr.Close()
+		if !known {
+			continue
+		}
+		if closeErr != nil {
+			// A close error makes an otherwise conclusive dictionary result
+			// unusable, so keep the row group conservatively.
+			slog.Warn("dictionary row-group pruning skipped after page reader close error",
+				"rowGroup", rg, "err", closeErr)
+
+			continue
+		}
+
+		if !matches {
+			return false
+		}
+	}
+
+	return true
+}
+
+// parquetColumnUsesOnlyDictionaryData verifies that the optional encoding
+// statistics identify a dictionary page and dictionary-encoded data pages,
+// with no PLAIN fallback pages. EncodingStats is deliberately required: the
+// column encoding list cannot distinguish the PLAIN dictionary page itself
+// from a later PLAIN data page in older files.
+func parquetColumnUsesOnlyDictionaryData(chunk *metadata.ColumnChunkMetaData) bool {
+	if !chunk.HasDictionaryPage() {
+		return false
+	}
+
+	stats := chunk.EncodingStats()
+	if len(stats) == 0 {
+		return false
+	}
+
+	var hasDictionaryPage, hasDictionaryData bool
+	for _, stat := range stats {
+		switch stat.PageType {
+		case file.PageTypeDictionaryPage:
+			if stat.Encoding != parquet.Encodings.Plain && stat.Encoding != parquet.Encodings.PlainDict {
+				return false
+			}
+			hasDictionaryPage = true
+		case file.PageTypeDataPage, file.PageTypeDataPageV2:
+			if stat.Encoding != parquet.Encodings.RLEDict && stat.Encoding != parquet.Encodings.PlainDict {
+				return false
+			}
+			hasDictionaryData = true
+		default:
+			return false
+		}
+	}
+
+	return hasDictionaryPage && hasDictionaryData
+}
+
+// dictionaryMatchesPredicates decodes a PLAIN dictionary page and reports
+// whether every requested predicate has at least one matching value. The
+// returned known flag is false for unsupported or malformed input that
+// prevents a pruning decision, which means the caller must retain the row
+// group.
+func dictionaryMatchesPredicates(
+	page *file.DictionaryPage,
+	physicalType parquet.Type,
+	typeLen int,
+	preds []RowGroupDictionaryPred,
+	predIndexes []int,
+) (bool, bool) {
+	pageEncoding := parquet.Encoding(page.Encoding())
+	if pageEncoding != parquet.Encodings.Plain && pageEncoding != parquet.Encodings.PlainDict {
+		return false, false
+	}
+
+	width, variableWidth, ok := parquetDictionaryValueLayout(physicalType, typeLen)
+	if !ok {
+		return false, false
+	}
+
+	for _, predIndex := range predIndexes {
+		usable := false
+		for _, candidate := range preds[predIndex].PhysBytes {
+			if variableWidth || len(candidate) == width {
+				usable = true
+
+				break
+			}
+		}
+		if !usable {
+			return false, false
+		}
+	}
+
+	data := page.Data()
+	offset := 0
+	numValues := page.NumValues()
+	if numValues < 0 {
+		return false, false
+	}
+	if numValues == 0 {
+		return false, false
+	}
+
+	if len(predIndexes) == 1 {
+		pred := preds[predIndexes[0]]
+		candidateSet := parquetDictionaryCandidateSet(
+			physicalType, width, variableWidth, numValues, pred.PhysBytes)
+		for range numValues {
+			value, next, ok := nextParquetDictionaryValue(data, offset, physicalType, width)
+			if !ok {
+				return false, false
+			}
+			offset = next
+
+			if candidateSet != nil {
+				if _, ok := candidateSet[string(value)]; ok {
+					return true, true
+				}
+			} else {
+				for _, candidate := range pred.PhysBytes {
+					if parquetDictionaryValueEqual(physicalType, value, candidate) {
+						return true, true
+					}
+				}
+			}
+		}
+
+		if offset != len(data) {
+			return false, false
+		}
+
+		return false, true
+	}
+
+	// predIndexes contains indexes into the full preds slice. Keep matches
+	// aligned with predIndexes so columns with a small predicate subset do not
+	// allocate a slice for predicates belonging to other columns.
+	matches := make([]bool, len(predIndexes))
+	candidateSets := make([]map[string]struct{}, len(predIndexes))
+	for matchIndex, predIndex := range predIndexes {
+		candidateSets[matchIndex] = parquetDictionaryCandidateSet(
+			physicalType, width, variableWidth, numValues, preds[predIndex].PhysBytes)
+	}
+	remaining := len(predIndexes)
+	for range numValues {
+		if remaining == 0 {
+			break
+		}
+
+		value, next, ok := nextParquetDictionaryValue(data, offset, physicalType, width)
+		if !ok {
+			return false, false
+		}
+		offset = next
+
+		for matchIndex, predIndex := range predIndexes {
+			if matches[matchIndex] {
+				continue
+			}
+
+			if candidateSets[matchIndex] != nil {
+				if _, ok := candidateSets[matchIndex][string(value)]; ok {
+					matches[matchIndex] = true
+					remaining--
+				}
+			} else {
+				for _, candidate := range preds[predIndex].PhysBytes {
+					if parquetDictionaryValueEqual(physicalType, value, candidate) {
+						matches[matchIndex] = true
+						remaining--
+
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if remaining == 0 {
+		// All predicates already match, so trailing dictionary entries cannot
+		// change the decision and do not need to be decoded or validated.
+		return true, true
+	}
+
+	if offset != len(data) {
+		return false, false
+	}
+
+	return false, true
+}
+
+const (
+	parquetDictionaryCandidateSetLimit     = 8
+	parquetDictionaryCandidateSetMinValues = 16
+)
+
+func parquetDictionaryCandidateSet(
+	physicalType parquet.Type,
+	width int,
+	variableWidth bool,
+	numValues int32,
+	candidates [][]byte,
+) map[string]struct{} {
+	if len(candidates) < parquetDictionaryCandidateSetLimit ||
+		numValues < parquetDictionaryCandidateSetMinValues {
+		return nil
+	}
+
+	switch physicalType {
+	case parquet.Types.Int32, parquet.Types.Int64,
+		parquet.Types.ByteArray, parquet.Types.FixedLenByteArray:
+	default:
+		// Float and Double need numeric comparison for signed zero and NaN.
+		return nil
+	}
+
+	result := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if variableWidth || len(candidate) == width {
+			result[string(candidate)] = struct{}{}
+		}
+	}
+
+	return result
+}
+
+func parquetDictionaryValueLayout(physicalType parquet.Type, typeLen int) (width int, variableWidth, ok bool) {
+	switch physicalType {
+	case parquet.Types.Int32, parquet.Types.Float:
+		return 4, false, true
+	case parquet.Types.Int64, parquet.Types.Double:
+		return 8, false, true
+	case parquet.Types.ByteArray:
+		return 0, true, true
+	case parquet.Types.FixedLenByteArray:
+		if typeLen > 0 {
+			return typeLen, false, true
+		}
+	}
+
+	return 0, false, false
+}
+
+func nextParquetDictionaryValue(data []byte, offset int, physicalType parquet.Type, width int) ([]byte, int, bool) {
+	if physicalType == parquet.Types.ByteArray {
+		if offset < 0 || offset > len(data) || len(data)-offset < 4 {
+			return nil, 0, false
+		}
+
+		valueLen := int(binary.LittleEndian.Uint32(data[offset:]))
+		valueStart := offset + 4
+		if valueLen > len(data)-valueStart {
+			return nil, 0, false
+		}
+
+		return data[valueStart : valueStart+valueLen], valueStart + valueLen, true
+	}
+
+	if offset < 0 || width < 0 || width > len(data)-offset {
+		return nil, 0, false
+	}
+
+	return data[offset : offset+width], offset + width, true
+}
+
+func parquetDictionaryValueEqual(physicalType parquet.Type, value, candidate []byte) bool {
+	if physicalType == parquet.Types.Float && len(value) == 4 && len(candidate) == 4 {
+		left := math.Float32frombits(binary.LittleEndian.Uint32(value))
+		right := math.Float32frombits(binary.LittleEndian.Uint32(candidate))
+		if math.IsNaN(float64(right)) {
+			// Keep groups for NaN literals because reader equality semantics
+			// can differ.
+			return true
+		}
+		if math.IsNaN(float64(left)) {
+			return false
+		}
+
+		return left == right
+	}
+
+	if physicalType == parquet.Types.Double && len(value) == 8 && len(candidate) == 8 {
+		left := math.Float64frombits(binary.LittleEndian.Uint64(value))
+		right := math.Float64frombits(binary.LittleEndian.Uint64(candidate))
+		if math.IsNaN(right) {
+			// Keep groups for NaN literals because reader equality semantics
+			// can differ.
+			return true
+		}
+		if math.IsNaN(left) {
+			return false
+		}
+
+		return left == right
+	}
+
+	return slices.Equal(value, candidate)
 }
 
 // buildFieldIDToColIdx maps each Iceberg field ID to its 0-based column index in
@@ -2150,7 +2605,12 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		return nil, err
 	}
 
-	result = wrapPqArrowReader{FileReader: fr, rowGroupInfos: rowGroupInfos}
+	result = wrapPqArrowReader{
+		FileReader:       fr,
+		rowGroupInfos:    rowGroupInfos,
+		dictionarySource: pf,
+		dictionaryMem:    pfs.mem,
+	}
 
 	return result, nil
 }

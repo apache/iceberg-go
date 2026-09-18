@@ -83,8 +83,12 @@ func TestCompiledFileFilterPlansSeparatePhysicalTypes(t *testing.T) {
 	assert.Len(t, scan.filterPlanCache.plans, 2)
 	require.Len(t, int32Plans.pruning.bloomPreds, 1)
 	require.Len(t, int64Plans.pruning.bloomPreds, 1)
+	require.Len(t, int32Plans.pruning.dictionaryPreds, 1)
+	require.Len(t, int64Plans.pruning.dictionaryPreds, 1)
 	assert.Equal(t, []byte{1, 0, 0, 0}, int32Plans.pruning.bloomPreds[0].PhysBytes[0])
 	assert.Equal(t, []byte{1, 0, 0, 0, 0, 0, 0, 0}, int64Plans.pruning.bloomPreds[0].PhysBytes[0])
+	assert.Equal(t, []byte{1, 0, 0, 0}, int32Plans.pruning.dictionaryPreds[0].PhysBytes[0])
+	assert.Equal(t, []byte{1, 0, 0, 0, 0, 0, 0, 0}, int64Plans.pruning.dictionaryPreds[0].PhysBytes[0])
 }
 
 func TestPhysicalSchemaKeyIncludesNestedFieldIDs(t *testing.T) {
@@ -195,4 +199,5 @@ func TestCompiledFileFilterPlansDisablePruningForMissingInitialDefault(t *testin
 
 	assert.True(t, plans.pruning.statsFilter.Equals(iceberg.AlwaysTrue{}))
 	assert.Empty(t, plans.pruning.bloomPreds)
+	assert.Empty(t, plans.pruning.dictionaryPreds)
 }
