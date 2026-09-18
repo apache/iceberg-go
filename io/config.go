@@ -54,10 +54,26 @@ const (
 	ADLSConnectionStringPrefix = "adls.connection-string."
 	ADLSSharedKeyAccountName   = "adls.auth.shared-key.account.name"
 	ADLSSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
-	ADLSClientID               = "adls.client-id"
 	ADLSEndpoint               = "adls.endpoint"
 	ADLSProtocol               = "adls.protocol"
+
+	// ADLSManagedIdentityEnabled opts in to authenticating with an Azure managed
+	// identity instead of the default credential chain. Pair it with ADLSClientID to
+	// select a user assigned identity; on its own it uses the system assigned identity.
+	//
+	// This property is specific to this implementation. Neither the Java nor the
+	// PyIceberg implementation defines an equivalent property, so catalog properties
+	// that set it will not carry over to them.
 	ADLSManagedIdentityEnabled = "adls.auth.managed-identity.enabled"
+
+	// ADLSClientID selects a user assigned managed identity by client ID. It only
+	// takes effect when ADLSManagedIdentityEnabled is "true"; on its own it is ignored.
+	//
+	// PyIceberg recognizes the same "adls.client-id" key but uses it for service
+	// principal authentication, alongside "adls.client-secret" and "adls.tenant-id".
+	// This implementation defines neither of those, so the key is only ever read as a
+	// managed identity ID here.
+	ADLSClientID = "adls.client-id"
 
 	// Not in use yet
 	// ADLSReadBlockSize          = "adls.read.block-size-bytes"
