@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -916,16 +917,18 @@ func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	assert := require.New(t)
 	ctx := context.Background()
 	const scheme = "hivepurgefail"
-	dropCalled := false
-	removeBeforeDrop := false
-	removeCalls := 0
+	var (
+		dropCalled       atomic.Bool
+		removeBeforeDrop atomic.Bool
+		removeCalls      atomic.Int64
+	)
 	failingFS := failRemoveIO{
 		MemFS: iceio.NewMemFS(),
 		err:   errHivePurgeRemove,
 		onRemove: func() {
-			removeCalls++
-			if !dropCalled {
-				removeBeforeDrop = true
+			removeCalls.Add(1)
+			if !dropCalled.Load() {
+				removeBeforeDrop.Store(true)
 			}
 		},
 	}
@@ -948,15 +951,15 @@ func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 		Return(hiveTable, nil).Twice()
 	mockClient.On("DropTable", mock.Anything, "test_database", "test_table", false).
 		Run(func(mock.Arguments) {
-			dropCalled = true
+			dropCalled.Store(true)
 		}).Return(nil).Once()
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
 	assert.NoError(hiveCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
-	assert.True(dropCalled)
-	assert.Positive(removeCalls)
-	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
+	assert.True(dropCalled.Load())
+	assert.Positive(removeCalls.Load())
+	assert.False(removeBeforeDrop.Load(), "PurgeTable should drop the catalog entry before removing files")
 	file, err := failingFS.Open(dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)
