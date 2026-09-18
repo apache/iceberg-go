@@ -424,6 +424,12 @@ func (s *Schema) FindColumnName(fieldID int) (string, bool) {
 	return col, ok
 }
 
+// ColumnNamesRef returns the schema-owned field-name index for trusted
+// internal callers. The returned map must be treated as read-only.
+func (s *Schema) ColumnNamesRef(_ internal.SchemaRef) (map[int]string, error) {
+	return s.lazyIDToName()
+}
+
 // FindFieldByName returns the field identified by the name given,
 // the second return value will be false if no field by this name
 // is found.
