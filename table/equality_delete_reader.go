@@ -630,10 +630,10 @@ func buildEqualityDeleteSetsForTask(
 	}
 
 	var (
-		groupKey   string
-		groupFiles []*equalityDeleteFileSet
-		groups     map[string][]*equalityDeleteFileSet
+		groupKey string
+		groups   map[string][]*equalityDeleteFileSet
 	)
+	groupFiles := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
 
 	for _, dataFile := range task.EqualityDeleteFiles {
 		fileSet, ok := perFile[dataFile.FilePath()]
