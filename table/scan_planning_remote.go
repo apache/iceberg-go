@@ -58,9 +58,14 @@ func remotePlanningSelectedFields(scan *Scan, schema *iceberg.Schema) ([]string,
 	}
 	slices.Sort(ids)
 
+	columnNames, err := schema.ColumnNamesRef(iceinternal.SchemaRef{})
+	if err != nil {
+		return nil, err
+	}
+
 	selected := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if name, ok := schema.FindColumnName(id); ok {
+		if name, ok := columnNames[id]; ok {
 			selected = append(selected, name)
 		}
 	}
