@@ -410,6 +410,15 @@ func TestFilePathMayMatch(t *testing.T) {
 			want:     false,
 		},
 		{
+			name:     "inverted bounds are conservative",
+			count:    1,
+			lower:    []byte("data-z.parquet"),
+			upper:    []byte("data-a.parquet"),
+			hasLower: true,
+			hasUpper: true,
+			want:     true,
+		},
+		{
 			name:     "missing lower bound",
 			count:    1,
 			upper:    []byte("data-z.parquet"),
