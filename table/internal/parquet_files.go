@@ -2039,8 +2039,12 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			}
 
 			if use && dictionaryPruningActive {
+				if rgMeta == nil {
+					rgMeta = fileMeta.RowGroup(rg)
+				}
 				use = checkRowGroupDictionaries(
-					dictionaryReader, fileMeta, rg, dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
+					dictionaryReader, fileMeta, rgMeta, rg,
+					dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
 				if use {
 					dictionaryKeepStreak++
 					if dictionaryKeepStreak >= parquetDictionaryKeepStreakLimit {
@@ -2136,6 +2140,7 @@ func groupRowGroupDictionaryPredicates(
 func checkRowGroupDictionaries(
 	rdr *file.Reader,
 	fileMeta *metadata.FileMetaData,
+	rgMeta *metadata.RowGroupMetaData,
 	rg int,
 	predsByColumn map[int][]int,
 	preds []RowGroupDictionaryPred,
@@ -2144,7 +2149,6 @@ func checkRowGroupDictionaries(
 		return true
 	}
 
-	rgMeta := fileMeta.RowGroup(rg)
 	rgReader := rdr.RowGroup(rg)
 	for colIdx, predIndexes := range predsByColumn {
 		chunk, err := rgMeta.ColumnChunk(colIdx)
@@ -2184,10 +2188,8 @@ func checkRowGroupDictionaries(
 			continue
 		}
 
-		for _, predIndex := range predIndexes {
-			if !matches[predIndex] {
-				return false
-			}
+		if !matches {
+			return false
 		}
 	}
 
@@ -2230,25 +2232,26 @@ func parquetColumnUsesOnlyDictionaryData(chunk *metadata.ColumnChunkMetaData) bo
 	return hasDictionaryPage && hasDictionaryData
 }
 
-// dictionaryMatchesPredicates decodes a PLAIN dictionary page and records
-// which requested predicates have at least one matching value. The returned
-// known flag is false for unsupported or malformed input that prevents a
-// pruning decision, which means the caller must retain the row group.
+// dictionaryMatchesPredicates decodes a PLAIN dictionary page and reports
+// whether every requested predicate has at least one matching value. The
+// returned known flag is false for unsupported or malformed input that
+// prevents a pruning decision, which means the caller must retain the row
+// group.
 func dictionaryMatchesPredicates(
 	page *file.DictionaryPage,
 	physicalType parquet.Type,
 	typeLen int,
 	preds []RowGroupDictionaryPred,
 	predIndexes []int,
-) ([]bool, bool) {
+) (bool, bool) {
 	pageEncoding := parquet.Encoding(page.Encoding())
 	if pageEncoding != parquet.Encodings.Plain && pageEncoding != parquet.Encodings.PlainDict {
-		return nil, false
+		return false, false
 	}
 
 	width, variableWidth, ok := parquetDictionaryValueLayout(physicalType, typeLen)
 	if !ok {
-		return nil, false
+		return false, false
 	}
 
 	for _, predIndex := range predIndexes {
@@ -2261,23 +2264,60 @@ func dictionaryMatchesPredicates(
 			}
 		}
 		if !usable {
-			return nil, false
+			return false, false
 		}
 	}
 
-	// predIndexes contains indexes into the full preds slice, so matches keeps
-	// the global predicate indexes instead of remapping them per column.
-	matches := make([]bool, len(preds))
 	data := page.Data()
 	offset := 0
 	numValues := page.NumValues()
 	if numValues < 0 {
-		return nil, false
+		return false, false
 	}
 	if numValues == 0 {
-		return nil, false
+		return false, false
 	}
 
+	if len(predIndexes) == 1 {
+		pred := preds[predIndexes[0]]
+		candidateSet := parquetDictionaryCandidateSet(
+			physicalType, width, variableWidth, numValues, pred.PhysBytes)
+		for range numValues {
+			value, next, ok := nextParquetDictionaryValue(data, offset, physicalType, width)
+			if !ok {
+				return false, false
+			}
+			offset = next
+
+			if candidateSet != nil {
+				if _, ok := candidateSet[string(value)]; ok {
+					return true, true
+				}
+			} else {
+				for _, candidate := range pred.PhysBytes {
+					if parquetDictionaryValueEqual(physicalType, value, candidate) {
+						return true, true
+					}
+				}
+			}
+		}
+
+		if offset != len(data) {
+			return false, false
+		}
+
+		return false, true
+	}
+
+	// predIndexes contains indexes into the full preds slice. Keep matches
+	// aligned with predIndexes so columns with a small predicate subset do not
+	// allocate a slice for predicates belonging to other columns.
+	matches := make([]bool, len(predIndexes))
+	candidateSets := make([]map[string]struct{}, len(predIndexes))
+	for matchIndex, predIndex := range predIndexes {
+		candidateSets[matchIndex] = parquetDictionaryCandidateSet(
+			physicalType, width, variableWidth, numValues, preds[predIndex].PhysBytes)
+	}
 	remaining := len(predIndexes)
 	for range numValues {
 		if remaining == 0 {
@@ -2286,21 +2326,28 @@ func dictionaryMatchesPredicates(
 
 		value, next, ok := nextParquetDictionaryValue(data, offset, physicalType, width)
 		if !ok {
-			return nil, false
+			return false, false
 		}
 		offset = next
 
-		for _, predIndex := range predIndexes {
-			if matches[predIndex] {
+		for matchIndex, predIndex := range predIndexes {
+			if matches[matchIndex] {
 				continue
 			}
 
-			for _, candidate := range preds[predIndex].PhysBytes {
-				if parquetDictionaryValueEqual(physicalType, value, candidate) {
-					matches[predIndex] = true
+			if candidateSets[matchIndex] != nil {
+				if _, ok := candidateSets[matchIndex][string(value)]; ok {
+					matches[matchIndex] = true
 					remaining--
+				}
+			} else {
+				for _, candidate := range preds[predIndex].PhysBytes {
+					if parquetDictionaryValueEqual(physicalType, value, candidate) {
+						matches[matchIndex] = true
+						remaining--
 
-					break
+						break
+					}
 				}
 			}
 		}
@@ -2309,14 +2356,49 @@ func dictionaryMatchesPredicates(
 	if remaining == 0 {
 		// All predicates already match, so trailing dictionary entries cannot
 		// change the decision and do not need to be decoded or validated.
-		return matches, true
+		return true, true
 	}
 
 	if offset != len(data) {
-		return nil, false
+		return false, false
 	}
 
-	return matches, true
+	return false, true
+}
+
+const (
+	parquetDictionaryCandidateSetLimit     = 8
+	parquetDictionaryCandidateSetMinValues = 16
+)
+
+func parquetDictionaryCandidateSet(
+	physicalType parquet.Type,
+	width int,
+	variableWidth bool,
+	numValues int32,
+	candidates [][]byte,
+) map[string]struct{} {
+	if len(candidates) < parquetDictionaryCandidateSetLimit ||
+		numValues < parquetDictionaryCandidateSetMinValues {
+		return nil
+	}
+
+	switch physicalType {
+	case parquet.Types.Int32, parquet.Types.Int64,
+		parquet.Types.ByteArray, parquet.Types.FixedLenByteArray:
+	default:
+		// Float and Double need numeric comparison for signed zero and NaN.
+		return nil
+	}
+
+	result := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if variableWidth || len(candidate) == width {
+			result[string(candidate)] = struct{}{}
+		}
+	}
+
+	return result
 }
 
 func parquetDictionaryValueLayout(physicalType parquet.Type, typeLen int) (width int, variableWidth, ok bool) {

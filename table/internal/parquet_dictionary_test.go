@@ -51,8 +51,31 @@ func TestDictionaryMatchesPredicatesByteArray(t *testing.T) {
 	page.Release()
 
 	require.True(t, known)
-	require.Len(t, matches, 1)
-	assert.True(t, matches[0])
+	assert.True(t, matches)
+}
+
+func TestDictionaryMatchesPredicatesUsesLocalPredicateIndexes(t *testing.T) {
+	data := make([]byte, 0, 16)
+	var length [4]byte
+	binary.LittleEndian.PutUint32(length[:], uint32(len("second")))
+	data = append(data, length[:]...)
+	data = append(data, "second"...)
+
+	page := file.NewDictionaryPage(memory.NewBufferBytes(data), 1, parquet.Encodings.Plain)
+	matches, known := dictionaryMatchesPredicates(
+		page,
+		parquet.Types.ByteArray,
+		-1,
+		[]RowGroupDictionaryPred{
+			{FieldID: 1, PhysBytes: [][]byte{[]byte("missing")}},
+			{FieldID: 1, PhysBytes: [][]byte{[]byte("second")}},
+		},
+		[]int{1},
+	)
+	page.Release()
+
+	require.True(t, known)
+	assert.True(t, matches)
 }
 
 func TestDictionaryMatchesPredicatesRejectsMalformedPage(t *testing.T) {
@@ -68,7 +91,7 @@ func TestDictionaryMatchesPredicatesRejectsMalformedPage(t *testing.T) {
 	page.Release()
 
 	assert.False(t, known)
-	assert.Nil(t, matches)
+	assert.False(t, matches)
 }
 
 func TestDictionaryMatchesPredicatesRejectsEmptyPage(t *testing.T) {
@@ -83,7 +106,7 @@ func TestDictionaryMatchesPredicatesRejectsEmptyPage(t *testing.T) {
 	page.Release()
 
 	assert.False(t, known)
-	assert.Nil(t, matches)
+	assert.False(t, matches)
 }
 
 func TestDictionaryMatchesPredicatesTreatsSignedZeroAsEqual(t *testing.T) {
@@ -103,8 +126,7 @@ func TestDictionaryMatchesPredicatesTreatsSignedZeroAsEqual(t *testing.T) {
 	page.Release()
 
 	require.True(t, known)
-	require.Len(t, matches, 1)
-	assert.True(t, matches[0])
+	assert.True(t, matches)
 }
 
 func appendFloat32DictionaryValue(data []byte, value float32) []byte {
@@ -196,9 +218,68 @@ func TestDictionaryMatchesPredicatesHandlesNaN(t *testing.T) {
 			page.Release()
 
 			require.True(t, known)
-			require.Len(t, matches, 1)
-			assert.Equal(t, test.wantMatch, matches[0])
+			assert.Equal(t, test.wantMatch, matches)
 		})
+	}
+}
+
+func TestDictionaryMatchesPredicatesUsesCandidateSet(t *testing.T) {
+	const numValues = 32
+	data := make([]byte, numValues*4)
+	for i := range numValues {
+		binary.LittleEndian.PutUint32(data[i*4:], uint32(i))
+	}
+
+	candidates := make([][]byte, 8)
+	for i := range candidates {
+		candidates[i] = int32BytesForTest(int32(1000 + i))
+	}
+	candidates[len(candidates)-1] = int32BytesForTest(17)
+
+	page := file.NewDictionaryPage(memory.NewBufferBytes(data), numValues, parquet.Encodings.Plain)
+	matches, known := dictionaryMatchesPredicates(
+		page,
+		parquet.Types.Int32,
+		-1,
+		[]RowGroupDictionaryPred{{FieldID: 1, PhysBytes: candidates}},
+		[]int{0},
+	)
+	page.Release()
+
+	assert.True(t, known)
+	assert.True(t, matches)
+}
+
+func BenchmarkDictionaryMatchesPredicatesLargeIn(b *testing.B) {
+	const (
+		numValues     = 4096
+		numCandidates = 200
+		physicalWidth = 4
+	)
+
+	data := make([]byte, numValues*physicalWidth)
+	for i := range numValues {
+		binary.LittleEndian.PutUint32(data[i*physicalWidth:], uint32(i))
+	}
+
+	candidates := make([][]byte, numCandidates)
+	for i := range candidates {
+		candidates[i] = int32BytesForTest(int32(-i - 1))
+	}
+
+	page := file.NewDictionaryPage(
+		memory.NewBufferBytes(data), numValues, parquet.Encodings.Plain)
+	defer page.Release()
+	preds := []RowGroupDictionaryPred{{FieldID: 1, PhysBytes: candidates}}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		matches, known := dictionaryMatchesPredicates(
+			page, parquet.Types.Int32, -1, preds, []int{0})
+		if matches || !known {
+			b.Fatal("large IN dictionary match returned an unexpected result")
+		}
 	}
 }
 
