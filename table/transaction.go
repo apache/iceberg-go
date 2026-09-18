@@ -67,9 +67,7 @@ func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID, filter iceberg.Boo
 		op = OpAppend
 	}
 	prod := newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
-	if filter != nil {
-		prod.producerImpl.(*overwriteFiles).filter = filter
-	}
+	prod.setOverwriteFilter(filter)
 
 	return prod
 }
@@ -1730,8 +1728,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
-		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
-		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+		updater.setSkipDefaultValidator(true)
 	}
 	if cfg.dataSequenceNumber != nil {
 		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
@@ -2134,8 +2131,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
-		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
-		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+		updater.setSkipDefaultValidator(true)
 	}
 	if cfg.dataSequenceNumber != nil {
 		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
@@ -2458,6 +2454,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
+	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, filesToRewrite, fileSeqByPath, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -2505,6 +2502,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
+	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, withPartialDeletions, _, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
