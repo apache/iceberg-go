@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -1074,6 +1075,10 @@ type arrowScan struct {
 
 	useLargeTypes bool
 	concurrency   int
+
+	// arrowBatchSize, when positive, overrides the table's
+	// read.parquet.batch-size property for this scan's reads.
+	arrowBatchSize int
 }
 
 // preparedFileRead contains the physical schema projection shared by all
@@ -2323,6 +2328,17 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	}
 
 	tableProperties := as.metadata.Properties()
+	batchSize := as.options.Get(ParquetBatchSizeKey, "")
+	if as.arrowBatchSize > 0 {
+		batchSize = strconv.Itoa(as.arrowBatchSize)
+	}
+	if batchSize != "" {
+		tableProperties = maps.Clone(tableProperties)
+		if tableProperties == nil {
+			tableProperties = iceberg.Properties{}
+		}
+		tableProperties[ParquetBatchSizeKey] = batchSize
+	}
 	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
