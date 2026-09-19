@@ -1108,66 +1108,80 @@ func TestRowDeltaRemoveDeletesFailsInsteadOfReplaying(t *testing.T) {
 		"the data file must carry exactly one live DV: the peer's")
 }
 
-func buildPuffinPosDeleteWithoutRef(t *testing.T, path string) iceberg.DataFile {
-	t.Helper()
-
-	b, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
-		path, iceberg.PuffinFile, nil, nil, nil, 2, 128)
-	require.NoError(t, err)
-
-	return b.Build()
-}
-
-func TestRowDeltaRejectsDeletionVectorBelowV3(t *testing.T) {
+func TestRowDeltaRejectsInvalidDeletionVector(t *testing.T) {
 	const (
 		dataPath = "s3://bucket/data/insert.parquet"
 		dvPath   = "s3://bucket/data/dv-001.puffin"
 	)
+	offset, length := int64(4), int64(64)
+	negativeOffset, zeroLength := int64(-1), int64(0)
 
 	tests := []struct {
 		name          string
 		formatVersion int
 		rows          []iceberg.DataFile
-		deletes       func(*testing.T) []iceberg.DataFile
+		deletes       []iceberg.DataFile
 		errContains   string
 	}{
 		{
 			name:          "deletion vector alone on v2",
 			formatVersion: 2,
-			deletes: func(t *testing.T) []iceberg.DataFile {
-				return []iceberg.DataFile{buildDVFile(t, dvPath, dataPath)}
-			},
-			errContains: "requires table format version >= 3",
+			deletes:       []iceberg.DataFile{buildDVFile(t, dvPath, dataPath)},
+			errContains:   "requires table format version >= 3",
 		},
 		{
 			name:          "deletion vector beside valid files on v2",
 			formatVersion: 2,
 			rows:          []iceberg.DataFile{buildDataFile(t, dataPath)},
-			deletes: func(t *testing.T) []iceberg.DataFile {
-				return []iceberg.DataFile{
-					buildPosDeleteFile(t, "s3://bucket/data/pos-del.parquet"),
-					buildEqDeleteFile(t, "s3://bucket/data/eq-del.parquet", []int{1}),
-					buildDVFile(t, dvPath, dataPath),
-				}
+			deletes: []iceberg.DataFile{
+				buildPosDeleteFile(t, "s3://bucket/data/pos-del.parquet"),
+				buildEqDeleteFile(t, "s3://bucket/data/eq-del.parquet", []int{1}),
+				buildDVFile(t, dvPath, dataPath),
 			},
 			errContains: "requires table format version >= 3",
 		},
 		{
-			name:          "deletion vector without referenced data file on v2",
+			name:          "deletion vector missing ref still fails on format version for v2",
 			formatVersion: 2,
-			deletes: func(t *testing.T) []iceberg.DataFile {
-				return []iceberg.DataFile{buildPuffinPosDeleteWithoutRef(t, dvPath)}
-			},
-			errContains: "requires table format version >= 3",
+			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, "", nil, nil)},
+			errContains:   "requires table format version >= 3",
 		},
 		{
 			// v1 rejects every delete file before the DV check is reached.
 			name:          "deletion vector on v1",
 			formatVersion: 1,
-			deletes: func(t *testing.T) []iceberg.DataFile {
-				return []iceberg.DataFile{buildDVFile(t, dvPath, dataPath)}
-			},
-			errContains: "format version >= 2",
+			deletes:       []iceberg.DataFile{buildDVFile(t, dvPath, dataPath)},
+			errContains:   "format version >= 2",
+		},
+		{
+			name:          "missing referenced data file on v3",
+			formatVersion: 3,
+			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, "", &offset, &length)},
+			errContains:   "missing referenced_data_file",
+		},
+		{
+			name:          "missing content offset on v3",
+			formatVersion: 3,
+			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, dataPath, nil, &length)},
+			errContains:   "missing content_offset",
+		},
+		{
+			name:          "negative content offset on v3",
+			formatVersion: 3,
+			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, dataPath, &negativeOffset, &length)},
+			errContains:   "invalid content_offset -1",
+		},
+		{
+			name:          "missing content size on v3",
+			formatVersion: 3,
+			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, dataPath, &offset, nil)},
+			errContains:   "missing content_size_in_bytes",
+		},
+		{
+			name:          "nonpositive content size on v3",
+			formatVersion: 3,
+			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, dataPath, &offset, &zeroLength)},
+			errContains:   "invalid content_size_in_bytes 0",
 		},
 	}
 
@@ -1175,7 +1189,7 @@ func TestRowDeltaRejectsDeletionVectorBelowV3(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tbl := newRowDeltaCommitTestTableVersion(t, tt.formatVersion)
 
-			rd := tbl.NewTransaction().NewRowDelta(nil).AddRows(tt.rows...).AddDeletes(tt.deletes(t)...)
+			rd := tbl.NewTransaction().NewRowDelta(nil).AddRows(tt.rows...).AddDeletes(tt.deletes...)
 
 			err := rd.Commit(t.Context())
 			require.Error(t, err)
@@ -1190,14 +1204,7 @@ func TestRowDeltaRejectsDeletionVectorBelowV3(t *testing.T) {
 }
 
 func TestRowDeltaAcceptsDeletionVectorOnV3(t *testing.T) {
-	tbl := newRowDeltaCommitTestTableVersion(t, 3)
-	dataPath := tbl.Location() + "/data/insert.parquet"
-	dvPath := tbl.Location() + "/data/dv-001.puffin"
-
-	tx := tbl.NewTransaction()
-	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(buildDVFile(t, dvPath, dataPath)).Commit(t.Context()))
-	tbl, err := tx.Commit(t.Context())
-	require.NoError(t, err)
+	tbl, _, dataPath, dv := newTableWithLiveDV(t)
 
 	snap := tbl.CurrentSnapshot()
 	require.NotNil(t, snap)
@@ -1205,7 +1212,7 @@ func TestRowDeltaAcceptsDeletionVectorOnV3(t *testing.T) {
 	live, removed := snapshotDeleteEntryFiles(t, snap, iceio.LocalFS{})
 	assert.Empty(t, removed)
 	require.Len(t, live, 1)
-	assert.Equal(t, dvPath, live[0].FilePath())
+	assert.Equal(t, dv.FilePath(), live[0].FilePath())
 	assert.Equal(t, dataPath, refOf(live[0]))
 }
 

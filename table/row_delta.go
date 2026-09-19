@@ -198,8 +198,10 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 				ct, f.FilePath())
 		}
 
-		if err := validateDeletionVectorFormatVersion(f, meta.formatVersion, "row delta"); err != nil {
-			return err
+		if IsDeletionVector(f) {
+			if err := validateDeletionVectorToAdd(f, meta.formatVersion, "row delta"); err != nil {
+				return err
+			}
 		}
 
 		// Equality delete files must declare which columns form the delete key,
