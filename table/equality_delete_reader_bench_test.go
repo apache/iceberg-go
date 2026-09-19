@@ -117,8 +117,10 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 	}
 }
 
-var equalityDeleteLoadingBenchmarkSink int
-var equalityDeleteMetadataBenchmarkSink int
+var (
+	equalityDeleteLoadingBenchmarkSink  int
+	equalityDeleteMetadataBenchmarkSink int
+)
 
 func BenchmarkLazyEqualityDeleteMetadataSetup(b *testing.B) {
 	tableSchema := iceberg.NewSchema(0,
