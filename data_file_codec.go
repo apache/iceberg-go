@@ -344,8 +344,10 @@ func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, err
 	}
 	for _, field := range spec.fields {
 		sourceType := Type(UnknownType{})
-		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
-			sourceType = typ
+		// ResultType only inspects the source type here; borrow it to avoid
+		// cloning nested source types on every schema-cache hit.
+		if sourceField, ok := schema.FindFieldByIDRef(field.SourceID(), internal.SchemaRef{}); ok {
+			sourceType = sourceField.Type
 		}
 		resultType := field.Transform.ResultType(sourceType)
 		// Keep supported result types in sync with partitionTypeToAvroSchema.
@@ -357,11 +359,13 @@ func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, err
 			return "", fmt.Errorf("unsupported partition type: %s", resultType.String())
 		}
 
+		typeName := resultType.String()
+		key.Grow(len(field.Name) + len(typeName) + 32)
+
 		// Length prefixes keep names and type parameters unambiguous.
 		writeInt(field.FieldID)
 		writeInt(len(field.Name))
 		key.WriteString(field.Name)
-		typeName := resultType.String()
 		writeInt(len(typeName))
 		key.WriteString(typeName)
 	}

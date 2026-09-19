@@ -352,6 +352,9 @@ func BenchmarkDataFileSchemaCache(b *testing.B) {
 		NestedField{ID: 2, Name: "category", Type: StringType{}},
 		NestedField{ID: 3, Name: "ts", Type: TimestampType{}},
 		NestedField{ID: 4, Name: "price", Type: DecimalTypeOf(10, 2)},
+		NestedField{ID: 5, Name: "nested", Type: &StructType{FieldList: []NestedField{
+			{ID: 6, Name: "value", Type: StringType{}},
+		}}},
 	)
 	for _, tc := range []struct {
 		name      string
@@ -368,6 +371,9 @@ func BenchmarkDataFileSchemaCache(b *testing.B) {
 			PartitionField{SourceIDs: []int{3}, FieldID: 1002, Name: "day", Transform: DayTransform{}},
 			PartitionField{SourceIDs: []int{4}, FieldID: 1003, Name: "price", Transform: IdentityTransform{}},
 		), map[int]any{1000: int32(3), 1001: "east", 1002: Date(123), 1003: Decimal{Val: decimal128.FromI64(4212), Scale: 2}}},
+		{"nested_source", NewPartitionSpec(PartitionField{
+			SourceIDs: []int{5}, FieldID: 1000, Name: "bucket", Transform: BucketTransform{NumBuckets: 16},
+		}), map[int]any{1000: int32(3)}},
 	} {
 		for _, version := range []int{1, 2, 3} {
 			b.Run(tc.name+"/v"+strconv.Itoa(version), func(b *testing.B) {
