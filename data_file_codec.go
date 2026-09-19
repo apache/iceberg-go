@@ -20,6 +20,8 @@ package iceberg
 import (
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/internal/datafileavro"
@@ -261,13 +263,9 @@ type dataFileFieldMaps struct {
 	unknownFieldIDs  map[int]struct{}
 }
 
-// dataFileSchemaCacheKey identifies a cached avro schema by the
-// structural fingerprint of the partition Avro shape and the format
-// version. The fingerprint is taken from the avro schema produced by
-// [partitionTypeToAvroSchema] rather than [StructType.String]: the
-// avro shape ignores doc strings and other metadata that don't change
-// the wire format, so structurally identical specs that differ only
-// in documentation share a single cache entry.
+// dataFileSchemaCacheKey identifies a cached Avro schema by the ordered
+// partition field IDs, names, result types, and format version. These determine
+// the partition Avro shape without including docs or table-local schema/spec IDs.
 type dataFileSchemaCacheKey struct {
 	partAvroFingerprint string
 	version             int
@@ -311,14 +309,17 @@ func SetSchemaCacheSize(size int) error {
 // The cache key fingerprints the partition Avro shape, so specs that
 // differ only in field documentation share a single entry.
 func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*avro.Schema, dataFileFieldMaps, error) {
-	partType := spec.PartitionType(schema)
-	partSchema, err := partitionTypeToAvroSchema(partType)
+	fingerprint, err := partitionSchemaFingerprint(spec, schema)
 	if err != nil {
 		return nil, dataFileFieldMaps{}, err
 	}
-	key := dataFileSchemaCacheKey{partAvroFingerprint: partSchema.String(), version: version}
+	key := dataFileSchemaCacheKey{partAvroFingerprint: fingerprint, version: version}
 	if cached, ok := dataFileSchemaCache.Get(key); ok {
 		return cached.schema, cached.maps, nil
+	}
+	partSchema, err := partitionTypeToAvroSchema(spec.PartitionType(schema))
+	if err != nil {
+		return nil, dataFileFieldMaps{}, err
 	}
 	fullSchema, err := internal.NewManifestEntrySchema(partSchema, version)
 	if err != nil {
@@ -332,4 +333,38 @@ func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*a
 	dataFileSchemaCache.Add(key, entry)
 
 	return entry.schema, entry.maps, nil
+}
+
+func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, error) {
+	var key strings.Builder
+	var buf [20]byte
+	writeInt := func(value int) {
+		key.Write(strconv.AppendInt(buf[:0], int64(value), 10))
+		key.WriteByte(':')
+	}
+	for _, field := range spec.fields {
+		sourceType := Type(UnknownType{})
+		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+			sourceType = typ
+		}
+		resultType := field.Transform.ResultType(sourceType)
+		// Keep supported result types in sync with partitionTypeToAvroSchema.
+		switch resultType.(type) {
+		case Int32Type, Int64Type, Float32Type, Float64Type, StringType,
+			DateType, TimeType, TimestampType, TimestampTzType, UUIDType,
+			BooleanType, BinaryType, FixedType, DecimalType, UnknownType:
+		default:
+			return "", fmt.Errorf("unsupported partition type: %s", resultType.String())
+		}
+
+		// Length prefixes keep names and type parameters unambiguous.
+		writeInt(field.FieldID)
+		writeInt(len(field.Name))
+		key.WriteString(field.Name)
+		typeName := resultType.String()
+		writeInt(len(typeName))
+		key.WriteString(typeName)
+	}
+
+	return key.String(), nil
 }
