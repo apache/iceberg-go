@@ -459,6 +459,18 @@ func benchmarkPhysicalSchemaCases() []struct {
 			ID: i + 2, Name: fmt.Sprintf("field_%d", i), Type: iceberg.PrimitiveTypes.Int64,
 		}
 	}
+	mixedFields := []iceberg.NestedField{
+		{ID: 1, Name: "flag", Type: iceberg.PrimitiveTypes.Bool},
+		{ID: 2, Name: "count", Type: iceberg.PrimitiveTypes.Int32},
+		{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64},
+		{ID: 4, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
+		{ID: 5, Name: "price", Type: iceberg.DecimalTypeOf(20, 4)},
+		{ID: 6, Name: "created", Type: iceberg.PrimitiveTypes.TimestampTzNs},
+		{ID: 7, Name: "payload", Type: iceberg.VariantType{}},
+		{ID: 8, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 9, Element: iceberg.PrimitiveTypes.String,
+		}},
+	}
 	nestedSchema := func(depth int) *iceberg.Schema {
 		var typ iceberg.Type = iceberg.PrimitiveTypes.Int64
 		for id := depth + 1; id > 1; id-- {
@@ -480,6 +492,7 @@ func benchmarkPhysicalSchemaCases() []struct {
 		{"wide_struct_100", iceberg.NewSchema(1, iceberg.NestedField{
 			ID: 1, Name: "root", Type: &iceberg.StructType{FieldList: wideFields},
 		})},
+		{"mixed_types", iceberg.NewSchema(1, mixedFields...)},
 	}
 }
 

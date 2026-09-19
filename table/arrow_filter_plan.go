@@ -191,6 +191,8 @@ func writePhysicalFieldKey(builder *strings.Builder, field iceberg.NestedField) 
 }
 
 func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
+	// Type tags are internal to the cache key. Parameterized types append their
+	// parameters so equal physical layouts still produce equal keys.
 	switch t := typ.(type) {
 	case *iceberg.StructType:
 		builder.WriteByte('s')
@@ -219,7 +221,48 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 			builder.WriteByte('0')
 		}
 		writePhysicalTypeKey(builder, t.ValueType)
-	case iceberg.PrimitiveType, iceberg.VariantType:
+	case iceberg.BooleanType:
+		builder.WriteByte('b')
+	case iceberg.Int32Type:
+		builder.WriteByte('i')
+	case iceberg.Int64Type:
+		builder.WriteByte('j')
+	case iceberg.Float32Type:
+		builder.WriteByte('k')
+	case iceberg.Float64Type:
+		builder.WriteByte('d')
+	case iceberg.DateType:
+		builder.WriteByte('D')
+	case iceberg.TimeType:
+		builder.WriteByte('T')
+	case iceberg.TimestampType:
+		builder.WriteByte('t')
+	case iceberg.TimestampTzType:
+		builder.WriteByte('z')
+	case iceberg.StringType:
+		builder.WriteByte('S')
+	case iceberg.UUIDType:
+		builder.WriteByte('u')
+	case iceberg.BinaryType:
+		builder.WriteByte('B')
+	case iceberg.TimestampNsType:
+		builder.WriteByte('n')
+	case iceberg.TimestampTzNsType:
+		builder.WriteByte('N')
+	case iceberg.UnknownType:
+		builder.WriteByte('U')
+	case iceberg.VariantType:
+		builder.WriteByte('v')
+	case iceberg.FixedType:
+		builder.WriteByte('f')
+		writePhysicalInt(builder, t.Len())
+	case iceberg.DecimalType:
+		builder.WriteByte('q')
+		writePhysicalInt(builder, t.Precision())
+		writePhysicalInt(builder, t.Scale())
+	case iceberg.PrimitiveType:
+		// Keep custom and parameterized primitive types (for example geometry)
+		// compatible with the previous structural key encoding.
 		builder.WriteByte('p')
 		writePhysicalString(builder, typ.String())
 	default:

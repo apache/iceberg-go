@@ -307,3 +307,27 @@ func TestPhysicalSchemaKeyInvalidSchema(t *testing.T) {
 	_, err = (&arrowScan{}).cachedFileFilterPlans(nil, true)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
+
+func TestPhysicalSchemaKeySupportsParameterizedPrimitiveTypes(t *testing.T) {
+	geometry, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geography, err := iceberg.GeographyTypeOf("srid:4326", "spherical")
+	require.NoError(t, err)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "geometry", Type: geometry},
+		iceberg.NestedField{ID: 2, Name: "geography", Type: geography},
+	)
+	original, err := physicalSchemaKey(schema)
+	require.NoError(t, err)
+
+	otherGeometry, err := iceberg.GeometryTypeOf("srid:3857")
+	require.NoError(t, err)
+	other := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "geometry", Type: otherGeometry},
+		iceberg.NestedField{ID: 2, Name: "geography", Type: geography},
+	)
+	changed, err := physicalSchemaKey(other)
+	require.NoError(t, err)
+	assert.NotEqual(t, original, changed)
+}
