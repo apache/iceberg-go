@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/substrait-io/substrait-go/v8/expr"
@@ -159,51 +160,23 @@ func (as *arrowScan) cachedFileFilterPlans(fileSchema *iceberg.Schema, includePr
 	return plans, nil
 }
 
-func physicalSchemaKey(fileSchema *iceberg.Schema) (string, error) {
+func physicalSchemaKey(fileSchema *iceberg.Schema) (key string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			key = ""
+			err = fmt.Errorf("%w: cannot encode physical schema key: %v", iceberg.ErrInvalidSchema, r)
+		}
+	}()
+
 	// The key includes field names, IDs, requiredness, and type details. Schema
 	// IDs, docs, and defaults do not affect filter translation or compilation.
-	visitor := &physicalSchemaKeyVisitor{}
-	_, err := iceberg.Visit(fileSchema, visitor)
-	if err != nil {
-		return "", fmt.Errorf("%w: cannot encode physical schema key: %v", iceberg.ErrInvalidSchema, err)
+	var builder strings.Builder
+	for _, field := range fileSchema.FieldsRef(iceberginternal.SchemaRef{}) {
+		writePhysicalFieldKey(&builder, field)
 	}
 
-	return visitor.builder.String(), nil
+	return builder.String(), nil
 }
-
-type physicalSchemaKeyVisitor struct {
-	builder strings.Builder
-	depth   int
-}
-
-func (v *physicalSchemaKeyVisitor) Schema(_ *iceberg.Schema, _ struct{}) struct{} { return struct{}{} }
-func (v *physicalSchemaKeyVisitor) Struct(_ iceberg.StructType, _ []struct{}) struct{} {
-	return struct{}{}
-}
-
-func (v *physicalSchemaKeyVisitor) Field(_ iceberg.NestedField, _ struct{}) struct{} {
-	return struct{}{}
-}
-func (v *physicalSchemaKeyVisitor) List(_ iceberg.ListType, _ struct{}) struct{}  { return struct{}{} }
-func (v *physicalSchemaKeyVisitor) Map(_ iceberg.MapType, _, _ struct{}) struct{} { return struct{}{} }
-func (v *physicalSchemaKeyVisitor) Primitive(_ iceberg.PrimitiveType) struct{}    { return struct{}{} }
-func (v *physicalSchemaKeyVisitor) Variant(_ iceberg.VariantType) struct{}        { return struct{}{} }
-
-func (v *physicalSchemaKeyVisitor) BeforeField(field iceberg.NestedField) {
-	if v.depth == 0 {
-		writePhysicalFieldKey(&v.builder, field)
-	}
-	v.depth++
-}
-
-func (v *physicalSchemaKeyVisitor) AfterField(_ iceberg.NestedField) { v.depth-- }
-
-func (v *physicalSchemaKeyVisitor) BeforeListElement(_ iceberg.NestedField) { v.depth++ }
-func (v *physicalSchemaKeyVisitor) AfterListElement(_ iceberg.NestedField)  { v.depth-- }
-func (v *physicalSchemaKeyVisitor) BeforeMapKey(_ iceberg.NestedField)      { v.depth++ }
-func (v *physicalSchemaKeyVisitor) AfterMapKey(_ iceberg.NestedField)       { v.depth-- }
-func (v *physicalSchemaKeyVisitor) BeforeMapValue(_ iceberg.NestedField)    { v.depth++ }
-func (v *physicalSchemaKeyVisitor) AfterMapValue(_ iceberg.NestedField)     { v.depth-- }
 
 func writePhysicalFieldKey(builder *strings.Builder, field iceberg.NestedField) {
 	builder.WriteByte('f')
@@ -218,6 +191,8 @@ func writePhysicalFieldKey(builder *strings.Builder, field iceberg.NestedField) 
 }
 
 func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
+	// Type tags are internal to the cache key. Parameterized types append their
+	// parameters so equal physical layouts still produce equal keys.
 	switch t := typ.(type) {
 	case *iceberg.StructType:
 		builder.WriteByte('s')
@@ -246,11 +221,52 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 			builder.WriteByte('0')
 		}
 		writePhysicalTypeKey(builder, t.ValueType)
-	case nil:
-		builder.WriteString("n")
-	default:
+	case iceberg.BooleanType:
+		builder.WriteByte('b')
+	case iceberg.Int32Type:
+		builder.WriteByte('i')
+	case iceberg.Int64Type:
+		builder.WriteByte('j')
+	case iceberg.Float32Type:
+		builder.WriteByte('k')
+	case iceberg.Float64Type:
+		builder.WriteByte('d')
+	case iceberg.DateType:
+		builder.WriteByte('D')
+	case iceberg.TimeType:
+		builder.WriteByte('T')
+	case iceberg.TimestampType:
+		builder.WriteByte('t')
+	case iceberg.TimestampTzType:
+		builder.WriteByte('z')
+	case iceberg.StringType:
+		builder.WriteByte('S')
+	case iceberg.UUIDType:
+		builder.WriteByte('u')
+	case iceberg.BinaryType:
+		builder.WriteByte('B')
+	case iceberg.TimestampNsType:
+		builder.WriteByte('n')
+	case iceberg.TimestampTzNsType:
+		builder.WriteByte('N')
+	case iceberg.UnknownType:
+		builder.WriteByte('U')
+	case iceberg.VariantType:
+		builder.WriteByte('v')
+	case iceberg.FixedType:
+		builder.WriteByte('f')
+		writePhysicalInt(builder, t.Len())
+	case iceberg.DecimalType:
+		builder.WriteByte('q')
+		writePhysicalInt(builder, t.Precision())
+		writePhysicalInt(builder, t.Scale())
+	case iceberg.PrimitiveType:
+		// Keep custom and parameterized primitive types (for example geometry)
+		// compatible with the previous structural key encoding.
 		builder.WriteByte('p')
 		writePhysicalString(builder, typ.String())
+	default:
+		panic(fmt.Errorf("unsupported physical type: %T", typ))
 	}
 }
 
