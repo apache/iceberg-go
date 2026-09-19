@@ -117,7 +117,44 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 	}
 }
 
-var equalityDeleteLoadingBenchmarkSink int
+var (
+	equalityDeleteLoadingBenchmarkSink  int
+	equalityDeleteMetadataBenchmarkSink int
+)
+
+func BenchmarkLazyEqualityDeleteMetadataSetup(b *testing.B) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	const taskCount = 10_000
+	for _, uniqueFiles := range []int{1, 100, 1_000} {
+		deleteFiles := make([]iceberg.DataFile, uniqueFiles)
+		for i := range deleteFiles {
+			deleteFiles[i] = newEqualityDeleteSetAssemblyTestFile(
+				b, fmt.Sprintf("mem://metadata-benchmark/delete-%04d.parquet", i), []int{1})
+		}
+
+		tasks := make([]FileScanTask, taskCount)
+		for i := range tasks {
+			tasks[i] = FileScanTask{
+				EqualityDeleteFiles: []iceberg.DataFile{deleteFiles[i%uniqueFiles]},
+			}
+		}
+
+		b.Run(fmt.Sprintf("tasks=%d/unique_files=%d", taskCount, uniqueFiles), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				loader, err := newLazyEqualityDeleteLoader(nil, tableSchema, nil, nil, tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+				equalityDeleteMetadataBenchmarkSink = len(loader.files)
+			}
+		})
+	}
+}
 
 type equalityDeleteLoadingBenchmarkInput struct {
 	fs          *countingEqualityDeleteOpenFS

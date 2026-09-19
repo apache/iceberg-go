@@ -364,23 +364,47 @@ func newLazyEqualityDeleteLoader(
 		tableSchema:  tableSchema,
 		tableSchemas: tableSchemas,
 		nameMapping:  nameMapping,
-		files:        make(map[string]*lazyEqualityDeleteFile),
 	}
 
+	var firstPath string
+	var firstFile *lazyEqualityDeleteFile
 	for _, task := range tasks {
 		for _, dataFile := range task.EqualityDeleteFiles {
 			if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
 				continue
 			}
 
-			fieldIDs := dataFile.EqualityFieldIDs()
-			if len(fieldIDs) == 0 {
-				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, dataFile.FilePath())
-			}
-
 			path := dataFile.FilePath()
+			if loader.files == nil {
+				if firstFile == nil {
+					fieldIDs := dataFileEqualityFieldIDs(dataFile)
+					if len(fieldIDs) == 0 {
+						return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
+					}
+
+					firstPath = path
+					firstFile = &lazyEqualityDeleteFile{
+						dataFile: dataFile,
+						fieldIDs: fieldIDs,
+					}
+
+					continue
+				}
+				if path == firstPath {
+					continue
+				}
+
+				loader.files = make(map[string]*lazyEqualityDeleteFile, 2)
+				firstFile.id = 0
+				loader.files[firstPath] = firstFile
+			}
 			if _, ok := loader.files[path]; ok {
 				continue
+			}
+
+			fieldIDs := dataFileEqualityFieldIDs(dataFile)
+			if len(fieldIDs) == 0 {
+				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
 			}
 
 			loader.files[path] = &lazyEqualityDeleteFile{
@@ -391,11 +415,31 @@ func newLazyEqualityDeleteLoader(
 		}
 	}
 
-	if len(loader.files) == 0 {
+	if firstFile == nil {
 		return nil, nil
+	}
+	if loader.files == nil {
+		firstFile.id = 0
+		loader.files = map[string]*lazyEqualityDeleteFile{firstPath: firstFile}
 	}
 
 	return loader, nil
+}
+
+func (l *lazyEqualityDeleteLoader) needsSchemaHistory() bool {
+	if l == nil {
+		return false
+	}
+
+	for _, file := range l.files {
+		for _, fieldID := range file.fieldIDs {
+			if _, found := l.tableSchema.FindColumnName(fieldID); !found {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (l *lazyEqualityDeleteLoader) addFieldIDs(idset set[int]) {
@@ -523,17 +567,21 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				continue
 			}
 
-			if len(d.EqualityFieldIDs()) == 0 {
-				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, d.FilePath())
+			path := d.FilePath()
+			if _, ok := uniqueDeletes[path]; ok {
+				continue
+			}
+
+			fieldIDs := dataFileEqualityFieldIDs(d)
+			if len(fieldIDs) == 0 {
+				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
 			}
 
 			hasAny = true
-			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
-				uniqueDeletes[d.FilePath()] = deleteFileInfo{
-					id:       len(uniqueDeletes),
-					file:     d,
-					fieldIDs: d.EqualityFieldIDs(),
-				}
+			uniqueDeletes[path] = deleteFileInfo{
+				id:       len(uniqueDeletes),
+				file:     d,
+				fieldIDs: fieldIDs,
 			}
 		}
 	}

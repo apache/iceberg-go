@@ -45,6 +45,16 @@ func dataFileCollections(file iceberg.DataFile) (
 	return internal.BorrowedDataFileCollections(file)
 }
 
+func dataFileEqualityFieldIDs(file iceberg.DataFile) []int {
+	if ref, ok := file.(internal.DataFileCollectionsRef); ok {
+		_, _, _, equalityFieldIDs := ref.DataFileCollectionsRef(internal.DataFileRef{})
+
+		return equalityFieldIDs
+	}
+
+	return file.EqualityFieldIDs()
+}
+
 // dataFilePartition returns a borrowed partition map for the concrete
 // manifest data file and falls back to the public getter for other DataFile
 // implementations. Callers must use the map only for the current planning
