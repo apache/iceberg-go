@@ -407,6 +407,197 @@ func TestAddColumn(t *testing.T) {
 		assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 		assert.Contains(t, err.Error(), "is not supported until v3")
 	})
+
+	t.Run("test add column under a deleted parent is rejected", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).
+			DeleteColumn([]string{"address"}).
+			AddColumn([]string{"address", "code"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Apply()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: address")
+	})
+
+	t.Run("test add column under a deleted nested parent is rejected", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			iceberg.NestedField{ID: 2, Name: "outer", Required: false, Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "inner", Required: false, Type: &iceberg.StructType{
+						FieldList: []iceberg.NestedField{
+							{ID: 4, Name: "leaf", Type: iceberg.PrimitiveTypes.String, Required: false},
+						},
+					}},
+				},
+			}},
+		)
+		meta, err := NewMetadata(schema, nil, UnsortedSortOrder, "", nil)
+		require.NoError(t, err)
+
+		table := New([]string{"id"}, meta, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err = NewUpdateSchema(txn, true, true).
+			DeleteColumn([]string{"outer", "inner"}).
+			AddColumn([]string{"outer", "inner", "new_leaf"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Apply()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: outer.inner")
+	})
+
+	t.Run("test add column then delete its parent is rejected", func(t *testing.T) {
+		// Reverse operation order: staging the child add before the parent delete.
+		// This path is caught by deleteColumn's "field that has additions cannot be deleted" guard,
+		// The two guards are symmetric and neither order can silently drop data.
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"address", "code"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			DeleteColumn([]string{"address"}).
+			Apply()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field that has additions cannot be deleted: address")
+	})
+
+	// Invariant test: should not regress
+	t.Run("test delete nested field then re-add same name under same parent is allowed", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			DeleteColumn([]string{"address", "city"}).
+			AddColumn([]string{"address", "city"}, iceberg.PrimitiveTypes.Int64, "recreated", false, nil).
+			Apply()
+		require.NoError(t, err)
+
+		addressField, ok := newSchema.FindFieldByName("address")
+		require.True(t, ok)
+		structType, ok := addressField.Type.(*iceberg.StructType)
+		require.True(t, ok)
+
+		fields := structType.Fields()
+		require.Len(t, fields, 2)
+
+		cityField, ok := newSchema.FindFieldByName("address.city")
+		require.True(t, ok)
+		assert.Equal(t, iceberg.PrimitiveTypes.Int64, cityField.Type)
+		assert.Equal(t, "recreated", cityField.Doc)
+		// The re-added field must receive a fresh id, not reuse the deleted one.
+		assert.NotEqual(t, 5, cityField.ID)
+	})
+}
+
+// threeLevelStructSchema builds: id, outer{ inner{ leaf } }
+func threeLevelStructSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "outer", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "inner", Required: false, Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 4, Name: "leaf", Type: iceberg.PrimitiveTypes.String, Required: false},
+					},
+				}},
+			},
+		}},
+	)
+}
+
+// listOfStructSchema builds: id, data list<struct{ a }>
+func listOfStructSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Required: false, Type: &iceberg.ListType{
+			ElementID:       3,
+			ElementRequired: false,
+			Element: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.String, Required: false},
+				},
+			},
+		}},
+	)
+}
+
+// mapValueStructSchema builds: id, props map<string, struct{ x }>.
+func mapValueStructSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "props", Required: false, Type: &iceberg.MapType{
+			KeyID:         3,
+			KeyType:       iceberg.PrimitiveTypes.String,
+			ValueID:       4,
+			ValueRequired: false,
+			ValueType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String, Required: false},
+				},
+			},
+		}},
+	)
+}
+
+func txnForSchema(t *testing.T, schema *iceberg.Schema) *Transaction {
+	t.Helper()
+	meta, err := NewMetadata(schema, nil, UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+
+	return New([]string{"id"}, meta, "", nil, nil).NewTransaction()
+}
+
+func TestAddColumnUnderDeletedAncestor(t *testing.T) {
+	cases := []struct {
+		name       string
+		schema     func() *iceberg.Schema
+		deletePath []string
+		addPath    []string
+		ancestor   string
+	}{
+		{
+			name:       "grandparent struct",
+			schema:     threeLevelStructSchema,
+			deletePath: []string{"outer"},
+			addPath:    []string{"outer", "inner", "new_leaf"},
+			ancestor:   "outer",
+		},
+		{
+			name:       "list element struct ancestor",
+			schema:     listOfStructSchema,
+			deletePath: []string{"data"},
+			addPath:    []string{"data", "b"},
+			ancestor:   "data",
+		},
+		{
+			name:       "map value struct ancestor",
+			schema:     mapValueStructSchema,
+			deletePath: []string{"props"},
+			addPath:    []string{"props", "y"},
+			ancestor:   "props",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+" delete then add", func(t *testing.T) {
+			_, err := NewUpdateSchema(txnForSchema(t, tc.schema()), true, true).
+				DeleteColumn(tc.deletePath).
+				AddColumn(tc.addPath, iceberg.PrimitiveTypes.String, "", false, nil).
+				Apply()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: "+tc.ancestor)
+		})
+
+		t.Run(tc.name+" add then delete", func(t *testing.T) {
+			_, err := NewUpdateSchema(txnForSchema(t, tc.schema()), true, true).
+				AddColumn(tc.addPath, iceberg.PrimitiveTypes.String, "", false, nil).
+				DeleteColumn(tc.deletePath).
+				Apply()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "field that has additions cannot be deleted: "+tc.ancestor)
+		})
+	}
 }
 
 func TestApplyChanges(t *testing.T) {
@@ -2620,4 +2811,65 @@ func TestUnionByNameRejectsOverlappingAdds(t *testing.T) {
 		Apply()
 	require.Error(t, err, "re-adding a field already pending must be rejected")
 	assert.Contains(t, err.Error(), "name")
+}
+
+func TestUnionByNameRejectsAddUnderDeletedParent(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}},
+	)
+	extend := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+				{ID: 4, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}},
+	)
+
+	_, err := NewUpdateSchema(unionTxn(t, current), true, true).
+		DeleteColumn([]string{"addr"}).
+		UnionByNameWith(extend).
+		Apply()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: addr")
+}
+
+func TestUnionByNameRejectsAddUnderDeletedAncestor(t *testing.T) {
+	extend := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "outer", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "inner", Required: false, Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 4, Name: "leaf", Type: iceberg.PrimitiveTypes.String, Required: false},
+						{ID: 5, Name: "new_leaf", Type: iceberg.PrimitiveTypes.String, Required: false},
+					},
+				}},
+			},
+		}},
+	)
+
+	t.Run("delete then union", func(t *testing.T) {
+		_, err := NewUpdateSchema(txnForSchema(t, threeLevelStructSchema()), true, true).
+			DeleteColumn([]string{"outer"}).
+			UnionByNameWith(extend).
+			Apply()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: outer")
+	})
+
+	t.Run("union then delete", func(t *testing.T) {
+		_, err := NewUpdateSchema(txnForSchema(t, threeLevelStructSchema()), true, true).
+			UnionByNameWith(extend).
+			DeleteColumn([]string{"outer"}).
+			Apply()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field that has additions cannot be deleted: outer")
+	})
 }
