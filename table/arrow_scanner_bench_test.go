@@ -406,6 +406,47 @@ func BenchmarkArrowScanFilterPlanSetup(b *testing.B) {
 }
 
 func BenchmarkArrowScanFilterPlanCacheHit(b *testing.B) {
+	for _, tc := range benchmarkPhysicalSchemaCases() {
+		b.Run(tc.name, func(b *testing.B) {
+			scan := &arrowScan{boundRowFilter: iceberg.AlwaysTrue{}, caseSensitive: true}
+			if _, err := scan.cachedFileFilterPlans(tc.schema, true); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			for b.Loop() {
+				plans, err := scan.cachedFileFilterPlans(tc.schema, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkCompiledFilterPlansSink = plans
+			}
+		})
+	}
+}
+
+var benchmarkPhysicalSchemaKeySink string
+
+func BenchmarkPhysicalSchemaKey(b *testing.B) {
+	for _, tc := range benchmarkPhysicalSchemaCases() {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				key, err := physicalSchemaKey(tc.schema)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkPhysicalSchemaKeySink = key
+			}
+		})
+	}
+}
+
+func benchmarkPhysicalSchemaCases() []struct {
+	name   string
+	schema *iceberg.Schema
+} {
 	flatFields := make([]iceberg.NestedField, 10)
 	for i := range flatFields {
 		flatFields[i] = iceberg.NestedField{
@@ -429,7 +470,7 @@ func BenchmarkArrowScanFilterPlanCacheHit(b *testing.B) {
 		return iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "root", Type: typ})
 	}
 
-	for _, tc := range []struct {
+	return []struct {
 		name   string
 		schema *iceberg.Schema
 	}{
@@ -439,22 +480,6 @@ func BenchmarkArrowScanFilterPlanCacheHit(b *testing.B) {
 		{"wide_struct_100", iceberg.NewSchema(1, iceberg.NestedField{
 			ID: 1, Name: "root", Type: &iceberg.StructType{FieldList: wideFields},
 		})},
-	} {
-		b.Run(tc.name, func(b *testing.B) {
-			scan := &arrowScan{boundRowFilter: iceberg.AlwaysTrue{}, caseSensitive: true}
-			if _, err := scan.cachedFileFilterPlans(tc.schema, true); err != nil {
-				b.Fatal(err)
-			}
-
-			b.ReportAllocs()
-			for b.Loop() {
-				plans, err := scan.cachedFileFilterPlans(tc.schema, true)
-				if err != nil {
-					b.Fatal(err)
-				}
-				benchmarkCompiledFilterPlansSink = plans
-			}
-		})
 	}
 }
 
