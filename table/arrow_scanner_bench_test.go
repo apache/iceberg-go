@@ -405,6 +405,59 @@ func BenchmarkArrowScanFilterPlanSetup(b *testing.B) {
 	})
 }
 
+func BenchmarkArrowScanFilterPlanCacheHit(b *testing.B) {
+	flatFields := make([]iceberg.NestedField, 10)
+	for i := range flatFields {
+		flatFields[i] = iceberg.NestedField{
+			ID: i + 1, Name: fmt.Sprintf("field_%d", i), Type: iceberg.PrimitiveTypes.Int64,
+		}
+	}
+	wideFields := make([]iceberg.NestedField, 100)
+	for i := range wideFields {
+		wideFields[i] = iceberg.NestedField{
+			ID: i + 2, Name: fmt.Sprintf("field_%d", i), Type: iceberg.PrimitiveTypes.Int64,
+		}
+	}
+	nestedSchema := func(depth int) *iceberg.Schema {
+		var typ iceberg.Type = iceberg.PrimitiveTypes.Int64
+		for id := depth + 1; id > 1; id-- {
+			typ = &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: id, Name: "child", Type: typ},
+			}}
+		}
+
+		return iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "root", Type: typ})
+	}
+
+	for _, tc := range []struct {
+		name   string
+		schema *iceberg.Schema
+	}{
+		{"flat_10", iceberg.NewSchema(1, flatFields...)},
+		{"nested_depth_3", nestedSchema(3)},
+		{"nested_depth_8", nestedSchema(8)},
+		{"wide_struct_100", iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "root", Type: &iceberg.StructType{FieldList: wideFields},
+		})},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			scan := &arrowScan{boundRowFilter: iceberg.AlwaysTrue{}, caseSensitive: true}
+			if _, err := scan.cachedFileFilterPlans(tc.schema, true); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			for b.Loop() {
+				plans, err := scan.cachedFileFilterPlans(tc.schema, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkCompiledFilterPlansSink = plans
+			}
+		})
+	}
+}
+
 func BenchmarkArrowScanAddTaskProjectedFieldIDs(b *testing.B) {
 	schema := benchmarkScanSchema(8)
 	filter := benchmarkComplexBoundFilter(b, schema)
