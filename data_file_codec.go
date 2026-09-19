@@ -350,25 +350,68 @@ func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, err
 			sourceType = sourceField.Type
 		}
 		resultType := field.Transform.ResultType(sourceType)
-		// Keep supported result types in sync with partitionTypeToAvroSchema.
-		switch resultType.(type) {
-		case Int32Type, Int64Type, Float32Type, Float64Type, StringType,
-			DateType, TimeType, TimestampType, TimestampTzType, UUIDType,
-			BooleanType, BinaryType, FixedType, DecimalType, UnknownType:
-		default:
-			return "", fmt.Errorf("unsupported partition type: %s", resultType.String())
-		}
+		key.Grow(len(field.Name) + 32)
 
-		typeName := resultType.String()
-		key.Grow(len(field.Name) + len(typeName) + 32)
-
-		// Length prefixes keep names and type parameters unambiguous.
+		// Length prefixes keep names unambiguous. The compact type tag also
+		// includes fixed lengths and decimal precision/scale without formatting
+		// a temporary type string on every cache hit.
 		writeInt(field.FieldID)
 		writeInt(len(field.Name))
 		key.WriteString(field.Name)
-		writeInt(len(typeName))
-		key.WriteString(typeName)
+		if err := writePartitionTypeFingerprint(&key, resultType); err != nil {
+			return "", err
+		}
 	}
 
 	return key.String(), nil
+}
+
+func writePartitionTypeFingerprint(key *strings.Builder, typ Type) error {
+	// These tags are internal to the cache key. Parameterized types append their
+	// parameters so equal Avro partition shapes still produce equal keys.
+	switch t := typ.(type) {
+	case Int32Type:
+		key.WriteByte('i')
+	case Int64Type:
+		key.WriteByte('j')
+	case Float32Type:
+		key.WriteByte('k')
+	case Float64Type:
+		key.WriteByte('d')
+	case StringType:
+		key.WriteByte('S')
+	case DateType:
+		key.WriteByte('D')
+	case TimeType:
+		key.WriteByte('T')
+	case TimestampType:
+		key.WriteByte('t')
+	case TimestampTzType:
+		key.WriteByte('z')
+	case UUIDType:
+		key.WriteByte('u')
+	case BooleanType:
+		key.WriteByte('b')
+	case BinaryType:
+		key.WriteByte('B')
+	case FixedType:
+		key.WriteByte('f')
+		writePartitionFingerprintInt(key, t.Len())
+	case DecimalType:
+		key.WriteByte('q')
+		writePartitionFingerprintInt(key, t.Precision())
+		writePartitionFingerprintInt(key, t.Scale())
+	case UnknownType:
+		key.WriteByte('U')
+	default:
+		return fmt.Errorf("unsupported partition type: %s", typ.String())
+	}
+
+	return nil
+}
+
+func writePartitionFingerprintInt(key *strings.Builder, value int) {
+	var buf [20]byte
+	key.Write(strconv.AppendInt(buf[:0], int64(value), 10))
+	key.WriteByte(':')
 }
