@@ -88,6 +88,26 @@ iceberg.NotStartsWith(iceberg.Reference("name"), "tmp_")
 
 Operators `OpStartsWith` and `OpNotStartsWith` (`exprs.go:53-54`). The value must be a `string`.
 
+## Variant extraction
+
+`iceberg.Extract(ref, path, typ)` builds a term that navigates a dotted JSONPath into a `variant` column and casts the leaf to `typ`. It is an `UnboundTerm`, so it plugs into the same predicate builders as `iceberg.Reference`:
+
+```go
+filter := iceberg.EqualTo(
+    iceberg.Extract(iceberg.Reference("payload"), "$.user.age", iceberg.PrimitiveTypes.Int64),
+    int64(30),
+)
+```
+
+The referenced column must be a `variant`, and a target type is required. Supported target types: `bool`, `int32`, `int64`, `float32`, `float64`, `date`, `time`, `timestamp`, `timestamptz`, `timestamp_ns`, `timestamptz_ns`, `string`, `fixed`, `binary`, `decimal`, `uuid`.
+
+Caveats:
+
+- Extract predicates are evaluated as per-row residual filters. Row-group stats and bloom pruning skip them; comparison pruning against shredded variant bounds is best-effort.
+- Extract terms are DSL-only. There is no string row-filter form, and they are not REST-serializable, so they are dropped from any server-side pushed filter and evaluated locally.
+
+See [Variant Type](./variant.md) for shredding and the full type list.
+
 ## Constants
 
 ```go

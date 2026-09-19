@@ -49,8 +49,9 @@ All V1 features are supported. V1 is the format-version baseline.
 | Default values (`initial-default`, `write-default`) | Supported |
 | Row lineage (`_row_id`, `_last_updated_sequence_number`) | Supported |
 | Encryption keys in metadata | Supported |
-| Variant type, non-shredded | Supported (PR [#932](https://github.com/apache/iceberg-go/pull/932); umbrella [#929](https://github.com/apache/iceberg-go/issues/929)) |
-| Variant type, shredded reader / writer | In progress ([#986](https://github.com/apache/iceberg-go/issues/986), [#987](https://github.com/apache/iceberg-go/issues/987)) |
+| Variant type, non-shredded | Supported |
+| Variant type, shredded reader / writer | Supported |
+| Variant predicate pushdown / field extract | Supported |
 | Deletion vectors, read | Supported |
 | Deletion vectors, write (unpartitioned) | Supported |
 | Deletion vectors, write (partitioned) | In progress ([#1135](https://github.com/apache/iceberg-go/issues/1135), PR [#1151](https://github.com/apache/iceberg-go/pull/1151)) |

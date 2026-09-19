@@ -24,6 +24,7 @@
 - [Install](./install.md)
 - [Getting Started](./getting-started.md)
 - [Configuration](./configuration.md)
+- [Variant Type](./variant.md)
 - [CLI](./cli.md)
 - [API](./api.md)
   - [Row Filter Syntax](./row-filter-syntax.md)
