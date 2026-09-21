@@ -230,6 +230,11 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 		if arr.NullN() == 0 {
 			return
 		}
+		if arr.Len() < n {
+			shouldBail = true
+
+			return
+		}
 		vb := arr.Data().Buffers()[0]
 		if vb == nil {
 			shouldBail = true
@@ -290,7 +295,7 @@ func tryShreddedTypedColumn(varr *extensions.VariantArray, path variant.VariantP
 		cur = field.Field(tvIdx)
 	}
 
-	if shouldBail || !arrow.TypeEqual(cur.DataType(), dt) {
+	if shouldBail || cur.Len() != n || !arrow.TypeEqual(cur.DataType(), dt) {
 		return bail()
 	}
 

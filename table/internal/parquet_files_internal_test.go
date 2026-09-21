@@ -24,6 +24,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
@@ -157,7 +158,7 @@ func TestGetWritePropertiesEnablesDictCostFallback(t *testing.T) {
 	}, nil)
 
 	format := parquetFormat{}
-	wp, err := getWriteProperties(format.GetWriteProperties(iceberg.Properties{}), arrowSchema)
+	wp, err := getWriteProperties(format.GetWriteProperties(iceberg.Properties{}), arrowSchema, writeArrowProps(memory.DefaultAllocator))
 	require.NoError(t, err)
 
 	assert.True(t, wp.DictionaryCostFallbackEnabledFor("s"))
@@ -191,6 +192,10 @@ func TestDictCostFallbackWalkMatchesToParquet(t *testing.T) {
 		"dict": arrow.NewSchema([]arrow.Field{
 			{Name: "c", Type: &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}},
 		}, nil),
+		"null": arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+			{Name: "z", Type: arrow.Null, Nullable: true},
+		}, nil),
 	}
 
 	for name, sc := range schemas {
@@ -199,7 +204,7 @@ func TestDictCostFallbackWalkMatchesToParquet(t *testing.T) {
 			ps, err := pqarrow.ToParquet(sc, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
 			require.NoError(t, err)
 
-			walk, err := dictCostFallbackProps(sc, nil)
+			walk, err := dictCostFallbackProps(sc, nil, writeArrowProps(memory.DefaultAllocator))
 			require.NoError(t, err)
 			wp := parquet.NewWriterProperties(walk...)
 
@@ -222,7 +227,7 @@ func TestDictCostFallbackListSchemaUsesToParquet(t *testing.T) {
 
 	ps, err := pqarrow.ToParquet(sc, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
 	require.NoError(t, err)
-	props, err := dictCostFallbackProps(sc, nil)
+	props, err := dictCostFallbackProps(sc, nil, writeArrowProps(memory.DefaultAllocator))
 	require.NoError(t, err)
 	wp := parquet.NewWriterProperties(props...)
 
@@ -230,4 +235,16 @@ func TestDictCostFallbackListSchemaUsesToParquet(t *testing.T) {
 	for i := range ps.NumColumns() {
 		require.Truef(t, wp.DictionaryCostFallbackEnabledFor(ps.Column(i).Path()), "missing leaf path %q", ps.Column(i).Path())
 	}
+}
+
+func TestDictCostFallbackWalkRunEndEncoded(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "r", Type: arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.String)},
+	}, nil)
+	require.False(t, schemaHasListOrMap(sc), "rle-over-primitive must take the walk path")
+
+	walk, err := dictCostFallbackProps(sc, nil, writeArrowProps(memory.DefaultAllocator))
+	require.NoError(t, err)
+	require.Len(t, walk, 1, "rle unwraps to a single encoded leaf")
+	require.True(t, parquet.NewWriterProperties(walk...).DictionaryCostFallbackEnabledFor("r"))
 }
