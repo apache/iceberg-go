@@ -282,13 +282,19 @@ func marshalSetPredicate(op Operation, term Term, lits []Literal) ([]byte, error
 
 func (r Reference) MarshalJSON() ([]byte, error) { return json.Marshal(string(r)) }
 
-func (b *boundRef[T]) MarshalJSON() ([]byte, error) { return json.Marshal(b.field.Name) }
+func (b *boundRef[T]) MarshalJSON() ([]byte, error) { return json.Marshal(b.fullName) }
 
 func (b *BoundTransform) MarshalJSON() ([]byte, error) {
+	ref := b.term.Ref()
+	name := ref.Field().Name
+	if named, ok := ref.(interface{ referenceName() string }); ok {
+		name = named.referenceName()
+	}
+
 	return json.Marshal(transformNode{
 		Type:      exprKeyTransform,
 		Transform: b.transform.String(),
-		Term:      b.term.Ref().Field().Name,
+		Term:      name,
 	})
 }
 

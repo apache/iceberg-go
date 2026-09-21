@@ -627,3 +627,44 @@ func TestUnmarshalExpressionCaseSensitive(t *testing.T) {
 	_, err := iceberg.ParseExpr([]byte(`{"type":"eq","term":"ID","value":1}`), schema)
 	require.Error(t, err)
 }
+
+// A leaf name can resolve successfully to the wrong top-level field, silently
+// changing a remote filter. Preserve the schema-qualified name when binding.
+func TestMarshalBoundNestedReferencePreservesPath(t *testing.T) {
+	t.Parallel()
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "Nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
+		}}},
+		iceberg.NestedField{ID: 3, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	ref := iceberg.Reference("nested.value")
+	for _, tc := range []struct {
+		name string
+		expr iceberg.BooleanExpression
+		want string
+	}{
+		{"unary", iceberg.IsNull(ref), `{"type":"is-null","term":"Nested.Value"}`},
+		{"literal", iceberg.EqualTo(ref, int32(7)), `{"type":"eq","term":"Nested.Value","value":7}`},
+		{"set", iceberg.IsIn(ref, int32(7), int32(8)), `{"type":"in","term":"Nested.Value","values":[7,8]}`},
+		{
+			"transform", iceberg.EqualTo(iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 16}, ref), int32(7)),
+			`{"type":"eq","term":{"type":"transform","transform":"bucket[16]","term":"Nested.Value"},"value":7}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(schema, tc.expr, false)
+			require.NoError(t, err)
+			assert.Equal(t, "Value", bound.(iceberg.BoundPredicate).Ref().Field().Name)
+			encoded, err := json.Marshal(bound)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(encoded))
+			parsed, err := iceberg.ParseExpr(encoded, schema)
+			require.NoError(t, err)
+			rebound, err := iceberg.BindExpr(schema, parsed, true)
+			require.NoError(t, err)
+			assert.True(t, bound.Equals(rebound), "the round trip must retain the nested field ID")
+			assert.Equal(t, 2, rebound.(iceberg.BoundPredicate).Ref().Field().ID)
+		})
+	}
+}

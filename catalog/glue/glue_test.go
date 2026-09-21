@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -864,16 +865,18 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	assert := require.New(t)
 	ctx := context.Background()
 	const scheme = "gluepurgefail"
-	dropCalled := false
-	removeBeforeDrop := false
-	removeCalls := 0
+	var (
+		dropCalled       atomic.Bool
+		removeBeforeDrop atomic.Bool
+		removeCalls      atomic.Int64
+	)
 	failingFS := failRemoveIO{
 		MemFS: iceio.NewMemFS(),
 		err:   errGluePurgeRemove,
 		onRemove: func() {
-			removeCalls++
-			if !dropCalled {
-				removeBeforeDrop = true
+			removeCalls.Add(1)
+			if !dropCalled.Load() {
+				removeBeforeDrop.Store(true)
 			}
 		},
 	}
@@ -899,15 +902,15 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 		DatabaseName: aws.String("test_database"),
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Run(func(mock.Arguments) {
-		dropCalled = true
+		dropCalled.Store(true)
 	}).Return(&glue.DeleteTableOutput{}, nil).Once()
 
 	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
 
 	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
-	assert.True(dropCalled)
-	assert.Positive(removeCalls)
-	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
+	assert.True(dropCalled.Load())
+	assert.Positive(removeCalls.Load())
+	assert.False(removeBeforeDrop.Load(), "PurgeTable should drop the catalog entry before removing files")
 	file, err := failingFS.Open(dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)
@@ -1027,6 +1030,69 @@ func TestGlueCreateNamespace(t *testing.T) {
 
 	err := glueCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("test_namespace"), props)
 	assert.NoError(err)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestGlueCreateNamespaceAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("CreateDatabase", mock.Anything, &glue.CreateDatabaseInput{
+		DatabaseInput: &types.DatabaseInput{
+			Name:        aws.String("test_namespace"),
+			Description: aws.String("Test Description"),
+			LocationUri: aws.String("s3://test-location"),
+			Parameters:  map[string]string{},
+		},
+	}, mock.Anything).Return(&glue.CreateDatabaseOutput{}, &types.AlreadyExistsException{
+		Message: aws.String("Database already exists"),
+	}).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	props := map[string]string{
+		"comment":        "Test Description",
+		PropsKeyLocation: "s3://test-location",
+	}
+
+	err := glueCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("test_namespace"), props)
+	assert.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestGlueCreateNamespacePassesThroughNonAlreadyExistsError(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+	expectedErr := errors.New("access denied")
+
+	mockGlueSvc.On("CreateDatabase", mock.Anything, &glue.CreateDatabaseInput{
+		DatabaseInput: &types.DatabaseInput{
+			Name:        aws.String("test_namespace"),
+			Description: aws.String("Test Description"),
+			LocationUri: aws.String("s3://test-location"),
+			Parameters:  map[string]string{},
+		},
+	}, mock.Anything).Return(&glue.CreateDatabaseOutput{}, expectedErr).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	props := map[string]string{
+		"comment":        "Test Description",
+		PropsKeyLocation: "s3://test-location",
+	}
+
+	err := glueCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("test_namespace"), props)
+	assert.Error(err)
+	assert.False(errors.Is(err, catalog.ErrNamespaceAlreadyExists))
+	assert.ErrorIs(err, expectedErr)
+	assert.ErrorContains(err, "test_namespace")
+	mockGlueSvc.AssertExpectations(t)
 }
 
 func TestGlueLoadNamespacePropertiesNormalizesDescription(t *testing.T) {
@@ -1937,6 +2003,30 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	assert.False(found, "expected table to be rolled back and not exist in the catalog")
 }
 
+func TestGlueCreateTableAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, &types.AlreadyExistsException{
+			Message: aws.String("Table already exists"),
+		}).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	_, err := glueCatalog.CreateTable(
+		context.Background(),
+		TableIdentifier("test_database", "test_table"),
+		testSchema,
+		catalog.WithLocation("file://"+filepath.Join(t.TempDir(), "test_table")),
+	)
+	assert.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	assert.ErrorContains(err, "failed to create table test_database.test_table")
+	mockGlueSvc.AssertExpectations(t)
+}
+
 func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 	assert := require.New(t)
 	mockGlueSvc := &mockGlueClient{}
@@ -1970,6 +2060,43 @@ func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 	mockGlueSvc.AssertNotCalled(t, "CreateTable", mock.Anything, mock.Anything, mock.Anything)
 	mockGlueSvc.AssertNotCalled(t, "DeleteTable", mock.Anything, mock.Anything, mock.Anything)
 	mockGlueSvc.AssertNotCalled(t, "GetTable", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestGlueRegisterTableAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+
+	const scheme = "glueregisteralreadyexists"
+	tableLocation := scheme + "://bucket/test_table"
+	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
+
+	memFS := iceio.NewMemFS()
+	writeGluePurgeTableMetadata(t, memFS, tableLocation, metadataLocation, nil)
+
+	iceio.Unregister(scheme)
+	iceio.Register(scheme, func(_ context.Context, _ *url.URL, _ map[string]string) (iceio.IO, error) {
+		return memFS, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, &types.AlreadyExistsException{
+			Message: aws.String("Table already exists"),
+		}).Once()
+
+	cat := &Catalog{
+		glueSvc: mockGlueSvc,
+		awsCfg:  &aws.Config{},
+	}
+
+	_, err := cat.RegisterTable(
+		context.Background(),
+		TableIdentifier("test_database", "test_table"),
+		metadataLocation,
+	)
+	assert.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	assert.ErrorContains(err, "failed to register table test_database.test_table")
+	mockGlueSvc.AssertExpectations(t)
 }
 
 func TestRegisterTableMetadataNotFound(t *testing.T) {
@@ -2231,6 +2358,31 @@ func TestGlueCheckTableNotExists(t *testing.T) {
 	exists, err := glueCatalog.CheckTableExists(context.TODO(), TableIdentifier("test_database", "nonexistent_table"))
 	assert.Nil(err)
 	assert.False(exists)
+}
+
+func TestGlueCommitTableCreateAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	ident := TableIdentifier("test_database", "test_table")
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{}, &types.EntityNotFoundException{}).Once()
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, &types.AlreadyExistsException{
+			Message: aws.String("Table already exists"),
+		}).Once()
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+	_, _, err := glueCatalog.CommitTable(ctx, ident, []table.Requirement{table.AssertCreate()}, []table.Update{
+		table.NewSetLocationUpdate("file://" + filepath.Join(t.TempDir(), "test_table")),
+	})
+
+	assert.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	assert.ErrorContains(err, "failed to create table test_database.test_table")
+	mockGlueSvc.AssertExpectations(t)
 }
 
 func TestGlueCommitTableValidatesRequirementsForMissingTable(t *testing.T) {

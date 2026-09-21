@@ -80,16 +80,16 @@ func (i InspectTable) currentPositionDeleteManifests(
 	if i.tbl.fsF == nil {
 		return nil, nil, errors.New("table file IO is not configured")
 	}
+	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
+	if err != nil {
+		return nil, nil, err
+	}
 	fs, err := i.tbl.fsF(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	manifests, err := snapshot.Manifests(fs)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	return fs, manifests, nil
+	return fs, manifestSet.allManifests(), nil
 }
 
 type positionDeleteRecordAppender struct {

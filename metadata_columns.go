@@ -17,10 +17,7 @@
 
 package iceberg
 
-import (
-	"math"
-	"slices"
-)
+import "math"
 
 // MaxStructFieldID is the largest field ID a user-supplied schema may assign.
 // Field IDs greater than this are reserved by the spec for metadata columns
@@ -94,7 +91,7 @@ func SchemaWithRowLineageColumns(s *Schema, rowID, lastUpdatedSeq bool) *Schema 
 	if s == nil {
 		return nil
 	}
-	fields := slices.Clone(s.Fields())
+	fields := s.Fields()
 
 	hasRowID := false
 	hasSeqNum := false

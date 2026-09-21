@@ -262,7 +262,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		// row-delta semantics; RowDelta registers its own validator
 		// below, so suppress the default the same way rewrites do.
 		producer = newOverwriteFilesProducer(op, rd.txn, wfs, nil, rd.props)
-		producer.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+		producer.setSkipDefaultValidator(true)
 
 		for _, live := range resolvedRemovals {
 			producer.removeDeletionVector(live)
