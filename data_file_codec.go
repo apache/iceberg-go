@@ -337,11 +337,6 @@ func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*a
 
 func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, error) {
 	var key strings.Builder
-	var buf [20]byte
-	writeInt := func(value int) {
-		key.Write(strconv.AppendInt(buf[:0], int64(value), 10))
-		key.WriteByte(':')
-	}
 	for _, field := range spec.fields {
 		sourceType := Type(UnknownType{})
 		// ResultType only inspects the source type here; borrow it to avoid
@@ -350,13 +345,14 @@ func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, err
 			sourceType = sourceField.Type
 		}
 		resultType := field.Transform.ResultType(sourceType)
+		// Reserve room for the ID, name length, type tag, and typical parameters.
 		key.Grow(len(field.Name) + 32)
 
 		// Length prefixes keep names unambiguous. The compact type tag also
 		// includes fixed lengths and decimal precision/scale without formatting
 		// a temporary type string on every cache hit.
-		writeInt(field.FieldID)
-		writeInt(len(field.Name))
+		writePartitionFingerprintInt(&key, field.FieldID)
+		writePartitionFingerprintInt(&key, len(field.Name))
 		key.WriteString(field.Name)
 		if err := writePartitionTypeFingerprint(&key, resultType); err != nil {
 			return "", err
@@ -366,6 +362,8 @@ func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, err
 	return key.String(), nil
 }
 
+// Keep the supported types and parameters in sync with partitionTypeToAvroSchema.
+// TestPartitionTypeFingerprintMatchesAvroConversion checks both paths together.
 func writePartitionTypeFingerprint(key *strings.Builder, typ Type) error {
 	// These tags are internal to the cache key. Parameterized types append their
 	// parameters so equal Avro partition shapes still produce equal keys.
