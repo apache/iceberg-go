@@ -101,7 +101,10 @@ var (
 	TimeNode        = avro.SchemaNode{Type: atype.Long, LogicalType: atype.TimeMicros}
 	TimestampNode   = avro.SchemaNode{Type: atype.Long, LogicalType: atype.TimestampMicros, Props: map[string]any{"adjust-to-utc": false}}
 	TimestampTzNode = avro.SchemaNode{Type: atype.Long, LogicalType: atype.TimestampMicros, Props: map[string]any{"adjust-to-utc": true}}
-	UUIDNode        = avro.SchemaNode{Type: atype.Fixed, Name: "uuid_fixed", Size: 16, LogicalType: atype.UUID}
+
+	TimestampNsNode   = avro.SchemaNode{Type: atype.Long, LogicalType: atype.TimestampNanos, Props: map[string]any{"adjust-to-utc": false}}
+	TimestampTzNsNode = avro.SchemaNode{Type: atype.Long, LogicalType: atype.TimestampNanos, Props: map[string]any{"adjust-to-utc": true}}
+	UUIDNode          = avro.SchemaNode{Type: atype.Fixed, Name: "uuid_fixed", Size: 16, LogicalType: atype.UUID}
 )
 
 // Compiled schemas for direct encoding/decoding use.
@@ -122,6 +125,8 @@ var (
 	TimeSchema           = mustSchema(TimeNode)
 	TimestampSchema      = mustSchema(TimestampNode)
 	TimestampTzSchema    = mustSchema(TimestampTzNode)
+	TimestampNsSchema    = mustSchema(TimestampNsNode)
+	TimestampTzNsSchema  = mustSchema(TimestampTzNsNode)
 	UUIDSchema           = mustSchema(UUIDNode)
 )
 
