@@ -40,8 +40,17 @@ import (
 
 // Keep this test serial: it temporarily replaces the global OTel providers.
 func TestScanPlanningTelemetryWiring(t *testing.T) {
+	// Deterministic sampling also makes accidental t.Parallel calls fail before
+	// the test can replace process-wide providers.
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
 	reader := sdkmetric.NewManualReader()
-	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader),
+		sdkmetric.WithExemplarFilter(func(ctx context.Context) bool {
+			span := trace.SpanFromContext(ctx)
+			assert.True(t, span.IsRecording(), "metrics must be recorded before the operation span ends")
+
+			return span.SpanContext().IsSampled()
+		}))
 	recorder := tracetest.NewSpanRecorder()
 	tracer := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	oldMeter, oldTracer := otel.GetMeterProvider(), otel.GetTracerProvider()
@@ -163,6 +172,20 @@ func TestScanPlanningTelemetryWiring(t *testing.T) {
 					}
 					if m.Name == "iceberg.scan.planning.fallbacks" {
 						key = reason.AsString()
+					}
+					if m.Name == "iceberg.scan.planning.expirations" {
+						require.Len(t, point.Exemplars, 1)
+						exemplar := point.Exemplars[0]
+						var matched bool
+						for _, span := range spans {
+							if span.Name() == "iceberg.scan.planning."+op.AsString() && span.Status().Code == codes.Error {
+								spanID, traceID := span.SpanContext().SpanID(), span.SpanContext().TraceID()
+								if string(exemplar.SpanID) == string(spanID[:]) && string(exemplar.TraceID) == string(traceID[:]) {
+									matched = true
+								}
+							}
+						}
+						assert.True(t, matched, "expiration exemplar must identify its failed operation span")
 					}
 					counts[m.Name][key] += point.Value
 				}

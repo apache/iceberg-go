@@ -657,10 +657,10 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (result FetchPlanningResultResponse, err error) {
 	ctx, finish := scanmetrics.Start(ctx, "fetch-result")
 	defer func() {
-		finish(err)
-		if errors.Is(err, ErrPlanExpired) || errors.Is(err, ErrNoSuchPlanTask) {
+		if errors.Is(err, ErrPlanExpired) {
 			scanmetrics.Expired(ctx, "fetch-result")
 		}
+		finish(err)
 	}()
 
 	if err := r.endpoints.check(endpointFetchPlanResult); err != nil {
@@ -733,10 +733,10 @@ func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, pl
 func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (result FetchScanTasksResponse, err error) {
 	ctx, finish := scanmetrics.Start(ctx, "fetch-tasks")
 	defer func() {
-		finish(err)
-		if errors.Is(err, ErrPlanExpired) || errors.Is(err, ErrNoSuchPlanTask) {
+		if errors.Is(err, ErrNoSuchPlanTask) {
 			scanmetrics.Expired(ctx, "fetch-tasks")
 		}
+		finish(err)
 	}()
 
 	if err := r.endpoints.check(endpointFetchScanTasks); err != nil {

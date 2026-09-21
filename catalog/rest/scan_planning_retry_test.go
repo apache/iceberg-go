@@ -85,7 +85,7 @@ func TestScanPlanningPOSTRetriesPreserveIdempotency(t *testing.T) {
 
 func TestScanPlanningPOSTDoesNotRetryTerminalResponses(t *testing.T) {
 	t.Parallel()
-	for _, status := range []int{200, 400, 401, 403, 404, 501} {
+	for _, status := range []int{400, 401, 403, 404, 501} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			t.Parallel()
 			var attempts atomic.Int32
@@ -98,6 +98,33 @@ func TestScanPlanningPOSTDoesNotRetryTerminalResponses(t *testing.T) {
 			})
 			_, err := cat.PlanTableScan(t.Context(), table.Identifier{"db", "tbl"}, PlanTableScanRequest{})
 			require.Error(t, err)
+			assert.Equal(t, int32(1), attempts.Load())
+		})
+	}
+}
+
+func TestScanPlanningPOSTDoesNotRetryMalformedSuccess(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []string{"plan", "tasks"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+			var attempts atomic.Int32
+			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
+				mux.HandleFunc("POST /v1/namespaces/db/tables/tbl/"+operation, func(w http.ResponseWriter, _ *http.Request) {
+					attempts.Add(1)
+					_, _ = w.Write([]byte(`invalid json`))
+				})
+			})
+			var err error
+			if operation == "plan" {
+				_, err = cat.PlanTableScan(t.Context(), table.Identifier{"db", "tbl"}, PlanTableScanRequest{})
+			} else {
+				_, err = cat.FetchScanTasks(t.Context(), table.Identifier{"db", "tbl"}, FetchScanTasksRequest{PlanTask: "opaque"})
+			}
+			require.ErrorIs(t, err, ErrRESTError)
+			require.ErrorContains(t, err, "error decoding json payload")
+			var responseError errorResponse
+			assert.False(t, errors.As(err, &responseError))
 			assert.Equal(t, int32(1), attempts.Load())
 		})
 	}

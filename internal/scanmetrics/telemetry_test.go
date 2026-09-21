@@ -33,6 +33,8 @@ import (
 )
 
 func TestPlanningTelemetry(t *testing.T) {
+	// Provider replacement is process-wide; Setenv also prevents t.Parallel.
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
 	reader := sdkmetric.NewManualReader()
 	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	recorder := tracetest.NewSpanRecorder()

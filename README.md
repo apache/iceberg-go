@@ -130,13 +130,22 @@ scan with `table.WithScanPlanningMode`; existing scans continue to plan locally.
 | :---------- | :------- |
 | `table.ScanPlanningLocal` (default) | Read manifests locally; no planning endpoints required. |
 | `table.ScanPlanningRemote` | Require the advertised plan endpoint. Async or fanout responses also require their continuation endpoints; missing capabilities return an error. |
-| `table.ScanPlanningAuto` | Use remote planning when all four endpoints are advertised; otherwise plan locally. Errors after choosing remote are returned, without falling back to local. |
+| `table.ScanPlanningAuto` | Use remote planning when submission, polling, and task retrieval endpoints are advertised; otherwise plan locally. Errors after choosing remote are returned, without falling back to local. |
 
 Capabilities come from `GET /v1/config`. `rest.Catalog.SupportsPlanTableScan()`
 checks submission support, while `SupportsFullRemoteScanPlanning()` checks
-submission, polling, cancellation, and task retrieval. In `auto` mode, catalogs
-without a planner retain local planning. The REST `scan-planning-mode` configuration key
-(`client`/`server`) is not yet resolved by the scanner; use the scan option above.
+submission, polling, and task retrieval. Cancellation is best-effort and is not
+required for automatic remote planning. In `auto` mode, catalogs
+without a planner retain local planning.
+
+The scanner does not honor the REST `scan-planning-mode` configuration key
+(`client`/`server`). A catalog requiring `server` mode may rely on planning to
+vend plan-scoped storage credentials. Default local planning, explicit `local`,
+or an `auto` fallback can instead read manifests with the table's storage
+credentials, which may use a different identity or lack the required access.
+For these deployments, explicitly select `table.ScanPlanningRemote` on every
+scan; do not rely on the server configuration or `auto` to enforce remote
+planning. Remote mode returns an error if a required capability is missing.
 
 ```go
 // tbl is a table loaded from a rest.Catalog.
