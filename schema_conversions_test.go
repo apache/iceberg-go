@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"testing"
@@ -52,6 +53,10 @@ func partitionTypeToAvroSchemaNonNullable(t *StructType) (*avro.Schema, error) {
 			node = internal.TimestampNode
 		case TimestampTzType:
 			node = internal.TimestampTzNode
+		case TimestampNsType:
+			node = internal.TimestampNsNode
+		case TimestampTzNsType:
+			node = internal.TimestampTzNsNode
 		case UUIDType:
 			node = internal.UUIDNode
 		case BooleanType:
@@ -306,10 +311,19 @@ func TestNanosecondPartitionAvroSchema(t *testing.T) {
 			avroSchema, err := partitionTypeToAvroSchema(partitionType)
 			require.NoError(t, err)
 			require.NotNil(t, avroSchema)
+			nonNullableSchema, err := partitionTypeToAvroSchemaNonNullable(partitionType)
+			require.NoError(t, err)
 
 			// A value that is not a whole number of microseconds, so a
 			// micros-based logical type would lose the trailing 123 ns.
 			want := time.Date(2024, time.March, 1, 12, 0, 0, 456789123, time.UTC)
+
+			nonNullableEncoded, err := nonNullableSchema.Encode(map[string]any{"ts_ns": want})
+			require.NoError(t, err)
+			var nonNullableDecoded map[string]any
+			_, err = nonNullableSchema.Decode(nonNullableEncoded, &nonNullableDecoded)
+			require.NoError(t, err)
+			assert.Equal(t, want, nonNullableDecoded["ts_ns"])
 
 			encoded, err := avroSchema.Encode(map[string]any{"ts_ns": want})
 			require.NoError(t, err)
@@ -353,6 +367,26 @@ func TestNewManifestWriterV3NanosecondPartition(t *testing.T) {
 			writer, err := NewManifestWriter(3, io.Discard, spec, sc, 1)
 			require.NoError(t, err)
 			require.NotNil(t, writer)
+
+			values := []TimestampNano{1709294400456789123, -123456789}
+			for i, value := range values {
+				builder, err := NewDataFileBuilder(spec, EntryContentData,
+					fmt.Sprintf("data-%d.parquet", i), ParquetFile,
+					map[int]any{1000: value}, nil, nil, 1, 1)
+				require.NoError(t, err)
+				require.NoError(t, writer.Add(NewManifestEntry(
+					EntryStatusADDED, nil, nil, nil, builder.Build())))
+			}
+
+			manifest, err := writer.ToManifestFile("manifest.avro", 0)
+			require.NoError(t, err)
+			summaries := manifest.Partitions()
+			require.Len(t, summaries, 1)
+			assert.False(t, summaries[0].ContainsNull)
+			require.NotNil(t, summaries[0].LowerBound)
+			require.NotNil(t, summaries[0].UpperBound)
+			assert.Equal(t, binary.LittleEndian.AppendUint64(nil, uint64(values[1])), *summaries[0].LowerBound)
+			assert.Equal(t, binary.LittleEndian.AppendUint64(nil, uint64(values[0])), *summaries[0].UpperBound)
 		})
 	}
 }
