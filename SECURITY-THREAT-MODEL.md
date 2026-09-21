@@ -260,8 +260,9 @@ Those documented configuration sources and registries are not tenant-isolation
 boundaries. Control of them normally demonstrates operator or
 embedding-application authority and lowers scanner confidence. Reassess when
 Iceberg Go sends a secret to a new audience, crosses internally managed
-catalog/client state, creates an unauthorized integrity capability, exposes or
-corrupts memory, or causes an unauthorized destructive effect.
+catalog/client state, bypasses an operator-selected restriction, creates an
+unauthorized integrity capability, exposes or corrupts memory, or causes an
+unauthorized destructive effect.
 
 ### Boundary 7: table provenance
 
@@ -401,8 +402,9 @@ resulting client behavior is authorized.
 
 A new credential audience, unexpected outbound request, cross-catalog or
 cross-client state reuse, bypass of an operator-selected restriction,
-unauthorized integrity or memory impact, or unauthorized destructive effect
-overrides this default downgrade.
+unauthorized integrity or memory impact, a demonstrated violation of a
+documented Iceberg Go-owned availability boundary, or unauthorized destructive
+effect overrides this default downgrade.
 
 ### 5. Equivalent-harm and authorized-writer reports
 
@@ -413,7 +415,8 @@ should be assumed.
 
 `write.data.path`, `write.metadata.path`, local IO, and `PurgeFiles` may operate
 on referenced external paths. A new credential audience, cross-boundary state
-reuse, greater integrity capability, attacker-observable memory impact,
+reuse, greater integrity capability, attacker-observable memory impact, a
+demonstrated violation of a documented Iceberg Go-owned availability boundary,
 cross-table/root deletion, or unauthorized purge overrides the default
 downgrade.
 
@@ -492,6 +495,7 @@ impact. They should not classify the mere presence of a configurable endpoint,
 reference as a vulnerability.
 
 These signals route findings for human review; they do not automatically accept
-or reject a report. Endpoint routing, credential scope, shared state, `unsafe`
+or reject a report. Endpoint routing, credential scope, Iceberg Go-owned shared
+state crossing separately constructed catalog or client instances, `unsafe`
 behavior, destructive paths, and violations of documented Iceberg Go-owned
 availability boundaries always require explicit human review.
