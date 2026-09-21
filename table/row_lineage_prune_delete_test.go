@@ -43,12 +43,13 @@ import (
 // test prunes a leading row group and deletes a row that lives only in the
 // surviving group.
 
-// TestScanPruningWithPositionalDeletes covers a Parquet positional delete whose
-// target (pos 6 = id=7) is in the second row group while the filter prunes the
-// first. The deleted row must vanish and survivors must keep their _row_id.
+// TestScanPruningWithPositionalDeletes covers a legacy Parquet positional delete,
+// committed before the v3 upgrade, whose target (pos 6 = id=7) is in the second row group
+// while the filter prunes the first.
+// The deleted row must vanish and survivors must keep their _row_id.
 func TestScanPruningWithPositionalDeletes(t *testing.T) {
 	ctx := context.Background()
-	tbl := buildTwoRowGroupV3Table(t)
+	tbl := buildTwoRowGroupTable(t, newV2RowLineageTestTable(t))
 
 	tasks, err := tbl.Scan().PlanFiles(ctx)
 	require.NoError(t, err)
@@ -64,10 +65,7 @@ func TestScanPruningWithPositionalDeletes(t *testing.T) {
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
 		posDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 256)
 	require.NoError(t, err)
-	tx := tbl.NewTransaction()
-	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(b.Build()).Commit(ctx))
-	tbl, err = tx.Commit(ctx)
-	require.NoError(t, err)
+	tbl = commitLegacyPosDelete(t, tbl, b.Build())
 
 	filter := table.WithRowFilter(iceberg.GreaterThan(iceberg.Reference("id"), int64(5)))
 
@@ -85,7 +83,7 @@ func TestScanPruningWithPositionalDeletes(t *testing.T) {
 // drops pos 6 (id=7) in the surviving second row group while the first is pruned.
 func TestScanPruningWithDeletionVector(t *testing.T) {
 	ctx := context.Background()
-	tbl := buildTwoRowGroupV3Table(t)
+	tbl := buildTwoRowGroupTable(t, newV3RowLineageTestTable(t))
 
 	tasks, err := tbl.Scan().PlanFiles(ctx)
 	require.NoError(t, err)
@@ -119,7 +117,7 @@ func TestScanPruningWithDeletionVector(t *testing.T) {
 // must keep advancing across batch boundaries, not reset per batch.
 func TestScanPruningSurvivingGroupSpansBatches(t *testing.T) {
 	ctx := context.Background()
-	tbl := buildTwoRowGroupV3Table(t)
+	tbl := buildTwoRowGroupTable(t, newV3RowLineageTestTable(t))
 
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.SetProperties(iceberg.Properties{table.ParquetBatchSizeKey: "2"}))
@@ -133,7 +131,7 @@ func TestScanPruningSurvivingGroupSpansBatches(t *testing.T) {
 
 func TestScanPruningAllRowGroupsCompletes(t *testing.T) {
 	ctx := context.Background()
-	tbl := buildTwoRowGroupV3Table(t)
+	tbl := buildTwoRowGroupTable(t, newV3RowLineageTestTable(t))
 
 	_, itr, err := tbl.Scan(
 		table.WithRowLineage(),
@@ -222,12 +220,11 @@ func TestReadTaskDeletionVectorSupersedesPositionalDeletes(t *testing.T) {
 // scan cannot prove bloom skipped a group, since a correct scan emits the same
 // rows whether or not the empty group was physically read.
 
-// buildTwoRowGroupV3Table writes a v3 row-lineage table with ids 1..10 across two
-// 5-row row groups, so an id>5 filter prunes the first group via stats.
-func buildTwoRowGroupV3Table(t *testing.T) *table.Table {
+// buildTwoRowGroupTable appends ids 1..10 to tbl across two 5-row row groups,
+// so an id>5 filter prunes the first group via stats.
+func buildTwoRowGroupTable(t *testing.T, tbl *table.Table) *table.Table {
 	t.Helper()
 	ctx := context.Background()
-	tbl := newV3RowLineageTestTable(t)
 
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.SetProperties(iceberg.Properties{table.ParquetRowGroupLimitKey: "5"}))
@@ -251,6 +248,28 @@ func buildTwoRowGroupV3Table(t *testing.T) *table.Table {
 
 	require.Equal(t, 2, parquetRowGroupCount(t, tbl),
 		"file must have multiple row groups for the id>5 / id==7 filter to prune one")
+
+	return tbl
+}
+
+// commitLegacyPosDelete adds posDel while tbl is still v2, then upgrades it to v3.
+// The no-op Delete creates a v3 snapshot, which gives the existing rows a _row_id.
+func commitLegacyPosDelete(t *testing.T, tbl *table.Table, posDel iceberg.DataFile) *table.Table {
+	t.Helper()
+	ctx := context.Background()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(posDel).Commit(ctx))
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	require.NoError(t, tx.Delete(ctx, iceberg.AlwaysFalse{}, nil))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	for _, task := range tasks {
+		require.NotNil(t, task.FirstRowID, "upgraded data file %s must inherit a first_row_id", task.File.FilePath())
+	}
 
 	return tbl
 }

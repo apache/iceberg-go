@@ -1192,6 +1192,9 @@ type deleteFilesToAddSet struct {
 }
 
 func validateDeletionVectorToAdd(df iceberg.DataFile, formatVersion int, operation string) error {
+	if !IsDeletionVector(df) {
+		return nil
+	}
 	path := df.FilePath()
 	if formatVersion < 3 {
 		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", path, operation)
@@ -1306,6 +1309,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			if err := validateDeletionVectorToAdd(df, meta.formatVersion, operation); err != nil {
 				return nil, err
 			}
+			// non-nil: validateDeletionVectorToAdd checked all three.
 			ref, offset, length := df.ReferencedDataFile(), df.ContentOffset(), df.ContentSizeInBytes()
 
 			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}

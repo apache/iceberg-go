@@ -120,11 +120,12 @@ func TestScanRowLineagePreservedThroughEqualityDeletes(t *testing.T) {
 		"equality-deleted rows must not renumber surviving rows' _row_id")
 }
 
-// TestScanRowLineagePreservedThroughPositionalDeletes: a Parquet position-delete
-// file drops rows during the scan; survivors must keep their original _row_id.
+// TestScanRowLineagePreservedThroughPositionalDeletes: a legacy Parquet position-delete
+// file, committed before the v3 upgrade, drops rows during the scan; survivors must
+// keep their original _row_id.
 func TestScanRowLineagePreservedThroughPositionalDeletes(t *testing.T) {
 	ctx := context.Background()
-	tbl := newV3RowLineageTestTable(t)
+	tbl := newV2RowLineageTestTable(t)
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
@@ -138,7 +139,6 @@ func TestScanRowLineagePreservedThroughPositionalDeletes(t *testing.T) {
 
 	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
 	require.NoError(t, err)
-	require.Equal(t, map[int64]int64{1: 0, 2: 1, 3: 2, 4: 3, 5: 4}, rowIDByID(t, tbl))
 
 	tasks, err := tbl.Scan().PlanFiles(ctx)
 	require.NoError(t, err)
@@ -156,13 +156,7 @@ func TestScanRowLineagePreservedThroughPositionalDeletes(t *testing.T) {
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
 		posDelPath, iceberg.ParquetFile, nil, nil, nil, 2, 256)
 	require.NoError(t, err)
-
-	tx := tbl.NewTransaction()
-	rd := tx.NewRowDelta(nil)
-	rd.AddDeletes(b.Build())
-	require.NoError(t, rd.Commit(ctx))
-	tbl, err = tx.Commit(ctx)
-	require.NoError(t, err)
+	tbl = commitLegacyPosDelete(t, tbl, b.Build())
 
 	assert.Equal(t, map[int64]int64{1: 0, 3: 2, 5: 4}, rowIDByID(t, tbl),
 		"position-deleted rows must not renumber surviving rows' _row_id")

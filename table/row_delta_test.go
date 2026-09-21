@@ -1183,6 +1183,12 @@ func TestRowDeltaRejectsInvalidDeletionVector(t *testing.T) {
 			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, dataPath, &offset, &zeroLength)},
 			errContains:   "invalid content_size_in_bytes 0",
 		},
+		{
+			name:          "parquet position delete on v3",
+			formatVersion: 3,
+			deletes:       []iceberg.DataFile{buildPosDeleteFile(t, "s3://bucket/data/pos-del.parquet")},
+			errContains:   "must be a deletion vector for v3 table",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1204,7 +1210,14 @@ func TestRowDeltaRejectsInvalidDeletionVector(t *testing.T) {
 }
 
 func TestRowDeltaAcceptsDeletionVectorOnV3(t *testing.T) {
-	tbl, _, dataPath, dv := newTableWithLiveDV(t)
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	dataPath := tbl.Location() + "/data/insert.parquet"
+	dvPath := tbl.Location() + "/data/dv-001.puffin"
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(buildDVFile(t, dvPath, dataPath)).Commit(t.Context()))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
 
 	snap := tbl.CurrentSnapshot()
 	require.NotNil(t, snap)
@@ -1212,7 +1225,7 @@ func TestRowDeltaAcceptsDeletionVectorOnV3(t *testing.T) {
 	live, removed := snapshotDeleteEntryFiles(t, snap, iceio.LocalFS{})
 	assert.Empty(t, removed)
 	require.Len(t, live, 1)
-	assert.Equal(t, dv.FilePath(), live[0].FilePath())
+	assert.Equal(t, dvPath, live[0].FilePath())
 	assert.Equal(t, dataPath, refOf(live[0]))
 }
 
@@ -1242,13 +1255,15 @@ func TestRowDeltaRemoveDeletesRequiresV3(t *testing.T) {
 // DV) while adding a valid DV.
 // Assertion: Commit fails identifying the live entry as not a DV.
 func TestRowDeltaRemoveDeletesRejectsNonDV(t *testing.T) {
-	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	tbl := newRowDeltaCommitTestTableVersion(t, 2)
 	location := tbl.Location()
 
+	// v3 rejects new Parquet pos-deletes, so the live one predates an upgrade.
 	posDelPath := location + "/data/pos-del-001.parquet"
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.NewRowDelta(nil).
 		AddDeletes(buildPosDeleteFile(t, posDelPath)).Commit(t.Context()))
+	require.NoError(t, tx.UpgradeFormatVersion(3))
 	tbl, err := tx.Commit(t.Context())
 	require.NoError(t, err)
 
