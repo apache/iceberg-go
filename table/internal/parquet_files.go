@@ -1998,8 +1998,6 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		rangeStart := rowGroupTester.Start
 		rangeEnd := rangeStart + rowGroupTester.Length
 		rgList = make([]int, 0)
-		dictionaryKeepStreak := 0
-		dictionaryPruningActive := len(dictionaryPredsByColumn) > 0
 		var firstRowPos int64
 		for rg := range numRg {
 			pos := firstRowPos
@@ -2038,21 +2036,13 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				}
 			}
 
-			if use && dictionaryPruningActive {
+			if use && len(dictionaryPredsByColumn) > 0 {
 				if rgMeta == nil {
 					rgMeta = fileMeta.RowGroup(rg)
 				}
 				use = checkRowGroupDictionaries(
 					dictionaryReader, fileMeta, rgMeta, rg,
 					dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
-				if use {
-					dictionaryKeepStreak++
-					if dictionaryKeepStreak >= parquetDictionaryKeepStreakLimit {
-						dictionaryPruningActive = false
-					}
-				} else {
-					dictionaryKeepStreak = 0
-				}
 			}
 
 			if use && bfReader != nil {
@@ -2083,13 +2073,6 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 	return w.GetRecordReader(ctx, cols, rgList)
 }
-
-// Once several consecutive row groups survive dictionary checks, further
-// checks are unlikely to pay for themselves. The limit is deliberately high
-// enough to keep checking after a short cluster of matching groups, since a
-// later group may still be prunable. Stopping is fail-open: it can only leave
-// extra row groups to the normal reader, never drop matching data.
-const parquetDictionaryKeepStreakLimit = 8
 
 // nonClosingReaderAtSeeker gives a temporary Parquet reader access to a shared
 // source without allowing that reader's Close method to close the source owned
@@ -2152,7 +2135,7 @@ func checkRowGroupDictionaries(
 	rgReader := rdr.RowGroup(rg)
 	for colIdx, predIndexes := range predsByColumn {
 		chunk, err := rgMeta.ColumnChunk(colIdx)
-		if err != nil || !parquetColumnUsesOnlyDictionaryData(chunk) {
+		if err != nil || chunk == nil || !parquetColumnUsesOnlyDictionaryData(chunk) {
 			continue
 		}
 
@@ -2275,7 +2258,7 @@ func dictionaryMatchesPredicates(
 		return false, false
 	}
 	if numValues == 0 {
-		return false, false
+		return false, len(data) == 0
 	}
 
 	if len(predIndexes) == 1 {

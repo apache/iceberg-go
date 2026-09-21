@@ -2464,8 +2464,11 @@ func TestDictionaryRowGroupPruningMultiColumnAnd(t *testing.T) {
 	}
 }
 
-func TestDictionaryRowGroupPruningKeepsCheckingAfterKeepStreak(t *testing.T) {
-	const rgSize = 1024
+func TestDictionaryRowGroupPruningChecksTailAfterMatchingPrefix(t *testing.T) {
+	const (
+		rgSize         = 1024
+		matchingGroups = 16
+	)
 
 	present := make([]int32, rgSize)
 	absent := make([]int32, rgSize)
@@ -2474,7 +2477,13 @@ func TestDictionaryRowGroupPruningKeepsCheckingAfterKeepStreak(t *testing.T) {
 		absent[i] = 1
 	}
 
-	data := buildDictionaryTestParquet(t, present, present, absent, absent)
+	rowGroups := make([][]int32, 0, matchingGroups+2)
+	for range matchingGroups {
+		rowGroups = append(rowGroups, present)
+	}
+	rowGroups = append(rowGroups, absent, absent)
+
+	data := buildDictionaryTestParquet(t, rowGroups...)
 	rdr := openBloomTestReader(t, data)
 	defer rdr.Close()
 
@@ -2491,11 +2500,15 @@ func TestDictionaryRowGroupPruningKeepsCheckingAfterKeepStreak(t *testing.T) {
 	rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
 	require.NoError(t, err)
 
-	assert.Equal(t, int64(2*rgSize), countRecords(t, rr))
-	assert.Equal(t, []internal.RowGroupSpan{
-		{FirstRowPos: 0, NumRows: rgSize},
-		{FirstRowPos: rgSize, NumRows: rgSize},
-	}, survivors)
+	assert.Equal(t, int64(matchingGroups*rgSize), countRecords(t, rr))
+	expected := make([]internal.RowGroupSpan, matchingGroups)
+	for i := range matchingGroups {
+		expected[i] = internal.RowGroupSpan{
+			FirstRowPos: int64(i * rgSize),
+			NumRows:     rgSize,
+		}
+	}
+	assert.Equal(t, expected, survivors)
 }
 
 func TestDictionaryRowGroupPruningFallbackUsesMainReader(t *testing.T) {

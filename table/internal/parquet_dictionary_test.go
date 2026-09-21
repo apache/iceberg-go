@@ -94,8 +94,24 @@ func TestDictionaryMatchesPredicatesRejectsMalformedPage(t *testing.T) {
 	assert.False(t, matches)
 }
 
-func TestDictionaryMatchesPredicatesRejectsEmptyPage(t *testing.T) {
+func TestDictionaryMatchesPredicatesPrunesEmptyDictionary(t *testing.T) {
 	page := file.NewDictionaryPage(memory.NewBufferBytes(nil), 0, parquet.Encodings.Plain)
+	matches, known := dictionaryMatchesPredicates(
+		page,
+		parquet.Types.Int32,
+		-1,
+		[]RowGroupDictionaryPred{{FieldID: 1, PhysBytes: [][]byte{int32BytesForTest(1)}}},
+		[]int{0},
+	)
+	page.Release()
+
+	assert.True(t, known)
+	assert.False(t, matches)
+}
+
+func TestDictionaryMatchesPredicatesRejectsZeroCountWithData(t *testing.T) {
+	page := file.NewDictionaryPage(
+		memory.NewBufferBytes(int32BytesForTest(1)), 0, parquet.Encodings.Plain)
 	matches, known := dictionaryMatchesPredicates(
 		page,
 		parquet.Types.Int32,
