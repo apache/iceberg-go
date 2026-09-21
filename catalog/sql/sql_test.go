@@ -35,6 +35,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -2761,6 +2762,76 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionReturnsCatalogS
 	close(start)
 
 	first, second := <-results, <-results
+	s.Require().NotEqual(first.err == nil, second.err == nil,
+		"expected exactly one concurrent create to succeed; table/view results: %v / %v", first.err, second.err)
+	if first.err != nil {
+		first, second = second, first
+	}
+	s.Require().NoError(first.err)
+	if first.objectType == sqlcat.TableType {
+		s.ErrorIs(second.err, catalog.ErrTableAlreadyExists)
+	} else {
+		s.ErrorIs(second.err, catalog.ErrViewAlreadyExists)
+	}
+}
+
+// TestConcurrentTableViewCollisionUnderLockContention pins the lock-retry budget in
+// retrySerializableWriteTx. SQLite serializes writers and reports a lock conflict on
+// upgrade immediately, without consulting the busy handler, so the losing create only
+// observes the catalog-level collision once the winner commits. Holding the write lock
+// for longer than the retry budget used to surface SQLITE_BUSY to the caller instead of
+// ErrTableAlreadyExists/ErrViewAlreadyExists.
+func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionUnderLockContention() {
+	// Longer than the former 30ms budget, comfortably inside the current one.
+	const holdWriteLockFor = 100 * time.Millisecond
+
+	ctx := context.Background()
+	sqlDB := s.getDB()
+	_, err := sqlDB.Exec("PRAGMA journal_mode=WAL")
+	s.Require().NoError(err)
+	_, err = sqlDB.Exec("CREATE TABLE IF NOT EXISTS lock_holder(x)")
+	s.Require().NoError(err)
+	s.Require().NoError(sqlDB.Close())
+
+	db := s.getCatalogSqlite()
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+
+	// Hold the database-wide write lock so both creates begin while contended.
+	holder := s.getDB()
+	tx, err := holder.Begin()
+	s.Require().NoError(err)
+	_, err = tx.Exec("INSERT INTO lock_holder VALUES (1)")
+	s.Require().NoError(err)
+
+	released := make(chan struct{})
+	time.AfterFunc(holdWriteLockFor, func() {
+		_ = tx.Rollback()
+		_ = holder.Close()
+		close(released)
+	})
+
+	type createResult struct {
+		objectType string
+		err        error
+	}
+	start := make(chan struct{})
+	results := make(chan createResult, 2)
+	go func() {
+		<-start
+		_, err := db.CreateTable(ctx, identifier, tableSchemaNested)
+		results <- createResult{objectType: sqlcat.TableType, err: err}
+	}()
+	go func() {
+		<-start
+		err := db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+		results <- createResult{objectType: sqlcat.ViewType, err: err}
+	}()
+	close(start)
+
+	first, second := <-results, <-results
+	<-released
+
 	s.Require().NotEqual(first.err == nil, second.err == nil,
 		"expected exactly one concurrent create to succeed; table/view results: %v / %v", first.err, second.err)
 	if first.err != nil {
