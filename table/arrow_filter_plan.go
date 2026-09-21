@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
-	iceberginternal "github.com/apache/iceberg-go/internal"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/substrait-io/substrait-go/v8/expr"
@@ -160,18 +161,28 @@ func (as *arrowScan) cachedFileFilterPlans(fileSchema *iceberg.Schema, includePr
 	return plans, nil
 }
 
+// physicalSchemaKeyPanic marks invalid input, not unexpected implementation panics.
+type physicalSchemaKeyPanic string
+
 func physicalSchemaKey(fileSchema *iceberg.Schema) (key string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			key = ""
-			err = fmt.Errorf("%w: cannot encode physical schema key: %v", iceberg.ErrInvalidSchema, r)
+			invalid, ok := r.(physicalSchemaKeyPanic)
+			if !ok {
+				panic(r)
+			}
+			err = fmt.Errorf("%w: cannot encode physical schema key: %s", iceberg.ErrInvalidSchema, invalid)
 		}
 	}()
+
+	if fileSchema == nil {
+		panic(physicalSchemaKeyPanic("nil schema"))
+	}
 
 	// The key includes field names, IDs, requiredness, and type details. Schema
 	// IDs, docs, and defaults do not affect filter translation or compilation.
 	var builder strings.Builder
-	for _, field := range fileSchema.FieldsRef(iceberginternal.SchemaRef{}) {
+	for _, field := range fileSchema.FieldsRef(iceinternal.SchemaRef{}) {
 		writePhysicalFieldKey(&builder, field)
 	}
 
@@ -195,6 +206,9 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 	// parameters so equal physical layouts still produce equal keys.
 	switch t := typ.(type) {
 	case *iceberg.StructType:
+		if t == nil {
+			panic(physicalSchemaKeyPanic("nil struct type"))
+		}
 		builder.WriteByte('s')
 		builder.WriteByte('{')
 		for _, field := range t.FieldList {
@@ -202,6 +216,9 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 		}
 		builder.WriteByte('}')
 	case *iceberg.ListType:
+		if t == nil {
+			panic(physicalSchemaKeyPanic("nil list type"))
+		}
 		builder.WriteByte('l')
 		writePhysicalInt(builder, t.ElementID)
 		if t.ElementRequired {
@@ -211,6 +228,9 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 		}
 		writePhysicalTypeKey(builder, t.Element)
 	case *iceberg.MapType:
+		if t == nil {
+			panic(physicalSchemaKeyPanic("nil map type"))
+		}
 		builder.WriteByte('m')
 		writePhysicalInt(builder, t.KeyID)
 		writePhysicalTypeKey(builder, t.KeyType)
@@ -254,19 +274,22 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 	case iceberg.VariantType:
 		builder.WriteByte('v')
 	case iceberg.FixedType:
-		builder.WriteByte('f')
+		builder.WriteByte('F')
 		writePhysicalInt(builder, t.Len())
 	case iceberg.DecimalType:
 		builder.WriteByte('q')
 		writePhysicalInt(builder, t.Precision())
 		writePhysicalInt(builder, t.Scale())
 	case iceberg.PrimitiveType:
+		if value := reflect.ValueOf(t); value.Kind() == reflect.Pointer && value.IsNil() {
+			panic(physicalSchemaKeyPanic("nil primitive type"))
+		}
 		// Keep custom and parameterized primitive types (for example geometry)
 		// compatible with the previous structural key encoding.
 		builder.WriteByte('p')
 		writePhysicalString(builder, typ.String())
 	default:
-		panic(fmt.Errorf("unsupported physical type: %T", typ))
+		panic(physicalSchemaKeyPanic(fmt.Sprintf("unsupported physical type: %T", typ)))
 	}
 }
 
