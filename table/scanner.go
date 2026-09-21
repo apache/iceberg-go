@@ -574,6 +574,13 @@ type Scan struct {
 
 	concurrency int
 
+	// arrowBatchSize, when positive, caps the rows decoded per Arrow
+	// record batch, overriding the table's read.parquet.batch-size
+	// property. Set via WithArrowBatchSize; kept as a dedicated field
+	// (like limit and concurrency) so WithOptions replacing the options
+	// map cannot silently drop it.
+	arrowBatchSize int
+
 	reporter metrics.Reporter
 }
 
@@ -2120,6 +2127,11 @@ type FileScanTask struct {
 // If an error is encountered, during the planning and setup then this will return the
 // error directly. If the error occurs while iterating the records, it will be returned
 // by the iterator.
+// Deletion-vector manifest references are validated during setup. Deletion-vector
+// format and blob-level validation happen when the Puffin file is read. Deletion-vector
+// Puffin files are loaded lazily, so a Puffin read error is returned by the iterator
+// when a task referencing that file is reached. If no such task is processed, the file
+// is not read and its error is not returned.
 //
 // The purpose for returning the schema up front is to handle the case where there are no
 // rows returned. The resulting Arrow Schema of the projection will still be known.
@@ -2138,8 +2150,11 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // Positional- and equality-delete read errors are delivered through the iterator
 // only if iteration reaches the task that encounters the error; a row limit or
 // early termination may finish the scan before the error is observed.
-// Deletion-vector read errors are returned by ReadTasks before it returns an
-// iterator. The returned iterator is single-use.
+// Deletion-vector manifest references are validated during setup. Deletion-vector
+// format and blob-level validation happen when the Puffin file is read. Deletion-vector
+// read errors are delivered through the iterator when a task referencing that file is
+// reached; if no such task is processed, the file is not read and its error is not
+// returned. The returned iterator is single-use.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
@@ -2215,6 +2230,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		rowLimit:        scan.limit,
 		options:         scan.options,
 		concurrency:     scan.concurrency,
+		arrowBatchSize:  scan.arrowBatchSize,
 	}).GetRecords(ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so release here.

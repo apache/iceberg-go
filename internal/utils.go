@@ -138,8 +138,19 @@ func PackingIterator[T any](itr iter.Seq[T], targetWeight int64, lookback int, w
 			return maxBin
 		}
 
-		var out Bin[T]
-		out, bins = bins[0], bins[1:]
+		out := bins[0]
+		if lookback == 1 {
+			// Keep the two-bin buffer for the next FIFO eviction.
+			if len(bins) == 2 {
+				bins[0] = bins[1]
+				bins[1] = Bin[T]{}
+			} else {
+				bins[0] = Bin[T]{}
+			}
+			bins = bins[:len(bins)-1]
+		} else {
+			bins = bins[1:]
+		}
 
 		return out
 	}
