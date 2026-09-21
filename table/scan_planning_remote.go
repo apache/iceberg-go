@@ -21,7 +21,7 @@ import (
 	"slices"
 
 	"github.com/apache/iceberg-go"
-	iceinternal "github.com/apache/iceberg-go/internal"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 )
 
 // supportsAutomaticRemotePlanning is deliberately more conservative than
@@ -53,19 +53,14 @@ func remotePlanningSelectedFields(scan *Scan, schema *iceberg.Schema) ([]string,
 	}
 
 	ids := make([]int, 0, schema.NumFields())
-	for _, field := range schema.FieldsRef(iceinternal.SchemaRef{}) {
+	for _, field := range schema.FieldsRef(iceberginternal.SchemaRef{}) {
 		appendRemoteProjectedFieldIDs(&ids, field)
 	}
 	slices.Sort(ids)
 
-	columnNames, err := schema.ColumnNamesRef(iceinternal.SchemaRef{})
-	if err != nil {
-		return nil, err
-	}
-
 	selected := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if name, ok := columnNames[id]; ok {
+		if name, ok := schema.FindColumnName(id); ok {
 			selected = append(selected, name)
 		}
 	}
