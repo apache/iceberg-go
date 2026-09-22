@@ -117,8 +117,112 @@ Tests requiring Spark 4 (currently the variant and unknown-type tests) automatic
 | Get Partition Specs      |     X     |
 | Get Manifests            |     X     |
 | Create New Manifests     |     X     |
-| Plan Scan                |     x     |
-| Plan Scan for Snapshot   |     x     |
+| Plan Scan                | Local + Remote |
+| Plan Scan for Snapshot   | Local + Remote |
+
+### REST Scan Planning
+
+REST catalogs can plan scans on the server, including asynchronous plans,
+batched task retrieval, and plan-scoped storage credentials. Enable this per
+scan with `table.WithScanPlanningMode`; existing scans continue to plan locally.
+
+| Scan option | Behavior |
+| :---------- | :------- |
+| `table.ScanPlanningLocal` (default) | Read manifests locally; no planning endpoints required. |
+| `table.ScanPlanningRemote` | Require the advertised plan endpoint. Async or fanout responses also require their continuation endpoints; missing capabilities return an error. |
+| `table.ScanPlanningAuto` | Use remote planning when submission, polling, and task retrieval endpoints are advertised; otherwise plan locally. Errors after choosing remote are returned, without falling back to local. |
+
+Capabilities come from `GET /v1/config`. `rest.Catalog.SupportsPlanTableScan()`
+checks submission support, while `SupportsFullRemoteScanPlanning()` checks
+submission, polling, and task retrieval. Cancellation is best-effort and is not
+required for automatic remote planning. In `auto` mode, catalogs
+without a planner retain local planning.
+
+The scanner does not honor the REST `scan-planning-mode` configuration key
+(`client`/`server`). A catalog requiring `server` mode may rely on planning to
+vend plan-scoped storage credentials. Default local planning, explicit `local`,
+or an `auto` fallback can instead read manifests with the table's storage
+credentials, which may use a different identity or lack the required access.
+For these deployments, explicitly select `table.ScanPlanningRemote` on every
+scan; do not rely on the server configuration or `auto` to enforce remote
+planning. Remote mode returns an error if a required capability is missing.
+
+```go
+// tbl is a table loaded from a rest.Catalog.
+ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+defer cancel()
+
+scan := tbl.Scan(
+    table.WithScanPlanningMode(table.ScanPlanningRemote),
+    table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("tenant_id"), "acme")),
+    table.WithSelectedFields("id", "tenant_id"),
+)
+defer scan.Close()
+
+tasks, err := scan.PlanFiles(ctx)
+if err != nil {
+    return err
+}
+// Read using this scan so its plan-scoped credentials remain attached.
+_, records, err := scan.ReadTasks(ctx, tasks)
+if err != nil {
+    return err
+}
+for record, err := range records {
+    if err != nil {
+        return err
+    }
+    // Consume the Arrow record batch here.
+    record.Release()
+}
+```
+
+`WithSnapshotID`, `WithSnapshotAsOf`, and tag scans use the historical schema;
+branch scans use the current table schema. File ranges follow
+`read.split.target-size` for both local and remote planning. Remote incremental
+scans and `_last_updated_sequence_number` projection are not supported. For
+row-lineage scans requiring that column, `auto` chooses local planning and
+`remote` returns an error.
+
+Plan and task POSTs retry HTTP 408, 429, 500, 502, 503, and 504 up to three times
+with jittered backoff, reusing the same UUIDv7 idempotency key. Other HTTP errors,
+transport failures, and malformed successful responses are returned directly.
+`Retry-After` is honored up to the caller's deadline (or capped at five seconds
+without a deadline). A new explicit call generates a new key unless one is
+supplied by the caller. `WaitForPlanOptions` controls polling delays and retry
+limits; use a context deadline to bound the complete operation. Cancellation
+during polling and exhausted polling trigger best-effort server cleanup. Recognized expired
+plans return `rest.ErrPlanExpired`; expired task handles return
+`rest.ErrNoSuchPlanTask`. Callers decide whether to submit a new plan.
+
+Close the scan after consuming its tasks, including when tasks are never read.
+Plan-scoped credentials remain alive for active readers; closing or replacing
+the plan releases them when those readers finish. They cannot be renewed from
+the table-credentials endpoint. Once `ReadTasks` returns an iterator, iterate it
+(even if stopping early) to release its reader lease.
+
+OpenTelemetry uses the application's global tracer and meter providers, with
+scope `github.com/apache/iceberg-go/scan-planning`; no SDK is installed by the
+library. Logical endpoint calls emit `iceberg.scan.planning.<operation>` spans
+and the following instruments:
+
+| Instrument | Meaning |
+| :--------- | :------ |
+| `iceberg.scan.planning.requests` | Logical endpoint calls, labeled by operation and success/error outcome. |
+| `iceberg.scan.planning.request.duration` | Endpoint call duration including retries, in milliseconds. |
+| `iceberg.scan.planning.retries` | Additional attempts after transient HTTP failures. |
+| `iceberg.scan.planning.expirations` | Recognized expired plan or task responses. |
+| `iceberg.scan.planning.fallbacks` | Auto mode choosing local due to capability or row-lineage constraints. |
+
+Operations are `plan`, `fetch-result`, `fetch-tasks`, and `cancel`. Attributes
+contain only operation, outcome, or fallback reason; they omit table names,
+filters, tokens, credentials, and raw error messages. These client metrics
+complement the existing scan/commit metrics reporter.
+
+The in-process local/remote parity test runs with `go test ./catalog/rest`.
+For Java interoperability, run `make integration-rest-scan-planning` (Docker
+required). Remote planning is opt-in, with no migration required for existing
+local scans.
 
 ### Catalog Support
 
