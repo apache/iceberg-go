@@ -38,8 +38,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const reorderCreditsPerWorker = 2
-
 type reorderGateIO struct {
 	iceio.LocalFS
 
@@ -233,16 +231,60 @@ func TestArrowScanReorderHeapBoundedWhileHeadTaskLags(t *testing.T) {
 		synctest.Wait()
 
 		held := gateIO.gatedCloses()
-		bound := numWorkers * reorderCreditsPerWorker
+		bound := (numWorkers - 1) * maxInFlightTasksPerWorker
 		if held > bound {
-			t.Errorf("scan held %d batches from the %d out-of-order tasks while task 0 was gated, %d bytes in Arrow buffers, bound is numWorkers x K = %d x %d = %d",
-				held, files-1, mem.CurrentAlloc(), numWorkers, reorderCreditsPerWorker, bound)
+			t.Errorf("scan completed %d of the %d out-of-order tasks while task 0 was gated, %d bytes in Arrow buffers, bound is (numWorkers - 1) x maxInFlightTasksPerWorker = %d x %d = %d",
+				held, files-1, mem.CurrentAlloc(), numWorkers-1, maxInFlightTasksPerWorker, bound)
 		}
 
 		gateIO.release()
 		result := <-done
 		require.NoError(t, result.err)
 		require.Equal(t, int64(files*rowsPerFile), result.rows)
+		mem.AssertSize(t, 0)
+	})
+}
+
+func TestArrowScanReorderCancelWhileWorkersWaitForTaskCredits(t *testing.T) {
+	const (
+		files       = 16
+		rowsPerFile = 256
+		numWorkers  = 4
+	)
+
+	synctest.Test(t, func(t *testing.T) {
+		dir := filepath.ToSlash(t.TempDir())
+		gateIO := &reorderGateIO{}
+		tbl, tasks := newReorderScanFixture(t, dir, files, rowsPerFile, gateIO)
+		gateIO.arm(tasks[0].File.FilePath(), nil)
+
+		mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+		ctx, cancel := context.WithCancel(compute.WithAllocator(context.Background(), mem))
+		defer cancel()
+		_, records, err := tbl.Scan(WithMaxConcurrency(numWorkers)).ReadTasks(ctx, tasks)
+		require.NoError(t, err)
+
+		done := make(chan error, 1)
+		go func() {
+			for rec, err := range records {
+				if err != nil {
+					done <- err
+
+					return
+				}
+				rec.Release()
+			}
+			done <- nil
+		}()
+
+		synctest.Wait()
+		require.Equal(t, numWorkers-1, gateIO.gatedCloses())
+
+		cancel()
+		require.ErrorIs(t, <-done, context.Canceled)
+
+		gateIO.release()
+		synctest.Wait()
 		mem.AssertSize(t, 0)
 	})
 }
