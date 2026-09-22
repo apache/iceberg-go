@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,18 +36,20 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/require"
 )
 
 type reorderGateIO struct {
 	iceio.LocalFS
 
-	mu       sync.Mutex
-	headPath string
-	gate     chan struct{}
-	closes   chan<- struct{}
-	released bool
-	closed   int
+	mu         sync.Mutex
+	headPath   string
+	gate       chan struct{}
+	createGate chan struct{}
+	closes     chan<- struct{}
+	released   bool
+	closed     int
 }
 
 func (g *reorderGateIO) arm(headPath string, closes chan<- struct{}) {
@@ -67,8 +70,6 @@ func (g *reorderGateIO) Open(name string) (iceio.File, error) {
 
 	if gate != nil && name == headPath {
 		<-gate
-
-		return g.LocalFS.Open(name)
 	}
 
 	f, err := g.LocalFS.Open(name)
@@ -79,13 +80,39 @@ func (g *reorderGateIO) Open(name string) (iceio.File, error) {
 	return &reorderCountingFile{File: f, owner: g}, nil
 }
 
+func (g *reorderGateIO) armCreate() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.createGate = make(chan struct{})
+}
+
+func (g *reorderGateIO) Create(name string) (iceio.FileWriter, error) {
+	g.mu.Lock()
+	gate := g.createGate
+	g.mu.Unlock()
+
+	if gate != nil {
+		<-gate
+	}
+
+	return g.LocalFS.Create(name)
+}
+
+func (g *reorderGateIO) releaseCreate() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.createGate != nil {
+		close(g.createGate)
+		g.createGate = nil
+	}
+}
+
 func (g *reorderGateIO) noteClose() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if g.released {
-		return
-	}
 	g.closed++
 	if g.closes != nil {
 		select {
@@ -285,6 +312,90 @@ func TestArrowScanReorderCancelWhileWorkersWaitForTaskCredits(t *testing.T) {
 
 		gateIO.release()
 		synctest.Wait()
+		mem.AssertSize(t, 0)
+	})
+}
+
+func TestRecordSinkHandsOffCreditOnce(t *testing.T) {
+	ctx := context.Background()
+	task := tblutils.Enumerated[FileScanTask]{Index: 3}
+	out := make(chan enumeratedRecord, 4)
+	sink := newRecordSink(out)
+
+	require.NoError(t, sink.reserve(ctx))
+	sink.fail(task, errors.New("open failed"))
+	failed := <-out
+	require.Error(t, failed.Err)
+	require.NotNil(t, failed.credits)
+
+	blocked, cancel := context.WithCancel(ctx)
+	cancel()
+	require.ErrorIs(t, sink.reserve(blocked), context.Canceled)
+	failed.credits.release()
+	require.NoError(t, sink.reserve(ctx))
+
+	sink.send(enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{Index: 0}})
+	sink.send(enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{Index: 1, Last: true}})
+	sink.fail(task, errors.New("close failed"))
+	first, last, afterLast := <-out, <-out, <-out
+	require.Nil(t, first.credits)
+	require.NotNil(t, last.credits)
+	require.Nil(t, afterLast.credits)
+	require.ErrorIs(t, sink.reserve(blocked), context.Canceled)
+	last.credits.release()
+	require.NoError(t, sink.reserve(ctx))
+}
+
+func TestExecuteCompactionGroupRecordPipelineBounded(t *testing.T) {
+	const (
+		files                 = 32
+		rowsPerFile           = 256
+		numWorkers            = 4
+		recordBatchBufferSize = 2
+	)
+
+	synctest.Test(t, func(t *testing.T) {
+		dir := filepath.ToSlash(t.TempDir())
+		gateIO := &reorderGateIO{}
+		tbl, tasks := newReorderScanFixture(t, dir, files, rowsPerFile, gateIO)
+		gateIO.arm(tasks[0].File.FilePath(), nil)
+		gateIO.armCreate()
+
+		mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+		ctx := compute.WithAllocator(context.Background(), mem)
+
+		type groupResult struct {
+			result CompactionGroupResult
+			err    error
+		}
+		done := make(chan groupResult, 1)
+		go func() {
+			result, err := ExecuteCompactionGroup(ctx, tbl,
+				CompactionTaskGroup{PartitionKey: "unpartitioned", Tasks: tasks},
+				WithCompactionScanConcurrency(numWorkers),
+				WithCompactionRecordBatchBufferSize(recordBatchBufferSize))
+			done <- groupResult{result: result, err: err}
+		}()
+
+		synctest.Wait()
+		if got, want := gateIO.gatedCloses(), (numWorkers-1)*maxInFlightTasksPerWorker; got != want {
+			t.Errorf("%d tasks fully read while task 0 was gated in Open, want (workers - 1) x maxInFlightTasksPerWorker = %d", got, want)
+		}
+
+		gateIO.release()
+		synctest.Wait()
+		if got, want := gateIO.gatedCloses(), numWorkers*maxInFlightTasksPerWorker+recordBatchBufferSize+2; got != want {
+			t.Errorf("%d tasks fully read while the writer was gated in Create, want workers x maxInFlightTasksPerWorker + recordBatchBufferSize + 2 = %d", got, want)
+		}
+
+		gateIO.releaseCreate()
+		res := <-done
+		require.NoError(t, res.err)
+		var rows int64
+		for _, df := range res.result.NewDataFiles {
+			rows += df.Count()
+		}
+		require.Equal(t, int64(files*rowsPerFile), rows)
 		mem.AssertSize(t, 0)
 	})
 }

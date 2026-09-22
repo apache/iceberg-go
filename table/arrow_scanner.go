@@ -1241,13 +1241,6 @@ func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, t
 	return nil
 }
 
-type enumeratedRecord struct {
-	Record  tblutils.Enumerated[arrow.RecordBatch]
-	Task    tblutils.Enumerated[FileScanTask]
-	Err     error
-	credits taskCredits
-}
-
 const maxInFlightTasksPerWorker = 1
 
 type taskCredits chan struct{}
@@ -1257,10 +1250,6 @@ func newTaskCredits() taskCredits {
 }
 
 func (c taskCredits) acquire(ctx context.Context) error {
-	if c == nil {
-		return nil
-	}
-
 	select {
 	case c <- struct{}{}:
 		return nil
@@ -1275,28 +1264,50 @@ func (c taskCredits) release() {
 	}
 }
 
-type recordSink struct {
-	out     chan<- enumeratedRecord
+type enumeratedRecord struct {
+	Record  tblutils.Enumerated[arrow.RecordBatch]
+	Task    tblutils.Enumerated[FileScanTask]
+	Err     error
 	credits taskCredits
 }
 
-func newRecordSink(out chan<- enumeratedRecord) recordSink {
-	return recordSink{out: out, credits: newTaskCredits()}
+type recordSink struct {
+	out     chan<- enumeratedRecord
+	credits taskCredits
+	held    bool
 }
 
-func (s recordSink) reserve(ctx context.Context) error {
-	return s.credits.acquire(ctx)
+func newRecordSink(out chan<- enumeratedRecord) *recordSink {
+	return &recordSink{out: out, credits: newTaskCredits()}
 }
 
-func (s recordSink) send(rec enumeratedRecord) {
+func (s *recordSink) reserve(ctx context.Context) error {
+	if err := s.credits.acquire(ctx); err != nil {
+		return err
+	}
+	s.held = true
+
+	return nil
+}
+
+func (s *recordSink) send(rec enumeratedRecord) {
 	if rec.Record.Last {
-		rec.credits = s.credits
+		rec.credits = s.handOff()
 	}
 	s.out <- rec
 }
 
-func (s recordSink) fail(task tblutils.Enumerated[FileScanTask], err error) {
-	s.out <- enumeratedRecord{Task: task, Err: err}
+func (s *recordSink) fail(task tblutils.Enumerated[FileScanTask], err error) {
+	s.out <- enumeratedRecord{Task: task, Err: err, credits: s.handOff()}
+}
+
+func (s *recordSink) handOff() taskCredits {
+	if !s.held {
+		return nil
+	}
+	s.held = false
+
+	return s.credits
 }
 
 func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (iceSchema *iceberg.Schema, colIndices []int, rdr tblutils.FileReader, err error) {
@@ -1734,7 +1745,7 @@ func (as *arrowScan) processRecords(
 	columns []int,
 	pipeline []recProcessFn,
 	posSource *rowPositionSource,
-	sink recordSink,
+	sink *recordSink,
 ) error {
 	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, sink, nil)
 }
@@ -1765,7 +1776,7 @@ func (as *arrowScan) processRecordsWithPlans(
 	columns []int,
 	pipeline []recProcessFn,
 	posSource *rowPositionSource,
-	sink recordSink,
+	sink *recordSink,
 	plans *compiledFileFilterPlans,
 ) (err error) {
 	var (
@@ -1944,7 +1955,7 @@ func pruningFilterHasMissingInitialDefault(
 	return false, nil
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], sink recordSink, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
+func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], sink *recordSink, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
 			sink.fail(task, err)
@@ -2090,7 +2101,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	return err
 }
 
-func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, sink recordSink, invariants *arrowScanInvariants) (err error) {
+func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, sink *recordSink, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
 			sink.fail(task, err)
@@ -2317,10 +2328,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 							var err error
 							positionalDeletes, err = positionDeleteLoader.load(scanCtx, task.Value)
 							if err != nil {
-								select {
-								case records <- enumeratedRecord{Task: task, Err: err}:
-								case <-scanCtx.Done():
-								}
+								sink.fail(task, err)
 								cancel(err)
 
 								return
@@ -2329,20 +2337,14 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 
 						dvBitmap, err := dvLoader.load(scanCtx, filePath)
 						if err != nil {
-							select {
-							case records <- enumeratedRecord{Task: task, Err: err}:
-							case <-scanCtx.Done():
-							}
+							sink.fail(task, err)
 							cancel(err)
 
 							return
 						}
 						eqDeleteSets, err := equalityDeleteLoader.load(scanCtx, task.Value)
 						if err != nil {
-							select {
-							case records <- enumeratedRecord{Task: task, Err: err}:
-							case <-scanCtx.Done():
-							}
+							sink.fail(task, err)
 							cancel(err)
 
 							return
