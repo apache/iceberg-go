@@ -1141,7 +1141,7 @@ func TestRowDeltaRejectsInvalidDeletionVector(t *testing.T) {
 			errContains: "requires table format version >= 3",
 		},
 		{
-			name:          "deletion vector missing ref still fails on format version for v2",
+			name:          "format version check precedes field checks on v2",
 			formatVersion: 2,
 			deletes:       []iceberg.DataFile{newRewriteDeletionVector(t, dvPath, "", nil, nil)},
 			errContains:   "requires table format version >= 3",

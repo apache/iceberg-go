@@ -253,7 +253,7 @@ func buildTwoRowGroupTable(t *testing.T, tbl *table.Table) *table.Table {
 }
 
 // commitLegacyPosDelete adds posDel while tbl is still v2, then upgrades it to v3.
-// The no-op Delete creates a v3 snapshot, which gives the existing rows a _row_id.
+// The no-op Delete must keep committing a v3 snapshot: that snapshot gives the existing rows a _row_id.
 func commitLegacyPosDelete(t *testing.T, tbl *table.Table, posDel iceberg.DataFile) *table.Table {
 	t.Helper()
 	ctx := context.Background()

@@ -1189,6 +1189,7 @@ type deleteFilesToAddSet struct {
 	dvsByRef map[string]rewriteDeleteFileAddition
 }
 
+// validateDeletionVectorToAdd is safe on any DataFile and no-ops on non-DVs.
 func validateDeletionVectorToAdd(df iceberg.DataFile, formatVersion int, operation string) error {
 	if !IsDeletionVector(df) {
 		return nil
@@ -1303,41 +1304,39 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			continue
 		}
 
-		if IsDeletionVector(df) {
-			if err := validateDeletionVectorToAdd(df, meta.formatVersion, operation); err != nil {
-				return nil, err
-			}
-			// non-nil: validateDeletionVectorToAdd checked all three.
-			ref, offset, length := df.ReferencedDataFile(), df.ContentOffset(), df.ContentSizeInBytes()
-
-			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
-			if setToAdd.dvBlobs == nil {
-				setToAdd.dvBlobs = make(map[deletionVectorBlobKey]struct{}, len(deleteFiles))
-			}
-			if _, ok := setToAdd.dvBlobs[blob]; ok {
-				return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
-					operation, path, *offset, *length)
-			}
-			if _, ok := setToAdd.dvsByRef[*ref]; ok {
-				return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
-					operation, *ref)
-			}
-			if pathAlreadyAdded {
-				if _, ok := setToAdd.dvPaths[path]; !ok {
-					return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
-						path, operation)
-				}
-			}
-			if setToAdd.dvPaths == nil {
-				setToAdd.dvPaths = make(map[string]struct{}, len(deleteFiles))
-			}
-			if setToAdd.dvsByRef == nil {
-				setToAdd.dvsByRef = make(map[string]rewriteDeleteFileAddition, len(deleteFiles))
-			}
-			setToAdd.dvPaths[path] = struct{}{}
-			setToAdd.dvBlobs[blob] = struct{}{}
-			setToAdd.dvsByRef[*ref] = addition
+		if err := validateDeletionVectorToAdd(df, meta.formatVersion, operation); err != nil {
+			return nil, err
 		}
+		// non-nil: validateDeletionVectorToAdd checked all three.
+		ref, offset, length := df.ReferencedDataFile(), df.ContentOffset(), df.ContentSizeInBytes()
+
+		blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
+		if setToAdd.dvBlobs == nil {
+			setToAdd.dvBlobs = make(map[deletionVectorBlobKey]struct{}, len(deleteFiles))
+		}
+		if _, ok := setToAdd.dvBlobs[blob]; ok {
+			return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
+				operation, path, *offset, *length)
+		}
+		if _, ok := setToAdd.dvsByRef[*ref]; ok {
+			return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
+				operation, *ref)
+		}
+		if pathAlreadyAdded {
+			if _, ok := setToAdd.dvPaths[path]; !ok {
+				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+					path, operation)
+			}
+		}
+		if setToAdd.dvPaths == nil {
+			setToAdd.dvPaths = make(map[string]struct{}, len(deleteFiles))
+		}
+		if setToAdd.dvsByRef == nil {
+			setToAdd.dvsByRef = make(map[string]rewriteDeleteFileAddition, len(deleteFiles))
+		}
+		setToAdd.dvPaths[path] = struct{}{}
+		setToAdd.dvBlobs[blob] = struct{}{}
+		setToAdd.dvsByRef[*ref] = addition
 	}
 
 	return setToAdd, nil
