@@ -343,8 +343,14 @@ func (m *GoEnvelopeEncryptionManager) NewDecryptedInputFile(ctx context.Context,
 	if meta.PlaintextLength < 0 {
 		return nil, fmt.Errorf("%w: plaintext-length must be non-negative, got %d", ErrInvalidKeyMetadata, meta.PlaintextLength)
 	}
-	if len(meta.AADPrefix) == 0 {
-		return nil, fmt.Errorf("%w: aad-prefix must not be empty", ErrInvalidKeyMetadata)
+	// AADPrefix is bounded to exactly the length this implementation's own
+	// writer emits (gcmStreamAADPrefixLength): key metadata is Go-specific
+	// (not cross-implementation compatible; see the type doc comment), so
+	// there is no other length a valid file could carry. Without this
+	// ceiling, an oversized prefix would be re-allocated on every
+	// gcmStreamBlockAAD call in readBlock.
+	if len(meta.AADPrefix) != gcmStreamAADPrefixLength {
+		return nil, fmt.Errorf("%w: aad-prefix must be exactly %d bytes, got %d", ErrInvalidKeyMetadata, gcmStreamAADPrefixLength, len(meta.AADPrefix))
 	}
 
 	plainDEK, err := m.kms.UnwrapKey(ctx, meta.KeyID, meta.WrappedKey)

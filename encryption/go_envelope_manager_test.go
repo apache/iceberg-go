@@ -19,6 +19,7 @@ package encryption_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -263,7 +264,18 @@ func TestGoEnvelopeEncryptionManager_EmptyAADPrefixMetadataRejectedOnRead(t *tes
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
-	assert.ErrorContains(t, err, "aad-prefix must not be empty")
+	assert.ErrorContains(t, err, "aad-prefix must be exactly 16 bytes")
+}
+
+func TestGoEnvelopeEncryptionManager_OversizedAADPrefixMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestGoEnvelopeManager(t)
+	// 17 zero bytes, base64-encoded: one byte longer than gcmStreamAADPrefixLength.
+	oversized := base64.StdEncoding.EncodeToString(make([]byte, 17))
+	meta := []byte(fmt.Sprintf(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":16,"aad-prefix":"%s","plaintext-length":10}`, oversized))
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+	assert.ErrorContains(t, err, "aad-prefix must be exactly 16 bytes")
 }
 
 func TestGoEnvelopeEncryptionManager_ZeroBlockSizeMetadataRejectedOnRead(t *testing.T) {
@@ -594,4 +606,49 @@ func TestGoEnvelopeEncryptionManager_ConcurrentReadAtOverlaps(t *testing.T) {
 	// a single delay; the threshold below is generous to stay robust on
 	// slow or loaded CI machines while still failing on a serialized regression.
 	assert.Less(t, elapsed, numBlocks/2*delay, "concurrent ReadAt calls for distinct blocks must overlap, not serialize")
+}
+
+// TestGoEnvelopeEncryptionManager_BlockNoncesAreUnique pins the one GCM
+// property whose loss is catastrophic and silent: reusing a nonce under a
+// single key leaks the plaintext XOR of the two blocks and the GHASH
+// authentication key, yet a file sealed with a reused (or constant) nonce
+// still round-trips and decrypts correctly, so no round-trip, tamper, or
+// reorder test would ever catch a regression here. Sealing identical
+// plaintext in every block makes any nonce collision directly visible as
+// matching ciphertext bytes.
+func TestGoEnvelopeEncryptionManager_BlockNoncesAreUnique(t *testing.T) {
+	const (
+		blockSize = 16
+		numBlocks = 8
+		// AGS1 wire layout (see the GoEnvelopeEncryptionManager doc comment):
+		// an 8-byte header (4-byte "AGS1" magic + 4-byte little-endian block
+		// length), then each block as nonce(12) || ciphertext(blockSize) || tag(16).
+		headerLength  = 8
+		nonceLength   = 12
+		blockOverhead = 28 // nonceLength + 16-byte GCM tag
+	)
+	mgr, _ := newTestGoEnvelopeManager(t, encryption.WithBlockSize(blockSize))
+	// Every block carries byte-for-byte identical plaintext.
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), numBlocks)
+
+	ciphertext, _ := encryptAll(t, mgr, "kek-1", plaintext)
+	require.Len(t, ciphertext, headerLength+numBlocks*(blockSize+blockOverhead))
+
+	seenNonceAt := make(map[string]int, numBlocks)
+	cipherBlocks := make([][]byte, numBlocks)
+	for i := range numBlocks {
+		offset := headerLength + i*(blockSize+blockOverhead)
+		block := ciphertext[offset : offset+blockSize+blockOverhead]
+		nonce := string(block[:nonceLength])
+
+		if prev, ok := seenNonceAt[nonce]; ok {
+			t.Fatalf("block %d reused the nonce from block %d: GCM nonce reuse under a single key leaks the plaintext XOR and the GHASH authentication key", i, prev)
+		}
+		seenNonceAt[nonce] = i
+		cipherBlocks[i] = block
+	}
+
+	for i := 1; i < numBlocks; i++ {
+		assert.NotEqual(t, cipherBlocks[0], cipherBlocks[i], "identical plaintext in blocks 0 and %d must not produce identical ciphertext", i)
+	}
 }
