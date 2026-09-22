@@ -20,6 +20,7 @@ package table_test
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -168,15 +169,21 @@ func planGroupConcGroups(tb testing.TB, tbl *table.Table) []table.CompactionTask
 func groupConcOutputPaths(tb testing.TB, location string, before map[string]struct{}) []string {
 	tb.Helper()
 
-	paths, err := filepath.Glob(filepath.Join(location, "data", "*.parquet"))
-	require.NoError(tb, err)
-
 	var out []string
-	for _, p := range paths {
-		if _, ok := before[p]; !ok {
-			out = append(out, p)
+	err := filepath.WalkDir(filepath.Join(location, "data"), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
+		if entry.IsDir() || filepath.Ext(path) != ".parquet" {
+			return nil
+		}
+		if _, ok := before[path]; !ok {
+			out = append(out, path)
+		}
+
+		return nil
+	})
+	require.NoError(tb, err)
 
 	return out
 }
