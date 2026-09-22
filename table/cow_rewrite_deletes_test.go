@@ -39,6 +39,8 @@ type cowRewriteOp struct {
 // Once the file is replaced that delete no longer reaches the copied rows, so the rewrite itself must drop id=1.
 func TestCoWRewriteKeepsRowsDeleted(t *testing.T) {
 	deleteID1 := func(t *testing.T, tbl *table.Table) *table.Table {
+		t.Helper()
+
 		return mergeOnReadDelete(t, tbl, 1)
 	}
 	equalityDeleteID1 := func(t *testing.T, tbl *table.Table) *table.Table {
@@ -221,7 +223,7 @@ func copyOnWriteDelete(t *testing.T, tbl *table.Table, filter iceberg.BooleanExp
 	return tbl
 }
 
-// filteredOverwrite replaces the rows matching id with a single row newID.
+// filteredOverwrite replaces the rows matching filter with the given records.
 func filteredOverwrite(t *testing.T, tbl *table.Table, filter iceberg.BooleanExpression, recordsJSON string) *table.Table {
 	t.Helper()
 
@@ -266,7 +268,9 @@ func liveDataRecordCount(t *testing.T, tbl *table.Table) int64 {
 
 	fs, err := tbl.FS(t.Context())
 	require.NoError(t, err)
-	manifests, err := tbl.CurrentSnapshot().Manifests(fs)
+	snapshot := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	manifests, err := snapshot.Manifests(fs)
 	require.NoError(t, err)
 
 	var total int64

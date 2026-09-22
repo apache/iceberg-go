@@ -2796,9 +2796,9 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 //
 // Delete manifests are not pruned by the row filter: with filter id=2 the rewrite keeps id=1,
 // so a delete on id=1 must still be applied.
-// 
+//
 // Known limitation: every live delete manifest of the snapshot is read on each call,
-// With no partition pruning, so a narrow rewrite on a delete-heavy table pays for all of them.
+// with no partition pruning, so a narrow rewrite on a delete-heavy table pays for all of them.
 func (t *Transaction) rewriteScanTasks(fs io.IO, entries []iceberg.ManifestEntry) ([]FileScanTask, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
