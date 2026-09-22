@@ -231,7 +231,8 @@ type RewriteDataFilesOptions struct {
 	//	MaxConcurrency x (workers x (rows in the largest task + n) + (recordBatchBufferSize + 2) x n)
 	//
 	// rows, where workers, n and recordBatchBufferSize are the per-group
-	// values. Delete-side memory is outside this bound. Negative values
+	// values. Multiply rows by the average row width in bytes for a byte
+	// estimate. Delete-side memory is outside this bound. Negative values
 	// are rejected with [ErrInvalidOperation].
 	MaxConcurrency int
 }
