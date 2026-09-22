@@ -23,8 +23,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -1400,4 +1403,480 @@ func appendEqualityDelete(t *testing.T, tbl *table.Table, equalityFieldIDs []int
 	require.NoError(t, err)
 
 	return out
+}
+
+func newMaxConcPartitionedTable(t *testing.T, fs iceio.IO) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "data",
+	})
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	cat := &partialProgressCatalog{metadata: meta}
+
+	return table.New(
+		table.Identifier{"db", "max_conc_test"},
+		meta, location+"/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil },
+		cat,
+	)
+}
+
+func addMaxConcPartitions(t *testing.T, tbl *table.Table, partitions, filesPerPartition, rowsPerFile int) *table.Table {
+	t.Helper()
+
+	var nextID int64 = 1
+	for p := range partitions {
+		partition := fmt.Sprintf("p%d", p)
+		for f := range filesPerPartition {
+			ids := make([]int64, rowsPerFile)
+			for r := range rowsPerFile {
+				ids[r] = nextID
+				nextID++
+			}
+			tbl = addPartitionedRowsOnRef(t, tbl, table.MainBranch, fmt.Sprintf("p%d-%d", p, f), partition, ids...)
+		}
+	}
+
+	return tbl
+}
+
+func groupsByPartition(t *testing.T, tbl *table.Table) []table.CompactionTaskGroup {
+	t.Helper()
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+
+	byPart := make(map[string][]table.FileScanTask)
+	for _, task := range tasks {
+		part, ok := task.File.Partition()[1000].(string)
+		require.True(t, ok)
+		byPart[part] = append(byPart[part], task)
+	}
+	keys := make([]string, 0, len(byPart))
+	for k := range byPart {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	groups := make([]table.CompactionTaskGroup, 0, len(keys))
+	for _, k := range keys {
+		var total int64
+		for _, task := range byPart[k] {
+			total += task.File.FileSizeBytes()
+		}
+		groups = append(groups, table.CompactionTaskGroup{
+			PartitionKey:   k,
+			Tasks:          byPart[k],
+			TotalSizeBytes: total,
+		})
+	}
+
+	return groups
+}
+
+func rowsByPartitionValue(t *testing.T, tbl *table.Table) map[string]int64 {
+	t.Helper()
+
+	_, itr, err := tbl.Scan().ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	out := make(map[string]int64)
+	for rec, err := range itr {
+		require.NoError(t, err)
+		idx := rec.Schema().FieldIndices("data")
+		require.NotEmpty(t, idx)
+		col, ok := rec.Column(idx[0]).(*array.String)
+		require.True(t, ok)
+		for i := range int(rec.NumRows()) {
+			out[col.Value(i)]++
+		}
+		rec.Release()
+	}
+
+	return out
+}
+
+func manifestDataPartitions(t *testing.T, tbl *table.Table) []string {
+	t.Helper()
+
+	snap := tbl.CurrentSnapshot()
+	require.NotNil(t, snap)
+	fs, err := tbl.FS(t.Context())
+	require.NoError(t, err)
+	manifests, err := snap.Manifests(fs)
+	require.NoError(t, err)
+
+	var parts []string
+	for _, m := range manifests {
+		for e, err := range m.Entries(fs, false) {
+			require.NoError(t, err)
+			if e.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
+			df := e.DataFile()
+			if df.ContentType() != iceberg.EntryContentData {
+				continue
+			}
+			part, ok := df.Partition()[1000].(string)
+			require.True(t, ok)
+			parts = append(parts, part)
+		}
+	}
+
+	return parts
+}
+
+func manifestLiveDataPaths(t *testing.T, tbl *table.Table) []string {
+	t.Helper()
+
+	snap := tbl.CurrentSnapshot()
+	require.NotNil(t, snap)
+	fs, err := tbl.FS(t.Context())
+	require.NoError(t, err)
+	manifests, err := snap.Manifests(fs)
+	require.NoError(t, err)
+
+	var paths []string
+	for _, m := range manifests {
+		for e, err := range m.Entries(fs, false) {
+			require.NoError(t, err)
+			if e.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
+			df := e.DataFile()
+			if df.ContentType() != iceberg.EntryContentData {
+				continue
+			}
+			paths = append(paths, df.FilePath())
+		}
+	}
+
+	return paths
+}
+
+func TestRewriteDataFiles_MaxConcurrencyMatchesSequential(t *testing.T) {
+	tblSeq := newMaxConcPartitionedTable(t, iceio.LocalFS{})
+	tblSeq = addMaxConcPartitions(t, tblSeq, 8, 2, 5)
+	tblConc := newMaxConcPartitionedTable(t, iceio.LocalFS{})
+	tblConc = addMaxConcPartitions(t, tblConc, 8, 2, 5)
+
+	groupsSeq := groupsByPartition(t, tblSeq)
+	groupsConc := groupsByPartition(t, tblConc)
+	require.Len(t, groupsSeq, 8)
+	require.Len(t, groupsConc, 8)
+
+	txSeq := tblSeq.NewTransaction()
+	resSeq, err := txSeq.RewriteDataFiles(t.Context(), groupsSeq, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	committedSeq, err := txSeq.Commit(t.Context())
+	require.NoError(t, err)
+
+	txConc := tblConc.NewTransaction()
+	resConc, err := txConc.RewriteDataFiles(t.Context(), groupsConc, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	require.NoError(t, err)
+	committedConc, err := txConc.Commit(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, resSeq.RewrittenGroups, resConc.RewrittenGroups)
+	assert.Equal(t, resSeq.AddedDataFiles, resConc.AddedDataFiles)
+	assert.Equal(t, resSeq.RemovedDataFiles, resConc.RemovedDataFiles)
+	assert.Equal(t, resSeq.RemovedPositionDeleteFiles, resConc.RemovedPositionDeleteFiles)
+	assert.Equal(t, resSeq.RemovedEqualityDeleteFiles, resConc.RemovedEqualityDeleteFiles)
+	assert.Equal(t, resSeq.RemovedDeletionVectorFiles, resConc.RemovedDeletionVectorFiles)
+	assert.Equal(t, resSeq.BytesBefore, resConc.BytesBefore)
+	assert.Equal(t, 8, resConc.RewrittenGroups)
+	assert.Equal(t, 16, resConc.RemovedDataFiles)
+	assert.Equal(t, 8, resConc.AddedDataFiles)
+
+	assert.Equal(t, rowsByPartitionValue(t, committedSeq), rowsByPartitionValue(t, committedConc))
+	for p := range 8 {
+		assert.Equal(t, int64(10), rowsByPartitionValue(t, committedConc)[fmt.Sprintf("p%d", p)])
+	}
+
+	paths := manifestLiveDataPaths(t, committedConc)
+	require.Len(t, paths, 8)
+	assert.Len(t, map[string]struct{}{paths[0]: {}, paths[1]: {}, paths[2]: {}, paths[3]: {}, paths[4]: {}, paths[5]: {}, paths[6]: {}, paths[7]: {}}, 8)
+}
+
+func TestRewriteDataFiles_MaxConcurrencyNegativeRejected(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	tx := tbl.NewTransaction()
+	_, err := tx.RewriteDataFiles(t.Context(), nil, table.RewriteDataFilesOptions{MaxConcurrency: -1})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+
+	txPartial := tbl.NewTransaction()
+	_, err = txPartial.RewriteDataFiles(t.Context(), nil, table.RewriteDataFilesOptions{PartialProgress: true, MaxConcurrency: -1})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+}
+
+func TestRewriteDataFiles_MaxConcurrencyDeterministicOrder(t *testing.T) {
+	tblA := newMaxConcPartitionedTable(t, iceio.LocalFS{})
+	tblA = addMaxConcPartitions(t, tblA, 8, 1, 5)
+	tblB := newMaxConcPartitionedTable(t, iceio.LocalFS{})
+	tblB = addMaxConcPartitions(t, tblB, 8, 1, 5)
+
+	groupsA := groupsByPartition(t, tblA)
+	groupsB := groupsByPartition(t, tblB)
+
+	txA := tblA.NewTransaction()
+	_, err := txA.RewriteDataFiles(t.Context(), groupsA, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	require.NoError(t, err)
+	committedA, err := txA.Commit(t.Context())
+	require.NoError(t, err)
+
+	txB := tblB.NewTransaction()
+	_, err = txB.RewriteDataFiles(t.Context(), groupsB, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	require.NoError(t, err)
+	committedB, err := txB.Commit(t.Context())
+	require.NoError(t, err)
+
+	orderA := manifestDataPartitions(t, committedA)
+	orderB := manifestDataPartitions(t, committedB)
+	require.Len(t, orderA, 8)
+	require.Len(t, orderB, 8)
+	assert.Equal(t, orderA, orderB)
+	assert.Equal(t, []string{"p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"}, orderA)
+}
+
+type failOpenIO struct {
+	iceio.LocalFS
+	mu         sync.Mutex
+	failSubstr string
+	failErr    error
+}
+
+func (f *failOpenIO) setFail(substr string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failSubstr = substr
+	f.failErr = err
+}
+
+func (f *failOpenIO) Open(name string) (iceio.File, error) {
+	f.mu.Lock()
+	substr, failErr := f.failSubstr, f.failErr
+	f.mu.Unlock()
+	if substr != "" && strings.Contains(name, substr) {
+		return nil, failErr
+	}
+
+	return f.LocalFS.Open(name)
+}
+
+func TestRewriteDataFiles_MaxConcurrencyGroupFailure(t *testing.T) {
+	injected := errors.New("injected compaction read failure")
+
+	fsAtomic := &failOpenIO{}
+	tblAtomic := newMaxConcPartitionedTable(t, fsAtomic)
+	tblAtomic = addMaxConcPartitions(t, tblAtomic, 4, 1, 5)
+	groupsAtomic := groupsByPartition(t, tblAtomic)
+	require.Len(t, groupsAtomic, 4)
+	fsAtomic.setFail(groupsAtomic[2].Tasks[0].File.FilePath(), injected)
+
+	txAtomic := tblAtomic.NewTransaction()
+	_, err := txAtomic.RewriteDataFiles(t.Context(), groupsAtomic, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), injected.Error())
+
+	fsPartial := &failOpenIO{}
+	tblPartial := newMaxConcPartitionedTable(t, fsPartial)
+	tblPartial = addMaxConcPartitions(t, tblPartial, 4, 1, 5)
+	groupsPartial := groupsByPartition(t, tblPartial)
+	require.Len(t, groupsPartial, 4)
+	fsPartial.setFail(groupsPartial[1].Tasks[0].File.FilePath(), injected)
+	beforeFiles := parquetFiles(t, tblPartial.Location())
+
+	txPartial := tblPartial.NewTransaction()
+	result, err := txPartial.RewriteDataFiles(t.Context(), groupsPartial, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      1,
+		MaxConcurrency:  4,
+	})
+	require.Error(t, err)
+	require.NotNil(t, result)
+	assert.Contains(t, err.Error(), injected.Error())
+	assert.Empty(t, result.CompletedGroups)
+	assert.ElementsMatch(t, beforeFiles, parquetFiles(t, tblPartial.Location()))
+}
+
+type gateOpenIO struct {
+	iceio.LocalFS
+	mu      sync.Mutex
+	enabled bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gateOpenIO) enable() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.enabled = true
+	g.entered = make(chan struct{}, 32)
+	g.release = make(chan struct{})
+}
+
+func (g *gateOpenIO) releaseAll() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	select {
+	case <-g.release:
+	default:
+		close(g.release)
+	}
+}
+
+func (g *gateOpenIO) Open(name string) (iceio.File, error) {
+	g.mu.Lock()
+	enabled, entered, release := g.enabled, g.entered, g.release
+	g.mu.Unlock()
+	if enabled && strings.Contains(name, "/data/") {
+		select {
+		case <-release:
+		default:
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+	}
+
+	return g.LocalFS.Open(name)
+}
+
+func TestRewriteDataFiles_MaxConcurrencyContextCancel(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		gate := &gateOpenIO{}
+		tbl := newMaxConcPartitionedTable(t, gate)
+		tbl = addMaxConcPartitions(t, tbl, 8, 1, 10)
+		groups := groupsByPartition(t, tbl)
+		require.Len(t, groups, 8)
+		gate.enable()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		var rewriteErr error
+		go func() {
+			defer close(done)
+			tx := tbl.NewTransaction()
+			opts := table.RewriteDataFilesOptions{MaxConcurrency: 4}
+			if partial {
+				opts.PartialProgress = true
+				opts.MaxCommits = 1
+			}
+			_, rewriteErr = tx.RewriteDataFiles(ctx, groups, opts)
+		}()
+
+		for range 4 {
+			select {
+			case <-gate.entered:
+			case <-done:
+				t.Fatalf("rewrite finished before 4 groups were in flight, err=%v", rewriteErr)
+			case <-t.Context().Done():
+				t.Fatal("test context done while waiting for groups")
+			}
+		}
+		cancel()
+		gate.releaseAll()
+		<-done
+		require.Error(t, rewriteErr)
+		assert.ErrorIs(t, rewriteErr, context.Canceled)
+		assert.Equal(t, ctx.Err(), rewriteErr)
+	}
+}
+
+type countOpenFile struct {
+	iceio.File
+	owner *countOpenIO
+	once  sync.Once
+}
+
+func (f *countOpenFile) Close() error {
+	err := f.File.Close()
+	f.once.Do(func() {
+		f.owner.mu.Lock()
+		defer f.owner.mu.Unlock()
+		f.owner.cur--
+	})
+
+	return err
+}
+
+type countOpenIO struct {
+	iceio.LocalFS
+	mu   sync.Mutex
+	cur  int
+	peak int
+}
+
+func (c *countOpenIO) Open(name string) (iceio.File, error) {
+	f, err := c.LocalFS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(name, "/data/") {
+		c.mu.Lock()
+		c.cur++
+		if c.cur > c.peak {
+			c.peak = c.cur
+		}
+		c.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+
+		return &countOpenFile{File: f, owner: c}, nil
+	}
+
+	return f, nil
+}
+
+func (c *countOpenIO) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cur = 0
+	c.peak = 0
+}
+
+func (c *countOpenIO) getPeak() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.peak
+}
+
+func TestRewriteDataFiles_MaxConcurrencyLimitsInFlight(t *testing.T) {
+	for _, maxConc := range []int{4, 0, 1} {
+		counter := &countOpenIO{}
+		tbl := newMaxConcPartitionedTable(t, counter)
+		tbl = addMaxConcPartitions(t, tbl, 8, 1, 10)
+		groups := groupsByPartition(t, tbl)
+		require.Len(t, groups, 8)
+		counter.reset()
+
+		tx := tbl.NewTransaction()
+		_, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+			MaxConcurrency: maxConc,
+			GroupOptions:   []table.CompactionGroupOption{table.WithCompactionScanConcurrency(1)},
+		})
+		require.NoError(t, err)
+		_, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		peak := counter.getPeak()
+		if maxConc > 1 {
+			assert.LessOrEqual(t, peak, maxConc)
+			assert.GreaterOrEqual(t, peak, 2)
+		} else {
+			assert.Equal(t, 1, peak)
+		}
+	}
 }
