@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -846,6 +847,25 @@ func parquetFiles(t *testing.T, location string) []string {
 	return paths
 }
 
+func allParquetFiles(t *testing.T, location string) []string {
+	t.Helper()
+
+	var paths []string
+	err := filepath.WalkDir(filepath.Join(location, "data"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".parquet") {
+			paths = append(paths, filepath.ToSlash(path))
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return paths
+}
+
 func newPartialProgressPartitionedTable(t *testing.T) *table.Table {
 	t.Helper()
 
@@ -1605,6 +1625,10 @@ func TestRewriteDataFiles_MaxConcurrencyMatchesSequential(t *testing.T) {
 	paths := manifestLiveDataPaths(t, committedConc)
 	require.Len(t, paths, 8)
 	assert.Len(t, map[string]struct{}{paths[0]: {}, paths[1]: {}, paths[2]: {}, paths[3]: {}, paths[4]: {}, paths[5]: {}, paths[6]: {}, paths[7]: {}}, 8)
+	onDisk := allParquetFiles(t, committedConc.Location())
+	for _, p := range paths {
+		assert.Contains(t, onDisk, p)
+	}
 }
 
 func TestRewriteDataFiles_MaxConcurrencyNegativeRejected(t *testing.T) {
@@ -1694,7 +1718,7 @@ func TestRewriteDataFiles_MaxConcurrencyGroupFailure(t *testing.T) {
 	groupsPartial := groupsByPartition(t, tblPartial)
 	require.Len(t, groupsPartial, 4)
 	fsPartial.setFail(groupsPartial[1].Tasks[0].File.FilePath(), injected)
-	beforeFiles := parquetFiles(t, tblPartial.Location())
+	beforeFiles := allParquetFiles(t, tblPartial.Location())
 
 	txPartial := tblPartial.NewTransaction()
 	result, err := txPartial.RewriteDataFiles(t.Context(), groupsPartial, table.RewriteDataFilesOptions{
@@ -1706,7 +1730,7 @@ func TestRewriteDataFiles_MaxConcurrencyGroupFailure(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Contains(t, err.Error(), injected.Error())
 	assert.Empty(t, result.CompletedGroups)
-	assert.ElementsMatch(t, beforeFiles, parquetFiles(t, tblPartial.Location()))
+	assert.ElementsMatch(t, beforeFiles, allParquetFiles(t, tblPartial.Location()))
 }
 
 type gateOpenIO struct {
