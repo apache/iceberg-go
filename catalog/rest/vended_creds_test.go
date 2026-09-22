@@ -692,6 +692,96 @@ func TestPrefixScopedIOReplacesS3CredentialAtomically(t *testing.T) {
 	assert.NotContains(t, props, keyS3TokenExpiresAtMs)
 }
 
+func TestPrefixScopedIOClearsStaleADLSAuthForVendedToken(t *testing.T) {
+	t.Parallel()
+
+	const host = "acct.dfs.core.windows.net"
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.ADLSEndpoint:                        "dfs.core.windows.net",
+		iceio.ADLSSharedKeyAccountName:            "acct",
+		iceio.ADLSSharedKeyAccountKey:             "stale-key",
+		iceio.ADLSSasTokenPrefix + host:           "stale-sas",
+		keyAdlsSasExpiresAtMs + "." + host:        "1000",
+		iceio.ADLSConnectionStringPrefix + "acct": "stale-connection-string",
+	}, []StorageCredential{{
+		Prefix: "abfss://container@" + host + "/",
+		Config: iceberg.Properties{iceio.ADLSToken: "vended-token"},
+	}})
+
+	props := p.propertiesForLocation("abfss://container@" + host + "/table/metadata.json")
+
+	// The vended token and unrelated tuning properties survive.
+	assert.Equal(t, "vended-token", props[iceio.ADLSToken])
+	assert.Equal(t, "dfs.core.windows.net", props[iceio.ADLSEndpoint])
+
+	// Everything that outranks adls.token in the Azure auth chain is gone, so the
+	// vended token is what actually authenticates the read.
+	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountName)
+	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountKey)
+	assert.NotContains(t, props, iceio.ADLSSasTokenPrefix+host)
+	assert.NotContains(t, props, keyAdlsSasExpiresAtMs+"."+host)
+	assert.NotContains(t, props, iceio.ADLSConnectionStringPrefix+"acct")
+}
+
+func TestPrefixScopedIOKeepsCredentialsWhenVendedADLSTokenIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	const host = "acct.dfs.core.windows.net"
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.ADLSSharedKeyAccountName:  "acct",
+		iceio.ADLSSharedKeyAccountKey:   "working-key",
+		iceio.ADLSSasTokenPrefix + host: "working-sas",
+	}, []StorageCredential{{
+		Prefix: "abfss://container@" + host + "/",
+		Config: iceberg.Properties{iceio.ADLSToken: ""},
+	}})
+
+	props := p.propertiesForLocation("abfss://container@" + host + "/table/metadata.json")
+
+	// The Azure bucket factory skips an empty adls.token, so clearing on key
+	// presence alone would discard these working credentials and fall through to
+	// a weaker auth method.
+	assert.Equal(t, "acct", props[iceio.ADLSSharedKeyAccountName])
+	assert.Equal(t, "working-key", props[iceio.ADLSSharedKeyAccountKey])
+	assert.Equal(t, "working-sas", props[iceio.ADLSSasTokenPrefix+host])
+}
+
+func TestVendedCredsRefreshClearsStaleADLSAuth(t *testing.T) {
+	const host = "acct.dfs.core.windows.net"
+
+	var captured iceberg.Properties
+	iceio.Register("vended-adls-refresh-test", func(_ context.Context, _ *url.URL, props map[string]string) (iceio.IO, error) {
+		captured = iceberg.Properties(props)
+
+		return iceio.LocalFS{}, nil
+	})
+
+	r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
+		return iceberg.Properties{iceio.ADLSToken: "fresh-token"}, nil
+	})
+	r.location = "vended-adls-refresh-test://" + host + "/table/metadata.json"
+	r.props = iceberg.Properties{
+		iceio.ADLSSharedKeyAccountName:  "acct",
+		iceio.ADLSSharedKeyAccountKey:   "stale-key",
+		iceio.ADLSSasTokenPrefix + host: "stale-sas",
+	}
+	// Force the refresh branch: a cached IO whose credentials have expired.
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = time.Now().Add(-time.Hour)
+
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+
+	// The refresher merges through mergeVendedCredentials, so the freshly vended
+	// token is not shadowed by credentials inherited from the catalog config.
+	assert.Equal(t, "fresh-token", captured[iceio.ADLSToken])
+	assert.NotContains(t, captured, iceio.ADLSSharedKeyAccountName)
+	assert.NotContains(t, captured, iceio.ADLSSharedKeyAccountKey)
+	assert.NotContains(t, captured, iceio.ADLSSasTokenPrefix+host)
+}
+
 func TestPrefixScopedIODoesNotHoldLockDuringFilesystemLoad(t *testing.T) {
 	loadStarted := make(chan struct{})
 	releaseLoad := make(chan struct{})
