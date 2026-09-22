@@ -204,13 +204,25 @@ Tuning properties:
 
 ### Azure Data Lake Storage / Blob
 
-Authentication is selected in the following order (`io/gocloud/azure/azure.go`); the first matching option takes precedence:
+Authentication is selected in the following order (`io/gocloud/azure/azure.go`); the first applicable option wins, and if none of 1-4 apply the default credential chain (5) is used:
 
 1. Shared key: a nonempty `adls.auth.shared-key.account.name` selects this path and requires a nonempty `adls.auth.shared-key.account.key`.
 2. Per-host SAS token: `adls.sas-token.<hostname>`, where `<hostname>` exactly matches the storage account hostname (for example, `myaccount.dfs.core.windows.net`).
 3. Per-account connection string: `adls.connection-string.<account-name>` (for example, `adls.connection-string.myaccount`).
-4. Managed identity: `adls.auth.managed-identity.enabled` set to exactly `"true"` uses `ManagedIdentityCredential` directly. Set `adls.client-id` to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.
+4. Managed identity: `adls.auth.managed-identity.enabled` set to exactly `"true"` selects this path and uses `ManagedIdentityCredential` directly. Set `adls.client-id` to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.
 5. Default credential chain: `DefaultAzureCredential`, which includes managed identity among its credential sources.
+
+> **Note on cross-client parity.** The two properties in step 4 diverge from the
+> other clients. `adls.auth.managed-identity.enabled` is Go-specific: neither
+> Iceberg Java nor PyIceberg defines a property that forces
+> `ManagedIdentityCredential`, so catalog properties that set it do not carry
+> over. `adls.client-id` collides in name only — PyIceberg reads it as a service
+> principal client ID used together with `adls.client-secret` and
+> `adls.tenant-id`, neither of which iceberg-go defines (see the
+> [PyIceberg ADLS configuration](https://py.iceberg.apache.org/configuration/#azure-data-lake)),
+> while Java's `AzureProperties` defines no `adls.client-id` at all. Here it is
+> only ever read as a user-assigned managed identity ID, and only when step 4 is
+> selected.
 
 Tuning properties:
 

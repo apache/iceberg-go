@@ -63,9 +63,9 @@ const (
 	// select a user-assigned managed identity; on its own it uses the system-assigned
 	// managed identity.
 	//
-	// It is evaluated only after shared-key, SAS-token, and connection-string auth:
-	// shared-key credentials, a SAS-token property for the target hostname, or a
-	// connection-string property for the target account name take precedence and
+	// It is evaluated only after shared-key credentials, a SAS-token property for
+	// the target hostname, and a connection-string property for the target account
+	// name, all of which take precedence over it; if any of them is configured,
 	// this flag has no effect.
 	//
 	// This property is specific to this implementation. Neither the Java nor the
