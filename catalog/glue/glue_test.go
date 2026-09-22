@@ -2008,6 +2008,11 @@ func TestGlueCreateTableAlreadyExists(t *testing.T) {
 	assert := require.New(t)
 
 	mockGlueSvc := &mockGlueClient{}
+	// An explicit-location create consults the database to reject federated S3
+	// Tables up front; a non-federated database takes the generic create path.
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_database"),
+	}, mock.Anything).Return(federatedDatabaseOutput(""), nil).Once()
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return(&glue.CreateTableOutput{}, &types.AlreadyExistsException{
 			Message: aws.String("Table already exists"),
