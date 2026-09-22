@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/apache/iceberg-go/internal"
 )
 
 const (
@@ -546,6 +548,18 @@ func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	return ret
 }
 
+// Clone returns a deep copy of the partition spec, including mutable transform
+// values and the source-ID lookup index.
+func (ps *PartitionSpec) Clone() PartitionSpec {
+	clone := PartitionSpec{id: ps.id, fields: make([]PartitionField, len(ps.fields))}
+	for i, field := range ps.fields {
+		clone.fields[i] = clonePartitionField(field)
+	}
+	clone.initialize()
+
+	return clone
+}
+
 // CompatibleWith returns true if this partition spec is considered
 // compatible with the passed in partition spec. This means that the two
 // specs have equivalent field lists regardless of the spec id.
@@ -581,6 +595,13 @@ func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
 			}
 		}
 	}
+}
+
+// FieldsRef returns the partition fields owned by this spec for trusted
+// internal callers. The returned slice and everything reachable through the
+// fields must be treated as read-only.
+func (ps *PartitionSpec) FieldsRef(_ internal.PartitionSpecRef) []PartitionField {
+	return ps.fields
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {

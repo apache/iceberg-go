@@ -348,6 +348,10 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		TableInput:   constructTableInput(tableName, staged.Table, nil),
 	})
 	if err != nil {
+		if isAlreadyExistsException(err) {
+			return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, catalog.ErrTableAlreadyExists)
+		}
+
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 	}
 
@@ -537,6 +541,10 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		TableInput:   constructTableInput(tableName, tbl, nil),
 	})
 	if err != nil {
+		if isAlreadyExistsException(err) {
+			return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, catalog.ErrTableAlreadyExists)
+		}
+
 		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
 	}
 
@@ -608,6 +616,10 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			TableInput:   constructTableInput(tableName, staged.Table, nil),
 		})
 		if err != nil {
+			if isAlreadyExistsException(err) {
+				return nil, "", fmt.Errorf("failed to create table %s.%s: %w", database, tableName, catalog.ErrTableAlreadyExists)
+			}
+
 			return nil, "", err
 		}
 	}
@@ -860,6 +872,10 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		DatabaseInput: constructDatabaseInput(database, props),
 	})
 	if err != nil {
+		if isAlreadyExistsException(err) {
+			return fmt.Errorf("failed to create database %s: %w", database, catalog.ErrNamespaceAlreadyExists)
+		}
+
 		return fmt.Errorf("failed to create database %s: %w", database, err)
 	}
 
@@ -1290,4 +1306,11 @@ func descriptionProperty(props iceberg.Properties) (string, bool) {
 // add an Is method to a type from another package.
 func isConcurrentModificationException(err error) bool {
 	return errors.As(err, new(*types.ConcurrentModificationException))
+}
+
+// isAlreadyExistsException reports whether err is or wraps Glue's
+// AlreadyExistsException. The SDK type has no Is method, so errors.As is used
+// for a type-only check.
+func isAlreadyExistsException(err error) bool {
+	return errors.As(err, new(*types.AlreadyExistsException))
 }

@@ -67,9 +67,7 @@ func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID, filter iceberg.Boo
 		op = OpAppend
 	}
 	prod := newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
-	if filter != nil {
-		prod.producerImpl.(*overwriteFiles).filter = filter
-	}
+	prod.setOverwriteFilter(filter)
 
 	return prod
 }
@@ -1191,6 +1189,14 @@ type deleteFilesToAddSet struct {
 	dvsByRef map[string]rewriteDeleteFileAddition
 }
 
+func validateDeletionVectorFormatVersion(df iceberg.DataFile, formatVersion int, operation string) error {
+	if IsDeletionVector(df) && formatVersion < 3 {
+		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", df.FilePath(), operation)
+	}
+
+	return nil
+}
+
 // validateDeleteFilesToAdd performs metadata-only validation for delete files
 // supplied to a rewrite. Delete files may use an older partition spec, so the
 // partition values are checked against the spec carried by each file rather
@@ -1259,6 +1265,10 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			}
 		}
 
+		if err := validateDeletionVectorFormatVersion(df, meta.formatVersion, operation); err != nil {
+			return nil, err
+		}
+
 		if !IsDeletionVector(df) {
 			if meta.formatVersion >= 3 && df.ContentType() == iceberg.EntryContentPosDeletes {
 				return nil, fmt.Errorf("position delete file %s must be a deletion vector for v%d table for %s",
@@ -1277,10 +1287,6 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		}
 
 		if IsDeletionVector(df) {
-			if meta.formatVersion < 3 {
-				return nil, fmt.Errorf("deletion vector %s requires table format version >= 3 for %s",
-					path, operation)
-			}
 			ref := df.ReferencedDataFile()
 			if ref == nil || *ref == "" {
 				return nil, fmt.Errorf("deletion vector to add is missing referenced_data_file for %s", operation)
@@ -1722,8 +1728,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
-		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
-		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+		updater.setSkipDefaultValidator(true)
 	}
 	if cfg.dataSequenceNumber != nil {
 		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
@@ -2126,8 +2131,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
-		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
-		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+		updater.setSkipDefaultValidator(true)
 	}
 	if cfg.dataSequenceNumber != nil {
 		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
@@ -2450,6 +2454,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
+	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, filesToRewrite, fileSeqByPath, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -2497,6 +2502,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
+	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, withPartialDeletions, _, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -3273,6 +3279,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		metadata:         updatedMeta,
 		metadataLocation: t.tbl.metadataLocation,
 		ioF:              t.tbl.fsF,
+		manifestCache:    newSnapshotManifestCacheForMetadata(updatedMeta),
 		// Catalog planners can only see committed table state, not metadata
 		// staged inside this transaction. Keep transaction scans local so auto
 		// mode cannot silently return stale tasks.

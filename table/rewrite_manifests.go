@@ -171,16 +171,12 @@ func (r *rewriteManifests) supersededManifests(committed bool) []string {
 	return paths
 }
 
-func (r *rewriteManifests) existingManifests(parent *Snapshot) ([]iceberg.ManifestFile, error) {
+func (r *rewriteManifests) parentDependentManifests(_ context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
 	if parent == nil {
 		return nil, nil
 	}
 
 	return parent.Manifests(r.base.io)
-}
-
-func (r *rewriteManifests) deletedEntries(context.Context, *Snapshot) ([]iceberg.ManifestEntry, error) {
-	return nil, nil
 }
 
 // rebuildManifests reuses the clustered output when a concurrent commit only

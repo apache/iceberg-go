@@ -159,27 +159,21 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if s.scan.ioF == nil {
 		return nil, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
 	}
-	manifestListFS, err := s.scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	// An inherited manifest can occur in every later snapshot's manifest list.
 	// Read each manifest path once, just as the Java incremental append scan
 	// collects the selected manifests into a set before opening them.
 	manifestsByPath := make(map[string]iceberg.ManifestFile)
+	manifestFS := sharedSnapshotManifestFSF(s.scan.ioF)
 	for _, snapshot := range snapshots {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		manifests, err := snapshot.Manifests(manifestListFS)
+		manifestSet, err := planningScan.manifestSetWithFSF(ctx, snapshot, manifestFS)
 		if err != nil {
 			return nil, err
 		}
-		for _, manifest := range manifests {
-			if manifest.ManifestContent() != iceberg.ManifestContentData {
-				continue
-			}
+		for _, manifest := range manifestSet.dataManifests() {
 			if _, ok := appendSnapshots[manifest.SnapshotID()]; !ok {
 				continue
 			}
@@ -253,48 +247,13 @@ func (s *IncrementalAppendScan) toSnapshot() (*Snapshot, error) {
 }
 
 func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot, error) {
-	ancestors := AncestorsOf(toSnapshotID, s.scan.metadata.SnapshotByID)
-	if len(ancestors) == 0 {
-		return nil, fmt.Errorf("%w: ending snapshot not found: %d", iceberg.ErrInvalidArgument, toSnapshotID)
+	snapshots, err := incrementalSnapshotsBetween(
+		s.scan.metadata, s.fromSnapshotID, s.fromInclusive, toSnapshotID)
+	if err != nil {
+		return nil, err
 	}
 
-	if s.fromSnapshotID == nil {
-		slices.Reverse(ancestors)
-
-		return appendOnlySnapshots(ancestors)
-	}
-
-	fromID := *s.fromSnapshotID
-	if !s.fromInclusive {
-		if fromID == toSnapshotID {
-			return nil, fmt.Errorf("%w: starting snapshot %d must be a parent ancestor of ending snapshot %d for an exclusive scan",
-				iceberg.ErrInvalidArgument, fromID, toSnapshotID)
-		}
-		between, found := AncestorsBetween(toSnapshotID, fromID, s.scan.metadata.SnapshotByID)
-		if !found {
-			return nil, fmt.Errorf("%w: starting snapshot %d is not an ancestor of ending snapshot %d", iceberg.ErrInvalidArgument, fromID, toSnapshotID)
-		}
-		slices.Reverse(between)
-
-		return appendOnlySnapshots(between)
-	}
-
-	if s.scan.metadata.SnapshotByID(fromID) == nil {
-		return nil, fmt.Errorf("%w: starting snapshot not found: %d", iceberg.ErrInvalidArgument, fromID)
-	}
-	if !IsAncestorOf(toSnapshotID, fromID, s.scan.metadata.SnapshotByID) {
-		return nil, fmt.Errorf("%w: starting snapshot %d is not an ancestor of ending snapshot %d", iceberg.ErrInvalidArgument, fromID, toSnapshotID)
-	}
-	selected := make([]Snapshot, 0, len(ancestors))
-	for _, snapshot := range ancestors {
-		selected = append(selected, snapshot)
-		if snapshot.SnapshotID == fromID {
-			break
-		}
-	}
-	slices.Reverse(selected)
-
-	return appendOnlySnapshots(selected)
+	return appendOnlySnapshots(snapshots)
 }
 
 func appendOnlySnapshots(snapshots []Snapshot) ([]Snapshot, error) {

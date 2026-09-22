@@ -452,6 +452,8 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 	return SortOrder{orderID, fieldCopies}, nil
 }
 
+// cloneSortField copies mutable sort-field state, including pointer-backed
+// transforms whose values can be changed by metadata consumers.
 func cloneSortField(field SortField) SortField {
 	field.SourceIDs = slices.Clone(field.SourceIDs)
 	switch transform := field.Transform.(type) {

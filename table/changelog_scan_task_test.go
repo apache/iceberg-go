@@ -98,6 +98,9 @@ func TestChangelogScanTaskInterface(t *testing.T) {
 	require.Equal(t, ChangelogOpInsert, tasks[0].Operation())
 	require.Equal(t, ChangelogOpDelete, tasks[1].Operation())
 	require.Equal(t, ChangelogOpDelete, tasks[2].Operation())
+	require.Equal(t, data.FilePath(), tasks[0].ScanTask().File.FilePath())
+	require.Equal(t, data.FilePath(), tasks[1].ScanTask().File.FilePath())
+	require.Equal(t, data.FilePath(), tasks[2].ScanTask().File.FilePath())
 }
 
 func TestClassifyDeleteFiles(t *testing.T) {

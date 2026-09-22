@@ -438,7 +438,8 @@ func TestWaitForPlanBoundsSlowServerSideCancel(t *testing.T) {
 	}()
 
 	opts := fastWaitOpts
-	opts.CancelGracePeriod = 100 * time.Millisecond
+	// The grace bounds the whole DELETE, including reaching the handler, not just the stall.
+	opts.CancelGracePeriod = time.Second
 
 	// Run in a goroutine: without the grace bound a stalled cancel would hang
 	// WaitForPlan forever (its DELETE runs on a context detached from the caller's
@@ -452,12 +453,12 @@ func TestWaitForPlanBoundsSlowServerSideCancel(t *testing.T) {
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
-		// The server-side cancel runs on a context detached from the caller, so it
-		// may be issued slightly after WaitForPlan returns. Poll instead of reading
-		// the flag once to avoid a race with the detached cancel on slower runners.
+		// The DELETE is sent before WaitForPlan returns.
+		// But, the stalling handler records it concurrently with the client that already gave up at grace.
+		// Thus, poll instead of reading the flag once.
 		assert.Eventually(t, cancelStarted.Load, time.Second, 5*time.Millisecond,
 			"expected the server-side cancel to be attempted")
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("WaitForPlan hung on a stalled server-side cancel; CancelGracePeriod not enforced")
 	}
 }

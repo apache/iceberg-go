@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
@@ -44,6 +45,22 @@ type adlsLocation struct {
 	containerName string // Container (bucket) name
 	hostname      string // Hostname of the Azure storage account
 	path          string // Object path within the container
+}
+
+type azureCredentialFactories struct {
+	newDefaultCredential func(*azidentity.DefaultAzureCredentialOptions) (azcore.TokenCredential, error)
+	newManagedIdentity   func(*azidentity.ManagedIdentityCredentialOptions) (azcore.TokenCredential, error)
+}
+
+func productionAzureCredentialFactories() azureCredentialFactories {
+	return azureCredentialFactories{
+		newDefaultCredential: func(opts *azidentity.DefaultAzureCredentialOptions) (azcore.TokenCredential, error) {
+			return azidentity.NewDefaultAzureCredential(opts)
+		},
+		newManagedIdentity: func(opts *azidentity.ManagedIdentityCredentialOptions) (azcore.TokenCredential, error) {
+			return azidentity.NewManagedIdentityCredential(opts)
+		},
+	}
 }
 
 // createServiceURL creates an Azure blob service URL with the given parameters
@@ -109,6 +126,15 @@ func newAdlsLocation(adlsURI *url.URL) (*adlsLocation, error) {
 
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+	return createAzureBucketWithCredentialFactories(ctx, parsed, props, productionAzureCredentialFactories())
+}
+
+func createAzureBucketWithCredentialFactories(
+	ctx context.Context,
+	parsed *url.URL,
+	props map[string]string,
+	credentialFactories azureCredentialFactories,
+) (*blob.Bucket, error) {
 	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSasTokenPrefix)
 	adlsConnectionStrings := propertiesWithPrefix(props, io.ADLSConnectionStringPrefix)
 
@@ -173,7 +199,7 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			}
 		}
 
-		cred, err := azidentity.NewManagedIdentityCredential(miOpts)
+		cred, err := credentialFactories.newManagedIdentity(miOpts)
 		if err != nil {
 			return nil, fmt.Errorf("failed azidentity.NewManagedIdentityCredential: %w", err)
 		}
@@ -188,7 +214,7 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			return nil, err
 		}
 
-		cred, err := azidentity.NewDefaultAzureCredential(nil)
+		cred, err := credentialFactories.newDefaultCredential(nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed azidentity.NewDefaultAzureCredential: %w", err)
 		}

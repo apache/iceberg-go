@@ -18,10 +18,14 @@
 package table
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	parquetschema "github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/iceberg-go"
@@ -74,6 +78,240 @@ func buildRowGroupMetricsMetadata(t testing.TB, rowGroups, columns int, withStat
 	}
 
 	return meta
+}
+
+// buildDecimalRowGroupMetadata builds a single row group holding one decimal
+// column with the supplied plain-encoded min and max statistics. The min and
+// max are kept distinct so that confusing the lower bound with the upper one is
+// detectable.
+func buildDecimalRowGroupMetadata(t testing.TB, physical parquet.Type, typeLen int, precision, scale int32, minEnc, maxEnc []byte) *metadata.FileMetaData {
+	t.Helper()
+	node, err := parquetschema.NewPrimitiveNodeLogical("decimal", parquet.Repetitions.Required,
+		parquetschema.NewDecimalLogicalType(precision, scale), physical, typeLen, 1)
+	require.NoError(t, err)
+	root, err := parquetschema.NewGroupNode("schema", parquet.Repetitions.Required,
+		parquetschema.FieldList{node}, -1)
+	require.NoError(t, err)
+
+	size := int64(len(minEnc) + len(maxEnc))
+	builder := metadata.NewFileMetadataBuilder(parquetschema.NewSchema(root), parquet.NewWriterProperties(), nil)
+	rg := builder.AppendRowGroup()
+	rg.SetNumRows(2)
+	chunk := rg.NextColumnChunk()
+	var stats metadata.EncodedStatistics
+	stats.SetMin(minEnc)
+	stats.SetMax(maxEnc)
+	stats.SetNullCount(0)
+	chunk.SetStats(stats)
+	require.NoError(t, chunk.Finish(metadata.ChunkMetaInfo{
+		NumValues:        2,
+		DataPageOffset:   100,
+		IndexPageOffset:  -1,
+		CompressedSize:   size,
+		UncompressedSize: size,
+	}, false, false, metadata.EncodingStats{}))
+	require.NoError(t, rg.Finish(size, 0))
+
+	meta, err := builder.Finish()
+	require.NoError(t, err)
+
+	return meta
+}
+
+func testDecimalRowGroup(t *testing.T, meta *metadata.FileMetaData, field iceberg.Type, pred iceberg.BooleanExpression) bool {
+	t.Helper()
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "decimal", Type: field, Required: true,
+	})
+	expr, err := iceberg.BindExpr(schema, pred, true)
+	require.NoError(t, err)
+	eval := &inclusiveMetricsEval{expr: expr}
+	keep, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+	require.NoError(t, err)
+
+	return keep
+}
+
+// decimalOf builds a decimal predicate value from an unscaled value at the
+// given scale. Named to avoid shadowing by the package's many "dec" locals.
+func decimalOf(unscaled int64, scale int) iceberg.Decimal {
+	return iceberg.Decimal{Val: decimal128.FromI64(unscaled), Scale: scale}
+}
+
+// Parquet writes INT32/INT64-backed decimal statistics little-endian, while an
+// Iceberg bound is big-endian two's complement. Decoding the raw stat bytes as
+// an Iceberg bound therefore yields a wildly wrong value and prunes row groups
+// that do match, so those bounds are byte-reversed first. A
+// FIXED_LEN_BYTE_ARRAY-backed decimal is big-endian in Parquet's plain encoding
+// too, so it needs no conversion. Each case asserts in both directions: a row
+// group that can match must survive, and one that cannot must be pruned, so
+// neither a corrupted bound nor a silently dropped one passes.
+// See apache/iceberg-go#1876.
+func TestInclusiveMetricsEvalIntBackedDecimalRowGroup(t *testing.T) {
+	const scale = 2
+
+	// Unscaled bounds of the synthetic row group, at scale 2. A negative
+	// value takes the decoder's sign-bit path, so the mixed range covers it
+	// for the lower bound and the all-negative range for the upper bound.
+	ranges := []struct {
+		name                     string
+		minUnscaled, maxUnscaled int64
+	}{
+		{name: "mixed sign", minUnscaled: -659, maxUnscaled: 12345},
+		{name: "both negative", minUnscaled: -12345, maxUnscaled: -659},
+	}
+
+	int32LE := func(v int64) []byte {
+		return binary.LittleEndian.AppendUint32(nil, uint32(int32(v)))
+	}
+	int64LE := func(v int64) []byte {
+		return binary.LittleEndian.AppendUint64(nil, uint64(v))
+	}
+	// Big-endian two's complement, sign-extended to 16 bytes, as Parquet
+	// stores a FIXED_LEN_BYTE_ARRAY decimal and as Iceberg expects a bound.
+	flbaBE := func(v int64) []byte {
+		b := make([]byte, 8, 16)
+		if v < 0 {
+			copy(b, bytes.Repeat([]byte{0xff}, 8))
+		}
+
+		return binary.BigEndian.AppendUint64(b, uint64(v))
+	}
+
+	types := []struct {
+		name      string
+		physical  parquet.Type
+		typeLen   int
+		precision int
+		encode    func(int64) []byte
+	}{
+		{
+			name:     "INT32-backed decimal",
+			physical: parquet.Types.Int32, typeLen: -1, precision: 9,
+			encode: int32LE,
+		},
+		{
+			name:     "INT64-backed decimal",
+			physical: parquet.Types.Int64, typeLen: -1, precision: 18,
+			encode: int64LE,
+		},
+		{
+			// Control: already big-endian, so reversing it would break it.
+			name:     "FIXED_LEN_BYTE_ARRAY decimal",
+			physical: parquet.Types.FixedLenByteArray, typeLen: 16, precision: 38,
+			encode: flbaBE,
+		},
+	}
+
+	for _, rng := range ranges {
+		for _, tt := range types {
+			t.Run(rng.name+"/"+tt.name, func(t *testing.T) {
+				minUnscaled, maxUnscaled := rng.minUnscaled, rng.maxUnscaled
+				meta := buildDecimalRowGroupMetadata(t, tt.physical, tt.typeLen,
+					int32(tt.precision), scale, tt.encode(minUnscaled), tt.encode(maxUnscaled))
+				field := iceberg.DecimalTypeOf(tt.precision, scale)
+				ref := iceberg.Reference("decimal")
+
+				keep := func(pred iceberg.BooleanExpression) bool {
+					return testDecimalRowGroup(t, meta, field, pred)
+				}
+
+				// One positive and one negative assertion per bound. The
+				// "keeps" catch a bound decoded wrongly or swapped with its
+				// partner; the "prunes" catch a bound dropped rather than
+				// converted, which would silently disable decimal pruning.
+				assert.True(t, keep(iceberg.EqualTo(ref, decimalOf(minUnscaled, scale))),
+					"pruned a row group whose minimum matches")
+				assert.True(t, keep(iceberg.EqualTo(ref, decimalOf(maxUnscaled, scale))),
+					"pruned a row group whose maximum matches")
+				assert.False(t, keep(iceberg.LessThan(ref, decimalOf(minUnscaled, scale))),
+					"failed to prune using the lower bound")
+				assert.False(t, keep(iceberg.GreaterThan(ref, decimalOf(maxUnscaled, scale))),
+					"failed to prune using the upper bound")
+
+				// Equality one step outside each bound. Redundant against every
+				// regression we could think of, kept as cheap insurance: equality
+				// just past a bound is the most common real query shape, and an
+				// off-by-one there would otherwise rest on LessThan/GreaterThan
+				// alone.
+				assert.False(t, keep(iceberg.EqualTo(ref, decimalOf(minUnscaled-1, scale))),
+					"failed to prune a value one below the lower bound")
+				assert.False(t, keep(iceberg.EqualTo(ref, decimalOf(maxUnscaled+1, scale))),
+					"failed to prune a value one above the upper bound")
+			})
+		}
+	}
+}
+
+// TestInclusiveMetricsEvalRealParquetDecimalRowGroup covers the same ground
+// without hand-written statistics: it writes a real Parquet file with an
+// INT32-backed decimal column and prunes against the metadata the writer
+// produced, so the fixture above cannot drift from what Parquet actually emits.
+func TestInclusiveMetricsEvalRealParquetDecimalRowGroup(t *testing.T) {
+	const (
+		precision, scale = 9, 2
+		minUnscaled      = -659
+		maxUnscaled      = 12345
+	)
+
+	node, err := parquetschema.NewPrimitiveNodeLogical("decimal", parquet.Repetitions.Required,
+		parquetschema.NewDecimalLogicalType(precision, scale), parquet.Types.Int32, -1, 1)
+	require.NoError(t, err)
+	root, err := parquetschema.NewGroupNode("schema", parquet.Repetitions.Required,
+		parquetschema.FieldList{node}, -1)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	w := file.NewParquetWriter(&buf, root,
+		file.WithWriterProps(parquet.NewWriterProperties(parquet.WithStats(true))))
+	rgw, err := w.AppendRowGroupChecked()
+	require.NoError(t, err)
+	cw, err := rgw.NextColumn()
+	require.NoError(t, err)
+	i32w, ok := cw.(*file.Int32ColumnChunkWriter)
+	require.True(t, ok, "expected an Int32ColumnChunkWriter, got %T", cw)
+	_, err = i32w.WriteBatch([]int32{minUnscaled, maxUnscaled}, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, cw.Close())
+	require.NoError(t, rgw.Close())
+	require.NoError(t, w.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rdr.Close()) })
+
+	meta := rdr.MetaData()
+	chunk, err := meta.RowGroup(0).ColumnChunk(0)
+	require.NoError(t, err)
+	stats, err := chunk.Statistics()
+	require.NoError(t, err)
+	require.True(t, intBackedDecimal(stats.Descr()),
+		"writer did not produce an INT32-backed decimal, so this test no longer covers the bug")
+
+	field := iceberg.DecimalTypeOf(precision, scale)
+	ref := iceberg.Reference("decimal")
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "decimal", Type: field, Required: true,
+	})
+
+	keep := func(pred iceberg.BooleanExpression) bool {
+		expr, err := iceberg.BindExpr(schema, pred, true)
+		require.NoError(t, err)
+		eval := &inclusiveMetricsEval{expr: expr}
+		result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+		require.NoError(t, err)
+
+		return result
+	}
+
+	assert.True(t, keep(iceberg.EqualTo(ref, decimalOf(minUnscaled, scale))),
+		"pruned a row group holding the written minimum")
+	assert.True(t, keep(iceberg.EqualTo(ref, decimalOf(maxUnscaled, scale))),
+		"pruned a row group holding the written maximum")
+	assert.False(t, keep(iceberg.LessThan(ref, decimalOf(minUnscaled, scale))),
+		"failed to prune below the written minimum")
+	assert.False(t, keep(iceberg.GreaterThan(ref, decimalOf(maxUnscaled, scale))),
+		"failed to prune above the written maximum")
 }
 
 func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
