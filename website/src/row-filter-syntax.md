@@ -90,7 +90,7 @@ Operators `OpStartsWith` and `OpNotStartsWith` (`exprs.go:53-54`). The value mus
 
 ## Variant extraction
 
-`iceberg.Extract(ref, path, typ)` builds a term that navigates a dotted JSONPath into a `variant` column and casts the leaf to `typ`. It is an `UnboundTerm`, so it plugs into the same predicate builders as `iceberg.Reference`:
+`iceberg.Extract(ref, path, typ)` builds a term that navigates a member-selector path into a `variant` column and casts the leaf to `typ`. The path uses dot (`$.user.age`) or quoted-bracket (`$['user']['age']`) notation; array indexing (`$.items[0]`), wildcards, filters, and recursive descent are rejected at bind time. It is an `UnboundTerm`, so it plugs into the same predicate builders as `iceberg.Reference`:
 
 ```go
 filter := iceberg.EqualTo(
@@ -103,10 +103,10 @@ The referenced column must be a `variant`, and a target type is required. Suppor
 
 Caveats:
 
-- Extract predicates are evaluated as per-row residual filters. Row-group stats and bloom pruning skip them; comparison pruning against shredded variant bounds is best-effort.
-- Extract terms are DSL-only. There is no string row-filter form, and they are not REST-serializable, so they are dropped from any server-side pushed filter and evaluated locally.
+- Extract predicates prune whole data files by shredded-field bounds (best-effort, and only for shredded fields), then filter row by row. Row-group statistics and bloom filters do not apply to them.
+- Extract terms are DSL-only (no string row-filter form) and are not REST-serializable. Under local scan planning (the default) they run as local residuals; with remote scan planning, a filter containing an Extract term fails to serialize rather than being silently dropped.
 
-See [Variant Type](./variant.md) for shredding and the full type list.
+See [Variant Type](./variant.md) for shredding.
 
 ## Constants
 

@@ -36,11 +36,15 @@ Build the column with a variant builder and write it like any other Arrow column
 
 ```go
 import (
+    "fmt"
+
     "github.com/apache/arrow-go/v18/arrow"
     "github.com/apache/arrow-go/v18/arrow/array"
     "github.com/apache/arrow-go/v18/arrow/extensions"
     "github.com/apache/arrow-go/v18/arrow/memory"
     "github.com/apache/arrow-go/v18/parquet/variant"
+    "github.com/apache/iceberg-go"
+    "github.com/apache/iceberg-go/table"
 )
 
 // tbl was created with table.PropertyFormatVersion = "3" and this schema.
@@ -59,11 +63,13 @@ bldr.Append(val)
 
 col := bldr.NewArray()
 defer col.Release()
-rec := array.NewRecord(arrowSchema, []arrow.Array{col}, 1)
+rec := array.NewRecordBatch(arrowSchema, []arrow.Array{col}, 1)
 defer rec.Release()
 
 tx := tbl.NewTransaction()
-_ = tx.AppendTable(ctx, array.NewTableFromRecords(arrowSchema, []arrow.Record{rec}), 1024, nil)
+arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+defer arrTable.Release()
+_ = tx.AppendTable(ctx, arrTable, 1024, nil)
 tbl, _ = tx.Commit(ctx)
 ```
 
@@ -95,27 +101,10 @@ configuration is required.
 
 ## Filtering on variant fields
 
-`iceberg.Extract(ref, path, typ)` builds a term that navigates a dotted JSONPath
-into a variant column and casts the leaf to `typ`. It plugs into the same predicate
-builders as `iceberg.Reference`:
-
-```go
-filter := iceberg.EqualTo(
-    iceberg.Extract(iceberg.Reference("payload"), "$.user.age", iceberg.PrimitiveTypes.Int64),
-    int64(30),
-)
-// filter is a BooleanExpression; pass it to Scan().WithRowFilter(filter).
-```
-
-See [Row Filter Syntax](./row-filter-syntax.md#variant-extraction) for the supported
-target types and caveats.
+Filter on a field inside a variant with `iceberg.Extract`, which plugs into the
+usual predicate builders. See [Row Filter Syntax](./row-filter-syntax.md#variant-extraction)
+for usage, supported target types, and caveats.
 
 ## Constraints
 
 - A variant column cannot be a partition source or an identity-transform source.
-- Extract predicates are evaluated as per-row residual filters. Row-group stats and
-  bloom pruning skip them; comparison pruning against shredded variant bounds is
-  best-effort.
-- Extract terms are DSL-only: there is no string row-filter form, and they are not
-  REST-serializable, so they are dropped from any server-side pushed filter and
-  evaluated locally.

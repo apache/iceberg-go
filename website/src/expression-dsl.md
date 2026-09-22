@@ -56,7 +56,7 @@ A *term* is the left-hand side of a predicate. Iceberg-go has two flavors:
 
 - `Reference("column_name")` - an unbound term that names a column (`exprs.go:373`). Typing happens at bind time, when the expression is matched against a schema. This is what you almost always want.
 - `BoundReference` - the resolved form, produced by `Reference.Bind(schema, caseSensitive)` (`exprs.go:389`). You only encounter these when writing custom expression visitors.
-- `Extract(ref, path, type)` - a variant sub-path term that navigates a dotted JSONPath into a `variant` column and casts the leaf to `type` (`variant_extract.go`). Use it inside any predicate builder to filter on a field within a variant. See [Row Filter Syntax](./row-filter-syntax.md#variant-extraction).
+- `Extract(ref, path, typ)` - a variant sub-path term that navigates a member-selector path (`$.a.b` or `$['a']['b']`; no array indexing or wildcards) into a `variant` column and casts the leaf to `typ` (`variant_extract.go`). Use it inside any predicate builder to filter on a field within a variant. See [Row Filter Syntax](./row-filter-syntax.md#variant-extraction).
 
 The interfaces are:
 
@@ -127,7 +127,7 @@ For projection, evaluation, and visitor patterns, see `visitors.go` and the scan
 | Filter a scan or row-level delete | Convenience builders + `NewAnd`/`NewOr`/`NewNot` |
 | Combine many clauses dynamically | Start from `AlwaysTrue{}` (for AND) or `AlwaysFalse{}` (for OR), fold with `NewAnd`/`NewOr` |
 | Construct a predicate whose operator is chosen at runtime | `UnaryPredicate(op, term)`, `LiteralPredicate(op, term, lit)`, `SetPredicate(op, term, lits)` |
-| Filter on a field inside a variant column | `Extract(ref, path, type)` inside a predicate builder |
+| Filter on a field inside a variant column | `Extract(ref, path, typ)` inside a predicate builder |
 | Walk an expression tree | A custom `BooleanExprVisitor` from `visitors.go` |
 
 For the per-operator cookbook, return to [Row Filter Syntax](./row-filter-syntax.md).
