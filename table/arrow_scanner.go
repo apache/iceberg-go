@@ -2187,6 +2187,10 @@ func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-c
 				return
 			case enum, ok := <-sequenced:
 				if !ok {
+					if err := context.Cause(ctx); err != nil {
+						yield(nil, err)
+					}
+
 					return
 				}
 
