@@ -250,6 +250,31 @@ type sessionTransport struct {
 	cfg            aws.Config
 	service        string
 	newHash        func() hash.Hash
+	// signingOrigin is the configured catalog origin. Requests to a different
+	// origin (e.g. a redirect hop) are not signed, so the SigV4 Authorization
+	// header and session token never reach an unconfigured host.
+	signingOrigin *url.URL
+}
+
+// sameOrigin reports whether two URLs share scheme, host, and effective port.
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		defaultedPort(a) == defaultedPort(b)
+}
+
+func defaultedPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 // from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
@@ -299,7 +324,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r.Header.Set(k, v)
 	}
 
-	if s.signer != nil {
+	if s.signer != nil && (s.signingOrigin == nil || sameOrigin(s.signingOrigin, r.URL)) {
 		var payloadHash string
 		if r.Body == nil {
 			payloadHash = emptyStringHash
@@ -1139,38 +1164,37 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 
 		session.cfg, session.service = cfg, opts.sigv4Service
 		session.signer, session.newHash = v4.NewSigner(), sha256.New
+		session.signingOrigin = r.baseURI
 	}
 
 	return cl, cleanup, nil
 }
 
 // staticCredsFromProps returns a static credentials provider built from the
-// signing-credential properties. It reads the s3.* keys, falling back to the
-// Java-compatible rest.* aliases per field. It returns (nil, nil) when no
-// credential property is set, so the caller falls back to the default credential
-// chain, and an ErrIncompleteStaticCredentials error when the properties form an
-// incomplete pair rather than silently signing as a different identity.
+// signing-credential properties. It prefers the s3.* keys and falls back to the
+// Java-compatible rest.* aliases, resolving the tuple atomically from a single
+// namespace so a partial pair is never completed with fields from the other one.
+// It returns (nil, nil) when neither namespace sets any credential property, so
+// the caller falls back to the default credential chain, and an
+// ErrIncompleteStaticCredentials error when the chosen namespace is incomplete.
 func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, error) {
-	firstNonEmpty := func(keys ...string) string {
-		for _, k := range keys {
-			if v := props[k]; v != "" {
-				return v
-			}
+	namespaces := [][3]string{
+		{iceio.S3AccessKeyID, iceio.S3SecretAccessKey, iceio.S3SessionToken},
+		{keyRestAccessKeyID, keyRestSecretAccessKey, keyRestSessionToken},
+	}
+	for _, ns := range namespaces {
+		accessKey, secretKey, token := props[ns[0]], props[ns[1]], props[ns[2]]
+		if accessKey == "" && secretKey == "" && token == "" {
+			continue
+		}
+		if err := internalaws.ValidateStaticCredentials(ns[0], ns[1], ns[2], accessKey, secretKey, token); err != nil {
+			return nil, err
 		}
 
-		return ""
-	}
-	accessKey := firstNonEmpty(iceio.S3AccessKeyID, keyRestAccessKeyID)
-	secretKey := firstNonEmpty(iceio.S3SecretAccessKey, keyRestSecretAccessKey)
-	token := firstNonEmpty(iceio.S3SessionToken, keyRestSessionToken)
-	if accessKey == "" && secretKey == "" && token == "" {
-		return nil, nil
-	}
-	if err := internalaws.ValidateStaticCredentials(iceio.S3AccessKeyID, iceio.S3SecretAccessKey, iceio.S3SessionToken, accessKey, secretKey, token); err != nil {
-		return nil, err
+		return credentials.NewStaticCredentialsProvider(accessKey, secretKey, token), nil
 	}
 
-	return credentials.NewStaticCredentialsProvider(accessKey, secretKey, token), nil
+	return nil, nil
 }
 
 func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
