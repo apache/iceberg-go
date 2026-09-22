@@ -57,22 +57,32 @@ const (
 	ADLSEndpoint               = "adls.endpoint"
 	ADLSProtocol               = "adls.protocol"
 
-	// ADLSManagedIdentityEnabled opts in to authenticating with an Azure managed
-	// identity instead of the default credential chain. Pair it with ADLSClientID to
-	// select a user assigned identity; on its own it uses the system assigned identity.
+	// ADLSManagedIdentityEnabled uses ManagedIdentityCredential directly when set
+	// to "true", rather than the broader DefaultAzureCredential chain, which already
+	// tries managed identity among its other sources. Pair it with ADLSClientID to
+	// select a user-assigned managed identity; on its own it uses the system-assigned
+	// managed identity.
+	//
+	// It is evaluated only after shared-key, SAS-token, and connection-string auth:
+	// shared-key credentials, a SAS-token property for the target hostname, or a
+	// connection-string property for the target account name take precedence and
+	// this flag has no effect.
 	//
 	// This property is specific to this implementation. Neither the Java nor the
 	// PyIceberg implementation defines an equivalent property, so catalog properties
 	// that set it will not carry over to them.
 	ADLSManagedIdentityEnabled = "adls.auth.managed-identity.enabled"
 
-	// ADLSClientID selects a user assigned managed identity by client ID. It only
+	// ADLSClientID selects a user-assigned managed identity by client ID. It only
 	// takes effect when ADLSManagedIdentityEnabled is "true"; on its own it is ignored.
 	//
 	// PyIceberg recognizes the same "adls.client-id" key but uses it for service
-	// principal authentication, alongside "adls.client-secret" and "adls.tenant-id".
-	// This implementation defines neither of those, so the key is only ever read as a
-	// managed identity ID here.
+	// principal authentication, alongside "adls.client-secret" and "adls.tenant-id",
+	// which it requires to be set together; see
+	// https://py.iceberg.apache.org/configuration/#azure-data-lake. This
+	// implementation defines neither of those, so the key is only ever read as a
+	// user-assigned managed identity ID here. Java's AzureProperties defines no
+	// "adls.client-id" at all.
 	ADLSClientID = "adls.client-id"
 
 	// Not in use yet
