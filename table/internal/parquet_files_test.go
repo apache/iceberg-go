@@ -213,7 +213,7 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, tab
 			"dates": "2022-01-02",
 			"times": "17:30:34",
 			"timestamps": "2022-01-02T17:30:34.399",
-			"timestamptzs": "2022-01-02T17:30:34.399",
+			"timestamptzs": "2022-01-02T17:30:34.399Z",
 			"strings": "hello",
 			"uuids": "`+uuid.NewMD5(uuid.NameSpaceDNS, []byte("foo")).String()+`",
 			"binaries": "aGVsbG8=",
@@ -230,7 +230,7 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, tab
 			"dates": "2023-02-04",
 			"times": "13:21:04",
 			"timestamps": "2023-02-04T13:21:04.354",
-			"timestamptzs": "2023-02-04T13:21:04.354",
+			"timestamptzs": "2023-02-04T13:21:04.354Z",
 			"strings": "world",
 			"uuids": "`+uuid.NewMD5(uuid.NameSpaceDNS, []byte("bar")).String()+`",
 			"binaries": "d29ybGQ=",
@@ -1679,6 +1679,8 @@ func writeDictTestColumn(t *testing.T, tableProps iceberg.Properties, values []p
 
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 	writeProps := format.GetWriteProperties(tableProps).([]parquet.WriterProperty)
+	// Mirror getWriteProperties: Iceberg enables the cost-based dictionary fallback per column.
+	writeProps = append(writeProps, parquet.WithDictionaryCostFallbackFor(dictTestColumn, true))
 
 	root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, schema.FieldList{
 		schema.NewByteArrayNode(dictTestColumn, parquet.Repetitions.Required, -1),
@@ -2588,7 +2590,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 
 	ext, ok := arrowSc.Field(0).Type.(arrow.ExtensionType)
 	require.True(t, ok, "expected extension type, got %T", arrowSc.Field(0).Type)
-	assert.Equal(t, "parquet.variant", ext.ExtensionName())
+	assert.Equal(t, extensions.VariantExtensionName, ext.ExtensionName())
 
 	// The shredded layout collapses back to a plain VariantType in Iceberg.
 	iceSc, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
