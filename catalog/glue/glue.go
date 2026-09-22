@@ -335,6 +335,9 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return c.createS3TablesTable(ctx, database, tableName, identifier, schema, opts...)
 	}
 
+	// Write metadata with the catalog's configured credentials rather than the
+	// ambient default chain, matching the Glue calls' principal.
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
@@ -443,6 +446,11 @@ func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName s
 // the table: the caller does that only after a successful commit, so a read
 // failure never triggers a rollback of an already-created table.
 func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) error {
+	// Write managed-table metadata with the catalog's configured credentials, not
+	// the ambient default chain, so the metadata PUT uses the same principal as
+	// the Glue calls. Covers WriteMetadata and the staged.FS cleanup below.
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+
 	allocated, err := c.glueSvc.GetTable(ctx, &glue.GetTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
@@ -563,6 +571,9 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 	if current != nil && staged.Metadata().Equals(current.Metadata()) {
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
+	// Write metadata with the catalog's configured credentials rather than the
+	// ambient default chain, matching the Glue calls' principal.
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
