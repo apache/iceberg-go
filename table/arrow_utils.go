@@ -436,7 +436,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		switch dt.ExtensionName() {
 		case "arrow.uuid":
 			result.Type = iceberg.PrimitiveTypes.UUID
-		case "parquet.variant":
+		case extensions.VariantExtensionName, extensions.LegacyVariantExtensionName:
 			result.Type = iceberg.VariantType{}
 		case "geoarrow.wkb":
 			wkb, ok := dt.(*geoarrow.WKBType)
@@ -1994,6 +1994,11 @@ type recordWritingArgs struct {
 	maxWriteWorkers int
 	clustered       bool
 	factoryOpts     []writerFactoryOption
+
+	// recordBatchBufferSize overrides the rolling writers' record
+	// channel capacity; non-positive uses the default (see
+	// rollingDataWriterQueueCapacity).
+	recordBatchBufferSize int
 	// existingDVs maps a data file path to the positions already recorded in
 	// its current deletion vector. On the v3 DV write path these are folded
 	// into the newly written DV so a data file that already had a DV ends up

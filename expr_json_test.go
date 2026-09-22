@@ -668,3 +668,22 @@ func TestMarshalBoundNestedReferencePreservesPath(t *testing.T) {
 		})
 	}
 }
+
+func TestUnboundTransformRejectsWrappedReference(t *testing.T) {
+	t.Parallel()
+	// External wrappers can embed Reference, but binding
+	// rejects them before they can reach BoundTransform.MarshalJSON.
+	type wrappedReference struct {
+		iceberg.Reference
+	}
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "Nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
+		}}},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 16},
+		wrappedReference{iceberg.Reference("Nested.Value")})
+	_, err := term.Bind(schema, true)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "transform terms must wrap a direct reference")
+}

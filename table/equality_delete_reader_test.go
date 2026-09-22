@@ -811,11 +811,11 @@ func TestEqualityDeleteNullableFastPathKeys(t *testing.T) {
 			keyType: iceberg.PrimitiveTypes.Timestamp,
 			dataJSON: `[
 				{"row_id": 1, "key": null},
-				{"row_id": 2, "key": "1970-01-01T00:00:00.000000Z"},
-				{"row_id": 3, "key": "2024-01-02T03:04:05.000000Z"}
+				{"row_id": 2, "key": "1970-01-01T00:00:00.000000"},
+				{"row_id": 3, "key": "2024-01-02T03:04:05.000000"}
 			]`,
 			nullDeleteJSON: `[{"key": null}]`,
-			zeroDeleteJSON: `[{"key": "1970-01-01T00:00:00.000000Z"}]`,
+			zeroDeleteJSON: `[{"key": "1970-01-01T00:00:00.000000"}]`,
 		},
 	}
 
@@ -880,7 +880,7 @@ func TestEqualityDeleteNullableCompositeFastPathKey(t *testing.T) {
 			name: "partially null key",
 			dataJSON: `[
 				{"row_id": 1, "id": 7, "deleted_at": null},
-				{"row_id": 2, "id": 7, "deleted_at": "1970-01-01T00:00:00.000000Z"},
+				{"row_id": 2, "id": 7, "deleted_at": "1970-01-01T00:00:00.000000"},
 				{"row_id": 3, "id": 8, "deleted_at": null},
 				{"row_id": 4, "id": null, "deleted_at": null}
 			]`,
@@ -891,7 +891,7 @@ func TestEqualityDeleteNullableCompositeFastPathKey(t *testing.T) {
 			name: "all-null key",
 			dataJSON: `[
 				{"row_id": 1, "id": null, "deleted_at": null},
-				{"row_id": 2, "id": null, "deleted_at": "1970-01-01T00:00:00.000000Z"},
+				{"row_id": 2, "id": null, "deleted_at": "1970-01-01T00:00:00.000000"},
 				{"row_id": 3, "id": 7, "deleted_at": null}
 			]`,
 			deleteJSON: `[{"id": null, "deleted_at": null}]`,

@@ -1572,6 +1572,12 @@ func convertPartitionTimestamp(value any) (Timestamp, bool) {
 	return Timestamp(converted), ok
 }
 
+func convertPartitionTimestampNano(value any) (TimestampNano, bool) {
+	converted, ok := convertPartitionInt64(value)
+
+	return TimestampNano(converted), ok
+}
+
 func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	switch typ.(type) {
 	case UnknownType:
@@ -1596,6 +1602,8 @@ func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
 	case TimestampTzType:
 		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
+	case TimestampNsType, TimestampTzNsType:
+		return makePartitionFieldStats[TimestampNano](convertPartitionTimestampNano), nil
 	case UUIDType:
 		return makePartitionFieldStats[uuid.UUID](convertPartitionUUID), nil
 	case BinaryType:

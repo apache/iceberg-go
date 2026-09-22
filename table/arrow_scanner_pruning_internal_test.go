@@ -121,6 +121,9 @@ func TestProcessRecordsUsesRowGroupFilterForPruning(t *testing.T) {
 	require.Len(t, reader.tester.BloomPreds, 1)
 	assert.Equal(t, 1, reader.tester.BloomPreds[0].FieldID)
 	assert.Len(t, reader.tester.BloomPreds[0].PhysBytes, 1)
+	require.Len(t, reader.tester.DictionaryPreds, 1)
+	assert.Equal(t, 1, reader.tester.DictionaryPreds[0].FieldID)
+	assert.Equal(t, reader.tester.BloomPreds[0].PhysBytes, reader.tester.DictionaryPreds[0].PhysBytes)
 
 	result := <-out
 	result.Record.Value.Release()
@@ -183,6 +186,9 @@ func TestProcessRecordsRebindsRowGroupFilterToPromotedFileSchema(t *testing.T) {
 	require.Len(t, reader.tester.BloomPreds, 1)
 	assert.Equal(t, []byte{1, 0, 0, 0}, reader.tester.BloomPreds[0].PhysBytes[0],
 		"the bloom predicate should use the INT32 file encoding")
+	require.Len(t, reader.tester.DictionaryPreds, 1)
+	assert.Equal(t, []byte{1, 0, 0, 0}, reader.tester.DictionaryPreds[0].PhysBytes[0],
+		"the dictionary predicate should use the INT32 file encoding")
 
 	result := <-out
 	result.Record.Value.Release()
@@ -227,6 +233,8 @@ func TestProcessRecordsDoesNotPruneMissingInitialDefault(t *testing.T) {
 	require.NotNil(t, reader.tester)
 	assert.Empty(t, reader.tester.BloomPreds,
 		"a missing field with an initial-default must disable bloom pruning")
+	assert.Empty(t, reader.tester.DictionaryPreds,
+		"a missing field with an initial-default must disable dictionary pruning")
 
 	result := <-out
 	result.Record.Value.Release()

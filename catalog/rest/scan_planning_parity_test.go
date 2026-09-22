@@ -219,8 +219,12 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		}
 		snapshotID, seq := int64((i+1)*10), int64(i+1)
 		path := fmt.Sprintf("mem://parity/list-%d.avro", snapshotID)
+		var parentSnapshotID *int64
+		if i == 1 {
+			parentSnapshotID = parityPtr(int64(10))
+		}
 		var list bytes.Buffer
-		require.NoError(t, iceberg.WriteManifestList(2, &list, snapshotID, nil, &seq, 0, manifests))
+		require.NoError(t, iceberg.WriteManifestList(2, &list, snapshotID, parentSnapshotID, &seq, 0, manifests))
 		require.NoError(t, fs.WriteFile(path, list.Bytes()))
 		if i == 0 {
 			committed, err := iceberg.ReadManifestList(bytes.NewReader(list.Bytes()))
@@ -228,7 +232,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 			mf = committed[0]
 		}
 		require.NoError(t, builder.AddSnapshot(&table.Snapshot{
-			SnapshotID: snapshotID, SequenceNumber: seq,
+			SnapshotID: snapshotID, ParentSnapshotID: parentSnapshotID, SequenceNumber: seq,
 			TimestampMs: time.Now().UnixMilli() + int64(i+1), ManifestList: path, SchemaID: parityPtr(0),
 		}))
 	}
