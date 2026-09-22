@@ -18,7 +18,9 @@
 package iceberg
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -51,6 +53,10 @@ func partitionTypeToAvroSchemaNonNullable(t *StructType) (*avro.Schema, error) {
 			node = internal.TimestampNode
 		case TimestampTzType:
 			node = internal.TimestampTzNode
+		case TimestampNsType:
+			node = internal.TimestampNsNode
+		case TimestampTzNsType:
+			node = internal.TimestampTzNsNode
 		case UUIDType:
 			node = internal.UUIDNode
 		case BooleanType:
@@ -281,4 +287,106 @@ func TestNonDayInt32PartitionAvroIntEncoding(t *testing.T) {
 	require.True(t, ok)
 	assert.IsType(t, int32(0), got, "plain Int32 partition must decode as int32, not time.Time")
 	assert.Equal(t, int32(42), got)
+}
+
+// TestNanosecondPartitionAvroSchema verifies that v3 nanosecond timestamp
+// types are accepted as partition types and round trip through Avro at
+// nanosecond precision. The read path in manifest.go already decodes
+// atype.TimestampNanos, so the write path has to emit it.
+func TestNanosecondPartitionAvroSchema(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  Type
+	}{
+		{"timestamp_ns", TimestampNsType{}},
+		{"timestamptz_ns", TimestampTzNsType{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			partitionType := &StructType{FieldList: []NestedField{
+				{ID: 1000, Name: "ts_ns", Type: tc.typ, Required: false},
+			}}
+
+			avroSchema, err := partitionTypeToAvroSchema(partitionType)
+			require.NoError(t, err)
+			require.NotNil(t, avroSchema)
+			nonNullableSchema, err := partitionTypeToAvroSchemaNonNullable(partitionType)
+			require.NoError(t, err)
+
+			// A value that is not a whole number of microseconds, so a
+			// micros-based logical type would lose the trailing 123 ns.
+			want := time.Date(2024, time.March, 1, 12, 0, 0, 456789123, time.UTC)
+
+			nonNullableEncoded, err := nonNullableSchema.Encode(map[string]any{"ts_ns": want})
+			require.NoError(t, err)
+			var nonNullableDecoded map[string]any
+			_, err = nonNullableSchema.Decode(nonNullableEncoded, &nonNullableDecoded)
+			require.NoError(t, err)
+			assert.Equal(t, want, nonNullableDecoded["ts_ns"])
+
+			encoded, err := avroSchema.Encode(map[string]any{"ts_ns": want})
+			require.NoError(t, err)
+
+			var decoded map[string]any
+			_, err = avroSchema.Decode(encoded, &decoded)
+			require.NoError(t, err)
+
+			got, ok := decoded["ts_ns"]
+			require.True(t, ok)
+			gotTime, isTime := got.(time.Time)
+			require.True(t, isTime, "nanosecond partition field must decode as time.Time, got %T", got)
+			assert.Equal(t, want.UnixNano(), gotTime.UTC().UnixNano(),
+				"nanosecond partition value must round trip without precision loss")
+		})
+	}
+}
+
+// TestNewManifestWriterV3NanosecondPartition verifies that a v3 manifest can
+// be written for a table with an identity partition on a nanosecond timestamp
+// column. Before the nanosecond arms existed in partitionTypeToAvroSchema,
+// this failed with "unsupported partition type: timestamp_ns".
+func TestNewManifestWriterV3NanosecondPartition(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  Type
+	}{
+		{"timestamp_ns", TimestampNsType{}},
+		{"timestamptz_ns", TimestampTzNsType{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := NewSchema(0,
+				NestedField{ID: 1, Name: "ts", Type: tc.typ, Required: true},
+			)
+			spec := NewPartitionSpecID(0,
+				PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "ts_identity", Transform: IdentityTransform{}},
+			)
+
+			writer, err := NewManifestWriter(3, io.Discard, spec, sc, 1)
+			require.NoError(t, err)
+			require.NotNil(t, writer)
+
+			values := []TimestampNano{1709294400456789123, -123456789}
+			for i, value := range values {
+				builder, err := NewDataFileBuilder(spec, EntryContentData,
+					fmt.Sprintf("data-%d.parquet", i), ParquetFile,
+					map[int]any{1000: value}, nil, nil, 1, 1)
+				require.NoError(t, err)
+				require.NoError(t, writer.Add(NewManifestEntry(
+					EntryStatusADDED, nil, nil, nil, builder.Build())))
+			}
+
+			manifest, err := writer.ToManifestFile("manifest.avro", 0)
+			require.NoError(t, err)
+			summaries := manifest.Partitions()
+			require.Len(t, summaries, 1)
+			assert.False(t, summaries[0].ContainsNull)
+			require.NotNil(t, summaries[0].LowerBound)
+			require.NotNil(t, summaries[0].UpperBound)
+			assert.Equal(t, binary.LittleEndian.AppendUint64(nil, uint64(values[1])), *summaries[0].LowerBound)
+			assert.Equal(t, binary.LittleEndian.AppendUint64(nil, uint64(values[0])), *summaries[0].UpperBound)
+		})
+	}
 }
