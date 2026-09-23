@@ -372,25 +372,16 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	if opts.MaxConcurrency > 1 {
 		results, err := executeCompactionGroups(ctx, t.tbl, groups, opts.GroupOptions, opts.MaxConcurrency)
 		if err != nil {
-			return result, err
+			return result, cleanupAtomicRewriteOutputs(ctx, t.tbl, results, err)
 		}
 		for _, gr := range results {
-			if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
-				continue
-			}
-			rewrite.ApplyResult(gr)
-			accumulateGroupMetrics(result, gr)
-			for _, df := range gr.SafePosDeletes {
-				stagedDeleteFiles[df.FilePath()] = struct{}{}
-			}
-			for _, df := range gr.SafeDeletionVectors {
-				stagedDeleteFiles[df.FilePath()] = struct{}{}
-			}
+			applyAtomicGroupResult(rewrite, result, stagedDeleteFiles, gr)
 		}
 	} else {
+		var applied []CompactionGroupResult
 		for _, group := range groups {
 			if err := ctx.Err(); err != nil {
-				return result, err
+				return result, cleanupAtomicRewriteOutputs(ctx, t.tbl, applied, err)
 			}
 
 			if len(group.Tasks) == 0 {
@@ -399,21 +390,11 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 			gr, err := ExecuteCompactionGroup(ctx, t.tbl, group, opts.GroupOptions...)
 			if err != nil {
-				return result, err
+				return result, cleanupAtomicRewriteOutputs(ctx, t.tbl, append(applied, gr), err)
 			}
+			applied = append(applied, gr)
 
-			if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
-				continue
-			}
-
-			rewrite.ApplyResult(gr)
-			accumulateGroupMetrics(result, gr)
-			for _, df := range gr.SafePosDeletes {
-				stagedDeleteFiles[df.FilePath()] = struct{}{}
-			}
-			for _, df := range gr.SafeDeletionVectors {
-				stagedDeleteFiles[df.FilePath()] = struct{}{}
-			}
+			applyAtomicGroupResult(rewrite, result, stagedDeleteFiles, gr)
 		}
 	}
 
@@ -448,12 +429,42 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	return result, nil
 }
 
+func applyAtomicGroupResult(rewrite *RewriteFiles, result *RewriteResult, stagedDeleteFiles map[string]struct{}, gr CompactionGroupResult) {
+	if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
+		return
+	}
+	rewrite.ApplyResult(gr)
+	accumulateGroupMetrics(result, gr)
+	for _, df := range gr.SafePosDeletes {
+		stagedDeleteFiles[df.FilePath()] = struct{}{}
+	}
+	for _, df := range gr.SafeDeletionVectors {
+		stagedDeleteFiles[df.FilePath()] = struct{}{}
+	}
+}
+
+func cleanupAtomicRewriteOutputs(ctx context.Context, tbl *Table, results []CompactionGroupResult, cause error) error {
+	fs, err := tbl.fsF(ctx)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("open table IO to clean up atomic rewrite outputs: %w", err))
+	}
+	if err := cleanupCompactionOutputs(fs, results); err != nil {
+		return errors.Join(cause, fmt.Errorf("clean up atomic rewrite outputs: %w", err))
+	}
+
+	return cause
+}
+
 func executeCompactionGroups(ctx context.Context, tbl *Table, groups []CompactionTaskGroup, groupOpts []CompactionGroupOption, maxConcurrency int) ([]CompactionGroupResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	limit := min(maxConcurrency, len(groups))
+	if limit < 1 {
+		limit = 1
+	}
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(min(maxConcurrency, len(groups)))
+	g.SetLimit(limit)
 	results := make([]CompactionGroupResult, len(groups))
 	for i, group := range groups {
 		if len(group.Tasks) == 0 {
@@ -467,8 +478,8 @@ func executeCompactionGroups(ctx context.Context, tbl *Table, groups []Compactio
 		})
 	}
 	if err := g.Wait(); err != nil {
-		if ctx.Err() != nil {
-			return results, ctx.Err()
+		if ctxErr := ctx.Err(); ctxErr != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return results, ctxErr
 		}
 
 		return results, err
@@ -715,17 +726,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 				return result, cleanupBatch(err, results...)
 			}
 			for _, gr := range results {
-				if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
-					continue
-				}
-				batchResults = append(batchResults, gr)
-				for _, df := range gr.OldDataFiles {
-					if _, ok := rewrittenPaths[df.FilePath()]; ok {
-						continue
-					}
-					rewrittenPaths[df.FilePath()] = struct{}{}
-					rewrittenFiles = append(rewrittenFiles, df)
-				}
+				batchResults, rewrittenFiles = appendPartialGroupResult(batchResults, rewrittenPaths, rewrittenFiles, gr)
 			}
 		} else {
 			for _, group := range batchGroups {
@@ -738,17 +739,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 					return result, cleanupBatch(err, gr)
 				}
 
-				if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
-					continue
-				}
-				batchResults = append(batchResults, gr)
-				for _, df := range gr.OldDataFiles {
-					if _, ok := rewrittenPaths[df.FilePath()]; ok {
-						continue
-					}
-					rewrittenPaths[df.FilePath()] = struct{}{}
-					rewrittenFiles = append(rewrittenFiles, df)
-				}
+				batchResults, rewrittenFiles = appendPartialGroupResult(batchResults, rewrittenPaths, rewrittenFiles, gr)
 			}
 		}
 
@@ -840,6 +831,22 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	}
 
 	return result, nil
+}
+
+func appendPartialGroupResult(batchResults []CompactionGroupResult, rewrittenPaths map[string]struct{}, rewrittenFiles []iceberg.DataFile, gr CompactionGroupResult) ([]CompactionGroupResult, []iceberg.DataFile) {
+	if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
+		return batchResults, rewrittenFiles
+	}
+	batchResults = append(batchResults, gr)
+	for _, df := range gr.OldDataFiles {
+		if _, ok := rewrittenPaths[df.FilePath()]; ok {
+			continue
+		}
+		rewrittenPaths[df.FilePath()] = struct{}{}
+		rewrittenFiles = append(rewrittenFiles, df)
+	}
+
+	return batchResults, rewrittenFiles
 }
 
 func recordCommittedRewriteBatch(
