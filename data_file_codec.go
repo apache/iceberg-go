@@ -386,6 +386,10 @@ func writePartitionTypeFingerprint(key *strings.Builder, typ Type) error {
 		key.WriteByte('t')
 	case TimestampTzType:
 		key.WriteByte('z')
+	case TimestampNsType:
+		key.WriteByte('n')
+	case TimestampTzNsType:
+		key.WriteByte('N')
 	case UUIDType:
 		key.WriteByte('u')
 	case BooleanType:
