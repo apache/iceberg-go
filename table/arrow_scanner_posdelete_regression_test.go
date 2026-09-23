@@ -1067,6 +1067,37 @@ func TestGroupPosDeletesByFilePathRejectsMismatchedLengths(t *testing.T) {
 	assert.Contains(t, err.Error(), "file_path and pos columns have different lengths: 2 and 1")
 }
 
+func TestPosDeleteAccumulatorAppendRecordRejectsMismatchedLengths(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		filePaths []string
+		positions []int64
+	}{
+		{name: "extra positions", filePaths: []string{"file-a.parquet"}, positions: []int64{1, 2}},
+		{name: "extra file paths", filePaths: []string{"file-a.parquet", "file-b.parquet"}, positions: []int64{1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+
+			filePathArr := stringArray(mem, tc.filePaths...)
+			defer filePathArr.Release()
+			posArr := int64Array(mem, tc.positions...)
+			defer posArr.Release()
+			record := array.NewRecordBatch(PositionalDeleteArrowSchema,
+				[]arrow.Array{filePathArr, posArr}, int64(min(len(tc.filePaths), len(tc.positions))))
+			defer record.Release()
+
+			acc := newPosDeleteAccumulator(ctx, nil)
+			defer acc.release()
+			err := acc.appendRecord(ctx, record)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), "file_path and pos columns have different lengths")
+		})
+	}
+}
+
 func TestGroupPosDeletesByFilePathRejectsNegativePositions(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
