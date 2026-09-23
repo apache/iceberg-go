@@ -2403,32 +2403,13 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		return nil, nil, err
 	}
 
-	var tableSchemas []*iceberg.Schema
-	seenDeleteFiles := make(map[string]struct{})
-
-loadSchemaHistory:
-	for _, task := range tasks {
-		for _, deleteFile := range task.EqualityDeleteFiles {
-			path := deleteFile.FilePath()
-			if _, seen := seenDeleteFiles[path]; seen {
-				continue
-			}
-			seenDeleteFiles[path] = struct{}{}
-
-			fieldIDs := dataFileEqualityFieldIDs(deleteFile)
-			for _, fieldID := range fieldIDs {
-				if _, found := invariants.tableSchema.FindFieldByID(fieldID); !found {
-					tableSchemas = as.metadata.Schemas()
-
-					break loadSchemaHistory
-				}
-			}
-		}
-	}
 	equalityDeleteLoader, err := newLazyEqualityDeleteLoader(
-		as.fs, invariants.tableSchema, tableSchemas, invariants.nameMapping, tasks)
+		as.fs, invariants.tableSchema, nil, invariants.nameMapping, tasks)
 	if err != nil {
 		return nil, nil, err
+	}
+	if equalityDeleteLoader.needsSchemaHistory() {
+		equalityDeleteLoader.tableSchemas = as.metadata.Schemas()
 	}
 	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 
