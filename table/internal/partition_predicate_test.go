@@ -44,7 +44,7 @@ func identityField(sourceID, fieldID int, name string) iceberg.PartitionField {
 	return iceberg.PartitionField{SourceIDs: []int{sourceID}, FieldID: fieldID, Name: name, Transform: iceberg.IdentityTransform{}}
 }
 
-func identitySpec(fields ...iceberg.PartitionField) iceberg.PartitionSpec {
+func specWithFields(fields ...iceberg.PartitionField) iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(fields...)
 }
 
@@ -67,7 +67,7 @@ func dateAtUTC(year, month, day int) iceberg.Date {
 }
 
 func TestBuildPartitionMatchPredicate_EmptyInput(t *testing.T) {
-	spec := identitySpec(identityField(1, 1000, "id"))
+	spec := specWithFields(identityField(1, 1000, "id"))
 
 	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), nil)
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestBuildPartitionMatchPredicate_EmptyInput(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_SingleField(t *testing.T) {
-	spec := identitySpec(identityField(1, 1000, "id"))
+	spec := specWithFields(identityField(1, 1000, "id"))
 
 	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{
 		{1000: int32(5)},
@@ -87,7 +87,7 @@ func TestBuildPartitionMatchPredicate_SingleField(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_MultipleFields(t *testing.T) {
-	spec := identitySpec(
+	spec := specWithFields(
 		identityField(1, 1000, "id"),
 		identityField(2, 1001, "category"),
 	)
@@ -105,7 +105,7 @@ func TestBuildPartitionMatchPredicate_MultipleFields(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_MultiplePartitions(t *testing.T) {
-	spec := identitySpec(identityField(1, 1000, "id"))
+	spec := specWithFields(identityField(1, 1000, "id"))
 
 	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{
 		{1000: int32(5)},
@@ -121,7 +121,7 @@ func TestBuildPartitionMatchPredicate_MultiplePartitions(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_MultipleFieldsAndPartitions(t *testing.T) {
-	spec := identitySpec(
+	spec := specWithFields(
 		identityField(1, 1000, "id"),
 		identityField(2, 1001, "category"),
 	)
@@ -146,30 +146,25 @@ func TestBuildPartitionMatchPredicate_MultipleFieldsAndPartitions(t *testing.T) 
 }
 
 func TestBuildPartitionMatchPredicate_NullValue(t *testing.T) {
-	spec := identitySpec(identityField(2, 1001, "category"))
+	spec := specWithFields(identityField(2, 1001, "category"))
 
-	// Both an explicit nil and a missing key represent a null partition value.
-	cases := []struct {
-		name       string
-		partitions []map[int]any
-	}{
-		{"explicit nil", []map[int]any{{1001: nil}}},
-		{"missing key", []map[int]any{{}}},
-	}
+	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1001: nil}})
+	require.NoError(t, err)
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), tc.partitions)
-			require.NoError(t, err)
+	want := iceberg.IsNull(iceberg.Reference("category"))
+	assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
+}
 
-			want := iceberg.IsNull(iceberg.Reference("category"))
-			assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
-		})
-	}
+func TestBuildPartitionMatchPredicate_MissingFieldID(t *testing.T) {
+	spec := specWithFields(identityField(2, 1001, "category"))
+
+	_, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{}})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "missing from partition tuple")
 }
 
 func TestBuildPartitionMatchPredicate_NullAndNonNullInSameTuple(t *testing.T) {
-	spec := identitySpec(
+	spec := specWithFields(
 		identityField(1, 1000, "id"),
 		identityField(2, 1001, "category"),
 	)
@@ -201,7 +196,7 @@ func TestBuildPartitionMatchPredicate_NaNValue(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := identitySpec(tc.field)
+			spec := specWithFields(tc.field)
 
 			expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{
 				{tc.field.FieldID: tc.nan},
@@ -215,7 +210,7 @@ func TestBuildPartitionMatchPredicate_NaNValue(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_NaNDeduplicates(t *testing.T) {
-	spec := identitySpec(identityField(4, 1003, "score"))
+	spec := specWithFields(identityField(4, 1003, "score"))
 
 	// NaN has many valid bit patterns; distinct payloads must still collapse to a
 	// single IsNaN clause (the dedup key uses a sentinel, not the raw float bits).
@@ -234,7 +229,7 @@ func TestBuildPartitionMatchPredicate_NaNDeduplicates(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_DeduplicatesPartitions(t *testing.T) {
-	spec := identitySpec(identityField(1, 1000, "id"))
+	spec := specWithFields(identityField(1, 1000, "id"))
 
 	// Many data files land in the same partition; the predicate must not repeat it.
 	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{
@@ -249,7 +244,7 @@ func TestBuildPartitionMatchPredicate_DeduplicatesPartitions(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_DeduplicatesMultiFieldPartitions(t *testing.T) {
-	spec := identitySpec(
+	spec := specWithFields(
 		identityField(1, 1000, "id"),
 		identityField(2, 1001, "category"),
 	)
@@ -271,7 +266,7 @@ func TestBuildPartitionMatchPredicate_DeduplicatesMultiFieldPartitions(t *testin
 // not collide into a single clause. A naive "%d=%v"-joined signature would map
 // both of these to "1001=5/1002=three/1002=x" and silently drop one partition.
 func TestBuildPartitionMatchPredicate_NoSeparatorCollision(t *testing.T) {
-	spec := identitySpec(
+	spec := specWithFields(
 		identityField(2, 1001, "category"),
 		identityField(3, 1002, "sub"),
 	)
@@ -321,7 +316,7 @@ func TestBuildPartitionMatchPredicate_UsesNonIdentityTransform(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := identitySpec(tc.field)
+			spec := specWithFields(tc.field)
 
 			expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1000: tc.value}})
 			require.NoError(t, err)
@@ -456,7 +451,7 @@ func TestBuildPartitionMatchPredicate_EvaluatesTransforms(t *testing.T) {
 			schema := iceberg.NewSchema(0, iceberg.NestedField{
 				ID: 1, Name: "value", Type: tc.sourceType,
 			})
-			spec := identitySpec(iceberg.PartitionField{
+			spec := specWithFields(iceberg.PartitionField{
 				SourceIDs: []int{1}, FieldID: 1000, Name: "value_part", Transform: tc.transform,
 			})
 
@@ -512,7 +507,7 @@ func TestBuildPartitionMatchPredicate_EvaluatesBucketCollision(t *testing.T) {
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32,
 	})
-	spec := identitySpec(iceberg.PartitionField{
+	spec := specWithFields(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id_bucket", Transform: transform,
 	})
 	expr, err := BuildPartitionMatchPredicate(spec, schema, []map[int]any{{1000: collisionBucket}})
@@ -532,17 +527,19 @@ func TestBuildPartitionMatchPredicate_EvaluatesBucketCollision(t *testing.T) {
 
 func TestBuildPartitionMatchPredicate_EvaluatesTransformedNull(t *testing.T) {
 	cases := []struct {
-		name       string
-		sourceType iceberg.Type
-		transform  iceberg.Transform
-		nonNil     any
+		name          string
+		sourceType    iceberg.Type
+		transform     iceberg.Transform
+		nonNil        any
+		nonNilMatches bool
 	}{
-		{name: "bucket", sourceType: iceberg.PrimitiveTypes.Int32, transform: iceberg.BucketTransform{NumBuckets: 4}, nonNil: int32(1)},
-		{name: "truncate", sourceType: iceberg.PrimitiveTypes.String, transform: iceberg.TruncateTransform{Width: 3}, nonNil: "books"},
-		{name: "year", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.YearTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
-		{name: "month", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.MonthTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
-		{name: "day", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.DayTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
-		{name: "hour", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.HourTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
+		{name: "bucket", sourceType: iceberg.PrimitiveTypes.Int32, transform: iceberg.BucketTransform{NumBuckets: 4}, nonNil: int32(1), nonNilMatches: false},
+		{name: "truncate", sourceType: iceberg.PrimitiveTypes.String, transform: iceberg.TruncateTransform{Width: 3}, nonNil: "books", nonNilMatches: false},
+		{name: "year", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.YearTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0), nonNilMatches: false},
+		{name: "month", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.MonthTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0), nonNilMatches: false},
+		{name: "day", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.DayTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0), nonNilMatches: false},
+		{name: "hour", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.HourTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0), nonNilMatches: false},
+		{name: "void", sourceType: iceberg.PrimitiveTypes.String, transform: iceberg.VoidTransform{}, nonNil: "books", nonNilMatches: true},
 	}
 
 	for _, tc := range cases {
@@ -550,7 +547,7 @@ func TestBuildPartitionMatchPredicate_EvaluatesTransformedNull(t *testing.T) {
 			schema := iceberg.NewSchema(0, iceberg.NestedField{
 				ID: 1, Name: "value", Type: tc.sourceType,
 			})
-			spec := identitySpec(iceberg.PartitionField{
+			spec := specWithFields(iceberg.PartitionField{
 				SourceIDs: []int{1}, FieldID: 1000, Name: "value_part", Transform: tc.transform,
 			})
 
@@ -566,9 +563,48 @@ func TestBuildPartitionMatchPredicate_EvaluatesTransformedNull(t *testing.T) {
 
 			matched, err = eval(partitionPredicateRow{tc.nonNil})
 			require.NoError(t, err)
-			assert.False(t, matched, "non-null source value should not match null partition value")
+			assert.Equal(t, tc.nonNilMatches, matched, "unexpected match for non-null source value")
 		})
 	}
+}
+
+func TestBuildPartitionMatchPredicate_VoidBindsAlwaysTrue(t *testing.T) {
+	spec := specWithFields(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1001, Name: "category_void", Transform: iceberg.VoidTransform{},
+	})
+
+	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1001: nil}})
+	require.NoError(t, err)
+
+	bound, err := iceberg.BindExpr(dynamicOverwriteSchema(), expr, true)
+	require.NoError(t, err)
+	assert.True(t, bound.Equals(iceberg.AlwaysTrue{}), "void-only predicate should bind to AlwaysTrue, got %s", bound)
+}
+
+func TestBuildPartitionMatchPredicate_CoercesRawDayValue(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Timestamp,
+	})
+	spec := specWithFields(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "value_day", Transform: iceberg.DayTransform{},
+	})
+	rawDay := int32(dateAtUTC(2020, 2, 29))
+
+	expr, err := BuildPartitionMatchPredicate(spec, schema, []map[int]any{{1000: rawDay}})
+	require.NoError(t, err)
+
+	want := iceberg.LiteralPredicate(iceberg.OpEQ,
+		iceberg.NewUnboundTransform(iceberg.DayTransform{}, iceberg.Reference("value")),
+		iceberg.DateLiteral(rawDay),
+	)
+	assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
+
+	eval, err := iceberg.ExpressionEvaluator(schema, expr, true)
+	require.NoError(t, err)
+
+	matched, err := eval(partitionPredicateRow{timestampAtUTC(2020, 2, 29, 12, 0, 0, 0)})
+	require.NoError(t, err)
+	assert.True(t, matched)
 }
 
 func TestBuildPartitionMatchPredicate_UsesNestedSourcePath(t *testing.T) {
@@ -580,7 +616,7 @@ func TestBuildPartitionMatchPredicate_UsesNestedSourcePath(t *testing.T) {
 		}},
 		iceberg.NestedField{ID: 12, Name: "category", Type: iceberg.PrimitiveTypes.String},
 	)
-	spec := identitySpec(iceberg.PartitionField{
+	spec := specWithFields(iceberg.PartitionField{
 		SourceIDs: []int{11}, FieldID: 1000, Name: "category_part",
 		Transform: iceberg.TruncateTransform{Width: 3},
 	})
@@ -598,7 +634,7 @@ func TestBuildPartitionMatchPredicate_UsesNestedSourcePath(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_RecognizesPointerIdentityTransform(t *testing.T) {
-	spec := identitySpec(iceberg.PartitionField{
+	spec := specWithFields(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id_part",
 		Transform: &iceberg.IdentityTransform{},
 	})
@@ -612,7 +648,7 @@ func TestBuildPartitionMatchPredicate_RecognizesPointerIdentityTransform(t *test
 
 func TestBuildPartitionMatchPredicate_UnknownSourceID(t *testing.T) {
 	// Partition field points at a source id that is not present in the schema.
-	spec := identitySpec(identityField(999, 1000, "ghost"))
+	spec := specWithFields(identityField(999, 1000, "ghost"))
 
 	_, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1000: int32(1)}})
 	require.Error(t, err)
@@ -620,7 +656,7 @@ func TestBuildPartitionMatchPredicate_UnknownSourceID(t *testing.T) {
 }
 
 func TestBuildPartitionMatchPredicate_UnsupportedValueType(t *testing.T) {
-	spec := identitySpec(identityField(1, 1000, "id"))
+	spec := specWithFields(identityField(1, 1000, "id"))
 
 	_, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{
 		{1000: struct{}{}},
@@ -687,11 +723,49 @@ func TestBuildPartitionMatchPredicate_RejectsInvalidTransforms(t *testing.T) {
 		{name: "invalid source type", transform: iceberg.DayTransform{}, want: iceberg.ErrInvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := identitySpec(iceberg.PartitionField{
+			spec := specWithFields(iceberg.PartitionField{
 				SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: tc.transform,
 			})
 			_, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1000: int32(1)}})
 			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
+func TestBuildPartitionMatchPredicate_RejectsImpossiblePartitionValues(t *testing.T) {
+	cases := []struct {
+		name      string
+		schema    *iceberg.Schema
+		transform iceberg.Transform
+		value     any
+	}{
+		{
+			name:      "bucket value outside range",
+			schema:    iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32}),
+			transform: iceberg.BucketTransform{NumBuckets: 4},
+			value:     int32(4),
+		},
+		{
+			name:      "truncate value is not fixed point",
+			schema:    iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.String}),
+			transform: iceberg.TruncateTransform{Width: 3},
+			value:     "books",
+		},
+		{
+			name:      "void value is not nil",
+			schema:    iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.String}),
+			transform: iceberg.VoidTransform{},
+			value:     "books",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := specWithFields(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1000, Name: "value_part", Transform: tc.transform,
+			})
+			_, err := BuildPartitionMatchPredicate(spec, tc.schema, []map[int]any{{1000: tc.value}})
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		})
 	}
 }
