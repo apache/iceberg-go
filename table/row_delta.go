@@ -198,8 +198,13 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 				ct, f.FilePath())
 		}
 
-		if err := validateDeletionVectorFormatVersion(f, meta.formatVersion, "row delta"); err != nil {
-			return err
+		if IsDeletionVector(f) {
+			if err := validateDeletionVectorToAdd(f, meta.formatVersion, "row delta"); err != nil {
+				return err
+			}
+		} else if ct == iceberg.EntryContentPosDeletes && meta.formatVersion >= 3 {
+			return fmt.Errorf("position delete file %s must be a deletion vector for v%d table for row delta",
+				f.FilePath(), meta.formatVersion)
 		}
 
 		// Equality delete files must declare which columns form the delete key,
