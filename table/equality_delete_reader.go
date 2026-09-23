@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"slices"
 	"sync"
 	"unsafe"
@@ -303,6 +304,28 @@ func newEqualityDeleteFileSet(id int, deleteSet *equalityDeleteSet) *equalityDel
 	}
 }
 
+func validateEqualityDeleteMetadata(
+	dataFile iceberg.DataFile,
+	existingFile iceberg.DataFile,
+	existingFieldIDs []int,
+) error {
+	if dataFile != nil && reflect.TypeOf(dataFile).Comparable() && dataFile == existingFile {
+		return nil
+	}
+
+	fieldIDs := dataFileEqualityFieldIDsRef(dataFile)
+	if len(fieldIDs) == 0 {
+		return fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, dataFile.FilePath())
+	}
+	if dataFile.FileFormat() == existingFile.FileFormat() && slices.Equal(fieldIDs, existingFieldIDs) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"conflicting equality delete metadata for file %s: first format=%s equality field IDs=%v, later format=%s equality field IDs=%v",
+		dataFile.FilePath(), existingFile.FileFormat(), existingFieldIDs, dataFile.FileFormat(), fieldIDs)
+}
+
 func schemaForEqualityFields(current *iceberg.Schema, schemas []*iceberg.Schema, fieldIDs []int) *iceberg.Schema {
 	hasAllFields := func(schema *iceberg.Schema) bool {
 		for _, fieldID := range fieldIDs {
@@ -391,13 +414,21 @@ func newLazyEqualityDeleteLoader(
 					continue
 				}
 				if path == firstPath {
+					if err := validateEqualityDeleteMetadata(dataFile, firstFile.dataFile, firstFile.fieldIDs); err != nil {
+						return nil, err
+					}
+
 					continue
 				}
 
 				loader.files = make(map[string]*lazyEqualityDeleteFile, 2)
 				loader.files[firstPath] = firstFile
 			}
-			if _, ok := loader.files[path]; ok {
+			if file, ok := loader.files[path]; ok {
+				if err := validateEqualityDeleteMetadata(dataFile, file.dataFile, file.fieldIDs); err != nil {
+					return nil, err
+				}
+
 				continue
 			}
 
@@ -565,7 +596,11 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 			}
 
 			path := d.FilePath()
-			if _, ok := uniqueDeletes[path]; ok {
+			if info, ok := uniqueDeletes[path]; ok {
+				if err := validateEqualityDeleteMetadata(d, info.file, info.fieldIDs); err != nil {
+					return nil, err
+				}
+
 				continue
 			}
 

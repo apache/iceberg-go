@@ -322,6 +322,30 @@ func TestEqualityDeleteMetadataIsReadOncePerPath(t *testing.T) {
 	assert.Zero(t, deleteFile.equalityFieldIDsCalls)
 }
 
+func TestEqualityDeleteMetadataRejectsConflictingSamePath(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	path := "mem://metadata-conflict/delete.parquet"
+	first := newEqualityDeleteSetAssemblyTestFile(t, path, []int{1, 2})
+	second := newEqualityDeleteSetAssemblyTestFile(t, path, []int{2, 1})
+	tasks := []FileScanTask{
+		{EqualityDeleteFiles: []iceberg.DataFile{first}},
+		{EqualityDeleteFiles: []iceberg.DataFile{second}},
+	}
+
+	_, err := newLazyEqualityDeleteLoader(iceio.NewMemFS(), schema, nil, nil, tasks)
+	require.ErrorContains(t, err, "conflicting equality delete metadata")
+	require.ErrorContains(t, err, path)
+
+	_, err = readAllEqualityDeleteFiles(t.Context(), iceio.NewMemFS(), schema, nil, tasks, 1)
+	require.ErrorContains(t, err, "conflicting equality delete metadata")
+	require.ErrorContains(t, err, path)
+}
+
 func TestLazyEqualityDeleteLoaderNeedsSchemaHistory(t *testing.T) {
 	t.Parallel()
 
