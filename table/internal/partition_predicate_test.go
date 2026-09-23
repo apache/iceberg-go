@@ -276,23 +276,42 @@ func TestBuildPartitionMatchPredicate_NoSeparatorCollision(t *testing.T) {
 	assert.True(t, expr.Equals(want), "distinct tuples must not be deduped, got %s", expr)
 }
 
-func TestBuildPartitionMatchPredicate_NonIdentityTransformRejected(t *testing.T) {
+func TestBuildPartitionMatchPredicate_UsesNonIdentityTransform(t *testing.T) {
 	cases := []struct {
 		name      string
-		transform iceberg.Transform
+		field     iceberg.PartitionField
+		source    string
+		value     any
+		wantValue iceberg.Literal
 	}{
-		{"bucket", iceberg.BucketTransform{NumBuckets: 4}},
-		{"truncate", iceberg.TruncateTransform{Width: 10}},
-		{"day", iceberg.DayTransform{}},
+		{
+			name:      "bucket",
+			field:     iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: iceberg.BucketTransform{NumBuckets: 4}},
+			source:    "id",
+			value:     int32(1),
+			wantValue: iceberg.Int32Literal(1),
+		},
+		{
+			name:      "truncate",
+			field:     iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Name: "category_part", Transform: iceberg.TruncateTransform{Width: 3}},
+			source:    "category",
+			value:     "boo",
+			wantValue: iceberg.StringLiteral("boo"),
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := identitySpec(iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: tc.transform})
+			spec := identitySpec(tc.field)
 
-			_, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1000: int32(1)}})
-			require.Error(t, err)
-			assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+			expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1000: tc.value}})
+			require.NoError(t, err)
+
+			want := iceberg.LiteralPredicate(iceberg.OpEQ,
+				iceberg.NewUnboundTransform(tc.field.Transform, iceberg.Reference(tc.source)),
+				tc.wantValue,
+			)
+			assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
 		})
 	}
 }

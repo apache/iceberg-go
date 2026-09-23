@@ -39,36 +39,29 @@ import (
 // result is an OR across distinct partitions, each clause an AND across the
 // spec's fields:
 //
-//	source == value   when the partition value is present
-//	IsNaN(source)      when the value is a floating-point NaN (x == NaN is never true)
-//	IsNull(source)     when the partition value is absent or nil
+//	transform(source) == value when the partition value is present
+//	IsNaN(transform(source)) when the value is a floating-point NaN (x == NaN is never true)
+//	IsNull(transform(source)) when the partition value is absent or nil
 //
 // Duplicate tuples collapse to a single clause, and an empty input yields
 // AlwaysFalse (matching nothing). Callers are expected to pass a partitioned
 // spec; dynamic partition overwrite rejects unpartitioned tables upstream.
 //
-// Because only identity transforms are accepted (see below), the partition
-// value equals the source-column value, so "source == value" selects exactly
-// the rows in that partition. Non-identity transforms (bucket, truncate, the
-// time transforms) cannot be matched by a source-column predicate and need
-// partition-level matching instead; they are rejected here and tracked as a
-// follow-up under issue #1215.
+// The transform is kept in the row predicate so the match is evaluated against
+// the partition value rather than comparing the post-transform value directly
+// with the source column.
 func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Schema, partitions []map[int]any) (iceberg.BooleanExpression, error) {
 	type fieldRef struct {
-		id   int
-		name string
+		id        int
+		name      string
+		transform iceberg.Transform
 	}
 
 	var fields []fieldRef
 	for _, f := range spec.Fields() {
-		if _, ok := f.Transform.(iceberg.IdentityTransform); !ok {
-			return nil, fmt.Errorf("%w: dynamic partition overwrite supports identity-transform partition fields only, got %s on %q (tracked in https://github.com/apache/iceberg-go/issues/1215)",
-				iceberg.ErrNotImplemented, f.Transform, f.Name)
-		}
-
-		// Identity transforms always have exactly one source column.
+		// Partition transforms currently have exactly one source column.
 		if len(f.SourceIDs) != 1 {
-			return nil, fmt.Errorf("%w: identity partition field %q must have exactly one source id, got %d",
+			return nil, fmt.Errorf("%w: partition field %q must have exactly one source id, got %d",
 				iceberg.ErrInvalidArgument, f.Name, len(f.SourceIDs))
 		}
 
@@ -77,8 +70,12 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 			return nil, fmt.Errorf("%w: partition field %q references unknown source id %d",
 				iceberg.ErrInvalidArgument, f.Name, f.SourceIDs[0])
 		}
+		if !f.Transform.CanTransform(src.Type) {
+			return nil, fmt.Errorf("%w: transform %s cannot be applied to source field %q of type %s",
+				iceberg.ErrInvalidArgument, f.Transform, src.Name, src.Type)
+		}
 
-		fields = append(fields, fieldRef{id: f.FieldID, name: src.Name})
+		fields = append(fields, fieldRef{id: f.FieldID, name: src.Name, transform: f.Transform})
 	}
 
 	// NewAnd/NewOr fold away the AlwaysTrue/AlwaysFalse seeds, so a single-field,
@@ -96,14 +93,14 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 		sigParts := make([]string, 0, len(fields))
 
 		for _, fr := range fields {
-			ref := iceberg.Reference(fr.name)
+			term := partitionTerm(fr.transform, fr.name)
 
 			// A missing key (!ok) is treated like an explicit nil. In practice
 			// DataFile.Partition() stores a null partition value as a nil-valued
 			// entry rather than an absent key; !ok is a defensive guard.
 			val, ok := part[fr.id]
 			if !ok || val == nil {
-				clause = iceberg.NewAnd(clause, iceberg.IsNull(ref))
+				clause = iceberg.NewAnd(clause, iceberg.IsNull(term))
 				sigParts = append(sigParts, strconv.Itoa(fr.id)+":null")
 
 				continue
@@ -119,7 +116,7 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 				// NaN has many valid bit patterns, so the dedup signature uses a
 				// fixed sentinel (not MarshalBinary) to keep duplicate NaN
 				// partitions collapsing to a single clause.
-				clause = iceberg.NewAnd(clause, iceberg.IsNaN(ref))
+				clause = iceberg.NewAnd(clause, iceberg.IsNaN(term))
 				sigParts = append(sigParts, strconv.Itoa(fr.id)+":nan")
 
 				continue
@@ -130,7 +127,7 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 				return nil, fmt.Errorf("partition field %q: %w", fr.name, err)
 			}
 
-			clause = iceberg.NewAnd(clause, iceberg.LiteralPredicate(iceberg.OpEQ, ref, lit))
+			clause = iceberg.NewAnd(clause, iceberg.LiteralPredicate(iceberg.OpEQ, term, lit))
 
 			enc, err := lit.MarshalBinary()
 			if err != nil {
@@ -149,6 +146,15 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 	}
 
 	return result, nil
+}
+
+func partitionTerm(transform iceberg.Transform, name string) iceberg.UnboundTerm {
+	ref := iceberg.Reference(name)
+	if _, ok := transform.(iceberg.IdentityTransform); ok {
+		return ref
+	}
+
+	return iceberg.NewUnboundTransform(transform, ref)
 }
 
 // isNaN reports whether v is a floating-point NaN.
