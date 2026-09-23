@@ -49,7 +49,7 @@ func BenchmarkReadDeletesWithFilePathFilter(b *testing.B) {
 	b.Run("all paths", func(b *testing.B) {
 		benchmarkReadDeletesWithFilePathFilter(b, ctx, memFS, deleteFile, nil)
 	})
-	for _, targetCount := range []int{1, 10, 100, 1_000} {
+	for _, targetCount := range []int{1, 10, 100, 200, 201, 1_000} {
 		b.Run(fmt.Sprintf("targets=%d", targetCount), func(b *testing.B) {
 			targets := make(map[string]struct{}, targetCount)
 			for _, path := range pathNames[:targetCount] {
@@ -152,7 +152,7 @@ func BenchmarkReadDeletesProjected(b *testing.B) {
 				benchmarkReadDeletes(b, ctx, memFS, dataFile, readDeletesBefore)
 			})
 			b.Run("after", func(b *testing.B) {
-				benchmarkReadDeletes(b, ctx, memFS, dataFile, readDeletes)
+				benchmarkReadDeletes(b, ctx, memFS, dataFile, readDeletesAfter)
 			})
 		})
 	}
@@ -176,6 +176,10 @@ func benchmarkReadDeletes(
 		}
 		releasePosDeletes(deletes)
 	}
+}
+
+func readDeletesAfter(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
+	return readDeletesForPaths(ctx, fs, dataFile, nil)
 }
 
 func benchmarkPositionDeleteFile(b *testing.B, numRows int) (*iceio.MemFS, iceberg.DataFile) {

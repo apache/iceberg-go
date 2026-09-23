@@ -66,7 +66,7 @@ type (
 // map. Required on every error return between readAllDeleteFiles and the
 // iterator returned by createIterator — Arrow allocations are not freed by
 // GC, so dropping the map on the floor leaks the chunks. Safe to call on a
-// nil map; the nil-chunk guard is defensive — readDeletes never inserts a
+// nil map; the nil-chunk guard is defensive — position-delete readers never insert a
 // nil *arrow.Chunked, but the guard keeps callers safe if that invariant
 // ever changes.
 func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
@@ -633,7 +633,7 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 		}
 
 		path := paths.Value(i)
-		if a.targets != nil {
+		if len(a.targets) > 0 {
 			if _, ok := a.targets[path]; !ok {
 				continue
 			}
@@ -775,10 +775,6 @@ func releasePosDeletes(deletes map[string]*arrow.Chunked) {
 	}
 }
 
-func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
-	return readDeletesForPaths(ctx, fs, dataFile, nil)
-}
-
 func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile,
 	targets map[string]struct{},
 ) (_ map[string]*arrow.Chunked, err error) {
@@ -888,6 +884,10 @@ func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]st
 }
 
 func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
+	// Row-group stats and Bloom predicates are keyed by Parquet physical field
+	// IDs, while projection resolves these columns by their spec-defined names.
+	// pqarrow carries the Parquet IDs into Arrow metadata, so only enable
+	// pushdown when those two views agree for the reserved delete columns.
 	physicalIDs := make(map[int]int)
 	var collectIDs func([]arrow.Field)
 	collectIDs = func(fields []arrow.Field) {
@@ -937,8 +937,14 @@ func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
 			continue
 		}
 		if *fieldID != want.ID {
-			return false, fmt.Errorf("%w: position delete column %q has field ID %d, want %d",
-				iceberg.ErrInvalidSchema, want.Name, *fieldID, want.ID)
+			if physicalIDs[want.ID] != 0 {
+				return false, fmt.Errorf("%w: position delete column %q has field ID %d, want %d; field ID %d is assigned to another column",
+					iceberg.ErrInvalidSchema, want.Name, *fieldID, want.ID, want.ID)
+			}
+			// A non-canonical ID is safe for name-based reading, but not for
+			// stats or Bloom pruning. Keep the pre-pruning read compatible with
+			// external writers that renumber fields.
+			pruningEnabled = false
 		}
 	}
 
