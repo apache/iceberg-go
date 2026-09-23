@@ -310,7 +310,7 @@ func writePosDeleteParquetToMemFS(t *testing.T, memFS *iceio.MemFS, path, conten
 }
 
 func writePosDeleteParquetToMemFSWithSchema(t *testing.T, memFS *iceio.MemFS, path string,
-	schema *arrow.Schema, content string,
+	schema *arrow.Schema, content string, props ...parquet.WriterProperty,
 ) {
 	t.Helper()
 
@@ -323,8 +323,12 @@ func writePosDeleteParquetToMemFSWithSchema(t *testing.T, memFS *iceio.MemFS, pa
 	fw, err := memFS.Create(path)
 	require.NoError(t, err)
 
+	props = append([]parquet.WriterProperty{
+		parquet.WithDictionaryDefault(true),
+		parquet.WithStats(true),
+	}, props...)
 	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
-		parquet.NewWriterProperties(parquet.WithDictionaryDefault(true), parquet.WithStats(true)),
+		parquet.NewWriterProperties(props...),
 		pqarrow.DefaultWriterProps()))
 	require.NoError(t, fw.Close())
 }
