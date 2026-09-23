@@ -28,7 +28,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -1503,21 +1502,25 @@ func groupsByPartition(t *testing.T, tbl *table.Table) []table.CompactionTaskGro
 	return groups
 }
 
-func rowsByPartitionValue(t *testing.T, tbl *table.Table) map[string]int64 {
+func idsByPartitionValue(t *testing.T, tbl *table.Table) map[string][]int64 {
 	t.Helper()
 
 	_, itr, err := tbl.Scan().ToArrowRecords(t.Context())
 	require.NoError(t, err)
 
-	out := make(map[string]int64)
+	out := make(map[string][]int64)
 	for rec, err := range itr {
 		require.NoError(t, err)
-		idx := rec.Schema().FieldIndices("data")
-		require.NotEmpty(t, idx)
-		col, ok := rec.Column(idx[0]).(*array.String)
+		dataIdx := rec.Schema().FieldIndices("data")
+		require.NotEmpty(t, dataIdx)
+		idIdx := rec.Schema().FieldIndices("id")
+		require.NotEmpty(t, idIdx)
+		dataCol, ok := rec.Column(dataIdx[0]).(*array.String)
+		require.True(t, ok)
+		idCol, ok := rec.Column(idIdx[0]).(*array.Int64)
 		require.True(t, ok)
 		for i := range int(rec.NumRows()) {
-			out[col.Value(i)]++
+			out[dataCol.Value(i)] = append(out[dataCol.Value(i)], idCol.Value(i))
 		}
 		rec.Release()
 	}
@@ -1617,9 +1620,13 @@ func TestRewriteDataFiles_MaxConcurrentGroupsMatchesSequential(t *testing.T) {
 	assert.Equal(t, 16, resConc.RemovedDataFiles)
 	assert.Equal(t, 8, resConc.AddedDataFiles)
 
-	assert.Equal(t, rowsByPartitionValue(t, committedSeq), rowsByPartitionValue(t, committedConc))
+	idsSeq := idsByPartitionValue(t, committedSeq)
+	idsConc := idsByPartitionValue(t, committedConc)
+	require.Len(t, idsConc, 8)
 	for p := range 8 {
-		assert.Equal(t, int64(10), rowsByPartitionValue(t, committedConc)[fmt.Sprintf("p%d", p)])
+		key := fmt.Sprintf("p%d", p)
+		assert.ElementsMatch(t, idsSeq[key], idsConc[key])
+		assert.Len(t, idsConc[key], 10)
 	}
 
 	paths := manifestLiveDataPaths(t, committedConc)
@@ -1706,11 +1713,13 @@ func TestRewriteDataFiles_MaxConcurrentGroupsGroupFailure(t *testing.T) {
 	groupsAtomic := groupsByPartition(t, tblAtomic)
 	require.Len(t, groupsAtomic, 4)
 	fsAtomic.setFail(groupsAtomic[2].Tasks[0].File.FilePath(), injected)
+	beforeAtomicFiles := allParquetFiles(t, tblAtomic.Location())
 
 	txAtomic := tblAtomic.NewTransaction()
 	_, err := txAtomic.RewriteDataFiles(t.Context(), groupsAtomic, table.RewriteDataFilesOptions{MaxConcurrentGroups: 4})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), injected.Error())
+	assert.ElementsMatch(t, beforeAtomicFiles, allParquetFiles(t, tblAtomic.Location()))
 
 	fsPartial := &failOpenIO{}
 	tblPartial := newMaxConcPartitionedTable(t, fsPartial)
@@ -1780,42 +1789,44 @@ func (g *gateOpenIO) Open(name string) (iceio.File, error) {
 
 func TestRewriteDataFiles_MaxConcurrentGroupsContextCancel(t *testing.T) {
 	for _, partial := range []bool{false, true} {
-		gate := &gateOpenIO{}
-		tbl := newMaxConcPartitionedTable(t, gate)
-		tbl = addMaxConcPartitions(t, tbl, 8, 1, 10)
-		groups := groupsByPartition(t, tbl)
-		require.Len(t, groups, 8)
-		gate.enable()
+		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
+			gate := &gateOpenIO{}
+			tbl := newMaxConcPartitionedTable(t, gate)
+			tbl = addMaxConcPartitions(t, tbl, 8, 1, 10)
+			groups := groupsByPartition(t, tbl)
+			require.Len(t, groups, 8)
+			gate.enable()
 
-		ctx, cancel := context.WithCancel(t.Context())
-		done := make(chan struct{})
-		var rewriteErr error
-		go func() {
-			defer close(done)
-			tx := tbl.NewTransaction()
-			opts := table.RewriteDataFilesOptions{MaxConcurrentGroups: 4}
-			if partial {
-				opts.PartialProgress = true
-				opts.MaxCommits = 1
-			}
-			_, rewriteErr = tx.RewriteDataFiles(ctx, groups, opts)
-		}()
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			var rewriteErr error
+			go func() {
+				defer close(done)
+				tx := tbl.NewTransaction()
+				opts := table.RewriteDataFilesOptions{MaxConcurrentGroups: 4}
+				if partial {
+					opts.PartialProgress = true
+					opts.MaxCommits = 1
+				}
+				_, rewriteErr = tx.RewriteDataFiles(ctx, groups, opts)
+			}()
 
-		for range 4 {
-			select {
-			case <-gate.entered:
-			case <-done:
-				t.Fatalf("rewrite finished before 4 groups were in flight, err=%v", rewriteErr)
-			case <-t.Context().Done():
-				t.Fatal("test context done while waiting for groups")
+			for range 4 {
+				select {
+				case <-gate.entered:
+				case <-done:
+					t.Fatalf("rewrite finished before 4 groups were in flight, err=%v", rewriteErr)
+				case <-t.Context().Done():
+					t.Fatal("test context done while waiting for groups")
+				}
 			}
-		}
-		cancel()
-		gate.releaseAll()
-		<-done
-		require.Error(t, rewriteErr)
-		assert.ErrorIs(t, rewriteErr, context.Canceled)
-		assert.Equal(t, ctx.Err(), rewriteErr)
+			cancel()
+			gate.releaseAll()
+			<-done
+			require.Error(t, rewriteErr)
+			assert.ErrorIs(t, rewriteErr, context.Canceled)
+			assert.Equal(t, ctx.Err(), rewriteErr)
+		})
 	}
 }
 
@@ -1838,9 +1849,11 @@ func (f *countOpenFile) Close() error {
 
 type countOpenIO struct {
 	iceio.LocalFS
-	mu   sync.Mutex
-	cur  int
-	peak int
+	mu      sync.Mutex
+	cur     int
+	peak    int
+	barrier bool
+	overlap chan struct{}
 }
 
 func (c *countOpenIO) Open(name string) (iceio.File, error) {
@@ -1854,8 +1867,18 @@ func (c *countOpenIO) Open(name string) (iceio.File, error) {
 		if c.cur > c.peak {
 			c.peak = c.cur
 		}
+		if c.barrier && c.cur >= 2 {
+			select {
+			case <-c.overlap:
+			default:
+				close(c.overlap)
+			}
+		}
+		barrier, overlap := c.barrier, c.overlap
 		c.mu.Unlock()
-		time.Sleep(20 * time.Millisecond)
+		if barrier {
+			<-overlap
+		}
 
 		return &countOpenFile{File: f, owner: c}, nil
 	}
@@ -1868,6 +1891,16 @@ func (c *countOpenIO) reset() {
 	defer c.mu.Unlock()
 	c.cur = 0
 	c.peak = 0
+	c.overlap = make(chan struct{})
+}
+
+func (c *countOpenIO) setBarrier(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.barrier = enabled
+	if c.overlap == nil {
+		c.overlap = make(chan struct{})
+	}
 }
 
 func (c *countOpenIO) getPeak() int {
@@ -1879,28 +1912,31 @@ func (c *countOpenIO) getPeak() int {
 
 func TestRewriteDataFiles_MaxConcurrentGroupsLimitsInFlight(t *testing.T) {
 	for _, maxConc := range []int{4, 0, 1} {
-		counter := &countOpenIO{}
-		tbl := newMaxConcPartitionedTable(t, counter)
-		tbl = addMaxConcPartitions(t, tbl, 8, 1, 10)
-		groups := groupsByPartition(t, tbl)
-		require.Len(t, groups, 8)
-		counter.reset()
+		t.Run(fmt.Sprintf("maxConc=%d", maxConc), func(t *testing.T) {
+			counter := &countOpenIO{}
+			tbl := newMaxConcPartitionedTable(t, counter)
+			tbl = addMaxConcPartitions(t, tbl, 8, 1, 10)
+			groups := groupsByPartition(t, tbl)
+			require.Len(t, groups, 8)
+			counter.reset()
+			counter.setBarrier(maxConc > 1)
 
-		tx := tbl.NewTransaction()
-		_, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
-			MaxConcurrentGroups: maxConc,
-			GroupOptions:        []table.CompactionGroupOption{table.WithCompactionScanConcurrency(1)},
+			tx := tbl.NewTransaction()
+			_, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+				MaxConcurrentGroups: maxConc,
+				GroupOptions:        []table.CompactionGroupOption{table.WithCompactionScanConcurrency(1)},
+			})
+			require.NoError(t, err)
+			_, err = tx.Commit(t.Context())
+			require.NoError(t, err)
+
+			peak := counter.getPeak()
+			if maxConc > 1 {
+				assert.LessOrEqual(t, peak, maxConc)
+				assert.GreaterOrEqual(t, peak, 2)
+			} else {
+				assert.Equal(t, 1, peak)
+			}
 		})
-		require.NoError(t, err)
-		_, err = tx.Commit(t.Context())
-		require.NoError(t, err)
-
-		peak := counter.getPeak()
-		if maxConc > 1 {
-			assert.LessOrEqual(t, peak, maxConc)
-			assert.GreaterOrEqual(t, peak, 2)
-		} else {
-			assert.Equal(t, 1, peak)
-		}
 	}
 }
