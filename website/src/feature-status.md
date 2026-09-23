@@ -48,16 +48,20 @@ All V1 features are supported. V1 is the format-version baseline.
 | Nanosecond timestamps (`timestamp_ns`, `timestamptz_ns`) | Supported |
 | Default values (`initial-default`, `write-default`) | Supported |
 | Row lineage (`_row_id`, `_last_updated_sequence_number`) | Supported |
-| Encryption keys in metadata | Supported |
+| Encryption keys in metadata | Supported (metadata-level storage + `EncryptionManager` interface; file-level envelope encryption not yet implemented [PR #1620 in review](https://github.com/apache/iceberg-go/pull/1620)) |
 | Variant type, non-shredded | Supported (PR [#932](https://github.com/apache/iceberg-go/pull/932); umbrella [#929](https://github.com/apache/iceberg-go/issues/929)) |
 | Variant type, shredded reader / writer | Supported (reader [#1238](https://github.com/apache/iceberg-go/pull/1238), writer [#1351](https://github.com/apache/iceberg-go/pull/1351)) |
 | Variant predicate pushdown / field extract | Supported (PR [#1607](https://github.com/apache/iceberg-go/pull/1607)) |
 | Deletion vectors, read | Supported |
 | Deletion vectors, write (unpartitioned) | Supported |
-| Deletion vectors, write (partitioned) | In progress ([#1135](https://github.com/apache/iceberg-go/issues/1135), PR [#1151](https://github.com/apache/iceberg-go/pull/1151)) |
+| Deletion vectors, write (partitioned) | Supported (PR [#1151](https://github.com/apache/iceberg-go/pull/1151)) |
 | Geometry / Geography types (schema) | Supported |
-| Geometry / Geography (transforms, statistics, pruning) | In progress (umbrella [#989](https://github.com/apache/iceberg-go/issues/989)) |
+| Geometry: statistics and pruning | Supported |
+| Geography: read, write, and schema | Supported (bounds/pruning intentionally omitted for geodesic safety) |
+| Geometry / Geography: nested-geo bounds | Deferred |
 | Multi-argument transforms | Infrastructure present; no concrete implementations exercised yet |
+| Statistics files (read / round-trip) | Supported |
+| NDV (Theta-sketch) statistics computation | Roadmap ([#1929](https://github.com/apache/iceberg-go/issues/1929)) |
 
 ## FileSystem support
 
