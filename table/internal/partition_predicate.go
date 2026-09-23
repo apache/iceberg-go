@@ -194,6 +194,7 @@ func partitionTerm(transform iceberg.Transform, name string) iceberg.UnboundTerm
 	if isIdentityTransform(transform) {
 		return ref
 	}
+
 	return iceberg.NewUnboundTransform(transform, ref)
 }
 
