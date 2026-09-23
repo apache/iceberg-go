@@ -1583,7 +1583,7 @@ func manifestLiveDataPaths(t *testing.T, tbl *table.Table) []string {
 	return paths
 }
 
-func TestRewriteDataFiles_MaxConcurrencyMatchesSequential(t *testing.T) {
+func TestRewriteDataFiles_MaxConcurrentGroupsMatchesSequential(t *testing.T) {
 	tblSeq := newMaxConcPartitionedTable(t, iceio.LocalFS{})
 	tblSeq = addMaxConcPartitions(t, tblSeq, 8, 2, 5)
 	tblConc := newMaxConcPartitionedTable(t, iceio.LocalFS{})
@@ -1601,7 +1601,7 @@ func TestRewriteDataFiles_MaxConcurrencyMatchesSequential(t *testing.T) {
 	require.NoError(t, err)
 
 	txConc := tblConc.NewTransaction()
-	resConc, err := txConc.RewriteDataFiles(t.Context(), groupsConc, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	resConc, err := txConc.RewriteDataFiles(t.Context(), groupsConc, table.RewriteDataFilesOptions{MaxConcurrentGroups: 4})
 	require.NoError(t, err)
 	committedConc, err := txConc.Commit(t.Context())
 	require.NoError(t, err)
@@ -1631,19 +1631,19 @@ func TestRewriteDataFiles_MaxConcurrencyMatchesSequential(t *testing.T) {
 	}
 }
 
-func TestRewriteDataFiles_MaxConcurrencyNegativeRejected(t *testing.T) {
+func TestRewriteDataFiles_MaxConcurrentGroupsNegativeRejected(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 
 	tx := tbl.NewTransaction()
-	_, err := tx.RewriteDataFiles(t.Context(), nil, table.RewriteDataFilesOptions{MaxConcurrency: -1})
+	_, err := tx.RewriteDataFiles(t.Context(), nil, table.RewriteDataFilesOptions{MaxConcurrentGroups: -1})
 	require.ErrorIs(t, err, table.ErrInvalidOperation)
 
 	txPartial := tbl.NewTransaction()
-	_, err = txPartial.RewriteDataFiles(t.Context(), nil, table.RewriteDataFilesOptions{PartialProgress: true, MaxConcurrency: -1})
+	_, err = txPartial.RewriteDataFiles(t.Context(), nil, table.RewriteDataFilesOptions{PartialProgress: true, MaxConcurrentGroups: -1})
 	require.ErrorIs(t, err, table.ErrInvalidOperation)
 }
 
-func TestRewriteDataFiles_MaxConcurrencyDeterministicOrder(t *testing.T) {
+func TestRewriteDataFiles_MaxConcurrentGroupsDeterministicOrder(t *testing.T) {
 	tblA := newMaxConcPartitionedTable(t, iceio.LocalFS{})
 	tblA = addMaxConcPartitions(t, tblA, 8, 1, 5)
 	tblB := newMaxConcPartitionedTable(t, iceio.LocalFS{})
@@ -1653,13 +1653,13 @@ func TestRewriteDataFiles_MaxConcurrencyDeterministicOrder(t *testing.T) {
 	groupsB := groupsByPartition(t, tblB)
 
 	txA := tblA.NewTransaction()
-	_, err := txA.RewriteDataFiles(t.Context(), groupsA, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	_, err := txA.RewriteDataFiles(t.Context(), groupsA, table.RewriteDataFilesOptions{MaxConcurrentGroups: 4})
 	require.NoError(t, err)
 	committedA, err := txA.Commit(t.Context())
 	require.NoError(t, err)
 
 	txB := tblB.NewTransaction()
-	_, err = txB.RewriteDataFiles(t.Context(), groupsB, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	_, err = txB.RewriteDataFiles(t.Context(), groupsB, table.RewriteDataFilesOptions{MaxConcurrentGroups: 4})
 	require.NoError(t, err)
 	committedB, err := txB.Commit(t.Context())
 	require.NoError(t, err)
@@ -1697,7 +1697,7 @@ func (f *failOpenIO) Open(name string) (iceio.File, error) {
 	return f.LocalFS.Open(name)
 }
 
-func TestRewriteDataFiles_MaxConcurrencyGroupFailure(t *testing.T) {
+func TestRewriteDataFiles_MaxConcurrentGroupsGroupFailure(t *testing.T) {
 	injected := errors.New("injected compaction read failure")
 
 	fsAtomic := &failOpenIO{}
@@ -1708,7 +1708,7 @@ func TestRewriteDataFiles_MaxConcurrencyGroupFailure(t *testing.T) {
 	fsAtomic.setFail(groupsAtomic[2].Tasks[0].File.FilePath(), injected)
 
 	txAtomic := tblAtomic.NewTransaction()
-	_, err := txAtomic.RewriteDataFiles(t.Context(), groupsAtomic, table.RewriteDataFilesOptions{MaxConcurrency: 4})
+	_, err := txAtomic.RewriteDataFiles(t.Context(), groupsAtomic, table.RewriteDataFilesOptions{MaxConcurrentGroups: 4})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), injected.Error())
 
@@ -1722,9 +1722,9 @@ func TestRewriteDataFiles_MaxConcurrencyGroupFailure(t *testing.T) {
 
 	txPartial := tblPartial.NewTransaction()
 	result, err := txPartial.RewriteDataFiles(t.Context(), groupsPartial, table.RewriteDataFilesOptions{
-		PartialProgress: true,
-		MaxCommits:      1,
-		MaxConcurrency:  4,
+		PartialProgress:     true,
+		MaxCommits:          1,
+		MaxConcurrentGroups: 4,
 	})
 	require.Error(t, err)
 	require.NotNil(t, result)
@@ -1778,7 +1778,7 @@ func (g *gateOpenIO) Open(name string) (iceio.File, error) {
 	return g.LocalFS.Open(name)
 }
 
-func TestRewriteDataFiles_MaxConcurrencyContextCancel(t *testing.T) {
+func TestRewriteDataFiles_MaxConcurrentGroupsContextCancel(t *testing.T) {
 	for _, partial := range []bool{false, true} {
 		gate := &gateOpenIO{}
 		tbl := newMaxConcPartitionedTable(t, gate)
@@ -1793,7 +1793,7 @@ func TestRewriteDataFiles_MaxConcurrencyContextCancel(t *testing.T) {
 		go func() {
 			defer close(done)
 			tx := tbl.NewTransaction()
-			opts := table.RewriteDataFilesOptions{MaxConcurrency: 4}
+			opts := table.RewriteDataFilesOptions{MaxConcurrentGroups: 4}
 			if partial {
 				opts.PartialProgress = true
 				opts.MaxCommits = 1
@@ -1877,7 +1877,7 @@ func (c *countOpenIO) getPeak() int {
 	return c.peak
 }
 
-func TestRewriteDataFiles_MaxConcurrencyLimitsInFlight(t *testing.T) {
+func TestRewriteDataFiles_MaxConcurrentGroupsLimitsInFlight(t *testing.T) {
 	for _, maxConc := range []int{4, 0, 1} {
 		counter := &countOpenIO{}
 		tbl := newMaxConcPartitionedTable(t, counter)
@@ -1888,8 +1888,8 @@ func TestRewriteDataFiles_MaxConcurrencyLimitsInFlight(t *testing.T) {
 
 		tx := tbl.NewTransaction()
 		_, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
-			MaxConcurrency: maxConc,
-			GroupOptions:   []table.CompactionGroupOption{table.WithCompactionScanConcurrency(1)},
+			MaxConcurrentGroups: maxConc,
+			GroupOptions:        []table.CompactionGroupOption{table.WithCompactionScanConcurrency(1)},
 		})
 		require.NoError(t, err)
 		_, err = tx.Commit(t.Context())

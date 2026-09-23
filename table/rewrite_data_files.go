@@ -219,22 +219,26 @@ type RewriteDataFilesOptions struct {
 	// [CompactionGroupOption].
 	GroupOptions []CompactionGroupOption
 
-	// MaxConcurrency bounds how many compaction groups run at once.
+	// MaxConcurrentGroups bounds how many compaction groups run at once.
 	// Zero and one both mean sequential execution, which is the default.
 	// Larger values run [ExecuteCompactionGroup] calls under a bounded
 	// errgroup and apply their results in the original group order, so
 	// manifests and [RewriteResult] are identical to a sequential run.
 	// The first error cancels the groups still running and is returned.
-	// Peak record-pipeline memory is MaxConcurrency times the per-group
-	// bound stated on [WithCompactionArrowBatchSize]:
+	// Peak record-pipeline memory is MaxConcurrentGroups times the
+	// per-group bound stated on [WithCompactionArrowBatchSize]:
 	//
-	//	MaxConcurrency x (workers x (rows in the largest task + n) + (recordBatchBufferSize + 2) x n)
+	//	MaxConcurrentGroups x (workers x (rows in the largest task + n) + (recordBatchBufferSize + 2) x n)
 	//
 	// rows, where workers, n and recordBatchBufferSize are the per-group
 	// values. Multiply rows by the average row width in bytes for a byte
-	// estimate. Delete-side memory is outside this bound. Negative values
-	// are rejected with [ErrInvalidOperation].
-	MaxConcurrency int
+	// estimate. Delete-side memory is outside this bound. File-open
+	// fan-out multiplies too: every group scans with up to
+	// [WithCompactionScanConcurrency] workers, so N groups open about N
+	// times the scan worker count in files at once. Size the two knobs
+	// together against connection and file descriptor limits. Negative
+	// values are rejected with [ErrInvalidOperation].
+	MaxConcurrentGroups int
 }
 
 // CompactionGroupOption configures a single [ExecuteCompactionGroup]
@@ -270,7 +274,10 @@ func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
 // The scan runs min(n, number of tasks) workers, and each worker holds
 // the decoded batches of at most one task until the writer has taken
 // them, so the worker count multiplies the read-side term of the
-// memory bound stated on [WithCompactionArrowBatchSize].
+// memory bound stated on [WithCompactionArrowBatchSize]. It also
+// multiplies [RewriteDataFilesOptions.MaxConcurrentGroups] for file
+// opens: N groups scan with up to n workers each, so about N times n
+// files are open at once.
 func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.scanConcurrency = n
@@ -355,8 +362,8 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	if _, err := t.txnMeta(); err != nil {
 		return nil, err
 	}
-	if opts.MaxConcurrency < 0 {
-		return nil, fmt.Errorf("%w: MaxConcurrency must be non-negative", ErrInvalidOperation)
+	if opts.MaxConcurrentGroups < 0 {
+		return nil, fmt.Errorf("%w: MaxConcurrentGroups must be non-negative", ErrInvalidOperation)
 	}
 	if opts.PartialProgress {
 		return t.rewriteDataFilesPartial(ctx, groups, opts)
@@ -369,8 +376,8 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	rewrite := t.NewRewrite(opts.SnapshotProps)
 	stagedDeleteFiles := make(map[string]struct{})
 
-	if opts.MaxConcurrency > 1 {
-		results, err := executeCompactionGroups(ctx, t.tbl, groups, opts.GroupOptions, opts.MaxConcurrency)
+	if opts.MaxConcurrentGroups > 1 {
+		results, err := executeCompactionGroups(ctx, t.tbl, groups, opts.GroupOptions, opts.MaxConcurrentGroups)
 		if err != nil {
 			return result, cleanupAtomicRewriteOutputs(ctx, t.tbl, results, err)
 		}
@@ -455,11 +462,11 @@ func cleanupAtomicRewriteOutputs(ctx context.Context, tbl *Table, results []Comp
 	return cause
 }
 
-func executeCompactionGroups(ctx context.Context, tbl *Table, groups []CompactionTaskGroup, groupOpts []CompactionGroupOption, maxConcurrency int) ([]CompactionGroupResult, error) {
+func executeCompactionGroups(ctx context.Context, tbl *Table, groups []CompactionTaskGroup, groupOpts []CompactionGroupOption, maxConcurrentGroups int) ([]CompactionGroupResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	limit := min(maxConcurrency, len(groups))
+	limit := min(maxConcurrentGroups, len(groups))
 	if limit < 1 {
 		limit = 1
 	}
@@ -720,8 +727,8 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			return cause
 		}
 
-		if opts.MaxConcurrency > 1 {
-			results, err := executeCompactionGroups(ctx, current, batchGroups, opts.GroupOptions, opts.MaxConcurrency)
+		if opts.MaxConcurrentGroups > 1 {
+			results, err := executeCompactionGroups(ctx, current, batchGroups, opts.GroupOptions, opts.MaxConcurrentGroups)
 			if err != nil {
 				return result, cleanupBatch(err, results...)
 			}
