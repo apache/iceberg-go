@@ -46,6 +46,9 @@ import (
 // Duplicate tuples collapse to a single clause, and an empty input yields
 // AlwaysFalse (matching nothing). Callers are expected to pass a partitioned
 // spec; dynamic partition overwrite rejects unpartitioned tables upstream.
+// Void fields are also accepted when their source column has been dropped (the
+// spec represents those tombstones with source ID 0), because void always
+// produces a null partition value and does not need a source column.
 //
 // The transform is kept in the row predicate so the match is evaluated against
 // the partition value rather than comparing the post-transform value directly
@@ -60,6 +63,7 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 		name       string
 		transform  iceberg.Transform
 		resultType iceberg.Type
+		isVoid     bool
 	}
 
 	var fields []fieldRef
@@ -68,6 +72,18 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 		if len(f.SourceIDs) != 1 {
 			return nil, fmt.Errorf("%w: partition field %q must have exactly one source id, got %d",
 				iceberg.ErrInvalidArgument, f.Name, len(f.SourceIDs))
+		}
+		if isVoidTransform(f.Transform) {
+			// A void field can survive source-column removal as a source-less
+			// tombstone. Its output is always null, so resolving or binding the
+			// source would add no information and would reject source ID 0.
+			if _, err := f.Transform.MarshalText(); err != nil {
+				return nil, fmt.Errorf("partition field %q: %w", f.Name, err)
+			}
+
+			fields = append(fields, fieldRef{id: f.FieldID, name: f.Name, transform: f.Transform, isVoid: true})
+
+			continue
 		}
 
 		sourceName, ok := schema.FindColumnName(f.SourceIDs[0])
@@ -103,8 +119,6 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 		sigParts := make([]string, 0, len(fields))
 
 		for _, fr := range fields {
-			term := partitionTerm(fr.transform, fr.name)
-
 			// DataFile.Partition() stores a null partition value as a nil-valued
 			// entry. A missing field ID is malformed and must fail closed rather
 			// than silently under-deleting.
@@ -114,11 +128,27 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 					iceberg.ErrInvalidArgument, fr.name, fr.id)
 			}
 			if val == nil {
+				if fr.isVoid {
+					// Void transforms produce null for every source value, so their
+					// null predicate is AlwaysTrue. Keeping the clause unchanged
+					// avoids inventing a reference for a source-less tombstone.
+					sigParts = append(sigParts, strconv.Itoa(fr.id)+":null")
+
+					continue
+				}
+
+				term := partitionTerm(fr.transform, fr.name)
 				clause = iceberg.NewAnd(clause, iceberg.IsNull(term))
 				sigParts = append(sigParts, strconv.Itoa(fr.id)+":null")
 
 				continue
 			}
+
+			if fr.isVoid {
+				return nil, fmt.Errorf("%w: partition value for void field %q must be nil",
+					iceberg.ErrInvalidArgument, fr.name)
+			}
+			term := partitionTerm(fr.transform, fr.name)
 
 			lit, err := LiteralForPartitionValue(val)
 			if err != nil {
