@@ -20,6 +20,7 @@ package internal
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
@@ -45,6 +46,24 @@ func identityField(sourceID, fieldID int, name string) iceberg.PartitionField {
 
 func identitySpec(fields ...iceberg.PartitionField) iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(fields...)
+}
+
+type partitionPredicateRow []any
+
+func (r partitionPredicateRow) Size() int       { return len(r) }
+func (r partitionPredicateRow) Get(pos int) any { return r[pos] }
+func (r partitionPredicateRow) Set(pos int, val any) {
+	r[pos] = val
+}
+
+func timestampAtUTC(year, month, day, hour, minute, second, microsecond int) iceberg.Timestamp {
+	return iceberg.Timestamp(time.Date(year, time.Month(month), day, hour, minute, second,
+		microsecond*int(time.Microsecond), time.UTC).UnixMicro())
+}
+
+func dateAtUTC(year, month, day int) iceberg.Date {
+	return iceberg.Date(time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC).Unix() /
+		int64((24*time.Hour)/time.Second))
 }
 
 func TestBuildPartitionMatchPredicate_EmptyInput(t *testing.T) {
@@ -312,6 +331,240 @@ func TestBuildPartitionMatchPredicate_UsesNonIdentityTransform(t *testing.T) {
 				tc.wantValue,
 			)
 			assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
+		})
+	}
+}
+
+func bucketValueForInt32(t *testing.T, transform iceberg.BucketTransform, value int32) int32 {
+	t.Helper()
+
+	result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.Int32Literal(value),
+	})
+	require.True(t, result.Valid)
+
+	return result.Val.(iceberg.Int32Literal).Value()
+}
+
+func TestBuildPartitionMatchPredicate_EvaluatesTransforms(t *testing.T) {
+	bucketTransform := iceberg.BucketTransform{NumBuckets: 4}
+	bucketPartition := bucketValueForInt32(t, bucketTransform, 1)
+	bucketNonMatch := int32(2)
+	for bucketValueForInt32(t, bucketTransform, bucketNonMatch) == bucketPartition {
+		bucketNonMatch++
+	}
+
+	cases := []struct {
+		name            string
+		sourceType      iceberg.Type
+		transform       iceberg.Transform
+		partitionValue  any
+		matchingValues  []any
+		nonMatchingVals []any
+	}{
+		{
+			name:            "bucket",
+			sourceType:      iceberg.PrimitiveTypes.Int32,
+			transform:       bucketTransform,
+			partitionValue:  bucketPartition,
+			matchingValues:  []any{int32(1)},
+			nonMatchingVals: []any{bucketNonMatch},
+		},
+		{
+			name:            "truncate",
+			sourceType:      iceberg.PrimitiveTypes.String,
+			transform:       iceberg.TruncateTransform{Width: 3},
+			partitionValue:  "boo",
+			matchingValues:  []any{"boo", "books", "booster"},
+			nonMatchingVals: []any{"bar", "science"},
+		},
+		{
+			name:           "year",
+			sourceType:     iceberg.PrimitiveTypes.Timestamp,
+			transform:      iceberg.YearTransform{},
+			partitionValue: int32(50), // 2020 - 1970
+			matchingValues: []any{
+				timestampAtUTC(2020, 1, 1, 0, 0, 0, 0),
+				timestampAtUTC(2020, 12, 31, 23, 59, 59, 999999),
+			},
+			nonMatchingVals: []any{
+				timestampAtUTC(2019, 12, 31, 23, 59, 59, 999999),
+				timestampAtUTC(2021, 1, 1, 0, 0, 0, 0),
+			},
+		},
+		{
+			name:           "month",
+			sourceType:     iceberg.PrimitiveTypes.Timestamp,
+			transform:      iceberg.MonthTransform{},
+			partitionValue: int32(601), // 2020-02, relative to 1970-01
+			matchingValues: []any{
+				timestampAtUTC(2020, 2, 1, 0, 0, 0, 0),
+				timestampAtUTC(2020, 2, 29, 23, 59, 59, 999999),
+			},
+			nonMatchingVals: []any{
+				timestampAtUTC(2020, 1, 31, 23, 59, 59, 999999),
+				timestampAtUTC(2020, 3, 1, 0, 0, 0, 0),
+			},
+		},
+		{
+			name:           "day",
+			sourceType:     iceberg.PrimitiveTypes.Timestamp,
+			transform:      iceberg.DayTransform{},
+			partitionValue: dateAtUTC(2020, 2, 29),
+			matchingValues: []any{
+				timestampAtUTC(2020, 2, 29, 0, 0, 0, 0),
+				timestampAtUTC(2020, 2, 29, 23, 59, 59, 999999),
+			},
+			nonMatchingVals: []any{
+				timestampAtUTC(2020, 2, 28, 23, 59, 59, 999999),
+				timestampAtUTC(2020, 3, 1, 0, 0, 0, 0),
+			},
+		},
+		{
+			name:           "hour",
+			sourceType:     iceberg.PrimitiveTypes.Timestamp,
+			transform:      iceberg.HourTransform{},
+			partitionValue: int32(439714), // 2020-02-29 10:00 UTC, relative to 1970
+			matchingValues: []any{
+				timestampAtUTC(2020, 2, 29, 10, 0, 0, 0),
+				timestampAtUTC(2020, 2, 29, 10, 59, 59, 999999),
+			},
+			nonMatchingVals: []any{
+				timestampAtUTC(2020, 2, 29, 9, 59, 59, 999999),
+				timestampAtUTC(2020, 2, 29, 11, 0, 0, 0),
+			},
+		},
+		{
+			name:           "hour before epoch",
+			sourceType:     iceberg.PrimitiveTypes.Timestamp,
+			transform:      iceberg.HourTransform{},
+			partitionValue: int32(-1), // 1969-12-31 23:00 UTC
+			matchingValues: []any{
+				timestampAtUTC(1969, 12, 31, 23, 0, 0, 0),
+				timestampAtUTC(1969, 12, 31, 23, 59, 59, 999999),
+			},
+			nonMatchingVals: []any{
+				timestampAtUTC(1969, 12, 31, 22, 59, 59, 999999),
+				timestampAtUTC(1970, 1, 1, 0, 0, 0, 0),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "value", Type: tc.sourceType,
+			})
+			spec := identitySpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1000, Name: "value_part", Transform: tc.transform,
+			})
+
+			expr, err := BuildPartitionMatchPredicate(spec, schema, []map[int]any{{1000: tc.partitionValue}})
+			require.NoError(t, err)
+
+			eval, err := iceberg.ExpressionEvaluator(schema, expr, true)
+			require.NoError(t, err)
+
+			for _, value := range tc.matchingValues {
+				matched, err := eval(partitionPredicateRow{value})
+				require.NoError(t, err)
+				assert.True(t, matched, "source value %v should match partition value %v", value, tc.partitionValue)
+			}
+			for _, value := range tc.nonMatchingVals {
+				matched, err := eval(partitionPredicateRow{value})
+				require.NoError(t, err)
+				assert.False(t, matched, "source value %v should not match partition value %v", value, tc.partitionValue)
+			}
+		})
+	}
+}
+
+func TestBuildPartitionMatchPredicate_EvaluatesBucketCollision(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 4}
+	valuesByBucket := make(map[int32][]int32)
+	var collisionBucket int32
+	var collisionValues []int32
+
+	for value := int32(0); value < 10000; value++ {
+		bucket := bucketValueForInt32(t, transform, value)
+		valuesByBucket[bucket] = append(valuesByBucket[bucket], value)
+		if len(valuesByBucket[bucket]) == 2 {
+			collisionBucket = bucket
+			collisionValues = valuesByBucket[bucket]
+			break
+		}
+	}
+	require.Len(t, collisionValues, 2)
+	assert.NotEqual(t, collisionValues[0], collisionValues[1])
+
+	nonMatchingValue := int32(-1)
+	for value := int32(0); value < 10000; value++ {
+		if bucketValueForInt32(t, transform, value) != collisionBucket {
+			nonMatchingValue = value
+			break
+		}
+	}
+	require.NotEqual(t, int32(-1), nonMatchingValue)
+
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32,
+	})
+	spec := identitySpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id_bucket", Transform: transform,
+	})
+	expr, err := BuildPartitionMatchPredicate(spec, schema, []map[int]any{{1000: collisionBucket}})
+	require.NoError(t, err)
+
+	eval, err := iceberg.ExpressionEvaluator(schema, expr, true)
+	require.NoError(t, err)
+	for _, value := range collisionValues {
+		matched, err := eval(partitionPredicateRow{value})
+		require.NoError(t, err)
+		assert.True(t, matched, "source value %d should match bucket %d", value, collisionBucket)
+	}
+	matched, err := eval(partitionPredicateRow{nonMatchingValue})
+	require.NoError(t, err)
+	assert.False(t, matched, "source value %d should not match bucket %d", nonMatchingValue, collisionBucket)
+}
+
+func TestBuildPartitionMatchPredicate_EvaluatesTransformedNull(t *testing.T) {
+	cases := []struct {
+		name       string
+		sourceType iceberg.Type
+		transform  iceberg.Transform
+		nonNil     any
+	}{
+		{name: "bucket", sourceType: iceberg.PrimitiveTypes.Int32, transform: iceberg.BucketTransform{NumBuckets: 4}, nonNil: int32(1)},
+		{name: "truncate", sourceType: iceberg.PrimitiveTypes.String, transform: iceberg.TruncateTransform{Width: 3}, nonNil: "books"},
+		{name: "year", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.YearTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
+		{name: "month", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.MonthTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
+		{name: "day", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.DayTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
+		{name: "hour", sourceType: iceberg.PrimitiveTypes.Timestamp, transform: iceberg.HourTransform{}, nonNil: timestampAtUTC(2020, 1, 1, 0, 0, 0, 0)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "value", Type: tc.sourceType,
+			})
+			spec := identitySpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1000, Name: "value_part", Transform: tc.transform,
+			})
+
+			expr, err := BuildPartitionMatchPredicate(spec, schema, []map[int]any{{1000: nil}})
+			require.NoError(t, err)
+
+			eval, err := iceberg.ExpressionEvaluator(schema, expr, true)
+			require.NoError(t, err)
+
+			matched, err := eval(partitionPredicateRow{nil})
+			require.NoError(t, err)
+			assert.True(t, matched, "null source value should match null partition value")
+
+			matched, err = eval(partitionPredicateRow{tc.nonNil})
+			require.NoError(t, err)
+			assert.False(t, matched, "non-null source value should not match null partition value")
 		})
 	}
 }
