@@ -3233,7 +3233,11 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	for range numWorkers {
 		go func() {
 			defer wg.Done()
+			sink := newRecordSink(records)
 			for {
+				if err := sink.reserve(ctx); err != nil {
+					return
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -3242,7 +3246,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 						return
 					}
 
-					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], records, invariants); err != nil {
+					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], sink, invariants); err != nil {
 						cancel(err)
 
 						return

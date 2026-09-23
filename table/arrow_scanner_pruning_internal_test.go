@@ -114,7 +114,7 @@ func TestProcessRecordsUsesRowGroupFilterForPruning(t *testing.T) {
 	err = (&arrowScan{rowGroupFilter: rowGroupFilter, projectedSchema: fileSchema}).processRecords(
 		ctx,
 		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
-		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, newRecordSink(out))
 	require.NoError(t, err)
 
 	require.NotNil(t, reader.tester)
@@ -179,7 +179,7 @@ func TestProcessRecordsRebindsRowGroupFilterToPromotedFileSchema(t *testing.T) {
 	}).processRecords(
 		ctx,
 		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
-		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, newRecordSink(out))
 	require.NoError(t, err)
 
 	assert.True(t, reader.statsResult, "matching INT32 row-group stats should be retained")
@@ -227,7 +227,7 @@ func TestProcessRecordsDoesNotPruneMissingInitialDefault(t *testing.T) {
 	}).processRecords(
 		ctx,
 		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
-		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, newRecordSink(out))
 	require.NoError(t, err)
 
 	require.NotNil(t, reader.tester)
