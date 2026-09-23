@@ -385,23 +385,37 @@ import _ &quot;github.com/apache/iceberg-go/io/gocloud/azure&quot; // abfs, abfs
 </tbody></table>
 </div>
 <h3 id="azure-data-lake-storage--blob"><a class="header" href="#azure-data-lake-storage--blob">Azure Data Lake Storage / Blob</a></h3>
-<p>Authentication is selected based on the property keys present (<code>io/gocloud/azure/azure.go</code>):</p>
+<p>Authentication is selected in the following order (<code>io/gocloud/azure/azure.go</code>); the first applicable option wins, and if none of 1-4 apply the default credential chain (5) is used:</p>
 <ol>
-<li>Shared key: both <code>adls.auth.shared-key.account.name</code> and <code>adls.auth.shared-key.account.key</code> set.</li>
-<li>Per-host SAS token: <code>adls.sas-token.&lt;hostname&gt;</code> (prefix-matched against the storage account host).</li>
-<li>Per-host connection string: <code>adls.connection-string.&lt;hostname&gt;</code>.</li>
-<li>Managed identity: <code>adls.auth.managed-identity.enabled</code> set to a truthy value.</li>
+<li>Shared key: a nonempty <code>adls.auth.shared-key.account.name</code> selects this path and requires a nonempty <code>adls.auth.shared-key.account.key</code>.</li>
+<li>Per-host SAS token: <code>adls.sas-token.&lt;hostname&gt;</code>, where <code>&lt;hostname&gt;</code> exactly matches the storage account hostname (for example, <code>myaccount.dfs.core.windows.net</code>).</li>
+<li>Per-account connection string: <code>adls.connection-string.&lt;account-name&gt;</code> (for example, <code>adls.connection-string.myaccount</code>).</li>
+<li>Managed identity: <code>adls.auth.managed-identity.enabled</code> set to exactly <code>&quot;true&quot;</code> selects this path and uses <code>ManagedIdentityCredential</code> directly. Set <code>adls.client-id</code> to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.</li>
+<li>Default credential chain: <code>DefaultAzureCredential</code>, which includes managed identity among its credential sources.</li>
 </ol>
+<blockquote>
+<p><strong>Note on cross-client parity.</strong> The two properties in step 4 diverge from the
+other clients. <code>adls.auth.managed-identity.enabled</code> is Go-specific: neither
+Iceberg Java nor PyIceberg defines a property that forces
+<code>ManagedIdentityCredential</code>, so catalog properties that set it do not carry
+over. <code>adls.client-id</code> collides in name only — PyIceberg reads it as a service
+principal client ID used together with <code>adls.client-secret</code> and
+<code>adls.tenant-id</code>, neither of which iceberg-go defines (see the
+<a href="https://py.iceberg.apache.org/configuration/#azure-data-lake">PyIceberg ADLS configuration</a>),
+while Java's <code>AzureProperties</code> defines no <code>adls.client-id</code> at all. Here it is
+only ever read as a user-assigned managed identity ID, and only when step 4 is
+selected.</p>
+</blockquote>
 <p>Tuning properties:</p>
 <div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>adls.auth.shared-key.account.name</code> (<code>io.ADLSSharedKeyAccountName</code>)</td><td>Account name.</td></tr>
 <tr><td><code>adls.auth.shared-key.account.key</code> (<code>io.ADLSSharedKeyAccountKey</code>)</td><td>Account key.</td></tr>
 <tr><td><code>adls.sas-token.&lt;host&gt;</code> (prefix <code>io.ADLSSasTokenPrefix</code>)</td><td>Per-host SAS token.</td></tr>
-<tr><td><code>adls.connection-string.&lt;host&gt;</code> (prefix <code>io.ADLSConnectionStringPrefix</code>)</td><td>Per-host connection string.</td></tr>
-<tr><td><code>adls.client-id</code> (<code>io.ADLSClientID</code>)</td><td>Client/application ID for AAD auth.</td></tr>
+<tr><td><code>adls.connection-string.&lt;account-name&gt;</code> (prefix <code>io.ADLSConnectionStringPrefix</code>)</td><td>Per-account connection string.</td></tr>
+<tr><td><code>adls.client-id</code> (<code>io.ADLSClientID</code>)</td><td>Client ID of a user-assigned managed identity. Used only when the explicit managed-identity authentication path is selected.</td></tr>
 <tr><td><code>adls.endpoint</code> (<code>io.ADLSEndpoint</code>)</td><td>Storage domain (e.g. <code>blob.core.windows.net</code>).</td></tr>
 <tr><td><code>adls.protocol</code> (<code>io.ADLSProtocol</code>)</td><td><code>http</code> or <code>https</code>.</td></tr>
-<tr><td><code>adls.auth.managed-identity.enabled</code> (<code>io.ADLSManagedIdentityEnabled</code>)</td><td>Enable Azure Managed Identity auth.</td></tr>
+<tr><td><code>adls.auth.managed-identity.enabled</code> (<code>io.ADLSManagedIdentityEnabled</code>)</td><td>Set to exactly <code>&quot;true&quot;</code> to use <code>ManagedIdentityCredential</code> directly, subject to the precedence above.</td></tr>
 </tbody></table>
 </div>
 <h2 id="environment-variables"><a class="header" href="#environment-variables">Environment variables</a></h2>
