@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -237,7 +238,7 @@ func TestPositionDeleteRowGroupTesterUsesFilePathStats(t *testing.T) {
 	defer reader.Close()
 	assert.Equal(t, 2, reader.NumRowGroups())
 
-	tester, err := newPositionDeleteRowGroupTester(map[string]struct{}{dataPath: {}})
+	tester, err := newPositionDeleteRowGroupTester(PositionalDeleteArrowSchema, map[string]struct{}{dataPath: {}})
 	require.NoError(t, err)
 	require.NotNil(t, tester)
 
@@ -393,6 +394,123 @@ func TestPosDeleteAccumulatorFinishAfterReleasePanics(t *testing.T) {
 	assert.PanicsWithValue(t, "position delete accumulator is already finished or released", func() {
 		acc.finish()
 	})
+}
+
+func TestPositionDeleteRowGroupTesterValidatesPhysicalFieldIDs(t *testing.T) {
+	t.Parallel()
+
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
+	dataPath := "mem://bucket/data/needed.parquet"
+
+	tests := []struct {
+		name       string
+		schema     *arrow.Schema
+		wantTester bool
+		wantErr    string
+	}{
+		{
+			name:       "canonical IDs",
+			schema:     positionDeleteSchemaWithFieldIDs(filePathField.ID, posField.ID),
+			wantTester: true,
+		},
+		{
+			name:   "IDs absent",
+			schema: positionDeleteSchemaWithoutFieldIDs(),
+		},
+		{
+			name:    "swapped IDs",
+			schema:  positionDeleteSchemaWithFieldIDs(posField.ID, filePathField.ID),
+			wantErr: `position delete column "file_path" has field ID`,
+		},
+		{
+			name:    "duplicate IDs",
+			schema:  positionDeleteSchemaWithFieldIDs(filePathField.ID, filePathField.ID),
+			wantErr: "is not unique",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tester, err := newPositionDeleteRowGroupTester(tt.schema, map[string]struct{}{dataPath: {}})
+			if tt.wantErr != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			if tt.wantTester {
+				require.NotNil(t, tester)
+				assert.NotEmpty(t, tester.BloomPreds)
+			} else {
+				assert.Nil(t, tester)
+			}
+		})
+	}
+}
+
+func TestReadDeletesForPathsRejectsSwappedPhysicalFieldIDs(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
+	deletePath := "mem://bucket/deletes/swapped-ids.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath,
+		positionDeleteSchemaWithFieldIDs(posField.ID, filePathField.ID),
+		`[{"file_path": "`+dataPath+`", "pos": 0}]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128),
+		map[string]struct{}{dataPath: {}})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, deletes)
+}
+
+func TestReadDeletesForPathsRejectsDuplicatePhysicalFieldIDs(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	deletePath := "mem://bucket/deletes/duplicate-ids.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath,
+		positionDeleteSchemaWithFieldIDs(filePathField.ID, filePathField.ID),
+		`[{"file_path": "`+dataPath+`", "pos": 0}]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128),
+		map[string]struct{}{dataPath: {}})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, deletes)
+}
+
+func positionDeleteSchemaWithFieldIDs(filePathID, posID int) *arrow.Schema {
+	return arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "file_path",
+			Type:     arrow.BinaryTypes.String,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(filePathID)}),
+		},
+		{
+			Name:     "pos",
+			Type:     arrow.PrimitiveTypes.Int64,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(posID)}),
+		},
+	}, nil)
+}
+
+func positionDeleteSchemaWithoutFieldIDs() *arrow.Schema {
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
 }
 
 func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
