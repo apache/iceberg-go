@@ -209,7 +209,7 @@ func TestMarshalAvroEntryTimestampPartitionRoundTrip(t *testing.T) {
 		t.Run(tc.typ.String(), func(t *testing.T) {
 			schema := NewSchema(0, NestedField{ID: 1, Name: "ts", Type: tc.typ})
 			spec := NewPartitionSpecID(1, PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "ts", Transform: IdentityTransform{}})
-			
+
 			path := "s3://bucket/ns/tbl/data/ts.parquet"
 			builder, err := NewDataFileBuilder(spec, EntryContentData, path, ParquetFile, map[int]any{1000: tc.want}, nil, nil, 1, 1024)
 			require.NoError(t, err)
