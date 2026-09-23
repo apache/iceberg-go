@@ -1260,6 +1260,7 @@ func isUnknownTransform(transform Transform) bool {
 		return false
 	}
 }
+
 // rejectTransformTerm guards predicates that still do not support transform
 // terms, such as bounding-box predicates.
 func rejectTransformTerm(term BoundTerm) error {
