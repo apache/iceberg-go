@@ -305,7 +305,6 @@ func mustLoadRecordBatchFromJSON(schema *arrow.Schema, content string) arrow.Rec
 
 func writePosDeleteParquetToMemFS(t *testing.T, memFS *iceio.MemFS, path, content string) {
 	t.Helper()
-
 	writePosDeleteParquetToMemFSWithSchema(t, memFS, path, PositionalDeleteArrowSchema, content)
 }
 
