@@ -164,7 +164,7 @@ func newReorderScanFixture(tb testing.TB, dir string, files, rowsPerFile int, fs
 	require.NoError(tb, err)
 
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir,
-		iceberg.Properties{PropertyFormatVersion: "2"})
+		iceberg.Properties{PropertyFormatVersion: "2", ParquetCompressionKey: "uncompressed"})
 	require.NoError(tb, err)
 
 	payload := strings.Repeat("x", 256)
