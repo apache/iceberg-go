@@ -217,15 +217,15 @@ func BenchmarkRewriteDataFilesGroupConcurrency(b *testing.B) {
 	groups := planGroupConcGroups(b, tbl)
 	totalRows := int64(groupConcPartitions * groupConcFilesPerPart * groupConcRowsPerFile)
 
-	for _, maxConcurrency := range []int{1, 2, 4, 8} {
-		b.Run(fmt.Sprintf("MaxConcurrency=%d", maxConcurrency), func(b *testing.B) {
+	for _, maxConcurrentGroups := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("MaxConcurrentGroups=%d", maxConcurrentGroups), func(b *testing.B) {
 			before, err := filepath.Glob(filepath.Join(tbl.Location(), "data", "*.parquet"))
 			require.NoError(b, err)
 			inputs := make(map[string]struct{}, len(before))
 			for _, p := range before {
 				inputs[p] = struct{}{}
 			}
-			opts := table.RewriteDataFilesOptions{MaxConcurrency: maxConcurrency}
+			opts := table.RewriteDataFilesOptions{MaxConcurrentGroups: maxConcurrentGroups}
 
 			b.ReportAllocs()
 			b.ResetTimer()
