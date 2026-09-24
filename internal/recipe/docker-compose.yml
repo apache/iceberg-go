@@ -134,7 +134,8 @@ services:
       - -ec
       - |
         for attempt in 1 2 3 4 5; do
-          if aws s3api head-bucket --bucket warehouse >/dev/null 2>&1 || aws s3api create-bucket --bucket warehouse; then
+          if { aws s3api head-bucket --bucket warehouse >/dev/null 2>&1 || aws s3api create-bucket --bucket warehouse; } \
+            && aws s3 rm s3://warehouse --recursive --quiet; then
             exit 0
           fi
           sleep 2

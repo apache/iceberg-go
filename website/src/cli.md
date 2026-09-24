@@ -104,7 +104,7 @@ All commands accept `--output text` (default, human-readable) or `--output json`
 
 Note: only the identity transform is supported for `--partition-spec` at this moment.
 ```shell
-# Create a simple table with REST catalog and Minio
+# Create a simple table with REST catalog and object store
 ./iceberg create table default.table-1 \
         --properties write.format.default=parquet \
         --partition-spec foo \
