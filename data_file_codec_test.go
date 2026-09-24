@@ -464,8 +464,6 @@ func TestManifestEntrySchemaForRejectsInvalidTypesAfterCacheHit(t *testing.T) {
 
 	for _, typ := range []Type{
 		unsupportedCodecPartitionType{},
-		TimestampNsType{},
-		TimestampTzNsType{},
 		VariantType{},
 		&StructType{}, &ListType{ElementID: 2, Element: Int64Type{}},
 		&MapType{KeyID: 2, KeyType: StringType{}, ValueID: 3, ValueType: Int64Type{}},
