@@ -70,7 +70,7 @@ make lint-install
 2. Export the required environment variables:
 
    ```shell
-   export AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000
+   export AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' object-store):9000
    export AWS_REGION=us-east-1
    export SPARK_CONTAINER_ID=$(docker ps -qf 'name=spark-iceberg')
    export DOCKER_API_VERSION=$(docker version -f '{{.Server.APIVersion}}')

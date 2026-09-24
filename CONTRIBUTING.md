@@ -60,6 +60,6 @@ make test-race # runs all unit tests with race detector
 Integration tests require Docker and are gated behind a build tag:
 
 ```bash
-docker compose -f internal/recipe/docker-compose.yml up -d rest minio mc --wait
+docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
 go test -tags integration ./...
 ```
