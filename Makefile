@@ -55,7 +55,7 @@ integration-logs:
 	docker compose -f internal/recipe/docker-compose.yml logs
 
 integration-env:
-	@echo "export AWS_S3_ENDPOINT=http://$$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000"
+	@echo "export AWS_S3_ENDPOINT=http://$$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' object-store):9000"
 	@echo "export AWS_REGION=us-east-1"
 	@echo "export SPARK_CONTAINER_ID=$$(docker ps -qf 'name=spark-iceberg')"
 	@echo "export DOCKER_API_VERSION=$$(docker version -f '{{.Server.APIVersion}}')"
