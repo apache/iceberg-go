@@ -96,7 +96,7 @@ services:
       - RUSTFS_ACCESS_KEY=admin
       - RUSTFS_SECRET_KEY=password
       - RUSTFS_SERVER_DOMAINS=object-store
-      - RUSTFS_CONSOLE_ENABLE=true
+      - RUSTFS_OBS_LOG_STDOUT_ENABLED=true
     networks:
       iceberg_net:
         aliases:
@@ -133,7 +133,14 @@ services:
     command:
       - -ec
       - |
-        aws s3api head-bucket --bucket warehouse || aws s3api create-bucket --bucket warehouse
+        for attempt in 1 2 3 4 5; do
+          if aws s3api head-bucket --bucket warehouse >/dev/null 2>&1 || aws s3api create-bucket --bucket warehouse; then
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Failed to create warehouse bucket." >&2
+        exit 1
   clickhouse:
     image: clickhouse/clickhouse-server
     container_name: clickhouse

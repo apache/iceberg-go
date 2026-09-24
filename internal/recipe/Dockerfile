@@ -19,7 +19,9 @@ RUN pip3 install -q ipython
 RUN pip3 install pyiceberg[s3fs,hive]
 RUN pip3 install pyarrow
 
-RUN sed -i 's|http://minio:9000|http://object-store:9000|g' ${SPARK_HOME}/conf/spark-defaults.conf
+# The base image's demo catalog points at MinIO.
+RUN sed -i 's|http://minio:9000|http://object-store:9000|g' ${SPARK_HOME}/conf/spark-defaults.conf \
+    && grep -q 'http://object-store:9000' ${SPARK_HOME}/conf/spark-defaults.conf
 COPY provision.py .
 COPY validation.py .
 COPY hadoop_validation.py .

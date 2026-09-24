@@ -39,7 +39,7 @@ lint-install:
 
 integration-setup:
 	mkdir -p /tmp/iceberg-hadoop-warehouse
-	docker compose -f internal/recipe/docker-compose.yml up -d --wait
+	docker compose -f internal/recipe/docker-compose.yml up -d --build --wait
 	docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
 
 integration-setup-spark4:
