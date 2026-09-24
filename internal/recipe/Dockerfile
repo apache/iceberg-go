@@ -19,7 +19,7 @@ RUN pip3 install -q ipython
 RUN pip3 install pyiceberg[s3fs,hive]
 RUN pip3 install pyarrow
 
-COPY spark-defaults.conf ${SPARK_HOME}/conf/spark-defaults.conf
+RUN sed -i 's|http://minio:9000|http://object-store:9000|g' ${SPARK_HOME}/conf/spark-defaults.conf
 COPY provision.py .
 COPY validation.py .
 COPY hadoop_validation.py .
