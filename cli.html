@@ -297,7 +297,7 @@ catalog:
 </code></pre>
 <p><strong>Create table</strong></p>
 <p>Note: only the identity transform is supported for <code>--partition-spec</code> at this moment.</p>
-<pre><code class="language-shell"># Create a simple table with REST catalog and Minio
+<pre><code class="language-shell"># Create a simple table with REST catalog and object store
 ./iceberg create table default.table-1 \
         --properties write.format.default=parquet \
         --partition-spec foo \

@@ -932,7 +932,7 @@ catalog:
 </code></pre>
 <p><strong>Create table</strong></p>
 <p>Note: only the identity transform is supported for <code>--partition-spec</code> at this moment.</p>
-<pre><code class="language-shell"># Create a simple table with REST catalog and Minio
+<pre><code class="language-shell"># Create a simple table with REST catalog and object store
 ./iceberg create table default.table-1 \
         --properties write.format.default=parquet \
         --partition-spec foo \
@@ -2276,7 +2276,7 @@ make test-race # runs all unit tests with race detector
 </code></pre>
 <h3 id="integration-tests"><a class="header" href="#integration-tests">Integration Tests</a></h3>
 <p>Integration tests require Docker and are gated behind a build tag:</p>
-<pre><code class="language-bash">docker compose -f internal/recipe/docker-compose.yml up -d rest minio mc --wait
+<pre><code class="language-bash">docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
 go test -tags integration ./...
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div><!--

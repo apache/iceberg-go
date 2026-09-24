@@ -268,7 +268,7 @@ make test-race # runs all unit tests with race detector
 </code></pre>
 <h3 id="integration-tests"><a class="header" href="#integration-tests">Integration Tests</a></h3>
 <p>Integration tests require Docker and are gated behind a build tag:</p>
-<pre><code class="language-bash">docker compose -f internal/recipe/docker-compose.yml up -d rest minio mc --wait
+<pre><code class="language-bash">docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
 go test -tags integration ./...
 </code></pre>
 
