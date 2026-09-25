@@ -507,17 +507,31 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 		return nil, err
 	}
 
-	wr, path, counter, fileCloser, err := m.snap.newManifestWriter(spec)
-	if err != nil {
-		return nil, err
-	}
-	defer internal.CheckedClose(fileCloser, &err)
+	var wr *iceberg.ManifestWriter
+	var path string
+	var counter *internal.CountingWriter
+	var fileCloser io.Closer
 	writerClosed := false
 	defer func() {
-		if !writerClosed {
+		if wr != nil && !writerClosed {
 			internal.CheckedClose(wr, &err)
 		}
 	}()
+	defer func() {
+		if fileCloser != nil {
+			internal.CheckedClose(fileCloser, &err)
+		}
+	}()
+
+	ensureWriter := func() error {
+		if wr != nil {
+			return nil
+		}
+
+		wr, path, counter, fileCloser, err = m.snap.newManifestWriter(spec)
+
+		return err
+	}
 
 	for _, manifest := range bin {
 		for entry, err := range m.snap.iterManifestEntries(manifest, false) {
@@ -527,12 +541,21 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 
 			switch {
 			case entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == m.snap.snapshotID:
+				if err = ensureWriter(); err != nil {
+					return nil, err
+				}
 				// only files deleted by this snapshot should be added to the new manifest
 				err = wr.Delete(entry)
 			case entry.Status() == iceberg.EntryStatusADDED && entry.SnapshotID() == m.snap.snapshotID:
+				if err = ensureWriter(); err != nil {
+					return nil, err
+				}
 				// added entries from this snapshot are still added, otherwise they should be existing
 				err = wr.Add(entry)
 			case entry.Status() != iceberg.EntryStatusDELETED:
+				if err = ensureWriter(); err != nil {
+					return nil, err
+				}
 				// add all non-deleted files from the old manifest as existing files
 				err = wr.Existing(entry)
 			}
@@ -541,6 +564,10 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 				return nil, err
 			}
 		}
+	}
+
+	if wr == nil {
+		return nil, nil
 	}
 
 	// close the writer to force a flush and ensure counter.Count is accurate
@@ -577,7 +604,9 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 			if err != nil {
 				return nil, err
 			}
-			output = append(output, created)
+			if created != nil {
+				output = append(output, created)
+			}
 		}
 
 		return output, nil
@@ -667,7 +696,8 @@ func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteF
 		minCountToMerge: txn.meta.props.GetInt(ManifestMinMergeCountKey, ManifestMinMergeCountDefault),
 		mergeEnabled:    txn.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault),
 		mergeConcurrency: manifestMergeConcurrencyLimit(
-			txn.meta.props.GetInt(ManifestMergeMaxConcurrencyKey, ManifestMergeMaxConcurrencyDefault)),
+			txn.meta.props.GetInt(ManifestMergeMaxConcurrencyKey, ManifestMergeMaxConcurrencyDefault),
+		),
 	}
 
 	return prod
@@ -1762,16 +1792,13 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 	// creates it).
 	baseHeadID := sp.txn.baseRefSnapshotID(branch)
 
-	return []Update{
-			addSnap,
-			// Carry over the branch's existing retention settings so advancing
-			// the ref on commit does not silently discard them. The update
-			// encodes exactly the current ref's retention (settings the branch
-			// lacks stay 0 and are dropped by the `omitempty` tags); the catalog
-			// applies a set-snapshot-ref as a pure replace, so this fully
-			// determines the resulting ref rather than merging with the old one.
-			sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef),
-		}, []Requirement{
-			AssertRefSnapshotID(branch, baseHeadID),
-		}, nil
+	// Carry over the branch's existing retention settings so advancing
+	// the ref on commit does not silently discard them. The update
+	// encodes exactly the current ref's retention (settings the branch
+	// lacks stay 0 and are dropped by the `omitempty` tags); the catalog
+	// applies a set-snapshot-ref as a pure replace, so this fully
+	// determines the resulting ref rather than merging with the old one.
+	retainingSnapshotRef := sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef)
+
+	return []Update{addSnap, retainingSnapshotRef}, []Requirement{AssertRefSnapshotID(branch, baseHeadID)}, nil
 }
