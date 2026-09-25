@@ -508,8 +508,9 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 // matters.
 //
 // manifestContent < 0 yields entries across both data and delete
-// manifests.
-func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent) iter.Seq2[iceberg.ManifestEntry, error] {
+// manifests. Set discardDeleted to skip DELETED entries: they are files
+// already removed from the table, not files still in it.
+func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
 	return func(yield func(iceberg.ManifestEntry, error) bool) {
 		manifests, err := s.Manifests(fio)
 		if err != nil {
@@ -523,7 +524,7 @@ func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent)
 				continue
 			}
 
-			for entry, err := range m.Entries(fio, false) {
+			for entry, err := range m.Entries(fio, discardDeleted) {
 				if err != nil {
 					yield(nil, err)
 
