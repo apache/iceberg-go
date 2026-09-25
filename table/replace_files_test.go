@@ -939,8 +939,8 @@ func TestReplaceFiles_ValidationErrors(t *testing.T) {
 	})
 }
 
-// seedDataFilesWithPositionDeletes creates two v2 data files (ids 1-3 and
-// 4-6), each with a position delete on a different row. Tasks are sorted by path.
+// seedDataFilesWithPositionDeletes creates two v2 data files (ids 1-3 and 4-6)
+// each with a position delete on a different row. Tasks are sorted by path.
 func seedDataFilesWithPositionDeletes(t *testing.T) (*table.Table, []table.FileScanTask) {
 	t.Helper()
 
@@ -1013,8 +1013,8 @@ func seedDataFilesWithPositionDeletes(t *testing.T) (*table.Table, []table.FileS
 	return tbl, tasks
 }
 
-// seedReplaceFilesTableWithDelete returns a table with one data file and one
-// delete on it: a position delete on v2, a deletion vector on v3.
+// seedReplaceFilesTableWithDelete returns a table with one data file and one delete on it:
+// a position delete on v2, a deletion vector on v3.
 func seedReplaceFilesTableWithDelete(t *testing.T, version int) (*table.Table, iceberg.DataFile, iceberg.DataFile) {
 	t.Helper()
 
@@ -1043,9 +1043,9 @@ func seedReplaceFilesTableWithDelete(t *testing.T, version int) (*table.Table, i
 	return nil, nil, nil
 }
 
-// seedSupersededDeletionVector deletes twice from one v3 data file. The first
-// DV gets replaced and stays only as a DELETED entry. It returns that old DV
-// and the scan task holding the new, live DV.
+// seedSupersededDeletionVector deletes twice from one v3 data file.
+// The first DV gets replaced and stays only as a DELETED entry.
+// It returns that old DV and the scan task holding the new, live DV.
 func seedSupersededDeletionVector(t *testing.T) (*table.Table, table.FileScanTask, iceberg.DataFile) {
 	t.Helper()
 
@@ -1125,8 +1125,8 @@ func compactWithDeletes(ctx context.Context, tx *table.Transaction, automatic bo
 	return tx.NewRewrite(nil).ApplyResult(result).Commit(ctx)
 }
 
-// metadataFileCount counts files in the table's metadata folder. Staging a
-// commit writes files there, so an unchanged count means nothing was written.
+// metadataFileCount counts files in the table's metadata folder.
+// Staging a commit writes files there, so an unchanged count means nothing was written.
 func metadataFileCount(t *testing.T, tbl *table.Table) int {
 	t.Helper()
 
@@ -1136,8 +1136,8 @@ func metadataFileCount(t *testing.T, tbl *table.Table) int {
 	return len(entries)
 }
 
-// A compaction planned before another writer deleted one of its data files
-// must fail. Committing it would bring the deleted rows back.
+// A compaction planned before another writer deleted one of its data files must fail.
+// Committing it would bring the deleted rows back.
 func TestReplaceFilesRejectsDataFileDeletedByCurrentSnapshot(t *testing.T) {
 	tbl, tasks := seedDataFilesWithPositionDeletes(t)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
