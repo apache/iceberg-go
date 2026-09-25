@@ -42,6 +42,8 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -51,6 +53,159 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+func TestStaticCredsFromProps(t *testing.T) {
+	creds, err := staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		iceio.S3SessionToken:    "ST",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	got, err := creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID)
+	require.Equal(t, "SK", got.SecretAccessKey)
+	require.Equal(t, "ST", got.SessionToken)
+
+	creds, err = staticCredsFromProps(iceberg.Properties{})
+	require.NoError(t, err, "no creds must fall back to the default chain")
+	require.Nil(t, creds)
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3AccessKeyID: "AK"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone access key must be an error, not the ambient identity")
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SecretAccessKey: "SK"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone secret key must be an error, not the ambient identity")
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SessionToken: "ST"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone session token must be an error, not the ambient identity")
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		keyRestAccessKeyID:     "RAK",
+		keyRestSecretAccessKey: "RSK",
+		keyRestSessionToken:    "RST",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "RAK", got.AccessKeyID)
+	require.Equal(t, "RSK", got.SecretAccessKey)
+	require.Equal(t, "RST", got.SessionToken)
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		keyRestAccessKeyID:      "RAK",
+		keyRestSecretAccessKey:  "RSK",
+	})
+	require.NoError(t, err)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID, "s3.* keys take precedence over rest.* aliases")
+	require.Equal(t, "SK", got.SecretAccessKey)
+
+	_, err = staticCredsFromProps(iceberg.Properties{keyRestAccessKeyID: "RAK"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone rest.* access key must be an error")
+
+	_, err = staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:    "AK",
+		keyRestSecretAccessKey: "RSK",
+	})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a partial pair must not be completed with a field from the other namespace")
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		keyRestSessionToken:     "RST",
+	})
+	require.NoError(t, err)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID)
+	require.Empty(t, got.SessionToken, "a complete s3.* pair must not inherit an unrelated rest.* session token")
+}
+
+// TestSigV4SignsWithPropsCredentials pins the wiring: the SigV4 Authorization
+// header must be signed with the credentials carried in the catalog properties.
+func TestSigV4SignsWithPropsCredentials(t *testing.T) {
+	var authHeader string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithSigV4RegionSvc("us-east-1", "s3"),
+		WithAdditionalProps(iceberg.Properties{
+			iceio.S3AccessKeyID:     "AKIDEXAMPLEPROPS",
+			iceio.S3SecretAccessKey: "secretexample",
+		}))
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/test", nil)
+	require.NoError(t, err)
+	resp, err := cat.cl.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.Contains(t, authHeader, "Credential=AKIDEXAMPLEPROPS/",
+		"SigV4 must sign with the credentials from catalog properties, not the default chain")
+}
+
+// TestSigv4DoesNotSignCrossOriginRedirect pins that a redirect to a different
+// origin is not re-signed, so the SigV4 Authorization header and session token
+// never reach an unconfigured host.
+func TestSigv4DoesNotSignCrossOriginRedirect(t *testing.T) {
+	var secondHit bool
+	var gotAuth, gotToken string
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHit = true
+		gotAuth = r.Header.Get("Authorization")
+		gotToken = r.Header.Get("X-Amz-Security-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer second.Close()
+
+	var firstAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
+		firstAuth = r.Header.Get("Authorization")
+		http.Redirect(w, r, second.URL+"/landing", http.StatusTemporaryRedirect)
+	})
+	first := httptest.NewServer(mux)
+	defer first.Close()
+
+	cat, err := NewCatalog(context.Background(), "rest", first.URL,
+		WithSigV4RegionSvc("us-east-1", "s3"),
+		WithAdditionalProps(iceberg.Properties{
+			iceio.S3AccessKeyID:     "AKIDEXAMPLEPROPS",
+			iceio.S3SecretAccessKey: "secretexample",
+			iceio.S3SessionToken:    "SESSIONTOKENEXAMPLE",
+		}))
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, first.URL+"/redirect", nil)
+	require.NoError(t, err)
+	resp, err := cat.cl.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.Contains(t, firstAuth, "Credential=AKIDEXAMPLEPROPS/", "the configured origin must still be signed")
+	require.True(t, secondHit, "the redirect target must be reached")
+	require.Empty(t, gotAuth, "the redirect target must not receive the SigV4 Authorization header")
+	require.Empty(t, gotToken, "the redirect target must not receive the session token")
+}
 
 func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}
