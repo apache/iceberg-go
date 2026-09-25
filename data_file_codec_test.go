@@ -194,6 +194,37 @@ func TestMarshalAvroEntryDecimalPartitionRoundTrip(t *testing.T) {
 	require.True(t, got.Equals(DecimalLiteral(want)))
 }
 
+func TestMarshalAvroEntryTimestampPartitionRoundTrip(t *testing.T) {
+	// Micro cases run first.
+	// A nano type sharing their schema-cache key would decode as Timestamp instead of TimestampNano.
+	for _, tc := range []struct {
+		typ  Type
+		want any
+	}{
+		{TimestampType{}, Timestamp(1_700_000_000_000_000)},
+		{TimestampTzType{}, Timestamp(1_700_000_000_000_000)},
+		{TimestampNsType{}, TimestampNano(1_700_000_000_000_000_123)},
+		{TimestampTzNsType{}, TimestampNano(1_700_000_000_000_000_123)},
+	} {
+		t.Run(tc.typ.String(), func(t *testing.T) {
+			schema := NewSchema(0, NestedField{ID: 1, Name: "ts", Type: tc.typ})
+			spec := NewPartitionSpecID(1, PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "ts", Transform: IdentityTransform{}})
+
+			path := "s3://bucket/ns/tbl/data/ts.parquet"
+			builder, err := NewDataFileBuilder(spec, EntryContentData, path, ParquetFile, map[int]any{1000: tc.want}, nil, nil, 1, 1024)
+			require.NoError(t, err)
+			df, ok := builder.Build().(*dataFile)
+			require.True(t, ok)
+
+			encoded, err := df.MarshalAvroEntry(spec, schema, 3)
+			require.NoError(t, err)
+			decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, 3)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, decoded.Partition()[1000])
+		})
+	}
+}
+
 // snapshotAvroFields returns a deep copy of every avro-tagged field on
 // d, keyed by field name. Slices, maps, byte arrays, and pointer
 // targets are reconstructed so the snapshot is fully independent of d
@@ -357,6 +388,8 @@ func TestManifestEntrySchemaForMatchesPartitionAvroShape(t *testing.T) {
 		TimeType{},
 		TimestampType{},
 		TimestampTzType{},
+		TimestampNsType{},
+		TimestampTzNsType{},
 		UUIDType{},
 		BooleanType{},
 		BinaryType{},
