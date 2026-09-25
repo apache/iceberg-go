@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -46,7 +47,6 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
-	"github.com/pterm/pterm"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -1507,13 +1507,13 @@ func arrowSchemaEqual(left, right *arrow.Schema) bool {
 type schemaCompatVisitor struct {
 	provided *iceberg.Schema
 
-	errorData pterm.TableData
+	errorData [][]string
 }
 
 func checkSchemaCompat(requested, provided *iceberg.Schema) error {
 	sc := &schemaCompatVisitor{
 		provided:  provided,
-		errorData: pterm.TableData{{"", "Table Field", "Requested Field"}},
+		errorData: [][]string{{"", "Table Field", "Requested Field"}},
 	}
 
 	_, compat := iceberg.PreOrderVisit(requested, sc)
@@ -1615,12 +1615,20 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 
 func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
 	if !v() {
-		pterm.DisableColor()
-		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
-		tbl.Render()
-		txt, _ := tbl.Srender()
-		pterm.EnableColor()
-		panic("mismatch in fields:\n" + txt)
+		// Render the collected mismatch rows into the error message with the
+		// stdlib tabwriter. Unlike the former pterm renderer this writes only to
+		// the returned error and has no stdout side effect. tabwriter measures
+		// column width by rune count, so the leading status column (✅/❌) may be
+		// off by one display cell in terminals that render those double-width;
+		// the reported content is unaffected.
+		var buf strings.Builder
+		w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
+		for _, row := range sc.errorData {
+			fmt.Fprintln(w, strings.Join(row, "\t"))
+		}
+		_ = w.Flush()
+
+		panic("mismatch in fields:\n" + buf.String())
 	}
 
 	return true
