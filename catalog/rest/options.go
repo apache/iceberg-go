@@ -23,7 +23,6 @@ import (
 	"net/url"
 
 	"github.com/apache/iceberg-go"
-	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 type Option func(*options)
@@ -124,10 +123,14 @@ func WithPrefix(prefix string) Option {
 	}
 }
 
-func WithAwsConfig(cfg aws.Config) Option {
+// WithSigner installs a RequestSigner that signs every catalog request in
+// place (for example AWS SigV4). It is the dependency-free way to enable
+// signing: construct the signer from an optional backend such as
+// github.com/apache/iceberg-go/catalog/rest/sigv4 and pass it here. This takes
+// precedence over WithSigV4 and the rest.sigv4-enabled property.
+func WithSigner(signer RequestSigner) Option {
 	return func(o *options) {
-		o.awsConfig = cfg
-		o.awsConfigSet = true
+		o.signer = signer
 	}
 }
 
@@ -177,8 +180,7 @@ func WithTransportFactory(factory TransportFactory) Option {
 }
 
 type options struct {
-	awsConfig         aws.Config
-	awsConfigSet      bool
+	signer            RequestSigner
 	tlsConfig         *tls.Config
 	oauthToken        string
 	credential        string

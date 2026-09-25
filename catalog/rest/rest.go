@@ -20,13 +20,10 @@ package rest
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"iter"
 	"log/slog"
@@ -46,9 +43,6 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"golang.org/x/sync/semaphore"
@@ -239,14 +233,8 @@ type sessionTransport struct {
 
 	authManager    AuthManager
 	defaultHeaders http.Header
-	signer         v4.HTTPSigner
-	cfg            aws.Config
-	service        string
-	newHash        func() hash.Hash
+	signer         RequestSigner
 }
-
-// from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
-const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// A session default is applied unless the request already carries that
@@ -293,44 +281,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	if s.signer != nil {
-		var payloadHash string
-		if r.Body == nil {
-			payloadHash = emptyStringHash
-		} else {
-			rdr, err := r.GetBody()
-			if err != nil {
-				return nil, err
-			}
-
-			h := s.newHash()
-			if _, err = io.Copy(h, rdr); err != nil {
-				if closeErr := rdr.Close(); closeErr != nil {
-					err = errors.Join(err, closeErr)
-				}
-
-				return nil, err
-			}
-
-			if err = rdr.Close(); err != nil {
-				return nil, err
-			}
-
-			payloadHash = hex.EncodeToString(h.Sum(nil))
-		}
-
-		creds, err := s.cfg.Credentials.Retrieve(r.Context())
-		if err != nil {
-			return nil, err
-		}
-
-		// Set the x-amz-content-sha256 header before signing.
-		// This header is required for AWS SigV4 signature verification.
-		r.Header.Set("x-amz-content-sha256", payloadHash)
-
-		// modifies the request in place
-		err = s.signer.SignHTTP(r.Context(), creds, r, payloadHash,
-			s.service, s.cfg.Region, time.Now())
-		if err != nil {
+		if err := s.signer.SignRequest(r); err != nil {
 			return nil, err
 		}
 	}
@@ -1104,25 +1055,13 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.authManager = authManager
 	}
 
-	if opts.enableSigv4 {
-		cfg := opts.awsConfig
-		if !opts.awsConfigSet {
-			// If no config provided, load defaults from environment.
-			var err error
-			cfg, err = config.LoadDefaultConfig(ctx)
-			if err != nil {
-				cleanup()
+	signer, err := resolveSigner(ctx, opts)
+	if err != nil {
+		cleanup()
 
-				return nil, nil, err
-			}
-		}
-		if opts.sigv4Region != "" {
-			cfg.Region = opts.sigv4Region
-		}
-
-		session.cfg, session.service = cfg, opts.sigv4Service
-		session.signer, session.newHash = v4.NewSigner(), sha256.New
+		return nil, nil, err
 	}
+	session.signer = signer
 
 	return cl, cleanup, nil
 }

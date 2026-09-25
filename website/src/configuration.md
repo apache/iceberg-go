@@ -71,10 +71,25 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 | Group | Options |
 |---|---|
 | Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
-| AWS SigV4 | `WithSigV4`, `WithSigV4RegionSvc`, `WithAwsConfig` |
+| AWS SigV4 | `WithSigV4`, `WithSigV4RegionSvc`, `WithSigner` |
 | HTTP | `WithHeaders`, `WithTLSConfig`, `WithOAuthTLSConfig`, `WithCustomTransport` |
 | Catalog routing | `WithPrefix`, `WithWarehouseLocation`, `WithMetadataLocation` |
 | Pass-through | `WithAdditionalProps` |
+
+> **AWS SigV4 is an optional backend.** `catalog/rest` no longer links the AWS
+> SDK. To sign REST requests with SigV4, pull in the
+> [`catalog/rest/sigv4`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/sigv4/sigv4.go)
+> sub-package one of two ways:
+>
+> - Ambient credentials (the AWS default chain): add a blank import
+>   `_ "github.com/apache/iceberg-go/catalog/rest/sigv4"` and enable signing with
+>   `WithSigV4` / `WithSigV4RegionSvc` or the `rest.sigv4-enabled` property.
+> - Explicit config: pass `sigv4.WithAwsConfig(cfg, region, service)` to
+>   `NewCatalog` (it wires an `rest.WithSigner` internally, so no blank import is
+>   needed).
+>
+> The former one-argument `rest.WithAwsConfig(aws.Config)` has been removed in
+> favor of these paths.
 
 #### Metrics reporting
 

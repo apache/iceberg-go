@@ -36,6 +36,11 @@ import (
 	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
+
+	// Register the AWS SigV4 signer backend so the --sigv4 / signing-region /
+	// signing-name flags work. catalog/rest itself no longer links the AWS SDK;
+	// the CLI already pulls it in via catalog/glue, so this adds no new weight.
+	_ "github.com/apache/iceberg-go/catalog/rest/sigv4"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/config"
 	_ "github.com/apache/iceberg-go/io/gocloud"
