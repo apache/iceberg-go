@@ -40,6 +40,12 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// ErrNoDefaultLocation is returned by location resolution when a table is created
+// without an explicit location and the namespace/catalog define no default
+// warehouse. Callers can match it to detect catalogs (e.g. S3 Tables) that assign
+// storage themselves and need a different create path.
+var ErrNoDefaultLocation = errors.New("no default path set, please specify a location when creating a table")
+
 func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
 	switch compression {
 	case table.MetadataCompressionCodecNone, table.MetadataCompressionCodecGzip, table.MetadataCompressionCodecZstd:
@@ -221,7 +227,7 @@ func getDefaultWarehouseLocation(namespaceKey, tablename string, nsprops, catpro
 		return url.JoinPath(warehousepath, namespaceKey+".db", tablename)
 	}
 
-	return "", errors.New("no default path set, please specify a location when creating a table")
+	return "", ErrNoDefaultLocation
 }
 
 // (\d+)            -> version number

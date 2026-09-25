@@ -42,6 +42,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -61,6 +62,11 @@ const (
 	tableParamPreviousMetadataLocation = "previous_metadata_location"
 	tableParamRenameToken              = "iceberg.go.rename-token"
 	glueTypeIcebergRenaming            = "ICEBERG_RENAMING"
+
+	// glueParamFormat marks the minimal entry that makes S3 Tables allocate
+	// storage; s3TablesConnectionType tags a database federated to S3 Tables.
+	glueParamFormat        = "format"
+	s3TablesConnectionType = "aws:s3tables"
 
 	// The ID of the Glue Data Catalog where the tables reside. If none is provided, Glue
 	// automatically uses the caller's AWS account ID by default.
@@ -277,13 +283,10 @@ var _ catalog.Closer = (*Catalog)(nil)
 // This function will create the metadata file in S3 using the catalog and table properties,
 // to determine the bucket and key for the metadata location.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	// The reporter is resolved once at construction (see NewCatalog), so a bad
-	// metrics-reporter-impl already failed there — no per-op guard is needed
-	// before mutating the catalog, and the trailing LoadTable reuses the cached
-	// reporter.
-	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
-	if err != nil {
-		return nil, err
+	// A missing namespace is reported before touching Glue, matching the contract
+	// callers rely on (an identifier without a database is not a missing table).
+	if len(identifier) < 2 {
+		return nil, fmt.Errorf("%w: missing namespace or invalid identifier %v", catalog.ErrNoSuchNamespace, identifier)
 	}
 
 	database, tableName, err := identifierToGlueTable(identifier)
@@ -291,6 +294,50 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
+	var cfg catalog.CreateTableCfg
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// S3 Tables manages storage, so an explicit location is rejected up front
+	// (as pyiceberg does) rather than creating a table outside managed storage.
+	if cfg.Location != "" {
+		federated, ferr := c.isS3TablesDatabase(ctx, database)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if federated {
+			return nil, fmt.Errorf("cannot specify a location for table %s.%s: S3 Tables manages storage automatically", database, tableName)
+		}
+	}
+
+	// The reporter is resolved once at construction (see NewCatalog), so a bad
+	// metrics-reporter-impl already failed there — no per-op guard is needed
+	// before mutating the catalog, and the trailing LoadTable reuses the cached
+	// reporter.
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
+	if err != nil {
+		// S3 Tables federated databases assign storage themselves, so client-side
+		// location resolution fails with ErrNoDefaultLocation. Only then probe for
+		// federation and retry via the S3 Tables path, keeping the extra
+		// GetDatabase off every other create.
+		if !errors.Is(err, internal.ErrNoDefaultLocation) {
+			return nil, err
+		}
+		federated, ferr := c.isS3TablesDatabase(ctx, database)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if !federated {
+			return nil, err
+		}
+
+		return c.createS3TablesTable(ctx, database, tableName, identifier, schema, opts...)
+	}
+
+	// Write metadata with the catalog's configured credentials rather than the
+	// ambient default chain, matching the Glue calls' principal.
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
@@ -309,6 +356,160 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	return c.LoadTable(ctx, identifier)
+}
+
+// isS3TablesDatabase reports whether the Glue database is federated to the
+// Amazon S3 Tables service, which owns table storage and location assignment.
+func (c *Catalog) isS3TablesDatabase(ctx context.Context, database string) (bool, error) {
+	db, err := c.getDatabase(ctx, database)
+	if err != nil {
+		// Best-effort: a missing database or a caller lacking glue:GetDatabase
+		// is treated as "not federated" so the generic create path can proceed.
+		var apiErr smithy.APIError
+		if errors.Is(err, catalog.ErrNoSuchNamespace) ||
+			(errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException") {
+			return false, nil
+		}
+
+		return false, err
+	}
+	if db == nil {
+		return false, nil
+	}
+
+	return isS3TablesFederatedDatabase(db), nil
+}
+
+func isS3TablesFederatedDatabase(db *types.Database) bool {
+	return db.FederatedDatabase != nil &&
+		strings.EqualFold(aws.ToString(db.FederatedDatabase.ConnectionType), s3TablesConnectionType)
+}
+
+func isS3TablesFederatedTable(tbl *types.Table) bool {
+	return tbl.FederatedTable != nil &&
+		strings.EqualFold(aws.ToString(tbl.FederatedTable.ConnectionType), s3TablesConnectionType)
+}
+
+// isS3TablesIcebergEntry reports whether a federated S3 Tables entry is Iceberg,
+// accepting the minimal format=ICEBERG entry left before the metadata repoint so
+// DropTable can clean it up after a failed create.
+func isS3TablesIcebergEntry(tbl *types.Table) bool {
+	if !isS3TablesFederatedTable(tbl) {
+		return false
+	}
+	tableType := tbl.Parameters[tableParamTableType]
+
+	return strings.EqualFold(tableType, glueTypeIceberg) ||
+		tableType == glueTypeIcebergRenaming ||
+		strings.EqualFold(tbl.Parameters[glueParamFormat], glueTypeIceberg)
+}
+
+// createS3TablesTable creates a table in an S3 Tables federated database. The
+// service assigns storage, so a minimal entry is created first to allocate the
+// location, then updated with the written metadata pointer; on any later
+// failure the minimal entry is removed so no half-created table is left behind.
+// On a commit failure the minimal Glue entry is rolled back and its metadata
+// object best-effort deleted; a stranded minimal entry after a double failure is
+// still removable via DropTable, matching pyiceberg's direct delete_table.
+func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+	_, err := c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(database),
+		TableInput: &types.TableInput{
+			Name:       aws.String(tableName),
+			Parameters: map[string]string{glueParamFormat: glueTypeIceberg},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to allocate S3 Tables storage for %s.%s: %w", database, tableName, err)
+	}
+
+	if err := c.commitS3TablesTable(ctx, database, tableName, identifier, schema, opts...); err != nil {
+		// Roll back with a detached context so a cancelled create still removes
+		// the minimal entry (S3 Tables enforces per-account table limits).
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), renameCleanupTimeout)
+		defer cancel()
+		if _, delErr := c.glueSvc.DeleteTable(cleanupCtx, &glue.DeleteTableInput{
+			CatalogId:    c.catalogId,
+			DatabaseName: aws.String(database),
+			Name:         aws.String(tableName),
+		}); delErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("failed to clean up allocated table %s.%s: %w", database, tableName, delErr))
+		}
+
+		return nil, err
+	}
+
+	// The table is committed; load it outside the rollback scope so a transient
+	// read failure does not delete an already-created table.
+	return c.LoadTable(ctx, identifier)
+}
+
+// commitS3TablesTable reads the service-assigned location, writes the Iceberg
+// metadata to it, and points the Glue entry at that metadata. It does not reload
+// the table: the caller does that only after a successful commit, so a read
+// failure never triggers a rollback of an already-created table.
+func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) error {
+	// Write managed-table metadata with the catalog's configured credentials, not
+	// the ambient default chain, so the metadata PUT uses the same principal as
+	// the Glue calls. Covers WriteMetadata and the staged.FS cleanup below.
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+
+	allocated, err := c.glueSvc.GetTable(ctx, &glue.GetTableInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(database),
+		Name:         aws.String(tableName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to load allocated S3 Tables table %s.%s: %w", database, tableName, err)
+	}
+	if allocated == nil || allocated.Table == nil || allocated.Table.StorageDescriptor == nil {
+		return fmt.Errorf("S3 Tables did not return a storage descriptor for %s.%s", database, tableName)
+	}
+	managedLocation := aws.ToString(allocated.Table.StorageDescriptor.Location)
+	if managedLocation == "" {
+		return fmt.Errorf("S3 Tables did not assign a storage location for %s.%s", database, tableName)
+	}
+	if allocated.Table.VersionId == nil {
+		return fmt.Errorf("cannot commit table %s.%s: because Glue table version id is missing", database, tableName)
+	}
+
+	// Copy rather than append onto the caller's opts, whose backing array may
+	// have spare capacity we would otherwise clobber.
+	stagedOpts := make([]catalog.CreateTableOpt, len(opts), len(opts)+1)
+	copy(stagedOpts, opts)
+	stagedOpts = append(stagedOpts, catalog.WithLocation(managedLocation))
+
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, stagedOpts...)
+	if err != nil {
+		return err
+	}
+
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
+		return err
+	}
+
+	// constructTableInput sends TableType=EXTERNAL_TABLE, but S3 Tables ignores the
+	// field on this repoint (verified live: any value passes) and keeps its own
+	// service type (e.g. "customer") on read, which getRawTable tolerates.
+	_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(database),
+		TableInput:   constructTableInput(tableName, staged.Table, allocated.Table),
+		VersionId:    allocated.Table.VersionId,
+		SkipArchive:  aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
+	})
+	if err != nil {
+		// Best-effort: drop the metadata object we just wrote; for S3 Tables the
+		// managed location may be unreachable, so leave any remainder to the service.
+		if fs, fsErr := staged.FS(ctx); fsErr == nil {
+			_ = fs.Remove(staged.MetadataLocation())
+		}
+
+		return fmt.Errorf("failed to commit S3 Tables table %s.%s: %w", database, tableName, err)
+	}
+
+	return nil
 }
 
 // RegisterTable registers a new table using existing metadata.
@@ -378,6 +579,9 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 	if current != nil && staged.Metadata().Equals(current.Metadata()) {
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
+	// Write metadata with the catalog's configured credentials rather than the
+	// ambient default chain, matching the Glue calls' principal.
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
@@ -437,7 +641,10 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 	tableType := glueTable.Parameters[tableParamTableType]
-	if !strings.EqualFold(tableType, glueTypeIceberg) && tableType != glueTypeIcebergRenaming {
+	isIceberg := strings.EqualFold(tableType, glueTypeIceberg) || tableType == glueTypeIcebergRenaming
+	// Also allow a minimal federated S3 Tables entry (format=ICEBERG, no
+	// table_type) so a failed create can be cleaned up through DropTable.
+	if !isIceberg && !isS3TablesIcebergEntry(glueTable) {
 		return fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
 	}
 
@@ -866,7 +1073,12 @@ func (c *Catalog) getRawTable(ctx context.Context, database, tableName string) (
 		return nil, fmt.Errorf("failed to get table %s.%s: missing Glue table response", database, tableName)
 	}
 
-	if aws.ToString(tblRes.Table.TableType) != glueTableType {
+	// A standard Iceberg table is an EXTERNAL_TABLE. An S3 Tables federated entry
+	// instead carries the service's own TableType (e.g. "customer"), so accept it
+	// when it is federated to S3 Tables and marked Iceberg — keeping the
+	// relaxation scoped to that case rather than every database.
+	isExternalTable := aws.ToString(tblRes.Table.TableType) == glueTableType
+	if !isExternalTable && !isS3TablesIcebergEntry(tblRes.Table) {
 		return nil, fmt.Errorf("table %s.%s is not an EXTERNAL_TABLE", database, tableName)
 	}
 
