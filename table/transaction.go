@@ -2818,13 +2818,11 @@ func (t *Transaction) rewriteScanTasks(fs io.IO, entries []iceberg.ManifestEntry
 
 	var liveDeletes []iceberg.ManifestEntry
 	if s := t.planningSnapshot(meta); s != nil {
-		for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes) {
+		for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes, true) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to read delete manifests: %w", err)
 			}
-			if entry.Status() != iceberg.EntryStatusDELETED {
-				liveDeletes = append(liveDeletes, entry)
-			}
+			liveDeletes = append(liveDeletes, entry)
 		}
 	}
 
