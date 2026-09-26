@@ -104,7 +104,6 @@ services:
     ports:
       - 9001:9001
       - 9000:9000
-    command: ["/data"]
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:9000/health/ready"]
       interval: 5s
