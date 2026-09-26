@@ -963,7 +963,7 @@ func TestRowDeltaRemoveDeletesRequiresReplacement(t *testing.T) {
 // Assertion: Commit fails identifying the surviving live DV (a) or the
 // duplicated reference (b).
 func TestRowDeltaRemoveDeletesRejectsSurvivingLiveDV(t *testing.T) {
-	t.Run("replacement added while live DV not removed", func(t *testing.T) {
+	t.Run("replacement added while live DV not removed (with RemoveDeletes)", func(t *testing.T) {
 		tbl, location, pathA, pathB, dvA, _ := newTableWithSharedPuffinDVs(t)
 
 		// Supersede A's DV, but also add a replacement for B without
@@ -978,6 +978,20 @@ func TestRowDeltaRemoveDeletesRejectsSurvivingLiveDV(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not removed by this row delta")
 		assert.Contains(t, err.Error(), pathB)
+	})
+
+	t.Run("replacement added while live DV not removed (without RemoveDeletes)", func(t *testing.T) {
+		tbl, location, pathA, _, _, _ := newTableWithSharedPuffinDVs(t)
+
+		// Add a replacement DV for A's live DV without removing the live one.
+		// This should fail in the fast-append path (no RemoveDeletes called).
+		dvA2 := writeDV(t, location, "dv-a2.puffin", pathA, []int64{0, 1})
+		rd := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dvA2)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is not removed by this row delta")
+		assert.Contains(t, err.Error(), pathA)
 	})
 
 	t.Run("two replacements for one data file", func(t *testing.T) {
@@ -995,60 +1009,83 @@ func TestRowDeltaRemoveDeletesRejectsSurvivingLiveDV(t *testing.T) {
 	})
 }
 
-// Why: a table that already violates the one-live-DV-per-data-file
-// invariant must fail a supersession commit loudly — the producer keys
-// DV removals by referenced data file, so proceeding would either
-// tombstone several entries while counting one removal (same path) or
-// leave the sibling duplicate live next to the replacement (different
-// paths).
-// Condition: v3 tables corrupted through the unvalidated plain
-// AddDeletes path so one data file carries two live DV entries, first
-// as duplicate entries at one Puffin path, then at two distinct paths;
-// a RowDelta then supersedes one of them.
-// Assertion: Commit fails naming the duplicate entries rather than
-// committing.
+// Why: supersession in the fast-append path (no RemoveDeletes called)
+// must still enforce the one-live-DV-per-data-file invariant and require
+// explicit removal of the live DV.
+// Condition: a RowDelta adds a replacement DV for a data file with a live
+// DV, without calling RemoveDeletes.
+// Assertion: Commit fails with the same error as the RemoveDeletes case,
+// directing the caller to remove the superseded DV. With RemoveDeletes,
+// the same operation succeeds.
+func TestRowDeltaFastAppendRejectsDVSupersessionWithoutRemoval(t *testing.T) {
+	tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+
+	// Add a replacement DV without removing the live one.
+	rep := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil).AddDeletes(rep)
+
+	err := rd.Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not removed by this row delta")
+	assert.Contains(t, err.Error(), "superseded entry must be removed in the same snapshot")
+
+	// With RemoveDeletes, the same operation succeeds.
+	rep2 := writeDV(t, location, "dv-003.puffin", dataPath, []int64{0, 1})
+	tx2 := tbl.NewTransaction()
+	rd2 := tx2.NewRowDelta(nil).AddDeletes(rep2).RemoveDeletes(dv1)
+	require.NoError(t, rd2.Commit(t.Context()))
+
+	result, err := tx2.Commit(t.Context())
+	require.NoError(t, err)
+	snap := result.CurrentSnapshot()
+	require.NotNil(t, snap)
+
+	fs := iceio.LocalFS{}
+	live, removed := snapshotDVEntries(t, snap, fs)
+	assert.Equal(t, []string{rep2.FilePath()}, live)
+	assert.Equal(t, []string{dv1.FilePath()}, removed)
+}
+
+// Why: the fast-append path now prevents tables from being corrupted with
+// duplicate DVs for the same data file. Previously, duplicate entries could
+// be added through the unvalidated plain AddDeletes path, violating the
+// one-live-DV-per-data-file invariant. Now this is detected immediately.
+// Condition: a RowDelta attempts to add a replacement DV for a data file
+// that already has a live DV without removing the live one.
+// Assertion: Commit fails in the fast-append path itself, before any
+// corruption can occur.
 func TestRowDeltaRemoveDeletesCorruptDuplicateLiveDVs(t *testing.T) {
-	t.Run("duplicate entries at one path", func(t *testing.T) {
-		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+	t.Run("duplicate entries at one path prevented", func(t *testing.T) {
+		tbl, _, dataPath, dv1 := newTableWithLiveDV(t)
 
-		// Corrupt the table: a second snapshot re-adds the same DV
-		// entry (same path, same referenced data file).
+		// Attempt to re-add the same DV without removing the live one.
+		// This now fails in the fast-append validation, preventing corruption.
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1).Commit(t.Context()))
-		tbl, err := tx.Commit(t.Context())
-		require.NoError(t, err)
+		rd := tx.NewRowDelta(nil).AddDeletes(dv1)
 
-		replacement := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
-		rd := tbl.NewTransaction().NewRowDelta(nil).
-			AddDeletes(replacement).
-			RemoveDeletes(dv1)
-
-		err = rd.Commit(t.Context())
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate live deletion vectors")
-	})
-
-	t.Run("duplicate entries at two paths", func(t *testing.T) {
-		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
-
-		// Corrupt the table: a second live DV for the same data file
-		// at a different Puffin path.
-		dv1b := writeDV(t, location, "dv-001b.puffin", dataPath, []int64{0})
-		tx := tbl.NewTransaction()
-		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1b).Commit(t.Context()))
-		tbl, err := tx.Commit(t.Context())
-		require.NoError(t, err)
-
-		replacement := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
-		rd := tbl.NewTransaction().NewRowDelta(nil).
-			AddDeletes(replacement).
-			RemoveDeletes(dv1)
-
-		err = rd.Commit(t.Context())
+		err := rd.Commit(t.Context())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not removed by this row delta",
-			"the sibling duplicate at the other path must be flagged as surviving")
-		assert.Contains(t, err.Error(), dv1b.FilePath())
+			"adding a duplicate DV for the same data file must fail in the fast-append path")
+		assert.Contains(t, err.Error(), dataPath)
+	})
+
+	t.Run("duplicate entries at two paths prevented", func(t *testing.T) {
+		tbl, location, dataPath, _ := newTableWithLiveDV(t)
+
+		// Attempt to add a second live DV for the same data file
+		// at a different Puffin path, without removing the first.
+		// This now fails in the fast-append validation, preventing corruption.
+		dv1b := writeDV(t, location, "dv-001b.puffin", dataPath, []int64{0})
+		tx := tbl.NewTransaction()
+		rd := tx.NewRowDelta(nil).AddDeletes(dv1b)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is not removed by this row delta",
+			"adding a second DV for the same data file must fail in the fast-append path")
+		assert.Contains(t, err.Error(), dataPath)
 	})
 }
 
