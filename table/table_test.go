@@ -51,7 +51,6 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
-	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -735,18 +734,15 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 
 	files := []string{filePath}
 
-	pterm.DisableOutput() // disable error to console
-	defer pterm.EnableOutput()
-
 	tx := tbl.NewTransaction()
 	err = tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.EqualError(err, `error encountered during file conversion: invalid schema: mismatch in fields:
-   | Table Field              | Requested Field         
-✅ | 1: foo: optional boolean | 1: foo: optional boolean
-✅ | 2: bar: optional string  | 2: bar: optional string 
-❌ | 3: baz: optional int     | 3: baz: optional string 
-✅ | 4: qux: optional date    | 4: qux: optional date   
+   Table Field               Requested Field
+✅  1: foo: optional boolean  1: foo: optional boolean
+✅  2: bar: optional string   2: bar: optional string
+❌  3: baz: optional int      3: baz: optional string
+✅  4: qux: optional date     4: qux: optional date
 `)
 }
 
