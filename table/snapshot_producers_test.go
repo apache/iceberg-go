@@ -578,6 +578,93 @@ func TestManifestMergeManagerClosesWriterOnError(t *testing.T) {
 	require.ErrorIs(t, err, errLimitedWrite)
 }
 
+func TestManifestMergeSkipsHistoricalDeletedOnlyManifest(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	trackIO := newTrackingIO()
+	txn := createTestTransaction(t, trackIO, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+
+	oldSnapshotID := sp.snapshotID - 1
+	sequenceNumber := int64(1)
+	df := newTestDataFile(t, spec, "file://deleted.parquet", nil)
+	manifestFile := writeTestManifestWithContent(t, trackIO, spec, schema, oldSnapshotID,
+		"table-location/metadata/historical-delete.avro", iceberg.ManifestContentData,
+		[]iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &oldSnapshotID, &sequenceNumber, nil, df),
+		})
+
+	trackIO.writers = make(map[string]*trackingWriteCloser)
+
+	mgr := manifestMergeManager{snap: sp}
+	created, err := mgr.createManifest(spec.ID(), []iceberg.ManifestFile{manifestFile})
+	require.NoError(t, err)
+	require.Nil(t, created)
+	require.Zero(t, trackIO.GetWriterCount())
+}
+
+func TestManifestMergeKeepsCurrentSnapshotDeletedEntries(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+
+	sequenceNumber := int64(1)
+	df := newTestDataFile(t, spec, "file://deleted.parquet", nil)
+	manifestFile := writeTestManifestWithContent(t, wfs, spec, schema, sp.snapshotID,
+		"mem://default/table-location/metadata/current-delete.avro", iceberg.ManifestContentData,
+		[]iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &sp.snapshotID, &sequenceNumber, nil, df),
+		})
+
+	mgr := manifestMergeManager{snap: sp}
+	created, err := mgr.createManifest(spec.ID(), []iceberg.ManifestFile{manifestFile})
+	require.NoError(t, err)
+	require.NotNil(t, created)
+
+	var entries []iceberg.ManifestEntry
+	for entry, err := range created.Entries(wfs, false) {
+		require.NoError(t, err)
+		entries = append(entries, entry)
+	}
+	require.Len(t, entries, 1)
+	require.Equal(t, iceberg.EntryStatusDELETED, entries[0].Status())
+	require.Equal(t, sp.snapshotID, entries[0].SnapshotID())
+	require.Equal(t, df.FilePath(), entries[0].DataFile().FilePath())
+}
+
+func TestManifestMergeGroupDropsEmptyMergedBin(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+
+	oldSnapshotID := sp.snapshotID - 1
+	sequenceNumber := int64(1)
+	manifests := make([]iceberg.ManifestFile, 0, 2)
+	for i := range 2 {
+		df := newTestDataFile(t, spec, "file://deleted-"+strconv.Itoa(i)+".parquet", nil)
+		manifests = append(manifests, writeTestManifestWithContent(t, wfs, spec, schema, oldSnapshotID,
+			"mem://default/table-location/metadata/historical-delete-"+strconv.Itoa(i)+".avro",
+			iceberg.ManifestContentData,
+			[]iceberg.ManifestEntry{
+				iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &oldSnapshotID, &sequenceNumber, nil, df),
+			}))
+	}
+
+	mgr := manifestMergeManager{
+		targetSizeBytes:  manifests[0].Length() + manifests[1].Length(),
+		minCountToMerge:  1,
+		mergeEnabled:     true,
+		mergeConcurrency: 1,
+		snap:             sp,
+	}
+
+	merged, err := mgr.mergeGroup(manifests[0], spec.ID(), manifests)
+	require.NoError(t, err)
+	require.Empty(t, merged)
+}
+
 func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 	spec := partitionedSpec()
 	schema := simpleSchema()
@@ -1898,7 +1985,8 @@ func newTestDeletionVectorForRef(t *testing.T, spec iceberg.PartitionSpec, path,
 
 	builder, err := iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentPosDeletes, path, iceberg.PuffinFile,
-		nil, nil, nil, 1, 1)
+		nil, nil, nil, 1, 1,
+	)
 	require.NoError(t, err, "new deletion vector builder")
 
 	return builder.ReferencedDataFile(referencedDataFile).Build()
