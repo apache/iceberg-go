@@ -2464,24 +2464,13 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		return nil, nil, err
 	}
 
-	var tableSchemas []*iceberg.Schema
-
-loadSchemaHistory:
-	for _, task := range tasks {
-		for _, deleteFile := range task.EqualityDeleteFiles {
-			for _, fieldID := range deleteFile.EqualityFieldIDs() {
-				if _, found := invariants.tableSchema.FindFieldByID(fieldID); !found {
-					tableSchemas = as.metadata.Schemas()
-
-					break loadSchemaHistory
-				}
-			}
-		}
-	}
 	equalityDeleteLoader, err := newLazyEqualityDeleteLoader(
-		as.fs, invariants.tableSchema, tableSchemas, invariants.nameMapping, tasks)
+		as.fs, invariants.tableSchema, nil, invariants.nameMapping, tasks)
 	if err != nil {
 		return nil, nil, err
+	}
+	if equalityDeleteLoader.needsSchemaHistory() {
+		equalityDeleteLoader.tableSchemas = as.metadata.Schemas()
 	}
 	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 

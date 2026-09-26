@@ -49,6 +49,26 @@ type countingEqualityDeleteOpenFS struct {
 	opens    atomic.Int64
 }
 
+type countingEqualityFieldDataFile struct {
+	iceberg.DataFile
+	equalityFieldIDsCalls         int
+	borrowedEqualityFieldIDsCalls int
+}
+
+func (f *countingEqualityFieldDataFile) EqualityFieldIDs() []int {
+	f.equalityFieldIDsCalls++
+
+	return f.DataFile.EqualityFieldIDs()
+}
+
+func (f *countingEqualityFieldDataFile) DataFileCollectionsRef(_ iceinternal.DataFileRef) (
+	map[int]int64, []byte, []int64, []int,
+) {
+	f.borrowedEqualityFieldIDsCalls++
+
+	return iceinternal.BorrowedDataFileCollections(f.DataFile)
+}
+
 func (f *countingEqualityDeleteOpenFS) Open(name string) (iceio.File, error) {
 	f.attempts.Add(1)
 	file, err := f.MemFS.Open(name)
@@ -263,6 +283,103 @@ func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 		[]FileScanTask{{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}})
 	require.ErrorIs(t, err, ErrEmptyEqualityFieldIDs)
 	require.ErrorContains(t, err, "empty-equality-fields.parquet")
+}
+
+func TestEqualityDeleteMetadataIsReadOncePerPath(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	base := newEqualityDeleteSetAssemblyTestFile(t, "mem://metadata-dedup/delete.parquet", []int{1})
+	deleteFile := &countingEqualityFieldDataFile{DataFile: base}
+	tasks := make([]FileScanTask, 100)
+	for i := range tasks {
+		tasks[i] = FileScanTask{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}
+	}
+
+	loader, err := newLazyEqualityDeleteLoader(iceio.NewMemFS(), schema, nil, nil, tasks)
+	require.NoError(t, err)
+	assert.Len(t, loader.files, 1)
+	assert.Equal(t, 1, deleteFile.borrowedEqualityFieldIDsCalls)
+	assert.Zero(t, deleteFile.equalityFieldIDsCalls)
+
+	fs := iceio.NewMemFS()
+	path := "mem://metadata-dedup/eager-delete.parquet"
+	writeEqualityDeleteParquetToMemFS(t, fs, path, `[{"id": 1}]`)
+	base = newEqualityDeleteSetAssemblyTestFile(t, path, []int{1})
+	deleteFile = &countingEqualityFieldDataFile{DataFile: base}
+	tasks = make([]FileScanTask, 100)
+	for i := range tasks {
+		tasks[i] = FileScanTask{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}
+	}
+
+	perTask, err := readAllEqualityDeleteFiles(t.Context(), fs, schema, nil, tasks, 1)
+	require.NoError(t, err)
+	assert.Len(t, perTask, len(tasks))
+	assert.Equal(t, 1, deleteFile.borrowedEqualityFieldIDsCalls)
+	assert.Zero(t, deleteFile.equalityFieldIDsCalls)
+}
+
+func TestEqualityDeleteMetadataRejectsConflictingSamePath(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	path := "mem://metadata-conflict/delete.parquet"
+	first := newEqualityDeleteSetAssemblyTestFile(t, path, []int{1, 2})
+	second := newEqualityDeleteSetAssemblyTestFile(t, path, []int{2, 1})
+	tasks := []FileScanTask{
+		{EqualityDeleteFiles: []iceberg.DataFile{first}},
+		{EqualityDeleteFiles: []iceberg.DataFile{second}},
+	}
+
+	_, err := newLazyEqualityDeleteLoader(iceio.NewMemFS(), schema, nil, nil, tasks)
+	require.ErrorContains(t, err, "conflicting equality delete metadata")
+	require.ErrorContains(t, err, path)
+
+	_, err = readAllEqualityDeleteFiles(t.Context(), iceio.NewMemFS(), schema, nil, tasks, 1)
+	require.ErrorContains(t, err, "conflicting equality delete metadata")
+	require.ErrorContains(t, err, path)
+}
+
+func TestLazyEqualityDeleteLoaderNeedsSchemaHistory(t *testing.T) {
+	t.Parallel()
+
+	currentSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 2, Name: "current", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	historicalSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	fs := iceio.NewMemFS()
+	deletePath := "mem://schema-history/delete.parquet"
+	writeEqualityDeleteParquetToMemFS(t, fs, deletePath, `[{"id": 1}]`)
+	deleteFile := newEqualityDeleteSetAssemblyTestFile(t, deletePath, []int{1})
+	task := FileScanTask{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}
+
+	loader, err := newLazyEqualityDeleteLoader(fs, currentSchema, nil, nil, []FileScanTask{task})
+	require.NoError(t, err)
+	require.True(t, loader.needsSchemaHistory())
+
+	loader.tableSchemas = []*iceberg.Schema{historicalSchema, currentSchema}
+	sets, err := loader.load(t.Context(), task)
+	require.NoError(t, err)
+	require.Len(t, sets, 1)
+	assert.Equal(t, []int{1}, sets[0].fieldIDs)
+	assert.Equal(t, []string{"id"}, sets[0].colNames)
+	assert.Len(t, sets[0].keys, 1)
+
+	currentDelete := newEqualityDeleteSetAssemblyTestFile(
+		t, "mem://schema-history/current.parquet", []int{2})
+	loader, err = newLazyEqualityDeleteLoader(fs, currentSchema, nil, nil, []FileScanTask{{
+		EqualityDeleteFiles: []iceberg.DataFile{currentDelete},
+	}})
+	require.NoError(t, err)
+	assert.False(t, loader.needsSchemaHistory())
 }
 
 func TestLazyEqualityDeleteLoaderLoadsFilesOnDemand(t *testing.T) {
