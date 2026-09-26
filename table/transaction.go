@@ -1188,9 +1188,31 @@ type deleteFilesToAddSet struct {
 	dvsByRef map[string]rewriteDeleteFileAddition
 }
 
-func validateDeletionVectorFormatVersion(df iceberg.DataFile, formatVersion int, operation string) error {
-	if IsDeletionVector(df) && formatVersion < 3 {
-		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", df.FilePath(), operation)
+// validateDeletionVectorToAdd is safe on any DataFile and no-ops on non-DVs.
+func validateDeletionVectorToAdd(df iceberg.DataFile, formatVersion int, operation string) error {
+	if !IsDeletionVector(df) {
+		return nil
+	}
+	path := df.FilePath()
+	if formatVersion < 3 {
+		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", path, operation)
+	}
+	if ref := df.ReferencedDataFile(); ref == nil || *ref == "" {
+		return fmt.Errorf("deletion vector %s is missing referenced_data_file for %s", path, operation)
+	}
+	offset := df.ContentOffset()
+	if offset == nil {
+		return fmt.Errorf("deletion vector %s is missing content_offset for %s", path, operation)
+	}
+	if *offset < 0 {
+		return fmt.Errorf("deletion vector %s has invalid content_offset %d for %s", path, *offset, operation)
+	}
+	length := df.ContentSizeInBytes()
+	if length == nil {
+		return fmt.Errorf("deletion vector %s is missing content_size_in_bytes for %s", path, operation)
+	}
+	if *length <= 0 {
+		return fmt.Errorf("deletion vector %s has invalid content_size_in_bytes %d for %s", path, *length, operation)
 	}
 
 	return nil
@@ -1264,10 +1286,6 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			}
 		}
 
-		if err := validateDeletionVectorFormatVersion(df, meta.formatVersion, operation); err != nil {
-			return nil, err
-		}
-
 		if !IsDeletionVector(df) {
 			if meta.formatVersion >= 3 && df.ContentType() == iceberg.EntryContentPosDeletes {
 				return nil, fmt.Errorf("position delete file %s must be a deletion vector for v%d table for %s",
@@ -1285,54 +1303,39 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			continue
 		}
 
-		if IsDeletionVector(df) {
-			ref := df.ReferencedDataFile()
-			if ref == nil || *ref == "" {
-				return nil, fmt.Errorf("deletion vector to add is missing referenced_data_file for %s", operation)
-			}
-			offset := df.ContentOffset()
-			if offset == nil {
-				return nil, fmt.Errorf("deletion vector %s is missing content_offset for %s", path, operation)
-			}
-			if *offset < 0 {
-				return nil, fmt.Errorf("deletion vector %s has invalid content_offset %d for %s", path, *offset, operation)
-			}
-			length := df.ContentSizeInBytes()
-			if length == nil {
-				return nil, fmt.Errorf("deletion vector %s is missing content_size_in_bytes for %s", path, operation)
-			}
-			if *length <= 0 {
-				return nil, fmt.Errorf("deletion vector %s has invalid content_size_in_bytes %d for %s", path, *length, operation)
-			}
-
-			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
-			if setToAdd.dvBlobs == nil {
-				setToAdd.dvBlobs = make(map[deletionVectorBlobKey]struct{}, len(deleteFiles))
-			}
-			if _, ok := setToAdd.dvBlobs[blob]; ok {
-				return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
-					operation, path, *offset, *length)
-			}
-			if _, ok := setToAdd.dvsByRef[*ref]; ok {
-				return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
-					operation, *ref)
-			}
-			if pathAlreadyAdded {
-				if _, ok := setToAdd.dvPaths[path]; !ok {
-					return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
-						path, operation)
-				}
-			}
-			if setToAdd.dvPaths == nil {
-				setToAdd.dvPaths = make(map[string]struct{}, len(deleteFiles))
-			}
-			if setToAdd.dvsByRef == nil {
-				setToAdd.dvsByRef = make(map[string]rewriteDeleteFileAddition, len(deleteFiles))
-			}
-			setToAdd.dvPaths[path] = struct{}{}
-			setToAdd.dvBlobs[blob] = struct{}{}
-			setToAdd.dvsByRef[*ref] = addition
+		if err := validateDeletionVectorToAdd(df, meta.formatVersion, operation); err != nil {
+			return nil, err
 		}
+		// non-nil: validateDeletionVectorToAdd checked all three.
+		ref, offset, length := df.ReferencedDataFile(), df.ContentOffset(), df.ContentSizeInBytes()
+
+		blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
+		if setToAdd.dvBlobs == nil {
+			setToAdd.dvBlobs = make(map[deletionVectorBlobKey]struct{}, len(deleteFiles))
+		}
+		if _, ok := setToAdd.dvBlobs[blob]; ok {
+			return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
+				operation, path, *offset, *length)
+		}
+		if _, ok := setToAdd.dvsByRef[*ref]; ok {
+			return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
+				operation, *ref)
+		}
+		if pathAlreadyAdded {
+			if _, ok := setToAdd.dvPaths[path]; !ok {
+				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+					path, operation)
+			}
+		}
+		if setToAdd.dvPaths == nil {
+			setToAdd.dvPaths = make(map[string]struct{}, len(deleteFiles))
+		}
+		if setToAdd.dvsByRef == nil {
+			setToAdd.dvsByRef = make(map[string]rewriteDeleteFileAddition, len(deleteFiles))
+		}
+		setToAdd.dvPaths[path] = struct{}{}
+		setToAdd.dvBlobs[blob] = struct{}{}
+		setToAdd.dvsByRef[*ref] = addition
 	}
 
 	return setToAdd, nil
@@ -1842,7 +1845,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	setDeleteFilesToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
-	dvRefsToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
+	dvsToRemoveByRef := make(map[string]iceberg.DataFile, len(deleteFilesToRemove))
 	for i, df := range deleteFilesToRemove {
 		if df == nil {
 			return fmt.Errorf("nil delete file at index %d for ReplaceFiles", i)
@@ -1856,10 +1859,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if ref == nil {
 				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
 			}
-			if _, ok := dvRefsToRemove[*ref]; ok {
+			if _, ok := dvsToRemoveByRef[*ref]; ok {
 				return errors.New("deletion vectors to remove must reference distinct data files for ReplaceFiles")
 			}
-			dvRefsToRemove[*ref] = struct{}{}
+			dvsToRemoveByRef[*ref] = df
 
 			continue
 		}
@@ -1869,7 +1872,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		setDeleteFilesToRemove[path] = struct{}{}
 	}
 	autoSetDeleteFilesToRemove := make(map[string]struct{}, len(autoDeleteFilesToRemove))
-	autoDVRefsToRemove := make(map[string]struct{}, len(autoDeleteFilesToRemove))
+	autoDVsToRemoveByRef := make(map[string]iceberg.DataFile, len(autoDeleteFilesToRemove))
 	for i, df := range autoDeleteFilesToRemove {
 		if df == nil {
 			return fmt.Errorf("nil automatic delete file at index %d for ReplaceFiles", i)
@@ -1883,13 +1886,13 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if ref == nil {
 				return errors.New("automatic deletion vector to remove is missing referenced_data_file for ReplaceFiles")
 			}
-			if _, ok := dvRefsToRemove[*ref]; ok {
+			if _, ok := dvsToRemoveByRef[*ref]; ok {
 				return errors.New("delete vectors to remove must reference distinct data files for ReplaceFiles")
 			}
-			if _, ok := autoDVRefsToRemove[*ref]; ok {
+			if _, ok := autoDVsToRemoveByRef[*ref]; ok {
 				return errors.New("automatic deletion vectors to remove must reference distinct data files for ReplaceFiles")
 			}
-			autoDVRefsToRemove[*ref] = struct{}{}
+			autoDVsToRemoveByRef[*ref] = df
 
 			continue
 		}
@@ -1921,26 +1924,28 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
 	markedAutoDeleteForRemoval := make([]iceberg.DataFile, 0, len(autoSetDeleteFilesToRemove))
-	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
+	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvsToRemoveByRef))
 	removedDeleteSequenceNumbers := make([]int64, 0, len(deleteFilesToRemove))
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
 	liveDataFiles := make(map[string]rewriteFileState)
 	survivingPositionDeletes := make([]rewriteFileState, 0)
-	for entry, err := range s.entries(fs, -1) {
+	for entry, err := range s.entries(fs, -1, false) {
 		if err != nil {
 			return err
 		}
 		df := entry.DataFile()
 		path := df.FilePath()
 		isData := df.ContentType() == iceberg.EntryContentData
+		// A DELETED entry is a file already removed from the table. It must not
+		// count as found when removing files, but it still blocks re-adding its path.
 		isLive := entry.Status() != iceberg.EntryStatusDELETED
 		if isData && isLive {
 			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.SequenceNum()}
+			if _, ok := setToDelete[path]; ok {
+				markedDataForDeletion = append(markedDataForDeletion, df)
+			}
 		}
-		if _, ok := setToDelete[path]; ok && isData {
-			markedDataForDeletion = append(markedDataForDeletion, df)
-		}
-		if !isData {
+		if !isData && isLive {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
 				if seq := entry.SequenceNum(); seq >= 0 {
@@ -1952,7 +1957,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			} else if _, ok := autoSetDeleteFilesToRemove[path]; ok {
 				markedAutoDeleteForRemoval = append(markedAutoDeleteForRemoval, df)
 			} else if ref := iceberginternal.BorrowedDataFileReferencedDataFile(df); IsDeletionVector(df) && ref != nil {
-				if _, ok := dvRefsToRemove[*ref]; ok {
+				// Match the DV's path too, not only its data file. Otherwise an old DV that
+				// was already replaced would match the newer DV, which holds more deletes.
+				if want, ok := dvsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
 					if seq := entry.SequenceNum(); seq >= 0 {
 						removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
@@ -1960,7 +1967,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 					} else {
 						return fmt.Errorf("deletion vector %s has no data sequence number in the current snapshot", path)
 					}
-				} else if _, ok := autoDVRefsToRemove[*ref]; ok {
+				} else if want, ok := autoDVsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
 				}
 			}
@@ -1997,10 +2004,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if _, addingReplacement := setDeleteFilesToAdd.dvsByRef[*ref]; !addingReplacement {
 				continue
 			}
-			if _, explicitlyRemoved := dvRefsToRemove[*ref]; explicitlyRemoved {
+			if _, explicitlyRemoved := dvsToRemoveByRef[*ref]; explicitlyRemoved {
 				continue
 			}
-			if _, automaticallyRemoved := autoDVRefsToRemove[*ref]; automaticallyRemoved {
+			if _, automaticallyRemoved := autoDVsToRemoveByRef[*ref]; automaticallyRemoved {
 				continue
 			}
 
@@ -2039,9 +2046,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if len(markedAutoDeleteForRemoval) != len(autoSetDeleteFilesToRemove) {
 		return errors.New("cannot remove automatic delete files that do not belong to the table")
 	}
-	// Keyed by referenced data file, so duplicate DV entries for one ref collapse
-	// to one slot; equality then means every requested ref exists in the table.
-	if len(markedDVsForRemoval) != len(dvRefsToRemove)+len(autoDVRefsToRemove) {
+	// markedDVsForRemoval has one slot per data file, so equal counts mean
+	// every requested DV was found live in the table.
+	if len(markedDVsForRemoval) != len(dvsToRemoveByRef)+len(autoDVsToRemoveByRef) {
 		return errors.New("cannot remove deletion vectors that do not belong to the table")
 	}
 
@@ -3172,18 +3179,11 @@ func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (ma
 	}
 
 	result := make(map[string]iceberg.DataFile)
-	// Iterate delete manifests only and skip DELETED-status entries: a
-	// superseded DV lingers as a DELETED entry in the deleted-files manifest
-	// against the same referenced data file. Including it here would let the
-	// stale ghost win the last-write into result (manifest concat order places
-	// deleted entries last), seeding the new DV from an outdated bitmap and
-	// resurrecting rows removed by the prior delete. See issue #1372.
-	for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes) {
+	// Skip DELETED entries: an old, replaced DV stays behind as one. Reading it
+	// would build the new DV from old data and bring back deleted rows. See #1372.
+	for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return nil, fmt.Errorf("scanning existing deletion vectors: %w", err)
-		}
-		if entry.Status() == iceberg.EntryStatusDELETED {
-			continue
 		}
 		df := entry.DataFile()
 		if !IsDeletionVector(df) {
@@ -3263,7 +3263,11 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	for range numWorkers {
 		go func() {
 			defer wg.Done()
+			sink := newRecordSink(records)
 			for {
+				if err := sink.reserve(ctx); err != nil {
+					return
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -3272,7 +3276,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 						return
 					}
 
-					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], records, invariants); err != nil {
+					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], sink, invariants); err != nil {
 						cancel(err)
 
 						return

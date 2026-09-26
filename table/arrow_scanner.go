@@ -1241,10 +1241,73 @@ func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, t
 	return nil
 }
 
+const maxInFlightTasksPerWorker = 1
+
+type taskCredits chan struct{}
+
+func newTaskCredits() taskCredits {
+	return make(taskCredits, maxInFlightTasksPerWorker)
+}
+
+func (c taskCredits) acquire(ctx context.Context) error {
+	select {
+	case c <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (c taskCredits) release() {
+	if c != nil {
+		<-c
+	}
+}
+
 type enumeratedRecord struct {
-	Record tblutils.Enumerated[arrow.RecordBatch]
-	Task   tblutils.Enumerated[FileScanTask]
-	Err    error
+	Record  tblutils.Enumerated[arrow.RecordBatch]
+	Task    tblutils.Enumerated[FileScanTask]
+	Err     error
+	credits taskCredits
+}
+
+type recordSink struct {
+	out     chan<- enumeratedRecord
+	credits taskCredits
+	held    bool
+}
+
+func newRecordSink(out chan<- enumeratedRecord) *recordSink {
+	return &recordSink{out: out, credits: newTaskCredits()}
+}
+
+func (s *recordSink) reserve(ctx context.Context) error {
+	if err := s.credits.acquire(ctx); err != nil {
+		return err
+	}
+	s.held = true
+
+	return nil
+}
+
+func (s *recordSink) send(rec enumeratedRecord) {
+	if rec.Record.Last {
+		rec.credits = s.handOff()
+	}
+	s.out <- rec
+}
+
+func (s *recordSink) fail(task tblutils.Enumerated[FileScanTask], err error) {
+	s.out <- enumeratedRecord{Task: task, Err: err, credits: s.handOff()}
+}
+
+func (s *recordSink) handOff() taskCredits {
+	if !s.held {
+		return nil
+	}
+	s.held = false
+
+	return s.credits
 }
 
 func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (iceSchema *iceberg.Schema, colIndices []int, rdr tblutils.FileReader, err error) {
@@ -1682,9 +1745,9 @@ func (as *arrowScan) processRecords(
 	columns []int,
 	pipeline []recProcessFn,
 	posSource *rowPositionSource,
-	out chan<- enumeratedRecord,
+	sink *recordSink,
 ) error {
-	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, out, nil)
+	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, sink, nil)
 }
 
 // adjustParquetTaskRange keeps a planned range within the physical file when
@@ -1713,7 +1776,7 @@ func (as *arrowScan) processRecordsWithPlans(
 	columns []int,
 	pipeline []recProcessFn,
 	posSource *rowPositionSource,
-	out chan<- enumeratedRecord,
+	sink *recordSink,
 	plans *compiledFileFilterPlans,
 ) (err error) {
 	var (
@@ -1728,7 +1791,7 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
-	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
+	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position
 	// deletes) recover it from posSource, which the tester seeds with each
@@ -1739,8 +1802,9 @@ func (as *arrowScan) processRecordsWithPlans(
 		var tester *tblutils.ParquetRowGroupTester
 		if plans != nil && plans.pruning != nil {
 			tester = &tblutils.ParquetRowGroupTester{
-				StatsFn:    plans.pruning.statsEvaluator(),
-				BloomPreds: plans.pruning.bloomPreds,
+				StatsFn:         plans.pruning.statsEvaluator(),
+				BloomPreds:      plans.pruning.bloomPreds,
+				DictionaryPreds: plans.pruning.dictionaryPreds,
 			}
 		} else {
 			logicalSchema := as.filterSchema
@@ -1786,9 +1850,15 @@ func (as *arrowScan) processRecordsWithPlans(
 				return err
 			}
 
+			dictionaryPreds, err := newDictionaryPredicates(filePruningFilter)
+			if err != nil {
+				return err
+			}
+
 			tester = &tblutils.ParquetRowGroupTester{
-				StatsFn:    statsFn,
-				BloomPreds: bloomPreds,
+				StatsFn:         statsFn,
+				BloomPreds:      bloomPreds,
+				DictionaryPreds: dictionaryPreds,
 			}
 		}
 		// A complete task already reads every row group. Leave its byte range
@@ -1821,9 +1891,9 @@ func (as *arrowScan) processRecordsWithPlans(
 
 	for recRdr.Next() {
 		if prev != nil {
-			out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
+			sink.send(enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 				Value: prev, Index: idx, Last: false,
-			}, Task: task}
+			}, Task: task})
 			idx++
 		}
 
@@ -1839,9 +1909,9 @@ func (as *arrowScan) processRecordsWithPlans(
 	}
 
 	if prev != nil {
-		out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: prev, Index: idx, Last: true,
-		}, Task: task}
+		}, Task: task})
 	} else {
 		// The reader produced no batches (e.g. every row group was pruned by
 		// stats). The sequenced channel in createIterator still needs this
@@ -1853,9 +1923,9 @@ func (as *arrowScan) processRecordsWithPlans(
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: idx, Last: true,
-		}, Task: task}
+		}, Task: task})
 	}
 
 	if recRdr.Err() != nil && recRdr.Err() != io.EOF {
@@ -1892,10 +1962,10 @@ func pruningFilterHasMissingInitialDefault(
 	return false, nil
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
+func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], sink *recordSink, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
-			out <- enumeratedRecord{Task: task, Err: err}
+			sink.fail(task, err)
 		}
 	}()
 
@@ -2013,9 +2083,9 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
-		}}
+		}})
 
 		return err
 	}
@@ -2033,15 +2103,15 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	})
 
-	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, out, filterPlans)
+	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)
 
 	return err
 }
 
-func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, out chan<- enumeratedRecord, invariants *arrowScanInvariants) (err error) {
+func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, sink *recordSink, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
-			out <- enumeratedRecord{Task: task, Err: err}
+			sink.fail(task, err)
 		}
 	}()
 
@@ -2097,9 +2167,9 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
-		}}
+		}})
 
 		return err
 	}
@@ -2113,7 +2183,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecordsWithPlans(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, out, filterPlans)
+	err = as.processRecordsWithPlans(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)
 
 	return err
 }
@@ -2154,6 +2224,7 @@ func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-c
 					prev.Record.Last && next.Record.Index == 0
 			}
 		}, enumeratedRecord{Task: tblutils.Enumerated[FileScanTask]{Index: -1}}, func(rec enumeratedRecord) {
+			rec.credits.release()
 			if rec.Record.Value != nil {
 				rec.Record.Value.Release()
 			}
@@ -2164,6 +2235,7 @@ func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-c
 	return func(yield func(arrow.RecordBatch, error) bool) {
 		defer func() {
 			for rec := range sequenced {
+				rec.credits.release()
 				if rec.Record.Value != nil {
 					rec.Record.Value.Release()
 				}
@@ -2187,9 +2259,14 @@ func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-c
 				return
 			case enum, ok := <-sequenced:
 				if !ok {
+					if err := context.Cause(ctx); err != nil {
+						yield(nil, err)
+					}
+
 					return
 				}
 
+				enum.credits.release()
 				if enum.Err != nil {
 					yield(nil, enum.Err)
 
@@ -2240,7 +2317,11 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 		for range numWorkers {
 			go func() {
 				defer wg.Done()
+				sink := newRecordSink(records)
 				for {
+					if err := sink.reserve(scanCtx); err != nil {
+						return
+					}
 					select {
 					case <-scanCtx.Done():
 						return
@@ -2258,10 +2339,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 							var err error
 							positionalDeletes, err = positionDeleteLoader.load(scanCtx, task.Value)
 							if err != nil {
-								select {
-								case records <- enumeratedRecord{Task: task, Err: err}:
-								case <-scanCtx.Done():
-								}
+								sink.fail(task, err)
 								cancel(err)
 
 								return
@@ -2270,26 +2348,20 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 
 						dvBitmap, err := dvLoader.load(scanCtx, filePath)
 						if err != nil {
-							select {
-							case records <- enumeratedRecord{Task: task, Err: err}:
-							case <-scanCtx.Done():
-							}
+							sink.fail(task, err)
 							cancel(err)
 
 							return
 						}
 						eqDeleteSets, err := equalityDeleteLoader.load(scanCtx, task.Value)
 						if err != nil {
-							select {
-							case records <- enumeratedRecord{Task: task, Err: err}:
-							case <-scanCtx.Done():
-							}
+							sink.fail(task, err)
 							cancel(err)
 
 							return
 						}
 
-						if err := as.recordsFromTask(scanCtx, task, records,
+						if err := as.recordsFromTask(scanCtx, task, sink,
 							positionalDeletes,
 							dvBitmap,
 							eqDeleteSets,

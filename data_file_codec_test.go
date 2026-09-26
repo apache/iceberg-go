@@ -20,9 +20,11 @@ package iceberg
 import (
 	"reflect"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -342,4 +344,165 @@ func BenchmarkMarshalAvroEntry(b *testing.B) {
 			}
 		})
 	}
+}
+
+func TestManifestEntrySchemaForMatchesPartitionAvroShape(t *testing.T) {
+	types := []Type{
+		Int32Type{},
+		Int64Type{},
+		Float32Type{},
+		Float64Type{},
+		StringType{},
+		DateType{},
+		TimeType{},
+		TimestampType{},
+		TimestampTzType{},
+		UUIDType{},
+		BooleanType{},
+		BinaryType{},
+		FixedTypeOf(8), FixedTypeOf(16),
+		DecimalTypeOf(10, 2), DecimalTypeOf(11, 2), DecimalTypeOf(10, 3),
+		UnknownType{},
+	}
+	for _, version := range []int{1, 2, 3} {
+		for _, typ := range types {
+			t.Run("v"+strconv.Itoa(version)+"/"+typ.String(), func(t *testing.T) {
+				schema := NewSchema(1, NestedField{ID: 1, Name: "source", Type: typ})
+				spec := NewPartitionSpec(PartitionField{
+					SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: IdentityTransform{},
+				})
+				partition, err := partitionTypeToAvroSchema(spec.PartitionType(schema))
+				require.NoError(t, err)
+				want, err := internal.NewManifestEntrySchema(partition, version)
+				require.NoError(t, err)
+				for range 2 {
+					got, maps, err := manifestEntrySchemaFor(spec, schema, version)
+					require.NoError(t, err)
+					require.Equal(t, want.String(), got.String())
+					require.Equal(t, getFieldIDMap(want), maps)
+				}
+			})
+		}
+	}
+}
+
+func TestManifestEntrySchemaForPartitionShapeEquivalence(t *testing.T) {
+	schema := NewSchema(1,
+		NestedField{ID: 1, Name: "source", Type: Int32Type{}},
+		NestedField{ID: 2, Name: "ts", Type: TimestampType{}},
+	)
+	field := PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: IdentityTransform{}}
+	spec := NewPartitionSpec(field)
+	original, _, err := manifestEntrySchemaFor(spec, schema, 2)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name   string
+		spec   PartitionSpec
+		schema *Schema
+	}{
+		{"spec_id", NewPartitionSpecID(99, field), schema},
+		{"schema_metadata", spec, NewSchema(99,
+			NestedField{
+				ID: 1, Name: "renamed_source", Type: Int32Type{}, Required: true,
+				Doc: "documentation", InitialDefault: int32(1), WriteDefault: int32(2),
+			},
+			NestedField{ID: 3, Name: "unrelated", Type: StringType{}},
+		)},
+		{"bucket", NewPartitionSpec(PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: BucketTransform{NumBuckets: 8},
+		}), schema},
+		{"year", NewPartitionSpec(PartitionField{
+			SourceIDs: []int{2}, FieldID: 1000, Name: "partition", Transform: YearTransform{},
+		}), schema},
+		{"dropped_bucket_source", NewPartitionSpec(PartitionField{
+			SourceIDs: []int{3}, FieldID: 1000, Name: "partition", Transform: BucketTransform{NumBuckets: 16},
+		}), schema},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := manifestEntrySchemaFor(tc.spec, tc.schema, 2)
+			require.NoError(t, err)
+			require.Same(t, original, got)
+		})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		fields  []PartitionField
+		version int
+	}{
+		{"field_id", []PartitionField{{SourceIDs: []int{1}, FieldID: 1001, Name: "partition", Transform: IdentityTransform{}}}, 2},
+		{"field_name", []PartitionField{{SourceIDs: []int{1}, FieldID: 1000, Name: "renamed", Transform: IdentityTransform{}}}, 2},
+		{"field_count", []PartitionField{field, {SourceIDs: []int{2}, FieldID: 1001, Name: "year", Transform: YearTransform{}}}, 2},
+		{"empty", nil, 2},
+		{"v1", []PartitionField{field}, 1},
+		{"v3", []PartitionField{field}, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := manifestEntrySchemaFor(NewPartitionSpec(tc.fields...), schema, tc.version)
+			require.NoError(t, err)
+			require.NotSame(t, original, got)
+		})
+	}
+
+	other := PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "year", Transform: YearTransform{}}
+	ordered, _, err := manifestEntrySchemaFor(NewPartitionSpec(field, other), schema, 2)
+	require.NoError(t, err)
+	reversed, _, err := manifestEntrySchemaFor(NewPartitionSpec(other, field), schema, 2)
+	require.NoError(t, err)
+	require.NotSame(t, ordered, reversed)
+}
+
+type unsupportedCodecPartitionType struct{ Int64Type }
+
+func TestManifestEntrySchemaForRejectsInvalidTypesAfterCacheHit(t *testing.T) {
+	spec := NewPartitionSpec(PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: IdentityTransform{},
+	})
+	_, _, err := manifestEntrySchemaFor(spec, NewSchema(1, NestedField{ID: 1, Name: "source", Type: Int64Type{}}), 2)
+	require.NoError(t, err)
+
+	for _, typ := range []Type{
+		unsupportedCodecPartitionType{},
+		VariantType{},
+		&StructType{}, &ListType{ElementID: 2, Element: Int64Type{}},
+		&MapType{KeyID: 2, KeyType: StringType{}, ValueID: 3, ValueType: Int64Type{}},
+	} {
+		schema := NewSchema(1, NestedField{ID: 1, Name: "source", Type: typ})
+		_, wantErr := partitionTypeToAvroSchema(spec.PartitionType(schema))
+		require.Error(t, wantErr)
+		_, _, err := manifestEntrySchemaFor(spec, schema, 2)
+		require.EqualError(t, err, wantErr.Error())
+	}
+}
+
+func TestManifestEntrySchemaForConcurrentTableLocalIDs(t *testing.T) {
+	spec := NewPartitionSpec(PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: IdentityTransform{},
+	})
+	schemas := []*Schema{
+		NewSchema(1, NestedField{ID: 1, Name: "source", Type: Int64Type{}}),
+		NewSchema(1, NestedField{ID: 1, Name: "source", Type: StringType{}}),
+	}
+	const workers = 32
+	results := make([]struct {
+		schema string
+		err    error
+	}, workers)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Go(func() {
+			got, _, err := manifestEntrySchemaFor(spec, schemas[i%len(schemas)], 2)
+			results[i].err = err
+			if err == nil {
+				results[i].schema = got.String()
+			}
+		})
+	}
+	wg.Wait()
+	for i, result := range results {
+		require.NoError(t, result.err)
+		require.Equal(t, results[i%len(schemas)].schema, result.schema)
+	}
+	require.NotEqual(t, results[0].schema, results[1].schema)
 }

@@ -159,6 +159,16 @@ func (b *boundExtract[T]) Ref() BoundReference { return b.ref }
 func (b *boundExtract[T]) Type() Type          { return b.typ }
 func (b *boundExtract[T]) Path() string        { return b.path }
 
+// VariantPath returns the term's member-name path for columnar extraction via compute.VariantGet.
+func (b *boundExtract[T]) VariantPath() variant.VariantPath {
+	var p variant.VariantPath
+	for _, f := range b.fields {
+		p = p.Field(f)
+	}
+
+	return p
+}
+
 // MarshalJSON reports that extract terms have no REST expression-JSON form (see ErrExtractNotSerializable), rather than silently encoding to {}.
 func (*boundExtract[T]) MarshalJSON() ([]byte, error) { return nil, ErrExtractNotSerializable }
 

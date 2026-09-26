@@ -237,6 +237,25 @@ func TestSplitParquetScanTaskKeepsUnsafeTasksIntact(t *testing.T) {
 	}
 }
 
+func TestSplitRemoteScanTasksPreservesPartialTasks(t *testing.T) {
+	t.Parallel()
+	file := splitTestDataFile(t, iceberg.ParquetFile, 100, []int64{8, 40, 70})
+	partial := []FileScanTask{
+		{File: file, Start: 0, Length: 40, Residual: iceberg.AlwaysTrue{}},
+		{File: file, Start: 40, Length: 60, Residual: iceberg.AlwaysFalse{}},
+	}
+	got := splitRemoteScanTasks(partial, 20)
+	assert.Equal(t, partial, got)
+	assert.Same(t, &partial[0], &got[0], "pass-through should retain the original slice")
+
+	// Partial tasks must also survive when another file causes a new slice.
+	mixed := []FileScanTask{partial[0], {File: file, Start: 0, Length: 100}, partial[1]}
+	got = splitRemoteScanTasks(mixed, 20)
+	require.Len(t, got, 5)
+	assert.Equal(t, partial[0], got[0])
+	assert.Equal(t, partial[1], got[len(got)-1])
+}
+
 func TestAdjustParquetTaskRangeToPhysicalFileSize(t *testing.T) {
 	file := splitTestDataFile(t, iceberg.ParquetFile, 100, []int64{8, 40, 70})
 	tests := []struct {

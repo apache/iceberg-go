@@ -198,8 +198,13 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 				ct, f.FilePath())
 		}
 
-		if err := validateDeletionVectorFormatVersion(f, meta.formatVersion, "row delta"); err != nil {
-			return err
+		if IsDeletionVector(f) {
+			if err := validateDeletionVectorToAdd(f, meta.formatVersion, "row delta"); err != nil {
+				return err
+			}
+		} else if ct == iceberg.EntryContentPosDeletes && meta.formatVersion >= 3 {
+			return fmt.Errorf("position delete file %s must be a deletion vector for v%d table for row delta",
+				f.FilePath(), meta.formatVersion)
 		}
 
 		// Equality delete files must declare which columns form the delete key,
@@ -430,12 +435,9 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 	}
 
 	liveByPath := make(map[string][]iceberg.DataFile, len(rd.removedDels))
-	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes) {
+	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return nil, nil, err
-		}
-		if entry.Status() == iceberg.EntryStatusDELETED {
-			continue
 		}
 		df := entry.DataFile()
 		if _, ok := want[df.FilePath()]; ok {

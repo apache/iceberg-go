@@ -204,12 +204,25 @@ Tuning properties:
 
 ### Azure Data Lake Storage / Blob
 
-Authentication is selected based on the property keys present (`io/gocloud/azure/azure.go`):
+Authentication is selected in the following order (`io/gocloud/azure/azure.go`); the first applicable option wins, and if none of 1-4 apply the default credential chain (5) is used:
 
-1. Shared key: both `adls.auth.shared-key.account.name` and `adls.auth.shared-key.account.key` set.
-2. Per-host SAS token: `adls.sas-token.<hostname>` (prefix-matched against the storage account host).
-3. Per-host connection string: `adls.connection-string.<hostname>`.
-4. Managed identity: `adls.auth.managed-identity.enabled` set to a truthy value.
+1. Shared key: a nonempty `adls.auth.shared-key.account.name` selects this path and requires a nonempty `adls.auth.shared-key.account.key`.
+2. Per-host SAS token: `adls.sas-token.<hostname>`, where `<hostname>` exactly matches the storage account hostname (for example, `myaccount.dfs.core.windows.net`).
+3. Per-account connection string: `adls.connection-string.<account-name>` (for example, `adls.connection-string.myaccount`).
+4. Managed identity: `adls.auth.managed-identity.enabled` set to exactly `"true"` selects this path and uses `ManagedIdentityCredential` directly. Set `adls.client-id` to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.
+5. Default credential chain: `DefaultAzureCredential`, which includes managed identity among its credential sources.
+
+> **Note on cross-client parity.** The two properties in step 4 diverge from the
+> other clients. `adls.auth.managed-identity.enabled` is Go-specific: neither
+> Iceberg Java nor PyIceberg defines a property that forces
+> `ManagedIdentityCredential`, so catalog properties that set it do not carry
+> over. `adls.client-id` collides in name only — PyIceberg reads it as a service
+> principal client ID used together with `adls.client-secret` and
+> `adls.tenant-id`, neither of which iceberg-go defines (see the
+> [PyIceberg ADLS configuration](https://py.iceberg.apache.org/configuration/#azure-data-lake)),
+> while Java's `AzureProperties` defines no `adls.client-id` at all. Here it is
+> only ever read as a user-assigned managed identity ID, and only when step 4 is
+> selected.
 
 Tuning properties:
 
@@ -218,11 +231,11 @@ Tuning properties:
 | `adls.auth.shared-key.account.name` (`io.ADLSSharedKeyAccountName`) | Account name. |
 | `adls.auth.shared-key.account.key` (`io.ADLSSharedKeyAccountKey`) | Account key. |
 | `adls.sas-token.<host>` (prefix `io.ADLSSasTokenPrefix`) | Per-host SAS token. |
-| `adls.connection-string.<host>` (prefix `io.ADLSConnectionStringPrefix`) | Per-host connection string. |
-| `adls.client-id` (`io.ADLSClientID`) | Client/application ID for AAD auth. |
+| `adls.connection-string.<account-name>` (prefix `io.ADLSConnectionStringPrefix`) | Per-account connection string. |
+| `adls.client-id` (`io.ADLSClientID`) | Client ID of a user-assigned managed identity. Used only when the explicit managed-identity authentication path is selected. |
 | `adls.endpoint` (`io.ADLSEndpoint`) | Storage domain (e.g. `blob.core.windows.net`). |
 | `adls.protocol` (`io.ADLSProtocol`) | `http` or `https`. |
-| `adls.auth.managed-identity.enabled` (`io.ADLSManagedIdentityEnabled`) | Enable Azure Managed Identity auth. |
+| `adls.auth.managed-identity.enabled` (`io.ADLSManagedIdentityEnabled`) | Set to exactly `"true"` to use `ManagedIdentityCredential` directly, subject to the precedence above. |
 
 ## Environment variables
 

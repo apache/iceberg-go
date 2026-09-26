@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/scanmetrics"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"golang.org/x/sync/errgroup"
@@ -1630,8 +1631,11 @@ func (scan *Scan) planFiles(ctx context.Context, projectScanColumns bool) ([]Fil
 	case ScanPlanningRemote:
 		return scan.planFilesRemote(ctx)
 	case ScanPlanningAuto:
-		if supportsAutomaticRemotePlanning(scan.planner) &&
-			!scan.requiresLastUpdatedSequenceNumber() {
+		if !supportsAutomaticRemotePlanning(scan.planner) {
+			scanmetrics.Fallback(ctx, "capability")
+		} else if scan.requiresLastUpdatedSequenceNumber() {
+			scanmetrics.Fallback(ctx, "row-lineage")
+		} else {
 			return scan.planFilesRemote(ctx)
 		}
 	case ScanPlanningLocal:
@@ -2135,6 +2139,7 @@ type FileScanTask struct {
 //
 // The purpose for returning the schema up front is to handle the case where there are no
 // rows returned. The resulting Arrow Schema of the projection will still be known.
+// The memory held while tasks are decoded in parallel is described on [Scan.ReadTasks].
 func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	tasks, err := scan.planFiles(ctx, true)
 	if err != nil {
@@ -2155,6 +2160,15 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // read errors are delivered through the iterator when a task referencing that file is
 // reached; if no such task is processed, the file is not read and its error is not
 // returned. The returned iterator is single-use.
+//
+// With [WithMaxConcurrency] above one, tasks are decoded in parallel and the
+// batches are returned in task order. Each worker holds the decoded batches of
+// at most one task until the iterator has returned them, so while an early task
+// is slow to open or decode, the batches waiting behind it total at most the
+// worker count times the rows in the largest task, rounded up to a multiple of
+// the batch size (see [WithArrowBatchSize]). One large file among small ones can
+// therefore still hold its whole decoded contents while it waits. The bound for
+// a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)

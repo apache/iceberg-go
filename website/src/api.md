@@ -589,7 +589,7 @@ When iceberg-go converts an Iceberg schema to Arrow (e.g. for the scanner output
 | `struct<...>` | `arrow.StructOf(...)` |
 | `list<E>` | `arrow.ListOf(E)` (or `LargeListOf` if `useLargeTypes`) |
 | `map<K, V>` | `arrow.MapOf(K, V)` |
-| `variant` | `arrow.ExtensionType` for Variant |
+| `variant` | `arrow.ExtensionType` for Variant (see [Variant Type](./variant.md)) |
 
 Helpers in [`table/arrow_utils.go`](https://github.com/apache/iceberg-go/blob/main/table/arrow_utils.go):
 

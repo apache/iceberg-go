@@ -114,13 +114,16 @@ func TestProcessRecordsUsesRowGroupFilterForPruning(t *testing.T) {
 	err = (&arrowScan{rowGroupFilter: rowGroupFilter, projectedSchema: fileSchema}).processRecords(
 		ctx,
 		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
-		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, newRecordSink(out))
 	require.NoError(t, err)
 
 	require.NotNil(t, reader.tester)
 	require.Len(t, reader.tester.BloomPreds, 1)
 	assert.Equal(t, 1, reader.tester.BloomPreds[0].FieldID)
 	assert.Len(t, reader.tester.BloomPreds[0].PhysBytes, 1)
+	require.Len(t, reader.tester.DictionaryPreds, 1)
+	assert.Equal(t, 1, reader.tester.DictionaryPreds[0].FieldID)
+	assert.Equal(t, reader.tester.BloomPreds[0].PhysBytes, reader.tester.DictionaryPreds[0].PhysBytes)
 
 	result := <-out
 	result.Record.Value.Release()
@@ -176,13 +179,16 @@ func TestProcessRecordsRebindsRowGroupFilterToPromotedFileSchema(t *testing.T) {
 	}).processRecords(
 		ctx,
 		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
-		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, newRecordSink(out))
 	require.NoError(t, err)
 
 	assert.True(t, reader.statsResult, "matching INT32 row-group stats should be retained")
 	require.Len(t, reader.tester.BloomPreds, 1)
 	assert.Equal(t, []byte{1, 0, 0, 0}, reader.tester.BloomPreds[0].PhysBytes[0],
 		"the bloom predicate should use the INT32 file encoding")
+	require.Len(t, reader.tester.DictionaryPreds, 1)
+	assert.Equal(t, []byte{1, 0, 0, 0}, reader.tester.DictionaryPreds[0].PhysBytes[0],
+		"the dictionary predicate should use the INT32 file encoding")
 
 	result := <-out
 	result.Record.Value.Release()
@@ -221,12 +227,14 @@ func TestProcessRecordsDoesNotPruneMissingInitialDefault(t *testing.T) {
 	}).processRecords(
 		ctx,
 		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
-		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, newRecordSink(out))
 	require.NoError(t, err)
 
 	require.NotNil(t, reader.tester)
 	assert.Empty(t, reader.tester.BloomPreds,
 		"a missing field with an initial-default must disable bloom pruning")
+	assert.Empty(t, reader.tester.DictionaryPreds,
+		"a missing field with an initial-default must disable dictionary pruning")
 
 	result := <-out
 	result.Record.Value.Release()
