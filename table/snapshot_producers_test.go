@@ -97,7 +97,7 @@ func newMemIO(limit int, err error) *memIO {
 	}
 }
 
-func (m *memIO) Open(name string) (iceio.File, error) {
+func (m *memIO) Open(_ context.Context, name string) (iceio.File, error) {
 	m.mu.Lock()
 	data, ok := m.files[name]
 	m.mu.Unlock()
@@ -120,7 +120,7 @@ func (m *memIO) WriteFile(name string, content []byte) error {
 	return nil
 }
 
-func (m *memIO) Remove(name string) error {
+func (m *memIO) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.files, name)
@@ -452,7 +452,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 func readManifestListFromPath(t *testing.T, fs iceio.IO, path string) []iceberg.ManifestFile {
 	t.Helper()
 
-	f, err := fs.Open(path)
+	f, err := fs.Open(context.Background(), path)
 	require.NoError(t, err, "open manifest list: %s", path)
 	defer f.Close()
 
@@ -709,7 +709,7 @@ func newTrackingIO() *trackingIO {
 	}
 }
 
-func (t *trackingIO) Open(name string) (iceio.File, error) {
+func (t *trackingIO) Open(_ context.Context, name string) (iceio.File, error) {
 	data, ok := t.files[name]
 	if !ok {
 		return nil, fs.ErrNotExist
@@ -734,7 +734,7 @@ func (t *trackingIO) WriteFile(name string, content []byte) error {
 	return nil
 }
 
-func (t *trackingIO) Remove(name string) error {
+func (t *trackingIO) Remove(_ context.Context, name string) error {
 	delete(t.files, name)
 
 	return nil
@@ -793,13 +793,13 @@ func (c *closeErrorIO) Create(name string) (iceio.FileWriter, error) {
 	return writer, err
 }
 
-func (c *closeErrorIO) Remove(name string) error {
+func (c *closeErrorIO) Remove(_ context.Context, name string) error {
 	c.removes = append(c.removes, name)
 	if c.removeErr != nil {
 		return c.removeErr
 	}
 
-	return c.trackingIO.Remove(name)
+	return c.trackingIO.Remove(context.Background(), name)
 }
 
 func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {

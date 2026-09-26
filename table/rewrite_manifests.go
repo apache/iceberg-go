@@ -314,7 +314,7 @@ func (r *rewriteManifests) deleteWritten(input, merged []iceberg.ManifestFile) {
 		if _, ok := inPaths[m.FilePath()]; ok {
 			continue
 		}
-		if err := r.base.io.Remove(m.FilePath()); err != nil {
+		if err := r.base.io.Remove(context.Background(), m.FilePath()); err != nil {
 			log.Printf("Warning: failed to delete orphaned merged manifest %s: %v", m.FilePath(), err)
 		}
 	}

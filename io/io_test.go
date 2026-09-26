@@ -18,6 +18,7 @@
 package io_test
 
 import (
+	"context"
 	"io/fs"
 	"testing"
 	"testing/fstest"
@@ -59,12 +60,12 @@ func TestFSPreProcNameTransformsAllOperations(t *testing.T) {
 		return "/rewritten/file.txt"
 	})
 
-	file, err := fsys.Open("file://bucket/original.txt")
+	file, err := fsys.Open(context.Background(), "file://bucket/original.txt")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 	_, err = fsys.(iceio.ReadFileIO).ReadFile("file://bucket/original.txt")
 	require.NoError(t, err)
-	require.NoError(t, fsys.Remove("file://bucket/original.txt"))
+	require.NoError(t, fsys.Remove(context.Background(), "file://bucket/original.txt"))
 
 	require.Equal(t, "rewritten/file.txt", underlying.opened)
 	require.Equal(t, underlying.opened, underlying.read)

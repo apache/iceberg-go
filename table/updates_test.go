@@ -52,20 +52,20 @@ func newTrackingCallsIO() *trackingCallsIO {
 	}
 }
 
-func (c *trackingCallsIO) Open(name string) (iceio.File, error) {
+func (c *trackingCallsIO) Open(_ context.Context, name string) (iceio.File, error) {
 	c.mu.Lock()
 	c.openCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Open(name)
+	return c.trackingIO.Open(context.Background(), name)
 }
 
-func (c *trackingCallsIO) Remove(name string) error {
+func (c *trackingCallsIO) Remove(_ context.Context, name string) error {
 	c.mu.Lock()
 	c.removeCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Remove(name)
+	return c.trackingIO.Remove(context.Background(), name)
 }
 
 // writeManifest writes a v2 data manifest with a single ADDED

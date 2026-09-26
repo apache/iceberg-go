@@ -95,7 +95,7 @@ func TestRunCleanOrphanFilesPreviewsPlanBeforeDeletion(t *testing.T) {
 	assert.False(t, deleted.DryRun)
 	assert.Equal(t, 1, deleted.OrphanFileCount)
 	assert.Equal(t, orphanPath, deleted.OrphanFiles[0].Path)
-	_, err = memFS.Open(orphanPath)
+	_, err = memFS.Open(context.Background(), orphanPath)
 	assert.ErrorIs(t, err, fs.ErrNotExist)
 }
 

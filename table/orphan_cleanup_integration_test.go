@@ -194,7 +194,7 @@ func (s *OrphanCleanupIntegrationSuite) mustFS(tbl *table.Table) io.IO {
 }
 
 func (s *OrphanCleanupIntegrationSuite) fileExists(fs io.IO, path string) bool {
-	f, err := fs.Open(path)
+	f, err := fs.Open(s.ctx, path)
 	if err != nil {
 		return false
 	}
@@ -248,7 +248,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupDryRun() {
 	}
 
 	for _, orphanFile := range orphanFiles {
-		s.NoError(fs.Remove(orphanFile))
+		s.NoError(fs.Remove(s.ctx, orphanFile))
 	}
 }
 
@@ -380,7 +380,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupWithConcurrency() {
 	// Clean up original orphan files
 	fs := s.mustFS(tbl)
 	for _, orphanFile := range orphanFiles {
-		fs.Remove(orphanFile) // Ignore errors, might already be deleted
+		fs.Remove(s.ctx, orphanFile) // Ignore errors, might already be deleted
 	}
 }
 
@@ -392,10 +392,10 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupCustomDeleteFunction() 
 	time.Sleep(100 * time.Millisecond)
 
 	var deletedByCustomFunc []string
-	customDeleteFunc := func(filePath string) error {
+	customDeleteFunc := func(ctx context.Context, filePath string) error {
 		deletedByCustomFunc = append(deletedByCustomFunc, filePath)
 		fs := s.mustFS(tbl)
-		return fs.Remove(filePath)
+		return fs.Remove(ctx, filePath)
 	}
 
 	result, err := tbl.DeleteOrphanFiles(s.ctx,

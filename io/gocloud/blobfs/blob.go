@@ -285,7 +285,9 @@ func directoryName(key string) string {
 	return pathpkg.Base(key)
 }
 
-func (bfs *FileIO) Open(path string) (icebergio.File, error) {
+func (bfs *FileIO) Open(_ context.Context, path string) (icebergio.File, error) {
+	// The returned File is read after Open returns, so its reads stay bound to
+	// the FileIO's lifetime context (bfs.ctx) rather than this per-call ctx.
 	originalPath := path
 	var err error
 	path, err = bfs.preprocess(path)
@@ -306,17 +308,17 @@ func (bfs *FileIO) Open(path string) (icebergio.File, error) {
 	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil
 }
 
-func (bfs *FileIO) Remove(name string) error {
+func (bfs *FileIO) Remove(ctx context.Context, name string) error {
 	key, err := bfs.preprocess(name)
 	if err != nil {
 		return &fs.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	if err := bfs.Delete(bfs.ctx, key); err != nil {
+	if err := bfs.Delete(ctx, key); err != nil {
 		if gcerrors.Code(err) == gcerrors.NotFound {
 			marker := directoryMarker(key)
 			if marker != "" {
-				if markerErr := bfs.Delete(bfs.ctx, marker); markerErr == nil {
+				if markerErr := bfs.Delete(ctx, marker); markerErr == nil {
 					return nil
 				} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
 					return &fs.PathError{Op: "remove", Path: name, Err: markerErr}

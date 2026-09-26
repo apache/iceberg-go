@@ -1833,7 +1833,7 @@ func TestPlanScopedIOAlreadyExpiredCredentials(t *testing.T) {
 
 	fs, err := p.Load(context.Background())
 	require.NoError(t, err)
-	_, err = fs.Open("file:///bucket/data.parquet")
+	_, err = fs.Open(context.Background(), "file:///bucket/data.parquet")
 	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
 }
 

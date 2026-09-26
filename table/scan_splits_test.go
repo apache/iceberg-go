@@ -472,8 +472,8 @@ type prepareReadTrackingIO struct {
 	closed int
 }
 
-func (fs *prepareReadTrackingIO) Open(path string) (iceio.File, error) {
-	file, err := fs.IO.Open(path)
+func (fs *prepareReadTrackingIO) Open(_ context.Context, path string) (iceio.File, error) {
+	file, err := fs.IO.Open(context.Background(), path)
 	if err != nil {
 		return nil, err
 	}
