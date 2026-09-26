@@ -302,7 +302,7 @@ func TestCoWRewriteDoesNotPruneMissingInitialDefault(t *testing.T) {
 
 func TestCoWRewriteNormalizesTheSurvivorComplement(t *testing.T) {
 	ctx := context.Background()
-	tbl := buildTwoRowGroupV3Table(t)
+	tbl := buildTwoRowGroupTable(t, newV3RowLineageTestTable(t))
 
 	var err error
 	tbl, err = tbl.Delete(ctx,

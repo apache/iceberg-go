@@ -25,7 +25,7 @@ services:
       iceberg_net:
     depends_on:
       - rest
-      - minio
+      - object-store
     volumes:
       - ./warehouse:/home/iceberg/warehouse
       - ./notebooks:/home/iceberg/notebooks/notebooks
@@ -46,6 +46,9 @@ services:
       retries: 12
       start_period: 30s
   rest:
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
     image: apache/iceberg-rest-fixture:1.10.1
     container_name: iceberg-rest
     networks:
@@ -58,8 +61,11 @@ services:
       - AWS_REGION=us-east-1
       - CATALOG_WAREHOUSE=s3://warehouse/
       - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
-      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_ENDPOINT=http://object-store:9000
   rest-scan-planning:
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
     # 1.10.1 predates the fixture's scan-planning implementation. Pin the
     # multi-platform image built from apache/iceberg@b0df3ca so the Java wire
     # compatibility tests are reproducible.
@@ -78,26 +84,32 @@ services:
       - AWS_REGION=us-east-1
       - CATALOG_WAREHOUSE=s3://warehouse/
       - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
-      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_ENDPOINT=http://object-store:9000
       - CATALOG_INCLUDE__CREDENTIALS=true
       # Use a non-S3 credential so vending can be asserted without changing the
-      # static MinIO credentials used by the fixture's backing FileIO.
+      # static S3 credentials used by the fixture's backing FileIO.
       - CATALOG_GCS_OAUTH2_TOKEN=scan-planning-integration-token
-  minio:
-    image: quay.io/minio/minio
-    container_name: minio
+  object-store:
+    image: rustfs/rustfs:1.0.0
+    container_name: object-store
     environment:
-      - MINIO_ROOT_USER=admin
-      - MINIO_ROOT_PASSWORD=password
-      - MINIO_DOMAIN=minio
+      - RUSTFS_ACCESS_KEY=admin
+      - RUSTFS_SECRET_KEY=password
+      - RUSTFS_SERVER_DOMAINS=object-store
+      - RUSTFS_OBS_LOG_STDOUT_ENABLED=true
     networks:
       iceberg_net:
         aliases:
-          - warehouse.minio
+          - warehouse.object-store
     ports:
       - 9001:9001
       - 9000:9000
-    command: ["server", "/data", "--console-address", ":9001"]
+    command: ["/data"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9000/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite
     container_name: azurite
@@ -105,25 +117,31 @@ services:
     ports:
       - 11000:11000
     command: ["azurite-blob", "--loose", "--blobHost", "0.0.0.0" ,"--blobPort", "11000", "--skipApiVersionCheck"]
-  mc:
+  create-bucket:
     depends_on:
-      - minio
-    image: quay.io/minio/mc
-    container_name: mc
+      object-store:
+        condition: service_healthy
+    image: amazon/aws-cli:2.36.44
     networks:
       iceberg_net:
     environment:
       - AWS_ACCESS_KEY_ID=admin
       - AWS_SECRET_ACCESS_KEY=password
-      - AWS_REGION=us-east-1
-    entrypoint: >
-      /bin/sh -c "
-      until (/usr/bin/mc alias set minio http://minio:9000 admin password) do echo '...waiting...' && sleep 1; done;
-      /usr/bin/mc rm -r --force minio/warehouse;
-      /usr/bin/mc mb minio/warehouse;
-      /usr/bin/mc policy set public minio/warehouse;
-      tail -f /dev/null
-      "
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://object-store:9000
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - |
+        for attempt in 1 2 3 4 5; do
+          if { aws s3api head-bucket --bucket warehouse >/dev/null 2>&1 || aws s3api create-bucket --bucket warehouse; } \
+            && aws s3 rm s3://warehouse --recursive --quiet; then
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Failed to create warehouse bucket." >&2
+        exit 1
   clickhouse:
     image: clickhouse/clickhouse-server
     container_name: clickhouse

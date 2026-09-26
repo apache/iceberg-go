@@ -33,7 +33,7 @@ catalogs = {
         **{
             "type": "rest",
             "uri": "http://rest:8181",
-            "s3.endpoint": "http://minio:9000",
+            "s3.endpoint": "http://object-store:9000",
             "s3.access-key-id": "admin",
             "s3.secret-access-key": "password",
         },

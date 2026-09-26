@@ -1264,7 +1264,9 @@ func WithLimit(n int64) ScanOption {
 }
 
 // WithMaxConcurrency sets the maximum concurrency for table scan and plan
-// operations. When unset it defaults to runtime.GOMAXPROCS.
+// operations. When unset it defaults to runtime.GOMAXPROCS. Above one, a
+// scan holds the decoded batches of up to n tasks at once while it returns
+// them in task order; [Scan.ReadTasks] states the bound.
 func WithMaxConcurrency(n int) ScanOption {
 	if n <= 0 {
 		return noopOption
