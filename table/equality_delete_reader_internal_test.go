@@ -69,9 +69,9 @@ func (f *countingEqualityFieldDataFile) DataFileCollectionsRef(_ iceinternal.Dat
 	return iceinternal.BorrowedDataFileCollections(f.DataFile)
 }
 
-func (f *countingEqualityDeleteOpenFS) Open(name string) (iceio.File, error) {
+func (f *countingEqualityDeleteOpenFS) Open(_ context.Context, name string) (iceio.File, error) {
 	f.attempts.Add(1)
-	file, err := f.MemFS.Open(name)
+	file, err := f.MemFS.Open(context.Background(), name)
 	if err == nil {
 		f.opens.Add(1)
 	}

@@ -268,7 +268,7 @@ type blockingSnapshotManifestIO struct {
 	opens map[string]int
 }
 
-func (fs *blockingSnapshotManifestIO) Open(name string) (iceio.File, error) {
+func (fs *blockingSnapshotManifestIO) Open(_ context.Context, name string) (iceio.File, error) {
 	if name == fs.blockedPath {
 		fs.once.Do(func() { close(fs.started) })
 		<-fs.release
@@ -278,7 +278,7 @@ func (fs *blockingSnapshotManifestIO) Open(name string) (iceio.File, error) {
 	fs.opens[name]++
 	fs.mu.Unlock()
 
-	return fs.IO.Open(name)
+	return fs.IO.Open(context.Background(), name)
 }
 
 type notifyingContext struct {
@@ -728,9 +728,9 @@ type contextBoundSnapshotManifestIO struct {
 	blockedPath string
 }
 
-func (fs *contextBoundSnapshotManifestIO) Open(name string) (iceio.File, error) {
+func (fs *contextBoundSnapshotManifestIO) Open(_ context.Context, name string) (iceio.File, error) {
 	if fs.blockedPath != "" && name != fs.blockedPath {
-		return fs.IO.Open(name)
+		return fs.IO.Open(context.Background(), name)
 	}
 	fs.startedOnce.Do(func() { close(fs.started) })
 	select {

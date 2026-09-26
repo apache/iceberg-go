@@ -2201,12 +2201,12 @@ type inspectManifestListContextIO struct {
 	rejectManifestList bool
 }
 
-func (fs inspectManifestListContextIO) Open(path string) (iceio.File, error) {
+func (fs inspectManifestListContextIO) Open(_ context.Context, path string) (iceio.File, error) {
 	if fs.rejectManifestList && strings.Contains(path, "manifest-list") {
 		return nil, errors.New("manifest list opened with uncancellable IO")
 	}
 
-	return fs.IO.Open(path)
+	return fs.IO.Open(context.Background(), path)
 }
 
 func TestInspectFilesKeepCallerContextForManifestListRead(t *testing.T) {

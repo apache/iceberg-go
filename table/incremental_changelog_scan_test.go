@@ -511,7 +511,7 @@ func incrementalChangelogTestTable(t *testing.T) *Table {
 			&sequenceNumber, 0, manifests))
 		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
 
-		listFile, err := fs.Open(path)
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		list, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -611,7 +611,7 @@ func incrementalChangelogManifestRewriteTable(t *testing.T) *Table {
 			&sequenceNumber, 0, manifests))
 		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
 
-		listFile, err := fs.Open(path)
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		list, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -711,7 +711,7 @@ func incrementalChangelogDeleteManifestTable(t *testing.T) *Table {
 			&sequenceNumber, 0, manifests))
 		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
 
-		listFile, err := fs.Open(path)
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		list, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -774,11 +774,11 @@ type countingOpenIO struct {
 	afterOpen func()
 }
 
-func (io *countingOpenIO) Open(name string) (iceio.File, error) {
+func (io *countingOpenIO) Open(_ context.Context, name string) (iceio.File, error) {
 	io.opens.Add(1)
 	if io.afterOpen != nil {
 		io.afterOpen()
 	}
 
-	return io.IO.Open(name)
+	return io.IO.Open(context.Background(), name)
 }

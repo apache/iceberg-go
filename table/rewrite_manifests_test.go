@@ -815,12 +815,12 @@ func (f *trackingFS) Create(name string) (iceio.FileWriter, error) {
 	return f.LocalFS.Create(name)
 }
 
-func (f *trackingFS) Remove(name string) error {
+func (f *trackingFS) Remove(_ context.Context, name string) error {
 	f.mu.Lock()
 	f.removed = append(f.removed, name)
 	f.mu.Unlock()
 
-	return f.LocalFS.Remove(name)
+	return f.LocalFS.Remove(context.Background(), name)
 }
 
 func (f *trackingFS) snapshotCreated() map[string]struct{} {

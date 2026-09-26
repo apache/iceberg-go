@@ -43,7 +43,7 @@ func TestMemIO_BasicOperations(t *testing.T) {
 	err = writeIO.WriteFile("test-file.txt", testData)
 	require.NoError(t, err)
 
-	file, err := memIO.Open("test-file.txt")
+	file, err := memIO.Open(context.Background(), "test-file.txt")
 	require.NoError(t, err)
 	defer file.Close()
 
@@ -51,10 +51,10 @@ func TestMemIO_BasicOperations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testData, content)
 
-	err = memIO.Remove("test-file.txt")
+	err = memIO.Remove(context.Background(), "test-file.txt")
 	require.NoError(t, err)
 
-	_, err = memIO.Open("test-file.txt")
+	_, err = memIO.Open(context.Background(), "test-file.txt")
 	assert.Error(t, err)
 }
 
@@ -78,7 +78,7 @@ func TestMemIO_Create(t *testing.T) {
 	err = writer.Close()
 	require.NoError(t, err)
 
-	file, err := memIO.Open("created-file.txt")
+	file, err := memIO.Open(context.Background(), "created-file.txt")
 	require.NoError(t, err)
 	defer file.Close()
 
@@ -107,7 +107,7 @@ func TestMemIO_MultipleFiles(t *testing.T) {
 	}
 
 	for name, expectedContent := range files {
-		file, err := memIO.Open(name)
+		file, err := memIO.Open(context.Background(), name)
 		require.NoError(t, err)
 
 		content, err := io.ReadAll(file)
@@ -118,17 +118,17 @@ func TestMemIO_MultipleFiles(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	err = memIO.Remove("file2.txt")
+	err = memIO.Remove(context.Background(), "file2.txt")
 	require.NoError(t, err)
 
-	_, err = memIO.Open("file2.txt")
+	_, err = memIO.Open(context.Background(), "file2.txt")
 	assert.Error(t, err)
 
-	file1, err := memIO.Open("file1.txt")
+	file1, err := memIO.Open(context.Background(), "file1.txt")
 	require.NoError(t, err)
 	file1.Close()
 
-	file3, err := memIO.Open("file3.txt")
+	file3, err := memIO.Open(context.Background(), "file3.txt")
 	require.NoError(t, err)
 	file3.Close()
 }
@@ -138,14 +138,14 @@ func TestMemIO_RemoveMissingReturnsNotExist(t *testing.T) {
 
 	memIO, err := icebergio.LoadFS(ctx, map[string]string{}, "mem://bucket/")
 	require.NoError(t, err)
-	require.ErrorIs(t, memIO.Remove("does-not-exist.txt"), fs.ErrNotExist)
+	require.ErrorIs(t, memIO.Remove(context.Background(), "does-not-exist.txt"), fs.ErrNotExist)
 }
 
 func TestMemIO_FileRejectsInvalidOffsets(t *testing.T) {
 	memIO := icebergio.NewMemFS()
 	require.NoError(t, memIO.WriteFile("file.txt", []byte("abc")))
 
-	file, err := memIO.Open("file.txt")
+	file, err := memIO.Open(context.Background(), "file.txt")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, file.Close()) })
 
@@ -242,7 +242,7 @@ func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
 				return nil
 			}
 
-			return memIO.Remove(path)
+			return memIO.Remove(context.Background(), path)
 		})
 	}()
 
@@ -253,9 +253,9 @@ func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
 		t.Fatal("WalkDir deadlocked when its callback removed a file")
 	}
 
-	_, err := memIO.Open("mem://bucket/root/1.txt")
+	_, err := memIO.Open(context.Background(), "mem://bucket/root/1.txt")
 	require.ErrorIs(t, err, fs.ErrNotExist)
-	_, err = memIO.Open("mem://bucket/root/2.txt")
+	_, err = memIO.Open(context.Background(), "mem://bucket/root/2.txt")
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 

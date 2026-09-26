@@ -342,22 +342,22 @@ func newPrefixScopedIO(ctx context.Context, baseProps iceberg.Properties, creden
 	}
 }
 
-func (p *prefixScopedIO) Open(name string) (iceio.File, error) {
+func (p *prefixScopedIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	fs, err := p.filesystemFor(name)
 	if err != nil {
 		return nil, err
 	}
 
-	return fs.Open(name)
+	return fs.Open(ctx, name)
 }
 
-func (p *prefixScopedIO) Remove(name string) error {
+func (p *prefixScopedIO) Remove(ctx context.Context, name string) error {
 	fs, err := p.filesystemFor(name)
 	if err != nil {
 		return err
 	}
 
-	return fs.Remove(name)
+	return fs.Remove(ctx, name)
 }
 
 func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {

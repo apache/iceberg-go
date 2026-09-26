@@ -18,6 +18,7 @@
 package io
 
 import (
+	"context"
 	"io/fs"
 	"net/url"
 	"os"
@@ -163,7 +164,7 @@ func TestLocalFSParsesEscapedFileURIsConsistently(t *testing.T) {
 func TestLocalFSRejectsUnsupportedFileURIAuthority(t *testing.T) {
 	t.Parallel()
 
-	_, err := (LocalFS{}).Open("file://remotehost/tmp/metadata.json")
+	_, err := (LocalFS{}).Open(context.Background(), "file://remotehost/tmp/metadata.json")
 	require.ErrorContains(t, err, `unsupported file URI authority "remotehost"`)
 }
 

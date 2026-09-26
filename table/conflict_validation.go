@@ -48,6 +48,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -228,12 +229,12 @@ func newConflictManifestIO(base iceio.IO) *conflictManifestIO {
 	}
 }
 
-func (c *conflictManifestIO) Open(name string) (iceio.File, error) {
+func (c *conflictManifestIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	if data, ok := c.files[name]; ok {
 		return newConflictManifestFile(name, data), nil
 	}
 
-	f, err := c.base.Open(name)
+	f, err := c.base.Open(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +263,7 @@ func (c *conflictManifestIO) Open(name string) (iceio.File, error) {
 	}, nil
 }
 
-func (c *conflictManifestIO) Remove(string) error {
+func (c *conflictManifestIO) Remove(context.Context, string) error {
 	return errConflictManifestIOReadOnly
 }
 
@@ -275,7 +276,7 @@ func (c *conflictManifestIO) Stat(name string) (fs.FileInfo, error) {
 		return statIO.Stat(name)
 	}
 
-	f, err := c.Open(name)
+	f, err := c.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}
