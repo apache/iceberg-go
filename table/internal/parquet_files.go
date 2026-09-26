@@ -1602,12 +1602,13 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
+			// These metrics come from column chunk metadata, so keep totaling them even when stats are invalid.
+			colSizes[fieldID] += colChunk.TotalCompressedSize()
+			valueCounts[fieldID] += colChunk.NumValues()
 			if _, invalid := invalidateCol[fieldID]; invalid {
 				continue
 			}
 
-			colSizes[fieldID] += colChunk.TotalCompressedSize()
-			valueCounts[fieldID] += colChunk.NumValues()
 			set, err := colChunk.StatsSet()
 			if err != nil {
 				panic(err)
