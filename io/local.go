@@ -18,6 +18,7 @@
 package io
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -68,7 +69,7 @@ func localPath(name string) (string, error) {
 	return filepath.FromSlash(path), nil
 }
 
-func (LocalFS) Open(name string) (File, error) {
+func (LocalFS) Open(_ context.Context, name string) (File, error) {
 	path, err := localPath(name)
 	if err != nil {
 		return nil, err
@@ -110,7 +111,7 @@ func (LocalFS) WriteFile(name string, content []byte) error {
 	return os.WriteFile(filename, content, 0o644)
 }
 
-func (LocalFS) Remove(name string) error {
+func (LocalFS) Remove(_ context.Context, name string) error {
 	path, err := localPath(name)
 	if err != nil {
 		return err

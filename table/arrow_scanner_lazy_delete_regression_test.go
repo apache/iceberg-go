@@ -50,7 +50,7 @@ type countingOpenMemFS struct {
 	unblock      <-chan struct{}
 }
 
-func (f *countingOpenMemFS) Open(name string) (iceio.File, error) {
+func (f *countingOpenMemFS) Open(_ context.Context, name string) (iceio.File, error) {
 	f.opens.Add(1)
 	if name == f.trackedPath {
 		f.trackedOpens.Add(1)
@@ -59,7 +59,7 @@ func (f *countingOpenMemFS) Open(name string) (iceio.File, error) {
 		<-f.unblock
 	}
 
-	return f.MemFS.Open(name)
+	return f.MemFS.Open(context.Background(), name)
 }
 
 func newLazyDataFile(t *testing.T, path string) iceberg.DataFile {

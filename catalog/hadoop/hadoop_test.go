@@ -123,11 +123,11 @@ var _ HadoopCatalogFS = (*stubHadoopCatalogFS)(nil)
 
 type stubIO struct{}
 
-func (stubIO) Open(string) (icebergio.File, error) {
+func (stubIO) Open(context.Context, string) (icebergio.File, error) {
 	return nil, fs.ErrNotExist
 }
 
-func (stubIO) Remove(string) error {
+func (stubIO) Remove(context.Context, string) error {
 	return nil
 }
 
@@ -1857,7 +1857,7 @@ func (s *HadoopCatalogTestSuite) TestCommitMetadataFileFailsClosedOnMetadataScan
 		s.cat.filesystem = originalFS
 	}()
 
-	err = s.cat.commitMetadataFile(ident, 1, tempPath, metaPath, table.ErrCommitFailed)
+	err = s.cat.commitMetadataFile(context.Background(), ident, 1, tempPath, metaPath, table.ErrCommitFailed)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "failed to inspect metadata directory for version 1")
 	s.ErrorIs(err, fs.ErrPermission)

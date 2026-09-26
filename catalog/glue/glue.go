@@ -491,7 +491,7 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 		// Best-effort: drop the metadata object we just wrote; for S3 Tables the
 		// managed location may be unreachable, so leave any remainder to the service.
 		if fs, fsErr := staged.FS(ctx); fsErr == nil {
-			_ = fs.Remove(staged.MetadataLocation())
+			_ = fs.Remove(ctx, staged.MetadataLocation())
 		}
 
 		return fmt.Errorf("failed to commit S3 Tables table %s.%s: %w", database, tableName, err)
