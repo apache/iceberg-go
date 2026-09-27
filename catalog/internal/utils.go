@@ -324,3 +324,53 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 		),
 	}, nil
 }
+
+func checkForOverlap(removals []string, updates iceberg.Properties) error {
+	overlap := []string{}
+	for _, key := range removals {
+		if _, ok := updates[key]; ok {
+			overlap = append(overlap, key)
+		}
+	}
+	if len(overlap) > 0 {
+		return fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
+	}
+
+	return nil
+}
+
+// GetUpdatedPropsAndUpdateSummary applies removals and updates to currentProps
+// and returns the updated properties alongside a summary of the changes. It is
+// shared by the catalog backend implementations.
+func GetUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error) {
+	if err := checkForOverlap(removals, updates); err != nil {
+		return nil, catalog.PropertiesUpdateSummary{}, err
+	}
+	var (
+		updatedProps = maps.Clone(currentProps)
+		removed      = make([]string, 0, len(removals))
+		updated      = make([]string, 0, len(updates))
+	)
+
+	for _, key := range removals {
+		if _, exists := updatedProps[key]; exists {
+			delete(updatedProps, key)
+			removed = append(removed, key)
+		}
+	}
+
+	for key, value := range updates {
+		if updatedProps[key] != value {
+			updated = append(updated, key)
+			updatedProps[key] = value
+		}
+	}
+
+	summary := catalog.PropertiesUpdateSummary{
+		Removed: removed,
+		Updated: updated,
+		Missing: internal.Difference(removals, removed),
+	}
+
+	return updatedProps, summary, nil
+}
