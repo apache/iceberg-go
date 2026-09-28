@@ -593,7 +593,7 @@ func TestManifestMergeManagerClosesWriterBeforeFileOnWriteFailure(t *testing.T) 
 	// Build a manifest with enough entries that the writer is opened
 	// and multiple writes occur before the failure.
 	entries := make([]iceberg.ManifestEntry, 0, 10)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		entries = append(entries, iceberg.NewManifestEntry(
 			iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df))
 	}
@@ -614,7 +614,6 @@ func TestManifestMergeManagerClosesWriterBeforeFileOnWriteFailure(t *testing.T) 
 	// get errLimitedWrite (not a write-after-close error) confirms
 	// the ordering is correct.
 }
-
 
 func TestManifestMergeSkipsHistoricalDeletedOnlyManifest(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
