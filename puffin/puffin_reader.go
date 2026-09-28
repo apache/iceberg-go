@@ -502,6 +502,10 @@ func (r *Reader) readFooter() error {
 			return fmt.Errorf("puffin: read buffered footer JSON: %w", err)
 		}
 		if len(bytes.TrimSpace(buffered)) > 0 {
+			if compressedFooter != nil && compressedFooter.err != nil {
+				return fmt.Errorf("puffin: read compressed footer: %w", compressedFooter.err)
+			}
+
 			return errors.New("puffin: unexpected content after footer JSON")
 		}
 	}
@@ -510,6 +514,10 @@ func (r *Reader) readFooter() error {
 	// content deliberately, even though some other Iceberg implementations
 	// accept padding or additional values inside the footer payload.
 	if decoder.More() {
+		if compressedFooter != nil && compressedFooter.err != nil {
+			return fmt.Errorf("puffin: read compressed footer: %w", compressedFooter.err)
+		}
+
 		return errors.New("puffin: unexpected content after footer JSON")
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
