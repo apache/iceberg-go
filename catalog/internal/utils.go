@@ -33,7 +33,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/internal"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -52,21 +52,21 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 	if err != nil {
 		return err
 	}
-	defer internal.CheckedClose(out, &err)
+	defer iceinternal.CheckedClose(out, &err)
 
 	var writer io.Writer = out
 	switch compression {
 	case table.MetadataCompressionCodecGzip:
 		gzw := gzip.NewWriter(out)
 		writer = gzw
-		defer internal.CheckedClose(gzw, &err)
+		defer iceinternal.CheckedClose(gzw, &err)
 	case table.MetadataCompressionCodecZstd:
 		enc, zErr := zstd.NewWriter(out)
 		if zErr != nil {
 			return zErr
 		}
 		writer = enc
-		defer internal.CheckedClose(enc, &err)
+		defer iceinternal.CheckedClose(enc, &err)
 	}
 
 	err = json.NewEncoder(writer).Encode(metadata)
@@ -369,7 +369,7 @@ func GetUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 	summary := catalog.PropertiesUpdateSummary{
 		Removed: removed,
 		Updated: updated,
-		Missing: internal.Difference(removals, removed),
+		Missing: iceinternal.Difference(removals, removed),
 	}
 
 	return updatedProps, summary, nil
