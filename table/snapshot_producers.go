@@ -512,12 +512,12 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 	var counter *internal.CountingWriter
 	var fileCloser io.Closer
 	writerClosed := false
+	// Close the ManifestWriter before the underlying file so a mid-loop
+	// write failure flushes into an open file, not a closed one.
 	defer func() {
 		if wr != nil && !writerClosed {
 			internal.CheckedClose(wr, &err)
 		}
-	}()
-	defer func() {
 		if fileCloser != nil {
 			internal.CheckedClose(fileCloser, &err)
 		}
@@ -566,6 +566,9 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 		}
 	}
 
+	// A bin with no live entries produces no manifest. This diverges from
+	// Java/PyIceberg, which write a zero-count manifest; the omission is
+	// intentional and should not be "fixed" later.
 	if wr == nil {
 		return nil, nil
 	}

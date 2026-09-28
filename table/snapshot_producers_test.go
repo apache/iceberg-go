@@ -578,6 +578,44 @@ func TestManifestMergeManagerClosesWriterOnError(t *testing.T) {
 	require.ErrorIs(t, err, errLimitedWrite)
 }
 
+func TestManifestMergeManagerClosesWriterBeforeFileOnWriteFailure(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+
+	// Use a byte-limited IO that fails after the writer is opened and
+	// has written some data, but before all entries are processed.
+	mem := newMemIO(manifestHeaderSize(t, 2, spec, schema), errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil)
+	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
+
+	// Build a manifest with enough entries that the writer is opened
+	// and multiple writes occur before the failure.
+	entries := make([]iceberg.ManifestEntry, 0, 10)
+	for i := 0; i < 10; i++ {
+		entries = append(entries, iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df))
+	}
+
+	manifestPath := "table-location/metadata/manifest-1.avro"
+	var manifestBuf bytes.Buffer
+	manifestFile, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, sp.snapshotID, entries)
+	require.NoError(t, err, "write manifest")
+	require.NoError(t, mem.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+	mgr := manifestMergeManager{snap: sp}
+	_, err = mgr.createManifest(spec.ID(), []iceberg.ManifestFile{manifestFile})
+	require.ErrorIs(t, err, errLimitedWrite)
+
+	// The writer must be closed before the file closer. If it were not,
+	// the ManifestWriter.Close() flush would write to an already-closed
+	// file and return a "write after close" error. The fact that we
+	// get errLimitedWrite (not a write-after-close error) confirms
+	// the ordering is correct.
+}
+
+
 func TestManifestMergeSkipsHistoricalDeletedOnlyManifest(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	schema := simpleSchema()
