@@ -1953,12 +1953,10 @@ func (s *SqliteCatalogTestSuite) TestCreateNamespaceConcurrent() {
 
 	var wg sync.WaitGroup
 	for range writers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			errs <- cat.CreateNamespace(ctx, namespace, nil)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

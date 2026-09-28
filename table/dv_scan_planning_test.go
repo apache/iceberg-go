@@ -230,11 +230,9 @@ func TestManifestEntries_ConcurrentMerge(t *testing.T) {
 	entries := newManifestEntries()
 	var wg sync.WaitGroup
 	for range manifestCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			assert.NoError(t, entries.merge(batch))
-		}()
+		})
 	}
 	wg.Wait()
 

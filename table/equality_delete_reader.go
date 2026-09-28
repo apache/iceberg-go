@@ -319,9 +319,9 @@ func schemaForEqualityFields(current *iceberg.Schema, schemas []*iceberg.Schema,
 	}
 	// Scan tasks do not retain the equality delete's sequence number, so use
 	// the newest schema that can resolve the file's complete equality key.
-	for i := len(schemas) - 1; i >= 0; i-- {
-		if hasAllFields(schemas[i]) {
-			return schemas[i]
+	for _, v := range slices.Backward(schemas) {
+		if hasAllFields(v) {
+			return v
 		}
 	}
 

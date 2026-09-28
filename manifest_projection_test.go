@@ -32,7 +32,7 @@ func TestManifestEntryProjectionWhitelistCoversDataFileSchema(t *testing.T) {
 	schema := NewSchema(1, NestedField{
 		ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true,
 	})
-	dataFileType := reflect.TypeOf(dataFile{})
+	dataFileType := reflect.TypeFor[dataFile]()
 	dataFileFields := make(map[string]struct{}, len(dataFileAvroFieldIndexes))
 	for _, index := range dataFileAvroFieldIndexes {
 		name := dataFileType.Field(index).Tag.Get("avro")

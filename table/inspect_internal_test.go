@@ -2224,8 +2224,7 @@ func TestInspectFilesKeepCallerContextForManifestListRead(t *testing.T) {
 		}, nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	manifests, err := tbl.Inspect().Manifests(ctx)
 	require.NoError(t, err)
 	manifests.Release()
