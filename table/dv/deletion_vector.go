@@ -205,6 +205,14 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	}
 
 	reader, f, err := openDVReader(fs, dvFile.FilePath())
+	if errors.Is(err, puffin.ErrNotPuffinFile) {
+		bitmaps, err := readBareDVs(fs, []iceberg.DataFile{dvFile})
+		if err != nil {
+			return nil, err
+		}
+
+		return bitmaps[0], nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -248,6 +256,9 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 	}
 
 	reader, f, err := openDVReader(fs, filePath)
+	if errors.Is(err, puffin.ErrNotPuffinFile) {
+		return readBareDVs(fs, dvFiles)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +333,54 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 		}
 
 		start = end
+	}
+
+	return bitmaps, nil
+}
+
+// readBareDVs reads deletion vectors from a file that is not a Puffin
+// container: the deletion-vector-v1 blobs are addressed directly by the
+// manifest's content_offset / content_size_in_bytes, exactly as the Java
+// reference reader (BaseDeleteLoader.readDV) does, which never consults the
+// Puffin footer. Databricks writes DVs for IcebergCompatV3 (UniForm) tables
+// this way — a Delta deletion_vector_*.bin file with a one-byte version
+// prefix and no Puffin header or footer.
+//
+// Without footer metadata the blob's type, referenced data file and
+// cardinality property cannot be cross-checked; the blob's own length,
+// magic and CRC-32 are still verified by DeserializeDV, and the decoded
+// cardinality is validated against the manifest record_count.
+func readBareDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap, error) {
+	filePath := dvFiles[0].FilePath()
+	f, err := fs.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open DV file %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	slog.Warn("DV file is not a Puffin container; reading deletion-vector-v1 blobs directly at content_offset, footer metadata validation skipped",
+		"dv_file", filePath)
+
+	bitmaps := make([]*RoaringPositionBitmap, len(dvFiles))
+	for i, dvFile := range dvFiles {
+		if err := validateDVFile(dvFile); err != nil {
+			return nil, err
+		}
+		_, _, _, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(dvFile)
+		offset, size := *contentOffset, *contentSize
+
+		data := make([]byte, size)
+		if _, err := f.ReadAt(data, offset); err != nil {
+			return nil, fmt.Errorf("%w: DV file %s is not a Puffin container; direct read of %d bytes at offset %d: %w",
+				ErrInvalidDeletionVector, filePath, size, offset, err)
+		}
+
+		bitmap, err := DeserializeDV(data, dvFile.Count())
+		if err != nil {
+			return nil, fmt.Errorf("%w: DV file %s is not a Puffin container; blob at offset %d: %w",
+				ErrInvalidDeletionVector, filePath, offset, err)
+		}
+		bitmaps[i] = bitmap
 	}
 
 	return bitmaps, nil

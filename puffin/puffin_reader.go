@@ -33,6 +33,12 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
+// ErrNotPuffinFile is returned by NewReader when the input does not carry a
+// Puffin container (missing header magic or too small to hold a footer).
+// Callers that can still consume the payload by other means (e.g. a
+// deletion vector addressed by content_offset) may test for it with errors.Is.
+var ErrNotPuffinFile = errors.New("puffin: not a puffin file")
+
 // ReaderAtSeeker combines io.ReaderAt and io.Seeker for reading Puffin files.
 // This interface is implemented by *os.File, *bytes.Reader, and similar types.
 type ReaderAtSeeker interface {
@@ -109,7 +115,7 @@ func NewReader(r ReaderAtSeeker, opts ...ReaderOption) (*Reader, error) {
 	// [Magic] + zero for blob + [Magic] + [FooterPayloadSize (assuming ~0)] + [Flags] + [Magic]
 	minSize := int64(MagicSize + MagicSize + footerTrailerSize)
 	if size < minSize {
-		return nil, fmt.Errorf("puffin: file too small (%d bytes, minimum %d)", size, minSize)
+		return nil, fmt.Errorf("%w: file too small (%d bytes, minimum %d)", ErrNotPuffinFile, size, minSize)
 	}
 
 	// Validate header magic
@@ -118,7 +124,7 @@ func NewReader(r ReaderAtSeeker, opts ...ReaderOption) (*Reader, error) {
 		return nil, fmt.Errorf("puffin: read header magic: %w", err)
 	}
 	if !bytes.Equal(headerMagic[:], magic[:]) {
-		return nil, errors.New("puffin: invalid header magic")
+		return nil, fmt.Errorf("%w: invalid header magic", ErrNotPuffinFile)
 	}
 
 	pr := &Reader{

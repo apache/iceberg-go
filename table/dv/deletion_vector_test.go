@@ -878,7 +878,66 @@ func TestReadDVInvalidPuffin(t *testing.T) {
 
 	offset, size := int64(4), int64(16)
 	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
-	assert.ErrorContains(t, err, "create puffin reader")
+	require.ErrorIs(t, err, ErrInvalidDeletionVector)
+	assert.ErrorContains(t, err, "not a Puffin container")
+}
+
+// Why: Databricks writes deletion vectors for IcebergCompatV3 (UniForm) tables
+// as a Delta deletion_vector_*.bin — a one-byte version prefix followed by
+// deletion-vector-v1 blobs, with no Puffin header or footer — and the manifest
+// addresses the blob with content_offset / content_size_in_bytes. The Java
+// reference reader reads these directly; so must we.
+// Condition: the DV file has no Puffin container but the manifest range holds a valid blob.
+// Assertion: ReadDV/ReadDVs decode the blob and validate cardinality against record_count.
+func TestReadDVBareBlobWithoutPuffinContainer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deletion_vector_0001.bin")
+
+	first := NewRoaringPositionBitmap()
+	first.Set(1)
+	first.Set(9)
+	firstData, err := SerializeDV(first)
+	require.NoError(t, err)
+	second := NewRoaringPositionBitmap()
+	second.Set(7)
+	secondData, err := SerializeDV(second)
+	require.NoError(t, err)
+
+	raw := append([]byte{0x01}, firstData...) // Delta DV file version byte, then blobs back to back
+	secondOffset := int64(len(raw))
+	raw = append(raw, secondData...)
+	require.NoError(t, os.WriteFile(path, raw, 0o644))
+
+	firstOffset, firstSize := int64(1), int64(len(firstData))
+	bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 2, &firstOffset, &firstSize))
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), bm.Cardinality())
+	assert.True(t, bm.Contains(1))
+	assert.True(t, bm.Contains(9))
+
+	secondSize := int64(len(secondData))
+	files := []iceberg.DataFile{
+		newDVTestFile(path, 2, &firstOffset, &firstSize),
+		newDVTestFile(path, 1, &secondOffset, &secondSize),
+	}
+	bitmaps, err := ReadDVs(iceio.LocalFS{}, files)
+	require.NoError(t, err)
+	require.Len(t, bitmaps, 2)
+	assert.Equal(t, int64(2), bitmaps[0].Cardinality())
+	assert.True(t, bitmaps[1].Contains(7))
+
+	t.Run("cardinality still validated against record_count", func(t *testing.T) {
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 3, &firstOffset, &firstSize))
+		require.ErrorIs(t, err, ErrInvalidDeletionVector)
+		assert.ErrorContains(t, err, "cardinality mismatch")
+	})
+
+	t.Run("range beyond file", func(t *testing.T) {
+		badOffset, badSize := int64(1), int64(len(raw)+8)
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 2, &badOffset, &badSize))
+		require.ErrorIs(t, err, ErrInvalidDeletionVector)
+		assert.ErrorContains(t, err, "direct read")
+	})
 }
 
 // Why: offset, size, and cardinality cannot prove that the selected Puffin blob
