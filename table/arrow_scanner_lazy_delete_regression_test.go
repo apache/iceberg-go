@@ -114,17 +114,19 @@ func TestLazyPositionDeleteLoaderDefersReadsAndSharesResults(t *testing.T) {
 	ctx := compute.WithAllocator(t.Context(), mem)
 
 	const (
-		deletePath = "mem://bucket/deletes/shared.parquet"
-		dataPathA  = "mem://bucket/data/a.parquet"
-		dataPathB  = "mem://bucket/data/b.parquet"
+		deletePath    = "mem://bucket/deletes/shared.parquet"
+		dataPathA     = "mem://bucket/data/a.parquet"
+		dataPathB     = "mem://bucket/data/b.parquet"
+		unrelatedPath = "mem://bucket/data/unrelated.parquet"
 	)
 	memFS := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
 	writePosDeleteParquetToMemFS(t, memFS.MemFS, deletePath, `[
 		{"file_path": "`+dataPathA+`", "pos": 1},
-		{"file_path": "`+dataPathB+`", "pos": 3}
+		{"file_path": "`+dataPathB+`", "pos": 3},
+		{"file_path": "`+unrelatedPath+`", "pos": 5}
 	]`)
 
-	deleteFile := newPosDeleteFile(t, deletePath, 2, 128)
+	deleteFile := newPosDeleteFile(t, deletePath, 3, 128)
 	tasks := []FileScanTask{
 		{
 			File:        newLazyDataFile(t, dataPathA),
@@ -144,6 +146,12 @@ func TestLazyPositionDeleteLoaderDefersReadsAndSharesResults(t *testing.T) {
 	require.Len(t, gotA, 1, "duplicate delete references must be read once per task")
 	assert.Equal(t, []int64{1}, int64Values(gotA[0]))
 	assert.Equal(t, int64(1), memFS.opens.Load())
+
+	cached := loader.files[deletePath]
+	require.NotNil(t, cached)
+	assert.Equal(t, map[string]struct{}{dataPathA: {}, dataPathB: {}}, cached.targets)
+	assert.NotContains(t, cached.deletes, unrelatedPath,
+		"lazy delete reads must filter paths that are not referenced by scan tasks")
 
 	gotB, err := loader.load(ctx, tasks[1])
 	require.NoError(t, err)
