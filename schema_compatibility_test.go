@@ -396,9 +396,6 @@ func TestCompatibilityCheckNullabilityRequiredStructField(t *testing.T) {
 	assert.Empty(t, errs)
 }
 
-// The remaining tests are not in Java's suite. They cover using
-// ReadCompatibilityErrors to validate a schema evolution, and error paths.
-
 func TestReadCompatibilitySchemaEvolution(t *testing.T) {
 	current := schemaOf(
 		required(1, "id", iceberg.PrimitiveTypes.Int32),

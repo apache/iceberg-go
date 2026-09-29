@@ -22,10 +22,9 @@ import (
 	"strings"
 )
 
-// IsPromotionAllowed reports whether a column of type from may be changed to
-// type to by schema evolution: int to long, float to double, or widening a
-// decimal's precision while keeping its scale. Mirrors Java's
-// TypeUtil.isPromotionAllowed.
+// IsPromotionAllowed reports whether schema evolution may change a column
+// from one type to another: int to long, float to double, or widening a
+// decimal's precision with the same scale.
 func IsPromotionAllowed(from, to PrimitiveType) bool {
 	if from.Equals(to) {
 		return true
@@ -53,35 +52,21 @@ func IsPromotionAllowed(from, to PrimitiveType) bool {
 }
 
 // ReadCompatibilityErrors returns the problems with reading data written
-// with writeSchema using readSchema, or an empty list if there are none.
-// Fields are matched by ID. A required read field must exist in writeSchema
-// and be required there, and every type must equal or be a valid promotion
-// of the written type. Field order is not checked.
-//
-// Passing a table's current schema as writeSchema and a proposed schema as
-// readSchema checks that the proposed schema is a valid evolution.
-//
-// Mirrors Java's CheckCompatibility.readCompatibilityErrors.
+// with writeSchema using readSchema. Fields are matched by ID and field
+// order is not checked.
 func ReadCompatibilityErrors(readSchema, writeSchema *Schema) ([]string, error) {
 	return checkCompatibility(readSchema, writeSchema, false, true)
 }
 
 // WriteCompatibilityErrors returns the problems with writing data in
-// writeSchema to a table whose schema is readSchema, or an empty list if
-// there are none. It applies the same checks as ReadCompatibilityErrors and,
-// when checkOrdering is true, also rejects fields that appear in a different
-// order than in readSchema.
-//
-// Mirrors Java's CheckCompatibility.writeCompatibilityErrors.
+// writeSchema to a table whose schema is readSchema. If checkOrdering is
+// set, reordered fields are also reported.
 func WriteCompatibilityErrors(readSchema, writeSchema *Schema, checkOrdering bool) ([]string, error) {
 	return checkCompatibility(readSchema, writeSchema, checkOrdering, true)
 }
 
 // TypeCompatibilityErrors is WriteCompatibilityErrors without the
-// nullability checks: writing optional values to a required field is not
-// reported.
-//
-// Mirrors Java's CheckCompatibility.typeCompatibilityErrors.
+// nullability checks.
 func TypeCompatibilityErrors(readSchema, writeSchema *Schema, checkOrdering bool) ([]string, error) {
 	return checkCompatibility(readSchema, writeSchema, checkOrdering, false)
 }
@@ -99,18 +84,16 @@ func checkCompatibility(readSchema, writeSchema *Schema, checkOrdering, checkNul
 }
 
 // compatibilityChecker walks the read schema, tracking the matching type in
-// the write schema. Error messages starting with ":" belong to the enclosing
-// field, which prefixes its name; others are nested and are joined with ".".
+// the write schema. Errors starting with ":" get the enclosing field's name
+// prepended; others are joined to it with ".".
 type compatibilityChecker struct {
 	schema           *Schema
 	checkOrdering    bool
 	checkNullability bool
 
-	// current is the write-side type matching the read-side node being visited.
 	current Type
-	// inContainer is set by List and Map before visiting an element, key or
-	// value. PreOrderVisit routes those through Field, but only struct members
-	// are matched by ID, so Field passes them straight through.
+	// PreOrderVisit sends list elements and map keys/values through Field,
+	// but only struct fields should be looked up by ID.
 	inContainer bool
 }
 
