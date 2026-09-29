@@ -1421,9 +1421,16 @@ func (r *Catalog) nsSeparator() string {
 	return r.namespaceSeparator
 }
 
+func encodeString(value string) string {
+	encoded := url.QueryEscape(value)
+	encoded = strings.ReplaceAll(encoded, "%2A", "*")
+
+	return strings.ReplaceAll(encoded, "~", "%7E")
+}
+
 // encodeNamespace URL-encodes each namespace level and joins them with the
 // server-advertised, URL-encoded namespace separator for use as a REST path
-// segment. Mirrors RESTUtil.encodeNamespace in the Java implementation.
+// segment.
 func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
 	encoded := make([]string, len(namespace))
 	for i, level := range namespace {
@@ -1454,7 +1461,7 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodeString(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1478,7 +1485,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1505,7 +1512,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	stagedCreate := len(cfg.StagedUpdates) > 0
 
 	payload := createTableRequest{
-		Name:          tbl,
+		Name:          catalog.ObjectNameFromIdent(identifier),
 		Schema:        schema,
 		Location:      cfg.Location,
 		PartitionSpec: cfg.PartitionSpec,
@@ -1607,7 +1614,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tblName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 
 	type payload struct {
@@ -1730,7 +1737,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1755,7 +1762,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 
 	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, path,
-		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
 	if err != nil {
@@ -1829,7 +1836,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tbl,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier          `json:"identifier"`

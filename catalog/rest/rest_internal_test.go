@@ -81,6 +81,15 @@ func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "parent%1Fnamespace", ns)
 	assert.Equal(t, "table", tbl)
+
+	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"namespace+name", "table+name"})
+	require.NoError(t, err)
+	assert.Equal(t, "namespace+name", ns)
+	assert.Equal(t, "table%2Bname", tbl)
+}
+
+func TestEncodeString(t *testing.T) {
+	assert.Equal(t, "+%25%26%2B%C2%A3%E2%82%AC", encodeString(" %&+£€"))
 }
 
 func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
