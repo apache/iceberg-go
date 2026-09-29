@@ -49,8 +49,9 @@ import (
 )
 
 var (
-	_ catalog.Catalog              = (*Catalog)(nil)
-	_ catalog.TransactionalCatalog = (*Catalog)(nil)
+	_ catalog.Catalog                      = (*Catalog)(nil)
+	_ catalog.TransactionalCatalog         = (*Catalog)(nil)
+	_ catalog.RefreshableCredentialCatalog = (*Catalog)(nil)
 )
 
 const (
@@ -1217,6 +1218,7 @@ func (r *Catalog) tableFromResponse(
 	scanPlanningConfig iceberg.Properties,
 	credsVended bool,
 	labels *iceberg.Labels,
+	opts ...table.Option,
 ) (*table.Table, error) {
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
@@ -1267,15 +1269,25 @@ func (r *Catalog) tableFromResponse(
 		}
 	}
 
+	// Caller-supplied opts are applied last so they can override the defaults
+	// derived above.
 	return table.New(
 		identifier,
 		metadata,
 		loc,
 		fsF,
 		r,
+<<<<<<< HEAD
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(scanPlanningConfig),
 		table.WithLabels(labels),
+=======
+		append([]table.Option{
+			table.WithMetricsReporter(reporter),
+			table.WithScanPlanningIOProperties(scanPlanningConfig),
+			table.WithSavedConfig(config),
+		}, opts...)...,
+>>>>>>> b9238e8 (feat(catalog): add RefreshTableCredentials call to catalog)
 	), nil
 }
 
@@ -1301,6 +1313,40 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 	}
 
 	return resolveStorageCredentials(ret.StorageCredentials, location), nil
+}
+
+// RefreshTableCredentials updates a *table.Table with newly-vended credentials from the catalog
+// without updating any other table-internal state that a full Refresh() would.
+// Allows for a quick table credential refresh if the table was created without any pre-seeded
+// credentials. If the catalog did not vend any credentials, the table is returned unmodified.
+//
+// Requires that the passed-in table instance be created with the table.WithSavedConfig() option to
+// save any table-specific configs. All tables created by this catalog pass in that option.
+func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table) (*table.Table, error) {
+	metadataLoc := tbl.MetadataLocation()
+	resp, err := r.fetchTableCreds(ctx, tbl.Identifier(), metadataLoc)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp) == 0 {
+		// No new credentials vended. Return as-is.
+		return tbl, nil
+	}
+
+	// Return a new *table.Table with newly-merged credentials coming from the
+	// fetchTableCreds call.
+	config := maps.Clone(r.props)
+	maps.Copy(config, tbl.SavedConfig())
+	maps.Copy(config, resp)
+
+	// Keep a reporter the caller set on the table rather than reverting it to
+	// the catalog default, as Refresh does.
+	var opts []table.Option
+	if reporter := tbl.MetricsReporter(); !metrics.IsNop(reporter) {
+		opts = append(opts, table.WithMetricsReporter(reporter))
+	}
+
+	return r.tableFromResponse(ctx, tbl.Identifier(), tbl.Metadata(), metadataLoc, config, tbl.ScanPlanningConfig(), true, opts...)
 }
 
 type identifierPageFetcher func(pageToken string) ([]table.Identifier, string, error)
