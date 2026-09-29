@@ -1573,6 +1573,99 @@ func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
 	assert.Nil(t, nestedWithoutDefaults.WriteDefault)
 }
 
+func TestAssignFreshSchemaIDsWithBase(t *testing.T) {
+	// base is the table's current schema. Column 3 ("dropped") has been
+	// removed from the new schema, so last-column-id stays at 9.
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+		iceberg.NestedField{ID: 3, Name: "dropped", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 5, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 6, Element: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 7, Name: "props", Type: &iceberg.MapType{
+			KeyID: 8, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 9, ValueType: iceberg.PrimitiveTypes.String,
+		}},
+	)
+
+	// The new schema reorders columns, adds "name" and "location.long", and
+	// uses placeholder IDs that don't match base.
+	sc := iceberg.NewSchemaWithIdentifiers(0, []int{101},
+		iceberg.NestedField{ID: 100, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 101, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 102, Name: "props", Type: &iceberg.MapType{
+			KeyID: 103, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 104, ValueType: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 105, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 106, Element: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 107, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 108, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+				{ID: 109, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+	)
+
+	lastColumnID := 9
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, func() int {
+		lastColumnID++
+
+		return lastColumnID
+	})
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchemaWithIdentifiers(0, []int{1},
+		iceberg.NestedField{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 7, Name: "props", Type: &iceberg.MapType{
+			KeyID: 8, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 9, ValueType: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 5, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 6, Element: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+				{ID: 11, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+	)
+	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
+	assert.Equal(t, []int{1}, out.IdentifierFieldIDs)
+	assert.Equal(t, 11, lastColumnID, "only new fields should consume IDs")
+}
+
+func TestAssignFreshSchemaIDsWithBaseCaseSensitive(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ID", Type: iceberg.PrimitiveTypes.Int64},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, func() int { return 50 })
+	require.NoError(t, err)
+	assert.Equal(t, 50, out.Field(0).ID)
+}
+
+func TestAssignFreshSchemaIDsWithNilBase(t *testing.T) {
+	withBase, err := iceberg.AssignFreshSchemaIDsWithBase(tableSchemaNested, nil, nil)
+	require.NoError(t, err)
+	withoutBase, err := iceberg.AssignFreshSchemaIDs(tableSchemaNested, nil)
+	require.NoError(t, err)
+
+	assert.True(t, withoutBase.Equals(withBase))
+	assert.Equal(t, withoutBase.IdentifierFieldIDs, withBase.IdentifierFieldIDs)
+}
+
 func TestSchemaRoundTrip(t *testing.T) {
 	data, err := json.Marshal(tableSchemaNested)
 	require.NoError(t, err)

@@ -1486,13 +1486,27 @@ func buildAccessors(schema *Schema) (map[int]accessor, error) {
 type setFreshIDs struct {
 	oldIdToNew map[int]int
 	nextIDFunc func() int
+	visiting   *Schema
+	base       *Schema
 }
 
 func (s *setFreshIDs) getAndInc(currentID int) int {
-	next := s.nextIDFunc()
+	next := s.idFor(currentID)
 	s.oldIdToNew[currentID] = next
 
 	return next
+}
+
+func (s *setFreshIDs) idFor(currentID int) int {
+	if s.base != nil {
+		if name, ok := s.visiting.FindColumnName(currentID); ok {
+			if f, ok := s.base.FindFieldByName(name); ok {
+				return f.ID
+			}
+		}
+	}
+
+	return s.nextIDFunc()
 }
 
 func (s *setFreshIDs) Schema(_ *Schema, structResult func() Type) Type {
@@ -1555,6 +1569,13 @@ func (s *setFreshIDs) Variant(v VariantType) Type {
 // fields in it. The nextID function is used to iteratively generate the ids, if
 // it is nil then a simple incrementing counter is used starting at 1.
 func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
+	return AssignFreshSchemaIDsWithBase(sc, nil, nextID)
+}
+
+// AssignFreshSchemaIDsWithBase is like AssignFreshSchemaIDs, but fields whose
+// full name exists in base reuse the ID from base. Only fields not found in
+// base get fresh IDs from nextID.
+func AssignFreshSchemaIDsWithBase(sc, base *Schema, nextID func() int) (*Schema, error) {
 	if nextID == nil {
 		id := 0
 		nextID = func() int {
@@ -1563,7 +1584,7 @@ func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
 			return id
 		}
 	}
-	visitor := &setFreshIDs{oldIdToNew: make(map[int]int), nextIDFunc: nextID}
+	visitor := &setFreshIDs{oldIdToNew: make(map[int]int), nextIDFunc: nextID, visiting: sc, base: base}
 	outType, err := PreOrderVisit(sc, visitor)
 	if err != nil {
 		return nil, err
