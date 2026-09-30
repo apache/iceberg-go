@@ -38,7 +38,7 @@ func (i InspectTable) inspectEntries(
 	allSnapshots bool,
 	schemaFn func(*iceberg.StructType) *iceberg.Schema,
 ) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}

@@ -20,8 +20,8 @@ package table
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
+	"iter"
 	"math"
 	"slices"
 	"strings"
@@ -100,8 +100,8 @@ func (i InspectTable) History(ctx context.Context) (array.RecordReader, error) {
 	// AncestorsOf already guards against cycles in malformed metadata, so a
 	// corrupt parent chain cannot hang the scan.
 	ancestors := make(map[int64]struct{})
-	if current := i.tbl.metadata.CurrentSnapshot(); current != nil {
-		for _, snap := range AncestorsOf(current.SnapshotID, i.tbl.metadata.SnapshotByID) {
+	if current := i.tbl.Metadata().CurrentSnapshot(); current != nil {
+		for _, snap := range AncestorsOf(current.SnapshotID, i.tbl.Metadata().SnapshotByID) {
 			ancestors[snap.SnapshotID] = struct{}{}
 		}
 	}
@@ -116,7 +116,7 @@ func (i InspectTable) History(ctx context.Context) (array.RecordReader, error) {
 	parentID := bldr.Field(2).(*array.Int64Builder)
 	isCurrentAncestor := bldr.Field(3).(*array.BooleanBuilder)
 
-	for entry := range i.tbl.metadata.SnapshotLogs() {
+	for entry := range i.tbl.Metadata().SnapshotLogs() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -128,7 +128,7 @@ func (i InspectTable) History(ctx context.Context) (array.RecordReader, error) {
 
 		// parent_id resolves through the live snapshot table, so an entry
 		// referencing an expired snapshot renders a null parent.
-		if snap := i.tbl.metadata.SnapshotByID(entry.SnapshotID); snap != nil && snap.ParentSnapshotID != nil {
+		if snap := i.tbl.Metadata().SnapshotByID(entry.SnapshotID); snap != nil && snap.ParentSnapshotID != nil {
 			parentID.Append(*snap.ParentSnapshotID)
 		} else {
 			parentID.AppendNull()
@@ -197,7 +197,7 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 	summaryKeys := summary.KeyBuilder().(*array.StringBuilder)
 	summaryValues := summary.ItemBuilder().(*array.StringBuilder)
 
-	for _, snap := range i.tbl.metadata.Snapshots() {
+	for _, snap := range i.tbl.Metadata().Snapshots() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -285,7 +285,7 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 func (i InspectTable) appendManifestRows(
 	ctx context.Context,
 	bldr *array.RecordBuilder,
-	manifests []iceberg.ManifestFile,
+	manifests iter.Seq[iceberg.ManifestFile],
 	referenceSnapshotID *int64,
 ) error {
 	content := bldr.Field(0).(*array.Int32Builder)
@@ -312,7 +312,7 @@ func (i InspectTable) appendManifestRows(
 		keyMetadata = bldr.Field(13).(*array.BinaryBuilder)
 	}
 
-	for _, manifest := range manifests {
+	for manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -387,12 +387,12 @@ func (i InspectTable) appendManifestRows(
 			continue
 		}
 
-		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
+		spec := i.tbl.Metadata().PartitionSpecByID(int(manifest.PartitionSpecID()))
 		if spec == nil {
 			return fmt.Errorf("manifest %s references missing partition spec %d",
 				manifest.FilePath(), manifest.PartitionSpecID())
 		}
-		partType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
+		partType := spec.PartitionType(i.tbl.Metadata().CurrentSchema())
 		if len(partitions) > spec.NumFields() {
 			return fmt.Errorf("manifest %s has %d partition summaries for partition spec %d with %d fields",
 				manifest.FilePath(), len(partitions), manifest.PartitionSpecID(), spec.NumFields())
@@ -442,21 +442,13 @@ func appendManifestCount(builder *array.Int32Builder, version int, name string, 
 	return nil
 }
 
-func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
-	snapshot := i.tbl.metadata.CurrentSnapshot()
+func (i InspectTable) currentSnapshotManifests(ctx context.Context) (iter.Seq[iceberg.ManifestFile], error) {
+	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
-		return nil, nil
-	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
+		return slices.Values([]iceberg.ManifestFile(nil)), nil
 	}
 
-	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
-	if err != nil {
-		return nil, err
-	}
-
-	return manifestSet.borrowAllManifests(), nil
+	return i.tbl.ManifestProvider().Manifests(ctx, *snapshot)
 }
 
 func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transform iceberg.Transform, bound *[]byte) error {
@@ -505,7 +497,7 @@ func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
 		ref  SnapshotRef
 	}
 	var refs []refRow
-	for name, ref := range i.tbl.metadata.Refs() {
+	for name, ref := range i.tbl.Metadata().Refs() {
 		refs = append(refs, refRow{name: name, ref: ref})
 	}
 	slices.SortFunc(refs, func(a, b refRow) int {
@@ -582,11 +574,11 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 		return nil, fmt.Errorf("inspect metadata log entries: build arrow schema: %w", err)
 	}
 
-	entries := slices.Collect(i.tbl.metadata.PreviousFiles())
-	if i.tbl.metadataLocation != "" {
+	entries := slices.Collect(i.tbl.Metadata().PreviousFiles())
+	if i.tbl.MetadataLocation() != "" {
 		entries = append(entries, MetadataLogEntry{
-			MetadataFile: i.tbl.metadataLocation,
-			TimestampMs:  i.tbl.metadata.LastUpdatedMillis(),
+			MetadataFile: i.tbl.MetadataLocation(),
+			TimestampMs:  i.tbl.Metadata().LastUpdatedMillis(),
 		})
 	}
 
@@ -607,7 +599,7 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 		timestamp.Append(arrow.Timestamp(entry.TimestampMs * 1000))
 		file.Append(entry.MetadataFile)
 
-		snapshotID, snapshot, found := latestSnapshotAt(i.tbl.metadata, entry.TimestampMs)
+		snapshotID, snapshot, found := latestSnapshotAt(i.tbl.Metadata(), entry.TimestampMs)
 		if !found {
 			latestSnapshotID.AppendNull()
 			latestSchemaID.AppendNull()

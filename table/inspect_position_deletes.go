@@ -18,8 +18,8 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"iter"
 	"math"
 	"slices"
 
@@ -50,11 +50,11 @@ const (
 // by the current snapshot. Parquet position-delete files and V3 deletion
 // vectors are exposed through the same schema.
 func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, error) {
-	partitionType, partitionIDs, err := positionDeletesPartitionType(i.tbl.metadata)
+	partitionType, partitionIDs, err := positionDeletesPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: %w", err)
 	}
-	schema := PositionDeletesSchema(i.tbl.metadata.CurrentSchema(), partitionType, i.tbl.metadata.Version())
+	schema := PositionDeletesSchema(i.tbl.Metadata().CurrentSchema(), partitionType, i.tbl.Metadata().Version())
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: build arrow schema: %w", err)
@@ -67,29 +67,27 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 	ctx = compute.WithAllocator(ctx, i.alloc)
 
 	return i.positionDeleteRecordReader(
-		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.metadata.Version()), nil
+		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().Version()), nil
 }
 
 func (i InspectTable) currentPositionDeleteManifests(
 	ctx context.Context,
-) (iceio.IO, []iceberg.ManifestFile, error) {
-	snapshot := i.tbl.metadata.CurrentSnapshot()
+) (iceio.IO, iter.Seq[iceberg.ManifestFile], error) {
+	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
-		return nil, nil, nil
+		return nil, slices.Values([]iceberg.ManifestFile(nil)), nil
 	}
-	if i.tbl.fsF == nil {
-		return nil, nil, errors.New("table file IO is not configured")
-	}
-	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
+	provider := i.tbl.ManifestProvider()
+	manifests, err := provider.Manifests(ctx, *snapshot)
 	if err != nil {
 		return nil, nil, err
 	}
-	fs, err := i.tbl.fsF(ctx)
+	fs, err := provider.FS(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return fs, manifestSet.borrowAllManifests(), nil
+	return fs, manifests, nil
 }
 
 type positionDeleteRecordAppender struct {
@@ -478,7 +476,7 @@ func (i InspectTable) positionDeleteRecordReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	fs iceio.IO,
-	manifests []iceberg.ManifestFile,
+	manifests iter.Seq[iceberg.ManifestFile],
 	partitionType *iceberg.StructType,
 	partitionIDByOld map[int]int,
 	formatVersion int,
@@ -497,9 +495,9 @@ func (i InspectTable) positionDeleteRecordReader(
 			positionDeleteProjectionOptions{
 				ctx:             ctx,
 				formatVersion:   formatVersion,
-				tableSchema:     i.tbl.metadata.CurrentSchema(),
-				nameMapping:     i.tbl.metadata.NameMapping(),
-				tableProperties: i.tbl.metadata.Properties(),
+				tableSchema:     i.tbl.Metadata().CurrentSchema(),
+				nameMapping:     i.tbl.Metadata().NameMapping(),
+				tableProperties: i.tbl.Metadata().Properties(),
 			},
 		)
 		if err != nil {
@@ -535,7 +533,7 @@ func (i InspectTable) positionDeleteRecordReader(
 			return true, nil
 		}
 
-		for _, manifest := range manifests {
+		for manifest := range manifests {
 			if err := ctx.Err(); err != nil {
 				yieldError(err)
 
