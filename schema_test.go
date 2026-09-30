@@ -1656,6 +1656,104 @@ func TestAssignFreshSchemaIDsWithBaseCaseSensitive(t *testing.T) {
 	assert.Equal(t, 50, out.Field(0).ID)
 }
 
+func TestAssignFreshSchemaIDsWithBaseListOfStruct(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
+			ElementID: 2,
+			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+			}},
+		}},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "events", Type: &iceberg.ListType{
+			ElementID: 101,
+			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 102, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+				{ID: 103, Name: "label", Type: iceberg.PrimitiveTypes.String},
+			}},
+		}},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
+			ElementID: 2,
+			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+				{ID: 4, Name: "label", Type: iceberg.PrimitiveTypes.String},
+			}},
+		}},
+	)
+	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
+}
+
+func TestAssignFreshSchemaIDsWithBaseNilNextID(t *testing.T) {
+	// The default counter must start above base's IDs, or c would get 1.
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
+}
+
+func TestAssignFreshSchemaIDsWithBaseNextIDTooLow(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	var out *iceberg.Schema
+	var err error
+	require.NotPanics(t, func() {
+		out, err = iceberg.AssignFreshSchemaIDsWithBase(sc, base, func() int { return 1 })
+	})
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, out)
+}
+
+func TestAssignFreshSchemaIDsWithBaseNewIdentifierField(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	sc := iceberg.NewSchemaWithIdentifiers(0, []int{10, 11},
+		iceberg.NestedField{ID: 10, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 11, Name: "b", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2}, out.IdentifierFieldIDs)
+}
+
+func TestAssignFreshSchemaIDsStaleIdentifierField(t *testing.T) {
+	sc := iceberg.NewSchemaWithIdentifiers(0, []int{99},
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	_, err := iceberg.AssignFreshSchemaIDsWithBase(sc, nil, nil)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
+
 func TestAssignFreshSchemaIDsWithNilBase(t *testing.T) {
 	withBase, err := iceberg.AssignFreshSchemaIDsWithBase(tableSchemaNested, nil, nil)
 	require.NoError(t, err)

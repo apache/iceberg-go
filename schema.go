@@ -1486,7 +1486,7 @@ func buildAccessors(schema *Schema) (map[int]accessor, error) {
 type setFreshIDs struct {
 	oldIdToNew map[int]int
 	nextIDFunc func() int
-	visiting   *Schema
+	source     *Schema
 	base       *Schema
 }
 
@@ -1499,7 +1499,7 @@ func (s *setFreshIDs) getAndInc(currentID int) int {
 
 func (s *setFreshIDs) idFor(currentID int) int {
 	if s.base != nil {
-		if name, ok := s.visiting.FindColumnName(currentID); ok {
+		if name, ok := s.source.FindColumnName(currentID); ok {
 			if f, ok := s.base.FindFieldByName(name); ok {
 				return f.ID
 			}
@@ -1574,17 +1574,24 @@ func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
 
 // AssignFreshSchemaIDsWithBase is like AssignFreshSchemaIDs, but fields whose
 // full name exists in base reuse the ID from base. Only fields not found in
-// base get fresh IDs from nextID.
+// base get fresh IDs from nextID. Name matching is case-sensitive.
+//
+// nextID must return IDs greater than base.HighestFieldID(), otherwise an
+// error is returned for the duplicate. If nextID is nil, the counter starts
+// after base's highest field ID.
 func AssignFreshSchemaIDsWithBase(sc, base *Schema, nextID func() int) (*Schema, error) {
 	if nextID == nil {
 		id := 0
+		if base != nil {
+			id = base.HighestFieldID()
+		}
 		nextID = func() int {
 			id++
 
 			return id
 		}
 	}
-	visitor := &setFreshIDs{oldIdToNew: make(map[int]int), nextIDFunc: nextID, visiting: sc, base: base}
+	visitor := &setFreshIDs{oldIdToNew: make(map[int]int), nextIDFunc: nextID, source: sc, base: base}
 	outType, err := PreOrderVisit(sc, visitor)
 	if err != nil {
 		return nil, err
@@ -1595,8 +1602,16 @@ func AssignFreshSchemaIDsWithBase(sc, base *Schema, nextID func() int) (*Schema,
 	if len(sc.IdentifierFieldIDs) != 0 {
 		newIdentifierIDs = make([]int, len(sc.IdentifierFieldIDs))
 		for i, id := range sc.IdentifierFieldIDs {
-			newIdentifierIDs[i] = visitor.oldIdToNew[id]
+			newID, ok := visitor.oldIdToNew[id]
+			if !ok {
+				return nil, fmt.Errorf("%w: cannot find field for identifier field id %d", ErrInvalidSchema, id)
+			}
+			newIdentifierIDs[i] = newID
 		}
+	}
+
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
+		return nil, err
 	}
 
 	return NewSchemaWithIdentifiers(0, newIdentifierIDs, fields...), nil
