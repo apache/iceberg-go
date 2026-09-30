@@ -224,7 +224,10 @@ type RewriteDataFilesOptions struct {
 	// Larger values run [ExecuteCompactionGroup] calls under a bounded
 	// errgroup and apply their results in the original group order, so
 	// manifests and [RewriteResult] are identical to a sequential run.
-	// The first error cancels the groups still running and is returned.
+	// A failure cancels the groups still running; the returned error
+	// is the lowest-index failure not caused by that cancellation, or
+	// the lowest-index failure when every group was canceled, so
+	// failures match a sequential run. Every group error is logged.
 	// Peak record-pipeline memory is MaxConcurrentGroups times the
 	// per-group bound stated on [WithCompactionArrowBatchSize]:
 	//
@@ -376,19 +379,25 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	rewrite := t.NewRewrite(opts.SnapshotProps)
 	stagedDeleteFiles := make(map[string]struct{})
 
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return result, fmt.Errorf("open table IO for atomic rewrite: %w", err)
+	}
+
+	var applied []CompactionGroupResult
 	if opts.MaxConcurrentGroups > 1 {
 		results, err := executeCompactionGroups(ctx, t.tbl, groups, opts.GroupOptions, opts.MaxConcurrentGroups)
 		if err != nil {
-			return result, cleanupAtomicRewriteOutputs(ctx, t.tbl, results, err)
+			return result, cleanupAtomicRewriteOutputs(fs, results, err)
 		}
+		applied = results
 		for _, gr := range results {
 			applyAtomicGroupResult(rewrite, result, stagedDeleteFiles, gr)
 		}
 	} else {
-		var applied []CompactionGroupResult
 		for _, group := range groups {
 			if err := ctx.Err(); err != nil {
-				return result, cleanupAtomicRewriteOutputs(ctx, t.tbl, applied, err)
+				return result, cleanupAtomicRewriteOutputs(fs, applied, err)
 			}
 
 			if len(group.Tasks) == 0 {
@@ -397,7 +406,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 			gr, err := ExecuteCompactionGroup(ctx, t.tbl, group, opts.GroupOptions...)
 			if err != nil {
-				return result, cleanupAtomicRewriteOutputs(ctx, t.tbl, append(applied, gr), err)
+				return result, cleanupAtomicRewriteOutputs(fs, append(applied, gr), err)
 			}
 			applied = append(applied, gr)
 
@@ -430,7 +439,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	}
 
 	if err := rewrite.Commit(ctx); err != nil {
-		return result, fmt.Errorf("commit compaction: %w", err)
+		return result, cleanupAtomicRewriteOutputs(fs, applied, fmt.Errorf("commit compaction: %w", err))
 	}
 
 	return result, nil
@@ -450,11 +459,7 @@ func applyAtomicGroupResult(rewrite *RewriteFiles, result *RewriteResult, staged
 	}
 }
 
-func cleanupAtomicRewriteOutputs(ctx context.Context, tbl *Table, results []CompactionGroupResult, cause error) error {
-	fs, err := tbl.fsF(ctx)
-	if err != nil {
-		return errors.Join(cause, fmt.Errorf("open table IO to clean up atomic rewrite outputs: %w", err))
-	}
+func cleanupAtomicRewriteOutputs(fs iceio.IO, results []CompactionGroupResult, cause error) error {
 	if err := cleanupCompactionOutputs(fs, results); err != nil {
 		return errors.Join(cause, fmt.Errorf("clean up atomic rewrite outputs: %w", err))
 	}
@@ -470,26 +475,55 @@ func executeCompactionGroups(ctx context.Context, tbl *Table, groups []Compactio
 	if limit < 1 {
 		limit = 1
 	}
-	g, gctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
 	g.SetLimit(limit)
+	runCtx, cancelRuns := context.WithCancel(ctx)
+	defer cancelRuns()
 	results := make([]CompactionGroupResult, len(groups))
+	groupErrs := make([]error, len(groups))
 	for i, group := range groups {
 		if len(group.Tasks) == 0 {
 			continue
 		}
 		g.Go(func() error {
-			gr, err := ExecuteCompactionGroup(gctx, tbl, group, groupOpts...)
+			gr, err := ExecuteCompactionGroup(runCtx, tbl, group, groupOpts...)
 			results[i] = gr
+			groupErrs[i] = err
+			if err != nil {
+				slog.Warn("compaction group failed", "index", i, "err", err)
+				cancelRuns()
+			}
 
 			return err
 		})
 	}
 	if err := g.Wait(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		var firstErr, firstNonContextErr error
+		for _, groupErr := range groupErrs {
+			if groupErr == nil {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = groupErr
+			}
+			if !errors.Is(groupErr, context.Canceled) && !errors.Is(groupErr, context.DeadlineExceeded) {
+				firstNonContextErr = groupErr
+
+				break
+			}
+		}
+		selected := firstNonContextErr
+		if selected == nil {
+			selected = firstErr
+		}
+		if selected == nil {
+			selected = err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil && (errors.Is(selected, context.Canceled) || errors.Is(selected, context.DeadlineExceeded)) {
 			return results, ctxErr
 		}
 
-		return results, err
+		return results, selected
 	}
 
 	return results, nil
