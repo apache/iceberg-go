@@ -375,7 +375,7 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 	}
 	manifestList1Path := "mem://default/table-location/metadata/snap-1.avro"
 	writeManifestList(1, manifestList1Path, []iceberg.ManifestFile{manifest1})
-	listFile, err := fs.Open(manifestList1Path)
+	listFile, err := fs.Open(context.Background(), manifestList1Path)
 	require.NoError(t, err)
 	manifestList1, err := iceberg.ReadManifestList(listFile)
 	require.NoError(t, err)
@@ -443,7 +443,7 @@ func incrementalAppendMixedOperationTable(t *testing.T) *Table {
 		require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil,
 			&sequenceNumber, 0, manifests))
 		require.NoError(t, fs.WriteFile(path, listBuf.Bytes()))
-		listFile, err := fs.Open(path)
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		manifestList, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -581,7 +581,7 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 	}
 	manifestListBPath := "mem://default/table-location/metadata/snap-b.avro"
 	writeManifestList(2, manifestListBPath, []iceberg.ManifestFile{manifestB})
-	listFile, err := fs.Open(manifestListBPath)
+	listFile, err := fs.Open(context.Background(), manifestListBPath)
 	require.NoError(t, err)
 	manifestListB, err := iceberg.ReadManifestList(listFile)
 	require.NoError(t, err)

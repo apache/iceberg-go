@@ -783,7 +783,7 @@ func cleanupCompactionOutputs(fs iceio.IO, batchResults []CompactionGroupResult)
 
 	var cleanupErr error
 	for path := range paths {
-		if err := fs.Remove(path); err != nil && !errors.Is(err, iofs.ErrNotExist) {
+		if err := fs.Remove(context.Background(), path); err != nil && !errors.Is(err, iofs.ErrNotExist) {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove %s: %w", path, err))
 		}
 	}

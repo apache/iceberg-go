@@ -292,7 +292,7 @@ func (of *overwriteFiles) rewriteManifest(
 		if retErr == nil {
 			return
 		}
-		if cleanupErr := of.base.io.Remove(path); cleanupErr != nil {
+		if cleanupErr := of.base.io.Remove(context.Background(), path); cleanupErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("remove failed manifest %s: %w", path, cleanupErr))
 		}
 	}()
@@ -343,7 +343,7 @@ func (of *overwriteFiles) cleanupFilteredManifests(input []iceberg.ManifestFile,
 				continue
 			}
 			seen[path] = struct{}{}
-			if err := of.base.io.Remove(path); err != nil {
+			if err := of.base.io.Remove(context.Background(), path); err != nil {
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove filtered manifest %s: %w", path, err))
 			}
 		}
@@ -424,7 +424,7 @@ func (of *overwriteFiles) filterAndRewriteParentManifests(
 func (sp *snapshotProducer) cleanupGeneratedManifests(manifests []iceberg.ManifestFile) error {
 	var cleanupErr error
 	for _, manifest := range manifests {
-		if err := sp.io.Remove(manifest.FilePath()); err != nil {
+		if err := sp.io.Remove(context.Background(), manifest.FilePath()); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove generated manifest %s: %w", manifest.FilePath(), err))
 		}
 	}
@@ -616,7 +616,7 @@ func (m *manifestMergeManager) removeOrphans(input, output []iceberg.ManifestFil
 		if _, ok := inPaths[mf.FilePath()]; ok {
 			continue
 		}
-		if err := m.snap.io.Remove(mf.FilePath()); err != nil {
+		if err := m.snap.io.Remove(context.Background(), mf.FilePath()); err != nil {
 			log.Printf("Warning: failed to delete orphaned merged manifest %s: %v", mf.FilePath(), err)
 		}
 	}
@@ -849,7 +849,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec, opts .
 	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
 		sp.txn.meta.CurrentSchema(), sp.snapshotID, opts...)
 	if err != nil {
-		return nil, "", nil, nil, errors.Join(err, out.Close(), sp.io.Remove(path))
+		return nil, "", nil, nil, errors.Join(err, out.Close(), sp.io.Remove(context.Background(), path))
 	}
 
 	return wr, path, counter, out, nil
@@ -1072,7 +1072,7 @@ func (sp *snapshotProducer) writeDeletedEntries(ctx context.Context, deleted []i
 			if retErr == nil {
 				return
 			}
-			if cleanupErr := sp.io.Remove(path); cleanupErr != nil {
+			if cleanupErr := sp.io.Remove(ctx, path); cleanupErr != nil {
 				retErr = errors.Join(retErr, fmt.Errorf("remove failed delete manifest %s: %w", path, cleanupErr))
 			}
 		}()
@@ -1489,7 +1489,7 @@ func writeManifestListFile(
 
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, fs.Remove(path))
+			err = errors.Join(err, fs.Remove(context.Background(), path))
 		}
 	}()
 	defer internal.CheckedClose(out, &err)

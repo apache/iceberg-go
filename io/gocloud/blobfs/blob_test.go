@@ -176,7 +176,7 @@ func TestBlobFileIOOpenMissingReturnsPathError(t *testing.T) {
 	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
 	name := "s3://my-bucket/missing.parquet"
 
-	_, err := fileIO.Open(name)
+	_, err := fileIO.Open(context.Background(), name)
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
 	var pathErr *fs.PathError
@@ -193,7 +193,7 @@ func TestBlobFileIOOpenPreprocessErrorRetainsOriginalPath(t *testing.T) {
 	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
 	name := "s3://other-bucket/file.parquet"
 
-	_, err := fileIO.Open(name)
+	_, err := fileIO.Open(context.Background(), name)
 	require.Error(t, err)
 
 	var pathErr *fs.PathError
@@ -369,7 +369,7 @@ func TestReadAtResourceCleanup(t *testing.T) {
 				},
 			}
 
-			file, err := bfs.Open("test-file")
+			file, err := bfs.Open(context.Background(), "test-file")
 			require.NoError(t, err)
 			defer file.Close()
 
@@ -562,7 +562,7 @@ func TestBlobFileIORawQueryFragmentRoundTrip(t *testing.T) {
 	content := []byte("data")
 	require.NoError(t, bfs.WriteFile(location, content))
 
-	file, err := bfs.Open(location)
+	file, err := bfs.Open(context.Background(), location)
 	require.NoError(t, err)
 	defer file.Close()
 
@@ -631,7 +631,7 @@ func TestBlobFileIORemoveMissingFileReturnsNotExist(t *testing.T) {
 	extractor := DefaultObjectLocationExtractor("test-bucket")
 	bfs := New(ctx, bucket, extractor)
 
-	err := bfs.Remove("s3://test-bucket/data/nonexistent.parquet")
+	err := bfs.Remove(context.Background(), "s3://test-bucket/data/nonexistent.parquet")
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
@@ -896,7 +896,7 @@ func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
 		op  string
 		run func() error
 	}{
-		{"remove", func() error { return fileIO.Remove(name) }},
+		{"remove", func() error { return fileIO.Remove(context.Background(), name) }},
 		{"write file", func() error { return fileIO.WriteFile(name, nil) }},
 		{"new writer", func() error {
 			_, err := fileIO.NewWriter(context.Background(), name, true, nil)
@@ -922,7 +922,7 @@ func TestBlobFileIORemoveFallsBackToDirectoryMarker(t *testing.T) {
 	require.NoError(t, bucket.WriteAll(ctx, "ns/tbl/", nil, nil))
 
 	fileIO := testBlobFileIO(ctx, "test-bucket", bucket)
-	require.NoError(t, fileIO.Remove("s3://test-bucket/ns/tbl"))
+	require.NoError(t, fileIO.Remove(context.Background(), "s3://test-bucket/ns/tbl"))
 
 	exists, err := bucket.Exists(ctx, "ns/tbl/")
 	require.NoError(t, err)

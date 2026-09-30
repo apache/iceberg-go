@@ -35,10 +35,10 @@ type delayedManifestIO struct {
 	delay time.Duration
 }
 
-func (io *delayedManifestIO) Open(name string) (iceio.File, error) {
+func (io *delayedManifestIO) Open(_ context.Context, name string) (iceio.File, error) {
 	time.Sleep(io.delay)
 
-	return io.memIO.Open(name)
+	return io.memIO.Open(context.Background(), name)
 }
 
 func (io *delayedManifestIO) Create(name string) (iceio.FileWriter, error) {

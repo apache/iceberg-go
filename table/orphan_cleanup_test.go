@@ -72,7 +72,7 @@ func TestOrphanCleanupOptions(t *testing.T) {
 	WithDryRun(true)(cfg)
 	assert.True(t, cfg.dryRun)
 
-	deleteFunc := func(string) error { return nil }
+	deleteFunc := func(context.Context, string) error { return nil }
 	WithDeleteFunc(deleteFunc)(cfg)
 	assert.NotNil(t, cfg.deleteFunc)
 
@@ -199,9 +199,9 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{plannedOrphan}, result.DeletedFiles)
 
-	_, err = fs.Open(plannedOrphan)
+	_, err = fs.Open(context.Background(), plannedOrphan)
 	assert.ErrorIs(t, err, stdfs.ErrNotExist)
-	file, err := fs.Open(newOrphan)
+	file, err := fs.Open(context.Background(), newOrphan)
 	require.NoError(t, err)
 	assert.NoError(t, file.Close())
 }
@@ -1515,11 +1515,11 @@ type mockBulkRemovableIO struct {
 	bulkPaths  []string
 }
 
-func (m *mockBulkRemovableIO) Open(string) (io.File, error) {
+func (m *mockBulkRemovableIO) Open(context.Context, string) (io.File, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockBulkRemovableIO) Remove(string) error {
+func (m *mockBulkRemovableIO) Remove(context.Context, string) error {
 	return errors.New("Remove should not be called when BulkRemovableIO is available")
 }
 
@@ -1547,7 +1547,7 @@ func TestDeleteFilesWithCustomDeleteFunc(t *testing.T) {
 
 	var customDeleted []string
 	cfg := &orphanCleanupConfig{
-		deleteFunc: func(path string) error {
+		deleteFunc: func(_ context.Context, path string) error {
 			customDeleted = append(customDeleted, path)
 
 			return nil
@@ -1575,11 +1575,11 @@ type mockPlainIO struct {
 	removed []string
 }
 
-func (m *mockPlainIO) Open(string) (io.File, error) {
+func (m *mockPlainIO) Open(context.Context, string) (io.File, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockPlainIO) Remove(name string) error {
+func (m *mockPlainIO) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1635,7 +1635,7 @@ type purgeDeleteTrackingIO struct {
 	removed   []string
 }
 
-func (m *purgeDeleteTrackingIO) Remove(name string) error {
+func (m *purgeDeleteTrackingIO) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	m.active++
 	m.maxActive = max(m.maxActive, m.active)
@@ -1676,7 +1676,7 @@ func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
 		context.Background(),
 		files,
 		4,
-		func(path string) error {
+		func(_ context.Context, path string) error {
 			mu.Lock()
 			calls[path]++
 			mu.Unlock()
@@ -1730,7 +1730,7 @@ func TestDeleteFilesParallelPreservesErrorWithNilWrapper(t *testing.T) {
 		context.Background(),
 		files,
 		2,
-		func(path string) error {
+		func(_ context.Context, path string) error {
 			if path == files[1] {
 				return deleteErr
 			}
@@ -1753,7 +1753,7 @@ func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 		ctx,
 		[]string{"s3://bucket/table/file.parquet"},
 		4,
-		func(string) error {
+		func(context.Context, string) error {
 			called = true
 
 			return nil
@@ -1813,7 +1813,7 @@ func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T)
 				gatedErrContext{Context: ctx, checks: checks, errCalls: errCalls},
 				files,
 				maxConcurrency,
-				func(string) error {
+				func(context.Context, string) error {
 					if calls.Add(1) > maxConcurrency {
 						extraCalls <- struct{}{}
 					}
@@ -2010,7 +2010,7 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 						WithLocation("s3://bucket/path"),
 						WithFilesOlderThan(0),
 						WithPrefixMismatchMode(mode),
-						WithDeleteFunc(func(path string) error {
+						WithDeleteFunc(func(_ context.Context, path string) error {
 							deleted = append(deleted, path)
 
 							return nil

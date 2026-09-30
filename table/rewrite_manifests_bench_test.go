@@ -107,7 +107,7 @@ func benchmarkManifestMergeMode(b *testing.B, cluster bool) {
 		}
 		b.StopTimer()
 		for _, manifest := range output {
-			if err := mem.Remove(manifest.FilePath()); err != nil {
+			if err := mem.Remove(context.Background(), manifest.FilePath()); err != nil {
 				b.Fatal(err)
 			}
 		}

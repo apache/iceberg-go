@@ -63,7 +63,7 @@ func (g *reorderGateIO) arm(headPath string, closes chan<- struct{}) {
 	g.closed = 0
 }
 
-func (g *reorderGateIO) Open(name string) (iceio.File, error) {
+func (g *reorderGateIO) Open(_ context.Context, name string) (iceio.File, error) {
 	g.mu.Lock()
 	headPath, gate := g.headPath, g.gate
 	g.mu.Unlock()
@@ -72,7 +72,7 @@ func (g *reorderGateIO) Open(name string) (iceio.File, error) {
 		<-gate
 	}
 
-	f, err := g.LocalFS.Open(name)
+	f, err := g.LocalFS.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}

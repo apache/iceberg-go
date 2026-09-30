@@ -657,7 +657,7 @@ func (s *SparkIntegrationTestSuite) variantField(obj variant.ObjectValue, key st
 func (s *SparkIntegrationTestSuite) assertVariantFileShredded(tbl *table.Table, path string) {
 	fs, err := tbl.FS(s.ctx)
 	s.Require().NoError(err)
-	f, err := fs.Open(path)
+	f, err := fs.Open(s.ctx, path)
 	s.Require().NoError(err)
 	defer f.Close()
 

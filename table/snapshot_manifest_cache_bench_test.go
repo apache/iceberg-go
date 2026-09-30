@@ -89,10 +89,10 @@ type snapshotManifestCacheBenchmarkIO struct {
 	opens map[string]int
 }
 
-func (fs *snapshotManifestCacheBenchmarkIO) Open(name string) (iceio.File, error) {
+func (fs *snapshotManifestCacheBenchmarkIO) Open(_ context.Context, name string) (iceio.File, error) {
 	fs.mu.Lock()
 	fs.opens[name]++
 	fs.mu.Unlock()
 
-	return fs.IO.Open(name)
+	return fs.IO.Open(context.Background(), name)
 }

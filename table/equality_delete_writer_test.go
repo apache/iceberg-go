@@ -99,7 +99,7 @@ func TestWriteEqualityDeleteFiles(t *testing.T) {
 
 	// Verify the file was actually written to disk
 	fs := iceio.LocalFS{}
-	f, err := fs.Open(df.FilePath())
+	f, err := fs.Open(context.Background(), df.FilePath())
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 }

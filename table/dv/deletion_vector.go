@@ -20,6 +20,7 @@ package dv
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -349,7 +350,9 @@ func validateDVFile(dvFile iceberg.DataFile) error {
 }
 
 func openDVReader(fs iceio.IO, filePath string) (*puffin.Reader, iceio.File, error) {
-	f, err := fs.Open(filePath)
+	// Puffin DV files are opened for reading; Open ignores ctx in every current
+	// IO backend, so no context needs threading through the loader here.
+	f, err := fs.Open(context.Background(), filePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open DV file %s: %w", filePath, err)
 	}

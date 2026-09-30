@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -420,7 +421,9 @@ func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[Manif
 }
 
 func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
-	f, openErr := fs.Open(m.FilePath())
+	// Entries reading does not yet carry a context; Open ignores it in every
+	// current IO backend, so Background is safe here.
+	f, openErr := fs.Open(context.Background(), m.FilePath())
 	if openErr != nil {
 		return nil, openErr
 	}

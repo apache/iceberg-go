@@ -750,7 +750,7 @@ func removeUncommittedMetadata(ctx context.Context, metadataLocation string, loa
 		return fmt.Errorf("failed to load filesystem while removing uncommitted metadata %s: %w", metadataLocation, err)
 	}
 
-	if err := fs.Remove(metadataLocation); err != nil {
+	if err := fs.Remove(ctx, metadataLocation); err != nil {
 		return fmt.Errorf("failed to remove uncommitted metadata %s: %w", metadataLocation, err)
 	}
 
@@ -1818,7 +1818,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 			return err
 		}
 
-		_ = fs.Remove(metadataLocation)
+		_ = fs.Remove(ctx, metadataLocation)
 	}
 
 	return nil

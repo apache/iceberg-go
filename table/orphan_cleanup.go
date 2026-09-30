@@ -81,7 +81,7 @@ type orphanCleanupConfig struct {
 	location           string
 	olderThan          time.Duration
 	dryRun             bool
-	deleteFunc         func(string) error
+	deleteFunc         func(context.Context, string) error
 	maxConcurrency     int
 	prefixMismatchMode PrefixMismatchMode
 	equalSchemes       map[string]string
@@ -120,7 +120,7 @@ func WithDryRun(enabled bool) OrphanCleanupOption {
 
 // WithDeleteFunc sets a custom delete function. If not provided, the table's FileIO
 // delete method will be used.
-func WithDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
+func WithDeleteFunc(deleteFunc func(context.Context, string) error) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.deleteFunc = deleteFunc
 	}
@@ -752,7 +752,7 @@ func deleteFilesSequential(ctx context.Context, fs iceio.IO, orphanFiles []strin
 
 			break
 		}
-		if err := deleteFunc(file); err != nil {
+		if err := deleteFunc(ctx, file); err != nil {
 			result = errors.Join(result, fmt.Errorf("failed to delete orphan file %s: %w", file, err))
 
 			continue
@@ -768,7 +768,7 @@ func deleteFilesParallel(
 	ctx context.Context,
 	files []string,
 	maxConcurrency int,
-	deleteFunc func(string) error,
+	deleteFunc func(context.Context, string) error,
 	wrapError func(string, error) error,
 ) ([]string, error) {
 	workers := min(max(maxConcurrency, 1), len(files))
@@ -807,7 +807,7 @@ func deleteFilesParallel(
 						return
 					}
 
-					if err := deleteFunc(files[index]); err != nil {
+					if err := deleteFunc(ctx, files[index]); err != nil {
 						wrappedErr := wrapError(files[index], err)
 						if wrappedErr == nil {
 							// Keep failed deletions observable if the wrapper suppresses the error.
@@ -1401,8 +1401,8 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 				ctx,
 				files,
 				defaultPurgeMaxConcurrency,
-				func(file string) error {
-					if err := fs.Remove(file); err != nil && !os.IsNotExist(err) {
+				func(ctx context.Context, file string) error {
+					if err := fs.Remove(ctx, file); err != nil && !os.IsNotExist(err) {
 						return err
 					}
 

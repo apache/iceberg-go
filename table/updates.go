@@ -803,7 +803,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 	var res error
 
 	for _, f := range paths {
-		if err := prefs.Remove(f); err != nil {
+		if err := prefs.Remove(ctx, f); err != nil {
 			res = errors.Join(res, err)
 		}
 	}
