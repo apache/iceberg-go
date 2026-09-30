@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,7 +105,7 @@ func (m *memIO) Open(name string) (iceio.File, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	return &internal.MockFile{Contents: bytes.NewReader(data)}, nil
+	return &iomock.MockFile{Contents: bytes.NewReader(data)}, nil
 }
 
 func (m *memIO) Create(name string) (iceio.FileWriter, error) {
@@ -715,7 +715,7 @@ func (t *trackingIO) Open(name string) (iceio.File, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	return &internal.MockFile{Contents: bytes.NewReader(data)}, nil
+	return &iomock.MockFile{Contents: bytes.NewReader(data)}, nil
 }
 
 func (t *trackingIO) Create(name string) (iceio.FileWriter, error) {

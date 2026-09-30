@@ -46,7 +46,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -112,10 +112,10 @@ func (t *TableWritingTestSuite) mustDataFile(spec iceberg.PartitionSpec, path st
 }
 
 func (t *TableTestSuite) SetupSuite() {
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	mockfs.Test(t.T())
 	mockfs.On("Open", "s3://bucket/test/location/uuid.metadata.json").
-		Return(&internal.MockFile{Contents: bytes.NewReader([]byte(table.ExampleTableMetadataV2))}, nil)
+		Return(&iomock.MockFile{Contents: bytes.NewReader([]byte(table.ExampleTableMetadataV2))}, nil)
 	defer mockfs.AssertExpectations(t.T())
 
 	tbl, err := table.NewFromLocation(
@@ -138,7 +138,7 @@ func (t *TableTestSuite) SetupSuite() {
 }
 
 func (t *TableTestSuite) TestNewTableFromReadFile() {
-	var mockfsReadFile internal.MockFSReadFile
+	var mockfsReadFile iomock.MockFSReadFile
 	mockfsReadFile.Test(t.T())
 	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.metadata.json").
 		Return([]byte(table.ExampleTableMetadataV2), nil)
@@ -172,7 +172,7 @@ func (t *TableTestSuite) TestNewTableFromReadFileGzipped() {
 		log.Fatalf("Error closing gzip writer: %v", err)
 	}
 
-	var mockfsReadFile internal.MockFSReadFile
+	var mockfsReadFile iomock.MockFSReadFile
 	mockfsReadFile.Test(t.T())
 	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.gz.metadata.json").
 		Return(b.Bytes(), nil)
@@ -202,7 +202,7 @@ func (t *TableTestSuite) TestNewTableFromReadFileZstd() {
 	t.Require().NoError(err)
 	t.Require().NoError(enc.Close())
 
-	var mockfsReadFile internal.MockFSReadFile
+	var mockfsReadFile iomock.MockFSReadFile
 	mockfsReadFile.Test(t.T())
 	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.zstd.metadata.json").
 		Return(b.Bytes(), nil)
@@ -232,7 +232,7 @@ func (t *TableTestSuite) TestNewTableFromReadFileZstdAlternateSuffix() {
 	t.Require().NoError(err)
 	t.Require().NoError(enc.Close())
 
-	var mockfsReadFile internal.MockFSReadFile
+	var mockfsReadFile iomock.MockFSReadFile
 	mockfsReadFile.Test(t.T())
 	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.metadata.json.zstd").
 		Return(b.Bytes(), nil)
@@ -262,10 +262,10 @@ func (t *TableTestSuite) TestNewTableFromOpenZstd() {
 	t.Require().NoError(err)
 	t.Require().NoError(enc.Close())
 
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	mockfs.Test(t.T())
 	mockfs.On("Open", "s3://bucket/test/location/uuid.zstd.metadata.json").
-		Return(&internal.MockFile{Contents: bytes.NewReader(b.Bytes())}, nil)
+		Return(&iomock.MockFile{Contents: bytes.NewReader(b.Bytes())}, nil)
 	defer mockfs.AssertExpectations(t.T())
 
 	tbl2, err := table.NewFromLocation(
@@ -292,10 +292,10 @@ func (t *TableTestSuite) TestNewTableFromOpenZstdAlternateSuffix() {
 	t.Require().NoError(err)
 	t.Require().NoError(enc.Close())
 
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	mockfs.Test(t.T())
 	mockfs.On("Open", "s3://bucket/test/location/uuid.metadata.json.zstd").
-		Return(&internal.MockFile{Contents: bytes.NewReader(b.Bytes())}, nil)
+		Return(&iomock.MockFile{Contents: bytes.NewReader(b.Bytes())}, nil)
 	defer mockfs.AssertExpectations(t.T())
 
 	tbl2, err := table.NewFromLocation(
