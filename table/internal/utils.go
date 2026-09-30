@@ -636,8 +636,8 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 
 	result := slices.Clone(val[:trunc])
 
-	for i := len(result) - 1; i >= 0; i-- {
-		if result[i] < 255 {
+	for i, v := range slices.Backward(result) {
+		if v < 255 {
 			result[i]++
 
 			return result[:i+1]
