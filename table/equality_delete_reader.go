@@ -45,6 +45,9 @@ import (
 
 var ErrAmbiguousEqualityColumn = errors.New("equality delete column is ambiguous")
 
+// ErrConflictingEqualityDeleteMetadata indicates incompatible metadata for one delete-file path.
+var ErrConflictingEqualityDeleteMetadata = errors.New("conflicting equality delete metadata")
+
 // equalityDeleteSet holds the set of delete keys and the column names
 // used to look them up in data records. Each set corresponds to one
 // group of equality field IDs — delete files with different field IDs
@@ -309,7 +312,10 @@ func validateEqualityDeleteMetadata(
 	existingFile iceberg.DataFile,
 	existingFieldIDs []int,
 ) error {
-	if dataFile != nil && reflect.TypeOf(dataFile).Comparable() && dataFile == existingFile {
+	// Callers have already inspected ContentType, so both files must be non-nil.
+	// Only skip validation for the same immutable file pointer: a comparable
+	// struct may still contain an interface holding a non-comparable value.
+	if reflect.TypeOf(dataFile).Kind() == reflect.Ptr && dataFile == existingFile {
 		return nil
 	}
 
@@ -317,13 +323,17 @@ func validateEqualityDeleteMetadata(
 	if len(fieldIDs) == 0 {
 		return fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, dataFile.FilePath())
 	}
+	// This intentionally rejects reordered IDs, although equality matching itself
+	// is order-independent. Keep this dedup change aligned with the existing
+	// order-sensitive key encoding/grouping; canonicalization is a separate change.
 	if dataFile.FileFormat() == existingFile.FileFormat() && slices.Equal(fieldIDs, existingFieldIDs) {
 		return nil
 	}
 
 	return fmt.Errorf(
-		"conflicting equality delete metadata for file %s: first format=%s equality field IDs=%v, later format=%s equality field IDs=%v",
-		dataFile.FilePath(), existingFile.FileFormat(), existingFieldIDs, dataFile.FileFormat(), fieldIDs)
+		"%w for file %s: first format=%s equality field IDs=%v, later format=%s equality field IDs=%v",
+		ErrConflictingEqualityDeleteMetadata, dataFile.FilePath(),
+		existingFile.FileFormat(), existingFieldIDs, dataFile.FileFormat(), fieldIDs)
 }
 
 func schemaForEqualityFields(current *iceberg.Schema, schemas []*iceberg.Schema, fieldIDs []int) *iceberg.Schema {
