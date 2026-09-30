@@ -243,7 +243,7 @@ func TestCompatibilityIncompatibleStructAndPrimitive(t *testing.T) {
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "struct cannot be read as a string")
+	assert.Equal(t, "nested: struct<1: from_field: required string> cannot be read as a string", errs[0])
 }
 
 func TestCompatibilityMultipleErrors(t *testing.T) {
@@ -311,7 +311,7 @@ func TestCompatibilityIncompatibleMapAndPrimitive(t *testing.T) {
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "map cannot be read as a string")
+	assert.Equal(t, "map_field: map<string, int> cannot be read as a string", errs[0])
 }
 
 func TestCompatibilityRequiredListElement(t *testing.T) {
@@ -338,7 +338,35 @@ func TestCompatibilityIncompatibleListAndPrimitive(t *testing.T) {
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "list cannot be read as a string")
+	assert.Equal(t, "list_field: list<int> cannot be read as a string", errs[0])
+}
+
+func TestCompatibilityIncompatibleNestedListOfMap(t *testing.T) {
+	write := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: &iceberg.MapType{
+		KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+		ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32,
+	}}))
+	read := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: &iceberg.MapType{
+		KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+		ValueID: 3, ValueType: iceberg.PrimitiveTypes.String,
+	}}))
+
+	errs := writeErrors(t, read, write)
+	assert.Equal(t, []string{"list_field: int cannot be promoted to string"}, errs)
+}
+
+func TestCompatibilityIncompatibleMapOfStruct(t *testing.T) {
+	write := schemaOf(required(0, "map_field", &iceberg.MapType{
+		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
+		ValueID: 2, ValueType: nestedStruct(required(3, "x", iceberg.PrimitiveTypes.Int32)),
+	}))
+	read := schemaOf(required(0, "map_field", &iceberg.MapType{
+		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
+		ValueID: 2, ValueType: nestedStruct(required(3, "x", iceberg.PrimitiveTypes.Float64)),
+	}))
+
+	errs := writeErrors(t, read, write)
+	assert.Equal(t, []string{"map_field.x: int cannot be promoted to double"}, errs)
 }
 
 func reorderedSchemas() (read, write *iceberg.Schema) {
@@ -366,7 +394,18 @@ func TestCompatibilityStructWriteReordering(t *testing.T) {
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "field_b is out of order, before field_a")
+	assert.Equal(t, "nested.field_b is out of order, before field_a", errs[0])
+}
+
+func TestCompatibilityStructWriteReorderingRenamed(t *testing.T) {
+	// the message should use read-side names only
+	read, _ := reorderedSchemas()
+	write := schemaOf(required(0, "nested", nestedStruct(
+		required(2, "old_b", iceberg.PrimitiveTypes.Int32),
+		required(1, "old_a", iceberg.PrimitiveTypes.Int32))))
+
+	errs := writeErrors(t, read, write)
+	assert.Equal(t, []string{"nested.field_b is out of order, before field_a"}, errs)
 }
 
 func TestCompatibilityStructReadReordering(t *testing.T) {
@@ -394,6 +433,15 @@ func TestCompatibilityCheckNullabilityRequiredStructField(t *testing.T) {
 	errs, err := iceberg.TypeCompatibilityErrors(read, write, true)
 	require.NoError(t, err)
 	assert.Empty(t, errs)
+}
+
+func TestCompatibilityTypeErrorsStillReportPromotion(t *testing.T) {
+	write := schemaOf(optional(1, "f", iceberg.PrimitiveTypes.Int32))
+	read := schemaOf(required(1, "f", iceberg.PrimitiveTypes.String))
+
+	errs, err := iceberg.TypeCompatibilityErrors(read, write, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"f: int cannot be promoted to string"}, errs)
 }
 
 func TestReadCompatibilitySchemaEvolution(t *testing.T) {
@@ -475,9 +523,9 @@ func TestCompatibilityNestedFieldErrorPath(t *testing.T) {
 func TestCompatibilityNilSchema(t *testing.T) {
 	sc := schemaOf(required(1, "id", iceberg.PrimitiveTypes.Int32))
 
-	_, err := iceberg.ReadCompatibilityErrors(nil, sc)
-	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
-
-	_, err = iceberg.ReadCompatibilityErrors(sc, nil)
-	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	for _, tc := range []struct{ read, write *iceberg.Schema }{{nil, sc}, {sc, nil}} {
+		_, err := iceberg.ReadCompatibilityErrors(tc.read, tc.write)
+		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		assert.ErrorContains(t, err, "cannot check compatibility against nil schema")
+	}
 }

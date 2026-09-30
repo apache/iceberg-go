@@ -65,14 +65,15 @@ func WriteCompatibilityErrors(readSchema, writeSchema *Schema, checkOrdering boo
 	return checkCompatibility(readSchema, writeSchema, checkOrdering, true)
 }
 
-// TypeCompatibilityErrors is WriteCompatibilityErrors without the
-// nullability checks.
+// TypeCompatibilityErrors is WriteCompatibilityErrors without the struct
+// field nullability check. Required list elements and map values are still
+// checked.
 func TypeCompatibilityErrors(readSchema, writeSchema *Schema, checkOrdering bool) ([]string, error) {
 	return checkCompatibility(readSchema, writeSchema, checkOrdering, false)
 }
 
 func checkCompatibility(readSchema, writeSchema *Schema, checkOrdering, checkNullability bool) ([]string, error) {
-	if writeSchema == nil {
+	if readSchema == nil || writeSchema == nil {
 		return nil, fmt.Errorf("%w: cannot check compatibility against nil schema", ErrInvalidArgument)
 	}
 
@@ -122,17 +123,16 @@ func (c *compatibilityChecker) Struct(readStruct StructType, fieldErrors []func(
 			ordinals[f.ID] = i
 		}
 
-		lastOrdinal := -1
+		lastOrdinal, lastName := -1, ""
 		for _, readField := range readStruct.FieldList {
 			ordinal, ok := ordinals[readField.ID]
 			if !ok {
 				continue
 			}
 			if lastOrdinal >= ordinal {
-				errs = append(errs, fmt.Sprintf("%s is out of order, before %s",
-					readField.Name, st.FieldList[lastOrdinal].Name))
+				errs = append(errs, fmt.Sprintf("%s is out of order, before %s", readField.Name, lastName))
 			}
-			lastOrdinal = ordinal
+			lastOrdinal, lastName = ordinal, readField.Name
 		}
 	}
 
@@ -146,7 +146,11 @@ func (c *compatibilityChecker) Field(readField NestedField, fieldErrors func() [
 		return fieldErrors()
 	}
 
-	st := c.current.(*StructType)
+	st, ok := c.current.(*StructType)
+	if !ok {
+		return nil // Struct() already reported the mismatch
+	}
+
 	var (
 		writeField NestedField
 		found      bool
@@ -231,7 +235,7 @@ func (c *compatibilityChecker) Primitive(readPrimitive PrimitiveType) []string {
 
 	writePrimitive, ok := c.current.(PrimitiveType)
 	if !ok {
-		return []string{fmt.Sprintf(": %s cannot be read as a %s", c.current.Type(), readPrimitive)}
+		return []string{fmt.Sprintf(": %s cannot be read as a %s", c.current, readPrimitive)}
 	}
 
 	if !IsPromotionAllowed(writePrimitive, readPrimitive) {
