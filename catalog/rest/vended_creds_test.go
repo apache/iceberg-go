@@ -928,3 +928,87 @@ func TestPrefixScopedIOPreservesReadContextCancellation(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, p.ctx.Err(), context.Canceled)
 }
+
+// registerContextCapturingScheme registers a filesystem whose factory records
+// the context it is opened with, the way a filesystem that keeps its opening
+// context (GCS) would.
+func registerContextCapturingScheme(t *testing.T, scheme string) func() context.Context {
+	t.Helper()
+
+	var (
+		mu     sync.Mutex
+		opened context.Context
+	)
+
+	iceio.Register(scheme, func(ctx context.Context, _ *url.URL, _ map[string]string) (iceio.IO, error) {
+		mu.Lock()
+		opened = ctx
+		mu.Unlock()
+
+		return iceio.LocalFS{}, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	return func() context.Context {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return opened
+	}
+}
+
+type vendedCtxKey struct{}
+
+// The cached IO outlives the call that built it, so a caller that scopes one
+// operation to its own context (cancelled when the operation returns) must not
+// leave every later operation with a filesystem opened on a dead context.
+func TestVendedCredsCachedIODoesNotInheritCallerCancellation(t *testing.T) {
+	const scheme = "vended-ctx-detach-test"
+
+	opened := registerContextCapturingScheme(t, scheme)
+
+	r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
+		return iceberg.Properties{}, nil
+	})
+	r.location = scheme + "://bucket/tbl"
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), vendedCtxKey{}, "v"))
+	_, err := r.loadFS(ctx)
+	require.NoError(t, err)
+	cancel()
+
+	require.NotNil(t, opened())
+	require.NoError(t, opened().Err(), "the cached IO must not be bound to the caller's cancellation")
+	assert.Equal(t, "v", opened().Value(vendedCtxKey{}), "context values still reach the filesystem")
+
+	// A renewal rebuilds the IO; it must not inherit that caller's cancellation either.
+	r.expiresAt = time.Now().Add(-time.Minute)
+	ctx, cancel = context.WithCancel(context.Background())
+	_, err = r.loadFS(ctx)
+	require.NoError(t, err)
+	cancel()
+
+	require.NoError(t, opened().Err(), "the renewed IO must not be bound to the caller's cancellation")
+}
+
+func TestVendedCredsPrefixScopedIODoesNotInheritCallerCancellation(t *testing.T) {
+	const scheme = "vended-prefix-ctx-detach-test"
+
+	opened := registerContextCapturingScheme(t, scheme)
+
+	r := newTestRefresher(nil)
+	r.location = scheme + "://bucket/tbl"
+	r.credentials = []StorageCredential{{Prefix: scheme + "://bucket/", Config: iceberg.Properties{}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	fs, err := r.loadFS(ctx)
+	require.NoError(t, err)
+	cancel()
+
+	// prefixScopedIO opens its filesystems lazily, after the call that built it returned.
+	_, err = fs.(*prefixScopedIO).filesystemFor(scheme + "://bucket/tbl/data/file.parquet")
+	require.NoError(t, err)
+
+	require.NotNil(t, opened())
+	require.NoError(t, opened().Err(), "filesystems opened later must not inherit the first caller's cancellation")
+}

@@ -171,8 +171,16 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 		maps.Copy(config, freshCreds)
 	}
 
+	// The IO is cached and shared by every later caller, so it must not
+	// inherit this caller's cancellation: a filesystem may keep the context it
+	// is opened with (the GCS one does), so a cached IO built on a
+	// per-operation context would fail every later operation with
+	// context.Canceled once that context is done. Values are kept; fetchCreds
+	// above still honours ctx.
+	ioCtx := context.WithoutCancel(ctx)
+
 	if len(v.credentials) > 0 {
-		prefixIO := newPrefixScopedIO(ctx, v.props, v.credentials)
+		prefixIO := newPrefixScopedIO(ioCtx, v.props, v.credentials)
 		prefixIO.nowFunc = v.now
 		v.cachedIO = prefixIO
 		// Expiry is enforced by prefixScopedIO against only the credential
@@ -182,7 +190,7 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 		return v.cachedIO, nil
 	}
 
-	newIO, err := iceio.LoadFS(ctx, config, v.location)
+	newIO, err := iceio.LoadFS(ioCtx, config, v.location)
 	if err != nil {
 		if v.cachedIO == nil {
 			return nil, err
