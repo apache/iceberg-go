@@ -84,12 +84,17 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 > - Ambient credentials (the AWS default chain): add a blank import
 >   `_ "github.com/apache/iceberg-go/catalog/rest/sigv4"` and enable signing with
 >   `WithSigV4` / `WithSigV4RegionSvc` or the `rest.sigv4-enabled` property.
-> - Explicit config: pass `sigv4.WithAwsConfig(cfg, region, service)` to
->   `NewCatalog` (it wires an `rest.WithSigner` internally, so no blank import is
->   needed).
+> - Explicit config: pass `sigv4.WithAwsConfig(cfg)` to `NewCatalog` alongside
+>   `WithSigV4` / `WithSigV4RegionSvc` (no blank import needed). It supplies the
+>   `aws.Config`; the signing region and service still come from those options
+>   (or a server `/v1/config` override), not from `cfg`.
 >
-> The former one-argument `rest.WithAwsConfig(aws.Config)` has been removed in
-> favor of these paths.
+> The former `rest.WithAwsConfig(aws.Config)` has been removed in favor of these
+> paths. Because signing is enabled by `WithSigV4` / `WithSigV4RegionSvc` (or the
+> `rest.sigv4-enabled` property) rather than by supplying a config, a program
+> that loads a REST catalog with `rest.sigv4-enabled=true` now fails at startup
+> until the `catalog/rest/sigv4` backend is blank-imported; the error names the
+> import to add.
 
 #### Metrics reporting
 

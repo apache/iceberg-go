@@ -131,14 +131,35 @@ func WithPrefix(prefix string) Option {
 	}
 }
 
-// WithSigner installs a RequestSigner that signs every catalog request in
-// place (for example AWS SigV4). It is the dependency-free way to enable
-// signing: construct the signer from an optional backend such as
-// github.com/apache/iceberg-go/catalog/rest/sigv4 and pass it here. This takes
-// precedence over WithSigV4 and the rest.sigv4-enabled property.
+// WithSigner installs a fully constructed RequestSigner that signs every
+// catalog request in place (for example AWS SigV4). It is the escape hatch for
+// callers that build their own signer: it is used verbatim and therefore
+// bypasses the SigV4 machinery entirely, taking precedence over
+// WithSignerFactory, WithSigV4 / WithSigV4RegionSvc, the rest.sigv4-enabled
+// property, and any server-provided signing-region / signing-name overrides.
+// Use WithSignerFactory (or, for AWS, sigv4.WithAwsConfig) instead if you want
+// the region and service to stay driven by those settings.
 func WithSigner(signer RequestSigner) Option {
 	return func(o *options) {
 		o.signer = signer
+	}
+}
+
+// WithSignerFactory installs a factory that builds the RequestSigner from the
+// resolved signing configuration. Unlike WithSigner, which takes an
+// already-built signer, a factory lets WithSigV4 / WithSigV4RegionSvc and any
+// server-provided /v1/config overrides remain the single source of the signing
+// region and service: they are folded into the SignerConfig passed to the
+// factory. Optional backends such as
+// github.com/apache/iceberg-go/catalog/rest/sigv4 (via sigv4.WithAwsConfig) use
+// this so the AWS SDK stays out of the core package.
+//
+// The factory is consulted only when SigV4 signing is enabled (WithSigV4,
+// WithSigV4RegionSvc, or the rest.sigv4-enabled property); on its own it does
+// not enable signing. An explicit WithSigner still takes precedence over it.
+func WithSignerFactory(factory SignerFactory) Option {
+	return func(o *options) {
+		o.signerFactory = factory
 	}
 }
 
@@ -189,6 +210,7 @@ func WithTransportFactory(factory TransportFactory) Option {
 
 type options struct {
 	signer            RequestSigner
+	signerFactory     SignerFactory
 	tlsConfig         *tls.Config
 	oauthToken        string
 	credential        string

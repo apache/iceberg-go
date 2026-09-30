@@ -64,8 +64,14 @@ var (
 
 // RegisterSigner registers a signer factory under name (e.g. "sigv4"). It is
 // intended to be called from a backend package's init function. Registering
-// the same name twice replaces the previous factory.
+// the same name twice replaces the previous factory. It panics if factory is
+// nil, since a nil factory is a programming error that would otherwise surface
+// only later, as a failure when signing is resolved.
 func RegisterSigner(name string, factory SignerFactory) {
+	if factory == nil {
+		panic(fmt.Sprintf("rest: RegisterSigner: nil factory for %q", name))
+	}
+
 	signerMu.Lock()
 	defer signerMu.Unlock()
 	signerRegistry[name] = factory
@@ -79,11 +85,19 @@ func lookupSigner(name string) (SignerFactory, bool) {
 	return f, ok
 }
 
-// resolveSigner determines the request signer for a session. An explicit
-// WithSigner wins; otherwise, when SigV4 is enabled (WithSigV4 or the
-// rest.sigv4-enabled property), the registered "sigv4" backend builds one. It
-// returns (nil, nil) when signing is not configured, and a helpful error when
-// SigV4 is requested but no backend has been imported.
+// resolveSigner determines the request signer for a session. It returns
+// (nil, nil) when signing is not configured, and a helpful error when SigV4 is
+// requested but no backend has been imported.
+//
+// Precedence:
+//   - An explicit WithSigner is used verbatim (the caller fully built it), so it
+//     bypasses the sigv4-enabled / signing-region / signing-name settings and any
+//     server-provided overrides.
+//   - Otherwise, when SigV4 is enabled (WithSigV4 / WithSigV4RegionSvc or the
+//     rest.sigv4-enabled property), a WithSignerFactory (e.g. sigv4.WithAwsConfig)
+//     builds the signer if one was supplied, else the registered "sigv4" backend
+//     does. Both receive the resolved region/service, which by this point already
+//     include any /v1/config overrides fetchConfig folded into opts.
 func resolveSigner(ctx context.Context, opts *options) (RequestSigner, error) {
 	if opts.signer != nil {
 		return opts.signer, nil
@@ -93,11 +107,14 @@ func resolveSigner(ctx context.Context, opts *options) (RequestSigner, error) {
 		return nil, nil
 	}
 
-	factory, ok := lookupSigner(SignerNameSigV4)
-	if !ok {
-		return nil, fmt.Errorf(
-			"rest: SigV4 signing was requested (%s) but no signer backend is registered; add a blank import: import _ %q",
-			keyRestSigV4, "github.com/apache/iceberg-go/catalog/rest/sigv4")
+	factory := opts.signerFactory
+	if factory == nil {
+		var ok bool
+		if factory, ok = lookupSigner(SignerNameSigV4); !ok {
+			return nil, fmt.Errorf(
+				"rest: SigV4 signing was requested (%s) but no signer backend is registered; add a blank import: import _ %q",
+				keyRestSigV4, "github.com/apache/iceberg-go/catalog/rest/sigv4")
+		}
 	}
 
 	return factory(ctx, SignerConfig{Region: opts.sigv4Region, Service: opts.sigv4Service})

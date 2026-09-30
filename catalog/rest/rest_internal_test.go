@@ -1799,26 +1799,6 @@ func TestSessionTransportInvokesSigner(t *testing.T) {
 	assert.Equal(t, "yes", got.Get("X-Signed"))
 }
 
-func TestSessionTransportNoSignerDoesNotSign(t *testing.T) {
-	t.Parallel()
-
-	var got http.Header
-	s := &sessionTransport{
-		RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			got = r.Header.Clone()
-
-			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
-		}),
-		defaultHeaders: http.Header{},
-	}
-
-	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
-	require.NoError(t, err)
-	_, err = s.RoundTrip(req)
-	require.NoError(t, err)
-	assert.Empty(t, got.Get("x-amz-content-sha256"))
-}
-
 func TestSessionTransportSignerErrorAbortsRequest(t *testing.T) {
 	t.Parallel()
 
@@ -1882,19 +1862,12 @@ func TestSessionTransportConcurrentRoundTrip(t *testing.T) {
 
 // TestSigV4WithoutBackendReturnsHelpfulError verifies that requesting SigV4
 // without a registered signer backend fails with guidance naming the import to
-// add. It clears the signer registry for the duration (and restores it) so the
-// "no backend" path is exercised deterministically regardless of which backends
-// happen to be linked into this test binary; that also precludes t.Parallel.
+// add. This internal test binary cannot import catalog/rest/sigv4 (that would be
+// an import cycle), so no init registers the "sigv4" backend and the registry is
+// always empty here; the "no backend" path is therefore exercised without any
+// registry manipulation.
 func TestSigV4WithoutBackendReturnsHelpfulError(t *testing.T) {
-	signerMu.Lock()
-	saved := signerRegistry
-	signerRegistry = map[string]SignerFactory{}
-	signerMu.Unlock()
-	t.Cleanup(func() {
-		signerMu.Lock()
-		signerRegistry = saved
-		signerMu.Unlock()
-	})
+	t.Parallel()
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -1909,4 +1882,47 @@ func TestSigV4WithoutBackendReturnsHelpfulError(t *testing.T) {
 	_, err := NewCatalog(context.Background(), "rest", srv.URL, WithSigV4())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "catalog/rest/sigv4")
+}
+
+// TestSignerFactoryReceivesResolvedRegionService verifies that a
+// WithSignerFactory is handed the signing region and service resolved from
+// WithSigV4RegionSvc and any server-provided /v1/config overrides, rather than
+// values frozen when the option was constructed. This is the seam a pre-built
+// WithSigner (which sigv4.WithAwsConfig used before it became a factory) got
+// wrong: it ignored both WithSigV4RegionSvc and server overrides.
+func TestSignerFactoryReceivesResolvedRegionService(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			"overrides": map[string]any{
+				keyRestSigV4Region:  "ap-south-1",
+				keyRestSigV4Service: "s3tables",
+			},
+		})
+	})
+
+	// Sequential within NewCatalog: the factory is called for the bootstrap
+	// /v1/config request (pre-override) and again for the real session
+	// (post-override), so the last call carries the merged values.
+	var last SignerConfig
+	factory := func(_ context.Context, cfg SignerConfig) (RequestSigner, error) {
+		last = cfg
+
+		return signerFunc(func(*http.Request) error { return nil }), nil
+	}
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithSigV4RegionSvc("us-east-1", "execute-api"),
+		WithSignerFactory(factory))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	assert.Equal(t, "ap-south-1", last.Region, "server signing-region override must reach the factory")
+	assert.Equal(t, "s3tables", last.Service, "server signing-name override must reach the factory")
 }

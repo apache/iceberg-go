@@ -162,11 +162,15 @@ func TestSignRequestReturnsClonedBodyCloseError(t *testing.T) {
 func TestSignRequestConcurrent(t *testing.T) {
 	t.Parallel()
 
+	// POSTs with a body so the payload-hashing path (GetBody clone + SHA-256)
+	// runs concurrently on a single shared signer, exercising the shared v4
+	// signer and aws.Config under the race detector.
 	s := newTestSigner(t)
+	body := []byte(`{"test":"data"}`)
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/test", nil)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/test", bytes.NewReader(body))
 			if err == nil {
 				err = s.SignRequest(req)
 			}
@@ -206,11 +210,54 @@ func TestRegisteredBackendEnablesSigV4(t *testing.T) {
 		rest.WithSigV4RegionSvc("us-east-1", "s3"))
 	require.NoError(t, err)
 	require.NotNil(t, cat)
+	t.Cleanup(func() { _ = cat.Close() })
 
 	// The registered backend must actually sign the bootstrap /v1/config request,
 	// not merely let catalog construction succeed.
 	assert.Contains(t, gotAuth, "AWS4-HMAC-SHA256", "request should carry a SigV4 Authorization header")
 	assert.NotEmpty(t, gotSHA, "request should carry x-amz-content-sha256")
+}
+
+// TestWithAwsConfigUsesConfiguredRegionService verifies that sigv4.WithAwsConfig
+// signs with the region/service from WithSigV4RegionSvc, not the aws.Config's
+// own region. Before WithAwsConfig became a signer factory it froze the scope at
+// option-construction time, so the natural migration (keep WithSigV4RegionSvc,
+// swap rest.WithAwsConfig for sigv4.WithAwsConfig) silently signed for the wrong
+// scope and the server rejected it with a 403.
+func TestWithAwsConfigUsesConfiguredRegionService(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	cfg := aws.Config{
+		Region: "eu-central-1", // must be overridden by WithSigV4RegionSvc below
+		Credentials: credentials.StaticCredentialsProvider{Value: aws.Credentials{
+			AccessKeyID:     "test-access-key",
+			SecretAccessKey: "test-secret-key",
+		}},
+	}
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL,
+		rest.WithSigV4RegionSvc("us-west-2", "s3tables"),
+		WithAwsConfig(cfg))
+	require.NoError(t, err)
+	require.NotNil(t, cat)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	assert.Contains(t, gotAuth, "/us-west-2/s3tables/aws4_request",
+		"signature scope must come from WithSigV4RegionSvc, not aws.Config.Region")
+	assert.NotContains(t, gotAuth, "eu-central-1",
+		"aws.Config.Region must not leak into the signature scope")
 }
 
 // TestConcurrentSignedCatalogRequests drives the full transport+signer stack
@@ -249,7 +296,7 @@ func TestConcurrentSignedCatalogRequests(t *testing.T) {
 
 				return
 			}
-			_ = cat
+			_ = cat.Close()
 		})
 	}
 	wg.Wait()

@@ -28,8 +28,9 @@
 //
 //	cat, err := rest.NewCatalog(ctx, "c", uri, rest.WithSigV4RegionSvc("us-east-1", "s3tables"))
 //
-// To sign with an explicit aws.Config, pass sigv4.WithAwsConfig to
-// rest.NewCatalog instead (no blank import needed).
+// To sign with an explicit aws.Config, pass sigv4.WithAwsConfig alongside
+// WithSigV4 / WithSigV4RegionSvc (no blank import needed); the option supplies
+// the config while those options still drive the signing region and service.
 package sigv4
 
 import (
@@ -64,20 +65,26 @@ func init() {
 			return nil, fmt.Errorf("sigv4: load AWS config: %w", err)
 		}
 
-		if cfg.Region != "" {
-			awscfg.Region = cfg.Region
-		}
-
-		service := cfg.Service
-		if service == "" {
-			// The property-only path (rest.sigv4-enabled without rest.signing-name)
-			// leaves the service empty; fall back to the same default as
-			// WithSigV4 / WithAwsConfig so signatures stay valid.
-			service = defaultSigningService
-		}
-
-		return newSigner(awscfg, service), nil
+		return buildSigner(awscfg, cfg), nil
 	})
+}
+
+// buildSigner applies the REST-core signing config to an aws.Config and returns
+// a ready signer. A non-empty cfg.Region overrides awscfg.Region; an empty
+// service falls back to defaultSigningService. The latter covers the
+// property-only path (rest.sigv4-enabled without rest.signing-name), matching
+// WithSigV4, so signatures stay valid.
+func buildSigner(awscfg aws.Config, cfg rest.SignerConfig) *signer {
+	if cfg.Region != "" {
+		awscfg.Region = cfg.Region
+	}
+
+	service := cfg.Service
+	if service == "" {
+		service = defaultSigningService
+	}
+
+	return newSigner(awscfg, service)
 }
 
 // signer signs HTTP requests with AWS Signature Version 4. It implements
@@ -145,18 +152,18 @@ func (s *signer) SignRequest(r *http.Request) error {
 }
 
 // WithAwsConfig returns a rest.Option that signs catalog requests with AWS
-// SigV4 using the supplied aws.Config. It replaces the former
-// rest.WithAwsConfig, whose AWS SDK dependency now lives only in this optional
-// sub-package. A non-empty region overrides cfg.Region; an empty service
-// defaults to "execute-api".
-func WithAwsConfig(cfg aws.Config, region, service string) rest.Option {
-	if region != "" {
-		cfg.Region = region
-	}
-
-	if service == "" {
-		service = defaultSigningService
-	}
-
-	return rest.WithSigner(newSigner(cfg, service))
+// SigV4 using the supplied aws.Config, without consulting the AWS default
+// credential chain. It replaces the former rest.WithAwsConfig, whose AWS SDK
+// dependency now lives only in this optional sub-package.
+//
+// Like the blank-import path, it does not by itself enable signing: pair it
+// with WithSigV4 or WithSigV4RegionSvc (or the rest.sigv4-enabled property),
+// which remain the single source of the signing region and service. Those
+// values, plus any server-provided /v1/config overrides, are applied on top of
+// cfg when the signer is built (a non-empty region overrides cfg.Region; an
+// empty service defaults to "execute-api").
+func WithAwsConfig(cfg aws.Config) rest.Option {
+	return rest.WithSignerFactory(func(_ context.Context, sc rest.SignerConfig) (rest.RequestSigner, error) {
+		return buildSigner(cfg, sc), nil
+	})
 }
