@@ -176,7 +176,8 @@ const (
 	CommitTotalRetryTimeoutMsDefault = 30 * 60 * 1000
 )
 
-func isGCEnabled(props iceberg.Properties) bool {
+// IsGCEnabled checks if garbage collection is enabled for the table properties.
+func IsGCEnabled(props iceberg.Properties) bool {
 	value, ok := props[GCEnabledKey]
 	if !ok {
 		return GCEnabledDefault

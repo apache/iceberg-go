@@ -17,7 +17,7 @@
 
 //go:build integration
 
-package table_test
+package maintenance_test
 
 import (
 	"context"
@@ -36,6 +36,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -220,10 +221,10 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupDryRun() {
 
 	// Run dry-run orphan cleanup (scan table root where both data and metadata exist)
 	s.T().Logf("Scanning location: %s", tbl.Location())
-	result, err := tbl.DeleteOrphanFiles(s.ctx,
-		table.WithDryRun(true),
-		table.WithLocation(tbl.Location()), // Scan the table root location
-		table.WithFilesOlderThan(0),        // Consider files created before the scan
+	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
+		maintenance.WithDryRun(true),
+		maintenance.WithLocation(tbl.Location()), // Scan the table root location
+		maintenance.WithFilesOlderThan(0),        // Consider files created before the scan
 	)
 
 	s.Require().NoError(err)
@@ -268,9 +269,9 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupActualDeletion() {
 	}
 
 	// Run actual orphan cleanup
-	result, err := tbl.DeleteOrphanFiles(s.ctx,
-		table.WithDryRun(false),
-		table.WithFilesOlderThan(0), // Consider files created before the scan
+	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
+		maintenance.WithDryRun(false),
+		maintenance.WithFilesOlderThan(0), // Consider files created before the scan
 	)
 
 	s.Require().NoError(err)
@@ -309,10 +310,10 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupCustomLocation() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Run orphan cleanup on table root (which includes the custom subdirectory)
-	result, err := tbl.DeleteOrphanFiles(s.ctx,
-		table.WithLocation(tbl.Location()), // Scan table root to find all subdirectories
-		table.WithFilesOlderThan(0),
-		table.WithDryRun(false),
+	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
+		maintenance.WithLocation(tbl.Location()), // Scan table root to find all subdirectories
+		maintenance.WithFilesOlderThan(0),
+		maintenance.WithDryRun(false),
 	)
 
 	s.Require().NoError(err)
@@ -358,10 +359,10 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupWithConcurrency() {
 			time.Sleep(100 * time.Millisecond)
 
 			// Run orphan cleanup with specific concurrency
-			result, err := tbl.DeleteOrphanFiles(s.ctx,
-				table.WithCleanupMaxConcurrency(tc.concurrency),
-				table.WithFilesOlderThan(0),
-				table.WithDryRun(false),
+			result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
+				maintenance.WithCleanupMaxConcurrency(tc.concurrency),
+				maintenance.WithFilesOlderThan(0),
+				maintenance.WithDryRun(false),
 			)
 
 			s.Require().NoError(err)
@@ -398,11 +399,11 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupCustomDeleteFunction() 
 		return fs.Remove(filePath)
 	}
 
-	result, err := tbl.DeleteOrphanFiles(s.ctx,
-		table.WithDeleteFunc(customDeleteFunc),
-		table.WithFilesOlderThan(0),
-		table.WithDryRun(false),
-		table.WithDryRun(false),
+	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
+		maintenance.WithDeleteFunc(customDeleteFunc),
+		maintenance.WithFilesOlderThan(0),
+		maintenance.WithDryRun(false),
+		maintenance.WithDryRun(false),
 	)
 
 	s.Require().NoError(err)

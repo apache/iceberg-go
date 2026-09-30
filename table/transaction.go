@@ -3391,7 +3391,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 }
 
 func validateGCEnabledForSnapshotExpiration(props iceberg.Properties) error {
-	if !isGCEnabled(props) {
+	if !IsGCEnabled(props) {
 		return errors.New("cannot expire snapshots: GC is disabled (deleting files may corrupt other tables)")
 	}
 
