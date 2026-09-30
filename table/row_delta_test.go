@@ -1748,3 +1748,125 @@ func writtenManifests(t *testing.T, location string) []string {
 
 	return paths
 }
+
+// Why: two DVs added in one row delta that reference the same data file would
+// commit two live DVs even when that data file has no live DV yet, so the
+// removal path's duplicate check never runs (no RemoveDeletes → fast-append).
+// The fast-append path must reject the duplicate directly.
+// Condition: AddDeletes(dvA, dvB) where both reference the same data file that
+// currently has no live DV, and no RemoveDeletes is called.
+// Assertion: Commit fails with the duplicate-added-DV error before committing.
+func TestRowDeltaFastAppendRejectsDuplicateAddedDVs(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	location := tbl.Location()
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := location + "/data/data-100.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[
+		{"id": 1, "data": "alpha"},
+		{"id": 2, "data": "beta"}
+	]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	// The data file has no live DV yet, and no RemoveDeletes is called, so
+	// only the fast-append path can catch the duplicate.
+	dvA := writeDV(t, location, "dv-a.puffin", dataPath, []int64{0})
+	dvB := writeDV(t, location, "dv-b.puffin", dataPath, []int64{1})
+
+	err = tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dvA, dvB).Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple added deletion vectors reference data file "+dataPath)
+}
+
+// Why: two writers that each add the FIRST deletion vector for the same data
+// file both pass the pre-commit scan against their shared base (no live DV
+// yet). After one commits, the other's add-only row delta is replayable, so
+// the retry must re-check against the refreshed head, or the table ends up
+// with two live DVs for one data file.
+// Condition: Writer A adds a DV for data file D; a concurrent writer commits
+// the first DV for D before A's commit lands, forcing A to retry.
+// Assertion: A's commit fails on the retry (after one refresh, before a second
+// commit attempt) with the concurrent-DV conflict error.
+func TestRowDeltaRejectsConcurrentFirstDVOnRetry(t *testing.T) {
+	localFS := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+	)
+	props := iceberg.Properties{
+		table.PropertyFormatVersion:        "3",
+		table.CommitMinRetryWaitMsKey:      "0",
+		table.CommitMaxRetryWaitMsKey:      "0",
+		table.CommitTotalRetryTimeoutMsKey: "60000",
+		table.CommitNumRetriesKey:          "2",
+	}
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location, props)
+	require.NoError(t, err)
+
+	ident := table.Identifier{"db", "row_delta_concurrent_dv"}
+
+	// Base: one data file D with two rows and no deletion vector.
+	baseCat := &occScenarioCatalog{current: meta, location: location}
+	baseTbl := table.New(ident, meta, location+"/metadata/v1.metadata.json", localFS, baseCat)
+
+	arrowSc, err := table.SchemaToArrowSchema(baseTbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := location + "/data/data-001.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[
+		{"id": 1, "data": "alpha"},
+		{"id": 2, "data": "beta"}
+	]`)
+
+	tx := baseTbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	_, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	metaBase := baseCat.current
+
+	// A concurrent writer commits the first DV for D just before A's commit,
+	// advancing the head A will refresh onto.
+	addConcurrentDV := func(current table.Metadata) table.Metadata {
+		peerCat := &occScenarioCatalog{current: current, location: location}
+		peerTbl := table.New(ident, current, location+"/metadata/peer.metadata.json", localFS, peerCat)
+
+		dvC := writeDV(t, location, "dv-concurrent.puffin", dataPath, []int64{0})
+		ptx := peerTbl.NewTransaction()
+		require.NoError(t, ptx.NewRowDelta(nil).AddDeletes(dvC).Commit(t.Context()))
+		_, perr := ptx.Commit(t.Context())
+		require.NoError(t, perr)
+
+		return peerCat.current
+	}
+
+	// Writer A starts from the DV-free base and adds its own first DV for D.
+	// Its catalog conflicts once (landing the concurrent DV), then would accept
+	// the retry — which the validator must reject before it commits.
+	catA := &occScenarioCatalog{
+		current:       metaBase,
+		conflictsLeft: 1,
+		location:      location,
+		onConflict:    addConcurrentDV,
+	}
+	writerA := table.New(ident, metaBase, location+"/metadata/base.metadata.json", localFS, catA)
+
+	dvA := writeDV(t, location, "dv-writer-a.puffin", dataPath, []int64{1})
+	txA := writerA.NewTransaction()
+	require.NoError(t, txA.NewRowDelta(nil).AddDeletes(dvA).Commit(t.Context()))
+
+	_, err = txA.Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "concurrent snapshot")
+	assert.Contains(t, err.Error(), dataPath)
+	assert.Equal(t, int32(1), catA.loadTableCalls.Load(),
+		"the commit must refresh once for the retry before rejecting")
+	assert.Equal(t, int32(1), catA.commitTableCalls.Load(),
+		"the validator must reject on the refreshed retry, before a second commit attempt")
+}

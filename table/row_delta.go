@@ -222,6 +222,16 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		}
 	}
 
+	// A data file may carry at most one live deletion vector, so a single row
+	// delta may add at most one DV per referenced data file. This must be
+	// checked on every path: on the fast-append path no removals are present,
+	// so validateRemovedDeletes (which also enforces it) never runs, and two
+	// DVs added for a data file with no live DV yet would otherwise commit two
+	// live DVs and make scans reject the table.
+	if err := rd.validateAddedDeletionVectors(); err != nil {
+		return err
+	}
+
 	fs, err := rd.txn.tbl.fsF(ctx)
 	if err != nil {
 		return err
@@ -359,13 +369,12 @@ func explicitReferencedDataFile(df iceberg.DataFile) string {
 //     removals — otherwise the commit would leave both the old and the
 //     new DV live on one data file.
 func (rd *RowDelta) validateRemovedDeletes(resolved, replacedLive []iceberg.DataFile) error {
+	// Duplicate added DVs (two references to one data file) are already
+	// rejected unconditionally by validateAddedDeletionVectors before this
+	// runs; here the set only pairs removals with their replacements.
 	addedDVs := make(map[string]struct{}, len(rd.delFiles))
 	for _, f := range rd.delFiles {
 		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
-			if _, ok := addedDVs[ref]; ok {
-				return fmt.Errorf("multiple added deletion vectors reference data file %s; at most one live deletion vector may exist per data file",
-					ref)
-			}
 			addedDVs[ref] = struct{}{}
 		}
 	}
@@ -394,6 +403,26 @@ func (rd *RowDelta) validateRemovedDeletes(resolved, replacedLive []iceberg.Data
 		if _, ok := removedKeys[key]; !ok {
 			return fmt.Errorf("cannot add a replacement deletion vector for data file %s: live deletion vector %s is not removed by this row delta; the superseded entry must be removed in the same snapshot",
 				key.ref, key.path)
+		}
+	}
+
+	return nil
+}
+
+// validateAddedDeletionVectors rejects a row delta that adds more than one
+// deletion vector referencing the same data file. Two live DVs on one data
+// file violate the v3 spec and make scan planning reject the table. It runs on
+// every commit path; validateRemovedDeletes enforces the same rule but only
+// runs when removals are present, so the fast-append path relies on this.
+func (rd *RowDelta) validateAddedDeletionVectors() error {
+	addedDVs := make(map[string]struct{}, len(rd.delFiles))
+	for _, f := range rd.delFiles {
+		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
+			if _, ok := addedDVs[ref]; ok {
+				return fmt.Errorf("multiple added deletion vectors reference data file %s; at most one live deletion vector may exist per data file",
+					ref)
+			}
+			addedDVs[ref] = struct{}{}
 		}
 	}
 
@@ -621,6 +650,15 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		return nil
 	}
 
+	// Enforce the v3 single-live-DV invariant against concurrently committed
+	// snapshots. findReplacedLiveDVs caught DVs already live in the base at
+	// Commit time; this catches a concurrent writer that added the first DV
+	// for the same data file after our base, visible once the branch is
+	// refreshed on retry.
+	if err := rd.validateNoConcurrentReplacedDVs(cc); err != nil {
+		return err
+	}
+
 	if len(referenced) > 0 {
 		if err := validateDataFilesExist(cc, referenced); err != nil {
 			return err
@@ -652,6 +690,41 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	}
 
 	return nil
+}
+
+// validateNoConcurrentReplacedDVs enforces the v3 single-live-DV invariant on
+// commit retries. findReplacedLiveDVs (run once at Commit time) rejects DVs
+// already live in the base snapshot, but two writers can each add the FIRST DV
+// for the same data file: both pass that scan against their shared base, and an
+// add-only row delta is replayable. On retry cc carries the concurrently
+// committed snapshots, so a concurrent writer that added a DV for a data file
+// this delta also adds a DV for would strand two live DVs on one data file —
+// reject. A removal-carrying delta is non-replayable (see RemoveDeletes), so a
+// retry never has removals to reconcile against the concurrent DV here.
+func (rd *RowDelta) validateNoConcurrentReplacedDVs(cc *conflictContext) error {
+	addedRefs := make(map[string]struct{}, len(rd.delFiles))
+	for _, f := range rd.delFiles {
+		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
+			addedRefs[ref] = struct{}{}
+		}
+	}
+	if len(addedRefs) == 0 {
+		return nil
+	}
+
+	return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, entry iceberg.ManifestEntry) error {
+		df := entry.DataFile()
+		ref := explicitReferencedDataFile(df)
+		if !IsDeletionVector(df) || ref == "" {
+			return nil
+		}
+		if _, ok := addedRefs[ref]; ok {
+			return fmt.Errorf("cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and rewrite the DV to supersede the concurrent one, removing the superseded DV in the same row delta",
+				ref, snap.SnapshotID, df.FilePath())
+		}
+
+		return nil
+	})
 }
 
 // Operation returns the snapshot operation type that will be used when
