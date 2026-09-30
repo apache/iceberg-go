@@ -2135,16 +2135,20 @@ instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</
 <tr><td>Nanosecond timestamps (<code>timestamp_ns</code>, <code>timestamptz_ns</code>)</td><td>Supported</td></tr>
 <tr><td>Default values (<code>initial-default</code>, <code>write-default</code>)</td><td>Supported</td></tr>
 <tr><td>Row lineage (<code>_row_id</code>, <code>_last_updated_sequence_number</code>)</td><td>Supported</td></tr>
-<tr><td>Encryption keys in metadata</td><td>Supported</td></tr>
+<tr><td>Encryption keys in metadata</td><td>Supported (metadata-level storage + <code>EncryptionManager</code> interface; file-level envelope encryption not yet implemented <a href="https://github.com/apache/iceberg-go/pull/1620">PR #1620 in review</a>)</td></tr>
 <tr><td>Variant type, non-shredded</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/932">#932</a>; umbrella <a href="https://github.com/apache/iceberg-go/issues/929">#929</a>)</td></tr>
 <tr><td>Variant type, shredded reader / writer</td><td>Supported (reader <a href="https://github.com/apache/iceberg-go/pull/1238">#1238</a>, writer <a href="https://github.com/apache/iceberg-go/pull/1351">#1351</a>)</td></tr>
 <tr><td>Variant predicate pushdown / field extract</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1607">#1607</a>)</td></tr>
 <tr><td>Deletion vectors, read</td><td>Supported</td></tr>
 <tr><td>Deletion vectors, write (unpartitioned)</td><td>Supported</td></tr>
-<tr><td>Deletion vectors, write (partitioned)</td><td>In progress (<a href="https://github.com/apache/iceberg-go/issues/1135">#1135</a>, PR <a href="https://github.com/apache/iceberg-go/pull/1151">#1151</a>)</td></tr>
+<tr><td>Deletion vectors, write (partitioned)</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1151">#1151</a>)</td></tr>
 <tr><td>Geometry / Geography types (schema)</td><td>Supported</td></tr>
-<tr><td>Geometry / Geography (transforms, statistics, pruning)</td><td>In progress (umbrella <a href="https://github.com/apache/iceberg-go/issues/989">#989</a>)</td></tr>
+<tr><td>Geometry: statistics and pruning</td><td>Supported</td></tr>
+<tr><td>Geography: read, write, and schema</td><td>Supported (bounds/pruning intentionally omitted for geodesic safety)</td></tr>
+<tr><td>Geometry / Geography: nested-geo bounds</td><td>Deferred</td></tr>
 <tr><td>Multi-argument transforms</td><td>Infrastructure present; no concrete implementations exercised yet</td></tr>
+<tr><td>Statistics files (read / round-trip)</td><td>Supported</td></tr>
+<tr><td>NDV (Theta-sketch) statistics computation</td><td>Roadmap (<a href="https://github.com/apache/iceberg-go/issues/1929">#1929</a>)</td></tr>
 </tbody></table>
 </div>
 <h2 id="filesystem-support"><a class="header" href="#filesystem-support">FileSystem support</a></h2>
