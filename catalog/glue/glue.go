@@ -848,8 +848,7 @@ func (c *Catalog) getRawTable(ctx context.Context, database, tableName string) (
 		},
 	)
 	if err != nil {
-		var notFoundErr *types.EntityNotFoundException
-		if errors.As(err, &notFoundErr) {
+		if _, ok := errors.AsType[*types.EntityNotFoundException](err); ok {
 			return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, catalog.ErrNoSuchTable)
 		}
 
@@ -924,8 +923,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 func (c *Catalog) getDatabase(ctx context.Context, databaseName string) (*types.Database, error) {
 	database, err := c.glueSvc.GetDatabase(ctx, &glue.GetDatabaseInput{CatalogId: c.catalogId, Name: aws.String(databaseName)})
 	if err != nil {
-		var notFoundErr *types.EntityNotFoundException
-		if errors.As(err, &notFoundErr) {
+		if _, ok := errors.AsType[*types.EntityNotFoundException](err); ok {
 			return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, catalog.ErrNoSuchNamespace)
 		}
 

@@ -667,7 +667,7 @@ func TestWaitForPlanForwardsAccessDelegation(t *testing.T) {
 	})
 
 	_, err := cat.WaitForPlan(context.Background(), table.Identifier{"db", "tbl"}, "plan-1", WaitForPlanOptions{
-		AccessDelegation: stringPtr("remote-signing"),
+		AccessDelegation: new("remote-signing"),
 	})
 	require.NoError(t, err)
 }

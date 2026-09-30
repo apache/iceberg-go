@@ -182,7 +182,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		b.SplitOffsets([]int64{4, 40, 70})
 		b.LowerBoundValues(map[int][]byte{2: lo}).UpperBoundValues(map[int][]byte{2: hi})
 		b.ValueCounts(map[int]int64{1: 10, 2: 10}).NullValueCounts(map[int]int64{1: 0, 2: 0})
-		entries = append(entries, iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, parityPtr(int64(10)), b.Build()).SequenceNum(1).Build())
+		entries = append(entries, iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(10)), b.Build()).SequenceNum(1).Build())
 	}
 	var data bytes.Buffer
 	mf, err := iceberg.WriteManifest("mem://parity/data.avro", &data, 2, spec, schema, 10, entries)
@@ -202,7 +202,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 			if content == iceberg.EntryContentEqDeletes {
 				b.EqualityFieldIDs([]int{2})
 			}
-			require.NoError(t, writer.Add(iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, parityPtr(int64(20)), b.Build()).SequenceNum(2).Build()))
+			require.NoError(t, writer.Add(iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(20)), b.Build()).SequenceNum(2).Build()))
 		}
 	}
 	require.NoError(t, writer.Close())
@@ -221,7 +221,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		path := fmt.Sprintf("mem://parity/list-%d.avro", snapshotID)
 		var parentSnapshotID *int64
 		if i == 1 {
-			parentSnapshotID = parityPtr(int64(10))
+			parentSnapshotID = new(int64(10))
 		}
 		var list bytes.Buffer
 		require.NoError(t, iceberg.WriteManifestList(2, &list, snapshotID, parentSnapshotID, &seq, 0, manifests))
@@ -233,7 +233,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		}
 		require.NoError(t, builder.AddSnapshot(&table.Snapshot{
 			SnapshotID: snapshotID, ParentSnapshotID: parentSnapshotID, SequenceNumber: seq,
-			TimestampMs: time.Now().UnixMilli() + int64(i+1), ManifestList: path, SchemaID: parityPtr(0),
+			TimestampMs: time.Now().UnixMilli() + int64(i+1), ManifestList: path, SchemaID: new(0),
 		}))
 	}
 	require.NoError(t, builder.SetSnapshotRef("main", 20, table.BranchRef))
@@ -526,8 +526,6 @@ func parityDeletes(files []iceberg.DataFile) []parityDelete {
 
 	return out
 }
-
-func parityPtr[T any](v T) *T { return &v }
 
 // Local residuals are already bound; wire residuals and the original filter
 // are unbound. Preserve the former and bind the latter without a JSON round

@@ -1083,7 +1083,7 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
 		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
 	}
-	builder.currentSnapshotID = ptr(snapshot3ID)
+	builder.currentSnapshotID = new(snapshot3ID)
 	builder.refs = map[string]SnapshotRef{
 		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
 	}
@@ -1219,7 +1219,7 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 			LastPartitionID:   &lastPartitionID,
 			Props:             iceberg.Properties{},
 			SnapshotList:      []Snapshot{{SnapshotID: removedID}, {SnapshotID: currentID}},
-			CurrentSnapshotID: ptr(currentID),
+			CurrentSnapshotID: new(currentID),
 			SnapshotLog:       []SnapshotLogEntry{},
 			SortOrderList:     []SortOrder{UnsortedSortOrder},
 			SnapshotRefs: map[string]SnapshotRef{
@@ -3796,8 +3796,8 @@ func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
 		return true
 	case reflect.Struct:
 		filled := false
-		for i := range v.NumField() {
-			if fillNonZero(fieldValue(v.Field(i)), seen) {
+		for _, field := range v.Fields() {
+			if fillNonZero(fieldValue(field), seen) {
 				filled = true
 			}
 		}

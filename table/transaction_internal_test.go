@@ -724,7 +724,7 @@ func TestExpireSnapshotsRetainsYoungUnreferencedSnapshots(t *testing.T) {
 			now := time.Now().UnixMilli()
 			require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 				SnapshotID:       30,
-				ParentSnapshotID: transactionTestPtr(int64(10)),
+				ParentSnapshotID: new(int64(10)),
 				SequenceNumber:   3,
 				ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
 				Summary:          &Summary{Operation: OpAppend},
@@ -802,7 +802,7 @@ func TestExpireSnapshotsRetainsOnlyRefHeadsWhenMinSnapshotsToKeepIsZero(t *testi
 	// interior ancestor held by no ref head.
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       30,
-		ParentSnapshotID: transactionTestPtr(int64(20)),
+		ParentSnapshotID: new(int64(20)),
 		SequenceNumber:   3,
 		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -832,7 +832,7 @@ func TestExpireSnapshotsRetainsOnlyRefHeadsWhenMinSnapshotsToKeepIsZero(t *testi
 // the retention walk, leaving AncestorsOf's cycle guard as the only exit.
 func TestExpireSnapshotsTerminatesOnParentCycle(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
-	expireSnapshotsSnapshot(t, txn, 10).ParentSnapshotID = transactionTestPtr(int64(20))
+	expireSnapshotsSnapshot(t, txn, 10).ParentSnapshotID = new(int64(20))
 
 	done := make(chan error, 1)
 	go func() { done <- txn.ExpireSnapshots() }()
@@ -1480,12 +1480,12 @@ func TestTransactionApplyKeepsRefAssertionsForDistinctRefs(t *testing.T) {
 	base := int64(10)
 	err := txn.apply(nil, []Requirement{
 		AssertRefSnapshotID(MainBranch, &base),
-		AssertRefSnapshotID("feature", transactionTestPtr(int64(20))),
+		AssertRefSnapshotID("feature", new(int64(20))),
 	})
 	require.NoError(t, err)
 	require.Len(t, txn.reqs, 2)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &base)
-	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", transactionTestPtr(int64(20)))
+	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", new(int64(20)))
 }
 
 // TestTransactionApplyDedupesIdenticalNonRefRequirements confirms that non-ref
@@ -1541,7 +1541,7 @@ func TestRollbackToSnapshotPreservesRetention(t *testing.T) {
 
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       20,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   2,
 		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1582,7 +1582,7 @@ func newTransactionWithSnapshotRefs(t *testing.T) *Transaction {
 
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       20,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   2,
 		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1606,10 +1606,6 @@ func requireContainsRefSnapshotRequirement(t *testing.T, requirements []Requirem
 	}
 
 	t.Fatalf("expected assertRefSnapshotID requirement for ref %q and snapshot id %v not found", ref, snapshotID)
-}
-
-func transactionTestPtr[T any](v T) *T {
-	return &v
 }
 
 func transactionTestInt64PtrEqual(left, right *int64) bool {
@@ -1644,7 +1640,7 @@ func newRollbackBranchTable(t *testing.T) *Table {
 	}))
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       20,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   2,
 		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1652,7 +1648,7 @@ func newRollbackBranchTable(t *testing.T) *Table {
 	}))
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       30,
-		ParentSnapshotID: transactionTestPtr(int64(20)),
+		ParentSnapshotID: new(int64(20)),
 		SequenceNumber:   3,
 		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1660,7 +1656,7 @@ func newRollbackBranchTable(t *testing.T) *Table {
 	}))
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       40,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   4,
 		ManifestList:     "mem://default/table-location/metadata/manifest-40.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1725,7 +1721,7 @@ func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
 	require.Equal(t, BranchRef, featureRef.SnapshotRefType, "the rolled-back ref must stay a branch")
 	requireUntouchedRollbackRefs(t, branchTxn, "feature")
 
-	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", transactionTestPtr(int64(30)))
+	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", new(int64(30)))
 }
 
 // TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch rejects snapshot 20:
@@ -1822,7 +1818,7 @@ func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
 		require.Equal(t, int64(10), *txn.meta.currentSnapshotID,
 			"rolling main back must also move the current-snapshot pointer")
 		requireUntouchedRollbackRefs(t, txn, MainBranch)
-		requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, transactionTestPtr(int64(20)))
+		requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, new(int64(20)))
 	})
 
 	t.Run("refuses when only a branch has a head", func(t *testing.T) {
@@ -1848,7 +1844,7 @@ func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
 func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
 	producerAssertion := func(txn *Transaction) error {
 		return txn.apply(nil, []Requirement{
-			AssertRefSnapshotID("feature", transactionTestPtr(int64(30))),
+			AssertRefSnapshotID("feature", new(int64(30))),
 		})
 	}
 

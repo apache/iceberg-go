@@ -71,8 +71,6 @@ func (*mockDVFile) SortOrderID() *int                         { return nil }
 func (*mockDVFile) SpecID() int32                             { return 0 }
 func (*mockDVFile) FirstRowID() *int64                        { return nil }
 
-func strPtr(s string) *string { return &s }
-
 func readDVTestData(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "deletes", name))
@@ -252,7 +250,7 @@ func newDVTestFile(path string, count int64, offset, size *int64) *mockDVFile {
 		path:               path,
 		format:             iceberg.PuffinFile,
 		count:              count,
-		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
+		referencedDataFile: new("s3://bucket/data/data-001.parquet"),
 		contentOffset:      offset,
 		contentSizeInBytes: size,
 	}
@@ -592,7 +590,7 @@ func TestReadDVs(t *testing.T) {
 	for i, meta := range metas {
 		offset, size := meta.Offset, meta.Length
 		file := newDVTestFile(path, 5, &offset, &size)
-		file.referencedDataFile = strPtr(fmt.Sprintf("s3://bucket/data/data-%03d.parquet", i+1))
+		file.referencedDataFile = new(fmt.Sprintf("s3://bucket/data/data-%03d.parquet", i+1))
 		files[i] = file
 	}
 
@@ -624,7 +622,7 @@ func TestReadDVs(t *testing.T) {
 	t.Run("invalid blob identity", func(t *testing.T) {
 		first := files[0].(*mockDVFile)
 		second := *files[1].(*mockDVFile)
-		second.referencedDataFile = strPtr("s3://bucket/data/wrong.parquet")
+		second.referencedDataFile = new("s3://bucket/data/wrong.parquet")
 
 		_, err := ReadDVs(iceio.LocalFS{}, []iceberg.DataFile{first, &second})
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
@@ -667,8 +665,8 @@ func TestReadDVsCoalescesAdjacentBlobReads(t *testing.T) {
 		newDVTestFile(path, 1, &secondOffset, &secondSize),
 		newDVTestFile(path, 1, &firstOffset, &firstSize),
 	}
-	files[0].(*mockDVFile).referencedDataFile = strPtr("data-002.parquet")
-	files[1].(*mockDVFile).referencedDataFile = strPtr("data-001.parquet")
+	files[0].(*mockDVFile).referencedDataFile = new("data-002.parquet")
+	files[1].(*mockDVFile).referencedDataFile = new("data-001.parquet")
 
 	fs := &countingReadIO{base: iceio.LocalFS{}}
 	bitmaps, err := ReadDVs(fs, files)
@@ -709,7 +707,7 @@ func TestReadDVsDoesNotCoalesceRangesOverSizeLimit(t *testing.T) {
 	for i, meta := range metas {
 		offset, size := meta.Offset, meta.Length
 		file := newDVTestFile(path, cardinality, &offset, &size)
-		file.referencedDataFile = strPtr(fmt.Sprintf("data-%03d.parquet", i+1))
+		file.referencedDataFile = new(fmt.Sprintf("data-%03d.parquet", i+1))
 		files[i] = file
 	}
 
@@ -757,7 +755,7 @@ func TestReadDVsDoesNotCoalesceBlobsWithGaps(t *testing.T) {
 	for i, meta := range metas {
 		offset, size := meta.Offset, meta.Length
 		file := newDVTestFile(path, 1, &offset, &size)
-		file.referencedDataFile = strPtr(fmt.Sprintf("data-%03d.parquet", i+1))
+		file.referencedDataFile = new(fmt.Sprintf("data-%03d.parquet", i+1))
 		files[i] = file
 	}
 
@@ -833,7 +831,7 @@ func TestReadDVMissingReferencedDataFile(t *testing.T) {
 		referenced *string
 	}{
 		{name: "nil", referenced: nil},
-		{name: "empty", referenced: strPtr("")},
+		{name: "empty", referenced: new("")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			offset, size := int64(4), int64(50)

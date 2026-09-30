@@ -509,15 +509,22 @@ func (r *Reader) readFooter() error {
 	// FooterPayloadSize defines a single JSON footer object. Reject trailing
 	// content deliberately, even though some other Iceberg implementations
 	// accept padding or additional values inside the footer payload.
-	if decoder.More() {
-		return errors.New("puffin: unexpected content after footer JSON")
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+	//
+	// A failed decompression read also stops the decoder here; report that
+	// error rather than trailing content. Since Go 1.27, Decoder.More reports
+	// true on non-EOF read errors, so both checks need it.
+	trailingContentErr := func() error {
 		if compressedFooter != nil && compressedFooter.err != nil {
 			return fmt.Errorf("puffin: read compressed footer: %w", compressedFooter.err)
 		}
 
 		return errors.New("puffin: unexpected content after footer JSON")
+	}
+	if decoder.More() {
+		return trailingContentErr()
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return trailingContentErr()
 	}
 	if limitedFooter != nil && limitedFooter.N == 0 {
 		return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)

@@ -1032,8 +1032,7 @@ func isNoSuchObjectError(err error) bool {
 		return false
 	}
 
-	var noSuchObjectErr *hive_metastore.NoSuchObjectException
-	if errors.As(err, &noSuchObjectErr) {
+	if _, ok := errors.AsType[*hive_metastore.NoSuchObjectException](err); ok {
 		return true
 	}
 

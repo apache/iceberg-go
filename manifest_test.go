@@ -4205,7 +4205,7 @@ func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCou
 
 	for _, tt := range tests {
 		m.Run(tt.name, func() {
-			legacy := *(manifestFileRecordsV1[0].(*manifestFile))
+			legacy := *manifestFileRecordsV1[0].(*manifestFile)
 			legacy.AddedRowsCount = tt.addedRows
 			legacy.ExistingRowsCount = tt.existingRows
 
@@ -4230,7 +4230,7 @@ func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCou
 	}
 
 	m.Run("mixed batch failure poisons writer", func() {
-		valid := *(manifestFileRecordsV1[0].(*manifestFile))
+		valid := *manifestFileRecordsV1[0].(*manifestFile)
 		valid.Path = "valid.avro"
 		unknown := valid
 		unknown.Path = "unknown-counts.avro"
