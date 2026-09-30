@@ -18,16 +18,19 @@
 package table_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -1427,6 +1430,12 @@ func appendEqualityDelete(t *testing.T, tbl *table.Table, equalityFieldIDs []int
 func newMaxConcPartitionedTable(t *testing.T, fs iceio.IO) *table.Table {
 	t.Helper()
 
+	return newMaxConcPartitionedTableWithFSF(t, func(context.Context) (iceio.IO, error) { return fs, nil })
+}
+
+func newMaxConcPartitionedTableWithFSF(t *testing.T, fsF func(context.Context) (iceio.IO, error)) *table.Table {
+	t.Helper()
+
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -1444,7 +1453,7 @@ func newMaxConcPartitionedTable(t *testing.T, fs iceio.IO) *table.Table {
 	return table.New(
 		table.Identifier{"db", "max_conc_test"},
 		meta, location+"/metadata/v1.metadata.json",
-		func(context.Context) (iceio.IO, error) { return fs, nil },
+		fsF,
 		cat,
 	)
 }
@@ -1740,6 +1749,229 @@ func TestRewriteDataFiles_MaxConcurrentGroupsGroupFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), injected.Error())
 	assert.Empty(t, result.CompletedGroups)
 	assert.ElementsMatch(t, beforeFiles, allParquetFiles(t, tblPartial.Location()))
+}
+
+type badContentFile struct {
+	iceberg.DataFile
+}
+
+func (badContentFile) ContentType() iceberg.ManifestEntryContent {
+	return iceberg.ManifestEntryContent(99)
+}
+
+func TestRewriteDataFiles_MaxConcurrentGroupsCommitFailureCleansOutputs(t *testing.T) {
+	for _, maxConc := range []int{4, 0} {
+		t.Run(fmt.Sprintf("maxConc=%d", maxConc), func(t *testing.T) {
+			tbl := newMaxConcPartitionedTable(t, iceio.LocalFS{})
+			tbl = addMaxConcPartitions(t, tbl, 4, 1, 5)
+			groups := groupsByPartition(t, tbl)
+			require.Len(t, groups, 4)
+			before := allParquetFiles(t, tbl.Location())
+
+			tx := tbl.NewTransaction()
+			_, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+				MaxConcurrentGroups:      maxConc,
+				ExtraDeleteFilesToRemove: []iceberg.DataFile{badContentFile{groups[0].Tasks[0].File}},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "unsupported content type")
+			assert.ElementsMatch(t, before, allParquetFiles(t, tbl.Location()))
+		})
+	}
+}
+
+type blockPathIO struct {
+	iceio.LocalFS
+	mu      sync.Mutex
+	substr  string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockPathIO) Open(name string) (iceio.File, error) {
+	b.mu.Lock()
+	substr, entered, release := b.substr, b.entered, b.release
+	b.mu.Unlock()
+	if substr != "" && strings.Contains(name, substr) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	return b.LocalFS.Open(name)
+}
+
+func cancelOnDoneFSF(t *testing.T, fs iceio.IO) func(context.Context) (iceio.IO, error) {
+	t.Helper()
+
+	return func(ctx context.Context) (iceio.IO, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		return fs, nil
+	}
+}
+
+func TestRewriteDataFiles_MaxConcurrentGroupsCleanupAfterCancelUsesOpenFS(t *testing.T) {
+	t.Run("sequential", func(t *testing.T) {
+		blocker := &blockPathIO{entered: make(chan struct{}, 1), release: make(chan struct{})}
+		tbl := newMaxConcPartitionedTableWithFSF(t, cancelOnDoneFSF(t, blocker))
+		tbl = addMaxConcPartitions(t, tbl, 4, 1, 5)
+		groups := groupsByPartition(t, tbl)
+		require.Len(t, groups, 4)
+		blocker.mu.Lock()
+		blocker.substr = groups[1].Tasks[0].File.FilePath()
+		blocker.mu.Unlock()
+		before := allParquetFiles(t, tbl.Location())
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		var rewriteErr error
+		go func() {
+			defer close(done)
+			tx := tbl.NewTransaction()
+			_, rewriteErr = tx.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{})
+		}()
+
+		select {
+		case <-blocker.entered:
+		case <-done:
+			t.Fatalf("rewrite finished before group 1 started, err=%v", rewriteErr)
+		case <-t.Context().Done():
+			t.Fatal("test context done while waiting for group 1")
+		}
+		cancel()
+		close(blocker.release)
+		<-done
+		require.Error(t, rewriteErr)
+		assert.ErrorIs(t, rewriteErr, context.Canceled)
+		assert.ElementsMatch(t, before, allParquetFiles(t, tbl.Location()))
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		blocker := &blockPathIO{entered: make(chan struct{}, 1), release: make(chan struct{})}
+		tbl := newMaxConcPartitionedTableWithFSF(t, cancelOnDoneFSF(t, blocker))
+		tbl = addMaxConcPartitions(t, tbl, 8, 1, 10)
+		groups := groupsByPartition(t, tbl)
+		require.Len(t, groups, 8)
+		blocker.mu.Lock()
+		blocker.substr = groups[7].Tasks[0].File.FilePath()
+		blocker.mu.Unlock()
+		before := allParquetFiles(t, tbl.Location())
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		var rewriteErr error
+		go func() {
+			defer close(done)
+			tx := tbl.NewTransaction()
+			_, rewriteErr = tx.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{MaxConcurrentGroups: 4})
+		}()
+
+		deadline := time.Now().Add(time.Minute)
+		for len(allParquetFiles(t, tbl.Location())) == len(before) {
+			select {
+			case <-done:
+				t.Fatalf("rewrite finished before any group wrote output, err=%v", rewriteErr)
+			default:
+			}
+			if time.Now().After(deadline) {
+				cancel()
+				close(blocker.release)
+				<-done
+				t.Fatal("timed out waiting for a group to write output")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		close(blocker.release)
+		<-done
+		require.Error(t, rewriteErr)
+		assert.ErrorIs(t, rewriteErr, context.Canceled)
+		assert.ElementsMatch(t, before, allParquetFiles(t, tbl.Location()))
+	})
+}
+
+type orderFailIO struct {
+	iceio.LocalFS
+	mu           sync.Mutex
+	slowSubstr   string
+	slowErr      error
+	fastSubstr   string
+	fastErr      error
+	slowEntered  chan struct{}
+	fastFailed   chan struct{}
+	slowSignaled bool
+	fastSignaled bool
+}
+
+func (o *orderFailIO) Open(name string) (iceio.File, error) {
+	o.mu.Lock()
+	slow := o.slowSubstr != "" && strings.Contains(name, o.slowSubstr)
+	fast := o.fastSubstr != "" && strings.Contains(name, o.fastSubstr)
+	if slow && !o.slowSignaled {
+		o.slowSignaled = true
+		close(o.slowEntered)
+	}
+	slowErr, fastErr := o.slowErr, o.fastErr
+	slowEntered, fastFailed := o.slowEntered, o.fastFailed
+	o.mu.Unlock()
+	switch {
+	case slow:
+		<-fastFailed
+
+		return nil, slowErr
+	case fast:
+		<-slowEntered
+		o.mu.Lock()
+		if !o.fastSignaled {
+			o.fastSignaled = true
+			close(fastFailed)
+		}
+		o.mu.Unlock()
+
+		return nil, fastErr
+	default:
+		return o.LocalFS.Open(name)
+	}
+}
+
+func TestRewriteDataFiles_MaxConcurrentGroupsFailureReturnsLowestIndexError(t *testing.T) {
+	slowErr := errors.New("injected slow group failure")
+	fastErr := errors.New("injected fast group failure")
+
+	ordered := &orderFailIO{slowEntered: make(chan struct{}), fastFailed: make(chan struct{})}
+	tbl := newMaxConcPartitionedTable(t, ordered)
+	tbl = addMaxConcPartitions(t, tbl, 4, 1, 5)
+	groups := groupsByPartition(t, tbl)
+	require.Len(t, groups, 4)
+	ordered.mu.Lock()
+	ordered.slowSubstr = groups[1].Tasks[0].File.FilePath()
+	ordered.slowErr = slowErr
+	ordered.fastSubstr = groups[3].Tasks[0].File.FilePath()
+	ordered.fastErr = fastErr
+	ordered.mu.Unlock()
+	before := allParquetFiles(t, tbl.Location())
+
+	var buf bytes.Buffer
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(origLogger)
+
+	tx := tbl.NewTransaction()
+	_, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{MaxConcurrentGroups: 4})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), slowErr.Error())
+	assert.NotContains(t, err.Error(), fastErr.Error())
+	assert.ElementsMatch(t, before, allParquetFiles(t, tbl.Location()))
+
+	logged := buf.String()
+	assert.Contains(t, logged, "compaction group failed")
+	assert.Contains(t, logged, slowErr.Error())
+	assert.Contains(t, logged, fastErr.Error())
 }
 
 type gateOpenIO struct {
