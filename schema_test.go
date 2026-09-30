@@ -1484,21 +1484,22 @@ func TestAssignFreshSchemaIDs(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, sc)
 
+	// Like Java, siblings get IDs before their children are visited.
 	startID = 100
-	var checkID func(iceberg.NestedField)
-	checkID = func(f iceberg.NestedField) {
-		startID++
-		assert.Equal(t, startID, f.ID)
-		if nested, ok := f.Type.(iceberg.NestedType); ok {
-			for _, nf := range nested.Fields() {
-				checkID(nf)
+	var checkIDs func([]iceberg.NestedField)
+	checkIDs = func(fields []iceberg.NestedField) {
+		for _, f := range fields {
+			startID++
+			assert.Equal(t, startID, f.ID)
+		}
+		for _, f := range fields {
+			if nested, ok := f.Type.(iceberg.NestedType); ok {
+				checkIDs(nested.Fields())
 			}
 		}
 	}
 
-	for _, f := range sc.Fields() {
-		checkID(f)
-	}
+	checkIDs(sc.Fields())
 }
 
 func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
@@ -1654,6 +1655,37 @@ func TestAssignFreshSchemaIDsWithBaseCaseSensitive(t *testing.T) {
 	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, func() int { return 50 })
 	require.NoError(t, err)
 	assert.Equal(t, 50, out.Field(0).ID)
+}
+
+func TestAssignFreshSchemaIDsSiblingsFirst(t *testing.T) {
+	// location is visited before name, but name should still get the lower
+	// fresh ID because sibling IDs are assigned before recursing.
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 101, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+				{ID: 102, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+		iceberg.NestedField{ID: 103, Name: "name", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+
+	name, ok := out.FindFieldByName("name")
+	require.True(t, ok)
+	assert.Equal(t, 3, name.ID)
+	long, ok := out.FindFieldByName("location.long")
+	require.True(t, ok)
+	assert.Equal(t, 4, long.ID)
 }
 
 func TestAssignFreshSchemaIDsWithBaseListOfStruct(t *testing.T) {

@@ -1514,10 +1514,16 @@ func (s *setFreshIDs) Schema(_ *Schema, structResult func() Type) Type {
 }
 
 func (s *setFreshIDs) Struct(st StructType, fieldResults []func() Type) Type {
+	// Assign all sibling IDs before recursing, matching Java.
+	newIDs := make([]int, len(st.FieldList))
+	for idx, f := range st.FieldList {
+		newIDs[idx] = s.getAndInc(f.ID)
+	}
+
 	newFields := make([]NestedField, len(st.FieldList))
 	for idx, f := range st.FieldList {
 		newFields[idx] = NestedField{
-			ID:             s.getAndInc(f.ID),
+			ID:             newIDs[idx],
 			Name:           f.Name,
 			Type:           fieldResults[idx](),
 			Doc:            f.Doc,
