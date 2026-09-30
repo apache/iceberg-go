@@ -352,8 +352,7 @@ func isRetryableSerializableError(err error) bool {
 		}
 	}
 
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
+	if mysqlErr, ok := errors.AsType[*mysql.MySQLError](err); ok {
 		switch mysqlErr.Number {
 		case 1205, 1213: // lock wait timeout, deadlock
 			return true

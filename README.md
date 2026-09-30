@@ -25,7 +25,7 @@
 
 ### Prerequisites
 
-* Go 1.25 or later
+* Go 1.26 or later
 
 ### Build
 
@@ -54,7 +54,7 @@ Install the linter first
 
 ```shell
 make lint-install
-# or: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+# or: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 ```
 
 ### Integration tests

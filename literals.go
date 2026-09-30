@@ -627,6 +627,7 @@ func (f Float32Literal) Type() Type                    { return PrimitiveTypes.F
 func (f Float32Literal) Value() float32                { return float32(f) }
 func (f Float32Literal) Any() any                      { return f.Value() }
 func (f Float32Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 32) }
+
 func (f Float32Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
@@ -675,6 +676,7 @@ func (f Float64Literal) Type() Type                    { return PrimitiveTypes.F
 func (f Float64Literal) Value() float64                { return float64(f) }
 func (f Float64Literal) Any() any                      { return f.Value() }
 func (f Float64Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 64) }
+
 func (f Float64Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
@@ -873,9 +875,10 @@ func (t *TimestampLiteral) UnmarshalBinary(data []byte) error {
 type TimestampNsLiteral TimestampNano
 
 func (TimestampNsLiteral) Comparator() Comparator[TimestampNano] { return cmp.Compare[TimestampNano] }
-func (t TimestampNsLiteral) Type() Type                          { return PrimitiveTypes.TimestampNs }
-func (t TimestampNsLiteral) Value() TimestampNano                { return TimestampNano(t) }
-func (t TimestampNsLiteral) Any() any                            { return t.Value() }
+
+func (t TimestampNsLiteral) Type() Type           { return PrimitiveTypes.TimestampNs }
+func (t TimestampNsLiteral) Value() TimestampNano { return TimestampNano(t) }
+func (t TimestampNsLiteral) Any() any             { return t.Value() }
 func (t TimestampNsLiteral) String() string {
 	tm := TimestampNano(t).ToTime()
 

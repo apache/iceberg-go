@@ -17,7 +17,7 @@
 
 module github.com/apache/iceberg-go
 
-go 1.25.9
+go 1.26.0
 
 require (
 	cloud.google.com/go/storage v1.66.0

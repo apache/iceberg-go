@@ -893,8 +893,7 @@ func (r *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planI
 // ErrServiceUnavailable preserves compatibility with callers or transports that
 // return the sentinel without the package's concrete errorResponse wrapper.
 func scanPlanPollRetry(err error) (time.Duration, bool) {
-	var restErr errorResponse
-	if errors.As(err, &restErr) {
+	if restErr, ok := errors.AsType[errorResponse](err); ok {
 		switch restErr.statusCode {
 		case http.StatusRequestTimeout,
 			http.StatusTooManyRequests,

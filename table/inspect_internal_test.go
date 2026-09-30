@@ -92,8 +92,8 @@ func inspectTestTable(identifier Identifier, snapshotRefs map[string]SnapshotRef
 		Props:           iceberg.Properties{},
 		SnapshotList: []Snapshot{
 			{SnapshotID: s1, TimestampMs: 1100, ManifestList: "/snap-101.avro"},
-			{SnapshotID: s2, ParentSnapshotID: int64Ptr(s1), TimestampMs: 1200, ManifestList: "/snap-102.avro"},
-			{SnapshotID: s3, ParentSnapshotID: int64Ptr(s1), TimestampMs: 1300, ManifestList: "/snap-103.avro"},
+			{SnapshotID: s2, ParentSnapshotID: new(s1), TimestampMs: 1200, ManifestList: "/snap-102.avro"},
+			{SnapshotID: s3, ParentSnapshotID: new(s1), TimestampMs: 1300, ManifestList: "/snap-103.avro"},
 		},
 		CurrentSnapshotID: &current,
 		SnapshotLog: []SnapshotLogEntry{
@@ -514,7 +514,7 @@ func snapshotsTestTable() *Table {
 				},
 			},
 			// s2 intentionally carries no summary and no manifest-list path.
-			{SnapshotID: s2, ParentSnapshotID: int64Ptr(s1), TimestampMs: 1200},
+			{SnapshotID: s2, ParentSnapshotID: new(s1), TimestampMs: 1200},
 		},
 		CurrentSnapshotID:  &current,
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
@@ -948,7 +948,7 @@ func TestInspectDeleteFiles(t *testing.T) {
 	entry := func(status iceberg.ManifestEntryStatus, file iceberg.DataFile) iceberg.ManifestEntry {
 		sequenceNumber := int64(1)
 
-		return iceberg.NewManifestEntry(status, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+		return iceberg.NewManifestEntry(status, new(snapshotID), &sequenceNumber, &sequenceNumber, file)
 	}
 	tbl := inspectFilesTableWithManifests(t, spec,
 		inspectManifestSpec{
@@ -1312,7 +1312,7 @@ func TestInspectManifests(t *testing.T) {
 		"mem://default/table-location/data/data.parquet", map[int]any{1000: int32(7)}, 3)
 	sequenceNumber := int64(1)
 	entry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+		iceberg.EntryStatusADDED, new(snapshotID), &sequenceNumber, &sequenceNumber, file)
 
 	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
 	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
@@ -1999,7 +1999,7 @@ func inspectDataFileEntries(t *testing.T, spec iceberg.PartitionSpec, count int)
 		file := newTestDataFile(t, spec, path, nil)
 		sequenceNumber := int64(1)
 		entries = append(entries, iceberg.NewManifestEntry(
-			iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file))
+			iceberg.EntryStatusADDED, new(snapshotID), &sequenceNumber, &sequenceNumber, file))
 	}
 
 	return entries
@@ -2340,13 +2340,13 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 			"mem://default/table-location/data/live-"+strconv.Itoa(index)+".parquet", nil)
 		sequenceNumber := int64(1)
 		entries = append(entries, iceberg.NewManifestEntry(
-			iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file))
+			iceberg.EntryStatusADDED, new(snapshotID), &sequenceNumber, &sequenceNumber, file))
 	}
 	deletedPath := "mem://default/table-location/data/deleted.parquet"
 	deleted := newTestDataFile(t, spec, deletedPath, nil)
 	deletedSequenceNumber := int64(1)
 	entries = append(entries, iceberg.NewManifestEntry(
-		iceberg.EntryStatusDELETED, int64Ptr(snapshotID), &deletedSequenceNumber, &deletedSequenceNumber, deleted))
+		iceberg.EntryStatusDELETED, new(snapshotID), &deletedSequenceNumber, &deletedSequenceNumber, deleted))
 
 	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
 	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
@@ -2400,7 +2400,7 @@ func TestInspectDataFilesReturnsPartitionValues(t *testing.T) {
 		"mem://default/table-location/data/partitioned.parquet", map[int]any{1000: int32(7)})
 	sequenceNumber := int64(1)
 	entry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+		iceberg.EntryStatusADDED, new(snapshotID), &sequenceNumber, &sequenceNumber, file)
 	tbl := inspectDataFilesTable(t, spec, []iceberg.ManifestEntry{entry})
 
 	rr, err := tbl.Inspect().DataFiles(context.Background())
@@ -2423,7 +2423,7 @@ func TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted(t *testing.T) {
 		"mem://default/table-location/data/deleted.parquet", nil)
 	sequenceNumber := int64(1)
 	entry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusDELETED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+		iceberg.EntryStatusDELETED, new(snapshotID), &sequenceNumber, &sequenceNumber, file)
 	tbl := inspectDataFilesTable(t, spec, []iceberg.ManifestEntry{entry})
 
 	rr, err := tbl.Inspect().DataFiles(context.Background())
@@ -2764,7 +2764,7 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	dataEntries := make([]iceberg.ManifestEntry, 0, len(dataFiles))
 	for _, file := range dataFiles {
 		dataEntries = append(dataEntries, iceberg.NewManifestEntry(
-			iceberg.EntryStatusADDED, int64Ptr(snapshotID), &dataSequenceNumber, &dataSequenceNumber, file))
+			iceberg.EntryStatusADDED, new(snapshotID), &dataSequenceNumber, &dataSequenceNumber, file))
 	}
 
 	dataManifestPath := "mem://default/table-location/metadata/data-manifest.avro"
@@ -2795,9 +2795,9 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
 	require.NoError(t, err)
 	require.NoError(t, deleteWriter.Add(iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &dataSequenceNumber, &dataSequenceNumber, deleteFile)))
+		iceberg.EntryStatusADDED, new(snapshotID), &dataSequenceNumber, &dataSequenceNumber, deleteFile)))
 	require.NoError(t, deleteWriter.Add(iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &dataSequenceNumber, &dataSequenceNumber, equalityDeleteFile)))
+		iceberg.EntryStatusADDED, new(snapshotID), &dataSequenceNumber, &dataSequenceNumber, equalityDeleteFile)))
 	require.NoError(t, deleteWriter.Close())
 	deleteManifest, err := deleteWriter.ToManifestFile(deleteManifestPath, int64(deleteManifestBuf.Len()),
 		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
@@ -2817,7 +2817,7 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 		SequenceNumber: manifestListSequenceNumber,
 		TimestampMs:    2000,
 	}}
-	txn.meta.currentSnapshotID = int64Ptr(snapshotID)
+	txn.meta.currentSnapshotID = new(snapshotID)
 	built, err := txn.meta.Build()
 	require.NoError(t, err)
 
@@ -2862,7 +2862,7 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 	var manifestBuf bytes.Buffer
 	_, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, expiredSnapshotID,
 		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
-			iceberg.EntryStatusADDED, int64Ptr(expiredSnapshotID), &sequenceNumber, &sequenceNumber, file)})
+			iceberg.EntryStatusADDED, new(expiredSnapshotID), &sequenceNumber, &sequenceNumber, file)})
 	require.NoError(t, err)
 	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
 	manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
@@ -2884,7 +2884,7 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 		SequenceNumber: currentSequenceNumber,
 		TimestampMs:    2000,
 	}}
-	txn.meta.currentSnapshotID = int64Ptr(currentSnapshotID)
+	txn.meta.currentSnapshotID = new(currentSnapshotID)
 	built, err := txn.meta.Build()
 	require.NoError(t, err)
 
@@ -2952,8 +2952,8 @@ func TestInspectEntriesIncludesDeletedEntries(t *testing.T) {
 		"mem://default/table-location/data/deleted.parquet", nil)
 	sequenceNumber := int64(1)
 	entries := []iceberg.ManifestEntry{
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, addedFile),
-		iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, deletedFile),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(snapshotID), &sequenceNumber, &sequenceNumber, addedFile),
+		iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, new(snapshotID), &sequenceNumber, &sequenceNumber, deletedFile),
 	}
 
 	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
@@ -2973,7 +2973,7 @@ func TestInspectEntriesIncludesDeletedEntries(t *testing.T) {
 		ManifestList:   manifestListPath,
 		SequenceNumber: sequenceNumber,
 	}}
-	txn.meta.currentSnapshotID = int64Ptr(snapshotID)
+	txn.meta.currentSnapshotID = new(snapshotID)
 	built, err := txn.meta.Build()
 	require.NoError(t, err)
 
