@@ -312,23 +312,13 @@ func sameEqualityFieldIDSet(left, right []int) bool {
 		return false
 	}
 
-	contains := func(ids []int, want int) bool {
-		for _, id := range ids {
-			if id == want {
-				return true
-			}
-		}
-
-		return false
-	}
-
 	for _, id := range left {
-		if !contains(right, id) {
+		if !slices.Contains(right, id) {
 			return false
 		}
 	}
 	for _, id := range right {
-		if !contains(left, id) {
+		if !slices.Contains(left, id) {
 			return false
 		}
 	}
