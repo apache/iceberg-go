@@ -919,6 +919,9 @@ func TestPrefixScopedIODoesNotApplyCredentialOutsidePrefix(t *testing.T) {
 	assert.NotContains(t, props, iceio.S3SecretAccessKey)
 }
 
+// newPrefixScopedIO does no detaching of its own: it keeps the context it is
+// given, which is how the refresher's close reaches the filesystems it opens.
+// loadFS hands it the refresher-owned context, never a caller's.
 func TestPrefixScopedIOPreservesReadContextCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -929,86 +932,167 @@ func TestPrefixScopedIOPreservesReadContextCancellation(t *testing.T) {
 	require.ErrorIs(t, p.ctx.Err(), context.Canceled)
 }
 
-// registerContextCapturingScheme registers a filesystem whose factory records
-// the context it is opened with, the way a filesystem that keeps its opening
-// context (GCS) would.
-func registerContextCapturingScheme(t *testing.T, scheme string) func() context.Context {
+// contextCapturingScheme is a filesystem whose factory records every context
+// it is opened with, the way a filesystem that keeps its opening context
+// (blobfs) would, and counts how often each IO it handed out is closed.
+type contextCapturingScheme struct {
+	mu     sync.Mutex
+	opened []context.Context
+	closes []*atomic.Int32
+}
+
+func registerContextCapturingScheme(t *testing.T, scheme string) *contextCapturingScheme {
 	t.Helper()
 
-	var (
-		mu     sync.Mutex
-		opened context.Context
-	)
+	c := &contextCapturingScheme{}
 
 	iceio.Register(scheme, func(ctx context.Context, _ *url.URL, _ map[string]string) (iceio.IO, error) {
-		mu.Lock()
-		opened = ctx
-		mu.Unlock()
+		closes := &atomic.Int32{}
 
-		return iceio.LocalFS{}, nil
+		c.mu.Lock()
+		c.opened = append(c.opened, ctx)
+		c.closes = append(c.closes, closes)
+		c.mu.Unlock()
+
+		return &closeTrackingIO{IO: iceio.LocalFS{}, closeCount: closes}, nil
 	})
 	t.Cleanup(func() { iceio.Unregister(scheme) })
 
-	return func() context.Context {
-		mu.Lock()
-		defer mu.Unlock()
+	return c
+}
 
-		return opened
-	}
+func (c *contextCapturingScheme) loads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.opened)
+}
+
+func (c *contextCapturingScheme) ctx(i int) context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.opened[i]
+}
+
+func (c *contextCapturingScheme) closeCount(i int) int32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.closes[i].Load()
 }
 
 type vendedCtxKey struct{}
 
 // The cached IO outlives the call that built it, so a caller that scopes one
 // operation to its own context (cancelled when the operation returns) must not
-// leave every later operation with a filesystem opened on a dead context.
+// leave every later operation with a filesystem opened on a dead context. The
+// refresher owns the IO's lifetime instead: renewal closes the superseded IO
+// and ends its context.
 func TestVendedCredsCachedIODoesNotInheritCallerCancellation(t *testing.T) {
 	const scheme = "vended-ctx-detach-test"
 
-	opened := registerContextCapturingScheme(t, scheme)
+	fs := registerContextCapturingScheme(t, scheme)
 
 	r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
 		return iceberg.Properties{}, nil
 	})
 	r.location = scheme + "://bucket/tbl"
 
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), vendedCtxKey{}, "v"))
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), vendedCtxKey{}, "first"))
 	_, err := r.loadFS(ctx)
 	require.NoError(t, err)
 	cancel()
 
-	require.NotNil(t, opened())
-	require.NoError(t, opened().Err(), "the cached IO must not be bound to the caller's cancellation")
-	assert.Equal(t, "v", opened().Value(vendedCtxKey{}), "context values still reach the filesystem")
+	require.Equal(t, 1, fs.loads())
+	require.NoError(t, fs.ctx(0).Err(), "the cached IO must not be bound to the caller's cancellation")
+	// WithoutCancel keeps values, so the first caller's values reach the shared
+	// IO. This documents the current behaviour; it is a trade-off, not a promise.
+	assert.Equal(t, "first", fs.ctx(0).Value(vendedCtxKey{}))
 
-	// A renewal rebuilds the IO; it must not inherit that caller's cancellation either.
+	// Renewal rebuilds the IO on its own context and retires the old one.
 	r.expiresAt = time.Now().Add(-time.Minute)
-	ctx, cancel = context.WithCancel(context.Background())
+	ctx, cancel = context.WithCancel(context.WithValue(context.Background(), vendedCtxKey{}, "second"))
 	_, err = r.loadFS(ctx)
 	require.NoError(t, err)
 	cancel()
 
-	require.NoError(t, opened().Err(), "the renewed IO must not be bound to the caller's cancellation")
+	require.Equal(t, 2, fs.loads(), "renewal must rebuild the IO")
+	assert.NotSame(t, fs.ctx(0), fs.ctx(1), "the renewed IO gets a context of its own")
+	require.NoError(t, fs.ctx(1).Err(), "the renewed IO must not be bound to the caller's cancellation")
+	assert.Equal(t, "second", fs.ctx(1).Value(vendedCtxKey{}))
+
+	require.ErrorIs(t, fs.ctx(0).Err(), context.Canceled, "the superseded IO's context is ended")
+	assert.Equal(t, int32(1), fs.closeCount(0), "the superseded IO is closed")
+	assert.Equal(t, int32(0), fs.closeCount(1))
+}
+
+func TestVendedCredsCloseEndsTheIOContext(t *testing.T) {
+	const scheme = "vended-ctx-close-test"
+
+	fs := registerContextCapturingScheme(t, scheme)
+
+	r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
+		return iceberg.Properties{}, nil
+	})
+	r.location = scheme + "://bucket/tbl"
+
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, r.close())
+
+	require.ErrorIs(t, fs.ctx(0).Err(), context.Canceled)
+	assert.Equal(t, int32(1), fs.closeCount(0))
+}
+
+func TestVendedCredsFailedRenewalKeepsTheCachedIO(t *testing.T) {
+	const scheme = "vended-ctx-failed-renewal-test"
+
+	fs := registerContextCapturingScheme(t, scheme)
+
+	r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
+		return iceberg.Properties{}, nil
+	})
+	r.location = scheme + "://bucket/tbl"
+
+	cached, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+
+	// The renewed load resolves to a scheme with no registered filesystem.
+	r.location = "vended-ctx-unregistered://bucket/tbl"
+	r.expiresAt = time.Now().Add(-time.Minute)
+	_, err = r.loadFS(context.Background())
+	require.Error(t, err)
+
+	assert.Same(t, cached, r.cachedIO, "a failed renewal leaves the cached IO in place")
+	require.NoError(t, fs.ctx(0).Err(), "and its context alive")
+	assert.Equal(t, int32(0), fs.closeCount(0))
 }
 
 func TestVendedCredsPrefixScopedIODoesNotInheritCallerCancellation(t *testing.T) {
 	const scheme = "vended-prefix-ctx-detach-test"
 
-	opened := registerContextCapturingScheme(t, scheme)
+	fs := registerContextCapturingScheme(t, scheme)
 
 	r := newTestRefresher(nil)
 	r.location = scheme + "://bucket/tbl"
 	r.credentials = []StorageCredential{{Prefix: scheme + "://bucket/", Config: iceberg.Properties{}}}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	fs, err := r.loadFS(ctx)
+	loaded, err := r.loadFS(ctx)
 	require.NoError(t, err)
 	cancel()
 
+	p, ok := loaded.(*prefixScopedIO)
+	require.True(t, ok, "scan-plan credentials load a prefixScopedIO, got %T", loaded)
+
 	// prefixScopedIO opens its filesystems lazily, after the call that built it returned.
-	_, err = fs.(*prefixScopedIO).filesystemFor(scheme + "://bucket/tbl/data/file.parquet")
+	_, err = p.filesystemFor(scheme + "://bucket/tbl/data/file.parquet")
 	require.NoError(t, err)
 
-	require.NotNil(t, opened())
-	require.NoError(t, opened().Err(), "filesystems opened later must not inherit the first caller's cancellation")
+	require.Equal(t, 1, fs.loads())
+	require.NoError(t, fs.ctx(0).Err(), "filesystems opened later must not inherit the first caller's cancellation")
+
+	require.NoError(t, r.close())
+	require.ErrorIs(t, fs.ctx(0).Err(), context.Canceled, "close ends the context its filesystems were opened with")
 }
