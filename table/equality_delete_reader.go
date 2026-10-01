@@ -395,9 +395,9 @@ type lazyEqualityDeleteLoader struct {
 }
 
 type lazyEqualityDeleteFile struct {
-	id                        int
-	dataFile                  iceberg.DataFile
-	fieldIDs                  []int
+	id                 int
+	dataFile           iceberg.DataFile
+	fieldIDs           []int
 	hasPointerIdentity bool
 
 	once sync.Once
@@ -447,8 +447,8 @@ func newLazyEqualityDeleteLoader(
 
 					firstPath = path
 					firstFile = &lazyEqualityDeleteFile{
-						dataFile:                   dataFile,
-						fieldIDs:                   fieldIDs,
+						dataFile:           dataFile,
+						fieldIDs:           fieldIDs,
 						hasPointerIdentity: dataFileHasPointerIdentity(dataFile),
 					}
 
@@ -483,9 +483,9 @@ func newLazyEqualityDeleteLoader(
 			}
 
 			loader.files[path] = &lazyEqualityDeleteFile{
-				id:                         len(loader.files),
-				dataFile:                   dataFile,
-				fieldIDs:                   fieldIDs,
+				id:                 len(loader.files),
+				dataFile:           dataFile,
+				fieldIDs:           fieldIDs,
 				hasPointerIdentity: dataFileHasPointerIdentity(dataFile),
 			}
 		}
@@ -628,9 +628,9 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 // kept as separate sets (not merged).
 func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceberg.Schema, nameMapping iceberg.NameMapping, tasks []FileScanTask, concurrency int) (map[int][]*equalityDeleteSet, error) {
 	type deleteFileInfo struct {
-		id                     int
-		file                   iceberg.DataFile
-		fieldIDs               []int
+		id                 int
+		file               iceberg.DataFile
+		fieldIDs           []int
 		hasPointerIdentity bool
 	}
 
@@ -659,9 +659,9 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 			}
 
 			uniqueDeletes[path] = deleteFileInfo{
-				id:                     len(uniqueDeletes),
-				file:                   d,
-				fieldIDs:               fieldIDs,
+				id:                 len(uniqueDeletes),
+				file:               d,
+				fieldIDs:           fieldIDs,
 				hasPointerIdentity: dataFileHasPointerIdentity(d),
 			}
 		}
