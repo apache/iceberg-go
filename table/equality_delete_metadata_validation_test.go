@@ -140,7 +140,7 @@ func TestEqualityDeleteMetadataConflictErrors(t *testing.T) {
 		wantErr  error
 	}{
 		{"different IDs", []int{1, 3}, iceberg.ParquetFile, ErrConflictingEqualityDeleteMetadata},
-		{"reordered IDs", []int{2, 1}, iceberg.ParquetFile, ErrConflictingEqualityDeleteMetadata},
+		{"reordered IDs", []int{2, 1}, iceberg.ParquetFile, nil},
 		{"different format", []int{1, 2}, iceberg.AvroFile, ErrConflictingEqualityDeleteMetadata},
 		{"empty IDs", nil, iceberg.ParquetFile, ErrEmptyEqualityFieldIDs},
 	} {
@@ -155,7 +155,15 @@ func TestEqualityDeleteMetadataConflictErrors(t *testing.T) {
 				{EqualityDeleteFiles: []iceberg.DataFile{second}},
 			}
 			fs := &countingEqualityDeleteOpenFS{MemFS: iceio.NewMemFS()}
-			_, err = newLazyEqualityDeleteLoader(fs, schema, nil, nil, tasks)
+			loader, err := newLazyEqualityDeleteLoader(fs, schema, nil, nil, tasks)
+			if tt.wantErr == nil {
+				require.NoError(t, err)
+				require.NotNil(t, loader)
+				assert.Len(t, loader.files, 1)
+				assert.Zero(t, fs.attempts.Load())
+				return
+			}
+
 			require.ErrorIs(t, err, tt.wantErr)
 			require.ErrorContains(t, err, path)
 			_, err = readAllEqualityDeleteFiles(t.Context(), fs, schema, nil, tasks, 1)
