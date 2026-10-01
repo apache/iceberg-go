@@ -1484,21 +1484,22 @@ func TestAssignFreshSchemaIDs(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, sc)
 
+	// Like Java, siblings get IDs before their children are visited.
 	startID = 100
-	var checkID func(iceberg.NestedField)
-	checkID = func(f iceberg.NestedField) {
-		startID++
-		assert.Equal(t, startID, f.ID)
-		if nested, ok := f.Type.(iceberg.NestedType); ok {
-			for _, nf := range nested.Fields() {
-				checkID(nf)
+	var checkIDs func([]iceberg.NestedField)
+	checkIDs = func(fields []iceberg.NestedField) {
+		for _, f := range fields {
+			startID++
+			assert.Equal(t, startID, f.ID)
+		}
+		for _, f := range fields {
+			if nested, ok := f.Type.(iceberg.NestedType); ok {
+				checkIDs(nested.Fields())
 			}
 		}
 	}
 
-	for _, f := range sc.Fields() {
-		checkID(f)
-	}
+	checkIDs(sc.Fields())
 }
 
 func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
@@ -1571,6 +1572,228 @@ func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
 	assert.Equal(t, "nested_without_defaults", nestedWithoutDefaults.Name)
 	assert.Nil(t, nestedWithoutDefaults.InitialDefault)
 	assert.Nil(t, nestedWithoutDefaults.WriteDefault)
+}
+
+func TestAssignFreshSchemaIDsWithBase(t *testing.T) {
+	// base is the table's current schema. Column 3 ("dropped") has been
+	// removed from the new schema, so last-column-id stays at 9.
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+		iceberg.NestedField{ID: 3, Name: "dropped", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 5, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 6, Element: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 7, Name: "props", Type: &iceberg.MapType{
+			KeyID: 8, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 9, ValueType: iceberg.PrimitiveTypes.String,
+		}},
+	)
+
+	// The new schema reorders columns, adds "name" and "location.long", and
+	// uses placeholder IDs that don't match base.
+	sc := iceberg.NewSchemaWithIdentifiers(0, []int{101},
+		iceberg.NestedField{ID: 100, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 101, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 102, Name: "props", Type: &iceberg.MapType{
+			KeyID: 103, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 104, ValueType: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 105, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 106, Element: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 107, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 108, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+				{ID: 109, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+	)
+
+	lastColumnID := 9
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, func() int {
+		lastColumnID++
+
+		return lastColumnID
+	})
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchemaWithIdentifiers(0, []int{1},
+		iceberg.NestedField{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 7, Name: "props", Type: &iceberg.MapType{
+			KeyID: 8, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 9, ValueType: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 5, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 6, Element: iceberg.PrimitiveTypes.String,
+		}},
+		iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+				{ID: 11, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+	)
+	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
+	assert.Equal(t, []int{1}, out.IdentifierFieldIDs)
+	assert.Equal(t, 11, lastColumnID, "only new fields should consume IDs")
+}
+
+func TestAssignFreshSchemaIDsWithBaseCaseSensitive(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ID", Type: iceberg.PrimitiveTypes.Int64},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, func() int { return 50 })
+	require.NoError(t, err)
+	assert.Equal(t, 50, out.Field(0).ID)
+}
+
+func TestAssignFreshSchemaIDsSiblingsFirst(t *testing.T) {
+	// location is visited before name, but name should still get the lower
+	// fresh ID because sibling IDs are assigned before recursing.
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 101, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+				{ID: 102, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+			},
+		}},
+		iceberg.NestedField{ID: 103, Name: "name", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+
+	name, ok := out.FindFieldByName("name")
+	require.True(t, ok)
+	assert.Equal(t, 3, name.ID)
+	long, ok := out.FindFieldByName("location.long")
+	require.True(t, ok)
+	assert.Equal(t, 4, long.ID)
+}
+
+func TestAssignFreshSchemaIDsWithBaseListOfStruct(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
+			ElementID: 2,
+			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+			}},
+		}},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "events", Type: &iceberg.ListType{
+			ElementID: 101,
+			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 102, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+				{ID: 103, Name: "label", Type: iceberg.PrimitiveTypes.String},
+			}},
+		}},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
+			ElementID: 2,
+			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+				{ID: 4, Name: "label", Type: iceberg.PrimitiveTypes.String},
+			}},
+		}},
+	)
+	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
+}
+
+func TestAssignFreshSchemaIDsWithBaseNilNextID(t *testing.T) {
+	// The default counter must start above base's IDs, or c would get 1.
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
+}
+
+func TestAssignFreshSchemaIDsWithBaseNextIDTooLow(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	var out *iceberg.Schema
+	var err error
+	require.NotPanics(t, func() {
+		out, err = iceberg.AssignFreshSchemaIDsWithBase(sc, base, func() int { return 1 })
+	})
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, out)
+}
+
+func TestAssignFreshSchemaIDsWithBaseNewIdentifierField(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	sc := iceberg.NewSchemaWithIdentifiers(0, []int{10, 11},
+		iceberg.NestedField{ID: 10, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 11, Name: "b", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2}, out.IdentifierFieldIDs)
+}
+
+func TestAssignFreshSchemaIDsStaleIdentifierField(t *testing.T) {
+	sc := iceberg.NewSchemaWithIdentifiers(0, []int{99},
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	_, err := iceberg.AssignFreshSchemaIDsWithBase(sc, nil, nil)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
+
+func TestAssignFreshSchemaIDsWithNilBase(t *testing.T) {
+	withBase, err := iceberg.AssignFreshSchemaIDsWithBase(tableSchemaNested, nil, nil)
+	require.NoError(t, err)
+	withoutBase, err := iceberg.AssignFreshSchemaIDs(tableSchemaNested, nil)
+	require.NoError(t, err)
+
+	assert.True(t, withoutBase.Equals(withBase))
+	assert.Equal(t, withoutBase.IdentifierFieldIDs, withBase.IdentifierFieldIDs)
 }
 
 func TestSchemaRoundTrip(t *testing.T) {

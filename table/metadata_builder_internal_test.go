@@ -269,9 +269,8 @@ func TestReassignIds(t *testing.T) {
 		Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{
 				{
-					Type: iceberg.PrimitiveTypes.Int64,
-					// TODO: this is discrepancy with rust impl, is 5 over there
-					ID:       4,
+					Type:     iceberg.PrimitiveTypes.Int64,
+					ID:       5,
 					Name:     "nested",
 					Required: true,
 				},
@@ -280,8 +279,7 @@ func TestReassignIds(t *testing.T) {
 		Required: true,
 	},
 		iceberg.NestedField{
-			// TODO: this is discrepancy with rust impl, is 4 over there
-			ID:       5,
+			ID:       4,
 			Name:     "c",
 			Type:     iceberg.PrimitiveTypes.Int64,
 			Required: true,
