@@ -533,7 +533,10 @@ func (l *lazyEqualityDeleteLoader) addFieldIDs(idset set[int]) {
 
 func (l *lazyEqualityDeleteLoader) loadFile(ctx context.Context, file *lazyEqualityDeleteFile) (*equalityDeleteFileSet, error) {
 	file.once.Do(func() {
-		deleteSchema := schemaForEqualityFields(l.tableSchema, l.tableSchemas, file.fieldIDs)
+		deleteSchema := l.tableSchema
+		if len(l.tableSchemas) > 0 {
+			deleteSchema = schemaForEqualityFields(l.tableSchema, l.tableSchemas, file.fieldIDs)
+		}
 		keys, colNames, err := readEqualityDeleteFile(
 			ctx, l.fs, deleteSchema, l.nameMapping, file.dataFile, file.fieldIDs)
 		if err != nil {
