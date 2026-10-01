@@ -307,6 +307,35 @@ func newEqualityDeleteFileSet(id int, deleteSet *equalityDeleteSet) *equalityDel
 	}
 }
 
+func sameEqualityFieldIDSet(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	contains := func(ids []int, want int) bool {
+		for _, id := range ids {
+			if id == want {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	for _, id := range left {
+		if !contains(right, id) {
+			return false
+		}
+	}
+	for _, id := range right {
+		if !contains(left, id) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func validateEqualityDeleteMetadata(
 	dataFile iceberg.DataFile,
 	existingFile iceberg.DataFile,
@@ -315,7 +344,7 @@ func validateEqualityDeleteMetadata(
 	// Callers have already inspected ContentType, so both files must be non-nil.
 	// Only skip validation for the same immutable file pointer: a comparable
 	// struct may still contain an interface holding a non-comparable value.
-	if reflect.TypeOf(dataFile).Kind() == reflect.Ptr && dataFile == existingFile {
+	if reflect.TypeOf(dataFile).Kind() == reflect.Pointer && dataFile == existingFile {
 		return nil
 	}
 
@@ -323,10 +352,10 @@ func validateEqualityDeleteMetadata(
 	if len(fieldIDs) == 0 {
 		return fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, dataFile.FilePath())
 	}
-	// This intentionally rejects reordered IDs, although equality matching itself
-	// is order-independent. Keep this dedup change aligned with the existing
-	// order-sensitive key encoding/grouping; canonicalization is a separate change.
-	if dataFile.FileFormat() == existingFile.FileFormat() && slices.Equal(fieldIDs, existingFieldIDs) {
+	// Equality delete field IDs are a set predicate. The first file keeps its
+	// encoding order; later entries for the same path may list the same IDs in
+	// a different order.
+	if dataFile.FileFormat() == existingFile.FileFormat() && sameEqualityFieldIDSet(fieldIDs, existingFieldIDs) {
 		return nil
 	}
 
