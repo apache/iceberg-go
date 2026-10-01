@@ -634,7 +634,12 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 		hasPointerIdentity bool
 	}
 
-	uniqueDeletes := make(map[string]deleteFileInfo)
+	var (
+		firstPath     string
+		firstInfo     deleteFileInfo
+		hasFirst      bool
+		uniqueDeletes map[string]deleteFileInfo
+	)
 
 	for _, t := range tasks {
 		for _, d := range t.EqualityDeleteFiles {
@@ -642,8 +647,43 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				continue
 			}
 
+			if !hasFirst {
+				path := d.FilePath()
+				fieldIDs := dataFileEqualityFieldIDs(d)
+				if len(fieldIDs) == 0 {
+					return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
+				}
+
+				firstPath = path
+				firstInfo = deleteFileInfo{
+					file:               d,
+					fieldIDs:           fieldIDs,
+					hasPointerIdentity: dataFileHasPointerIdentity(d),
+				}
+				hasFirst = true
+
+				continue
+			}
+
+			if uniqueDeletes == nil && firstInfo.hasPointerIdentity && d == firstInfo.file {
+				continue
+			}
+
 			path := d.FilePath()
-			if info, ok := uniqueDeletes[path]; ok {
+			if uniqueDeletes == nil {
+				if path == firstPath {
+					if err := validateEqualityDeleteMetadata(
+						d, firstInfo.file, firstInfo.fieldIDs, firstInfo.hasPointerIdentity,
+					); err != nil {
+						return nil, err
+					}
+
+					continue
+				}
+
+				uniqueDeletes = make(map[string]deleteFileInfo, 2)
+				uniqueDeletes[firstPath] = firstInfo
+			} else if info, ok := uniqueDeletes[path]; ok {
 				if err := validateEqualityDeleteMetadata(
 					d, info.file, info.fieldIDs, info.hasPointerIdentity,
 				); err != nil {
@@ -667,8 +707,11 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 		}
 	}
 
-	if len(uniqueDeletes) == 0 {
+	if !hasFirst {
 		return nil, nil
+	}
+	if uniqueDeletes == nil {
+		uniqueDeletes = map[string]deleteFileInfo{firstPath: firstInfo}
 	}
 
 	type deleteFileResult struct {
