@@ -84,12 +84,40 @@ func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 
 	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"namespace+name", "table+name"})
 	require.NoError(t, err)
-	assert.Equal(t, "namespace+name", ns)
+	assert.Equal(t, "namespace%2Bname", ns)
 	assert.Equal(t, "table%2Bname", tbl)
+
+	for name, split := range map[string]func(table.Identifier) (string, string, error){
+		"view":     cat.splitViewIdentForPath,
+		"function": cat.splitFunctionIdentForPath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ns, object, err := split(table.Identifier{"namespace+name", name + "+name"})
+			require.NoError(t, err)
+			assert.Equal(t, "namespace%2Bname", ns)
+			assert.Equal(t, name+"%2Bname", object)
+		})
+	}
 }
 
-func TestEncodeString(t *testing.T) {
-	assert.Equal(t, "+%25%26%2B%C2%A3%E2%82%AC", encodeString(" %&+£€"))
+func TestEncodePathSegment(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "space", value: " ", want: "%20"},
+		{name: "plus", value: "+", want: "%2B"},
+		{name: "percent", value: "%", want: "%25"},
+		{name: "slash", value: "/", want: "%2F"},
+		{name: "unicode", value: "£€", want: "%C2%A3%E2%82%AC"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, encodePathSegment(tt.value))
+		})
+	}
 }
 
 func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {

@@ -1421,11 +1421,11 @@ func (r *Catalog) nsSeparator() string {
 	return r.namespaceSeparator
 }
 
-func encodeString(value string) string {
-	encoded := url.QueryEscape(value)
-	encoded = strings.ReplaceAll(encoded, "%2A", "*")
-
-	return strings.ReplaceAll(encoded, "~", "%7E")
+// encodePathSegment escapes a REST path segment per RFC 3986. PathEscape
+// leaves plus signs literal, so encode them explicitly to avoid form decoders
+// interpreting them as spaces.
+func encodePathSegment(value string) string {
+	return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
 }
 
 // encodeNamespace URL-encodes each namespace level and joins them with the
@@ -1434,7 +1434,7 @@ func encodeString(value string) string {
 func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
 	encoded := make([]string, len(namespace))
 	for i, level := range namespace {
-		encoded[i] = url.PathEscape(level)
+		encoded[i] = encodePathSegment(level)
 	}
 
 	return strings.Join(encoded, r.nsSeparator())
@@ -1461,7 +1461,7 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodeString(catalog.ObjectNameFromIdent(ident)), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1469,7 +1469,7 @@ func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string,
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1477,7 +1477,7 @@ func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, str
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
@@ -1607,7 +1607,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		return nil, "", err
 	}
 
-	ns, tblName, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1623,7 +1623,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		Updates      []table.Update      `json:"updates"`
 	}
 
-	path, err := endpointUpdateTable.reqPath(ns, tblName)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1829,7 +1829,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1843,7 +1843,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateTable.reqPath(ns, tbl)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, err
 	}
