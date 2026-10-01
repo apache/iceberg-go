@@ -599,18 +599,13 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 		return file.singleSet[:], nil
 	}
 
-	perFile := make(map[string]*equalityDeleteFileSet, len(task.EqualityDeleteFiles))
+	files := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
 	for _, dataFile := range task.EqualityDeleteFiles {
 		if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
 			continue
 		}
 
-		path := dataFile.FilePath()
-		if _, seen := perFile[path]; seen {
-			continue
-		}
-
-		file, ok := l.files[path]
+		file, ok := l.files[dataFile.FilePath()]
 		if !ok {
 			continue
 		}
@@ -619,14 +614,10 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 		if err != nil {
 			return nil, err
 		}
-		perFile[path] = fileSet
+		files = append(files, fileSet)
 	}
 
-	if len(perFile) == 0 {
-		return nil, nil
-	}
-
-	return buildEqualityDeleteSetsForTask(task, perFile, l.combine), nil
+	return buildEqualityDeleteSetsForFiles(files, l.combine), nil
 }
 
 // readAllEqualityDeleteFiles reads all unique equality delete files from
@@ -816,39 +807,41 @@ func buildEqualityDeleteSetsForTask(
 		return []*equalityDeleteSet{fileSet.equalityDeleteSet}
 	}
 
-	var (
-		groupKey string
-		groups   map[string][]*equalityDeleteFileSet
-	)
-	groupFiles := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
-
+	files := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
 	for _, dataFile := range task.EqualityDeleteFiles {
-		fileSet, ok := perFile[dataFile.FilePath()]
-		if !ok {
-			continue
-		}
-
-		if groups != nil {
-			groups[fileSet.groupKey] = append(groups[fileSet.groupKey], fileSet)
-		} else if len(groupFiles) == 0 {
-			groupKey = fileSet.groupKey
-			groupFiles = append(groupFiles, fileSet)
-		} else if fileSet.groupKey != groupKey {
-			groups = make(map[string][]*equalityDeleteFileSet, 2)
-			groups[groupKey] = groupFiles
-			groupFiles = nil
-			groups[fileSet.groupKey] = append(groups[fileSet.groupKey], fileSet)
-		} else {
-			groupFiles = append(groupFiles, fileSet)
+		if fileSet, ok := perFile[dataFile.FilePath()]; ok {
+			files = append(files, fileSet)
 		}
 	}
 
-	if groups == nil {
-		if len(groupFiles) == 0 {
+	return buildEqualityDeleteSetsForFiles(files, combine)
+}
+
+func buildEqualityDeleteSetsForFiles(
+	files []*equalityDeleteFileSet,
+	combine func([]*equalityDeleteFileSet) *equalityDeleteSet,
+) []*equalityDeleteSet {
+	if len(files) == 0 {
+		return nil
+	}
+	if len(files) == 1 {
+		if len(files[0].keys) == 0 {
 			return nil
 		}
 
-		deleteSet := combine(groupFiles)
+		return []*equalityDeleteSet{files[0].equalityDeleteSet}
+	}
+
+	groupKey := files[0].groupKey
+	oneGroup := true
+	for _, file := range files[1:] {
+		if file.groupKey != groupKey {
+			oneGroup = false
+			break
+		}
+	}
+	if oneGroup {
+		deleteSet := combine(files)
 		if len(deleteSet.keys) == 0 {
 			return nil
 		}
@@ -856,9 +849,14 @@ func buildEqualityDeleteSetsForTask(
 		return []*equalityDeleteSet{deleteSet}
 	}
 
+	groups := make(map[string][]*equalityDeleteFileSet, 2)
+	for _, file := range files {
+		groups[file.groupKey] = append(groups[file.groupKey], file)
+	}
+
 	sets := make([]*equalityDeleteSet, 0, len(groups))
-	for _, files := range groups {
-		deleteSet := combine(files)
+	for _, groupFiles := range groups {
+		deleteSet := combine(groupFiles)
 		if len(deleteSet.keys) > 0 {
 			sets = append(sets, deleteSet)
 		}
