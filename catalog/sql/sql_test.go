@@ -2782,8 +2782,11 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionReturnsCatalogS
 // for longer than the retry budget used to surface SQLITE_BUSY to the caller instead of
 // ErrTableAlreadyExists/ErrViewAlreadyExists.
 func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionUnderLockContention() {
-	// Longer than the former 30ms budget, comfortably inside the current one.
-	const holdWriteLockFor = 100 * time.Millisecond
+	// Longer than the former 30ms budget. Attempts fire at 0/10/30/70/150/310ms,
+	// so a 50ms hold is contended through attempt 3 (70ms) and leaves attempts 4
+	// and 5 for the loser to observe the committed winner; the hold would have to
+	// drift past 150ms before the collision could land on the last attempt.
+	const holdWriteLockFor = 50 * time.Millisecond
 
 	ctx := context.Background()
 	sqlDB := s.getDB()
@@ -2799,9 +2802,9 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionUnderLockConten
 
 	// Hold the database-wide write lock so both creates begin while contended.
 	holder := s.getDB()
-	tx, err := holder.Begin()
+	tx, err := holder.BeginTx(ctx, nil)
 	s.Require().NoError(err)
-	_, err = tx.Exec("INSERT INTO lock_holder VALUES (1)")
+	_, err = tx.ExecContext(ctx, "INSERT INTO lock_holder VALUES (1)")
 	s.Require().NoError(err)
 
 	released := make(chan struct{})
