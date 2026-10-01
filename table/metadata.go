@@ -1517,12 +1517,17 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		b.lastUpdatedMS = time.Now().UnixMilli()
 	}
 
+	// Build may run more than once on the same builder, so the log is extended on a
+	// copy. Appending to b.metadataLog would add the previous file again on every call.
+	metadataLog := b.metadataLog
 	if b.previousFileEntry != nil && b.HasChanges() {
 		maxMetadataLogEntries := max(1,
 			b.props.GetInt(
 				MetadataPreviousVersionsMaxKey, MetadataPreviousVersionsMaxDefault))
-		b.AppendMetadataLog(*b.previousFileEntry)
-		b.TrimMetadataLogs(maxMetadataLogEntries)
+		metadataLog = append(slices.Clone(b.metadataLog), *b.previousFileEntry)
+		if len(metadataLog) > maxMetadataLogEntries {
+			metadataLog = metadataLog[len(metadataLog)-maxMetadataLogEntries:]
+		}
 	}
 
 	return &commonMetadata{
@@ -1543,7 +1548,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		snapshotIndex:      b.snapshotIndex,
 		CurrentSnapshotID:  b.currentSnapshotID,
 		SnapshotLog:        b.snapshotLog,
-		MetadataLog:        b.metadataLog,
+		MetadataLog:        metadataLog,
 		SortOrderList:      b.sortOrderList,
 		DefaultSortOrderID: b.defaultSortOrderID,
 		SnapshotRefs:       b.refs,
