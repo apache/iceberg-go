@@ -24,6 +24,7 @@ package table
 import (
 	"context"
 	"io"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	icebergio "github.com/apache/iceberg-go/io"
@@ -52,6 +53,31 @@ const (
 	// back to local.
 	ScanPlanningAuto ScanPlanningMode = "auto"
 )
+
+// ScanPlanningModeKey is the REST table-config key a catalog uses to tell
+// clients which planning mode a table supports. Valid values are `client` and
+// `server`.
+const ScanPlanningModeKey = "scan-planning-mode"
+
+// ScanPlanningMode returns the scan-planning modes permitted by the catalog's
+// `scan-planning-mode` table config, as supplied in the load response. A
+// `client` directive permits only ScanPlanningLocal and a `server` directive
+// permits only ScanPlanningRemote. ScanPlanningAuto is never returned because
+// it may resolve to either mode. The result is empty when the key is absent or
+// holds an unrecognized value, meaning the catalog imposed no constraint.
+//
+// The scanner does not yet enforce this directive; callers must apply it
+// themselves via WithScanPlanningMode.
+func (t Table) ScanPlanningMode() []ScanPlanningMode {
+	switch strings.ToLower(strings.TrimSpace(t.scanPlanningIOProps[ScanPlanningModeKey])) {
+	case "client":
+		return []ScanPlanningMode{ScanPlanningLocal}
+	case "server":
+		return []ScanPlanningMode{ScanPlanningRemote}
+	default:
+		return []ScanPlanningMode{}
+	}
+}
 
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
 // ScanPlanningLocal.

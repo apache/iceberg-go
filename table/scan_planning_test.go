@@ -740,3 +740,32 @@ func mustPlanIOState(t *testing.T, planIO PlanIO) *planIOState {
 
 	return state
 }
+
+func TestTableScanPlanningMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		props iceberg.Properties
+		want  []ScanPlanningMode
+	}{
+		{"no props", nil, []ScanPlanningMode{}},
+		{"key absent", iceberg.Properties{"s3.endpoint": "https://table.local"}, []ScanPlanningMode{}},
+		{"client", iceberg.Properties{ScanPlanningModeKey: "client"}, []ScanPlanningMode{ScanPlanningLocal}},
+		{"server", iceberg.Properties{ScanPlanningModeKey: "server"}, []ScanPlanningMode{ScanPlanningRemote}},
+		{"case insensitive", iceberg.Properties{ScanPlanningModeKey: " SERVER "}, []ScanPlanningMode{ScanPlanningRemote}},
+		{"unrecognized", iceberg.Properties{ScanPlanningModeKey: "remote"}, []ScanPlanningMode{}},
+		{"empty value", iceberg.Properties{ScanPlanningModeKey: ""}, []ScanPlanningMode{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tbl := New(Identifier{"db", "tbl"}, nil, "", nil, nil, WithScanPlanningIOProperties(tt.props))
+			got := tbl.ScanPlanningMode()
+			require.NotNil(t, got)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

@@ -1685,6 +1685,53 @@ func (r *RestCatalogSuite) TestLoadTableLabels() {
 	r.Nil(labels.Field(1))                                                     // field present in schema but unlabeled
 }
 
+func (r *RestCatalogSuite) TestLoadTableScanPlanningMode() {
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   []table.ScanPlanningMode
+	}{
+		{"absent", `{}`, []table.ScanPlanningMode{}},
+		{"client", `{"scan-planning-mode": "client"}`, []table.ScanPlanningMode{table.ScanPlanningLocal}},
+		{"server", `{"scan-planning-mode": "server"}`, []table.ScanPlanningMode{table.ScanPlanningRemote}},
+	} {
+		r.Run(tc.name, func() {
+			tableName := "table_" + tc.name
+			r.mux.HandleFunc("/v1/namespaces/fokko/tables/"+tableName, func(w http.ResponseWriter, req *http.Request) {
+				r.Require().Equal(http.MethodGet, req.Method)
+				w.Write([]byte(`{
+					"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
+					"metadata": {
+						"format-version": 1,
+						"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+						"location": "s3://warehouse/database/table",
+						"last-updated-ms": 1646787054459,
+						"last-column-id": 2,
+						"schema": {"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]},
+						"current-schema-id": 0,
+						"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]}],
+						"partition-spec": [],
+						"default-spec-id": 0,
+						"partition-specs": [{"spec-id":0,"fields":[]}],
+						"last-partition-id": 999,
+						"default-sort-order-id": 0,
+						"sort-orders": [{"order-id":0,"fields":[]}],
+						"properties": {}
+					},
+					"config": ` + tc.config + `
+				}`))
+			})
+
+			cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+			r.Require().NoError(err)
+
+			tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", tableName))
+			r.Require().NoError(err)
+			r.Equal(tc.want, tbl.ScanPlanningMode())
+		})
+	}
+}
+
 func (r *RestCatalogSuite) TestCreateTableLabels() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
