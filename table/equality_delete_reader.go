@@ -401,10 +401,10 @@ type lazyEqualityDeleteFile struct {
 	fieldIDs           []int
 	hasPointerIdentity bool
 
-	once       sync.Once
-	set        *equalityDeleteFileSet
-	singleSet  [1]*equalityDeleteSet
-	err        error
+	once      sync.Once
+	set       *equalityDeleteFileSet
+	singleSet [1]*equalityDeleteSet
+	err       error
 }
 
 type lazyEqualityDeleteCombination struct {
@@ -840,6 +840,7 @@ func buildEqualityDeleteSetsForFiles(
 	for _, file := range files[1:] {
 		if file.groupKey != groupKey {
 			oneGroup = false
+
 			break
 		}
 	}
