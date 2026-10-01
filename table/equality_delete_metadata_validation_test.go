@@ -161,6 +161,7 @@ func TestEqualityDeleteMetadataConflictErrors(t *testing.T) {
 				require.NotNil(t, loader)
 				assert.Len(t, loader.files, 1)
 				assert.Zero(t, fs.attempts.Load())
+
 				return
 			}
 
