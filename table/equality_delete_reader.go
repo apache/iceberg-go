@@ -428,12 +428,11 @@ func newLazyEqualityDeleteLoader(
 	var firstFile *lazyEqualityDeleteFile
 	for _, task := range tasks {
 		for _, dataFile := range task.EqualityDeleteFiles {
-			if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
-				continue
-			}
-
 			if loader.files == nil && firstFile != nil &&
 				firstFile.hasPointerIdentity && dataFile == firstFile.dataFile {
+				continue
+			}
+			if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
 				continue
 			}
 
@@ -643,6 +642,10 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 
 	for _, t := range tasks {
 		for _, d := range t.EqualityDeleteFiles {
+			if hasFirst && uniqueDeletes == nil &&
+				firstInfo.hasPointerIdentity && d == firstInfo.file {
+				continue
+			}
 			if d.ContentType() != iceberg.EntryContentEqDeletes {
 				continue
 			}
@@ -665,9 +668,6 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				continue
 			}
 
-			if uniqueDeletes == nil && firstInfo.hasPointerIdentity && d == firstInfo.file {
-				continue
-			}
 
 			path := d.FilePath()
 			if uniqueDeletes == nil {
