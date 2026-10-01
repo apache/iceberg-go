@@ -271,7 +271,7 @@ func TestGoEnvelopeEncryptionManager_OversizedAADPrefixMetadataRejectedOnRead(t 
 	mgr, _ := newTestGoEnvelopeManager(t)
 	// 17 zero bytes, base64-encoded: one byte longer than gcmStreamAADPrefixLength.
 	oversized := base64.StdEncoding.EncodeToString(make([]byte, 17))
-	meta := []byte(fmt.Sprintf(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":16,"aad-prefix":"%s","plaintext-length":10}`, oversized))
+	meta := fmt.Appendf(nil, `{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":16,"aad-prefix":"%s","plaintext-length":10}`, oversized)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
@@ -289,7 +289,7 @@ func TestGoEnvelopeEncryptionManager_ZeroBlockSizeMetadataRejectedOnRead(t *test
 
 func TestGoEnvelopeEncryptionManager_BlockSizeExceedingMaxMetadataRejectedOnRead(t *testing.T) {
 	mgr, _ := newTestGoEnvelopeManager(t)
-	meta := []byte(fmt.Sprintf(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":%d,"aad-prefix":"MTIzNDU2Nzg5MDEyMzQ1Ng==","plaintext-length":10}`, encryption.GoEnvelopeMaxBlockSize+1))
+	meta := fmt.Appendf(nil, `{"v":1,"key-id":"kek-1","wrapped-key":"AA==","block-size":%d,"aad-prefix":"MTIzNDU2Nzg5MDEyMzQ1Ng==","plaintext-length":10}`, encryption.GoEnvelopeMaxBlockSize+1)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
