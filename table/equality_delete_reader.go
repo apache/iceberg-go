@@ -391,6 +391,7 @@ type lazyEqualityDeleteLoader struct {
 	tableSchemas []*iceberg.Schema
 	nameMapping  iceberg.NameMapping
 	files        map[string]*lazyEqualityDeleteFile
+	singleFile   *lazyEqualityDeleteFile
 	combinations sync.Map
 }
 
@@ -495,6 +496,7 @@ func newLazyEqualityDeleteLoader(
 	}
 	if loader.files == nil {
 		loader.files = map[string]*lazyEqualityDeleteFile{firstPath: firstFile}
+		loader.singleFile = firstFile
 	}
 
 	return loader, nil
@@ -571,13 +573,17 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 	}
 	if len(task.EqualityDeleteFiles) == 1 {
 		dataFile := task.EqualityDeleteFiles[0]
-		if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
-			return nil, nil
-		}
+		file := l.singleFile
+		if file == nil || !file.hasPointerIdentity || dataFile != file.dataFile {
+			if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
+				return nil, nil
+			}
 
-		file, ok := l.files[dataFile.FilePath()]
-		if !ok {
-			return nil, nil
+			var ok bool
+			file, ok = l.files[dataFile.FilePath()]
+			if !ok {
+				return nil, nil
+			}
 		}
 
 		fileSet, err := l.loadFile(ctx, file)
@@ -667,7 +673,6 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 
 				continue
 			}
-
 
 			path := d.FilePath()
 			if uniqueDeletes == nil {
