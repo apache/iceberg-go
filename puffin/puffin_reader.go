@@ -33,6 +33,15 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
+// ErrNotPuffinFile is returned by NewReader when the input does not carry a
+// Puffin container: the file is too short to hold the header magic, or its
+// leading bytes are not the Puffin magic. A file that starts with the magic
+// but is truncated or has a broken footer is a damaged Puffin file and does
+// NOT wrap this error. Callers that can still consume the payload by other
+// means (e.g. a deletion vector addressed by content_offset) may test for it
+// with errors.Is.
+var ErrNotPuffinFile = errors.New("puffin: not a puffin file")
+
 // ReaderAtSeeker combines io.ReaderAt and io.Seeker for reading Puffin files.
 // This interface is implemented by *os.File, *bytes.Reader, and similar types.
 type ReaderAtSeeker interface {
@@ -105,20 +114,25 @@ func NewReader(r ReaderAtSeeker, opts ...ReaderOption) (*Reader, error) {
 		return nil, fmt.Errorf("puffin: detect file size: %w", err)
 	}
 
-	// Minimum size: header magic + footer magic + footer trailer
-	// [Magic] + zero for blob + [Magic] + [FooterPayloadSize (assuming ~0)] + [Flags] + [Magic]
-	minSize := int64(MagicSize + MagicSize + footerTrailerSize)
-	if size < minSize {
-		return nil, fmt.Errorf("puffin: file too small (%d bytes, minimum %d)", size, minSize)
+	// Validate header magic first: only a file that cannot show the Puffin
+	// magic is "not a Puffin file". A file that starts with the magic but is
+	// truncated is a damaged Puffin file and must not be mistaken for one.
+	if size < int64(MagicSize) {
+		return nil, fmt.Errorf("%w: file too small to hold header magic (%d bytes)", ErrNotPuffinFile, size)
 	}
-
-	// Validate header magic
 	var headerMagic [MagicSize]byte
 	if _, err := r.ReadAt(headerMagic[:], 0); err != nil {
 		return nil, fmt.Errorf("puffin: read header magic: %w", err)
 	}
 	if !bytes.Equal(headerMagic[:], magic[:]) {
-		return nil, errors.New("puffin: invalid header magic")
+		return nil, fmt.Errorf("%w: invalid header magic", ErrNotPuffinFile)
+	}
+
+	// Minimum size: header magic + footer magic + footer trailer
+	// [Magic] + zero for blob + [Magic] + [FooterPayloadSize (assuming ~0)] + [Flags] + [Magic]
+	minSize := int64(MagicSize + MagicSize + footerTrailerSize)
+	if size < minSize {
+		return nil, fmt.Errorf("puffin: file too small (%d bytes, minimum %d)", size, minSize)
 	}
 
 	pr := &Reader{
