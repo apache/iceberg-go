@@ -1315,6 +1315,7 @@ func (r *Catalog) tableFromResponse(
 	config iceberg.Properties,
 	scanPlanningConfig iceberg.Properties,
 	credsVended bool,
+	labels *iceberg.Labels,
 ) (*table.Table, error) {
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
@@ -1373,6 +1374,7 @@ func (r *Catalog) tableFromResponse(
 		r,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(scanPlanningConfig),
+		table.WithLabels(labels),
 	), nil
 }
 
@@ -1612,7 +1614,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1840,7 +1842,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1885,7 +1887,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1933,7 +1935,8 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, metadata.Properties())
 
-	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false)
+	// A commit response carries no labels (they are load-time enrichment).
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil)
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
@@ -2410,6 +2413,7 @@ type viewResponse struct {
 	MetadataLoc string             `json:"metadata-location"`
 	RawMetadata json.RawMessage    `json:"metadata"`
 	Config      iceberg.Properties `json:"config"`
+	Labels      *iceberg.Labels    `json:"labels,omitempty"`
 	Metadata    view.Metadata      `json:"-"`
 }
 
@@ -2485,7 +2489,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	return view.New(identifier, ret.Metadata, ret.MetadataLoc), nil
+	return view.New(identifier, ret.Metadata, ret.MetadataLoc, view.WithLabels(ret.Labels)), nil
 }
 
 // UpdateView updates a view in the catalog.
@@ -2520,7 +2524,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	return view.New(ident, ret.Metadata, ret.MetadataLoc), nil
+	return view.New(ident, ret.Metadata, ret.MetadataLoc, view.WithLabels(ret.Labels)), nil
 }
 
 // loadViewResponse contains the response from loading a view
@@ -2568,7 +2572,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
 	}
 
-	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+	return view.New(identifier, metadata, rsp.MetadataLoc, view.WithLabels(rsp.Labels)), nil
 }
 
 // LoadView loads a view from the catalog.
@@ -2600,7 +2604,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
 	}
 
-	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+	return view.New(identifier, metadata, rsp.MetadataLoc, view.WithLabels(rsp.Labels)), nil
 }
 
 func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*view.View, error) {
