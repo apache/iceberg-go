@@ -307,7 +307,20 @@ func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.T
 }
 
 const (
-	serializableWriteMaxAttempts = 3
+	// The retry budget has to outlast a competing writer's transaction, not just a
+	// scheduling hiccup. SQLite serializes writers and reports a lock conflict on
+	// upgrade immediately, without consulting the busy handler, so a losing
+	// CreateTable/CreateView only observes the catalog-level conflict it should
+	// report once the winner commits. At 3 attempts the budget was 30ms, which a
+	// loaded machine exceeds, surfacing SQLITE_BUSY instead of
+	// ErrTableAlreadyExists/ErrViewAlreadyExists.
+	//
+	// Attempts fire at 0/10/30/70/150/310ms (delay doubles per attempt), so the
+	// worst case is ~310ms of waiting, and nothing when there is no contention.
+	// The same budget gates retrySerializableWriteTx for every dialect that
+	// isRetryableSerializableError recognises (Postgres 40001/40P01, MySQL
+	// 1205/1213, ...), so changing either constant changes their worst case too.
+	serializableWriteMaxAttempts = 6
 	serializableWriteRetryDelay  = 10 * time.Millisecond
 )
 
