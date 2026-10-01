@@ -401,9 +401,10 @@ type lazyEqualityDeleteFile struct {
 	fieldIDs           []int
 	hasPointerIdentity bool
 
-	once sync.Once
-	set  *equalityDeleteFileSet
-	err  error
+	once       sync.Once
+	set        *equalityDeleteFileSet
+	singleSet  [1]*equalityDeleteSet
+	err        error
 }
 
 type lazyEqualityDeleteCombination struct {
@@ -546,6 +547,7 @@ func (l *lazyEqualityDeleteLoader) loadFile(ctx context.Context, file *lazyEqual
 			colNames: colNames,
 			keys:     keys,
 		})
+		file.singleSet[0] = file.set.equalityDeleteSet
 	})
 
 	return file.set, file.err
@@ -594,7 +596,7 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 			return nil, nil
 		}
 
-		return []*equalityDeleteSet{fileSet.equalityDeleteSet}, nil
+		return file.singleSet[:], nil
 	}
 
 	perFile := make(map[string]*equalityDeleteFileSet, len(task.EqualityDeleteFiles))
