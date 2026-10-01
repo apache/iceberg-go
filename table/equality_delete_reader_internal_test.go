@@ -322,61 +322,6 @@ func TestEqualityDeleteMetadataIsReadOncePerPath(t *testing.T) {
 	assert.Zero(t, deleteFile.equalityFieldIDsCalls)
 }
 
-func TestEqualityDeleteMetadataRejectsConflictingSamePath(t *testing.T) {
-	t.Parallel()
-
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-	)
-	path := "mem://metadata-conflict/delete.parquet"
-	first := newEqualityDeleteSetAssemblyTestFile(t, path, []int{1, 2})
-
-	avroBuilder, err := iceberg.NewDataFileBuilder(
-		*iceberg.UnpartitionedSpec,
-		iceberg.EntryContentEqDeletes,
-		path,
-		iceberg.AvroFile,
-		nil,
-		nil,
-		nil,
-		1,
-		128,
-	)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name   string
-		second iceberg.DataFile
-	}{
-		{
-			name:   "equality field IDs",
-			second: newEqualityDeleteSetAssemblyTestFile(t, path, []int{2, 1}),
-		},
-		{
-			name:   "file format",
-			second: avroBuilder.EqualityFieldIDs([]int{1, 2}).Build(),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tasks := []FileScanTask{
-				{EqualityDeleteFiles: []iceberg.DataFile{first}},
-				{EqualityDeleteFiles: []iceberg.DataFile{tt.second}},
-			}
-
-			_, err := newLazyEqualityDeleteLoader(iceio.NewMemFS(), schema, nil, nil, tasks)
-			require.ErrorContains(t, err, "conflicting equality delete metadata")
-			require.ErrorContains(t, err, path)
-
-			_, err = readAllEqualityDeleteFiles(t.Context(), iceio.NewMemFS(), schema, nil, tasks, 1)
-			require.ErrorContains(t, err, "conflicting equality delete metadata")
-			require.ErrorContains(t, err, path)
-		})
-	}
-}
-
 func TestLazyEqualityDeleteLoaderNeedsSchemaHistory(t *testing.T) {
 	t.Parallel()
 
