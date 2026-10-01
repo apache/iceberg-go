@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
@@ -831,6 +832,81 @@ func TestVariantLiteralLargeObject(t *testing.T) {
 	}
 }
 
+func variantLiteralOf(t *testing.T, v any, opts ...variant.AppendOpt) iceberg.VariantLiteral {
+	t.Helper()
+	var b variant.Builder
+	require.NoError(t, b.Append(v, opts...))
+	val, err := b.Build()
+	require.NoError(t, err)
+
+	return iceberg.VariantLiteral(val)
+}
+
+func TestVariantLiteralConversions(t *testing.T) {
+	testUUID := uuid.New()
+	ts := arrow.Timestamp(1503066061919234)
+	dec := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
+
+	tests := []struct {
+		from iceberg.VariantLiteral
+		to   iceberg.Literal
+	}{
+		{variantLiteralOf(t, int8(5)), iceberg.NewLiteral(int32(5))},
+		{variantLiteralOf(t, int16(1000)), iceberg.NewLiteral(int32(1000))},
+		{variantLiteralOf(t, int32(100000)), iceberg.NewLiteral(int32(100000))},
+		{variantLiteralOf(t, int64(12345123456)), iceberg.NewLiteral(int64(12345123456))},
+		{variantLiteralOf(t, float32(1.5)), iceberg.NewLiteral(float32(1.5))},
+		{variantLiteralOf(t, float64(2.5)), iceberg.NewLiteral(float64(2.5))},
+		{variantLiteralOf(t, true), iceberg.NewLiteral(true)},
+		{variantLiteralOf(t, "abc"), iceberg.NewLiteral("abc")},
+		{variantLiteralOf(t, []byte{0x00, 0x01, 0x02}), iceberg.NewLiteral([]byte{0x00, 0x01, 0x02})},
+		{variantLiteralOf(t, arrow.Date32(17396)), iceberg.NewLiteral(iceberg.Date(17396))},
+		{variantLiteralOf(t, arrow.Time64(51661919000)), iceberg.NewLiteral(iceberg.Time(51661919000))},
+		{variantLiteralOf(t, ts), iceberg.NewLiteral(iceberg.Timestamp(ts))},
+		{variantLiteralOf(t, ts, variant.OptTimestampNano), iceberg.NewLiteral(iceberg.TimestampNano(ts))},
+		{variantLiteralOf(t, testUUID), iceberg.NewLiteral(testUUID)},
+		{
+			variantLiteralOf(t, variant.DecimalValue[decimal.Decimal32]{Scale: 2, Value: decimal.Decimal32(1234)}),
+			iceberg.NewLiteral(dec),
+		},
+		{
+			variantLiteralOf(t, variant.DecimalValue[decimal.Decimal64]{Scale: 2, Value: decimal.Decimal64(1234)}),
+			iceberg.NewLiteral(dec),
+		},
+		{
+			variantLiteralOf(t, variant.DecimalValue[decimal.Decimal128]{Scale: 2, Value: decimal128.FromI64(1234)}),
+			iceberg.NewLiteral(dec),
+		},
+		// the casts of the literal for the underlying value apply
+		{variantLiteralOf(t, int8(5)), iceberg.NewLiteral(int64(5))},
+		{variantLiteralOf(t, int8(5)), iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(500), Scale: 2})},
+		{variantLiteralOf(t, float32(1.5)), iceberg.NewLiteral(float64(1.5))},
+		{variantLiteralOf(t, "12345"), iceberg.NewLiteral(int32(12345))},
+		{variantLiteralOf(t, testUUID.String()), iceberg.NewLiteral(testUUID)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.to.Type().String(), func(t *testing.T) {
+			got, err := tt.from.To(tt.to.Type())
+			require.NoError(t, err)
+			assert.Truef(t, tt.to.Equals(got), "expected: %s, got: %s", tt.to, got)
+		})
+	}
+
+	lit := variantLiteralOf(t, ts, variant.OptTimestampUTC)
+	casted, err := lit.To(iceberg.PrimitiveTypes.TimestampTz)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.NewLiteral(iceberg.Timestamp(ts)), casted)
+
+	// null, object and array variants still convert to the variant type
+	for _, v := range []any{nil, []any{int64(1)}, map[string]any{"a": int64(1)}} {
+		lit := variantLiteralOf(t, v)
+		same, err := lit.To(iceberg.VariantType{})
+		require.NoError(t, err)
+		assert.True(t, lit.Equals(same))
+	}
+}
+
 func TestFixedLiteral(t *testing.T) {
 	emptyFixed := iceberg.FixedLiteral(nil)
 	assert.NotPanics(t, func() {
@@ -1148,6 +1224,55 @@ func TestInvalidBinaryLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
 	})
+}
+
+func TestInvalidVariantLiteralConversions(t *testing.T) {
+	// null, object and array variants hold no primitive value to convert
+	for _, v := range []any{nil, []any{int64(1)}, map[string]any{"a": int64(1)}} {
+		testInvalidLiteralConversions(t, variantLiteralOf(t, v), []iceberg.Type{
+			iceberg.PrimitiveTypes.Bool,
+			iceberg.PrimitiveTypes.Int32,
+			iceberg.PrimitiveTypes.Int64,
+			iceberg.PrimitiveTypes.Float32,
+			iceberg.PrimitiveTypes.Float64,
+			iceberg.PrimitiveTypes.Date,
+			iceberg.PrimitiveTypes.Time,
+			iceberg.PrimitiveTypes.Timestamp,
+			iceberg.PrimitiveTypes.TimestampTz,
+			iceberg.DecimalTypeOf(9, 2),
+			iceberg.PrimitiveTypes.String,
+			iceberg.PrimitiveTypes.UUID,
+			iceberg.PrimitiveTypes.Binary,
+			iceberg.FixedTypeOf(2),
+		})
+	}
+
+	// a primitive variant rejects what the literal for its value rejects
+	testInvalidLiteralConversions(t, variantLiteralOf(t, true), []iceberg.Type{
+		iceberg.PrimitiveTypes.Int32,
+		iceberg.PrimitiveTypes.Int64,
+		iceberg.PrimitiveTypes.Float32,
+		iceberg.PrimitiveTypes.Float64,
+		iceberg.PrimitiveTypes.Date,
+		iceberg.PrimitiveTypes.Time,
+		iceberg.PrimitiveTypes.Timestamp,
+		iceberg.PrimitiveTypes.TimestampTz,
+		iceberg.DecimalTypeOf(9, 2),
+		iceberg.PrimitiveTypes.String,
+		iceberg.PrimitiveTypes.UUID,
+		iceberg.PrimitiveTypes.Binary,
+		iceberg.FixedTypeOf(2),
+	})
+
+	// a zero-value variant has no value to convert
+	testInvalidLiteralConversions(t, iceberg.VariantLiteral(variant.Value{}), []iceberg.Type{
+		iceberg.PrimitiveTypes.Int32,
+		iceberg.PrimitiveTypes.String,
+	})
+
+	_, err := variantLiteralOf(t, int8(5)).To(iceberg.PrimitiveTypes.String)
+	assert.ErrorIs(t, err, iceberg.ErrBadCast)
+	assert.ErrorContains(t, err, "VariantLiteral: could not cast value: Int32Literal to string")
 }
 
 func TestBadStringLiteralCasts(t *testing.T) {

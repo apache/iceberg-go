@@ -1529,9 +1529,17 @@ func (v VariantLiteral) To(typ Type) (Literal, error) {
 		return v, nil
 	}
 
-	// TODO: improve by getting the actual value (using .Type()) and attempting
-	// to convert, or returning an error if it can't.
-	return nil, fmt.Errorf("%w: VariantLiteral to %s", ErrBadCast, typ)
+	lit, ok := literalFromVariant(variant.Value(v))
+	if !ok {
+		return nil, fmt.Errorf("%w: VariantLiteral to %s", ErrBadCast, typ)
+	}
+
+	out, err := lit.To(typ)
+	if err != nil {
+		return nil, fmt.Errorf("VariantLiteral: %w", err)
+	}
+
+	return out, nil
 }
 
 func (v VariantLiteral) Equals(other Literal) bool {
