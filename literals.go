@@ -1343,7 +1343,10 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: could not convert %v to %s",
 			ErrBadCast, d, t)
 	case Int32Type:
-		v := d.Val.BigInt()
+		v, err := d.integral(t)
+		if err != nil {
+			return nil, err
+		}
 		if !v.IsInt64() {
 			if v.Sign() > 0 {
 				return Int32AboveMaxLiteral(), nil
@@ -1360,7 +1363,10 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 
 		return Int32Literal(int32(i)), nil
 	case Int64Type:
-		v := d.Val.BigInt()
+		v, err := d.integral(t)
+		if err != nil {
+			return nil, err
+		}
 		if !v.IsInt64() {
 			if v.Sign() > 0 {
 				return Int64AboveMaxLiteral(), nil
@@ -1384,6 +1390,47 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 	}
 
 	return nil, fmt.Errorf("%w: DecimalLiteral to %s", ErrBadCast, t)
+}
+
+// integral returns the decimal's value as a whole number, or ErrBadCast if
+// it has a nonzero fractional part. Rounding would be unsafe for range
+// predicates: qty < 12.34 must not bind as qty < 12.
+//
+// It uses big.Int rather than decimal128.Rescale, which panics on scales
+// outside [-38, 38] or when scaling up overflows 128 bits; DecimalLiteral
+// can be constructed directly without scale validation.
+func (d DecimalLiteral) integral(t Type) (*big.Int, error) {
+	v := d.Val.BigInt()
+	switch {
+	case d.Scale == 0 || v.Sign() == 0:
+		return v, nil
+	case d.Scale > 38:
+		// |v| < 10^39, so any scale above 38 leaves a fractional part. The
+		// literal is not formatted: String cannot render this scale.
+		return nil, fmt.Errorf("%w: decimal scale %d is out of range for conversion to %s",
+			ErrBadCast, d.Scale, t)
+	case d.Scale > 0:
+		q, r := v.QuoRem(v, pow10Big(d.Scale), new(big.Int))
+		if r.Sign() != 0 {
+			return nil, fmt.Errorf("%w: could not convert %v to %s without losing its fractional part",
+				ErrBadCast, d, t)
+		}
+
+		return q, nil
+	default:
+		// A nonzero value times 10^19 is already outside int64, and callers
+		// clamp that to above max or below min, so larger exponents add nothing.
+		shift := 19
+		if d.Scale > -shift {
+			shift = -d.Scale
+		}
+
+		return v.Mul(v, pow10Big(shift)), nil
+	}
+}
+
+func pow10Big(n int) *big.Int {
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
 }
 
 func (d DecimalLiteral) Equals(other Literal) bool {

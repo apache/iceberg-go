@@ -19,7 +19,9 @@ package iceberg_test
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"testing"
 	"time"
@@ -479,17 +481,158 @@ func TestDecimalLiteralTypeDoesNotPanicForLargeScale(t *testing.T) {
 	})
 }
 
+func TestDecimalLiteralToIntegerRespectsScale(t *testing.T) {
+	dec := func(unscaled int64, scale int) iceberg.DecimalLiteral {
+		return iceberg.DecimalLiteral(iceberg.Decimal{Val: decimal128.FromI64(unscaled), Scale: scale})
+	}
+
+	for _, typ := range []iceberg.Type{iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64} {
+		t.Run(typ.String(), func(t *testing.T) {
+			// 12.34 has a fractional part, so it cannot be cast without changing
+			// the predicate's meaning.
+			_, err := dec(1234, 2).To(typ)
+			require.ErrorIs(t, err, iceberg.ErrBadCast)
+
+			_, err = dec(-1, 3).To(typ)
+			require.ErrorIs(t, err, iceberg.ErrBadCast)
+
+			// 12.00 is a whole number and converts to 12.
+			got, err := dec(1200, 2).To(typ)
+			require.NoError(t, err)
+			want, err := iceberg.NewLiteral(int32(12)).To(typ)
+			require.NoError(t, err)
+			assert.Truef(t, want.Equals(got), "expected: %s, got: %s", want, got)
+
+			got, err = dec(-500, 2).To(typ)
+			require.NoError(t, err)
+			want, err = iceberg.NewLiteral(int32(-5)).To(typ)
+			require.NoError(t, err)
+			assert.Truef(t, want.Equals(got), "expected: %s, got: %s", want, got)
+		})
+	}
+
+	// Range checks apply to the scaled value, not the unscaled one.
+	above, err := dec((math.MaxInt32+1)*100, 2).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32AboveMaxLiteral(), above)
+
+	got, err := dec((math.MaxInt32+1)*100, 2).To(iceberg.PrimitiveTypes.Int64)
+	require.NoError(t, err)
+	assert.True(t, iceberg.NewLiteral(int64(math.MaxInt32+1)).Equals(got))
+
+	// The unscaled value is above the int max, but MaxInt32.000 itself fits.
+	got, err = dec(int64(math.MaxInt32)*1000, 3).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.True(t, iceberg.NewLiteral(int32(math.MaxInt32)).Equals(got))
+}
+
+func TestDecimalLiteralToIntegerScaleEdgeCases(t *testing.T) {
+	dec := func(unscaled *big.Int, scale int) iceberg.DecimalLiteral {
+		return iceberg.DecimalLiteral(iceberg.Decimal{Val: decimal128.FromBigInt(unscaled), Scale: scale})
+	}
+	scaled := func(v int64, by int64) *big.Int {
+		return new(big.Int).Mul(big.NewInt(v), big.NewInt(by))
+	}
+	pow10 := func(n int64) *big.Int {
+		return new(big.Int).Exp(big.NewInt(10), big.NewInt(n), nil)
+	}
+	one, maxI64, minI64 := big.NewInt(1), big.NewInt(math.MaxInt64), big.NewInt(math.MinInt64)
+
+	// DecimalLiteral can be built with scales Iceberg schemas would reject;
+	// integer conversion must return an error or clamp, never panic.
+	t.Run("out of range scales", func(t *testing.T) {
+		for _, typ := range []iceberg.Type{iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64} {
+			for _, scale := range []int{39, 100, math.MaxInt} {
+				_, err := dec(one, scale).To(typ)
+				require.ErrorIs(t, err, iceberg.ErrBadCast, "scale %d to %s", scale, typ)
+				assert.ErrorContains(t, err, fmt.Sprintf("decimal scale %d is out of range", scale))
+				assert.NotContains(t, err.Error(), "PANIC")
+			}
+
+			got, err := dec(big.NewInt(0), 39).To(typ)
+			require.NoError(t, err)
+			want, err := iceberg.NewLiteral(int32(0)).To(typ)
+			require.NoError(t, err)
+			assert.True(t, want.Equals(got), "got %s", got)
+		}
+	})
+
+	t.Run("negative scales", func(t *testing.T) {
+		got, err := dec(big.NewInt(12), -1).To(iceberg.PrimitiveTypes.Int32)
+		require.NoError(t, err)
+		assert.True(t, iceberg.NewLiteral(int32(120)).Equals(got), "got %s", got)
+
+		got, err = dec(big.NewInt(-12), -2).To(iceberg.PrimitiveTypes.Int64)
+		require.NoError(t, err)
+		assert.True(t, iceberg.NewLiteral(int64(-1200)).Equals(got), "got %s", got)
+
+		// Around the 10^19 cap: ±9e18 fits in int64, ±1e19 does not.
+		nineE18 := new(big.Int).Mul(big.NewInt(9), pow10(18))
+		for _, sign := range []int64{1, -1} {
+			got, err := dec(big.NewInt(9*sign), -18).To(iceberg.PrimitiveTypes.Int64)
+			require.NoError(t, err)
+			want := new(big.Int).Mul(nineE18, big.NewInt(sign)).Int64()
+			assert.True(t, iceberg.NewLiteral(want).Equals(got), "got %s", got)
+		}
+
+		for _, tc := range []struct {
+			unscaled int64
+			scale    int
+		}{{10, -18}, {1, -19}} {
+			above, err := dec(big.NewInt(tc.unscaled), tc.scale).To(iceberg.PrimitiveTypes.Int64)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.Int64AboveMaxLiteral(), above, "%d at scale %d", tc.unscaled, tc.scale)
+
+			below, err := dec(big.NewInt(-tc.unscaled), tc.scale).To(iceberg.PrimitiveTypes.Int64)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.Int64BelowMinLiteral(), below, "%d at scale %d", -tc.unscaled, tc.scale)
+		}
+
+		for _, scale := range []int{-1, -40, math.MinInt} {
+			above, err := dec(pow10(38), scale).To(iceberg.PrimitiveTypes.Int64)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.Int64AboveMaxLiteral(), above, "scale %d", scale)
+
+			below, err := dec(new(big.Int).Neg(pow10(38)), scale).To(iceberg.PrimitiveTypes.Int32)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.Int32BelowMinLiteral(), below, "scale %d", scale)
+		}
+	})
+
+	t.Run("scaled int64 bounds", func(t *testing.T) {
+		got, err := dec(scaled(math.MaxInt64, 100), 2).To(iceberg.PrimitiveTypes.Int64)
+		require.NoError(t, err)
+		assert.True(t, iceberg.NewLiteral(int64(math.MaxInt64)).Equals(got), "got %s", got)
+
+		got, err = dec(scaled(math.MinInt64, 100), 2).To(iceberg.PrimitiveTypes.Int64)
+		require.NoError(t, err)
+		assert.True(t, iceberg.NewLiteral(int64(math.MinInt64)).Equals(got), "got %s", got)
+
+		above, err := dec(new(big.Int).Mul(new(big.Int).Add(maxI64, one), big.NewInt(100)), 2).
+			To(iceberg.PrimitiveTypes.Int64)
+		require.NoError(t, err)
+		assert.Equal(t, iceberg.Int64AboveMaxLiteral(), above)
+
+		below, err := dec(new(big.Int).Mul(new(big.Int).Sub(minI64, one), big.NewInt(100)), 2).
+			To(iceberg.PrimitiveTypes.Int64)
+		require.NoError(t, err)
+		assert.Equal(t, iceberg.Int64BelowMinLiteral(), below)
+
+		// MaxInt64.01 is fractional, so it errors rather than clamping.
+		_, err = dec(new(big.Int).Add(scaled(math.MaxInt64, 100), one), 2).To(iceberg.PrimitiveTypes.Int64)
+		require.ErrorIs(t, err, iceberg.ErrBadCast)
+	})
+}
+
 func TestDecimalLiteralConversions(t *testing.T) {
 	n1 := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 	n2 := iceberg.Decimal{Val: decimal128.FromI64(math.MaxInt32 + 1), Scale: 0}
-	n3 := iceberg.Decimal{Val: decimal128.FromI64(math.MinInt32 - 1), Scale: 10}
+	n3 := iceberg.Decimal{Val: decimal128.FromI64(math.MinInt32 - 1), Scale: 0}
 
 	tests := []struct {
 		from iceberg.DecimalLiteral
 		to   iceberg.Literal
 	}{
-		{iceberg.DecimalLiteral(n1), iceberg.NewLiteral(int32(1234))},
-		{iceberg.DecimalLiteral(n1), iceberg.NewLiteral(int64(1234))},
 		{iceberg.DecimalLiteral(n2), iceberg.NewLiteral(int64(math.MaxInt32 + 1))},
 		{iceberg.DecimalLiteral(n1), iceberg.NewLiteral(float32(12.34))},
 		{iceberg.DecimalLiteral(n1), iceberg.NewLiteral(float64(12.34))},
@@ -515,7 +658,7 @@ func TestDecimalLiteralConversions(t *testing.T) {
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, below.Type())
 
 	n4 := iceberg.Decimal{Val: decimal128.FromU64(math.MaxInt64 + 1), Scale: 0}
-	n5 := iceberg.Decimal{Val: decimal128.FromU64(math.MaxUint64).Negate(), Scale: 20}
+	n5 := iceberg.Decimal{Val: decimal128.FromU64(math.MaxUint64).Negate(), Scale: 0}
 
 	above, err = iceberg.DecimalLiteral(n4).To(iceberg.PrimitiveTypes.Int64)
 	require.NoError(t, err)
