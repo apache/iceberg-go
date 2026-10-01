@@ -326,15 +326,20 @@ func sameEqualityFieldIDSet(left, right []int) bool {
 	return true
 }
 
+func dataFileHasPointerIdentity(dataFile iceberg.DataFile) bool {
+	return reflect.TypeOf(dataFile).Kind() == reflect.Pointer
+}
+
 func validateEqualityDeleteMetadata(
 	dataFile iceberg.DataFile,
 	existingFile iceberg.DataFile,
 	existingFieldIDs []int,
+	existingHasPointerIdentity bool,
 ) error {
 	// Callers have already inspected ContentType, so both files must be non-nil.
-	// Only skip validation for the same immutable file pointer: a comparable
-	// struct may still contain an interface holding a non-comparable value.
-	if reflect.TypeOf(dataFile).Kind() == reflect.Pointer && dataFile == existingFile {
+	// A pointer-backed retained file makes interface identity comparison safe,
+	// even when a later custom DataFile value itself is not comparable.
+	if existingHasPointerIdentity && dataFile == existingFile {
 		return nil
 	}
 
@@ -390,9 +395,10 @@ type lazyEqualityDeleteLoader struct {
 }
 
 type lazyEqualityDeleteFile struct {
-	id       int
-	dataFile iceberg.DataFile
-	fieldIDs []int
+	id                        int
+	dataFile                  iceberg.DataFile
+	fieldIDs                  []int
+	dataFileHasPointerIdentity bool
 
 	once sync.Once
 	set  *equalityDeleteFileSet
@@ -436,14 +442,17 @@ func newLazyEqualityDeleteLoader(
 
 					firstPath = path
 					firstFile = &lazyEqualityDeleteFile{
-						dataFile: dataFile,
-						fieldIDs: fieldIDs,
+						dataFile:                   dataFile,
+						fieldIDs:                   fieldIDs,
+						dataFileHasPointerIdentity: dataFileHasPointerIdentity(dataFile),
 					}
 
 					continue
 				}
 				if path == firstPath {
-					if err := validateEqualityDeleteMetadata(dataFile, firstFile.dataFile, firstFile.fieldIDs); err != nil {
+					if err := validateEqualityDeleteMetadata(
+						dataFile, firstFile.dataFile, firstFile.fieldIDs, firstFile.dataFileHasPointerIdentity,
+					); err != nil {
 						return nil, err
 					}
 
@@ -454,7 +463,9 @@ func newLazyEqualityDeleteLoader(
 				loader.files[firstPath] = firstFile
 			}
 			if file, ok := loader.files[path]; ok {
-				if err := validateEqualityDeleteMetadata(dataFile, file.dataFile, file.fieldIDs); err != nil {
+				if err := validateEqualityDeleteMetadata(
+					dataFile, file.dataFile, file.fieldIDs, file.dataFileHasPointerIdentity,
+				); err != nil {
 					return nil, err
 				}
 
@@ -467,9 +478,10 @@ func newLazyEqualityDeleteLoader(
 			}
 
 			loader.files[path] = &lazyEqualityDeleteFile{
-				id:       len(loader.files),
-				dataFile: dataFile,
-				fieldIDs: fieldIDs,
+				id:                         len(loader.files),
+				dataFile:                   dataFile,
+				fieldIDs:                   fieldIDs,
+				dataFileHasPointerIdentity: dataFileHasPointerIdentity(dataFile),
 			}
 		}
 	}
@@ -611,9 +623,10 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 // kept as separate sets (not merged).
 func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceberg.Schema, nameMapping iceberg.NameMapping, tasks []FileScanTask, concurrency int) (map[int][]*equalityDeleteSet, error) {
 	type deleteFileInfo struct {
-		id       int
-		file     iceberg.DataFile
-		fieldIDs []int
+		id                     int
+		file                   iceberg.DataFile
+		fieldIDs               []int
+		fileHasPointerIdentity bool
 	}
 
 	uniqueDeletes := make(map[string]deleteFileInfo)
@@ -626,7 +639,9 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 
 			path := d.FilePath()
 			if info, ok := uniqueDeletes[path]; ok {
-				if err := validateEqualityDeleteMetadata(d, info.file, info.fieldIDs); err != nil {
+				if err := validateEqualityDeleteMetadata(
+					d, info.file, info.fieldIDs, info.fileHasPointerIdentity,
+				); err != nil {
 					return nil, err
 				}
 
@@ -639,9 +654,10 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 			}
 
 			uniqueDeletes[path] = deleteFileInfo{
-				id:       len(uniqueDeletes),
-				file:     d,
-				fieldIDs: fieldIDs,
+				id:                     len(uniqueDeletes),
+				file:                   d,
+				fieldIDs:               fieldIDs,
+				fileHasPointerIdentity: dataFileHasPointerIdentity(d),
 			}
 		}
 	}
