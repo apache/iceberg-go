@@ -86,8 +86,9 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 >   `WithSigV4` / `WithSigV4RegionSvc` or the `rest.sigv4-enabled` property.
 > - Explicit config: pass `sigv4.WithAwsConfig(cfg)` to `NewCatalog` alongside
 >   `WithSigV4` / `WithSigV4RegionSvc` (no blank import needed). It supplies the
->   `aws.Config`; the signing region and service still come from those options
->   (or a server `/v1/config` override), not from `cfg`.
+>   `aws.Config`; the signing service comes from those options (or a server
+>   `/v1/config` override), and so does the region when one is set. Otherwise
+>   the region falls back to `cfg.Region`.
 >
 > The former `rest.WithAwsConfig(aws.Config)` has been removed in favor of these
 > paths. Because signing is enabled by `WithSigV4` / `WithSigV4RegionSvc` (or the
