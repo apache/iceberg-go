@@ -3353,6 +3353,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			t.tbl.cat,
 			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
 			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
+			withScanPlanningDirectiveState(t.tbl.scanPlanningDirective, t.tbl.hasScanPlanningDirective),
 			WithLabels(t.tbl.labels),
 			WithSavedConfig(t.tbl.savedConfig),
 		),
