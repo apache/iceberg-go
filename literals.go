@@ -1524,6 +1524,10 @@ func (v VariantLiteral) MarshalBinary() ([]byte, error) {
 	return variant.Value(v).Bytes(), nil
 }
 
+// To returns v for VariantType. For other types, a primitive variant is
+// converted with the cast rules of the literal for its value (int8/int16 widen
+// to int32, timestamps are tz-agnostic), not the stricter CastVariantLiteral
+// rules. Null, object, array and zero-value variants return ErrBadCast.
 func (v VariantLiteral) To(typ Type) (Literal, error) {
 	if _, ok := typ.(VariantType); ok {
 		return v, nil
@@ -1536,6 +1540,10 @@ func (v VariantLiteral) To(typ Type) (Literal, error) {
 
 	out, err := lit.To(typ)
 	if err != nil {
+		if !errors.Is(err, ErrBadCast) {
+			err = fmt.Errorf("%w: %w", ErrBadCast, err)
+		}
+
 		return nil, fmt.Errorf("VariantLiteral: %w", err)
 	}
 

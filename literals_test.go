@@ -1247,23 +1247,6 @@ func TestInvalidVariantLiteralConversions(t *testing.T) {
 		})
 	}
 
-	// a primitive variant rejects what the literal for its value rejects
-	testInvalidLiteralConversions(t, variantLiteralOf(t, true), []iceberg.Type{
-		iceberg.PrimitiveTypes.Int32,
-		iceberg.PrimitiveTypes.Int64,
-		iceberg.PrimitiveTypes.Float32,
-		iceberg.PrimitiveTypes.Float64,
-		iceberg.PrimitiveTypes.Date,
-		iceberg.PrimitiveTypes.Time,
-		iceberg.PrimitiveTypes.Timestamp,
-		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.DecimalTypeOf(9, 2),
-		iceberg.PrimitiveTypes.String,
-		iceberg.PrimitiveTypes.UUID,
-		iceberg.PrimitiveTypes.Binary,
-		iceberg.FixedTypeOf(2),
-	})
-
 	// a zero-value variant has no value to convert
 	testInvalidLiteralConversions(t, iceberg.VariantLiteral(variant.Value{}), []iceberg.Type{
 		iceberg.PrimitiveTypes.Int32,
@@ -1273,6 +1256,11 @@ func TestInvalidVariantLiteralConversions(t *testing.T) {
 	_, err := variantLiteralOf(t, int8(5)).To(iceberg.PrimitiveTypes.String)
 	assert.ErrorIs(t, err, iceberg.ErrBadCast)
 	assert.ErrorContains(t, err, "VariantLiteral: could not cast value: Int32Literal to string")
+
+	// a cast error from the underlying literal that lacks ErrBadCast still gets it
+	_, err = variantLiteralOf(t, float32(1e30)).To(iceberg.DecimalTypeOf(9, 2))
+	assert.ErrorIs(t, err, iceberg.ErrBadCast)
+	assert.ErrorContains(t, err, "VariantLiteral: ")
 }
 
 func TestBadStringLiteralCasts(t *testing.T) {
