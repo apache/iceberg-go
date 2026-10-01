@@ -398,7 +398,7 @@ type lazyEqualityDeleteFile struct {
 	id                        int
 	dataFile                  iceberg.DataFile
 	fieldIDs                  []int
-	dataFileHasPointerIdentity bool
+	hasPointerIdentity bool
 
 	once sync.Once
 	set  *equalityDeleteFileSet
@@ -432,6 +432,11 @@ func newLazyEqualityDeleteLoader(
 				continue
 			}
 
+			if loader.files == nil && firstFile != nil &&
+				firstFile.hasPointerIdentity && dataFile == firstFile.dataFile {
+				continue
+			}
+
 			path := dataFile.FilePath()
 			if loader.files == nil {
 				if firstFile == nil {
@@ -444,14 +449,14 @@ func newLazyEqualityDeleteLoader(
 					firstFile = &lazyEqualityDeleteFile{
 						dataFile:                   dataFile,
 						fieldIDs:                   fieldIDs,
-						dataFileHasPointerIdentity: dataFileHasPointerIdentity(dataFile),
+						hasPointerIdentity: dataFileHasPointerIdentity(dataFile),
 					}
 
 					continue
 				}
 				if path == firstPath {
 					if err := validateEqualityDeleteMetadata(
-						dataFile, firstFile.dataFile, firstFile.fieldIDs, firstFile.dataFileHasPointerIdentity,
+						dataFile, firstFile.dataFile, firstFile.fieldIDs, firstFile.hasPointerIdentity,
 					); err != nil {
 						return nil, err
 					}
@@ -464,7 +469,7 @@ func newLazyEqualityDeleteLoader(
 			}
 			if file, ok := loader.files[path]; ok {
 				if err := validateEqualityDeleteMetadata(
-					dataFile, file.dataFile, file.fieldIDs, file.dataFileHasPointerIdentity,
+					dataFile, file.dataFile, file.fieldIDs, file.hasPointerIdentity,
 				); err != nil {
 					return nil, err
 				}
@@ -481,7 +486,7 @@ func newLazyEqualityDeleteLoader(
 				id:                         len(loader.files),
 				dataFile:                   dataFile,
 				fieldIDs:                   fieldIDs,
-				dataFileHasPointerIdentity: dataFileHasPointerIdentity(dataFile),
+				hasPointerIdentity: dataFileHasPointerIdentity(dataFile),
 			}
 		}
 	}
@@ -626,7 +631,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 		id                     int
 		file                   iceberg.DataFile
 		fieldIDs               []int
-		fileHasPointerIdentity bool
+		hasPointerIdentity bool
 	}
 
 	uniqueDeletes := make(map[string]deleteFileInfo)
@@ -640,7 +645,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 			path := d.FilePath()
 			if info, ok := uniqueDeletes[path]; ok {
 				if err := validateEqualityDeleteMetadata(
-					d, info.file, info.fieldIDs, info.fileHasPointerIdentity,
+					d, info.file, info.fieldIDs, info.hasPointerIdentity,
 				); err != nil {
 					return nil, err
 				}
@@ -657,7 +662,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				id:                     len(uniqueDeletes),
 				file:                   d,
 				fieldIDs:               fieldIDs,
-				fileHasPointerIdentity: dataFileHasPointerIdentity(d),
+				hasPointerIdentity: dataFileHasPointerIdentity(d),
 			}
 		}
 	}
