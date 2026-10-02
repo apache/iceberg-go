@@ -238,6 +238,20 @@ type sessionTransport struct {
 	// origin (e.g. a redirect hop) is not signed, so the signer's Authorization
 	// header and any session token never reach an unconfigured host.
 	signingOrigin *url.URL
+
+	// builtinHeaders is the subset of defaultHeaders that identifies the
+	// client and carries no credentials. It is all a request to an origin
+	// other than catalogOrigin or authOrigin (e.g. a redirect hop) receives.
+	builtinHeaders http.Header
+	// catalogOrigin is the configured catalog origin: the only origin that
+	// receives the auth header. authOrigin is the configured OAuth token
+	// endpoint, if any, which also receives user-supplied default headers.
+	// These are compared against the request URL rather than derived from
+	// the redirect chain, so a transport that omits Response.Request cannot
+	// widen them. A nil catalogOrigin disables the check, matching
+	// signingOrigin.
+	catalogOrigin *url.URL
+	authOrigin    *url.URL
 }
 
 // sameOrigin reports whether two URLs share scheme, host, and effective port.
@@ -262,12 +276,21 @@ func defaultedPort(u *url.URL) string {
 }
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// net/http strips Authorization from cross-origin redirect hops, but this
+	// runs after that stripping, so credentials and user-supplied headers are
+	// only applied for the configured origins.
+	toCatalog := s.catalogOrigin == nil || sameOrigin(s.catalogOrigin, r.URL)
+	defaults := s.builtinHeaders
+	if toCatalog || (s.authOrigin != nil && sameOrigin(s.authOrigin, r.URL)) {
+		defaults = s.defaultHeaders
+	}
+
 	// A session default is applied unless the request already carries that
 	// header (a per-request override of any default, not just Content-Type
 	// wins) or explicitly opted out of it via withSuppressedHeaders (carried on
 	// the context as an explicit set, never inferred from header values).
 	suppressed := suppressedHeadersFrom(r.Context())
-	for k, v := range s.defaultHeaders {
+	for k, v := range defaults {
 		ck := http.CanonicalHeaderKey(k)
 		if _, ok := r.Header[ck]; ok {
 			continue
@@ -286,7 +309,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// session default of the same key. A caller cannot suppress or spoof the
 	// Authorization header by supplying its own. Do not reorder this before the
 	// default-header loop.
-	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
+	if s.authManager != nil && toCatalog && r.Context().Value(skipOAuth) == nil {
 		var (
 			k, v string
 			err  error
@@ -1046,6 +1069,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session := &sessionTransport{
 		RoundTripper:   baseTransport,
 		defaultHeaders: http.Header{},
+		catalogOrigin:  r.baseURI,
+		authOrigin:     opts.authUri,
 	}
 	cl := &http.Client{Transport: session}
 
@@ -1065,6 +1090,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session.defaultHeaders.Set("Content-Type", "application/json")
 	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
 	session.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
+	session.builtinHeaders = session.defaultHeaders.Clone()
 
 	for k, v := range opts.headers {
 		session.defaultHeaders.Set(k, v)

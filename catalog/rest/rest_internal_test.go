@@ -102,6 +102,165 @@ func TestSignerDoesNotSignCrossOriginRedirect(t *testing.T) {
 	require.Empty(t, gotToken, "the redirect target must not receive the session token")
 }
 
+// TestCredentialsNotSentOnCrossOriginRedirect pins that the OAuth bearer token
+// and user-supplied default headers stay on the origin that started the request,
+// while a same-origin redirect keeps them.
+func TestCredentialsNotSentOnCrossOriginRedirect(t *testing.T) {
+	type seen struct {
+		hit                         bool
+		auth, apiKey, custom, agent string
+	}
+	record := func(s *seen, r *http.Request) {
+		s.hit = true
+		s.auth = r.Header.Get("Authorization")
+		s.apiKey = r.Header.Get("X-Api-Key")
+		s.custom = r.Header.Get("X-Custom")
+		s.agent = r.Header.Get("User-Agent")
+	}
+
+	var first, other, sameLanding seen
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(&other, r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer second.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+	mux.HandleFunc("/cross", func(w http.ResponseWriter, r *http.Request) {
+		record(&first, r)
+		http.Redirect(w, r, second.URL+"/landing", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/same", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/landing", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/landing", func(w http.ResponseWriter, r *http.Request) {
+		record(&sameLanding, r)
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithOAuthToken("SECRET-CATALOG-TOKEN"),
+		WithHeaders(map[string]string{"X-Custom": "SECRET-CUSTOM"}),
+		WithAdditionalProps(iceberg.Properties{"header.X-Api-Key": "SECRET-API-KEY"}))
+	require.NoError(t, err)
+
+	get := func(path string) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil)
+		require.NoError(t, err)
+		resp, err := cat.cl.Do(req)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+
+	t.Run("cross origin", func(t *testing.T) {
+		get("/cross")
+
+		require.Equal(t, "Bearer SECRET-CATALOG-TOKEN", first.auth, "the configured origin must still be authenticated")
+		require.Equal(t, "SECRET-API-KEY", first.apiKey)
+		require.Equal(t, "SECRET-CUSTOM", first.custom)
+
+		require.True(t, other.hit, "the redirect target must be reached")
+		assert.Empty(t, other.auth, "the redirect target must not receive the bearer token")
+		assert.Empty(t, other.apiKey, "the redirect target must not receive header.* defaults")
+		assert.Empty(t, other.custom, "the redirect target must not receive WithHeaders defaults")
+		assert.Equal(t, "GoIceberg/"+iceberg.Version(), other.agent, "built-in client headers are still sent")
+	})
+
+	t.Run("same origin", func(t *testing.T) {
+		get("/same")
+
+		require.True(t, sameLanding.hit)
+		assert.Equal(t, "Bearer SECRET-CATALOG-TOKEN", sameLanding.auth)
+		assert.Equal(t, "SECRET-API-KEY", sameLanding.apiKey)
+		assert.Equal(t, "SECRET-CUSTOM", sameLanding.custom)
+	})
+}
+
+// TestCredentialsNotSentOnSyntheticRedirect pins that the redirect guard does
+// not depend on the transport linking Response.Request: a custom transport that
+// returns a bare 307 must not cause credentials to follow it.
+func TestCredentialsNotSentOnSyntheticRedirect(t *testing.T) {
+	var otherHit bool
+	var otherAuth, otherAPIKey string
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Host == "other.test":
+			otherHit = true
+			otherAuth = r.Header.Get("Authorization")
+			otherAPIKey = r.Header.Get("X-Api-Key")
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		case r.URL.Path == "/v1/config":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"defaults":{},"overrides":{}}`))),
+			}, nil
+		default:
+			// A synthetic redirect: no Request backlink on the response.
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": {"http://other.test/landing"}},
+				Body:       http.NoBody,
+			}, nil
+		}
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", "http://catalog.test",
+		WithCustomTransport(transport),
+		WithOAuthToken("SECRET-CATALOG-TOKEN"),
+		WithAdditionalProps(iceberg.Properties{"header.X-Api-Key": "SECRET-API-KEY"}))
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://catalog.test/redirect", nil)
+	require.NoError(t, err)
+	resp, err := cat.cl.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.True(t, otherHit, "the redirect target must be reached")
+	assert.Empty(t, otherAuth, "the redirect target must not receive the bearer token")
+	assert.Empty(t, otherAPIKey, "the redirect target must not receive header.* defaults")
+}
+
+// TestHeaderDefaultsReachSeparateTokenEndpoint pins that the configured OAuth
+// token endpoint is trusted for header.* defaults even on a different origin
+// from the catalog, so the redirect guard does not break IdPs that need them.
+func TestHeaderDefaultsReachSeparateTokenEndpoint(t *testing.T) {
+	var tokenAPIKey string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenAPIKey = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "TOKEN", "token_type": "Bearer", "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	var catalogAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		catalogAuth = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	authURI, err := url.Parse(tokenSrv.URL + "/token")
+	require.NoError(t, err)
+
+	_, err = NewCatalog(context.Background(), "rest", srv.URL,
+		WithCredential("client:secret"),
+		WithAuthURI(authURI),
+		WithAdditionalProps(iceberg.Properties{"header.X-Api-Key": "SECRET-API-KEY"}))
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer TOKEN", catalogAuth)
+	assert.Equal(t, "SECRET-API-KEY", tokenAPIKey, "the configured token endpoint must still receive header.* defaults")
+}
+
 func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}
 
