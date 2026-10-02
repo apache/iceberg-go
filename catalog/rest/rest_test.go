@@ -3088,52 +3088,88 @@ var (
 }`, exampleViewMetadataJSON)
 )
 
-func (r *RestCatalogSuite) TestUpdatePathsEncodeNamesAndBodiesRemainRaw() {
+func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	const objectName = "a b+c"
 
+	type namedPayload struct {
+		Name string `json:"name"`
+	}
 	type updatePayload struct {
-		Identifier struct {
-			Name string `json:"name"`
-		} `json:"identifier"`
+		Identifier namedPayload `json:"identifier"`
 	}
 
-	r.mux.HandleFunc("/v1/namespaces/table-ns/tables/", func(w http.ResponseWriter, req *http.Request) {
-		r.Equal("/v1/namespaces/table-ns/tables/a%20b%2Bc", req.URL.EscapedPath())
-
-		var payload updatePayload
-		if !r.NoError(json.NewDecoder(req.Body).Decode(&payload)) {
-			return
+	assertRawName := func(req *http.Request, payload any) bool {
+		if !r.NoError(json.NewDecoder(req.Body).Decode(payload)) {
+			return false
 		}
-		r.Equal(objectName, payload.Identifier.Name)
-
+		return true
+	}
+	writeTableResponse := func(w http.ResponseWriter) {
 		_, err := w.Write([]byte(createTableRestExample))
-		if !r.NoError(err) {
+		r.NoError(err)
+	}
+
+	r.mux.HandleFunc("/v1/namespaces/create-ns/tables", func(w http.ResponseWriter, req *http.Request) {
+		var payload namedPayload
+		if !assertRawName(req, &payload) {
 			return
 		}
+		r.Equal(objectName, payload.Name)
+		writeTableResponse(w)
 	})
+
+	r.mux.HandleFunc("/v1/namespaces/register-ns/register", func(w http.ResponseWriter, req *http.Request) {
+		var payload namedPayload
+		if !assertRawName(req, &payload) {
+			return
+		}
+		r.Equal(objectName, payload.Name)
+		writeTableResponse(w)
+	})
+
+	for _, namespace := range []string{"commit-ns", "update-ns"} {
+		r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables/", func(w http.ResponseWriter, req *http.Request) {
+			r.Equal("/v1/namespaces/"+namespace+"/tables/a%20b%2Bc", req.URL.EscapedPath())
+
+			var payload updatePayload
+			if !assertRawName(req, &payload) {
+				return
+			}
+			r.Equal(objectName, payload.Identifier.Name)
+			writeTableResponse(w)
+		})
+	}
 
 	r.mux.HandleFunc("/v1/namespaces/view-ns/views/", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal("/v1/namespaces/view-ns/views/a%20b%2Bc", req.URL.EscapedPath())
 
 		var payload updatePayload
-		if !r.NoError(json.NewDecoder(req.Body).Decode(&payload)) {
+		if !assertRawName(req, &payload) {
 			return
 		}
 		r.Equal(objectName, payload.Identifier.Name)
 
 		_, err := w.Write([]byte(createViewRestExample))
-		if !r.NoError(err) {
-			return
-		}
+		r.NoError(err)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
 	r.Require().NoError(err)
+	ctx := context.Background()
 
-	_, err = cat.UpdateTable(context.Background(), table.Identifier{"table-ns", objectName}, nil, nil)
+	_, err = cat.CreateTable(ctx, table.Identifier{"create-ns", objectName}, tableSchemaSimple)
 	r.Require().NoError(err)
 
-	_, err = cat.UpdateView(context.Background(), table.Identifier{"view-ns", objectName}, nil, nil)
+	_, err = cat.RegisterTable(ctx, table.Identifier{"register-ns", objectName}, "metadata.json")
+	r.Require().NoError(err)
+
+	_, _, err = cat.CommitTable(ctx, table.Identifier{"commit-ns", objectName}, nil, nil)
+	r.Require().NoError(err)
+
+	_, err = cat.UpdateTable(ctx, table.Identifier{"update-ns", objectName}, nil, nil)
+	r.Require().NoError(err)
+
+	_, err = cat.UpdateView(ctx, table.Identifier{"view-ns", objectName}, nil, nil)
 	r.Require().NoError(err)
 }
 
