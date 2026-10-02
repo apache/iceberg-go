@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -1079,6 +1080,36 @@ func TestBindOutOfRangeDate(t *testing.T) {
 			wantBound, err := iceberg.BindExpr(sc, tt.expected, true)
 			require.NoError(t, err)
 			assert.True(t, wantBound.Equals(bound), "expected %s, got %s", wantBound, bound)
+		})
+	}
+}
+
+func TestBindDecimalToIntRespectsScale(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "qty", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "total", Type: iceberg.PrimitiveTypes.Int64},
+	)
+
+	fractional := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2} // 12.34
+	whole := iceberg.Decimal{Val: decimal128.FromI64(1200), Scale: 2}      // 12.00
+
+	for _, name := range []string{"qty", "total"} {
+		t.Run(name, func(t *testing.T) {
+			ref := iceberg.Reference(name)
+
+			// Binding 12.34 must not produce qty == 1234, and rounding would
+			// turn qty < 12.34 into qty < 12, so both are rejected.
+			_, err := iceberg.BindExpr(sc, iceberg.EqualTo(ref, fractional), true)
+			require.ErrorIs(t, err, iceberg.ErrBadCast)
+
+			_, err = iceberg.BindExpr(sc, iceberg.LessThan(ref, fractional), true)
+			require.ErrorIs(t, err, iceberg.ErrBadCast)
+
+			bound, err := iceberg.BindExpr(sc, iceberg.EqualTo(ref, whole), true)
+			require.NoError(t, err)
+			want, err := iceberg.BindExpr(sc, iceberg.EqualTo(ref, int64(12)), true)
+			require.NoError(t, err)
+			assert.True(t, want.Equals(bound), "expected %s, got %s", want, bound)
 		})
 	}
 }
