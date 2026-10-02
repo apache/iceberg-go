@@ -507,17 +507,32 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 		return nil, err
 	}
 
-	wr, path, counter, fileCloser, err := m.snap.newManifestWriter(spec)
-	if err != nil {
-		return nil, err
-	}
-	defer internal.CheckedClose(fileCloser, &err)
+	var wr *iceberg.ManifestWriter
+	var path string
+	var counter *internal.CountingWriter
+	var fileCloser io.Closer
 	writerClosed := false
+	// Close the ManifestWriter before the underlying file so a mid-loop
+	// write failure flushes into an open file, not a closed one.
 	defer func() {
-		if !writerClosed {
+		if wr != nil && !writerClosed {
 			internal.CheckedClose(wr, &err)
 		}
+		if fileCloser != nil {
+			internal.CheckedClose(fileCloser, &err)
+		}
 	}()
+
+	ensureWriter := func() error {
+		if wr != nil {
+			return nil
+		}
+
+		var writerErr error
+		wr, path, counter, fileCloser, writerErr = m.snap.newManifestWriter(spec)
+
+		return writerErr
+	}
 
 	for _, manifest := range bin {
 		for entry, err := range m.snap.iterManifestEntries(manifest, false) {
@@ -527,12 +542,21 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 
 			switch {
 			case entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == m.snap.snapshotID:
+				if err = ensureWriter(); err != nil {
+					return nil, err
+				}
 				// only files deleted by this snapshot should be added to the new manifest
 				err = wr.Delete(entry)
 			case entry.Status() == iceberg.EntryStatusADDED && entry.SnapshotID() == m.snap.snapshotID:
+				if err = ensureWriter(); err != nil {
+					return nil, err
+				}
 				// added entries from this snapshot are still added, otherwise they should be existing
 				err = wr.Add(entry)
 			case entry.Status() != iceberg.EntryStatusDELETED:
+				if err = ensureWriter(); err != nil {
+					return nil, err
+				}
 				// add all non-deleted files from the old manifest as existing files
 				err = wr.Existing(entry)
 			}
@@ -541,6 +565,12 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 				return nil, err
 			}
 		}
+	}
+
+	// Java's merge manager writes zero-count manifests; this path omits bins
+	// with no live entries.
+	if wr == nil {
+		return nil, nil
 	}
 
 	// close the writer to force a flush and ensure counter.Count is accurate
@@ -577,7 +607,9 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 			if err != nil {
 				return nil, err
 			}
-			output = append(output, created)
+			if created != nil {
+				output = append(output, created)
+			}
 		}
 
 		return output, nil
