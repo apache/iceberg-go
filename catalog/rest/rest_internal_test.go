@@ -46,6 +46,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// markingSigner marks every request it signs with sentinel headers, so a test
+// can assert exactly which origins the session transport chose to sign without
+// pulling in a cloud SDK.
+type markingSigner struct{}
+
+func (markingSigner) SignRequest(r *http.Request) error {
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=SENTINELKEY/scope")
+	r.Header.Set("X-Amz-Security-Token", "SENTINELTOKEN")
+
+	return nil
+}
+
+// TestSignerDoesNotSignCrossOriginRedirect pins the origin guard in
+// sessionTransport.RoundTrip: a redirect to a different origin is not signed, so
+// the signer's Authorization header and any session token never reach an
+// unconfigured host. The guard is signer-agnostic, so it covers an explicit
+// WithSigner too; a marking signer exercises it without a real SigV4 backend.
+func TestSignerDoesNotSignCrossOriginRedirect(t *testing.T) {
+	var secondHit bool
+	var gotAuth, gotToken string
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHit = true
+		gotAuth = r.Header.Get("Authorization")
+		gotToken = r.Header.Get("X-Amz-Security-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer second.Close()
+
+	var firstAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
+		firstAuth = r.Header.Get("Authorization")
+		http.Redirect(w, r, second.URL+"/landing", http.StatusTemporaryRedirect)
+	})
+	first := httptest.NewServer(mux)
+	defer first.Close()
+
+	cat, err := NewCatalog(context.Background(), "rest", first.URL, WithSigner(markingSigner{}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, first.URL+"/redirect", nil)
+	require.NoError(t, err)
+	resp, err := cat.cl.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.NotEmpty(t, firstAuth, "the configured origin must be signed")
+	require.True(t, secondHit, "the redirect target must be reached")
+	require.Empty(t, gotAuth, "the redirect target must not receive the Authorization header")
+	require.Empty(t, gotToken, "the redirect target must not receive the session token")
+}
+
 func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}
 

@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+
+	"github.com/apache/iceberg-go"
 )
 
 // SignerNameSigV4 is the scheme under which the AWS SigV4 backend registers
@@ -49,6 +51,12 @@ type SignerConfig struct {
 	// Service is the signing service name (SigV4 signing-name), e.g.
 	// "execute-api", "s3tables".
 	Service string
+	// Props carries the catalog properties after /v1/config overrides have been
+	// folded in. A backend may read signing credentials from it (e.g. the sigv4
+	// backend builds a static credentials provider from the s3.* / rest.* keys)
+	// without the core knowing any cloud-SDK property names. It may be nil or
+	// empty when no properties were supplied.
+	Props iceberg.Properties
 }
 
 // SignerFactory builds a RequestSigner from core configuration. A signing
@@ -117,5 +125,9 @@ func resolveSigner(ctx context.Context, opts *options) (RequestSigner, error) {
 		}
 	}
 
-	return factory(ctx, SignerConfig{Region: opts.sigv4Region, Service: opts.sigv4Service})
+	return factory(ctx, SignerConfig{
+		Region:  opts.sigv4Region,
+		Service: opts.sigv4Service,
+		Props:   opts.additionalProps,
+	})
 }

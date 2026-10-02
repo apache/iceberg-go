@@ -43,10 +43,14 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog/rest"
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
 // emptyStringHash is the SHA-256 of the empty string, used as the payload hash
@@ -58,15 +62,65 @@ const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 // matching the Iceberg Java reference default (AwsProperties.REST_SIGNING_NAME_DEFAULT).
 const defaultSigningService = "execute-api"
 
+// keyRestAccessKeyID and friends are the Java-client property names for the
+// SigV4 signing credentials. They are accepted as aliases for the s3.*
+// properties; the s3.* keys take precedence when both are set.
+const (
+	keyRestAccessKeyID     = "rest.access-key-id"
+	keyRestSecretAccessKey = "rest.secret-access-key"
+	keyRestSessionToken    = "rest.session-token"
+)
+
 func init() {
 	rest.RegisterSigner(rest.SignerNameSigV4, func(ctx context.Context, cfg rest.SignerConfig) (rest.RequestSigner, error) {
+		creds, err := staticCredsFromProps(cfg.Props)
+		if err != nil {
+			return nil, err
+		}
+
 		awscfg, err := config.LoadDefaultConfig(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("sigv4: load AWS config: %w", err)
 		}
+		// Sign with the credentials carried in the catalog properties when present,
+		// rather than only the AWS default credential chain.
+		if creds != nil {
+			awscfg.Credentials = creds
+		}
 
 		return buildSigner(awscfg, cfg), nil
 	})
+}
+
+// staticCredsFromProps returns a static credentials provider built from the
+// signing-credential properties carried in the catalog config. It prefers the
+// s3.* keys and falls back to the Java-compatible rest.* aliases, resolving the
+// tuple atomically from a single namespace so a partial pair is never completed
+// with fields from the other one. It returns (nil, nil) when neither namespace
+// sets any credential property, so the caller falls back to the default
+// credential chain, and an ErrIncompleteStaticCredentials error when the chosen
+// namespace is incomplete.
+//
+// An explicit aws.Config supplied via WithAwsConfig bypasses this: that path
+// already fully specifies the credentials, so it never consults the properties.
+func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, error) {
+	namespaces := [][3]string{
+		{iceio.S3AccessKeyID, iceio.S3SecretAccessKey, iceio.S3SessionToken},
+		{keyRestAccessKeyID, keyRestSecretAccessKey, keyRestSessionToken},
+	}
+	for _, ns := range namespaces {
+		accessKey, secretKey, token := props[ns[0]], props[ns[1]], props[ns[2]]
+		if accessKey == "" && secretKey == "" && token == "" {
+			continue
+		}
+		if err := internalaws.ValidateStaticCredentials(ns[0], ns[1], ns[2], accessKey, secretKey, token); err != nil {
+			return nil, err
+		}
+
+		return credentials.NewStaticCredentialsProvider(accessKey, secretKey, token), nil
+	}
+
+	return nil, nil
 }
 
 // buildSigner applies the REST-core signing config to an aws.Config and returns

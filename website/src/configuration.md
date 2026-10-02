@@ -81,9 +81,11 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 > [`catalog/rest/sigv4`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/sigv4/sigv4.go)
 > sub-package one of two ways:
 >
-> - Ambient credentials (the AWS default chain): add a blank import
+> - Property or ambient credentials: add a blank import
 >   `_ "github.com/apache/iceberg-go/catalog/rest/sigv4"` and enable signing with
->   `WithSigV4` / `WithSigV4RegionSvc` or the `rest.sigv4-enabled` property.
+>   `WithSigV4` / `WithSigV4RegionSvc` or the `rest.sigv4-enabled` property. The
+>   backend signs with the `s3.*` credential properties when set (falling back to
+>   the `rest.*` aliases), otherwise with the AWS default credential chain.
 > - Explicit config: pass `sigv4.WithAwsConfig(cfg)` to `NewCatalog` alongside
 >   `WithSigV4` / `WithSigV4RegionSvc` (no blank import needed). It supplies the
 >   `aws.Config`; the signing service comes from those options (or a server

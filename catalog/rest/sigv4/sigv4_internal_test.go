@@ -32,7 +32,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog/rest"
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -303,4 +306,110 @@ func TestConcurrentSignedCatalogRequests(t *testing.T) {
 
 	require.Positive(t, total.Load())
 	assert.Equal(t, total.Load(), signed.Load(), "every request must be SigV4-signed")
+}
+
+func TestStaticCredsFromProps(t *testing.T) {
+	t.Parallel()
+
+	creds, err := staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		iceio.S3SessionToken:    "ST",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	got, err := creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID)
+	require.Equal(t, "SK", got.SecretAccessKey)
+	require.Equal(t, "ST", got.SessionToken)
+
+	creds, err = staticCredsFromProps(iceberg.Properties{})
+	require.NoError(t, err, "no creds must fall back to the default chain")
+	require.Nil(t, creds)
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3AccessKeyID: "AK"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone access key must be an error, not the ambient identity")
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SecretAccessKey: "SK"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone secret key must be an error, not the ambient identity")
+
+	_, err = staticCredsFromProps(iceberg.Properties{iceio.S3SessionToken: "ST"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone session token must be an error, not the ambient identity")
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		keyRestAccessKeyID:     "RAK",
+		keyRestSecretAccessKey: "RSK",
+		keyRestSessionToken:    "RST",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "RAK", got.AccessKeyID)
+	require.Equal(t, "RSK", got.SecretAccessKey)
+	require.Equal(t, "RST", got.SessionToken)
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		keyRestAccessKeyID:      "RAK",
+		keyRestSecretAccessKey:  "RSK",
+	})
+	require.NoError(t, err)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID, "s3.* keys take precedence over rest.* aliases")
+	require.Equal(t, "SK", got.SecretAccessKey)
+
+	_, err = staticCredsFromProps(iceberg.Properties{keyRestAccessKeyID: "RAK"})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a lone rest.* access key must be an error")
+
+	_, err = staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:    "AK",
+		keyRestSecretAccessKey: "RSK",
+	})
+	require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials, "a partial pair must not be completed with a field from the other namespace")
+
+	creds, err = staticCredsFromProps(iceberg.Properties{
+		iceio.S3AccessKeyID:     "AK",
+		iceio.S3SecretAccessKey: "SK",
+		keyRestSessionToken:     "RST",
+	})
+	require.NoError(t, err)
+	got, err = creds.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "AK", got.AccessKeyID)
+	require.Empty(t, got.SessionToken, "a complete s3.* pair must not inherit an unrelated rest.* session token")
+}
+
+// TestSigV4SignsWithPropsCredentials pins the wiring end to end: the SigV4
+// Authorization header on the bootstrap request must be signed with the
+// credentials carried in the catalog properties (via SignerConfig.Props), not
+// the AWS default chain.
+func TestSigV4SignsWithPropsCredentials(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL,
+		rest.WithSigV4RegionSvc("us-east-1", "s3"),
+		rest.WithAdditionalProps(iceberg.Properties{
+			iceio.S3AccessKeyID:     "AKIDEXAMPLEPROPS",
+			iceio.S3SecretAccessKey: "secretexample",
+		}))
+	require.NoError(t, err)
+	require.NotNil(t, cat)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	require.Contains(t, gotAuth, "Credential=AKIDEXAMPLEPROPS/",
+		"SigV4 must sign with the credentials from catalog properties, not the default chain")
 }
