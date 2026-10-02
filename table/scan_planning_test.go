@@ -741,30 +741,41 @@ func mustPlanIOState(t *testing.T, planIO PlanIO) *planIOState {
 	return state
 }
 
-func TestTableScanPlanningMode(t *testing.T) {
+func TestTableScanPlanningDirective(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		props iceberg.Properties
-		want  []ScanPlanningMode
+		name    string
+		opts    []Option
+		want    ScanPlanningDirective
+		wantErr bool
 	}{
-		{"no props", nil, []ScanPlanningMode{}},
-		{"key absent", iceberg.Properties{"s3.endpoint": "https://table.local"}, []ScanPlanningMode{}},
-		{"client", iceberg.Properties{ScanPlanningModeKey: "client"}, []ScanPlanningMode{ScanPlanningLocal}},
-		{"server", iceberg.Properties{ScanPlanningModeKey: "server"}, []ScanPlanningMode{ScanPlanningRemote}},
-		{"case insensitive", iceberg.Properties{ScanPlanningModeKey: " SERVER "}, []ScanPlanningMode{ScanPlanningRemote}},
-		{"unrecognized", iceberg.Properties{ScanPlanningModeKey: "remote"}, []ScanPlanningMode{}},
-		{"empty value", iceberg.Properties{ScanPlanningModeKey: ""}, []ScanPlanningMode{}},
+		{name: "absent", want: ScanPlanningDirectiveUnknown},
+		{
+			name: "io props ignored",
+			opts: []Option{WithScanPlanningIOProperties(iceberg.Properties{ScanPlanningModeKey: "server"})},
+			want: ScanPlanningDirectiveUnknown,
+		},
+		{name: "client", opts: []Option{WithScanPlanningDirective("client")}, want: ScanPlanningDirectiveClient},
+		{name: "server", opts: []Option{WithScanPlanningDirective("server")}, want: ScanPlanningDirectiveServer},
+		{name: "case insensitive", opts: []Option{WithScanPlanningDirective("SERVER")}, want: ScanPlanningDirectiveServer},
+		{name: "unrecognized", opts: []Option{WithScanPlanningDirective("remote")}, want: ScanPlanningDirectiveUnknown, wantErr: true},
+		{name: "empty value", opts: []Option{WithScanPlanningDirective("")}, want: ScanPlanningDirectiveUnknown, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			tbl := New(Identifier{"db", "tbl"}, nil, "", nil, nil, WithScanPlanningIOProperties(tt.props))
-			got := tbl.ScanPlanningMode()
-			require.NotNil(t, got)
+			tbl := New(Identifier{"db", "tbl"}, nil, "", nil, nil, tt.opts...)
+			got, err := tbl.ScanPlanningDirective()
+			if tt.wantErr {
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+				assert.Equal(t, tt.want, got)
+
+				return
+			}
+			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
 	}

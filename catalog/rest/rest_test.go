@@ -1685,18 +1685,40 @@ func (r *RestCatalogSuite) TestLoadTableLabels() {
 	r.Nil(labels.Field(1))                                                     // field present in schema but unlabeled
 }
 
-func (r *RestCatalogSuite) TestLoadTableScanPlanningMode() {
+func (r *RestCatalogSuite) TestLoadTableScanPlanningDirective() {
 	for _, tc := range []struct {
-		name   string
-		config string
-		want   []table.ScanPlanningMode
+		name       string
+		config     string
+		properties string
+		catOpts    []rest.Option
+		want       table.ScanPlanningDirective
+		wantErr    bool
 	}{
-		{"absent", `{}`, []table.ScanPlanningMode{}},
-		{"client", `{"scan-planning-mode": "client"}`, []table.ScanPlanningMode{table.ScanPlanningLocal}},
-		{"server", `{"scan-planning-mode": "server"}`, []table.ScanPlanningMode{table.ScanPlanningRemote}},
+		{name: "absent", config: `{}`, want: table.ScanPlanningDirectiveUnknown},
+		{name: "client", config: `{"scan-planning-mode": "client"}`, want: table.ScanPlanningDirectiveClient},
+		{name: "server", config: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveServer},
+		{name: "unrecognized", config: `{"scan-planning-mode": "bogus"}`, want: table.ScanPlanningDirectiveUnknown, wantErr: true},
+		// Only the load response's config block carries the directive.
+		{name: "metadata_property_only", config: `{}`, properties: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveUnknown},
+		{
+			name:    "catalog_property_only",
+			config:  `{}`,
+			catOpts: []rest.Option{rest.WithAdditionalProps(iceberg.Properties{"scan-planning-mode": "client"})},
+			want:    table.ScanPlanningDirectiveUnknown,
+		},
+		{
+			name:       "config_wins_over_metadata_property",
+			config:     `{"scan-planning-mode": "client"}`,
+			properties: `{"scan-planning-mode": "server"}`,
+			want:       table.ScanPlanningDirectiveClient,
+		},
 	} {
 		r.Run(tc.name, func() {
 			tableName := "table_" + tc.name
+			properties := tc.properties
+			if properties == "" {
+				properties = `{}`
+			}
 			r.mux.HandleFunc("/v1/namespaces/fokko/tables/"+tableName, func(w http.ResponseWriter, req *http.Request) {
 				r.Require().Equal(http.MethodGet, req.Method)
 				w.Write([]byte(`{
@@ -1716,18 +1738,27 @@ func (r *RestCatalogSuite) TestLoadTableScanPlanningMode() {
 						"last-partition-id": 999,
 						"default-sort-order-id": 0,
 						"sort-orders": [{"order-id":0,"fields":[]}],
-						"properties": {}
+						"properties": ` + properties + `
 					},
 					"config": ` + tc.config + `
 				}`))
 			})
 
-			cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+			cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+				append([]rest.Option{rest.WithOAuthToken(TestToken)}, tc.catOpts...)...)
 			r.Require().NoError(err)
 
 			tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", tableName))
 			r.Require().NoError(err)
-			r.Equal(tc.want, tbl.ScanPlanningMode())
+			got, err := tbl.ScanPlanningDirective()
+			if tc.wantErr {
+				r.ErrorIs(err, iceberg.ErrInvalidArgument)
+				r.Equal(tc.want, got)
+
+				return
+			}
+			r.Require().NoError(err)
+			r.Equal(tc.want, got)
 		})
 	}
 }

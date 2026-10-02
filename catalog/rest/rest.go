@@ -1316,6 +1316,7 @@ func (r *Catalog) tableFromResponse(
 	scanPlanningConfig iceberg.Properties,
 	credsVended bool,
 	labels *iceberg.Labels,
+	loadConfig iceberg.Properties,
 ) (*table.Table, error) {
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
@@ -1366,16 +1367,19 @@ func (r *Catalog) tableFromResponse(
 		}
 	}
 
-	return table.New(
-		identifier,
-		metadata,
-		loc,
-		fsF,
-		r,
+	opts := []table.Option{
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(scanPlanningConfig),
 		table.WithLabels(labels),
-	), nil
+	}
+	// The scan-planning directive comes only from the load response's config
+	// block, never from table metadata or catalog properties, matching Java's
+	// RESTSessionCatalog.
+	if directive, ok := loadConfig[table.ScanPlanningModeKey]; ok {
+		opts = append(opts, table.WithScanPlanningDirective(directive))
+	}
+
+	return table.New(identifier, metadata, loc, fsF, r, opts...), nil
 }
 
 func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location string) (iceberg.Properties, error) {
@@ -1614,7 +1618,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, ret.Config)
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1842,7 +1846,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, ret.Config)
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1887,7 +1891,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, ret.Config)
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1935,8 +1939,9 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, metadata.Properties())
 
-	// A commit response carries no labels (they are load-time enrichment).
-	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil)
+	// A commit response carries no labels or table config (they are load-time
+	// enrichment), so the returned table reports no scan-planning directive.
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil, nil)
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {

@@ -23,6 +23,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 
@@ -59,23 +60,62 @@ const (
 // `server`.
 const ScanPlanningModeKey = "scan-planning-mode"
 
-// ScanPlanningMode returns the scan-planning modes permitted by the catalog's
-// `scan-planning-mode` table config, as supplied in the load response. A
-// `client` directive permits only ScanPlanningLocal and a `server` directive
-// permits only ScanPlanningRemote. ScanPlanningAuto is never returned because
-// it may resolve to either mode. The result is empty when the key is absent or
-// holds an unrecognized value, meaning the catalog imposed no constraint.
+// ScanPlanningDirective is the catalog's `scan-planning-mode` table-config
+// value. It is distinct from ScanPlanningMode, the user-facing scan option.
+type ScanPlanningDirective string
+
+const (
+	// ScanPlanningDirectiveUnknown is the zero-value string denoting an unknown,
+	// unrestricted or missing scan planning directive.
+	ScanPlanningDirectiveUnknown ScanPlanningDirective = ""
+	// ScanPlanningDirectiveClient indicates the catalog requires the client to
+	// plan scans locally.
+	ScanPlanningDirectiveClient ScanPlanningDirective = "client"
+	// ScanPlanningDirectiveServer indicates the catalog requires scans to be
+	// planned remotely by the catalog server.
+	ScanPlanningDirectiveServer ScanPlanningDirective = "server"
+)
+
+// ScanPlanningDirective returns the catalog's `scan-planning-mode` directive
+// taken from the `config` block of the table-load response. Table metadata
+// properties and catalog properties are not consulted. Values are matched
+// case-insensitively.
+//
+// It returns an empty directive and a nil error when the catalog supplied no
+// directive, and an error wrapping iceberg.ErrInvalidArgument when the
+// directive holds an unrecognized value.
+//
+// The directive is only known for tables built from a load response
+// (LoadTable, CreateTable, RegisterTable, and their refreshes). Tables returned
+// by a catalog's UpdateTable report no directive, because commit responses do
+// not carry table config; reload the table to obtain it.
 //
 // The scanner does not yet enforce this directive; callers must apply it
 // themselves via WithScanPlanningMode.
-func (t Table) ScanPlanningMode() []ScanPlanningMode {
-	switch strings.ToLower(strings.TrimSpace(t.scanPlanningIOProps[ScanPlanningModeKey])) {
-	case "client":
-		return []ScanPlanningMode{ScanPlanningLocal}
-	case "server":
-		return []ScanPlanningMode{ScanPlanningRemote}
-	default:
-		return []ScanPlanningMode{}
+func (t Table) ScanPlanningDirective() (ScanPlanningDirective, error) {
+	if !t.hasScanPlanningDirective {
+		return ScanPlanningDirectiveUnknown, nil
+	}
+
+	for _, d := range []ScanPlanningDirective{ScanPlanningDirectiveClient, ScanPlanningDirectiveServer} {
+		if strings.EqualFold(t.scanPlanningDirective, string(d)) {
+			return d, nil
+		}
+	}
+
+	return ScanPlanningDirectiveUnknown, fmt.Errorf("%w: unrecognized %s %q, expected %q or %q",
+		iceberg.ErrInvalidArgument, ScanPlanningModeKey, t.scanPlanningDirective,
+		ScanPlanningDirectiveClient, ScanPlanningDirectiveServer)
+}
+
+// WithScanPlanningDirective records the raw `scan-planning-mode` value from a
+// catalog's table-load response config. Catalogs should only pass this option
+// when the key is present in that config, so that an empty value is reported
+// as unrecognized rather than absent.
+func WithScanPlanningDirective(value string) Option {
+	return func(t *Table) {
+		t.scanPlanningDirective = value
+		t.hasScanPlanningDirective = true
 	}
 }
 
