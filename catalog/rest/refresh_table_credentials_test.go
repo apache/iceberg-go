@@ -226,10 +226,8 @@ func TestRefreshTableCredentialsSeedsExternallyCreatedTable(t *testing.T) {
 	// The saved config also carries over to the refreshed table itself, without
 	// any changes - the vended credentials are not merged in it.
 	refreshedConfig := refreshed.SavedConfig()
-	for k, v := range savedConfig {
-		assert.Equal(t, v, refreshedConfig[k], "saved config key %q", k)
-	}
-	assert.Empty(t, refreshedConfig["s3.access-key-id"])
+	assert.Equal(t, savedConfig, refreshedConfig,
+		"saved config must round-trip unchanged: no catalog props, no vended credentials")
 
 	// The table the caller passed in, and the map it saved, are left alone.
 	_, err = tbl.FS(context.Background())

@@ -1315,7 +1315,8 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 // credentials. If the catalog did not vend any credentials, the table is returned unmodified.
 //
 // Requires that the passed-in table instance be created with the table.WithSavedConfig() option to
-// save any table-specific configs. All tables created by this catalog pass in that option.
+// save any table-specific configs. All tables created by this catalog pass in that option. Callers of
+// table.New() that use this method should also pass metadata.Properties() into table.WithSavedConfig().
 func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table) (*table.Table, error) {
 	metadataLoc := tbl.MetadataLocation()
 	resp, err := r.fetchTableCreds(ctx, tbl.Identifier(), metadataLoc)
@@ -1886,7 +1887,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	maps.Copy(config, metadata.Properties())
 
 	// A commit response carries no labels (they are load-time enrichment).
-	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil)
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil, table.WithSavedConfig(metadata.Properties()))
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
