@@ -1064,7 +1064,7 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	if len(b.snapshotList) != previousSnapshotCount {
 		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
 	}
-	// Snapshot-log pruning is deferred to updateSnapshotLog during Build so
+	// Snapshot-log pruning is deferred to updatedSnapshotLog during Build so
 	// removed entries remain available when trimming history gaps.
 
 	validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
@@ -1509,10 +1509,13 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	}
 	defaultSpecID := b.defaultSpecID
 
-	if err := b.updateSnapshotLog(); err != nil {
+	snapshotLog, err := b.updatedSnapshotLog()
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
+	// The timestamp is fixed by the first Build and kept on the builder on purpose, so
+	// repeated builds of the same changes report the same last-updated time.
 	if b.lastUpdatedMS == 0 {
 		b.lastUpdatedMS = time.Now().UnixMilli()
 	}
@@ -1544,7 +1547,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		SnapshotList:       b.snapshotList,
 		snapshotIndex:      b.snapshotIndex,
 		CurrentSnapshotID:  b.currentSnapshotID,
-		SnapshotLog:        b.snapshotLog,
+		SnapshotLog:        snapshotLog,
 		MetadataLog:        metadataLog,
 		SortOrderList:      b.sortOrderList,
 		DefaultSortOrderID: b.defaultSortOrderID,
@@ -1555,7 +1558,10 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	}, nil
 }
 
-func (b *MetadataBuilder) updateSnapshotLog() error {
+// updatedSnapshotLog returns the snapshot log with intermediate and removed
+// snapshots dropped. It leaves b.snapshotLog unchanged, so Build stays free of
+// side effects on the log.
+func (b *MetadataBuilder) updatedSnapshotLog() ([]SnapshotLogEntry, error) {
 	addedIDs := make(map[int64]struct{}, 2)
 	hasRemoved := false
 	for _, upd := range b.updates {
@@ -1593,13 +1599,14 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 		if b.currentSnapshotID != nil && len(newSnapsLog) != 0 {
 			last := newSnapsLog[len(newSnapsLog)-1]
 			if last.SnapshotID != *b.currentSnapshotID {
-				return fmt.Errorf("%w: cannot set invalid snapshot log: latest entry is not the current snapshot", iceberg.ErrInvalidArgument)
+				return nil, fmt.Errorf("%w: cannot set invalid snapshot log: latest entry is not the current snapshot", iceberg.ErrInvalidArgument)
 			}
 		}
-		b.snapshotLog = newSnapsLog
+
+		return newSnapsLog, nil
 	}
 
-	return nil
+	return slices.Clone(b.snapshotLog), nil
 }
 
 func (b *MetadataBuilder) GetSchemaByID(id int) (*iceberg.Schema, error) {

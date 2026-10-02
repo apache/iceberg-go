@@ -1060,6 +1060,11 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 		TimestampMs: snapshot2.TimestampMs,
 	}, "expected snapshot to match added snapshot")
 	require.True(t, res.CurrentSnapshot().Equals(snapshot2))
+
+	require.Len(t, builder.snapshotLog, 2, "Build must not prune the builder's own log")
+	again, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, res.(*metadataV2).SnapshotLog, again.(*metadataV2).SnapshotLog)
 }
 
 func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
