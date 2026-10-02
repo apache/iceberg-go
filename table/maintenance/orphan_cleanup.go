@@ -15,6 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package maintenance provides table maintenance operations, such as orphan
+// file cleanup, that operate on a loaded [table.Table]. The operations are
+// free functions that take the table as their first argument, for example:
+//
+//	result, err := maintenance.DeleteOrphanFiles(ctx, tbl, maintenance.WithCleanupFilesOlderThan(72*time.Hour))
 package maintenance
 
 import (
@@ -96,16 +101,16 @@ const defaultPurgeMaxConcurrency = 32
 
 type OrphanCleanupOption func(*orphanCleanupConfig)
 
-func WithLocation(location string) OrphanCleanupOption {
+func WithCleanupLocation(location string) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
-		rejectPlanOption(cfg, "WithLocation")
+		rejectPlanOption(cfg, "WithCleanupLocation")
 		cfg.location = location
 	}
 }
 
-func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
+func WithCleanupFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
-		rejectPlanOption(cfg, "WithFilesOlderThan")
+		rejectPlanOption(cfg, "WithCleanupFilesOlderThan")
 		cfg.olderThan = duration
 		if duration < 0 && cfg.validationErr == nil {
 			cfg.validationErr = errors.New("orphan cleanup age must be non-negative")
@@ -113,15 +118,15 @@ func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	}
 }
 
-func WithDryRun(enabled bool) OrphanCleanupOption {
+func WithCleanupDryRun(enabled bool) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.dryRun = enabled
 	}
 }
 
-// WithDeleteFunc sets a custom delete function. If not provided, the table's FileIO
+// WithCleanupDeleteFunc sets a custom delete function. If not provided, the table's FileIO
 // delete method will be used.
-func WithDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
+func WithCleanupDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.deleteFunc = deleteFunc
 	}
@@ -310,12 +315,12 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 //
 // The table filesystem must implement io.ListableIO so orphan cleanup can
 // fully enumerate candidate files before deciding what is safe to delete.
-func (s *Service) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
+func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupResult{}, cfg.validationErr
 	}
-	plan, err := s.planOrphanFiles(ctx, cfg)
+	plan, err := planOrphanFiles(ctx, tbl, cfg)
 	if err != nil {
 		return OrphanCleanupResult{}, err
 	}
@@ -323,24 +328,24 @@ func (s *Service) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOp
 		return plan.result(), nil
 	}
 
-	return s.executeOrphanCleanup(ctx, plan, cfg)
+	return executeOrphanCleanup(ctx, tbl, plan, cfg)
 }
 
 // PlanOrphanFiles identifies orphan files without deleting anything. The
 // returned plan can be shown to a user and passed to ExecuteOrphanCleanup to
 // delete exactly that set.
-func (s *Service) PlanOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupPlan, error) {
+func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupPlan, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupPlan{}, cfg.validationErr
 	}
 
-	return s.planOrphanFiles(ctx, cfg)
+	return planOrphanFiles(ctx, tbl, cfg)
 }
 
 // ExecuteOrphanCleanup deletes exactly the files in plan. It does not perform
 // another orphan scan, so files appearing after planning are not included.
-func (s *Service) ExecuteOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
+func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupResult{}, cfg.validationErr
@@ -352,7 +357,7 @@ func (s *Service) ExecuteOrphanCleanup(ctx context.Context, plan OrphanCleanupPl
 		return plan.result(), nil
 	}
 
-	return s.executeOrphanCleanup(ctx, plan, cfg)
+	return executeOrphanCleanup(ctx, tbl, plan, cfg)
 }
 
 type scannedFile struct {
@@ -365,15 +370,15 @@ type referencedFileIndex struct {
 	byPath     map[string][]string
 }
 
-func (s *Service) planOrphanFiles(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupPlan, error) {
-	fs, err := s.tbl.FS(ctx)
+func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupConfig) (OrphanCleanupPlan, error) {
+	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupPlan{}, fmt.Errorf("failed to get filesystem: %w", err)
 	}
 
 	scanLocation := cfg.location
 	if scanLocation == "" {
-		scanLocation = s.tbl.Metadata().Location()
+		scanLocation = tbl.Metadata().Location()
 	}
 
 	// Run the S3 walk and referenced-file collection concurrently.
@@ -385,7 +390,7 @@ func (s *Service) planOrphanFiles(ctx context.Context, cfg *orphanCleanupConfig)
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		var err error
-		referencedFiles, err = s.getReferencedFiles(gctx, fs, cfg.maxConcurrency, true)
+		referencedFiles, err = getReferencedFiles(gctx, tbl, fs, cfg.maxConcurrency, true)
 
 		return err
 	})
@@ -437,8 +442,8 @@ func (s *Service) planOrphanFiles(ctx context.Context, cfg *orphanCleanupConfig)
 	}, nil
 }
 
-func (s *Service) executeOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
-	fs, err := s.tbl.FS(ctx)
+func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
+	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get filesystem: %w", err)
 	}
@@ -471,14 +476,14 @@ func (s *Service) executeOrphanCleanup(ctx context.Context, plan OrphanCleanupPl
 // comparison identity before normalization discards information. The bool value
 // distinguishes data files (true) from metadata files (false), which is used by
 // PurgeFiles to respect gc.enabled.
-func (s *Service) getReferencedFiles(ctx context.Context, fs io.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
+func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
 	referenced := make(map[string]bool)
-	metadata := s.tbl.Metadata()
+	metadata := tbl.Metadata()
 
 	for entry := range metadata.PreviousFiles() {
 		referenced[entry.MetadataFile] = false
 	}
-	referenced[s.tbl.MetadataLocation()] = false
+	referenced[tbl.MetadataLocation()] = false
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
@@ -1325,17 +1330,17 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 // does not get out of sync with storage. Non-bulk deletion invokes Remove
 // concurrently and is bounded to defaultPurgeMaxConcurrency operations because
 // it is typically I/O-bound.
-func (s *Service) PurgeFiles(ctx context.Context) error {
-	gcEnabled := table.IsGCEnabled(s.tbl.Properties())
+func PurgeFiles(ctx context.Context, tbl *table.Table) error {
+	gcEnabled := table.IsGCEnabled(tbl.Properties())
 
-	fs, err := s.tbl.FS(ctx)
+	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load filesystem for table purge: %w", err)
 	}
 
 	var errs []error
 	fileSet := make(map[string]string)
-	location := s.tbl.Metadata().Location()
+	location := tbl.Metadata().Location()
 
 	// 1. Walk the table location directory tree to capture all local files
 	// Only walk the directory if gc.enabled=true to prevent accidental deletion
@@ -1366,7 +1371,7 @@ func (s *Service) PurgeFiles(ctx context.Context) error {
 	}
 
 	// 2. Union in manifest-referenced and metadata files (which might be outside the table location)
-	referencedFiles, refErr := s.getReferencedFiles(ctx, fs, runtime.GOMAXPROCS(0), false)
+	referencedFiles, refErr := getReferencedFiles(ctx, tbl, fs, runtime.GOMAXPROCS(0), false)
 	if refErr != nil {
 		return fmt.Errorf("failed to get referenced files: %w", refErr)
 	}

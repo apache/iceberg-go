@@ -176,7 +176,14 @@ const (
 	CommitTotalRetryTimeoutMsDefault = 30 * 60 * 1000
 )
 
-// IsGCEnabled checks if garbage collection is enabled for the table properties.
+// IsGCEnabled reports whether garbage collection (physical file deletion) is
+// enabled for the given table properties. A missing "gc.enabled" key returns
+// [GCEnabledDefault]. Otherwise GC is enabled only when the value is a
+// case-insensitive "true"; any other value, including "1", "true " (with
+// surrounding whitespace), or arbitrary text, disables it.
+//
+// This is exported so the table/maintenance package can gate destructive
+// operations on it; the parsing rules above are part of that contract.
 func IsGCEnabled(props iceberg.Properties) bool {
 	value, ok := props[GCEnabledKey]
 	if !ok {

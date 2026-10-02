@@ -40,15 +40,14 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 
 	opts := []maintenance.OrphanCleanupOption{
-		maintenance.WithFilesOlderThan(olderThan),
+		maintenance.WithCleanupFilesOlderThan(olderThan),
 	}
 
 	if cmd.Location != "" {
-		opts = append(opts, maintenance.WithLocation(cmd.Location))
+		opts = append(opts, maintenance.WithCleanupLocation(cmd.Location))
 	}
 
-	maint := maintenance.New(tbl)
-	plan, err := maint.PlanOrphanFiles(ctx, opts...)
+	plan, err := maintenance.PlanOrphanFiles(ctx, tbl, opts...)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file scan failed: %w", err))
 		os.Exit(1)
@@ -88,7 +87,7 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 		os.Exit(1)
 	}
 
-	deleteResult, err := maint.ExecuteOrphanCleanup(ctx, plan)
+	deleteResult, err := maintenance.ExecuteOrphanCleanup(ctx, tbl, plan)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file deletion failed: %w", err))
 		os.Exit(1)

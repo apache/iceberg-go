@@ -17,14 +17,22 @@
 
 package maintenance
 
-import "github.com/apache/iceberg-go/table"
+import (
+	"context"
+	"testing"
+	"time"
 
-// Service provides maintenance operations on a table, including orphan file cleanup.
-type Service struct {
-	tbl *table.Table
+	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDeleteOrphanFilesRejectsNegativeAgeBeforeScan(t *testing.T) {
+	_, err := DeleteOrphanFiles(context.Background(), &table.Table{}, WithCleanupFilesOlderThan(-time.Nanosecond))
+	require.EqualError(t, err, "orphan cleanup age must be non-negative")
 }
 
-// New creates a new maintenance service for the given table.
-func New(tbl *table.Table) *Service {
-	return &Service{tbl: tbl}
+func TestRetentionOptionsAcceptZeroAge(t *testing.T) {
+	cfg := &orphanCleanupConfig{}
+	WithCleanupFilesOlderThan(0)(cfg)
+	require.NoError(t, cfg.validationErr)
 }

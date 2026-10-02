@@ -18,8 +18,14 @@
 package maintenance
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
 var orphanCleanupBenchmarkSink string
@@ -61,5 +67,87 @@ func BenchmarkApplyURIEquivalence(b *testing.B) {
 			// Keep the result observable without including the sink in the benchmark.
 			orphanCleanupBenchmarkSink = result
 		})
+	}
+}
+
+func BenchmarkGetReferencedFilesManifestLists(b *testing.B) {
+	for _, snapshotCount := range []int{1, 16, 128, 1024} {
+		for _, maxWorkers := range []int{1, 4, 16} {
+			b.Run(fmt.Sprintf("snapshots=%d/concurrency=%d", snapshotCount, maxWorkers), func(b *testing.B) {
+				baseIO := newTrackingIO()
+				manifestPath := "s3://bucket/benchmark/manifest-shared.avro"
+				mf := writeManifest(b, baseIO, 1, 1, manifestPath, "s3://bucket/benchmark/data.parquet")
+				var snapshotJSON []string
+				for i := 1; i <= snapshotCount; i++ {
+					listPath := fmt.Sprintf("s3://bucket/benchmark/snap-%d.avro", i)
+					writeManifestList(b, baseIO, int64(i), listPath, []iceberg.ManifestFile{mf})
+					snapshotJSON = append(snapshotJSON,
+						fmt.Sprintf(`{"snapshot-id":%d,"timestamp-ms":%d,"manifest-list":%q}`,
+							i, i*1000, listPath))
+				}
+
+				meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{
+					snapshots: strings.Join(snapshotJSON, ","),
+				}))
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				fs := &benchmarkDelayIO{IO: baseIO, delay: time.Millisecond}
+				tbl := table.New(table.Identifier{"ns", "orphan-cleanup-benchmark"}, meta,
+					"metadata.json", testFSF(fs), nil)
+
+				b.ReportAllocs()
+				b.ReportMetric(float64(snapshotCount), "manifest_lists/op")
+				b.ResetTimer()
+				for b.Loop() {
+					if _, err := getReferencedFiles(context.Background(), tbl, fs, maxWorkers, true); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkPurgeFilesNonBulkDeletion measures the bounded fallback used when
+// the filesystem does not implement BulkRemovableIO. The delay models the
+// round trip to a remote object store; the zero-delay cases show the worker
+// pool overhead on local-style deletes.
+func BenchmarkPurgeFilesNonBulkDeletion(b *testing.B) {
+	for _, fileCount := range []int{100, 1_000, 10_000} {
+		files := make([]string, fileCount)
+		for i := range files {
+			files[i] = fmt.Sprintf("s3://bucket/table/data/file-%d.parquet", i)
+		}
+
+		for _, delay := range []time.Duration{0, 100 * time.Microsecond, time.Millisecond} {
+			for _, concurrency := range []int{1, 4, 16, 32, 64} {
+				b.Run(fmt.Sprintf("files=%d/delay=%s/concurrency=%d", fileCount, delay, concurrency), func(b *testing.B) {
+					deleteFunc := func(string) error {
+						time.Sleep(delay)
+
+						return nil
+					}
+
+					b.ReportAllocs()
+					b.ReportMetric(float64(fileCount), "files/op")
+					b.ResetTimer()
+					for b.Loop() {
+						deleted, err := deleteFilesParallel(
+							context.Background(),
+							files,
+							concurrency,
+							deleteFunc,
+							func(_ string, err error) error { return err },
+						)
+						if err != nil {
+							b.Fatal(err)
+						}
+						orphanCleanupBenchmarkSink = deleted[len(deleted)-1]
+					}
+				})
+			}
+		}
 	}
 }

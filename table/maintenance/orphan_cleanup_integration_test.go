@@ -221,10 +221,10 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupDryRun() {
 
 	// Run dry-run orphan cleanup (scan table root where both data and metadata exist)
 	s.T().Logf("Scanning location: %s", tbl.Location())
-	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
-		maintenance.WithDryRun(true),
-		maintenance.WithLocation(tbl.Location()), // Scan the table root location
-		maintenance.WithFilesOlderThan(0),        // Consider files created before the scan
+	result, err := maintenance.DeleteOrphanFiles(s.ctx, tbl,
+		maintenance.WithCleanupDryRun(true),
+		maintenance.WithCleanupLocation(tbl.Location()), // Scan the table root location
+		maintenance.WithCleanupFilesOlderThan(0),        // Consider files created before the scan
 	)
 
 	s.Require().NoError(err)
@@ -269,9 +269,9 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupActualDeletion() {
 	}
 
 	// Run actual orphan cleanup
-	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
-		maintenance.WithDryRun(false),
-		maintenance.WithFilesOlderThan(0), // Consider files created before the scan
+	result, err := maintenance.DeleteOrphanFiles(s.ctx, tbl,
+		maintenance.WithCleanupDryRun(false),
+		maintenance.WithCleanupFilesOlderThan(0), // Consider files created before the scan
 	)
 
 	s.Require().NoError(err)
@@ -310,10 +310,10 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupCustomLocation() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Run orphan cleanup on table root (which includes the custom subdirectory)
-	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
-		maintenance.WithLocation(tbl.Location()), // Scan table root to find all subdirectories
-		maintenance.WithFilesOlderThan(0),
-		maintenance.WithDryRun(false),
+	result, err := maintenance.DeleteOrphanFiles(s.ctx, tbl,
+		maintenance.WithCleanupLocation(tbl.Location()), // Scan table root to find all subdirectories
+		maintenance.WithCleanupFilesOlderThan(0),
+		maintenance.WithCleanupDryRun(false),
 	)
 
 	s.Require().NoError(err)
@@ -359,10 +359,10 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupWithConcurrency() {
 			time.Sleep(100 * time.Millisecond)
 
 			// Run orphan cleanup with specific concurrency
-			result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
+			result, err := maintenance.DeleteOrphanFiles(s.ctx, tbl,
 				maintenance.WithCleanupMaxConcurrency(tc.concurrency),
-				maintenance.WithFilesOlderThan(0),
-				maintenance.WithDryRun(false),
+				maintenance.WithCleanupFilesOlderThan(0),
+				maintenance.WithCleanupDryRun(false),
 			)
 
 			s.Require().NoError(err)
@@ -399,11 +399,11 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupCustomDeleteFunction() 
 		return fs.Remove(filePath)
 	}
 
-	result, err := maintenance.New(tbl).DeleteOrphanFiles(s.ctx,
-		maintenance.WithDeleteFunc(customDeleteFunc),
-		maintenance.WithFilesOlderThan(0),
-		maintenance.WithDryRun(false),
-		maintenance.WithDryRun(false),
+	result, err := maintenance.DeleteOrphanFiles(s.ctx, tbl,
+		maintenance.WithCleanupDeleteFunc(customDeleteFunc),
+		maintenance.WithCleanupFilesOlderThan(0),
+		maintenance.WithCleanupDryRun(false),
+		maintenance.WithCleanupDryRun(false),
 	)
 
 	s.Require().NoError(err)
