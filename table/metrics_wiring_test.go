@@ -116,6 +116,31 @@ func TestStagedTableInheritsReporter(t *testing.T) {
 		"StagedTable must forward the transaction table's reporter")
 }
 
+// TestStagedTableInheritsSavedConfig pins that StagedTable forwards the saved
+// config, so a credential refresh of a staged table, or of anything committed
+// from it, still sees the config the original table was created with.
+func TestStagedTableInheritsSavedConfig(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://default/staged", iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	savedConfig := iceberg.Properties{
+		"s3.region":      "eu-central-1",
+		"client.factory": "com.example.CustomClientFactory",
+	}
+	tbl := New(Identifier{"default", "staged"}, meta, "",
+		func(context.Context) (iceio.IO, error) { return iceio.NewMemFS(), nil }, nil,
+		WithSavedConfig(savedConfig))
+
+	staged, err := tbl.NewTransaction().StagedTable()
+	require.NoError(t, err)
+	assert.Equal(t, savedConfig, staged.SavedConfig(),
+		"StagedTable must forward the transaction table's saved config")
+}
+
 // TestRefreshKeepsCallerReporter pins that a reporter injected via
 // WithMetricsReporter must survive a Refresh even though the catalog's LoadTable
 // hands back the default nop reporter.

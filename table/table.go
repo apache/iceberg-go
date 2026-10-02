@@ -111,6 +111,7 @@ type Table struct {
 	// REST catalogs can return FileIO configuration in the response's config
 	// block.
 	scanPlanningIOProps iceberg.Properties
+	savedConfig         iceberg.Properties
 	reporter            metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
@@ -136,6 +137,7 @@ func (t Table) Schema() *iceberg.Schema                      { return t.metadata
 func (t Table) Spec() iceberg.PartitionSpec                  { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                         { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties               { return t.metadata.Properties() }
+func (t Table) SavedConfig() iceberg.Properties              { return maps.Clone(t.savedConfig) }
 
 // Labels returns the catalog-provided labels from the load response, or nil if
 // the catalog returned none. Labels are transient enrichment, not table state.
@@ -249,6 +251,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	t.labels = fresh.labels
+	t.savedConfig = maps.Clone(fresh.savedConfig)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
 	// of their own. Refresh runs inside commit retry loops, so unconditionally
 	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
@@ -836,6 +839,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		withReporterState(t.reporter, t.reporterSet),
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
 		WithLabels(t.labels),
+		WithSavedConfig(t.savedConfig),
 	), nil
 }
 
@@ -1420,6 +1424,21 @@ func WithLabels(l *iceberg.Labels) Option {
 
 	return func(t *Table) {
 		t.labels = l
+	}
+}
+
+// WithSavedConfig supplies a set of properties used to create a *Table
+// instance. This saved config is exposed through table.SavedConfig() and
+// can be used by callers to save properties along with a table instance, for
+// reuse later if the table instance were to be cloned in a new call to
+// table.New.
+func WithSavedConfig(config iceberg.Properties) Option {
+	if config == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.savedConfig = maps.Clone(config)
 	}
 }
 
