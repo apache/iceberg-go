@@ -97,6 +97,21 @@ func TestBuild_NullAndMissingFields(t *testing.T) {
 	assert.ErrorContains(t, err, "cannot set uuid to null")
 }
 
+func TestBuild_DoesNotGrowVersionLog(t *testing.T) {
+	b := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersion(1, LastAddedID)).
+		SetCurrentVersionID(LastAddedID)
+
+	for range 3 {
+		res, err := b.Build()
+		require.NoError(t, err)
+		require.Len(t, res.VersionLog(), 1)
+		require.Empty(t, b.versionLog, "Build must not append to the builder's own log")
+	}
+}
+
 func TestNewVersion_RepresentationValidation(t *testing.T) {
 	tests := []struct {
 		name            string
