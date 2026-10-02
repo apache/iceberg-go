@@ -299,40 +299,35 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		opt(&cfg)
 	}
 
-	// S3 Tables manages storage, so an explicit location is rejected up front
-	// (as pyiceberg does) rather than creating a table outside managed storage.
-	if cfg.Location != "" {
-		federated, ferr := c.isS3TablesDatabase(ctx, database)
-		if ferr != nil {
-			return nil, ferr
-		}
-		if federated {
+	// Fetch the database once to decide S3 Tables federation for both default and
+	// explicit-location creates. A missing database or a caller lacking
+	// glue:GetDatabase is tolerated as non-federated so the generic path can
+	// proceed and surface any genuine error itself. Resolving federation here (not
+	// lazily on ErrNoDefaultLocation) also catches catalogs with a `warehouse`
+	// property, where staging would otherwise write outside the managed storage.
+	db, err := c.lookupDatabase(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+
+	if db != nil && isS3TablesFederatedDatabase(db) {
+		// S3 Tables manages storage, so an explicit location can never be the
+		// managed path it assigns; reject it up front (as pyiceberg does).
+		if cfg.Location != "" {
 			return nil, fmt.Errorf("cannot specify a location for table %s.%s: S3 Tables manages storage automatically", database, tableName)
 		}
+
+		return c.createS3TablesTable(ctx, database, tableName, identifier, schema, opts...)
 	}
 
 	// The reporter is resolved once at construction (see NewCatalog), so a bad
 	// metrics-reporter-impl already failed there — no per-op guard is needed
 	// before mutating the catalog, and the trailing LoadTable reuses the cached
-	// reporter.
-	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
+	// reporter. Reuse the database already fetched for namespace-property lookup so
+	// staging does not issue a second GetDatabase.
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.namespacePropsFn(db), identifier, schema, opts...)
 	if err != nil {
-		// S3 Tables federated databases assign storage themselves, so client-side
-		// location resolution fails with ErrNoDefaultLocation. Only then probe for
-		// federation and retry via the S3 Tables path, keeping the extra
-		// GetDatabase off every other create.
-		if !errors.Is(err, internal.ErrNoDefaultLocation) {
-			return nil, err
-		}
-		federated, ferr := c.isS3TablesDatabase(ctx, database)
-		if ferr != nil {
-			return nil, ferr
-		}
-		if !federated {
-			return nil, err
-		}
-
-		return c.createS3TablesTable(ctx, database, tableName, identifier, schema, opts...)
+		return nil, err
 	}
 
 	// Write metadata with the catalog's configured credentials rather than the
@@ -358,26 +353,36 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return c.LoadTable(ctx, identifier)
 }
 
-// isS3TablesDatabase reports whether the Glue database is federated to the
-// Amazon S3 Tables service, which owns table storage and location assignment.
-func (c *Catalog) isS3TablesDatabase(ctx context.Context, database string) (bool, error) {
+// lookupDatabase fetches a database, tolerating a missing database or a caller
+// lacking glue:GetDatabase by returning (nil, nil) so create paths proceed as
+// non-federated and surface any genuine error themselves. Other errors are
+// returned.
+func (c *Catalog) lookupDatabase(ctx context.Context, database string) (*types.Database, error) {
 	db, err := c.getDatabase(ctx, database)
 	if err != nil {
-		// Best-effort: a missing database or a caller lacking glue:GetDatabase
-		// is treated as "not federated" so the generic create path can proceed.
 		var apiErr smithy.APIError
 		if errors.Is(err, catalog.ErrNoSuchNamespace) ||
 			(errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException") {
-			return false, nil
+			return nil, nil
 		}
 
-		return false, err
-	}
-	if db == nil {
-		return false, nil
+		return nil, err
 	}
 
-	return isS3TablesFederatedDatabase(db), nil
+	return db, nil
+}
+
+// namespacePropsFn returns a namespace-property lookup for staging that reuses an
+// already-fetched database, avoiding a second GetDatabase. It falls back to a
+// fresh lookup when the database could not be fetched (e.g. AccessDenied).
+func (c *Catalog) namespacePropsFn(db *types.Database) internal.GetNamespacePropsFn {
+	return func(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
+		if db != nil {
+			return namespacePropsFromDatabase(db), nil
+		}
+
+		return c.LoadNamespaceProperties(ctx, namespace)
+	}
 }
 
 func isS3TablesFederatedDatabase(db *types.Database) bool {
@@ -421,6 +426,10 @@ func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName s
 		},
 	})
 	if err != nil {
+		if isAlreadyExistsException(err) {
+			return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, catalog.ErrTableAlreadyExists)
+		}
+
 		return nil, fmt.Errorf("failed to allocate S3 Tables storage for %s.%s: %w", database, tableName, err)
 	}
 
@@ -706,6 +715,12 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch the table %s.%s: %w", fromDatabase, fromTable, err)
 	}
+	// S3 Tables owns the managed storage location, so the copy-then-delete rename
+	// below would repoint the destination at a location the service may reclaim
+	// when the source is dropped. Refuse rather than risk a dangling entry.
+	if isS3TablesFederatedTable(fromGlueTable) {
+		return nil, fmt.Errorf("cannot rename table %s.%s: renaming is not supported for S3 Tables managed tables", fromDatabase, fromTable)
+	}
 	if aws.ToString(fromGlueTable.VersionId) == "" {
 		return nil, fmt.Errorf("failed to rename the table %s.%s: Glue table version id is missing", fromDatabase, fromTable)
 	}
@@ -953,6 +968,12 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		return nil, err
 	}
 
+	return namespacePropsFromDatabase(database), nil
+}
+
+// namespacePropsFromDatabase converts a Glue database into namespace properties,
+// normalizing the description key and surfacing the database location.
+func namespacePropsFromDatabase(database *types.Database) iceberg.Properties {
 	props := make(map[string]string)
 	if database.Parameters != nil {
 		maps.Copy(props, database.Parameters)
@@ -970,7 +991,7 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		props[PropsKeyLocation] = aws.ToString(database.LocationUri)
 	}
 
-	return props, nil
+	return props
 }
 
 // avoid circular dependency while still avoiding having to export the getUpdatedPropsAndUpdateSummary function
