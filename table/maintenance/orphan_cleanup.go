@@ -99,8 +99,12 @@ type orphanCleanupConfig struct {
 
 const defaultPurgeMaxConcurrency = 32
 
+// OrphanCleanupOption configures an orphan-cleanup run. Options are passed to
+// DeleteOrphanFiles, PlanOrphanFiles, and ExecuteOrphanCleanup.
 type OrphanCleanupOption func(*orphanCleanupConfig)
 
+// WithCleanupLocation sets the location to scan for orphan files. Defaults to
+// the table's data location.
 func WithCleanupLocation(location string) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		rejectPlanOption(cfg, "WithCleanupLocation")
@@ -108,6 +112,9 @@ func WithCleanupLocation(location string) OrphanCleanupOption {
 	}
 }
 
+// WithCleanupFilesOlderThan only considers files last modified before now minus
+// duration, so recently written files are never treated as orphans. Defaults to
+// 72h. The duration must be non-negative.
 func WithCleanupFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		rejectPlanOption(cfg, "WithCleanupFilesOlderThan")
@@ -118,6 +125,8 @@ func WithCleanupFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	}
 }
 
+// WithCleanupDryRun reports which files would be deleted without deleting them.
+// Defaults to false.
 func WithCleanupDryRun(enabled bool) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.dryRun = enabled
