@@ -137,7 +137,6 @@ func (t Table) Schema() *iceberg.Schema                      { return t.metadata
 func (t Table) Spec() iceberg.PartitionSpec                  { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                         { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties               { return t.metadata.Properties() }
-func (t Table) ScanPlanningConfig() iceberg.Properties       { return maps.Clone(t.scanPlanningIOProps) }
 func (t Table) SavedConfig() iceberg.Properties              { return maps.Clone(t.savedConfig) }
 
 // Labels returns the catalog-provided labels from the load response, or nil if
@@ -1430,9 +1429,9 @@ func WithLabels(l *iceberg.Labels) Option {
 
 // WithSavedConfig supplies a set of properties used to create a *Table
 // instance. This saved config is exposed through table.SavedConfig() and
-// can be used by callers to save properties useful for loading files of a
-// table, such as client factories and resolved storage credentials, so that
-// new clones of this table can contain the same settings.
+// can be used by callers to save properties along with a table instance, for
+// reuse later if the table instance were to be cloned in a new call to
+// table.New.
 func WithSavedConfig(config iceberg.Properties) Option {
 	if config == nil {
 		return noopTableOption

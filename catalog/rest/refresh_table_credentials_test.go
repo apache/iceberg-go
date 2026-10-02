@@ -223,13 +223,13 @@ func TestRefreshTableCredentialsSeedsExternallyCreatedTable(t *testing.T) {
 		assert.Equal(t, v, props[k], "FileIO property %q", k)
 	}
 
-	// The saved config also carries over to the refreshed table itself, now
-	// merged with the vended credentials, so a further refresh starts from it.
+	// The saved config also carries over to the refreshed table itself, without
+	// any changes - the vended credentials are not merged in it.
 	refreshedConfig := refreshed.SavedConfig()
 	for k, v := range savedConfig {
 		assert.Equal(t, v, refreshedConfig[k], "saved config key %q", k)
 	}
-	assert.Equal(t, "vended-key", refreshedConfig["s3.access-key-id"])
+	assert.Empty(t, refreshedConfig["s3.access-key-id"])
 
 	// The table the caller passed in, and the map it saved, are left alone.
 	_, err = tbl.FS(context.Background())

@@ -1277,17 +1277,11 @@ func (r *Catalog) tableFromResponse(
 		loc,
 		fsF,
 		r,
-<<<<<<< HEAD
-		table.WithMetricsReporter(reporter),
-		table.WithScanPlanningIOProperties(scanPlanningConfig),
-		table.WithLabels(labels),
-=======
 		append([]table.Option{
 			table.WithMetricsReporter(reporter),
 			table.WithScanPlanningIOProperties(scanPlanningConfig),
-			table.WithSavedConfig(config),
+			table.WithLabels(labels),
 		}, opts...)...,
->>>>>>> b9238e8 (feat(catalog): add RefreshTableCredentials call to catalog)
 	), nil
 }
 
@@ -1337,16 +1331,17 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 	// fetchTableCreds call.
 	config := maps.Clone(r.props)
 	maps.Copy(config, tbl.SavedConfig())
+	scanCfg := maps.Clone(config)
 	maps.Copy(config, resp)
 
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.
-	var opts []table.Option
+	opts := []table.Option{table.WithSavedConfig(tbl.SavedConfig())}
 	if reporter := tbl.MetricsReporter(); !metrics.IsNop(reporter) {
 		opts = append(opts, table.WithMetricsReporter(reporter))
 	}
 
-	return r.tableFromResponse(ctx, tbl.Identifier(), tbl.Metadata(), metadataLoc, config, tbl.ScanPlanningConfig(), true, opts...)
+	return r.tableFromResponse(ctx, tbl.Identifier(), tbl.Metadata(), metadataLoc, config, scanCfg, true, tbl.Labels(), opts...)
 }
 
 type identifierPageFetcher func(pageToken string) ([]table.Identifier, string, error)
@@ -1556,12 +1551,15 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	// Save only the per-table configs.
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1784,12 +1782,14 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1829,12 +1829,15 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	// Save only the per-table configs, not r.props.
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
