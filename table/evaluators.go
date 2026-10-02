@@ -750,6 +750,18 @@ func (m *metricsEvaluator) isNan(v iceberg.Literal) bool {
 func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression,
 	caseSensitive bool, includeEmptyFiles bool,
 ) (func(iceberg.DataFile) (bool, error), error) {
+	if expr.Equals(iceberg.AlwaysTrue{}) {
+		if includeEmptyFiles {
+			return func(iceberg.DataFile) (bool, error) {
+				return rowsMightMatch, nil
+			}, nil
+		}
+
+		return func(file iceberg.DataFile) (bool, error) {
+			return file.Count() != 0, nil
+		}, nil
+	}
+
 	rewritten, err := iceberg.RewriteNotExpr(expr)
 	if err != nil {
 		return nil, err

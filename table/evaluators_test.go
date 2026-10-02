@@ -1632,6 +1632,38 @@ func (suite *InclusiveMetricsTestSuite) TestZeroRecordFileStats() {
 	}
 }
 
+func (suite *InclusiveMetricsTestSuite) TestAlwaysTrue() {
+	emptyFile := &mockDataFile{
+		path:   "empty.parquet",
+		format: iceberg.ParquetFile,
+		count:  0,
+	}
+
+	tests := []struct {
+		name              string
+		file              iceberg.DataFile
+		includeEmptyFiles bool
+		want              bool
+	}{
+		{name: "nonempty file", file: suite.dataFiles[0], want: true},
+		{name: "empty file", file: emptyFile, want: false},
+		{name: "empty file when included", file: emptyFile, includeEmptyFiles: true, want: true},
+	}
+
+	for _, tt := range tests {
+		suite.Run(tt.name, func() {
+			eval, err := newInclusiveMetricsEvaluator(
+				suite.schemaDataFile, iceberg.AlwaysTrue{}, true, tt.includeEmptyFiles,
+			)
+			suite.Require().NoError(err)
+
+			matches, err := eval(tt.file)
+			suite.Require().NoError(err)
+			suite.Equal(tt.want, matches)
+		})
+	}
+}
+
 func (suite *InclusiveMetricsTestSuite) TestNot() {
 	tests := []struct {
 		expr     iceberg.BooleanExpression
