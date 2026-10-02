@@ -3099,10 +3099,7 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	}
 
 	assertRawName := func(req *http.Request, payload any) bool {
-		if !r.NoError(json.NewDecoder(req.Body).Decode(payload)) {
-			return false
-		}
-		return true
+		return r.NoError(json.NewDecoder(req.Body).Decode(payload))
 	}
 	writeTableResponse := func(w http.ResponseWriter) {
 		_, err := w.Write([]byte(createTableRestExample))
