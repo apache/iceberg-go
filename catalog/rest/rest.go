@@ -1439,10 +1439,18 @@ func (r *Catalog) nsSeparator() string {
 }
 
 // encodePathSegment escapes a REST path segment per RFC 3986. PathEscape
-// leaves plus signs literal, so encode them explicitly to avoid form decoders
-// interpreting them as spaces.
+// leaves plus signs and pure-dot segments literal, so encode them explicitly to
+// avoid form decoders interpreting plus signs as spaces and JoinPath resolving
+// dot segments while cleaning the path.
 func encodePathSegment(value string) string {
-	return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
+	switch value {
+	case ".":
+		return "%2E"
+	case "..":
+		return "%2E%2E"
+	default:
+		return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
+	}
 }
 
 // encodeNamespace URL-encodes each namespace level and joins them with the

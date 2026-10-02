@@ -1046,26 +1046,10 @@ func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ..
 	params := make([]string, 0, 2+len(extra))
 	params = append(params, identPath.encodedNamespace, identPath.encodedName)
 	for _, seg := range extra {
-		params = append(params, escapeOpaquePathSegment(seg))
+		params = append(params, encodePathSegment(seg))
 	}
 
 	return ep.reqPath(params...)
-}
-
-// escapeOpaquePathSegment percent-encodes an opaque string so it survives
-// url.URL.JoinPath as a single literal path segment. encodePathSegment leaves a
-// pure-dot segment ("." or "..") unescaped, which JoinPath's path.Clean would
-// then resolve as a dot-segment; encode those dots so the segment is preserved
-// verbatim.
-func escapeOpaquePathSegment(s string) string {
-	switch escaped := encodePathSegment(s); escaped {
-	case ".":
-		return "%2E"
-	case "..":
-		return "%2E%2E"
-	default:
-		return escaped
-	}
 }
 
 func scanPlanningHeaders(idempotencyKey, accessDelegation *string, includeIdempotency bool) (map[string]string, error) {

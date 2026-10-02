@@ -164,6 +164,9 @@ func TestEncodePathSegment(t *testing.T) {
 		{name: "plus", value: "+", want: "%2B"},
 		{name: "percent", value: "%", want: "%25"},
 		{name: "slash", value: "/", want: "%2F"},
+		{name: "dot", value: ".", want: "%2E"},
+		{name: "double dot", value: "..", want: "%2E%2E"},
+		{name: "dots in name", value: "a..b", want: "a..b"},
 		{name: "unicode", value: "£€", want: "%C2%A3%E2%82%AC"},
 	}
 
