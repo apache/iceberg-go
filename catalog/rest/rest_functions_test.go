@@ -61,7 +61,9 @@ func (r *RestCatalogSuite) TestListFunctions200() {
 	customPageSize := 100
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/functions", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -102,7 +104,9 @@ func (r *RestCatalogSuite) TestListFunctions200() {
 func (r *RestCatalogSuite) TestListFunctionsPagination() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/functions", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		switch req.URL.Query().Get("pageToken") {
 		case "":
@@ -145,7 +149,9 @@ func (r *RestCatalogSuite) TestListFunctionsPagination() {
 func (r *RestCatalogSuite) TestListFunctionsZeroPageSizeNotSent() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/functions", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Equal("", req.URL.Query().Get("pageSize"), "pageSize must not be sent when set to 0")
 		json.NewEncoder(w).Encode(map[string]any{"identifiers": []any{}})
 	})
@@ -162,7 +168,9 @@ func (r *RestCatalogSuite) TestListFunctionsZeroPageSizeNotSent() {
 func (r *RestCatalogSuite) TestListFunctionsPaginationErrorOnSubsequentPage() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/functions", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -228,7 +236,9 @@ func (r *RestCatalogSuite) TestListFunctionsPaginationErrorOnSubsequentPage() {
 func (r *RestCatalogSuite) TestListFunctions404() {
 	namespace := "nonexistent"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/functions", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -261,7 +271,9 @@ func (r *RestCatalogSuite) TestListFunctions404() {
 
 func (r *RestCatalogSuite) TestLoadFunction200() {
 	r.mux.HandleFunc("/v1/namespaces/accounting/functions/add_one", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -291,7 +303,9 @@ func (r *RestCatalogSuite) TestLoadFunction200() {
 
 func (r *RestCatalogSuite) TestLoadFunction404() {
 	r.mux.HandleFunc("/v1/namespaces/accounting/functions/missing_fn", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -313,7 +327,9 @@ func (r *RestCatalogSuite) TestLoadFunction404() {
 
 func (r *RestCatalogSuite) TestLoadFunction404Namespace() {
 	r.mux.HandleFunc("/v1/namespaces/ghost_ns/functions/some_fn", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -369,7 +385,9 @@ func (r *RestCatalogSuite) TestLoadFunctionMalformedMetadata() {
 
 func (r *RestCatalogSuite) TestCheckFunctionExists() {
 	r.mux.HandleFunc("/v1/namespaces/accounting/functions/add_one", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method, "existence must be checked via GET: the spec has no HEAD endpoint")
+		if !r.Equal(http.MethodGet, req.Method, "existence must be checked via GET: the spec has no HEAD endpoint") {
+			return
+		}
 
 		w.Write([]byte(`{"metadata": ` + testFunctionMetadataJSON + `}`))
 	})

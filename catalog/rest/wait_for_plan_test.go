@@ -42,19 +42,25 @@ func TestWaitForPlanCompletesAfterPolling(t *testing.T) {
 	var polls atomic.Int32
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodGet, req.Method)
+			if !assert.Equal(t, http.MethodGet, req.Method) {
+				return
+			}
 			// Two "submitted" responses, then a "completed" one carrying tasks and
 			// vended credentials.
 			if polls.Add(1) <= 2 {
 				_, err := w.Write([]byte(`{"status":"submitted"}`))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 
 				return
 			}
 			_, err := w.Write([]byte(`{"status":"completed","plan-tasks":["t1","t2"],` +
 				`"file-scan-tasks":[{}],"delete-files":[{}],` +
 				`"storage-credentials":[{"prefix":"s3://bucket/","config":{"k":"v"}}]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -82,7 +88,9 @@ func TestWaitForPlanReturnsImmediatelyWhenCompleted(t *testing.T) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			polls.Add(1)
 			_, err := w.Write([]byte(`{"status":"completed","plan-tasks":["t1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -103,7 +111,9 @@ func TestWaitForPlanPropagatesFailed(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"failed","error":{"message":"boom","type":"ValidationException","code":400}}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -126,7 +136,9 @@ func TestWaitForPlanPropagatesFailedWithoutUsableError(t *testing.T) {
 		cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 				_, err := w.Write([]byte(payload))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 			})
 		})
 
@@ -144,7 +156,9 @@ func TestWaitForPlanPropagatesCancelled(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"cancelled"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -177,7 +191,9 @@ func TestWaitForPlanRetriesServiceUnavailable(t *testing.T) {
 				return
 			}
 			_, err := w.Write([]byte(`{"status":"completed","plan-tasks":["t1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -215,7 +231,9 @@ func TestWaitForPlanRetriesJavaIdempotentGETStatuses(t *testing.T) {
 						return
 					}
 					_, err := w.Write([]byte(`{"status":"completed"}`))
-					require.NoError(t, err)
+					if !assert.NoError(t, err) {
+						return
+					}
 				})
 			})
 
@@ -238,12 +256,16 @@ func TestWaitForPlanRetriesStatusWithMalformedErrorBody(t *testing.T) {
 			if polls.Add(1) == 1 {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, err := w.Write([]byte("not json"))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 
 				return
 			}
 			_, err := w.Write([]byte(`{"status":"completed"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -385,7 +407,9 @@ func TestWaitForPlanCancelsServerSideOnContextCancel(t *testing.T) {
 			default:
 			}
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("DELETE /v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			deleteHit.Store(true)
@@ -420,7 +444,9 @@ func TestWaitForPlanBoundsSlowServerSideCancel(t *testing.T) {
 			default:
 			}
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		// The cancel endpoint stalls: it never responds until the client (bounded
 		// by the grace) gives up and drops the connection.
@@ -469,7 +495,9 @@ func TestWaitForPlanReturnsDeadlineWhileSubmitted(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -492,7 +520,9 @@ func TestWaitForPlanExhaustsMaxRetries(t *testing.T) {
 		mux.HandleFunc("GET /v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			polls.Add(1)
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("DELETE /v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			deleteHit.Store(true)
@@ -520,7 +550,9 @@ func TestWaitForPlanDeadlineDisablesDefaultRetryCap(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -662,7 +694,9 @@ func TestWaitForPlanForwardsAccessDelegation(t *testing.T) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			assert.Equal(t, "remote-signing", req.Header.Get(headerIcebergAccessDelegation))
 			_, err := w.Write([]byte(`{"status":"completed"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 

@@ -1725,7 +1725,9 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 
 func (r *RestCatalogSuite) TestLoadTableLabels() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
 			"metadata": {
@@ -1773,7 +1775,9 @@ func (r *RestCatalogSuite) TestLoadTableLabels() {
 
 func (r *RestCatalogSuite) TestCreateTableLabels() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
 			"metadata": {
@@ -2237,7 +2241,9 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 
 func (r *RestCatalogSuite) TestRegisterTableLabels() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/register", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
 			"metadata": {
@@ -2836,7 +2842,9 @@ func (r *RestCatalogSuite) TestLoadView200() {
 
 func (r *RestCatalogSuite) TestLoadViewLabels() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/views/myview", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		w.Write([]byte(`{
 			"metadata-location": "s3://bucket/warehouse/default.db/event_agg/metadata/00001.metadata.json",
 			"metadata": {
@@ -3360,7 +3368,9 @@ func (r *RestCatalogSuite) TestRegisterViewLabels() {
 	)
 
 	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}, "labels": {"object-labels": {"owner": "analytics"}}}`,
 			metadataLoc, exampleViewMetadataJSON)
