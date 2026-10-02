@@ -3106,7 +3106,7 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 		Identifier namedPayload `json:"identifier"`
 	}
 
-	assertRawName := func(req *http.Request, payload any) bool {
+	decodePayload := func(req *http.Request, payload any) bool {
 		return r.NoError(json.NewDecoder(req.Body).Decode(payload))
 	}
 	writeTableResponse := func(w http.ResponseWriter) {
@@ -3116,7 +3116,7 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 
 	r.mux.HandleFunc("/v1/namespaces/create-ns/tables", func(w http.ResponseWriter, req *http.Request) {
 		var payload namedPayload
-		if !assertRawName(req, &payload) {
+		if !decodePayload(req, &payload) {
 			return
 		}
 		r.Equal(objectName, payload.Name)
@@ -3125,7 +3125,7 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 
 	r.mux.HandleFunc("/v1/namespaces/register-ns/register", func(w http.ResponseWriter, req *http.Request) {
 		var payload namedPayload
-		if !assertRawName(req, &payload) {
+		if !decodePayload(req, &payload) {
 			return
 		}
 		r.Equal(objectName, payload.Name)
@@ -3137,7 +3137,7 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 			r.Equal("/v1/namespaces/"+namespace+"/tables/a%20b%2Bc", req.URL.EscapedPath())
 
 			var payload updatePayload
-			if !assertRawName(req, &payload) {
+			if !decodePayload(req, &payload) {
 				return
 			}
 			r.Equal(objectName, payload.Identifier.Name)
@@ -3149,7 +3149,7 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 		r.Equal("/v1/namespaces/view-ns/views/a%20b%2Bc", req.URL.EscapedPath())
 
 		var payload updatePayload
-		if !assertRawName(req, &payload) {
+		if !decodePayload(req, &payload) {
 			return
 		}
 		r.Equal(objectName, payload.Identifier.Name)
