@@ -227,10 +227,8 @@ func (b baseRequirement) GetType() string {
 	return b.Type
 }
 
-// requirementFailed reports table metadata that does not satisfy a commit
-// requirement. The error matches ErrCommitFailed, as Java's
-// CommitFailedException does, so a commit can be retried against refreshed
-// metadata.
+// requirementFailed returns an error that matches ErrCommitFailed, so the
+// commit can be retried against refreshed metadata.
 func requirementFailed(format string, args ...any) error {
 	return &requirementError{msg: fmt.Sprintf(format, args...)}
 }
