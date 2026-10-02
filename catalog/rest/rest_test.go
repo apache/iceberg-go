@@ -2954,9 +2954,50 @@ var (
 }`, exampleViewMetadataJSON)
 )
 
+func (r *RestCatalogSuite) TestUpdatePathsEncodeNamesAndBodiesRemainRaw() {
+	const objectName = "a b+c"
+
+	type updatePayload struct {
+		Identifier struct {
+			Name string `json:"name"`
+		} `json:"identifier"`
+	}
+
+	r.mux.HandleFunc("/v1/namespaces/table-ns/tables/", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/table-ns/tables/a%20b%2Bc", req.URL.EscapedPath())
+
+		var payload updatePayload
+		r.Require().NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal(objectName, payload.Identifier.Name)
+
+		_, err := w.Write([]byte(createTableRestExample))
+		r.Require().NoError(err)
+	})
+
+	r.mux.HandleFunc("/v1/namespaces/view-ns/views/", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/view-ns/views/a%20b%2Bc", req.URL.EscapedPath())
+
+		var payload updatePayload
+		r.Require().NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal(objectName, payload.Identifier.Name)
+
+		_, err := w.Write([]byte(createViewRestExample))
+		r.Require().NoError(err)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Require().NoError(err)
+
+	_, err = cat.UpdateTable(context.Background(), table.Identifier{"table-ns", objectName}, nil, nil)
+	r.Require().NoError(err)
+
+	_, err = cat.UpdateView(context.Background(), table.Identifier{"view-ns", objectName}, nil, nil)
+	r.Require().NoError(err)
+}
+
 func (r *RestCatalogSuite) TestCreateView200() {
 	ns := "ns"
-	viewName := "view"
+	viewName := "a b+c"
 	identifier := table.Identifier{ns, viewName}
 	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1}, iceberg.NestedField{
 		ID:       1,
@@ -3095,7 +3136,7 @@ func (r *RestCatalogSuite) TestCreateView404() {
 func (r *RestCatalogSuite) TestRegisterView200() {
 	const (
 		ns          = "fokko"
-		viewName    = "myview"
+		viewName    = "a b+c"
 		metadataLoc = "s3://bucket/warehouse/fokko.db/myview/metadata/00001.metadata.json"
 	)
 	identifier := table.Identifier{ns, viewName}

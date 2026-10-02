@@ -1395,13 +1395,20 @@ func (r *Catalog) nsSeparator() string {
 	return r.namespaceSeparator
 }
 
+// encodePathSegment escapes a REST path segment per RFC 3986. PathEscape
+// leaves plus signs literal, so encode them explicitly to avoid form decoders
+// interpreting them as spaces.
+func encodePathSegment(value string) string {
+	return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
+}
+
 // encodeNamespace URL-encodes each namespace level and joins them with the
 // server-advertised, URL-encoded namespace separator for use as a REST path
-// segment. Mirrors RESTUtil.encodeNamespace in the Java implementation.
+// segment.
 func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
 	encoded := make([]string, len(namespace))
 	for i, level := range namespace {
-		encoded[i] = url.PathEscape(level)
+		encoded[i] = encodePathSegment(level)
 	}
 
 	return strings.Join(encoded, r.nsSeparator())
@@ -1428,7 +1435,7 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1436,7 +1443,7 @@ func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string,
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1444,7 +1451,7 @@ func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, str
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
@@ -1452,7 +1459,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1479,7 +1486,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	stagedCreate := len(cfg.StagedUpdates) > 0
 
 	payload := createTableRequest{
-		Name:          tbl,
+		Name:          catalog.ObjectNameFromIdent(identifier),
 		Schema:        schema,
 		Location:      cfg.Location,
 		PartitionSpec: cfg.PartitionSpec,
@@ -1574,14 +1581,14 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		return nil, "", err
 	}
 
-	ns, tblName, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, "", err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tblName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 
 	type payload struct {
@@ -1590,7 +1597,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		Updates      []table.Update      `json:"updates"`
 	}
 
-	path, err := endpointUpdateTable.reqPath(ns, tblName)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1704,7 +1711,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1729,7 +1736,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 
 	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, path,
-		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
 	if err != nil {
@@ -1796,21 +1803,21 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tbl,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier          `json:"identifier"`
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateTable.reqPath(ns, tbl)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, err
 	}
@@ -2338,7 +2345,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, fmt.Errorf("%w: view version cannot be nil", iceberg.ErrInvalidArgument)
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2369,7 +2376,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	payload := createViewRequest{
-		Name:        viewName,
+		Name:        catalog.ObjectNameFromIdent(identifier),
 		Location:    cfg.Location,
 		Schema:      freshSchema,
 		Props:       cfg.Properties,
@@ -2399,21 +2406,21 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(ident)
+	ns, encodedView, err := r.splitViewIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      viewName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier         `json:"identifier"`
 		Requirements []view.Requirement `json:"requirements"`
 		Updates      []view.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateView.reqPath(ns, viewName)
+	path, err := endpointUpdateView.reqPath(ns, encodedView)
 	if err != nil {
 		return nil, err
 	}
@@ -2445,7 +2452,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2461,7 +2468,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 	}
 
 	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, path,
-		payload{Name: v, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
 		})
 	if err != nil {
