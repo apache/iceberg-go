@@ -573,8 +573,8 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	if err != nil {
 		return nil, err
 	}
-	if t.committed {
-		return nil, errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return nil, err
 	}
 	result := &RewriteResult{Table: t.tbl}
 	if len(meta.updates) > 0 || len(t.reqs) > 0 || len(t.validators) > 0 {

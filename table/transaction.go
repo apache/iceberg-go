@@ -108,6 +108,24 @@ type Transaction struct {
 
 	mx        sync.Mutex
 	committed bool
+
+	// unusable records that a failed commit removed files the staged
+	// updates reference (see ErrTransactionUnusable).
+	unusable bool
+}
+
+// checkUsable reports whether the transaction can still stage or submit
+// updates. The caller must hold t.mx.
+func (t *Transaction) checkUsable() error {
+	if t.unusable {
+		return fmt.Errorf("%w: staged files were cleaned up after a failed commit; build a new transaction",
+			ErrTransactionUnusable)
+	}
+	if t.committed {
+		return errors.New("transaction has already been committed")
+	}
+
+	return nil
 }
 
 func (t *Transaction) ensureInitialized() error {
@@ -166,8 +184,8 @@ func (t *Transaction) applyLocked(updates []Update, reqs []Requirement) error {
 		return err
 	}
 
-	if t.committed {
-		return errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return err
 	}
 
 	stagedMeta := meta.clone()
@@ -3362,8 +3380,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		return nil, err
 	}
 
-	if t.committed {
-		return nil, errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return nil, err
 	}
 
 	if len(meta.updates) > 0 {
@@ -3381,6 +3399,9 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			// avoid a double-apply on retry.
 			if !errors.Is(err, ErrCommitFailed) {
 				t.committed = true
+			}
+			if errors.Is(err, ErrTransactionUnusable) {
+				t.unusable = true
 			}
 
 			return tbl, err

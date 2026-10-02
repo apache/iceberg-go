@@ -51,6 +51,7 @@ import (
 type headTrackingCatalog struct {
 	metadata Metadata
 	attempts atomic.Int32
+	loads    atomic.Int32
 }
 
 type identifierCapturingCatalog struct {
@@ -61,6 +62,8 @@ type identifierCapturingCatalog struct {
 }
 
 func (c *headTrackingCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	c.loads.Add(1)
+
 	return New(ident, c.metadata, "",
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
 }
@@ -213,6 +216,75 @@ func TestDoCommit_ValidatorRejectsOnRefresh(t *testing.T) {
 	// + validator rejects → terminal exit before any further attempts.
 	assert.Equal(t, int32(1), cat.attempts.Load(),
 		"validator rejection on retry must abort before re-issuing CommitTable")
+}
+
+// Why: the retry loop rebases only unpinned assertions on the commit
+// branch. Any other requirement is resubmitted unchanged, so one the
+// refreshed state violates fails identically on every retry and must
+// end the commit after the first refresh; one that still holds must not
+// block the rebase.
+// Condition: a writer commits against a catalog where a peer changed
+// the schema, or only advanced the branch head.
+// Assertion: the schema race fails with ErrCommitFailed after one
+// CommitTable attempt and one refresh; the head-only race succeeds on
+// the rebased retry.
+func TestDoCommit_NonRebasedRequirementFailsAfterOneRefresh(t *testing.T) {
+	writerHead := int64(100)
+	props := iceberg.Properties{
+		CommitNumRetriesKey:     "3",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}
+
+	t.Run("stale schema update fails without retrying", func(t *testing.T) {
+		writerBase := newConflictTestMetadataWithProps(t, &writerHead, props)
+
+		// Catalog state: a peer added a column, moving the current schema
+		// and the last assigned field id.
+		builder, err := MetadataBuilderFromBase(writerBase, "")
+		require.NoError(t, err)
+		peerSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "peer", Type: iceberg.PrimitiveTypes.String},
+		)
+		require.NoError(t, builder.AddSchema(peerSchema))
+		require.NoError(t, builder.SetCurrentSchemaID(-1))
+		peerChanged, err := builder.Build()
+		require.NoError(t, err)
+
+		tbl, cat := newAssertRefTestTable(t, writerBase, peerChanged)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.UpdateSchema(true, false).
+			AddColumn([]string{"writer"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Commit())
+
+		_, err = tx.Commit(t.Context())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrCommitFailed)
+		assert.Contains(t, err.Error(), "requirement no longer holds after refresh")
+		assert.Equal(t, int32(1), cat.attempts.Load(), "the stale requirement must not be resubmitted")
+		assert.Equal(t, int32(1), cat.loads.Load(), "the commit must stop after the first refresh")
+		assert.Equal(t, 1, cat.metadata.CurrentSchema().ID, "the peer's schema must survive")
+	})
+
+	t.Run("requirements that still hold do not block the rebase", func(t *testing.T) {
+		writerBase := newConflictTestMetadataWithProps(t, &writerHead, props)
+		advanced := graftSnapshotOnto(t, writerBase, MainBranch, 200)
+		tbl, cat := newAssertRefTestTable(t, writerBase, advanced)
+
+		reqs := []Requirement{
+			AssertRefSnapshotID(MainBranch, &writerHead),
+			AssertCurrentSchemaID(writerBase.CurrentSchema().ID),
+			AssertTableUUID(writerBase.TableUUID()),
+		}
+		_, err := tbl.doCommit(t.Context(),
+			[]Update{NewSetPropertiesUpdate(iceberg.Properties{"k": "v"})}, reqs,
+			withCommitBranch(MainBranch))
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), cat.attempts.Load())
+		assert.Equal(t, int32(1), cat.loads.Load())
+		assert.Equal(t, "v", cat.metadata.Properties()["k"])
+	})
 }
 
 func TestRefreshPassesIdentifierCopy(t *testing.T) {

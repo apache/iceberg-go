@@ -17,10 +17,7 @@
 
 package table
 
-import (
-	"errors"
-	"slices"
-)
+import "slices"
 
 // TableCommit holds the identifier, requirements, and updates for a single
 // table within a multi-table transaction. It is used with
@@ -66,8 +63,8 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 		return TableCommit{}, err
 	}
 
-	if t.committed {
-		return TableCommit{}, errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return TableCommit{}, err
 	}
 
 	if len(meta.updates) == 0 {
