@@ -2369,7 +2369,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, fmt.Errorf("%w: view version cannot be nil", iceberg.ErrInvalidArgument)
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2400,7 +2400,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	payload := createViewRequest{
-		Name:        viewName,
+		Name:        catalog.ObjectNameFromIdent(identifier),
 		Location:    cfg.Location,
 		Schema:      freshSchema,
 		Props:       cfg.Properties,
@@ -2430,21 +2430,21 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(ident)
+	ns, encodedView, err := r.splitViewIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      viewName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier         `json:"identifier"`
 		Requirements []view.Requirement `json:"requirements"`
 		Updates      []view.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateView.reqPath(ns, viewName)
+	path, err := endpointUpdateView.reqPath(ns, encodedView)
 	if err != nil {
 		return nil, err
 	}
@@ -2476,7 +2476,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2492,7 +2492,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 	}
 
 	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, path,
-		payload{Name: v, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
 		})
 	if err != nil {
