@@ -35,6 +35,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -466,7 +467,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// Physically delete all table files on storage best-effort
-	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+	if purgeErr := maintenance.PurgeFiles(ctx, tbl); purgeErr != nil {
 		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 
