@@ -20,13 +20,10 @@ package rest
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"iter"
 	"log/slog"
@@ -41,16 +38,11 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"golang.org/x/sync/semaphore"
@@ -94,12 +86,6 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
-	// keyRestAccessKeyID and friends are the Java-client property names for the
-	// SigV4 signing credentials. They are accepted as aliases for the s3.*
-	// properties; the s3.* keys take precedence when both are set.
-	keyRestAccessKeyID     = "rest.access-key-id"
-	keyRestSecretAccessKey = "rest.secret-access-key"
-	keyRestSessionToken    = "rest.session-token"
 	// keyOAuth2ServerURI is the portable, spec-aligned property for the OAuth2
 	// token endpoint used by Java, PyIceberg and iceberg-rust. It is the
 	// preferred key; keyAuthUrl is retained as a compatibility alias. When both
@@ -247,13 +233,10 @@ type sessionTransport struct {
 
 	authManager    AuthManager
 	defaultHeaders http.Header
-	signer         v4.HTTPSigner
-	cfg            aws.Config
-	service        string
-	newHash        func() hash.Hash
-	// signingOrigin is the configured catalog origin. Requests to a different
-	// origin (e.g. a redirect hop) are not signed, so the SigV4 Authorization
-	// header and session token never reach an unconfigured host.
+	signer         RequestSigner
+	// signingOrigin is the configured catalog origin. A request to a different
+	// origin (e.g. a redirect hop) is not signed, so the signer's Authorization
+	// header and any session token never reach an unconfigured host.
 	signingOrigin *url.URL
 }
 
@@ -277,9 +260,6 @@ func defaultedPort(u *url.URL) string {
 		return ""
 	}
 }
-
-// from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
-const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// A session default is applied unless the request already carries that
@@ -326,44 +306,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	if s.signer != nil && (s.signingOrigin == nil || sameOrigin(s.signingOrigin, r.URL)) {
-		var payloadHash string
-		if r.Body == nil {
-			payloadHash = emptyStringHash
-		} else {
-			rdr, err := r.GetBody()
-			if err != nil {
-				return nil, err
-			}
-
-			h := s.newHash()
-			if _, err = io.Copy(h, rdr); err != nil {
-				if closeErr := rdr.Close(); closeErr != nil {
-					err = errors.Join(err, closeErr)
-				}
-
-				return nil, err
-			}
-
-			if err = rdr.Close(); err != nil {
-				return nil, err
-			}
-
-			payloadHash = hex.EncodeToString(h.Sum(nil))
-		}
-
-		creds, err := s.cfg.Credentials.Retrieve(r.Context())
-		if err != nil {
-			return nil, err
-		}
-
-		// Set the x-amz-content-sha256 header before signing.
-		// This header is required for AWS SigV4 signature verification.
-		r.Header.Set("x-amz-content-sha256", payloadHash)
-
-		// modifies the request in place
-		err = s.signer.SignHTTP(r.Context(), creds, r, payloadHash,
-			s.service, s.cfg.Region, time.Now())
-		if err != nil {
+		if err := s.signer.SignRequest(r); err != nil {
 			return nil, err
 		}
 	}
@@ -1137,65 +1080,23 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.authManager = authManager
 	}
 
-	if opts.enableSigv4 {
-		cfg := opts.awsConfig
-		if !opts.awsConfigSet {
-			creds, err := staticCredsFromProps(opts.additionalProps)
-			if err != nil {
-				cleanup()
+	signer, err := resolveSigner(ctx, opts)
+	if err != nil {
+		cleanup()
 
-				return nil, nil, err
-			}
-			// If no config provided, load defaults from environment.
-			cfg, err = config.LoadDefaultConfig(ctx)
-			if err != nil {
-				cleanup()
-
-				return nil, nil, err
-			}
-			// Sign with the S3 credentials carried in the catalog properties when
-			// present, rather than only the AWS default credential chain.
-			if creds != nil {
-				cfg.Credentials = creds
-			}
-		}
-		if opts.sigv4Region != "" {
-			cfg.Region = opts.sigv4Region
-		}
-
-		session.cfg, session.service = cfg, opts.sigv4Service
-		session.signer, session.newHash = v4.NewSigner(), sha256.New
+		return nil, nil, err
+	}
+	session.signer = signer
+	// A signer only signs requests to the configured catalog origin: a request
+	// to a different origin (e.g. a redirect hop) is left unsigned, so the
+	// signer's Authorization header and any session token never reach an
+	// unconfigured host. The guard lives here, in core, so it covers every
+	// signer, including one installed verbatim via WithSigner.
+	if signer != nil {
 		session.signingOrigin = r.baseURI
 	}
 
 	return cl, cleanup, nil
-}
-
-// staticCredsFromProps returns a static credentials provider built from the
-// signing-credential properties. It prefers the s3.* keys and falls back to the
-// Java-compatible rest.* aliases, resolving the tuple atomically from a single
-// namespace so a partial pair is never completed with fields from the other one.
-// It returns (nil, nil) when neither namespace sets any credential property, so
-// the caller falls back to the default credential chain, and an
-// ErrIncompleteStaticCredentials error when the chosen namespace is incomplete.
-func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, error) {
-	namespaces := [][3]string{
-		{iceio.S3AccessKeyID, iceio.S3SecretAccessKey, iceio.S3SessionToken},
-		{keyRestAccessKeyID, keyRestSecretAccessKey, keyRestSessionToken},
-	}
-	for _, ns := range namespaces {
-		accessKey, secretKey, token := props[ns[0]], props[ns[1]], props[ns[2]]
-		if accessKey == "" && secretKey == "" && token == "" {
-			continue
-		}
-		if err := internalaws.ValidateStaticCredentials(ns[0], ns[1], ns[2], accessKey, secretKey, token); err != nil {
-			return nil, err
-		}
-
-		return credentials.NewStaticCredentialsProvider(accessKey, secretKey, token), nil
-	}
-
-	return nil, nil
 }
 
 func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
