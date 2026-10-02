@@ -20,6 +20,7 @@ package table_test
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go/table"
@@ -309,4 +310,36 @@ func TestAssertRefSnapshotIDValidate(t *testing.T) {
 		req := table.AssertRefSnapshotID("nonexistent", nil)
 		assert.NoError(t, req.Validate(meta))
 	})
+}
+
+func TestRequirementFailuresAreCommitConflicts(t *testing.T) {
+	meta, err := table.ParseMetadataBytes([]byte(table.ExampleTableMetadataV2))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		req  table.Requirement
+		meta table.Metadata
+	}{
+		{"table already exists", table.AssertCreate(), meta},
+		{"table uuid mismatch", table.AssertTableUUID(uuid.New()), meta},
+		{"table metadata missing", table.AssertTableUUID(meta.TableUUID()), nil},
+		{"ref has changed", table.AssertRefSnapshotID("test", new(int64(1))), meta},
+		{"ref created concurrently", table.AssertRefSnapshotID("test", nil), meta},
+		{"ref missing", table.AssertRefSnapshotID("nonexistent", new(int64(1))), meta},
+		{"last assigned field id changed", table.AssertLastAssignedFieldID(meta.LastColumnID() + 1), meta},
+		{"current schema id changed", table.AssertCurrentSchemaID(meta.CurrentSchema().ID + 1), meta},
+		{"last assigned partition id changed", table.AssertLastAssignedPartitionID(*meta.LastPartitionSpecID() + 1), meta},
+		{"default spec id changed", table.AssertDefaultSpecID(meta.DefaultPartitionSpec() + 1), meta},
+		{"default sort order id changed", table.AssertDefaultSortOrderID(meta.DefaultSortOrder() + 1), meta},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate(tt.meta)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, table.ErrCommitFailed)
+			assert.Contains(t, strings.ToLower(err.Error()), "requirement failed")
+		})
+	}
 }

@@ -50,12 +50,8 @@ import (
 // commit fails due to a concurrent modification (e.g. HTTP 409 Conflict
 // from the REST catalog). Catalog implementations should wrap this
 // error so that callers using errors.Is(err, table.ErrCommitFailed)
-// can detect retryable commit conflicts.
-//
-// Currently only catalog/rest wraps this sentinel; Glue, SQL, and Hive
-// catalogs return their conflict errors raw and will not trigger
-// retries until follow-up work wires them through (tracked under
-// issue #830).
+// can detect retryable commit conflicts. Requirement validation failures,
+// such as a branch that has moved since the table was loaded, also wrap it.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system

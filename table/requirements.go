@@ -227,6 +227,20 @@ func (b baseRequirement) GetType() string {
 	return b.Type
 }
 
+// requirementFailed reports table metadata that does not satisfy a commit
+// requirement. The error matches ErrCommitFailed, as Java's
+// CommitFailedException does, so a commit can be retried against refreshed
+// metadata.
+func requirementFailed(format string, args ...any) error {
+	return &requirementError{msg: fmt.Sprintf(format, args...)}
+}
+
+type requirementError struct{ msg string }
+
+func (e *requirementError) Error() string { return e.msg }
+
+func (e *requirementError) Unwrap() error { return ErrCommitFailed }
+
 type assertCreate struct {
 	baseRequirement
 }
@@ -240,7 +254,7 @@ func AssertCreate() Requirement {
 
 func (a *assertCreate) Validate(meta Metadata) error {
 	if meta != nil {
-		return errors.New("Requirement failed: table already exists")
+		return requirementFailed("Requirement failed: table already exists")
 	}
 
 	return nil
@@ -261,11 +275,11 @@ func AssertTableUUID(uuid uuid.UUID) Requirement {
 
 func (a *assertTableUuid) Validate(meta Metadata) error {
 	if meta == nil {
-		return errors.New("Requirement failed: current table metadata does not exist")
+		return requirementFailed("Requirement failed: current table metadata does not exist")
 	}
 
 	if meta.TableUUID() != a.UUID {
-		return fmt.Errorf("Requirement failed: UUID mismatch: %s != %s", meta.TableUUID(), a.UUID)
+		return requirementFailed("Requirement failed: UUID mismatch: %s != %s", meta.TableUUID(), a.UUID)
 	}
 
 	return nil
@@ -300,7 +314,7 @@ func assertBranchRefSnapshotID(ref string, id *int64) Requirement {
 
 func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 	if meta == nil {
-		return errors.New("Requirement failed: current table metadata does not exist")
+		return requirementFailed("Requirement failed: current table metadata does not exist")
 	}
 
 	var r *SnapshotRef
@@ -318,14 +332,14 @@ func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 		}
 
 		if a.SnapshotID == nil {
-			return fmt.Errorf("requirement failed: %s %q was created concurrently", r.SnapshotRefType, a.Ref)
+			return requirementFailed("requirement failed: %s %q was created concurrently", r.SnapshotRefType, a.Ref)
 		}
 
 		if r.SnapshotID != *a.SnapshotID {
-			return fmt.Errorf("requirement failed: %s %q has changed: expected id %d, found %d", r.SnapshotRefType, a.Ref, *a.SnapshotID, r.SnapshotID)
+			return requirementFailed("requirement failed: %s %q has changed: expected id %d, found %d", r.SnapshotRefType, a.Ref, *a.SnapshotID, r.SnapshotID)
 		}
 	} else if a.SnapshotID != nil {
-		return fmt.Errorf("requirement failed: branch or tag %q is missing, expected %d", a.Ref, *a.SnapshotID)
+		return requirementFailed("requirement failed: branch or tag %q is missing, expected %d", a.Ref, *a.SnapshotID)
 	}
 
 	return nil
@@ -347,11 +361,11 @@ func AssertLastAssignedFieldID(id int) Requirement {
 
 func (a *assertLastAssignedFieldId) Validate(meta Metadata) error {
 	if meta == nil {
-		return errors.New("Requirement failed: current table metadata does not exist")
+		return requirementFailed("Requirement failed: current table metadata does not exist")
 	}
 
 	if meta.LastColumnID() != a.LastAssignedFieldID {
-		return fmt.Errorf("Requirement failed: last assigned field id has changed: expected %d, found %d", a.LastAssignedFieldID, meta.LastColumnID())
+		return requirementFailed("Requirement failed: last assigned field id has changed: expected %d, found %d", a.LastAssignedFieldID, meta.LastColumnID())
 	}
 
 	return nil
@@ -373,11 +387,11 @@ func AssertCurrentSchemaID(id int) Requirement {
 
 func (a *assertCurrentSchemaId) Validate(meta Metadata) error {
 	if meta == nil {
-		return errors.New("Requirement failed: current table metadata does not exist")
+		return requirementFailed("Requirement failed: current table metadata does not exist")
 	}
 
 	if meta.CurrentSchema().ID != a.CurrentSchemaID {
-		return fmt.Errorf("Requirement failed: current schema id has changed: expected %d, found %d", a.CurrentSchemaID, meta.CurrentSchema().ID)
+		return requirementFailed("Requirement failed: current schema id has changed: expected %d, found %d", a.CurrentSchemaID, meta.CurrentSchema().ID)
 	}
 
 	return nil
@@ -399,7 +413,7 @@ func AssertLastAssignedPartitionID(id int) Requirement {
 
 func (a *assertLastAssignedPartitionId) Validate(meta Metadata) error {
 	if meta == nil {
-		return errors.New("Requirement failed: current table metadata does not exist")
+		return requirementFailed("Requirement failed: current table metadata does not exist")
 	}
 
 	lastPartitionSpecID := meta.LastPartitionSpecID()
@@ -408,7 +422,7 @@ func (a *assertLastAssignedPartitionId) Validate(meta Metadata) error {
 	}
 
 	if *lastPartitionSpecID != a.LastAssignedPartitionID {
-		return fmt.Errorf("requirement failed: last assigned partition id has changed: expected %d, found %d", a.LastAssignedPartitionID, *lastPartitionSpecID)
+		return requirementFailed("requirement failed: last assigned partition id has changed: expected %d, found %d", a.LastAssignedPartitionID, *lastPartitionSpecID)
 	}
 
 	return nil
@@ -430,11 +444,11 @@ func AssertDefaultSpecID(id int) Requirement {
 
 func (a *assertDefaultSpecId) Validate(meta Metadata) error {
 	if meta == nil {
-		return errors.New("Requirement failed: current table metadata does not exist")
+		return requirementFailed("Requirement failed: current table metadata does not exist")
 	}
 
 	if meta.DefaultPartitionSpec() != a.DefaultSpecID {
-		return fmt.Errorf("Requirement failed: default spec id has changed: expected %d, found %d", a.DefaultSpecID, meta.DefaultPartitionSpec())
+		return requirementFailed("Requirement failed: default spec id has changed: expected %d, found %d", a.DefaultSpecID, meta.DefaultPartitionSpec())
 	}
 
 	return nil
@@ -456,11 +470,11 @@ func AssertDefaultSortOrderID(id int) Requirement {
 
 func (a *assertDefaultSortOrderId) Validate(meta Metadata) error {
 	if meta == nil {
-		return errors.New("requirement failed: current table metadata does not exist")
+		return requirementFailed("requirement failed: current table metadata does not exist")
 	}
 
 	if meta.DefaultSortOrder() != a.DefaultSortOrderID {
-		return fmt.Errorf("requirement failed: default sort order id has changed: expected %d, found %d", a.DefaultSortOrderID, meta.DefaultSortOrder())
+		return requirementFailed("requirement failed: default sort order id has changed: expected %d, found %d", a.DefaultSortOrderID, meta.DefaultSortOrder())
 	}
 
 	return nil

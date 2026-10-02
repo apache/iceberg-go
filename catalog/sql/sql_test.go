@@ -1496,6 +1496,104 @@ func (s *SqliteCatalogTestSuite) TestDropTableNotExist() {
 	}
 }
 
+// A writer whose table handle predates a peer's commit fails the catalog's
+// branch requirement check. That failure must be a retryable commit
+// conflict, so commit retries refresh the table and land both appends.
+func (s *SqliteCatalogTestSuite) TestStaleAppendRetriesRequirementFailure() {
+	ctx := context.Background()
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+	})
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "foo", Type: arrow.BinaryTypes.String}}, nil)
+
+	appendRow := func(tbl *table.Table, value string) (*table.Table, error) {
+		bldr := array.NewStringBuilder(memory.DefaultAllocator)
+		defer bldr.Release()
+		bldr.Append(value)
+		arr := bldr.NewArray()
+		defer arr.Release()
+		rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, 1)
+		defer rec.Release()
+		arrTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
+		defer arrTable.Release()
+
+		return tbl.AppendTable(ctx, arrTable, 1024, nil)
+	}
+
+	storedValues := func(tbl *table.Table) []string {
+		rows, err := tbl.Scan().ToArrowTable(ctx)
+		s.Require().NoError(err)
+		defer rows.Release()
+
+		var values []string
+		for i := range int(rows.NumCols()) {
+			if rows.Schema().Field(i).Name != "foo" {
+				continue
+			}
+			for _, chunk := range rows.Column(i).Data().Chunks() {
+				for j := range chunk.Len() {
+					values = append(values, chunk.ValueStr(j))
+				}
+			}
+		}
+
+		return values
+	}
+
+	tests := []struct {
+		name       string
+		numRetries string
+	}{
+		{"retries enabled", "2"},
+		{"retries disabled", "0"},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			cat := s.getCatalogSqlite()
+			defer cat.Close()
+			tblID := s.randomTableIdentifier()
+			s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+
+			created, err := cat.CreateTable(ctx, tblID, schema, catalog.WithProperties(iceberg.Properties{
+				table.CommitNumRetriesKey:     tt.numRetries,
+				table.CommitMinRetryWaitMsKey: "1",
+				table.CommitMaxRetryWaitMsKey: "2",
+			}))
+			s.Require().NoError(err)
+			_, err = appendRow(created, "seed")
+			s.Require().NoError(err)
+
+			peer, err := cat.LoadTable(ctx, tblID)
+			s.Require().NoError(err)
+			stale, err := cat.LoadTable(ctx, tblID)
+			s.Require().NoError(err)
+
+			_, err = appendRow(peer, "peer")
+			s.Require().NoError(err)
+
+			_, err = appendRow(stale, "stale")
+			if tt.numRetries == "0" {
+				s.Require().Error(err)
+				s.ErrorIs(err, table.ErrCommitFailed)
+				s.Contains(err.Error(), "has changed")
+
+				current, err := cat.LoadTable(ctx, tblID)
+				s.Require().NoError(err)
+				s.ElementsMatch([]string{"seed", "peer"}, storedValues(current))
+
+				return
+			}
+			s.Require().NoError(err)
+
+			current, err := cat.LoadTable(ctx, tblID)
+			s.Require().NoError(err)
+			s.Len(current.Metadata().Snapshots(), 3)
+			s.ElementsMatch([]string{"seed", "peer", "stale"}, storedValues(current))
+		})
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestPurgeTable() {
 	tests := []struct {
 		cat   *sqlcat.Catalog
