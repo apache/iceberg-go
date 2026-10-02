@@ -1034,7 +1034,7 @@ func (r *Catalog) abandonPlan(ctx context.Context, ident table.Identifier, planI
 }
 
 func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ...string) ([]string, error) {
-	ns, tbl, err := r.splitIdentForPath(ident)
+	identPath, err := r.tableIdentifierPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1045,7 +1045,7 @@ func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ..
 	// a '..'/'.' segment would resolve to a different endpoint (e.g. ".." on the
 	// plan path lands on .../tasks). Escape each as a single literal path segment.
 	params := make([]string, 0, 2+len(extra))
-	params = append(params, ns, tbl)
+	params = append(params, identPath.encodedNamespace, identPath.encodedName)
 	for _, seg := range extra {
 		params = append(params, escapeOpaquePathSegment(seg))
 	}
