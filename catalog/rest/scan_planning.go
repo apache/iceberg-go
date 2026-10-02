@@ -29,7 +29,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net/http"
-	"net/url"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1054,12 +1053,12 @@ func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ..
 }
 
 // escapeOpaquePathSegment percent-encodes an opaque string so it survives
-// url.URL.JoinPath as a single literal path segment. url.PathEscape handles '/',
-// '%', spaces, etc., but leaves a pure-dot segment ("." or "..") unescaped, which
-// JoinPath's path.Clean would then resolve as a dot-segment; encode those dots so
-// the segment is preserved verbatim.
+// url.URL.JoinPath as a single literal path segment. encodePathSegment leaves a
+// pure-dot segment ("." or "..") unescaped, which JoinPath's path.Clean would
+// then resolve as a dot-segment; encode those dots so the segment is preserved
+// verbatim.
 func escapeOpaquePathSegment(s string) string {
-	switch escaped := url.PathEscape(s); escaped {
+	switch escaped := encodePathSegment(s); escaped {
 	case ".":
 		return "%2E"
 	case "..":
