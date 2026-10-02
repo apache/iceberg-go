@@ -561,12 +561,36 @@ catalog:
 <p>The most option-rich surface. Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/options.go"><code>catalog/rest/options.go</code></a>.</p>
 <div class="table-wrapper"><table><thead><tr><th>Group</th><th>Options</th></tr></thead><tbody>
 <tr><td>Authentication</td><td><code>WithCredential</code>, <code>WithOAuthToken</code>, <code>WithAuthManager</code>, <code>WithAuthURI</code>, <code>WithScope</code>, <code>WithAudience</code>, <code>WithResource</code></td></tr>
-<tr><td>AWS SigV4</td><td><code>WithSigV4</code>, <code>WithSigV4RegionSvc</code>, <code>WithAwsConfig</code></td></tr>
+<tr><td>AWS SigV4</td><td><code>WithSigV4</code>, <code>WithSigV4RegionSvc</code>, <code>WithSigner</code></td></tr>
 <tr><td>HTTP</td><td><code>WithHeaders</code>, <code>WithTLSConfig</code>, <code>WithOAuthTLSConfig</code>, <code>WithCustomTransport</code></td></tr>
 <tr><td>Catalog routing</td><td><code>WithPrefix</code>, <code>WithWarehouseLocation</code>, <code>WithMetadataLocation</code></td></tr>
 <tr><td>Pass-through</td><td><code>WithAdditionalProps</code></td></tr>
 </tbody></table>
 </div>
+<blockquote>
+<p><strong>AWS SigV4 is an optional backend.</strong> <code>catalog/rest</code> no longer links the AWS
+SDK. To sign REST requests with SigV4, pull in the
+<a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/sigv4/sigv4.go"><code>catalog/rest/sigv4</code></a>
+sub-package one of two ways:</p>
+<ul>
+<li>Property or ambient credentials: add a blank import
+<code>_ &quot;github.com/apache/iceberg-go/catalog/rest/sigv4&quot;</code> and enable signing with
+<code>WithSigV4</code> / <code>WithSigV4RegionSvc</code> or the <code>rest.sigv4-enabled</code> property. The
+backend signs with the <code>s3.*</code> credential properties when set (falling back to
+the <code>rest.*</code> aliases), otherwise with the AWS default credential chain.</li>
+<li>Explicit config: pass <code>sigv4.WithAwsConfig(cfg)</code> to <code>NewCatalog</code> alongside
+<code>WithSigV4</code> / <code>WithSigV4RegionSvc</code> (no blank import needed). It supplies the
+<code>aws.Config</code>; the signing service comes from those options (or a server
+<code>/v1/config</code> override), and so does the region when one is set. Otherwise
+the region falls back to <code>cfg.Region</code>.</li>
+</ul>
+<p>The former <code>rest.WithAwsConfig(aws.Config)</code> has been removed in favor of these
+paths. Because signing is enabled by <code>WithSigV4</code> / <code>WithSigV4RegionSvc</code> (or the
+<code>rest.sigv4-enabled</code> property) rather than by supplying a config, a program
+that loads a REST catalog with <code>rest.sigv4-enabled=true</code> now fails at startup
+until the <code>catalog/rest/sigv4</code> backend is blank-imported; the error names the
+import to add.</p>
+</blockquote>
 <h4 id="metrics-reporting"><a class="header" href="#metrics-reporting">Metrics reporting</a></h4>
 <p>The REST catalog can POST scan and commit metrics to the catalog's
 <code>.../tables/{table}/metrics</code> endpoint. These properties are passed as
