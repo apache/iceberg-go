@@ -173,28 +173,25 @@ func exactVariantMatch(pt variant.Type, raw any, typ PrimitiveType) (any, bool) 
 }
 
 func castVariantDecimal(raw any, typ DecimalType) (any, bool) {
+	d, ok := decimalFromVariant(raw)
+	if !ok || d.Scale != typ.Scale() {
+		return nil, false
+	}
+
+	return d, true
+}
+
+func decimalFromVariant(raw any) (Decimal, bool) {
 	switch d := raw.(type) {
 	case variant.DecimalValue[decimal.Decimal32]:
-		if int(d.Scale) != typ.Scale() {
-			return nil, false
-		}
-
 		return Decimal{Val: decimal128.FromI64(int64(d.Value.(decimal.Decimal32))), Scale: int(d.Scale)}, true
 	case variant.DecimalValue[decimal.Decimal64]:
-		if int(d.Scale) != typ.Scale() {
-			return nil, false
-		}
-
 		return Decimal{Val: decimal128.FromI64(int64(d.Value.(decimal.Decimal64))), Scale: int(d.Scale)}, true
 	case variant.DecimalValue[decimal.Decimal128]:
-		if int(d.Scale) != typ.Scale() {
-			return nil, false
-		}
-
 		return Decimal{Val: d.Value.(decimal.Decimal128), Scale: int(d.Scale)}, true
 	}
 
-	return nil, false
+	return Decimal{}, false
 }
 
 // castVariantToMicros converts a nanosecond or date leaf to a microsecond timestamp; the source's tz-awareness must match the target's (tz).
@@ -280,4 +277,36 @@ func literalFromCastValue(result any) Literal {
 	}
 
 	return nil
+}
+
+func literalFromVariant(v variant.Value) (Literal, bool) {
+	// a zero Value has no header byte to read a type from
+	if len(v.Bytes()) == 0 {
+		return nil, false
+	}
+
+	raw := v.Value()
+	switch v.Type() {
+	case variant.Int8:
+		return Int32Literal(raw.(int8)), true
+	case variant.Int16:
+		return Int32Literal(raw.(int16)), true
+	case variant.Date:
+		return DateLiteral(raw.(arrow.Date32)), true
+	case variant.Time:
+		return TimeLiteral(raw.(arrow.Time64)), true
+	case variant.TimestampMicros, variant.TimestampMicrosNTZ:
+		return TimestampLiteral(raw.(arrow.Timestamp)), true
+	case variant.TimestampNanos, variant.TimestampNanosNTZ:
+		return TimestampNsLiteral(raw.(arrow.Timestamp)), true
+	case variant.Decimal4, variant.Decimal8, variant.Decimal16:
+		d, ok := decimalFromVariant(raw)
+
+		return DecimalLiteral(d), ok
+	}
+
+	// the rest map directly; null, object and array have no literal
+	lit := literalFromCastValue(raw)
+
+	return lit, lit != nil
 }
