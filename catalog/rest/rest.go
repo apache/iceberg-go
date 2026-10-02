@@ -1314,9 +1314,10 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 // Allows for a quick table credential refresh if the table was created without any pre-seeded
 // credentials. If the catalog did not vend any credentials, the table is returned unmodified.
 //
-// Requires that the passed-in table instance be created with the table.WithSavedConfig() option to
-// save any table-specific configs. All tables created by this catalog pass in that option. Callers of
-// table.New() that use this method should also pass metadata.Properties() into table.WithSavedConfig().
+// Note that the passed-in table instance should be created with the table.WithSavedConfig() option to
+// save any table-specific configs for reuse in the newly-created instance. All tables created by this
+// catalog pass in that option. Callers of table.New() that use this method should also pass
+// metadata.Properties() into table.WithSavedConfig().
 func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table) (*table.Table, error) {
 	metadataLoc := tbl.MetadataLocation()
 	resp, err := r.fetchTableCreds(ctx, tbl.Identifier(), metadataLoc)
