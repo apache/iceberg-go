@@ -29,8 +29,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A copy-on-write delete builds the transaction's metadata once per rewritten
-// file. The staged table must still carry a single previous-metadata entry.
+// A transaction builds its metadata several times before it commits (for a
+// copy-on-write delete: while classifying files, once per rewritten file, and again
+// for StagedTable). However many builds there are, the staged table must carry a
+// single previous-metadata entry.
 func TestCopyOnWriteDeleteStagesSinglePreviousMetadataLogEntry(t *testing.T) {
 	ctx := context.Background()
 	location := filepath.ToSlash(t.TempDir())
@@ -60,5 +62,6 @@ func TestCopyOnWriteDeleteStagesSinglePreviousMetadataLogEntry(t *testing.T) {
 
 	staged, err := txn.StagedTable()
 	require.NoError(t, err)
-	require.Len(t, slices.Collect(staged.Metadata().PreviousFiles()), 1)
+	require.Len(t, slices.Collect(staged.Metadata().PreviousFiles()), 1,
+		"each Build must not add another previous-metadata entry")
 }

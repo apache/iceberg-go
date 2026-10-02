@@ -1519,15 +1519,12 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 
 	// Build may run more than once on the same builder, so the log is extended on a
 	// copy. Appending to b.metadataLog would add the previous file again on every call.
-	metadataLog := b.metadataLog
+	metadataLog := slices.Clone(b.metadataLog)
 	if b.previousFileEntry != nil && b.HasChanges() {
 		maxMetadataLogEntries := max(1,
 			b.props.GetInt(
 				MetadataPreviousVersionsMaxKey, MetadataPreviousVersionsMaxDefault))
-		metadataLog = append(slices.Clone(b.metadataLog), *b.previousFileEntry)
-		if len(metadataLog) > maxMetadataLogEntries {
-			metadataLog = metadataLog[len(metadataLog)-maxMetadataLogEntries:]
-		}
+		metadataLog = trimMetadataLog(append(metadataLog, *b.previousFileEntry), maxMetadataLogEntries)
 	}
 
 	return &commonMetadata{
@@ -1668,13 +1665,19 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 }
 
 func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {
-	if len(b.metadataLog) <= maxEntries {
-		return b
-	}
-
-	b.metadataLog = b.metadataLog[len(b.metadataLog)-maxEntries:]
+	b.metadataLog = trimMetadataLog(b.metadataLog, maxEntries)
 
 	return b
+}
+
+// trimMetadataLog returns the newest maxEntries entries of log, leaving log itself
+// unchanged.
+func trimMetadataLog(log []MetadataLogEntry, maxEntries int) []MetadataLogEntry {
+	if len(log) <= maxEntries {
+		return log
+	}
+
+	return log[len(log)-maxEntries:]
 }
 
 func (b *MetadataBuilder) AppendMetadataLog(entry MetadataLogEntry) *MetadataBuilder {

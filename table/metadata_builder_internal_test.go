@@ -1497,6 +1497,18 @@ func TestBuildDoesNotGrowMetadataLog(t *testing.T) {
 		meta, err := builder.Build()
 		require.NoError(t, err)
 		require.Len(t, meta.(*metadataV2).MetadataLog, 1)
+		require.Empty(t, builder.metadataLog, "Build must not append to the builder's own log")
+	}
+}
+
+func TestBuildWithoutChangesAddsNoMetadataLogEntry(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NotNil(t, builder.previousFileEntry, "setup: the builder must have a previous file")
+
+	for range 2 {
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Empty(t, meta.(*metadataV2).MetadataLog)
 	}
 }
 
