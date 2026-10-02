@@ -146,7 +146,7 @@ func TestMarshalAvroEntryDoesNotMutateAnyAvroField(t *testing.T) {
 }
 
 func TestDataFileAvroFieldIndexesCoverEveryAvroField(t *testing.T) {
-	typ := reflect.TypeOf(dataFile{})
+	typ := reflect.TypeFor[dataFile]()
 	want := make([]int, 0, typ.NumField())
 	for i := range typ.NumField() {
 		if _, ok := typ.Field(i).Tag.Lookup("avro"); ok {

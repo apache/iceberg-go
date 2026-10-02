@@ -76,7 +76,7 @@ type ScanPlanningMetadata interface {
 
 // Compile-time guard that the full Metadata interface still satisfies the
 // narrowed planner view, so callers can pass a table.Metadata directly.
-var _ ScanPlanningMetadata = (Metadata)(nil)
+var _ ScanPlanningMetadata = Metadata(nil)
 
 // Compile-time guard that Scan exposes the lifecycle contract as io.Closer.
 var _ io.Closer = (*Scan)(nil)

@@ -355,13 +355,11 @@ func TestDeferredSnapshotsConcurrentMaterialization(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			require.NotNil(t, meta.CurrentSnapshot())
 			require.NotNil(t, meta.SnapshotByID(historicalID))
 			require.Len(t, meta.Snapshots(), 2)
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -410,11 +408,9 @@ func TestDeferredSnapshotsConcurrentSingleLookupDoesNotMaterializeHistory(t *tes
 
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			require.Equal(t, historicalID, meta.SnapshotByID(historicalID).SnapshotID)
-		}()
+		})
 	}
 	wg.Wait()
 

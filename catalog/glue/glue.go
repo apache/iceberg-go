@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -766,12 +765,6 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	return props, nil
 }
 
-// avoid circular dependency while still avoiding having to export the getUpdatedPropsAndUpdateSummary function
-// so that we can re-use it in the catalog implementations without duplicating the code.
-
-//go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
-func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
-
 // UpdateNamespaceProperties updates the properties of an Iceberg namespace in the Glue catalog.
 // The removals list contains the keys to remove, and the updates map contains the keys and values to update.
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
@@ -782,7 +775,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
-	updatedProperties, propertiesUpdateSummary, err := getUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
+	updatedProperties, propertiesUpdateSummary, err := internal.GetUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
 	if err != nil {
 		return catalog.PropertiesUpdateSummary{}, err
 	}
@@ -855,8 +848,7 @@ func (c *Catalog) getRawTable(ctx context.Context, database, tableName string) (
 		},
 	)
 	if err != nil {
-		var notFoundErr *types.EntityNotFoundException
-		if errors.As(err, &notFoundErr) {
+		if _, ok := errors.AsType[*types.EntityNotFoundException](err); ok {
 			return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, catalog.ErrNoSuchTable)
 		}
 
@@ -931,8 +923,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 func (c *Catalog) getDatabase(ctx context.Context, databaseName string) (*types.Database, error) {
 	database, err := c.glueSvc.GetDatabase(ctx, &glue.GetDatabaseInput{CatalogId: c.catalogId, Name: aws.String(databaseName)})
 	if err != nil {
-		var notFoundErr *types.EntityNotFoundException
-		if errors.As(err, &notFoundErr) {
+		if _, ok := errors.AsType[*types.EntityNotFoundException](err); ok {
 			return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, catalog.ErrNoSuchNamespace)
 		}
 

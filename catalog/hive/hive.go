@@ -25,7 +25,6 @@ import (
 	"log"
 	"maps"
 	"strings"
-	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -934,9 +933,6 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	return props, nil
 }
 
-//go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
-func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
-
 // UpdateNamespaceProperties updates the properties for a namespace.
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
 	removals []string, updates iceberg.Properties,
@@ -946,7 +942,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
-	updatedProperties, propertiesUpdateSummary, err := getUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
+	updatedProperties, propertiesUpdateSummary, err := internal.GetUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
 	if err != nil {
 		return catalog.PropertiesUpdateSummary{}, err
 	}
@@ -1036,8 +1032,7 @@ func isNoSuchObjectError(err error) bool {
 		return false
 	}
 
-	var noSuchObjectErr *hive_metastore.NoSuchObjectException
-	if errors.As(err, &noSuchObjectErr) {
+	if _, ok := errors.AsType[*hive_metastore.NoSuchObjectException](err); ok {
 		return true
 	}
 

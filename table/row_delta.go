@@ -435,12 +435,9 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 	}
 
 	liveByPath := make(map[string][]iceberg.DataFile, len(rd.removedDels))
-	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes) {
+	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return nil, nil, err
-		}
-		if entry.Status() == iceberg.EntryStatusDELETED {
-			continue
 		}
 		df := entry.DataFile()
 		if _, ok := want[df.FilePath()]; ok {

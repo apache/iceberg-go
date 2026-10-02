@@ -20,11 +20,15 @@ package table_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -213,7 +217,7 @@ func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 	require.NoError(t, err)
 
 	oldDelete := oldDeleteBuilder.Build()
-	oldSequence := deleteFileSequence(t, tbl, oldDelete.FilePath())
+	oldSequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).SequenceNum()
 	newDeletePath := tbl.Location() + "/data/new-pos-delete.parquet"
 	writeParquetFile(t, newDeletePath, table.PositionalDeleteArrowSchema,
 		fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, dataPath))
@@ -232,7 +236,7 @@ func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	assert.Equal(t, oldSequence, deleteFileSequence(t, tbl, newDeletePath),
+	assert.Equal(t, oldSequence, currentManifestEntry(t, tbl, newDeletePath).SequenceNum(),
 		"rewritten delete files must retain the replaced data sequence number")
 	assert.NotEqual(t, tbl.CurrentSnapshot().SequenceNumber, oldSequence,
 		"the new snapshot sequence must not replace the delete data sequence")
@@ -362,7 +366,7 @@ func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorIdentity(t *testing.T
 		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(sourceDelete).Commit(t.Context()))
 		sharedTbl, err := tx.Commit(t.Context())
 		require.NoError(t, err)
-		sequence := deleteFileSequence(t, sharedTbl, sourceDelete.FilePath())
+		sequence := currentManifestEntry(t, sharedTbl, sourceDelete.FilePath()).SequenceNum()
 
 		tx = sharedTbl.NewTransaction()
 		require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -454,7 +458,7 @@ func TestReplaceFilesWithDeleteFilesValidatesExistingPaths(t *testing.T) {
 			}
 			tbl, err = tx.Commit(t.Context())
 			require.NoError(t, err)
-			sequence := deleteFileSequence(t, tbl, source.FilePath())
+			sequence := currentManifestEntry(t, tbl, source.FilePath()).SequenceNum()
 
 			for _, tt := range []struct {
 				name string
@@ -525,7 +529,7 @@ func TestReplaceFilesWithDeleteFilesRejectsPartialPositionDeleteToDVRewrite(t *t
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	sequence := deleteFileSequence(t, tbl, oldDeletes[0].FilePath())
+	sequence := currentManifestEntry(t, tbl, oldDeletes[0].FilePath()).SequenceNum()
 	offset, length := int64(8), int64(16)
 	replacement := newRewriteDeletionVector(t, tbl.Location()+"/data/replacement.puffin", dataPath, &offset, &length)
 
@@ -568,7 +572,7 @@ func TestReplaceFilesWithDeleteFilesRejectsDeletionVectorPartitionMismatch(t *te
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	deleteSequence := fileDataSequence(t, tbl, oldDeletePath)
+	deleteSequence := currentManifestEntry(t, tbl, oldDeletePath).SequenceNum()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -620,7 +624,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldPartitionDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	oldPartitionDeleteSequence := fileDataSequence(t, tbl, oldPartitionDeletePath)
+	oldPartitionDeleteSequence := currentManifestEntry(t, tbl, oldPartitionDeletePath).SequenceNum()
 
 	dataBPath := tbl.Location() + "/data/data-b.parquet"
 	dataBBuilder, err := iceberg.NewDataFileBuilder(
@@ -631,7 +635,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{dataBBuilder.Build()}, nil))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	dataBSequence := fileDataSequence(t, tbl, dataBPath)
+	dataBSequence := currentManifestEntry(t, tbl, dataBPath).SequenceNum()
 	require.Greater(t, dataBSequence, oldPartitionDeleteSequence)
 
 	filePathField, ok := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
@@ -651,7 +655,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(newPositionDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	newPositionDeleteSequence := fileDataSequence(t, tbl, newPositionDeletePath)
+	newPositionDeleteSequence := currentManifestEntry(t, tbl, newPositionDeletePath).SequenceNum()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -677,7 +681,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 		"an older position delete cannot apply to the newer target data file")
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, newPositionDeleteSequence, fileDataSequence(t, tbl, replacement.FilePath()))
+	assert.Equal(t, newPositionDeleteSequence, currentManifestEntry(t, tbl, replacement.FilePath()).SequenceNum())
 }
 
 func TestReplaceFilesWithDeleteFilesRejectsSurvivingDeletionVector(t *testing.T) {
@@ -707,7 +711,7 @@ func TestReplaceFilesWithDeleteFilesRejectsSurvivingDeletionVector(t *testing.T)
 
 	offset, length := int64(8), int64(16)
 	replacement := newRewriteDeletionVector(t, tbl.Location()+"/data/replacement-dv.puffin", target, &offset, &length)
-	sequence := deleteFileSequence(t, tbl, siblingDVs[0].FilePath())
+	sequence := currentManifestEntry(t, tbl, siblingDVs[0].FilePath()).SequenceNum()
 	tx = tbl.NewTransaction()
 	err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
 		[]iceberg.DataFile{siblingDVs[0]},
@@ -729,7 +733,7 @@ func TestReplaceFilesWithDeleteFilesAllowsDroppedEqualityField(t *testing.T) {
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	sequence := deleteFileSequence(t, tbl, oldDelete.FilePath())
+	sequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).SequenceNum()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpdateSchema(true, false).DeleteColumn([]string{"data"}).Commit())
@@ -750,11 +754,9 @@ func TestReplaceFilesWithDeleteFilesAllowsDroppedEqualityField(t *testing.T) {
 		[]table.DeleteFileAddition{{File: newDelete, DataSequenceNumber: sequence}}, nil))
 }
 
-func deleteFileSequence(t *testing.T, tbl *table.Table, path string) int64 {
-	return fileDataSequence(t, tbl, path)
-}
-
-func fileDataSequence(t *testing.T, tbl *table.Table, path string) int64 {
+// currentManifestEntry returns the manifest entry for path in the current
+// snapshot, including DELETED entries.
+func currentManifestEntry(t *testing.T, tbl *table.Table, path string) iceberg.ManifestEntry {
 	t.Helper()
 	snap := tbl.CurrentSnapshot()
 	require.NotNil(t, snap)
@@ -764,13 +766,13 @@ func fileDataSequence(t *testing.T, tbl *table.Table, path string) int64 {
 		for entry, err := range manifest.Entries(iceio.LocalFS{}, false) {
 			require.NoError(t, err)
 			if entry.DataFile().FilePath() == path {
-				return entry.SequenceNum()
+				return entry
 			}
 		}
 	}
 	t.Fatalf("file %q not found in current snapshot", path)
 
-	return -1
+	return nil
 }
 
 func scanIDs(t *testing.T, tbl *table.Table) []int64 {
@@ -934,5 +936,401 @@ func TestReplaceFiles_ValidationErrors(t *testing.T) {
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot remove deletion vectors that do not belong to the table")
+	})
+}
+
+// seedDataFilesWithPositionDeletes creates two v2 data files (ids 1-3 and 4-6)
+// each with a position delete on a different row. Tasks are sorted by path.
+func seedDataFilesWithPositionDeletes(t *testing.T) (*table.Table, []table.FileScanTask) {
+	t.Helper()
+
+	tbl := newReplaceFilesTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	files := []struct {
+		rows      string
+		deletePos int64
+	}{
+		{
+			rows:      `[{"id":1,"data":"a"}, {"id":2,"data":"b"}, {"id":3,"data":"c"}]`,
+			deletePos: 0,
+		},
+		{
+			rows:      `[{"id":4,"data":"d"}, {"id":5,"data":"e"}, {"id":6,"data":"f"}]`,
+			deletePos: 1,
+		},
+	}
+	dataPaths := make([]string, len(files))
+	for i, f := range files {
+		dataPaths[i] = fmt.Sprintf("%s/data/data-%d.parquet", tbl.Location(), i)
+		writeParquetFile(t, dataPaths[i], arrowSc, f.rows)
+	}
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), dataPaths, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	filePathField, ok := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	require.True(t, ok)
+	tx = tbl.NewTransaction()
+	rowDelta := tx.NewRowDelta(nil)
+	for i, f := range files {
+		deletePath := fmt.Sprintf("%s/data/pos-delete-%d.parquet", tbl.Location(), i)
+		row := fmt.Sprintf(`[{"file_path":%q,"pos":%d}]`, dataPaths[i], f.deletePos)
+
+		writeParquetFile(t, deletePath, table.PositionalDeleteArrowSchema, row)
+		bound, err := iceberg.StringLiteral(dataPaths[i]).MarshalBinary()
+		require.NoError(t, err)
+
+		builder, err := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+			deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128,
+		)
+		require.NoError(t, err)
+		rowDelta.AddDeletes(builder.
+			LowerBoundValues(map[int][]byte{filePathField.ID: bound}).
+			UpperBoundValues(map[int][]byte{filePathField.ID: bound}).
+			Build())
+	}
+
+	require.NoError(t, rowDelta.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3, 4, 6}, idsInTable(t, tbl))
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, len(files))
+	slices.SortFunc(tasks, func(a, b table.FileScanTask) int {
+		return strings.Compare(a.File.FilePath(), b.File.FilePath())
+	})
+	for _, task := range tasks {
+		require.Len(t, task.DeleteFiles, 1, "each data file must carry only its own position delete")
+	}
+
+	return tbl, tasks
+}
+
+// seedReplaceFilesTableWithDelete returns a table with one data file and one delete on it:
+// a position delete on v2, a deletion vector on v3.
+func seedReplaceFilesTableWithDelete(t *testing.T, version int) (*table.Table, iceberg.DataFile, iceberg.DataFile) {
+	t.Helper()
+
+	switch version {
+	case 2:
+		tbl, tasks := seedDataFilesWithPositionDeletes(t)
+
+		return tbl, tasks[0].File, tasks[0].DeleteFiles[0]
+	case 3:
+		tbl, target := seedV3TableWithDV(t)
+		tasks, err := tbl.Scan().PlanFiles(t.Context())
+		require.NoError(t, err)
+
+		for _, task := range tasks {
+			if task.File.FilePath() == target {
+				require.Len(t, task.DeletionVectorFiles, 1)
+
+				return tbl, task.File, task.DeletionVectorFiles[0]
+			}
+		}
+		t.Fatalf("deletion vector target %q not found in scan tasks", target)
+	default:
+		t.Fatalf("unsupported format version %d", version)
+	}
+
+	return nil, nil, nil
+}
+
+// seedSupersededDeletionVector deletes twice from one v3 data file.
+// The first DV gets replaced and stays only as a DELETED entry.
+// It returns that old DV and the scan task holding the new, live DV.
+func seedSupersededDeletionVector(t *testing.T) (*table.Table, table.FileScanTask, iceberg.DataFile) {
+	t.Helper()
+
+	tbl := newMergeOnReadTestTableVersion(t, "3")
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSc, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},
+		{"id":3,"data":"c"},{"id":4,"data":"d"},
+		{"id":5,"data":"e"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(t.Context(), array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	var superseded iceberg.DataFile
+	for _, id := range []int64{2, 4} {
+		tbl, err = tbl.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference("id"), id), nil)
+		require.NoError(t, err)
+
+		if superseded == nil {
+			tasks, err := tbl.Scan().PlanFiles(t.Context())
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			require.Len(t, tasks[0].DeletionVectorFiles, 1)
+			superseded = tasks[0].DeletionVectorFiles[0]
+		}
+	}
+	require.Equal(t, 1, liveDVCount(t, tbl))
+	require.Equal(t, iceberg.EntryStatusDELETED, currentManifestEntry(t, tbl, superseded.FilePath()).Status(),
+		"the second delete must keep the first DV only as a DELETED entry")
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	require.Equal(t, superseded.ReferencedDataFile(), tasks[0].DeletionVectorFiles[0].ReferencedDataFile())
+	require.NotEqual(t, superseded.FilePath(), tasks[0].DeletionVectorFiles[0].FilePath())
+
+	return tbl, tasks[0], superseded
+}
+
+func newCompactedDataFile(t *testing.T, tbl *table.Table, path string, recordCount int64) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, nil, nil, nil, recordCount, 512,
+	)
+	require.NoError(t, err)
+	if tbl.Metadata().Version() >= 3 {
+		builder.FirstRowID(tbl.Metadata().NextRowID())
+	}
+
+	return builder.Build()
+}
+
+// compactWithDeletes swaps data for compacted and removes dels, either through
+// ReplaceFiles or, when automatic is set, through RewriteFiles.
+func compactWithDeletes(ctx context.Context, tx *table.Transaction, automatic bool, data, compacted, dels []iceberg.DataFile) error {
+	if !automatic {
+		return tx.ReplaceFiles(ctx, data, compacted, dels, nil)
+	}
+
+	result := table.CompactionGroupResult{OldDataFiles: data, NewDataFiles: compacted}
+	for _, del := range dels {
+		if table.IsDeletionVector(del) {
+			result.SafeDeletionVectors = append(result.SafeDeletionVectors, del)
+		} else {
+			result.SafePosDeletes = append(result.SafePosDeletes, del)
+		}
+	}
+
+	return tx.NewRewrite(nil).ApplyResult(result).Commit(ctx)
+}
+
+// metadataFileCount counts files in the table's metadata folder.
+// Staging a commit writes files there, so an unchanged count means nothing was written.
+func metadataFileCount(t *testing.T, tbl *table.Table) int {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.FromSlash(tbl.Location() + "/metadata"))
+	require.NoError(t, err)
+
+	return len(entries)
+}
+
+// A compaction planned before another writer deleted one of its data files must fail.
+// Committing it would bring the deleted rows back.
+func TestReplaceFilesRejectsDataFileDeletedByCurrentSnapshot(t *testing.T) {
+	tbl, tasks := seedDataFilesWithPositionDeletes(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	compactedPath := tbl.Location() + "/data/compacted-0.parquet"
+
+	jsonData := `[{"id":2,"data":"b"},{"id":3,"data":"c"}]`
+	writeParquetFile(t, compactedPath, arrowSc, jsonData)
+
+	path := tbl.Location() + "/data/compacted-1.parquet"
+	compacted := []iceberg.DataFile{
+		newCompactedDataFile(t, tbl, compactedPath, 2),
+		newCompactedDataFile(t, tbl, path, 2),
+	}
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.Delete(t.Context(), iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(4)), nil))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+	require.Equal(t, iceberg.EntryStatusDELETED, currentManifestEntry(t, tbl, tasks[1].File.FilePath()).Status())
+	require.NotEqual(t, iceberg.EntryStatusDELETED, currentManifestEntry(t, tbl, tasks[0].File.FilePath()).Status())
+
+	before := metadataFileCount(t, tbl)
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceFiles(t.Context(),
+		[]iceberg.DataFile{tasks[0].File, tasks[1].File}, compacted,
+		[]iceberg.DataFile{tasks[0].DeleteFiles[0], tasks[1].DeleteFiles[0]}, nil)
+	assert.ErrorContains(t, err, "cannot delete data files that do not belong to the table")
+	assert.Equal(t, before, metadataFileCount(t, tbl), "a rejected replace must not write manifests")
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.ReplaceFiles(t.Context(), []iceberg.DataFile{tasks[0].File}, compacted[:1], tasks[0].DeleteFiles, nil),
+		"the data file the delete left live must still compact")
+	assert.Greater(t, metadataFileCount(t, tbl), before, "staging a replace must write manifests")
+
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+}
+
+func TestReplaceFilesRejectsDeleteFileRemovedByCurrentSnapshot(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		version   int
+		automatic bool
+		wantErr   string
+	}{
+		{
+			name:      "position delete",
+			version:   2,
+			automatic: false,
+			wantErr:   "cannot remove delete files that do not belong to the table",
+		},
+		{
+			name:      "automatic position delete",
+			version:   2,
+			automatic: true,
+			wantErr:   "cannot remove automatic delete files that do not belong to the table",
+		},
+		{
+			name:      "deletion vector",
+			version:   3,
+			automatic: false,
+			wantErr:   "cannot remove deletion vectors that do not belong to the table",
+		},
+		{
+			name:      "automatic deletion vector",
+			version:   3,
+			automatic: true,
+			wantErr:   "cannot remove deletion vectors that do not belong to the table",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl, data, del := seedReplaceFilesTableWithDelete(t, tt.version)
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.ReplaceFiles(t.Context(), nil, nil, []iceberg.DataFile{del}, nil))
+			tbl, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, iceberg.EntryStatusDELETED, currentManifestEntry(t, tbl, del.FilePath()).Status())
+			require.NotEqual(t, iceberg.EntryStatusDELETED, currentManifestEntry(t, tbl, data.FilePath()).Status())
+
+			compacted := newCompactedDataFile(t, tbl, tbl.Location()+"/data/compacted.parquet", 1)
+			before := metadataFileCount(t, tbl)
+			err = compactWithDeletes(t.Context(), tbl.NewTransaction(), tt.automatic,
+				[]iceberg.DataFile{data}, []iceberg.DataFile{compacted}, []iceberg.DataFile{del})
+			assert.ErrorContains(t, err, tt.wantErr)
+			assert.Equal(t, before, metadataFileCount(t, tbl), "a rejected replace must not write manifests")
+		})
+	}
+}
+
+// A rewrite planned with an old DV must fail once a newer DV has replaced it,
+// because the newer DV has deletes the rewrite never saw.
+func TestReplaceFilesRejectsDeletionVectorSupersededByCurrentSnapshot(t *testing.T) {
+	type stageFunc func(t *testing.T, tx *table.Transaction, tbl *table.Table, task table.FileScanTask, superseded iceberg.DataFile) error
+	compaction := func(automatic bool) stageFunc {
+		return func(t *testing.T, tx *table.Transaction, tbl *table.Table, task table.FileScanTask, superseded iceberg.DataFile) error {
+			compacted := newCompactedDataFile(t, tbl, tbl.Location()+"/data/compacted.parquet", 4)
+
+			return compactWithDeletes(t.Context(), tx, automatic,
+				[]iceberg.DataFile{task.File}, []iceberg.DataFile{compacted}, []iceberg.DataFile{superseded})
+		}
+	}
+
+	for _, tt := range []struct {
+		name  string
+		stage stageFunc
+	}{
+		{
+			name:  "compaction",
+			stage: compaction(false),
+		},
+		{
+			name:  "automatic compaction",
+			stage: compaction(true),
+		},
+		{
+			name: "deletion vector rewrite",
+			stage: func(t *testing.T, tx *table.Transaction, tbl *table.Table, task table.FileScanTask, superseded iceberg.DataFile) error {
+				writer := dv.NewDVWriter(iceio.LocalFS{}, unpartitionedSpecByID)
+				require.NoError(t, writer.Add(task.File.FilePath(), []int64{1}, 0, nil))
+				rewritten, err := writer.Flush(t.Context(), tbl.Location()+"/data/rewritten-dv.puffin")
+				require.NoError(t, err)
+				require.Len(t, rewritten, 1)
+
+				return tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+					[]iceberg.DataFile{superseded},
+					[]table.DeleteFileAddition{{
+						File:               rewritten[0],
+						DataSequenceNumber: currentManifestEntry(t, tbl, superseded.FilePath()).SequenceNum(),
+					}}, nil)
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl, task, superseded := seedSupersededDeletionVector(t)
+
+			before := metadataFileCount(t, tbl)
+			err := tt.stage(t, tbl.NewTransaction(), tbl, task, superseded)
+			assert.ErrorContains(t, err, "cannot remove deletion vectors that do not belong to the table")
+			assert.Equal(t, before, metadataFileCount(t, tbl), "a rejected replace must not write manifests")
+		})
+	}
+}
+
+// Removing the current DV must remove that DV, not the old replaced one that
+// is still listed as a DELETED entry.
+func TestReplaceFilesRemovesLiveDeletionVectorNotSupersededEntry(t *testing.T) {
+	t.Run("compaction", func(t *testing.T) {
+		tbl, task, _ := seedSupersededDeletionVector(t)
+		arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+		require.NoError(t, err)
+
+		compactedPath := tbl.Location() + "/data/compacted.parquet"
+		jsonData := `[{"id":1,"data":"a"},{"id":3,"data":"c"},{"id":5,"data":"e"}]`
+		writeParquetFile(t, compactedPath, arrowSc, jsonData)
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.ReplaceFiles(t.Context(),
+			[]iceberg.DataFile{task.File},
+			[]iceberg.DataFile{newCompactedDataFile(t, tbl, compactedPath, 3)},
+			task.DeletionVectorFiles, nil))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		assert.Zero(t, liveDVCount(t, tbl), "the live deletion vector must be removed with its data file")
+		assert.Equal(t, []int64{1, 3, 5}, idsInTable(t, tbl))
+	})
+
+	t.Run("deletion vector rewrite", func(t *testing.T) {
+		tbl, task, _ := seedSupersededDeletionVector(t)
+		liveDV := task.DeletionVectorFiles[0]
+		writer := dv.NewDVWriter(iceio.LocalFS{}, unpartitionedSpecByID)
+		require.NoError(t, writer.Add(task.File.FilePath(), []int64{1, 3}, 0, nil))
+
+		rewritten, err := writer.Flush(t.Context(), tbl.Location()+"/data/rewritten-dv.puffin")
+		require.NoError(t, err)
+		require.Len(t, rewritten, 1)
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+			[]iceberg.DataFile{liveDV},
+			[]table.DeleteFileAddition{{
+				File:               rewritten[0],
+				DataSequenceNumber: currentManifestEntry(t, tbl, liveDV.FilePath()).SequenceNum(),
+			}}, nil))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		assert.Equal(t, 1, liveDVCount(t, tbl), "a data file must keep exactly one deletion vector")
+		assert.Equal(t, iceberg.EntryStatusDELETED, currentManifestEntry(t, tbl, liveDV.FilePath()).Status())
+		assert.Equal(t, []int64{1, 3, 5}, idsInTable(t, tbl))
 	})
 }

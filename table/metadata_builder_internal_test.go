@@ -269,9 +269,8 @@ func TestReassignIds(t *testing.T) {
 		Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{
 				{
-					Type: iceberg.PrimitiveTypes.Int64,
-					// TODO: this is discrepancy with rust impl, is 5 over there
-					ID:       4,
+					Type:     iceberg.PrimitiveTypes.Int64,
+					ID:       5,
 					Name:     "nested",
 					Required: true,
 				},
@@ -280,8 +279,7 @@ func TestReassignIds(t *testing.T) {
 		Required: true,
 	},
 		iceberg.NestedField{
-			// TODO: this is discrepancy with rust impl, is 4 over there
-			ID:       5,
+			ID:       4,
 			Name:     "c",
 			Type:     iceberg.PrimitiveTypes.Int64,
 			Required: true,
@@ -1083,7 +1081,7 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
 		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
 	}
-	builder.currentSnapshotID = ptr(snapshot3ID)
+	builder.currentSnapshotID = new(snapshot3ID)
 	builder.refs = map[string]SnapshotRef{
 		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
 	}
@@ -1219,7 +1217,7 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 			LastPartitionID:   &lastPartitionID,
 			Props:             iceberg.Properties{},
 			SnapshotList:      []Snapshot{{SnapshotID: removedID}, {SnapshotID: currentID}},
-			CurrentSnapshotID: ptr(currentID),
+			CurrentSnapshotID: new(currentID),
 			SnapshotLog:       []SnapshotLogEntry{},
 			SortOrderList:     []SortOrder{UnsortedSortOrder},
 			SnapshotRefs: map[string]SnapshotRef{
@@ -3796,8 +3794,8 @@ func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
 		return true
 	case reflect.Struct:
 		filled := false
-		for i := range v.NumField() {
-			if fillNonZero(fieldValue(v.Field(i)), seen) {
+		for _, field := range v.Fields() {
+			if fillNonZero(fieldValue(field), seen) {
 				filled = true
 			}
 		}

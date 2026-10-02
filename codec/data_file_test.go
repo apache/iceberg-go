@@ -279,8 +279,8 @@ var expectedDataFileMethods = []string{
 func dataFileInterfaceMethods() []string {
 	t := reflect.TypeFor[iceberg.DataFile]()
 	out := make([]string, 0, t.NumMethod())
-	for i := range t.NumMethod() {
-		out = append(out, t.Method(i).Name)
+	for method := range t.Methods() {
+		out = append(out, method.Name)
 	}
 	sort.Strings(out)
 

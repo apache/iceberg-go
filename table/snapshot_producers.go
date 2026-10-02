@@ -1795,13 +1795,16 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 	// creates it).
 	baseHeadID := sp.txn.baseRefSnapshotID(branch)
 
-	// Carry over the branch's existing retention settings so advancing
-	// the ref on commit does not silently discard them. The update
-	// encodes exactly the current ref's retention (settings the branch
-	// lacks stay 0 and are dropped by the `omitempty` tags); the catalog
-	// applies a set-snapshot-ref as a pure replace, so this fully
-	// determines the resulting ref rather than merging with the old one.
-	retainingSnapshotRef := sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef)
+	updates := []Update{
+		addSnap,
+		// Carry over the branch's existing retention settings so advancing
+		// the ref on commit does not silently discard them. The update
+		// encodes exactly the current ref's retention (settings the branch
+		// lacks stay 0 and are dropped by the `omitempty` tags); the catalog
+		// applies a set-snapshot-ref as a pure replace, so this fully
+		// determines the resulting ref rather than merging with the old one.
+		sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef),
+	}
 
-	return []Update{addSnap, retainingSnapshotRef}, []Requirement{AssertRefSnapshotID(branch, baseHeadID)}, nil
+	return updates, []Requirement{AssertRefSnapshotID(branch, baseHeadID)}, nil
 }

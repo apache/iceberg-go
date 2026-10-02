@@ -463,8 +463,8 @@ func incrementalChangelogDivergentTable(t *testing.T) *Table {
 	baseTimestamp := base.LastUpdatedMillis()
 	snapshots := []*Snapshot{
 		{SnapshotID: 1, TimestampMs: baseTimestamp + 1, SequenceNumber: 1, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: baseTimestamp + 2, SequenceNumber: 2, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 3, ParentSnapshotID: int64Ptr(1), TimestampMs: baseTimestamp + 3, SequenceNumber: 3, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: baseTimestamp + 2, SequenceNumber: 2, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 3, ParentSnapshotID: new(int64(1)), TimestampMs: baseTimestamp + 3, SequenceNumber: 3, Summary: &Summary{Operation: OpAppend}},
 	}
 	for _, snapshot := range snapshots {
 		require.NoError(t, builder.AddSnapshot(snapshot))
@@ -555,9 +555,9 @@ func incrementalChangelogTestTable(t *testing.T) *Table {
 
 	txn.meta.snapshotList = []Snapshot{
 		{SnapshotID: 1, TimestampMs: 1000, ManifestList: listOnePath, SequenceNumber: 1, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: listTwoPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpOverwrite}},
-		{SnapshotID: 3, ParentSnapshotID: int64Ptr(2), TimestampMs: 3000, ManifestList: listThreePath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpReplace}},
-		{SnapshotID: 4, ParentSnapshotID: int64Ptr(3), TimestampMs: 4000, ManifestList: listFourPath, SequenceNumber: 4, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: 2000, ManifestList: listTwoPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpOverwrite}},
+		{SnapshotID: 3, ParentSnapshotID: new(int64(2)), TimestampMs: 3000, ManifestList: listThreePath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpReplace}},
+		{SnapshotID: 4, ParentSnapshotID: new(int64(3)), TimestampMs: 4000, ManifestList: listFourPath, SequenceNumber: 4, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
 	}
 	txn.meta.snapshotLog = []SnapshotLogEntry{
 		{SnapshotID: 1, TimestampMs: 1000},
@@ -659,9 +659,9 @@ func incrementalChangelogManifestRewriteTable(t *testing.T) *Table {
 
 	txn.meta.snapshotList = []Snapshot{
 		{SnapshotID: 1, TimestampMs: 1000, ManifestList: listOnePath, SequenceNumber: 1, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: listTwoPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 3, ParentSnapshotID: int64Ptr(2), TimestampMs: 3000, ManifestList: listThreePath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpReplace}},
-		{SnapshotID: 4, ParentSnapshotID: int64Ptr(3), TimestampMs: 4000, ManifestList: listFourPath, SequenceNumber: 4, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: 2000, ManifestList: listTwoPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 3, ParentSnapshotID: new(int64(2)), TimestampMs: 3000, ManifestList: listThreePath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpReplace}},
+		{SnapshotID: 4, ParentSnapshotID: new(int64(3)), TimestampMs: 4000, ManifestList: listFourPath, SequenceNumber: 4, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
 	}
 	txn.meta.snapshotLog = []SnapshotLogEntry{
 		{SnapshotID: 1, TimestampMs: 1000},
@@ -750,8 +750,8 @@ func incrementalChangelogDeleteManifestTable(t *testing.T) *Table {
 
 	txn.meta.snapshotList = []Snapshot{
 		{SnapshotID: 1, TimestampMs: 1000, ManifestList: listOnePath, SequenceNumber: 1, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: listTwoPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpDelete}},
-		{SnapshotID: 3, ParentSnapshotID: int64Ptr(2), TimestampMs: 3000, ManifestList: listThreePath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: 2000, ManifestList: listTwoPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpDelete}},
+		{SnapshotID: 3, ParentSnapshotID: new(int64(2)), TimestampMs: 3000, ManifestList: listThreePath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
 	}
 	txn.meta.snapshotLog = []SnapshotLogEntry{
 		{SnapshotID: 1, TimestampMs: 1000},

@@ -119,12 +119,12 @@ func clusteredPartitionedWrite(
 					return err
 				}
 				if completedPartitions.contains(part.partitionRec) {
-					partitionPath := spec.PartitionToPath(part.partitionRec, schema)
+					partitionPath := extractionPlan.pathPlan.format(part.partitionRec)
 
 					return fmt.Errorf("clustered write: incoming records violate the clustering assumption; "+
 						"partition %q has records arriving after its writer was already closed", partitionPath)
 				}
-				partitionPath := spec.PartitionToPath(part.partitionRec, schema)
+				partitionPath := extractionPlan.pathPlan.format(part.partitionRec)
 				currentWriter = factory.newRollingDataWriter(
 					ctx, partitionPath, part.partitionValues, outputCh)
 				currentRec = part.partitionRec
