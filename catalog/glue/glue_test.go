@@ -2683,9 +2683,7 @@ func TestGlueLookupDatabase(t *testing.T) {
 	}
 }
 
-// TestGlueCreateTableS3TablesFederated exercises the full two-phase create:
-// detect federation, allocate storage with a minimal entry, read the assigned
-// location, write metadata to it, and repoint the Glue entry.
+// TestGlueCreateTableS3TablesFederated exercises the full two-phase create.
 func TestGlueCreateTableS3TablesFederated(t *testing.T) {
 	ctx := context.Background()
 	managedLocation := "file://" + t.TempDir()
@@ -2835,9 +2833,8 @@ func TestGlueCreateTableS3TablesAllocateError(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueCreateTableS3TablesRejectsExplicitLocation verifies an explicit
-// location is refused for a federated S3 Tables database, which manages storage
-// itself; the table is never created.
+// TestGlueCreateTableS3TablesRejectsExplicitLocation verifies an explicit location
+// is refused for a federated database and nothing is created.
 func TestGlueCreateTableS3TablesRejectsExplicitLocation(t *testing.T) {
 	ctx := context.Background()
 	schema := s3TablesTestSchema()
@@ -2930,11 +2927,8 @@ func TestGlueCreateTableNonFederatedFallsThrough(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueCreateTableS3TablesFederatedIntegration creates a real table in an S3
-// Tables federated catalog through the native Glue path. Gated by env vars:
-//
-//	TEST_S3TABLES_CATALOG_ID = <account-id>:s3tablescatalog/<table-bucket>
-//	TEST_S3TABLES_DATABASE   = a namespace you can create tables in
+// TestGlueCreateTableS3TablesFederatedIntegration is gated by TEST_S3TABLES_CATALOG_ID
+// (<account-id>:s3tablescatalog/<bucket>) and TEST_S3TABLES_DATABASE.
 func TestGlueCreateTableS3TablesFederatedIntegration(t *testing.T) {
 	catalogID := os.Getenv("TEST_S3TABLES_CATALOG_ID")
 	dbName := os.Getenv("TEST_S3TABLES_DATABASE")
@@ -2966,10 +2960,8 @@ func TestGlueCreateTableS3TablesFederatedIntegration(t *testing.T) {
 	assert.Equal(tbl.MetadataLocation(), reloaded.MetadataLocation())
 }
 
-// TestGlueGetRawTableTableType covers the relaxed TableType gate: standard
-// EXTERNAL_TABLE tables and S3 Tables federated iceberg tables (whose Glue
-// TableType is service-specific) are both accepted, while non-iceberg entries
-// with an unexpected TableType are still rejected.
+// TestGlueGetRawTableTableType covers the TableType gate: EXTERNAL_TABLE and
+// federated iceberg entries pass, anything else is rejected.
 func TestGlueGetRawTableTableType(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -3039,9 +3031,8 @@ func TestGlueGetRawTableTableType(t *testing.T) {
 	}
 }
 
-// TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure covers the mid-flight
-// case where storage is allocated but writing metadata to it fails: the
-// allocated entry must be rolled back and UpdateTable never issued.
+// TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure verifies a failed
+// metadata write rolls back the allocated entry without issuing UpdateTable.
 func TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure(t *testing.T) {
 	ctx := context.Background()
 	schema := s3TablesTestSchema()
@@ -3075,9 +3066,8 @@ func TestGlueCreateTableS3TablesRollbackOnMetadataWriteFailure(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueCreateTableS3TablesRollbackOnUpdateFailure covers the final step
-// failing after metadata is written: the pointer commit is rejected, so the
-// allocated entry is rolled back.
+// TestGlueCreateTableS3TablesRollbackOnUpdateFailure verifies a rejected repoint
+// rolls back the allocated entry.
 func TestGlueCreateTableS3TablesRollbackOnUpdateFailure(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -3153,9 +3143,8 @@ func TestGlueCreateTableS3TablesNoRollbackOnLoadFailure(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueCreateTableS3TablesRollbackDetachesContext verifies the rollback
-// DeleteTable runs on a context detached from a cancelled create so the minimal
-// entry is still removed rather than leaked.
+// TestGlueCreateTableS3TablesRollbackDetachesContext verifies rollback still runs
+// on a detached context when the create is cancelled.
 func TestGlueCreateTableS3TablesRollbackDetachesContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -3181,9 +3170,8 @@ func TestGlueCreateTableS3TablesRollbackDetachesContext(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueDropTableRemovesStrandedS3TablesEntry verifies DropTable can remove a
-// minimal federated entry (format=ICEBERG, no table_type) left by a failed
-// S3 Tables create, matching pyiceberg's direct delete_table cleanup.
+// TestGlueDropTableRemovesStrandedS3TablesEntry verifies DropTable removes a
+// minimal entry (format=ICEBERG, no table_type) left by a failed create.
 func TestGlueDropTableRemovesStrandedS3TablesEntry(t *testing.T) {
 	ctx := context.Background()
 
@@ -3208,9 +3196,8 @@ func TestGlueDropTableRemovesStrandedS3TablesEntry(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// recordingMemFS registers an in-memory FileIO under scheme that records the AWS
-// config carried on the context each time the FileIO is resolved, so tests can
-// assert the catalog's configured credentials reach metadata reads and writes.
+// recordingMemFS registers an in-memory FileIO that records the context's AWS
+// config on every resolution.
 func recordingMemFS(t *testing.T, scheme string) (*iceio.MemFS, *[]*aws.Config) {
 	t.Helper()
 	memFS := iceio.NewMemFS()
@@ -3234,9 +3221,8 @@ func assertRecordedConfig(t *testing.T, want *aws.Config, recorded *[]*aws.Confi
 	}
 }
 
-// TestGlueCreateTableS3TablesAllocateAlreadyExists verifies an AlreadyExists on
-// the allocate step maps to ErrTableAlreadyExists without rolling back a table
-// this call did not create.
+// TestGlueCreateTableS3TablesAllocateAlreadyExists verifies AlreadyExists maps to
+// ErrTableAlreadyExists without rolling back a table this call did not create.
 func TestGlueCreateTableS3TablesAllocateAlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	schema := s3TablesTestSchema()
@@ -3257,9 +3243,8 @@ func TestGlueCreateTableS3TablesAllocateAlreadyExists(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
-// TestGlueCreateTableS3TablesWarehouseSet verifies a catalog `warehouse` property
-// does not bypass federation detection: a federated database still takes the
-// two-phase S3 Tables create (a minimal entry), not a warehouse-located one.
+// TestGlueCreateTableS3TablesWarehouseSet verifies a `warehouse` property does not
+// bypass federation: the create still goes through the minimal-entry allocate.
 func TestGlueCreateTableS3TablesWarehouseSet(t *testing.T) {
 	ctx := context.Background()
 	managedLocation := "file://" + t.TempDir()
@@ -3437,9 +3422,8 @@ func TestGlueCreateTableUsesCatalogAwsConfig(t *testing.T) {
 	assertRecordedConfig(t, awsCfg, recorded)
 }
 
-// TestGlueCommitS3TablesTableUsesCatalogAwsConfig pins that the S3 Tables commit
-// writes metadata and runs the fs.Remove cleanup (after a failed UpdateTable) with
-// the catalog's configured AWS config.
+// TestGlueCommitS3TablesTableUsesCatalogAwsConfig pins the catalog AWS config on
+// the metadata write and the fs.Remove cleanup after a failed UpdateTable.
 func TestGlueCommitS3TablesTableUsesCatalogAwsConfig(t *testing.T) {
 	ctx := context.Background()
 	const scheme = "gluecommits3credcfg"
