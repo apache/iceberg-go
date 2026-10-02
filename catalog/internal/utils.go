@@ -40,6 +40,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// ErrNoDefaultLocation is returned when a table has no explicit location and the
+// namespace and catalog define no default warehouse.
+var ErrNoDefaultLocation = errors.New("no default path set, please specify a location when creating a table")
+
 func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
 	switch compression {
 	case table.MetadataCompressionCodecNone, table.MetadataCompressionCodecGzip, table.MetadataCompressionCodecZstd:
@@ -221,7 +225,7 @@ func getDefaultWarehouseLocation(namespaceKey, tablename string, nsprops, catpro
 		return url.JoinPath(warehousepath, namespaceKey+".db", tablename)
 	}
 
-	return "", errors.New("no default path set, please specify a location when creating a table")
+	return "", ErrNoDefaultLocation
 }
 
 // (\d+)            -> version number
