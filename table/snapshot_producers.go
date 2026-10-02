@@ -528,9 +528,10 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 			return nil
 		}
 
-		wr, path, counter, fileCloser, err = m.snap.newManifestWriter(spec)
+		var writerErr error
+		wr, path, counter, fileCloser, writerErr = m.snap.newManifestWriter(spec)
 
-		return err
+		return writerErr
 	}
 
 	for _, manifest := range bin {
@@ -566,9 +567,8 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 		}
 	}
 
-	// A bin with no live entries produces no manifest. This diverges from
-	// Java/PyIceberg, which write a zero-count manifest; the omission is
-	// intentional and should not be "fixed" later.
+	// Java's merge manager writes zero-count manifests; this path omits bins
+	// with no live entries.
 	if wr == nil {
 		return nil, nil
 	}
@@ -699,8 +699,7 @@ func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteF
 		minCountToMerge: txn.meta.props.GetInt(ManifestMinMergeCountKey, ManifestMinMergeCountDefault),
 		mergeEnabled:    txn.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault),
 		mergeConcurrency: manifestMergeConcurrencyLimit(
-			txn.meta.props.GetInt(ManifestMergeMaxConcurrencyKey, ManifestMergeMaxConcurrencyDefault),
-		),
+			txn.meta.props.GetInt(ManifestMergeMaxConcurrencyKey, ManifestMergeMaxConcurrencyDefault)),
 	}
 
 	return prod

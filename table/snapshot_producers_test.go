@@ -578,41 +578,52 @@ func TestManifestMergeManagerClosesWriterOnError(t *testing.T) {
 	require.ErrorIs(t, err, errLimitedWrite)
 }
 
-func TestManifestMergeManagerClosesWriterBeforeFileOnWriteFailure(t *testing.T) {
+func TestManifestMergeManagerClosesWriterBeforeFileOnReadFailure(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	schema := simpleSchema()
-
-	// Use a byte-limited IO that fails after the writer is opened and
-	// has written some data, but before all entries are processed.
-	mem := newMemIO(manifestHeaderSize(t, 2, spec, schema), errLimitedWrite)
-	txn := createTestTransaction(t, mem, spec)
-
-	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil)
+	trackIO := newTrackingIO()
+	txn := createTestTransaction(t, trackIO, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
-
-	// Build a manifest with enough entries that the writer is opened
-	// and multiple writes occur before the failure.
-	entries := make([]iceberg.ManifestEntry, 0, 10)
-	for range 10 {
-		entries = append(entries, iceberg.NewManifestEntry(
-			iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df))
-	}
-
-	manifestPath := "table-location/metadata/manifest-1.avro"
-	var manifestBuf bytes.Buffer
-	manifestFile, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, sp.snapshotID, entries)
-	require.NoError(t, err, "write manifest")
-	require.NoError(t, mem.WriteFile(manifestPath, manifestBuf.Bytes()))
+	manifest := writeTestManifestWithContent(t, trackIO, spec, schema, sp.snapshotID,
+		"table-location/metadata/manifest-1.avro", iceberg.ManifestContentData,
+		[]iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df),
+		})
+	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1,
+		int32(spec.ID()), sp.snapshotID).Build()
 
 	mgr := manifestMergeManager{snap: sp}
-	_, err = mgr.createManifest(spec.ID(), []iceberg.ManifestFile{manifestFile})
-	require.ErrorIs(t, err, errLimitedWrite)
+	_, err := mgr.createManifest(spec.ID(), []iceberg.ManifestFile{manifest, missingManifest})
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	require.NotContains(t, err.Error(), "write after close",
+		"buffered entries must flush before the underlying file closes")
+	require.Equal(t, 1, trackIO.GetWriterCount())
+	require.Empty(t, trackIO.GetUnclosedWriters())
+}
 
-	// The writer must be closed before the file closer. If it were not,
-	// the ManifestWriter.Close() flush would write to an already-closed
-	// file and return a "write after close" error. The fact that we
-	// get errLimitedWrite (not a write-after-close error) confirms
-	// the ordering is correct.
+func TestManifestMergeReturnsReadErrorBeforeCreatingWriter(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	trackIO := newTrackingIO()
+	txn := createTestTransaction(t, trackIO, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+
+	oldSnapshotID := sp.snapshotID - 1
+	sequenceNumber := int64(1)
+	df := newTestDataFile(t, spec, "file://deleted.parquet", nil)
+	deletedManifest := writeTestManifestWithContent(t, trackIO, spec, schema, oldSnapshotID,
+		"table-location/metadata/historical-delete.avro", iceberg.ManifestContentData,
+		[]iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &oldSnapshotID, &sequenceNumber, nil, df),
+		})
+	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1,
+		int32(spec.ID()), sp.snapshotID).Build()
+
+	mgr := manifestMergeManager{snap: sp}
+	_, err := mgr.createManifest(spec.ID(), []iceberg.ManifestFile{deletedManifest, missingManifest})
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	require.Zero(t, trackIO.GetWriterCount())
 }
 
 func TestManifestMergeSkipsHistoricalDeletedOnlyManifest(t *testing.T) {
@@ -2022,8 +2033,7 @@ func newTestDeletionVectorForRef(t *testing.T, spec iceberg.PartitionSpec, path,
 
 	builder, err := iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentPosDeletes, path, iceberg.PuffinFile,
-		nil, nil, nil, 1, 1,
-	)
+		nil, nil, nil, 1, 1)
 	require.NoError(t, err, "new deletion vector builder")
 
 	return builder.ReferencedDataFile(referencedDataFile).Build()
