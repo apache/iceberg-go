@@ -1008,7 +1008,7 @@ func writeRESTNotFound(t *testing.T, w http.ResponseWriter, errType string) {
 	}
 
 	_, err := fmt.Fprintf(w, `{"error":{"message":%q,"type":%q,"code":404}}`, errType, errType)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 }
 
 // TestPlanTableScanRequestFromEncodesFilter checks the row filter serializes to

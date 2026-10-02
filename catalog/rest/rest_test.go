@@ -753,7 +753,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 			return
 		}
 
-		r.FailNow("unexpected page token:", pageToken)
+		r.Fail("unexpected page token:", pageToken)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
@@ -2593,7 +2593,7 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 			return
 		}
 
-		r.FailNow("unexpected page token:", pageToken)
+		r.Fail("unexpected page token:", pageToken)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))

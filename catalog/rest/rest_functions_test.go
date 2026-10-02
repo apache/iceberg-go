@@ -119,7 +119,7 @@ func (r *RestCatalogSuite) TestListFunctionsPagination() {
 				"identifiers": []any{[]string{"accounting", "add_two"}},
 			})
 		default:
-			r.FailNow("unexpected page token")
+			r.Fail("unexpected page token")
 		}
 	})
 
@@ -205,7 +205,7 @@ func (r *RestCatalogSuite) TestListFunctionsPaginationErrorOnSubsequentPage() {
 			return
 		}
 
-		r.FailNow("unexpected page token:", pageToken)
+		r.Fail("unexpected page token:", pageToken)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
