@@ -929,8 +929,10 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 
+	meta := txn.meta
 	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &mainSnapshotID)})
 	require.NoError(t, err)
+	require.Same(t, meta, txn.meta)
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 }
