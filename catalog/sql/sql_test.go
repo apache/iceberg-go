@@ -1496,9 +1496,6 @@ func (s *SqliteCatalogTestSuite) TestDropTableNotExist() {
 	}
 }
 
-// A writer whose table handle predates a peer's commit fails the catalog's
-// branch requirement check. That failure must be a retryable commit
-// conflict, so commit retries refresh the table and land both appends.
 func (s *SqliteCatalogTestSuite) TestStaleAppendRetriesRequirementFailure() {
 	ctx := context.Background()
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
