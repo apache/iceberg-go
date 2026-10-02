@@ -96,12 +96,15 @@ func TestScanPlanningEscapesOpaquePlanID(t *testing.T) {
 	// literal segment; otherwise "a/b" splits and ".." / "../tasks" resolve to a
 	// different endpoint. Each must survive JoinPath as the final .../plan/ segment
 	// and round-trip.
-	for _, planID := range []string{"a/b", "../tasks", "a b", "a%2Fb", ".", "..", "plan-123"} {
+	for _, planID := range []string{"a/b", "../tasks", "a b", "a+b", "a%2Fb", ".", "..", "plan-123"} {
 		path, err := cat.scanPlanningPath(endpointFetchPlanResult, table.Identifier{"db", "tbl"}, planID)
 		require.NoErrorf(t, err, "plan-id %q", planID)
 
 		seg := path[len(path)-1]
 		assert.NotContainsf(t, seg, "/", "plan-id %q split into multiple segments: %q", planID, seg)
+		if planID == "a+b" {
+			assert.Equal(t, "a%2Bb", seg)
+		}
 
 		decoded, err := url.PathUnescape(seg)
 		require.NoErrorf(t, err, "plan-id %q", planID)

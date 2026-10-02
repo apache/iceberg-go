@@ -1248,13 +1248,13 @@ func (r *Catalog) tableFromResponse(
 	// catalog-owned dispatcher. It is non-nil only when the client enabled
 	// reporting and the server advertises the endpoint (see init).
 	if r.metricsDispatcher != nil {
-		if ns, tbl, idErr := r.splitIdentForPath(identifier); idErr != nil {
+		if identPath, idErr := r.tableIdentifierPath(identifier); idErr != nil {
 			// Unreachable for a valid identifier that already loaded above, but if it
 			// ever regresses, log why the REST reporter was dropped rather than let
 			// metrics silently vanish with no signal.
 			slog.Debug("iceberg: skipping REST metrics reporter, cannot split identifier",
 				"error", idErr)
-		} else if path, pErr := endpointReportMetrics.reqPath(ns, tbl); pErr != nil {
+		} else if path, pErr := endpointReportMetrics.reqPath(identPath.encodedNamespace, identPath.encodedName); pErr != nil {
 			slog.Debug("iceberg: skipping REST metrics reporter, cannot build metrics path",
 				"error", pErr)
 		} else {
@@ -1284,12 +1284,12 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(ident)
+	identPath, err := r.tableIdentifierPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
-	path, err := endpointTableCredentials.reqPath(ns, tbl)
+	path, err := endpointTableCredentials.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return nil, err
 	}
@@ -1396,10 +1396,18 @@ func (r *Catalog) nsSeparator() string {
 }
 
 // encodePathSegment escapes a REST path segment per RFC 3986. PathEscape
-// leaves plus signs literal, so encode them explicitly to avoid form decoders
-// interpreting them as spaces.
+// leaves plus signs and pure-dot segments literal, so encode them explicitly to
+// avoid form decoders interpreting plus signs as spaces and JoinPath resolving
+// dot segments while cleaning the path.
 func encodePathSegment(value string) string {
-	return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
+	switch value {
+	case ".":
+		return "%2E"
+	case "..":
+		return "%2E%2E"
+	default:
+		return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
+	}
 }
 
 // encodeNamespace URL-encodes each namespace level and joins them with the
@@ -1430,28 +1438,44 @@ func (r *Catalog) namespaceToQueryParam(namespace table.Identifier) string {
 	return strings.Join(namespace, r.decodedNamespaceSeparator())
 }
 
-func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, error) {
+type identifierPath struct {
+	encodedNamespace string
+	rawName          string
+	encodedName      string
+}
+
+func (r *Catalog) newIdentifierPath(ident table.Identifier) identifierPath {
+	rawName := catalog.ObjectNameFromIdent(ident)
+
+	return identifierPath{
+		encodedNamespace: r.encodeNamespace(catalog.NamespaceFromIdent(ident)),
+		rawName:          rawName,
+		encodedName:      encodePathSegment(rawName),
+	}
+}
+
+func (r *Catalog) tableIdentifierPath(ident table.Identifier) (identifierPath, error) {
 	if err := catalog.ValidateTableIdentifier(ident); err != nil {
-		return "", "", err
+		return identifierPath{}, err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
+	return r.newIdentifierPath(ident), nil
 }
 
-func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
+func (r *Catalog) viewIdentifierPath(ident table.Identifier) (identifierPath, error) {
 	if err := catalog.ValidateViewIdentifier(ident); err != nil {
-		return "", "", err
+		return identifierPath{}, err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
+	return r.newIdentifierPath(ident), nil
 }
 
-func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, string, error) {
+func (r *Catalog) functionIdentifierPath(ident table.Identifier) (identifierPath, error) {
 	if err := catalog.ValidateFunctionIdentifier(ident); err != nil {
-		return "", "", err
+		return identifierPath{}, err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
+	return r.newIdentifierPath(ident), nil
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
@@ -1459,7 +1483,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	ns, _, err := r.splitIdentForPath(identifier)
+	identPath, err := r.tableIdentifierPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1486,7 +1510,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	stagedCreate := len(cfg.StagedUpdates) > 0
 
 	payload := createTableRequest{
-		Name:          catalog.ObjectNameFromIdent(identifier),
+		Name:          identPath.rawName,
 		Schema:        schema,
 		Location:      cfg.Location,
 		PartitionSpec: cfg.PartitionSpec,
@@ -1495,7 +1519,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		Props:         cfg.Properties,
 	}
 
-	path, err := endpointCreateTable.reqPath(ns)
+	path, err := endpointCreateTable.reqPath(identPath.encodedNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -1581,14 +1605,14 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		return nil, "", err
 	}
 
-	ns, encodedTbl, err := r.splitIdentForPath(ident)
+	identPath, err := r.tableIdentifierPath(ident)
 	if err != nil {
 		return nil, "", err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      catalog.ObjectNameFromIdent(ident),
+		Name:      identPath.rawName,
 	}
 
 	type payload struct {
@@ -1597,7 +1621,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		Updates      []table.Update      `json:"updates"`
 	}
 
-	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
+	path, err := endpointUpdateTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1711,7 +1735,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	ns, _, err := r.splitIdentForPath(identifier)
+	identPath, err := r.tableIdentifierPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1730,13 +1754,13 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
-	path, err := endpointRegisterTable.reqPath(ns)
+	path, err := endpointRegisterTable.reqPath(identPath.encodedNamespace)
 	if err != nil {
 		return nil, err
 	}
 
 	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, path,
-		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: identPath.rawName, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
 	if err != nil {
@@ -1767,12 +1791,12 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	identPath, err := r.tableIdentifierPath(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	path, err := endpointLoadTable.reqPath(ns, tbl)
+	path, err := endpointLoadTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return nil, err
 	}
@@ -1803,21 +1827,21 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		return nil, err
 	}
 
-	ns, encodedTbl, err := r.splitIdentForPath(ident)
+	identPath, err := r.tableIdentifierPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      catalog.ObjectNameFromIdent(ident),
+		Name:      identPath.rawName,
 	}
 	type payload struct {
 		Identifier   identifier          `json:"identifier"`
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
+	path, err := endpointUpdateTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return nil, err
 	}
@@ -1852,12 +1876,12 @@ func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	identPath, err := r.tableIdentifierPath(identifier)
 	if err != nil {
 		return err
 	}
 
-	path, err := endpointDeleteTable.reqPath(ns, tbl)
+	path, err := endpointDeleteTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return err
 	}
@@ -1878,12 +1902,12 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		return err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	identPath, err := r.tableIdentifierPath(identifier)
 	if err != nil {
 		return err
 	}
 
-	path, err := endpointDeleteTable.reqPath(ns, tbl)
+	path, err := endpointDeleteTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return err
 	}
@@ -2141,7 +2165,7 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 }
 
 func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	identPath, err := r.tableIdentifierPath(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -2161,7 +2185,7 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		return true, nil
 	}
 
-	path, err := endpointTableExists.reqPath(ns, tbl)
+	path, err := endpointTableExists.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return false, err
 	}
@@ -2254,12 +2278,12 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return err
 	}
 
-	ns, view, err := r.splitViewIdentForPath(identifier)
+	identPath, err := r.viewIdentifierPath(identifier)
 	if err != nil {
 		return err
 	}
 
-	path, err := endpointDeleteView.reqPath(ns, view)
+	path, err := endpointDeleteView.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return err
 	}
@@ -2271,7 +2295,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 }
 
 func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns, view, err := r.splitViewIdentForPath(identifier)
+	identPath, err := r.viewIdentifierPath(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -2291,7 +2315,7 @@ func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		return true, nil
 	}
 
-	path, err := endpointViewExists.reqPath(ns, view)
+	path, err := endpointViewExists.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return false, err
 	}
@@ -2345,7 +2369,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, fmt.Errorf("%w: view version cannot be nil", iceberg.ErrInvalidArgument)
 	}
 
-	ns, _, err := r.splitViewIdentForPath(identifier)
+	identPath, err := r.viewIdentifierPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2376,14 +2400,14 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	payload := createViewRequest{
-		Name:        catalog.ObjectNameFromIdent(identifier),
+		Name:        identPath.rawName,
 		Location:    cfg.Location,
 		Schema:      freshSchema,
 		Props:       cfg.Properties,
 		ViewVersion: version,
 	}
 
-	path, err := endpointCreateView.reqPath(ns)
+	path, err := endpointCreateView.reqPath(identPath.encodedNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -2406,21 +2430,21 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, encodedView, err := r.splitViewIdentForPath(ident)
+	identPath, err := r.viewIdentifierPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      catalog.ObjectNameFromIdent(ident),
+		Name:      identPath.rawName,
 	}
 	type payload struct {
 		Identifier   identifier         `json:"identifier"`
 		Requirements []view.Requirement `json:"requirements"`
 		Updates      []view.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateView.reqPath(ns, encodedView)
+	path, err := endpointUpdateView.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return nil, err
 	}
@@ -2452,7 +2476,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, _, err := r.splitViewIdentForPath(identifier)
+	identPath, err := r.viewIdentifierPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2462,13 +2486,13 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		MetadataLoc string `json:"metadata-location"`
 	}
 
-	path, err := endpointRegisterView.reqPath(ns)
+	path, err := endpointRegisterView.reqPath(identPath.encodedNamespace)
 	if err != nil {
 		return nil, err
 	}
 
 	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, path,
-		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: identPath.rawName, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
 		})
 	if err != nil {
@@ -2489,12 +2513,12 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, err
 	}
 
-	ns, v, err := r.splitViewIdentForPath(identifier)
+	identPath, err := r.viewIdentifierPath(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	path, err := endpointLoadView.reqPath(ns, v)
+	path, err := endpointLoadView.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return nil, err
 	}
@@ -2662,18 +2686,18 @@ func (r *Catalog) LoadFunction(ctx context.Context, identifier table.Identifier)
 		return nil, err
 	}
 
-	ns, fn, err := r.splitFunctionIdentForPath(identifier)
+	identPath, err := r.functionIdentifierPath(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	return r.loadFunction(ctx, identifier, ns, fn)
+	return r.loadFunction(ctx, identifier, identPath)
 }
 
 // loadFunction fetches and parses a function after endpoint negotiation and
 // identifier validation, so its ErrNoSuchFunction is always server-reported.
-func (r *Catalog) loadFunction(ctx context.Context, identifier table.Identifier, ns, fn string) (*udf.UDF, error) {
-	path, err := endpointLoadFunction.reqPath(ns, fn)
+func (r *Catalog) loadFunction(ctx context.Context, identifier table.Identifier, identPath identifierPath) (*udf.UDF, error) {
+	path, err := endpointLoadFunction.reqPath(identPath.encodedNamespace, identPath.encodedName)
 	if err != nil {
 		return nil, err
 	}
@@ -2721,12 +2745,12 @@ func (r *Catalog) CheckFunctionExists(ctx context.Context, identifier table.Iden
 		return false, err
 	}
 
-	ns, fn, err := r.splitFunctionIdentForPath(identifier)
+	identPath, err := r.functionIdentifierPath(identifier)
 	if err != nil {
 		return false, err
 	}
 
-	if _, err := r.loadFunction(ctx, identifier, ns, fn); err != nil {
+	if _, err := r.loadFunction(ctx, identifier, identPath); err != nil {
 		if errors.Is(err, catalog.ErrNoSuchFunction) {
 			return false, nil
 		}
