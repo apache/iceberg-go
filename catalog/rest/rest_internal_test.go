@@ -232,7 +232,9 @@ func TestLoadRegisteredCatalogAcceptsValidAuthURL(t *testing.T) {
 		oauthCalled.Store(true)
 		assert.Equal(t, http.MethodPost, req.Method)
 
-		require.NoError(t, req.ParseForm())
+		if !assert.NoError(t, req.ParseForm()) {
+			return
+		}
 		assert.Equal(t, "client", req.PostForm.Get("client_id"))
 		assert.Equal(t, "secret", req.PostForm.Get("client_secret"))
 
@@ -592,7 +594,9 @@ func TestOAuthTokenRequestParams(t *testing.T) {
 				assert.Equal(t, http.MethodPost, req.Method)
 				assert.Equal(t, "application/x-www-form-urlencoded", req.Header.Get("Content-Type"))
 
-				require.NoError(t, req.ParseForm())
+				if !assert.NoError(t, req.ParseForm()) {
+					return
+				}
 				values := req.PostForm
 				assert.Equal(t, "client_credentials", values.Get("grant_type"))
 				assert.Equal(t, "secret", values.Get("client_secret"))
@@ -766,7 +770,9 @@ func TestAuthHeader(t *testing.T) {
 
 		assert.Equal(t, req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
-		require.NoError(t, req.ParseForm())
+		if !assert.NoError(t, req.ParseForm()) {
+			return
+		}
 		values := req.PostForm
 		assert.Equal(t, "client_credentials", values.Get("grant_type"))
 		assert.Equal(t, "client", values.Get("client_id"))
@@ -824,7 +830,9 @@ func TestAuthUriHeader(t *testing.T) {
 
 		assert.Equal(t, req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
-		require.NoError(t, req.ParseForm())
+		if !assert.NoError(t, req.ParseForm()) {
+			return
+		}
 		values := req.PostForm
 		assert.Equal(t, "client_credentials", values.Get("grant_type"))
 		assert.Equal(t, "client", values.Get("client_id"))
