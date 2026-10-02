@@ -110,9 +110,9 @@ type vendedCredentialRefresher struct {
 	mu       *semaphore.Weighted
 	cachedIO iceio.IO
 	// ioCancel ends the context cachedIO was opened with. That context is the
-	// refresher's own, detached from the caller that triggered the load, so
-	// this is the only thing that tears down what the IO spawned: it is called
-	// when the IO is superseded on renewal and in close.
+	// refresher's own, detached from the caller that triggered the load, and
+	// close is what cancels it. An IO superseded on renewal is left open with
+	// its context alive, since callers that loaded it may still be using it.
 	ioCancel  context.CancelFunc
 	expiresAt time.Time
 	issuedAt  time.Time
@@ -223,20 +223,11 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	return v.cachedIO, nil
 }
 
-// replaceIO installs io as the cached IO, then closes the one it supersedes
-// and cancels that one's context. An error closing the superseded IO is not
-// returned: the new IO is already in place, and the caller has no use for it.
+// replaceIO installs io as the cached IO. The superseded IO is left open:
+// callers that loaded it earlier may still be using it, and its credentials
+// remain valid until their own expiry.
 func (v *vendedCredentialRefresher) replaceIO(io iceio.IO, cancel context.CancelFunc) {
-	oldIO, oldCancel := v.cachedIO, v.ioCancel
 	v.cachedIO, v.ioCancel = io, cancel
-
-	if oldIO != nil {
-		_ = closeOptionalIO(oldIO)
-	}
-
-	if oldCancel != nil {
-		oldCancel()
-	}
 }
 
 func (v *vendedCredentialRefresher) expiredError(at time.Time) error {
