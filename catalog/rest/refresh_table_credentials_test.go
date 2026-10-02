@@ -340,6 +340,8 @@ func TestRefreshTableCredentialsAfterLoadTable(t *testing.T) {
 	assert.Equal(t, "vended-key", props[iceio.S3AccessKeyID])
 	assert.Equal(t, "vended-secret", props[iceio.S3SecretAccessKey])
 	assert.Equal(t, "vended-token", props[iceio.S3SessionToken])
+	// Saved configs are identical.
+	assert.Equal(t, tbl.SavedConfig(), refreshed.SavedConfig())
 }
 
 // TestRefreshTableCredentialsSeededTableRenewsOnExpiry checks the refreshed
