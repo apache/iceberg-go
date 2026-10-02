@@ -71,7 +71,9 @@ func (r *RestCatalogSuite) SetupTest() {
 	r.mux = http.NewServeMux()
 
 	r.mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.configVals = req.URL.Query()
 
 		json.NewEncoder(w).Encode(map[string]any{
@@ -95,7 +97,9 @@ func TestRESTRejectsTrailingJSONInGetResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
 		_, err := w.Write([]byte(`{"defaults":{},"overrides":{},"endpoints":[]} {}`))
-		require.NoError(t, err)
+		if !assert.NoError(t, err) {
+			return
+		}
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -108,15 +112,19 @@ func TestRESTRejectsTrailingJSONInGetResponse(t *testing.T) {
 func TestRESTRejectsTrailingJSONInPostResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+		if !assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
 			"endpoints": rest.AllEndpointStrings,
-		}))
+		})) {
+			return
+		}
 	})
 	mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, _ *http.Request) {
 		_, err := w.Write([]byte(createTableRestExample + `{}`))
-		require.NoError(t, err)
+		if !assert.NoError(t, err) {
+			return
+		}
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -135,7 +143,9 @@ func (r *RestCatalogSuite) TestToken200() {
 
 		r.Equal(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
-		r.Require().NoError(req.ParseForm())
+		if !r.NoError(req.ParseForm()) {
+			return
+		}
 		values := req.PostForm
 		r.Equal(values.Get("grant_type"), "client_credentials")
 		r.Equal(values.Get("client_id"), "client")
@@ -168,7 +178,9 @@ func (r *RestCatalogSuite) TestLoadRegisteredCatalog() {
 
 		r.Equal(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
-		r.Require().NoError(req.ParseForm())
+		if !r.NoError(req.ParseForm()) {
+			return
+		}
 		values := req.PostForm
 		r.Equal(values.Get("grant_type"), "client_credentials")
 		r.Equal(values.Get("client_id"), "client")
@@ -224,7 +236,9 @@ func (r *RestCatalogSuite) TestToken200AuthUrl() {
 
 		r.Equal(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
-		r.Require().NoError(req.ParseForm())
+		if !r.NoError(req.ParseForm()) {
+			return
+		}
 		values := req.PostForm
 		r.Equal(values.Get("grant_type"), "client_credentials")
 		r.Equal(values.Get("client_id"), "client")
@@ -304,7 +318,9 @@ func (r *RestCatalogSuite) TestWithHeaders() {
 	}
 
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		// Check for standard headers
 		for k, v := range TestHeaders {
@@ -340,7 +356,9 @@ func (r *RestCatalogSuite) TestAdditionalPropsHeaderPrefix() {
 	customHeaderValue := "my-project"
 
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Equal(customHeaderValue, req.Header.Get("x-goog-user-project"))
 		json.NewEncoder(w).Encode(map[string]any{"identifiers": []any{}})
 	})
@@ -428,7 +446,9 @@ func (r *RestCatalogSuite) TestListTables200() {
 	namespace := "examples"
 	customPageSize := 100
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -474,7 +494,9 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 
 		r.Equal(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
-		r.Require().NoError(req.ParseForm())
+		if !r.NoError(req.ParseForm()) {
+			return
+		}
 		values := req.PostForm
 		r.Equal(values.Get("grant_type"), "client_credentials")
 		r.Equal(values.Get("client_id"), "client")
@@ -492,7 +514,9 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 
 	namespace := "examples"
 	r.mux.HandleFunc("/v1/prefix/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -541,7 +565,9 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 	defaultPageSize := 20
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -684,7 +710,9 @@ func (r *RestCatalogSuite) TestListTablesPaginationCycle() {
 func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -757,7 +785,9 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 func (r *RestCatalogSuite) TestListTables404() {
 	namespace := "examples"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -797,7 +827,9 @@ func (r *RestCatalogSuite) TestListTables404() {
 
 func (r *RestCatalogSuite) TestListNamespaces200() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -821,8 +853,12 @@ func (r *RestCatalogSuite) TestListNamespaces200() {
 
 func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
-		r.Require().Equal("accounting", req.URL.Query().Get("parent"))
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
+		if !r.Equal("accounting", req.URL.Query().Get("parent")) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -887,7 +923,9 @@ func (r *RestCatalogSuite) TestNamespaceOperationsRejectInvalidComponents() {
 
 func (r *RestCatalogSuite) TestListNamespaces400() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -916,7 +954,9 @@ func (r *RestCatalogSuite) TestListNamespacesPagination() {
 	requestCount := 0
 
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -965,8 +1005,12 @@ func (r *RestCatalogSuite) TestListNamespacesPagination() {
 
 func (r *RestCatalogSuite) TestCreateNamespace200() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
-		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+		if !r.Equal("application/json", req.Header.Get("Content-Type")) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -979,7 +1023,9 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 			Props     iceberg.Properties `json:"properties"`
 		}{}
 
-		r.Require().NoError(dec.Decode(&body))
+		if !r.NoError(dec.Decode(&body)) {
+			return
+		}
 		r.Equal(table.Identifier{"leden"}, body.Namespace)
 		r.Empty(body.Props)
 
@@ -996,7 +1042,9 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 
 func (r *RestCatalogSuite) TestCheckNamespaceExists204() {
 	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodHead, req.Method)
+		if !r.Equal(http.MethodHead, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1013,7 +1061,9 @@ func (r *RestCatalogSuite) TestCheckNamespaceExists204() {
 
 func (r *RestCatalogSuite) TestCheckNamespaceExists404() {
 	r.mux.HandleFunc("/v1/namespaces/noneexistent", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodHead, req.Method)
+		if !r.Equal(http.MethodHead, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1042,8 +1092,12 @@ func (r *RestCatalogSuite) TestCheckNamespaceExists404() {
 
 func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
-		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+		if !r.Equal("application/json", req.Header.Get("Content-Type")) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1056,7 +1110,9 @@ func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
 			Props     iceberg.Properties `json:"properties"`
 		}{}
 
-		r.Require().NoError(dec.Decode(&body))
+		if !r.NoError(dec.Decode(&body)) {
+			return
+		}
 		r.Equal(table.Identifier{"leden"}, body.Namespace)
 		r.Equal(iceberg.Properties{"foo": "bar", "super": "duper"}, body.Props)
 
@@ -1073,8 +1129,12 @@ func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
 
 func (r *RestCatalogSuite) TestCreateNamespace409() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
-		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+		if !r.Equal("application/json", req.Header.Get("Content-Type")) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1087,7 +1147,9 @@ func (r *RestCatalogSuite) TestCreateNamespace409() {
 			Props     iceberg.Properties `json:"properties"`
 		}{}
 
-		r.Require().NoError(dec.Decode(&body))
+		if !r.NoError(dec.Decode(&body)) {
+			return
+		}
 		r.Equal(table.Identifier{"fokko"}, body.Namespace)
 		r.Empty(body.Props)
 
@@ -1111,7 +1173,9 @@ func (r *RestCatalogSuite) TestCreateNamespace409() {
 
 func (r *RestCatalogSuite) TestDropNamespace204() {
 	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1128,7 +1192,9 @@ func (r *RestCatalogSuite) TestDropNamespace204() {
 
 func (r *RestCatalogSuite) TestDropNamespace404() {
 	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1154,7 +1220,9 @@ func (r *RestCatalogSuite) TestDropNamespace404() {
 
 func (r *RestCatalogSuite) TestDropNamespace409() {
 	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1180,7 +1248,9 @@ func (r *RestCatalogSuite) TestDropNamespace409() {
 
 func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1203,7 +1273,9 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 
 func (r *RestCatalogSuite) TestLoadNamespaceProps404() {
 	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1229,7 +1301,9 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps404() {
 
 func (r *RestCatalogSuite) TestUpdateNamespaceProps200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/properties", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1258,7 +1332,9 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps200() {
 
 func (r *RestCatalogSuite) TestUpdateNamespaceProps404() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/properties", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1349,7 +1425,9 @@ var (
 
 func (r *RestCatalogSuite) TestCreateTable200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1385,7 +1463,9 @@ func (r *RestCatalogSuite) TestCreateTable200() {
 func (r *RestCatalogSuite) TestCreateTable409() {
 	// Mock the create table endpoint with 409 response
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1474,7 +1554,9 @@ func TestServerVendedReporterImplIgnored(t *testing.T) {
 
 func (r *RestCatalogSuite) TestCheckTableExists204() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodHead, req.Method)
+		if !r.Equal(http.MethodHead, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1492,7 +1574,9 @@ func (r *RestCatalogSuite) TestCheckTableExists204() {
 
 func (r *RestCatalogSuite) TestCheckTableExists404() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/nonexistent", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodHead, req.Method)
+		if !r.Equal(http.MethodHead, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1517,7 +1601,9 @@ func (r *RestCatalogSuite) TestCheckTableExists404() {
 
 func (r *RestCatalogSuite) TestLoadTable200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Empty(req.URL.Query().Get("snapshots"), "LoadTable must not send ?snapshots by default")
 
 		for k, v := range TestHeaders {
@@ -1730,7 +1816,9 @@ func (r *RestCatalogSuite) TestCreateTableLabels() {
 func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {
 	// Server returns only the snapshot referenced by the main branch (refs behaviour).
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Equal("refs", req.URL.Query().Get("snapshots"))
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/database/table/metadata/00002.gz.metadata.json",
@@ -1787,7 +1875,9 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {
 func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
 	// Server returns all snapshots including unreferenced historical ones (all behaviour).
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Equal("all", req.URL.Query().Get("snapshots"))
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/database/table/metadata/00002.gz.metadata.json",
@@ -1853,7 +1943,9 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
 func (r *RestCatalogSuite) TestRenameTable204() {
 	// Mock the rename table endpoint
 	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1880,7 +1972,9 @@ func (r *RestCatalogSuite) TestRenameTable204() {
 
 	// Mock the get table endpoint for loading the renamed table
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/destination", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1913,7 +2007,9 @@ func (r *RestCatalogSuite) TestRenameTable204() {
 func (r *RestCatalogSuite) TestDropTable204() {
 	// Mock the drop table endpoint
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1936,7 +2032,9 @@ func (r *RestCatalogSuite) TestDropTable204() {
 func (r *RestCatalogSuite) TestPurgeTable204() {
 	// Mock the purge table endpoint
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1959,7 +2057,9 @@ func (r *RestCatalogSuite) TestPurgeTable204() {
 func (r *RestCatalogSuite) TestDropTable404() {
 	// Mock the drop table endpoint with 404 response
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1987,7 +2087,9 @@ func (r *RestCatalogSuite) TestDropTable404() {
 
 func (r *RestCatalogSuite) TestRegisterTable200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/register", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2175,7 +2277,9 @@ func (r *RestCatalogSuite) TestRegisterTableLabels() {
 
 func (r *RestCatalogSuite) TestRegisterTable404() {
 	r.mux.HandleFunc("/v1/namespaces/nonexistent/register", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2208,7 +2312,9 @@ func (r *RestCatalogSuite) TestRegisterTable404() {
 
 func (r *RestCatalogSuite) TestRegisterTable409() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/register", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2243,7 +2349,9 @@ func (r *RestCatalogSuite) TestListViews200() {
 	customPageSize := 100
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2296,7 +2404,9 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 	defaultPageSize := 20
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2379,7 +2489,9 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 func (r *RestCatalogSuite) TestListTablesZeroPageSizeNotSent() {
 	namespace := "examples"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Equal("", req.URL.Query().Get("pageSize"), "pageSize must not be sent when set to 0")
 		json.NewEncoder(w).Encode(map[string]any{"identifiers": []any{}})
 	})
@@ -2395,7 +2507,9 @@ func (r *RestCatalogSuite) TestListTablesZeroPageSizeNotSent() {
 
 func (r *RestCatalogSuite) TestListNamespacesZeroPageSizeNotSent() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Equal("", req.URL.Query().Get("pageSize"), "pageSize must not be sent when set to 0")
 		json.NewEncoder(w).Encode(map[string]any{"namespaces": []any{}})
 	})
@@ -2411,7 +2525,9 @@ func (r *RestCatalogSuite) TestListNamespacesZeroPageSizeNotSent() {
 func (r *RestCatalogSuite) TestListViewsZeroPageSizeNotSent() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.Equal("", req.URL.Query().Get("pageSize"), "pageSize must not be sent when set to 0")
 		json.NewEncoder(w).Encode(map[string]any{"identifiers": []any{}})
 	})
@@ -2428,7 +2544,9 @@ func (r *RestCatalogSuite) TestListViewsZeroPageSizeNotSent() {
 func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2501,7 +2619,9 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 func (r *RestCatalogSuite) TestListViews404() {
 	namespace := "nonexistent"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2535,7 +2655,9 @@ func (r *RestCatalogSuite) TestListViews404() {
 
 func (r *RestCatalogSuite) TestDropView204() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/views/fokko2", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2553,7 +2675,9 @@ func (r *RestCatalogSuite) TestDropView204() {
 
 func (r *RestCatalogSuite) TestDropView404() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodDelete, req.Method)
+		if !r.Equal(http.MethodDelete, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2581,7 +2705,9 @@ func (r *RestCatalogSuite) TestDropView404() {
 
 func (r *RestCatalogSuite) TestCheckViewExists204() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/views/fokko2", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodHead, req.Method)
+		if !r.Equal(http.MethodHead, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2598,7 +2724,9 @@ func (r *RestCatalogSuite) TestCheckViewExists204() {
 
 func (r *RestCatalogSuite) TestCheckViewExists404() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodHead, req.Method)
+		if !r.Equal(http.MethodHead, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2627,7 +2755,9 @@ func (r *RestCatalogSuite) TestCheckViewExists404() {
 
 func (r *RestCatalogSuite) TestLoadView200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/views/myview", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2753,7 +2883,9 @@ func (r *RestCatalogSuite) TestLoadViewLabels() {
 
 func (r *RestCatalogSuite) TestLoadView404() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -2792,7 +2924,9 @@ func (r *RestTLSCatalogSuite) SetupTest() {
 	r.mux = http.NewServeMux()
 
 	r.mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 		r.configVals = req.URL.Query()
 		r.configAuthHeader = req.Header.Get("Authorization")
 
@@ -2967,22 +3101,30 @@ func (r *RestCatalogSuite) TestUpdatePathsEncodeNamesAndBodiesRemainRaw() {
 		r.Equal("/v1/namespaces/table-ns/tables/a%20b%2Bc", req.URL.EscapedPath())
 
 		var payload updatePayload
-		r.Require().NoError(json.NewDecoder(req.Body).Decode(&payload))
+		if !r.NoError(json.NewDecoder(req.Body).Decode(&payload)) {
+			return
+		}
 		r.Equal(objectName, payload.Identifier.Name)
 
 		_, err := w.Write([]byte(createTableRestExample))
-		r.Require().NoError(err)
+		if !r.NoError(err) {
+			return
+		}
 	})
 
 	r.mux.HandleFunc("/v1/namespaces/view-ns/views/", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal("/v1/namespaces/view-ns/views/a%20b%2Bc", req.URL.EscapedPath())
 
 		var payload updatePayload
-		r.Require().NoError(json.NewDecoder(req.Body).Decode(&payload))
+		if !r.NoError(json.NewDecoder(req.Body).Decode(&payload)) {
+			return
+		}
 		r.Equal(objectName, payload.Identifier.Name)
 
 		_, err := w.Write([]byte(createViewRestExample))
-		r.Require().NoError(err)
+		if !r.NoError(err) {
+			return
+		}
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
@@ -3142,7 +3284,9 @@ func (r *RestCatalogSuite) TestRegisterView200() {
 	identifier := table.Identifier{ns, viewName}
 
 	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -3264,7 +3408,9 @@ func (r *RestCatalogSuite) TestRegisterView404() {
 	)
 
 	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -3295,7 +3441,9 @@ func (r *RestCatalogSuite) TestRegisterView409() {
 	)
 
 	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -3322,7 +3470,9 @@ func (r *RestCatalogSuite) TestRenameView204() {
 	const metadataLoc = "s3://bucket/warehouse/example.db/destination/metadata/00001.metadata.json"
 
 	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -3349,7 +3499,9 @@ func (r *RestCatalogSuite) TestRenameView204() {
 
 	// Mock the load view endpoint for loading the renamed view.
 	r.mux.HandleFunc("/v1/namespaces/example/views/destination", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		if !r.Equal(http.MethodGet, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -3377,7 +3529,9 @@ func (r *RestCatalogSuite) TestRenameView204() {
 
 func (r *RestCatalogSuite) TestRenameView404() {
 	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -3403,7 +3557,9 @@ func (r *RestCatalogSuite) TestRenameView404() {
 
 func (r *RestCatalogSuite) TestRenameView409() {
 	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
