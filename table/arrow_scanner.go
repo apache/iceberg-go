@@ -1689,29 +1689,34 @@ func validateBoundFilter(schema *iceberg.Schema, filter iceberg.BooleanExpressio
 	return validationErr
 }
 
-func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
+func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, bool, error) {
 	if filter == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	state, err := iceberg.VisitExpr(filter, filterBindingVisitor{})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if state.hasBound && state.hasUnbound {
-		return nil, fmt.Errorf("%w: scan task residual mixes bound and unbound predicates", iceberg.ErrInvalidArgument)
+		return nil, false, fmt.Errorf("%w: scan task residual mixes bound and unbound predicates", iceberg.ErrInvalidArgument)
 	}
 	if !state.hasUnbound {
 		if state.hasBound {
 			if err := validateBoundFilter(schema, filter); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 
-		return filter, nil
+		return filter, false, nil
 	}
 
-	return iceberg.BindExpr(schema, filter, caseSensitive)
+	bound, err := iceberg.BindExpr(schema, filter, caseSensitive)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return bound, true, nil
 }
 
 func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpression, error) {
@@ -1724,7 +1729,8 @@ func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpress
 		filterSchema = as.filterSchema
 	}
 
-	return bindTaskFilter(filterSchema, task.Residual, as.caseSensitive)
+	bound, _, err := bindTaskFilter(filterSchema, task.Residual, as.caseSensitive)
+	return bound, err
 }
 
 // fieldIndexByID returns the index of the field carrying fieldID in its Arrow

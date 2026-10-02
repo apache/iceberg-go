@@ -136,7 +136,7 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 	if err != nil {
 		return nil, err
 	}
-	residual, err := bindTaskFilter(schema, planningScan.rowFilter, planningScan.caseSensitive)
+	residual, _, err := bindTaskFilter(schema, planningScan.rowFilter, planningScan.caseSensitive)
 	if err != nil {
 		return nil, fmt.Errorf("bind incremental changelog scan residual: %w", err)
 	}
