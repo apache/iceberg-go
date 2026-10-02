@@ -2478,6 +2478,20 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 		}
 	}
 
+	// Reject the commit if a concurrent snapshot added deletes against any
+	// data file this operation removes. The overwriteFiles producer only
+	// checks added data files (and only under serializable isolation);
+	// without this check a refresh-and-replay would swap the original file
+	// for a rewrite built from the stale snapshot, dropping the concurrent
+	// deletes and resurrecting their rows. Mirrors Java's copy-on-write
+	// validateNoConflictingDeletes: no isolation gating.
+	removed := append(slices.Clip(filesToDelete), filesToRewrite...)
+	if len(removed) > 0 {
+		t.addValidator(func(cc *conflictContext) error {
+			return validateNoNewDeletesForRewrittenFiles(cc, removed)
+		})
+	}
+
 	return updater, wfs, nil
 }
 
