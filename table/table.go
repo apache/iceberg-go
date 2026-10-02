@@ -52,6 +52,11 @@ import (
 // error so that callers using errors.Is(err, table.ErrCommitFailed)
 // can detect retryable commit conflicts. Requirement validation failures,
 // such as a branch that has moved since the table was loaded, also wrap it.
+// When commit retries are enabled, the retry loop rebases only the implicit
+// assertion on the commit branch's head; any other requirement that fails after a
+// refresh ends the commit, and the caller must reload the table and
+// rebuild the commit. When an error matches both ErrCommitFailed and
+// ErrTransactionUnusable, build a new transaction rather than retrying.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrTransactionUnusable is returned when a failed commit removed files

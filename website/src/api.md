@@ -386,7 +386,7 @@ To target a specific branch:
 txn := tbl.NewTransactionOnBranch("staging")
 ```
 
-`Commit` retries automatically on conflict (`ErrCommitFailed`) - tune via the `commit.retry.*` table properties.
+`Commit` can retry on conflict (`ErrCommitFailed`) once `commit.retry.num-retries` is set; see [Automatic retry](./concurrent-writes.md#automatic-retry) and the `commit.retry.*` table properties.
 
 ## Schema and partition evolution
 
