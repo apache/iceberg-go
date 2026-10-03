@@ -1299,7 +1299,9 @@ func TestTransactionApplyDefersMetadataBuildForNoopRequirements(t *testing.T) {
 		// A duplicate requirement only needs its conflict check. Make Build fail
 		// after the first apply so this path cannot accidentally rebuild metadata.
 		txn.meta.defaultSpecID = 999
+		meta := txn.meta
 		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+		require.Same(t, meta, txn.meta)
 		_, err := txn.meta.Build()
 		require.ErrorIs(t, err, ErrInvalidMetadata)
 	})
