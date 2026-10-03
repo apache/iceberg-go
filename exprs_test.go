@@ -1164,10 +1164,24 @@ func TestVariantSetPredicate(t *testing.T) {
 			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false},
 		)
 
-		// Set predicates on variant columns are not supported yet; this only
-		// guards that binding rejects them instead of panicking.
+		// Set predicates on variant columns are not supported yet; binding
+		// falls through to the set-predicate type error.
 		_, err := iceberg.BindExpr(sc, iceberg.IsIn(ref, one, two), true)
-		require.Error(t, err)
+		require.ErrorIs(t, err, iceberg.ErrType)
+	})
+
+	t.Run("bind to primitive column", func(t *testing.T) {
+		sc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		)
+
+		bound, err := iceberg.BindExpr(sc, iceberg.IsIn(ref, one, two), true)
+		require.NoError(t, err)
+		require.Implements(t, (*iceberg.BoundSetPredicate)(nil), bound)
+		lits := bound.(iceberg.BoundSetPredicate).Literals()
+		assert.Equal(t, 2, lits.Len())
+		assert.True(t, lits.Contains(iceberg.Int64Literal(1)))
+		assert.True(t, lits.Contains(iceberg.Int64Literal(2)))
 	})
 }
 
