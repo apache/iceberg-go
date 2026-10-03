@@ -18,6 +18,8 @@
 package rest
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -31,19 +33,44 @@ func BenchmarkDecodeScanTasksPrimitivePartitions(b *testing.B) {
 		iceberg.PartitionField{SourceIDs: []int{5}, FieldID: 1002, Name: "code_part", Transform: iceberg.IdentityTransform{}},
 	)
 	base := validScanTasksWire().FileScanTasks[0].DataFile
-	b.Run("1024_tasks", func(b *testing.B) {
-		wire := ScanTasks{FileScanTasks: make([]RESTFileScanTask, 1024)}
-		for i := range wire.FileScanTasks {
-			dataFile := *base
-			wire.FileScanTasks[i] = RESTFileScanTask{DataFile: &dataFile}
-		}
-		b.ReportAllocs()
-		for b.Loop() {
-			tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
-			if err != nil {
-				b.Fatal(err)
+	for _, taskCount := range []int{1, 64, 1024} {
+		b.Run(fmt.Sprintf("%d_tasks", taskCount), func(b *testing.B) {
+			wire := ScanTasks{FileScanTasks: make([]RESTFileScanTask, taskCount)}
+			for i := range wire.FileScanTasks {
+				dataFile := *base
+				wire.FileScanTasks[i] = RESTFileScanTask{DataFile: &dataFile}
 			}
-			decodeScanTasksBenchmarkSink = len(tasks)
-		}
-	})
+			b.ReportAllocs()
+			for b.Loop() {
+				tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				decodeScanTasksBenchmarkSink = len(tasks)
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeScanTasksNullPartitions(b *testing.B) {
+	metadata := newScanTaskDecoderMetadata()
+	base := validScanTasksWire().FileScanTasks[0].DataFile
+	for _, taskCount := range []int{1, 1024} {
+		b.Run(fmt.Sprintf("%d_tasks", taskCount), func(b *testing.B) {
+			wire := ScanTasks{FileScanTasks: make([]RESTFileScanTask, taskCount)}
+			for i := range wire.FileScanTasks {
+				file := *base
+				file.Partition = []json.RawMessage{json.RawMessage("null"), json.RawMessage("null"), json.RawMessage("null")}
+				wire.FileScanTasks[i] = RESTFileScanTask{DataFile: &file}
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				decodeScanTasksBenchmarkSink = len(tasks)
+			}
+		})
+	}
 }
