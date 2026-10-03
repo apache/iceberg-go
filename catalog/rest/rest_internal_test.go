@@ -181,6 +181,48 @@ func TestCredentialsNotSentOnCrossOriginRedirect(t *testing.T) {
 	})
 }
 
+// TestOverriddenBuiltinHeadersSentOnCrossOriginRedirect pins that a
+// cross-origin hop receives the operator's value for a built-in header it
+// overrode, not the built-in default.
+func TestOverriddenBuiltinHeadersSentOnCrossOriginRedirect(t *testing.T) {
+	var otherHit bool
+	var otherAgent, otherDelegation, otherCustom string
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHit = true
+		otherAgent = r.Header.Get("User-Agent")
+		otherDelegation = r.Header.Get(headerIcebergAccessDelegation)
+		otherCustom = r.Header.Get("X-Custom")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer second.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+	})
+	mux.HandleFunc("/cross", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, second.URL+"/landing", http.StatusTemporaryRedirect)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithHeaders(map[string]string{"User-Agent": "corp-agent/1", "X-Custom": "SECRET-CUSTOM"}),
+		WithAdditionalProps(iceberg.Properties{"header." + headerIcebergAccessDelegation: "remote-signing"}))
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/cross", nil)
+	require.NoError(t, err)
+	resp, err := cat.cl.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.True(t, otherHit, "the redirect target must be reached")
+	assert.Equal(t, "corp-agent/1", otherAgent)
+	assert.Equal(t, "remote-signing", otherDelegation)
+	assert.Empty(t, otherCustom, "the redirect target must not receive WithHeaders defaults")
+}
+
 // TestCredentialsNotSentOnSyntheticRedirect pins that the redirect guard does
 // not depend on the transport linking Response.Request: a custom transport that
 // returns a bare 307 must not cause credentials to follow it.
