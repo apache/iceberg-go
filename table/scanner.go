@@ -1056,7 +1056,7 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(
 		return nil, err
 	}
 
-	return scan.filterManifestsWithSchema(manifestSet.allManifests(), schema, acc, partitionFilters)
+	return scan.filterManifestsWithSchema(manifestSet.borrowAllManifests(), schema, acc, partitionFilters)
 }
 
 func (scan *Scan) manifestSet(

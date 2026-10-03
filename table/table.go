@@ -414,7 +414,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 					if err != nil {
 						return err
 					}
-					manifests := manifestSet.allManifests()
+					manifests := manifestSet.borrowAllManifests()
 
 					select {
 					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:

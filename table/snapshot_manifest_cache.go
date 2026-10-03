@@ -77,6 +77,14 @@ func (s snapshotManifestSet) dataManifests() []iceberg.ManifestFile {
 	return slices.Clone(s.data)
 }
 
+func (s snapshotManifestSet) borrowAllManifests() []iceberg.ManifestFile {
+	return s.all
+}
+
+func (s snapshotManifestSet) borrowDataManifests() []iceberg.ManifestFile {
+	return s.data
+}
+
 func snapshotManifestSetSize(set snapshotManifestSet) int {
 	return len(set.all)
 }
