@@ -649,3 +649,42 @@ func benchmarkNestedEqualityDeleteSchema(width, depth int) (*iceberg.Schema, int
 
 	return iceberg.NewSchema(0, fields...), lastLeafID
 }
+
+type equalityMetadataPublicBenchmarkFile struct{ iceberg.DataFile }
+
+func BenchmarkLazyEqualityDeleteMetadataShapes(b *testing.B) {
+	const taskCount = 10000
+	tableSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
+	for _, uniqueFiles := range []int{1, 100, 1000, 10000} {
+		for _, shape := range []string{"shared", "distinct", "public"} {
+			b.Run(fmt.Sprintf("unique=%d/%s", uniqueFiles, shape), func(b *testing.B) {
+				files := make([]iceberg.DataFile, uniqueFiles)
+				for i := range files {
+					files[i] = newEqualityDeleteSetAssemblyTestFile(b, fmt.Sprintf("mem://metadata-shapes/delete-%d.parquet", i), []int{1})
+				}
+				tasks := make([]FileScanTask, taskCount)
+				for i := range tasks {
+					file := files[i%uniqueFiles]
+					if shape != "shared" {
+						file = newEqualityDeleteSetAssemblyTestFile(b, file.FilePath(), []int{1})
+					}
+					if shape == "public" {
+						file = equalityMetadataPublicBenchmarkFile{DataFile: file}
+					}
+					tasks[i].EqualityDeleteFiles = []iceberg.DataFile{file}
+				}
+				b.ReportAllocs()
+				for b.Loop() {
+					loader, err := newLazyEqualityDeleteLoader(nil, tableSchema, nil, nil, tasks)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if len(loader.files) != uniqueFiles {
+						b.Fatalf("got %d unique files, want %d", len(loader.files), uniqueFiles)
+					}
+					equalityDeleteMetadataBenchmarkSink = len(loader.files)
+				}
+			})
+		}
+	}
+}
