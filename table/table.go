@@ -50,18 +50,15 @@ import (
 // commit fails due to a concurrent modification (e.g. HTTP 409 Conflict
 // from the REST catalog). Catalog implementations should wrap this
 // error so that callers using errors.Is(err, table.ErrCommitFailed)
-// can detect retryable commit conflicts. Requirement validation failures,
-// such as a branch that has moved since the table was loaded, also wrap it.
-// When commit retries are enabled, the retry loop rebases only the implicit
-// assertion on the commit branch's head; any other requirement that fails after a
-// refresh ends the commit, and the caller must reload the table and
-// rebuild the commit. When an error matches both ErrCommitFailed and
-// ErrTransactionUnusable, build a new transaction rather than retrying.
+// can detect retryable commit conflicts. Failed requirements also wrap it.
+// Requirements other than the implicit commit-branch assertion are not rebased.
+// If they fail after refresh, reload the table and rebuild the operation.
+// If the error also matches ErrTransactionUnusable, build a new transaction.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrTransactionUnusable is returned when a failed commit removed files
-// the transaction's staged updates reference. The transaction cannot be
-// committed again, by Commit or through TableCommit; build a new one.
+// referenced by staged updates. The transaction cannot be committed again.
+// Build a new transaction to retry.
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -555,8 +552,7 @@ type commitOpts struct {
 	// in snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
-	// pinnedRefs names refs whose assertions guard the commit and must
-	// not be rewritten to the fresh head between retries (see
+	// Pinned assertions must not be rebased between retries (see
 	// Transaction.pinnedRefs).
 	pinnedRefs map[string]struct{}
 }
@@ -640,11 +636,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		if !cleanupOrphans {
 			return
 		}
-		// Inner data manifests written by superseded retry attempts (a
-		// rewrite re-merges everything on each retry) are orphaned objects.
-		// On any safe failure exit nothing committed, so the accumulator
-		// also folds in the final attempt's manifests. On success the
-		// committed snapshot references those, so they are excluded.
+		// The final attempt's manifests are orphaned only if the commit failed.
 		for _, u := range updates {
 			if su, ok := u.(*addSnapshotUpdate); ok && su.supersededSource != nil {
 				orphanedManifests = append(orphanedManifests, su.supersededSource.supersededManifests(committed)...)
@@ -655,10 +647,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
 			}
 		}
-		// A failed commit only removes files the staged updates built: the
-		// attempt-0 manifest list a rebuild replaced, or a rewrite's merged
-		// manifests. Resubmitting those updates would commit references to
-		// deleted files.
+		// Resubmitting staged updates after cleanup would reference deleted files.
 		if !committed && retErr != nil && len(orphanedManifests) > 0 {
 			retErr = fmt.Errorf("%w (staged files were cleaned up; build a new transaction to retry): %w",
 				retErr, ErrTransactionUnusable)
@@ -714,11 +703,6 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			current = fresh.metadata
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
 
-			// A requirement the retry does not rebase and the fresh
-			// catalog state violates can never succeed — fail now
-			// instead of burning the remaining retries on it. The error
-			// still matches ErrCommitFailed, so callers can reload and
-			// rebuild the commit.
 			if err := validateNonRebasedRequirements(reqs, co.branch, co.pinnedRefs, current); err != nil {
 				return nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w", ErrCommitFailed, err)
 			}
@@ -867,10 +851,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // deleted underneath us), reqs is returned unchanged — newConflict-
 // Context will surface the divergence on the next pre-flight pass.
 //
-// Assertions on refs in pinned guard the commit (an explicit
-// Transaction.AssertRefSnapshotID, a rollback, or snapshot expiry) and
-// are never rewritten: a ref that has changed must fail the commit, not
-// be replayed against the new head.
+// Pinned assertions protect explicit ref requirements, rollbacks, and snapshot
+// expiry from being replayed against a changed ref.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
@@ -900,14 +882,9 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	return out
 }
 
-// validateNonRebasedRequirements validates every requirement that the
-// retry loop does not rebase against the freshly refreshed catalog
-// metadata. Only unpinned assert-ref-snapshot-id requirements on the
-// commit branch are rebased, by rewriteRefSnapshotRequirements; every
-// other requirement (schema, spec, sort order, UUID, other refs, pinned
-// refs) is resubmitted unchanged, so one the fresh state violates fails
-// identically on every retry. Like Java's ValidationFailureException,
-// the commit must fail instead of retrying.
+// validateNonRebasedRequirements checks the requirements a retry does not
+// rebase. Only unpinned commit-branch assertions are rebased, so any other
+// requirement that fails against refreshed metadata cannot succeed on retry.
 func validateNonRebasedRequirements(reqs []Requirement, branch string, pinned map[string]struct{}, fresh Metadata) error {
 	for _, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {

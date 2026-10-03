@@ -227,8 +227,6 @@ func (b baseRequirement) GetType() string {
 	return b.Type
 }
 
-// requirementFailed returns an error that matches ErrCommitFailed, so the
-// commit can be retried against refreshed metadata.
 func requirementFailed(format string, args ...any) error {
 	return &requirementError{msg: fmt.Sprintf(format, args...)}
 }

@@ -176,8 +176,6 @@ func TestTransactionAssertRefSnapshotID(t *testing.T) {
 	})
 }
 
-// probeRequirement runs probe from Validate, while the transaction lock
-// is held, and fails with err.
 type probeRequirement struct {
 	baseRequirement
 	probe func()
@@ -190,11 +188,8 @@ func (p *probeRequirement) Validate(Metadata) error {
 	return p.err
 }
 
-// Why: a pin published before its apply succeeds can be relied on by an
-// overlapping registration of the same ref and then withdrawn when the
-// apply fails, leaving that registration's assertion rebasable.
-// Assertion: a pin is not visible while its apply runs, and a failed
-// apply leaves no pin.
+// Why: withdrawing a failed apply's pin could leave an overlapping registration unguarded.
+// Assertion: pins remain unpublished until apply succeeds.
 func TestApplyPinnedPublishesPinsOnlyOnSuccess(t *testing.T) {
 	head := int64(100)
 	base := newConflictTestMetadataWithProps(t, &head, assertRefRetryProps)

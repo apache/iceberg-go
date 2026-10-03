@@ -1034,8 +1034,6 @@ func TestRewriteManifestsCleansSupersededOnExhaustedRetries(t *testing.T) {
 	}
 }
 
-// resortedMetadata returns base with a new default sort order on id, as a
-// peer's sort-order change that does not advance the snapshot.
 func resortedMetadata(t *testing.T, base table.Metadata) table.Metadata {
 	t.Helper()
 	builder, err := table.MetadataBuilderFromBase(base, "")
@@ -1055,13 +1053,8 @@ func resortedMetadata(t *testing.T, base table.Metadata) table.Metadata {
 	return out
 }
 
-// TestRewriteManifestsCleansOnNonRebasedRequirementFailure asserts that a
-// rewrite whose transaction also carries a requirement the refreshed table
-// violates (here a default sort order fence) cleans up its merged manifest
-// when the retry loop stops after the refresh, and that the transaction
-// then refuses another Commit: its staged manifest list references the
-// removed manifest, so resubmitting it once the fence holds again would
-// commit an unreadable snapshot.
+// Cleanup after a failed requirement must prevent resubmitting staged updates
+// that reference the deleted manifest, even if the requirement holds again.
 func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1070,8 +1063,6 @@ func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
 
 	h0, _, _ := stagedRewriteHeads(t, ctx, dir, "2", fsF, track)
 
-	// The first attempt conflicts; the refresh then sees a peer's new
-	// default sort order.
 	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{resortedMetadata(t, h0)}, failures: 1, location: dir, fsF: fsF}
 	tbl := table.New(table.Identifier{"default", "staged"}, h0, dir+"/metadata/00000.json", fsF, cat)
 
@@ -1082,8 +1073,6 @@ func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
 	_, err := txn.RewriteManifests(ctx)
 	require.NoError(t, err)
 
-	// Queue the transaction in a multi-table transaction while it is still
-	// usable, so its later submission must be fenced too.
 	multiCat := &recordingTransactionalCatalog{}
 	queued, err := catalog.NewMultiTableTransaction(multiCat)
 	require.NoError(t, err)
@@ -1100,8 +1089,6 @@ func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
 		assert.NoFileExistsf(t, p, "merged manifest %s must be removed when the commit stops", p)
 	}
 
-	// The peer restores the original sort order, so the fence holds again,
-	// yet no path may resubmit the staged updates.
 	cat.current = h0
 	_, err = txn.Commit(ctx)
 	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
@@ -1117,8 +1104,7 @@ func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
 	assert.Same(t, h0, cat.current, "nothing may be committed")
 }
 
-// recordingTransactionalCatalog counts multi-table submissions. Only
-// CommitTransaction is implemented; the embedded Catalog is nil.
+// Only CommitTransaction is implemented. The embedded Catalog is nil.
 type recordingTransactionalCatalog struct {
 	catalog.Catalog
 	commitTransactionCalls int
@@ -1130,10 +1116,6 @@ func (c *recordingTransactionalCatalog) CommitTransaction(context.Context, []tab
 	return nil
 }
 
-// TestCommitAfterFailFastWithoutCleanupStaysRetriable asserts that a
-// transaction whose commit stopped on a violated requirement, but which
-// staged no files the failure removed, can be committed again once the
-// requirement holds.
 func TestCommitAfterFailFastWithoutCleanupStaysRetriable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

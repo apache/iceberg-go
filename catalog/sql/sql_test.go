@@ -1497,8 +1497,7 @@ func (s *SqliteCatalogTestSuite) TestDropTableNotExist() {
 	}
 }
 
-// stringRow builds a one-row table for the string field "foo". The
-// caller releases it.
+// The caller must release the returned table.
 func stringRow(value string) arrow.Table {
 	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "foo", Type: arrow.BinaryTypes.String}}, nil)
 	bldr := array.NewStringBuilder(memory.DefaultAllocator)
@@ -1512,8 +1511,6 @@ func stringRow(value string) arrow.Table {
 	return array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 }
 
-// appendStringRow appends one row to a table whose only column is the
-// string field "foo".
 func appendStringRow(ctx context.Context, tbl *table.Table, value string) (*table.Table, error) {
 	arrTable := stringRow(value)
 	defer arrTable.Release()
@@ -1521,8 +1518,6 @@ func appendStringRow(ctx context.Context, tbl *table.Table, value string) (*tabl
 	return tbl.AppendTable(ctx, arrTable, 1024, nil)
 }
 
-// appendStringRowOnBranch commits one row to branch, creating the branch
-// from main's head if it does not exist.
 func (s *SqliteCatalogTestSuite) appendStringRowOnBranch(ctx context.Context, tbl *table.Table, branch, value string) *table.Table {
 	tx := tbl.NewTransactionOnBranch(branch)
 	s.stageStringRow(ctx, tx, value)
@@ -1538,9 +1533,7 @@ func (s *SqliteCatalogTestSuite) stageStringRow(ctx context.Context, tx *table.T
 	s.Require().NoError(tx.AppendTable(ctx, arrTable, 1024, nil))
 }
 
-// waitPastSnapshots blocks until the wall clock in milliseconds is past
-// every snapshot timestamp of meta, so an expiry with WithOlderThan(0)
-// treats them all as old enough.
+// WithOlderThan(0) must consider every snapshot old enough to expire.
 func (s *SqliteCatalogTestSuite) waitPastSnapshots(meta table.Metadata) {
 	var newest int64
 	for _, snap := range meta.Snapshots() {
@@ -1550,8 +1543,6 @@ func (s *SqliteCatalogTestSuite) waitPastSnapshots(meta table.Metadata) {
 		time.Second, time.Millisecond)
 }
 
-// storedStringValues returns every value of the "foo" column in the
-// table's current snapshot, or the snapshot opts select.
 func (s *SqliteCatalogTestSuite) storedStringValues(ctx context.Context, tbl *table.Table, opts ...table.ScanOption) []string {
 	rows, err := tbl.Scan(opts...).ToArrowTable(ctx)
 	s.Require().NoError(err)
@@ -1572,9 +1563,6 @@ func (s *SqliteCatalogTestSuite) storedStringValues(ctx context.Context, tbl *ta
 	return values
 }
 
-// createRetryingStringTable creates a single-column string table that
-// retries conflicting commits numRetries times with millisecond waits,
-// then appends one row per value.
 func (s *SqliteCatalogTestSuite) createRetryingStringTable(ctx context.Context, cat *sqlcat.Catalog, numRetries string, values ...string) table.Identifier {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
@@ -1673,10 +1661,7 @@ func (s *SqliteCatalogTestSuite) TestStaleRollbackFailsAfterPeerAppend() {
 	s.ElementsMatch([]string{"seed", "second", "peer"}, s.storedStringValues(ctx, current))
 }
 
-// Snapshot expiry staged before a peer rolled the branch back must not
-// be replayed against the new head: its retention window was computed
-// from the old head, so it would expire snapshots the rolled-back
-// branch still retains.
+// A stale retention window must not expire snapshots retained by a peer's rollback.
 func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsFailsAfterPeerRollback() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()
@@ -1715,9 +1700,7 @@ func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsFailsAfterPeerRollback(
 	s.ElementsMatch([]string{"s1", "s2"}, s.storedStringValues(ctx, current))
 }
 
-// A rollback of a branch the transaction staged must not be replayed
-// against a branch a peer created meanwhile, which would point the
-// peer's branch back at main and drop its append.
+// A staged branch's rollback must not discard an append on a peer-created branch.
 func (s *SqliteCatalogTestSuite) TestStaleRollbackOfStagedBranchFailsAfterPeerCreatesIt() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()
@@ -1748,9 +1731,7 @@ func (s *SqliteCatalogTestSuite) TestStaleRollbackOfStagedBranchFailsAfterPeerCr
 		s.storedStringValues(ctx, current, table.WithSnapshotID(peerHead)))
 }
 
-// Snapshot expiry in a transaction that staged a new branch must not be
-// replayed against a branch a peer created meanwhile: its retention was
-// computed without the peer's branch.
+// A stale retention window must not expire snapshots on a peer-created branch.
 func (s *SqliteCatalogTestSuite) TestStaleExpireWithStagedBranchFailsAfterPeerCreatesIt() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()

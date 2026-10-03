@@ -218,16 +218,8 @@ func TestDoCommit_ValidatorRejectsOnRefresh(t *testing.T) {
 		"validator rejection on retry must abort before re-issuing CommitTable")
 }
 
-// Why: the retry loop rebases only unpinned assertions on the commit
-// branch. Any other requirement is resubmitted unchanged, so one the
-// refreshed state violates fails identically on every retry and must
-// end the commit after the first refresh; one that still holds must not
-// block the rebase.
-// Condition: a writer commits against a catalog where a peer changed
-// the schema, or only advanced the branch head.
-// Assertion: the schema race fails with ErrCommitFailed after one
-// CommitTable attempt and one refresh; the head-only race succeeds on
-// the rebased retry.
+// A stale schema requirement cannot be rebased, but a valid one must not
+// prevent retrying against a changed branch head.
 func TestDoCommit_NonRebasedRequirementFailsAfterOneRefresh(t *testing.T) {
 	writerHead := int64(100)
 	props := iceberg.Properties{
@@ -239,8 +231,6 @@ func TestDoCommit_NonRebasedRequirementFailsAfterOneRefresh(t *testing.T) {
 	t.Run("stale schema update fails without retrying", func(t *testing.T) {
 		writerBase := newConflictTestMetadataWithProps(t, &writerHead, props)
 
-		// Catalog state: a peer added a column, moving the current schema
-		// and the last assigned field id.
 		builder, err := MetadataBuilderFromBase(writerBase, "")
 		require.NoError(t, err)
 		peerSchema := iceberg.NewSchema(1,

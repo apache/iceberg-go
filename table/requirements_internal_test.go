@@ -58,8 +58,7 @@ func TestAssertBranchRefSnapshotIDRejectsTagWithoutRetry(t *testing.T) {
 	meta, err := ParseMetadataBytes([]byte(ExampleTableMetadataV2))
 	require.NoError(t, err)
 
-	// "test" is a tag in ExampleTableMetadataV2. Targeting a tag is a usage
-	// error that a refresh cannot fix, so it must not look retryable.
+	// "test" is a tag. Refresh cannot make it a valid transaction target.
 	err = assertBranchRefSnapshotID("test", new(int64(3051729675574597004))).Validate(meta)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tags cannot be transaction targets")
