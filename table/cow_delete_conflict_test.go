@@ -170,3 +170,31 @@ func TestCopyOnWriteConflict_ConcurrentAppendCommits(t *testing.T) {
 		}
 	}
 }
+
+// TestCopyOnWriteConflict_ConcurrentDeleteOnUntouchedFileCommits pins the
+// validator's scope: a concurrent delete against a data file this commit does
+// not remove must not reject it. v3 deletion vectors carry
+// referenced_data_file, so the delete resolves to its exact target; v2 position
+// deletes written here are partition-scoped and conservatively conflict.
+func TestCopyOnWriteConflict_ConcurrentDeleteOnUntouchedFileCommits(t *testing.T) {
+	for _, isolation := range cowIsolations {
+		for _, op := range cowOps {
+			t.Run(fmt.Sprintf("v3/%s/%s", isolation, op), func(t *testing.T) {
+				ctx := context.Background()
+				tbl := appendTenRows(t, newCoWConflictTestTable(t, "3", isolation))
+				// A second data file that the id==2 removal does not touch.
+				tbl, err := tbl.Append(ctx, cowTestRecords(t, `[{"id":11,"data":"k"},{"id":12,"data":"l"}]`), nil)
+				require.NoError(t, err)
+
+				txn := stageCopyOnWrite(t, tbl, op, iceberg.EqualTo(iceberg.Reference("id"), int64(2)))
+
+				_, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(12)), nil)
+				require.NoError(t, err)
+
+				committed, err := txn.Commit(ctx)
+				require.NoError(t, err)
+				require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 11}, idsInTable(t, committed))
+			})
+		}
+	}
+}
