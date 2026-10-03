@@ -33,6 +33,33 @@ const (
 	IntMinValue, IntMaxValue int32 = 30, 79
 )
 
+type noPartitionAccessManifestFile struct {
+	iceberg.ManifestFile
+}
+
+func (noPartitionAccessManifestFile) Partitions() []iceberg.FieldSummary {
+	panic("partition summaries should not be read")
+}
+
+func TestManifestEvaluatorAlwaysTrue(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_part",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	eval, err := newManifestEvaluator(spec, schema, iceberg.AlwaysTrue{}, true)
+	require.NoError(t, err)
+
+	matches, err := eval(noPartitionAccessManifestFile{})
+	require.NoError(t, err)
+	assert.True(t, matches)
+}
+
 func TestManifestEvaluator(t *testing.T) {
 	var (
 		IntMin, IntMax       = []byte{byte(IntMinValue), 0x00, 0x00, 0x00}, []byte{byte(IntMaxValue), 0x00, 0x00, 0x00}
