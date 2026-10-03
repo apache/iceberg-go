@@ -721,11 +721,15 @@ func BenchmarkArrowScanReadTasksResidualBinding(b *testing.B) {
 		{taskCount: 100_000, name: "bound", residual: boundResidual},
 		{taskCount: 100_000, name: "nil"},
 		{taskCount: 100_000, name: "unbound", residual: unboundResidual},
+		{taskCount: 100_000, name: "late_unbound", residual: boundResidual},
 	} {
 		b.Run(fmt.Sprintf("tasks=%d/residual=%s", workload.taskCount, workload.name), func(b *testing.B) {
 			tasks := make([]FileScanTask, workload.taskCount)
 			for i := range tasks {
 				tasks[i].Residual = workload.residual
+			}
+			if workload.name == "late_unbound" {
+				tasks[len(tasks)-1].Residual = unboundResidual
 			}
 
 			b.ReportAllocs()
