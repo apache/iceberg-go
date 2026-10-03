@@ -2823,7 +2823,10 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 		return err
 	}
 
-	complementFilter := iceberg.NewNot(filter)
+	complementFilter, err := isNotTrueExpr(filter)
+	if err != nil {
+		return err
+	}
 
 	// Bind + convert the complement filter once for the whole rewrite. The
 	// per-batch filter function is reused across every record batch from
@@ -2859,6 +2862,77 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 	}
 
 	return nil
+}
+
+// isNotTrueExpr returns an expression that holds exactly for the rows where
+// filter is not true, i.e. where it is false or NULL. Plain NOT(filter) is not
+// enough: under three-valued logic `v = 5` is NULL when v is NULL, and so is
+// NOT(v = 5), so a copy-on-write rewrite would drop rows that never matched.
+func isNotTrueExpr(filter iceberg.BooleanExpression) (iceberg.BooleanExpression, error) {
+	res, err := iceberg.VisitExpr(filter, isNotTrueVisitor{})
+	if err != nil {
+		return nil, err
+	}
+
+	// res.isTrue is never NULL, so negating it is safe. Don't push the NOT
+	// down with RewriteNotExpr: NOT(x < 5) and x >= 5 differ for NaN.
+	return iceberg.NewNot(res.isTrue), nil
+}
+
+// truthExprs holds two never-NULL expressions for a sub-expression e:
+// isTrue holds iff e is true, isFalse holds iff e is false.
+type truthExprs struct {
+	isTrue, isFalse iceberg.BooleanExpression
+}
+
+type isNotTrueVisitor struct{}
+
+func (isNotTrueVisitor) VisitTrue() truthExprs {
+	return truthExprs{isTrue: iceberg.AlwaysTrue{}, isFalse: iceberg.AlwaysFalse{}}
+}
+
+func (isNotTrueVisitor) VisitFalse() truthExprs {
+	return truthExprs{isTrue: iceberg.AlwaysFalse{}, isFalse: iceberg.AlwaysTrue{}}
+}
+
+func (isNotTrueVisitor) VisitNot(child truthExprs) truthExprs {
+	return truthExprs{isTrue: child.isFalse, isFalse: child.isTrue}
+}
+
+func (isNotTrueVisitor) VisitAnd(left, right truthExprs) truthExprs {
+	return truthExprs{
+		isTrue:  iceberg.NewAnd(left.isTrue, right.isTrue),
+		isFalse: iceberg.NewOr(left.isFalse, right.isFalse),
+	}
+}
+
+func (isNotTrueVisitor) VisitOr(left, right truthExprs) truthExprs {
+	return truthExprs{
+		isTrue:  iceberg.NewOr(left.isTrue, right.isTrue),
+		isFalse: iceberg.NewAnd(left.isFalse, right.isFalse),
+	}
+}
+
+func (isNotTrueVisitor) VisitUnbound(pred iceberg.UnboundPredicate) truthExprs {
+	switch pred.Op() {
+	case iceberg.OpIsNull, iceberg.OpNotNull, iceberg.OpIsNan, iceberg.OpNotNan:
+		// never evaluates to NULL
+		return truthExprs{isTrue: pred, isFalse: iceberg.NewNot(pred)}
+	}
+
+	// Any other predicate can be NULL when its term is NULL. Guard In and
+	// NotIn too: binding turns a set that ends up with one value into
+	// Equal or NotEqual, which are NULL for a NULL term.
+	notNull := iceberg.NotNull(pred.Term())
+
+	return truthExprs{
+		isTrue:  iceberg.NewAnd(pred, notNull),
+		isFalse: iceberg.NewAnd(iceberg.NewNot(pred), notNull),
+	}
+}
+
+func (isNotTrueVisitor) VisitBound(pred iceberg.BoundPredicate) truthExprs {
+	panic(fmt.Errorf("%w: found already bound predicate: %s", iceberg.ErrInvalidArgument, pred))
 }
 
 // rewriteSingleFileArgs bundles the parameters for [Transaction.rewriteSingleFile]
