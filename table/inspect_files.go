@@ -140,7 +140,7 @@ func (i InspectTable) manifestEntryReader(
 	if err != nil {
 		return nil, err
 	}
-	manifests := manifestSet.allManifests()
+	manifests := manifestSet.borrowAllManifests()
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
@@ -193,7 +193,7 @@ func (i InspectTable) allManifestEntryReader(
 
 					return
 				}
-				for _, manifest := range manifestSet.allManifests() {
+				for _, manifest := range manifestSet.borrowAllManifests() {
 					if _, ok := seen[manifest.FilePath()]; ok {
 						continue
 					}
