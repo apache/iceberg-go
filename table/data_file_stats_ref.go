@@ -18,6 +18,8 @@
 package table
 
 import (
+	"slices"
+
 	iceberg "github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 )
@@ -43,6 +45,31 @@ func dataFileCollections(file iceberg.DataFile) (
 	equalityFieldIDs []int,
 ) {
 	return internal.BorrowedDataFileCollections(file)
+}
+
+// dataFileEqualityFieldIDsRef returns a borrowed equality field ID view for
+// short-lived comparisons. Callers must not retain or mutate the returned slice.
+func dataFileEqualityFieldIDsRef(file iceberg.DataFile) []int {
+	if ref, ok := file.(internal.DataFileCollectionsRef); ok {
+		_, _, _, equalityFieldIDs := ref.DataFileCollectionsRef(internal.DataFileRef{})
+
+		return equalityFieldIDs
+	}
+
+	return file.EqualityFieldIDs()
+}
+
+// dataFileEqualityFieldIDs returns equality field IDs that are safe to retain.
+// The internal collection view is borrowed, so clone it before storing the IDs
+// on scan-lifetime loader state. The public getter already returns its own view.
+func dataFileEqualityFieldIDs(file iceberg.DataFile) []int {
+	if ref, ok := file.(internal.DataFileCollectionsRef); ok {
+		_, _, _, equalityFieldIDs := ref.DataFileCollectionsRef(internal.DataFileRef{})
+
+		return slices.Clone(equalityFieldIDs)
+	}
+
+	return file.EqualityFieldIDs()
 }
 
 // dataFilePartition returns a borrowed partition map for the concrete
