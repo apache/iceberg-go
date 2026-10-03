@@ -27,6 +27,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro/atype"
 )
 
 func TestDecodeScanTasksFullPayload(t *testing.T) {
@@ -723,11 +724,11 @@ func TestPartitionDecodePlanKeepsValuesIndependent(t *testing.T) {
 	cache := newPartitionDecodePlanCache()
 	plan, err := cache.planFor(metadata.spec.ID(), metadata)
 	require.NoError(t, err)
-	first, firstLogical, firstFixed, err := decodePartition([]json.RawMessage{
+	first, firstLogical, err := decodePartition([]json.RawMessage{
 		json.RawMessage(`34`), json.RawMessage(`"2026-07-17"`), json.RawMessage(`"78797A21"`),
 	}, plan)
 	require.NoError(t, err)
-	second, secondLogical, secondFixed, err := decodePartition([]json.RawMessage{
+	second, secondLogical, err := decodePartition([]json.RawMessage{
 		json.RawMessage(`35`), json.RawMessage(`null`), json.RawMessage(`"41424344"`),
 	}, plan)
 	require.NoError(t, err)
@@ -740,12 +741,11 @@ func TestPartitionDecodePlanKeepsValuesIndependent(t *testing.T) {
 	assert.Equal(t, []byte("ABCD"), second[1002])
 	firstLogical[1001] = "changed"
 	assert.NotContains(t, secondLogical, 1001)
-	firstFixed[1002] = 99
-	assert.NotContains(t, secondFixed, 1002)
+	assert.Nil(t, secondLogical)
 
-	_, _, _, err = decodePartition([]json.RawMessage{json.RawMessage(`34`)}, plan)
+	_, _, err = decodePartition([]json.RawMessage{json.RawMessage(`34`)}, plan)
 	require.ErrorContains(t, err, "has 1 values, want 3")
-	_, _, _, err = decodePartition([]json.RawMessage{
+	_, _, err = decodePartition([]json.RawMessage{
 		json.RawMessage(`34`), json.RawMessage(`"invalid-date"`), json.RawMessage(`"41424344"`),
 	}, plan)
 	require.ErrorContains(t, err, "date_part")
@@ -814,6 +814,63 @@ func TestDecodeScanTasksAcceptsPointerAndUnknownPartitionTransforms(t *testing.T
 			require.NoError(t, err)
 			require.Len(t, tasks, 1)
 			assert.Equal(t, tt.want, tasks[0].File.Partition()[1000])
+		})
+	}
+}
+
+func TestDecodePartitionLogicalMetadata(t *testing.T) {
+	t.Parallel()
+	decimalType := iceberg.DecimalTypeOf(9, 2)
+	for _, tt := range []struct {
+		name        string
+		typ         iceberg.Type
+		raw         string
+		want        any
+		logicalType string
+	}{
+		{name: "unpartitioned"},
+		{name: "integer", typ: iceberg.PrimitiveTypes.Int64, raw: `34`, want: int64(34)},
+		{name: "fixed", typ: iceberg.FixedTypeOf(4), raw: `"78797A21"`, want: []byte("xyz!")},
+		{name: "null date", typ: iceberg.PrimitiveTypes.Date, raw: `null`},
+		{name: "null decimal", typ: decimalType, raw: `null`},
+		{name: "date", typ: iceberg.PrimitiveTypes.Date, raw: `"2026-07-17"`, want: mustLiteral(t, "2026-07-17", iceberg.PrimitiveTypes.Date).Any(), logicalType: atype.Date},
+		{name: "decimal", typ: decimalType, raw: `"12.34"`, want: mustLiteral(t, "12.34", decimalType).Any(), logicalType: atype.Decimal},
+		{name: "uuid", typ: iceberg.PrimitiveTypes.UUID, raw: `"f79c3e09-677c-4bbd-a479-3f349cb785e7"`, want: mustLiteral(t, "f79c3e09-677c-4bbd-a479-3f349cb785e7", iceberg.PrimitiveTypes.UUID).Any(), logicalType: atype.UUID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := &scanTaskDecoderMetadata{schema: iceberg.NewSchema(10), spec: *iceberg.UnpartitionedSpec}
+			var values []json.RawMessage
+			want := make(map[int]any)
+			if tt.typ != nil {
+				metadata.schema = iceberg.NewSchema(10, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+				metadata.spec = iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+					SourceIDs: []int{1}, FieldID: 1000, Name: "value_part", Transform: iceberg.IdentityTransform{},
+				})
+				values = []json.RawMessage{json.RawMessage(tt.raw)}
+				want[1000] = tt.want
+			}
+			plan, err := newPartitionDecodePlan(&metadata.spec, metadata)
+			require.NoError(t, err)
+			partition, logicalTypes, err := decodePartition(values, plan)
+			require.NoError(t, err)
+			assert.Equal(t, want, partition)
+			if tt.logicalType == "" {
+				assert.Nil(t, logicalTypes)
+			} else {
+				assert.Equal(t, map[int]string{1000: tt.logicalType}, logicalTypes)
+			}
+
+			wire := validScanTasksWire()
+			wire.FileScanTasks[0].DataFile.SpecID = metadata.spec.ID()
+			wire.FileScanTasks[0].DataFile.Partition = values
+			wire.DeleteFiles[0].SpecID = metadata.spec.ID()
+			wire.DeleteFiles[0].Partition = values
+			tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			assert.Equal(t, want, tasks[0].File.Partition())
+			require.Len(t, tasks[0].DeleteFiles, 1)
+			assert.Equal(t, want, tasks[0].DeleteFiles[0].Partition())
 		})
 	}
 }
