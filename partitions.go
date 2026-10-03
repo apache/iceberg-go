@@ -896,15 +896,19 @@ func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedParti
 // retains the field's position and lets transforms with fixed result types,
 // such as bucket, continue to resolve their result type.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	resolvedFields := ps.resolvedPartitionFields(schema)
-	nestedFields := make([]NestedField, 0, len(resolvedFields))
-	for _, field := range resolvedFields {
-		nestedFields = append(nestedFields, NestedField{
-			ID:       field.field.FieldID,
-			Name:     field.field.Name,
-			Type:     field.resultType,
+	nestedFields := make([]NestedField, len(ps.fields))
+	for i, field := range ps.fields {
+		sourceType := Type(UnknownType{})
+		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+			sourceType = typ
+		}
+
+		nestedFields[i] = NestedField{
+			ID:       field.FieldID,
+			Name:     field.Name,
+			Type:     field.Transform.ResultType(sourceType),
 			Required: false,
-		})
+		}
 	}
 
 	return &StructType{FieldList: nestedFields}
