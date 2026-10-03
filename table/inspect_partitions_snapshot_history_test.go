@@ -32,6 +32,7 @@ type countingPartitionSnapshotsMetadata struct {
 
 func (m *countingPartitionSnapshotsMetadata) Snapshots() []Snapshot {
 	m.calls++
+
 	return m.Metadata.Snapshots()
 }
 

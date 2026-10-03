@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -29,13 +30,15 @@ import (
 )
 
 func BenchmarkInspectPartitionsSnapshotHistory(b *testing.B) {
-	for _, count := range []int{1, 100, 1000} {
+	for _, count := range []int{0, 1, 100, 1000} {
 		b.Run(fmt.Sprintf("snapshots=%d", count), func(b *testing.B) {
 			tbl := inspectPartitionSnapshotHistoryTable(b, count)
 			inspector := tbl.Inspect()
 			ctx := context.Background()
-			_, err := tbl.manifestSet(ctx, *tbl.metadata.CurrentSnapshot())
-			require.NoError(b, err)
+			if snapshot := tbl.metadata.CurrentSnapshot(); snapshot != nil {
+				_, err := tbl.manifestSet(ctx, *snapshot)
+				require.NoError(b, err)
+			}
 			b.ReportAllocs()
 			for b.Loop() {
 				rr, err := inspector.Partitions(ctx)
@@ -51,8 +54,9 @@ func BenchmarkInspectPartitionsSnapshotHistory(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				if rows != 1 {
-					b.Fatalf("got %d rows, want 1", rows)
+				wantRows := int64(min(count, 1))
+				if rows != wantRows {
+					b.Fatalf("got %d rows, want %d", rows, wantRows)
 				}
 			}
 		})
@@ -76,7 +80,7 @@ func inspectPartitionSnapshotHistoryTable(t testing.TB, count int) *Table {
 			ManifestList: fmt.Sprintf("mem://snapshot-history/table/metadata/snap-%d.avro", id),
 			SchemaID:     new(schema.ID),
 			Summary: &Summary{Operation: OpAppend, Properties: iceberg.Properties{
-				"added-data-files": "1", "added-records": "1", "total-records": fmt.Sprint(id),
+				"added-data-files": "1", "added-records": "1", "total-records": strconv.FormatInt(id, 10),
 			}},
 		}
 		if index > 0 {
@@ -107,6 +111,7 @@ func inspectPartitionSnapshotHistoryTable(t testing.TB, count int) *Table {
 	}
 	built, err := builder.Build()
 	require.NoError(t, err)
+
 	return New(Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
 }
