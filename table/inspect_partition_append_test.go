@@ -18,6 +18,7 @@
 package table
 
 import (
+	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -220,4 +221,39 @@ func newInspectPartitionBuilderForTest(
 	require.NoError(t, err)
 
 	return builder, partitionBuilder
+}
+
+func TestInspectPartitionBuilderPreservesEmptyAndSpecialValues(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		typ   iceberg.Type
+		value any
+		check func(*testing.T, arrow.Array)
+	}{
+		{"empty string", iceberg.PrimitiveTypes.String, "", func(t *testing.T, a arrow.Array) { require.Empty(t, a.(*array.String).Value(0)) }},
+		{"empty binary", iceberg.PrimitiveTypes.Binary, []byte{}, func(t *testing.T, a arrow.Array) { require.Empty(t, a.(*array.Binary).Value(0)) }},
+		{"float32 negative zero", iceberg.PrimitiveTypes.Float32, float32(math.Copysign(0, -1)), func(t *testing.T, a arrow.Array) { require.True(t, math.Signbit(float64(a.(*array.Float32).Value(0)))) }},
+		{"float64 NaN", iceberg.PrimitiveTypes.Float64, math.NaN(), func(t *testing.T, a arrow.Array) { require.True(t, math.IsNaN(a.(*array.Float64).Value(0))) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			builder, partitionBuilder := newInspectPartitionBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: tt.typ}})
+			require.NoError(t, partitionBuilder.append(map[int]any{2: tt.value}))
+			require.NoError(t, partitionBuilder.append(nil))
+			partition := builder.NewArray().(*array.Struct)
+			defer partition.Release()
+			require.True(t, partition.Field(0).IsValid(0))
+			require.True(t, partition.Field(0).IsNull(1))
+			tt.check(t, partition.Field(0))
+		})
+	}
+}
+
+func TestInspectPartitionBuilderCopiesBinaryValues(t *testing.T) {
+	builder, partitionBuilder := newInspectPartitionBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Binary}})
+	value := []byte("abc")
+	require.NoError(t, partitionBuilder.append(map[int]any{2: value}))
+	value[0] = 'x'
+	partition := builder.NewArray().(*array.Struct)
+	defer partition.Release()
+	require.Equal(t, []byte("abc"), partition.Field(0).(*array.Binary).Value(0))
 }
