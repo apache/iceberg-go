@@ -2202,17 +2202,26 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	// Bind task residuals against the schema selected by this scan, which may
 	// be an older snapshot schema rather than the table's current schema. Keep
 	// the caller's task slice untouched because the same plan may be reused.
-	readTasks := slices.Clone(tasks)
-	for i := range readTasks {
-		if readTasks[i].Residual == nil {
+	readTasks := tasks
+	clonedTasks := false
+	for i := range tasks {
+		if tasks[i].Residual == nil {
 			continue
 		}
 
-		readTasks[i].Residual, err = bindTaskFilter(effectiveSchema,
-			readTasks[i].Residual, scan.caseSensitive)
-		if err != nil {
-			return nil, nil, fmt.Errorf("bind residual for task %d: %w", i, err)
+		boundResidual, changed, bindErr := bindTaskFilter(effectiveSchema,
+			tasks[i].Residual, scan.caseSensitive)
+		if bindErr != nil {
+			return nil, nil, fmt.Errorf("bind residual for task %d: %w", i, bindErr)
 		}
+		if !changed {
+			continue
+		}
+		if !clonedTasks {
+			readTasks = slices.Clone(tasks)
+			clonedTasks = true
+		}
+		readTasks[i].Residual = boundResidual
 	}
 
 	// A plan-scoped FileIO (from remote planning) takes precedence over the

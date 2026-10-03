@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -686,4 +687,62 @@ func benchmarkTaskResidualJSON(rowCount int) string {
 	result.WriteByte(']')
 
 	return result.String()
+}
+
+var benchmarkReadTasksCount int
+
+func BenchmarkArrowScanReadTasksResidualBinding(b *testing.B) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	metadata, err := NewMetadata(
+		schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://benchmark/read-tasks", nil,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	fs := iceio.NewMemFS()
+	scan := New(Identifier{"benchmark", "read_tasks"}, metadata, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil).Scan()
+	boundResidual, err := iceberg.BindExpr(schema,
+		iceberg.GreaterThan(iceberg.Reference("id"), int64(1)), true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	unboundResidual := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
+
+	for _, workload := range []struct {
+		taskCount int
+		name      string
+		residual  iceberg.BooleanExpression
+	}{
+		{taskCount: 1_000, name: "bound", residual: boundResidual},
+		{taskCount: 10_000, name: "bound", residual: boundResidual},
+		{taskCount: 100_000, name: "bound", residual: boundResidual},
+		{taskCount: 100_000, name: "nil"},
+		{taskCount: 100_000, name: "unbound", residual: unboundResidual},
+		{taskCount: 100_000, name: "late_unbound", residual: boundResidual},
+	} {
+		b.Run(fmt.Sprintf("tasks=%d/residual=%s", workload.taskCount, workload.name), func(b *testing.B) {
+			tasks := make([]FileScanTask, workload.taskCount)
+			for i := range tasks {
+				tasks[i].Residual = workload.residual
+			}
+			if workload.name == "late_unbound" {
+				tasks[len(tasks)-1].Residual = unboundResidual
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, records, err := scan.ReadTasks(b.Context(), tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkReadTasksCount = len(tasks)
+				runtime.KeepAlive(records)
+			}
+			b.ReportMetric(float64(len(tasks)), "tasks/op")
+		})
+	}
 }
