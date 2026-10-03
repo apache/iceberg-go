@@ -71,10 +71,15 @@ type DataFileCollections interface {
 	EqualityFieldIDs() []int
 }
 
+// DataFileSplitOffsetsRef exposes the immutable split-offset slice to trusted
+// in-module callers without invoking the public defensive-copy getter.
 type DataFileSplitOffsetsRef interface {
 	DataFileSplitOffsetsRef(DataFileRef) []int64
 }
 
+// BorrowedDataFileSplitOffsets returns split offsets without copying when the
+// file exposes the trusted reference path. The returned slice is read-only and
+// must not be mutated or retained beyond the current planning or read operation.
 func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
 	if ref, ok := file.(DataFileSplitOffsetsRef); ok {
 		return ref.DataFileSplitOffsetsRef(DataFileRef{})
