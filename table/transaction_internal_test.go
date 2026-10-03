@@ -2175,3 +2175,35 @@ func TestTableCommitWithoutUpdatesStaysEmpty(t *testing.T) {
 	assert.Equal(t, []Requirement{}, tc.Requirements, "an empty payload must serialize as [], not null")
 	assert.Equal(t, []Update{}, tc.Updates, "an empty payload must serialize as [], not null")
 }
+
+func TestTransactionApplyDuplicateRequirementWithUpdates(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%t", fail), func(t *testing.T) {
+			txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+			requirement := AssertCurrentSchemaID(0)
+			require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+			before, err := txn.meta.Build()
+			require.NoError(t, err)
+			original := txn.meta
+			updates := []Update{NewSetPropertiesUpdate(iceberg.Properties{"test-key": "test-value"})}
+			if fail {
+				updates = append(updates, NewSetCurrentSchemaUpdate(9999))
+			}
+			err = txn.apply(updates, []Requirement{requirement})
+			require.Equal(t, []Requirement{requirement}, txn.reqs)
+			after, buildErr := txn.meta.Build()
+			require.NoError(t, buildErr)
+			if fail {
+				require.Error(t, err)
+				require.Same(t, original, txn.meta)
+				require.True(t, before.Equals(after))
+
+				return
+			}
+			require.NoError(t, err)
+			require.NotSame(t, original, txn.meta)
+			require.Equal(t, "test-value", after.Properties()["test-key"])
+			require.Empty(t, before.Properties()["test-key"])
+		})
+	}
+}
