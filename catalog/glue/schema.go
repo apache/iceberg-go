@@ -31,6 +31,8 @@ import (
 func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Column) []types.Column {
 	// preserve the current schema's logical column order and then,
 	// append columns from historical schemas that are not already present
+	currentSchema := metadata.CurrentSchema()
+	schemas := metadata.Schemas()
 	var columns []types.Column
 	addedNames := make(map[string]struct{})
 
@@ -44,12 +46,12 @@ func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Colum
 		addedNames[name] = struct{}{}
 	}
 
-	for _, field := range schemaToGlueColumns(metadata.CurrentSchema(), true) {
+	for _, field := range schemaToGlueColumns(currentSchema, true) {
 		addColumnWithDedupe(field)
 	}
 
-	for _, schema := range metadata.Schemas() {
-		if schema.ID == metadata.CurrentSchema().ID {
+	for _, schema := range schemas {
+		if schema.ID == currentSchema.ID {
 			continue
 		}
 
@@ -72,13 +74,12 @@ func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Colum
 	// Preserve nil for fields that have never had an Iceberg doc, but keep an
 	// explicit empty string when a documented field was cleared in a later schema.
 	clearedComments := make(map[string]struct{})
-	currentSchema := metadata.CurrentSchema()
 	for _, field := range currentSchema.Fields() {
 		if field.Doc != "" {
 			continue
 		}
 
-		for _, schema := range metadata.Schemas() {
+		for _, schema := range schemas {
 			if schema.ID == currentSchema.ID {
 				continue
 			}
