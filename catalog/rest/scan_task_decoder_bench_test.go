@@ -18,11 +18,14 @@
 package rest
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 )
 
 var decodeScanTasksBenchmarkSink int
+var decodeJSONIntegerBenchmarkSink int64
+var decodeJSONFloatBenchmarkSink float64
 
 func BenchmarkDecodeScanTasksDeletionVectors(b *testing.B) {
 	metadata := newScanTaskDecoderMetadata()
@@ -105,6 +108,38 @@ func BenchmarkDecodeScanTasks(b *testing.B) {
 				if _, err := DecodeScanTasks(wire, metadata, metadata.schema, nil); err != nil {
 					b.Fatal(err)
 				}
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeJSONInteger(b *testing.B) {
+	raw := json.RawMessage("12345")
+	for _, bitSize := range []int{32, 64} {
+		b.Run(fmt.Sprintf("int%d", bitSize), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				value, err := decodeJSONInteger(raw, bitSize)
+				if err != nil {
+					b.Fatal(err)
+				}
+				decodeJSONIntegerBenchmarkSink = value
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeJSONFloat(b *testing.B) {
+	raw := json.RawMessage("12345.25")
+	for _, bitSize := range []int{32, 64} {
+		b.Run(fmt.Sprintf("float%d", bitSize), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				value, err := decodeJSONFloat(raw, bitSize)
+				if err != nil {
+					b.Fatal(err)
+				}
+				decodeJSONFloatBenchmarkSink = value
 			}
 		})
 	}
