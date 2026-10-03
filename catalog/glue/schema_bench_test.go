@@ -39,7 +39,7 @@ func BenchmarkSchemasToGlueColumns(b *testing.B) {
 		{schemaCount: 100, fieldCount: 128},
 	} {
 		b.Run(fmt.Sprintf("schemas=%d/fields=%d", tc.schemaCount, tc.fieldCount), func(b *testing.B) {
-			metadata := schemaHistoryBenchmarkMetadata(b, tc.schemaCount, tc.fieldCount)
+			metadata := schemaHistoryBenchmarkMetadata(b, tc.schemaCount, tc.fieldCount, false)
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -50,7 +50,7 @@ func BenchmarkSchemasToGlueColumns(b *testing.B) {
 	}
 }
 
-func schemaHistoryBenchmarkMetadata(b *testing.B, schemaCount, fieldCount int) table.Metadata {
+func schemaHistoryBenchmarkMetadata(b *testing.B, schemaCount, fieldCount int, documented bool) table.Metadata {
 	b.Helper()
 
 	fields := make([]iceberg.NestedField, fieldCount)
@@ -59,6 +59,9 @@ func schemaHistoryBenchmarkMetadata(b *testing.B, schemaCount, fieldCount int) t
 			ID:   i + 1,
 			Name: fmt.Sprintf("field_%d", i+1),
 			Type: iceberg.PrimitiveTypes.String,
+		}
+		if documented {
+			fields[i].Doc = "field documentation"
 		}
 	}
 
@@ -93,4 +96,16 @@ func schemaHistoryBenchmarkMetadata(b *testing.B, schemaCount, fieldCount int) t
 	}
 
 	return metadata
+}
+
+func BenchmarkSchemasToGlueColumnsDocumented(b *testing.B) {
+	for _, schemaCount := range []int{1, 100} {
+		b.Run(fmt.Sprintf("schemas=%d/fields=128", schemaCount), func(b *testing.B) {
+			metadata := schemaHistoryBenchmarkMetadata(b, schemaCount, 128, true)
+			b.ReportAllocs()
+			for b.Loop() {
+				schemasToGlueColumnsBenchmarkSink = schemasToGlueColumns(metadata, nil)
+			}
+		})
+	}
 }
