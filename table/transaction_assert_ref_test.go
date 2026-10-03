@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"testing"
 
@@ -173,6 +174,39 @@ func TestTransactionAssertRefSnapshotID(t *testing.T) {
 		assert.ErrorIs(t, err, ErrCommitFailed)
 		assert.NotContains(t, cat.metadata.Properties(), "offsets")
 	})
+}
+
+type probeRequirement struct {
+	baseRequirement
+	probe func()
+	err   error
+}
+
+func (p *probeRequirement) Validate(Metadata) error {
+	p.probe()
+
+	return p.err
+}
+
+// Why: withdrawing a failed apply's pin could leave an overlapping registration unguarded.
+// Assertion: pins remain unpublished until apply succeeds.
+func TestApplyPinnedPublishesPinsOnlyOnSuccess(t *testing.T) {
+	head := int64(100)
+	base := newConflictTestMetadataWithProps(t, &head, assertRefRetryProps)
+	tbl, _ := newAssertRefTestTable(t, base, base)
+	tx := tbl.NewTransaction()
+
+	errApply := errors.New("apply failed")
+	var pinnedDuringApply bool
+	req := &probeRequirement{
+		baseRequirement: baseRequirement{Type: "probe"},
+		probe:           func() { _, pinnedDuringApply = tx.pinnedRefs[MainBranch] },
+		err:             errApply,
+	}
+
+	require.ErrorIs(t, tx.applyPinned(nil, []Requirement{req}, []string{MainBranch}), errApply)
+	assert.False(t, pinnedDuringApply, "a pin must not be visible before its apply succeeds")
+	assert.NotContains(t, tx.pinnedRefs, MainBranch)
 }
 
 // Why: ref assertions are deduplicated by (type, ref), so assertions

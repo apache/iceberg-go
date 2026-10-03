@@ -87,6 +87,12 @@ _, err := cat.CreateTable(ctx, ident, schema,
 )
 ```
 
-> **Catalog support:** retry currently engages on the REST catalog, which wraps
-> commit conflicts as `ErrCommitFailed`. The Glue, SQL, and Hive catalogs do
-> not yet wrap their conflict errors, so the retry loop will not fire on them.
+> **Catalog support:** all built-in catalogs report commit conflicts as
+> `ErrCommitFailed`, including failed commit requirements. The REST catalog
+> maps HTTP 409 Conflict to this error.
+
+Only the implicit assertion on the commit branch's head is rebased after a
+refresh. Other requirements, including schema, spec, sort order, and refs pinned
+by `AssertRefSnapshotID`, `RollbackToSnapshot`, or `ExpireSnapshots`, must still
+hold. Otherwise, the commit fails with `ErrCommitFailed` without another attempt.
+Reload the table and rebuild the operation to try again.

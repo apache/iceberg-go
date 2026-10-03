@@ -50,13 +50,16 @@ import (
 // commit fails due to a concurrent modification (e.g. HTTP 409 Conflict
 // from the REST catalog). Catalog implementations should wrap this
 // error so that callers using errors.Is(err, table.ErrCommitFailed)
-// can detect retryable commit conflicts.
-//
-// Currently only catalog/rest wraps this sentinel; Glue, SQL, and Hive
-// catalogs return their conflict errors raw and will not trigger
-// retries until follow-up work wires them through (tracked under
-// issue #830).
+// can detect retryable commit conflicts. Failed requirements also wrap it.
+// Requirements other than the implicit commit-branch assertion are not rebased.
+// If they fail after refresh, reload the table and rebuild the operation.
+// If the error also matches ErrTransactionUnusable, build a new transaction.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
+
+// ErrTransactionUnusable is returned when a failed commit removed files
+// referenced by staged updates. The transaction cannot be committed again.
+// Build a new transaction to retry.
+var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
 // does not implement io.WriteFileIO. Commit retries also fail fast on this
@@ -549,9 +552,7 @@ type commitOpts struct {
 	// in snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
-	// pinnedRefs names branches with an explicit requirement from
-	// Transaction.AssertRefSnapshotID, whose assertions must not be
-	// rewritten to the fresh branch head between retries (see
+	// Pinned assertions must not be rebased between retries (see
 	// Transaction.pinnedRefs).
 	pinnedRefs map[string]struct{}
 }
@@ -582,7 +583,7 @@ func withCommitPinnedRefs(refs map[string]struct{}) commitOption {
 	return func(o *commitOpts) { o.pinnedRefs = refs }
 }
 
-func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
+func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (_ *Table, retErr error) {
 	var co commitOpts
 	for _, apply := range opts {
 		apply(&co)
@@ -630,14 +631,26 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// CommitTable, where the catalog may have silently accepted the commit and one
 	// of the "orphaned" files may actually be the live snapshot.
 	cleanupOrphans := true
+	committed := false
 	defer func() {
-		if !cleanupOrphans || len(orphanedManifests) == 0 {
+		if !cleanupOrphans {
 			return
+		}
+		// The final attempt's manifests are orphaned only if the commit failed.
+		for _, u := range updates {
+			if su, ok := u.(*addSnapshotUpdate); ok && su.supersededSource != nil {
+				orphanedManifests = append(orphanedManifests, su.supersededSource.supersededManifests(committed)...)
+			}
 		}
 		for _, path := range orphanedManifests {
 			if removeErr := wfs.Remove(path); removeErr != nil {
 				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
 			}
+		}
+		// Resubmitting staged updates after cleanup would reference deleted files.
+		if !committed && retErr != nil && len(orphanedManifests) > 0 {
+			retErr = fmt.Errorf("%w (staged files were cleaned up; build a new transaction to retry): %w",
+				retErr, ErrTransactionUnusable)
 		}
 	}()
 
@@ -690,11 +703,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			current = fresh.metadata
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
 
-			// A pinned assertion the fresh catalog state violates can
-			// never succeed — fail now instead of burning the remaining
-			// retries on it.
-			if err := validatePinnedRefRequirements(reqs, co.pinnedRefs, current); err != nil {
-				return nil, fmt.Errorf("%w: explicit ref requirement failed: %w", ErrCommitFailed, err)
+			if err := validateNonRebasedRequirements(reqs, co.branch, co.pinnedRefs, current); err != nil {
+				return nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w", ErrCommitFailed, err)
 			}
 			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
 				return nil, err
@@ -755,6 +765,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
+			committed = true
 			attemptsUsed = int64(attempt) + 1
 			// Capture elapsed time at the commit boundary, before orphan
 			// cleanup and deleteOldMetadata below (both can do I/O).
@@ -781,21 +792,6 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		if co.noReplay {
 			return nil, fmt.Errorf("%w (commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals)", err)
 		}
-	}
-
-	// Inner data manifests written by superseded retry attempts (a rewrite
-	// re-merges everything on each retry) are orphaned objects. On a safe
-	// exhausted-ErrCommitFailed failure (err != nil here) nothing committed, so
-	// the accumulator also folds in the final attempt's manifests. On success
-	// the committed snapshot references those, so they are excluded. The defer
-	// skips cleanup only on the unsafe non-ErrCommitFailed path, which returned
-	// above with cleanupOrphans = false.
-	for _, u := range updates {
-		su, ok := u.(*addSnapshotUpdate)
-		if !ok || su.supersededSource == nil {
-			continue
-		}
-		orphanedManifests = append(orphanedManifests, su.supersededSource.supersededManifests(err == nil)...)
 	}
 
 	if err != nil {
@@ -855,10 +851,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // deleted underneath us), reqs is returned unchanged — newConflict-
 // Context will surface the divergence on the next pre-flight pass.
 //
-// Assertions on branches in pinned were registered explicitly by the
-// committer (Transaction.AssertRefSnapshotID) for compare-and-swap
-// semantics and are never rewritten: a branch that has changed must
-// fail the commit, not be replayed against the new head.
+// Pinned assertions protect explicit ref requirements, rollbacks, and snapshot
+// expiry from being replayed against a changed ref.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
@@ -888,24 +882,17 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	return out
 }
 
-// validatePinnedRefRequirements validates every assert-ref-snapshot-id
-// requirement on a pinned branch against the freshly refreshed catalog
-// metadata. A failure means the branch has changed from the required
-// snapshot: the assertion is never rewritten, so it can never hold and
-// the commit must fail instead of retrying.
-func validatePinnedRefRequirements(reqs []Requirement, pinned map[string]struct{}, fresh Metadata) error {
-	if len(pinned) == 0 {
-		return nil
-	}
+// validateNonRebasedRequirements checks the requirements a retry does not
+// rebase. Only unpinned commit-branch assertions are rebased, so any other
+// requirement that fails against refreshed metadata cannot succeed on retry.
+func validateNonRebasedRequirements(reqs []Requirement, branch string, pinned map[string]struct{}, fresh Metadata) error {
 	for _, r := range reqs {
-		a, ok := r.(*assertRefSnapshotID)
-		if !ok {
-			continue
+		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
+			if _, isPinned := pinned[a.Ref]; !isPinned {
+				continue
+			}
 		}
-		if _, isPinned := pinned[a.Ref]; !isPinned {
-			continue
-		}
-		if err := a.Validate(fresh); err != nil {
+		if err := r.Validate(fresh); err != nil {
 			return err
 		}
 	}
