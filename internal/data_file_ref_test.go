@@ -30,21 +30,25 @@ type splitOffsetsCollectionsTestFile struct {
 
 func (f *splitOffsetsCollectionsTestFile) ColumnSizes() map[int]int64 {
 	f.otherCollectionCalls++
+
 	return nil
 }
 
 func (f *splitOffsetsCollectionsTestFile) KeyMetadata() []byte {
 	f.otherCollectionCalls++
+
 	return nil
 }
 
 func (f *splitOffsetsCollectionsTestFile) SplitOffsets() []int64 {
 	f.splitOffsetsCalls++
+
 	return f.offsets
 }
 
 func (f *splitOffsetsCollectionsTestFile) EqualityFieldIDs() []int {
 	f.otherCollectionCalls++
+
 	return nil
 }
 
@@ -56,6 +60,7 @@ type splitOffsetsReferenceTestFile struct {
 
 func (f *splitOffsetsReferenceTestFile) DataFileSplitOffsetsRef(DataFileRef) []int64 {
 	f.refCalls++
+
 	return f.borrowedOffsets
 }
 
