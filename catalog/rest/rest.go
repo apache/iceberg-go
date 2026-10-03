@@ -234,22 +234,19 @@ type sessionTransport struct {
 	authManager    AuthManager
 	defaultHeaders http.Header
 	signer         RequestSigner
-	// signingOrigin is the configured catalog origin. A request to a different
-	// origin (e.g. a redirect hop) is not signed, so the signer's Authorization
-	// header and any session token never reach an unconfigured host.
-	signingOrigin *url.URL
 
-	// builtinHeaders is the subset of defaultHeaders that identifies the
-	// client and carries no credentials. It is all a request to an origin
-	// other than catalogOrigin or authOrigin (e.g. a redirect hop) receives.
+	// builtinHeaders is the subset of defaultHeaders under the built-in keys
+	// (with any operator override applied), which identify the client and
+	// carry no credentials. It is all a request to an origin other than
+	// catalogOrigin or authOrigin (e.g. a redirect hop) receives.
 	builtinHeaders http.Header
 	// catalogOrigin is the configured catalog origin: the only origin that
-	// receives the auth header. authOrigin is the configured OAuth token
-	// endpoint, if any, which also receives user-supplied default headers.
+	// receives the auth header and the signer's signature. authOrigin is the
+	// configured OAuth token endpoint, if any, which also receives
+	// user-supplied default headers.
 	// These are compared against the request URL rather than derived from
 	// the redirect chain, so a transport that omits Response.Request cannot
-	// widen them. A nil catalogOrigin disables the check, matching
-	// signingOrigin.
+	// widen them. A nil catalogOrigin disables the check.
 	catalogOrigin *url.URL
 	authOrigin    *url.URL
 }
@@ -276,7 +273,8 @@ func defaultedPort(u *url.URL) string {
 }
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	// net/http strips Authorization from cross-origin redirect hops, but this
+	// net/http strips Authorization on redirect only for a new hostname (a
+	// port or scheme change, or a hop to a subdomain, keeps it), but this
 	// runs after that stripping, so credentials and user-supplied headers are
 	// only applied for the configured origins.
 	toCatalog := s.catalogOrigin == nil || sameOrigin(s.catalogOrigin, r.URL)
@@ -328,7 +326,12 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r.Header.Set(k, v)
 	}
 
-	if s.signer != nil && (s.signingOrigin == nil || sameOrigin(s.signingOrigin, r.URL)) {
+	// A signer only signs requests to the configured catalog origin: a request
+	// to a different origin (e.g. a redirect hop) is left unsigned, so the
+	// signer's Authorization header and any session token never reach an
+	// unconfigured host. The guard lives here, in core, so it covers every
+	// signer, including one installed verbatim via WithSigner.
+	if s.signer != nil && toCatalog {
 		if err := s.signer.SignRequest(r); err != nil {
 			return nil, err
 		}
@@ -1090,7 +1093,6 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session.defaultHeaders.Set("Content-Type", "application/json")
 	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
 	session.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
-	session.builtinHeaders = session.defaultHeaders.Clone()
 
 	for k, v := range opts.headers {
 		session.defaultHeaders.Set(k, v)
@@ -1099,6 +1101,13 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	for k, v := range opts.additionalProps {
 		if headerKey, found := strings.CutPrefix(k, "header."); found {
 			session.defaultHeaders.Set(headerKey, v)
+		}
+	}
+
+	session.builtinHeaders = http.Header{}
+	for _, k := range []string{"X-Client-Version", "Content-Type", "User-Agent", headerIcebergAccessDelegation} {
+		if v := session.defaultHeaders.Values(k); len(v) > 0 {
+			session.builtinHeaders[http.CanonicalHeaderKey(k)] = v
 		}
 	}
 
@@ -1113,14 +1122,6 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		return nil, nil, err
 	}
 	session.signer = signer
-	// A signer only signs requests to the configured catalog origin: a request
-	// to a different origin (e.g. a redirect hop) is left unsigned, so the
-	// signer's Authorization header and any session token never reach an
-	// unconfigured host. The guard lives here, in core, so it covers every
-	// signer, including one installed verbatim via WithSigner.
-	if signer != nil {
-		session.signingOrigin = r.baseURI
-	}
 
 	return cl, cleanup, nil
 }
