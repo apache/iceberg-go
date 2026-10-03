@@ -18,6 +18,7 @@
 package table
 
 import (
+	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -137,6 +138,107 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 			assert.Equal(t, tt.expectRead, result)
 		})
 	}
+}
+
+func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
+	encode := func(value int32) []byte {
+		encoded, err := iceberg.NewLiteral(value).MarshalBinary()
+		require.NoError(t, err)
+
+		return encoded
+	}
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32})
+	expr := iceberg.IsIn(iceberg.Reference("value"), int32(1), int32(100))
+	eval, err := newInclusiveMetricsEvaluator(schema, expr, true, true)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		lowerBound []byte
+		upperBound []byte
+		want       bool
+	}{
+		{name: "lower bound above set", lowerBound: encode(101), upperBound: encode(200), want: false},
+		{name: "upper bound below set", lowerBound: encode(-10), upperBound: encode(0), want: false},
+		{name: "sparse set has no member in range", lowerBound: encode(40), upperBound: encode(60), want: false},
+		{name: "overlapping range contains member", lowerBound: encode(50), upperBound: encode(100), want: true},
+		{name: "upper bound equals minimum literal", upperBound: encode(1), want: true},
+		{name: "lower bound equals maximum literal", lowerBound: encode(100), want: true},
+		{name: "missing bounds", want: true},
+		{name: "upper bound below set without lower bound", upperBound: encode(0), want: false},
+		{name: "lower bound above set without upper bound", lowerBound: encode(101), want: false},
+		{name: "disjoint lower bound avoids malformed upper bound", lowerBound: encode(101), upperBound: []byte{1}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := inclusiveMetricsInTestFile(t, tt.lowerBound, tt.upperBound)
+			got, err := eval(file)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("NaN bounds fail open", func(t *testing.T) {
+		nan, err := iceberg.NewLiteral(math.NaN()).MarshalBinary()
+		require.NoError(t, err)
+		floatSchema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Float64,
+		})
+		floatEval, err := newInclusiveMetricsEvaluator(
+			floatSchema, iceberg.IsIn(iceberg.Reference("value"), float64(1), float64(2)), true, true,
+		)
+		require.NoError(t, err)
+
+		got, err := floatEval(inclusiveMetricsInTestFile(t, nan, nan))
+		require.NoError(t, err)
+		assert.True(t, got)
+	})
+
+	t.Run("oversized set keeps existing fallback", func(t *testing.T) {
+		values := make([]int32, inPredicateLimit+1)
+		for i := range values {
+			values[i] = int32(i)
+		}
+		largeEval, err := newInclusiveMetricsEvaluator(
+			schema, iceberg.IsIn(iceberg.Reference("value"), values...), true, true,
+		)
+		require.NoError(t, err)
+
+		got, err := largeEval(inclusiveMetricsInTestFile(
+			t, encode(int32(inPredicateLimit+1)), encode(int32(inPredicateLimit+1)),
+		))
+		require.NoError(t, err)
+		assert.True(t, got)
+	})
+}
+
+func inclusiveMetricsInTestFile(t *testing.T, lowerBound, upperBound []byte) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData, "file.parquet", iceberg.ParquetFile,
+		nil, nil, nil, 10, 100,
+	)
+	require.NoError(t, err)
+
+	lowerBounds := map[int][]byte{}
+	if lowerBound != nil {
+		lowerBounds[1] = lowerBound
+	}
+	upperBounds := map[int][]byte{}
+	if upperBound != nil {
+		upperBounds[1] = upperBound
+	}
+
+	return builder.
+		ValueCounts(map[int]int64{1: 10}).
+		NullValueCounts(map[int]int64{1: 0}).
+		NaNValueCounts(map[int]int64{1: 0}).
+		LowerBoundValues(lowerBounds).
+		UpperBoundValues(upperBounds).
+		Build()
 }
 
 func TestRemoveBoundCheckSupportsTimestampNanos(t *testing.T) {
