@@ -1730,6 +1730,7 @@ func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpress
 	}
 
 	bound, _, err := bindTaskFilter(filterSchema, task.Residual, as.caseSensitive)
+
 	return bound, err
 }
 
