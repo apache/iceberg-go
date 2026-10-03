@@ -25,8 +25,10 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-var manifestInPredicateBenchmarkSink bool
-var inclusiveMetricsInPredicateBenchmarkSink int
+var (
+	manifestInPredicateBenchmarkSink         bool
+	inclusiveMetricsInPredicateBenchmarkSink int
+)
 
 func BenchmarkManifestEvaluatorInPredicate(b *testing.B) {
 	for _, literalCount := range []int{2, 10, 50, 200} {
@@ -137,13 +139,13 @@ func BenchmarkInclusiveMetricsEvalInPredicate(b *testing.B) {
 			{name: "sparse-gap", lower: values[literalCount/2] + 1, upper: values[literalCount/2] + 1},
 		} {
 			b.Run("int32/in="+strconv.Itoa(literalCount)+"/"+bounds.name, func(b *testing.B) {
-				benchmarkInclusiveMetricsIn(b, values, bounds.lower, bounds.upper, literalCount)
+				benchmarkInclusiveMetricsIn(b, values, bounds.lower, bounds.upper, literalCount, bounds.name == "overlap")
 			})
 		}
 	}
 }
 
-func benchmarkInclusiveMetricsIn(b *testing.B, values []int32, lower, upper int32, literalCount int) {
+func benchmarkInclusiveMetricsIn(b *testing.B, values []int32, lower, upper int32, literalCount int, wantMatch bool) {
 	b.Helper()
 
 	lowerBytes, err := iceberg.NewLiteral(lower).MarshalBinary()
@@ -196,6 +198,13 @@ func benchmarkInclusiveMetricsIn(b *testing.B, values []int32, lower, upper int3
 			if matched {
 				matchedFiles++
 			}
+		}
+		wantFiles := 0
+		if wantMatch {
+			wantFiles = len(files)
+		}
+		if matchedFiles != wantFiles {
+			b.Fatalf("matched %d files, want %d", matchedFiles, wantFiles)
 		}
 		inclusiveMetricsInPredicateBenchmarkSink = matchedFiles
 	}
