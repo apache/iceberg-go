@@ -17,7 +17,10 @@
 
 package table
 
-import "github.com/apache/iceberg-go"
+import (
+	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
+)
 
 // splitParquetScanTask returns coalesced byte-range tasks when a complete,
 // large-file task can be split safely. The boolean is false when the original
@@ -40,7 +43,7 @@ func splitParquetScanTask(task FileScanTask, targetSize int64) ([]FileScanTask, 
 		return nil, false
 	}
 
-	offsets := file.SplitOffsets()
+	offsets := iceinternal.BorrowedDataFileSplitOffsets(file)
 	if len(offsets) < 2 {
 		return nil, false
 	}

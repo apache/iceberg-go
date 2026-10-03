@@ -71,6 +71,18 @@ type DataFileCollections interface {
 	EqualityFieldIDs() []int
 }
 
+type DataFileSplitOffsetsRef interface {
+	DataFileSplitOffsetsRef(DataFileRef) []int64
+}
+
+func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
+	if ref, ok := file.(DataFileSplitOffsetsRef); ok {
+		return ref.DataFileSplitOffsetsRef(DataFileRef{})
+	}
+
+	return file.SplitOffsets()
+}
+
 type DataFileCollectionsRef interface {
 	DataFileCollectionsRef(DataFileRef) (
 		columnSizes map[int]int64,

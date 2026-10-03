@@ -65,6 +65,14 @@ func (d *dataFile) DataFileCollectionsRef(_ internal.DataFileRef) (
 	return d.colSizeMap, keyMetadata, splitOffsets, equalityFieldIDs
 }
 
+func (d *dataFile) DataFileSplitOffsetsRef(_ internal.DataFileRef) []int64 {
+	if d.Splits == nil {
+		return nil
+	}
+
+	return *d.Splits
+}
+
 // DataFilePartitionRef returns the data file's partition map without copying.
 // The token restricts this zero-copy accessor to trusted in-module callers;
 // the public Partition getter continues returning a defensive copy. The
