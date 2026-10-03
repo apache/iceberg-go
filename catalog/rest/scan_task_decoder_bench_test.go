@@ -23,9 +23,11 @@ import (
 	"testing"
 )
 
-var decodeScanTasksBenchmarkSink int
-var decodeJSONIntegerBenchmarkSink int64
-var decodeJSONFloatBenchmarkSink float64
+var (
+	decodeScanTasksBenchmarkSink   int
+	decodeJSONIntegerBenchmarkSink int64
+	decodeJSONFloatBenchmarkSink   float64
+)
 
 func BenchmarkDecodeScanTasksDeletionVectors(b *testing.B) {
 	metadata := newScanTaskDecoderMetadata()
@@ -140,6 +142,38 @@ func BenchmarkDecodeJSONFloat(b *testing.B) {
 					b.Fatal(err)
 				}
 				decodeJSONFloatBenchmarkSink = value
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeJSONNumberForms(b *testing.B) {
+	for _, tc := range []struct {
+		name, raw string
+		floating  bool
+	}{
+		{name: "int64_exact", raw: "9007199254740993"},
+		{name: "quoted_int64", raw: `"9007199254740993"`},
+		{name: "exponent", raw: "-1.25e2", floating: true},
+		{name: "quoted_exponent", raw: `"-1.25e2"`, floating: true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			raw := json.RawMessage(tc.raw)
+			b.ReportAllocs()
+			for b.Loop() {
+				if tc.floating {
+					value, err := decodeJSONFloat(raw, 64)
+					if err != nil {
+						b.Fatal(err)
+					}
+					decodeJSONFloatBenchmarkSink = value
+				} else {
+					value, err := decodeJSONInteger(raw, 64)
+					if err != nil {
+						b.Fatal(err)
+					}
+					decodeJSONIntegerBenchmarkSink = value
+				}
 			}
 		})
 	}

@@ -764,9 +764,16 @@ func decodePartitionLiteral(raw json.RawMessage, typ iceberg.Type) (iceberg.Lite
 }
 
 func decodeJSONInteger(raw json.RawMessage, bitSize int) (int64, error) {
-	value := bytes.TrimSpace(raw)
+	value := bytes.Trim(raw, " \t\r\n")
 	if !json.Valid(value) {
 		return 0, fmt.Errorf("invalid integer value: invalid JSON number %q", raw)
+	}
+	if len(value) > 0 && value[0] == '"' {
+		var number json.Number
+		if err := json.Unmarshal(value, &number); err != nil {
+			return 0, fmt.Errorf("invalid integer value: %w", err)
+		}
+		value = []byte(number)
 	}
 	parsed, err := strconv.ParseInt(string(value), 10, 64)
 	if err != nil {
@@ -780,9 +787,16 @@ func decodeJSONInteger(raw json.RawMessage, bitSize int) (int64, error) {
 }
 
 func decodeJSONFloat(raw json.RawMessage, bitSize int) (float64, error) {
-	value := bytes.TrimSpace(raw)
+	value := bytes.Trim(raw, " \t\r\n")
 	if !json.Valid(value) {
 		return 0, fmt.Errorf("invalid floating-point value: invalid JSON number %q", raw)
+	}
+	if len(value) > 0 && value[0] == '"' {
+		var number json.Number
+		if err := json.Unmarshal(value, &number); err != nil {
+			return 0, fmt.Errorf("invalid floating-point value: %w", err)
+		}
+		value = []byte(number)
 	}
 	parsed, err := strconv.ParseFloat(string(value), 64)
 	if err != nil {
