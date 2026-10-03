@@ -43,6 +43,12 @@ const (
 // manifest file has rows that might or might not match a given partition filter by using
 // the stats provided in the partitions (UpperBound/LowerBound/ContainsNull/ContainsNaN).
 func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, partitionFilter iceberg.BooleanExpression, caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
+	if partitionFilter.Equals(iceberg.AlwaysTrue{}) {
+		return func(iceberg.ManifestFile) (bool, error) {
+			return rowsMightMatch, nil
+		}, nil
+	}
+
 	partType := spec.PartitionType(schema)
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 	filter, err := iceberg.RewriteNotExpr(partitionFilter)
