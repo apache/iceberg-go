@@ -940,7 +940,6 @@ func TestPrefixScopedIOPreservesReadContextCancellation(t *testing.T) {
 // operation. It records each context and counts closes; closing an IO closes
 // its bucket.
 type contextCapturingScheme struct {
-	scheme string
 	mu     sync.Mutex
 	opened []context.Context
 	closes []*atomic.Int32
@@ -949,7 +948,7 @@ type contextCapturingScheme struct {
 func registerContextCapturingScheme(t *testing.T, scheme string) *contextCapturingScheme {
 	t.Helper()
 
-	c := &contextCapturingScheme{scheme: scheme}
+	c := &contextCapturingScheme{}
 
 	iceio.Register(scheme, func(ctx context.Context, u *url.URL, _ map[string]string) (iceio.IO, error) {
 		closes := &atomic.Int32{}
