@@ -867,8 +867,8 @@ func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedParti
 	fields := make([]resolvedPartitionField, 0, len(ps.fields))
 	for _, field := range ps.fields {
 		sourceType := Type(UnknownType{})
-		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
-			sourceType = typ
+		if sourceField, ok := schema.FindFieldByIDRef(field.SourceID(), internal.SchemaRef{}); ok {
+			sourceType = sourceField.Type
 		}
 
 		fields = append(fields, resolvedPartitionField{
