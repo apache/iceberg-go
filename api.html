@@ -580,18 +580,18 @@ err = txn.RollbackToSnapshot(targetSnapshotID)
 <pre><code class="language-go">import (
     &quot;time&quot;
 
-    &quot;github.com/apache/iceberg-go/table&quot;
+    &quot;github.com/apache/iceberg-go/table/maintenance&quot;
 )
 
-result, err := tbl.DeleteOrphanFiles(ctx,
-    table.WithFilesOlderThan(72*time.Hour),
-    table.WithDryRun(false),
-    table.WithCleanupMaxConcurrency(8),
+result, err := maintenance.DeleteOrphanFiles(ctx, tbl,
+    maintenance.WithCleanupFilesOlderThan(72*time.Hour),
+    maintenance.WithCleanupDryRun(false),
+    maintenance.WithCleanupMaxConcurrency(8),
 )
 if err != nil { /* ... */ }
 fmt.Printf(&quot;removed %d files\n&quot;, len(result.DeletedFiles))
 </code></pre>
-<p>Also see <code>table.WithLocation</code>, <code>table.WithDeleteFunc</code>, <code>table.WithPrefixMismatchMode</code>, <code>table.WithEqualSchemes</code>, and <code>table.WithEqualAuthorities</code> in <code>table/orphan_cleanup.go</code>.</p>
+<p>Also see <code>maintenance.WithCleanupLocation</code>, <code>maintenance.WithCleanupDeleteFunc</code>, <code>maintenance.WithPrefixMismatchMode</code>, <code>maintenance.WithEqualSchemes</code>, and <code>maintenance.WithEqualAuthorities</code> in <code>table/maintenance/orphan_cleanup.go</code>.</p>
 <h3 id="compaction-rewrite-data-files"><a class="header" href="#compaction-rewrite-data-files">Compaction (rewrite data files)</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 

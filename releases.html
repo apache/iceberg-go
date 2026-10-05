@@ -248,7 +248,19 @@
 <p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
-<li><code>Table.PurgeFiles</code> now calls <code>IO.Remove</code> concurrently, with up to 32 calls in flight, when the filesystem does not implement <code>BulkRemovableIO</code>. Custom IO implementations, including those registered with <code>io.Register</code>, must make <code>Remove</code> safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.</li>
+<li>
+<p><strong>Orphan file cleanup moved to <code>table/maintenance</code>.</strong> The orphan-cleanup and file-purge API is no longer on <code>table.Table</code>; it now lives in the <code>table/maintenance</code> package as free functions that take the table as their first argument (matching <code>table/compaction</code>). For example, <code>tbl.DeleteOrphanFiles(ctx, ...)</code> becomes <code>maintenance.DeleteOrphanFiles(ctx, tbl, ...)</code>. Because <code>table/maintenance</code> imports <code>table</code> (and not the reverse), this cannot be offered as a deprecation shim on <code>table.Table</code> without an import cycle, so callers must switch to the new package. The following moved from <code>table</code> to <code>table/maintenance</code>:</p>
+<ul>
+<li>Functions (now free functions taking <code>*table.Table</code>): <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, <code>PurgeFiles</code>.</li>
+<li>Types: <code>OrphanCleanupOption</code>, <code>OrphanCleanupResult</code>, <code>OrphanFile</code>, <code>OrphanCleanupPlan</code>, <code>PrefixMismatchMode</code>.</li>
+<li>Constants: <code>PrefixMismatchError</code>, <code>PrefixMismatchIgnore</code>, <code>PrefixMismatchDelete</code>.</li>
+<li>Option constructors: <code>WithCleanupLocation</code>, <code>WithCleanupFilesOlderThan</code>, <code>WithCleanupDryRun</code>, <code>WithCleanupDeleteFunc</code>, <code>WithCleanupMaxConcurrency</code>, <code>WithPrefixMismatchMode</code>, <code>WithEqualSchemes</code>, <code>WithEqualAuthorities</code>. The four generic names (<code>WithLocation</code>, <code>WithFilesOlderThan</code>, <code>WithDryRun</code>, <code>WithDeleteFunc</code>) gained the <code>WithCleanup</code> prefix for consistency.</li>
+</ul>
+<p>Relatedly, the previously unexported <code>isGCEnabled</code> is now <code>table.IsGCEnabled</code>, so the new package can gate destructive operations on the <code>gc.enabled</code> table property.</p>
+</li>
+<li>
+<p><code>maintenance.PurgeFiles</code> (previously <code>Table.PurgeFiles</code>) now calls <code>IO.Remove</code> concurrently, with up to 32 calls in flight, when the filesystem does not implement <code>BulkRemovableIO</code>. Custom IO implementations, including those registered with <code>io.Register</code>, must make <code>Remove</code> safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.</p>
+</li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>
 <p>If you are validating an RC or cutting a new release, see:</p>
