@@ -3341,8 +3341,11 @@ func TestToRequestedSchemaGeoAbsentCRSAgainstSRID0SchemaFails(t *testing.T) {
 }
 
 // TestGeoTypeParquetRoundTrip pins the CRS a geo column carries on the Parquet
-// wire. arrow-go writes no GEOMETRY or GEOGRAPHY logical type, so the CRS
-// travels in the GeoArrow metadata of the stored Arrow schema.
+// wire. geoarrow-go's WKB type maps to the Parquet GEOMETRY or GEOGRAPHY logical
+// type, and the CRS also travels in the GeoArrow metadata of the stored Arrow
+// schema.
+// Per the Parquet spec, SRIDs are written as "srid:<id>" and the default
+// OGC:CRS84 is omitted.
 func TestGeoTypeParquetRoundTrip(t *testing.T) {
 	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
 	require.NoError(t, err)
@@ -3357,31 +3360,37 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 		name             string
 		icebergType      iceberg.Type
 		geoarrowMetaJSON string
+		parquetLogical   schema.LogicalType
 	}{
 		{
 			name:             "geometry_default_crs",
 			icebergType:      iceberg.GeometryType{},
 			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code"}`,
+			parquetLogical:   schema.GeometryLogicalType{},
 		},
 		{
 			name:             "geometry_srid_0",
 			icebergType:      geomSRID0,
 			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: "srid:0"},
 		},
 		{
 			name:             "geography_srid_0",
 			icebergType:      geogSRID0,
 			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid","edges":"spherical"}`,
+			parquetLogical:   schema.GeographyLogicalType{Crs: "srid:0", Algorithm: schema.GeographyEdgeSpherical},
 		},
 		{
 			name:             "geometry_srid_4326",
 			icebergType:      geomSRID,
 			geoarrowMetaJSON: `{"crs":"4326","crs_type":"srid"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: "srid:4326"},
 		},
 		{
 			name:             "geometry_authority_code",
 			icebergType:      geomEPSG3857,
 			geoarrowMetaJSON: `{"crs":"EPSG:3857","crs_type":"authority_code"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: "EPSG:3857"},
 		},
 	}
 
@@ -3416,10 +3425,8 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 			require.NoError(t, err)
 			defer rdr.Close()
 
-			// Revisit the CRS spelling once arrow-go emits the geo logical types:
-			// the Parquet CRS field takes the prefixed srid:<id> form.
 			logical := rdr.MetaData().Schema.Column(0).LogicalType()
-			assert.True(t, logical.Equals(schema.NoLogicalType{}), "unexpected logical type %s", logical)
+			assert.True(t, logical.Equals(tt.parquetLogical), "expected logical type %s, got %s", tt.parquetLogical, logical)
 
 			arrRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, mem)
 			require.NoError(t, err)

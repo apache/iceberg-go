@@ -517,6 +517,7 @@ type ParquetFileWriter struct {
 	geoCols          []geoColumn
 	geoNormalizeCols []int
 	geoAccs          map[int]*geoBoundsAccumulator
+	geoNullCounts    map[int]int64
 	arrowSchema      *arrow.Schema
 	rowGroupBytes    int64
 }
@@ -661,6 +662,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		geoCols:          geoCols,
 		geoNormalizeCols: geoNormalizeCols,
 		geoAccs:          geoAccs,
+		geoNullCounts:    make(map[int]int64, len(geoCols)),
 		arrowSchema:      arrowSchema,
 		rowGroupBytes:    rowGroupTargetSizeBytes,
 	}, nil
@@ -1188,7 +1190,8 @@ func normalizeWKBArrayReachable(ext array.ExtensionArray, active []bool, mem mem
 }
 
 // accumulateGeoBounds extends the per-field bounding boxes with the WKB values
-// in this batch. Null rows are skipped; a malformed WKB value fails the write.
+// in this batch and tallies their null counts. Null rows are skipped; a
+// malformed WKB value fails the write.
 func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
 	for _, gc := range w.geoCols {
 		if gc.colIdx >= int(batch.NumCols()) {
@@ -1207,6 +1210,7 @@ func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
 		if !ok {
 			continue
 		}
+		w.geoNullCounts[gc.fieldID] += int64(storage.NullN())
 		for i := range storage.Len() {
 			if storage.IsNull(i) {
 				continue
@@ -1268,17 +1272,29 @@ func (w *ParquetFileWriter) Abort() error {
 	return errors.Join(closeErr, removeErr)
 }
 
-// applyGeoBounds injects the WKB single-point bounds accumulated during the
-// write into the file statistics, so they flow through ToDataFile into the
-// manifest entry like any other typed bound.
+// applyGeoBounds injects the WKB single-point bounds and null counts
+// accumulated during the write into the file statistics, so they flow through
+// ToDataFile into the manifest entry like any other typed bound.
+//
+// Parquet GEOMETRY/GEOGRAPHY columns have an undefined sort order, so the
+// Parquet writer omits their column statistics entirely and
+// DataFileStatsFromMeta cannot recover null counts for them.
 func (w *ParquetFileWriter) applyGeoBounds(stats *DataFileStatistics) error {
 	for fieldID, acc := range w.geoAccs {
 		// Honor the column's metrics mode: a column the caller never registered
-		// (missing key) or one set to counts/none does not record bounds. Check
-		// presence first — a missing key yields a zero-value mode of "" that would
-		// otherwise fall through and write bounds the caller asked to skip.
+		// (missing key) or one set to none records nothing, and counts records
+		// no bounds. Check presence first — a missing key yields a zero-value
+		// mode of "" that would otherwise fall through and write bounds the
+		// caller asked to skip.
 		sc, ok := w.info.StatsCols[fieldID]
-		if !ok || sc.Mode.Typ == MetricModeNone || sc.Mode.Typ == MetricModeCounts {
+		if !ok || sc.Mode.Typ == MetricModeNone {
+			continue
+		}
+		if stats.NullValueCounts == nil {
+			stats.NullValueCounts = make(map[int]int64)
+		}
+		stats.NullValueCounts[fieldID] = w.geoNullCounts[fieldID]
+		if sc.Mode.Typ == MetricModeCounts {
 			continue
 		}
 

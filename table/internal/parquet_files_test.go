@@ -3238,7 +3238,10 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 		assert.True(t, geomType.Equals(lit.Type()), "want geo type, got %s", lit.Type())
 		assert.Equal(t, geoBoundBytes(5, 10), lit.(iceberg.GeoLiteral).Value())
 
-		// Null counts are still recorded for geo columns.
+		// Null counts are still recorded for geo columns. The Parquet writer
+		// omits statistics for GEOMETRY/GEOGRAPHY columns, so these come from
+		// the Arrow data rather than the footer.
+		assert.Equal(t, int64(0), df.NullValueCounts()[2])
 		assert.Equal(t, int64(1), df.NullValueCounts()[3])
 	})
 
@@ -3257,6 +3260,13 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 			df := writeWithGeomMode(t, tt.mode)
 			assert.NotContains(t, df.LowerBoundValues(), 2, "geometry lower bound must be omitted for %s", tt.mode.Typ)
 			assert.NotContains(t, df.UpperBoundValues(), 2, "geometry upper bound must be omitted for %s", tt.mode.Typ)
+
+			// Counts mode still records the geometry null count; none records nothing.
+			if tt.mode.Typ == internal.MetricModeCounts {
+				assert.Equal(t, int64(0), df.NullValueCounts()[2])
+			} else {
+				assert.NotContains(t, df.NullValueCounts(), 2)
+			}
 		})
 	}
 }
