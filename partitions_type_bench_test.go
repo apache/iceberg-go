@@ -51,3 +51,33 @@ func BenchmarkPartitionTypeFieldCount(b *testing.B) {
 		})
 	}
 }
+
+
+func BenchmarkPartitionTypeMultipleSchemas(b *testing.B) {
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "name",
+			Transform: iceberg.IdentityTransform{},
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001, Name: "count",
+			Transform: iceberg.IdentityTransform{},
+		},
+	)
+	schemas := make([]*iceberg.Schema, 10)
+	for i := range schemas {
+		schemas[i] = iceberg.NewSchema(i,
+			iceberg.NestedField{ID: 1, Name: "name", Type: iceberg.StringType{}},
+			iceberg.NestedField{ID: 2, Name: "count", Type: iceberg.Int64Type{}},
+		)
+		// Warm the schema's field-ID index before timing, matching normal
+		// repeated planning against already-used metadata.
+		partitionTypeBenchmarkResult = spec.PartitionType(schemas[i])
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; b.Loop(); i++ {
+		partitionTypeBenchmarkResult = spec.PartitionType(schemas[i%len(schemas)])
+	}
+}
