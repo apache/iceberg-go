@@ -912,7 +912,7 @@ func TestIsGCEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, isGCEnabled(tt.props))
+			require.Equal(t, tt.want, IsGCEnabled(tt.props))
 		})
 	}
 }
