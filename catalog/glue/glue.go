@@ -294,11 +294,6 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	var cfg catalog.CreateTableCfg
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
 	// Resolve federation up front so default, explicit-location and `warehouse`
 	// creates all route correctly; a missing DB or AccessDenied is non-federated.
 	db, err := c.lookupDatabase(ctx, database)
@@ -307,6 +302,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	if db != nil && isS3TablesFederatedDatabase(db) {
+		var cfg catalog.CreateTableCfg
+		for _, opt := range opts {
+			opt(&cfg)
+		}
+
 		// S3 Tables assigns storage itself, so reject an explicit location (as pyiceberg does).
 		if cfg.Location != "" {
 			return nil, fmt.Errorf("cannot specify a location for table %s.%s: S3 Tables manages storage automatically", database, tableName)

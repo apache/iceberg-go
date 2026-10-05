@@ -3427,6 +3427,7 @@ func TestGlueCreateTableUsesCatalogAwsConfig(t *testing.T) {
 func TestGlueCommitS3TablesTableUsesCatalogAwsConfig(t *testing.T) {
 	ctx := context.Background()
 	const scheme = "gluecommits3credcfg"
+	const catalogID = "123456789012:s3tablescatalog/bucket"
 	_, recorded := recordingMemFS(t, scheme)
 	managedLocation := scheme + "://bucket/test_table"
 	awsCfg := &aws.Config{Region: "cred-regression"}
@@ -3447,10 +3448,11 @@ func TestGlueCommitS3TablesTableUsesCatalogAwsConfig(t *testing.T) {
 	// Fail the repoint so the fs.Remove cleanup runs; the entry is then rolled back.
 	mockGlueSvc.On("UpdateTable", mock.Anything, mock.Anything, mock.Anything).
 		Return((*glue.UpdateTableOutput)(nil), errors.New("update boom")).Once()
-	mockGlueSvc.On("DeleteTable", mock.Anything, mock.Anything, mock.Anything).
-		Return(&glue.DeleteTableOutput{}, nil).Once()
+	mockGlueSvc.On("DeleteTable", mock.Anything, mock.MatchedBy(func(in *glue.DeleteTableInput) bool {
+		return aws.ToString(in.CatalogId) == catalogID
+	}), mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
 
-	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: awsCfg}
+	cat := &Catalog{glueSvc: mockGlueSvc, awsCfg: awsCfg, catalogId: aws.String(catalogID)}
 	_, err := cat.CreateTable(ctx, TableIdentifier("test_database", "test_table"), schema)
 	require.Error(t, err)
 	assertRecordedConfig(t, awsCfg, recorded)
