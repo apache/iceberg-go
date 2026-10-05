@@ -326,48 +326,6 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 	panic(iceberg.ErrType)
 }
 
-func compareLiteralValues[T iceberg.LiteralType](left, right iceberg.Literal) int {
-	leftValue := left.(iceberg.TypedLiteral[T])
-	rightValue := right.(iceberg.TypedLiteral[T])
-
-	return leftValue.Comparator()(leftValue.Value(), rightValue.Value())
-}
-
-func compareBoundLiterals(left, right iceberg.Literal) int {
-	switch left.(type) {
-	case iceberg.TypedLiteral[bool]:
-		return compareLiteralValues[bool](left, right)
-	case iceberg.TypedLiteral[int32]:
-		return compareLiteralValues[int32](left, right)
-	case iceberg.TypedLiteral[int64]:
-		return compareLiteralValues[int64](left, right)
-	case iceberg.TypedLiteral[float32]:
-		return compareLiteralValues[float32](left, right)
-	case iceberg.TypedLiteral[float64]:
-		return compareLiteralValues[float64](left, right)
-	case iceberg.TypedLiteral[iceberg.Date]:
-		return compareLiteralValues[iceberg.Date](left, right)
-	case iceberg.TypedLiteral[iceberg.Time]:
-		return compareLiteralValues[iceberg.Time](left, right)
-	case iceberg.TypedLiteral[iceberg.Timestamp]:
-		return compareLiteralValues[iceberg.Timestamp](left, right)
-	case iceberg.TypedLiteral[iceberg.TimestampNano]:
-		return compareLiteralValues[iceberg.TimestampNano](left, right)
-	case iceberg.TypedLiteral[[]byte]:
-		return compareLiteralValues[[]byte](left, right)
-	case iceberg.TypedLiteral[string]:
-		return compareLiteralValues[string](left, right)
-	case iceberg.TypedLiteral[uuid.UUID]:
-		return compareLiteralValues[uuid.UUID](left, right)
-	case iceberg.TypedLiteral[iceberg.Decimal]:
-		return compareLiteralValues[iceberg.Decimal](left, right)
-	case iceberg.GeoLiteral:
-		panic(fmt.Errorf("%w: geometry/geography has no ordering, cannot compare %s bounds",
-			iceberg.ErrType, left.Type()))
-	}
-	panic(iceberg.ErrType)
-}
-
 func (m *manifestEvalVisitor) VisitEqual(term iceberg.BoundTerm, lit iceberg.Literal) bool {
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
@@ -1221,13 +1179,13 @@ func (m *inclusiveMetricsEval) visitIn(
 				return rowsMightMatch
 			}
 
-			if compareBoundLiterals(lowerBound, maxLit) > 0 {
+			if getCmpLiteral(lowerBound)(lowerBound, maxLit) > 0 {
 				return rowsCannotMatch
 			}
 		}
 
 		upperBound, hasUpperBound = m.boundFor(t, m.upperBounds[fieldID])
-		if hasUpperBound && !m.isNan(upperBound) && compareBoundLiterals(upperBound, minLit) < 0 {
+		if hasUpperBound && !m.isNan(upperBound) && getCmpLiteral(upperBound)(upperBound, minLit) < 0 {
 			return rowsCannotMatch
 		}
 
