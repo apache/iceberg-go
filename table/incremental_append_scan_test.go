@@ -384,7 +384,7 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 
 	txn.meta.snapshotList = []Snapshot{
 		{SnapshotID: 1, TimestampMs: 1000, ManifestList: "mem://default/table-location/metadata/snap-1.avro", SequenceNumber: 1, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: "mem://default/table-location/metadata/snap-2.avro", SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: 2000, ManifestList: "mem://default/table-location/metadata/snap-2.avro", SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
 	}
 	txn.meta.snapshotLog = []SnapshotLogEntry{
 		{SnapshotID: 1, TimestampMs: 1000},
@@ -461,8 +461,8 @@ func incrementalAppendMixedOperationTable(t *testing.T) *Table {
 
 	txn.meta.snapshotList = []Snapshot{
 		{SnapshotID: 1, TimestampMs: 1000, ManifestList: listAPath, SequenceNumber: 1, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: listBPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpOverwrite}},
-		{SnapshotID: 3, ParentSnapshotID: int64Ptr(2), TimestampMs: 3000, ManifestList: listCPath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: 2000, ManifestList: listBPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpOverwrite}},
+		{SnapshotID: 3, ParentSnapshotID: new(int64(2)), TimestampMs: 3000, ManifestList: listCPath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
 	}
 	txn.meta.snapshotLog = []SnapshotLogEntry{
 		{SnapshotID: 1, TimestampMs: 1000},
@@ -532,8 +532,8 @@ func incrementalAppendDivergentTable(t *testing.T) *Table {
 	snapshots := []*Snapshot{
 		{SnapshotID: 10, TimestampMs: baseTimestamp + 1, SequenceNumber: 1, Summary: &Summary{Operation: OpAppend}},
 		{SnapshotID: 20, TimestampMs: baseTimestamp + 2, SequenceNumber: 2, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 21, ParentSnapshotID: int64Ptr(20), TimestampMs: baseTimestamp + 3, SequenceNumber: 3, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 22, ParentSnapshotID: int64Ptr(21), TimestampMs: baseTimestamp + 4, SequenceNumber: 4, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 21, ParentSnapshotID: new(int64(20)), TimestampMs: baseTimestamp + 3, SequenceNumber: 3, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 22, ParentSnapshotID: new(int64(21)), TimestampMs: baseTimestamp + 4, SequenceNumber: 4, Summary: &Summary{Operation: OpAppend}},
 	}
 	for _, snapshot := range snapshots {
 		require.NoError(t, builder.AddSnapshot(snapshot))
@@ -615,7 +615,7 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 		},
 		{
 			SnapshotID:       3,
-			ParentSnapshotID: int64Ptr(2),
+			ParentSnapshotID: new(int64(2)),
 			TimestampMs:      3000,
 			ManifestList:     manifestListCPath,
 			SequenceNumber:   3,

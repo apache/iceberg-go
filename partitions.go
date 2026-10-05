@@ -230,8 +230,7 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 
 func unmarshalJSONField(data json.RawMessage, field string, value any) error {
 	if err := json.Unmarshal(data, value); err != nil {
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
+		if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 			typeErr.Struct = ""
 			typeErr.Field = field
 		}
@@ -777,7 +776,13 @@ func (ps PartitionSpec) IsUnpartitioned() bool {
 	}
 
 	for _, f := range ps.fields {
-		if _, ok := f.Transform.(VoidTransform); !ok {
+		switch transform := f.Transform.(type) {
+		case VoidTransform:
+		case *VoidTransform:
+			if transform == nil {
+				return false
+			}
+		default:
 			return false
 		}
 	}

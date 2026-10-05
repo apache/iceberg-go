@@ -96,9 +96,9 @@ func newDVMockDataFile(puffinPath, referencedDataFile string, offset, contentSiz
 			format:      iceberg.PuffinFile,
 			count:       recordCount,
 		},
-		referencedDataFile: strPtr(referencedDataFile),
-		contentOffset:      int64Ptr(offset),
-		contentSizeInBytes: int64Ptr(contentSize),
+		referencedDataFile: new(referencedDataFile),
+		contentOffset:      new(offset),
+		contentSizeInBytes: new(contentSize),
 	}
 }
 
@@ -223,9 +223,9 @@ func TestLazyDeletionVectorLoaderReadPath(t *testing.T) {
 				contentType: iceberg.EntryContentPosDeletes,
 				format:      iceberg.PuffinFile,
 			},
-			referencedDataFile: strPtr("file:///table/data/data.parquet"),
+			referencedDataFile: new("file:///table/data/data.parquet"),
 			contentOffset:      nil,
-			contentSizeInBytes: int64Ptr(42),
+			contentSizeInBytes: new(int64(42)),
 		}
 
 		_, err := newLazyDeletionVectorLoader(fs, []FileScanTask{{
@@ -254,8 +254,8 @@ func TestLazyDeletionVectorLoaderReadPath(t *testing.T) {
 				contentType: iceberg.EntryContentPosDeletes,
 				format:      iceberg.PuffinFile,
 			},
-			contentOffset:      int64Ptr(0),
-			contentSizeInBytes: int64Ptr(0),
+			contentOffset:      new(int64(0)),
+			contentSizeInBytes: new(int64(0)),
 		}
 
 		var err error

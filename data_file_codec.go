@@ -182,7 +182,7 @@ func newDecodeEntry(version int) (any, *dataFile) {
 	return &manifestEntry{Data: df}, df
 }
 
-var dataFileAvroFieldIndexes = avroFieldIndexes(reflect.TypeOf(dataFile{}))
+var dataFileAvroFieldIndexes = avroFieldIndexes(reflect.TypeFor[dataFile]())
 
 func avroFieldIndexes(t reflect.Type) []int {
 	indexes := make([]int, 0, t.NumField())

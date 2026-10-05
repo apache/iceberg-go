@@ -448,13 +448,13 @@ func TestPlanTableScanRequest(t *testing.T) {
 			name:       "completed",
 			response:   `{"status":"completed","plan-id":"plan-1","plan-tasks":["task-1"]}`,
 			wantStatus: PlanStatusCompleted,
-			wantPlanID: stringPtr("plan-1"),
+			wantPlanID: new("plan-1"),
 		},
 		{
 			name:       "submitted",
 			response:   `{"status":"submitted","plan-id":"plan-2"}`,
 			wantStatus: PlanStatusSubmitted,
-			wantPlanID: stringPtr("plan-2"),
+			wantPlanID: new("plan-2"),
 		},
 		{
 			name:       "failed",
@@ -957,8 +957,6 @@ func writeRESTNotFound(t *testing.T, w http.ResponseWriter, errType string) {
 	require.NoError(t, err)
 }
 
-func stringPtr(s string) *string { return &s }
-
 // TestPlanTableScanRequestFromEncodesFilter checks the row filter serializes to
 // ExpressionParser JSON on the wire request, and that trivial filters are
 // dropped so the server plans without one.
@@ -1059,8 +1057,9 @@ func scanFilterSchema() *iceberg.Schema {
 // encoding needs.
 type scanTestMetadata struct{ schema *iceberg.Schema }
 
-func (m scanTestMetadata) CurrentSchema() *iceberg.Schema               { return m.schema }
-func (m scanTestMetadata) Schemas() []*iceberg.Schema                   { return []*iceberg.Schema{m.schema} }
+func (m scanTestMetadata) CurrentSchema() *iceberg.Schema { return m.schema }
+func (m scanTestMetadata) Schemas() []*iceberg.Schema     { return []*iceberg.Schema{m.schema} }
+
 func (m scanTestMetadata) PartitionSpec() iceberg.PartitionSpec         { return iceberg.PartitionSpec{} }
 func (m scanTestMetadata) PartitionSpecByID(int) *iceberg.PartitionSpec { return nil }
 func (m scanTestMetadata) CurrentSnapshot() *table.Snapshot             { return nil }

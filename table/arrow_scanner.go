@@ -57,15 +57,16 @@ const (
 var PositionalDeleteArrowSchema, _ = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, true, false)
 
 type (
-	positionDeletes   = []*arrow.Chunked
-	perFilePosDeletes = map[string]positionDeletes
+	positionDeletes      = []*arrow.Chunked
+	perFilePosDeletes    = map[string]positionDeletes
+	perDeleteFileTargets = map[string]map[string]struct{}
 )
 
 // releasePerFilePosDeletes releases every Arrow chunk in a positional-delete
 // map. Required on every error return between readAllDeleteFiles and the
 // iterator returned by createIterator — Arrow allocations are not freed by
 // GC, so dropping the map on the floor leaks the chunks. Safe to call on a
-// nil map; the nil-chunk guard is defensive — readDeletes never inserts a
+// nil map; the nil-chunk guard is defensive — position-delete readers never insert a
 // nil *arrow.Chunked, but the guard keeps callers safe if that invariant
 // ever changes.
 func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
@@ -78,24 +79,50 @@ func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
 	}
 }
 
+// collectPositionDeleteFilesAndTargets indexes each positional-delete file and
+// the data-file paths of tasks that reference it. A nil target set preserves
+// the whole-file fallback when any referencing task lacks a usable data path.
+func collectPositionDeleteFilesAndTargets(tasks []FileScanTask) (map[string]iceberg.DataFile, perDeleteFileTargets) {
+	uniqueDeletes := make(map[string]iceberg.DataFile)
+	targetsByDelete := make(perDeleteFileTargets)
+
+	for _, task := range tasks {
+		for _, deleteFile := range task.DeleteFiles {
+			if deleteFile.ContentType() != iceberg.EntryContentPosDeletes {
+				continue
+			}
+
+			deletePath := deleteFile.FilePath()
+			if _, ok := uniqueDeletes[deletePath]; !ok {
+				uniqueDeletes[deletePath] = deleteFile
+			}
+
+			targets, ok := targetsByDelete[deletePath]
+			if !ok {
+				targets = make(map[string]struct{})
+				targetsByDelete[deletePath] = targets
+			}
+			if targets == nil {
+				continue
+			}
+			if task.File == nil || task.File.FilePath() == "" {
+				targetsByDelete[deletePath] = nil
+
+				continue
+			}
+			targets[task.File.FilePath()] = struct{}{}
+		}
+	}
+
+	return uniqueDeletes, targetsByDelete
+}
+
 // readAllDeleteFiles reads every referenced positional-delete file up front. It
 // remains the path used by Transaction.makePositionDeleteRecordsForFilter and by
 // the eager-vs-lazy benchmark; arrowScan.GetRecords uses lazyPositionDeleteLoader.
 func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
 	deletesPerFile := make(perFilePosDeletes)
-	uniqueDeletes := make(map[string]iceberg.DataFile)
-
-	for _, t := range tasks {
-		for _, d := range t.DeleteFiles {
-			if d.ContentType() != iceberg.EntryContentPosDeletes {
-				continue
-			}
-
-			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
-				uniqueDeletes[d.FilePath()] = d
-			}
-		}
-	}
+	uniqueDeletes, targetsByDelete := collectPositionDeleteFilesAndTargets(tasks)
 
 	if len(uniqueDeletes) == 0 {
 		return deletesPerFile, nil
@@ -112,7 +139,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 		defer close(perFileChan)
 		for _, v := range uniqueDeletes {
 			g.Go(func() error {
-				deletes, err := readDeletes(gctx, fs, v)
+				deletes, err := readDeletesForPaths(gctx, fs, v, targetsByDelete[v.FilePath()])
 				if err != nil {
 					return fmt.Errorf("read position deletes from %s: %w", v.FilePath(), err)
 				}
@@ -167,6 +194,7 @@ var errPositionDeleteLoaderReleased = errors.New("position delete loader already
 
 type lazyPositionDeleteFile struct {
 	dataFile iceberg.DataFile
+	targets  map[string]struct{}
 
 	once    sync.Once
 	deletes map[string]*arrow.Chunked
@@ -174,21 +202,16 @@ type lazyPositionDeleteFile struct {
 }
 
 func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositionDeleteLoader {
+	uniqueDeletes, targetsByDelete := collectPositionDeleteFilesAndTargets(tasks)
 	loader := &lazyPositionDeleteLoader{
 		fs:    fs,
-		files: make(map[string]*lazyPositionDeleteFile),
+		files: make(map[string]*lazyPositionDeleteFile, len(uniqueDeletes)),
 	}
 
-	for _, task := range tasks {
-		for _, deleteFile := range task.DeleteFiles {
-			if deleteFile.ContentType() != iceberg.EntryContentPosDeletes {
-				continue
-			}
-
-			path := deleteFile.FilePath()
-			if _, ok := loader.files[path]; !ok {
-				loader.files[path] = &lazyPositionDeleteFile{dataFile: deleteFile}
-			}
+	for path, deleteFile := range uniqueDeletes {
+		loader.files[path] = &lazyPositionDeleteFile{
+			dataFile: deleteFile,
+			targets:  targetsByDelete[path],
 		}
 	}
 
@@ -234,9 +257,9 @@ func (l *lazyPositionDeleteLoader) load(ctx context.Context, task FileScanTask) 
 		}
 
 		cached.once.Do(func() {
-			cached.deletes, cached.err = readDeletes(ctx, l.fs, cached.dataFile)
+			cached.deletes, cached.err = readDeletesForPaths(ctx, l.fs, cached.dataFile, cached.targets)
 			if cached.err != nil {
-				// readDeletes currently returns nil on errors. Release defensively
+				// readDeletesForPaths currently returns nil on errors. Release defensively
 				// in case a future reader returns partial Arrow ownership.
 				releasePosDeletes(cached.deletes)
 				cached.deletes = nil
@@ -505,12 +528,14 @@ func (c *posDeleteCursor) next() (int64, bool) {
 
 type posDeleteAccumulator struct {
 	mem      memory.Allocator
+	targets  map[string]struct{}
 	builders map[string]*array.Int64Builder
 }
 
-func newPosDeleteAccumulator(ctx context.Context) *posDeleteAccumulator {
+func newPosDeleteAccumulator(ctx context.Context, targets map[string]struct{}) *posDeleteAccumulator {
 	return &posDeleteAccumulator{
 		mem:      compute.GetAllocator(ctx),
+		targets:  targets,
 		builders: make(map[string]*array.Int64Builder),
 	}
 }
@@ -611,6 +636,12 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 		}
 
 		path := paths.Value(i)
+		if len(a.targets) > 0 {
+			if _, ok := a.targets[path]; !ok {
+				continue
+			}
+		}
+
 		builder, ok := a.builders[path]
 		if !ok {
 			path = strings.Clone(path)
@@ -649,6 +680,7 @@ func (a *posDeleteAccumulator) appendChunked(ctx context.Context, filePathCol, p
 	return ctx.Err()
 }
 
+// appendRecord requires columns projected in file_path, pos order.
 func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.RecordBatch) error {
 	if record.NumCols() != 2 {
 		return fmt.Errorf("%w: projected position delete record has %d columns, expected 2",
@@ -661,8 +693,15 @@ func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.Re
 		posCol.DataType(), posCol.NullN()); err != nil {
 		return err
 	}
+	if err := validatePosDeleteColumnLengths(filePathCol.Len(), posCol.Len()); err != nil {
+		return err
+	}
 
-	posArr := posCol.(*array.Int64)
+	posArr, ok := posCol.(*array.Int64)
+	if !ok {
+		return fmt.Errorf("%w: unsupported pos record array type %T in position delete file",
+			iceberg.ErrInvalidSchema, posCol)
+	}
 	posCursor := posDeleteCursor{chunks: []*array.Int64{posArr}}
 	if err := a.appendFilePathChunk(ctx, filePathCol, &posCursor); err != nil {
 		return err
@@ -672,7 +711,7 @@ func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.Re
 }
 
 func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
-	acc := newPosDeleteAccumulator(ctx)
+	acc := newPosDeleteAccumulator(ctx, nil)
 	defer func() {
 		if err != nil {
 			acc.release()
@@ -746,7 +785,13 @@ func releasePosDeletes(deletes map[string]*arrow.Chunked) {
 	}
 }
 
-func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_ map[string]*arrow.Chunked, err error) {
+func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
+	return readDeletesForPaths(ctx, fs, dataFile, nil)
+}
+
+func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile,
+	targets map[string]struct{},
+) (_ map[string]*arrow.Chunked, err error) {
 	src, err := tblutils.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
 		return nil, err
@@ -768,7 +813,12 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 		return nil, err
 	}
 
-	records, err := rdr.GetRecords(ctx, columns, nil)
+	tester, err := newPositionDeleteRowGroupTester(schema, targets)
+	if err != nil {
+		return nil, err
+	}
+
+	records, err := rdr.GetRecords(ctx, columns, tester)
 	if err != nil {
 		return nil, err
 	}
@@ -776,7 +826,7 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	// string values, so independent dictionaries across batches are safe.
 	defer records.Release()
 
-	acc := newPosDeleteAccumulator(ctx)
+	acc := newPosDeleteAccumulator(ctx, targets)
 	defer func() {
 		// Returning an error assigns the named return value before deferred
 		// functions run, which releases builders on every error path.
@@ -798,6 +848,121 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 
 	return acc.finish(), nil
+}
+
+func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]struct{}) (*tblutils.ParquetRowGroupTester, error) {
+	if len(targets) == 0 || len(targets) > inPredicateLimit {
+		return nil, nil
+	}
+	pruningEnabled, err := positionDeletePruningEnabled(schema)
+	if err != nil {
+		return nil, err
+	}
+	if !pruningEnabled {
+		return nil, nil
+	}
+
+	paths := make([]string, 0, len(targets))
+	for path := range targets {
+		paths = append(paths, path)
+	}
+
+	var filter iceberg.BooleanExpression
+	if len(paths) == 1 {
+		// A single target is the common case. EqualTo avoids building the
+		// set literal used by IsIn and gives the stats/bloom planners the
+		// simpler predicate directly.
+		filter = iceberg.EqualTo(iceberg.Reference("file_path"), paths[0])
+	} else {
+		slices.Sort(paths)
+		filter = iceberg.IsIn(iceberg.Reference("file_path"), paths...)
+	}
+	filter, err = iceberg.BindExpr(iceberg.PositionalDeleteSchema, filter, true)
+	if err != nil {
+		return nil, err
+	}
+
+	statsFn, err := newParquetRowGroupStatsEvaluator(iceberg.PositionalDeleteSchema, filter, false)
+	if err != nil {
+		return nil, err
+	}
+	bloomPreds, err := newBloomFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+
+	return &tblutils.ParquetRowGroupTester{
+		StatsFn:    statsFn,
+		BloomPreds: bloomPreds,
+	}, nil
+}
+
+func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
+	// Row-group stats and Bloom predicates are keyed by Parquet physical field
+	// IDs, while projection resolves these columns by their spec-defined names.
+	// pqarrow carries the Parquet IDs into Arrow metadata, so only enable
+	// pushdown when those two views agree for the reserved delete columns.
+	physicalIDs := make(map[int]int)
+	var collectIDs func([]arrow.Field)
+	collectIDs = func(fields []arrow.Field) {
+		for _, field := range fields {
+			if id := getFieldID(field); id != nil {
+				physicalIDs[*id]++
+			}
+			if nested, ok := field.Type.(arrow.NestedType); ok {
+				collectIDs(nested.Fields())
+			}
+		}
+	}
+	collectIDs(schema.Fields())
+	if len(physicalIDs) == 0 {
+		// External position-delete files are allowed to omit Iceberg field IDs.
+		// The name-based projection and row-level target filter remain safe, but
+		// stats and Bloom pruning cannot be trusted without the IDs.
+		return false, nil
+	}
+
+	deleteFields := iceberg.PositionalDeleteSchema.Fields()
+	for _, field := range deleteFields {
+		if physicalIDs[field.ID] > 1 {
+			return false, fmt.Errorf("%w: position delete field ID %d is not unique",
+				iceberg.ErrInvalidSchema, field.ID)
+		}
+	}
+
+	pruningEnabled := true
+	for _, want := range deleteFields {
+		indices := schema.FieldIndices(want.Name)
+		if len(indices) != 1 {
+			return false, fmt.Errorf("%w: position delete file must contain exactly one %q column, found %d",
+				iceberg.ErrInvalidSchema, want.Name, len(indices))
+		}
+
+		fieldID := getFieldID(schema.Field(indices[0]))
+		if fieldID == nil {
+			if physicalIDs[want.ID] != 0 {
+				return false, fmt.Errorf("%w: position delete field ID %d is assigned to another column instead of %q",
+					iceberg.ErrInvalidSchema, want.ID, want.Name)
+			}
+			// Missing IDs only disable pruning. Keep checking the remaining
+			// columns so this fallback cannot hide an invalid ID mapping.
+			pruningEnabled = false
+
+			continue
+		}
+		if *fieldID != want.ID {
+			if physicalIDs[want.ID] != 0 {
+				return false, fmt.Errorf("%w: position delete column %q has field ID %d, want %d; field ID %d is assigned to another column",
+					iceberg.ErrInvalidSchema, want.Name, *fieldID, want.ID, want.ID)
+			}
+			// A non-canonical ID is safe for name-based reading, but not for
+			// stats or Bloom pruning. Keep the pre-pruning read compatible with
+			// external writers that renumber fields.
+			pruningEnabled = false
+		}
+	}
+
+	return pruningEnabled, nil
 }
 
 func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {

@@ -138,7 +138,7 @@ func benchmarkDVFiles(b *testing.B, numDVs int) []iceberg.DataFile {
 
 		offset, size := meta.Offset, meta.Length
 		file := newDVTestFile(path, 1, &offset, &size)
-		file.referencedDataFile = strPtr(referencedDataFile)
+		file.referencedDataFile = new(referencedDataFile)
 		files[i] = file
 	}
 

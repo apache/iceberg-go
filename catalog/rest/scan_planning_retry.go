@@ -44,8 +44,7 @@ func retryScanPlanning[T any](ctx context.Context, operation string, request fun
 			return zero, err
 		}
 		result, err := request()
-		var responseError errorResponse
-		if !errors.As(err, &responseError) {
+		if _, ok := errors.AsType[errorResponse](err); !ok {
 			return result, err
 		}
 		retryAfter, retryable := scanPlanPollRetry(err)

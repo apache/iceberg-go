@@ -20,13 +20,10 @@ package rest
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"iter"
 	"log/slog"
@@ -46,9 +43,6 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"golang.org/x/sync/semaphore"
@@ -239,14 +233,33 @@ type sessionTransport struct {
 
 	authManager    AuthManager
 	defaultHeaders http.Header
-	signer         v4.HTTPSigner
-	cfg            aws.Config
-	service        string
-	newHash        func() hash.Hash
+	signer         RequestSigner
+	// signingOrigin is the configured catalog origin. A request to a different
+	// origin (e.g. a redirect hop) is not signed, so the signer's Authorization
+	// header and any session token never reach an unconfigured host.
+	signingOrigin *url.URL
 }
 
-// from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
-const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+// sameOrigin reports whether two URLs share scheme, host, and effective port.
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		defaultedPort(a) == defaultedPort(b)
+}
+
+func defaultedPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// A session default is applied unless the request already carries that
@@ -292,45 +305,8 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r.Header.Set(k, v)
 	}
 
-	if s.signer != nil {
-		var payloadHash string
-		if r.Body == nil {
-			payloadHash = emptyStringHash
-		} else {
-			rdr, err := r.GetBody()
-			if err != nil {
-				return nil, err
-			}
-
-			h := s.newHash()
-			if _, err = io.Copy(h, rdr); err != nil {
-				if closeErr := rdr.Close(); closeErr != nil {
-					err = errors.Join(err, closeErr)
-				}
-
-				return nil, err
-			}
-
-			if err = rdr.Close(); err != nil {
-				return nil, err
-			}
-
-			payloadHash = hex.EncodeToString(h.Sum(nil))
-		}
-
-		creds, err := s.cfg.Credentials.Retrieve(r.Context())
-		if err != nil {
-			return nil, err
-		}
-
-		// Set the x-amz-content-sha256 header before signing.
-		// This header is required for AWS SigV4 signature verification.
-		r.Header.Set("x-amz-content-sha256", payloadHash)
-
-		// modifies the request in place
-		err = s.signer.SignHTTP(r.Context(), creds, r, payloadHash,
-			s.service, s.cfg.Region, time.Now())
-		if err != nil {
+	if s.signer != nil && (s.signingOrigin == nil || sameOrigin(s.signingOrigin, r.URL)) {
+		if err := s.signer.SignRequest(r); err != nil {
 			return nil, err
 		}
 	}
@@ -1104,24 +1080,20 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.authManager = authManager
 	}
 
-	if opts.enableSigv4 {
-		cfg := opts.awsConfig
-		if !opts.awsConfigSet {
-			// If no config provided, load defaults from environment.
-			var err error
-			cfg, err = config.LoadDefaultConfig(ctx)
-			if err != nil {
-				cleanup()
+	signer, err := resolveSigner(ctx, opts)
+	if err != nil {
+		cleanup()
 
-				return nil, nil, err
-			}
-		}
-		if opts.sigv4Region != "" {
-			cfg.Region = opts.sigv4Region
-		}
-
-		session.cfg, session.service = cfg, opts.sigv4Service
-		session.signer, session.newHash = v4.NewSigner(), sha256.New
+		return nil, nil, err
+	}
+	session.signer = signer
+	// A signer only signs requests to the configured catalog origin: a request
+	// to a different origin (e.g. a redirect hop) is left unsigned, so the
+	// signer's Authorization header and any session token never reach an
+	// unconfigured host. The guard lives here, in core, so it covers every
+	// signer, including one installed verbatim via WithSigner.
+	if signer != nil {
+		session.signingOrigin = r.baseURI
 	}
 
 	return cl, cleanup, nil
@@ -1244,6 +1216,7 @@ func (r *Catalog) tableFromResponse(
 	config iceberg.Properties,
 	scanPlanningConfig iceberg.Properties,
 	credsVended bool,
+	labels *iceberg.Labels,
 ) (*table.Table, error) {
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
@@ -1302,6 +1275,7 @@ func (r *Catalog) tableFromResponse(
 		r,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(scanPlanningConfig),
+		table.WithLabels(labels),
 	), nil
 }
 
@@ -1421,13 +1395,20 @@ func (r *Catalog) nsSeparator() string {
 	return r.namespaceSeparator
 }
 
+// encodePathSegment escapes a REST path segment per RFC 3986. PathEscape
+// leaves plus signs literal, so encode them explicitly to avoid form decoders
+// interpreting them as spaces.
+func encodePathSegment(value string) string {
+	return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
+}
+
 // encodeNamespace URL-encodes each namespace level and joins them with the
 // server-advertised, URL-encoded namespace separator for use as a REST path
-// segment. Mirrors RESTUtil.encodeNamespace in the Java implementation.
+// segment.
 func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
 	encoded := make([]string, len(namespace))
 	for i, level := range namespace {
-		encoded[i] = url.PathEscape(level)
+		encoded[i] = encodePathSegment(level)
 	}
 
 	return strings.Join(encoded, r.nsSeparator())
@@ -1454,7 +1435,7 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1462,7 +1443,7 @@ func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string,
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1470,7 +1451,7 @@ func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, str
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
@@ -1478,7 +1459,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1505,7 +1486,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	stagedCreate := len(cfg.StagedUpdates) > 0
 
 	payload := createTableRequest{
-		Name:          tbl,
+		Name:          catalog.ObjectNameFromIdent(identifier),
 		Schema:        schema,
 		Location:      cfg.Location,
 		PartitionSpec: cfg.PartitionSpec,
@@ -1541,7 +1522,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1600,14 +1581,14 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		return nil, "", err
 	}
 
-	ns, tblName, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, "", err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tblName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 
 	type payload struct {
@@ -1616,7 +1597,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		Updates      []table.Update      `json:"updates"`
 	}
 
-	path, err := endpointUpdateTable.reqPath(ns, tblName)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1730,7 +1711,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1755,7 +1736,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 
 	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, path,
-		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
 	if err != nil {
@@ -1769,7 +1750,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1814,7 +1795,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1822,21 +1803,21 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tbl,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier          `json:"identifier"`
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateTable.reqPath(ns, tbl)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, err
 	}
@@ -1862,7 +1843,8 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, metadata.Properties())
 
-	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false)
+	// A commit response carries no labels (they are load-time enrichment).
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil)
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
@@ -2339,6 +2321,7 @@ type viewResponse struct {
 	MetadataLoc string             `json:"metadata-location"`
 	RawMetadata json.RawMessage    `json:"metadata"`
 	Config      iceberg.Properties `json:"config"`
+	Labels      *iceberg.Labels    `json:"labels,omitempty"`
 	Metadata    view.Metadata      `json:"-"`
 }
 
@@ -2362,7 +2345,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, fmt.Errorf("%w: view version cannot be nil", iceberg.ErrInvalidArgument)
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2393,7 +2376,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	payload := createViewRequest{
-		Name:        viewName,
+		Name:        catalog.ObjectNameFromIdent(identifier),
 		Location:    cfg.Location,
 		Schema:      freshSchema,
 		Props:       cfg.Properties,
@@ -2414,7 +2397,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	return view.New(identifier, ret.Metadata, ret.MetadataLoc), nil
+	return view.New(identifier, ret.Metadata, ret.MetadataLoc, view.WithLabels(ret.Labels)), nil
 }
 
 // UpdateView updates a view in the catalog.
@@ -2423,21 +2406,21 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(ident)
+	ns, encodedView, err := r.splitViewIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      viewName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier         `json:"identifier"`
 		Requirements []view.Requirement `json:"requirements"`
 		Updates      []view.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateView.reqPath(ns, viewName)
+	path, err := endpointUpdateView.reqPath(ns, encodedView)
 	if err != nil {
 		return nil, err
 	}
@@ -2449,7 +2432,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	return view.New(ident, ret.Metadata, ret.MetadataLoc), nil
+	return view.New(ident, ret.Metadata, ret.MetadataLoc, view.WithLabels(ret.Labels)), nil
 }
 
 // loadViewResponse contains the response from loading a view
@@ -2469,7 +2452,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2485,7 +2468,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 	}
 
 	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, path,
-		payload{Name: v, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
 		})
 	if err != nil {
@@ -2497,7 +2480,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
 	}
 
-	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+	return view.New(identifier, metadata, rsp.MetadataLoc, view.WithLabels(rsp.Labels)), nil
 }
 
 // LoadView loads a view from the catalog.
@@ -2529,7 +2512,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
 	}
 
-	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+	return view.New(identifier, metadata, rsp.MetadataLoc, view.WithLabels(rsp.Labels)), nil
 }
 
 func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*view.View, error) {

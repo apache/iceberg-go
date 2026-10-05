@@ -196,7 +196,7 @@ func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 			continue
 		}
 
-		for _, value := range strings.Split(group, ",") {
+		for value := range strings.SplitSeq(group, ",") {
 			flattened[strings.TrimSpace(value)] = equivalences[group]
 		}
 	}

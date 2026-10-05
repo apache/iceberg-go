@@ -46,7 +46,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
-	internal2 "github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/internal"
@@ -1270,10 +1270,10 @@ func ewkbWithSRID(isoWKB []byte, srid uint32) []byte {
 func TestWriteDataFileErrOnClose(t *testing.T) {
 	ctx := context.Background()
 	fm := internal.GetFileFormat(iceberg.ParquetFile)
-	mockfs := internal2.MockFS{}
+	mockfs := iomock.MockFS{}
 	mockfs.Test(t)
 
-	mockfs.On("Create", "f").Return(&internal2.MockFile{
+	mockfs.On("Create", "f").Return(&iomock.MockFile{
 		ErrOnClose: true,
 	}, nil)
 
@@ -1380,7 +1380,7 @@ func TestParquetFileWriterAbortRemovesFile(t *testing.T) {
 }
 
 func TestParquetFileWriterAbortIgnoresRemoveNotExist(t *testing.T) {
-	mockfs := internal2.MockFS{}
+	mockfs := iomock.MockFS{}
 	mockfs.Test(t)
 	mockfs.On("Create", "f").Return(&abortTestFile{}, nil)
 	mockfs.On("Remove", "f").Return(&iofs.PathError{
@@ -1398,7 +1398,7 @@ func TestParquetFileWriterAbortJoinsCloseAndRemoveErrors(t *testing.T) {
 	closeErr := errors.New("close failed")
 	removeErr := errors.New("remove failed")
 
-	mockfs := internal2.MockFS{}
+	mockfs := iomock.MockFS{}
 	mockfs.Test(t)
 	mockfs.On("Create", "f").Return(&abortTestFile{closeErr: closeErr}, nil)
 	mockfs.On("Remove", "f").Return(removeErr)
