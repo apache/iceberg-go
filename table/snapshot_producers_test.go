@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,7 +105,7 @@ func (m *memIO) Open(name string) (iceio.File, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	return &internal.MockFile{Contents: bytes.NewReader(data)}, nil
+	return &iomock.MockFile{Contents: bytes.NewReader(data)}, nil
 }
 
 func (m *memIO) Create(name string) (iceio.FileWriter, error) {
@@ -715,7 +715,7 @@ func (t *trackingIO) Open(name string) (iceio.File, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	return &internal.MockFile{Contents: bytes.NewReader(data)}, nil
+	return &iomock.MockFile{Contents: bytes.NewReader(data)}, nil
 }
 
 func (t *trackingIO) Create(name string) (iceio.FileWriter, error) {
@@ -976,7 +976,7 @@ func TestRebuildManifestListSummaryFailureCreatesNoOutput(t *testing.T) {
 	parentManifestList := "mem://default/table-location/metadata/fresh-parent.avro"
 	out, err := wfs.Create(parentManifestList)
 	require.NoError(t, err)
-	require.NoError(t, iceberg.WriteManifestList(2, out, 77, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, iceberg.WriteManifestList(2, out, 77, nil, new(int64(0)), 0, nil))
 	require.NoError(t, out.Close())
 
 	sp.op = Operation("unsupported")
@@ -1924,7 +1924,7 @@ func TestSummaryOnRetry_SkipsAlreadyRemovedDeleteFile(t *testing.T) {
 	parentManifestList := "mem://default/table-location/metadata/fresh-parent-skip.avro"
 	out, err := wfs.Create(parentManifestList)
 	require.NoError(t, err)
-	require.NoError(t, iceberg.WriteManifestList(2, out, 77, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, iceberg.WriteManifestList(2, out, 77, nil, new(int64(0)), 0, nil))
 	require.NoError(t, out.Close())
 
 	freshParent := &Snapshot{
@@ -2027,7 +2027,7 @@ func TestCheckRemovedFiles_AbortsWhenRewriteTargetMissing(t *testing.T) {
 	parentManifestList := "mem://default/table-location/metadata/fresh-parent-diverged.avro"
 	out, err := wfs.Create(parentManifestList)
 	require.NoError(t, err)
-	require.NoError(t, iceberg.WriteManifestList(2, out, 99, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, iceberg.WriteManifestList(2, out, 99, nil, new(int64(0)), 0, nil))
 	require.NoError(t, out.Close())
 
 	freshParent := &Snapshot{SnapshotID: 99, ManifestList: parentManifestList}

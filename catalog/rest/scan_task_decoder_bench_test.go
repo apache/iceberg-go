@@ -59,8 +59,8 @@ func deletionVectorScanTasksWire(taskCount int, explicitOwner bool) ScanTasks {
 	dataFile := *base.FileScanTasks[0].DataFile
 	deleteFile := base.DeleteFiles[0]
 	deleteFile.FileFormat = "puffin"
-	deleteFile.ContentOffset = int64Ptr(10)
-	deleteFile.ContentSizeInBytes = int64Ptr(20)
+	deleteFile.ContentOffset = new(int64(10))
+	deleteFile.ContentSizeInBytes = new(int64(20))
 
 	wire := ScanTasks{
 		FileScanTasks: make([]RESTFileScanTask, taskCount),
@@ -72,7 +72,7 @@ func deletionVectorScanTasksWire(taskCount int, explicitOwner bool) ScanTasks {
 		delete := deleteFile
 		delete.FilePath = fmt.Sprintf("s3://bucket/table/delete-%d.puffin", i)
 		if explicitOwner {
-			delete.ReferencedDataFile = stringPtr(data.FilePath)
+			delete.ReferencedDataFile = new(data.FilePath)
 		}
 
 		wire.FileScanTasks[i] = RESTFileScanTask{

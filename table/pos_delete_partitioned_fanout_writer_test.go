@@ -736,10 +736,6 @@ func (m *dataFileMatcher) Format(val iceberg.DataFile) string {
 // defaultPositionDeleteMatching is a convenience preset for the options we want to match for position delete matching
 var defaultPositionDeleteMatching = []dataFileMatcherOption{withContentTypeMatching(), withColumnSizesMatching(), withCountMatching(), withFileFormatMatching(), withSpecIDMatching(), withPartitionMatching(), withCountMatching(), withSortOrderIDMatching()}
 
-// ptr returns a pointer to v. A generic stand-in for the various one-off
-// ptr-helpers previously sprinkled across the internal package tests.
-func ptr[T any](v T) *T { return &v }
-
 // Position deletes are ordered by (file_path, pos), never by a table sort
 // order, so their sort order id stays null.
 func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {

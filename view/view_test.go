@@ -23,7 +23,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -41,10 +41,10 @@ func TestView(t *testing.T) {
 }
 
 func (t *ViewTestSuite) SetupSuite() {
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	mockfs.Test(t.T())
 	mockfs.On("Open", "s3://bucket/test/location/uuid.metadata.json").
-		Return(&internal.MockFile{Contents: bytes.NewReader([]byte(exampleViewJSON))}, nil)
+		Return(&iomock.MockFile{Contents: bytes.NewReader([]byte(exampleViewJSON))}, nil)
 	defer mockfs.AssertExpectations(t.T())
 
 	vw, err := NewFromLocation(
@@ -68,7 +68,7 @@ func (t *ViewTestSuite) SetupSuite() {
 }
 
 func (t *ViewTestSuite) TestNewViewFromReadFile() {
-	var mockfsReadFile internal.MockFSReadFile
+	var mockfsReadFile iomock.MockFSReadFile
 	mockfsReadFile.Test(t.T())
 	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.metadata.json").
 		Return([]byte(exampleViewJSON), nil)
@@ -120,10 +120,10 @@ func (t *ViewTestSuite) TestLocation() {
 }
 
 func TestCreateViewReturnsMetadataCloseError(t *testing.T) {
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	mockfs.Test(t)
 	mockfs.On("Create", mock.Anything).
-		Return(&internal.MockFile{Contents: bytes.NewReader(nil), ErrOnClose: true}, nil)
+		Return(&iomock.MockFile{Contents: bytes.NewReader(nil), ErrOnClose: true}, nil)
 	defer mockfs.AssertExpectations(t)
 
 	const scheme = "view-close-error"

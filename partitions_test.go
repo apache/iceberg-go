@@ -318,6 +318,12 @@ func TestUnpartitionedWithVoidField(t *testing.T) {
 
 	assert.True(t, spec.IsUnpartitioned())
 
+	pointerSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: &iceberg.VoidTransform{},
+	})
+
+	assert.True(t, pointerSpec.IsUnpartitioned())
+
 	spec2 := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
 	}, iceberg.PartitionField{

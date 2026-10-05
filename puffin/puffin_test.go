@@ -653,8 +653,11 @@ func TestReaderInvalidFile(t *testing.T) {
 		data    func() []byte
 		wantErr string
 	}{
-		// file too small: Minimum valid puffin file has header magic + footer, rejects truncated files.
-		{"file too small", func() []byte { return []byte("tiny") }, "too small"},
+		// file too small: Minimum valid puffin file has header magic + footer, rejects truncated files
+		// (magic is valid here, so this is a damaged Puffin file, not ErrNotPuffinFile).
+		{"file too small", func() []byte { return []byte("PFA1tiny") }, "too small"},
+		// too small to hold the magic: cannot be identified as Puffin at all.
+		{"too small for magic", func() []byte { return []byte("ti") }, "too small to hold header magic"},
 		// invalid header magic: First 4 bytes must be 'PFA1' to identify puffin format.
 		{"invalid header magic", func() []byte {
 			d := validFile()

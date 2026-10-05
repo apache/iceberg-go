@@ -114,8 +114,8 @@ func TestDecodeScanTasksFullPayload(t *testing.T) {
 	}, task.File.Partition())
 	assert.Equal(t, []byte{0x0a, 0x0b}, task.File.KeyMetadata())
 	assert.Equal(t, []int64{4, 128}, task.File.SplitOffsets())
-	assert.Equal(t, intPtr(3), task.File.SortOrderID())
-	assert.Equal(t, int64Ptr(99), task.FirstRowID)
+	assert.Equal(t, new(3), task.File.SortOrderID())
+	assert.Equal(t, new(int64(99)), task.FirstRowID)
 	assert.Equal(t, map[int]int64{1: 800, 2: 1200}, task.File.ColumnSizes())
 	assert.Equal(t, map[int]int64{1: 100, 2: 100}, task.File.ValueCounts())
 	assert.Equal(t, map[int]int64{1: 0, 2: 1}, task.File.NullValueCounts())
@@ -137,9 +137,9 @@ func TestDecodeScanTasksFullPayload(t *testing.T) {
 	require.Len(t, task.DeletionVectorFiles, 1)
 	dv := task.DeletionVectorFiles[0]
 	assert.Equal(t, iceberg.PuffinFile, dv.FileFormat())
-	assert.Equal(t, stringPtr("s3://bucket/table/data.parquet"), dv.ReferencedDataFile())
-	assert.Equal(t, int64Ptr(25), dv.ContentOffset())
-	assert.Equal(t, int64Ptr(50), dv.ContentSizeInBytes())
+	assert.Equal(t, new("s3://bucket/table/data.parquet"), dv.ReferencedDataFile())
+	assert.Equal(t, new(int64(25)), dv.ContentOffset())
+	assert.Equal(t, new(int64(50)), dv.ContentSizeInBytes())
 }
 
 func TestDecodeScanTasksAcceptsLegacyJavaContentValues(t *testing.T) {
@@ -278,14 +278,14 @@ func TestDecodeScanTasksDerivesDeletionVectorTargetWhenOmitted(t *testing.T) {
 	wire := validScanTasksWire()
 	wire.FileScanTasks[0].DeleteFileReferences = []int{0}
 	wire.DeleteFiles[0].FileFormat = "puffin"
-	wire.DeleteFiles[0].ContentOffset = int64Ptr(10)
-	wire.DeleteFiles[0].ContentSizeInBytes = int64Ptr(20)
+	wire.DeleteFiles[0].ContentOffset = new(int64(10))
+	wire.DeleteFiles[0].ContentSizeInBytes = new(int64(20))
 
 	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.Len(t, tasks[0].DeletionVectorFiles, 1)
-	assert.Equal(t, stringPtr("s3://bucket/table/data.parquet"), tasks[0].DeletionVectorFiles[0].ReferencedDataFile())
+	assert.Equal(t, new("s3://bucket/table/data.parquet"), tasks[0].DeletionVectorFiles[0].ReferencedDataFile())
 }
 
 func TestRESTValueMapMatchesJavaContentFileParser(t *testing.T) {
@@ -364,7 +364,7 @@ func TestDecodeScanTasksKeyMetadataMatchesJavaContentFileParser(t *testing.T) {
 	wire := validScanTasksWire()
 	// This value mirrors Java TestContentFileParser's all-optional data-file
 	// fixture. SingleValueParser encodes binary values as hexadecimal strings.
-	wire.FileScanTasks[0].DataFile.KeyMetadata = stringPtr("00000000000000000000000000000000")
+	wire.FileScanTasks[0].DataFile.KeyMetadata = new("00000000000000000000000000000000")
 
 	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
 	require.NoError(t, err)
@@ -473,8 +473,8 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 			mutate: func(w *ScanTasks) {
 				w.DeleteFiles[0].Content = "equality-deletes"
 				w.DeleteFiles[0].EqualityIDs = []int{1}
-				w.DeleteFiles[0].ContentOffset = int64Ptr(10)
-				w.DeleteFiles[0].ContentSizeInBytes = int64Ptr(20)
+				w.DeleteFiles[0].ContentOffset = new(int64(10))
+				w.DeleteFiles[0].ContentSizeInBytes = new(int64(20))
 			},
 			want: "must not carry position-delete reference or blob offsets",
 		},
@@ -509,7 +509,7 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 		{
 			name: "referenced data file disagrees with task",
 			mutate: func(w *ScanTasks) {
-				w.DeleteFiles[0].ReferencedDataFile = stringPtr("s3://bucket/table/other.parquet")
+				w.DeleteFiles[0].ReferencedDataFile = new("s3://bucket/table/other.parquet")
 				w.FileScanTasks[0].DeleteFileReferences = []int{0}
 			},
 			want: "task data-file",
@@ -518,8 +518,8 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 			name: "deletion vector referenced by different data files",
 			mutate: func(w *ScanTasks) {
 				w.DeleteFiles[0].FileFormat = "puffin"
-				w.DeleteFiles[0].ContentOffset = int64Ptr(10)
-				w.DeleteFiles[0].ContentSizeInBytes = int64Ptr(20)
+				w.DeleteFiles[0].ContentOffset = new(int64(10))
+				w.DeleteFiles[0].ContentSizeInBytes = new(int64(20))
 				w.FileScanTasks[0].DeleteFileReferences = []int{0}
 				secondDataFile := *w.FileScanTasks[0].DataFile
 				secondDataFile.FilePath = "s3://bucket/table/other.parquet"
@@ -692,6 +692,7 @@ func newScanTaskDecoderMetadata() *scanTaskDecoderMetadata {
 
 func (m *scanTaskDecoderMetadata) CurrentSchema() *iceberg.Schema { return m.schema }
 func (m *scanTaskDecoderMetadata) Schemas() []*iceberg.Schema     { return []*iceberg.Schema{m.schema} }
+
 func (m *scanTaskDecoderMetadata) PartitionSpec() iceberg.PartitionSpec {
 	return m.spec
 }
@@ -714,9 +715,6 @@ func mustLiteral(t *testing.T, value string, typ iceberg.Type) iceberg.Literal {
 
 	return literal
 }
-
-func intPtr(value int) *int       { return &value }
-func int64Ptr(value int64) *int64 { return &value }
 
 func TestPartitionDecodePlanKeepsValuesIndependent(t *testing.T) {
 	t.Parallel()

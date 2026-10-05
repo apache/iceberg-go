@@ -290,8 +290,6 @@ func TestArrowSchemaToIceberg(t *testing.T) {
 	}
 }
 
-func makeID(v int) *int { return &v }
-
 var (
 	icebergSchemaNested = iceberg.NewSchema(0,
 		iceberg.NestedField{
@@ -1103,37 +1101,37 @@ func TestArrowSchemaWithNameMapping(t *testing.T) {
 		err      string
 	}{
 		{"simple", schemaWithoutIDs, iceberg.NameMapping{
-			{FieldID: makeID(1), Names: []string{"foo"}},
-			{FieldID: makeID(2), Names: []string{"bar"}},
-			{FieldID: makeID(3), Names: []string{"baz"}},
+			{FieldID: new(1), Names: []string{"foo"}},
+			{FieldID: new(2), Names: []string{"bar"}},
+			{FieldID: new(3), Names: []string{"baz"}},
 		}, icebergSchemaSimple, ""},
 		{"field missing", schemaWithoutIDs, iceberg.NameMapping{
-			{FieldID: makeID(1), Names: []string{"foo"}},
+			{FieldID: new(1), Names: []string{"foo"}},
 		}, nil, "field missing from name mapping: bar"},
 		{"nested schema", schemaNestedWithoutIDs, iceberg.NameMapping{
-			{FieldID: makeID(1), Names: []string{"foo"}},
-			{FieldID: makeID(2), Names: []string{"bar"}},
-			{FieldID: makeID(3), Names: []string{"baz"}},
+			{FieldID: new(1), Names: []string{"foo"}},
+			{FieldID: new(2), Names: []string{"bar"}},
+			{FieldID: new(3), Names: []string{"baz"}},
 			{
-				FieldID: makeID(4), Names: []string{"qux"},
-				Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
+				FieldID: new(4), Names: []string{"qux"},
+				Fields: []iceberg.MappedField{{FieldID: new(5), Names: []string{"element"}}},
 			},
-			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(7), Names: []string{"key"}},
-				{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
-					{FieldID: makeID(9), Names: []string{"key"}},
-					{FieldID: makeID(10), Names: []string{"value"}},
+			{FieldID: new(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+				{FieldID: new(7), Names: []string{"key"}},
+				{FieldID: new(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+					{FieldID: new(9), Names: []string{"key"}},
+					{FieldID: new(10), Names: []string{"value"}},
 				}},
 			}},
-			{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
-					{FieldID: makeID(13), Names: []string{"latitude"}},
-					{FieldID: makeID(14), Names: []string{"longitude"}},
+			{FieldID: new(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+				{FieldID: new(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+					{FieldID: new(13), Names: []string{"latitude"}},
+					{FieldID: new(14), Names: []string{"longitude"}},
 				}},
 			}},
-			{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(16), Names: []string{"name"}},
-				{FieldID: makeID(17), Names: []string{"age"}},
+			{FieldID: new(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+				{FieldID: new(16), Names: []string{"name"}},
+				{FieldID: new(17), Names: []string{"age"}},
 			}},
 		}, icebergSchemaNested, ""},
 	}

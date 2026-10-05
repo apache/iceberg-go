@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -916,14 +917,14 @@ func (m *ManifestTestSuite) SetupSuite() {
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV1() {
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	manifest := manifestFile{
 		version: 1,
 		Path:    manifestFileRecordsV1[0].FilePath(),
 	}
 
 	mockfs.Test(m.T())
-	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
+	mockfs.On("Open", manifest.FilePath()).Return(&iomock.MockFile{
 		Contents: bytes.NewReader(m.v1ManifestEntries.Bytes()),
 	}, nil)
 	defer mockfs.AssertExpectations(m.T())
@@ -2063,7 +2064,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
 		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
-	mockedFile := &internal.MockFile{
+	mockedFile := &iomock.MockFile{
 		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes()),
 	}
 	manifestReader, err := NewManifestReader(&manifest, mockedFile)
@@ -2220,7 +2221,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV3() {
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
 		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
-	mockedFile := &internal.MockFile{
+	mockedFile := &iomock.MockFile{
 		Contents: bytes.NewReader(m.v3ManifestEntries.Bytes()),
 	}
 	manifestReader, err := NewManifestReader(&manifest, mockedFile)
@@ -4205,7 +4206,7 @@ func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCou
 
 	for _, tt := range tests {
 		m.Run(tt.name, func() {
-			legacy := *(manifestFileRecordsV1[0].(*manifestFile))
+			legacy := *manifestFileRecordsV1[0].(*manifestFile)
 			legacy.AddedRowsCount = tt.addedRows
 			legacy.ExistingRowsCount = tt.existingRows
 
@@ -4230,7 +4231,7 @@ func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCou
 	}
 
 	m.Run("mixed batch failure poisons writer", func() {
-		valid := *(manifestFileRecordsV1[0].(*manifestFile))
+		valid := *manifestFileRecordsV1[0].(*manifestFile)
 		valid.Path = "valid.avro"
 		unknown := valid
 		unknown.Path = "unknown-counts.avro"
@@ -4634,7 +4635,7 @@ var (
 )
 
 func (m *ManifestTestSuite) TestEntriesEarlyBreakClosesFile() {
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	manifest := manifestFile{
 		version: 2,
 		SpecID:  1,
@@ -4660,7 +4661,7 @@ func (m *ManifestTestSuite) TestEntriesEarlyBreakClosesFile() {
 }
 
 func (m *ManifestTestSuite) TestEntriesMidStreamErrorYieldsAndStops() {
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	manifest := manifestFile{
 		version: 2,
 		SpecID:  1,
@@ -4698,7 +4699,7 @@ func (m *ManifestTestSuite) TestEntriesMidStreamErrorYieldsAndStops() {
 }
 
 func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
-	var mockfs internal.MockFS
+	var mockfs iomock.MockFS
 	manifest := manifestFile{
 		version: 2,
 		SpecID:  1,

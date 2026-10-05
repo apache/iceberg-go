@@ -227,7 +227,7 @@ func TestResolveRollbackSnapshotIDExplicit(t *testing.T) {
 
 	got, err := resolveRollbackSnapshotID(tbl, &RollbackCmd{
 		TableID:    "db.events",
-		SnapshotID: int64Ptr(100),
+		SnapshotID: new(int64(100)),
 	})
 
 	require.NoError(t, err)
@@ -332,7 +332,7 @@ func TestValidateRollbackSelector(t *testing.T) {
 	}{
 		{
 			name:    "snapshot id only",
-			cmd:     RollbackCmd{SnapshotID: int64Ptr(100)},
+			cmd:     RollbackCmd{SnapshotID: new(int64(100))},
 			wantErr: "",
 		},
 		{
@@ -342,7 +342,7 @@ func TestValidateRollbackSelector(t *testing.T) {
 		},
 		{
 			name:    "both selectors",
-			cmd:     RollbackCmd{SnapshotID: int64Ptr(100), Timestamp: "2026-01-15T03:00:00Z"},
+			cmd:     RollbackCmd{SnapshotID: new(int64(100)), Timestamp: "2026-01-15T03:00:00Z"},
 			wantErr: "mutually exclusive",
 		},
 		{
@@ -389,7 +389,7 @@ func TestResolveRollbackSnapshotIDErrors(t *testing.T) {
 		},
 		{
 			name:    "missing snapshot id",
-			cmd:     RollbackCmd{TableID: "db.events", SnapshotID: int64Ptr(999)},
+			cmd:     RollbackCmd{TableID: "db.events", SnapshotID: new(int64(999))},
 			wantErr: "snapshot 999 not found",
 		},
 	}
@@ -551,7 +551,7 @@ func TestRunRollbackRejectsNonAncestor(t *testing.T) {
 	exitCode := captureExit(func() {
 		runRollback(context.Background(), &errOut, cat, &RollbackCmd{
 			TableID:    "db.events",
-			SnapshotID: int64Ptr(300),
+			SnapshotID: new(int64(300)),
 			Yes:        true,
 		})
 	})
@@ -575,7 +575,7 @@ func TestRunRollbackRejectsInvalidSelectorsBeforeLoad(t *testing.T) {
 			name: "snapshot id and timestamp",
 			cmd: RollbackCmd{
 				TableID:    "db.events",
-				SnapshotID: int64Ptr(100),
+				SnapshotID: new(int64(100)),
 				Timestamp:  time.UnixMilli(1515100955770).UTC().Format(time.RFC3339),
 			},
 			wantErr: "mutually exclusive",
@@ -705,10 +705,6 @@ func upgradeRollbackTestTable(t *testing.T) *table.Table {
 	require.NoError(t, err)
 
 	return table.New([]string{"db", "events"}, meta, "", nil, nil)
-}
-
-func int64Ptr(v int64) *int64 {
-	return &v
 }
 
 type errCapture struct {
