@@ -1173,19 +1173,20 @@ func (m *inclusiveMetricsEval) visitIn(
 		hasUpperBound          bool
 	)
 	if hasExtrema {
+		cmp := getCmpLiteral(minLit)
 		lowerBound, hasLowerBound = m.boundFor(t, m.lowerBounds[fieldID])
 		if hasLowerBound {
 			if m.isNan(lowerBound) {
 				return rowsMightMatch
 			}
 
-			if getCmpLiteral(lowerBound)(lowerBound, maxLit) > 0 {
+			if cmp(lowerBound, maxLit) > 0 {
 				return rowsCannotMatch
 			}
 		}
 
 		upperBound, hasUpperBound = m.boundFor(t, m.upperBounds[fieldID])
-		if hasUpperBound && !m.isNan(upperBound) && getCmpLiteral(upperBound)(upperBound, minLit) < 0 {
+		if hasUpperBound && !m.isNan(upperBound) && cmp(upperBound, minLit) < 0 {
 			return rowsCannotMatch
 		}
 
