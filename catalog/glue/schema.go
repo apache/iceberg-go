@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
@@ -74,7 +75,7 @@ func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Colum
 	// Preserve nil for fields that have never had an Iceberg doc, but keep an
 	// explicit empty string when a documented field was cleared in a later schema.
 	clearedComments := make(map[string]struct{})
-	for _, field := range currentSchema.Fields() {
+	for _, field := range currentSchema.FieldsRef(iceberginternal.SchemaRef{}) {
 		if field.Doc != "" {
 			continue
 		}
@@ -83,7 +84,7 @@ func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Colum
 			if schema.ID == currentSchema.ID {
 				continue
 			}
-			if previous, ok := schema.FindFieldByID(field.ID); ok && previous.Doc != "" {
+			if previous, ok := schema.FindFieldByIDRef(field.ID, iceberginternal.SchemaRef{}); ok && previous.Doc != "" {
 				clearedComments[strconv.Itoa(field.ID)] = struct{}{}
 
 				break
@@ -113,7 +114,7 @@ func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Colum
 // schemaToGlueColumns converts an Iceberg schema to a list of Glue columns.
 func schemaToGlueColumns(schema *iceberg.Schema, isCurrent bool) []types.Column {
 	var columns []types.Column
-	for _, field := range schema.Fields() {
+	for _, field := range schema.FieldsRef(iceberginternal.SchemaRef{}) {
 		columns = append(columns, fieldToGlueColumn(field, isCurrent))
 	}
 
