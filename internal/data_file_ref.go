@@ -71,23 +71,6 @@ type DataFileCollections interface {
 	EqualityFieldIDs() []int
 }
 
-// DataFileSplitOffsetsRef exposes the immutable split-offset slice to trusted
-// in-module callers without invoking the public defensive-copy getter.
-type DataFileSplitOffsetsRef interface {
-	DataFileSplitOffsetsRef(DataFileRef) []int64
-}
-
-// BorrowedDataFileSplitOffsets returns split offsets without copying when the
-// file exposes the trusted reference path. The returned slice is read-only and
-// must not be mutated or retained beyond the current planning or read operation.
-func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
-	if ref, ok := file.(DataFileSplitOffsetsRef); ok {
-		return ref.DataFileSplitOffsetsRef(DataFileRef{})
-	}
-
-	return file.SplitOffsets()
-}
-
 type DataFileCollectionsRef interface {
 	DataFileCollectionsRef(DataFileRef) (
 		columnSizes map[int]int64,
@@ -95,6 +78,20 @@ type DataFileCollectionsRef interface {
 		splitOffsets []int64,
 		equalityFieldIDs []int,
 	)
+}
+
+// BorrowedDataFileSplitOffsets returns split offsets without copying for the
+// built-in data file and falls back to the public getter for external
+// implementations. The returned slice is read-only and must not be mutated or
+// retained beyond the current planning or read operation.
+func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
+	if ref, ok := file.(DataFileCollectionsRef); ok {
+		_, _, splitOffsets, _ := ref.DataFileCollectionsRef(DataFileRef{})
+
+		return splitOffsets
+	}
+
+	return file.SplitOffsets()
 }
 
 func BorrowedDataFileCollections(file DataFileCollections) (
