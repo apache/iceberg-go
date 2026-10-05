@@ -3328,6 +3328,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
 			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
 			WithLabels(t.tbl.labels),
+			WithSavedConfig(t.tbl.savedConfig),
 		),
 	}, nil
 }
