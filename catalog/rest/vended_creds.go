@@ -227,7 +227,10 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 
 // replaceIO installs io as the cached IO. The superseded IO is left open:
 // callers that loaded it earlier may still be using it, and its credentials
-// remain valid until their own expiry.
+// remain valid until their own expiry. Its cancel is dropped without being
+// called on purpose: cancelling it would end the context those callers'
+// operations still run on. The detached context has no parent to deregister
+// from, so it is collected with the IO.
 func (v *vendedCredentialRefresher) replaceIO(io iceio.IO, cancel context.CancelFunc) {
 	v.cachedIO, v.ioCancel = io, cancel
 }
