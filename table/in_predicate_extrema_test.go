@@ -286,7 +286,7 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			expr:   iceberg.IsIn(iceberg.Reference("value"), "a", "b"),
 			minLit: iceberg.NewLiteral("a"), maxLit: iceberg.NewLiteral("b"),
 			lower: iceberg.NewLiteral("a"), upper: iceberg.NewLiteral("a"),
-			want:   true,
+			want: true,
 		},
 		{
 			name:   "decimal upper disjoint",
@@ -301,7 +301,7 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			expr:   iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
 			minLit: iceberg.NewLiteral(decimal(100)), maxLit: iceberg.NewLiteral(decimal(200)),
 			lower: iceberg.NewLiteral(decimal(100)), upper: iceberg.NewLiteral(decimal(150)),
-			want:   true,
+			want: true,
 		},
 		{
 			name:   "binary lower disjoint",
@@ -316,7 +316,7 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			expr:   iceberg.IsIn(iceberg.Reference("value"), []byte{1}, []byte{2}),
 			minLit: iceberg.NewLiteral([]byte{1}), maxLit: iceberg.NewLiteral([]byte{2}),
 			lower: iceberg.NewLiteral([]byte{1}), upper: iceberg.NewLiteral([]byte{1}),
-			want:   true,
+			want: true,
 		},
 		{
 			name:   "date upper disjoint",
@@ -331,7 +331,7 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Date(10), iceberg.Date(20)),
 			minLit: iceberg.NewLiteral(iceberg.Date(10)), maxLit: iceberg.NewLiteral(iceberg.Date(20)),
 			lower: iceberg.NewLiteral(iceberg.Date(10)), upper: iceberg.NewLiteral(iceberg.Date(15)),
-			want:   true,
+			want: true,
 		},
 		{
 			name:   "timestamp lower disjoint",
@@ -346,7 +346,7 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Timestamp(10), iceberg.Timestamp(20)),
 			minLit: iceberg.NewLiteral(iceberg.Timestamp(10)), maxLit: iceberg.NewLiteral(iceberg.Timestamp(20)),
 			lower: iceberg.NewLiteral(iceberg.Timestamp(10)), upper: iceberg.NewLiteral(iceberg.Timestamp(15)),
-			want:   true,
+			want: true,
 		},
 	}
 
