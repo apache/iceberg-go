@@ -172,8 +172,9 @@ func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.S
 	return m.visitIn(term, literals, nil, nil)
 }
 
-// VisitInWithExtrema expects minLit and maxLit to be the actual extrema of
-// literals. If either is nil, it uses the same member scan as VisitIn.
+// VisitInWithExtrema expects minLit and maxLit to either both be the actual
+// extrema of literals or both be nil. A partial pair is treated as unavailable
+// and follows the same path as VisitIn.
 func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
 	return m.visitIn(term, literals, minLit, maxLit)
 }
@@ -1190,8 +1191,9 @@ func (m *inclusiveMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceber
 	return m.visitIn(t, s, nil, nil)
 }
 
-// VisitInWithExtrema expects minLit and maxLit to be the actual extrema of s.
-// If either is nil, it uses the same member scan as VisitIn.
+// VisitInWithExtrema expects minLit and maxLit to either both be the actual
+// extrema of s or both be nil. A partial pair is treated as unavailable and
+// follows the same path as VisitIn.
 func (m *inclusiveMetricsEval) VisitInWithExtrema(
 	t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal,
 ) bool {
@@ -1207,12 +1209,12 @@ func (m *inclusiveMetricsEval) visitIn(
 		return rowsCannotMatch
 	}
 
-	if s.Len() > inPredicateLimit {
-		// skip evaluating the predicate if the number of values is too big
+	hasExtrema := minLit != nil && maxLit != nil
+	oversized := s.Len() > inPredicateLimit
+	if oversized && !hasExtrema {
+		// Skip evaluating the predicate if the number of values is too big.
 		return rowsMightMatch
 	}
-
-	hasExtrema := minLit != nil && maxLit != nil
 
 	lowerBound, hasLowerBound := m.boundFor(t, m.lowerBounds[fieldID])
 	if hasLowerBound {
@@ -1235,6 +1237,11 @@ func (m *inclusiveMetricsEval) visitIn(
 		if hasExtrema && compareBoundLiterals(upperBound, minLit) < 0 {
 			return rowsCannotMatch
 		}
+	}
+
+	if oversized {
+		// Extrema checks above stay O(1); only the per-member scan is capped.
+		return rowsMightMatch
 	}
 
 	values := s.Members()
