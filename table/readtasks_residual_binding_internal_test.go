@@ -19,6 +19,8 @@ package table
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -156,40 +158,77 @@ func TestReadTasksResidualPlanIsReusable(t *testing.T) {
 }
 
 func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
-	scan, schema := residualBindingTestScan(t)
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	location := t.TempDir()
+	metadata, err := NewMetadata(
+		schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, location, nil,
+	)
+	require.NoError(t, err)
+	tbl := New(
+		Identifier{"db", "tbl"}, metadata, filepath.Join(location, "metadata.json"),
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil,
+	)
+	scan := tbl.Scan(WithMaxConcurrency(4))
+
 	unbound := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
 	bound, err := iceberg.BindExpr(schema, unbound, true)
 	require.NoError(t, err)
-
-	builder, err := iceberg.NewDataFileBuilder(
-		*iceberg.UnpartitionedSpec,
-		iceberg.EntryContentData,
-		"mem://mixed-residuals/missing.parquet",
-		iceberg.ParquetFile,
-		nil,
-		nil,
-		nil,
-		1,
-		128,
-	)
-	require.NoError(t, err)
-	file := builder.Build()
-	tasks := []FileScanTask{{File: file, Residual: bound}}
-	original := tasks[0]
-
-	_, records, err := scan.ReadTasks(t.Context(), tasks)
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, false, false)
 	require.NoError(t, err)
 
-	sawReadError := false
-	for _, readErr := range records {
-		require.Error(t, readErr)
-		sawReadError = true
-
-		break
+	paths := []string{
+		filepath.Join(location, "data-1.parquet"),
+		filepath.Join(location, "data-2.parquet"),
 	}
-	require.True(t, sawReadError)
-	require.Same(t, original.File, tasks[0].File)
-	require.Same(t, original.Residual, tasks[0].Residual)
-	require.Equal(t, original.Start, tasks[0].Start)
-	require.Equal(t, original.Length, tasks[0].Length)
+	rows := []string{
+		`[{"id":2}]`,
+		`[{"id":3}]`,
+	}
+	tasks := make([]FileScanTask, len(paths))
+	for i, path := range paths {
+		writeParquetFile(t, path, arrowSchema, rows[i])
+		info, statErr := os.Stat(path)
+		require.NoError(t, statErr)
+
+		builder, buildErr := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentData,
+			path,
+			iceberg.ParquetFile,
+			nil,
+			nil,
+			nil,
+			1,
+			info.Size(),
+		)
+		require.NoError(t, buildErr)
+		tasks[i] = FileScanTask{File: builder.Build(), Residual: bound}
+	}
+	snapshot := append([]FileScanTask(nil), tasks...)
+
+	errCh := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, records, readErr := scan.ReadTasks(t.Context(), tasks)
+			if readErr != nil {
+				errCh <- readErr
+				return
+			}
+			for record, iterErr := range records {
+				if iterErr != nil {
+					errCh <- iterErr
+					return
+				}
+				record.Release()
+			}
+			errCh <- nil
+		}()
+	}
+
+	for range 2 {
+		require.NoError(t, <-errCh)
+	}
+	require.Equal(t, snapshot, tasks)
 }
