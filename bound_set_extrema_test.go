@@ -22,6 +22,7 @@ import (
 	"math"
 	"testing"
 
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,26 +34,82 @@ func TestBoundSetExtremaUnavailableForGeoLiterals(t *testing.T) {
 
 		return data
 	}
-	geomType := GeometryType{}
-	first, err := LiteralFromBytes(geomType, geoBytes(1, 2))
-	require.NoError(t, err)
-	second, err := LiteralFromBytes(geomType, geoBytes(3, 4))
-	require.NoError(t, err)
 
-	schema := NewSchema(1, NestedField{ID: 1, Name: "geom", Type: geomType})
+	for _, tt := range []struct {
+		name string
+		typ  Type
+	}{
+		{name: "geometry", typ: GeometryType{}},
+		{name: "geography", typ: GeographyType{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			first, err := LiteralFromBytes(tt.typ, geoBytes(1, 2))
+			require.NoError(t, err)
+			second, err := LiteralFromBytes(tt.typ, geoBytes(3, 4))
+			require.NoError(t, err)
+
+			schema := NewSchema(1, NestedField{ID: 1, Name: "geo", Type: tt.typ})
+			bound, err := BindExpr(
+				schema,
+				SetPredicate(OpIn, Reference("geo"), []Literal{first, second}),
+				true,
+			)
+			require.NoError(t, err)
+			pred, ok := bound.(BoundPredicate)
+			require.True(t, ok)
+			extrema, ok := pred.(boundSetExtremaRef)
+			require.True(t, ok)
+
+			minLit, maxLit, hasExtrema := extrema.boundSetExtremaRef()
+			require.False(t, hasExtrema)
+			require.Nil(t, minLit)
+			require.Nil(t, maxLit)
+		})
+	}
+}
+
+type extremaDispatchProbe struct {
+	BoundBooleanExprVisitor[bool]
+	visitedIn      bool
+	visitedExtrema bool
+	minLit         Literal
+	maxLit         Literal
+}
+
+func (v *extremaDispatchProbe) VisitIn(BoundTerm, Set[Literal]) bool {
+	v.visitedIn = true
+
+	return false
+}
+
+func (v *extremaDispatchProbe) VisitInWithExtrema(_ BoundTerm, _ Set[Literal], minLit, maxLit Literal) bool {
+	v.visitedExtrema = true
+	v.minLit = minLit
+	v.maxLit = maxLit
+
+	return true
+}
+
+func TestVisitBoundPredicateRefDispatchesSetExtrema(t *testing.T) {
+	schema := NewSchema(1, NestedField{ID: 1, Name: "value", Type: PrimitiveTypes.Int32})
 	bound, err := BindExpr(
 		schema,
-		SetPredicate(OpIn, Reference("geom"), []Literal{first, second}),
+		IsIn(Reference("value"), int32(100), int32(1), int32(50)),
 		true,
 	)
 	require.NoError(t, err)
 	pred, ok := bound.(BoundPredicate)
 	require.True(t, ok)
-	extrema, ok := pred.(boundSetExtremaRef)
-	require.True(t, ok)
 
-	minLit, maxLit, hasExtrema := extrema.boundSetExtremaRef()
-	require.False(t, hasExtrema)
-	require.Nil(t, minLit)
-	require.Nil(t, maxLit)
+	borrowedVisitor := &extremaDispatchProbe{}
+	require.True(t, VisitBoundPredicateRef(pred, borrowedVisitor, iceberginternal.BoundPredicateRef{}))
+	require.True(t, borrowedVisitor.visitedExtrema)
+	require.False(t, borrowedVisitor.visitedIn)
+	require.Equal(t, int32(1), borrowedVisitor.minLit.(TypedLiteral[int32]).Value())
+	require.Equal(t, int32(100), borrowedVisitor.maxLit.(TypedLiteral[int32]).Value())
+
+	publicVisitor := &extremaDispatchProbe{}
+	require.False(t, VisitBoundPredicate(pred, publicVisitor))
+	require.False(t, publicVisitor.visitedExtrema)
+	require.True(t, publicVisitor.visitedIn)
 }
