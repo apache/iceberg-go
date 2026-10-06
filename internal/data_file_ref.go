@@ -17,6 +17,8 @@
 
 package internal
 
+import "slices"
+
 // DataFileRef authorizes zero-copy access to immutable DataFile state from
 // trusted packages within this module. Go's internal-package rule prevents
 // external callers from constructing this token.
@@ -92,7 +94,7 @@ func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
 		splitOffsets = file.SplitOffsets()
 	}
 
-	return splitOffsets[:len(splitOffsets):len(splitOffsets)]
+	return slices.Clip(splitOffsets)
 }
 
 func BorrowedDataFileCollections(file DataFileCollections) (
