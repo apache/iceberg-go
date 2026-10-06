@@ -422,7 +422,7 @@ func contentFileBuilder(
 	if err != nil {
 		return nil, "", err
 	}
-	partition, logicalTypes, fixedSizes, err := decodePartition(wire.Partition, plan)
+	partition, logicalTypes, err := decodePartition(wire.Partition, plan)
 	if err != nil {
 		return nil, "", err
 	}
@@ -438,7 +438,7 @@ func contentFileBuilder(
 		format,
 		partition,
 		logicalTypes,
-		fixedSizes,
+		nil,
 		wire.RecordCount,
 		wire.FileSizeInBytes,
 	)
@@ -506,8 +506,6 @@ type partitionDecodeField struct {
 	sourceTypeFound bool
 	resultType      iceberg.Type
 	logicalType     string
-	fixedSize       int
-	hasFixedSize    bool
 }
 
 func newPartitionDecodePlanCache() *partitionDecodePlanCache {
@@ -557,7 +555,7 @@ func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlan
 		fieldPlan.sourceTypeFound = ok
 		if ok {
 			fieldPlan.resultType = field.Transform.ResultType(sourceType)
-			fieldPlan.logicalType, fieldPlan.fixedSize, fieldPlan.hasFixedSize = partitionLogicalType(fieldPlan.resultType)
+			fieldPlan.logicalType = partitionLogicalType(fieldPlan.resultType)
 		}
 		plan.fields[i] = fieldPlan
 	}
@@ -568,15 +566,14 @@ func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlan
 func decodePartition(
 	values []json.RawMessage,
 	plan *partitionDecodePlan,
-) (map[int]any, map[int]string, map[int]int, error) {
+) (map[int]any, map[int]string, error) {
 	if len(values) != len(plan.fields) {
-		return nil, nil, nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"partition for spec ID %d has %d values, want %d", plan.spec.ID(), len(values), len(plan.fields))
 	}
 
 	partition := make(map[int]any, len(values))
-	logicalTypes := make(map[int]string)
-	fixedSizes := make(map[int]int)
+	var logicalTypes map[int]string
 	for i, field := range plan.fields {
 		raw := values[i]
 		if isJSONNull(raw) {
@@ -586,24 +583,24 @@ func decodePartition(
 		}
 
 		if !field.sourceTypeFound {
-			return nil, nil, nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"partition field %q (ID %d) has unknown source field ID %d",
 				field.fieldName, field.fieldID, field.sourceID)
 		}
 		literal, err := decodePartitionLiteral(raw, field.resultType)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("partition[%d] for field %q: %w", i, field.fieldName, err)
+			return nil, nil, fmt.Errorf("partition[%d] for field %q: %w", i, field.fieldName, err)
 		}
 		partition[field.fieldID] = literal.Any()
 		if field.logicalType != "" {
+			if logicalTypes == nil {
+				logicalTypes = make(map[int]string)
+			}
 			logicalTypes[field.fieldID] = field.logicalType
-		}
-		if field.hasFixedSize {
-			fixedSizes[field.fieldID] = field.fixedSize
 		}
 	}
 
-	return partition, logicalTypes, fixedSizes, nil
+	return partition, logicalTypes, nil
 }
 
 func findFieldType(fieldID int, metadata table.ScanPlanningMetadata) (iceberg.Type, bool) {
@@ -624,23 +621,23 @@ func findFieldType(fieldID int, metadata table.ScanPlanningMetadata) (iceberg.Ty
 	return nil, false
 }
 
-func partitionLogicalType(typ iceberg.Type) (string, int, bool) {
-	switch typ := typ.(type) {
+func partitionLogicalType(typ iceberg.Type) string {
+	switch typ.(type) {
 	case iceberg.DateType:
-		return atype.Date, 0, false
+		return atype.Date
 	case iceberg.TimeType:
-		return atype.TimeMicros, 0, false
+		return atype.TimeMicros
 	case iceberg.TimestampType, iceberg.TimestampTzType:
-		return atype.TimestampMicros, 0, false
+		return atype.TimestampMicros
 	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
-		return atype.TimestampNanos, 0, false
+		return atype.TimestampNanos
 	case iceberg.DecimalType:
-		return atype.Decimal, typ.Scale(), true
+		return atype.Decimal
 	case iceberg.UUIDType:
-		return atype.UUID, 0, false
+		return atype.UUID
 	}
 
-	return "", 0, false
+	return ""
 }
 
 func decodeCountMap(name string, wire *RESTCountMap) (map[int]int64, error) {
