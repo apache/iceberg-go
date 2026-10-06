@@ -85,13 +85,14 @@ type DataFileCollectionsRef interface {
 // implementations. The returned slice is read-only and must not be mutated or
 // retained beyond the current planning or read operation.
 func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
+	var splitOffsets []int64
 	if ref, ok := file.(DataFileCollectionsRef); ok {
-		_, _, splitOffsets, _ := ref.DataFileCollectionsRef(DataFileRef{})
-
-		return splitOffsets
+		_, _, splitOffsets, _ = ref.DataFileCollectionsRef(DataFileRef{})
+	} else {
+		splitOffsets = file.SplitOffsets()
 	}
 
-	return file.SplitOffsets()
+	return splitOffsets[:len(splitOffsets):len(splitOffsets)]
 }
 
 func BorrowedDataFileCollections(file DataFileCollections) (

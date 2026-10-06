@@ -912,7 +912,7 @@ func TestIsGCEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, isGCEnabled(tt.props))
+			require.Equal(t, tt.want, IsGCEnabled(tt.props))
 		})
 	}
 }
@@ -929,8 +929,10 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 
+	meta := txn.meta
 	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &mainSnapshotID)})
 	require.NoError(t, err)
+	require.Same(t, meta, txn.meta)
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 }
@@ -1297,7 +1299,9 @@ func TestTransactionApplyDefersMetadataBuildForNoopRequirements(t *testing.T) {
 		// A duplicate requirement only needs its conflict check. Make Build fail
 		// after the first apply so this path cannot accidentally rebuild metadata.
 		txn.meta.defaultSpecID = 999
+		meta := txn.meta
 		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+		require.Same(t, meta, txn.meta)
 		_, err := txn.meta.Build()
 		require.ErrorIs(t, err, ErrInvalidMetadata)
 	})
@@ -2170,4 +2174,36 @@ func TestTableCommitWithoutUpdatesStaysEmpty(t *testing.T) {
 
 	assert.Equal(t, []Requirement{}, tc.Requirements, "an empty payload must serialize as [], not null")
 	assert.Equal(t, []Update{}, tc.Updates, "an empty payload must serialize as [], not null")
+}
+
+func TestTransactionApplyDuplicateRequirementWithUpdates(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%t", fail), func(t *testing.T) {
+			txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+			requirement := AssertCurrentSchemaID(0)
+			require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+			before, err := txn.meta.Build()
+			require.NoError(t, err)
+			original := txn.meta
+			updates := []Update{NewSetPropertiesUpdate(iceberg.Properties{"test-key": "test-value"})}
+			if fail {
+				updates = append(updates, NewSetCurrentSchemaUpdate(9999))
+			}
+			err = txn.apply(updates, []Requirement{requirement})
+			require.Equal(t, []Requirement{requirement}, txn.reqs)
+			after, buildErr := txn.meta.Build()
+			require.NoError(t, buildErr)
+			if fail {
+				require.Error(t, err)
+				require.Same(t, original, txn.meta)
+				require.True(t, before.Equals(after))
+
+				return
+			}
+			require.NoError(t, err)
+			require.NotSame(t, original, txn.meta)
+			require.Equal(t, "test-value", after.Properties()["test-key"])
+			require.Empty(t, before.Properties()["test-key"])
+		})
+	}
 }

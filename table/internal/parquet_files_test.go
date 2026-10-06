@@ -737,6 +737,31 @@ func TestDataFileStatsFromMetaWithMalformedFixedLenDecimalStats(t *testing.T) {
 	assert.NotContains(t, dataFile.UpperBoundValues(), 15)
 }
 
+func TestDataFileStatsFromMetaPreservesCountsWhenStatsAreMissing(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	meta, tblMeta := constructTestTablePrimitiveTypes(t)
+	secondMeta, _ := constructTestTablePrimitiveTypes(t)
+	secondRowGroup := *secondMeta.RowGroups[0]
+	secondRowGroup.Columns = append(secondRowGroup.Columns[:0:0], secondRowGroup.Columns...)
+	meta.RowGroups = append(meta.RowGroups, &secondRowGroup)
+
+	const columnPos = 1 // field id 2: ints
+	meta.RowGroups[0].Columns[columnPos].MetaData.Statistics = nil
+
+	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+	require.NoError(t, err)
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil, nil)
+	secondGroupStats := format.DataFileStatsFromMeta(internal.Metadata(secondMeta), getCollector(), mapping, nil, nil)
+
+	require.Greater(t, secondGroupStats.ColSizes[2], int64(0))
+	require.Greater(t, secondGroupStats.ValueCounts[2], int64(0))
+	assert.Equal(t, 2*secondGroupStats.ColSizes[2], stats.ColSizes[2])
+	assert.Equal(t, 2*secondGroupStats.ValueCounts[2], stats.ValueCounts[2])
+	assert.NotContains(t, stats.NullValueCounts, 2)
+	assert.NotContains(t, stats.ColAggs, 2)
+}
+
 func TestDataFileStatsFromMetaDoesNotSkipInvalidatedColumnMetadata(t *testing.T) {
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 

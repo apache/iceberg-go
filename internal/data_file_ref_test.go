@@ -111,6 +111,9 @@ func TestBorrowedDataFileSplitOffsetsUsesBorrowedReference(t *testing.T) {
 			if len(got) > 0 && &got[0] != &tt.offsets[0] {
 				t.Fatal("BorrowedDataFileSplitOffsets() copied the borrowed offsets")
 			}
+			if cap(got) != len(got) {
+				t.Fatalf("BorrowedDataFileSplitOffsets() capacity = %d, want %d", cap(got), len(got))
+			}
 			if file.refCalls != 1 {
 				t.Fatalf("DataFileCollectionsRef() called %d times, want 1", file.refCalls)
 			}

@@ -630,6 +630,93 @@ func TestDecodePartitionLiteralRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONInteger(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		raw     string
+		bitSize int
+		want    int64
+		wantErr string
+	}{
+		{name: "int64 max", raw: `9223372036854775807`, bitSize: 64, want: math.MaxInt64},
+		{name: "int64 min with whitespace", raw: ` -9223372036854775808 `, bitSize: 64, want: math.MinInt64},
+		{name: "int32 max", raw: `2147483647`, bitSize: 32, want: math.MaxInt32},
+		{name: "int32 min", raw: `-2147483648`, bitSize: 32, want: math.MinInt32},
+		{name: "above float precision", raw: `9007199254740993`, bitSize: 64, want: 9007199254740993},
+		{name: "quoted integer", raw: `"34"`, bitSize: 32, want: 34},
+		{name: "escaped integer", raw: `"\u0033\u0034"`, bitSize: 64, want: 34},
+		{name: "quoted overflow", raw: `"9223372036854775808"`, bitSize: 64, wantErr: "invalid integer value"},
+		{name: "invalid quoted number", raw: `"not-a-number"`, bitSize: 64, wantErr: "invalid integer value"},
+		{name: "non JSON whitespace", raw: "\u00a01\u00a0", bitSize: 64, wantErr: "invalid JSON number"},
+		{name: "fraction", raw: `1.5`, bitSize: 64, wantErr: "invalid integer value"},
+		{name: "exponent", raw: `1e2`, bitSize: 64, wantErr: "invalid integer value"},
+		{name: "int64 overflow", raw: `9223372036854775808`, bitSize: 64, wantErr: "invalid integer value"},
+		{name: "int32 overflow", raw: `2147483648`, bitSize: 32, wantErr: "outside int32 range"},
+		{name: "leading plus", raw: `+1`, bitSize: 64, wantErr: "invalid JSON number"},
+		{name: "leading zero", raw: `01`, bitSize: 64, wantErr: "invalid JSON number"},
+		{name: "trailing value", raw: `1 2`, bitSize: 64, wantErr: "invalid JSON number"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := decodeJSONInteger(json.RawMessage(tt.raw), tt.bitSize)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestDecodeJSONFloat(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name        string
+		raw         string
+		bitSize     int
+		want        float64
+		wantSignbit bool
+		wantErr     string
+	}{
+		{name: "exponent with whitespace", raw: ` -1.25e2 `, bitSize: 64, want: -125},
+		{name: "negative zero", raw: `-0`, bitSize: 64, wantSignbit: true},
+		{name: "float32 range", raw: `3.4028234e38`, bitSize: 32, want: 3.4028234e38},
+		{name: "float32 overflow", raw: `3.5e38`, bitSize: 32, wantErr: "outside float32 range"},
+		{name: "quoted float", raw: `"1.25"`, bitSize: 64, want: 1.25},
+		{name: "escaped float", raw: `"\u0031.25"`, bitSize: 32, want: 1.25},
+		{name: "quoted exponent", raw: `"-1.25e2"`, bitSize: 64, want: -125},
+		{name: "quoted negative zero", raw: `"-0"`, bitSize: 64, wantSignbit: true},
+		{name: "quoted overflow", raw: `"1e999"`, bitSize: 64, wantErr: "invalid floating-point value"},
+		{name: "invalid quoted number", raw: `"NaN"`, bitSize: 64, wantErr: "invalid floating-point value"},
+		{name: "non JSON whitespace", raw: "\u00a01.25\u00a0", bitSize: 64, wantErr: "invalid JSON number"},
+		{name: "overflow", raw: `1e999`, bitSize: 64, wantErr: "invalid floating-point value"},
+		{name: "leading plus", raw: `+1.5`, bitSize: 64, wantErr: "invalid JSON number"},
+		{name: "trailing value", raw: `1.5 2`, bitSize: 64, wantErr: "invalid JSON number"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := decodeJSONFloat(json.RawMessage(tt.raw), tt.bitSize)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			if tt.wantSignbit {
+				assert.True(t, math.Signbit(got))
+			}
+		})
+	}
+}
+
 func validScanTasksWire() ScanTasks {
 	data := RESTContentFile{
 		SpecID:          7,

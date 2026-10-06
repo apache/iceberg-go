@@ -1602,12 +1602,14 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
+			// These metrics come from column chunk metadata, so keep totaling them even when stats are invalid.
+			// This deliberately diverges from Java, which drops value_counts for a column once any row group lacks stats.
+			colSizes[fieldID] += colChunk.TotalCompressedSize()
+			valueCounts[fieldID] += colChunk.NumValues()
 			if _, invalid := invalidateCol[fieldID]; invalid {
 				continue
 			}
 
-			colSizes[fieldID] += colChunk.TotalCompressedSize()
-			valueCounts[fieldID] += colChunk.NumValues()
 			set, err := colChunk.StatsSet()
 			if err != nil {
 				panic(err)
@@ -1923,11 +1925,11 @@ type ParquetRowGroupTester struct {
 	// Parquet row-group offset falls in [Start, Start+Length).
 	Start, Length int64
 	// PlanningSplitOffsets contains the split offsets used when the scan task
-	// was planned. It may be a borrowed view of DataFile state and must be treated
-	// as read-only for the lifetime of this tester. When it contains one valid
-	// offset per row group, range
-	// selection uses these offsets instead of re-deriving them from the opened
-	// Parquet footer. Sparse split-offset lists fall back to the footer offsets.
+	// was planned. It may be a borrowed view of DataFile state and must be
+	// treated as read-only for the lifetime of this tester. When it contains one
+	// valid offset per row group, range selection uses these offsets instead of
+	// re-deriving them from the opened Parquet footer. Sparse split-offset lists
+	// fall back to the footer offsets.
 	PlanningSplitOffsets []int64
 	// Survivors, if non-nil, is reset and then filled with one span per row group
 	// that survives pruning, in file order, with positions relative to the full

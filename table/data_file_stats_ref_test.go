@@ -193,6 +193,7 @@ func TestBorrowedDataFileSplitOffsetsUsesBuiltInBackingSlice(t *testing.T) {
 	require.NotEmpty(t, first)
 	require.Equal(t, first, second)
 	require.Equal(t, first, public)
+	require.Equal(t, len(first), cap(first))
 
 	if &first[0] != &second[0] {
 		t.Fatal("borrowed split offsets do not share the built-in data file backing slice")
@@ -200,6 +201,17 @@ func TestBorrowedDataFileSplitOffsetsUsesBuiltInBackingSlice(t *testing.T) {
 	if &first[0] == &public[0] {
 		t.Fatal("public SplitOffsets unexpectedly exposed the built-in backing slice")
 	}
+}
+
+func TestDataFileEqualityFieldIDsClonesBorrowedView(t *testing.T) {
+	file := testDataFileWithStats(t)
+	require.Implements(t, (*internal.DataFileCollectionsRef)(nil), file)
+
+	fieldIDs := dataFileEqualityFieldIDs(file)
+	require.Equal(t, []int{1}, fieldIDs)
+	fieldIDs[0] = 99
+
+	assert.Equal(t, []int{1}, file.EqualityFieldIDs())
 }
 
 func TestDataFileCollectionsFallsBackToPublicGetters(t *testing.T) {
