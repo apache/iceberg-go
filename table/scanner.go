@@ -2151,30 +2151,6 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 	return scan.ReadTasks(ctx, tasks)
 }
 
-// ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
-// scan's projection, per-task residual filters, and delete handling. This is useful
-// when the caller has already planned or selected specific tasks to read.
-// Positional- and equality-delete read errors are delivered through the iterator
-// only if iteration reaches the task that encounters the error; a row limit or
-// early termination may finish the scan before the error is observed.
-// Deletion-vector manifest references are validated during setup. Deletion-vector
-// format and blob-level validation happen when the Puffin file is read. Deletion-vector
-// read errors are delivered through the iterator when a task referencing that file is
-// reached; if no such task is processed, the file is not read and its error is not
-// returned. The returned iterator is single-use.
-//
-// The caller must not modify tasks or any task element until the returned
-// iterator is exhausted or abandoned. When every residual is already bound,
-// ReadTasks may retain the caller's backing array instead of cloning it.
-//
-// With [WithMaxConcurrency] above one, tasks are decoded in parallel and the
-// batches are returned in task order. Each worker holds the decoded batches of
-// at most one task until the iterator has returned them, so while an early task
-// is slow to open or decode, the batches waiting behind it total at most the
-// worker count times the rows in the largest task, rounded up to a multiple of
-// the batch size (see [WithArrowBatchSize]). One large file among small ones can
-// therefore still hold its whole decoded contents while it waits. The bound for
-// a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 // bindReadTasksResiduals keeps the caller's task slice untouched. If every
 // residual is nil or already bound, the returned slice aliases tasks and must
 // remain read-only. It clones once, on the first residual that needs binding.
@@ -2205,6 +2181,30 @@ func bindReadTasksResiduals(
 	return readTasks, nil
 }
 
+// ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
+// scan's projection, per-task residual filters, and delete handling. This is useful
+// when the caller has already planned or selected specific tasks to read.
+// Positional- and equality-delete read errors are delivered through the iterator
+// only if iteration reaches the task that encounters the error; a row limit or
+// early termination may finish the scan before the error is observed.
+// Deletion-vector manifest references are validated during setup. Deletion-vector
+// format and blob-level validation happen when the Puffin file is read. Deletion-vector
+// read errors are delivered through the iterator when a task referencing that file is
+// reached; if no such task is processed, the file is not read and its error is not
+// returned. The returned iterator is single-use.
+//
+// The caller must not modify tasks or any task element until the returned
+// iterator is exhausted or abandoned. When every residual is already bound,
+// ReadTasks may retain the caller's backing array instead of cloning it.
+//
+// With [WithMaxConcurrency] above one, tasks are decoded in parallel and the
+// batches are returned in task order. Each worker holds the decoded batches of
+// at most one task until the iterator has returned them, so while an early task
+// is slow to open or decode, the batches waiting behind it total at most the
+// worker count times the rows in the largest task, rounded up to a multiple of
+// the batch size (see [WithArrowBatchSize]). One large file among small ones can
+// therefore still hold its whole decoded contents while it waits. The bound for
+// a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
