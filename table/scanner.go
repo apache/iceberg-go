@@ -2194,8 +2194,9 @@ func bindReadTasksResiduals(
 // returned. The returned iterator is single-use.
 //
 // The caller must not modify tasks or any task element until the returned
-// iterator is exhausted or abandoned. When every residual is already bound,
-// ReadTasks may retain the caller's backing array instead of cloning it.
+// iterator is exhausted or abandoned. When no residual needs binding (each is
+// nil or already bound), ReadTasks may retain the caller's backing array
+// instead of cloning it.
 //
 // With [WithMaxConcurrency] above one, tasks are decoded in parallel and the
 // batches are returned in task order. Each worker holds the decoded batches of
