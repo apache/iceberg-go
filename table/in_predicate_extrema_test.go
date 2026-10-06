@@ -240,45 +240,45 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 	}
 
 	tests := []struct {
-		name             string
-		typ              iceberg.Type
-		expr             iceberg.BooleanExpression
-		minLit, maxLit   iceberg.Literal
-		lower, upper     iceberg.Literal
-		want             bool
+		name           string
+		typ            iceberg.Type
+		expr           iceberg.BooleanExpression
+		minLit, maxLit iceberg.Literal
+		lower, upper   iceberg.Literal
+		want           bool
 	}{
 		{
-			name: "string lower disjoint",
-			typ: iceberg.PrimitiveTypes.String,
-			expr: iceberg.IsIn(iceberg.Reference("value"), "a", "b"),
+			name:   "string lower disjoint",
+			typ:    iceberg.PrimitiveTypes.String,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), "a", "b"),
 			minLit: iceberg.NewLiteral("a"), maxLit: iceberg.NewLiteral("b"),
 			lower: iceberg.NewLiteral("m"), upper: iceberg.NewLiteral("z"),
 		},
 		{
-			name: "decimal upper disjoint",
-			typ: iceberg.DecimalTypeOf(12, 2),
-			expr: iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
+			name:   "decimal upper disjoint",
+			typ:    iceberg.DecimalTypeOf(12, 2),
+			expr:   iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
 			minLit: iceberg.NewLiteral(decimal(100)), maxLit: iceberg.NewLiteral(decimal(200)),
 			lower: iceberg.NewLiteral(decimal(-200)), upper: iceberg.NewLiteral(decimal(0)),
 		},
 		{
-			name: "binary lower disjoint",
-			typ: iceberg.PrimitiveTypes.Binary,
-			expr: iceberg.IsIn(iceberg.Reference("value"), []byte{1}, []byte{2}),
+			name:   "binary lower disjoint",
+			typ:    iceberg.PrimitiveTypes.Binary,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), []byte{1}, []byte{2}),
 			minLit: iceberg.NewLiteral([]byte{1}), maxLit: iceberg.NewLiteral([]byte{2}),
 			lower: iceberg.NewLiteral([]byte{10}), upper: iceberg.NewLiteral([]byte{20}),
 		},
 		{
-			name: "date upper disjoint",
-			typ: iceberg.PrimitiveTypes.Date,
-			expr: iceberg.IsIn(iceberg.Reference("value"), iceberg.Date(10), iceberg.Date(20)),
+			name:   "date upper disjoint",
+			typ:    iceberg.PrimitiveTypes.Date,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Date(10), iceberg.Date(20)),
 			minLit: iceberg.NewLiteral(iceberg.Date(10)), maxLit: iceberg.NewLiteral(iceberg.Date(20)),
 			lower: iceberg.NewLiteral(iceberg.Date(-10)), upper: iceberg.NewLiteral(iceberg.Date(0)),
 		},
 		{
-			name: "timestamp lower disjoint",
-			typ: iceberg.PrimitiveTypes.Timestamp,
-			expr: iceberg.IsIn(iceberg.Reference("value"), iceberg.Timestamp(10), iceberg.Timestamp(20)),
+			name:   "timestamp lower disjoint",
+			typ:    iceberg.PrimitiveTypes.Timestamp,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Timestamp(10), iceberg.Timestamp(20)),
 			minLit: iceberg.NewLiteral(iceberg.Timestamp(10)), maxLit: iceberg.NewLiteral(iceberg.Timestamp(20)),
 			lower: iceberg.NewLiteral(iceberg.Timestamp(30)), upper: iceberg.NewLiteral(iceberg.Timestamp(40)),
 		},
@@ -299,8 +299,8 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			newVisitor := func() *inclusiveMetricsEval {
 				return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
 					valueCounts: map[int]int64{1: 10},
-					nullCounts: map[int]int64{1: 0},
-					nanCounts: map[int]int64{1: 0},
+					nullCounts:  map[int]int64{1: 0},
+					nanCounts:   map[int]int64{1: 0},
 					lowerBounds: map[int][]byte{1: lower},
 					upperBounds: map[int][]byte{1: upper},
 				}}
@@ -329,8 +329,8 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaPartialNilUsesSlowPath(t *te
 	newVisitor := func() *inclusiveMetricsEval {
 		return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
 			valueCounts: map[int]int64{1: 10},
-			nullCounts: map[int]int64{1: 0},
-			nanCounts: map[int]int64{1: 0},
+			nullCounts:  map[int]int64{1: 0},
+			nanCounts:   map[int]int64{1: 0},
 			lowerBounds: map[int][]byte{1: lower},
 			upperBounds: map[int][]byte{1: upper},
 		}}
@@ -358,8 +358,8 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaVariantExtract(t *testing.T)
 	newVisitor := func() *inclusiveMetricsEval {
 		return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
 			valueCounts: map[int]int64{1: 10},
-			nullCounts: map[int]int64{1: 0},
-			nanCounts: map[int]int64{1: 0},
+			nullCounts:  map[int]int64{1: 0},
+			nanCounts:   map[int]int64{1: 0},
 			lowerBounds: map[int][]byte{1: variantMetricBoundInt64(t, "$['a']", 10)},
 			upperBounds: map[int][]byte{1: variantMetricBoundInt64(t, "$['a']", 20)},
 		}}
