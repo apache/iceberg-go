@@ -126,14 +126,14 @@ func TestBuild_RepeatedBuildsAreStable(t *testing.T) {
 	for range 2 {
 		res, err := b.Build()
 		require.NoError(t, err)
-		require.Equal(t, first.Metadata.ViewUUID(), res.Metadata.ViewUUID())
-		require.Equal(t, first.Metadata.VersionLog(), res.Metadata.VersionLog())
+		require.Equal(t, first.ViewUUID(), res.ViewUUID())
+		require.Equal(t, first.VersionLog(), res.VersionLog())
 	}
 
 	assigned := uuid.New()
 	res, err := b.SetUUID(assigned).Build()
 	require.NoError(t, err)
-	require.Equal(t, assigned, res.Metadata.ViewUUID())
+	require.Equal(t, assigned, res.ViewUUID())
 }
 
 func TestBuild_DoesNotGrowVersionLogWhenExpiringVersions(t *testing.T) {
@@ -153,8 +153,8 @@ func TestBuild_DoesNotGrowVersionLogWhenExpiringVersions(t *testing.T) {
 	for range 2 {
 		res, err := b.Build()
 		require.NoError(t, err)
-		require.Equal(t, first.Metadata.VersionLog(), res.Metadata.VersionLog())
-		require.Equal(t, first.Metadata.ViewUUID(), res.Metadata.ViewUUID())
+		require.Equal(t, first.VersionLog(), res.VersionLog())
+		require.Equal(t, first.ViewUUID(), res.ViewUUID())
 		require.Empty(t, b.versionLog, "Build must not append to the builder's own log")
 	}
 }
@@ -169,22 +169,22 @@ func TestBuild_FromBaseDoesNotGrowVersionLog(t *testing.T) {
 		SetCurrentVersionID(LastAddedID).
 		Build()
 	require.NoError(t, err)
-	baseLog := base.Metadata.VersionLog()
+	baseLog := base.VersionLog()
 	require.Len(t, baseLog, 1)
 
 	b, err := MetadataBuilderFromBase(base.Metadata)
 	require.NoError(t, err)
-	schemaID := base.Metadata.CurrentVersion().SchemaID
+	schemaID := base.CurrentVersion().SchemaID
 	b.AddVersion(newTestVersionWithSQL(2, schemaID, "select 2")).SetCurrentVersionID(LastAddedID)
 
 	first, err := b.Build()
 	require.NoError(t, err)
-	require.Len(t, first.Metadata.VersionLog(), 2)
+	require.Len(t, first.VersionLog(), 2)
 	for range 2 {
 		res, err := b.Build()
 		require.NoError(t, err)
-		require.Equal(t, first.Metadata.VersionLog(), res.Metadata.VersionLog())
-		require.Equal(t, base.Metadata.ViewUUID(), res.Metadata.ViewUUID())
+		require.Equal(t, first.VersionLog(), res.VersionLog())
+		require.Equal(t, base.ViewUUID(), res.ViewUUID())
 		require.Equal(t, baseLog, b.versionLog, "Build must not append to the builder's own log")
 	}
 }
