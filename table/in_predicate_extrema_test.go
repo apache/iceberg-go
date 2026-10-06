@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,8 +182,15 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 	}
 
 	t.Run("NaN bounds fail open", func(t *testing.T) {
-		nan, err := iceberg.NewLiteral(math.NaN()).MarshalBinary()
-		require.NoError(t, err)
+		encodeFloat := func(value float64) []byte {
+			encoded, err := iceberg.NewLiteral(value).MarshalBinary()
+			require.NoError(t, err)
+
+			return encoded
+		}
+		nan := encodeFloat(math.NaN())
+		finiteLower := encodeFloat(0)
+		finiteUpper := encodeFloat(3)
 		floatSchema := iceberg.NewSchema(1, iceberg.NestedField{
 			ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Float64,
 		})
@@ -191,9 +199,20 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		got, err := floatEval(inclusiveMetricsInTestFile(t, nan, nan))
-		require.NoError(t, err)
-		assert.True(t, got)
+		for _, bounds := range []struct {
+			name         string
+			lower, upper []byte
+		}{
+			{name: "both NaN", lower: nan, upper: nan},
+			{name: "NaN lower finite upper", lower: nan, upper: finiteUpper},
+			{name: "finite lower NaN upper", lower: finiteLower, upper: nan},
+		} {
+			t.Run(bounds.name, func(t *testing.T) {
+				got, err := floatEval(inclusiveMetricsInTestFile(t, bounds.lower, bounds.upper))
+				require.NoError(t, err)
+				assert.True(t, got)
+			})
+		}
 	})
 
 	t.Run("oversized set keeps existing fallback", func(t *testing.T) {
@@ -206,12 +225,166 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 		)
 		require.NoError(t, err)
 
+		disjointLower := int32(inPredicateLimit + 1000)
 		got, err := largeEval(inclusiveMetricsInTestFile(
-			t, encode(int32(inPredicateLimit+1)), encode(int32(inPredicateLimit+1)),
+			t, encode(disjointLower), encode(disjointLower+1),
 		))
 		require.NoError(t, err)
 		assert.True(t, got)
 	})
+}
+
+func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) {
+	decimal := func(value int64) iceberg.Decimal {
+		return iceberg.Decimal{Val: decimal128.FromI64(value), Scale: 2}
+	}
+
+	tests := []struct {
+		name             string
+		typ              iceberg.Type
+		expr             iceberg.BooleanExpression
+		minLit, maxLit   iceberg.Literal
+		lower, upper     iceberg.Literal
+		want             bool
+	}{
+		{
+			name: "string lower disjoint",
+			typ: iceberg.PrimitiveTypes.String,
+			expr: iceberg.IsIn(iceberg.Reference("value"), "a", "b"),
+			minLit: iceberg.NewLiteral("a"), maxLit: iceberg.NewLiteral("b"),
+			lower: iceberg.NewLiteral("m"), upper: iceberg.NewLiteral("z"),
+		},
+		{
+			name: "decimal upper disjoint",
+			typ: iceberg.DecimalTypeOf(12, 2),
+			expr: iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
+			minLit: iceberg.NewLiteral(decimal(100)), maxLit: iceberg.NewLiteral(decimal(200)),
+			lower: iceberg.NewLiteral(decimal(-200)), upper: iceberg.NewLiteral(decimal(0)),
+		},
+		{
+			name: "binary lower disjoint",
+			typ: iceberg.PrimitiveTypes.Binary,
+			expr: iceberg.IsIn(iceberg.Reference("value"), []byte{1}, []byte{2}),
+			minLit: iceberg.NewLiteral([]byte{1}), maxLit: iceberg.NewLiteral([]byte{2}),
+			lower: iceberg.NewLiteral([]byte{10}), upper: iceberg.NewLiteral([]byte{20}),
+		},
+		{
+			name: "date upper disjoint",
+			typ: iceberg.PrimitiveTypes.Date,
+			expr: iceberg.IsIn(iceberg.Reference("value"), iceberg.Date(10), iceberg.Date(20)),
+			minLit: iceberg.NewLiteral(iceberg.Date(10)), maxLit: iceberg.NewLiteral(iceberg.Date(20)),
+			lower: iceberg.NewLiteral(iceberg.Date(-10)), upper: iceberg.NewLiteral(iceberg.Date(0)),
+		},
+		{
+			name: "timestamp lower disjoint",
+			typ: iceberg.PrimitiveTypes.Timestamp,
+			expr: iceberg.IsIn(iceberg.Reference("value"), iceberg.Timestamp(10), iceberg.Timestamp(20)),
+			minLit: iceberg.NewLiteral(iceberg.Timestamp(10)), maxLit: iceberg.NewLiteral(iceberg.Timestamp(20)),
+			lower: iceberg.NewLiteral(iceberg.Timestamp(30)), upper: iceberg.NewLiteral(iceberg.Timestamp(40)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+			bound, err := iceberg.BindExpr(schema, tt.expr, true)
+			require.NoError(t, err)
+			pred, ok := bound.(iceberg.BoundSetPredicate)
+			require.True(t, ok)
+
+			lower, err := tt.lower.MarshalBinary()
+			require.NoError(t, err)
+			upper, err := tt.upper.MarshalBinary()
+			require.NoError(t, err)
+			newVisitor := func() *inclusiveMetricsEval {
+				return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+					valueCounts: map[int]int64{1: 10},
+					nullCounts: map[int]int64{1: 0},
+					nanCounts: map[int]int64{1: 0},
+					lowerBounds: map[int][]byte{1: lower},
+					upperBounds: map[int][]byte{1: upper},
+				}}
+			}
+
+			slow := newVisitor().VisitIn(pred.Term(), pred.Literals())
+			fast := newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), tt.minLit, tt.maxLit)
+			require.Equal(t, slow, fast)
+			require.Equal(t, tt.want, fast)
+		})
+	}
+}
+
+func TestInclusiveMetricsEvaluatorInPredicateExtremaPartialNilUsesSlowPath(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32})
+	bound, err := iceberg.BindExpr(
+		schema, iceberg.IsIn(iceberg.Reference("value"), int32(1), int32(100)), true,
+	)
+	require.NoError(t, err)
+	pred := bound.(iceberg.BoundSetPredicate)
+	lower, err := iceberg.NewLiteral(int32(40)).MarshalBinary()
+	require.NoError(t, err)
+	upper, err := iceberg.NewLiteral(int32(60)).MarshalBinary()
+	require.NoError(t, err)
+
+	newVisitor := func() *inclusiveMetricsEval {
+		return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+			valueCounts: map[int]int64{1: 10},
+			nullCounts: map[int]int64{1: 0},
+			nanCounts: map[int]int64{1: 0},
+			lowerBounds: map[int][]byte{1: lower},
+			upperBounds: map[int][]byte{1: upper},
+		}}
+	}
+	slow := newVisitor().VisitIn(pred.Term(), pred.Literals())
+	minLit := iceberg.NewLiteral(int32(1))
+	maxLit := iceberg.NewLiteral(int32(100))
+	require.Equal(t, slow, newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), minLit, nil))
+	require.Equal(t, slow, newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), nil, maxLit))
+}
+
+func TestInclusiveMetricsEvaluatorInPredicateExtremaVariantExtract(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "payload", Type: iceberg.VariantType{},
+	})
+	expr := iceberg.IsIn(
+		iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64),
+		int64(1), int64(2),
+	)
+	bound, err := iceberg.BindExpr(schema, expr, true)
+	require.NoError(t, err)
+	pred, ok := bound.(iceberg.BoundSetPredicate)
+	require.True(t, ok)
+
+	newVisitor := func() *inclusiveMetricsEval {
+		return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+			valueCounts: map[int]int64{1: 10},
+			nullCounts: map[int]int64{1: 0},
+			nanCounts: map[int]int64{1: 0},
+			lowerBounds: map[int][]byte{1: variantMetricBoundInt64(t, "$['a']", 10)},
+			upperBounds: map[int][]byte{1: variantMetricBoundInt64(t, "$['a']", 20)},
+		}}
+	}
+
+	slow := newVisitor().VisitIn(pred.Term(), pred.Literals())
+	fast := newVisitor().VisitInWithExtrema(
+		pred.Term(), pred.Literals(), iceberg.NewLiteral(int64(1)), iceberg.NewLiteral(int64(2)),
+	)
+	require.False(t, slow)
+	require.Equal(t, slow, fast)
+}
+
+func variantMetricBoundInt64(t *testing.T, path string, value int64) []byte {
+	t.Helper()
+
+	var builder variant.Builder
+	start := builder.Offset()
+	entries := []variant.FieldEntry{builder.NextField(start, path)}
+	require.NoError(t, builder.AppendInt(value))
+	require.NoError(t, builder.FinishObject(start, entries))
+	v, err := builder.Build()
+	require.NoError(t, err)
+
+	return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
 }
 
 func inclusiveMetricsInTestFile(t *testing.T, lowerBound, upperBound []byte) iceberg.DataFile {
