@@ -22,7 +22,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -689,8 +688,6 @@ func benchmarkTaskResidualJSON(rowCount int) string {
 	return result.String()
 }
 
-var benchmarkReadTasksCount int
-
 func BenchmarkArrowScanReadTasksResidualBinding(b *testing.B) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -739,8 +736,10 @@ func BenchmarkArrowScanReadTasksResidualBinding(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				benchmarkReadTasksCount = len(tasks)
-				runtime.KeepAlive(records)
+				if records == nil {
+					b.Fatal("ReadTasks returned a nil iterator")
+				}
+				// Do not drain the iterator: this benchmark isolates setup and residual binding.
 			}
 			b.ReportMetric(float64(len(tasks)), "tasks/op")
 		})
