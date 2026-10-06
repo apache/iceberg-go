@@ -1227,19 +1227,13 @@ func (m *inclusiveMetricsEval) visitIn(
 		}
 	}
 
-	var (
-		upperBound    iceberg.Literal
-		hasUpperBound bool
-	)
-	if hasExtrema {
-		upperBound, hasUpperBound = m.boundFor(t, m.upperBounds[fieldID])
-		if hasUpperBound {
-			if m.isNan(upperBound) {
-				return rowsMightMatch
-			}
-			if compareBoundLiterals(upperBound, minLit) < 0 {
-				return rowsCannotMatch
-			}
+	upperBound, hasUpperBound := m.boundFor(t, m.upperBounds[fieldID])
+	if hasUpperBound {
+		if m.isNan(upperBound) {
+			return rowsMightMatch
+		}
+		if hasExtrema && compareBoundLiterals(upperBound, minLit) < 0 {
+			return rowsCannotMatch
 		}
 	}
 
@@ -1248,13 +1242,6 @@ func (m *inclusiveMetricsEval) visitIn(
 		values = removeBoundCheck(lowerBound, values, 1)
 		if len(values) == 0 {
 			return rowsCannotMatch
-		}
-	}
-
-	if !hasExtrema {
-		upperBound, hasUpperBound = m.boundFor(t, m.upperBounds[fieldID])
-		if hasUpperBound && m.isNan(upperBound) {
-			return rowsMightMatch
 		}
 	}
 
