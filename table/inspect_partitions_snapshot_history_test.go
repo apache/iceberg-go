@@ -36,12 +36,10 @@ func TestInspectPartitionsUsesHistoricalSnapshotTimestamp(t *testing.T) {
 	const (
 		historicalSnapshotID = int64(1)
 		currentSnapshotID    = int64(2)
-		historicalTimestamp  = int64(1000)
-		currentTimestamp     = int64(2000)
 	)
 
-	tbl := inspectPartitionHistoricalSnapshotTable(
-		t, historicalSnapshotID, currentSnapshotID, historicalTimestamp, currentTimestamp,
+	tbl, historicalTimestamp := inspectPartitionHistoricalSnapshotTable(
+		t, historicalSnapshotID, currentSnapshotID,
 	)
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { mem.AssertSize(t, 0) })
@@ -67,8 +65,8 @@ func TestInspectPartitionsUsesHistoricalSnapshotTimestamp(t *testing.T) {
 
 func inspectPartitionHistoricalSnapshotTable(
 	t testing.TB,
-	historicalSnapshotID, currentSnapshotID, historicalTimestamp, currentTimestamp int64,
-) *Table {
+	historicalSnapshotID, currentSnapshotID int64,
+) (*Table, int64) {
 	t.Helper()
 
 	spec := partitionedSpec()
@@ -77,6 +75,8 @@ func inspectPartitionHistoricalSnapshotTable(
 		schema, &spec, UnsortedSortOrder, "mem://snapshot-history/table", nil,
 	)
 	require.NoError(t, err)
+	historicalTimestamp := meta.LastUpdatedMillis() + 1
+	currentTimestamp := historicalTimestamp + 1
 	builder, err := MetadataBuilderFromBase(meta, "metadata.json")
 	require.NoError(t, err)
 	fs := iceio.NewMemFS()
@@ -158,5 +158,5 @@ func inspectPartitionHistoricalSnapshotTable(
 		"metadata.json",
 		func(context.Context) (iceio.IO, error) { return fs, nil },
 		nil,
-	)
+	), historicalTimestamp
 }
