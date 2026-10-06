@@ -582,9 +582,67 @@ func (s *Schema) Equals(other *Schema) bool {
 // HighestFieldID returns the value of the numerically highest field ID
 // in this schema.
 func (s *Schema) HighestFieldID() int {
-	id, _ := Visit(s, findLastFieldID{})
+	id, _ := highestFieldIDFields(s.fields)
 
 	return id
+}
+
+func highestFieldIDFields(fields []NestedField) (int, bool) {
+	if len(fields) == 0 {
+		return 0, false
+	}
+
+	highest := 0
+	for _, field := range fields {
+		nested, ok := highestFieldIDType(field.Type)
+		if !ok {
+			return 0, false
+		}
+		highest = max(highest, field.ID, nested)
+	}
+
+	return highest, true
+}
+
+func highestFieldIDType(typ Type) (int, bool) {
+	switch typ := typ.(type) {
+	case *StructType:
+		if typ == nil {
+			return 0, false
+		}
+
+		return highestFieldIDFields(typ.FieldList)
+	case *ListType:
+		if typ == nil {
+			return 0, false
+		}
+		element, ok := highestFieldIDType(typ.Element)
+		if !ok {
+			return 0, false
+		}
+
+		return max(typ.ElementID, element), true
+	case *MapType:
+		if typ == nil {
+			return 0, false
+		}
+		key, ok := highestFieldIDType(typ.KeyType)
+		if !ok {
+			return 0, false
+		}
+		value, ok := highestFieldIDType(typ.ValueType)
+		if !ok {
+			return 0, false
+		}
+
+		return max(typ.KeyID, typ.ValueID, key, value), true
+	case VariantType:
+		return 0, true
+	case PrimitiveType:
+		return 0, true
+	default:
+		return 0, false
+	}
 }
 
 type Void = struct{}
@@ -1347,31 +1405,6 @@ func (*pruneColVisitor) projectMap(mapType *MapType, valueResult Type) *MapType 
 		ValueRequired: mapType.ValueRequired,
 	}
 }
-
-type findLastFieldID struct{}
-
-func (findLastFieldID) Schema(_ *Schema, result int) int {
-	return result
-}
-
-func (findLastFieldID) Struct(_ StructType, fieldResults []int) int {
-	return slices.Max(fieldResults)
-}
-
-func (findLastFieldID) Field(field NestedField, fieldResult int) int {
-	return max(field.ID, fieldResult)
-}
-
-func (findLastFieldID) List(field ListType, elemResult int) int {
-	return max(field.ElementID, elemResult)
-}
-
-func (findLastFieldID) Map(field MapType, keyResult, valueResult int) int {
-	return max(field.KeyID, field.ValueID, keyResult, valueResult)
-}
-
-func (findLastFieldID) Primitive(PrimitiveType) int { return 0 }
-func (findLastFieldID) Variant(VariantType) int     { return 0 }
 
 // IndexParents generates an index of field IDs to their parent field
 // IDs. Root fields are not indexed
