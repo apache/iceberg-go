@@ -128,18 +128,22 @@ func BenchmarkInclusiveMetricsEvalInPredicate(b *testing.B) {
 		}
 
 		maxValue := values[len(values)-1]
+		// below-set and above-set measure the extrema short-circuit. overlap and
+		// sparse-gap stay inside the set envelope as regression baselines for the
+		// existing per-member removeBoundCheck path.
 		for _, bounds := range []struct {
-			name  string
-			lower int32
-			upper int32
+			name      string
+			lower     int32
+			upper     int32
+			wantMatch bool
 		}{
 			{name: "below-set", lower: -2, upper: -2},
 			{name: "above-set", lower: maxValue + 2, upper: maxValue + 2},
-			{name: "overlap", lower: values[0], upper: maxValue},
+			{name: "overlap", lower: values[0], upper: maxValue, wantMatch: true},
 			{name: "sparse-gap", lower: values[literalCount/2] + 1, upper: values[literalCount/2] + 1},
 		} {
 			b.Run("int32/in="+strconv.Itoa(literalCount)+"/"+bounds.name, func(b *testing.B) {
-				benchmarkInclusiveMetricsIn(b, values, bounds.lower, bounds.upper, literalCount, bounds.name == "overlap")
+				benchmarkInclusiveMetricsIn(b, values, bounds.lower, bounds.upper, literalCount, bounds.wantMatch)
 			})
 		}
 	}
@@ -190,8 +194,8 @@ func benchmarkInclusiveMetricsIn(b *testing.B, values []int32, lower, upper int3
 	b.ResetTimer()
 	for range b.N {
 		matchedFiles := 0
-		for _, file := range files {
-			matched, err := eval(file)
+		for _, f := range files {
+			matched, err := eval(f)
 			if err != nil {
 				b.Fatal(err)
 			}
