@@ -170,7 +170,6 @@ func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
 		Identifier{"db", "tbl"}, metadata, filepath.Join(location, "metadata.json"),
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil,
 	)
-	scan := tbl.Scan(WithMaxConcurrency(4))
 
 	unbound := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
 	bound, err := iceberg.BindExpr(schema, unbound, true)
@@ -211,6 +210,7 @@ func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
 	errCh := make(chan error, 2)
 	for range 2 {
 		go func() {
+			scan := tbl.Scan(WithMaxConcurrency(4))
 			_, records, readErr := scan.ReadTasks(t.Context(), tasks)
 			if readErr != nil {
 				errCh <- readErr
