@@ -83,8 +83,8 @@ type BoundGeospatialExprVisitor[T any] interface {
 }
 
 // boundSetExtremaExprVisitor is consulted only by the borrowed
-// VisitBoundPredicateRef path. The table package's manifest evaluator is
-// currently the only implementation.
+// VisitBoundPredicateRef path. It is used by trusted evaluators that can prune
+// an IN predicate from its precomputed minimum and maximum literals.
 type boundSetExtremaExprVisitor[T any] interface {
 	VisitInWithExtrema(BoundTerm, Set[Literal], Literal, Literal) T
 }
