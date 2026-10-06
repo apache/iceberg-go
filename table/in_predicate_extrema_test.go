@@ -181,6 +181,32 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 		})
 	}
 
+	t.Run("evaluator dispatch skips member scan for disjoint extrema", func(t *testing.T) {
+		disjoint := inclusiveMetricsInTestFile(t, encode(-10), encode(0))
+		overlap := inclusiveMetricsInTestFile(t, encode(-10), encode(100))
+
+		var (
+			got bool
+			err error
+		)
+		disjointAllocs := testing.AllocsPerRun(100, func() {
+			got, err = eval(disjoint)
+			if err != nil {
+				panic(err)
+			}
+		})
+		require.False(t, got)
+
+		overlapAllocs := testing.AllocsPerRun(100, func() {
+			got, err = eval(overlap)
+			if err != nil {
+				panic(err)
+			}
+		})
+		require.True(t, got)
+		require.Less(t, disjointAllocs, overlapAllocs)
+	})
+
 	t.Run("NaN bounds fail open", func(t *testing.T) {
 		encodeFloat := func(value float64) []byte {
 			encoded, err := iceberg.NewLiteral(value).MarshalBinary()
@@ -255,11 +281,27 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			lower: iceberg.NewLiteral("m"), upper: iceberg.NewLiteral("z"),
 		},
 		{
+			name:   "string overlaps",
+			typ:    iceberg.PrimitiveTypes.String,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), "a", "b"),
+			minLit: iceberg.NewLiteral("a"), maxLit: iceberg.NewLiteral("b"),
+			lower: iceberg.NewLiteral("a"), upper: iceberg.NewLiteral("a"),
+			want:   true,
+		},
+		{
 			name:   "decimal upper disjoint",
 			typ:    iceberg.DecimalTypeOf(12, 2),
 			expr:   iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
 			minLit: iceberg.NewLiteral(decimal(100)), maxLit: iceberg.NewLiteral(decimal(200)),
 			lower: iceberg.NewLiteral(decimal(-200)), upper: iceberg.NewLiteral(decimal(0)),
+		},
+		{
+			name:   "decimal overlaps",
+			typ:    iceberg.DecimalTypeOf(12, 2),
+			expr:   iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
+			minLit: iceberg.NewLiteral(decimal(100)), maxLit: iceberg.NewLiteral(decimal(200)),
+			lower: iceberg.NewLiteral(decimal(100)), upper: iceberg.NewLiteral(decimal(150)),
+			want:   true,
 		},
 		{
 			name:   "binary lower disjoint",
@@ -269,6 +311,14 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			lower: iceberg.NewLiteral([]byte{10}), upper: iceberg.NewLiteral([]byte{20}),
 		},
 		{
+			name:   "binary overlaps",
+			typ:    iceberg.PrimitiveTypes.Binary,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), []byte{1}, []byte{2}),
+			minLit: iceberg.NewLiteral([]byte{1}), maxLit: iceberg.NewLiteral([]byte{2}),
+			lower: iceberg.NewLiteral([]byte{1}), upper: iceberg.NewLiteral([]byte{1}),
+			want:   true,
+		},
+		{
 			name:   "date upper disjoint",
 			typ:    iceberg.PrimitiveTypes.Date,
 			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Date(10), iceberg.Date(20)),
@@ -276,11 +326,27 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 			lower: iceberg.NewLiteral(iceberg.Date(-10)), upper: iceberg.NewLiteral(iceberg.Date(0)),
 		},
 		{
+			name:   "date overlaps",
+			typ:    iceberg.PrimitiveTypes.Date,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Date(10), iceberg.Date(20)),
+			minLit: iceberg.NewLiteral(iceberg.Date(10)), maxLit: iceberg.NewLiteral(iceberg.Date(20)),
+			lower: iceberg.NewLiteral(iceberg.Date(10)), upper: iceberg.NewLiteral(iceberg.Date(15)),
+			want:   true,
+		},
+		{
 			name:   "timestamp lower disjoint",
 			typ:    iceberg.PrimitiveTypes.Timestamp,
 			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Timestamp(10), iceberg.Timestamp(20)),
 			minLit: iceberg.NewLiteral(iceberg.Timestamp(10)), maxLit: iceberg.NewLiteral(iceberg.Timestamp(20)),
 			lower: iceberg.NewLiteral(iceberg.Timestamp(30)), upper: iceberg.NewLiteral(iceberg.Timestamp(40)),
+		},
+		{
+			name:   "timestamp overlaps",
+			typ:    iceberg.PrimitiveTypes.Timestamp,
+			expr:   iceberg.IsIn(iceberg.Reference("value"), iceberg.Timestamp(10), iceberg.Timestamp(20)),
+			minLit: iceberg.NewLiteral(iceberg.Timestamp(10)), maxLit: iceberg.NewLiteral(iceberg.Timestamp(20)),
+			lower: iceberg.NewLiteral(iceberg.Timestamp(10)), upper: iceberg.NewLiteral(iceberg.Timestamp(15)),
+			want:   true,
 		},
 	}
 
