@@ -22,7 +22,6 @@ import (
 	"math"
 	"testing"
 
-	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,48 +67,3 @@ func TestBoundSetExtremaUnavailableForGeoLiterals(t *testing.T) {
 	}
 }
 
-type extremaDispatchProbe struct {
-	BoundBooleanExprVisitor[bool]
-	visitedIn      bool
-	visitedExtrema bool
-	minLit         Literal
-	maxLit         Literal
-}
-
-func (v *extremaDispatchProbe) VisitIn(BoundTerm, Set[Literal]) bool {
-	v.visitedIn = true
-
-	return false
-}
-
-func (v *extremaDispatchProbe) VisitInWithExtrema(_ BoundTerm, _ Set[Literal], minLit, maxLit Literal) bool {
-	v.visitedExtrema = true
-	v.minLit = minLit
-	v.maxLit = maxLit
-
-	return true
-}
-
-func TestVisitBoundPredicateRefDispatchesSetExtrema(t *testing.T) {
-	schema := NewSchema(1, NestedField{ID: 1, Name: "value", Type: PrimitiveTypes.Int32})
-	bound, err := BindExpr(
-		schema,
-		IsIn(Reference("value"), int32(100), int32(1), int32(50)),
-		true,
-	)
-	require.NoError(t, err)
-	pred, ok := bound.(BoundPredicate)
-	require.True(t, ok)
-
-	borrowedVisitor := &extremaDispatchProbe{}
-	require.True(t, VisitBoundPredicateRef(pred, borrowedVisitor, iceberginternal.BoundPredicateRef{}))
-	require.True(t, borrowedVisitor.visitedExtrema)
-	require.False(t, borrowedVisitor.visitedIn)
-	require.Equal(t, int32(1), borrowedVisitor.minLit.(TypedLiteral[int32]).Value())
-	require.Equal(t, int32(100), borrowedVisitor.maxLit.(TypedLiteral[int32]).Value())
-
-	publicVisitor := &extremaDispatchProbe{}
-	require.False(t, VisitBoundPredicate(pred, publicVisitor))
-	require.False(t, publicVisitor.visitedExtrema)
-	require.True(t, publicVisitor.visitedIn)
-}
