@@ -66,4 +66,3 @@ func TestBoundSetExtremaUnavailableForGeoLiterals(t *testing.T) {
 		})
 	}
 }
-
