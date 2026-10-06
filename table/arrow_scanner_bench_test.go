@@ -278,12 +278,14 @@ func benchmarkSplitParquetScanWithRowGroups(
 	fullTask := FileScanTask{File: dataFile, Start: 0, Length: int64(buf.Len())}
 	splitTasks, split := splitParquetScanTask(fullTask, 1)
 	if rowGroups == 1 && !split {
+		// A one-row-group file has fewer than two split offsets and cannot be split.
+		// Make the task partial so the benchmark still exercises range planning.
 		partialTask := fullTask
 		partialTask.Length--
 		splitTasks, split = []FileScanTask{partialTask}, true
 	}
 	if !split || len(splitTasks) != rowGroups {
-		b.Fatalf("expected one split task per row group, got %d", len(splitTasks))
+		b.Fatalf("expected %d benchmark range tasks, got %d", rowGroups, len(splitTasks))
 	}
 
 	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
