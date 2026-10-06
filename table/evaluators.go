@@ -172,6 +172,8 @@ func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.S
 	return m.visitIn(term, literals, nil, nil)
 }
 
+// VisitInWithExtrema expects minLit and maxLit to be the actual extrema of
+// literals. If either is nil, it uses the same member scan as VisitIn.
 func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
 	return m.visitIn(term, literals, minLit, maxLit)
 }
@@ -179,6 +181,7 @@ func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literal
 func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
+	hasExtrema := minLit != nil && maxLit != nil
 
 	if field.LowerBound == nil {
 		return rowsCannotMatch
@@ -189,7 +192,7 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 		panic(err)
 	}
 
-	if maxLit != nil {
+	if hasExtrema {
 		if getCmpLiteral(lower)(lower, maxLit) > 0 {
 			return rowsCannotMatch
 		}
@@ -208,7 +211,7 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 			panic(err)
 		}
 
-		if minLit != nil {
+		if hasExtrema {
 			if getCmpLiteral(upper)(upper, minLit) < 0 {
 				return rowsCannotMatch
 			}
@@ -1145,6 +1148,8 @@ func (m *inclusiveMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceber
 	return m.visitIn(t, s, nil, nil)
 }
 
+// VisitInWithExtrema expects minLit and maxLit to be the actual extrema of s.
+// If either is nil, it uses the same member scan as VisitIn.
 func (m *inclusiveMetricsEval) VisitInWithExtrema(
 	t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal,
 ) bool {
@@ -1166,41 +1171,37 @@ func (m *inclusiveMetricsEval) visitIn(
 	}
 
 	hasExtrema := minLit != nil && maxLit != nil
-	var (
-		values                 []iceberg.Literal
-		lowerBound, upperBound iceberg.Literal
-		hasLowerBound          bool
-		hasUpperBound          bool
-	)
-	if hasExtrema {
-		cmp := getCmpLiteral(minLit)
-		lowerBound, hasLowerBound = m.boundFor(t, m.lowerBounds[fieldID])
-		if hasLowerBound {
-			if m.isNan(lowerBound) {
-				return rowsMightMatch
-			}
-
-			if cmp(lowerBound, maxLit) > 0 {
-				return rowsCannotMatch
-			}
-		}
-
-		upperBound, hasUpperBound = m.boundFor(t, m.upperBounds[fieldID])
-		if hasUpperBound && !m.isNan(upperBound) && cmp(upperBound, minLit) < 0 {
-			return rowsCannotMatch
-		}
-
-		values = s.Members()
-	} else {
-		values = s.Members()
-		lowerBound, hasLowerBound = m.boundFor(t, m.lowerBounds[fieldID])
-	}
-
+	lowerBound, hasLowerBound := m.boundFor(t, m.lowerBounds[fieldID])
 	if hasLowerBound {
 		if m.isNan(lowerBound) {
 			return rowsMightMatch
 		}
+		if hasExtrema && getCmpLiteral(minLit)(lowerBound, maxLit) > 0 {
+			// Preserve this lower-bound short circuit before decoding the upper
+			// bound: malformed upper metrics must not matter once lower proves
+			// the set disjoint.
+			return rowsCannotMatch
+		}
+	}
 
+	var (
+		upperBound    iceberg.Literal
+		hasUpperBound bool
+	)
+	if hasExtrema {
+		upperBound, hasUpperBound = m.boundFor(t, m.upperBounds[fieldID])
+		if hasUpperBound {
+			if m.isNan(upperBound) {
+				return rowsMightMatch
+			}
+			if getCmpLiteral(minLit)(upperBound, minLit) < 0 {
+				return rowsCannotMatch
+			}
+		}
+	}
+
+	values := s.Members()
+	if hasLowerBound {
 		values = removeBoundCheck(lowerBound, values, 1)
 		if len(values) == 0 {
 			return rowsCannotMatch
@@ -1209,13 +1210,12 @@ func (m *inclusiveMetricsEval) visitIn(
 
 	if !hasExtrema {
 		upperBound, hasUpperBound = m.boundFor(t, m.upperBounds[fieldID])
+		if hasUpperBound && m.isNan(upperBound) {
+			return rowsMightMatch
+		}
 	}
 
 	if hasUpperBound {
-		if m.isNan(upperBound) {
-			return rowsMightMatch
-		}
-
 		values = removeBoundCheck(upperBound, values, -1)
 		if len(values) == 0 {
 			return rowsCannotMatch
