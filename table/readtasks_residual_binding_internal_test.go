@@ -59,6 +59,7 @@ func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
 		wantAlias bool
 	}{
 		{name: "all bound and nil", residuals: []iceberg.BooleanExpression{bound, nil, bound}, wantAlias: true},
+		{name: "all nil", residuals: []iceberg.BooleanExpression{nil, nil, nil}, wantAlias: true},
 		{name: "mixed", residuals: []iceberg.BooleanExpression{bound, nil, unbound, bound}},
 		{name: "first task unbound", residuals: []iceberg.BooleanExpression{unbound, bound}},
 		{name: "all unbound", residuals: []iceberg.BooleanExpression{unbound, unbound}},
@@ -91,7 +92,9 @@ func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
 				require.NoError(t, visitErr)
 				require.True(t, state.hasBound)
 				require.False(t, state.hasUnbound)
-				if stateBefore, stateErr := iceberg.VisitExpr(original, filterBindingVisitor{}); stateErr == nil && !stateBefore.hasUnbound {
+				stateBefore, stateErr := iceberg.VisitExpr(original, filterBindingVisitor{})
+				require.NoError(t, stateErr)
+				if !stateBefore.hasUnbound {
 					require.Same(t, original, got[i].Residual)
 				}
 			}
