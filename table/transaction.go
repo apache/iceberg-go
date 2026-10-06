@@ -165,10 +165,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return errors.New("transaction has already been committed")
 	}
 
-	stagedMeta := meta.clone()
-	if stagedMeta == nil {
-		return errors.New("cannot apply updates to nil metadata")
-	}
+	var stagedMeta *MetadataBuilder
 
 	// Only new requirement validation needs the immutable metadata view.
 	// Updates can be applied directly to the staged builder, and duplicate
@@ -207,6 +204,12 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 
 				continue
 			}
+			if stagedMeta == nil {
+				stagedMeta = meta.clone()
+				if stagedMeta == nil {
+					return errors.New("cannot apply updates to nil metadata")
+				}
+			}
 			if current == nil {
 				built, err := stagedMeta.Build()
 				if err != nil {
@@ -224,6 +227,15 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			}
 			existing[key] = r
 			stagedReqs = append(stagedReqs, r)
+		}
+	}
+	if stagedMeta == nil {
+		if len(updates) == 0 {
+			return nil
+		}
+		stagedMeta = meta.clone()
+		if stagedMeta == nil {
+			return errors.New("cannot apply updates to nil metadata")
 		}
 	}
 
