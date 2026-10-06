@@ -59,6 +59,8 @@ func TestInspectPartitionsUsesHistoricalSnapshotTimestamp(t *testing.T) {
 
 	updatedAt := record.Column(updatedAtIndex[0]).(*array.Timestamp)
 	updatedSnapshot := record.Column(updatedSnapshotIndex[0]).(*array.Int64)
+	require.True(t, updatedAt.IsValid(0))
+	require.True(t, updatedSnapshot.IsValid(0))
 	require.EqualValues(t, historicalTimestamp*millisToMicros, updatedAt.Value(0))
 	require.Equal(t, historicalSnapshotID, updatedSnapshot.Value(0))
 }
