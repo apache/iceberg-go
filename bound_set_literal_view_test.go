@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"math"
 	"slices"
 	"strconv"
 	"testing"
@@ -137,7 +138,7 @@ func TestBoundSetPredicateLiteralsIndependentCopies(t *testing.T) {
 
 	for _, tt := range tests {
 		for _, op := range []iceberg.Operation{iceberg.OpIn, iceberg.OpNotIn} {
-			for _, size := range []int{2, 8, 64, 1024} {
+			for _, size := range []int{2, 8, 9, 64, 1024} {
 				t.Run(tt.name+"/"+op.String()+"/"+strconv.Itoa(size), func(t *testing.T) {
 					t.Parallel()
 
@@ -169,5 +170,36 @@ func TestBoundSetPredicateLiteralsIndependentCopies(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestBoundSetPredicateLiteralsAfterRangeFiltering(t *testing.T) {
+	t.Parallel()
+
+	for _, op := range []iceberg.Operation{iceberg.OpIn, iceberg.OpNotIn} {
+		t.Run(op.String(), func(t *testing.T) {
+			t.Parallel()
+
+			values := make([]iceberg.Literal, 8192)
+			for i := range values {
+				value := int64(i)
+				if i >= 2 {
+					value += math.MaxInt32
+				}
+				values[i] = iceberg.NewLiteral(value)
+			}
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32})
+			bound, err := iceberg.SetPredicate(op, iceberg.Reference("value"), values).(iceberg.UnboundPredicate).Bind(schema, true)
+			require.NoError(t, err)
+
+			setPredicate := bound.(iceberg.BoundSetPredicate)
+			literals := setPredicate.Literals()
+			require.Equal(t, 2, literals.Len())
+			assert.True(t, literals.Contains(iceberg.NewLiteral(int32(0))))
+			assert.True(t, literals.Contains(iceberg.NewLiteral(int32(1))))
+			literals.Add(iceberg.NewLiteral(int32(2)))
+			assert.Equal(t, 2, setPredicate.Literals().Len())
+			assert.False(t, setPredicate.Literals().Contains(iceberg.NewLiteral(int32(2))))
+		})
 	}
 }
