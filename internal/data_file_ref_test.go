@@ -68,13 +68,16 @@ func splitOffsetsTestCases() []struct {
 	name    string
 	offsets []int64
 } {
+	populated := make([]int64, 3, 8)
+	copy(populated, []int64{12, 40, 96})
+
 	return []struct {
 		name    string
 		offsets []int64
 	}{
 		{name: "nil"},
 		{name: "empty", offsets: []int64{}},
-		{name: "populated", offsets: []int64{12, 40, 96}},
+		{name: "populated with spare capacity", offsets: populated},
 	}
 }
 
