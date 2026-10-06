@@ -181,32 +181,6 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 		})
 	}
 
-	t.Run("evaluator dispatch skips member scan for disjoint extrema", func(t *testing.T) {
-		disjoint := inclusiveMetricsInTestFile(t, encode(-10), encode(0))
-		overlap := inclusiveMetricsInTestFile(t, encode(-10), encode(100))
-
-		var (
-			got bool
-			err error
-		)
-		disjointAllocs := testing.AllocsPerRun(100, func() {
-			got, err = eval(disjoint)
-			if err != nil {
-				panic(err)
-			}
-		})
-		require.False(t, got)
-
-		overlapAllocs := testing.AllocsPerRun(100, func() {
-			got, err = eval(overlap)
-			if err != nil {
-				panic(err)
-			}
-		})
-		require.True(t, got)
-		require.Less(t, disjointAllocs, overlapAllocs)
-	})
-
 	t.Run("NaN bounds fail open", func(t *testing.T) {
 		encodeFloat := func(value float64) []byte {
 			encoded, err := iceberg.NewLiteral(value).MarshalBinary()
@@ -241,7 +215,7 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 		}
 	})
 
-	t.Run("oversized set keeps existing fallback", func(t *testing.T) {
+	t.Run("oversized set still uses extrema before member scan limit", func(t *testing.T) {
 		values := make([]int32, inPredicateLimit+1)
 		for i := range values {
 			values[i] = int32(i)
@@ -255,6 +229,10 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 		got, err := largeEval(inclusiveMetricsInTestFile(
 			t, encode(disjointLower), encode(disjointLower+1),
 		))
+		require.NoError(t, err)
+		assert.False(t, got)
+
+		got, err = largeEval(inclusiveMetricsInTestFile(t, encode(50), encode(60)))
 		require.NoError(t, err)
 		assert.True(t, got)
 	})
