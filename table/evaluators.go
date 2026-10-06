@@ -182,6 +182,10 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
 	hasExtrema := minLit != nil && maxLit != nil
+	var extremaCmp func(iceberg.Literal, iceberg.Literal) int
+	if hasExtrema {
+		extremaCmp = getCmpLiteral(minLit)
+	}
 
 	if field.LowerBound == nil {
 		return rowsCannotMatch
@@ -193,7 +197,7 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	}
 
 	if hasExtrema {
-		if getCmpLiteral(lower)(lower, maxLit) > 0 {
+		if extremaCmp(lower, maxLit) > 0 {
 			return rowsCannotMatch
 		}
 	} else {
@@ -212,7 +216,7 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 		}
 
 		if hasExtrema {
-			if getCmpLiteral(upper)(upper, minLit) < 0 {
+			if extremaCmp(upper, minLit) < 0 {
 				return rowsCannotMatch
 			}
 		} else if allBoundCheck(upper, literals, -1) {
