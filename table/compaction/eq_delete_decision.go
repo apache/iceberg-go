@@ -19,7 +19,6 @@ package compaction
 
 import (
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 
@@ -105,11 +104,12 @@ func (s *SurvivorSurvey) AddSurvivorWithSpec(specID int32, partition map[int]any
 }
 
 func (s *SurvivorSurvey) conservativeMinSeq() int64 {
-	if len(s.PartMinSeq) == 0 {
-		return s.EmptyPartMinSeq
+	minSeq := s.EmptyPartMinSeq
+	for _, seq := range s.PartMinSeq {
+		minSeq = min(minSeq, seq)
 	}
 
-	return min(s.EmptyPartMinSeq, slices.Min(slices.Collect(maps.Values(s.PartMinSeq))))
+	return minSeq
 }
 
 func (s *SurvivorSurvey) specAwareApplicableMinSeq(
