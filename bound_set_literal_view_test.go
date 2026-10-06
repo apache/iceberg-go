@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"slices"
+	"strconv"
 	"testing"
 
 	iceberg "github.com/apache/iceberg-go"
@@ -38,11 +39,16 @@ func TestBoundSetPredicateLiteralsCloneMutableMembers(t *testing.T) {
 	tests := []struct {
 		name string
 		typ  iceberg.Type
+		op   iceberg.Operation
 	}{
-		{name: "binary", typ: iceberg.PrimitiveTypes.Binary},
-		{name: "fixed", typ: iceberg.FixedTypeOf(16)},
-		{name: "geometry", typ: geometry},
-		{name: "geography", typ: geography},
+		{name: "binary_in", typ: iceberg.PrimitiveTypes.Binary, op: iceberg.OpIn},
+		{name: "binary_not_in", typ: iceberg.PrimitiveTypes.Binary, op: iceberg.OpNotIn},
+		{name: "fixed_in", typ: iceberg.FixedTypeOf(16), op: iceberg.OpIn},
+		{name: "fixed_not_in", typ: iceberg.FixedTypeOf(16), op: iceberg.OpNotIn},
+		{name: "geometry_in", typ: geometry, op: iceberg.OpIn},
+		{name: "geometry_not_in", typ: geometry, op: iceberg.OpNotIn},
+		{name: "geography_in", typ: geography, op: iceberg.OpIn},
+		{name: "geography_not_in", typ: geography, op: iceberg.OpNotIn},
 	}
 
 	for _, tt := range tests {
@@ -69,7 +75,7 @@ func TestBoundSetPredicateLiteralsCloneMutableMembers(t *testing.T) {
 			}
 
 			predicate := iceberg.SetPredicate(
-				iceberg.OpIn,
+				tt.op,
 				iceberg.Reference("value"),
 				predicateLiterals,
 			)
@@ -102,5 +108,66 @@ func TestBoundSetPredicateLiteralsCloneMutableMembers(t *testing.T) {
 				assert.True(t, bound.(iceberg.BoundSetPredicate).Literals().Contains(expected))
 			}
 		})
+	}
+}
+
+func TestBoundSetPredicateLiteralsIndependentCopies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		typ     iceberg.Type
+		literal func(int) iceberg.Literal
+	}{
+		{
+			name: "int32",
+			typ:  iceberg.PrimitiveTypes.Int32,
+			literal: func(i int) iceberg.Literal {
+				return iceberg.NewLiteral(int32(i))
+			},
+		},
+		{
+			name: "string",
+			typ:  iceberg.PrimitiveTypes.String,
+			literal: func(i int) iceberg.Literal {
+				return iceberg.NewLiteral(strconv.Itoa(i))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		for _, op := range []iceberg.Operation{iceberg.OpIn, iceberg.OpNotIn} {
+			for _, size := range []int{2, 8, 64, 1024} {
+				t.Run(tt.name+"/"+op.String()+"/"+strconv.Itoa(size), func(t *testing.T) {
+					t.Parallel()
+
+					values := make([]iceberg.Literal, size)
+					for i := range values {
+						values[i] = tt.literal(i)
+					}
+					predicate := iceberg.SetPredicate(op, iceberg.Reference("value"), append(values, values[0]))
+					schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+					bound, err := predicate.(iceberg.UnboundPredicate).Bind(schema, true)
+					require.NoError(t, err)
+
+					setPredicate := bound.(iceberg.BoundSetPredicate)
+					first, second := setPredicate.Literals(), setPredicate.Literals()
+					require.Equal(t, size, first.Len())
+					require.Equal(t, size, second.Len())
+					for _, literal := range values {
+						assert.True(t, first.Contains(literal))
+						assert.True(t, second.Contains(literal))
+					}
+
+					injected := tt.literal(size)
+					first.Add(injected)
+					assert.True(t, first.Contains(injected))
+					assert.False(t, second.Contains(injected))
+					assert.False(t, setPredicate.Literals().Contains(injected))
+					assert.Equal(t, size, second.Len())
+					assert.Equal(t, size, setPredicate.Literals().Len())
+				})
+			}
+		}
 	}
 }
