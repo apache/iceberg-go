@@ -1574,6 +1574,47 @@ func TestBuildPartitionEvaluatorMatchesPartitionValues(t *testing.T) {
 	assert.False(t, matches)
 }
 
+type noPartitionAccessDataFile struct {
+	iceberg.DataFile
+}
+
+func (noPartitionAccessDataFile) Partition() map[int]any {
+	panic("partition should not be read")
+}
+
+func TestBuildPartitionEvaluatorAlwaysTrue(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_part",
+		Transform: iceberg.IdentityTransform{},
+	})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	metadata, err := NewMetadata(
+		schema, &spec, UnsortedSortOrder, "s3://test-bucket/test_table", iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	partitionFilters := newKeyDefaultMapWrapErr(func(int) (iceberg.BooleanExpression, error) {
+		return iceberg.AlwaysTrue{}, nil
+	})
+	evaluator, err := buildPartitionEvaluator(spec.ID(), metadata, schema, partitionFilters, true)
+	require.NoError(t, err)
+
+	matches, err := evaluator(noPartitionAccessDataFile{})
+	require.NoError(t, err)
+	assert.True(t, matches)
+
+	filterErr := errors.New("partition filter failed")
+	partitionFilters = newKeyDefaultMapWrapErr(func(int) (iceberg.BooleanExpression, error) {
+		return iceberg.AlwaysTrue{}, filterErr
+	})
+	_, err = buildPartitionEvaluator(spec.ID(), metadata, schema, partitionFilters, true)
+	require.ErrorIs(t, err, filterErr)
+}
+
 func TestTimeTravelManifestPruningUsesSnapshotSchema(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
 		SourceIDs: []int{1},
