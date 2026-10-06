@@ -173,7 +173,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		if err != nil {
 			return nil, err
 		}
-		for _, manifest := range manifestSet.dataManifests() {
+		for _, manifest := range manifestSet.borrowDataManifests() {
 			if _, ok := appendSnapshots[manifest.SnapshotID()]; !ok {
 				continue
 			}

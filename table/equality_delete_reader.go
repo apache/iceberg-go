@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"slices"
 	"sync"
 	"unsafe"
@@ -43,6 +44,9 @@ import (
 )
 
 var ErrAmbiguousEqualityColumn = errors.New("equality delete column is ambiguous")
+
+// ErrConflictingEqualityDeleteMetadata indicates incompatible metadata for one delete-file path.
+var ErrConflictingEqualityDeleteMetadata = errors.New("conflicting equality delete metadata")
 
 // equalityDeleteSet holds the set of delete keys and the column names
 // used to look them up in data records. Each set corresponds to one
@@ -303,6 +307,59 @@ func newEqualityDeleteFileSet(id int, deleteSet *equalityDeleteSet) *equalityDel
 	}
 }
 
+func sameEqualityFieldIDSet(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	for _, id := range left {
+		if !slices.Contains(right, id) {
+			return false
+		}
+	}
+	for _, id := range right {
+		if !slices.Contains(left, id) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func dataFileHasPointerIdentity(dataFile iceberg.DataFile) bool {
+	return reflect.TypeOf(dataFile).Kind() == reflect.Pointer
+}
+
+func validateEqualityDeleteMetadata(
+	dataFile iceberg.DataFile,
+	existingFile iceberg.DataFile,
+	existingFieldIDs []int,
+	existingHasPointerIdentity bool,
+) error {
+	// Callers have already inspected ContentType, so both files must be non-nil.
+	// A pointer-backed retained file makes interface identity comparison safe,
+	// even when a later custom DataFile value itself is not comparable.
+	if existingHasPointerIdentity && dataFile == existingFile {
+		return nil
+	}
+
+	fieldIDs := dataFileEqualityFieldIDsRef(dataFile)
+	if len(fieldIDs) == 0 {
+		return fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, dataFile.FilePath())
+	}
+	// Equality delete field IDs are a set predicate. The first file keeps its
+	// encoding order; later entries for the same path may list the same IDs in
+	// a different order.
+	if dataFile.FileFormat() == existingFile.FileFormat() && sameEqualityFieldIDSet(fieldIDs, existingFieldIDs) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w for file %s: first format=%s equality field IDs=%v, later format=%s equality field IDs=%v",
+		ErrConflictingEqualityDeleteMetadata, dataFile.FilePath(),
+		existingFile.FileFormat(), existingFieldIDs, dataFile.FileFormat(), fieldIDs)
+}
+
 func schemaForEqualityFields(current *iceberg.Schema, schemas []*iceberg.Schema, fieldIDs []int) *iceberg.Schema {
 	hasAllFields := func(schema *iceberg.Schema) bool {
 		for _, fieldID := range fieldIDs {
@@ -334,13 +391,15 @@ type lazyEqualityDeleteLoader struct {
 	tableSchemas []*iceberg.Schema
 	nameMapping  iceberg.NameMapping
 	files        map[string]*lazyEqualityDeleteFile
+	singleFile   *lazyEqualityDeleteFile
 	combinations sync.Map
 }
 
 type lazyEqualityDeleteFile struct {
-	id       int
-	dataFile iceberg.DataFile
-	fieldIDs []int
+	id                 int
+	dataFile           iceberg.DataFile
+	fieldIDs           []int
+	hasPointerIdentity bool
 
 	once sync.Once
 	set  *equalityDeleteFileSet
@@ -364,38 +423,99 @@ func newLazyEqualityDeleteLoader(
 		tableSchema:  tableSchema,
 		tableSchemas: tableSchemas,
 		nameMapping:  nameMapping,
-		files:        make(map[string]*lazyEqualityDeleteFile),
 	}
 
+	var firstPath string
+	var firstFile *lazyEqualityDeleteFile
 	for _, task := range tasks {
 		for _, dataFile := range task.EqualityDeleteFiles {
+			if loader.files == nil && firstFile != nil &&
+				firstFile.hasPointerIdentity && dataFile == firstFile.dataFile {
+				continue
+			}
 			if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
 				continue
 			}
 
-			fieldIDs := dataFile.EqualityFieldIDs()
-			if len(fieldIDs) == 0 {
-				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, dataFile.FilePath())
-			}
-
 			path := dataFile.FilePath()
-			if _, ok := loader.files[path]; ok {
+			if loader.files == nil {
+				if firstFile == nil {
+					fieldIDs := dataFileEqualityFieldIDs(dataFile)
+					if len(fieldIDs) == 0 {
+						return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
+					}
+
+					firstPath = path
+					firstFile = &lazyEqualityDeleteFile{
+						dataFile:           dataFile,
+						fieldIDs:           fieldIDs,
+						hasPointerIdentity: dataFileHasPointerIdentity(dataFile),
+					}
+
+					continue
+				}
+				if path == firstPath {
+					if err := validateEqualityDeleteMetadata(
+						dataFile, firstFile.dataFile, firstFile.fieldIDs, firstFile.hasPointerIdentity,
+					); err != nil {
+						return nil, err
+					}
+
+					continue
+				}
+
+				loader.files = make(map[string]*lazyEqualityDeleteFile, 2)
+				loader.files[firstPath] = firstFile
+			}
+			if file, ok := loader.files[path]; ok {
+				if err := validateEqualityDeleteMetadata(
+					dataFile, file.dataFile, file.fieldIDs, file.hasPointerIdentity,
+				); err != nil {
+					return nil, err
+				}
+
 				continue
 			}
 
+			fieldIDs := dataFileEqualityFieldIDs(dataFile)
+			if len(fieldIDs) == 0 {
+				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
+			}
+
 			loader.files[path] = &lazyEqualityDeleteFile{
-				id:       len(loader.files),
-				dataFile: dataFile,
-				fieldIDs: fieldIDs,
+				id:                 len(loader.files),
+				dataFile:           dataFile,
+				fieldIDs:           fieldIDs,
+				hasPointerIdentity: dataFileHasPointerIdentity(dataFile),
 			}
 		}
 	}
 
-	if len(loader.files) == 0 {
+	if firstFile == nil {
 		return nil, nil
+	}
+	if loader.files == nil {
+		loader.files = map[string]*lazyEqualityDeleteFile{firstPath: firstFile}
+		loader.singleFile = firstFile
 	}
 
 	return loader, nil
+}
+
+func (l *lazyEqualityDeleteLoader) needsSchemaHistory() bool {
+	if l == nil {
+		return false
+	}
+
+	for _, file := range l.files {
+		for _, fieldID := range file.fieldIDs {
+			if _, found := l.tableSchema.FindFieldByID(fieldID); !found {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (l *lazyEqualityDeleteLoader) addFieldIDs(idset set[int]) {
@@ -412,7 +532,10 @@ func (l *lazyEqualityDeleteLoader) addFieldIDs(idset set[int]) {
 
 func (l *lazyEqualityDeleteLoader) loadFile(ctx context.Context, file *lazyEqualityDeleteFile) (*equalityDeleteFileSet, error) {
 	file.once.Do(func() {
-		deleteSchema := schemaForEqualityFields(l.tableSchema, l.tableSchemas, file.fieldIDs)
+		deleteSchema := l.tableSchema
+		if len(l.tableSchemas) > 0 {
+			deleteSchema = schemaForEqualityFields(l.tableSchema, l.tableSchemas, file.fieldIDs)
+		}
 		keys, colNames, err := readEqualityDeleteFile(
 			ctx, l.fs, deleteSchema, l.nameMapping, file.dataFile, file.fieldIDs)
 		if err != nil {
@@ -453,13 +576,17 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 	}
 	if len(task.EqualityDeleteFiles) == 1 {
 		dataFile := task.EqualityDeleteFiles[0]
-		if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
-			return nil, nil
-		}
+		file := l.singleFile
+		if file == nil || !file.hasPointerIdentity || dataFile != file.dataFile {
+			if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
+				return nil, nil
+			}
 
-		file, ok := l.files[dataFile.FilePath()]
-		if !ok {
-			return nil, nil
+			var ok bool
+			file, ok = l.files[dataFile.FilePath()]
+			if !ok {
+				return nil, nil
+			}
 		}
 
 		fileSet, err := l.loadFile(ctx, file)
@@ -473,18 +600,13 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 		return []*equalityDeleteSet{fileSet.equalityDeleteSet}, nil
 	}
 
-	perFile := make(map[string]*equalityDeleteFileSet, len(task.EqualityDeleteFiles))
+	files := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
 	for _, dataFile := range task.EqualityDeleteFiles {
 		if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
 			continue
 		}
 
-		path := dataFile.FilePath()
-		if _, seen := perFile[path]; seen {
-			continue
-		}
-
-		file, ok := l.files[path]
+		file, ok := l.files[dataFile.FilePath()]
 		if !ok {
 			continue
 		}
@@ -493,14 +615,10 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 		if err != nil {
 			return nil, err
 		}
-		perFile[path] = fileSet
+		files = append(files, fileSet)
 	}
 
-	if len(perFile) == 0 {
-		return nil, nil
-	}
-
-	return buildEqualityDeleteSetsForTask(task, perFile, l.combine), nil
+	return buildEqualityDeleteSetsForFiles(files, l.combine), nil
 }
 
 // readAllEqualityDeleteFiles reads all unique equality delete files from
@@ -509,13 +627,13 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 // kept as separate sets (not merged).
 func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceberg.Schema, nameMapping iceberg.NameMapping, tasks []FileScanTask, concurrency int) (map[int][]*equalityDeleteSet, error) {
 	type deleteFileInfo struct {
-		id       int
-		file     iceberg.DataFile
-		fieldIDs []int
+		id                 int
+		file               iceberg.DataFile
+		fieldIDs           []int
+		hasPointerIdentity bool
 	}
 
 	uniqueDeletes := make(map[string]deleteFileInfo)
-	hasAny := false
 
 	for _, t := range tasks {
 		for _, d := range t.EqualityDeleteFiles {
@@ -523,22 +641,32 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				continue
 			}
 
-			if len(d.EqualityFieldIDs()) == 0 {
-				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, d.FilePath())
+			path := d.FilePath()
+			if info, ok := uniqueDeletes[path]; ok {
+				if err := validateEqualityDeleteMetadata(
+					d, info.file, info.fieldIDs, info.hasPointerIdentity,
+				); err != nil {
+					return nil, err
+				}
+
+				continue
 			}
 
-			hasAny = true
-			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
-				uniqueDeletes[d.FilePath()] = deleteFileInfo{
-					id:       len(uniqueDeletes),
-					file:     d,
-					fieldIDs: d.EqualityFieldIDs(),
-				}
+			fieldIDs := dataFileEqualityFieldIDs(d)
+			if len(fieldIDs) == 0 {
+				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, path)
+			}
+
+			uniqueDeletes[path] = deleteFileInfo{
+				id:                 len(uniqueDeletes),
+				file:               d,
+				fieldIDs:           fieldIDs,
+				hasPointerIdentity: dataFileHasPointerIdentity(d),
 			}
 		}
 	}
 
-	if !hasAny {
+	if len(uniqueDeletes) == 0 {
 		return nil, nil
 	}
 
@@ -637,39 +765,42 @@ func buildEqualityDeleteSetsForTask(
 		return []*equalityDeleteSet{fileSet.equalityDeleteSet}
 	}
 
-	var (
-		groupKey string
-		groups   map[string][]*equalityDeleteFileSet
-	)
-	groupFiles := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
-
+	files := make([]*equalityDeleteFileSet, 0, len(task.EqualityDeleteFiles))
 	for _, dataFile := range task.EqualityDeleteFiles {
-		fileSet, ok := perFile[dataFile.FilePath()]
-		if !ok {
-			continue
-		}
-
-		if groups != nil {
-			groups[fileSet.groupKey] = append(groups[fileSet.groupKey], fileSet)
-		} else if len(groupFiles) == 0 {
-			groupKey = fileSet.groupKey
-			groupFiles = append(groupFiles, fileSet)
-		} else if fileSet.groupKey != groupKey {
-			groups = make(map[string][]*equalityDeleteFileSet, 2)
-			groups[groupKey] = groupFiles
-			groupFiles = nil
-			groups[fileSet.groupKey] = append(groups[fileSet.groupKey], fileSet)
-		} else {
-			groupFiles = append(groupFiles, fileSet)
+		if fileSet, ok := perFile[dataFile.FilePath()]; ok {
+			files = append(files, fileSet)
 		}
 	}
 
-	if groups == nil {
-		if len(groupFiles) == 0 {
+	return buildEqualityDeleteSetsForFiles(files, combine)
+}
+
+func buildEqualityDeleteSetsForFiles(
+	files []*equalityDeleteFileSet,
+	combine func([]*equalityDeleteFileSet) *equalityDeleteSet,
+) []*equalityDeleteSet {
+	if len(files) == 0 {
+		return nil
+	}
+	if len(files) == 1 {
+		if len(files[0].keys) == 0 {
 			return nil
 		}
 
-		deleteSet := combine(groupFiles)
+		return []*equalityDeleteSet{files[0].equalityDeleteSet}
+	}
+
+	groupKey := files[0].groupKey
+	oneGroup := true
+	for _, file := range files[1:] {
+		if file.groupKey != groupKey {
+			oneGroup = false
+
+			break
+		}
+	}
+	if oneGroup {
+		deleteSet := combine(files)
 		if len(deleteSet.keys) == 0 {
 			return nil
 		}
@@ -677,9 +808,14 @@ func buildEqualityDeleteSetsForTask(
 		return []*equalityDeleteSet{deleteSet}
 	}
 
+	groups := make(map[string][]*equalityDeleteFileSet, 2)
+	for _, file := range files {
+		groups[file.groupKey] = append(groups[file.groupKey], file)
+	}
+
 	sets := make([]*equalityDeleteSet, 0, len(groups))
-	for _, files := range groups {
-		deleteSet := combine(files)
+	for _, groupFiles := range groups {
+		deleteSet := combine(groupFiles)
 		if len(deleteSet.keys) > 0 {
 			sets = append(sets, deleteSet)
 		}

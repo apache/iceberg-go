@@ -165,10 +165,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return errors.New("transaction has already been committed")
 	}
 
-	stagedMeta := meta.clone()
-	if stagedMeta == nil {
-		return errors.New("cannot apply updates to nil metadata")
-	}
+	var stagedMeta *MetadataBuilder
 
 	// Only new requirement validation needs the immutable metadata view.
 	// Updates can be applied directly to the staged builder, and duplicate
@@ -207,6 +204,12 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 
 				continue
 			}
+			if stagedMeta == nil {
+				stagedMeta = meta.clone()
+				if stagedMeta == nil {
+					return errors.New("cannot apply updates to nil metadata")
+				}
+			}
 			if current == nil {
 				built, err := stagedMeta.Build()
 				if err != nil {
@@ -224,6 +227,15 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			}
 			existing[key] = r
 			stagedReqs = append(stagedReqs, r)
+		}
+	}
+	if stagedMeta == nil {
+		if len(updates) == 0 {
+			return nil
+		}
+		stagedMeta = meta.clone()
+		if stagedMeta == nil {
+			return errors.New("cannot apply updates to nil metadata")
 		}
 	}
 
@@ -3328,6 +3340,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
 			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
 			WithLabels(t.tbl.labels),
+			WithSavedConfig(t.tbl.savedConfig),
 		),
 	}, nil
 }
@@ -3392,7 +3405,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 }
 
 func validateGCEnabledForSnapshotExpiration(props iceberg.Properties) error {
-	if !isGCEnabled(props) {
+	if !IsGCEnabled(props) {
 		return errors.New("cannot expire snapshots: GC is disabled (deleting files may corrupt other tables)")
 	}
 

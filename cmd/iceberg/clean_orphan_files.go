@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/pterm/pterm"
 )
 
@@ -38,22 +39,22 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 
-	opts := []table.OrphanCleanupOption{
-		table.WithFilesOlderThan(olderThan),
+	opts := []maintenance.OrphanCleanupOption{
+		maintenance.WithCleanupFilesOlderThan(olderThan),
 	}
 
 	if cmd.Location != "" {
-		opts = append(opts, table.WithLocation(cmd.Location))
+		opts = append(opts, maintenance.WithCleanupLocation(cmd.Location))
 	}
 
-	plan, err := tbl.PlanOrphanFiles(ctx, opts...)
+	plan, err := maintenance.PlanOrphanFiles(ctx, tbl, opts...)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file scan failed: %w", err))
 		os.Exit(1)
 	}
 
 	planFiles := plan.Files()
-	result := table.OrphanCleanupResult{
+	result := maintenance.OrphanCleanupResult{
 		OrphanFileLocations: planFiles,
 		OrphanFiles:         plan.OrphanFiles(),
 		TotalSizeBytes:      plan.TotalSizeBytes(),
@@ -86,7 +87,7 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 		os.Exit(1)
 	}
 
-	deleteResult, err := tbl.ExecuteOrphanCleanup(ctx, plan)
+	deleteResult, err := maintenance.ExecuteOrphanCleanup(ctx, tbl, plan)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file deletion failed: %w", err))
 		os.Exit(1)
@@ -105,7 +106,7 @@ func shouldPrintCleanOrphanPreview(output Output) bool {
 	}
 }
 
-func buildCleanOrphanFilesResult(tbl *table.Table, result table.OrphanCleanupResult, dryRun bool) CleanOrphanFilesResult {
+func buildCleanOrphanFilesResult(tbl *table.Table, result maintenance.OrphanCleanupResult, dryRun bool) CleanOrphanFilesResult {
 	var entries []OrphanFileEntry
 	if dryRun {
 		entries = make([]OrphanFileEntry, 0, len(result.OrphanFiles))
