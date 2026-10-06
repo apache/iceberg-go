@@ -66,37 +66,57 @@ func (f *splitOffsetsReferenceTestFile) DataFileCollectionsRef(DataFileRef) (
 	return nil, nil, f.borrowedOffsets, nil
 }
 
-func TestBorrowedDataFileSplitOffsetsUsesPublicFallbackOnly(t *testing.T) {
-	want := []int64{12, 40, 96}
-	file := &splitOffsetsCollectionsTestFile{offsets: want}
+func splitOffsetsTestCases() []struct {
+	name    string
+	offsets []int64
+} {
+	return []struct {
+		name    string
+		offsets []int64
+	}{
+		{name: "nil"},
+		{name: "empty", offsets: []int64{}},
+		{name: "populated", offsets: []int64{12, 40, 96}},
+	}
+}
 
-	got := BorrowedDataFileSplitOffsets(file)
-	if !slices.Equal(got, want) {
-		t.Fatalf("BorrowedDataFileSplitOffsets() = %v, want %v", got, want)
-	}
-	if file.splitOffsetsCalls != 1 {
-		t.Fatalf("SplitOffsets() called %d times, want 1", file.splitOffsetsCalls)
-	}
-	if file.otherCollectionCalls != 0 {
-		t.Fatalf("other collection getters called %d times, want 0", file.otherCollectionCalls)
+func TestBorrowedDataFileSplitOffsetsUsesPublicFallbackOnly(t *testing.T) {
+	for _, tt := range splitOffsetsTestCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			file := &splitOffsetsCollectionsTestFile{offsets: tt.offsets}
+
+			got := BorrowedDataFileSplitOffsets(file)
+			if !slices.Equal(got, tt.offsets) || (got == nil) != (tt.offsets == nil) {
+				t.Fatalf("BorrowedDataFileSplitOffsets() = %v, want %v", got, tt.offsets)
+			}
+			if file.splitOffsetsCalls != 1 {
+				t.Fatalf("SplitOffsets() called %d times, want 1", file.splitOffsetsCalls)
+			}
+			if file.otherCollectionCalls != 0 {
+				t.Fatalf("other collection getters called %d times, want 0", file.otherCollectionCalls)
+			}
+		})
 	}
 }
 
 func TestBorrowedDataFileSplitOffsetsUsesBorrowedReference(t *testing.T) {
-	borrowed := []int64{12, 40, 96}
-	file := &splitOffsetsReferenceTestFile{borrowedOffsets: borrowed}
+	for _, tt := range splitOffsetsTestCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			file := &splitOffsetsReferenceTestFile{borrowedOffsets: tt.offsets}
 
-	got := BorrowedDataFileSplitOffsets(file)
-	if !slices.Equal(got, borrowed) {
-		t.Fatalf("BorrowedDataFileSplitOffsets() = %v, want %v", got, borrowed)
-	}
-	if len(got) > 0 && &got[0] != &borrowed[0] {
-		t.Fatal("BorrowedDataFileSplitOffsets() copied the borrowed offsets")
-	}
-	if file.refCalls != 1 {
-		t.Fatalf("DataFileCollectionsRef() called %d times, want 1", file.refCalls)
-	}
-	if file.splitOffsetsCalls != 0 || file.otherCollectionCalls != 0 {
-		t.Fatal("public collection getters were called for borrowed offsets")
+			got := BorrowedDataFileSplitOffsets(file)
+			if !slices.Equal(got, tt.offsets) || (got == nil) != (tt.offsets == nil) {
+				t.Fatalf("BorrowedDataFileSplitOffsets() = %v, want %v", got, tt.offsets)
+			}
+			if len(got) > 0 && &got[0] != &tt.offsets[0] {
+				t.Fatal("BorrowedDataFileSplitOffsets() copied the borrowed offsets")
+			}
+			if file.refCalls != 1 {
+				t.Fatalf("DataFileCollectionsRef() called %d times, want 1", file.refCalls)
+			}
+			if file.splitOffsetsCalls != 0 || file.otherCollectionCalls != 0 {
+				t.Fatal("public collection getters were called for borrowed offsets")
+			}
+		})
 	}
 }
