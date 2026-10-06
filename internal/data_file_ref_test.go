@@ -89,6 +89,9 @@ func TestBorrowedDataFileSplitOffsetsUsesPublicFallbackOnly(t *testing.T) {
 			if !slices.Equal(got, tt.offsets) || (got == nil) != (tt.offsets == nil) {
 				t.Fatalf("BorrowedDataFileSplitOffsets() = %v, want %v", got, tt.offsets)
 			}
+			if cap(got) != len(got) {
+				t.Fatalf("BorrowedDataFileSplitOffsets() capacity = %d, want %d", cap(got), len(got))
+			}
 			if file.splitOffsetsCalls != 1 {
 				t.Fatalf("SplitOffsets() called %d times, want 1", file.splitOffsetsCalls)
 			}
