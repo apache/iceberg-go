@@ -96,6 +96,8 @@ func inspectPartitionHistoricalSnapshotTable(
 
 	historicalSequence := int64(1)
 	currentSequence := int64(2)
+	// The current snapshot's manifest keeps a file last added by the historical
+	// snapshot, so last_updated_* must resolve through snapshot history.
 	manifestPath := "mem://snapshot-history/table/metadata/manifest.avro"
 	var manifestBuffer bytes.Buffer
 	manifest, err := iceberg.WriteManifest(
