@@ -65,6 +65,7 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 					if publicGetter {
 						file = splitOffsetsPublicBenchmarkFile{DataFile: file}
 					}
+
 					return file
 				}
 				makeTasks := func() []FileScanTask {
@@ -72,6 +73,7 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 					for i := range tasks {
 						tasks[i] = FileScanTask{File: makeFile(i), Start: 0, Length: fileSize}
 					}
+
 					return tasks
 				}
 
