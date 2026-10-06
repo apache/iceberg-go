@@ -38,32 +38,47 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 					offsets[i] = int64(i+1) * 64
 				}
 
-				dataFileBuilder, err := iceberg.NewDataFileBuilder(
-					*iceberg.UnpartitionedSpec,
-					iceberg.EntryContentData,
-					"mem://benchmark/split-offsets.parquet",
-					iceberg.ParquetFile,
-					nil,
-					nil,
-					nil,
-					1,
-					fileSize,
-				)
-				if err != nil {
-					b.Fatal(err)
+				makeFile := func(i int) iceberg.DataFile {
+					dataFileBuilder, err := iceberg.NewDataFileBuilder(
+						*iceberg.UnpartitionedSpec,
+						iceberg.EntryContentData,
+						fmt.Sprintf("mem://benchmark/split-offsets-%d.parquet", i),
+						iceberg.ParquetFile,
+						nil,
+						nil,
+						nil,
+						1,
+						fileSize,
+					)
+					if err != nil {
+						b.Fatal(err)
+					}
+					file := dataFileBuilder.
+						ColumnSizes(map[int]int64{1: fileSize}).
+						ValueCounts(map[int]int64{1: 1}).
+						NullValueCounts(map[int]int64{1: 0}).
+						NaNValueCounts(map[int]int64{1: 0}).
+						LowerBoundValues(map[int][]byte{1: {1}}).
+						UpperBoundValues(map[int][]byte{1: {2}}).
+						SplitOffsets(offsets).
+						Build()
+					if publicGetter {
+						file = splitOffsetsPublicBenchmarkFile{DataFile: file}
+					}
+					return file
 				}
-				file := dataFileBuilder.SplitOffsets(offsets).Build()
-				if publicGetter {
-					file = splitOffsetsPublicBenchmarkFile{DataFile: file}
-				}
-				tasks := make([]FileScanTask, filesPerOp)
-				for i := range tasks {
-					tasks[i] = FileScanTask{File: file, Start: 0, Length: fileSize}
+				makeTasks := func() []FileScanTask {
+					tasks := make([]FileScanTask, filesPerOp)
+					for i := range tasks {
+						tasks[i] = FileScanTask{File: makeFile(i), Start: 0, Length: fileSize}
+					}
+					return tasks
 				}
 
+				probe := makeTasks()
 				wantTasksPerFile := 1
 				if offsetCount > 1 {
-					splits, ok := splitParquetScanTask(tasks[0], fileSize/2)
+					splits, ok := splitParquetScanTask(probe[0], fileSize/2)
 					if !ok {
 						b.Fatal("expected split offsets to produce scan tasks")
 					}
@@ -74,11 +89,20 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for b.Loop() {
+					// Rebuild distinct files outside the timer so each timed call measures
+					// first access to per-file metadata, matching scan planning.
+					b.StopTimer()
+					tasks := makeTasks()
+					b.StartTimer()
+
 					result := splitRemoteScanTasks(tasks, fileSize/2)
+
+					b.StopTimer()
 					if len(result) != wantTasks {
 						b.Fatalf("splitRemoteScanTasks() returned %d tasks, want %d", len(result), wantTasks)
 					}
 					splitRemoteScanTasksBenchmarkSink = result
+					b.StartTimer()
 				}
 				b.ReportMetric(filesPerOp, "files/op")
 				b.ReportMetric(float64(offsetCount), "split_offsets/file")
@@ -88,5 +112,5 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 }
 
 // Embedding only the public DataFile interface intentionally hides
-// DataFileCollectionsRef, forcing the defensive-copy fallback for comparison.
+// DataFileSplitOffsetsRef, forcing the defensive-copy fallback for comparison.
 type splitOffsetsPublicBenchmarkFile struct{ iceberg.DataFile }
