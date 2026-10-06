@@ -52,8 +52,7 @@ func BenchmarkPartitionTypeFieldCount(b *testing.B) {
 	}
 }
 
-
-func BenchmarkPartitionTypeMultipleSchemas(b *testing.B) {
+func BenchmarkPartitionTypeMultipleSchemasWarmIndexes(b *testing.B) {
 	spec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
 			SourceIDs: []int{1}, FieldID: 1000, Name: "name",
