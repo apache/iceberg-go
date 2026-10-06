@@ -1689,6 +1689,9 @@ func validateBoundFilter(schema *iceberg.Schema, filter iceberg.BooleanExpressio
 	return validationErr
 }
 
+// bindTaskFilter returns changed=true only when binding an unbound residual
+// produces a new expression. When changed is false, the returned expression is
+// the exact input value, after validating any already-bound predicates.
 func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, bool, error) {
 	if filter == nil {
 		return nil, false, nil
