@@ -87,4 +87,6 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 	}
 }
 
+// Embedding only the public DataFile interface intentionally hides
+// DataFileCollectionsRef, forcing the defensive-copy fallback for comparison.
 type splitOffsetsPublicBenchmarkFile struct{ iceberg.DataFile }
