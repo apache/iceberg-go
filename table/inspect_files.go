@@ -555,11 +555,12 @@ type inspectPartitionBuilder struct {
 }
 
 type inspectPartitionFieldBuilder struct {
-	id        int
-	name      string
-	typ       iceberg.Type
-	arrowType arrow.DataType
-	builder   array.Builder
+	id          int
+	name        string
+	typ         iceberg.Type
+	arrowType   arrow.DataType
+	builder     array.Builder
+	appendValue func(any) error
 }
 
 func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
@@ -737,13 +738,15 @@ func newInspectPartitionBuilder(
 	fields := make([]inspectPartitionFieldBuilder, 0, len(partitionType.FieldList))
 	for _, field := range partitionType.FieldList {
 		fieldBuilder := lookup[field.ID]
-		fields = append(fields, inspectPartitionFieldBuilder{
+		partitionField := inspectPartitionFieldBuilder{
 			id:        field.ID,
 			name:      field.Name,
 			typ:       field.Type,
 			arrowType: fieldBuilder.Type(),
 			builder:   fieldBuilder,
-		})
+		}
+		partitionField.appendValue = newInspectPartitionFieldAppender(partitionField)
+		fields = append(fields, partitionField)
 	}
 
 	return &inspectPartitionBuilder{builder: builder, fields: fields}, nil
@@ -752,22 +755,88 @@ func newInspectPartitionBuilder(
 func (b *inspectPartitionBuilder) append(values map[int]any) error {
 	b.builder.Append(true)
 	for _, field := range b.fields {
-		value := values[field.id]
-		if value == nil {
-			field.builder.AppendNull()
-
-			continue
-		}
-		sc, err := inspectValueScalar(value, field.typ, field.arrowType)
-		if err != nil {
-			return fmt.Errorf("partition field %q: %w", field.name, err)
-		}
-		if err := scalar.Append(field.builder, sc); err != nil {
+		if err := field.appendValue(values[field.id]); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func newInspectPartitionFieldAppender(field inspectPartitionFieldBuilder) func(any) error {
+	appendScalar := func(value any) error {
+		sc, err := inspectValueScalar(value, field.typ, field.arrowType)
+		if err != nil {
+			return fmt.Errorf("partition field %q: %w", field.name, err)
+		}
+
+		return scalar.Append(field.builder, sc)
+	}
+	appendNull := func() {
+		field.builder.AppendNull()
+	}
+
+	switch field.typ.(type) {
+	case iceberg.BooleanType:
+		if builder, ok := field.builder.(*array.BooleanBuilder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Int32Type:
+		if builder, ok := field.builder.(*array.Int32Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Int64Type:
+		if builder, ok := field.builder.(*array.Int64Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Float32Type:
+		if builder, ok := field.builder.(*array.Float32Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Float64Type:
+		if builder, ok := field.builder.(*array.Float64Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.StringType:
+		if builder, ok := field.builder.(*array.StringBuilder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.BinaryType:
+		if builder, ok := field.builder.(*array.BinaryBuilder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	}
+
+	return func(value any) error {
+		if value == nil {
+			appendNull()
+
+			return nil
+		}
+
+		return appendScalar(value)
+	}
+}
+
+func newInspectTypedPartitionAppender[T any](
+	appendValue func(T),
+	appendNull func(),
+	appendScalar func(any) error,
+) func(any) error {
+	return func(value any) error {
+		if value == nil {
+			appendNull()
+
+			return nil
+		}
+		typed, ok := value.(T)
+		if !ok {
+			return appendScalar(value)
+		}
+		appendValue(typed)
+
+		return nil
+	}
 }
 
 func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
