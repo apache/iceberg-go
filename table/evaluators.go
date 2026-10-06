@@ -182,10 +182,6 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
 	hasExtrema := minLit != nil && maxLit != nil
-	var extremaCmp func(iceberg.Literal, iceberg.Literal) int
-	if hasExtrema {
-		extremaCmp = getCmpLiteral(minLit)
-	}
 
 	if field.LowerBound == nil {
 		return rowsCannotMatch
@@ -197,7 +193,7 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	}
 
 	if hasExtrema {
-		if extremaCmp(lower, maxLit) > 0 {
+		if compareBoundLiterals(lower, maxLit) > 0 {
 			return rowsCannotMatch
 		}
 	} else {
@@ -216,7 +212,7 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 		}
 
 		if hasExtrema {
-			if extremaCmp(upper, minLit) < 0 {
+			if compareBoundLiterals(upper, minLit) < 0 {
 				return rowsCannotMatch
 			}
 		} else if allBoundCheck(upper, literals, -1) {
@@ -329,6 +325,48 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 		// names the real cause if a geo term is ever routed here.
 		panic(fmt.Errorf("%w: geometry/geography has no ordering, cannot compare %s bounds",
 			iceberg.ErrType, boundary.Type()))
+	}
+	panic(iceberg.ErrType)
+}
+
+func compareLiteralValues[T iceberg.LiteralType](left, right iceberg.Literal) int {
+	leftValue := left.(iceberg.TypedLiteral[T])
+	rightValue := right.(iceberg.TypedLiteral[T])
+
+	return leftValue.Comparator()(leftValue.Value(), rightValue.Value())
+}
+
+func compareBoundLiterals(left, right iceberg.Literal) int {
+	switch left.(type) {
+	case iceberg.TypedLiteral[bool]:
+		return compareLiteralValues[bool](left, right)
+	case iceberg.TypedLiteral[int32]:
+		return compareLiteralValues[int32](left, right)
+	case iceberg.TypedLiteral[int64]:
+		return compareLiteralValues[int64](left, right)
+	case iceberg.TypedLiteral[float32]:
+		return compareLiteralValues[float32](left, right)
+	case iceberg.TypedLiteral[float64]:
+		return compareLiteralValues[float64](left, right)
+	case iceberg.TypedLiteral[iceberg.Date]:
+		return compareLiteralValues[iceberg.Date](left, right)
+	case iceberg.TypedLiteral[iceberg.Time]:
+		return compareLiteralValues[iceberg.Time](left, right)
+	case iceberg.TypedLiteral[iceberg.Timestamp]:
+		return compareLiteralValues[iceberg.Timestamp](left, right)
+	case iceberg.TypedLiteral[iceberg.TimestampNano]:
+		return compareLiteralValues[iceberg.TimestampNano](left, right)
+	case iceberg.TypedLiteral[[]byte]:
+		return compareLiteralValues[[]byte](left, right)
+	case iceberg.TypedLiteral[string]:
+		return compareLiteralValues[string](left, right)
+	case iceberg.TypedLiteral[uuid.UUID]:
+		return compareLiteralValues[uuid.UUID](left, right)
+	case iceberg.TypedLiteral[iceberg.Decimal]:
+		return compareLiteralValues[iceberg.Decimal](left, right)
+	case iceberg.GeoLiteral:
+		panic(fmt.Errorf("%w: geometry/geography has no ordering, cannot compare %s bounds",
+			iceberg.ErrType, left.Type()))
 	}
 	panic(iceberg.ErrType)
 }
@@ -1175,17 +1213,13 @@ func (m *inclusiveMetricsEval) visitIn(
 	}
 
 	hasExtrema := minLit != nil && maxLit != nil
-	var extremaCmp func(iceberg.Literal, iceberg.Literal) int
-	if hasExtrema {
-		extremaCmp = getCmpLiteral(minLit)
-	}
 
 	lowerBound, hasLowerBound := m.boundFor(t, m.lowerBounds[fieldID])
 	if hasLowerBound {
 		if m.isNan(lowerBound) {
 			return rowsMightMatch
 		}
-		if hasExtrema && extremaCmp(lowerBound, maxLit) > 0 {
+		if hasExtrema && compareBoundLiterals(lowerBound, maxLit) > 0 {
 			// Preserve this lower-bound short circuit before decoding the upper
 			// bound: malformed upper metrics must not matter once lower proves
 			// the set disjoint.
@@ -1203,7 +1237,7 @@ func (m *inclusiveMetricsEval) visitIn(
 			if m.isNan(upperBound) {
 				return rowsMightMatch
 			}
-			if extremaCmp(upperBound, minLit) < 0 {
+			if compareBoundLiterals(upperBound, minLit) < 0 {
 				return rowsCannotMatch
 			}
 		}
