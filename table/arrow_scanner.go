@@ -2035,7 +2035,9 @@ func (as *arrowScan) processRecordsWithPlans(
 			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes()) {
 			tester.RangeSet = true
 			tester.Start, tester.Length = adjustParquetTaskRange(task.Value, rdr.SourceFileSize())
-			tester.PlanningSplitOffsets = iceinternal.BorrowedDataFileSplitOffsets(task.Value.File)
+			planningOffsets := iceinternal.BorrowedDataFileSplitOffsets(task.Value.File)
+			// Cap capacity so an accidental append cannot overwrite borrowed DataFile state.
+			tester.PlanningSplitOffsets = planningOffsets[:len(planningOffsets):len(planningOffsets)]
 		}
 		if posSource != nil {
 			tester.Survivors = &posSource.spans
