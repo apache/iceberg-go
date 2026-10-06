@@ -2579,6 +2579,9 @@ func WithDeleteCaseInsensitive() DeleteOption {
 //   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
 //   - Files where no rows match the filter are kept unchanged
 //
+// A row matches only if the filter is true for it. Rows where the filter evaluates to NULL, for example
+// `age = 30` on a NULL age, do not match and are kept.
+//
 // The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
@@ -2706,7 +2709,16 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 		return nil, nil, nil, fmt.Errorf("failed to create inclusive metrics evaluator: %w", err)
 	}
 
-	strictEvaluator, err := newStrictMetricsEvaluator(schema, filter, caseSensitive, false)
+	// A file is deleted as a whole only if the filter is true for all of its
+	// rows. The strict evaluator treats predicates as two-valued, so NotEqual
+	// and NotIn would also count rows where the filter is NULL. Evaluate the
+	// negation of the rows the rewrite keeps instead, so that both paths agree.
+	notTrue, err := isNotTrueExpr(filter)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	strictEvaluator, err := newStrictMetricsEvaluator(schema, iceberg.NewNot(notTrue), caseSensitive, false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
 	}
@@ -2918,9 +2930,14 @@ func (isNotTrueVisitor) VisitOr(left, right truthExprs) truthExprs {
 func (isNotTrueVisitor) VisitUnbound(pred iceberg.UnboundPredicate) truthExprs {
 	negated := pred.Negate()
 	switch pred.Op() {
-	case iceberg.OpIsNull, iceberg.OpNotNull, iceberg.OpIsNan, iceberg.OpNotNan:
+	case iceberg.OpIsNull, iceberg.OpNotNull, iceberg.OpNotNan:
 		// never evaluates to NULL
 		return truthExprs{notTrue: negated, notFalse: pred}
+	case iceberg.OpIsNan:
+		// is_nan(NULL) is false, so NULL rows survive. The guard also covers
+		// files written before the column existed, where NotNaN on the missing
+		// column translates to AlwaysFalse.
+		return truthExprs{notTrue: iceberg.NewOr(negated, iceberg.IsNull(pred.Term())), notFalse: pred}
 	case iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ:
 		// NaN fails both x < 5 and x >= 5. IsNaN binds to AlwaysFalse for
 		// non-floating-point terms.
@@ -2929,7 +2946,9 @@ func (isNotTrueVisitor) VisitUnbound(pred iceberg.UnboundPredicate) truthExprs {
 
 	// Any other predicate is NULL when its term is NULL. Guard In and NotIn
 	// too: binding turns a set that ends up with one value into Equal or
-	// NotEqual, which are NULL for a NULL term.
+	// NotEqual, which are NULL for a NULL term. A scan with a multi-valued
+	// NotIn still matches NULL rows, see
+	// https://github.com/apache/iceberg-go/issues/2132.
 	isNull := iceberg.IsNull(pred.Term())
 
 	return truthExprs{

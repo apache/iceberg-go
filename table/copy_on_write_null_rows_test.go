@@ -58,6 +58,11 @@ func TestCopyOnWriteDeleteKeepsRowsWhereFilterIsNull(t *testing.T) {
 		{"and", iceberg.NewAnd(iceberg.EqualTo(age, int64(30)), iceberg.EqualTo(name, "c")), []int64{1, 2, 3, 4}},
 		{"or", iceberg.NewOr(iceberg.EqualTo(age, int64(25)), iceberg.EqualTo(name, "c")), []int64{2, 4}},
 		{"not and", iceberg.NewNot(iceberg.NewAnd(iceberg.EqualTo(age, int64(30)), iceberg.EqualTo(name, "c"))), []int64{2, 3}},
+		// the literal is outside the file's bounds, so every non-NULL row
+		// matches and only the NULL row keeps the file from being deleted whole
+		{"not equal outside bounds", iceberg.NotEqualTo(age, int64(100)), []int64{3}},
+		{"not outside bounds", iceberg.NewNot(iceberg.EqualTo(age, int64(100))), []int64{3}},
+		{"not in outside bounds", iceberg.NotIn(age, int64(100), int64(200)), []int64{3}},
 	}
 
 	for _, version := range []string{"2", "3"} {
@@ -156,6 +161,66 @@ func TestCopyOnWriteDeleteKeepsNaNRowsInPrunedRowGroups(t *testing.T) {
 			t.Run("v"+version+"/"+c.name, func(t *testing.T) {
 				tbl := newCopyOnWriteNaNTable(t, version, c.values, nil)
 				requireDeleteMatchesScan(t, tbl, c.filter)
+			})
+		}
+	}
+}
+
+// Rows of a file written before the filtered column was added read as NULL
+// and must survive, also for IsNaN, which is false rather than NULL for them.
+func TestCopyOnWriteDeleteKeepsRowsOfFilesWithoutTheColumn(t *testing.T) {
+	x := iceberg.Reference("x")
+
+	cases := []struct {
+		name   string
+		filter iceberg.BooleanExpression
+		want   []int64
+	}{
+		{"is nan", iceberg.IsNaN(x), []int64{1, 2, 3, 4, 5}},
+		{"is nan and", iceberg.NewAnd(iceberg.IsNaN(x), iceberg.GreaterThan(iceberg.Reference("id"), int64(0))), []int64{1, 2, 3, 4, 5}},
+		{"less than", iceberg.LessThan(x, 5.0), []int64{1, 2, 3, 4, 6}},
+		{"is null", iceberg.IsNull(x), []int64{5, 6}},
+	}
+
+	for _, version := range []string{"2", "3"} {
+		for _, c := range cases {
+			t.Run("v"+version+"/"+c.name, func(t *testing.T) {
+				ctx := context.Background()
+				// ids 1 to 4 are written before x exists
+				tbl := newCopyOnWriteNullRowsTable(t, version)
+
+				txn := tbl.NewTransaction()
+				require.NoError(t, txn.UpdateSchema(true, false).
+					AddColumn([]string{"x"}, iceberg.PrimitiveTypes.Float64, "", false, nil).Commit())
+				tbl, err := txn.Commit(ctx)
+				require.NoError(t, err)
+
+				arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+				require.NoError(t, err)
+				bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+				defer bldr.Release()
+				bldr.Field(0).(*array.Int64Builder).AppendValues([]int64{5, 6}, nil)
+				bldr.Field(1).(*array.Int64Builder).AppendValues([]int64{50, 60}, nil)
+				bldr.Field(2).(*array.StringBuilder).AppendValues([]string{"e", "f"}, nil)
+				bldr.Field(3).(*array.Float64Builder).AppendValues([]float64{1, math.NaN()}, nil)
+				rec := bldr.NewRecordBatch()
+				defer rec.Release()
+
+				rdr, err := array.NewRecordReader(rec.Schema(), []arrow.RecordBatch{rec})
+				require.NoError(t, err)
+				defer rdr.Release()
+
+				tbl, err = tbl.Append(ctx, rdr, nil)
+				require.NoError(t, err)
+
+				txn = tbl.NewTransaction()
+				require.NoError(t, txn.Delete(ctx, c.filter, nil))
+				tbl, err = txn.Commit(ctx)
+				require.NoError(t, err)
+
+				ids := scanIDs(t, tbl)
+				slices.Sort(ids)
+				require.Equal(t, c.want, ids)
 			})
 		}
 	}
