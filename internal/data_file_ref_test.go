@@ -58,12 +58,10 @@ type splitOffsetsReferenceTestFile struct {
 	refCalls        int
 }
 
-func (f *splitOffsetsReferenceTestFile) DataFileCollectionsRef(DataFileRef) (
-	map[int]int64, []byte, []int64, []int,
-) {
+func (f *splitOffsetsReferenceTestFile) DataFileSplitOffsetsRef(DataFileRef) []int64 {
 	f.refCalls++
 
-	return nil, nil, f.borrowedOffsets, nil
+	return f.borrowedOffsets
 }
 
 func splitOffsetsTestCases() []struct {
@@ -118,7 +116,7 @@ func TestBorrowedDataFileSplitOffsetsUsesBorrowedReference(t *testing.T) {
 				t.Fatalf("BorrowedDataFileSplitOffsets() capacity = %d, want %d", cap(got), len(got))
 			}
 			if file.refCalls != 1 {
-				t.Fatalf("DataFileCollectionsRef() called %d times, want 1", file.refCalls)
+				t.Fatalf("DataFileSplitOffsetsRef() called %d times, want 1", file.refCalls)
 			}
 			if file.splitOffsetsCalls != 0 || file.otherCollectionCalls != 0 {
 				t.Fatal("public collection getters were called for borrowed offsets")
