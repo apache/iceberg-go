@@ -82,14 +82,20 @@ type DataFileCollectionsRef interface {
 	)
 }
 
+// DataFileSplitOffsetsRef exposes only split offsets so callers that do not
+// need column statistics do not trigger their lazy materialization.
+type DataFileSplitOffsetsRef interface {
+	DataFileSplitOffsetsRef(DataFileRef) []int64
+}
+
 // BorrowedDataFileSplitOffsets returns split offsets without copying for the
 // built-in data file and falls back to the public getter for external
 // implementations. The returned slice is read-only and must not be mutated or
 // retained beyond the current planning or read operation.
 func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
 	var splitOffsets []int64
-	if ref, ok := file.(DataFileCollectionsRef); ok {
-		_, _, splitOffsets, _ = ref.DataFileCollectionsRef(DataFileRef{})
+	if ref, ok := file.(DataFileSplitOffsetsRef); ok {
+		splitOffsets = ref.DataFileSplitOffsetsRef(DataFileRef{})
 	} else {
 		splitOffsets = file.SplitOffsets()
 	}
