@@ -107,8 +107,13 @@ type vendedCredentialRefresher struct {
 	// Use a weighted semaphore with a single unit to use as an exclusive lock
 	// but cancellation (via context) is supported. This is important as we do IO
 	// while holding this lock and we want to allow others to cancel during acquisition.
-	mu        *semaphore.Weighted
-	cachedIO  iceio.IO
+	mu       *semaphore.Weighted
+	cachedIO iceio.IO
+	// ioCancel ends the context cachedIO was opened with. That context is the
+	// refresher's own, detached from the caller that triggered the load, and
+	// close is what cancels it. An IO superseded on renewal is left open with
+	// its context alive, since callers that loaded it may still be using it.
+	ioCancel  context.CancelFunc
 	expiresAt time.Time
 	issuedAt  time.Time
 
@@ -171,31 +176,63 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 		maps.Copy(config, freshCreds)
 	}
 
+	// The IO is cached and shared by every later caller, so it must not
+	// inherit this caller's cancellation: a filesystem may keep the context it
+	// is opened with (blobfs does, so every gocloud backend), and a cached IO
+	// built on a per-operation context would fail every later operation with
+	// context.Canceled once that context is done. The refresher owns the IO's
+	// lifetime instead, through ioCancel. fetchCreds above still honours ctx.
+	//
+	// WithoutCancel keeps ctx's values, and the IO depends on them: the S3
+	// factory takes its base AWS config from utils.GetAwsConfig(ctx), so do
+	// not replace this with context.Background(). The flip side is that the
+	// first caller's request-scoped values stay attached to the shared IO.
+	ioCtx, ioCancel := context.WithCancel(context.WithoutCancel(ctx))
+
+	var (
+		newIO     iceio.IO
+		expiresAt time.Time
+		issuedAt  = v.issuedAt
+	)
+
 	if len(v.credentials) > 0 {
-		prefixIO := newPrefixScopedIO(ctx, v.props, v.credentials)
+		prefixIO := newPrefixScopedIO(ioCtx, v.props, v.credentials)
 		prefixIO.nowFunc = v.now
-		v.cachedIO = prefixIO
+		newIO = prefixIO
 		// Expiry is enforced by prefixScopedIO against only the credential
 		// selected for each object location.
-		v.expiresAt = time.Time{}
+	} else {
+		loaded, err := iceio.LoadFS(ioCtx, config, v.location)
+		if err != nil {
+			ioCancel()
 
-		return v.cachedIO, nil
-	}
+			if v.cachedIO == nil {
+				return nil, err
+			}
 
-	newIO, err := iceio.LoadFS(ctx, config, v.location)
-	if err != nil {
-		if v.cachedIO == nil {
-			return nil, err
+			return nil, fmt.Errorf("load filesystem with refreshed credentials for %s: %w", v.location, err)
 		}
 
-		return nil, fmt.Errorf("load filesystem with refreshed credentials for %s: %w", v.location, err)
+		newIO = loaded
+		expiresAt = v.expiresAtFromConfig(config)
+		issuedAt = v.now()
 	}
 
-	v.cachedIO = newIO
-	v.expiresAt = v.expiresAtFromConfig(config)
-	v.issuedAt = v.now()
+	v.replaceIO(newIO, ioCancel)
+	v.expiresAt = expiresAt
+	v.issuedAt = issuedAt
 
 	return v.cachedIO, nil
+}
+
+// replaceIO installs io as the cached IO. The superseded IO is left open:
+// callers that loaded it earlier may still be using it, and its credentials
+// remain valid until their own expiry. Its cancel is dropped without being
+// called on purpose: cancelling it would end the context those callers'
+// operations still run on. The detached context has no parent to deregister
+// from, so it is collected with the IO.
+func (v *vendedCredentialRefresher) replaceIO(io iceio.IO, cancel context.CancelFunc) {
+	v.cachedIO, v.ioCancel = io, cancel
 }
 
 func (v *vendedCredentialRefresher) expiredError(at time.Time) error {
@@ -263,13 +300,19 @@ func (v *vendedCredentialRefresher) close() error {
 	}
 	defer v.mu.Release(1)
 
-	closer, ok := v.cachedIO.(interface{ Close() error })
-	v.cachedIO = nil
-	if ok {
-		return closer.Close()
+	cachedIO, cancel := v.cachedIO, v.ioCancel
+	v.cachedIO, v.ioCancel = nil, nil
+
+	var err error
+	if cachedIO != nil {
+		err = closeOptionalIO(cachedIO)
 	}
 
-	return nil
+	if cancel != nil {
+		cancel()
+	}
+
+	return err
 }
 
 // prefixScopedIO selects a plan credential using the actual object location
@@ -287,6 +330,9 @@ type prefixScopedIO struct {
 	nowFunc     func() time.Time
 }
 
+// newPrefixScopedIO keeps ctx as given and opens every filesystem with it, so
+// ctx bounds their lifetime. It does no detaching of its own: loadFS hands it
+// the refresher-owned context, which close cancels.
 func newPrefixScopedIO(ctx context.Context, baseProps iceberg.Properties, credentials []StorageCredential) *prefixScopedIO {
 	return &prefixScopedIO{
 		ctx:         ctx,
