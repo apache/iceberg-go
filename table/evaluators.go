@@ -1171,12 +1171,17 @@ func (m *inclusiveMetricsEval) visitIn(
 	}
 
 	hasExtrema := minLit != nil && maxLit != nil
+	var extremaCmp func(iceberg.Literal, iceberg.Literal) int
+	if hasExtrema {
+		extremaCmp = getCmpLiteral(minLit)
+	}
+
 	lowerBound, hasLowerBound := m.boundFor(t, m.lowerBounds[fieldID])
 	if hasLowerBound {
 		if m.isNan(lowerBound) {
 			return rowsMightMatch
 		}
-		if hasExtrema && getCmpLiteral(minLit)(lowerBound, maxLit) > 0 {
+		if hasExtrema && extremaCmp(lowerBound, maxLit) > 0 {
 			// Preserve this lower-bound short circuit before decoding the upper
 			// bound: malformed upper metrics must not matter once lower proves
 			// the set disjoint.
@@ -1194,7 +1199,7 @@ func (m *inclusiveMetricsEval) visitIn(
 			if m.isNan(upperBound) {
 				return rowsMightMatch
 			}
-			if getCmpLiteral(minLit)(upperBound, minLit) < 0 {
+			if extremaCmp(upperBound, minLit) < 0 {
 				return rowsCannotMatch
 			}
 		}
