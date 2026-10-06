@@ -52,3 +52,77 @@ func BenchmarkApplyNameMappingWideSchema(b *testing.B) {
 		}
 	}
 }
+
+var benchmarkUpdatedNameMapping iceberg.NameMapping
+
+func benchmarkNameMappingFields(count int) iceberg.NameMapping {
+	mapping := make(iceberg.NameMapping, count)
+	for i := range count {
+		mapping[i] = iceberg.MappedField{
+			FieldID: new(i + 1),
+			Names:   []string{fmt.Sprintf("field_%d", i), fmt.Sprintf("old_field_%d", i)},
+		}
+	}
+
+	return mapping
+}
+
+func BenchmarkUpdateNameMapping(b *testing.B) {
+	for _, size := range []int{2, 8, 256, 1024} {
+		for _, operation := range []string{"no-updates", "rename", "rename-reused", "add-reused"} {
+			b.Run(fmt.Sprintf("%s/%d", operation, size), func(b *testing.B) {
+				mapping := benchmarkNameMappingFields(size)
+				var updates map[int]iceberg.NestedField
+				var adds map[int][]iceberg.NestedField
+				switch operation {
+				case "rename":
+					updates = map[int]iceberg.NestedField{1: {ID: 1, Name: "renamed"}}
+				case "rename-reused":
+					updates = map[int]iceberg.NestedField{2: {ID: 2, Name: "field_0"}}
+				case "add-reused":
+					adds = map[int][]iceberg.NestedField{-1: {{ID: size + 1, Name: "field_0", Type: iceberg.PrimitiveTypes.Int32}}}
+				}
+
+				b.ReportAllocs()
+				for b.Loop() {
+					result, err := iceberg.UpdateNameMapping(mapping, updates, adds)
+					if err != nil {
+						b.Fatal(err)
+					}
+					benchmarkUpdatedNameMapping = result
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkUpdateNameMappingNested(b *testing.B) {
+	for _, size := range []int{8, 256} {
+		for _, operation := range []string{"rename-reused", "add-reused"} {
+			b.Run(fmt.Sprintf("%s/%d", operation, size), func(b *testing.B) {
+				parentID := size + 1
+				mapping := iceberg.NameMapping{{
+					FieldID: &parentID,
+					Names:   []string{"parent"},
+					Fields:  benchmarkNameMappingFields(size),
+				}}
+				var updates map[int]iceberg.NestedField
+				var adds map[int][]iceberg.NestedField
+				if operation == "rename-reused" {
+					updates = map[int]iceberg.NestedField{2: {ID: 2, Name: "field_0"}}
+				} else {
+					adds = map[int][]iceberg.NestedField{parentID: {{ID: size + 2, Name: "field_0", Type: iceberg.PrimitiveTypes.Int32}}}
+				}
+
+				b.ReportAllocs()
+				for b.Loop() {
+					result, err := iceberg.UpdateNameMapping(mapping, updates, adds)
+					if err != nil {
+						b.Fatal(err)
+					}
+					benchmarkUpdatedNameMapping = result
+				}
+			})
+		}
+	}
+}
