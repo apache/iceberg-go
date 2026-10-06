@@ -79,6 +79,7 @@ func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
 			for i, original := range tt.residuals {
 				if original == nil {
 					require.Nil(t, got[i].Residual)
+
 					continue
 				}
 
@@ -183,6 +184,7 @@ func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
 	for _, readErr := range records {
 		require.Error(t, readErr)
 		sawReadError = true
+
 		break
 	}
 	require.True(t, sawReadError)
