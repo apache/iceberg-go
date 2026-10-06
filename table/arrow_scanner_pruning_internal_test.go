@@ -261,6 +261,7 @@ func TestBindTaskFilterValidatesBoundSchema(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, changed)
 		require.NotNil(t, got)
+		require.NotSame(t, unbound, got)
 	})
 
 	t.Run("missing field is rejected", func(t *testing.T) {
