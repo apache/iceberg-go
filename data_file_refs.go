@@ -44,6 +44,17 @@ func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	return d.valCntMap, d.nullCntMap, d.nanCntMap, d.lowerBoundMap, d.upperBoundMap
 }
 
+// DataFileSplitOffsetsRef returns the data file's split offsets without
+// initializing unrelated column-statistics maps. The returned slice aliases
+// immutable DataFile state and must be treated as read-only.
+func (d *dataFile) DataFileSplitOffsetsRef(_ internal.DataFileRef) []int64 {
+	if d.Splits == nil {
+		return nil
+	}
+
+	return *d.Splits
+}
+
 func (d *dataFile) DataFileCollectionsRef(_ internal.DataFileRef) (
 	map[int]int64, []byte, []int64, []int,
 ) {
