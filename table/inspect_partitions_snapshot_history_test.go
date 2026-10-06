@@ -107,8 +107,6 @@ func inspectPartitionHistoricalSnapshotTable(
 		spec,
 		schema,
 		currentSnapshotID,
-		// Keep the live entry attributed to the historical snapshot so the
-		// metadata row must resolve its update time from snapshot history.
 		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
 			iceberg.EntryStatusEXISTING,
 			&historicalSnapshotID,
