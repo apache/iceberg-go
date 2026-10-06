@@ -1923,7 +1923,9 @@ type ParquetRowGroupTester struct {
 	// Parquet row-group offset falls in [Start, Start+Length).
 	Start, Length int64
 	// PlanningSplitOffsets contains the split offsets used when the scan task
-	// was planned. When it contains one valid offset per row group, range
+	// was planned. It may be a borrowed view of DataFile state and must be treated
+	// as read-only for the lifetime of this tester. When it contains one valid
+	// offset per row group, range
 	// selection uses these offsets instead of re-deriving them from the opened
 	// Parquet footer. Sparse split-offset lists fall back to the footer offsets.
 	PlanningSplitOffsets []int64
