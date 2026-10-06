@@ -112,6 +112,83 @@ func TestBuild_DoesNotGrowVersionLog(t *testing.T) {
 	}
 }
 
+func TestBuild_RepeatedBuildsAreStable(t *testing.T) {
+	// A new view never assigned a UUID gets one on the first Build and keeps it, so a
+	// retried build describes the same view, and SetUUID still works afterwards.
+	b := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersion(1, LastAddedID)).
+		SetCurrentVersionID(LastAddedID)
+
+	first, err := b.Build()
+	require.NoError(t, err)
+	for range 2 {
+		res, err := b.Build()
+		require.NoError(t, err)
+		require.Equal(t, first.Metadata.ViewUUID(), res.Metadata.ViewUUID())
+		require.Equal(t, first.Metadata.VersionLog(), res.Metadata.VersionLog())
+	}
+
+	assigned := uuid.New()
+	res, err := b.SetUUID(assigned).Build()
+	require.NoError(t, err)
+	require.Equal(t, assigned, res.Metadata.ViewUUID())
+}
+
+func TestBuild_DoesNotGrowVersionLogWhenExpiringVersions(t *testing.T) {
+	// With a history size of 1, older versions are expired and updateHistory prunes the
+	// log on every Build; repeated builds still give the same log.
+	b := newTestBuilder().
+		SetLoc("location").
+		SetProperties(iceberg.Properties{VersionHistorySizeKey: "1"}).
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersionWithSQL(1, LastAddedID, "select 1")).
+		AddVersion(newTestVersionWithSQL(2, LastAddedID, "select 2")).
+		AddVersion(newTestVersionWithSQL(3, LastAddedID, "select 3")).
+		SetCurrentVersionID(LastAddedID)
+
+	first, err := b.Build()
+	require.NoError(t, err)
+	for range 2 {
+		res, err := b.Build()
+		require.NoError(t, err)
+		require.Equal(t, first.Metadata.VersionLog(), res.Metadata.VersionLog())
+		require.Equal(t, first.Metadata.ViewUUID(), res.Metadata.ViewUUID())
+		require.Empty(t, b.versionLog, "Build must not append to the builder's own log")
+	}
+}
+
+func TestBuild_FromBaseDoesNotGrowVersionLog(t *testing.T) {
+	// The commit-retry case: a builder from existing metadata with a non-empty version
+	// log, replacing the current version, built more than once.
+	base, err := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersionWithSQL(1, LastAddedID, "select 1")).
+		SetCurrentVersionID(LastAddedID).
+		Build()
+	require.NoError(t, err)
+	baseLog := base.Metadata.VersionLog()
+	require.Len(t, baseLog, 1)
+
+	b, err := MetadataBuilderFromBase(base.Metadata)
+	require.NoError(t, err)
+	schemaID := base.Metadata.CurrentVersion().SchemaID
+	b.AddVersion(newTestVersionWithSQL(2, schemaID, "select 2")).SetCurrentVersionID(LastAddedID)
+
+	first, err := b.Build()
+	require.NoError(t, err)
+	require.Len(t, first.Metadata.VersionLog(), 2)
+	for range 2 {
+		res, err := b.Build()
+		require.NoError(t, err)
+		require.Equal(t, first.Metadata.VersionLog(), res.Metadata.VersionLog())
+		require.Equal(t, base.Metadata.ViewUUID(), res.Metadata.ViewUUID())
+		require.Equal(t, baseLog, b.versionLog, "Build must not append to the builder's own log")
+	}
+}
+
 func TestNewVersion_RepresentationValidation(t *testing.T) {
 	tests := []struct {
 		name            string
