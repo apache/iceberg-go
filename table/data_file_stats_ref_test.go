@@ -185,7 +185,7 @@ func TestDataFileCollectionsUsesBorrowedView(t *testing.T) {
 
 func TestBorrowedDataFileSplitOffsetsUsesBuiltInBackingSlice(t *testing.T) {
 	file := testDataFileWithStats(t)
-	require.Implements(t, (*internal.DataFileCollectionsRef)(nil), file)
+	require.Implements(t, (*internal.DataFileSplitOffsetsRef)(nil), file)
 
 	first := internal.BorrowedDataFileSplitOffsets(file)
 	second := internal.BorrowedDataFileSplitOffsets(file)
