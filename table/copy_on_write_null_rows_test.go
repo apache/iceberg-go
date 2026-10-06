@@ -124,25 +124,65 @@ func TestCopyOnWriteDeleteMatchesScanWithNaNAndNull(t *testing.T) {
 	for _, version := range []string{"2", "3"} {
 		for _, c := range cases {
 			t.Run("v"+version+"/"+c.name, func(t *testing.T) {
-				ctx := context.Background()
-				tbl := newCopyOnWriteNaNTable(t, version)
-
-				matched := scanIDsMatching(t, tbl, c.filter)
-				want := slices.DeleteFunc([]int64{1, 2, 3, 4}, func(id int64) bool {
-					return slices.Contains(matched, id)
-				})
-
-				txn := tbl.NewTransaction()
-				require.NoError(t, txn.Delete(ctx, c.filter, nil))
-				tbl, err := txn.Commit(ctx)
-				require.NoError(t, err)
-
-				ids := scanIDs(t, tbl)
-				slices.Sort(ids)
-				require.Equal(t, want, ids, "scan with the filter matched %v", matched)
+				tbl := newCopyOnWriteNaNTable(t, version,
+					[]float64{1, math.NaN(), 10, 0}, []bool{true, true, true, false})
+				requireDeleteMatchesScan(t, tbl, c.filter)
 			})
 		}
 	}
+}
+
+// Row-group pruning on the rows to keep must not skip a NaN row. Parquet
+// min/max leave NaN out, so with every other value on one side of 5 a pruning
+// filter of x >= 5 for NOT(x < 5) would drop the whole row group.
+func TestCopyOnWriteDeleteKeepsNaNRowsInPrunedRowGroups(t *testing.T) {
+	x := iceberg.Reference("x")
+
+	cases := []struct {
+		name   string
+		values []float64
+		filter iceberg.BooleanExpression
+	}{
+		{"less than", []float64{1, math.NaN(), 2}, iceberg.LessThan(x, 5.0)},
+		{"less than or equal", []float64{1, math.NaN(), 2}, iceberg.LessThanEqual(x, 5.0)},
+		{"greater than", []float64{10, math.NaN(), 20}, iceberg.GreaterThan(x, 5.0)},
+		{"greater than or equal", []float64{10, math.NaN(), 20}, iceberg.GreaterThanEqual(x, 5.0)},
+		{"or", []float64{1, math.NaN(), 20}, iceberg.NewOr(iceberg.LessThan(x, 5.0), iceberg.GreaterThan(x, 10.0))},
+		{"and", []float64{1, math.NaN(), 2}, iceberg.NewAnd(iceberg.GreaterThan(x, 0.0), iceberg.LessThan(x, 5.0))},
+	}
+
+	for _, version := range []string{"2", "3"} {
+		for _, c := range cases {
+			t.Run("v"+version+"/"+c.name, func(t *testing.T) {
+				tbl := newCopyOnWriteNaNTable(t, version, c.values, nil)
+				requireDeleteMatchesScan(t, tbl, c.filter)
+			})
+		}
+	}
+}
+
+// requireDeleteMatchesScan deletes filter from tbl and checks that exactly the
+// rows a scan with the same filter returns were removed.
+func requireDeleteMatchesScan(t *testing.T, tbl *table.Table, filter iceberg.BooleanExpression) {
+	t.Helper()
+	ctx := context.Background()
+
+	before := scanIDs(t, tbl)
+	require.NotEmpty(t, before)
+	matched := scanIDsMatching(t, tbl, filter)
+	want := slices.DeleteFunc(before, func(id int64) bool {
+		return slices.Contains(matched, id)
+	})
+	slices.Sort(want)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.Delete(ctx, filter, nil))
+	tbl, err := txn.Commit(ctx)
+	require.NoError(t, err)
+
+	ids := scanIDs(t, tbl)
+	slices.Sort(ids)
+	require.Equal(t, want, ids, "scan with the filter matched %v", matched)
 }
 
 func newCopyOnWriteNullRowsTable(t *testing.T, version string) *table.Table {
@@ -184,7 +224,7 @@ func newCopyOnWriteNullRowsTable(t *testing.T, version string) *table.Table {
 	return tbl
 }
 
-func newCopyOnWriteNaNTable(t *testing.T, version string) *table.Table {
+func newCopyOnWriteNaNTable(t *testing.T, version string, values []float64, valid []bool) *table.Table {
 	t.Helper()
 
 	location := filepath.ToSlash(t.TempDir())
@@ -209,8 +249,10 @@ func newCopyOnWriteNaNTable(t *testing.T, version string) *table.Table {
 		{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
 	}, nil))
 	defer bldr.Release()
-	bldr.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2, 3, 4}, nil)
-	bldr.Field(1).(*array.Float64Builder).AppendValues([]float64{1, math.NaN(), 10, 0}, []bool{true, true, true, false})
+	for i := range values {
+		bldr.Field(0).(*array.Int64Builder).Append(int64(i + 1))
+	}
+	bldr.Field(1).(*array.Float64Builder).AppendValues(values, valid)
 	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
