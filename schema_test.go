@@ -1958,12 +1958,24 @@ func TestHighestFieldID(t *testing.T) {
 	}{
 		{"existing nested schema", tableSchemaNested, 22},
 		{"empty schema", iceberg.NewSchema(0), 0},
+		{"nil schema", (*iceberg.Schema)(nil), 0},
 		{"flat field", iceberg.NewSchema(0, field(50, iceberg.PrimitiveTypes.String)), 50},
 		{"map key", iceberg.NewSchema(0, field(1, &iceberg.MapType{
 			KeyID: 50, KeyType: iceberg.PrimitiveTypes.String, ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32,
 		})), 50},
+		{"map key nested field", iceberg.NewSchema(0, field(1, &iceberg.MapType{
+			KeyID: 2, KeyType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				field(50, iceberg.PrimitiveTypes.String),
+			}}, ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32,
+		})), 50},
 		{"map value", iceberg.NewSchema(0, field(1, &iceberg.MapType{
 			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 50, ValueType: iceberg.PrimitiveTypes.Int32,
+		})), 50},
+		{"map value nested field", iceberg.NewSchema(0, field(1, &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
+			ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				field(50, iceberg.PrimitiveTypes.String),
+			}},
 		})), 50},
 		{"nested map value", iceberg.NewSchema(0, field(1, &iceberg.MapType{
 			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
@@ -1999,6 +2011,8 @@ func TestHighestFieldID(t *testing.T) {
 			field(1, highestFieldIDUnsupportedType{}), field(50, iceberg.PrimitiveTypes.String)), 50},
 		{"variant field type", iceberg.NewSchema(0,
 			field(1, iceberg.VariantType{}), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"unassigned placeholder field", iceberg.NewSchema(0,
+			field(-1, iceberg.PrimitiveTypes.String)), 0},
 	}
 
 	for _, tt := range tests {
@@ -2006,6 +2020,30 @@ func TestHighestFieldID(t *testing.T) {
 			assert.Equal(t, tt.want, tt.schema.HighestFieldID())
 		})
 	}
+}
+
+// TestHighestFieldIDDoesNotAllocate protects the zero-allocation traversal.
+func TestHighestFieldIDDoesNotAllocate(t *testing.T) {
+	var id int
+	allocs := testing.AllocsPerRun(100, func() {
+		id = tableSchemaNested.HighestFieldID()
+	})
+	assert.Zero(t, allocs)
+	runtime.KeepAlive(id)
+}
+
+func TestAssignFreshSchemaIDsWithBaseEmptyStruct(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "empty", Type: &iceberg.StructType{}},
+		iceberg.NestedField{ID: 50, Name: "existing", Type: iceberg.PrimitiveTypes.String},
+	)
+	source := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "added", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	assigned, err := iceberg.AssignFreshSchemaIDsWithBase(source, base, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 51, assigned.Field(0).ID)
 }
 
 // TestHighestFieldIDListType tests that HighestFieldID correctly computes
