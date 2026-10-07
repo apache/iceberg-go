@@ -160,7 +160,7 @@ func decodeScanTasks(
 
 	out := make([]table.FileScanTask, 0, len(wire.FileScanTasks))
 	dvOwners := make(map[int]string)
-	referencedDeletes := make([]bool, len(deletes))
+	deleteRefTaskIDs := make([]int, len(deletes))
 	for i := range wire.FileScanTasks {
 		wireTask := wire.FileScanTasks[i]
 		if wireTask.DataFile == nil {
@@ -187,20 +187,20 @@ func decodeScanTasks(
 		// The REST FileScanTask schema does not carry manifest data sequence
 		// numbers, so DataSequenceNumber intentionally remains nil.
 
-		seenRefs := make(map[int]struct{}, len(wireTask.DeleteFileReferences))
+		// Use one-based task IDs so zero remains the unreferenced marker.
+		taskID := i + 1
 		for j, ref := range wireTask.DeleteFileReferences {
 			if ref < 0 || ref >= len(deletes) {
 				return nil, fmt.Errorf(
 					"%w: decoding scan tasks: file-scan-tasks[%d].delete-file-references[%d] is %d, want 0 <= index < %d",
 					ErrRESTError, i, j, ref, len(deletes))
 			}
-			if _, ok := seenRefs[ref]; ok {
+			if deleteRefTaskIDs[ref] == taskID {
 				return nil, fmt.Errorf(
 					"%w: decoding scan tasks: file-scan-tasks[%d] repeats delete-file reference %d",
 					ErrRESTError, i, ref)
 			}
-			seenRefs[ref] = struct{}{}
-			referencedDeletes[ref] = true
+			deleteRefTaskIDs[ref] = taskID
 
 			wireDelete := wire.DeleteFiles[ref]
 			if wireDelete.ReferencedDataFile != nil && *wireDelete.ReferencedDataFile != dataFile.FilePath() {
@@ -244,8 +244,8 @@ func decodeScanTasks(
 		out = append(out, task)
 	}
 
-	for i, referenced := range referencedDeletes {
-		if !referenced {
+	for i, taskID := range deleteRefTaskIDs {
+		if taskID == 0 {
 			return nil, fmt.Errorf(
 				"%w: decoding scan tasks: delete-files[%d] is not referenced by any file scan task",
 				ErrRESTError, i)
