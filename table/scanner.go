@@ -2195,11 +2195,11 @@ func bindReadTasksResiduals(
 // reached; if no such task is processed, the file is not read and its error is not
 // returned. The returned iterator is single-use.
 //
-// The caller must treat tasks and every task element as immutable until a range
-// over the returned iterator has returned. If the iterator is never ranged,
-// tasks must remain immutable while it may still be used. When no residual needs
-// binding (each is nil or already bound), ReadTasks retains the caller's backing
-// array. Any clone is shallow, so nested slices remain shared either way.
+// The caller must not mutate tasks or any task element while the returned
+// iterator can still be used, until a range over it has returned or the iterator
+// is otherwise dropped. ReadTasks retains the caller's backing array when no
+// residual needs binding (each is nil or already bound). Any clone is shallow,
+// so nested slices (for example DeleteFiles) remain shared with the caller.
 //
 // With [WithMaxConcurrency] above one, tasks are decoded in parallel and the
 // batches are returned in task order. Each worker holds the decoded batches of

@@ -53,25 +53,43 @@ func residualBindingTestScan(t *testing.T) (*Scan, *iceberg.Schema) {
 	return tbl.Scan(), schema
 }
 
-func writeResidualBindingParquetFile(t testing.TB, path string, schema *arrow.Schema, jsonData string) {
+func writeResidualBindingParquetFile(t testing.TB, path string, schema *iceberg.Schema, jsonData string) iceberg.DataFile {
 	t.Helper()
 
-	record, _, err := array.RecordFromJSON(memory.DefaultAllocator, schema, strings.NewReader(jsonData))
+	// Real Iceberg field IDs are needed for the Parquet reader to reach residual filtering.
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+	record, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(jsonData))
 	require.NoError(t, err)
 	defer record.Release()
 
-	fs := iceio.LocalFS{}
-	writer, err := fs.Create(path)
+	writer, err := (iceio.LocalFS{}).Create(path)
 	require.NoError(t, err)
 	defer writer.Close()
 
-	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{record})
+	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
 	defer tbl.Release()
 
 	props := parquet.NewWriterProperties(parquet.WithStats(true))
 	require.NoError(t, pqarrow.WriteTable(
 		tbl, writer, record.NumRows(), props, pqarrow.DefaultWriterProps(),
 	))
+	require.NoError(t, writer.Close())
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		path,
+		iceberg.ParquetFile,
+		nil, nil, nil,
+		record.NumRows(),
+		info.Size(),
+	)
+	require.NoError(t, err)
+
+	return builder.Build()
 }
 
 func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
@@ -224,68 +242,69 @@ func TestReadTasksConcurrentScansPreserveInputTasks(t *testing.T) {
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil,
 	)
 
-	unbound := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
-	bound, err := iceberg.BindExpr(schema, unbound, true)
+	bound, err := iceberg.BindExpr(schema, iceberg.GreaterThan(iceberg.Reference("id"), int64(1)), true)
 	require.NoError(t, err)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, false, false)
-	require.NoError(t, err)
-
-	paths := []string{
-		filepath.Join(location, "data-1.parquet"),
-		filepath.Join(location, "data-2.parquet"),
+	unbound := iceberg.LessThan(iceberg.Reference("id"), int64(3))
+	files := []iceberg.DataFile{
+		writeResidualBindingParquetFile(t, filepath.Join(location, "data-1.parquet"), schema, `[{"id":2}]`),
+		writeResidualBindingParquetFile(t, filepath.Join(location, "data-2.parquet"), schema, `[{"id":3}]`),
 	}
-	rows := []string{
-		`[{"id":2}]`,
-		`[{"id":3}]`,
+
+	tests := []struct {
+		name      string
+		residuals []iceberg.BooleanExpression
+		wantRows  int64
+	}{
+		{name: "aliased bound plan", residuals: []iceberg.BooleanExpression{bound, bound}, wantRows: 2},
+		{name: "mixed copy-on-write plan", residuals: []iceberg.BooleanExpression{bound, unbound}, wantRows: 1},
 	}
-	tasks := make([]FileScanTask, len(paths))
-	for i, path := range paths {
-		writeResidualBindingParquetFile(t, path, arrowSchema, rows[i])
-		info, statErr := os.Stat(path)
-		require.NoError(t, statErr)
 
-		builder, buildErr := iceberg.NewDataFileBuilder(
-			*iceberg.UnpartitionedSpec,
-			iceberg.EntryContentData,
-			path,
-			iceberg.ParquetFile,
-			nil,
-			nil,
-			nil,
-			1,
-			info.Size(),
-		)
-		require.NoError(t, buildErr)
-		tasks[i] = FileScanTask{File: builder.Build(), Residual: bound}
-	}
-	snapshot := append([]FileScanTask(nil), tasks...)
-
-	errCh := make(chan error, 2)
-	for range 2 {
-		go func() {
-			scan := tbl.Scan(WithMaxConcurrency(4))
-			_, records, readErr := scan.ReadTasks(t.Context(), tasks)
-			if readErr != nil {
-				errCh <- readErr
-
-				return
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tasks := []FileScanTask{
+				{File: files[0], Residual: tt.residuals[0]},
+				{File: files[1], Residual: tt.residuals[1]},
 			}
-			for record, iterErr := range records {
-				if iterErr != nil {
-					errCh <- iterErr
+			snapshot := append([]FileScanTask(nil), tasks...)
 
-					return
-				}
-				record.Release()
+			type result struct {
+				rows int64
+				err  error
 			}
-			errCh <- nil
-		}()
-	}
+			results := make(chan result, 2)
+			for range 2 {
+				go func() {
+					scan := tbl.Scan(WithMaxConcurrency(4))
+					_, records, readErr := scan.ReadTasks(t.Context(), tasks)
+					if readErr != nil {
+						results <- result{err: readErr}
+						return
+					}
 
-	for range 2 {
-		require.NoError(t, <-errCh)
+					var rows int64
+					for record, iterErr := range records {
+						if iterErr != nil {
+							results <- result{err: iterErr}
+							return
+						}
+						rows += record.NumRows()
+						record.Release()
+					}
+					results <- result{rows: rows}
+				}()
+			}
+
+			for range 2 {
+				got := <-results
+				require.NoError(t, got.err)
+				require.Equal(t, tt.wantRows, got.rows)
+			}
+			require.Equal(t, snapshot, tasks)
+			for i := range tasks {
+				require.Same(t, snapshot[i].Residual, tasks[i].Residual)
+			}
+		})
 	}
-	require.Equal(t, snapshot, tasks)
 }
 
 func TestReadTasksPassesBoundResidualsToGetRecords(t *testing.T) {
@@ -302,39 +321,45 @@ func TestReadTasksPassesBoundResidualsToGetRecords(t *testing.T) {
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil,
 	)
 
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, false, false)
-	require.NoError(t, err)
-	path := filepath.Join(location, "data.parquet")
-	writeResidualBindingParquetFile(t, path, arrowSchema, `[{"id":1},{"id":2},{"id":3}]`)
-
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	builder, err := iceberg.NewDataFileBuilder(
-		*iceberg.UnpartitionedSpec,
-		iceberg.EntryContentData,
-		path,
-		iceberg.ParquetFile,
-		nil,
-		nil,
-		nil,
-		3,
-		info.Size(),
-	)
-	require.NoError(t, err)
-
 	unbound := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
-	tasks := []FileScanTask{{File: builder.Build(), Residual: unbound}}
+	bound, err := iceberg.BindExpr(schema, iceberg.LessThan(iceberg.Reference("id"), int64(5)), true)
+	require.NoError(t, err)
+
+	// Distinct data and residuals expose both an unbound handoff and an
+	// incorrect residual-to-task index, rather than just asserting row totals.
+	files := []struct {
+		name     string
+		json     string
+		residual iceberg.BooleanExpression
+	}{
+		{name: "unbound.parquet", json: `[{"id":1},{"id":2},{"id":3}]`, residual: unbound},
+		{name: "bound.parquet", json: `[{"id":4},{"id":5},{"id":6}]`, residual: bound},
+		{name: "nil.parquet", json: `[{"id":7},{"id":8},{"id":9}]`},
+	}
+	tasks := make([]FileScanTask, len(files))
+	for i, file := range files {
+		tasks[i] = FileScanTask{
+			File:     writeResidualBindingParquetFile(t, filepath.Join(location, file.name), schema, file.json),
+			Residual: file.residual,
+		}
+	}
 
 	_, records, err := tbl.Scan().ReadTasks(t.Context(), tasks)
 	require.NoError(t, err)
 
-	var rows int64
+	var ids []int64
 	for record, readErr := range records {
 		require.NoError(t, readErr)
-		rows += record.NumRows()
+		values, ok := record.Column(0).(*array.Int64)
+		require.True(t, ok)
+		for i := 0; i < values.Len(); i++ {
+			ids = append(ids, values.Value(i))
+		}
 		record.Release()
 	}
 
-	require.EqualValues(t, 2, rows)
+	require.Equal(t, []int64{2, 3, 4, 7, 8, 9}, ids)
 	require.Same(t, unbound, tasks[0].Residual)
+	require.Same(t, bound, tasks[1].Residual)
+	require.Nil(t, tasks[2].Residual)
 }
