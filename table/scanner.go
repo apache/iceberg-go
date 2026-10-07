@@ -2118,7 +2118,8 @@ type FileScanTask struct {
 	// file metadata; nil means the caller did not provide a task residual. Callers
 	// may supply either a bound or unbound expression; ReadTasks validates bound
 	// residuals and binds unbound residuals against the scan's effective schema.
-	// ReadTasks applies the scan's original row filter and each task residual.
+	// Residuals that mix bound and unbound predicates are rejected. ReadTasks
+	// applies the scan's original row filter and each task residual.
 	Residual iceberg.BooleanExpression
 
 	// Row lineage (v3): constants used when reading to synthesize _row_id and _last_updated_sequence_number.
@@ -2152,8 +2153,9 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 }
 
 // bindReadTasksResiduals keeps the caller's task slice untouched. If every
-// residual is nil or already bound, the returned slice aliases tasks and must
-// remain read-only. It clones once, on the first residual that needs binding.
+// residual is nil or already bound, the returned top-level slice aliases tasks.
+// Otherwise it shallow-clones once, on the first residual that needs binding.
+// Nested slices remain shared in either case.
 func bindReadTasksResiduals(
 	schema *iceberg.Schema, tasks []FileScanTask, caseSensitive bool,
 ) ([]FileScanTask, error) {
@@ -2193,10 +2195,11 @@ func bindReadTasksResiduals(
 // reached; if no such task is processed, the file is not read and its error is not
 // returned. The returned iterator is single-use.
 //
-// The caller must not modify tasks or any task element until the returned
-// iterator is exhausted or abandoned. When no residual needs binding (each is
-// nil or already bound), ReadTasks may retain the caller's backing array
-// instead of cloning it.
+// The caller must treat tasks and every task element as immutable until a range
+// over the returned iterator has returned. If the iterator is never ranged,
+// tasks must remain immutable while it may still be used. When no residual needs
+// binding (each is nil or already bound), ReadTasks retains the caller's backing
+// array. Any clone is shallow, so nested slices remain shared either way.
 //
 // With [WithMaxConcurrency] above one, tasks are decoded in parallel and the
 // batches are returned in task order. Each worker holds the decoded batches of
@@ -2262,17 +2265,18 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	}
 
 	outSchema, records, err := (&arrowScan{
-		metadata:        scan.metadata,
-		fs:              fs,
-		scanSchema:      effectiveSchema,
-		projectedSchema: schema,
-		boundRowFilter:  boundFilter,
-		filterSchema:    effectiveSchema,
-		caseSensitive:   scan.caseSensitive,
-		rowLimit:        scan.limit,
-		options:         scan.options,
-		concurrency:     scan.concurrency,
-		arrowBatchSize:  scan.arrowBatchSize,
+		metadata:           scan.metadata,
+		fs:                 fs,
+		scanSchema:         effectiveSchema,
+		projectedSchema:    schema,
+		boundRowFilter:     boundFilter,
+		filterSchema:       effectiveSchema,
+		caseSensitive:      scan.caseSensitive,
+		taskResidualsBound: true,
+		rowLimit:           scan.limit,
+		options:            scan.options,
+		concurrency:        scan.concurrency,
+		arrowBatchSize:     scan.arrowBatchSize,
 	}).GetRecords(ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so release here.

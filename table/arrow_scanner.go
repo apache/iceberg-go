@@ -1235,14 +1235,15 @@ type arrowScan struct {
 	// rowGroupFilter is used only for Parquet statistics and bloom-filter
 	// pruning. It lets callers keep boundRowFilter as AlwaysTrue while they
 	// must evaluate the real row filter after position-dependent enrichment.
-	rowGroupFilter    iceberg.BooleanExpression
-	filterSchema      *iceberg.Schema
-	caseSensitive     bool
-	rowLimit          int64
-	options           iceberg.Properties
-	filterPlanCache   compiledFileFilterPlanCache
-	fileReadPlanCache preparedFileReadPlanCache
-	cacheFileReadPlan bool
+	rowGroupFilter     iceberg.BooleanExpression
+	filterSchema       *iceberg.Schema
+	caseSensitive      bool
+	rowLimit           int64
+	options            iceberg.Properties
+	filterPlanCache    compiledFileFilterPlanCache
+	fileReadPlanCache  preparedFileReadPlanCache
+	cacheFileReadPlan  bool
+	taskResidualsBound bool
 
 	useLargeTypes bool
 	concurrency   int
@@ -1725,6 +1726,9 @@ func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, ca
 func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpression, error) {
 	if task.Residual == nil {
 		return as.boundRowFilter, nil
+	}
+	if as.taskResidualsBound {
+		return task.Residual, nil
 	}
 
 	filterSchema := as.scanSchema

@@ -21,8 +21,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
@@ -47,6 +53,27 @@ func residualBindingTestScan(t *testing.T) (*Scan, *iceberg.Schema) {
 	return tbl.Scan(), schema
 }
 
+func writeResidualBindingParquetFile(t testing.TB, path string, schema *arrow.Schema, jsonData string) {
+	t.Helper()
+
+	record, _, err := array.RecordFromJSON(memory.DefaultAllocator, schema, strings.NewReader(jsonData))
+	require.NoError(t, err)
+	defer record.Release()
+
+	fs := iceio.LocalFS{}
+	writer, err := fs.Create(path)
+	require.NoError(t, err)
+	defer writer.Close()
+
+	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{record})
+	defer tbl.Release()
+
+	props := parquet.NewWriterProperties(parquet.WithStats(true))
+	require.NoError(t, pqarrow.WriteTable(
+		tbl, writer, record.NumRows(), props, pqarrow.DefaultWriterProps(),
+	))
+}
+
 func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
 	_, schema := residualBindingTestScan(t)
 	unbound := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
@@ -57,12 +84,35 @@ func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
 		name      string
 		residuals []iceberg.BooleanExpression
 		wantAlias bool
+		wantSame  []bool
 	}{
-		{name: "all bound and nil", residuals: []iceberg.BooleanExpression{bound, nil, bound}, wantAlias: true},
-		{name: "all nil", residuals: []iceberg.BooleanExpression{nil, nil, nil}, wantAlias: true},
-		{name: "mixed", residuals: []iceberg.BooleanExpression{bound, nil, unbound, bound}},
-		{name: "first task unbound", residuals: []iceberg.BooleanExpression{unbound, bound}},
-		{name: "all unbound", residuals: []iceberg.BooleanExpression{unbound, unbound}},
+		{
+			name:      "all bound and nil",
+			residuals: []iceberg.BooleanExpression{bound, nil, bound},
+			wantAlias: true,
+			wantSame:  []bool{true, false, true},
+		},
+		{
+			name:      "all nil",
+			residuals: []iceberg.BooleanExpression{nil, nil, nil},
+			wantAlias: true,
+			wantSame:  []bool{false, false, false},
+		},
+		{
+			name:      "mixed",
+			residuals: []iceberg.BooleanExpression{bound, nil, unbound, bound},
+			wantSame:  []bool{true, false, false, true},
+		},
+		{
+			name:      "first task unbound",
+			residuals: []iceberg.BooleanExpression{unbound, bound},
+			wantSame:  []bool{false, true},
+		},
+		{
+			name:      "all unbound",
+			residuals: []iceberg.BooleanExpression{unbound, unbound},
+			wantSame:  []bool{false, false},
+		},
 	}
 
 	for _, tt := range tests {
@@ -88,15 +138,15 @@ func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
 
 				// The input plan is never rewritten, even when the output needs binding.
 				require.Same(t, original, tasks[i].Residual)
+				if tt.wantSame[i] {
+					require.Same(t, original, got[i].Residual)
+				} else {
+					require.NotSame(t, original, got[i].Residual)
+				}
 				state, visitErr := iceberg.VisitExpr(got[i].Residual, filterBindingVisitor{})
 				require.NoError(t, visitErr)
 				require.True(t, state.hasBound)
 				require.False(t, state.hasUnbound)
-				stateBefore, stateErr := iceberg.VisitExpr(original, filterBindingVisitor{})
-				require.NoError(t, stateErr)
-				if !stateBefore.hasUnbound {
-					require.Same(t, original, got[i].Residual)
-				}
 			}
 		})
 	}
@@ -160,7 +210,7 @@ func TestReadTasksResidualPlanIsReusable(t *testing.T) {
 	}
 }
 
-func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
+func TestReadTasksConcurrentScansPreserveInputTasks(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
 	)
@@ -190,7 +240,7 @@ func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
 	}
 	tasks := make([]FileScanTask, len(paths))
 	for i, path := range paths {
-		writeParquetFile(t, path, arrowSchema, rows[i])
+		writeResidualBindingParquetFile(t, path, arrowSchema, rows[i])
 		info, statErr := os.Stat(path)
 		require.NoError(t, statErr)
 
@@ -217,11 +267,13 @@ func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
 			_, records, readErr := scan.ReadTasks(t.Context(), tasks)
 			if readErr != nil {
 				errCh <- readErr
+
 				return
 			}
 			for record, iterErr := range records {
 				if iterErr != nil {
 					errCh <- iterErr
+
 					return
 				}
 				record.Release()
@@ -234,4 +286,55 @@ func TestReadTasksAlreadyBoundTasksRemainReadOnly(t *testing.T) {
 		require.NoError(t, <-errCh)
 	}
 	require.Equal(t, snapshot, tasks)
+}
+
+func TestReadTasksPassesBoundResidualsToGetRecords(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	location := t.TempDir()
+	metadata, err := NewMetadata(
+		schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, location, nil,
+	)
+	require.NoError(t, err)
+	tbl := New(
+		Identifier{"db", "tbl"}, metadata, filepath.Join(location, "metadata.json"),
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil,
+	)
+
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, false, false)
+	require.NoError(t, err)
+	path := filepath.Join(location, "data.parquet")
+	writeResidualBindingParquetFile(t, path, arrowSchema, `[{"id":1},{"id":2},{"id":3}]`)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		path,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		3,
+		info.Size(),
+	)
+	require.NoError(t, err)
+
+	unbound := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
+	tasks := []FileScanTask{{File: builder.Build(), Residual: unbound}}
+
+	_, records, err := tbl.Scan().ReadTasks(t.Context(), tasks)
+	require.NoError(t, err)
+
+	var rows int64
+	for record, readErr := range records {
+		require.NoError(t, readErr)
+		rows += record.NumRows()
+		record.Release()
+	}
+
+	require.EqualValues(t, 2, rows)
+	require.Same(t, unbound, tasks[0].Residual)
 }
