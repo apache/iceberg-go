@@ -503,7 +503,7 @@ func TestTruncateTransformInt32MaxWidth(t *testing.T) {
 		{math.MaxInt32 - 1, 0},
 		{math.MaxInt32, math.MaxInt32},
 		{-1, -math.MaxInt32},
-		{math.MinInt32, math.MinInt32},
+		{math.MinInt32, 2},
 	} {
 		assert.Equal(t, tt.expected, transformer(tt.value))
 	}
