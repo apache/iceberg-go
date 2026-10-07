@@ -1514,11 +1514,12 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
-	// Computed per Build rather than stored on the builder, so a builder that gets more
-	// changes after a Build reports a fresh last-updated time on the next one.
-	lastUpdatedMS := b.lastUpdatedMS
-	if lastUpdatedMS == 0 {
-		lastUpdatedMS = time.Now().UnixMilli()
+	// If no change has set lastUpdatedMS yet, the first Build sets it and keeps it on
+	// the builder on purpose (Java's TableMetadata.Builder does the same), so repeated
+	// builds of the same changes report the same time. Adding a snapshot or moving
+	// main after a Build still updates it.
+	if b.lastUpdatedMS == 0 {
+		b.lastUpdatedMS = time.Now().UnixMilli()
 	}
 
 	// Build may run more than once on the same builder, so the log is extended on a
@@ -1535,7 +1536,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		FormatVersion:      b.formatVersion,
 		UUID:               b.uuid,
 		Loc:                b.loc,
-		LastUpdatedMS:      lastUpdatedMS,
+		LastUpdatedMS:      b.lastUpdatedMS,
 		LastColumnId:       b.lastColumnId,
 		SchemaList:         b.schemaList,
 		schemaIndex:        b.schemaIndex,
@@ -1694,10 +1695,6 @@ func (b *MetadataBuilder) AppendMetadataLog(entry MetadataLogEntry) *MetadataBui
 	return b
 }
 
-// Build returns the metadata for the builder's base plus its changes. It can be called
-// more than once, for example to retry a commit: it doesn't modify the builder, and each
-// call describes all of the builder's changes so far. When no change set a timestamp,
-// each call uses the current time as the last-updated time.
 func (b *MetadataBuilder) Build() (Metadata, error) {
 	common, err := b.buildCommonMetadata()
 	if err != nil {

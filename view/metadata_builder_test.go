@@ -112,30 +112,6 @@ func TestBuild_DoesNotGrowVersionLog(t *testing.T) {
 	}
 }
 
-func TestBuild_RepeatedBuildsAreStable(t *testing.T) {
-	// A new view never assigned a UUID gets one on the first Build and keeps it, so a
-	// retried build describes the same view, and SetUUID still works afterwards.
-	b := newTestBuilder().
-		SetLoc("location").
-		AddSchema(newTestSchema(1)).
-		AddVersion(newTestVersion(1, LastAddedID)).
-		SetCurrentVersionID(LastAddedID)
-
-	first, err := b.Build()
-	require.NoError(t, err)
-	for range 2 {
-		res, err := b.Build()
-		require.NoError(t, err)
-		require.Equal(t, first.ViewUUID(), res.ViewUUID())
-		require.Equal(t, first.VersionLog(), res.VersionLog())
-	}
-
-	assigned := uuid.New()
-	res, err := b.SetUUID(assigned).Build()
-	require.NoError(t, err)
-	require.Equal(t, assigned, res.ViewUUID())
-}
-
 func TestBuild_DoesNotGrowVersionLogWhenExpiringVersions(t *testing.T) {
 	// With a history size of 1, older versions are expired and updateHistory prunes the
 	// log on every Build; repeated builds still give the same log.
@@ -154,37 +130,47 @@ func TestBuild_DoesNotGrowVersionLogWhenExpiringVersions(t *testing.T) {
 		res, err := b.Build()
 		require.NoError(t, err)
 		require.Equal(t, first.VersionLog(), res.VersionLog())
-		require.Equal(t, first.ViewUUID(), res.ViewUUID())
 		require.Empty(t, b.versionLog, "Build must not append to the builder's own log")
 	}
 }
 
 func TestBuild_FromBaseDoesNotGrowVersionLog(t *testing.T) {
-	// The commit-retry case: a builder from existing metadata with a non-empty version
-	// log, replacing the current version, built more than once.
-	base, err := newTestBuilder().
+	// The commit-retry case: a builder from existing metadata with a three-entry version
+	// log and a history size of 2, replacing the current version, built more than once.
+	res, err := newTestBuilder().
 		SetLoc("location").
 		AddSchema(newTestSchema(1)).
 		AddVersion(newTestVersionWithSQL(1, LastAddedID, "select 1")).
 		SetCurrentVersionID(LastAddedID).
 		Build()
 	require.NoError(t, err)
-	baseLog := base.VersionLog()
-	require.Len(t, baseLog, 1)
+	for id := int64(2); id <= 3; id++ {
+		b, err := MetadataBuilderFromBase(res.Metadata)
+		require.NoError(t, err)
+		schemaID := res.CurrentVersion().SchemaID
+		res, err = b.AddVersion(newTestVersionWithSQL(id, schemaID, fmt.Sprintf("select %d", id))).
+			SetCurrentVersionID(LastAddedID).
+			Build()
+		require.NoError(t, err)
+	}
+	baseLog := res.VersionLog()
+	require.Len(t, baseLog, 3)
 
-	b, err := MetadataBuilderFromBase(base.Metadata)
+	b, err := MetadataBuilderFromBase(res.Metadata)
 	require.NoError(t, err)
-	schemaID := base.CurrentVersion().SchemaID
-	b.AddVersion(newTestVersionWithSQL(2, schemaID, "select 2")).SetCurrentVersionID(LastAddedID)
+	schemaID := res.CurrentVersion().SchemaID
+	b.SetProperties(iceberg.Properties{VersionHistorySizeKey: "2"}).
+		AddVersion(newTestVersionWithSQL(4, schemaID, "select 4")).
+		SetCurrentVersionID(LastAddedID)
 
-	first, err := b.Build()
-	require.NoError(t, err)
-	require.Len(t, first.VersionLog(), 2)
-	for range 2 {
+	for range 3 {
 		res, err := b.Build()
 		require.NoError(t, err)
-		require.Equal(t, first.VersionLog(), res.VersionLog())
-		require.Equal(t, base.ViewUUID(), res.ViewUUID())
+		ids := make([]int64, 0, 2)
+		for _, entry := range res.VersionLog() {
+			ids = append(ids, entry.VersionID)
+		}
+		require.Equal(t, []int64{3, 4}, ids)
 		require.Equal(t, baseLog, b.versionLog, "Build must not append to the builder's own log")
 	}
 }

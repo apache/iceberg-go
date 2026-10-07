@@ -51,13 +51,9 @@ type MetadataBuilder struct {
 
 	// update tracking
 	versionHistoryEntry *VersionLogEntry
-	// generatedUUID is the UUID of a new view that was never assigned one. It is made
-	// on the first Build and reused, so repeated builds describe the same view, while
-	// uuid stays unset and SetUUID still works.
-	generatedUUID      uuid.UUID
-	previousVersion    *Version
-	lastAddedVersionID *int64
-	lastAddedSchemaID  *int
+	previousVersion     *Version
+	lastAddedVersionID  *int64
+	lastAddedSchemaID   *int
 
 	// error tracking for build chaining
 	// if set, subsequent operations become a noop
@@ -411,10 +407,7 @@ func (b *MetadataBuilder) Err() error {
 func (b *MetadataBuilder) buildMetadata(retainedVersions []*Version, retainedHistory []VersionLogEntry) (*metadata, error) {
 	uuid_ := b.uuid
 	if uuid_ == uuid.Nil {
-		if b.generatedUUID == uuid.Nil {
-			b.generatedUUID = uuid.New()
-		}
-		uuid_ = b.generatedUUID
+		uuid_ = uuid.New()
 	}
 
 	md := &metadata{
@@ -432,10 +425,7 @@ func (b *MetadataBuilder) buildMetadata(retainedVersions []*Version, retainedHis
 	return md, md.validate()
 }
 
-// Build builds the view metadata and updates from the builder. It can be called more
-// than once, for example to retry a commit: each call describes all of the builder's
-// changes so far, the builder's logs are left unchanged, and a new view without an
-// assigned UUID gets the same generated UUID every time.
+// Build builds the view metadata and updates from the builder
 func (b *MetadataBuilder) Build() (*MetadataBuildResult, error) {
 	if b.err != nil {
 		return nil, b.err

@@ -1067,6 +1067,40 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 	require.Equal(t, res.(*metadataV2).SnapshotLog, again.(*metadataV2).SnapshotLog)
 }
 
+func TestSnapshotLogAfterMovingMainBackAfterBuild(t *testing.T) {
+	// add A, set main to A, add B, set main to B, build, set main back to A, build.
+	// B is intermediate in the first build, so it is skipped, and the second build
+	// logs A again: [A, A], as UpdateTableMetadata gives for the same updates.
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	newSnapshot := func(id int64) *Snapshot {
+		return &Snapshot{
+			SnapshotID:   id,
+			TimestampMs:  builder.base.LastUpdatedMillis() + id,
+			ManifestList: fmt.Sprintf("/snap-%d.avro", id),
+			Summary:      &Summary{Operation: OpAppend},
+			SchemaID:     &schemaID,
+		}
+	}
+
+	require.NoError(t, builder.AddSnapshot(newSnapshot(1)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	require.NoError(t, builder.AddSnapshot(newSnapshot(2)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
+	_, err := builder.Build()
+	require.NoError(t, err)
+
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	res, err := builder.Build()
+	require.NoError(t, err)
+
+	ids := make([]int64, 0, 2)
+	for entry := range res.SnapshotLogs() {
+		ids = append(ids, entry.SnapshotID)
+	}
+	require.Equal(t, []int64{1, 1}, ids)
+}
+
 func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	baseTimestamp := builder.base.LastUpdatedMillis()
@@ -1115,23 +1149,6 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, slices.Collect(rebuilt.SnapshotLogs()), slices.Collect(again.SnapshotLogs()))
 	require.Len(t, newBuilder.snapshotLog, 3, "Build must not prune the builder's own log")
-}
-
-func TestBuild_LastUpdatedIsNotFixedByAnEarlierBuild(t *testing.T) {
-	// Build doesn't store its timestamp on the builder, so a build after more changes
-	// reports a later last-updated time than the build before them.
-	builder, err := MetadataBuilderFromBase(builderWithoutChanges(2).base, "")
-	require.NoError(t, err)
-	require.NoError(t, builder.SetProperties(map[string]string{"foo": "bar"}))
-	first, err := builder.Build()
-	require.NoError(t, err)
-
-	time.Sleep(5 * time.Millisecond)
-	require.NoError(t, builder.SetProperties(map[string]string{"foo": "baz"}))
-	second, err := builder.Build()
-	require.NoError(t, err)
-	require.Greater(t, second.LastUpdatedMillis(), first.LastUpdatedMillis())
-	require.Zero(t, builder.lastUpdatedMS, "Build must not store its timestamp on the builder")
 }
 
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
@@ -1758,7 +1775,7 @@ func TestLastUpdateIncreasedForPropertyOnlyUpdate(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	lastUpdatedMS := meta.LastUpdatedMillis()
+	lastUpdatedMS := builder.lastUpdatedMS
 	time.Sleep(5 * time.Millisecond)
 	// Set a property
 
