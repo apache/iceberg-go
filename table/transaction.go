@@ -2496,12 +2496,12 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	// without this check a refresh-and-replay would swap the original file
 	// for a rewrite built from the stale snapshot, dropping the concurrent
 	// deletes and resurrecting their rows. Mirrors Java's copy-on-write
-	// validateNoConflictingDeletes: no isolation gating.
-	removed := append(slices.Clip(filesToDelete), filesToRewrite...)
+	// validateNoConflictingDeletes: no isolation gating. A concurrent
+	// removal of one of these files is caught earlier, by the retry
+	// rebuild's checkRemovedFiles (ErrCommitDiverged).
+	removed := slices.Concat(filesToDelete, filesToRewrite)
 	if len(removed) > 0 {
-		t.addValidator(func(cc *conflictContext) error {
-			return validateNoNewDeletesForRewrittenFiles(cc, removed)
-		})
+		t.addValidator(rewriteValidator(removed))
 	}
 
 	return updater, wfs, nil

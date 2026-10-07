@@ -75,7 +75,10 @@ func cowTestRecords(t *testing.T, rowsJSON string) array.RecordReader {
 	require.NoError(t, err)
 	t.Cleanup(data.Release)
 
-	return array.NewTableReader(data, -1)
+	rdr := array.NewTableReader(data, -1)
+	t.Cleanup(rdr.Release)
+
+	return rdr
 }
 
 // stageCopyOnWrite stages, without committing, a copy-on-write removal of the
@@ -104,15 +107,8 @@ var (
 	cowFormatVersions = []string{"2", "3"}
 	cowIsolations     = []table.IsolationLevel{table.IsolationSerializable, table.IsolationSnapshot}
 	cowOps            = []string{"delete", "overwrite"}
-)
 
-// TestCopyOnWriteConflict_ConcurrentDeleteOnRemovedFile proves a copy-on-write
-// Delete or Overwrite is rejected, at every isolation level, when a concurrent
-// commit added a delete against a data file it removes. Without the validator,
-// refresh-and-replay swaps the original file for a rewrite built from the stale
-// snapshot, dropping the concurrent delete and resurrecting its row (#2090).
-func TestCopyOnWriteConflict_ConcurrentDeleteOnRemovedFile(t *testing.T) {
-	removals := []struct {
+	cowRemovals = []struct {
 		name   string
 		filter iceberg.BooleanExpression
 	}{
@@ -121,11 +117,18 @@ func TestCopyOnWriteConflict_ConcurrentDeleteOnRemovedFile(t *testing.T) {
 		// id>=1 matches every row, so the file is dropped outright.
 		{"fully deleted", iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(1))},
 	}
+)
 
+// TestCopyOnWriteConflict_ConcurrentDeleteOnRemovedFile proves a copy-on-write
+// Delete or Overwrite is rejected, at every isolation level, when a concurrent
+// commit added a delete against a data file it removes. Without the validator,
+// refresh-and-replay swaps the original file for a rewrite built from the stale
+// snapshot, dropping the concurrent delete and resurrecting its row (#2090).
+func TestCopyOnWriteConflict_ConcurrentDeleteOnRemovedFile(t *testing.T) {
 	for _, version := range cowFormatVersions {
 		for _, isolation := range cowIsolations {
 			for _, op := range cowOps {
-				for _, removal := range removals {
+				for _, removal := range cowRemovals {
 					name := fmt.Sprintf("v%s/%s/%s/%s", version, isolation, op, removal.name)
 					t.Run(name, func(t *testing.T) {
 						ctx := context.Background()
@@ -195,6 +198,37 @@ func TestCopyOnWriteConflict_ConcurrentDeleteOnUntouchedFileCommits(t *testing.T
 				require.NoError(t, err)
 				require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 11}, idsInTable(t, committed))
 			})
+		}
+	}
+}
+
+// TestCopyOnWriteConflict_ConcurrentRemovalOfSameFileDiverges pins the other
+// half of copy-on-write conflict detection: when a concurrent commit already
+// removed a data file this commit also removes, the retry rebuild's
+// checkRemovedFiles aborts terminally with ErrCommitDiverged, before any
+// validator runs, rather than rebuilding the file from the stale snapshot.
+func TestCopyOnWriteConflict_ConcurrentRemovalOfSameFileDiverges(t *testing.T) {
+	for _, version := range cowFormatVersions {
+		for _, isolation := range cowIsolations {
+			for _, op := range cowOps {
+				for _, removal := range cowRemovals {
+					name := fmt.Sprintf("v%s/%s/%s/%s", version, isolation, op, removal.name)
+					t.Run(name, func(t *testing.T) {
+						ctx := context.Background()
+						tbl := appendTenRows(t, newCoWConflictTestTable(t, version, isolation))
+
+						txn := stageCopyOnWrite(t, tbl, op, removal.filter)
+
+						// A concurrent copy-on-write delete of id==4 rewrites the
+						// same data file first.
+						_, err := stageCopyOnWrite(t, tbl, "delete", iceberg.EqualTo(iceberg.Reference("id"), int64(4))).Commit(ctx)
+						require.NoError(t, err)
+
+						_, err = txn.Commit(ctx)
+						require.ErrorIs(t, err, table.ErrCommitDiverged)
+					})
+				}
+			}
 		}
 	}
 }
