@@ -139,10 +139,10 @@ func TestExplicitUtf8CollationStillPrunes(t *testing.T) {
 // collatedMockDataFile augments mockDataFile with Delta-style collation bounds.
 type collatedMockDataFile struct {
 	*mockDataFile
-	collBounds map[int]iceberg.CollationBoundEntry
+	collBounds map[int]iceberg.CollationColumnStats
 }
 
-func (c *collatedMockDataFile) CollationBounds() map[int]iceberg.CollationBoundEntry {
+func (c *collatedMockDataFile) CollationBounds() map[int]iceberg.CollationColumnStats {
 	return c.collBounds
 }
 
@@ -177,7 +177,7 @@ func fileWithCollatedValues(t *testing.T, spec *collation.Spec, values ...string
 			lowerBounds: map[int][]byte{1: stringBound(t, byteMin)},
 			upperBounds: map[int][]byte{1: stringBound(t, byteMax)},
 		},
-		collBounds: map[int]iceberg.CollationBoundEntry{1: entry},
+		collBounds: map[int]iceberg.CollationColumnStats{1: {Bounds: []iceberg.CollationBoundEntry{entry}}},
 	}
 }
 
@@ -231,6 +231,37 @@ func TestCollationVersionMismatchKeepsFile(t *testing.T) {
 	match, err := eval(file)
 	require.NoError(t, err)
 	require.True(t, match, "version-mismatched collation bounds must not prune")
+}
+
+// TestMultiVersionBoundsPruneForEitherReader shows the multi-version model: a
+// file carrying bounds for v1 AND v2 (e.g. v2 bounds backfilled by compaction
+// during an ICU upgrade) stays prunable by readers on either version, while a
+// reader on a version absent from the file keeps it.
+func TestMultiVersionBoundsPruneForEitherReader(t *testing.T) {
+	v1 := collation.MustParse("en_US-ci").WithVersion("v1")
+	v2 := v1.WithVersion("v2")
+	file := fileWithCollatedValues(t, v1, "Banana", "apple")
+	e2, ok := iceberg.ComputeCollatedBounds(v2, []string{"Banana", "apple"})
+	require.True(t, ok)
+	stats := file.collBounds[1]
+	stats.Bounds = append(stats.Bounds, e2)
+	file.collBounds[1] = stats
+
+	expr := iceberg.EqualTo(iceberg.Reference("name"), "CHERRY")
+	for _, tc := range []struct {
+		reader     *collation.Spec
+		mightMatch bool
+	}{
+		{v1, false},
+		{v2, false},
+		{v1.WithVersion("v3"), true},
+	} {
+		eval, err := newInclusiveMetricsEvaluator(schemaWithName(tc.reader), expr, true, true)
+		require.NoError(t, err)
+		match, err := eval(file)
+		require.NoError(t, err)
+		require.Equal(t, tc.mightMatch, match, "reader on %s", tc.reader.Version())
+	}
 }
 
 // TestUnversionedCollationKeepsFile shows that without a pinned version, bounds

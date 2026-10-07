@@ -1835,7 +1835,7 @@ type dataFile struct {
 	DistinctCounts          *[]colMap[int, int64]               `avro:"distinct_counts"`
 	LowerBounds             *[]colMap[int, []byte]              `avro:"lower_bounds"`
 	UpperBounds             *[]colMap[int, []byte]              `avro:"upper_bounds"`
-	CollationBoundsData     *[]colMap[int, CollationBoundEntry] `avro:"collation_bounds"`
+	CollationStatsData      *[]colMap[int, collationStatsValue] `avro:"collation_stats"`
 	Key                     *[]byte                             `avro:"key_metadata"`
 	Splits                  *[]int64                            `avro:"split_offsets"`
 	EqualityIDs             *[]int                              `avro:"equality_ids"`
@@ -1852,7 +1852,7 @@ type dataFile struct {
 	distinctCntMap    map[int]int64
 	lowerBoundMap     map[int][]byte
 	upperBoundMap     map[int][]byte
-	collationBoundMap map[int]CollationBoundEntry
+	collationStatsMap map[int]CollationColumnStats
 
 	// used for partition retrieval
 	fieldNameToID          map[string]int
@@ -1888,7 +1888,8 @@ func (d *dataFile) initColumnStatsData() {
 		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
-		d.collationBoundMap = avroColMapToMap(d.CollationBoundsData)
+		// decoded last: a layout may read the generic maps populated above
+		d.collationStatsMap = collationLayout.decode(d)
 	})
 }
 
@@ -2037,12 +2038,13 @@ func (d *dataFile) UpperBoundValues() map[int][]byte {
 	return d.upperBoundMap
 }
 
-// CollationBounds returns the collation-aware bounds (prototype) keyed by field
-// ID. Implements CollationBoundsProvider.
-func (d *dataFile) CollationBounds() map[int]CollationBoundEntry {
+// CollationBounds returns the collation-aware statistics (prototype) keyed by
+// field ID, decoded by the active collation bounds layout. Implements
+// CollationBoundsProvider.
+func (d *dataFile) CollationBounds() map[int]CollationColumnStats {
 	d.initColumnStatsData()
 
-	return d.collationBoundMap
+	return d.collationStatsMap
 }
 
 func (d *dataFile) KeyMetadata() []byte {
@@ -2196,6 +2198,8 @@ func NewManifestEntry(status ManifestEntryStatus, snapshotID *int64, seqNum, fil
 // conform to the DataFile interface.
 type DataFileBuilder struct {
 	d *dataFile
+
+	collationStats map[int]CollationColumnStats
 }
 
 // NewDataFileBuilder is passed all of the required fields and then allows
@@ -2333,13 +2337,14 @@ func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuild
 	return b
 }
 
-// WithCollationBounds sets the collation-aware bounds for the data file
-// (prototype). Named With… to distinguish the setter from the CollationBounds()
-// accessor. Note: collation_bounds is only present in the v3 data_file Avro
-// schema, so bounds set here are silently dropped when written to a v1/v2
-// manifest.
-func (b *DataFileBuilder) WithCollationBounds(bounds map[int]CollationBoundEntry) *DataFileBuilder {
-	b.d.CollationBoundsData = mapToAvroColMap(bounds)
+// WithCollationBounds sets the collation-aware statistics for the data file
+// (prototype), keyed by field ID with one bound per collation version. They are
+// stored by the active collation bounds layout when Build is called, so the call
+// order relative to LowerBoundValues/UpperBoundValues does not matter. Note:
+// collation stats are only present in the v3 data_file Avro schema, so stats set
+// here are silently dropped when written to a v1/v2 manifest.
+func (b *DataFileBuilder) WithCollationBounds(stats map[int]CollationColumnStats) *DataFileBuilder {
+	b.collationStats = stats
 
 	return b
 }
@@ -2397,6 +2402,10 @@ func (b *DataFileBuilder) ContentSizeInBytes(size int64) *DataFileBuilder {
 }
 
 func (b *DataFileBuilder) Build() DataFile {
+	if b.collationStats != nil {
+		collationLayout.encode(b.d, b.collationStats)
+	}
+
 	return b.d
 }
 

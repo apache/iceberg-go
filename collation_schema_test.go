@@ -152,6 +152,36 @@ func TestCollationBoundEntryValidFor(t *testing.T) {
 
 	unversioned := iceberg.CollationBoundEntry{Collation: "en_US-ci", Lower: []byte("a"), Upper: []byte("z")}
 	assert.False(t, unversioned.ValidFor(collation.MustParse("en_US-ci").WithVersion("v1")))
+
+	// A layout that does not persist the collation per entry leaves it empty: the
+	// field's declared collation applies and only the version gates use.
+	noCollation := iceberg.CollationBoundEntry{Version: "v1", Lower: []byte("a"), Upper: []byte("z")}
+	assert.True(t, noCollation.ValidFor(collation.MustParse("en_US-ci").WithVersion("v1")))
+	assert.False(t, noCollation.ValidFor(collation.MustParse("en_US-ci").WithVersion("v2")))
+}
+
+func TestCollationColumnStatsMultiVersion(t *testing.T) {
+	stats := iceberg.CollationColumnStats{Bounds: []iceberg.CollationBoundEntry{
+		{Collation: "en_US-ci", Version: "v1", Lower: []byte("a"), Upper: []byte("y")},
+		{Collation: "en_US-ci", Version: "v2", Lower: []byte("b"), Upper: []byte("z")},
+	}}
+
+	got, ok := stats.BoundFor(collation.MustParse("en_US-ci").WithVersion("v2"))
+	require.True(t, ok)
+	assert.Equal(t, []byte("b"), got.Lower, "reader on v2 must pick the v2 bound")
+
+	_, ok = stats.BoundFor(collation.MustParse("en_US-ci").WithVersion("v3"))
+	assert.False(t, ok, "no bound for an absent version")
+}
+
+func TestComputeCodePointRange(t *testing.T) {
+	lo, hi, ok := iceberg.ComputeCodePointRange([]string{"Zebra", "äpfel", "abc"})
+	require.True(t, ok)
+	assert.Equal(t, int32('Z'), lo)
+	assert.Equal(t, int32('ä'), hi)
+
+	_, _, ok = iceberg.ComputeCodePointRange([]string{"", ""})
+	assert.False(t, ok)
 }
 
 func TestCollatedStringInSchemaRoundTrip(t *testing.T) {

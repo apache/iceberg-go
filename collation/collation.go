@@ -43,11 +43,13 @@
 // spec discussion, not production-complete):
 //
 //   - Collation-aware bounds ("collation metrics") live in the parent iceberg
-//     package (CollationBoundEntry, ComputeCollatedBounds) and the manifest's
-//     prototype data_file.collation_bounds field; this package only does the
-//     specifier parsing and comparison.
-//   - The collation_bounds Avro field uses provisional, experimental field IDs
-//     (9000-9006) until an official range is reserved in the spec.
+//     package (CollationColumnStats, CollationBoundEntry, ComputeCollatedBounds);
+//     this package only does the specifier parsing and comparison. A column may
+//     carry one bound per collation version.
+//   - The on-disk layout of those bounds is not settled in the spec (inline
+//     content_stats fields vs derived COLLATE() fields). It is isolated behind
+//     the iceberg package's collation bounds layout seam; the provisional layout
+//     uses experimental field IDs (9000+) until an official range is reserved.
 //   - The collation_spec schema-JSON shape (name + icu_collator_version) tracks
 //     the current proposal and is provisional; a Java reference implementation
 //     may settle on different keys.

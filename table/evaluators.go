@@ -739,10 +739,11 @@ type inclusiveMetricsEval struct {
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
 
-	// collation-aware bounds (Delta-style: original values + version), keyed by
-	// field ID. Populated from a DataFile that implements
-	// iceberg.CollationBoundsProvider; nil for files without collation stats.
-	collationBounds map[int]iceberg.CollationBoundEntry
+	// collation-aware stats (Delta-style: original values tagged with a
+	// collation version, one bound per version), keyed by field ID. Populated
+	// from a DataFile that implements iceberg.CollationBoundsProvider; nil for
+	// files without collation stats.
+	collationBounds map[int]iceberg.CollationColumnStats
 }
 
 func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
@@ -885,8 +886,8 @@ func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
 // version-matching collation bounds, or (_, false) when no usable bounds exist
 // (the caller then conservatively keeps the file).
 func (m *inclusiveMetricsEval) evalCollated(pred iceberg.BoundPredicate, fieldID int, spec *collation.Spec) (bool, bool) {
-	entry, ok := m.collationBounds[fieldID]
-	if !ok || !entry.ValidFor(spec) {
+	entry, ok := m.collationBounds[fieldID].BoundFor(spec)
+	if !ok {
 		return false, false
 	}
 

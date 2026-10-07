@@ -138,27 +138,6 @@ func fieldNode(name string, typ avro.SchemaNode, fieldID int, opts ...func(*avro
 	return f
 }
 
-// collationBoundNode is the Avro record stored as the value of the prototype
-// data_file.collation_bounds map: collation-aware original-value bounds plus the
-// collation/version they were computed under.
-//
-// PROTOTYPE field IDs: 9000-9006 are a deliberately high, experimental range so
-// this demo does not collide with spec-reserved data_file field IDs. In
-// particular 146 (and the IDs immediately above it) is reserved for the V4
-// content_stats struct, and the spec reserves field IDs globally across
-// versions, so the prototype must stay out of that range until an official range
-// is reserved for collation bounds.
-var collationBoundNode = avro.SchemaNode{
-	Type: "record",
-	Name: "collation_bound_entry",
-	Fields: []avro.SchemaField{
-		fieldNode("collation", StringNode, 9003),
-		fieldNode("version", StringNode, 9004),
-		fieldNode("lower_bound", BytesNode, 9005),
-		fieldNode("upper_bound", BytesNode, 9006),
-	},
-}
-
 func withDoc(doc string) func(*avro.SchemaField) {
 	return func(f *avro.SchemaField) {
 		f.Doc = doc
@@ -381,7 +360,9 @@ func init() {
 	AvroSchemaMap["data_file_v3"] = mustSchema(avro.SchemaNode{
 		Type: "record",
 		Name: "r2",
-		Fields: []avro.SchemaField{
+		// The collation-stats fields come from the active collation bounds layout
+		// (collation_layout_schema.go); see iceberg.collationBoundsLayout.
+		Fields: append([]avro.SchemaField{
 			fieldNode("content", IntNode, 134, withDoc("Content type"), withDefault(0)),
 			fieldNode("file_path", StringNode, 100, withDoc("Location URI with FS scheme")),
 			fieldNode("file_format", StringNode, 101, withDoc("File format name: avro, orc, parquet")),
@@ -421,17 +402,7 @@ func init() {
 				withDoc("The offset in the file where the content starts")),
 			fieldNode("content_size_in_bytes", NullableNode(LongNode), 145,
 				withDoc("The length of the referenced content stored in the file")),
-			// PROTOTYPE: collation-aware bounds (Delta-style original values +
-			// version) for collated string columns. Field IDs 9000-9006 are a
-			// high experimental range chosen to avoid the spec's globally-reserved
-			// data_file IDs (e.g. 146 = V4 content_stats); they are provisional and
-			// must be replaced with an officially reserved range before this is a
-			// real spec change.
-			fieldNode("collation_bounds",
-				NullableNode(newMapNode("k9001_v9002", IntNode, collationBoundNode, 9001, 9002)),
-				9000, withDefault(nil),
-				withDoc("map of column id to collation-aware original-value bounds (prototype)")),
-		},
+		}, collationStatsFields()...),
 	})
 
 	AvroSchemaMap["manifest_entry_v3"] = mustSchema(avro.SchemaNode{

@@ -19,30 +19,24 @@ package iceberg
 
 import "github.com/apache/iceberg-go/collation"
 
-// CollationBoundEntry is the collation-aware lower/upper bound for one column in
-// one data file, following the Delta approach to collation statistics. It is
-// both the on-disk Avro record (the data_file.collation_bounds map value) and
-// the in-memory value consumed by the metrics evaluator.
+// CollationBoundEntry is one collation-aware lower/upper bound for one column in
+// one data file, computed under one collation version. A column may carry
+// several entries, one per collation version (see CollationColumnStats).
 //
 //   - Lower and Upper hold the ORIGINAL string values (their normal binary
 //     encoding), not ICU sort keys. Sort keys are not stable across ICU/CLDR
 //     versions, so storing them would couple every reader to one exact
 //     implementation; original values stay readable and let each engine compare
 //     with its own collator.
-//   - Collation and Version identify the collation and the implementation version
-//     under which the min/max were selected. A reader must only trust the bound
-//     when both match its own collation (see ValidFor), because a different
-//     version may order values differently and thus pick a different min/max.
+//   - Version identifies the collation implementation version under which the
+//     min/max were selected. Collation identifies the collation itself; it is
+//     empty when the on-disk layout does not persist it per entry, in which case
+//     the field's declared collation applies.
 //
 // Unlike the original UTF-8 lower/upper bounds (the byte-order min/max), these
 // are the min/max under the column's COLLATION order, which can select entirely
 // different values (e.g. for {"Banana","apple"} the byte-min is "Banana" but the
 // case-insensitive min is "apple").
-//
-// Prototype note: the spec should generalize the data_file.collation_bounds map
-// value to a LIST of these entries (Delta's validForCollations), letting one file
-// carry bounds for several collation versions at once for smooth engine upgrades.
-// This prototype stores a single entry per column.
 type CollationBoundEntry struct {
 	Collation string `avro:"collation"`
 	Version   string `avro:"version"`
@@ -51,20 +45,106 @@ type CollationBoundEntry struct {
 }
 
 // ValidFor reports whether this bound may be used for collation-aware pruning
-// under spec. It requires the collation identity and a non-empty version to
-// match exactly: an unversioned or version-mismatched bound cannot be trusted to
-// be the true min/max under the reader's collation. This is the mechanism that
-// keeps pruning correct across ICU/CLDR version changes.
+// under spec. It requires a non-empty version that matches exactly, and a
+// matching collation when the entry records one: an unversioned or
+// version-mismatched bound cannot be trusted to be the true min/max under the
+// reader's collation. This is the mechanism that keeps pruning correct across
+// ICU/CLDR version changes.
 func (e CollationBoundEntry) ValidFor(spec *collation.Spec) bool {
-	return e.Version != "" && spec.Version() == e.Version && e.Collation == spec.String()
+	if e.Version == "" || spec.Version() != e.Version {
+		return false
+	}
+
+	return e.Collation == "" || e.Collation == spec.String()
+}
+
+// CollationColumnStats holds the collation-aware statistics of one collated
+// column in one data file. It is the format-neutral, in-memory model: how it is
+// physically stored in a manifest is decided by the active collation bounds
+// layout (see collationBoundsLayout), not by this type.
+type CollationColumnStats struct {
+	// MinCodePoint and MaxCodePoint are the smallest and largest Unicode code
+	// points present in the column's values in the file, or nil if unknown.
+	// Layouts that do not persist them drop them.
+	MinCodePoint *int32
+	MaxCodePoint *int32
+	// Bounds holds one entry per collation version present in the file.
+	Bounds []CollationBoundEntry
+}
+
+// BoundFor returns the first bound usable for pruning under spec.
+func (s CollationColumnStats) BoundFor(spec *collation.Spec) (CollationBoundEntry, bool) {
+	for _, e := range s.Bounds {
+		if e.ValidFor(spec) {
+			return e, true
+		}
+	}
+
+	return CollationBoundEntry{}, false
 }
 
 // CollationBoundsProvider is an optional interface a DataFile may implement to
-// expose collation-aware bounds (the Delta statsWithCollation analogue) keyed by
-// field ID. The metrics evaluator consults it for collated columns; data files
-// that don't implement it (or carry no collation bounds) are conservatively kept.
+// expose collation-aware statistics keyed by field ID. The metrics evaluator
+// consults it for collated columns; data files that don't implement it (or carry
+// no collation stats) are conservatively kept.
 type CollationBoundsProvider interface {
-	CollationBounds() map[int]CollationBoundEntry
+	CollationBounds() map[int]CollationColumnStats
+}
+
+// CollationVersionRef identifies one (column, collation, version) combination
+// that a table carries collation bounds for.
+type CollationVersionRef struct {
+	FieldID   int
+	Collation string
+	Version   string
+}
+
+// collationBoundsLayout is the seam that decides how collation-aware statistics
+// are physically stored in a manifest entry. The Iceberg spec has not yet settled
+// the on-disk layout (inline content_stats fields vs derived COLLATE() fields
+// reusing lower_bounds/upper_bounds), so everything layout-specific lives behind
+// this interface, in collation_layout.go plus its Avro schema fragment in
+// internal/collation_layout_schema.go. Swapping those two files swaps the layout;
+// the rest of the code works on CollationColumnStats.
+type collationBoundsLayout interface {
+	// name is a short identifier of the layout.
+	name() string
+	// encode stores stats on d's Avro-mapped fields.
+	encode(d *dataFile, stats map[int]CollationColumnStats)
+	// decode reconstructs stats from d's Avro-mapped fields. It runs after the
+	// generic column stats maps (lower/upper bounds etc.) are populated.
+	decode(d *dataFile) map[int]CollationColumnStats
+	// tableMetadata returns any per-table metadata the layout requires (for
+	// example derived-field definitions in the table schema), serialized as JSON,
+	// or nil if the layout needs none. It is reported separately because it is
+	// paid once per table, not once per data file.
+	tableMetadata(refs []CollationVersionRef) []byte
+}
+
+// CollationLayoutName returns the name of the active collation bounds layout.
+func CollationLayoutName() string { return collationLayout.name() }
+
+// CollationLayoutTableMetadata returns the per-table metadata the active layout
+// needs for refs, serialized as JSON, or nil if it needs none.
+func CollationLayoutTableMetadata(refs []CollationVersionRef) []byte {
+	return collationLayout.tableMetadata(refs)
+}
+
+// ComputeCodePointRange returns the smallest and largest Unicode code points
+// present in values. It returns ok=false for empty input or input with no runes.
+func ComputeCodePointRange(values []string) (lo, hi int32, ok bool) {
+	for _, v := range values {
+		for _, r := range v {
+			if !ok {
+				lo, hi, ok = r, r, true
+
+				continue
+			}
+			lo, hi = min(lo, r), max(hi, r)
+		}
+	}
+
+	return lo, hi, ok
 }
 
 // ComputeCollatedBounds selects the collation-order minimum and maximum of
