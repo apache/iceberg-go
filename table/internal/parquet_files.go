@@ -1914,7 +1914,10 @@ type RowGroupDictionaryPred struct {
 // group pruning.
 // Pass it as the tester argument to wrapPqArrowReader.GetRecords.
 type ParquetRowGroupTester struct {
-	StatsFn         func(*metadata.RowGroupMetaData, []int) (bool, error)
+	StatsFn func(*metadata.RowGroupMetaData, []int) (bool, error)
+	// StatsFieldIDs limits StatsFn to Parquet columns referenced by the pruning
+	// expression. Nil preserves the historical behavior of using all read columns.
+	StatsFieldIDs   []int
 	BloomPreds      []RowGroupBloomPred      // nil = no bloom filter pass
 	DictionaryPreds []RowGroupDictionaryPred // nil = no dictionary filter pass
 	// RangeSet indicates that Start and Length came from an explicit scan task.
@@ -2064,8 +2067,18 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			dictionaryReader *file.Reader
 		)
 
-		if len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
+		if len(rowGroupTester.StatsFieldIDs) > 0 ||
+			len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
 			fieldIDToColIdx = buildFieldIDToColIdx(fileMeta)
+		}
+		statsCols := cols
+		if rowGroupTester.StatsFn != nil && rowGroupTester.StatsFieldIDs != nil {
+			statsCols = make([]int, 0, len(rowGroupTester.StatsFieldIDs))
+			for _, fieldID := range rowGroupTester.StatsFieldIDs {
+				if colIdx, ok := fieldIDToColIdx[fieldID]; ok {
+					statsCols = append(statsCols, colIdx)
+				}
+			}
 		}
 		var dictionaryPredsByColumn map[int][]int
 		if len(rowGroupTester.DictionaryPreds) > 0 {
@@ -2130,7 +2143,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			}
 			if use && rowGroupTester.StatsFn != nil {
 				var err error
-				use, err = rowGroupTester.StatsFn(rgMeta, cols)
+				use, err = rowGroupTester.StatsFn(rgMeta, statsCols)
 				if err != nil {
 					return nil, err
 				}

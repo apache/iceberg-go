@@ -881,6 +881,10 @@ func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]st
 	if err != nil {
 		return nil, err
 	}
+	statsFieldIDs, err := iceberg.ExtractFieldIDs(filter)
+	if err != nil {
+		return nil, err
+	}
 
 	statsFn, err := newParquetRowGroupStatsEvaluator(iceberg.PositionalDeleteSchema, filter, false)
 	if err != nil {
@@ -892,8 +896,9 @@ func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]st
 	}
 
 	return &tblutils.ParquetRowGroupTester{
-		StatsFn:    statsFn,
-		BloomPreds: bloomPreds,
+		StatsFn:       statsFn,
+		StatsFieldIDs: statsFieldIDs,
+		BloomPreds:    bloomPreds,
 	}, nil
 }
 
@@ -1968,6 +1973,7 @@ func (as *arrowScan) processRecordsWithPlans(
 		if plans != nil && plans.pruning != nil {
 			tester = &tblutils.ParquetRowGroupTester{
 				StatsFn:         plans.pruning.statsEvaluator(),
+				StatsFieldIDs:   plans.pruning.statsFieldIDs,
 				BloomPreds:      plans.pruning.bloomPreds,
 				DictionaryPreds: plans.pruning.dictionaryPreds,
 			}
@@ -2004,6 +2010,10 @@ func (as *arrowScan) processRecordsWithPlans(
 			if err != nil {
 				return err
 			}
+			statsFieldIDs, err := iceberg.ExtractFieldIDs(filePruningFilter)
+			if err != nil {
+				return err
+			}
 
 			statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, filePruningFilter, false)
 			if err != nil {
@@ -2022,6 +2032,7 @@ func (as *arrowScan) processRecordsWithPlans(
 
 			tester = &tblutils.ParquetRowGroupTester{
 				StatsFn:         statsFn,
+				StatsFieldIDs:   statsFieldIDs,
 				BloomPreds:      bloomPreds,
 				DictionaryPreds: dictionaryPreds,
 			}
