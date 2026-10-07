@@ -35,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -143,21 +144,65 @@ func TestLazyPositionDeleteLoaderDefersReadsAndSharesResults(t *testing.T) {
 
 	gotA, err := loader.load(ctx, tasks[0])
 	require.NoError(t, err)
-	require.Len(t, gotA, 1, "duplicate delete references must be read once per task")
-	assert.Equal(t, []int64{1}, int64Values(gotA[0]))
+	require.NotNil(t, gotA)
+	assert.Equal(t, int64(1), gotA.Cardinality(),
+		"duplicate delete references must be indexed once per task")
+	assert.True(t, gotA.Contains(1))
 	assert.Equal(t, int64(1), memFS.opens.Load())
 
 	cached := loader.files[deletePath]
 	require.NotNil(t, cached)
 	assert.Equal(t, map[string]struct{}{dataPathA: {}, dataPathB: {}}, cached.targets)
-	assert.NotContains(t, cached.deletes, unrelatedPath,
+	assert.NotContains(t, cached.bitmaps, unrelatedPath,
 		"lazy delete reads must filter paths that are not referenced by scan tasks")
 
 	gotB, err := loader.load(ctx, tasks[1])
 	require.NoError(t, err)
-	require.Len(t, gotB, 1)
-	assert.Equal(t, []int64{3}, int64Values(gotB[0]))
+	require.NotNil(t, gotB)
+	assert.Equal(t, int64(1), gotB.Cardinality())
+	assert.True(t, gotB.Contains(3))
 	assert.Equal(t, int64(1), memFS.opens.Load(), "shared delete files must use one read")
+
+	loader.release()
+}
+
+func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	const (
+		deletePathA = "mem://bucket/deletes/split-a.parquet"
+		deletePathB = "mem://bucket/deletes/split-b.parquet"
+		dataPath    = "mem://bucket/data/split.parquet"
+	)
+	fs := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
+	writePosDeleteParquetToMemFS(t, fs.MemFS, deletePathA,
+		`[{"file_path":"`+dataPath+`","pos":1}]`)
+	writePosDeleteParquetToMemFS(t, fs.MemFS, deletePathB,
+		`[{"file_path":"`+dataPath+`","pos":3}]`)
+
+	deleteA := newPosDeleteFile(t, deletePathA, 1, 128)
+	deleteB := newPosDeleteFile(t, deletePathB, 1, 128)
+	dataFile := newLazyDataFile(t, dataPath)
+	tasks := []FileScanTask{
+		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}, Start: 0, Length: 64},
+		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteB, deleteA}, Start: 64, Length: 64},
+	}
+	loader := newLazyPositionDeleteLoader(fs, tasks)
+
+	first, err := loader.load(ctx, tasks[0])
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	second, err := loader.load(ctx, tasks[1])
+	require.NoError(t, err)
+	require.NotNil(t, second)
+
+	assert.Same(t, first, second, "split tasks must reuse the merged position index")
+	assert.Equal(t, int64(2), first.Cardinality())
+	assert.True(t, first.Contains(1))
+	assert.True(t, first.Contains(3))
+	assert.Equal(t, int64(2), fs.opens.Load(), "each delete file must be read once")
 
 	loader.release()
 }
@@ -182,7 +227,7 @@ func TestLazyPositionDeleteLoaderSingleflightsConcurrentLoads(t *testing.T) {
 	loader := newLazyPositionDeleteLoader(fs, []FileScanTask{task})
 
 	const callers = 8
-	results := make(chan positionDeletes, callers)
+	results := make(chan *dv.RoaringPositionBitmap, callers)
 	errs := make(chan error, callers)
 	var wg sync.WaitGroup
 	wg.Add(callers)
@@ -201,9 +246,16 @@ func TestLazyPositionDeleteLoaderSingleflightsConcurrentLoads(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
-	for deletes := range results {
-		require.Len(t, deletes, 1)
-		assert.Equal(t, []int64{7}, int64Values(deletes[0]))
+	var first *dv.RoaringPositionBitmap
+	for bitmap := range results {
+		require.NotNil(t, bitmap)
+		assert.Equal(t, int64(1), bitmap.Cardinality())
+		assert.True(t, bitmap.Contains(7))
+		if first == nil {
+			first = bitmap
+		} else {
+			assert.Same(t, first, bitmap, "concurrent loads must share one position index")
+		}
 	}
 	assert.Equal(t, int64(1), fs.opens.Load(), "concurrent users must share one delete-file read")
 
@@ -448,17 +500,24 @@ func TestArrowScanRowLimitStopsBeforeLazyPositionDeleteError(t *testing.T) {
 		"a row limit may finish before a later task's positional-delete error")
 }
 
-func TestLazyPositionDeleteLoaderReleasesChunksWhenIteratorStops(t *testing.T) {
+func TestLazyPositionDeleteLoaderClearsBitmapsWhenIteratorStops(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer mem.AssertSize(t, 0)
 
-	loader := &lazyPositionDeleteLoader{files: map[string]*lazyPositionDeleteFile{
-		"mem://bucket/deletes/one.parquet": {
-			deletes: map[string]*arrow.Chunked{
-				"mem://bucket/data/a.parquet": chunkedPosDelete(t, mem, []int64{1}),
+	bitmap := dv.NewRoaringPositionBitmap()
+	bitmap.Set(1)
+	loader := &lazyPositionDeleteLoader{
+		files: map[string]*lazyPositionDeleteFile{
+			"mem://bucket/deletes/one.parquet": {
+				bitmaps: map[string]*dv.RoaringPositionBitmap{
+					"mem://bucket/data/a.parquet": bitmap,
+				},
 			},
 		},
-	}}
+		indexes: map[string]*lazyPositionDeleteIndex{
+			"index": {bitmap: bitmap},
+		},
+	}
 
 	batch := checkedInt64RecordBatch(mem, 1)
 	records := make(chan enumeratedRecord, 1)
@@ -482,7 +541,10 @@ func TestLazyPositionDeleteLoaderReleasesChunksWhenIteratorStops(t *testing.T) {
 	}
 
 	for _, cached := range loader.files {
-		assert.Nil(t, cached.deletes, "release must clear cached delete chunks")
+		assert.Nil(t, cached.bitmaps, "release must clear cached delete bitmaps")
+	}
+	for _, index := range loader.indexes {
+		assert.Nil(t, index.bitmap, "release must clear merged position indexes")
 	}
 }
 
