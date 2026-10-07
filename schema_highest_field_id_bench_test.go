@@ -22,28 +22,30 @@ import (
 	"testing"
 )
 
-var benchmarkHighestFieldIDResult int
-
 func BenchmarkHighestFieldID(b *testing.B) {
 	for _, tc := range []struct {
 		name   string
 		schema *Schema
+		want   int
 	}{
-		{name: "flat/fields=1", schema: benchmarkHighestFlatSchema(1)},
-		{name: "flat/fields=32", schema: benchmarkHighestFlatSchema(32)},
-		{name: "flat/fields=256", schema: benchmarkHighestFlatSchema(256)},
-		{name: "flat/fields=2048", schema: benchmarkHighestFlatSchema(2048)},
-		{name: "nested/depth=8", schema: benchmarkHighestNestedSchema(8)},
-		{name: "nested/depth=32", schema: benchmarkHighestNestedSchema(32)},
-		{name: "nested/depth=64", schema: benchmarkHighestNestedSchema(64)},
-		{name: "mixed/groups=8", schema: benchmarkHighestMixedSchema(8)},
-		{name: "mixed/groups=64", schema: benchmarkHighestMixedSchema(64)},
+		{name: "flat/fields=1", schema: benchmarkHighestFlatSchema(1), want: 1},
+		{name: "flat/fields=32", schema: benchmarkHighestFlatSchema(32), want: 32},
+		{name: "flat/fields=256", schema: benchmarkHighestFlatSchema(256), want: 256},
+		{name: "flat/fields=2048", schema: benchmarkHighestFlatSchema(2048), want: 2048},
+		{name: "nested/depth=8", schema: benchmarkHighestNestedSchema(8), want: 9},
+		{name: "nested/depth=32", schema: benchmarkHighestNestedSchema(32), want: 33},
+		{name: "nested/depth=64", schema: benchmarkHighestNestedSchema(64), want: 65},
+		{name: "mixed/groups=8", schema: benchmarkHighestMixedSchema(8), want: 40},
+		{name: "mixed/groups=64", schema: benchmarkHighestMixedSchema(64), want: 320},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
-			b.ResetTimer()
-			for range b.N {
-				benchmarkHighestFieldIDResult = tc.schema.HighestFieldID()
+			var got int
+			for b.Loop() {
+				got = tc.schema.HighestFieldID()
+			}
+			if got != tc.want {
+				b.Fatalf("highest field ID = %d, want %d", got, tc.want)
 			}
 		})
 	}

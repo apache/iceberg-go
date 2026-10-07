@@ -1986,6 +1986,10 @@ func TestHighestFieldID(t *testing.T) {
 		{"list element", iceberg.NewSchema(0, field(1, &iceberg.ListType{
 			ElementID: 50, Element: iceberg.PrimitiveTypes.Int32,
 		})), 50},
+		{"collection field exceeds nested IDs", iceberg.NewSchema(0, field(50, &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
+			ValueType: &iceberg.ListType{ElementID: 4, Element: iceberg.PrimitiveTypes.Int32},
+		})), 50},
 		{"deeply nested struct", iceberg.NewSchema(0, deeplyNested), 100},
 		{"empty struct before sibling", iceberg.NewSchema(0,
 			field(1, &iceberg.StructType{}), field(50, iceberg.PrimitiveTypes.String)), 50},
