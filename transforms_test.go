@@ -492,6 +492,23 @@ func overflowingInt32TransformParameter(t *testing.T) int {
 	return int(value)
 }
 
+func TestTruncateTransformInt32MaxWidth(t *testing.T) {
+	transformer, err := (iceberg.TruncateTransform{Width: math.MaxInt32}).Transformer(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		value    int32
+		expected int32
+	}{
+		{math.MaxInt32 - 1, 0},
+		{math.MaxInt32, math.MaxInt32},
+		{-1, -math.MaxInt32},
+		{math.MinInt32, math.MinInt32},
+	} {
+		assert.Equal(t, tt.expected, transformer(tt.value))
+	}
+}
+
 func TestTruncateTransform_WidthValidation(t *testing.T) {
 	testValidation := func(t *testing.T, transform iceberg.TruncateTransform, errorContains string) {
 		t.Helper()
