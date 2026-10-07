@@ -19,8 +19,8 @@ package puffin
 
 import (
 	"bufio"
-	"cmp"
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
