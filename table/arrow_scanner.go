@@ -318,6 +318,7 @@ func (l *lazyPositionDeleteLoader) buildIndex(
 		}
 		if bitmap == nil {
 			bitmap = deleteBitmap
+
 			continue
 		}
 
