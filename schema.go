@@ -582,14 +582,19 @@ func (s *Schema) Equals(other *Schema) bool {
 // HighestFieldID returns the value of the numerically highest field ID
 // in this schema.
 func (s *Schema) HighestFieldID() int {
+	if s == nil {
+		return 0
+	}
+
 	return highestFieldIDFields(s.fields)
 }
 
 func highestFieldIDFields(fields []NestedField) int {
 	highest := 0
-	for _, field := range fields {
-		highest = max(highest, field.ID, highestFieldIDType(field.Type))
+	for i := range fields {
+		highest = max(highest, fields[i].ID, highestFieldIDType(fields[i].Type))
 	}
+
 	return highest
 }
 
@@ -608,6 +613,7 @@ func highestFieldIDType(typ Type) int {
 			return max(typ.KeyID, typ.ValueID, highestFieldIDType(typ.KeyType), highestFieldIDType(typ.ValueType))
 		}
 	}
+
 	return 0
 }
 
