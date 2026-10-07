@@ -58,16 +58,31 @@ func (markingSigner) SignRequest(r *http.Request) error {
 	return nil
 }
 
-// TestSignerDoesNotSignCrossOriginRedirect pins the origin guard in
-// sessionTransport.RoundTrip: a redirect to a different origin is not signed, so
+// serveEmptyConfig answers GET /v1/config with no defaults or overrides.
+func serveEmptyConfig(w http.ResponseWriter, _ *http.Request) {
+	_ = json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
+}
+
+// roundTripTo sends a GET for target through the catalog session's transport
+// directly, bypassing the client's redirect policy, so a test can exercise the
+// transport's own origin gate.
+func roundTripTo(t *testing.T, cat *Catalog, target string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+	require.NoError(t, err)
+	resp, err := cat.cl.Transport.RoundTrip(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+}
+
+// TestSignerDoesNotSignCrossOriginRequest pins the origin guard in
+// sessionTransport.RoundTrip: a request to a different origin is not signed, so
 // the signer's Authorization header and any session token never reach an
 // unconfigured host. The guard is signer-agnostic, so it covers an explicit
 // WithSigner too; a marking signer exercises it without a real SigV4 backend.
-func TestSignerDoesNotSignCrossOriginRedirect(t *testing.T) {
-	var secondHit bool
+func TestSignerDoesNotSignCrossOriginRequest(t *testing.T) {
 	var gotAuth, gotToken string
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		secondHit = true
 		gotAuth = r.Header.Get("Authorization")
 		gotToken = r.Header.Get("X-Amz-Security-Token")
 		w.WriteHeader(http.StatusOK)
@@ -76,12 +91,10 @@ func TestSignerDoesNotSignCrossOriginRedirect(t *testing.T) {
 
 	var firstAuth string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
-	})
-	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/config", serveEmptyConfig)
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
 		firstAuth = r.Header.Get("Authorization")
-		http.Redirect(w, r, second.URL+"/landing", http.StatusTemporaryRedirect)
+		w.WriteHeader(http.StatusOK)
 	})
 	first := httptest.NewServer(mux)
 	defer first.Close()
@@ -90,54 +103,31 @@ func TestSignerDoesNotSignCrossOriginRedirect(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, first.URL+"/redirect", nil)
-	require.NoError(t, err)
-	resp, err := cat.cl.Do(req)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
+	roundTripTo(t, cat, first.URL+"/ok")
+	roundTripTo(t, cat, second.URL+"/landing")
 
 	require.NotEmpty(t, firstAuth, "the configured origin must be signed")
-	require.True(t, secondHit, "the redirect target must be reached")
-	require.Empty(t, gotAuth, "the redirect target must not receive the Authorization header")
-	require.Empty(t, gotToken, "the redirect target must not receive the session token")
+	require.Empty(t, gotAuth, "another origin must not receive the Authorization header")
+	require.Empty(t, gotToken, "another origin must not receive the session token")
 }
 
-// TestCredentialsNotSentOnCrossOriginRedirect pins that the OAuth bearer token
-// and user-supplied default headers stay on the origin that started the request,
-// while a same-origin redirect keeps them.
-func TestCredentialsNotSentOnCrossOriginRedirect(t *testing.T) {
-	type seen struct {
-		hit                         bool
-		auth, apiKey, custom, agent string
-	}
-	record := func(s *seen, r *http.Request) {
-		s.hit = true
-		s.auth = r.Header.Get("Authorization")
-		s.apiKey = r.Header.Get("X-Api-Key")
-		s.custom = r.Header.Get("X-Custom")
-		s.agent = r.Header.Get("User-Agent")
-	}
-
-	var first, other, sameLanding seen
+// TestCredentialsNotSentCrossOrigin pins that the OAuth bearer token and
+// user-supplied default headers are only added for the catalog origin, while
+// built-in client headers go everywhere, including an operator override of
+// one of them.
+func TestCredentialsNotSentCrossOrigin(t *testing.T) {
+	var other http.Header
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		record(&other, r)
+		other = r.Header.Clone()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer second.Close()
 
+	var first http.Header
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
-	})
-	mux.HandleFunc("/cross", func(w http.ResponseWriter, r *http.Request) {
-		record(&first, r)
-		http.Redirect(w, r, second.URL+"/landing", http.StatusTemporaryRedirect)
-	})
-	mux.HandleFunc("/same", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/landing", http.StatusTemporaryRedirect)
-	})
-	mux.HandleFunc("/landing", func(w http.ResponseWriter, r *http.Request) {
-		record(&sameLanding, r)
+	mux.HandleFunc("/v1/config", serveEmptyConfig)
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
+		first = r.Header.Clone()
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := httptest.NewServer(mux)
@@ -145,96 +135,105 @@ func TestCredentialsNotSentOnCrossOriginRedirect(t *testing.T) {
 
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
 		WithOAuthToken("SECRET-CATALOG-TOKEN"),
-		WithHeaders(map[string]string{"X-Custom": "SECRET-CUSTOM"}),
-		WithAdditionalProps(iceberg.Properties{"header.X-Api-Key": "SECRET-API-KEY"}))
+		WithHeaders(map[string]string{"X-Custom": "SECRET-CUSTOM", "User-Agent": "corp-agent/1"}),
+		WithAdditionalProps(iceberg.Properties{
+			"header.X-Api-Key":                        "SECRET-API-KEY",
+			"header." + headerIcebergAccessDelegation: "remote-signing",
+		}))
 	require.NoError(t, err)
 
-	get := func(path string) {
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil)
-		require.NoError(t, err)
-		resp, err := cat.cl.Do(req)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-	}
+	roundTripTo(t, cat, srv.URL+"/ok")
+	roundTripTo(t, cat, second.URL+"/landing")
 
-	t.Run("cross origin", func(t *testing.T) {
-		get("/cross")
+	assert.Equal(t, "Bearer SECRET-CATALOG-TOKEN", first.Get("Authorization"))
+	assert.Equal(t, "SECRET-API-KEY", first.Get("X-Api-Key"))
+	assert.Equal(t, "SECRET-CUSTOM", first.Get("X-Custom"))
 
-		require.Equal(t, "Bearer SECRET-CATALOG-TOKEN", first.auth, "the configured origin must still be authenticated")
-		require.Equal(t, "SECRET-API-KEY", first.apiKey)
-		require.Equal(t, "SECRET-CUSTOM", first.custom)
-
-		require.True(t, other.hit, "the redirect target must be reached")
-		assert.Empty(t, other.auth, "the redirect target must not receive the bearer token")
-		assert.Empty(t, other.apiKey, "the redirect target must not receive header.* defaults")
-		assert.Empty(t, other.custom, "the redirect target must not receive WithHeaders defaults")
-		assert.Equal(t, "GoIceberg/"+iceberg.Version(), other.agent, "built-in client headers are still sent")
-	})
-
-	t.Run("same origin", func(t *testing.T) {
-		get("/same")
-
-		require.True(t, sameLanding.hit)
-		assert.Equal(t, "Bearer SECRET-CATALOG-TOKEN", sameLanding.auth)
-		assert.Equal(t, "SECRET-API-KEY", sameLanding.apiKey)
-		assert.Equal(t, "SECRET-CUSTOM", sameLanding.custom)
-	})
+	assert.Empty(t, other.Get("Authorization"), "another origin must not receive the bearer token")
+	assert.Empty(t, other.Get("X-Api-Key"), "another origin must not receive header.* defaults")
+	assert.Empty(t, other.Get("X-Custom"), "another origin must not receive WithHeaders defaults")
+	assert.Equal(t, "corp-agent/1", other.Get("User-Agent"), "an overridden built-in header keeps the override")
+	assert.Equal(t, "remote-signing", other.Get(headerIcebergAccessDelegation))
+	assert.Equal(t, icebergRestSpecVersion, other.Get("X-Client-Version"), "built-in client headers are still sent")
 }
 
-// TestOverriddenBuiltinHeadersSentOnCrossOriginRedirect pins that a
-// cross-origin hop receives the operator's value for a built-in header it
-// overrode, not the built-in default.
-func TestOverriddenBuiltinHeadersSentOnCrossOriginRedirect(t *testing.T) {
-	var otherHit bool
-	var otherAgent, otherDelegation, otherCustom string
+// TestCrossOriginRedirectNotFollowed pins that the catalog client refuses a
+// redirect to another origin before contacting it, while a same-origin
+// redirect is still followed with credentials.
+func TestCrossOriginRedirectNotFollowed(t *testing.T) {
+	var otherHit atomic.Bool
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		otherHit = true
-		otherAgent = r.Header.Get("User-Agent")
-		otherDelegation = r.Header.Get(headerIcebergAccessDelegation)
-		otherCustom = r.Header.Get("X-Custom")
+		otherHit.Store(true)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer second.Close()
 
+	var landingAuth string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}})
-	})
+	mux.HandleFunc("/v1/config", serveEmptyConfig)
 	mux.HandleFunc("/cross", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, second.URL+"/landing", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/same", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/landing", http.StatusTemporaryRedirect)
+	})
+	// The loop ends after maxRedirects*2 hops, so a missing redirect limit fails
+	// the test instead of hanging it.
+	var loopHops atomic.Int32
+	mux.HandleFunc("/loop", func(w http.ResponseWriter, r *http.Request) {
+		if loopHops.Add(1) > maxRedirects*2 {
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
+		http.Redirect(w, r, "/loop", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/landing", func(w http.ResponseWriter, r *http.Request) {
+		landingAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
-		WithHeaders(map[string]string{"User-Agent": "corp-agent/1", "X-Custom": "SECRET-CUSTOM"}),
-		WithAdditionalProps(iceberg.Properties{"header." + headerIcebergAccessDelegation: "remote-signing"}))
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithOAuthToken("SECRET-CATALOG-TOKEN"))
 	require.NoError(t, err)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/cross", nil)
-	require.NoError(t, err)
-	resp, err := cat.cl.Do(req)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
+	get := func(t *testing.T, path string) (*http.Response, error) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil)
+		require.NoError(t, err)
 
-	require.True(t, otherHit, "the redirect target must be reached")
-	assert.Equal(t, "corp-agent/1", otherAgent)
-	assert.Equal(t, "remote-signing", otherDelegation)
-	assert.Empty(t, otherCustom, "the redirect target must not receive WithHeaders defaults")
+		return cat.cl.Do(req)
+	}
+
+	t.Run("cross origin", func(t *testing.T) {
+		_, err := get(t, "/cross")
+		require.ErrorIs(t, err, ErrRESTError)
+		assert.False(t, otherHit.Load(), "the redirect target must not be contacted")
+	})
+
+	t.Run("same origin", func(t *testing.T) {
+		resp, err := get(t, "/same")
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		assert.Equal(t, "Bearer SECRET-CATALOG-TOKEN", landingAuth)
+	})
+
+	t.Run("loop", func(t *testing.T) {
+		_, err := get(t, "/loop")
+		require.ErrorContains(t, err, "stopped after 10 redirects")
+	})
 }
 
-// TestCredentialsNotSentOnSyntheticRedirect pins that the redirect guard does
-// not depend on the transport linking Response.Request: a custom transport that
-// returns a bare 307 must not cause credentials to follow it.
-func TestCredentialsNotSentOnSyntheticRedirect(t *testing.T) {
+// TestSyntheticCrossOriginRedirectNotFollowed pins that the redirect policy
+// does not depend on the transport linking Response.Request: a custom
+// transport that returns a bare 307 to another origin is not followed either.
+func TestSyntheticCrossOriginRedirectNotFollowed(t *testing.T) {
 	var otherHit bool
-	var otherAuth, otherAPIKey string
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
 		case r.URL.Host == "other.test":
 			otherHit = true
-			otherAuth = r.Header.Get("Authorization")
-			otherAPIKey = r.Header.Get("X-Api-Key")
 
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 		case r.URL.Path == "/v1/config":
@@ -254,19 +253,181 @@ func TestCredentialsNotSentOnSyntheticRedirect(t *testing.T) {
 
 	cat, err := NewCatalog(context.Background(), "rest", "http://catalog.test",
 		WithCustomTransport(transport),
-		WithOAuthToken("SECRET-CATALOG-TOKEN"),
-		WithAdditionalProps(iceberg.Properties{"header.X-Api-Key": "SECRET-API-KEY"}))
+		WithOAuthToken("SECRET-CATALOG-TOKEN"))
 	require.NoError(t, err)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://catalog.test/redirect", nil)
 	require.NoError(t, err)
-	resp, err := cat.cl.Do(req)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
+	_, err = cat.cl.Do(req)
+	require.ErrorIs(t, err, ErrRESTError)
+	assert.False(t, otherHit, "the redirect target must not be contacted")
+}
 
-	require.True(t, otherHit, "the redirect target must be reached")
-	assert.Empty(t, otherAuth, "the redirect target must not receive the bearer token")
-	assert.Empty(t, otherAPIKey, "the redirect target must not receive header.* defaults")
+// TestTokenRequestCrossOriginRedirectNotFollowed pins that a token endpoint
+// redirecting to another origin does not get the client_credentials form,
+// client_secret included, replayed there, on every OAuth client the catalog
+// builds.
+func TestTokenRequestCrossOriginRedirectNotFollowed(t *testing.T) {
+	var evilHit atomic.Bool
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilHit.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "EVIL", "token_type": "Bearer", "expires_in": 3600})
+	}))
+	defer evil.Close()
+
+	redirectToEvil := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL+"/steal", http.StatusTemporaryRedirect)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", serveEmptyConfig)
+	mux.HandleFunc("/v1/oauth/tokens", redirectToEvil)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(redirectToEvil))
+	defer tokenSrv.Close()
+	tlsTokenSrv := httptest.NewTLSServer(http.HandlerFunc(redirectToEvil))
+	defer tlsTokenSrv.Close()
+
+	authURI, err := url.Parse(tokenSrv.URL + "/token")
+	require.NoError(t, err)
+	tlsAuthURI, err := url.Parse(tlsTokenSrv.URL + "/token")
+	require.NoError(t, err)
+	tlsTransport, ok := tlsTokenSrv.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+
+	for _, tc := range []struct {
+		name string
+		opts []Option
+	}{
+		{"catalog token endpoint", nil},
+		{"separate token endpoint", []Option{WithAuthURI(authURI)}},
+		{"separate oauth tls config", []Option{
+			WithAuthURI(tlsAuthURI),
+			WithOAuthTLSConfig(tlsTransport.TLSClientConfig.Clone()),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evilHit.Store(false)
+			opts := append([]Option{WithCredential("client:SECRET-CLIENT-SECRET")}, tc.opts...)
+			_, err := NewCatalog(context.Background(), "rest", srv.URL, opts...)
+			require.ErrorIs(t, err, ErrRESTError)
+			assert.False(t, evilHit.Load(), "the redirect target must not receive the token request")
+		})
+	}
+}
+
+// TestDropTableCrossOriginRedirectNotFollowed pins that a DELETE redirected to
+// another origin is not followed, so that origin cannot bounce it back to the
+// catalog as a purge of a different table carrying the bearer.
+func TestDropTableCrossOriginRedirectNotFollowed(t *testing.T) {
+	var srvURL string
+	var evilHit, victimHit atomic.Bool
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilHit.Store(true)
+		http.Redirect(w, r, srvURL+"/v1/namespaces/ns/tables/victim?purgeRequested=true", http.StatusTemporaryRedirect)
+	}))
+	defer evil.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", serveEmptyConfig)
+	mux.HandleFunc("/v1/namespaces/ns/tables/t", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL+"/bounce", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/v1/namespaces/ns/tables/victim", func(w http.ResponseWriter, r *http.Request) {
+		victimHit.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithOAuthToken("SECRET-CATALOG-TOKEN"))
+	require.NoError(t, err)
+
+	err = cat.DropTable(context.Background(), table.Identifier{"ns", "t"})
+	require.ErrorIs(t, err, ErrRESTError)
+	assert.False(t, evilHit.Load(), "the redirect target must not be contacted")
+	assert.False(t, victimHit.Load(), "a different table must not be dropped")
+}
+
+// TestConfigURIOverrideKeepsCredentials pins that a /v1/config uri override
+// onto another origin moves the trusted origin with it. The origin gate relies
+// on init creating the final session after fetchConfig applies the override.
+func TestConfigURIOverrideKeepsCredentials(t *testing.T) {
+	var got http.Header
+	second := http.NewServeMux()
+	second.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "SECOND-TOKEN", "token_type": "Bearer", "expires_in": 3600})
+	})
+	second.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_ = json.NewEncoder(w).Encode(map[string]any{"namespaces": [][]string{}})
+	})
+	secondSrv := httptest.NewServer(second)
+	defer secondSrv.Close()
+
+	first := http.NewServeMux()
+	first.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "FIRST-TOKEN", "token_type": "Bearer", "expires_in": 3600})
+	})
+	first.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{"uri": secondSrv.URL}})
+	})
+	firstSrv := httptest.NewServer(first)
+	defer firstSrv.Close()
+
+	for _, tc := range []struct {
+		name       string
+		opt        Option
+		header     string
+		wantHeader string
+	}{
+		{"static token", WithOAuthToken("STATIC-TOKEN"), "Authorization", "Bearer STATIC-TOKEN"},
+		{"client credentials", WithCredential("client:secret"), "Authorization", "Bearer SECOND-TOKEN"},
+		{"signer", WithSigner(markingSigner{}), "X-Amz-Security-Token", "SENTINELTOKEN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got = nil
+			cat, err := NewCatalog(context.Background(), "rest", firstSrv.URL, tc.opt,
+				WithAdditionalProps(iceberg.Properties{"header.X-Api-Key": "SECRET-API-KEY"}))
+			require.NoError(t, err)
+
+			_, err = cat.ListNamespaces(context.Background(), nil)
+			require.NoError(t, err)
+			require.NotNil(t, got, "the overridden origin must be reached")
+			assert.Equal(t, tc.wantHeader, got.Get(tc.header))
+			assert.Equal(t, "SECRET-API-KEY", got.Get("X-Api-Key"))
+		})
+	}
+}
+
+func TestSameOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"https://catalog.example.com/v1", "https://catalog.example.com/other?x=1", true},
+		{"https://catalog.example.com", "https://CATALOG.example.com", true},
+		{"HTTPS://catalog.example.com", "https://catalog.example.com", true},
+		{"https://catalog.example.com", "https://catalog.example.com:443", true},
+		{"http://catalog.example.com", "http://catalog.example.com:80", true},
+		{"https://catalog.example.com", "http://catalog.example.com", false},
+		{"https://catalog.example.com", "https://catalog.example.com:8443", false},
+		{"https://example.com", "https://sub.example.com", false},
+		{"https://sub.example.com", "https://example.com", false},
+		{"https://catalog.example.com", "https://other.example.com", false},
+	} {
+		a, err := url.Parse(tc.a)
+		require.NoError(t, err)
+		b, err := url.Parse(tc.b)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, sameOrigin(a, b), "%s vs %s", tc.a, tc.b)
+	}
 }
 
 // TestHeaderDefaultsReachSeparateTokenEndpoint pins that the configured OAuth
@@ -1092,6 +1253,7 @@ func TestRoundTripDefaultHeaderHandling(t *testing.T) {
 				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 			}),
 			defaultHeaders: http.Header{},
+			catalogOrigin:  &url.URL{Scheme: "http", Host: "example.com"},
 		}
 		s.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
 
@@ -1157,6 +1319,7 @@ func TestRoundTripAuthManagerWinsOverPerRequestHeader(t *testing.T) {
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 		}),
 		defaultHeaders: http.Header{},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "example.com"},
 		authManager:    staticAuthManager{key: "Authorization", value: "Bearer managed-token"},
 	}
 
@@ -2085,6 +2248,7 @@ func TestSessionTransportInvokesSigner(t *testing.T) {
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 		}),
 		defaultHeaders: http.Header{},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "example.com"},
 		signer: signerFunc(func(r *http.Request) error {
 			signed = true
 			r.Header.Set("X-Signed", "yes")
@@ -2101,6 +2265,37 @@ func TestSessionTransportInvokesSigner(t *testing.T) {
 	assert.Equal(t, "yes", got.Get("X-Signed"))
 }
 
+// TestSessionTransportNilCatalogOriginTrustsNothing pins that the origin gate
+// fails closed: a sessionTransport built without a catalogOrigin adds no auth
+// header, signature or user-supplied default to any request.
+func TestSessionTransportNilCatalogOriginTrustsNothing(t *testing.T) {
+	t.Parallel()
+
+	var got http.Header
+	s := &sessionTransport{
+		RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = r.Header.Clone()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+		authManager:    staticAuthManager{key: "Authorization", value: "Bearer managed-token"},
+		defaultHeaders: http.Header{"X-Api-Key": {"SECRET-API-KEY"}},
+		signer: signerFunc(func(r *http.Request) error {
+			r.Header.Set("X-Signed", "yes")
+
+			return nil
+		}),
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+	_, err = s.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Empty(t, got.Get("Authorization"))
+	assert.Empty(t, got.Get("X-Signed"))
+	assert.Empty(t, got.Get("X-Api-Key"))
+}
+
 func TestSessionTransportSignerErrorAbortsRequest(t *testing.T) {
 	t.Parallel()
 
@@ -2112,6 +2307,7 @@ func TestSessionTransportSignerErrorAbortsRequest(t *testing.T) {
 			return nil, nil
 		}),
 		defaultHeaders: http.Header{},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "example.com"},
 		signer:         signerFunc(func(_ *http.Request) error { return wantErr }),
 	}
 
@@ -2135,6 +2331,7 @@ func TestSessionTransportConcurrentRoundTrip(t *testing.T) {
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 		}),
 		defaultHeaders: http.Header{"X-Default": {"v"}},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "example.com"},
 		signer: signerFunc(func(r *http.Request) error {
 			count.Add(1)
 			r.Header.Set("X-Signed", "yes")

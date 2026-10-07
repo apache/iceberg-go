@@ -247,9 +247,31 @@ type sessionTransport struct {
 	// user-supplied default headers.
 	// These are compared against the request URL rather than derived from
 	// the redirect chain, so a transport that omits Response.Request cannot
-	// widen them. A nil catalogOrigin disables the check.
+	// widen them. A nil catalogOrigin trusts no origin.
 	catalogOrigin *url.URL
 	authOrigin    *url.URL
+}
+
+// maxRedirects matches net/http's default redirect policy, which a custom
+// CheckRedirect replaces.
+const maxRedirects = 10
+
+// sameOriginRedirectsOnly is the CheckRedirect policy for every client the
+// catalog builds. A redirect is followed only while it stays on the origin of
+// the request that started the chain. A cross-origin hop would otherwise
+// replay a 307/308 body (such as the client_credentials form, client_secret
+// included) to the other origin, and a hop that redirects back to a different
+// catalog path would be sent with the catalog's credentials.
+func sameOriginRedirectsOnly(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if from := via[0].URL; !sameOrigin(from, req.URL) {
+		return fmt.Errorf("%w: refusing redirect from %s://%s to a different origin %s://%s",
+			ErrRESTError, from.Scheme, from.Host, req.URL.Scheme, req.URL.Host)
+	}
+
+	return nil
 }
 
 // sameOrigin reports whether two URLs share scheme, host, and effective port.
@@ -274,11 +296,14 @@ func defaultedPort(u *url.URL) string {
 }
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	// net/http strips Authorization on redirect only for a new hostname (a
-	// port or scheme change, or a hop to a subdomain, keeps it), but this
-	// runs after that stripping, so credentials and user-supplied headers are
-	// only applied for the configured origins.
-	toCatalog := s.catalogOrigin == nil || sameOrigin(s.catalogOrigin, r.URL)
+	// This transport adds the auth header, the signature and the session
+	// defaults to every request it sends, including each redirect hop.
+	// net/http's redirect stripping only covers Authorization and cookies set
+	// on the request passed to Client.Do, and never custom headers, so these
+	// are applied only for the configured origins. sameOriginRedirectsOnly
+	// keeps the clients from following a cross-origin hop at all; this gate
+	// is the second line of defense.
+	toCatalog := s.catalogOrigin != nil && sameOrigin(s.catalogOrigin, r.URL)
 	defaults := s.builtinHeaders
 	if toCatalog || (s.authOrigin != nil && sameOrigin(s.authOrigin, r.URL)) {
 		defaults = s.defaultHeaders
@@ -979,7 +1004,11 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 	// this reuses the catalog client's transport — preserving its TLS, proxy and
 	// header behavior — but as a distinct *http.Client so the Timeout applies to
 	// refresh alone and not to ordinary catalog requests.
-	oauthClient := &http.Client{Transport: cl.Transport, Timeout: defaultOAuthTimeout}
+	oauthClient := &http.Client{
+		Transport:     cl.Transport,
+		Timeout:       defaultOAuthTimeout,
+		CheckRedirect: sameOriginRedirectsOnly,
+	}
 	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
 		transport := &http.Transport{
@@ -987,8 +1016,9 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 			TLSClientConfig: opts.oauthTLSConfig,
 		}
 		oauthClient = &http.Client{
-			Transport: transport,
-			Timeout:   defaultOAuthTimeout,
+			Transport:     transport,
+			Timeout:       defaultOAuthTimeout,
+			CheckRedirect: sameOriginRedirectsOnly,
 		}
 		closeIdleConnections = transport.CloseIdleConnections
 	}
@@ -1046,6 +1076,19 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
+// builtinHeaderDefaults returns the headers every session sends by default.
+// They identify the client and carry no credentials, so they are the only
+// defaults a request to an unconfigured origin receives (see
+// sessionTransport.builtinHeaders).
+func builtinHeaderDefaults() []struct{ key, value string } {
+	return []struct{ key, value string }{
+		{"X-Client-Version", icebergRestSpecVersion},
+		{"Content-Type", "application/json"},
+		{"User-Agent", "GoIceberg/" + iceberg.Version()},
+		{headerIcebergAccessDelegation, defaultAccessDelegation},
+	}
+}
+
 // createSession returns a cleanup that closes only transports created by this
 // function, never transports supplied by the caller.
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, func(), error) {
@@ -1076,7 +1119,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		catalogOrigin:  r.baseURI,
 		authOrigin:     opts.authUri,
 	}
-	cl := &http.Client{Transport: session}
+	cl := &http.Client{Transport: session, CheckRedirect: sameOriginRedirectsOnly}
 
 	// If the user does not set an AuthManager, construct one for this session
 	// without storing it in opts. Bootstrap authentication must not leak into
@@ -1090,10 +1133,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
-	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
-	session.defaultHeaders.Set("Content-Type", "application/json")
-	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	session.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
+	builtins := builtinHeaderDefaults()
+	for _, h := range builtins {
+		session.defaultHeaders.Set(h.key, h.value)
+	}
 
 	for k, v := range opts.headers {
 		session.defaultHeaders.Set(k, v)
@@ -1106,9 +1149,9 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 
 	session.builtinHeaders = http.Header{}
-	for _, k := range []string{"X-Client-Version", "Content-Type", "User-Agent", headerIcebergAccessDelegation} {
-		if v := session.defaultHeaders.Values(k); len(v) > 0 {
-			session.builtinHeaders[http.CanonicalHeaderKey(k)] = v
+	for _, h := range builtins {
+		if v := session.defaultHeaders.Values(h.key); len(v) > 0 {
+			session.builtinHeaders[http.CanonicalHeaderKey(h.key)] = slices.Clone(v)
 		}
 	}
 
