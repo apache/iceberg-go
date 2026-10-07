@@ -358,6 +358,123 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 	}
 }
 
+
+func TestInclusiveMetricsEvaluatorInPredicateExtremaUsesFastPath(t *testing.T) {
+	decimal := func(value int64) iceberg.Decimal {
+		return iceberg.Decimal{Val: decimal128.FromI64(value), Scale: 2}
+	}
+	// Deliberately incorrect extrema prove the optimization is taken: the real
+	// members overlap the file, but these synthetic extrema force a prune.
+	// Binding never produces mismatched extrema.
+	tests := []struct {
+		name string
+		typ iceberg.Type
+		members []iceberg.Literal
+		minLit, maxLit iceberg.Literal
+	}{
+		{"string", iceberg.PrimitiveTypes.String,
+			[]iceberg.Literal{iceberg.NewLiteral("m"), iceberg.NewLiteral("n")},
+			iceberg.NewLiteral("a"), iceberg.NewLiteral("b")},
+		{"decimal", iceberg.DecimalTypeOf(12, 2),
+			[]iceberg.Literal{iceberg.NewLiteral(decimal(5000)), iceberg.NewLiteral(decimal(6000))},
+			iceberg.NewLiteral(decimal(100)), iceberg.NewLiteral(decimal(200))},
+		{"binary", iceberg.PrimitiveTypes.Binary,
+			[]iceberg.Literal{iceberg.NewLiteral([]byte("m")), iceberg.NewLiteral([]byte("n"))},
+			iceberg.NewLiteral([]byte("a")), iceberg.NewLiteral([]byte("b"))},
+		{"date", iceberg.PrimitiveTypes.Date,
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.Date(50)), iceberg.NewLiteral(iceberg.Date(60))},
+			iceberg.NewLiteral(iceberg.Date(1)), iceberg.NewLiteral(iceberg.Date(2))},
+		{"timestamp", iceberg.PrimitiveTypes.Timestamp,
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.Timestamp(50)), iceberg.NewLiteral(iceberg.Timestamp(60))},
+			iceberg.NewLiteral(iceberg.Timestamp(1)), iceberg.NewLiteral(iceberg.Timestamp(2))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+			bound, err := iceberg.BindExpr(schema, iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), tt.members), true)
+			require.NoError(t, err)
+			pred, ok := bound.(iceberg.BoundSetPredicate)
+			require.True(t, ok)
+
+			lower, err := tt.members[0].MarshalBinary()
+			require.NoError(t, err)
+			upper, err := tt.members[1].MarshalBinary()
+			require.NoError(t, err)
+			newVisitor := func() *inclusiveMetricsEval {
+				return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+					valueCounts: map[int]int64{1: 10},
+					nullCounts: map[int]int64{1: 0},
+					nanCounts: map[int]int64{1: 0},
+					lowerBounds: map[int][]byte{1: lower},
+					upperBounds: map[int][]byte{1: upper},
+				}}
+			}
+
+			require.True(t, newVisitor().VisitIn(pred.Term(), pred.Literals()))
+			require.False(t, newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), tt.minLit, tt.maxLit))
+		})
+	}
+}
+
+func TestInclusiveMetricsEvaluatorInPredicateSlowPathLowerBeforeUpper(t *testing.T) {
+	tests := []struct {
+		name string
+		typ iceberg.Type
+		members []iceberg.Literal
+		lower iceberg.Literal
+		upper iceberg.Literal
+		malformedUpper bool
+	}{
+		{
+			name: "malformed upper",
+			typ: iceberg.PrimitiveTypes.Int32,
+			members: []iceberg.Literal{iceberg.NewLiteral(int32(1)), iceberg.NewLiteral(int32(2))},
+			lower: iceberg.NewLiteral(int32(3)),
+			malformedUpper: true,
+		},
+		{
+			name: "NaN upper",
+			typ: iceberg.PrimitiveTypes.Float64,
+			members: []iceberg.Literal{iceberg.NewLiteral(float64(1)), iceberg.NewLiteral(float64(2))},
+			lower: iceberg.NewLiteral(float64(3)),
+			upper: iceberg.NewLiteral(math.NaN()),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+			bound, err := iceberg.BindExpr(schema, iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), tt.members), true)
+			require.NoError(t, err)
+			pred, ok := bound.(iceberg.BoundSetPredicate)
+			require.True(t, ok)
+
+			lower, err := tt.lower.MarshalBinary()
+			require.NoError(t, err)
+			upper := []byte{1}
+			if !tt.malformedUpper {
+				upper, err = tt.upper.MarshalBinary()
+				require.NoError(t, err)
+			}
+			newVisitor := func() *inclusiveMetricsEval {
+				return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+					valueCounts: map[int]int64{1: 10},
+					nullCounts: map[int]int64{1: 0},
+					nanCounts: map[int]int64{1: 0},
+					lowerBounds: map[int][]byte{1: lower},
+					upperBounds: map[int][]byte{1: upper},
+				}}
+			}
+
+			// Both slow entry points must prune without even decoding the upper bound.
+			require.False(t, newVisitor().VisitIn(pred.Term(), pred.Literals()))
+			require.False(t, newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), tt.lower, nil))
+			require.False(t, newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), nil, tt.lower))
+		})
+	}
+}
+
 func TestInclusiveMetricsEvaluatorInPredicateExtremaPartialNilUsesSlowPath(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32})
 	bound, err := iceberg.BindExpr(

@@ -330,6 +330,8 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 	panic(iceberg.ErrType)
 }
 
+// compareLiteralValues requires the same concrete literal type on both sides,
+// as guaranteed for bound predicates. A mismatched type assertion will panic.
 func compareLiteralValues[T iceberg.LiteralType](left, right iceberg.Literal) int {
 	leftValue := left.(iceberg.TypedLiteral[T])
 	rightValue := right.(iceberg.TypedLiteral[T])
@@ -337,6 +339,8 @@ func compareLiteralValues[T iceberg.LiteralType](left, right iceberg.Literal) in
 	return leftValue.Comparator()(leftValue.Value(), rightValue.Value())
 }
 
+// Keep this dispatch aligned with getCmpLiteral, removeBoundCheck, and
+// allBoundCheck when adding a new literal type.
 func compareBoundLiterals(left, right iceberg.Literal) int {
 	switch left.(type) {
 	case iceberg.TypedLiteral[bool]:
@@ -1216,16 +1220,22 @@ func (m *inclusiveMetricsEval) visitIn(
 		return rowsMightMatch
 	}
 
+	var values []iceberg.Literal
 	lowerBound, hasLowerBound := m.boundFor(t, m.lowerBounds[fieldID])
 	if hasLowerBound {
 		if m.isNan(lowerBound) {
 			return rowsMightMatch
 		}
 		if hasExtrema && compareBoundLiterals(lowerBound, maxLit) > 0 {
-			// Preserve this lower-bound short circuit before decoding the upper
-			// bound: malformed upper metrics must not matter once lower proves
-			// the set disjoint.
+			// Short-circuit before decoding an unnecessary (possibly invalid) upper bound.
 			return rowsCannotMatch
+		}
+		if !hasExtrema && !oversized {
+			// The slow path must finish the lower scan before reading the upper bound.
+			values = removeBoundCheck(lowerBound, s.Members(), 1)
+			if len(values) == 0 {
+				return rowsCannotMatch
+			}
 		}
 	}
 
@@ -1240,12 +1250,16 @@ func (m *inclusiveMetricsEval) visitIn(
 	}
 
 	if oversized {
-		// Extrema checks above stay O(1); only the per-member scan is capped.
+		// Unlike Java's InclusiveEvalVisitor, we still prune disjoint oversized
+		// IN sets with O(1) extrema checks, and cap only the member scan. The
+		// manifest evaluator handles its size limit in a separate branch.
 		return rowsMightMatch
 	}
 
-	values := s.Members()
-	if hasLowerBound {
+	if hasExtrema || !hasLowerBound {
+		values = s.Members()
+	}
+	if hasExtrema && hasLowerBound {
 		values = removeBoundCheck(lowerBound, values, 1)
 		if len(values) == 0 {
 			return rowsCannotMatch
