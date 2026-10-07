@@ -2715,7 +2715,7 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	// negation of the rows the rewrite keeps instead, so that both paths agree.
 	notTrue, err := isNotTrueExpr(filter)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("failed to build negated filter: %w", err)
 	}
 
 	strictEvaluator, err := newStrictMetricsEvaluator(schema, iceberg.NewNot(notTrue), caseSensitive, false)
@@ -2837,7 +2837,7 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 
 	complementFilter, err := isNotTrueExpr(filter)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to build complement filter: %w", err)
 	}
 
 	// Bind + convert the complement filter once for the whole rewrite. The

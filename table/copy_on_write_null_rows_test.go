@@ -79,6 +79,12 @@ func TestCopyOnWriteDeleteKeepsRowsWhereFilterIsNull(t *testing.T) {
 				ids := scanIDs(t, tbl)
 				slices.Sort(ids)
 				require.Equal(t, c.want, ids)
+
+				// the NULL row keeps the file from being deleted whole, so
+				// the file must have been rewritten rather than dropped
+				summary := tbl.CurrentSnapshot().Summary.Properties
+				require.Equal(t, "1", summary["deleted-data-files"])
+				require.Equal(t, "1", summary["added-data-files"])
 			})
 		}
 	}
@@ -168,6 +174,8 @@ func TestCopyOnWriteDeleteKeepsNaNRowsInPrunedRowGroups(t *testing.T) {
 
 // Rows of a file written before the filtered column was added read as NULL
 // and must survive, also for IsNaN, which is false rather than NULL for them.
+// NotNaN is true for a NULL, like in Java's Evaluator, so those rows match it
+// and are deleted along with every other non-NaN row.
 func TestCopyOnWriteDeleteKeepsRowsOfFilesWithoutTheColumn(t *testing.T) {
 	x := iceberg.Reference("x")
 
@@ -178,6 +186,8 @@ func TestCopyOnWriteDeleteKeepsRowsOfFilesWithoutTheColumn(t *testing.T) {
 	}{
 		{"is nan", iceberg.IsNaN(x), []int64{1, 2, 3, 4, 5}},
 		{"is nan and", iceberg.NewAnd(iceberg.IsNaN(x), iceberg.GreaterThan(iceberg.Reference("id"), int64(0))), []int64{1, 2, 3, 4, 5}},
+		{"not nan", iceberg.NotNaN(x), []int64{6}},
+		{"not is nan", iceberg.NewNot(iceberg.IsNaN(x)), []int64{6}},
 		{"less than", iceberg.LessThan(x, 5.0), []int64{1, 2, 3, 4, 6}},
 		{"is null", iceberg.IsNull(x), []int64{5, 6}},
 	}
@@ -283,7 +293,10 @@ func newCopyOnWriteNullRowsTable(t *testing.T, version string) *table.Table {
 	require.NoError(t, err)
 	defer data.Release()
 
-	tbl, err = tbl.Append(context.Background(), array.NewTableReader(data, -1), nil)
+	rdr := array.NewTableReader(data, -1)
+	defer rdr.Release()
+
+	tbl, err = tbl.Append(context.Background(), rdr, nil)
 	require.NoError(t, err)
 
 	return tbl
