@@ -642,8 +642,6 @@ func TestManifestMergeSkipsHistoricalDeletedOnlyManifest(t *testing.T) {
 			iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &oldSnapshotID, &sequenceNumber, nil, df),
 		})
 
-	trackIO.writers = make(map[string]*trackingWriteCloser)
-
 	mgr := manifestMergeManager{snap: sp}
 	created, err := mgr.createManifest(spec.ID(), []iceberg.ManifestFile{manifestFile})
 	require.NoError(t, err)
@@ -777,7 +775,6 @@ func TestMergeAppendCommitSkipsHistoricalDeleteOnlyBin(t *testing.T) {
 	require.Len(t, outputEntries, 1)
 	require.Equal(t, iceberg.EntryStatusADDED, outputEntries[0].Status())
 	require.Equal(t, newFile.FilePath(), outputEntries[0].DataFile().FilePath())
-	t.Logf("snapshot commit succeeded with %d output manifest containing the new data file", len(outputManifests))
 }
 
 func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {

@@ -535,40 +535,40 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 	}
 
 	for _, manifest := range bin {
-		for entry, err := range m.snap.iterManifestEntries(manifest, false) {
-			if err != nil {
-				return nil, err
+		for entry, iterErr := range m.snap.iterManifestEntries(manifest, false) {
+			if iterErr != nil {
+				return nil, iterErr
 			}
 
 			switch {
 			case entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == m.snap.snapshotID:
-				if err = ensureWriter(); err != nil {
-					return nil, err
+				if iterErr = ensureWriter(); iterErr != nil {
+					return nil, iterErr
 				}
 				// only files deleted by this snapshot should be added to the new manifest
-				err = wr.Delete(entry)
+				iterErr = wr.Delete(entry)
 			case entry.Status() == iceberg.EntryStatusADDED && entry.SnapshotID() == m.snap.snapshotID:
-				if err = ensureWriter(); err != nil {
-					return nil, err
+				if iterErr = ensureWriter(); iterErr != nil {
+					return nil, iterErr
 				}
 				// added entries from this snapshot are still added, otherwise they should be existing
-				err = wr.Add(entry)
+				iterErr = wr.Add(entry)
 			case entry.Status() != iceberg.EntryStatusDELETED:
-				if err = ensureWriter(); err != nil {
-					return nil, err
+				if iterErr = ensureWriter(); iterErr != nil {
+					return nil, iterErr
 				}
 				// add all non-deleted files from the old manifest as existing files
-				err = wr.Existing(entry)
+				iterErr = wr.Existing(entry)
 			}
 
-			if err != nil {
-				return nil, err
+			if iterErr != nil {
+				return nil, iterErr
 			}
 		}
 	}
 
 	// Java's merge manager writes zero-count manifests; this path omits bins
-	// with no live entries.
+	// whose entries are all deletes from earlier snapshots.
 	if wr == nil {
 		return nil, nil
 	}
