@@ -640,7 +640,7 @@ func (s *SnapshotSummaryCollector) partitionSummary(metrics *updateMetrics) stri
 
 	return strings.Join(slices.Sorted(func(yield func(s string) bool) {
 		for k, v := range props {
-			if !yield(fmt.Sprintf("%s=%s", k, v)) {
+			if !yield(k + "=" + v) {
 				return
 			}
 		}
