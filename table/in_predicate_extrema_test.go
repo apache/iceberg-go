@@ -358,7 +358,6 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 	}
 }
 
-
 func TestInclusiveMetricsEvaluatorInPredicateExtremaUsesFastPath(t *testing.T) {
 	decimal := func(value int64) iceberg.Decimal {
 		return iceberg.Decimal{Val: decimal128.FromI64(value), Scale: 2}
@@ -367,9 +366,9 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaUsesFastPath(t *testing.T) {
 	// members overlap the file, but these synthetic extrema force a prune.
 	// Binding never produces mismatched extrema.
 	tests := []struct {
-		name string
-		typ iceberg.Type
-		members []iceberg.Literal
+		name           string
+		typ            iceberg.Type
+		members        []iceberg.Literal
 		minLit, maxLit iceberg.Literal
 	}{
 		{"string", iceberg.PrimitiveTypes.String,
@@ -404,8 +403,8 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaUsesFastPath(t *testing.T) {
 			newVisitor := func() *inclusiveMetricsEval {
 				return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
 					valueCounts: map[int]int64{1: 10},
-					nullCounts: map[int]int64{1: 0},
-					nanCounts: map[int]int64{1: 0},
+					nullCounts:  map[int]int64{1: 0},
+					nanCounts:   map[int]int64{1: 0},
 					lowerBounds: map[int][]byte{1: lower},
 					upperBounds: map[int][]byte{1: upper},
 				}}
@@ -419,26 +418,26 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaUsesFastPath(t *testing.T) {
 
 func TestInclusiveMetricsEvaluatorInPredicateSlowPathLowerBeforeUpper(t *testing.T) {
 	tests := []struct {
-		name string
-		typ iceberg.Type
-		members []iceberg.Literal
-		lower iceberg.Literal
-		upper iceberg.Literal
+		name           string
+		typ            iceberg.Type
+		members        []iceberg.Literal
+		lower          iceberg.Literal
+		upper          iceberg.Literal
 		malformedUpper bool
 	}{
 		{
-			name: "malformed upper",
-			typ: iceberg.PrimitiveTypes.Int32,
-			members: []iceberg.Literal{iceberg.NewLiteral(int32(1)), iceberg.NewLiteral(int32(2))},
-			lower: iceberg.NewLiteral(int32(3)),
+			name:           "malformed upper",
+			typ:            iceberg.PrimitiveTypes.Int32,
+			members:        []iceberg.Literal{iceberg.NewLiteral(int32(1)), iceberg.NewLiteral(int32(2))},
+			lower:          iceberg.NewLiteral(int32(3)),
 			malformedUpper: true,
 		},
 		{
-			name: "NaN upper",
-			typ: iceberg.PrimitiveTypes.Float64,
+			name:    "NaN upper",
+			typ:     iceberg.PrimitiveTypes.Float64,
 			members: []iceberg.Literal{iceberg.NewLiteral(float64(1)), iceberg.NewLiteral(float64(2))},
-			lower: iceberg.NewLiteral(float64(3)),
-			upper: iceberg.NewLiteral(math.NaN()),
+			lower:   iceberg.NewLiteral(float64(3)),
+			upper:   iceberg.NewLiteral(math.NaN()),
 		},
 	}
 
@@ -460,8 +459,8 @@ func TestInclusiveMetricsEvaluatorInPredicateSlowPathLowerBeforeUpper(t *testing
 			newVisitor := func() *inclusiveMetricsEval {
 				return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
 					valueCounts: map[int]int64{1: 10},
-					nullCounts: map[int]int64{1: 0},
-					nanCounts: map[int]int64{1: 0},
+					nullCounts:  map[int]int64{1: 0},
+					nanCounts:   map[int]int64{1: 0},
 					lowerBounds: map[int][]byte{1: lower},
 					upperBounds: map[int][]byte{1: upper},
 				}}
