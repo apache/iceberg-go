@@ -528,6 +528,50 @@ func buildBenchDeleteSetStringNoMatch(numDeletes int) *equalityDeleteSet {
 	}
 }
 
+func buildBenchDeleteSetSingleInt64(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string], numDeletes)
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		bufPutUint64(&buf, uint64(int64(i)*3))
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1},
+		colNames: []string{"id"},
+	}
+}
+
+func buildBenchDeleteSetSingleInt64NoMatch(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string], numDeletes)
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		bufPutUint64(&buf, uint64(-int64(i)-1))
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1},
+		colNames: []string{"id"},
+	}
+}
+
+func BenchmarkProcessEqualityDeletesSingleInt64(b *testing.B) {
+	benchEqDeletesForFile(b, buildBenchRecordInt, buildBenchDeleteSetSingleInt64, benchIntFileSchema())
+}
+
+func BenchmarkProcessEqualityDeletesSingleInt64NoMatch(b *testing.B) {
+	benchEqDeletesForFile(b, buildBenchRecordInt, buildBenchDeleteSetSingleInt64NoMatch, benchIntFileSchema())
+}
+
 func BenchmarkProcessEqualityDeletesInt(b *testing.B) {
 	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetInt, benchIntFileSchema())
 }
