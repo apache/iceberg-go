@@ -31,7 +31,7 @@ var benchmarkIndexSink map[int]benchmarkIndexItem
 func BenchmarkIndexBy(b *testing.B) {
 	extractKey := func(item benchmarkIndexItem) int { return item.id }
 
-	for _, entries := range []int{10, 32, 128} {
+	for _, entries := range []int{1, 10, 32, 128} {
 		items := make([]benchmarkIndexItem, entries)
 		for i := range items {
 			items[i].id = i
