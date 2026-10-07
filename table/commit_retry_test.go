@@ -1069,6 +1069,30 @@ func TestTransactionCommit_RetriableAfterExhaustedInternalRetries(t *testing.T) 
 	assert.False(t, tx.committed, "exhausted clean-conflict retries must leave committed == false")
 }
 
+func TestTransactionCommit_UnusableAfterAppendRetriesExhausted(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+	cat := &sequentialCatalog{
+		metadata: meta,
+		errs:     []error{ErrCommitFailed, ErrCommitFailed, ErrCommitFailed, ErrCommitFailed},
+	}
+	tbl := newOCCTable(t, meta, wfs, cat)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{
+		newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil),
+	}, nil))
+
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitFailed)
+	require.ErrorIs(t, err, ErrTransactionUnusable)
+	assert.Equal(t, int32(4), cat.attempts.Load())
+
+	_, err = tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrTransactionUnusable)
+	assert.Equal(t, int32(4), cat.attempts.Load())
+}
+
 func TestTransactionCommit_TerminalOnUnknownState(t *testing.T) {
 	cat := &sequentialCatalog{
 		errs: []error{errors.New("simulated 5xx: internal server error")},

@@ -880,6 +880,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit))
 	}
 
+	// A no-op expiry must not pin the commit branch, which would stop the
+	// transaction's other updates from rebasing on retry.
+	if len(updates) == 0 {
+		return nil
+	}
+
 	return t.applyPinned(updates, reqs, pinned)
 }
 
@@ -3374,10 +3380,10 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			withCommitPinnedRefs(t.pinnedRefs),
 		)
 		if err != nil {
-			// A clean conflict (ErrCommitFailed) committed nothing and stays
-			// retriable. Any other failure leaves the commit state unknown
-			// (the catalog may have accepted it), so mark it terminal to
-			// avoid a double-apply on retry.
+			// A clean conflict (ErrCommitFailed) stays retriable unless cleanup
+			// removed files the staged updates reference, as it does after any
+			// manifest-list rebuild or rewrite. Any other failure leaves the
+			// commit state unknown, so mark it terminal to avoid a double-apply.
 			if !errors.Is(err, ErrCommitFailed) {
 				t.committed = true
 			}
