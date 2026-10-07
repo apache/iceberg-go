@@ -146,14 +146,109 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 		b.ResetTimer()
 		for b.Loop() {
 			loader := newLazyPositionDeleteLoader(fixture.fs, fixture.tasks)
-			deletes, err := loader.load(b.Context(), fixture.tasks[0])
+			bitmap, err := loader.load(b.Context(), fixture.tasks[0])
 			if err != nil {
 				b.Fatal(err)
 			}
-			if len(deletes) != 1 {
-				b.Fatalf("expected one delete chunk for the first task, got %d", len(deletes))
+			if bitmap == nil || bitmap.Cardinality() != 1 {
+				b.Fatalf("expected one indexed delete for the first task")
 			}
 			loader.release()
 		}
 	})
+}
+
+var positionDeleteSplitReuseBenchmarkSink int64
+
+func BenchmarkPositionDeleteBitmapReuseAcrossSplits(b *testing.B) {
+	const deleteRows = 100_000
+
+	deletePath := "mem://benchmark/deletes/split-reuse.parquet"
+	dataPath := "mem://benchmark/data/split-reuse.parquet"
+	fs := iceio.NewMemFS()
+
+	var content strings.Builder
+	content.Grow(deleteRows * 72)
+	content.WriteByte('[')
+	for pos := range deleteRows {
+		if pos > 0 {
+			content.WriteByte(',')
+		}
+		fmt.Fprintf(&content, `{"file_path":"%s","pos":%d}`, dataPath, pos)
+	}
+	content.WriteByte(']')
+	benchmarkWritePosDeleteParquet(b, fs, deletePath, content.String())
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, deleteRows, 128)
+	if err != nil {
+		b.Fatal(err)
+	}
+	deleteFile := deleteBuilder.Build()
+
+	dataBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		dataPath, iceberg.ParquetFile, nil, nil, nil, deleteRows*2, 16*128)
+	if err != nil {
+		b.Fatal(err)
+	}
+	dataFile := dataBuilder.Build()
+	targets := map[string]struct{}{dataPath: {}}
+
+	for _, splitCount := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("splits=%d", splitCount), func(b *testing.B) {
+			tasks := make([]FileScanTask, splitCount)
+			for i := range tasks {
+				tasks[i] = FileScanTask{
+					File:        dataFile,
+					DeleteFiles: []iceberg.DataFile{deleteFile},
+					Start:       int64(i * 128),
+					Length:      128,
+				}
+			}
+
+			b.Run("task_local_hash_sets", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					deletes, err := readDeletesForPaths(b.Context(), fs, deleteFile, targets)
+					if err != nil {
+						b.Fatal(err)
+					}
+					positions := positionDeletes{deletes[dataPath]}
+					for range splitCount {
+						set, err := collectPosDeletePositions(positions)
+						if err != nil {
+							releasePosDeletes(deletes)
+							b.Fatal(err)
+						}
+						positionDeleteSplitReuseBenchmarkSink = int64(len(set))
+					}
+					releasePosDeletes(deletes)
+				}
+			})
+
+			b.Run("shared_roaring_bitmap", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					loader := newLazyPositionDeleteLoader(fs, tasks)
+					for _, task := range tasks {
+						bitmap, err := loader.load(b.Context(), task)
+						if err != nil {
+							loader.release()
+							b.Fatal(err)
+						}
+						if bitmap == nil {
+							loader.release()
+							b.Fatal("expected position delete bitmap")
+						}
+						positionDeleteSplitReuseBenchmarkSink = bitmap.Cardinality()
+					}
+					loader.release()
+				}
+			})
+		})
+	}
 }
