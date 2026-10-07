@@ -112,9 +112,11 @@ func TestBuild_DoesNotGrowVersionLog(t *testing.T) {
 	}
 }
 
-func TestBuild_DoesNotGrowVersionLogWhenExpiringVersions(t *testing.T) {
-	// With a history size of 1, older versions are expired and updateHistory prunes the
-	// log on every Build; repeated builds still give the same log.
+func TestBuild_RepeatedBuildsWithVersionExpiry(t *testing.T) {
+	// With a history size of 1, versions 1 and 2 are expired. The only history entry is
+	// the one for version 3, which is retained, so updateHistory keeps it; its clear
+	// branch is covered by TestBuild_FromBaseDoesNotGrowVersionLog. Repeated builds
+	// return the same one-entry log.
 	b := newTestBuilder().
 		SetLoc("location").
 		SetProperties(iceberg.Properties{VersionHistorySizeKey: "1"}).
@@ -126,6 +128,8 @@ func TestBuild_DoesNotGrowVersionLogWhenExpiringVersions(t *testing.T) {
 
 	first, err := b.Build()
 	require.NoError(t, err)
+	require.Len(t, first.VersionLog(), 1)
+	require.Equal(t, int64(3), first.VersionLog()[0].VersionID)
 	for range 2 {
 		res, err := b.Build()
 		require.NoError(t, err)

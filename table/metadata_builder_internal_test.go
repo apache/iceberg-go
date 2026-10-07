@@ -1069,8 +1069,10 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 
 func TestSnapshotLogAfterMovingMainBackAfterBuild(t *testing.T) {
 	// add A, set main to A, add B, set main to B, build, set main back to A, build.
-	// B is intermediate in the first build, so it is skipped, and the second build
-	// logs A again: [A, A], as UpdateTableMetadata gives for the same updates.
+	// In the first build main moved from A to B, so A is the intermediate snapshot and
+	// that build logs [B]. Moving main back to A makes B the intermediate one, while
+	// both of A's entries stay, so the second build logs [A, A]. Before the fix, the
+	// first build wrote its pruned [B] back to the builder and the second returned [A].
 	builder := builderWithoutChanges(2)
 	schemaID := 0
 	newSnapshot := func(id int64) *Snapshot {
@@ -1099,6 +1101,11 @@ func TestSnapshotLogAfterMovingMainBackAfterBuild(t *testing.T) {
 		ids = append(ids, entry.SnapshotID)
 	}
 	require.Equal(t, []int64{1, 1}, ids)
+
+	// Committing the same updates gives the same log.
+	committed, err := UpdateTableMetadata(builder.base, builder.updates, "")
+	require.NoError(t, err)
+	require.Equal(t, slices.Collect(committed.SnapshotLogs()), slices.Collect(res.SnapshotLogs()))
 }
 
 func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {

@@ -1516,8 +1516,9 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 
 	// If no change has set lastUpdatedMS yet, the first Build sets it and keeps it on
 	// the builder on purpose (Java's TableMetadata.Builder does the same), so repeated
-	// builds of the same changes report the same time. Adding a snapshot or moving
-	// main after a Build still updates it.
+	// builds of the same changes report the same time. After that only AddSnapshot,
+	// SetSnapshotRef on main and SetLastUpdatedMS move it: a later SetProperties or
+	// AddSchema followed by another Build still reports the first Build's time.
 	if b.lastUpdatedMS == 0 {
 		b.lastUpdatedMS = time.Now().UnixMilli()
 	}
@@ -1562,7 +1563,10 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 
 // updatedSnapshotLog returns the snapshot log with intermediate and removed
 // snapshots dropped. It leaves b.snapshotLog unchanged, so Build stays free of
-// side effects on the log.
+// side effects on the log. The result is always a new slice that never aliases
+// b.snapshotLog, including the slices.Clone when nothing is pruned, so callers
+// may modify it. The pruning is derived again from b.updates on every call, so
+// it relies on b.updates holding every change made through this builder.
 func (b *MetadataBuilder) updatedSnapshotLog() ([]SnapshotLogEntry, error) {
 	addedIDs := make(map[int64]struct{}, 2)
 	hasRemoved := false
