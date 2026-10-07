@@ -46,6 +46,26 @@ const (
 	ReadManifestListCacheEnabledKey     = "read.manifest-list-cache.enabled"
 	ReadManifestListCacheEnabledDefault = true
 
+	// IOManifestCacheEnabledKey controls Java-compatible raw manifest-file
+	// content caching. These settings are FileIO/catalog configuration rather
+	// than table metadata and are read from the saved table config.
+	IOManifestCacheEnabledKey     = "io.manifest.cache-enabled"
+	IOManifestCacheEnabledDefault = false
+
+	// IOManifestCacheExpirationIntervalMsKey controls how long an unused cached
+	// manifest stays resident. Zero disables time-based expiration.
+	IOManifestCacheExpirationIntervalMsKey     = "io.manifest.cache.expiration-interval-ms"
+	IOManifestCacheExpirationIntervalMsDefault = 60 * 1000
+
+	// IOManifestCacheMaxTotalBytesKey bounds total retained manifest content.
+	IOManifestCacheMaxTotalBytesKey     = "io.manifest.cache.max-total-bytes"
+	IOManifestCacheMaxTotalBytesDefault = 100 * 1024 * 1024
+
+	// IOManifestCacheMaxContentLengthKey skips caching individual manifests
+	// larger than this size.
+	IOManifestCacheMaxContentLengthKey     = "io.manifest.cache.max-content-length"
+	IOManifestCacheMaxContentLengthDefault = 8 * 1024 * 1024
+
 	// These Java-compatible properties are reserved for future task-group
 	// planning. They are exported so applications can share configuration
 	// names across Iceberg implementations.

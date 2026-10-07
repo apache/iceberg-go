@@ -544,14 +544,15 @@ func classifyDataFile(f iceberg.DataFile) (dataFileKind, error) {
 // close it when they are done, including early exits after remote planning
 // succeeds but before all records are consumed.
 type Scan struct {
-	identifier          Identifier
-	metadata            Metadata
-	metadataLocation    string
-	ioF                 FSysF
-	manifestCache       *snapshotManifestCache
-	planner             ScanPlanner
-	scanPlanningIOProps iceberg.Properties
-	planningMode        ScanPlanningMode
+	identifier           Identifier
+	metadata             Metadata
+	metadataLocation     string
+	ioF                  FSysF
+	manifestCache        *snapshotManifestCache
+	manifestContentCache *manifestContentCache
+	planner              ScanPlanner
+	scanPlanningIOProps  iceberg.Properties
+	planningMode         ScanPlanningMode
 	// planIO, when non-nil, is a plan-scoped FileIO loader set by remote scan
 	// planning. ReadTasks leases it instead of falling back to ioF, and replacing
 	// the plan retires it after all active readers finish. See PlanIO.
@@ -1287,6 +1288,7 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 			if err != nil {
 				return err
 			}
+			fs = scan.manifestContentCache.wrap(gctx, fs, mf)
 			partEval, err := partitionEvaluators.Get(int(mf.PartitionSpecID()))
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
@@ -1442,6 +1444,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 			if err != nil {
 				return err
 			}
+			fs = scan.manifestContentCache.wrap(gctx, fs, manifest)
 			partEval, err := partitionEvaluators.Get(int(manifest.PartitionSpecID()))
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", manifest.PartitionSpecID(), err)
