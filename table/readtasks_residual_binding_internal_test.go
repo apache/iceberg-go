@@ -278,6 +278,7 @@ func TestReadTasksConcurrentScansPreserveInputTasks(t *testing.T) {
 					_, records, readErr := scan.ReadTasks(t.Context(), tasks)
 					if readErr != nil {
 						results <- result{err: readErr}
+
 						return
 					}
 
@@ -285,6 +286,7 @@ func TestReadTasksConcurrentScansPreserveInputTasks(t *testing.T) {
 					for record, iterErr := range records {
 						if iterErr != nil {
 							results <- result{err: iterErr}
+
 							return
 						}
 						rows += record.NumRows()
@@ -352,7 +354,7 @@ func TestReadTasksPassesBoundResidualsToGetRecords(t *testing.T) {
 		require.NoError(t, readErr)
 		values, ok := record.Column(0).(*array.Int64)
 		require.True(t, ok)
-		for i := 0; i < values.Len(); i++ {
+		for i := range values.Len() {
 			ids = append(ids, values.Value(i))
 		}
 		record.Release()
