@@ -454,12 +454,9 @@ func (rd *RowDelta) findReplacedLiveDVs(fs iceio.IO, meta *MetadataBuilder) ([]i
 	}
 
 	var replacedLive []iceberg.DataFile
-	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes) {
+	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return nil, err
-		}
-		if entry.Status() == iceberg.EntryStatusDELETED {
-			continue
 		}
 		df := entry.DataFile()
 		if ref := explicitReferencedDataFile(df); IsDeletionVector(df) && ref != "" {
