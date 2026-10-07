@@ -314,6 +314,70 @@ func TestInclusiveMetricsEvalRealParquetDecimalRowGroup(t *testing.T) {
 		"failed to prune above the written maximum")
 }
 
+// TestInclusiveMetricsEvalRowGroupValueCountIncludesNulls writes a row group
+// whose column holds as many nulls as values. Parquet's column statistics
+// count only the non-null values, so reading them as the Iceberg value count
+// makes the column look like it holds nulls only, and any predicate on it
+// prunes a row group that has matching rows.
+func TestInclusiveMetricsEvalRowGroupValueCountIncludesNulls(t *testing.T) {
+	node := parquetschema.NewInt32Node("id", parquet.Repetitions.Optional, 1)
+	root, err := parquetschema.NewGroupNode("schema", parquet.Repetitions.Required,
+		parquetschema.FieldList{node}, -1)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	w := file.NewParquetWriter(&buf, root,
+		file.WithWriterProps(parquet.NewWriterProperties(parquet.WithStats(true))))
+	rgw, err := w.AppendRowGroupChecked()
+	require.NoError(t, err)
+	cw, err := rgw.NextColumn()
+	require.NoError(t, err)
+	i32w, ok := cw.(*file.Int32ColumnChunkWriter)
+	require.True(t, ok, "expected an Int32ColumnChunkWriter, got %T", cw)
+	// Two values followed by two nulls.
+	_, err = i32w.WriteBatch([]int32{1, 2}, []int16{1, 1, 0, 0}, nil)
+	require.NoError(t, err)
+	require.NoError(t, cw.Close())
+	require.NoError(t, rgw.Close())
+	require.NoError(t, w.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rdr.Close()) })
+
+	meta := rdr.MetaData()
+	chunk, err := meta.RowGroup(0).ColumnChunk(0)
+	require.NoError(t, err)
+	stats, err := chunk.Statistics()
+	require.NoError(t, err)
+	require.Equal(t, stats.NullCount(), stats.NumValues(),
+		"writer did not produce equal null and non-null counts, so this test no longer covers the bug")
+
+	ref := iceberg.Reference("id")
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32,
+	})
+
+	keep := func(pred iceberg.BooleanExpression) bool {
+		expr, err := iceberg.BindExpr(schema, pred, true)
+		require.NoError(t, err)
+		eval := &inclusiveMetricsEval{expr: expr}
+		result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+		require.NoError(t, err)
+
+		return result
+	}
+
+	assert.True(t, keep(iceberg.EqualTo(ref, int32(1))),
+		"pruned a row group holding the written value")
+	assert.True(t, keep(iceberg.LessThan(ref, int32(3))),
+		"pruned a row group with values below the bound")
+	assert.True(t, keep(iceberg.NotNull(ref)),
+		"pruned a row group holding non-null values")
+	assert.False(t, keep(iceberg.EqualTo(ref, int32(3))),
+		"failed to prune a value outside the written range")
+}
+
 func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	withStats := buildRowGroupMetricsMetadata(t, 1, 2, true)
 	withoutStats := buildRowGroupMetricsMetadata(t, 1, 2, false)

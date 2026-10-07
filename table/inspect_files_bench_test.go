@@ -97,3 +97,55 @@ func benchmarkInspectContentFiles(
 
 	return partitionType, files
 }
+
+func BenchmarkInspectContentFileAppenderMixedPartitions(b *testing.B) {
+	types := []iceberg.Type{iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.Date}
+	raw := []any{true, int32(34), int64(9007199254740993), float32(1.25), float64(2.5), "partition", []byte("binary"), iceberg.Date(12)}
+	fields := make([]iceberg.NestedField, len(types))
+	partitions := make([]iceberg.PartitionField, len(types))
+	for i, typ := range types {
+		fields[i] = iceberg.NestedField{ID: i + 1, Name: fmt.Sprintf("field_%d", i), Type: typ}
+		partitions[i] = iceberg.PartitionField{SourceIDs: []int{i + 1}, FieldID: 1000 + i, Name: fields[i].Name, Transform: iceberg.IdentityTransform{}}
+	}
+	spec := iceberg.NewPartitionSpec(partitions...)
+	partitionType := spec.PartitionType(iceberg.NewSchema(0, fields...))
+	for _, nullEvery := range []int{0, 2} {
+		b.Run(fmt.Sprintf("fields=8/files=4096/null_every=%d", nullEvery), func(b *testing.B) {
+			files := make([]iceberg.DataFile, 4096)
+			for i := range files {
+				values := make(map[int]any, len(types))
+				for j, value := range raw {
+					if nullEvery > 0 && (i+j)%nullEvery == 0 {
+						value = nil
+					}
+					values[1000+j] = value
+				}
+				file, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, fmt.Sprintf("file-%d.parquet", i), iceberg.ParquetFile, values, map[int]string{1007: "date"}, nil, 1, 1)
+				if err != nil {
+					b.Fatal(err)
+				}
+				files[i] = file.Build()
+			}
+			arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
+			if err != nil {
+				b.Fatal(err)
+			}
+			builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+			defer builder.Release()
+			appendFile := newInspectContentFileAppender(partitionType)
+			b.ReportAllocs()
+			for b.Loop() {
+				for _, file := range files {
+					if err := appendFile(builder, file); err != nil {
+						b.Fatal(err)
+					}
+				}
+				record := builder.NewRecordBatch()
+				if record.NumRows() != int64(len(files)) {
+					b.Fatalf("got %d rows, want %d", record.NumRows(), len(files))
+				}
+				record.Release()
+			}
+		})
+	}
+}

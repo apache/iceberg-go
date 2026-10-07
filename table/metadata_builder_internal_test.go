@@ -269,9 +269,8 @@ func TestReassignIds(t *testing.T) {
 		Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{
 				{
-					Type: iceberg.PrimitiveTypes.Int64,
-					// TODO: this is discrepancy with rust impl, is 5 over there
-					ID:       4,
+					Type:     iceberg.PrimitiveTypes.Int64,
+					ID:       5,
 					Name:     "nested",
 					Required: true,
 				},
@@ -280,8 +279,7 @@ func TestReassignIds(t *testing.T) {
 		Required: true,
 	},
 		iceberg.NestedField{
-			// TODO: this is discrepancy with rust impl, is 4 over there
-			ID:       5,
+			ID:       4,
 			Name:     "c",
 			Type:     iceberg.PrimitiveTypes.Int64,
 			Required: true,
@@ -1083,7 +1081,7 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
 		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
 	}
-	builder.currentSnapshotID = ptr(snapshot3ID)
+	builder.currentSnapshotID = new(snapshot3ID)
 	builder.refs = map[string]SnapshotRef{
 		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
 	}
@@ -1219,7 +1217,7 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 			LastPartitionID:   &lastPartitionID,
 			Props:             iceberg.Properties{},
 			SnapshotList:      []Snapshot{{SnapshotID: removedID}, {SnapshotID: currentID}},
-			CurrentSnapshotID: ptr(currentID),
+			CurrentSnapshotID: new(currentID),
 			SnapshotLog:       []SnapshotLogEntry{},
 			SortOrderList:     []SortOrder{UnsortedSortOrder},
 			SnapshotRefs: map[string]SnapshotRef{
@@ -1489,6 +1487,60 @@ func TestExpireMetadataLog(t *testing.T) {
 	meta, err = newBuilder.Build()
 	require.NoError(t, err)
 	require.Len(t, meta.(*metadataV2).MetadataLog, 2)
+}
+
+func TestBuildDoesNotGrowMetadataLog(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NoError(t, builder.SetProperties(map[string]string{"test.prop": "value"}))
+
+	for range 3 {
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Len(t, meta.(*metadataV2).MetadataLog, 1)
+		require.Empty(t, builder.metadataLog, "Build must not append to the builder's own log")
+	}
+}
+
+func TestBuildWithoutChangesAddsNoMetadataLogEntry(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NotNil(t, builder.previousFileEntry, "setup: the builder must have a previous file")
+
+	for range 2 {
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Empty(t, meta.(*metadataV2).MetadataLog)
+	}
+}
+
+func TestBuildDoesNotTrimTheBuilderMetadataLog(t *testing.T) {
+	base := builderWithoutChanges(2)
+	require.NoError(t, base.SetProperties(map[string]string{MetadataPreviousVersionsMaxKey: "2"}))
+	meta1, err := base.Build()
+	require.NoError(t, err)
+
+	builder2, err := MetadataBuilderFromBase(meta1, "s3://bucket/test/location/metadata/v2.json")
+	require.NoError(t, err)
+	require.NoError(t, builder2.SetProperties(map[string]string{"test.prop": "value1"}))
+	meta2, err := builder2.Build()
+	require.NoError(t, err)
+
+	builder3, err := MetadataBuilderFromBase(meta2, "s3://bucket/test/location/metadata/v3.json")
+	require.NoError(t, err)
+	require.NoError(t, builder3.SetProperties(map[string]string{"test.prop": "value2"}))
+
+	want := []string{
+		"s3://bucket/test/location/metadata/v2.json",
+		"s3://bucket/test/location/metadata/v3.json",
+	}
+	for range 2 {
+		meta, err := builder3.Build()
+		require.NoError(t, err)
+		var got []string
+		for entry := range meta.PreviousFiles() {
+			got = append(got, entry.MetadataFile)
+		}
+		require.Equal(t, want, got)
+	}
 }
 
 func TestMetadataLogTrimsWithUpdatedProperty(t *testing.T) {
@@ -3796,8 +3848,8 @@ func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
 		return true
 	case reflect.Struct:
 		filled := false
-		for i := range v.NumField() {
-			if fillNonZero(fieldValue(v.Field(i)), seen) {
+		for _, field := range v.Fields() {
+			if fillNonZero(fieldValue(field), seen) {
 				filled = true
 			}
 		}

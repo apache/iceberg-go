@@ -174,8 +174,8 @@ func TestStagedSnapshotStillValid(t *testing.T) {
 		{"v1 ignores sequence numbers", v1, &Snapshot{}, true},
 		{"v2 sequence number ahead", v2, &Snapshot{SequenceNumber: v2.LastSequenceNumber() + 1}, true},
 		{"v2 sequence number equal", v2, &Snapshot{SequenceNumber: v2.LastSequenceNumber()}, false},
-		{"v3 first-row-id at the cursor", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1, FirstRowID: ptr(v3.NextRowID())}, true},
-		{"v3 first-row-id behind", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1, FirstRowID: ptr(v3.NextRowID() - 1)}, false},
+		{"v3 first-row-id at the cursor", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1, FirstRowID: new(v3.NextRowID())}, true},
+		{"v3 first-row-id behind", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1, FirstRowID: new(v3.NextRowID() - 1)}, false},
 		{"v3 first-row-id missing", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1}, false},
 		{"nil fresh metadata", nil, &Snapshot{}, true},
 	}
@@ -512,7 +512,7 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 	parentManifestListPath := "mem://default/table-location/metadata/fresh-parent-snap.avro"
 	out, createErr := wfs.Create(parentManifestListPath)
 	require.NoError(t, createErr)
-	writeErr := iceberg.WriteManifestList(2, out, 77, nil, ptr(int64(0)), 0, nil)
+	writeErr := iceberg.WriteManifestList(2, out, 77, nil, new(int64(0)), 0, nil)
 	require.NoError(t, writeErr)
 	require.NoError(t, out.Close())
 

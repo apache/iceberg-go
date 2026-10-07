@@ -365,15 +365,21 @@ func TestPlanTableScanGeneratesIdempotencyKeyAndUsesDefaultAccessDelegation(t *t
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			got := req.Header.Get(headerIdempotencyKey)
-			require.NotEmpty(t, got)
+			if !assert.NotEmpty(t, got) {
+				return
+			}
 			parsed, err := uuid.Parse(got)
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 			// The spec pins the generated key to UUIDv7.
 			assert.Equal(t, 7, int(parsed.Version()))
 			assert.Equal(t, []string{defaultAccessDelegation}, req.Header.Values(headerIcebergAccessDelegation))
 
 			_, err = w.Write([]byte(`{"status":"completed","plan-id":"plan-1"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -424,7 +430,9 @@ func TestPlanTableScanAcceptsUppercaseCanonicalIdempotencyKey(t *testing.T) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			assert.Equal(t, key, req.Header.Get(headerIdempotencyKey))
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -448,13 +456,13 @@ func TestPlanTableScanRequest(t *testing.T) {
 			name:       "completed",
 			response:   `{"status":"completed","plan-id":"plan-1","plan-tasks":["task-1"]}`,
 			wantStatus: PlanStatusCompleted,
-			wantPlanID: stringPtr("plan-1"),
+			wantPlanID: new("plan-1"),
 		},
 		{
 			name:       "submitted",
 			response:   `{"status":"submitted","plan-id":"plan-2"}`,
 			wantStatus: PlanStatusSubmitted,
-			wantPlanID: stringPtr("plan-2"),
+			wantPlanID: new("plan-2"),
 		},
 		{
 			name:       "failed",
@@ -473,12 +481,16 @@ func TestPlanTableScanRequest(t *testing.T) {
 			snapshotID := int64(22)
 			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
-					require.Equal(t, http.MethodPost, req.Method)
+					if !assert.Equal(t, http.MethodPost, req.Method) {
+						return
+					}
 					assert.Equal(t, idempotencyKey, req.Header.Get(headerIdempotencyKey))
 					assert.Equal(t, []string{accessDelegation}, req.Header.Values(headerIcebergAccessDelegation))
 
 					body, err := io.ReadAll(req.Body)
-					require.NoError(t, err)
+					if !assert.NoError(t, err) {
+						return
+					}
 					assert.JSONEq(t, `{
 						"snapshot-id": 22,
 						"select": ["id", "data"],
@@ -486,7 +498,9 @@ func TestPlanTableScanRequest(t *testing.T) {
 					}`, string(body))
 
 					_, err = w.Write([]byte(tc.response))
-					require.NoError(t, err)
+					if !assert.NoError(t, err) {
+						return
+					}
 				})
 			})
 
@@ -529,7 +543,9 @@ func TestPlanTableScanRejectsEmptyBody(t *testing.T) {
 	// success; assert it is rejected instead.
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodPost, req.Method)
+			if !assert.Equal(t, http.MethodPost, req.Method) {
+				return
+			}
 			w.Header().Set("Content-Length", "0")
 			w.WriteHeader(http.StatusOK)
 		})
@@ -550,7 +566,9 @@ func TestFetchScanTasksRejectsEmptyBody(t *testing.T) {
 	key := "0190b6c5-1c3d-7000-8000-000000000004"
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodPost, req.Method)
+			if !assert.Equal(t, http.MethodPost, req.Method) {
+				return
+			}
 			w.Header().Set("Content-Length", "0")
 			w.WriteHeader(http.StatusOK)
 		})
@@ -570,9 +588,13 @@ func TestFetchScanTasksRejectsNullBody(t *testing.T) {
 	key := "0190b6c5-1c3d-7000-8000-000000000005"
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodPost, req.Method)
+			if !assert.Equal(t, http.MethodPost, req.Method) {
+				return
+			}
 			_, err := w.Write([]byte("null"))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -590,11 +612,15 @@ func TestFetchPlanningResultRequest(t *testing.T) {
 	accessDelegation := "remote-signing"
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodGet, req.Method)
+			if !assert.Equal(t, http.MethodGet, req.Method) {
+				return
+			}
 			assert.Equal(t, []string{accessDelegation}, req.Header.Values(headerIcebergAccessDelegation))
 
 			_, err := w.Write([]byte(`{"status":"completed","plan-tasks":["task-1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -611,11 +637,15 @@ func TestFetchPlanningResultUsesDefaultAccessDelegation(t *testing.T) {
 
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodGet, req.Method)
+			if !assert.Equal(t, http.MethodGet, req.Method) {
+				return
+			}
 			assert.Equal(t, []string{defaultAccessDelegation}, req.Header.Values(headerIcebergAccessDelegation))
 
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -650,7 +680,9 @@ func TestFetchPlanningResultMapsNotFound(t *testing.T) {
 
 			cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
-					require.Equal(t, http.MethodGet, req.Method)
+					if !assert.Equal(t, http.MethodGet, req.Method) {
+						return
+					}
 					writeRESTNotFound(t, w, tc.errType)
 				})
 			})
@@ -690,7 +722,9 @@ func TestFetchScanTasksMapsNotFound(t *testing.T) {
 			idempotencyKey := "0190b6c5-1c3d-7000-8000-000000000003"
 			cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
 				mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
-					require.Equal(t, http.MethodPost, req.Method)
+					if !assert.Equal(t, http.MethodPost, req.Method) {
+						return
+					}
 					writeRESTNotFound(t, w, tc.errType)
 				})
 			})
@@ -731,7 +765,9 @@ func TestPlanTableScanMapsNotFound(t *testing.T) {
 
 			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
-					require.Equal(t, http.MethodPost, req.Method)
+					if !assert.Equal(t, http.MethodPost, req.Method) {
+						return
+					}
 					writeRESTNotFound(t, w, tc.errType)
 				})
 			})
@@ -765,7 +801,9 @@ func TestFetchPlanningResultStatusArms(t *testing.T) {
 		cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
 				_, err := w.Write([]byte(`{"status":"cancelled"}`))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 			})
 		})
 
@@ -779,7 +817,9 @@ func TestFetchPlanningResultStatusArms(t *testing.T) {
 		cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
 				_, err := w.Write([]byte(`{"status":"failed","error":{"message":"boom","type":"ServerError","code":500}}`))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 			})
 		})
 
@@ -801,7 +841,9 @@ func TestFetchPlanningResultStatusArms(t *testing.T) {
 			cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
 					_, err := w.Write([]byte(payload))
-					require.NoError(t, err)
+					if !assert.NoError(t, err) {
+						return
+					}
 				})
 			})
 
@@ -819,7 +861,9 @@ func TestCancelPlanningRequest(t *testing.T) {
 
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointCancelPlanning}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodDelete, req.Method)
+			if !assert.Equal(t, http.MethodDelete, req.Method) {
+				return
+			}
 			assert.Empty(t, req.Header.Values(headerIdempotencyKey))
 			assert.Empty(t, req.Header.Values(headerIcebergAccessDelegation))
 			w.WriteHeader(http.StatusNoContent)
@@ -835,12 +879,16 @@ func TestFetchScanTasksRequest(t *testing.T) {
 	idempotencyKey := "0190b6c5-1c3d-7000-8000-000000000002"
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodPost, req.Method)
+			if !assert.Equal(t, http.MethodPost, req.Method) {
+				return
+			}
 			assert.Equal(t, idempotencyKey, req.Header.Get(headerIdempotencyKey))
 			assert.Empty(t, req.Header.Values(headerIcebergAccessDelegation))
 
 			body, err := io.ReadAll(req.Body)
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 			assert.JSONEq(t, `{"plan-task":"task-1"}`, string(body))
 
 			_, err = w.Write([]byte(`{
@@ -848,7 +896,9 @@ func TestFetchScanTasksRequest(t *testing.T) {
 				"file-scan-tasks": [{}],
 				"delete-files": [{}]
 			}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -907,13 +957,17 @@ func newScanPlanningTestCatalog(t *testing.T, endpoints []endpoint, register fun
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
-		require.Equal(t, http.MethodGet, req.Method)
+		if !assert.Equal(t, http.MethodGet, req.Method) {
+			return
+		}
 		err := json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
 			"endpoints": endpointStrings(endpoints),
 		})
-		require.NoError(t, err)
+		if !assert.NoError(t, err) {
+			return
+		}
 	})
 	if register != nil {
 		register(mux)
@@ -954,10 +1008,8 @@ func writeRESTNotFound(t *testing.T, w http.ResponseWriter, errType string) {
 	}
 
 	_, err := fmt.Fprintf(w, `{"error":{"message":%q,"type":%q,"code":404}}`, errType, errType)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 }
-
-func stringPtr(s string) *string { return &s }
 
 // TestPlanTableScanRequestFromEncodesFilter checks the row filter serializes to
 // ExpressionParser JSON on the wire request, and that trivial filters are
@@ -1059,8 +1111,9 @@ func scanFilterSchema() *iceberg.Schema {
 // encoding needs.
 type scanTestMetadata struct{ schema *iceberg.Schema }
 
-func (m scanTestMetadata) CurrentSchema() *iceberg.Schema               { return m.schema }
-func (m scanTestMetadata) Schemas() []*iceberg.Schema                   { return []*iceberg.Schema{m.schema} }
+func (m scanTestMetadata) CurrentSchema() *iceberg.Schema { return m.schema }
+func (m scanTestMetadata) Schemas() []*iceberg.Schema     { return []*iceberg.Schema{m.schema} }
+
 func (m scanTestMetadata) PartitionSpec() iceberg.PartitionSpec         { return iceberg.PartitionSpec{} }
 func (m scanTestMetadata) PartitionSpecByID(int) *iceberg.PartitionSpec { return nil }
 func (m scanTestMetadata) CurrentSnapshot() *table.Snapshot             { return nil }
@@ -1093,7 +1146,9 @@ func TestPlanFilesCompletedEmpty(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -1110,11 +1165,13 @@ func TestScanPlanningRemoteSupportsSynchronousPlanOnlyServer(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			planID := "plan-1"
-			require.NoError(t, json.NewEncoder(w).Encode(PlanTableScanResponse{
+			if !assert.NoError(t, json.NewEncoder(w).Encode(PlanTableScanResponse{
 				Status:    PlanStatusCompleted,
 				PlanID:    &planID,
 				ScanTasks: validScanTasksWire(),
-			}))
+			})) {
+				return
+			}
 		})
 	})
 
@@ -1152,7 +1209,9 @@ func TestPlanFilesRequiresAdvertisedResponseContinuation(t *testing.T) {
 			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 					_, err := w.Write([]byte(test.response))
-					require.NoError(t, err)
+					if !assert.NoError(t, err) {
+						return
+					}
 				})
 			})
 
@@ -1170,14 +1229,20 @@ func TestPlanFilesEncodesFilter(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			body, err := io.ReadAll(req.Body)
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 
 			var got PlanTableScanRequest
-			require.NoError(t, json.Unmarshal(body, &got))
+			if !assert.NoError(t, json.Unmarshal(body, &got)) {
+				return
+			}
 			assert.JSONEq(t, `{"type":"eq","term":"i","value":25}`, string(got.Filter))
 
 			_, err = w.Write([]byte(`{"status":"completed","plan-id":"plan-1"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -1195,7 +1260,9 @@ func TestPlanFilesRejectsMalformedScanTasks(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","file-scan-tasks":[{}]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -1211,12 +1278,18 @@ func TestPlanFilesPollsSubmittedPlan(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"submitted","plan-id":"plan-9"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-9", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodGet, req.Method)
+			if !assert.Equal(t, http.MethodGet, req.Method) {
+				return
+			}
 			_, err := w.Write([]byte(`{"status":"completed"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -1236,21 +1309,29 @@ func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			var body FetchScanTasksRequest
-			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			if !assert.NoError(t, json.NewDecoder(req.Body).Decode(&body)) {
+				return
+			}
 			mu.Lock()
 			fetched = append(fetched, body.PlanTask)
 			mu.Unlock()
 			switch body.PlanTask {
 			case "h1":
 				_, err := w.Write([]byte(`{"plan-tasks":["h2"]}`))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 			default:
 				_, err := w.Write([]byte(`{"file-scan-tasks":[]}`))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 			}
 		})
 	})
@@ -1473,12 +1554,16 @@ func TestPlanFilesFanoutCycleTerminates(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			calls.Add(1)
 			_, err := w.Write([]byte(`{"plan-tasks":["h1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -1499,14 +1584,20 @@ func TestPlanFilesCancelsAfterFanoutFailure(t *testing.T) {
 	}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1","h2"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			var body FetchScanTasksRequest
-			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			if !assert.NoError(t, json.NewDecoder(req.Body).Decode(&body)) {
+				return
+			}
 			if body.PlanTask == "h1" {
 				_, err := w.Write([]byte(`{"plan-tasks":[]}`))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 
 				return
 			}
@@ -1514,7 +1605,9 @@ func TestPlanFilesCancelsAfterFanoutFailure(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodDelete, req.Method)
+			if !assert.Equal(t, http.MethodDelete, req.Method) {
+				return
+			}
 			cancels.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 		})
@@ -1536,17 +1629,27 @@ func TestPlanFilesCancelsAfterSuccessfulMaterialization(t *testing.T) {
 	}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			var body FetchScanTasksRequest
-			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
-			require.Equal(t, "h1", body.PlanTask)
+			if !assert.NoError(t, json.NewDecoder(req.Body).Decode(&body)) {
+				return
+			}
+			if !assert.Equal(t, "h1", body.PlanTask) {
+				return
+			}
 			_, err := w.Write([]byte(`{"file-scan-tasks":[]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodDelete, req.Method)
+			if !assert.Equal(t, http.MethodDelete, req.Method) {
+				return
+			}
 			cancels.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 		})
@@ -1568,10 +1671,14 @@ func TestPlanFilesDefersCancelWithVendedCredentials(t *testing.T) {
 	}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","storage-credentials":[{"prefix":"s3://bucket/","config":{"s3.access-key-id":"vended"}}]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodDelete, req.Method)
+			if !assert.Equal(t, http.MethodDelete, req.Method) {
+				return
+			}
 			cancels.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 		})
@@ -1599,17 +1706,27 @@ func TestPlanFilesCancelsAfterTaskDecodeFailure(t *testing.T) {
 	}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			var body FetchScanTasksRequest
-			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
-			require.Equal(t, "h1", body.PlanTask)
+			if !assert.NoError(t, json.NewDecoder(req.Body).Decode(&body)) {
+				return
+			}
+			if !assert.Equal(t, "h1", body.PlanTask) {
+				return
+			}
 			_, err := w.Write([]byte(`{"file-scan-tasks":[{}]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodDelete, req.Method)
+			if !assert.Equal(t, http.MethodDelete, req.Method) {
+				return
+			}
 			cancels.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 		})
@@ -1631,7 +1748,9 @@ func TestPlanFilesCancelsAfterTerminalPollError(t *testing.T) {
 	}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"submitted","plan-id":"plan-1"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			switch req.Method {
@@ -1710,13 +1829,21 @@ func TestPlanFilesDecodesFanoutTaskEnvelopes(t *testing.T) {
 				PlanID:    "plan-1",
 				ScanTasks: first,
 			}
-			require.NoError(t, json.NewEncoder(w).Encode(response))
+			if !assert.NoError(t, json.NewEncoder(w).Encode(response)) {
+				return
+			}
 		})
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			var got FetchScanTasksRequest
-			require.NoError(t, json.NewDecoder(req.Body).Decode(&got))
-			require.Equal(t, "h1", got.PlanTask)
-			require.NoError(t, json.NewEncoder(w).Encode(FetchScanTasksResponse{ScanTasks: second}))
+			if !assert.NoError(t, json.NewDecoder(req.Body).Decode(&got)) {
+				return
+			}
+			if !assert.Equal(t, "h1", got.PlanTask) {
+				return
+			}
+			if !assert.NoError(t, json.NewEncoder(w).Encode(FetchScanTasksResponse{ScanTasks: second})) {
+				return
+			}
 		})
 	})
 
@@ -1744,7 +1871,9 @@ func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","storage-credentials":[{"prefix":"s3://bucket/","config":{"s3.access-key-id":"vended"}}]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 	cat.props["s3.endpoint"] = "https://catalog.local"
@@ -1897,7 +2026,9 @@ func TestPlanFilesPropagatesFailure(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"failed","error":{"message":"boom","type":"ServerError","code":500}}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 

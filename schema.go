@@ -542,13 +542,15 @@ func (s *Schema) columnPathSegments(id int) []string {
 		if !ok {
 			return nil
 		}
-		segs = append([]string{f.Name}, segs...)
+		segs = append(segs, f.Name)
 		p, ok := parents[cur]
 		if !ok {
 			break
 		}
 		cur = p
 	}
+
+	slices.Reverse(segs)
 
 	return segs
 }
@@ -1486,13 +1488,27 @@ func buildAccessors(schema *Schema) (map[int]accessor, error) {
 type setFreshIDs struct {
 	oldIdToNew map[int]int
 	nextIDFunc func() int
+	source     *Schema
+	base       *Schema
 }
 
 func (s *setFreshIDs) getAndInc(currentID int) int {
-	next := s.nextIDFunc()
+	next := s.idFor(currentID)
 	s.oldIdToNew[currentID] = next
 
 	return next
+}
+
+func (s *setFreshIDs) idFor(currentID int) int {
+	if s.base != nil {
+		if name, ok := s.source.FindColumnName(currentID); ok {
+			if f, ok := s.base.FindFieldByName(name); ok {
+				return f.ID
+			}
+		}
+	}
+
+	return s.nextIDFunc()
 }
 
 func (s *setFreshIDs) Schema(_ *Schema, structResult func() Type) Type {
@@ -1500,10 +1516,16 @@ func (s *setFreshIDs) Schema(_ *Schema, structResult func() Type) Type {
 }
 
 func (s *setFreshIDs) Struct(st StructType, fieldResults []func() Type) Type {
+	// Assign all sibling IDs before recursing, matching Java.
+	newIDs := make([]int, len(st.FieldList))
+	for idx, f := range st.FieldList {
+		newIDs[idx] = s.getAndInc(f.ID)
+	}
+
 	newFields := make([]NestedField, len(st.FieldList))
 	for idx, f := range st.FieldList {
 		newFields[idx] = NestedField{
-			ID:             s.getAndInc(f.ID),
+			ID:             newIDs[idx],
 			Name:           f.Name,
 			Type:           fieldResults[idx](),
 			Doc:            f.Doc,
@@ -1555,15 +1577,29 @@ func (s *setFreshIDs) Variant(v VariantType) Type {
 // fields in it. The nextID function is used to iteratively generate the ids, if
 // it is nil then a simple incrementing counter is used starting at 1.
 func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
+	return AssignFreshSchemaIDsWithBase(sc, nil, nextID)
+}
+
+// AssignFreshSchemaIDsWithBase is like AssignFreshSchemaIDs, but fields whose
+// full name exists in base reuse the ID from base. Only fields not found in
+// base get fresh IDs from nextID. Name matching is case-sensitive.
+//
+// nextID must return IDs greater than base.HighestFieldID(), otherwise an
+// error is returned for the duplicate. If nextID is nil, the counter starts
+// after base's highest field ID.
+func AssignFreshSchemaIDsWithBase(sc, base *Schema, nextID func() int) (*Schema, error) {
 	if nextID == nil {
 		id := 0
+		if base != nil {
+			id = base.HighestFieldID()
+		}
 		nextID = func() int {
 			id++
 
 			return id
 		}
 	}
-	visitor := &setFreshIDs{oldIdToNew: make(map[int]int), nextIDFunc: nextID}
+	visitor := &setFreshIDs{oldIdToNew: make(map[int]int), nextIDFunc: nextID, source: sc, base: base}
 	outType, err := PreOrderVisit(sc, visitor)
 	if err != nil {
 		return nil, err
@@ -1574,8 +1610,16 @@ func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
 	if len(sc.IdentifierFieldIDs) != 0 {
 		newIdentifierIDs = make([]int, len(sc.IdentifierFieldIDs))
 		for i, id := range sc.IdentifierFieldIDs {
-			newIdentifierIDs[i] = visitor.oldIdToNew[id]
+			newID, ok := visitor.oldIdToNew[id]
+			if !ok {
+				return nil, fmt.Errorf("%w: cannot find field for identifier field id %d", ErrInvalidSchema, id)
+			}
+			newIdentifierIDs[i] = newID
 		}
+	}
+
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
+		return nil, err
 	}
 
 	return NewSchemaWithIdentifiers(0, newIdentifierIDs, fields...), nil

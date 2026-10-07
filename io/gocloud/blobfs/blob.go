@@ -486,10 +486,7 @@ func (bfs *FileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, e
 	}
 
 	results := make([]result, len(paths))
-	workers := len(paths)
-	if workers > deleteFilesMaxConcurrency {
-		workers = deleteFilesMaxConcurrency
-	}
+	workers := min(len(paths), deleteFilesMaxConcurrency)
 
 	jobs := make(chan int)
 	var wg sync.WaitGroup

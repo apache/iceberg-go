@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -25,8 +26,10 @@ import (
 )
 
 var (
-	benchmarkDecimalBucketLiteralResult iceberg.Optional[iceberg.Literal]
-	benchmarkDecimalBucketResult        iceberg.Optional[int32]
+	benchmarkDecimalBucketLiteralResult   iceberg.Optional[iceberg.Literal]
+	benchmarkDecimalBucketResult          iceberg.Optional[int32]
+	benchmarkDecimalTruncateLiteralResult iceberg.Optional[iceberg.Literal]
+	benchmarkDecimalTruncateResult        any
 )
 
 func BenchmarkBucketTransformDecimal(b *testing.B) {
@@ -66,4 +69,58 @@ func BenchmarkBucketTransformDecimal(b *testing.B) {
 			benchmarkDecimalBucketResult = transformer(boxedValues[i%len(boxedValues)])
 		}
 	})
+}
+
+func BenchmarkTruncateTransformDecimal(b *testing.B) {
+	values := []iceberg.Decimal{
+		{Val: decimal128.FromI64(0), Scale: 2},
+		{Val: decimal128.FromI64(1065), Scale: 2},
+		{Val: decimal128.FromI64(-1065), Scale: 2},
+		{Val: decimal128.New(0x123456789abcdef, 0xfedcba9876543210), Scale: 2},
+		{Val: decimal128.New(-0x123456789abcdef, 0xfedcba9876543210), Scale: 2},
+	}
+	tests := []struct {
+		name   string
+		width  int
+		values []iceberg.Decimal
+	}{
+		{name: "zero", width: 50, values: values[:1]},
+		{name: "positive", width: 50, values: values[1:2]},
+		{name: "negative", width: 50, values: values[2:3]},
+		{name: "wide-positive", width: 50, values: values[3:4]},
+		{name: "wide-negative", width: 50, values: values[4:5]},
+		{name: "width-1", width: 1, values: values},
+		{name: "width-max", width: math.MaxInt32, values: values},
+	}
+	for _, tt := range tests {
+		transform := iceberg.TruncateTransform{Width: tt.width}
+		literals := make([]iceberg.Literal, len(tt.values))
+		boxedValues := make([]any, len(tt.values))
+		for i, value := range tt.values {
+			literals[i] = iceberg.DecimalLiteral(value)
+			boxedValues[i] = value
+		}
+
+		b.Run(tt.name+"/Apply", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				benchmarkDecimalTruncateLiteralResult = transform.Apply(iceberg.Optional[iceberg.Literal]{
+					Valid: true,
+					Val:   literals[i%len(literals)],
+				})
+			}
+		})
+		b.Run(tt.name+"/Transformer", func(b *testing.B) {
+			transformer, err := transform.Transformer(iceberg.DecimalTypeOf(38, 2))
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				benchmarkDecimalTruncateResult = transformer(boxedValues[i%len(boxedValues)])
+			}
+		})
+	}
 }

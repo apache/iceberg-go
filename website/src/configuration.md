@@ -56,7 +56,7 @@ catalog:
 | `catalog.<name>.aws-profile` | AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used. |
 | `catalog.<name>.sql-driver` | `database/sql` driver name for the SQL catalog. Maps to the `sql.driver` property. The default CLI binary only compiles in `sqliteshim`; other drivers require a custom build. |
 | `catalog.<name>.sql-dialect` | SQL dialect for the SQL catalog (`postgres`, `mysql`, `sqlite`, `mssql`, `oracle`). Maps to the `sql.dialect` property. The default CLI binary only ships `sqlite` via `sqliteshim`; other dialects need a custom build with their drivers. |
-| `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. |
+| `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. When enabled, requests are signed with the `s3.*` credential properties if set (`s3.access-key-id` / `s3.secret-access-key` / `s3.session-token`), otherwise with the AWS default credential chain. The Java-client names (`rest.access-key-id` / `rest.secret-access-key` / `rest.session-token`) are accepted as aliases, resolved per field with the `s3.*` keys taking precedence. |
 | `catalog.<name>.rest.signing-name` | SigV4 service name. |
 | `catalog.<name>.rest.signing-region` | SigV4 region. |
 
@@ -71,10 +71,33 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 | Group | Options |
 |---|---|
 | Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
-| AWS SigV4 | `WithSigV4`, `WithSigV4RegionSvc`, `WithAwsConfig` |
+| AWS SigV4 | `WithSigV4`, `WithSigV4RegionSvc`, `WithSigner` |
 | HTTP | `WithHeaders`, `WithTLSConfig`, `WithOAuthTLSConfig`, `WithCustomTransport` |
 | Catalog routing | `WithPrefix`, `WithWarehouseLocation`, `WithMetadataLocation` |
 | Pass-through | `WithAdditionalProps` |
+
+> **AWS SigV4 is an optional backend.** `catalog/rest` no longer links the AWS
+> SDK. To sign REST requests with SigV4, pull in the
+> [`catalog/rest/sigv4`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/sigv4/sigv4.go)
+> sub-package one of two ways:
+>
+> - Property or ambient credentials: add a blank import
+>   `_ "github.com/apache/iceberg-go/catalog/rest/sigv4"` and enable signing with
+>   `WithSigV4` / `WithSigV4RegionSvc` or the `rest.sigv4-enabled` property. The
+>   backend signs with the `s3.*` credential properties when set (falling back to
+>   the `rest.*` aliases), otherwise with the AWS default credential chain.
+> - Explicit config: pass `sigv4.WithAwsConfig(cfg)` to `NewCatalog` alongside
+>   `WithSigV4` / `WithSigV4RegionSvc` (no blank import needed). It supplies the
+>   `aws.Config`; the signing service comes from those options (or a server
+>   `/v1/config` override), and so does the region when one is set. Otherwise
+>   the region falls back to `cfg.Region`.
+>
+> The former `rest.WithAwsConfig(aws.Config)` has been removed in favor of these
+> paths. Because signing is enabled by `WithSigV4` / `WithSigV4RegionSvc` (or the
+> `rest.sigv4-enabled` property) rather than by supplying a config, a program
+> that loads a REST catalog with `rest.sigv4-enabled=true` now fails at startup
+> until the `catalog/rest/sigv4` backend is blank-imported; the error names the
+> import to add.
 
 #### Metrics reporting
 

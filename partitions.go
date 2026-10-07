@@ -230,8 +230,7 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 
 func unmarshalJSONField(data json.RawMessage, field string, value any) error {
 	if err := json.Unmarshal(data, value); err != nil {
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
+		if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 			typeErr.Struct = ""
 			typeErr.Field = field
 		}
@@ -777,7 +776,13 @@ func (ps PartitionSpec) IsUnpartitioned() bool {
 	}
 
 	for _, f := range ps.fields {
-		if _, ok := f.Transform.(VoidTransform); !ok {
+		switch transform := f.Transform.(type) {
+		case VoidTransform:
+		case *VoidTransform:
+			if transform == nil {
+				return false
+			}
+		default:
 			return false
 		}
 	}
@@ -862,8 +867,8 @@ func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedParti
 	fields := make([]resolvedPartitionField, 0, len(ps.fields))
 	for _, field := range ps.fields {
 		sourceType := Type(UnknownType{})
-		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
-			sourceType = typ
+		if sourceField, ok := schema.FindFieldByIDRef(field.SourceID(), internal.SchemaRef{}); ok {
+			sourceType = sourceField.Type
 		}
 
 		fields = append(fields, resolvedPartitionField{
@@ -891,15 +896,19 @@ func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedParti
 // retains the field's position and lets transforms with fixed result types,
 // such as bucket, continue to resolve their result type.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	resolvedFields := ps.resolvedPartitionFields(schema)
-	nestedFields := make([]NestedField, 0, len(resolvedFields))
-	for _, field := range resolvedFields {
-		nestedFields = append(nestedFields, NestedField{
-			ID:       field.field.FieldID,
-			Name:     field.field.Name,
-			Type:     field.resultType,
+	nestedFields := make([]NestedField, len(ps.fields))
+	for i, field := range ps.fields {
+		sourceType := Type(UnknownType{})
+		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+			sourceType = typ
+		}
+
+		nestedFields[i] = NestedField{
+			ID:       field.FieldID,
+			Name:     field.Name,
+			Type:     field.Transform.ResultType(sourceType),
 			Required: false,
-		})
+		}
 	}
 
 	return &StructType{FieldList: nestedFields}

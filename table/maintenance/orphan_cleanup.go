@@ -15,7 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+// Package maintenance provides table maintenance operations, such as orphan
+// file cleanup, that operate on a loaded [table.Table]. The operations are
+// free functions that take the table as their first argument, for example:
+//
+//	result, err := maintenance.DeleteOrphanFiles(ctx, tbl, maintenance.WithCleanupFilesOlderThan(72*time.Hour))
+package maintenance
 
 import (
 	"context"
@@ -37,7 +42,8 @@ import (
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/internal/fileuri"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -93,18 +99,25 @@ type orphanCleanupConfig struct {
 
 const defaultPurgeMaxConcurrency = 32
 
+// OrphanCleanupOption configures an orphan-cleanup run. Options are passed to
+// DeleteOrphanFiles, PlanOrphanFiles, and ExecuteOrphanCleanup.
 type OrphanCleanupOption func(*orphanCleanupConfig)
 
-func WithLocation(location string) OrphanCleanupOption {
+// WithCleanupLocation sets the location to scan for orphan files. Defaults to
+// the table's data location.
+func WithCleanupLocation(location string) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
-		rejectPlanOption(cfg, "WithLocation")
+		rejectPlanOption(cfg, "WithCleanupLocation")
 		cfg.location = location
 	}
 }
 
-func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
+// WithCleanupFilesOlderThan only considers files last modified before now minus
+// duration, so recently written files are never treated as orphans. Defaults to
+// 72h. The duration must be non-negative.
+func WithCleanupFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
-		rejectPlanOption(cfg, "WithFilesOlderThan")
+		rejectPlanOption(cfg, "WithCleanupFilesOlderThan")
 		cfg.olderThan = duration
 		if duration < 0 && cfg.validationErr == nil {
 			cfg.validationErr = errors.New("orphan cleanup age must be non-negative")
@@ -112,15 +125,17 @@ func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	}
 }
 
-func WithDryRun(enabled bool) OrphanCleanupOption {
+// WithCleanupDryRun reports which files would be deleted without deleting them.
+// Defaults to false.
+func WithCleanupDryRun(enabled bool) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.dryRun = enabled
 	}
 }
 
-// WithDeleteFunc sets a custom delete function. If not provided, the table's FileIO
+// WithCleanupDeleteFunc sets a custom delete function. If not provided, the table's FileIO
 // delete method will be used.
-func WithDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
+func WithCleanupDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.deleteFunc = deleteFunc
 	}
@@ -196,7 +211,7 @@ func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 			continue
 		}
 
-		for _, value := range strings.Split(group, ",") {
+		for value := range strings.SplitSeq(group, ",") {
 			flattened[strings.TrimSpace(value)] = equivalences[group]
 		}
 	}
@@ -307,14 +322,14 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 // DeleteOrphanFiles identifies files under a table location that are no longer
 // referenced by table metadata and deletes them unless dry-run is enabled.
 //
-// The table filesystem must implement iceio.ListableIO so orphan cleanup can
+// The table filesystem must implement io.ListableIO so orphan cleanup can
 // fully enumerate candidate files before deciding what is safe to delete.
-func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
+func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupResult{}, cfg.validationErr
 	}
-	plan, err := t.planOrphanFiles(ctx, cfg)
+	plan, err := planOrphanFiles(ctx, tbl, cfg)
 	if err != nil {
 		return OrphanCleanupResult{}, err
 	}
@@ -322,24 +337,24 @@ func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOptio
 		return plan.result(), nil
 	}
 
-	return t.executeOrphanCleanup(ctx, plan, cfg)
+	return executeOrphanCleanup(ctx, tbl, plan, cfg)
 }
 
 // PlanOrphanFiles identifies orphan files without deleting anything. The
 // returned plan can be shown to a user and passed to ExecuteOrphanCleanup to
 // delete exactly that set.
-func (t Table) PlanOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupPlan, error) {
+func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupPlan, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupPlan{}, cfg.validationErr
 	}
 
-	return t.planOrphanFiles(ctx, cfg)
+	return planOrphanFiles(ctx, tbl, cfg)
 }
 
 // ExecuteOrphanCleanup deletes exactly the files in plan. It does not perform
 // another orphan scan, so files appearing after planning are not included.
-func (t Table) ExecuteOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
+func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupResult{}, cfg.validationErr
@@ -351,7 +366,7 @@ func (t Table) ExecuteOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan,
 		return plan.result(), nil
 	}
 
-	return t.executeOrphanCleanup(ctx, plan, cfg)
+	return executeOrphanCleanup(ctx, tbl, plan, cfg)
 }
 
 type scannedFile struct {
@@ -364,15 +379,15 @@ type referencedFileIndex struct {
 	byPath     map[string][]string
 }
 
-func (t Table) planOrphanFiles(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupPlan, error) {
-	fs, err := t.fsF(ctx)
+func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupConfig) (OrphanCleanupPlan, error) {
+	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupPlan{}, fmt.Errorf("failed to get filesystem: %w", err)
 	}
 
 	scanLocation := cfg.location
 	if scanLocation == "" {
-		scanLocation = t.metadata.Location()
+		scanLocation = tbl.Metadata().Location()
 	}
 
 	// Run the S3 walk and referenced-file collection concurrently.
@@ -384,7 +399,7 @@ func (t Table) planOrphanFiles(ctx context.Context, cfg *orphanCleanupConfig) (O
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		var err error
-		referencedFiles, err = t.getReferencedFiles(gctx, fs, cfg.maxConcurrency, true)
+		referencedFiles, err = getReferencedFiles(gctx, tbl, fs, cfg.maxConcurrency, true)
 
 		return err
 	})
@@ -436,8 +451,8 @@ func (t Table) planOrphanFiles(ctx context.Context, cfg *orphanCleanupConfig) (O
 	}, nil
 }
 
-func (t Table) executeOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
-	fs, err := t.fsF(ctx)
+func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
+	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get filesystem: %w", err)
 	}
@@ -470,14 +485,14 @@ func (t Table) executeOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan,
 // comparison identity before normalization discards information. The bool value
 // distinguishes data files (true) from metadata files (false), which is used by
 // PurgeFiles to respect gc.enabled.
-func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
+func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
 	referenced := make(map[string]bool)
-	metadata := t.metadata
+	metadata := tbl.Metadata()
 
 	for entry := range metadata.PreviousFiles() {
 		referenced[entry.MetadataFile] = false
 	}
-	referenced[t.metadataLocation] = false
+	referenced[tbl.MetadataLocation()] = false
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
@@ -611,8 +626,8 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 	return referenced, nil
 }
 
-func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	if listable, ok := fsys.(iceio.ListableIO); ok {
+func walkDirectory(fsys io.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+	if listable, ok := fsys.(io.ListableIO); ok {
 		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -631,7 +646,7 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 		})
 	}
 
-	return fmt.Errorf("filesystem %T does not implement iceio.ListableIO", fsys)
+	return fmt.Errorf("filesystem %T does not implement io.ListableIO", fsys)
 }
 
 func isFileOrphan(
@@ -702,14 +717,14 @@ func newReferencedFileIndex(referencedFiles map[string]bool, cfg *orphanCleanupC
 	return index
 }
 
-func deleteFiles(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFiles(ctx context.Context, fs io.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	if len(orphanFiles) == 0 {
 		return nil, nil
 	}
 
 	// Use bulk delete when available and no custom deleteFunc is set.
 	if cfg.deleteFunc == nil {
-		if bulk, ok := fs.(iceio.BulkRemovableIO); ok {
+		if bulk, ok := fs.(io.BulkRemovableIO); ok {
 			return bulk.DeleteFiles(ctx, orphanFiles)
 		}
 	}
@@ -734,7 +749,7 @@ func deleteFiles(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *or
 	)
 }
 
-func deleteFilesSequential(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFilesSequential(ctx context.Context, fs io.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	var deletedFiles []string
 
 	deleteFunc := fs.Remove
@@ -1324,23 +1339,23 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 // does not get out of sync with storage. Non-bulk deletion invokes Remove
 // concurrently and is bounded to defaultPurgeMaxConcurrency operations because
 // it is typically I/O-bound.
-func (t Table) PurgeFiles(ctx context.Context) error {
-	gcEnabled := isGCEnabled(t.Metadata().Properties())
+func PurgeFiles(ctx context.Context, tbl *table.Table) error {
+	gcEnabled := table.IsGCEnabled(tbl.Properties())
 
-	fs, err := t.FS(ctx)
+	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load filesystem for table purge: %w", err)
 	}
 
 	var errs []error
 	fileSet := make(map[string]string)
-	location := t.metadata.Location()
+	location := tbl.Metadata().Location()
 
 	// 1. Walk the table location directory tree to capture all local files
 	// Only walk the directory if gc.enabled=true to prevent accidental deletion
 	// of unreferenced branched data files.
 	if gcEnabled {
-		if listable, ok := fs.(iceio.ListableIO); ok {
+		if listable, ok := fs.(io.ListableIO); ok {
 			walkErr := listable.WalkDir(location, func(path string, d stdfs.DirEntry, err error) error {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -1365,7 +1380,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 	}
 
 	// 2. Union in manifest-referenced and metadata files (which might be outside the table location)
-	referencedFiles, refErr := t.getReferencedFiles(ctx, fs, runtime.GOMAXPROCS(0), false)
+	referencedFiles, refErr := getReferencedFiles(ctx, tbl, fs, runtime.GOMAXPROCS(0), false)
 	if refErr != nil {
 		return fmt.Errorf("failed to get referenced files: %w", refErr)
 	}
@@ -1391,7 +1406,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 	slices.Sort(files)
 
 	if len(files) > 0 {
-		if bulk, ok := fs.(iceio.BulkRemovableIO); ok {
+		if bulk, ok := fs.(io.BulkRemovableIO); ok {
 			_, bulkErr := bulk.DeleteFiles(ctx, files)
 			if bulkErr != nil {
 				errs = append(errs, fmt.Errorf("bulk deletion failed: %w", bulkErr))

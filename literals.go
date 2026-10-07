@@ -627,6 +627,7 @@ func (f Float32Literal) Type() Type                    { return PrimitiveTypes.F
 func (f Float32Literal) Value() float32                { return float32(f) }
 func (f Float32Literal) Any() any                      { return f.Value() }
 func (f Float32Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 32) }
+
 func (f Float32Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
@@ -675,6 +676,7 @@ func (f Float64Literal) Type() Type                    { return PrimitiveTypes.F
 func (f Float64Literal) Value() float64                { return float64(f) }
 func (f Float64Literal) Any() any                      { return f.Value() }
 func (f Float64Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 64) }
+
 func (f Float64Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
@@ -873,9 +875,10 @@ func (t *TimestampLiteral) UnmarshalBinary(data []byte) error {
 type TimestampNsLiteral TimestampNano
 
 func (TimestampNsLiteral) Comparator() Comparator[TimestampNano] { return cmp.Compare[TimestampNano] }
-func (t TimestampNsLiteral) Type() Type                          { return PrimitiveTypes.TimestampNs }
-func (t TimestampNsLiteral) Value() TimestampNano                { return TimestampNano(t) }
-func (t TimestampNsLiteral) Any() any                            { return t.Value() }
+
+func (t TimestampNsLiteral) Type() Type           { return PrimitiveTypes.TimestampNs }
+func (t TimestampNsLiteral) Value() TimestampNano { return TimestampNano(t) }
+func (t TimestampNsLiteral) Any() any             { return t.Value() }
 func (t TimestampNsLiteral) String() string {
 	tm := TimestampNano(t).ToTime()
 
@@ -1340,7 +1343,10 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: could not convert %v to %s",
 			ErrBadCast, d, t)
 	case Int32Type:
-		v := d.Val.BigInt()
+		v, err := d.integral(t)
+		if err != nil {
+			return nil, err
+		}
 		if !v.IsInt64() {
 			if v.Sign() > 0 {
 				return Int32AboveMaxLiteral(), nil
@@ -1357,7 +1363,10 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 
 		return Int32Literal(int32(i)), nil
 	case Int64Type:
-		v := d.Val.BigInt()
+		v, err := d.integral(t)
+		if err != nil {
+			return nil, err
+		}
 		if !v.IsInt64() {
 			if v.Sign() > 0 {
 				return Int64AboveMaxLiteral(), nil
@@ -1381,6 +1390,47 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 	}
 
 	return nil, fmt.Errorf("%w: DecimalLiteral to %s", ErrBadCast, t)
+}
+
+// integral returns the decimal's value as a whole number, or ErrBadCast if
+// it has a nonzero fractional part. Rounding would be unsafe for range
+// predicates: qty < 12.34 must not bind as qty < 12.
+//
+// It uses big.Int rather than decimal128.Rescale, which panics on scales
+// outside [-38, 38] or when scaling up overflows 128 bits; DecimalLiteral
+// can be constructed directly without scale validation.
+func (d DecimalLiteral) integral(t Type) (*big.Int, error) {
+	v := d.Val.BigInt()
+	switch {
+	case d.Scale == 0 || v.Sign() == 0:
+		return v, nil
+	case d.Scale > 38:
+		// |v| < 10^39, so any scale above 38 leaves a fractional part. The
+		// literal is not formatted: String cannot render this scale.
+		return nil, fmt.Errorf("%w: decimal scale %d is out of range for conversion to %s",
+			ErrBadCast, d.Scale, t)
+	case d.Scale > 0:
+		q, r := v.QuoRem(v, pow10Big(d.Scale), new(big.Int))
+		if r.Sign() != 0 {
+			return nil, fmt.Errorf("%w: could not convert %v to %s without losing its fractional part",
+				ErrBadCast, d, t)
+		}
+
+		return q, nil
+	default:
+		// A nonzero value times 10^19 is already outside int64, and callers
+		// clamp that to above max or below min, so larger exponents add nothing.
+		shift := 19
+		if d.Scale > -shift {
+			shift = -d.Scale
+		}
+
+		return v.Mul(v, pow10Big(shift)), nil
+	}
+}
+
+func pow10Big(n int) *big.Int {
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
 }
 
 func (d DecimalLiteral) Equals(other Literal) bool {
@@ -1521,14 +1571,30 @@ func (v VariantLiteral) MarshalBinary() ([]byte, error) {
 	return variant.Value(v).Bytes(), nil
 }
 
+// To returns v for VariantType. For other types, a primitive variant is
+// converted with the cast rules of the literal for its value (int8/int16 widen
+// to int32, timestamps are tz-agnostic), not the stricter CastVariantLiteral
+// rules. Null, object, array and zero-value variants return ErrBadCast.
 func (v VariantLiteral) To(typ Type) (Literal, error) {
 	if _, ok := typ.(VariantType); ok {
 		return v, nil
 	}
 
-	// TODO: improve by getting the actual value (using .Type()) and attempting
-	// to convert, or returning an error if it can't.
-	return nil, fmt.Errorf("%w: VariantLiteral to %s", ErrBadCast, typ)
+	lit, ok := literalFromVariant(variant.Value(v))
+	if !ok {
+		return nil, fmt.Errorf("%w: VariantLiteral to %s", ErrBadCast, typ)
+	}
+
+	out, err := lit.To(typ)
+	if err != nil {
+		if !errors.Is(err, ErrBadCast) {
+			err = fmt.Errorf("%w: %w", ErrBadCast, err)
+		}
+
+		return nil, fmt.Errorf("VariantLiteral: %w", err)
+	}
+
+	return out, nil
 }
 
 func (v VariantLiteral) Equals(other Literal) bool {

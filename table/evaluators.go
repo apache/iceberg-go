@@ -43,6 +43,12 @@ const (
 // manifest file has rows that might or might not match a given partition filter by using
 // the stats provided in the partitions (UpperBound/LowerBound/ContainsNull/ContainsNaN).
 func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, partitionFilter iceberg.BooleanExpression, caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
+	if partitionFilter.Equals(iceberg.AlwaysTrue{}) {
+		return func(iceberg.ManifestFile) (bool, error) {
+			return rowsMightMatch, nil
+		}, nil
+	}
+
 	partType := spec.PartitionType(schema)
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 	filter, err := iceberg.RewriteNotExpr(partitionFilter)
@@ -750,6 +756,18 @@ func (m *metricsEvaluator) isNan(v iceberg.Literal) bool {
 func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression,
 	caseSensitive bool, includeEmptyFiles bool,
 ) (func(iceberg.DataFile) (bool, error), error) {
+	if expr.Equals(iceberg.AlwaysTrue{}) {
+		if includeEmptyFiles {
+			return func(iceberg.DataFile) (bool, error) {
+				return rowsMightMatch, nil
+			}, nil
+		}
+
+		return func(file iceberg.DataFile) (bool, error) {
+			return file.Count() != 0, nil
+		}, nil
+	}
+
 	rewritten, err := iceberg.RewriteNotExpr(expr)
 	if err != nil {
 		return nil, err
@@ -870,7 +888,7 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		}
 
 		fieldID := int(stats.Descr().SchemaNode().FieldID())
-		m.valueCounts[fieldID] = stats.NumValues()
+		m.valueCounts[fieldID] = colMeta.NumValues()
 		if stats.HasNullCount() {
 			m.nullCounts[fieldID] = stats.NullCount()
 		}

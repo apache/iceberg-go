@@ -2237,7 +2237,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) (err error) {
 					ErrInvalidArgument, m.version, file.Version())
 			}
 
-			wrapped := *(file.(*manifestFile))
+			wrapped := *file.(*manifestFile)
 			ensurePartitionList(&wrapped.PartitionList)
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168

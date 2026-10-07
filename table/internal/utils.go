@@ -309,7 +309,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	fieldIDToLogicalType := make(map[int]string)
 
 	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
-		fieldIDToPartitionData = make(map[int]any)
+		fieldIDToPartitionData = make(map[int]any, opts.Spec.NumFields())
 		for _, field := range opts.Spec.Fields() {
 			sourceField, sourceFieldFound := opts.Schema.FindFieldByIDRef(
 				field.SourceID(), iceberginternal.SchemaRef{})
@@ -636,8 +636,8 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 
 	result := slices.Clone(val[:trunc])
 
-	for i := len(result) - 1; i >= 0; i-- {
-		if result[i] < 255 {
+	for i, v := range slices.Backward(result) {
+		if v < 255 {
 			result[i]++
 
 			return result[:i+1]

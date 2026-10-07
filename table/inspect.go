@@ -456,7 +456,7 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 		return nil, err
 	}
 
-	return manifestSet.allManifests(), nil
+	return manifestSet.borrowAllManifests(), nil
 }
 
 func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transform iceberg.Transform, bound *[]byte) error {

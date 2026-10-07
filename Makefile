@@ -15,9 +15,9 @@
 # limitations under the License.
 
 # golangci-lint version (keep in sync with CI and README)
-GOLANGCI_LINT_VERSION := v2.12.2
+GOLANGCI_LINT_VERSION := v2.14.0
 
-.PHONY: test test-assert test-race lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-rest-scan-planning integration-spark integration-hadoop integration-down integration-logs docs-gen
+.PHONY: test test-assert test-race vet lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-rest-scan-planning integration-spark integration-hadoop integration-down integration-logs docs-gen
 
 test:
 	go test -v ./...
@@ -27,6 +27,13 @@ test-assert:
 
 test-race:
 	go test -race -v ./...
+
+# vet also type-checks the //go:build integration files, which the default
+# toolchain skips. Without the tagged pass, code behind that tag (for example
+# table/maintenance's integration test) can break without any target noticing.
+vet:
+	go vet ./...
+	go vet -tags=integration ./...
 
 docs-gen:
 	go run ./website/gen

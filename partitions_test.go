@@ -318,6 +318,12 @@ func TestUnpartitionedWithVoidField(t *testing.T) {
 
 	assert.True(t, spec.IsUnpartitioned())
 
+	pointerSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: &iceberg.VoidTransform{},
+	})
+
+	assert.True(t, pointerSpec.IsUnpartitioned())
+
 	spec2 := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
 	}, iceberg.PartitionField{
@@ -515,6 +521,90 @@ func TestPartitionType(t *testing.T) {
 	actual = spec.PartitionType(droppedSourceSchema)
 	assert.Truef(t, expectedWithDroppedSources.Equals(actual),
 		"expected: %s, got: %s", expectedWithDroppedSources, actual)
+}
+
+func TestPartitionTypePreservesFieldOrderAndResultTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "nested", Type: iceberg.Int64Type{}, Required: true},
+		}}},
+		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.TimestampTzNsType{}, Required: true},
+		iceberg.NestedField{ID: 4, Name: "amount", Type: iceberg.DecimalTypeOf(12, 2)},
+	)
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	fields := []iceberg.PartitionField{
+		{SourceIDs: []int{2}, FieldID: 1007, Name: "nested", Transform: iceberg.IdentityTransform{}},
+		{SourceIDs: []int{3}, FieldID: 1001, Name: "ts", Transform: iceberg.IdentityTransform{}},
+		{SourceIDs: []int{4}, FieldID: 1006, Name: "amount", Transform: iceberg.TruncateTransform{Width: 10}},
+		{SourceIDs: []int{99}, FieldID: 1002, Name: "missing_bucket", Transform: iceberg.BucketTransform{NumBuckets: 16}},
+		{SourceIDs: []int{99}, FieldID: 1005, Name: "missing_day", Transform: iceberg.DayTransform{}},
+		{SourceIDs: []int{99}, FieldID: 1003, Name: "missing_identity", Transform: iceberg.IdentityTransform{}},
+		{SourceIDs: []int{0}, FieldID: 1004, Name: "void", Transform: iceberg.VoidTransform{}},
+		{SourceIDs: []int{99}, FieldID: 1000, Name: "custom", Transform: unknown},
+	}
+	spec := iceberg.NewPartitionSpec(fields...)
+
+	want := []iceberg.NestedField{
+		{ID: 1007, Name: "nested", Type: iceberg.Int64Type{}},
+		{ID: 1001, Name: "ts", Type: iceberg.TimestampTzNsType{}},
+		{ID: 1006, Name: "amount", Type: iceberg.DecimalTypeOf(12, 2)},
+		{ID: 1002, Name: "missing_bucket", Type: iceberg.Int32Type{}},
+		{ID: 1005, Name: "missing_day", Type: iceberg.DateType{}},
+		{ID: 1003, Name: "missing_identity", Type: iceberg.UnknownType{}},
+		{ID: 1004, Name: "void", Type: iceberg.UnknownType{}},
+		{ID: 1000, Name: "custom", Type: iceberg.StringType{}},
+	}
+	require.Equal(t, want, spec.PartitionType(schema).FieldList)
+
+	for i, field := range fields {
+		require.True(t, field.Equals(spec.Field(i)))
+	}
+}
+
+func TestPartitionTypeResolvesEachSchema(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "value", Transform: iceberg.IdentityTransform{},
+	})
+	schemas := []*iceberg.Schema{
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.StringType{}}),
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.Int64Type{}}),
+		iceberg.NewSchema(0),
+	}
+	types := []iceberg.Type{iceberg.StringType{}, iceberg.Int64Type{}, iceberg.UnknownType{}}
+	for range 2 {
+		for i, schema := range schemas {
+			require.Equal(t, []iceberg.NestedField{
+				{ID: 1000, Name: "value", Type: types[i]},
+			}, spec.PartitionType(schema).FieldList)
+		}
+	}
+}
+
+func TestPartitionTypeReturnsIndependentFields(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.StringType{}})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "value", Transform: iceberg.IdentityTransform{},
+	})
+	first := spec.PartitionType(schema)
+	second := spec.PartitionType(schema)
+	first.FieldList[0] = iceberg.NestedField{ID: 2000, Name: "changed", Type: iceberg.Int64Type{}, Required: true}
+
+	want := []iceberg.NestedField{{ID: 1000, Name: "value", Type: iceberg.StringType{}}}
+	require.Equal(t, want, second.FieldList)
+	require.Equal(t, want, spec.PartitionType(schema).FieldList)
+	require.Equal(t, "value", spec.Field(0).Name)
+	require.Equal(t, 1000, spec.Field(0).FieldID)
+}
+
+func TestPartitionTypeUnpartitioned(t *testing.T) {
+	for _, spec := range []iceberg.PartitionSpec{{}, iceberg.NewPartitionSpec()} {
+		partitionType := spec.PartitionType(nil)
+		require.NotNil(t, partitionType)
+		require.NotNil(t, partitionType.FieldList)
+		require.Empty(t, partitionType.FieldList)
+	}
 }
 
 type partitionRecord []any
