@@ -89,8 +89,8 @@ func (s *FanoutWriterTestSuite) TestBinaryPartitionValuesDoNotAliasArrowStorage(
 
 func (s *FanoutWriterTestSuite) TestBinaryPartitionKeysWorkAtEveryLevel() {
 	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "first", Type: arrow.BinaryTypes.Binary},
-		{Name: "second", Type: arrow.BinaryTypes.Binary},
+		{Name: "first", Type: arrow.BinaryTypes.Binary, Nullable: true},
+		{Name: "second", Type: arrow.BinaryTypes.Binary, Nullable: true},
 	}, nil)
 	record := s.createCustomTestRecord(arrowSchema, [][]any{
 		{[]byte("a"), []byte("x")},
@@ -98,6 +98,20 @@ func (s *FanoutWriterTestSuite) TestBinaryPartitionKeysWorkAtEveryLevel() {
 		{[]byte("a"), []byte("y")},
 		{[]byte("b"), []byte("x")},
 		{[]byte("b"), []byte("x")},
+		{nil, []byte("x")},
+		{[]byte{}, []byte("x")},
+		{nil, []byte("x")},
+		{[]byte{}, []byte("x")},
+		{[]byte("a"), nil},
+		{[]byte("a"), []byte{}},
+		{[]byte("a"), nil},
+		{[]byte("a"), []byte{}},
+		{nil, nil},
+		{[]byte{}, []byte{}},
+		{[]byte("a"), []byte{0, 0xff}},
+		{[]byte("a"), []byte{0, 0xff}},
+		{[]byte("a"), []byte("x/y")},
+		{[]byte("a/x"), []byte("y")},
 	})
 	defer record.Release()
 
@@ -116,17 +130,35 @@ func (s *FanoutWriterTestSuite) TestBinaryPartitionKeysWorkAtEveryLevel() {
 
 	partitions, err := getRecordPartitions(spec, icebergSchema, record)
 	s.Require().NoError(err)
-	s.Require().Len(partitions, 3)
+	s.Require().Len(partitions, 12)
 
-	rowsByPartition := make(map[string][]int64)
+	// Keep NULL separate from an empty binary value at either tree level.
+	// A tuple key also preserves arbitrary bytes and embedded separators.
+	rowsByPartition := make(map[[2]any][]int64)
 	for _, partition := range partitions {
-		key := string(partition.partitionRec[0].([]byte)) + "/" + string(partition.partitionRec[1].([]byte))
+		var key [2]any
+		for i, value := range partition.partitionRec {
+			if value != nil {
+				key[i] = string(value.([]byte))
+			}
+		}
 		rowsByPartition[key] = partition.rows
 	}
 
-	s.Equal([]int64{0, 1}, rowsByPartition["a/x"])
-	s.Equal([]int64{2}, rowsByPartition["a/y"])
-	s.Equal([]int64{3, 4}, rowsByPartition["b/x"])
+	s.Equal(map[[2]any][]int64{
+		{"a", "x"}:        {0, 1},
+		{"a", "y"}:        {2},
+		{"b", "x"}:        {3, 4},
+		{nil, "x"}:        {5, 7},
+		{"", "x"}:         {6, 8},
+		{"a", nil}:        {9, 11},
+		{"a", ""}:         {10, 12},
+		{nil, nil}:        {13},
+		{"", ""}:          {14},
+		{"a", "\x00\xff"}: {15, 16},
+		{"a", "x/y"}:      {17},
+		{"a/x", "y"}:      {18},
+	}, rowsByPartition)
 }
 
 func (s *FanoutWriterTestSuite) TestFixedSizeBinaryPartitionReportsWidthMismatch() {
