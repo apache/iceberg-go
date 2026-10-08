@@ -2467,12 +2467,35 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 		return nil, nil, err
 	}
 
+	// SetProperties above may have staged a name mapping, which replaces t.meta, so re-read it.
+	meta, err = t.txnMeta()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Rewrites need the live deletes to drop rows already deleted, and every removed file must take its deletion vector with it. 
+	// DVs only exist from v3, so a v2 delete that only drops whole files skips the read.
+	var (
+		deletes   planningDeletes
+		builtMeta Metadata
+	)
+	if len(entriesToRewrite) > 0 || (len(filesToDelete) > 0 && meta.formatVersion >= 3) {
+		builtMeta, err = meta.Build()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to build metadata: %w", err)
+		}
+		deletes, err = t.readPlanningDeletes(fs, builtMeta)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	for _, df := range filesToDelete {
-		updater.deleteDataFile(df)
+		deletes.removeDataFile(updater, df)
 	}
 
 	if len(entriesToRewrite) > 0 {
-		if err := t.rewriteFilesWithFilter(ctx, fs, updater, entriesToRewrite, filter, caseSensitive, concurrency); err != nil {
+		if err := t.rewriteFilesWithFilter(ctx, fs, updater, builtMeta, deletes, entriesToRewrite, filter, caseSensitive, concurrency); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -2798,67 +2821,69 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	return filesToDelete, filesWithPartialDeletes, nil
 }
 
-// rewriteScanTasks returns a scan task for each rewrite candidate that carries the deletes applying to it on the
-// planning snapshot, matched the same way scan planning matches them.
+// planningDeletes indexes the live delete files of the planning snapshot the same way scan planning indexes them.
+type planningDeletes struct {
+	positional *positionalDeleteIndex
+	dvs        map[string]iceberg.ManifestEntry
+	equality   *equalityDeleteIndex
+}
+
+// readPlanningDeletes reads and indexes every live delete file of the planning snapshot.
 //
 // Delete manifests are not pruned by the row filter: with filter id=2 the rewrite keeps id=1,
 // so a delete on id=1 must still be applied.
 //
 // Known limitation: every live delete manifest of the snapshot is read on each call,
 // with no partition pruning, so a narrow rewrite on a delete-heavy table pays for all of them.
-func (t *Transaction) rewriteScanTasks(fs io.IO, entries []iceberg.ManifestEntry) ([]FileScanTask, error) {
+func (t *Transaction) readPlanningDeletes(fs io.IO, builtMeta Metadata) (planningDeletes, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
-		return nil, err
-	}
-	builtMeta, err := meta.Build()
-	if err != nil {
-		return nil, err
+		return planningDeletes{}, err
 	}
 
 	var liveDeletes []iceberg.ManifestEntry
 	if s := t.planningSnapshot(meta); s != nil {
 		for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes, true) {
 			if err != nil {
-				return nil, fmt.Errorf("failed to read delete manifests: %w", err)
+				return planningDeletes{}, fmt.Errorf("failed to read delete manifests: %w", err)
 			}
 			liveDeletes = append(liveDeletes, entry)
 		}
 	}
 
-	deletes, err := classifyManifestEntries(liveDeletes)
+	classified, err := classifyManifestEntries(liveDeletes)
 	if err != nil {
-		return nil, err
+		return planningDeletes{}, err
 	}
-	posDeleteIndex, err := buildPositionalDeleteIndex(deletes.positionalDeleteEntries)
+	positional, err := buildPositionalDeleteIndex(classified.positionalDeleteEntries)
 	if err != nil {
-		return nil, err
+		return planningDeletes{}, err
 	}
-	dvIndex, err := buildDVIndex(deletes.dvEntries)
+	dvs, err := buildDVIndex(classified.dvEntries)
 	if err != nil {
-		return nil, err
+		return planningDeletes{}, err
 	}
-	eqDeleteIndex, err := buildEqualityDeleteIndex(deletes.equalityDeleteEntries, builtMeta, meta.CurrentSchema())
+	equality, err := buildEqualityDeleteIndex(classified.equalityDeleteEntries, builtMeta, meta.CurrentSchema())
 	if err != nil {
-		return nil, err
+		return planningDeletes{}, err
 	}
 
-	tasks := make([]FileScanTask, 0, len(entries))
-	for _, entry := range entries {
-		task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex)
-		if err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, task)
-	}
+	return planningDeletes{positional: positional, dvs: dvs, equality: equality}, nil
+}
 
-	return tasks, nil
+// removeDataFile removes df together with the deletion vector that references it.
+// Position and equality delete files are left alone, since they can still apply to other files.
+func (d planningDeletes) removeDataFile(updater *snapshotProducer, df iceberg.DataFile) {
+	updater.deleteDataFile(df)
+	if dv, ok := d.dvs[df.FilePath()]; ok {
+		updater.removeDeletionVector(dv.DataFile())
+	}
 }
 
 // rewriteFilesWithFilter rewrites data files by preserving only rows that do NOT match the filter.
 // Rows already removed by a delete are dropped too, since those deletes stop applying once the file is replaced.
 // The filter binding and substrait conversion are computed once here and reused across every file.
-func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, entries []iceberg.ManifestEntry, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) error {
+func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, builtMeta Metadata, deletes planningDeletes, entries []iceberg.ManifestEntry, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -2875,16 +2900,17 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 		return err
 	}
 
-	tasks, err := t.rewriteScanTasks(fs, entries)
-	if err != nil {
-		return err
-	}
+	for _, entry := range entries {
+		task, err := fileScanTaskForDataEntry(entry, deletes.positional, deletes.dvs, deletes.equality)
+		if err != nil {
+			return err
+		}
 
-	for _, task := range tasks {
 		// Use a separate UUID for rewrite operations to avoid filename collisions with new data files
 		rewriteUUID := uuid.New()
 		args := rewriteSingleFileArgs{
 			fs:            fs,
+			builtMeta:     builtMeta,
 			task:          task,
 			filter:        complementFilter,
 			postFilter:    postFilter,
@@ -2897,7 +2923,7 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 			return fmt.Errorf("failed to rewrite file %s: %w", task.File.FilePath(), err)
 		}
 
-		updater.deleteDataFile(task.File)
+		deletes.removeDataFile(updater, task.File)
 		for _, rewrittenFile := range rewrittenFiles {
 			updater.appendDataFile(rewrittenFile)
 		}
@@ -2911,7 +2937,9 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 // int) so positional ordering offers no compile-time order protection.
 type rewriteSingleFileArgs struct {
 	fs io.IO
-	// task is the source file as planned by [Transaction.rewriteScanTasks].
+	// builtMeta is the transaction's metadata, built once for the whole rewrite.
+	builtMeta Metadata
+	// task is the source file as planned by [fileScanTaskForDataEntry].
 	// Its deletes must be applied, and its sequence number seeds _last_updated_sequence_number
 	// for rows whose value is null in the file.
 	task FileScanTask
@@ -2980,13 +3008,8 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 		scanFilter = boundFilter
 	}
 
-	builtMeta, err := meta.Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build metadata: %w", err)
-	}
-
 	scanner := &arrowScan{
-		metadata:        builtMeta,
+		metadata:        args.builtMeta,
 		fs:              args.fs,
 		scanSchema:      meta.CurrentSchema(),
 		projectedSchema: projectedSchema,
@@ -3008,7 +3031,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	if preserveRowLineage {
 		arrowSchema, err = SchemaToArrowSchemaWithOptions(projectedSchema, ArrowSchemaOptions{
 			IncludeFieldIDs: true,
-			TableProperties: builtMeta.Properties(),
+			TableProperties: args.builtMeta.Properties(),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to build arrow schema with field IDs: %w", err)
