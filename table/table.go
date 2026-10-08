@@ -52,13 +52,14 @@ import (
 // error so that callers using errors.Is(err, table.ErrCommitFailed)
 // can detect retryable commit conflicts. Failed requirements also wrap it.
 // Requirements other than the implicit commit-branch assertion are not rebased.
-// If they fail after refresh, reload the table and rebuild the operation.
-// If the error also matches ErrTransactionUnusable, build a new transaction.
+// When an error matches both ErrCommitFailed and ErrTransactionUnusable,
+// retrying the same transaction cannot succeed. Reload the table and build a
+// new transaction.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrTransactionUnusable is returned when a failed commit removed files
-// referenced by staged updates. The transaction cannot be committed again.
-// Build a new transaction to retry.
+// referenced by staged updates, or when a requirement fails after a refresh.
+// The transaction cannot be committed again. Build a new transaction to retry.
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -649,7 +650,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 		// Resubmitting staged updates after cleanup would reference deleted files.
 		if !committed && retErr != nil && len(orphanedManifests) > 0 {
-			retErr = fmt.Errorf("%w (staged files were cleaned up; build a new transaction to retry): %w",
+			retErr = fmt.Errorf("%w (staged files were cleaned up, build a new transaction to retry): %w",
 				retErr, ErrTransactionUnusable)
 		}
 	}()
@@ -704,7 +705,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
 
 			if err := validateNonRebasedRequirements(reqs, co.branch, co.pinnedRefs, current); err != nil {
-				return nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w", ErrCommitFailed, err)
+				return nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w: %w",
+					ErrCommitFailed, err, ErrTransactionUnusable)
 			}
 			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
 				return nil, err

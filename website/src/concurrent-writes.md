@@ -35,6 +35,9 @@ state. A failed validation surfaces as one of:
   retried after refreshing (see below).
 - `table.ErrCommitDiverged` — terminal. The base snapshot is no longer on the
   branch at all, so a retry cannot reconcile the change.
+- `table.ErrTransactionUnusable` — terminal for this transaction. It can
+  accompany `ErrCommitFailed` when retrying the same transaction cannot
+  succeed, so check it first.
 
 ```go
 import (
@@ -46,7 +49,7 @@ import (
 
 _, err := txn.Commit(context.Background())
 switch {
-case errors.Is(err, table.ErrCommitDiverged):
+case errors.Is(err, table.ErrCommitDiverged), errors.Is(err, table.ErrTransactionUnusable):
     // unrecoverable: rebuild the operation from the latest table
 case errors.Is(err, table.ErrCommitFailed):
     // retriable: refresh and try again (the retry loop does this for you)
@@ -94,5 +97,6 @@ _, err := cat.CreateTable(ctx, ident, schema,
 Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including schema, spec, sort order, and refs pinned
 by `AssertRefSnapshotID`, `RollbackToSnapshot`, or `ExpireSnapshots`, must still
-hold. Otherwise, the commit fails with `ErrCommitFailed` without another attempt.
-Reload the table and rebuild the operation to try again.
+hold. Otherwise, the commit fails without another attempt, with an error that
+matches both `ErrCommitFailed` and `ErrTransactionUnusable`. The same transaction
+cannot be committed again. Reload the table and build a new transaction.

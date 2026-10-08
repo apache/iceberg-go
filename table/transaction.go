@@ -112,7 +112,7 @@ type Transaction struct {
 // The caller must hold t.mx.
 func (t *Transaction) checkUsable() error {
 	if t.unusable {
-		return fmt.Errorf("%w: staged files were cleaned up after a failed commit; build a new transaction",
+		return fmt.Errorf("%w: a previous commit failed, build a new transaction",
 			ErrTransactionUnusable)
 	}
 	if t.committed {
@@ -3380,10 +3380,11 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			withCommitPinnedRefs(t.pinnedRefs),
 		)
 		if err != nil {
-			// A clean conflict (ErrCommitFailed) stays retriable unless cleanup
-			// removed files the staged updates reference, as it does after any
-			// manifest-list rebuild or rewrite. Any other failure leaves the
-			// commit state unknown, so mark it terminal to avoid a double-apply.
+			// A clean conflict (ErrCommitFailed) stays retriable unless the error
+			// also matches ErrTransactionUnusable: cleanup removed files the staged
+			// updates reference, or a requirement failed after a refresh. Any other
+			// failure leaves the commit state unknown, so mark it terminal to avoid
+			// a double-apply.
 			if !errors.Is(err, ErrCommitFailed) {
 				t.committed = true
 			}

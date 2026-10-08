@@ -1116,7 +1116,7 @@ func (c *recordingTransactionalCatalog) CommitTransaction(context.Context, []tab
 	return nil
 }
 
-func TestCommitAfterFailFastWithoutCleanupStaysRetriable(t *testing.T) {
+func TestCommitAfterNonRebasedRequirementFailureIsUnusable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	track := &trackingFS{}
@@ -1131,12 +1131,14 @@ func TestCommitAfterFailFastWithoutCleanupStaysRetriable(t *testing.T) {
 	require.NoError(t, txn.SetProperties(iceberg.Properties{"marker": "1"}))
 	_, err := txn.Commit(ctx)
 	require.ErrorIs(t, err, table.ErrCommitFailed)
-	assert.NotErrorIs(t, err, table.ErrTransactionUnusable)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Empty(t, track.removed)
 
 	cat.current = h0
-	committed, err := txn.Commit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, "1", committed.Properties()["marker"])
+	_, err = txn.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.EqualValues(t, 1, cat.commitTableCalls.Load())
+	assert.NotContains(t, cat.current.Properties(), "marker")
 }
 
 // TestRewriteManifestsClusterByReusesOutputOnOCCRetry verifies that a
