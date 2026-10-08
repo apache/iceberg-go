@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 )
 
 const (
@@ -159,6 +160,50 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 }
 
 var positionDeleteSplitReuseBenchmarkSink int64
+
+// BenchmarkPositionDeleteBitmapUnion isolates merging already decoded delete
+// files. Separate high-bit buckets make repeated copies of the growing union
+// visible as the number of applicable delete files increases.
+func BenchmarkPositionDeleteBitmapUnion(b *testing.B) {
+	const (
+		dataPath         = "mem://benchmark/data/union.parquet"
+		positionsPerFile = 16_384
+	)
+
+	for _, fileCount := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("files=%d", fileCount), func(b *testing.B) {
+			loader := &lazyPositionDeleteLoader{
+				files: make(map[string]*lazyPositionDeleteFile, fileCount),
+			}
+			paths := make([]string, fileCount)
+			for i := range paths {
+				paths[i] = fmt.Sprintf("delete-%d.parquet", i)
+				bitmap := dv.NewRoaringPositionBitmap()
+				for position := range positionsPerFile {
+					bitmap.Set(uint64(i)<<32 | uint64(position*37))
+				}
+				cached := &lazyPositionDeleteFile{
+					bitmaps: map[string]*dv.RoaringPositionBitmap{dataPath: bitmap},
+				}
+				cached.once.Do(func() {})
+				loader.files[paths[i]] = cached
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				bitmap, err := loader.buildIndex(b.Context(), dataPath, paths)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if bitmap.Cardinality() != int64(fileCount*positionsPerFile) {
+					b.Fatal("merged bitmap has unexpected cardinality")
+				}
+				positionDeleteSplitReuseBenchmarkSink = bitmap.Cardinality()
+			}
+		})
+	}
+}
 
 func BenchmarkPositionDeleteBitmapReuseAcrossSplits(b *testing.B) {
 	const deleteRows = 100_000

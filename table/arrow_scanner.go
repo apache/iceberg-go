@@ -303,6 +303,7 @@ func (l *lazyPositionDeleteLoader) buildIndex(
 	ctx context.Context, targetPath string, deletePaths []string,
 ) (*dv.RoaringPositionBitmap, error) {
 	var bitmap *dv.RoaringPositionBitmap
+	owned := false
 	for _, path := range deletePaths {
 		cached, err := l.loadDeleteFile(ctx, path)
 		if err != nil {
@@ -322,13 +323,15 @@ func (l *lazyPositionDeleteLoader) buildIndex(
 			continue
 		}
 
-		// The first bitmap may be shared by every target using this delete file.
-		// Copy it only when a second delete file must be merged so cached per-file
-		// bitmaps remain immutable for concurrent split tasks.
-		merged := dv.NewRoaringPositionBitmap()
-		merged.Or(bitmap)
-		merged.Or(deleteBitmap)
-		bitmap = merged
+		// Detach from the first cached bitmap once, then accumulate into the
+		// private union. Cached inputs stay immutable for other split tasks.
+		if !owned {
+			merged := dv.NewRoaringPositionBitmap()
+			merged.Or(bitmap)
+			bitmap = merged
+			owned = true
+		}
+		bitmap.Or(deleteBitmap)
 	}
 
 	return bitmap, nil

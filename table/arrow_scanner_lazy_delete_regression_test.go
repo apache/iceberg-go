@@ -174,6 +174,7 @@ func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T
 	const (
 		deletePathA = "mem://bucket/deletes/split-a.parquet"
 		deletePathB = "mem://bucket/deletes/split-b.parquet"
+		deletePathC = "mem://bucket/deletes/split-c.parquet"
 		dataPath    = "mem://bucket/data/split.parquet"
 	)
 	fs := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
@@ -181,13 +182,18 @@ func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T
 		`[{"file_path":"`+dataPath+`","pos":1}]`)
 	writePosDeleteParquetToMemFS(t, fs.MemFS, deletePathB,
 		`[{"file_path":"`+dataPath+`","pos":3}]`)
+	writePosDeleteParquetToMemFS(t, fs.MemFS, deletePathC,
+		`[{"file_path":"`+dataPath+`","pos":5}]`)
 
 	deleteA := newPosDeleteFile(t, deletePathA, 1, 128)
 	deleteB := newPosDeleteFile(t, deletePathB, 1, 128)
+	deleteC := newPosDeleteFile(t, deletePathC, 1, 128)
 	dataFile := newLazyDataFile(t, dataPath)
 	tasks := []FileScanTask{
-		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}, Start: 0, Length: 64},
-		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteB, deleteA}, Start: 64, Length: 64},
+		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteA, deleteB, deleteC}, Start: 0, Length: 64},
+		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteC, deleteB, deleteA}, Start: 64, Length: 64},
+		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteA}},
+		{File: dataFile, DeleteFiles: []iceberg.DataFile{deleteB, deleteC}},
 	}
 	loader := newLazyPositionDeleteLoader(fs, tasks)
 
@@ -199,10 +205,25 @@ func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T
 	require.NotNil(t, second)
 
 	assert.Same(t, first, second, "split tasks must reuse the merged position index")
-	assert.Equal(t, int64(2), first.Cardinality())
+	assert.Equal(t, int64(3), first.Cardinality())
 	assert.True(t, first.Contains(1))
 	assert.True(t, first.Contains(3))
-	assert.Equal(t, int64(2), fs.opens.Load(), "each delete file must be read once")
+	assert.True(t, first.Contains(5))
+
+	// Merging three or more files must not change cached source bitmaps used
+	// by another task with a smaller set of applicable delete files.
+	single, err := loader.load(ctx, tasks[2])
+	require.NoError(t, err)
+	require.NotNil(t, single)
+	assert.Equal(t, int64(1), single.Cardinality())
+	assert.True(t, single.Contains(1))
+	subset, err := loader.load(ctx, tasks[3])
+	require.NoError(t, err)
+	require.NotNil(t, subset)
+	assert.Equal(t, int64(2), subset.Cardinality())
+	assert.True(t, subset.Contains(3))
+	assert.True(t, subset.Contains(5))
+	assert.Equal(t, int64(3), fs.opens.Load(), "each delete file must be read once")
 
 	loader.release()
 }
