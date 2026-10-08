@@ -250,6 +250,71 @@ func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 	assert.Equal(t, 1, openCount, "concurrent misses should share one backend read")
 }
 
+
+func TestManifestContentCacheInFlightLengthMismatch(t *testing.T) {
+	const location = "mem://manifest-content-cache/inflight-length.avro"
+	content := []byte("manifest")
+	base := iceio.NewMemFS()
+	require.NoError(t, base.WriteFile(location, content))
+	fs := &blockingSnapshotManifestIO{
+		IO: base, blockedPath: location, started: make(chan struct{}),
+		release: make(chan struct{}), opens: make(map[string]int),
+	}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
+
+	cache := newManifestContentCache(0, 1024, 1024)
+	actual := iceberg.NewManifestFile(2, location, int64(len(content)), 0, 1).Build()
+	wrongLength := iceberg.NewManifestFile(2, location, int64(len(content)-1), 0, 1).Build()
+	type result struct {
+		content []byte
+		err     error
+	}
+	read := func(ctx context.Context, manifest iceberg.ManifestFile) <-chan result {
+		out := make(chan result, 1)
+		go func() {
+			file, err := cache.open(ctx, fs, manifest)
+			if err != nil {
+				out <- result{err: err}
+
+				return
+			}
+			got, err := io.ReadAll(file)
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
+			out <- result{content: got, err: err}
+		}()
+
+		return out
+	}
+
+	producer := read(t.Context(), actual)
+	select {
+	case <-fs.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manifest read did not start")
+	}
+
+	waiterCtx := &notifyingContext{Context: t.Context(), entered: make(chan struct{})}
+	waiter := read(waiterCtx, wrongLength)
+	select {
+	case <-waiterCtx.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not join the manifest read")
+	}
+	release.Do(func() { close(fs.release) })
+
+	for _, got := range []result{<-producer, <-waiter} {
+		require.NoError(t, got.err)
+		assert.Equal(t, content, got.content)
+	}
+	fs.mu.Lock()
+	opens := fs.opens[location]
+	fs.mu.Unlock()
+	assert.Equal(t, 2, opens, "a descriptor with a different length must bypass in-flight bytes")
+}
+
 func newManifestContentCacheTestTable(
 	t testing.TB,
 	fs *trackingCallsIO,

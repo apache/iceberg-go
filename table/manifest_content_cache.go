@@ -142,7 +142,9 @@ func (c *manifestContentCache) open(
 			if load.canceled {
 				continue
 			}
-			if load.err != nil {
+			// Concurrent callers may describe the same path with different lengths.
+			// Never reuse in-flight bytes that do not match this caller's descriptor.
+			if load.err != nil || int64(len(load.content)) != expectedLength {
 				return base.Open(location)
 			}
 
