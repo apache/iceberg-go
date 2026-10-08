@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sync"
@@ -61,27 +62,119 @@ func TestManifestContentCacheSkipsOversizedManifest(t *testing.T) {
 	assert.Equal(t, 2, fs.openCount[manifestPath], "oversized manifests must bypass the content cache")
 }
 
+func TestManifestContentCacheBoundsPopulationAndPreservesFullReads(t *testing.T) {
+	const location = "mem://manifest-content-cache/length.avro"
+	content := bytes.Repeat([]byte("x"), 32)
+	for _, tt := range []struct {
+		name           string
+		expectedLength int64
+		wantOpens      int
+		firstReadBytes int
+	}{
+		{name: "matching length", expectedLength: 32, wantOpens: 1, firstReadBytes: 32},
+		{name: "longer content", expectedLength: 8, wantOpens: 2, firstReadBytes: 9},
+		{name: "shorter content", expectedLength: 64, wantOpens: 2, firstReadBytes: 32},
+		{name: "unknown length", expectedLength: 0, wantOpens: 1, firstReadBytes: 32},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base := iceio.NewMemFS()
+			require.NoError(t, base.WriteFile(location, content))
+			fs := &manifestContentCountingIO{IO: base}
+			cache := newManifestContentCache(0, 128, 64)
+			manifest := iceberg.NewManifestFile(2, location, tt.expectedLength, 0, 1).Build()
+
+			file, err := cache.open(t.Context(), fs, manifest)
+			require.NoError(t, err)
+			got, err := io.ReadAll(file)
+			require.NoError(t, err)
+			require.NoError(t, file.Close())
+			assert.Equal(t, content, got, "cache population must not truncate the ordinary read")
+			require.Len(t, fs.files, tt.wantOpens)
+			assert.Equal(t, tt.firstReadBytes, fs.files[0].bytesRead)
+			if tt.expectedLength == int64(len(content)) {
+				require.Contains(t, cache.entries, location)
+				assert.Equal(t, len(content), cap(cache.entries[location].content))
+				assert.Equal(t, int64(len(content)), cache.totalBytes)
+			} else {
+				assert.Empty(t, cache.entries)
+				assert.Zero(t, cache.totalBytes)
+			}
+		})
+	}
+}
+
+type manifestContentCountingIO struct {
+	iceio.IO
+	files []*manifestContentCountingFile
+}
+
+func (f *manifestContentCountingIO) Open(name string) (iceio.File, error) {
+	file, err := f.IO.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	counted := &manifestContentCountingFile{File: file}
+	f.files = append(f.files, counted)
+
+	return counted, nil
+}
+
+type manifestContentCountingFile struct {
+	iceio.File
+	bytesRead int
+}
+
+func (f *manifestContentCountingFile) Read(p []byte) (int, error) {
+	n, err := f.File.Read(p)
+	f.bytesRead += n
+
+	return n, err
+}
+
 func TestManifestContentCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	fs := newTrackingCallsIO()
 	const (
 		firstPath  = "mem://manifest-content-cache/first.avro"
 		secondPath = "mem://manifest-content-cache/second.avro"
+		thirdPath  = "mem://manifest-content-cache/third.avro"
 	)
 	firstBytes := []byte("aaaa")
 	secondBytes := []byte("bbbb")
 	require.NoError(t, fs.WriteFile(firstPath, firstBytes))
 	require.NoError(t, fs.WriteFile(secondPath, secondBytes))
+	require.NoError(t, fs.WriteFile(thirdPath, []byte("cccc")))
 
 	first := iceberg.NewManifestFile(2, firstPath, int64(len(firstBytes)), 0, 1).Build()
 	second := iceberg.NewManifestFile(2, secondPath, int64(len(secondBytes)), 0, 1).Build()
-	cache := newManifestContentCache(0, 4, 4)
+	third := iceberg.NewManifestFile(2, thirdPath, 4, 0, 1).Build()
+	cache := newManifestContentCache(0, 8, 4)
 
 	readCachedManifest(t, cache, fs, first)
 	readCachedManifest(t, cache, fs, second)
 	readCachedManifest(t, cache, fs, first)
+	readCachedManifest(t, cache, fs, third)
 
-	assert.Equal(t, 2, fs.openCount[firstPath])
+	assert.Contains(t, cache.entries, firstPath, "access must refresh LRU order")
+	assert.NotContains(t, cache.entries, secondPath)
+	assert.Equal(t, 1, fs.openCount[firstPath])
 	assert.Equal(t, 1, fs.openCount[secondPath])
+	assert.Equal(t, int64(8), cache.totalBytes)
+}
+
+func TestManifestContentCacheExpiresIdleEntries(t *testing.T) {
+	const location = "mem://manifest-content-cache/expired.avro"
+	fs := newTrackingCallsIO()
+	require.NoError(t, fs.WriteFile(location, []byte("aaaa")))
+	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+	cache := newManifestContentCache(60_000, 8, 4)
+
+	readCachedManifest(t, cache, fs, manifest)
+	cache.entries[location].lastAccessMs = time.Now().Add(-time.Hour).UnixMilli()
+	readCachedManifest(t, cache, fs, manifest)
+
+	assert.Equal(t, 2, fs.openCount[location])
+	assert.Equal(t, int64(4), cache.totalBytes)
+	assert.Len(t, cache.entries, 1)
 }
 
 func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
@@ -121,6 +214,29 @@ func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 	case <-fs.started:
 	case <-time.After(time.Second):
 		t.Fatal("manifest read did not start")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	waiterCtx := &notifyingContext{Context: ctx, entered: make(chan struct{})}
+	waiterErr := make(chan error, 1)
+	go func() {
+		file, err := cache.open(waiterCtx, fs, manifest)
+		if file != nil {
+			file.Close()
+		}
+		waiterErr <- err
+	}()
+	select {
+	case <-waiterCtx.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not join the manifest read")
+	}
+	cancel()
+	select {
+	case err := <-waiterErr:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled waiter did not return")
 	}
 	release.Do(func() { close(fs.release) })
 

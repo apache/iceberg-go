@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"path"
@@ -116,7 +117,7 @@ func (c *manifestContentCache) open(
 ) (iceio.File, error) {
 	location := manifest.FilePath()
 	expectedLength := manifest.Length()
-	if expectedLength < 0 || expectedLength > c.maxContentLength || expectedLength > c.maxTotalBytes {
+	if expectedLength <= 0 || expectedLength > c.maxContentLength || expectedLength > c.maxTotalBytes {
 		return base.Open(location)
 	}
 
@@ -152,7 +153,7 @@ func (c *manifestContentCache) open(
 		c.loads[location] = load
 		c.mu.Unlock()
 
-		content, err := readManifestContent(base, location)
+		content, err := readManifestContent(base, location, expectedLength)
 		canceled := err != nil && ctx.Err() != nil
 		c.finishLoad(location, expectedLength, load, content, err, canceled)
 		if err != nil {
@@ -250,11 +251,7 @@ func (c *manifestContentCache) removeEntryLocked(entry *manifestContentCacheEntr
 	c.totalBytes -= int64(len(entry.content))
 }
 
-func readManifestContent(base iceio.IO, location string) (content []byte, err error) {
-	if readFileIO, ok := base.(iceio.ReadFileIO); ok {
-		return readFileIO.ReadFile(location)
-	}
-
+func readManifestContent(base iceio.IO, location string, expectedLength int64) (content []byte, err error) {
 	file, err := base.Open(location)
 	if err != nil {
 		return nil, err
@@ -265,7 +262,24 @@ func readManifestContent(base iceio.IO, location string) (content []byte, err er
 		}
 	}()
 
-	return io.ReadAll(file)
+	// The advertised length has already passed the cache's size limits. Read
+	// into an exact-sized buffer so retained capacity matches byte accounting
+	// and a larger actual file cannot grow the population buffer without bound.
+	content = make([]byte, expectedLength)
+	if _, err := io.ReadFull(file, content); err != nil {
+		return nil, err
+	}
+
+	var extra [1]byte
+	if _, err := io.ReadFull(file, extra[:]); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("manifest content exceeds expected length %d", expectedLength)
+		}
+
+		return nil, err
+	}
+
+	return content, nil
 }
 
 type manifestContentCacheIO struct {
