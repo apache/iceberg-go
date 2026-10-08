@@ -3306,7 +3306,7 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 // statistics, and only top-level geo columns have their null counts tallied
 // from the Arrow data, so the nested leaf records a value count but no null
 // count. A missing null count only costs pruning. Flip this when nested geo
-// metrics land (TODO(#992)).
+// metrics land (TODO(#2158)).
 func TestWriteDataFileNestedGeoNullCount(t *testing.T) {
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},

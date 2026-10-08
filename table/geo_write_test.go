@@ -61,7 +61,7 @@ func wktToWKB(t *testing.T, s string) geoarrow.WKBBytes {
 // exercise the stats-plan dispatch that decides whether geo bounds are recorded.
 //
 // The geo columns are all top-level; nested geo columns are still unhandled in
-// the writer (see the TODO(#992) in parquet_files.go), so nothing here covers
+// the writer (see the TODO(#2158) in parquet_files.go), so nothing here covers
 // them.
 func newGeoTestWriter(t *testing.T, dir string, props iceberg.Properties) (*defaultDataFileWriter, *iceberg.Schema, *arrow.Schema) {
 	t.Helper()
