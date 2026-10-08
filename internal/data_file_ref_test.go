@@ -22,38 +22,19 @@ import (
 	"testing"
 )
 
-type splitOffsetsCollectionsTestFile struct {
-	offsets              []int64
-	splitOffsetsCalls    int
-	otherCollectionCalls int
+type splitOffsetsTestFile struct {
+	offsets           []int64
+	splitOffsetsCalls int
 }
 
-func (f *splitOffsetsCollectionsTestFile) ColumnSizes() map[int]int64 {
-	f.otherCollectionCalls++
-
-	return nil
-}
-
-func (f *splitOffsetsCollectionsTestFile) KeyMetadata() []byte {
-	f.otherCollectionCalls++
-
-	return nil
-}
-
-func (f *splitOffsetsCollectionsTestFile) SplitOffsets() []int64 {
+func (f *splitOffsetsTestFile) SplitOffsets() []int64 {
 	f.splitOffsetsCalls++
 
 	return f.offsets
 }
 
-func (f *splitOffsetsCollectionsTestFile) EqualityFieldIDs() []int {
-	f.otherCollectionCalls++
-
-	return nil
-}
-
 type splitOffsetsReferenceTestFile struct {
-	splitOffsetsCollectionsTestFile
+	splitOffsetsTestFile
 	borrowedOffsets []int64
 	refCalls        int
 }
@@ -84,7 +65,7 @@ func splitOffsetsTestCases() []struct {
 func TestBorrowedDataFileSplitOffsetsUsesPublicFallbackOnly(t *testing.T) {
 	for _, tt := range splitOffsetsTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
-			file := &splitOffsetsCollectionsTestFile{offsets: tt.offsets}
+			file := &splitOffsetsTestFile{offsets: tt.offsets}
 
 			got := BorrowedDataFileSplitOffsets(file)
 			if !slices.Equal(got, tt.offsets) || (got == nil) != (tt.offsets == nil) {
@@ -95,9 +76,6 @@ func TestBorrowedDataFileSplitOffsetsUsesPublicFallbackOnly(t *testing.T) {
 			}
 			if file.splitOffsetsCalls != 1 {
 				t.Fatalf("SplitOffsets() called %d times, want 1", file.splitOffsetsCalls)
-			}
-			if file.otherCollectionCalls != 0 {
-				t.Fatalf("other collection getters called %d times, want 0", file.otherCollectionCalls)
 			}
 		})
 	}
@@ -121,8 +99,8 @@ func TestBorrowedDataFileSplitOffsetsUsesBorrowedReference(t *testing.T) {
 			if file.refCalls != 1 {
 				t.Fatalf("DataFileSplitOffsetsRef() called %d times, want 1", file.refCalls)
 			}
-			if file.splitOffsetsCalls != 0 || file.otherCollectionCalls != 0 {
-				t.Fatal("public collection getters were called for borrowed offsets")
+			if file.splitOffsetsCalls != 0 {
+				t.Fatal("public getter was called for borrowed offsets")
 			}
 		})
 	}

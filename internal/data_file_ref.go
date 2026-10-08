@@ -82,6 +82,12 @@ type DataFileCollectionsRef interface {
 	)
 }
 
+// DataFileSplitOffsets is the public getter needed by the internal split-offset
+// helper. It intentionally excludes unrelated collection and statistics getters.
+type DataFileSplitOffsets interface {
+	SplitOffsets() []int64
+}
+
 // DataFileSplitOffsetsRef exposes only split offsets so callers that do not
 // need column statistics do not trigger their lazy materialization.
 type DataFileSplitOffsetsRef interface {
@@ -92,7 +98,7 @@ type DataFileSplitOffsetsRef interface {
 // built-in data file and falls back to the public getter for external
 // implementations. The returned slice is read-only and must not be mutated or
 // retained beyond the current planning or read operation.
-func BorrowedDataFileSplitOffsets(file DataFileCollections) []int64 {
+func BorrowedDataFileSplitOffsets(file DataFileSplitOffsets) []int64 {
 	var splitOffsets []int64
 	if ref, ok := file.(DataFileSplitOffsetsRef); ok {
 		splitOffsets = ref.DataFileSplitOffsetsRef(DataFileRef{})
