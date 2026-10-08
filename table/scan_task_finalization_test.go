@@ -91,6 +91,7 @@ func TestFinalizePlannedTasksParallelMatchesSerial(t *testing.T) {
 func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
 	schema := simpleSchema()
 	spec := partitionedSpec()
+	unpartitioned := iceberg.NewPartitionSpecID(1)
 	metadata, err := NewMetadata(
 		schema,
 		&spec,
@@ -99,6 +100,11 @@ func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddPartitionSpec(&unpartitioned, false))
+	metadata, err = builder.Build()
+	require.NoError(t, err)
 
 	tasks := make([]FileScanTask, 256)
 	for i := range tasks {
@@ -106,8 +112,12 @@ func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
 		if i%2 != 0 {
 			partitionValue = 8
 		}
+		fileSpec := spec
+		if i%4 < 2 {
+			fileSpec = unpartitioned
+		}
 		file := finalizationTestDataFile(
-			t, spec,
+			t, fileSpec,
 			fmt.Sprintf("mem://table/data/file-%d.parquet", i),
 			map[int]any{1000: partitionValue}, 100, nil)
 		tasks[i] = FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
@@ -128,13 +138,46 @@ func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
 	assert.Equal(t, serial, parallel)
 	assert.Equal(t, serialMetrics, parallelMetrics)
 	for i, task := range parallel {
-		if i%2 == 0 {
+		if i%4 < 2 {
+			assert.Nil(t, task.Residual, "task %d has no partition projection", i)
+		} else if i%2 == 0 {
 			_, ok := task.Residual.(iceberg.AlwaysTrue)
 			assert.True(t, ok, "task %d should simplify to always true", i)
 		} else {
 			_, ok := task.Residual.(iceberg.AlwaysFalse)
 			assert.True(t, ok, "task %d should simplify to always false", i)
 		}
+	}
+}
+
+func TestFinalizePlannedTasksReturnsFirstErrorInTaskOrder(t *testing.T) {
+	schema := simpleSchema()
+	spec := partitionedSpec()
+	metadata, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://table", nil)
+	require.NoError(t, err)
+
+	tasks := make([]FileScanTask, 256)
+	for i := range tasks {
+		var partitionValue any = int32(7)
+		if i == 1 || i == 128 {
+			// Put failures in separate worker ranges. Both must retain the
+			// first file's diagnostic even if a later range finishes first.
+			partitionValue = "invalid integer partition"
+		}
+		file := finalizationTestDataFile(t, spec,
+			fmt.Sprintf("mem://table/data/file-%d.parquet", i),
+			map[int]any{1000: partitionValue}, 100, nil)
+		tasks[i] = FileScanTask{File: file, Length: file.FileSizeBytes()}
+	}
+
+	for _, concurrency := range []int{1, 8} {
+		scan := &Scan{
+			metadata: metadata, concurrency: concurrency, caseSensitive: true,
+			rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7)),
+		}
+		result, err := scan.finalizePlannedTasks(tasks, schema, &scanMetricsAccumulator{})
+		require.ErrorContains(t, err, "evaluate partition residual for mem://table/data/file-1.parquet")
+		assert.Nil(t, result)
 	}
 }
 

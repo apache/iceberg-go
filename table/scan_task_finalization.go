@@ -36,7 +36,6 @@ type scanTaskSplitReplacement struct {
 type scanTaskFinalizationResult struct {
 	metrics      scanMetricsAccumulator
 	replacements []scanTaskSplitReplacement
-	errIndex     int
 	err          error
 }
 
@@ -100,19 +99,13 @@ func (scan *Scan) finalizePlannedTasks(
 		wg.Wait()
 	}
 
-	// Workers are allowed to finish independently after an error. Choose the
-	// lowest failing task index so callers observe the same error as the serial
-	// task-order loop.
-	firstErrIndex := len(plannedTasks)
-	var firstErr error
+	// Each worker stops at its first error, and results follow contiguous task
+	// ranges. The first error in result order is therefore also the first error
+	// in task order, regardless of which worker finished first.
 	for i := range results {
-		if results[i].err != nil && results[i].errIndex < firstErrIndex {
-			firstErrIndex = results[i].errIndex
-			firstErr = results[i].err
+		if results[i].err != nil {
+			return nil, results[i].err
 		}
-	}
-	if firstErr != nil {
-		return nil, firstErr
 	}
 
 	totalTasks := len(plannedTasks)
@@ -146,24 +139,32 @@ func (scan *Scan) finalizeTaskRange(
 	residualEvaluators *keyDefaultMapErr[int, *partitionResidualEvaluator],
 	splitTargetSize int64,
 ) scanTaskFinalizationResult {
-	result := scanTaskFinalizationResult{errIndex: end}
+	var result scanTaskFinalizationResult
+	var residualEvaluator *partitionResidualEvaluator
+	var cachedSpecID int
+	var hasCachedSpec bool
 	for index := start; index < end; index++ {
 		task := &plannedTasks[index]
 		if residualEvaluators != nil {
 			specID := int(task.File.SpecID())
-			residualEvaluator, err := residualEvaluators.Get(specID)
-			if err != nil {
-				result.errIndex = index
-				result.err = fmt.Errorf(
-					"build partition residual evaluator for spec %d: %w", specID, err)
+			var err error
+			if !hasCachedSpec || specID != cachedSpecID {
+				residualEvaluator, err = residualEvaluators.Get(specID)
+				if err != nil {
+					result.err = fmt.Errorf(
+						"build partition residual evaluator for spec %d: %w", specID, err)
 
-				return result
+					return result
+				}
+				// Manifest-order runs normally share one spec. Evaluators are
+				// immutable, so each worker can reuse its last lookup without
+				// acquiring the shared cache lock for every file.
+				cachedSpecID, hasCachedSpec = specID, true
 			}
 			if residualEvaluator != nil {
 				var simplified bool
 				task.Residual, simplified, err = residualEvaluator.residual(dataFilePartition(task.File))
 				if err != nil {
-					result.errIndex = index
 					result.err = fmt.Errorf(
 						"evaluate partition residual for %s: %w", task.File.FilePath(), err)
 
