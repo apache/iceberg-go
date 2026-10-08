@@ -250,7 +250,6 @@ func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 	assert.Equal(t, 1, openCount, "concurrent misses should share one backend read")
 }
 
-
 func TestManifestContentCacheInFlightLengthMismatch(t *testing.T) {
 	const location = "mem://manifest-content-cache/inflight-length.avro"
 	content := []byte("manifest")
