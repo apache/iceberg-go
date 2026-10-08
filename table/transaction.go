@@ -2863,7 +2863,7 @@ type planningDeletes struct {
 // Delete manifests are not pruned by the row filter: with filter id=2 the rewrite keeps id=1,
 // so a delete on id=1 must still be applied.
 //
-// Known limitation: every live delete manifest of the snapshot is read on each call,
+// Known limitation (#2160): every live delete manifest of the snapshot is read on each call,
 // with no partition pruning, so a narrow rewrite on a delete-heavy table pays for all of them.
 func (t *Transaction) readPlanningDeletes(fs io.IO, builtMeta Metadata) (planningDeletes, error) {
 	meta, err := t.txnMeta()
