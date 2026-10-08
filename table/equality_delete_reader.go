@@ -1377,7 +1377,11 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 
 	singleInt64Sets := make([]*singleInt64EqualityDeleteSet, len(eqDeleteSets))
 	for i, eqDel := range eqDeleteSets {
-		singleInt64Sets[i] = eqDel.singleInt64Set(fileSchema)
+		// Nested fields need parent validity checks and use the generic path.
+		// Do not duplicate their encoded keys in an index that cannot be used.
+		if len(fieldRefs[i]) == 1 && len(fieldRefs[i][0].path) == 1 {
+			singleInt64Sets[i] = eqDel.singleInt64Set(fileSchema)
+		}
 	}
 
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {

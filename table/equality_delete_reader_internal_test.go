@@ -900,6 +900,48 @@ func TestProcessEqualityDeletesSingleInt64FastPathHandlesNullAndNegative(t *test
 	result.Release()
 }
 
+func TestProcessEqualityDeletesNestedInt64DoesNotBuildUnusedIndex(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	builder := array.NewInt64Builder(mem)
+	builder.AppendValues([]int64{123, 456, 789}, nil)
+	child := builder.NewArray()
+	builder.Release()
+	defer child.Release()
+	validity := memory.NewBufferBytes([]byte{0x06})
+	defer validity.Release()
+	parent, err := array.NewStructArrayWithNulls(
+		[]arrow.Array{child}, []string{"id"}, validity, 1, 0)
+	require.NoError(t, err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "person", Type: parent.DataType(), Nullable: true,
+	}}, nil)
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{parent}, 3)
+	parent.Release()
+
+	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 2, Name: "person", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		}},
+	})
+	deleteSet := int64EqualityDeleteSet(456)
+	deleteSet.colNames[0] = "person.id"
+	deleteSet.keys[string([]byte{0})] = struct{}{}
+	process, err := processEqualityDeletesColumnarForFile(ctx,
+		[]*equalityDeleteSet{deleteSet}, fileSchema, "nested.parquet")
+	require.NoError(t, err)
+	assert.Nil(t, deleteSet.singleInt64, "nested fields must not allocate an unused typed index")
+
+	result, err := process(record)
+	require.NoError(t, err)
+	defer result.Release()
+	require.Equal(t, int64(1), result.NumRows())
+	assert.Equal(t, int64(789), result.Column(0).(*array.Struct).Field(0).(*array.Int64).Value(0))
+}
+
 func int64EqualityDeleteSet(values ...int64) *equalityDeleteSet {
 	keys := make(set[string], len(values))
 	for _, value := range values {
