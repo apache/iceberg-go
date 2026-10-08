@@ -890,13 +890,19 @@ func buildPartitionEvaluator(specID int, metadata Metadata, schema *iceberg.Sche
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
-	partType := spec.PartitionType(schema)
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 
 	partitionFilter, err := partitionFilters.Get(specID)
 	if err != nil {
 		return nil, err
 	}
+	if partitionFilter.Equals(iceberg.AlwaysTrue{}) {
+		return func(iceberg.DataFile) (bool, error) {
+			return true, nil
+		}, nil
+	}
+
+	partType := spec.PartitionType(schema)
+	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 
 	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilter, caseSensitive)
 	if err != nil {
@@ -1056,7 +1062,7 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(
 		return nil, err
 	}
 
-	return scan.filterManifestsWithSchema(manifestSet.allManifests(), schema, acc, partitionFilters)
+	return scan.filterManifestsWithSchema(manifestSet.borrowAllManifests(), schema, acc, partitionFilters)
 }
 
 func (scan *Scan) manifestSet(

@@ -51,9 +51,13 @@ func TestScanPlanningPOSTRetriesPreserveIdempotency(t *testing.T) {
 						defer mu.Unlock()
 						key := req.Header.Get(headerIdempotencyKey)
 						body, err := io.ReadAll(req.Body)
-						require.NoError(t, err)
+						if !assert.NoError(t, err) {
+							return
+						}
 						parsed, err := uuid.Parse(key)
-						require.NoError(t, err)
+						if !assert.NoError(t, err) {
+							return
+						}
 						assert.Equal(t, uuid.Version(7), parsed.Version())
 						if attempts.Add(1) == 1 {
 							firstKey, firstBody = key, string(body)

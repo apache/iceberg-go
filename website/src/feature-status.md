@@ -129,7 +129,7 @@ As long as the FileSystem is supported and the Catalog supports altering the tab
 | Append Stream        |     X     |
 | Append Data Files    |     X     |
 | Rewrite Files        |     X     |
-| Rewrite manifests    |           |
+| Rewrite manifests    |     X     |
 | Overwrite Files      |     X     |
 | Copy-On-Write Delete |     X     |
 | Write Pos Delete     |     X     |

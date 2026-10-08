@@ -1131,6 +1131,55 @@ func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
 	assert.ErrorContains(t, err, "ordered predicates are not supported on variant fields")
 }
 
+func TestVariantSetPredicate(t *testing.T) {
+	one := variant.Value(variantLiteralOf(t, int64(1)))
+	two := variant.Value(variantLiteralOf(t, int64(2)))
+	ref := iceberg.Reference("payload")
+
+	t.Run("in", func(t *testing.T) {
+		pred := iceberg.IsIn(ref, one, two, variant.Value(variantLiteralOf(t, int64(1))))
+		require.Implements(t, (*iceberg.UnboundPredicate)(nil), pred)
+		assert.Equal(t, iceberg.OpIn, pred.Op())
+		// The duplicate is a separate buffer, so this only holds if the set dedups by content.
+		assert.True(t, pred.Equals(iceberg.IsIn(ref, one, two)))
+	})
+
+	t.Run("not in", func(t *testing.T) {
+		pred := iceberg.NotIn(ref, one, two)
+		require.Implements(t, (*iceberg.UnboundPredicate)(nil), pred)
+		assert.Equal(t, iceberg.OpNotIn, pred.Op())
+		assert.True(t, pred.Negate().Equals(iceberg.IsIn(ref, one, two)))
+	})
+
+	t.Run("bind to variant column keeps distinct members", func(t *testing.T) {
+		sc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+		)
+
+		// Set predicates on variant columns are not supported yet, so binding
+		// falls through to the set-predicate ErrType. That error is only
+		// reachable if the bind-time set still holds both members: had they
+		// collapsed to one, binding would take the single-literal path and
+		// fail with ErrInvalidArgument instead.
+		_, err := iceberg.BindExpr(sc, iceberg.IsIn(ref, one, two), true)
+		require.ErrorIs(t, err, iceberg.ErrType)
+	})
+
+	t.Run("bind to primitive column", func(t *testing.T) {
+		sc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		)
+
+		bound, err := iceberg.BindExpr(sc, iceberg.IsIn(ref, one, two), true)
+		require.NoError(t, err)
+		require.Implements(t, (*iceberg.BoundSetPredicate)(nil), bound)
+		lits := bound.(iceberg.BoundSetPredicate).Literals()
+		assert.Equal(t, 2, lits.Len())
+		assert.True(t, lits.Contains(iceberg.Int64Literal(1)))
+		assert.True(t, lits.Contains(iceberg.Int64Literal(2)))
+	})
+}
+
 func TestUnknownTransformCannotBindAsPredicate(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
