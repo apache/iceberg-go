@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,10 +72,10 @@ func writeResidualBindingParquetFile(t testing.TB, path string, schema *iceberg.
 	defer tbl.Release()
 
 	props := parquet.NewWriterProperties(parquet.WithStats(true))
+	// WriteTable flushes and closes the file before returning.
 	require.NoError(t, pqarrow.WriteTable(
 		tbl, writer, record.NumRows(), props, pqarrow.DefaultWriterProps(),
 	))
-	require.NoError(t, writer.Close())
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
@@ -296,8 +297,10 @@ func TestReadTasksConcurrentScansPreserveInputTasks(t *testing.T) {
 				}()
 			}
 
-			for range 2 {
-				got := <-results
+			// Join both readers before any assertion can end the subtest and
+			// remove fixtures still in use by the other reader.
+			completed := []result{<-results, <-results}
+			for _, got := range completed {
 				require.NoError(t, got.err)
 				require.Equal(t, tt.wantRows, got.rows)
 			}
@@ -346,22 +349,26 @@ func TestReadTasksPassesBoundResidualsToGetRecords(t *testing.T) {
 		}
 	}
 
-	_, records, err := tbl.Scan().ReadTasks(t.Context(), tasks)
-	require.NoError(t, err)
+	for _, concurrency := range []int{1, 4} {
+		t.Run(fmt.Sprintf("concurrency=%d", concurrency), func(t *testing.T) {
+			_, records, err := tbl.Scan(WithMaxConcurrency(concurrency)).ReadTasks(t.Context(), tasks)
+			require.NoError(t, err)
 
-	var ids []int64
-	for record, readErr := range records {
-		require.NoError(t, readErr)
-		values, ok := record.Column(0).(*array.Int64)
-		require.True(t, ok)
-		for i := range values.Len() {
-			ids = append(ids, values.Value(i))
-		}
-		record.Release()
+			var ids []int64
+			for record, readErr := range records {
+				require.NoError(t, readErr)
+				values, ok := record.Column(0).(*array.Int64)
+				require.True(t, ok)
+				for i := range values.Len() {
+					ids = append(ids, values.Value(i))
+				}
+				record.Release()
+			}
+
+			require.Equal(t, []int64{2, 3, 4, 7, 8, 9}, ids)
+			require.Same(t, unbound, tasks[0].Residual)
+			require.Same(t, bound, tasks[1].Residual)
+			require.Nil(t, tasks[2].Residual)
+		})
 	}
-
-	require.Equal(t, []int64{2, 3, 4, 7, 8, 9}, ids)
-	require.Same(t, unbound, tasks[0].Residual)
-	require.Same(t, bound, tasks[1].Residual)
-	require.Nil(t, tasks[2].Residual)
 }
