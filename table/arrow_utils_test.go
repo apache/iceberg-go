@@ -3373,6 +3373,12 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 			parquetLogical:   schema.GeometryLogicalType{Crs: "srid:0"},
 		},
 		{
+			name:             "geography_default",
+			icebergType:      iceberg.GeographyType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code","edges":"spherical"}`,
+			parquetLogical:   schema.GeographyLogicalType{Algorithm: schema.GeographyEdgeSpherical},
+		},
+		{
 			name:             "geography_srid_0",
 			icebergType:      geogSRID0,
 			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid","edges":"spherical"}`,

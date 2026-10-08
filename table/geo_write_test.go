@@ -296,3 +296,70 @@ func TestWriteGeometryColumnCheckedAllocator(t *testing.T) {
 	require.Contains(t, df.LowerBoundValues(), geoTestGeomFieldID, "geometry column must record a lower bound")
 	require.Contains(t, df.UpperBoundValues(), geoTestGeomFieldID, "geometry column must record an upper bound")
 }
+
+// TestWriteGeoColumnMultiRowGroupStats writes geo columns across several row
+// groups and batches. Parquet GEOMETRY/GEOGRAPHY column chunks omit the
+// standard Statistics block (min, max, null count), so DataFileStatsFromMeta
+// invalidates the column in the first row group; value counts and column sizes
+// (which live outside that block) must still sum over every row group, and the
+// null count (tallied from the Arrow data) must sum over every batch. A value
+// count from row group 0 only, paired with the whole-file null count, would make
+// the file look all-null and let NotNull/IsNull evaluators drop live rows.
+func TestWriteGeoColumnMultiRowGroupStats(t *testing.T) {
+	t.Parallel()
+
+	writer, schema, arrowSchema := newGeoTestWriter(t, t.TempDir(), iceberg.Properties{
+		tblutils.ParquetRowGroupLimitKey: "2",
+	})
+
+	pt := wktToWKB(t, "POINT (1 2)").String()
+	// Nulls fill row group 0 only. The second batch has none, so a null tally
+	// that overwrote rather than summed across batches would record 0.
+	first, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 1, "geom": null, "geog": null},
+		{"id": 2, "geom": null, "geog": null},
+		{"id": 3, "geom": "`+pt+`", "geog": "`+pt+`"}
+	]`))
+	require.NoError(t, err)
+	defer first.Release()
+	second, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 4, "geom": "`+pt+`", "geog": "`+pt+`"},
+		{"id": 5, "geom": "`+pt+`", "geog": "`+pt+`"},
+		{"id": 6, "geom": "`+pt+`", "geog": "`+pt+`"}
+	]`))
+	require.NoError(t, err)
+	defer second.Release()
+
+	df, err := writer.writeFile(t.Context(), nil, WriteTask{
+		Uuid:      uuid.New(),
+		ID:        0,
+		FileCount: 1,
+		Schema:    schema,
+		Batches:   []arrow.RecordBatch{first, second},
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 6, df.Count())
+	require.Len(t, df.SplitOffsets(), 3, "row group limit of 2 must produce 3 row groups")
+
+	for _, fieldID := range []int{geoTestGeomFieldID, geoTestGeogFieldID} {
+		require.Contains(t, df.ValueCounts(), fieldID)
+		assert.EqualValues(t, 6, df.ValueCounts()[fieldID], "value count must cover every row group")
+		require.Contains(t, df.NullValueCounts(), fieldID)
+		assert.EqualValues(t, 2, df.NullValueCounts()[fieldID], "null count must cover every batch")
+		require.Contains(t, df.ColumnSizes(), fieldID)
+	}
+
+	for _, name := range []string{"geom", "geog"} {
+		notNull, err := newInclusiveMetricsEvaluator(schema, iceberg.NotNull(iceberg.Reference(name)), true, true)
+		require.NoError(t, err)
+		mightMatch, err := notNull(df)
+		require.NoError(t, err)
+		assert.True(t, mightMatch, "NotNull(%s) must not prune a file with non-null rows", name)
+
+		isNull, err := newStrictMetricsEvaluator(schema, iceberg.IsNull(iceberg.Reference(name)), true, true)
+		require.NoError(t, err)
+		mustMatch, err := isNull(df)
+		require.NoError(t, err)
+		assert.False(t, mustMatch, "IsNull(%s) must not match every row of a file with non-null rows", name)
+	}
+}
