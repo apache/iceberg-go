@@ -22,6 +22,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
@@ -67,6 +68,46 @@ func TestParquetRowGroupStatsUseRequestedFieldIDs(t *testing.T) {
 			assert.Equal(t, test.wantCols, calls[0])
 		})
 	}
+}
+
+func TestParquetRowGroupStatsPruneUsingUnprojectedColumn(t *testing.T) {
+	data := buildMultiColumnDictionaryTestParquet(t,
+		multiColumnDictionaryTestRowGroup{ids: []int32{9}, categories: []string{"drop"}},
+		multiColumnDictionaryTestRowGroup{ids: []int32{42}, categories: []string{"keep"}},
+	)
+	rdr := openBloomTestReader(t, data)
+	defer rdr.Close()
+
+	var survivors []internal.RowGroupSpan
+	var calls int
+	tester := &internal.ParquetRowGroupTester{
+		StatsFieldIDs: []int{2},
+		Survivors:     &survivors,
+		StatsFn: func(rg *metadata.RowGroupMetaData, cols []int) (bool, error) {
+			calls++
+			require.Equal(t, []int{1}, cols, "stats must use the filter column, independent of projection")
+			column, err := rg.ColumnChunk(cols[0])
+			require.NoError(t, err)
+			stats, err := column.Statistics()
+			require.NoError(t, err)
+			require.NotNil(t, stats)
+
+			return bytes.Equal(stats.EncodeMin(), []byte("keep")), nil
+		},
+	}
+	rr, err := rdr.GetRecords(t.Context(), []int{0}, tester)
+	require.NoError(t, err)
+	defer rr.Release()
+
+	require.True(t, rr.Next())
+	record := rr.RecordBatch()
+	require.Equal(t, int64(1), record.NumCols(), "pruning must not add the filter column to the output")
+	assert.Equal(t, "id", record.Schema().Field(0).Name)
+	assert.Equal(t, []int32{42}, record.Column(0).(*array.Int32).Int32Values())
+	assert.False(t, rr.Next())
+	require.NoError(t, rr.Err())
+	assert.Equal(t, 2, calls)
+	assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: 1, NumRows: 1}}, survivors)
 }
 
 func TestParquetRowGroupStatsUseNestedFieldIDs(t *testing.T) {

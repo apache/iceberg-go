@@ -1917,6 +1917,7 @@ type ParquetRowGroupTester struct {
 	StatsFn func(*metadata.RowGroupMetaData, []int) (bool, error)
 	// StatsFieldIDs limits StatsFn to Parquet columns referenced by the pruning
 	// expression. Nil preserves the historical behavior of using all read columns.
+	// A non-nil empty slice requests no column statistics.
 	StatsFieldIDs   []int
 	BloomPreds      []RowGroupBloomPred      // nil = no bloom filter pass
 	DictionaryPreds []RowGroupDictionaryPred // nil = no dictionary filter pass
@@ -2067,7 +2068,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			dictionaryReader *file.Reader
 		)
 
-		if len(rowGroupTester.StatsFieldIDs) > 0 ||
+		if (rowGroupTester.StatsFn != nil && len(rowGroupTester.StatsFieldIDs) > 0) ||
 			len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
 			fieldIDToColIdx = buildFieldIDToColIdx(fileMeta)
 		}
