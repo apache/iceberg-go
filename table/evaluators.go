@@ -1230,7 +1230,7 @@ func (m *inclusiveMetricsEval) visitIn(
 			// Short-circuit before decoding an unnecessary (possibly invalid) upper bound.
 			return rowsCannotMatch
 		}
-		if !hasExtrema && !oversized {
+		if !hasExtrema {
 			// The slow path must finish the lower scan before reading the upper bound.
 			values = removeBoundCheck(lowerBound, s.Members(), 1)
 			if len(values) == 0 {
