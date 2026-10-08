@@ -1093,6 +1093,88 @@ func TestTransactionCommit_UnusableAfterAppendRetriesExhausted(t *testing.T) {
 	assert.Equal(t, int32(4), cat.attempts.Load())
 }
 
+// transientAfterRebuildCatalog fails its failLoad-th LoadTable (1-based)
+// and cancels the commit's context after cancelAt CommitTable calls.
+type transientAfterRebuildCatalog struct {
+	*progressingRebuildCatalog
+	loads    int
+	failLoad int
+	cancelAt int32
+	cancel   context.CancelFunc
+}
+
+func (c *transientAfterRebuildCatalog) LoadTable(ctx context.Context, ident Identifier) (*Table, error) {
+	c.loads++
+	if c.loads == c.failLoad {
+		return nil, errors.New("simulated refresh failure")
+	}
+
+	return c.progressingRebuildCatalog.LoadTable(ctx, ident)
+}
+
+func (c *transientAfterRebuildCatalog) CommitTable(ctx context.Context, ident Identifier, reqs []Requirement, updates []Update) (Metadata, string, error) {
+	meta, loc, err := c.progressingRebuildCatalog.CommitTable(ctx, ident, reqs, updates)
+	if c.cancel != nil && c.commitTableCalls.Load() == c.cancelAt {
+		c.cancel()
+	}
+
+	return meta, loc, err
+}
+
+func TestTransactionCommit_UnusableAfterTransientFailureFollowingRebuild(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(*transientAfterRebuildCatalog, context.CancelFunc)
+		wantErr error
+	}{
+		{"refresh error", func(c *transientAfterRebuildCatalog, _ context.CancelFunc) { c.failLoad = 2 }, nil},
+		{"context cancelled during retry wait", func(c *transientAfterRebuildCatalog, cancel context.CancelFunc) {
+			c.cancelAt, c.cancel = 2, cancel
+		}, context.Canceled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := iceberg.NewPartitionSpec()
+			wfs, meta := newMemIOWithRetryMeta(t, spec)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			cat := &transientAfterRebuildCatalog{progressingRebuildCatalog: &progressingRebuildCatalog{
+				metadata: meta, wfs: wfs, location: "mem://default/table-location", branch: MainBranch, failTimes: 99,
+			}}
+			tt.setup(cat, cancel)
+			tbl := newOCCTable(t, meta, wfs, cat)
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{
+				newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil),
+			}, nil))
+			var staged string
+			for _, u := range tx.meta.updates {
+				if su, ok := u.(*addSnapshotUpdate); ok {
+					staged = su.Snapshot.ManifestList
+				}
+			}
+			require.NotEmpty(t, staged)
+
+			_, err := tx.Commit(ctx)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			} else {
+				require.ErrorContains(t, err, "simulated refresh failure")
+			}
+			require.ErrorIs(t, err, ErrTransactionUnusable)
+			require.Equal(t, int32(2), cat.commitTableCalls.Load(), "the failure must follow a rebuilt attempt")
+			_, stillExists := wfs.files[staged]
+			assert.False(t, stillExists, "cleanup must remove the staged manifest list the rebuild replaced")
+
+			_, err = tx.Commit(t.Context())
+			require.ErrorIs(t, err, ErrTransactionUnusable)
+			assert.Equal(t, int32(2), cat.commitTableCalls.Load())
+		})
+	}
+}
+
 func TestTransactionCommit_TerminalOnUnknownState(t *testing.T) {
 	cat := &sequentialCatalog{
 		errs: []error{errors.New("simulated 5xx: internal server error")},
