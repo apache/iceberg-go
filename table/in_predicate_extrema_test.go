@@ -24,9 +24,48 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCompareBoundLiteralsMatchesGetCmpLiteral(t *testing.T) {
+	decimal := func(value int64) iceberg.Decimal {
+		return iceberg.Decimal{Val: decimal128.FromI64(value), Scale: 2}
+	}
+	// Both dispatchers must recognize every orderable concrete literal type.
+	tests := []struct {
+		name        string
+		lower, upper iceberg.Literal
+	}{
+		{"bool", iceberg.NewLiteral(false), iceberg.NewLiteral(true)},
+		{"int32", iceberg.NewLiteral(int32(1)), iceberg.NewLiteral(int32(2))},
+		{"int64", iceberg.NewLiteral(int64(1)), iceberg.NewLiteral(int64(2))},
+		{"float32", iceberg.NewLiteral(float32(1)), iceberg.NewLiteral(float32(2))},
+		{"float64", iceberg.NewLiteral(float64(1)), iceberg.NewLiteral(float64(2))},
+		{"date", iceberg.NewLiteral(iceberg.Date(1)), iceberg.NewLiteral(iceberg.Date(2))},
+		{"time", iceberg.NewLiteral(iceberg.Time(1)), iceberg.NewLiteral(iceberg.Time(2))},
+		{"timestamp", iceberg.NewLiteral(iceberg.Timestamp(1)), iceberg.NewLiteral(iceberg.Timestamp(2))},
+		{"timestamp nanos", iceberg.NewLiteral(iceberg.TimestampNano(1)), iceberg.NewLiteral(iceberg.TimestampNano(2))},
+		{"binary", iceberg.NewLiteral([]byte("a")), iceberg.NewLiteral([]byte("b"))},
+		{"string", iceberg.NewLiteral("a"), iceberg.NewLiteral("b")},
+		{"uuid", iceberg.NewLiteral(uuid.Nil), iceberg.NewLiteral(uuid.MustParse("00000000-0000-0000-0000-000000000001"))},
+		{"decimal", iceberg.NewLiteral(decimal(100)), iceberg.NewLiteral(decimal(200))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compare := getCmpLiteral(tt.lower)
+			for _, pair := range [][2]iceberg.Literal{
+				{tt.lower, tt.upper},
+				{tt.upper, tt.lower},
+				{tt.lower, tt.lower},
+			} {
+				assert.Equal(t, compare(pair[0], pair[1]), compareBoundLiterals(pair[0], pair[1]))
+			}
+		})
+	}
+}
 
 func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 	decimal := func(value int64) iceberg.Decimal {
@@ -350,10 +389,19 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 				}}
 			}
 
-			slow := newVisitor().VisitIn(pred.Term(), pred.Literals())
-			fast := newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), tt.minLit, tt.maxLit)
+			slowSet := &inExtremaTrackingSet{Set: pred.Literals()}
+			fastSet := &inExtremaTrackingSet{Set: pred.Literals()}
+			slow := newVisitor().VisitIn(pred.Term(), slowSet)
+			fast := newVisitor().VisitInWithExtrema(pred.Term(), fastSet, tt.minLit, tt.maxLit)
 			require.Equal(t, slow, fast)
 			require.Equal(t, tt.want, fast)
+			require.Equal(t, 1, slowSet.memberCalls)
+			if tt.want {
+				// Overlapping ranges must still visit the exact set members.
+				require.Equal(t, 1, fastSet.memberCalls)
+			} else {
+				require.Zero(t, fastSet.memberCalls)
+			}
 		})
 	}
 }
@@ -441,6 +489,42 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaUsesFastPath(t *testing.T) {
 			require.Zero(t, fastSet.memberCalls)
 		})
 	}
+
+	t.Run("supplied extrema are used, not recomputed", func(t *testing.T) {
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32,
+		})
+		bound, err := iceberg.BindExpr(
+			schema, iceberg.IsIn(iceberg.Reference("value"), int32(50), int32(100)), true,
+		)
+		require.NoError(t, err)
+		pred, ok := bound.(iceberg.BoundSetPredicate)
+		require.True(t, ok)
+
+		lower, err := iceberg.NewLiteral(int32(40)).MarshalBinary()
+		require.NoError(t, err)
+		upper, err := iceberg.NewLiteral(int32(60)).MarshalBinary()
+		require.NoError(t, err)
+		visitor := &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+			valueCounts: map[int]int64{1: 10},
+			nullCounts:  map[int]int64{1: 0},
+			nanCounts:   map[int]int64{1: 0},
+			lowerBounds: map[int][]byte{1: lower},
+			upperBounds: map[int][]byte{1: upper},
+		}}
+
+		slowSet := &inExtremaTrackingSet{Set: pred.Literals()}
+		require.True(t, visitor.VisitIn(pred.Term(), slowSet))
+		require.Equal(t, 1, slowSet.memberCalls)
+
+		// Binding always supplies real extrema. Deliberately incorrect values
+		// distinguish the fast-path contract from recomputing or scanning members.
+		fastSet := &inExtremaTrackingSet{Set: pred.Literals()}
+		require.False(t, visitor.VisitInWithExtrema(
+			pred.Term(), fastSet, iceberg.NewLiteral(int32(1)), iceberg.NewLiteral(int32(2)),
+		))
+		require.Zero(t, fastSet.memberCalls)
+	})
 }
 
 func TestInclusiveMetricsEvaluatorInPredicateSlowPathLowerBeforeUpper(t *testing.T) {
@@ -527,6 +611,25 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaPartialNilUsesSlowPath(t *te
 	maxLit := iceberg.NewLiteral(int32(100))
 	require.Equal(t, slow, newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), minLit, nil))
 	require.Equal(t, slow, newVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), nil, maxLit))
+}
+
+func TestInclusiveMetricsEvaluatorGeoInUsesFallback(t *testing.T) {
+	geometry := iceberg.GeometryType{}
+	first, err := iceberg.LiteralFromBytes(geometry, []byte("1234567890abcdef"))
+	require.NoError(t, err)
+	second, err := iceberg.LiteralFromBytes(geometry, []byte("fedcba9876543210"))
+	require.NoError(t, err)
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: geometry})
+	pred := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), []iceberg.Literal{first, second})
+	eval, err := newInclusiveMetricsEvaluator(schema, pred, true, true)
+	require.NoError(t, err)
+
+	// Geo has no total ordering, so bound dispatch must avoid extrema comparisons.
+	// Missing bounds leave metrics pruning conservative.
+	mightMatch, err := eval(inclusiveMetricsInTestFile(t, nil, nil))
+	require.NoError(t, err)
+	require.True(t, mightMatch)
 }
 
 func TestInclusiveMetricsEvaluatorInPredicateExtremaVariantExtract(t *testing.T) {

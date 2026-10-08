@@ -194,6 +194,8 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	}
 
 	if hasExtrema {
+		// Like data-file metrics pruning, extrema can reject oversized IN
+		// sets before we apply the per-member scan limit.
 		if compareBoundLiterals(lower, maxLit) > 0 {
 			return rowsCannotMatch
 		}
@@ -370,6 +372,8 @@ func compareBoundLiterals(left, right iceberg.Literal) int {
 	case iceberg.TypedLiteral[iceberg.Decimal]:
 		return compareLiteralValues[iceberg.Decimal](left, right)
 	case iceberg.GeoLiteral:
+		// Bound IN dispatch never supplies geo extrema because geo has no
+		// ordering. Keep this guard for direct or incorrectly routed calls.
 		panic(fmt.Errorf("%w: geometry/geography has no ordering, cannot compare %s bounds",
 			iceberg.ErrType, left.Type()))
 	}
@@ -1250,9 +1254,9 @@ func (m *inclusiveMetricsEval) visitIn(
 	}
 
 	if oversized {
-		// Unlike Java's InclusiveEvalVisitor, we still prune disjoint oversized
-		// IN sets with O(1) extrema checks, and cap only the member scan. The
-		// manifest evaluator handles its size limit in a separate branch.
+		// Both metrics evaluators prune disjoint oversized IN sets with O(1)
+		// extrema comparisons before limiting the member scan. Unlike Java's
+		// inclusive evaluator, this can reject files past the IN size limit.
 		return rowsMightMatch
 	}
 
