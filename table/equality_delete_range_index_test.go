@@ -70,6 +70,14 @@ func TestEqualityDeleteRangeIndexMatchesLinearReference(t *testing.T) {
 		{name: "selective middle", sequence: 0, lower: 2000, upper: 2099},
 		{name: "selective with sequence pruning", sequence: 200, lower: 4000, upper: 4099},
 		{name: "no ranged overlap keeps fallback", sequence: 0, lower: 9000, upper: 9100},
+		{name: "just below fallback threshold", sequence: 0, lower: 0, upper: 2454},
+		{name: "at fallback threshold", sequence: 0, lower: 0, upper: 2464},
+		{name: "unselective range uses linear fallback", sequence: 0, lower: 0, upper: 5200},
+		{name: "unselective sequence suffix", sequence: 200, lower: 0, upper: 5200},
+		{name: "small sequence suffix", sequence: 450, lower: 0, upper: 5200},
+		{name: "no applicable sequences", sequence: 513, lower: 0, upper: 5200},
+		{name: "equal lower endpoint overlaps", sequence: 0, lower: 2000, upper: 2000},
+		{name: "equal upper endpoint overlaps", sequence: 0, lower: 2004, upper: 2004},
 	}
 
 	for _, tt := range tests {
@@ -168,7 +176,7 @@ func BenchmarkEqualityDeleteRangeIndexLookup(b *testing.B) {
 		b.Fatal("range index was not built")
 	}
 
-	benchmark := func(b *testing.B, indexed bool) {
+	benchmark := func(b *testing.B, indexed bool, dataEntries []iceberg.ManifestEntry) {
 		b.ReportAllocs()
 		matched := 0
 		b.ResetTimer()
@@ -189,13 +197,26 @@ func BenchmarkEqualityDeleteRangeIndexLookup(b *testing.B) {
 			equalityDeleteBenchmarkSink = matched
 		}
 		b.StopTimer()
-		b.ReportMetric(float64(matched)/float64(dataFileCount), "attached_deletes_per_data_file")
+		b.ReportMetric(float64(matched)/float64(len(dataEntries)), "attached_deletes_per_data_file")
 	}
 
 	b.Run("linear", func(b *testing.B) {
-		benchmark(b, false)
+		benchmark(b, false, dataEntries)
 	})
 	b.Run("range_index", func(b *testing.B) {
-		benchmark(b, true)
+		benchmark(b, true, dataEntries)
+	})
+
+	// A broad data range exercises the cost of abandoning an unselective index.
+	lower, upper := equalityDeleteMetricsTestBounds(b, int32(0), int32(deleteFileCount))
+	unselectiveEntries := []iceberg.ManifestEntry{newEqualityDeleteMetricsTestEntry(
+		"unselective.parquet", 1, partition, iceberg.EntryContentData, 0, nil,
+		map[int]int64{1: 1}, map[int]int64{1: 0}, map[int]int64{1: 0}, lower, upper,
+	)}
+	b.Run("unselective_linear", func(b *testing.B) {
+		benchmark(b, false, unselectiveEntries)
+	})
+	b.Run("unselective_range_index", func(b *testing.B) {
+		benchmark(b, true, unselectiveEntries)
 	})
 }

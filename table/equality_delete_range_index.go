@@ -206,23 +206,26 @@ func (idx *equalityDeleteRangeIndex) candidates(
 	dataStats *equalityDeleteDataFileStats,
 ) ([]int, bool) {
 	remaining := len(entries) - start
-	candidateCapacity := min(remaining, 128)
-	candidates := make([]int, 0, candidateCapacity)
+	// Use the linear path once at least half the applicable entries remain.
+	// Stop at that threshold instead of allocating a full candidate list that
+	// will be discarded before the same entries are scanned again.
+	candidateLimit := remaining / 2
 	fallbackStart := sort.Search(len(idx.fallback), func(i int) bool {
 		return idx.fallback[i] >= start
 	})
+	if len(idx.fallback)-fallbackStart >= candidateLimit {
+		return nil, false
+	}
+
+	candidates := make([]int, 0, min(candidateLimit, 128))
 	candidates = append(candidates, idx.fallback[fallbackStart:]...)
 
 	for i := range idx.groups {
 		var ok bool
-		candidates, ok = idx.groups[i].appendCandidates(candidates, dataStats, dataSeqNum)
-		if !ok {
+		candidates, ok = idx.groups[i].appendCandidates(candidates, dataStats, dataSeqNum, candidateLimit)
+		if !ok || len(candidates) >= candidateLimit {
 			return nil, false
 		}
-	}
-
-	if remaining > 0 && len(candidates) >= remaining/2 {
-		return nil, false
 	}
 
 	slices.Sort(candidates)
@@ -234,6 +237,7 @@ func (group *equalityDeleteRangeGroup) appendCandidates(
 	out []int,
 	dataStats *equalityDeleteDataFileStats,
 	dataSeqNum int64,
+	candidateLimit int,
 ) ([]int, bool) {
 	field := &group.field
 	if field.floatType && !equalityDeleteFloatRangesAreKnown(*dataStats, field) {
@@ -245,7 +249,7 @@ func (group *equalityDeleteRangeGroup) appendCandidates(
 		return out, false
 	}
 
-	return group.appendNodeCandidates(out, group.root, dataBounds, dataSeqNum), true
+	return group.appendNodeCandidates(out, group.root, dataBounds, dataSeqNum, candidateLimit), true
 }
 
 func (group *equalityDeleteRangeGroup) appendNodeCandidates(
@@ -253,8 +257,9 @@ func (group *equalityDeleteRangeGroup) appendNodeCandidates(
 	nodeIndex int,
 	dataBounds *equalityDeleteDataFileBounds,
 	dataSeqNum int64,
+	candidateLimit int,
 ) []int {
-	if nodeIndex < 0 {
+	if nodeIndex < 0 || len(out) >= candidateLimit {
 		return out
 	}
 
@@ -264,8 +269,9 @@ func (group *equalityDeleteRangeGroup) appendNodeCandidates(
 		return out
 	}
 
-	out = group.appendNodeCandidates(out, node.left, dataBounds, dataSeqNum)
-	if equalityDeleteMetricValueCompare(&node.lower, &dataBounds.upper) > 0 {
+	out = group.appendNodeCandidates(out, node.left, dataBounds, dataSeqNum, candidateLimit)
+	if len(out) >= candidateLimit ||
+		equalityDeleteMetricValueCompare(&node.lower, &dataBounds.upper) > 0 {
 		return out
 	}
 
@@ -274,5 +280,5 @@ func (group *equalityDeleteRangeGroup) appendNodeCandidates(
 		out = append(out, node.entryIndex)
 	}
 
-	return group.appendNodeCandidates(out, node.right, dataBounds, dataSeqNum)
+	return group.appendNodeCandidates(out, node.right, dataBounds, dataSeqNum, candidateLimit)
 }
