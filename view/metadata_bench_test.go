@@ -20,28 +20,37 @@ package view
 import (
 	"fmt"
 	"testing"
+
+	"github.com/apache/iceberg-go"
 )
 
-type benchmarkIndexItem struct {
-	id int
-}
-
-var benchmarkIndexSink map[int]benchmarkIndexItem
+var (
+	benchmarkVersionIndexSink map[int64]*Version
+	benchmarkSchemaIndexSink  map[int]*iceberg.Schema
+)
 
 func BenchmarkIndexBy(b *testing.B) {
-	extractKey := func(item benchmarkIndexItem) int { return item.id }
-
-	for _, entries := range []int{1, 10, 32, 128} {
-		items := make([]benchmarkIndexItem, entries)
-		for i := range items {
-			items[i].id = i
+	for _, entries := range []int{0, 1, 10, 32, 128} {
+		versions := make([]*Version, entries)
+		schemas := make([]*iceberg.Schema, entries)
+		for i := range entries {
+			versions[i] = &Version{VersionID: int64(i)}
+			schemas[i] = iceberg.NewSchema(i)
 		}
 
 		b.Run(fmt.Sprintf("entries=%d", entries), func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				benchmarkIndexSink = indexBy(items, extractKey)
-			}
+			b.Run("versions", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					benchmarkVersionIndexSink = indexBy(versions, func(v *Version) int64 { return v.VersionID })
+				}
+			})
+			b.Run("schemas", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					benchmarkSchemaIndexSink = indexBy(schemas, func(s *iceberg.Schema) int { return s.ID })
+				}
+			})
 		})
 	}
 }
