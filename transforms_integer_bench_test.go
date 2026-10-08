@@ -70,9 +70,13 @@ func BenchmarkTruncateTransformInteger(b *testing.B) {
 			}
 
 			b.ReportAllocs()
-			b.ResetTimer()
-			for i := range b.N {
-				benchmarkIntegerTruncateResult = transformer(tt.values[i%len(tt.values)])
+			index := 0
+			for b.Loop() {
+				benchmarkIntegerTruncateResult = transformer(tt.values[index])
+				index++
+				if index == len(tt.values) {
+					index = 0
+				}
 			}
 		})
 	}

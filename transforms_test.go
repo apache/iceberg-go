@@ -492,23 +492,6 @@ func overflowingInt32TransformParameter(t *testing.T) int {
 	return int(value)
 }
 
-func TestTruncateTransformInt32MaxWidth(t *testing.T) {
-	transformer, err := (iceberg.TruncateTransform{Width: math.MaxInt32}).Transformer(iceberg.PrimitiveTypes.Int32)
-	require.NoError(t, err)
-
-	for _, tt := range []struct {
-		value    int32
-		expected int32
-	}{
-		{math.MaxInt32 - 1, 0},
-		{math.MaxInt32, math.MaxInt32},
-		{-1, -math.MaxInt32},
-		{math.MinInt32, 2},
-	} {
-		assert.Equal(t, tt.expected, transformer(tt.value))
-	}
-}
-
 func TestTruncateTransform_WidthValidation(t *testing.T) {
 	testValidation := func(t *testing.T, transform iceberg.TruncateTransform, errorContains string) {
 		t.Helper()
@@ -1154,8 +1137,24 @@ func TestTruncateTransform(t *testing.T) {
 	}{
 		{10, iceberg.Int32Literal(1), iceberg.Int32Literal(0)},
 		{10, iceberg.Int32Literal(-1), iceberg.Int32Literal(-10)},
+		{10, iceberg.Int32Literal(-10), iceberg.Int32Literal(-10)},
+		{10, iceberg.Int32Literal(-11), iceberg.Int32Literal(-20)},
+		{1, iceberg.Int32Literal(math.MinInt32), iceberg.Int32Literal(math.MinInt32)},
+		{1 << 30, iceberg.Int32Literal((1 << 30) - 1), iceberg.Int32Literal(0)},
+		{(1 << 30) + 1, iceberg.Int32Literal((1 << 30) - 1), iceberg.Int32Literal(0)},
+		{math.MaxInt32, iceberg.Int32Literal(math.MaxInt32 - 1), iceberg.Int32Literal(0)},
+		{math.MaxInt32, iceberg.Int32Literal(math.MaxInt32), iceberg.Int32Literal(math.MaxInt32)},
+		{math.MaxInt32, iceberg.Int32Literal(-1), iceberg.Int32Literal(-math.MaxInt32)},
+		// The final subtraction retains signed integer wraparound at the minimum value.
+		{math.MaxInt32, iceberg.Int32Literal(math.MinInt32), iceberg.Int32Literal(2)},
 		{10, iceberg.Int64Literal(1), iceberg.Int64Literal(0)},
 		{10, iceberg.Int64Literal(-1), iceberg.Int64Literal(-10)},
+		{10, iceberg.Int64Literal(-10), iceberg.Int64Literal(-10)},
+		{10, iceberg.Int64Literal(-11), iceberg.Int64Literal(-20)},
+		{1, iceberg.Int64Literal(math.MinInt64), iceberg.Int64Literal(math.MinInt64)},
+		{10, iceberg.Int64Literal(math.MaxInt64), iceberg.Int64Literal(math.MaxInt64 - 7)},
+		{10, iceberg.Int64Literal(math.MinInt64), iceberg.Int64Literal(math.MaxInt64 - 1)},
+		{math.MaxInt32, iceberg.Int64Literal(math.MaxInt64), iceberg.Int64Literal(math.MaxInt64 - 1)},
 		{50, iceberg.DecimalLiteral{
 			Val:   decimal128.FromI64(1065),
 			Scale: 2,
@@ -1171,8 +1170,13 @@ func TestTruncateTransform(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(fmt.Sprintf("width=%d value=%v", tt.width, tt.value.Any()), func(t *testing.T) {
+		t.Run(fmt.Sprintf("type=%s/width=%d/value=%v", tt.value.Type(), tt.width, tt.value.Any()), func(t *testing.T) {
 			transform := iceberg.TruncateTransform{Width: tt.width}
+			transformer, err := transform.Transformer(tt.value.Type())
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected.Any(), transformer(tt.value.Any()))
+			assert.Nil(t, transformer(nil))
+
 			result := transform.Apply(iceberg.Optional[iceberg.Literal]{Val: tt.value, Valid: true})
 			require.True(t, result.Valid)
 			assert.Equal(t, tt.expected, result.Val)
