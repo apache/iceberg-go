@@ -53,9 +53,10 @@ func TestCoWRewriteKeepsRowsDeleted(t *testing.T) {
 		name          string
 		formatVersion string
 		seed          func(*testing.T, *table.Table) *table.Table
+		seededDVs     int
 	}{
 		{name: "position delete", formatVersion: "2", seed: deleteID1},
-		{name: "deletion vector", formatVersion: "3", seed: deleteID1},
+		{name: "deletion vector", formatVersion: "3", seed: deleteID1, seededDVs: 1},
 		{name: "equality delete on v2", formatVersion: "2", seed: equalityDeleteID1},
 		{name: "equality delete on v3", formatVersion: "3", seed: equalityDeleteID1},
 	}
@@ -85,6 +86,7 @@ func TestCoWRewriteKeepsRowsDeleted(t *testing.T) {
 				tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2, 3, 4, 5)
 				tbl = del.seed(t, tbl)
 				require.Equal(t, []int64{2, 3, 4, 5}, idsInTable(t, tbl))
+				require.Equal(t, del.seededDVs, liveDVCount(t, tbl))
 
 				var rowIDsBefore map[int64]int64
 				if del.formatVersion == "3" {
@@ -96,6 +98,7 @@ func TestCoWRewriteKeepsRowsDeleted(t *testing.T) {
 
 				assert.Equal(t, op.wantIDs, idsInTable(t, tbl), "id=1 was deleted before the rewrite and must stay deleted")
 				assert.Equal(t, op.wantRecords, liveDataRecordCount(t, tbl), "the rewritten file must not carry the already-deleted row")
+				assert.Zero(t, liveDVCount(t, tbl), "the deletion vector of the replaced file must be removed with it")
 
 				if rowIDsBefore != nil {
 					rowIDsAfter := readRowIDsByID(t, t.Context(), tbl)
@@ -156,6 +159,106 @@ func TestCoWRewriteKeepsEachFilesOwnRowsDeleted(t *testing.T) {
 
 			assert.Equal(t, op.wantIDs, idsInTable(t, tbl), "each rewritten file must drop only the row its own deletion vector removed")
 			assert.Equal(t, op.wantRecords, liveDataRecordCount(t, tbl))
+			assert.Zero(t, liveDVCount(t, tbl), "both replaced files must take their deletion vectors with them")
+		})
+	}
+}
+
+func TestCoWRewriteAppliesStackedDeletes(t *testing.T) {
+	matchID2 := iceberg.EqualTo(iceberg.Reference("id"), int64(2))
+	operations := []cowRewriteOp{
+		{
+			name:        "copy-on-write delete",
+			run:         func(t *testing.T, tbl *table.Table) *table.Table { return copyOnWriteDelete(t, tbl, matchID2) },
+			wantIDs:     []int64{4, 5},
+			wantRecords: 2,
+		},
+		{
+			name: "filtered overwrite",
+			run: func(t *testing.T, tbl *table.Table) *table.Table {
+				return filteredOverwrite(t, tbl, matchID2, `[{"id": 6}]`)
+			},
+			wantIDs:     []int64{4, 5, 6},
+			wantRecords: 3,
+		},
+	}
+
+	for _, op := range operations {
+		t.Run(op.name, func(t *testing.T) {
+			tbl := newMergeOnReadTestTableVersion(t, "3")
+			tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2, 3, 4, 5)
+			tbl = mergeOnReadDelete(t, tbl, 1)
+			tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id": 3}]`)
+			require.Equal(t, 1, liveDVCount(t, tbl))
+			require.Equal(t, []int64{2, 4, 5}, idsInTable(t, tbl))
+
+			tbl = op.run(t, tbl)
+
+			assert.Equal(t, op.wantIDs, idsInTable(t, tbl), "id=1 and id=3 were deleted before the rewrite and must stay deleted")
+			assert.Equal(t, op.wantRecords, liveDataRecordCount(t, tbl), "the rewritten file must carry neither already-deleted row")
+			assert.Zero(t, liveDVCount(t, tbl))
+		})
+	}
+}
+
+func TestCoWDeleteRemovesDeletionVectorsOfDroppedFiles(t *testing.T) {
+	matchY := iceberg.EqualTo(iceberg.Reference("category"), "y")
+	matchYOrID2 := iceberg.NewOr(matchY, iceberg.EqualTo(iceberg.Reference("id"), int64(2)))
+
+	cases := []struct {
+		name    string
+		run     func(*testing.T, *table.Table) *table.Table
+		wantIDs []int64
+		wantDVs int
+	}{
+		{
+			name:    "copy-on-write delete drops a file",
+			run:     func(t *testing.T, tbl *table.Table) *table.Table { return copyOnWriteDelete(t, tbl, matchY) },
+			wantIDs: []int64{2, 3},
+			wantDVs: 1,
+		},
+		{
+			name: "filtered overwrite drops a file",
+			run: func(t *testing.T, tbl *table.Table) *table.Table {
+				return filteredOverwrite(t, tbl, matchY, `[{"id": 7, "category": "y"}]`)
+			},
+			wantIDs: []int64{2, 3, 7},
+			wantDVs: 1,
+		},
+		{
+			name:    "copy-on-write delete drops a file and rewrites another",
+			run:     func(t *testing.T, tbl *table.Table) *table.Table { return copyOnWriteDelete(t, tbl, matchYOrID2) },
+			wantIDs: []int64{3},
+			wantDVs: 0,
+		},
+		{
+			name: "filtered overwrite drops a file and rewrites another",
+			run: func(t *testing.T, tbl *table.Table) *table.Table {
+				return filteredOverwrite(t, tbl, matchYOrID2, `[{"id": 7, "category": "y"}]`)
+			},
+			wantIDs: []int64{3, 7},
+			wantDVs: 0,
+		},
+	}
+
+	recordsJSON := `[
+		{"id": 1, "category": "x"}, {"id": 2, "category": "x"}, {"id": 3, "category": "x"},
+		{"id": 4, "category": "y"}, {"id": 5, "category": "y"}, {"id": 6, "category": "y"}
+	]`
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := newPartitionedMergeOnReadTestTable(t)
+			tbl = appendRows(t, tbl, recordsJSON)
+			tbl = mergeOnReadDelete(t, tbl, 1)
+			tbl = mergeOnReadDelete(t, tbl, 6)
+			require.Equal(t, 2, liveDVCount(t, tbl))
+			require.Equal(t, []int64{2, 3, 4, 5}, idsInTable(t, tbl))
+
+			tbl = tc.run(t, tbl)
+
+			assert.Equal(t, tc.wantIDs, idsInTable(t, tbl))
+			assert.Equal(t, tc.wantDVs, liveDVCount(t, tbl), "only the deletion vector of the untouched file may stay live")
 		})
 	}
 }
