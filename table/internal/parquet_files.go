@@ -1629,14 +1629,10 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
-			// Sizes and value counts come from the column chunk metadata, not its
-			// Statistics block, so they are summed for every row group even after
-			// the column's statistics are invalidated. GEOMETRY/GEOGRAPHY column
-			// chunks never carry a Statistics block (min, max, null count);
-			// skipping these would record row group 0 only.
+			// These metrics come from column chunk metadata, so keep totaling them even when stats are invalid.
+			// This deliberately diverges from Java, which drops value_counts for a column once any row group lacks stats.
 			colSizes[fieldID] += colChunk.TotalCompressedSize()
 			valueCounts[fieldID] += colChunk.NumValues()
-
 			if _, invalid := invalidateCol[fieldID]; invalid {
 				continue
 			}

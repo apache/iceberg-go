@@ -28,6 +28,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -127,9 +128,9 @@ func TestBuildCleanOrphanFilesResultDryRun(t *testing.T) {
 
 	tbl := table.New([]string{"db", "orphans"}, meta, "", nil, nil)
 
-	orphanResult := table.OrphanCleanupResult{
+	orphanResult := maintenance.OrphanCleanupResult{
 		OrphanFileLocations: []string{"s3://bucket/data/file1.parquet", "s3://bucket/data/file2.parquet"},
-		OrphanFiles: []table.OrphanFile{
+		OrphanFiles: []maintenance.OrphanFile{
 			{Path: "s3://bucket/data/file1.parquet", SizeBytes: 1024},
 			{Path: "s3://bucket/data/file2.parquet", SizeBytes: 2048},
 		},
@@ -175,9 +176,9 @@ func TestBuildCleanOrphanFilesResultDeleted(t *testing.T) {
 
 	tbl := table.New([]string{"db", "orphans"}, meta, "", nil, nil)
 
-	orphanResult := table.OrphanCleanupResult{
+	orphanResult := maintenance.OrphanCleanupResult{
 		OrphanFileLocations: []string{"s3://bucket/data/file1.parquet"},
-		OrphanFiles: []table.OrphanFile{
+		OrphanFiles: []maintenance.OrphanFile{
 			{Path: "s3://bucket/data/file1.parquet", SizeBytes: 2048},
 		},
 		DeletedFiles:   []string{"s3://bucket/data/file1.parquet"},
@@ -220,12 +221,12 @@ func TestBuildCleanOrphanFilesResultDeletedFiltersToDeletedFiles(t *testing.T) {
 
 	tbl := table.New([]string{"db", "orphans"}, meta, "", nil, nil)
 
-	orphanResult := table.OrphanCleanupResult{
+	orphanResult := maintenance.OrphanCleanupResult{
 		OrphanFileLocations: []string{
 			"s3://bucket/data/file1.parquet",
 			"s3://bucket/data/file2.parquet",
 		},
-		OrphanFiles: []table.OrphanFile{
+		OrphanFiles: []maintenance.OrphanFile{
 			{Path: "s3://bucket/data/file1.parquet", SizeBytes: 1024},
 			{Path: "s3://bucket/data/file2.parquet", SizeBytes: 2048},
 		},

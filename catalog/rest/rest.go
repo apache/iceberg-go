@@ -49,8 +49,9 @@ import (
 )
 
 var (
-	_ catalog.Catalog              = (*Catalog)(nil)
-	_ catalog.TransactionalCatalog = (*Catalog)(nil)
+	_ catalog.Catalog                      = (*Catalog)(nil)
+	_ catalog.TransactionalCatalog         = (*Catalog)(nil)
+	_ catalog.RefreshableCredentialCatalog = (*Catalog)(nil)
 )
 
 const (
@@ -1217,6 +1218,7 @@ func (r *Catalog) tableFromResponse(
 	scanPlanningConfig iceberg.Properties,
 	credsVended bool,
 	labels *iceberg.Labels,
+	opts ...table.Option,
 ) (*table.Table, error) {
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
@@ -1267,15 +1269,19 @@ func (r *Catalog) tableFromResponse(
 		}
 	}
 
+	// Caller-supplied opts are applied last so they can override the defaults
+	// derived above.
 	return table.New(
 		identifier,
 		metadata,
 		loc,
 		fsF,
 		r,
-		table.WithMetricsReporter(reporter),
-		table.WithScanPlanningIOProperties(scanPlanningConfig),
-		table.WithLabels(labels),
+		append([]table.Option{
+			table.WithMetricsReporter(reporter),
+			table.WithScanPlanningIOProperties(scanPlanningConfig),
+			table.WithLabels(labels),
+		}, opts...)...,
 	), nil
 }
 
@@ -1301,6 +1307,43 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 	}
 
 	return resolveStorageCredentials(ret.StorageCredentials, location), nil
+}
+
+// RefreshTableCredentials updates a *table.Table with newly-vended credentials from the catalog
+// without updating any other table-internal state that a full Refresh() would.
+// Allows for a quick table credential refresh if the table was created without any pre-seeded
+// credentials. If the catalog did not vend any credentials, the table is returned unmodified.
+//
+// Note that the passed-in table instance should be created with the table.WithSavedConfig() option to
+// save any table-specific configs for reuse in the newly-created instance. All tables created by this
+// catalog pass in that option. Callers of table.New() that use this method should also pass
+// metadata.Properties() into table.WithSavedConfig().
+func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table) (*table.Table, error) {
+	metadataLoc := tbl.MetadataLocation()
+	resp, err := r.fetchTableCreds(ctx, tbl.Identifier(), metadataLoc)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp) == 0 {
+		// No new credentials vended. Return as-is.
+		return tbl, nil
+	}
+
+	// Return a new *table.Table with newly-merged credentials coming from the
+	// fetchTableCreds call.
+	config := maps.Clone(r.props)
+	maps.Copy(config, tbl.SavedConfig())
+	scanCfg := maps.Clone(config)
+	maps.Copy(config, resp)
+
+	// Keep a reporter the caller set on the table rather than reverting it to
+	// the catalog default, as Refresh does.
+	opts := []table.Option{table.WithSavedConfig(tbl.SavedConfig())}
+	if reporter := tbl.MetricsReporter(); !metrics.IsNop(reporter) {
+		opts = append(opts, table.WithMetricsReporter(reporter))
+	}
+
+	return r.tableFromResponse(ctx, tbl.Identifier(), tbl.Metadata(), metadataLoc, config, scanCfg, true, tbl.Labels(), opts...)
 }
 
 type identifierPageFetcher func(pageToken string) ([]table.Identifier, string, error)
@@ -1517,12 +1560,15 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	// Save only the per-table configs.
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1745,12 +1791,14 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1790,12 +1838,15 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	// Save only the per-table configs, not r.props.
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1844,7 +1895,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	maps.Copy(config, metadata.Properties())
 
 	// A commit response carries no labels (they are load-time enrichment).
-	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil)
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil, table.WithSavedConfig(metadata.Properties()))
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {

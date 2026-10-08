@@ -97,6 +97,10 @@ func TestSnapshotManifestCacheSeparatesContentAndProtectsSlices(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, set.allManifests(), 2)
 	require.Len(t, set.dataManifests(), 1)
+	borrowedAll := set.borrowAllManifests()
+	borrowedData := set.borrowDataManifests()
+	assert.Same(t, &set.all[0], &borrowedAll[0])
+	assert.Same(t, &set.data[0], &borrowedData[0])
 
 	all := set.allManifests()
 	all[0] = nil
