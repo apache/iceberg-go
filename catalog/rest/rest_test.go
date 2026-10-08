@@ -1782,17 +1782,17 @@ func (r *RestCatalogSuite) TestLoadTableScanPlanningDirective() {
 		want       table.ScanPlanningDirective
 		wantErr    bool
 	}{
-		{name: "absent", config: `{}`, want: table.ScanPlanningDirectiveUnknown},
+		{name: "absent", config: `{}`, want: table.ScanPlanningDirectiveNone},
 		{name: "client", config: `{"scan-planning-mode": "client"}`, want: table.ScanPlanningDirectiveClient},
 		{name: "server", config: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveServer},
-		{name: "unrecognized", config: `{"scan-planning-mode": "bogus"}`, want: table.ScanPlanningDirectiveUnknown, wantErr: true},
+		{name: "unrecognized", config: `{"scan-planning-mode": "bogus"}`, want: table.ScanPlanningDirectiveNone, wantErr: true},
 		// Only the load response's config block carries the directive.
-		{name: "metadata_property_only", config: `{}`, properties: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveUnknown},
+		{name: "metadata_property_only", config: `{}`, properties: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveNone},
 		{
 			name:    "catalog_property_only",
 			config:  `{}`,
 			catOpts: []rest.Option{rest.WithAdditionalProps(iceberg.Properties{"scan-planning-mode": "client"})},
-			want:    table.ScanPlanningDirectiveUnknown,
+			want:    table.ScanPlanningDirectiveNone,
 		},
 		{
 			name:       "config_wins_over_metadata_property",
@@ -1848,6 +1848,98 @@ func (r *RestCatalogSuite) TestLoadTableScanPlanningDirective() {
 			r.Require().NoError(err)
 			r.Equal(tc.want, got)
 		})
+	}
+}
+
+// TestCreateAndRegisterTableScanPlanningDirective pins that the other load
+// response paths read the directive from the config block too.
+func (r *RestCatalogSuite) TestCreateAndRegisterTableScanPlanningDirective() {
+	const metadataLoc = "s3://warehouse/database/table/metadata/00001.metadata.json"
+
+	for _, op := range []struct {
+		name string
+		path string
+		call func(cat *rest.Catalog, ident table.Identifier) (*table.Table, error)
+	}{
+		{
+			name: "create",
+			path: "/v1/namespaces/fokko/tables",
+			call: func(cat *rest.Catalog, ident table.Identifier) (*table.Table, error) {
+				return cat.CreateTable(context.Background(), ident, tableSchemaSimple)
+			},
+		},
+		{
+			name: "register",
+			path: "/v1/namespaces/fokko/register",
+			call: func(cat *rest.Catalog, ident table.Identifier) (*table.Table, error) {
+				return cat.RegisterTable(context.Background(), ident, metadataLoc)
+			},
+		},
+	} {
+		for _, tc := range []struct {
+			name       string
+			config     string
+			properties string
+			want       table.ScanPlanningDirective
+			wantErr    bool
+		}{
+			{name: "absent", config: `{}`, properties: `{}`, want: table.ScanPlanningDirectiveNone},
+			{name: "server", config: `{"scan-planning-mode": "server"}`, properties: `{}`, want: table.ScanPlanningDirectiveServer},
+			{name: "unrecognized", config: `{"scan-planning-mode": "bogus"}`, properties: `{}`, wantErr: true},
+			{name: "metadata_property_only", config: `{}`, properties: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveNone},
+		} {
+			r.Run(op.name+"_"+tc.name, func() {
+				mux := http.NewServeMux()
+				srv := httptest.NewServer(mux)
+				defer srv.Close()
+
+				mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+					json.NewEncoder(w).Encode(map[string]any{
+						"defaults":  map[string]any{},
+						"overrides": map[string]any{},
+						"endpoints": rest.AllEndpointStrings,
+					})
+				})
+				mux.HandleFunc(op.path, func(w http.ResponseWriter, req *http.Request) {
+					r.Require().Equal(http.MethodPost, req.Method)
+					w.Write([]byte(`{
+						"metadata-location": "` + metadataLoc + `",
+						"metadata": {
+							"format-version": 1,
+							"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+							"location": "s3://warehouse/database/table",
+							"last-updated-ms": 1646787054459,
+							"last-column-id": 2,
+							"schema": {"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]},
+							"current-schema-id": 0,
+							"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]}],
+							"partition-spec": [],
+							"default-spec-id": 0,
+							"partition-specs": [{"spec-id":0,"fields":[]}],
+							"last-partition-id": 999,
+							"default-sort-order-id": 0,
+							"sort-orders": [{"order-id":0,"fields":[]}],
+							"properties": ` + tc.properties + `
+						},
+						"config": ` + tc.config + `
+					}`))
+				})
+
+				cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+				r.Require().NoError(err)
+
+				tbl, err := op.call(cat, catalog.ToIdentifier("fokko", "fokko2"))
+				r.Require().NoError(err)
+				got, err := tbl.ScanPlanningDirective()
+				if tc.wantErr {
+					r.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+					return
+				}
+				r.Require().NoError(err)
+				r.Equal(tc.want, got)
+			})
+		}
 	}
 }
 

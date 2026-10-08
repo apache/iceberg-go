@@ -750,17 +750,23 @@ func TestTableScanPlanningDirective(t *testing.T) {
 		want    ScanPlanningDirective
 		wantErr bool
 	}{
-		{name: "absent", want: ScanPlanningDirectiveUnknown},
+		{name: "absent", want: ScanPlanningDirectiveNone},
 		{
 			name: "io props ignored",
 			opts: []Option{WithScanPlanningIOProperties(iceberg.Properties{ScanPlanningModeKey: "server"})},
-			want: ScanPlanningDirectiveUnknown,
+			want: ScanPlanningDirectiveNone,
 		},
-		{name: "client", opts: []Option{WithScanPlanningDirective("client")}, want: ScanPlanningDirectiveClient},
-		{name: "server", opts: []Option{WithScanPlanningDirective("server")}, want: ScanPlanningDirectiveServer},
-		{name: "case insensitive", opts: []Option{WithScanPlanningDirective("SERVER")}, want: ScanPlanningDirectiveServer},
-		{name: "unrecognized", opts: []Option{WithScanPlanningDirective("remote")}, want: ScanPlanningDirectiveUnknown, wantErr: true},
-		{name: "empty value", opts: []Option{WithScanPlanningDirective("")}, want: ScanPlanningDirectiveUnknown, wantErr: true},
+		{name: "not present", opts: []Option{WithScanPlanningDirective("server", false)}, want: ScanPlanningDirectiveNone},
+		{name: "client", opts: []Option{WithScanPlanningDirective("client", true)}, want: ScanPlanningDirectiveClient},
+		{name: "server", opts: []Option{WithScanPlanningDirective("server", true)}, want: ScanPlanningDirectiveServer},
+		{name: "case insensitive", opts: []Option{WithScanPlanningDirective("SERVER", true)}, want: ScanPlanningDirectiveServer},
+		{name: "unrecognized", opts: []Option{WithScanPlanningDirective("remote", true)}, want: ScanPlanningDirectiveNone, wantErr: true},
+		{name: "empty value", opts: []Option{WithScanPlanningDirective("", true)}, want: ScanPlanningDirectiveNone, wantErr: true},
+		{
+			name: "later option overrides",
+			opts: []Option{WithScanPlanningDirective("server", true), WithScanPlanningDirective("", false)},
+			want: ScanPlanningDirectiveNone,
+		},
 	}
 
 	for _, tt := range tests {
@@ -777,6 +783,33 @@ func TestTableScanPlanningDirective(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestWithScanPlanningDirectiveFrom pins that the directive is copied
+// verbatim, including its presence bit and an unrecognized raw value.
+func TestWithScanPlanningDirectiveFrom(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		opts []Option
+	}{
+		{name: "absent"},
+		{name: "server", opts: []Option{WithScanPlanningDirective("server", true)}},
+		{name: "unrecognized", opts: []Option{WithScanPlanningDirective("hybrid", true)}},
+		{name: "empty value", opts: []Option{WithScanPlanningDirective("", true)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := New(Identifier{"db", "tbl"}, nil, "", nil, nil, tc.opts...)
+			dst := New(Identifier{"db", "tbl"}, nil, "", nil, nil,
+				WithScanPlanningDirective("client", true), WithScanPlanningDirectiveFrom(src))
+
+			assert.Equal(t, src.scanPlanningDirective, dst.scanPlanningDirective)
+			assert.Equal(t, src.hasScanPlanningDirective, dst.hasScanPlanningDirective)
 		})
 	}
 }

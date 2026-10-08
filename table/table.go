@@ -845,7 +845,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		t.cat,
 		withReporterState(t.reporter, t.reporterSet),
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
-		withScanPlanningDirectiveState(t.scanPlanningDirective, t.hasScanPlanningDirective),
+		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
 	), nil
@@ -1448,16 +1448,6 @@ func WithSavedConfig(config iceberg.Properties) Option {
 	return func(t *Table) {
 		t.savedConfig = maps.Clone(config)
 	}
-}
-
-// withScanPlanningDirectiveState carries a table's scan-planning directive
-// verbatim across a New(...) rebuild, leaving it absent when it was absent.
-func withScanPlanningDirectiveState(value string, present bool) Option {
-	if !present {
-		return noopTableOption
-	}
-
-	return WithScanPlanningDirective(value)
 }
 
 // withReporterState copies both the reporter and the reporterSet flag verbatim.

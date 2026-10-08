@@ -65,9 +65,12 @@ const ScanPlanningModeKey = "scan-planning-mode"
 type ScanPlanningDirective string
 
 const (
-	// ScanPlanningDirectiveUnknown is the zero-value string denoting an unknown,
-	// unrestricted or missing scan planning directive.
-	ScanPlanningDirectiveUnknown ScanPlanningDirective = ""
+	// ScanPlanningDirectiveNone is the zero value. When returned with a nil
+	// error from Table.ScanPlanningDirective, it means the catalog supplied no
+	// directive and does not constrain where scans are planned. It is also
+	// returned alongside a non-nil error for an unrecognized directive, in
+	// which case it carries no meaning.
+	ScanPlanningDirectiveNone ScanPlanningDirective = ""
 	// ScanPlanningDirectiveClient indicates the catalog requires the client to
 	// plan scans locally.
 	ScanPlanningDirectiveClient ScanPlanningDirective = "client"
@@ -81,42 +84,58 @@ const (
 // properties and catalog properties are not consulted. Values are matched
 // case-insensitively.
 //
-// It returns an empty directive and a nil error when the catalog supplied no
-// directive, and an error wrapping iceberg.ErrInvalidArgument when the
-// directive holds an unrecognized value.
+// It returns ScanPlanningDirectiveNone and a nil error when the catalog
+// supplied no directive. Any value other than `client` or `server`, including
+// an empty value or a mode introduced by a future version of the REST spec,
+// returns an error wrapping iceberg.ErrInvalidArgument; callers should treat
+// that as a directive they cannot honor rather than as the absence of one.
 //
 // The directive is only known for tables built from a load response
-// (LoadTable, CreateTable, RegisterTable, and their refreshes). Tables returned
-// by a catalog's UpdateTable report no directive, because commit responses do
-// not carry table config; reload the table to obtain it.
+// (LoadTable, CreateTable, RegisterTable, and their refreshes); tables
+// returned by Transaction.Commit or StagedTable keep the directive of the
+// table they were derived from. Tables returned by a catalog's UpdateTable
+// report no directive, because commit responses do not carry table config;
+// reload the table to obtain it.
 //
 // The scanner does not yet enforce this directive; callers must apply it
 // themselves via WithScanPlanningMode.
 func (t Table) ScanPlanningDirective() (ScanPlanningDirective, error) {
 	if !t.hasScanPlanningDirective {
-		return ScanPlanningDirectiveUnknown, nil
+		return ScanPlanningDirectiveNone, nil
 	}
 
-	for _, d := range []ScanPlanningDirective{ScanPlanningDirectiveClient, ScanPlanningDirectiveServer} {
-		if strings.EqualFold(t.scanPlanningDirective, string(d)) {
-			return d, nil
-		}
+	switch d := ScanPlanningDirective(strings.ToLower(t.scanPlanningDirective)); d {
+	case ScanPlanningDirectiveClient, ScanPlanningDirectiveServer:
+		return d, nil
+	default:
+		return ScanPlanningDirectiveNone, fmt.Errorf("%w: unrecognized %s %q, expected %q or %q",
+			iceberg.ErrInvalidArgument, ScanPlanningModeKey, t.scanPlanningDirective,
+			ScanPlanningDirectiveClient, ScanPlanningDirectiveServer)
 	}
-
-	return ScanPlanningDirectiveUnknown, fmt.Errorf("%w: unrecognized %s %q, expected %q or %q",
-		iceberg.ErrInvalidArgument, ScanPlanningModeKey, t.scanPlanningDirective,
-		ScanPlanningDirectiveClient, ScanPlanningDirectiveServer)
 }
 
 // WithScanPlanningDirective records the raw `scan-planning-mode` value from a
-// catalog's table-load response config. Catalogs should only pass this option
-// when the key is present in that config, so that an empty value is reported
-// as unrecognized rather than absent.
-func WithScanPlanningDirective(value string) Option {
+// catalog's table-load response config. ok reports whether the key was
+// present, so callers can pass a comma-ok map read straight through:
+//
+//	v, ok := cfg[table.ScanPlanningModeKey]
+//	table.WithScanPlanningDirective(v, ok)
+//
+// When ok is false the table reports no directive. A present but empty value
+// is reported as unrecognized.
+func WithScanPlanningDirective(value string, ok bool) Option {
 	return func(t *Table) {
 		t.scanPlanningDirective = value
-		t.hasScanPlanningDirective = true
+		t.hasScanPlanningDirective = ok
 	}
+}
+
+// WithScanPlanningDirectiveFrom copies src's scan-planning directive verbatim,
+// including whether one was present and any unrecognized raw value. Catalogs
+// use it when rebuilding a table from a response that carries no table config,
+// such as a credential refresh.
+func WithScanPlanningDirectiveFrom(src *Table) Option {
+	return WithScanPlanningDirective(src.scanPlanningDirective, src.hasScanPlanningDirective)
 }
 
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
