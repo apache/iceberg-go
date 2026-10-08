@@ -1630,6 +1630,32 @@ func (s *SqliteCatalogTestSuite) TestStaleAppendRetriesRequirementFailure() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestStaleAppendWithNoOpExpireRetriesAfterPeerAppend() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.createRetryingStringTable(ctx, cat, "2", "seed")
+
+	stale, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	tx := stale.NewTransaction()
+	s.stageStringRow(ctx, tx, "stale")
+	s.Require().NoError(tx.ExpireSnapshots())
+
+	peer, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	_, err = appendStringRow(ctx, peer, "peer")
+	s.Require().NoError(err)
+
+	_, err = tx.Commit(ctx)
+	s.Require().NoError(err)
+
+	current, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Len(current.Metadata().Snapshots(), 3)
+	s.ElementsMatch([]string{"seed", "peer", "stale"}, s.storedStringValues(ctx, current))
+}
+
 // A rollback staged before a peer advanced the branch must not be
 // replayed against the new head, which would drop the peer's append.
 func (s *SqliteCatalogTestSuite) TestStaleRollbackFailsAfterPeerAppend() {
