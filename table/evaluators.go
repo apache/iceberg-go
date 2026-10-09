@@ -178,6 +178,9 @@ func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.S
 	return m.visitIn(term, literals, nil, nil)
 }
 
+// VisitInWithExtrema expects minLit and maxLit to either both be the actual
+// extrema of literals or both be nil. A partial pair is treated as unavailable
+// and follows the same path as VisitIn.
 func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
 	return m.visitIn(term, literals, minLit, maxLit)
 }
@@ -185,6 +188,7 @@ func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literal
 func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
+	hasExtrema := minLit != nil && maxLit != nil
 
 	if field.LowerBound == nil {
 		return rowsCannotMatch
@@ -195,8 +199,10 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 		panic(err)
 	}
 
-	if maxLit != nil {
-		if getCmpLiteral(lower)(lower, maxLit) > 0 {
+	if hasExtrema {
+		// Like data-file metrics pruning, extrema can reject oversized IN
+		// sets before we apply the per-member scan limit.
+		if compareBoundLiterals(lower, maxLit) > 0 {
 			return rowsCannotMatch
 		}
 	} else {
@@ -214,8 +220,8 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 			panic(err)
 		}
 
-		if minLit != nil {
-			if getCmpLiteral(upper)(upper, minLit) < 0 {
+		if hasExtrema {
+			if compareBoundLiterals(upper, minLit) < 0 {
 				return rowsCannotMatch
 			}
 		} else if allBoundCheck(upper, literals, -1) {
@@ -328,6 +334,54 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 		// names the real cause if a geo term is ever routed here.
 		panic(fmt.Errorf("%w: geometry/geography has no ordering, cannot compare %s bounds",
 			iceberg.ErrType, boundary.Type()))
+	}
+	panic(iceberg.ErrType)
+}
+
+// compareLiteralValues requires the same concrete literal type on both sides,
+// as guaranteed for bound predicates. A mismatched type assertion will panic.
+func compareLiteralValues[T iceberg.LiteralType](left, right iceberg.Literal) int {
+	leftValue := left.(iceberg.TypedLiteral[T])
+	rightValue := right.(iceberg.TypedLiteral[T])
+
+	return leftValue.Comparator()(leftValue.Value(), rightValue.Value())
+}
+
+// Keep this dispatch aligned with getCmpLiteral, removeBoundCheck, and
+// allBoundCheck when adding a new literal type.
+func compareBoundLiterals(left, right iceberg.Literal) int {
+	switch left.(type) {
+	case iceberg.TypedLiteral[bool]:
+		return compareLiteralValues[bool](left, right)
+	case iceberg.TypedLiteral[int32]:
+		return compareLiteralValues[int32](left, right)
+	case iceberg.TypedLiteral[int64]:
+		return compareLiteralValues[int64](left, right)
+	case iceberg.TypedLiteral[float32]:
+		return compareLiteralValues[float32](left, right)
+	case iceberg.TypedLiteral[float64]:
+		return compareLiteralValues[float64](left, right)
+	case iceberg.TypedLiteral[iceberg.Date]:
+		return compareLiteralValues[iceberg.Date](left, right)
+	case iceberg.TypedLiteral[iceberg.Time]:
+		return compareLiteralValues[iceberg.Time](left, right)
+	case iceberg.TypedLiteral[iceberg.Timestamp]:
+		return compareLiteralValues[iceberg.Timestamp](left, right)
+	case iceberg.TypedLiteral[iceberg.TimestampNano]:
+		return compareLiteralValues[iceberg.TimestampNano](left, right)
+	case iceberg.TypedLiteral[[]byte]:
+		return compareLiteralValues[[]byte](left, right)
+	case iceberg.TypedLiteral[string]:
+		return compareLiteralValues[string](left, right)
+	case iceberg.TypedLiteral[uuid.UUID]:
+		return compareLiteralValues[uuid.UUID](left, right)
+	case iceberg.TypedLiteral[iceberg.Decimal]:
+		return compareLiteralValues[iceberg.Decimal](left, right)
+	case iceberg.GeoLiteral:
+		// Bound IN dispatch never supplies geo extrema because geo has no
+		// ordering. Keep this guard for direct or incorrectly routed calls.
+		panic(fmt.Errorf("%w: geometry/geography has no ordering, cannot compare %s bounds",
+			iceberg.ErrType, left.Type()))
 	}
 	panic(iceberg.ErrType)
 }
@@ -1160,34 +1214,81 @@ func (m *inclusiveMetricsEval) VisitNotEqual(iceberg.BoundTerm, iceberg.Literal)
 }
 
 func (m *inclusiveMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) bool {
+	return m.visitIn(t, s, nil, nil)
+}
+
+// VisitInWithExtrema expects minLit and maxLit to either both be the actual
+// extrema of s or both be nil. A partial pair is treated as unavailable and
+// follows the same path as VisitIn.
+func (m *inclusiveMetricsEval) VisitInWithExtrema(
+	t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal,
+) bool {
+	return m.visitIn(t, s, minLit, maxLit)
+}
+
+func (m *inclusiveMetricsEval) visitIn(
+	t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal,
+) bool {
 	fieldID := t.Ref().Field().ID
 
 	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsCannotMatch
 	}
 
-	if s.Len() > inPredicateLimit {
-		// skip evaluating the predicate if the number of values is too big
+	hasExtrema := minLit != nil && maxLit != nil
+	oversized := s.Len() > inPredicateLimit
+	if oversized && !hasExtrema {
+		// Skip evaluating the predicate if the number of values is too big.
 		return rowsMightMatch
 	}
 
-	values := s.Members()
-	if lowerBound, ok := m.boundFor(t, m.lowerBounds[fieldID]); ok {
+	var values []iceberg.Literal
+	lowerBound, hasLowerBound := m.boundFor(t, m.lowerBounds[fieldID])
+	if hasLowerBound {
 		if m.isNan(lowerBound) {
 			return rowsMightMatch
 		}
+		if hasExtrema && compareBoundLiterals(lowerBound, maxLit) > 0 {
+			// Short-circuit before decoding an unnecessary (possibly invalid) upper bound.
+			return rowsCannotMatch
+		}
+		if !hasExtrema {
+			// The slow path must finish the lower scan before reading the upper bound.
+			values = removeBoundCheck(lowerBound, s.Members(), 1)
+			if len(values) == 0 {
+				return rowsCannotMatch
+			}
+		}
+	}
 
+	upperBound, hasUpperBound := m.boundFor(t, m.upperBounds[fieldID])
+	if hasUpperBound {
+		if m.isNan(upperBound) {
+			return rowsMightMatch
+		}
+		if hasExtrema && compareBoundLiterals(upperBound, minLit) < 0 {
+			return rowsCannotMatch
+		}
+	}
+
+	if oversized {
+		// Both metrics evaluators prune disjoint oversized IN sets with O(1)
+		// extrema comparisons before limiting the member scan. Unlike Java's
+		// inclusive evaluator, this can reject files past the IN size limit.
+		return rowsMightMatch
+	}
+
+	if hasExtrema || !hasLowerBound {
+		values = s.Members()
+	}
+	if hasExtrema && hasLowerBound {
 		values = removeBoundCheck(lowerBound, values, 1)
 		if len(values) == 0 {
 			return rowsCannotMatch
 		}
 	}
 
-	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
-		if m.isNan(upperBound) {
-			return rowsMightMatch
-		}
-
+	if hasUpperBound {
 		values = removeBoundCheck(upperBound, values, -1)
 		if len(values) == 0 {
 			return rowsCannotMatch
