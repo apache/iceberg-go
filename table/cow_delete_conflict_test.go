@@ -204,9 +204,10 @@ func TestCopyOnWriteConflict_ConcurrentDeleteOnUntouchedFileCommits(t *testing.T
 
 // TestCopyOnWriteConflict_ConcurrentRemovalOfSameFileDiverges pins the other
 // half of copy-on-write conflict detection: when a concurrent commit already
-// removed a data file this commit also removes, the retry rebuild's
-// checkRemovedFiles aborts terminally with ErrCommitDiverged, before any
-// validator runs, rather than rebuilding the file from the stale snapshot.
+// removed a data file this commit also removes, the stale commit aborts
+// terminally with ErrCommitDiverged (the retry rebuild's checkRemovedFiles)
+// rather than rebuilding the file from the stale snapshot, and the table keeps
+// the concurrent result.
 func TestCopyOnWriteConflict_ConcurrentRemovalOfSameFileDiverges(t *testing.T) {
 	for _, version := range cowFormatVersions {
 		for _, isolation := range cowIsolations {
@@ -226,6 +227,11 @@ func TestCopyOnWriteConflict_ConcurrentRemovalOfSameFileDiverges(t *testing.T) {
 
 						_, err = txn.Commit(ctx)
 						require.ErrorIs(t, err, table.ErrCommitDiverged)
+						require.ErrorContains(t, err, "no longer on the branch head")
+						require.NotErrorIs(t, err, table.ErrCommitFailed)
+
+						require.NoError(t, tbl.Refresh(ctx))
+						require.Equal(t, []int64{1, 2, 3, 5, 6, 7, 8, 9, 10}, idsInTable(t, tbl))
 					})
 				}
 			}

@@ -942,7 +942,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 		case iceberg.EntryContentPosDeletes:
 			if path := referencedDataFilePath(df); path != "" {
 				if _, overlap := rewrittenPaths[path]; overlap {
-					return fmt.Errorf("%w: snapshot %d added pos-delete %s referencing removed data file %s",
+					return fmt.Errorf("%w: snapshot %d added pos-delete %s referencing rewritten file %s",
 						ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), path)
 				}
 
@@ -955,7 +955,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 					df.FilePath(), df.SpecID(), err)
 			}
 			if _, overlap := rewrittenPartitions[key]; overlap {
-				return fmt.Errorf("%w: snapshot %d added partition-scoped pos-delete %s overlapping the partition of a removed data file (spec %d)",
+				return fmt.Errorf("%w: snapshot %d added partition-scoped pos-delete %s overlapping rewritten partition (spec %d)",
 					ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), df.SpecID())
 			}
 
@@ -966,7 +966,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 			// for a rewrite, because the predicate could cover a
 			// rewritten file. Follow-up: accept partition-overlap
 			// hints to narrow this.
-			return fmt.Errorf("%w: snapshot %d added equality delete %s that may apply to a removed data file",
+			return fmt.Errorf("%w: snapshot %d added equality delete %s during rewrite",
 				ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath())
 		}
 
