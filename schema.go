@@ -582,9 +582,39 @@ func (s *Schema) Equals(other *Schema) bool {
 // HighestFieldID returns the value of the numerically highest field ID
 // in this schema.
 func (s *Schema) HighestFieldID() int {
-	id, _ := Visit(s, findLastFieldID{})
+	if s == nil {
+		return 0
+	}
 
-	return id
+	return highestFieldIDFields(s.fields)
+}
+
+func highestFieldIDFields(fields []NestedField) int {
+	highest := 0
+	for i := range fields {
+		highest = max(highest, fields[i].ID, highestFieldIDType(fields[i].Type))
+	}
+
+	return highest
+}
+
+func highestFieldIDType(typ Type) int {
+	switch typ := typ.(type) {
+	case *StructType:
+		if typ != nil {
+			return highestFieldIDFields(typ.FieldList)
+		}
+	case *ListType:
+		if typ != nil {
+			return max(typ.ElementID, highestFieldIDType(typ.Element))
+		}
+	case *MapType:
+		if typ != nil {
+			return max(typ.KeyID, typ.ValueID, highestFieldIDType(typ.KeyType), highestFieldIDType(typ.ValueType))
+		}
+	}
+
+	return 0
 }
 
 type Void = struct{}
@@ -1347,31 +1377,6 @@ func (*pruneColVisitor) projectMap(mapType *MapType, valueResult Type) *MapType 
 		ValueRequired: mapType.ValueRequired,
 	}
 }
-
-type findLastFieldID struct{}
-
-func (findLastFieldID) Schema(_ *Schema, result int) int {
-	return result
-}
-
-func (findLastFieldID) Struct(_ StructType, fieldResults []int) int {
-	return slices.Max(fieldResults)
-}
-
-func (findLastFieldID) Field(field NestedField, fieldResult int) int {
-	return max(field.ID, fieldResult)
-}
-
-func (findLastFieldID) List(field ListType, elemResult int) int {
-	return max(field.ElementID, elemResult)
-}
-
-func (findLastFieldID) Map(field MapType, keyResult, valueResult int) int {
-	return max(field.KeyID, field.ValueID, keyResult, valueResult)
-}
-
-func (findLastFieldID) Primitive(PrimitiveType) int { return 0 }
-func (findLastFieldID) Variant(VariantType) int     { return 0 }
 
 // IndexParents generates an index of field IDs to their parent field
 // IDs. Root fields are not indexed

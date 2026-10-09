@@ -1936,9 +1936,118 @@ func TestSchemaRoundTrip(t *testing.T) {
 	assert.Truef(t, tableSchemaNested.Equals(&sc), "expected: %s\ngot: %s", tableSchemaNested, &sc)
 }
 
+type highestFieldIDUnsupportedType struct{}
+
+func (highestFieldIDUnsupportedType) Type() string             { return "unsupported" }
+func (highestFieldIDUnsupportedType) String() string           { return "unsupported" }
+func (highestFieldIDUnsupportedType) Equals(iceberg.Type) bool { return false }
+
 func TestHighestFieldID(t *testing.T) {
-	id := tableSchemaNested.HighestFieldID()
-	assert.Equal(t, 22, id, "expected highest field ID to be 22, got %d", id)
+	field := func(id int, typ iceberg.Type) iceberg.NestedField {
+		return iceberg.NestedField{ID: id, Name: fmt.Sprintf("field_%d", id), Type: typ}
+	}
+	deeplyNested := field(100, iceberg.PrimitiveTypes.Int64)
+	for id := 8; id >= 1; id-- {
+		deeplyNested = field(id, &iceberg.StructType{FieldList: []iceberg.NestedField{deeplyNested}})
+	}
+
+	tests := []struct {
+		name   string
+		schema *iceberg.Schema
+		want   int
+	}{
+		{"existing nested schema", tableSchemaNested, 22},
+		{"empty schema", iceberg.NewSchema(0), 0},
+		{"nil schema", (*iceberg.Schema)(nil), 0},
+		{"flat field", iceberg.NewSchema(0, field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"map key", iceberg.NewSchema(0, field(1, &iceberg.MapType{
+			KeyID: 50, KeyType: iceberg.PrimitiveTypes.String, ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32,
+		})), 50},
+		{"map key nested field", iceberg.NewSchema(0, field(1, &iceberg.MapType{
+			KeyID: 2, KeyType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				field(50, iceberg.PrimitiveTypes.String),
+			}}, ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32,
+		})), 50},
+		{"map value", iceberg.NewSchema(0, field(1, &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 50, ValueType: iceberg.PrimitiveTypes.Int32,
+		})), 50},
+		{"map value nested field", iceberg.NewSchema(0, field(1, &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
+			ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				field(50, iceberg.PrimitiveTypes.String),
+			}},
+		})), 50},
+		{"nested map value", iceberg.NewSchema(0, field(1, &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
+			ValueType: &iceberg.ListType{ElementID: 4, Element: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{field(50, iceberg.PrimitiveTypes.String)},
+			}},
+		})), 50},
+		{"list element", iceberg.NewSchema(0, field(1, &iceberg.ListType{
+			ElementID: 50, Element: iceberg.PrimitiveTypes.Int32,
+		})), 50},
+		{"collection field exceeds nested IDs", iceberg.NewSchema(0, field(50, &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
+			ValueType: &iceberg.ListType{ElementID: 4, Element: iceberg.PrimitiveTypes.Int32},
+		})), 50},
+		{"deeply nested struct", iceberg.NewSchema(0, deeplyNested), 100},
+		{"empty struct before sibling", iceberg.NewSchema(0,
+			field(1, &iceberg.StructType{}), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"empty struct after sibling", iceberg.NewSchema(0,
+			field(50, iceberg.PrimitiveTypes.String), field(1, &iceberg.StructType{})), 50},
+		{"empty nested struct", iceberg.NewSchema(0, field(1, &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				field(2, &iceberg.StructType{}), field(50, iceberg.PrimitiveTypes.Int32),
+			},
+		})), 50},
+		{"empty struct inside list", iceberg.NewSchema(0,
+			field(1, &iceberg.ListType{ElementID: 2, Element: &iceberg.StructType{}}),
+			field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"nil field type", iceberg.NewSchema(0,
+			field(1, nil), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"nil struct pointer", iceberg.NewSchema(0,
+			field(1, (*iceberg.StructType)(nil)), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"nil list pointer", iceberg.NewSchema(0,
+			field(1, (*iceberg.ListType)(nil)), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"nil map pointer", iceberg.NewSchema(0,
+			field(1, (*iceberg.MapType)(nil)), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"unsupported field type", iceberg.NewSchema(0,
+			field(1, highestFieldIDUnsupportedType{}), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"variant field type", iceberg.NewSchema(0,
+			field(1, iceberg.VariantType{}), field(50, iceberg.PrimitiveTypes.String)), 50},
+		{"unassigned placeholder field", iceberg.NewSchema(0,
+			field(-1, iceberg.PrimitiveTypes.String)), 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.schema.HighestFieldID())
+		})
+	}
+}
+
+// TestHighestFieldIDDoesNotAllocate protects the zero-allocation traversal.
+func TestHighestFieldIDDoesNotAllocate(t *testing.T) {
+	var id int
+	allocs := testing.AllocsPerRun(100, func() {
+		id = tableSchemaNested.HighestFieldID()
+	})
+	assert.Zero(t, allocs)
+	runtime.KeepAlive(id)
+}
+
+func TestAssignFreshSchemaIDsWithBaseEmptyStruct(t *testing.T) {
+	base := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "empty", Type: &iceberg.StructType{}},
+		iceberg.NestedField{ID: 50, Name: "existing", Type: iceberg.PrimitiveTypes.String},
+	)
+	source := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "added", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	assigned, err := iceberg.AssignFreshSchemaIDsWithBase(source, base, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 51, assigned.Field(0).ID)
 }
 
 // TestHighestFieldIDListType tests that HighestFieldID correctly computes
