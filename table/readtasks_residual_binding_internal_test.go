@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +129,11 @@ func TestBindReadTasksResidualsCopyOnWrite(t *testing.T) {
 			wantSame:  []bool{false, true},
 		},
 		{
+			name:      "last task unbound",
+			residuals: []iceberg.BooleanExpression{bound, nil, unbound},
+			wantSame:  []bool{true, false, false},
+		},
+		{
 			name:      "all unbound",
 			residuals: []iceberg.BooleanExpression{unbound, unbound},
 			wantSame:  []bool{false, false},
@@ -213,6 +219,7 @@ func TestReadTasksResidualPlanIsReusable(t *testing.T) {
 				_, _, err := scan.ReadTasks(t.Context(), tt.tasks)
 				if tt.wantErr {
 					require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+					require.ErrorContains(t, err, "bind residual for task 2")
 					require.ErrorContains(t, err, "field ID 2")
 				} else {
 					require.NoError(t, err)
@@ -327,48 +334,93 @@ func TestReadTasksPassesBoundResidualsToGetRecords(t *testing.T) {
 	)
 
 	unbound := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
-	bound, err := iceberg.BindExpr(schema, iceberg.LessThan(iceberg.Reference("id"), int64(5)), true)
+	lowerBound, err := iceberg.BindExpr(schema, unbound, true)
+	require.NoError(t, err)
+	upperBound, err := iceberg.BindExpr(schema, iceberg.LessThan(iceberg.Reference("id"), int64(5)), true)
 	require.NoError(t, err)
 
 	// Distinct data and residuals expose both an unbound handoff and an
 	// incorrect residual-to-task index, rather than just asserting row totals.
-	files := []struct {
-		name     string
-		json     string
-		residual iceberg.BooleanExpression
+	files := []iceberg.DataFile{
+		writeResidualBindingParquetFile(t, filepath.Join(location, "data-1.parquet"), schema, `[{"id":1},{"id":2},{"id":3}]`),
+		writeResidualBindingParquetFile(t, filepath.Join(location, "data-2.parquet"), schema, `[{"id":4},{"id":5},{"id":6}]`),
+		writeResidualBindingParquetFile(t, filepath.Join(location, "data-3.parquet"), schema, `[{"id":7},{"id":8},{"id":9}]`),
+	}
+
+	tests := []struct {
+		name      string
+		residuals []iceberg.BooleanExpression
+		wantAlias bool
+		wantIDs   []int64
 	}{
-		{name: "unbound.parquet", json: `[{"id":1},{"id":2},{"id":3}]`, residual: unbound},
-		{name: "bound.parquet", json: `[{"id":4},{"id":5},{"id":6}]`, residual: bound},
-		{name: "nil.parquet", json: `[{"id":7},{"id":8},{"id":9}]`},
-	}
-	tasks := make([]FileScanTask, len(files))
-	for i, file := range files {
-		tasks[i] = FileScanTask{
-			File:     writeResidualBindingParquetFile(t, filepath.Join(location, file.name), schema, file.json),
-			Residual: file.residual,
-		}
+		{
+			name:      "bound and nil",
+			residuals: []iceberg.BooleanExpression{lowerBound, upperBound, nil},
+			wantAlias: true,
+			wantIDs:   []int64{2, 3, 4, 7, 8, 9},
+		},
+		{
+			name:      "all nil",
+			residuals: []iceberg.BooleanExpression{nil, nil, nil},
+			wantAlias: true,
+			wantIDs:   []int64{1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
+		{
+			name:      "mixed",
+			residuals: []iceberg.BooleanExpression{unbound, upperBound, nil},
+			wantIDs:   []int64{2, 3, 4, 7, 8, 9},
+		},
 	}
 
-	for _, concurrency := range []int{1, 4} {
-		t.Run(fmt.Sprintf("concurrency=%d", concurrency), func(t *testing.T) {
-			_, records, err := tbl.Scan(WithMaxConcurrency(concurrency)).ReadTasks(t.Context(), tasks)
-			require.NoError(t, err)
-
-			var ids []int64
-			for record, readErr := range records {
-				require.NoError(t, readErr)
-				values, ok := record.Column(0).(*array.Int64)
-				require.True(t, ok)
-				for i := range values.Len() {
-					ids = append(ids, values.Value(i))
+	for _, tt := range tests {
+		for _, concurrency := range []int{1, 4} {
+			t.Run(fmt.Sprintf("%s/concurrency=%d", tt.name, concurrency), func(t *testing.T) {
+				tasks := make([]FileScanTask, len(files))
+				for i, file := range files {
+					tasks[i] = FileScanTask{File: file, Residual: tt.residuals[i]}
 				}
-				record.Release()
-			}
 
-			require.Equal(t, []int64{2, 3, 4, 7, 8, 9}, ids)
-			require.Same(t, unbound, tasks[0].Residual)
-			require.Same(t, bound, tasks[1].Residual)
-			require.Nil(t, tasks[2].Residual)
-		})
+				scan := tbl.Scan(WithMaxConcurrency(concurrency))
+				readerCalls := 0
+				scan.readRecords = func(reader *arrowScan, ctx context.Context, received []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+					readerCalls++
+					require.Len(t, received, len(tasks))
+					// Check the actual ReadTasks-to-GetRecords handoff, so an
+					// unconditional clone outside the binding helper fails too.
+					require.Equal(t, tt.wantAlias, &received[0] == &tasks[0])
+					for i, task := range received {
+						if task.Residual != nil {
+							_, bound := task.Residual.(iceberg.BoundPredicate)
+							require.True(t, bound, "residual for task %d must be bound", i)
+						}
+					}
+
+					return reader.GetRecords(ctx, received)
+				}
+				_, records, err := scan.ReadTasks(t.Context(), tasks)
+				require.NoError(t, err)
+				require.Equal(t, 1, readerCalls)
+
+				var ids []int64
+				for record, readErr := range records {
+					require.NoError(t, readErr)
+					values, ok := record.Column(0).(*array.Int64)
+					require.True(t, ok)
+					for i := range values.Len() {
+						ids = append(ids, values.Value(i))
+					}
+					record.Release()
+				}
+
+				require.Equal(t, tt.wantIDs, ids)
+				for i, residual := range tt.residuals {
+					if residual == nil {
+						require.Nil(t, tasks[i].Residual)
+					} else {
+						require.Same(t, residual, tasks[i].Residual)
+					}
+				}
+			})
+		}
 	}
 }

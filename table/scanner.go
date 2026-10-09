@@ -582,6 +582,10 @@ type Scan struct {
 	// map cannot silently drop it.
 	arrowBatchSize int
 
+	// readRecords is a scan-local reader seam; nil uses (*arrowScan).GetRecords.
+	// Tests can wrap it to observe the task slice handed to the Arrow reader.
+	readRecords func(*arrowScan, context.Context, []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error)
+
 	reporter metrics.Reporter
 }
 
@@ -2195,9 +2199,10 @@ func bindReadTasksResiduals(
 // reached; if no such task is processed, the file is not read and its error is not
 // returned. The returned iterator is single-use.
 //
-// The caller must not mutate tasks or any task element while the returned
-// iterator can still be used, until a range over it has returned or the iterator
-// is otherwise dropped. ReadTasks retains the caller's backing array when no
+// On success, callers must not modify tasks or its elements until
+// the range over the returned iterator has finished, including an early break.
+// If the iterator is never ranged over, callers must ensure it will not be used
+// before modifying tasks. ReadTasks retains the caller's backing array when no
 // residual needs binding (each is nil or already bound). Any clone is shallow,
 // so nested slices (for example DeleteFiles) remain shared with the caller.
 //
@@ -2264,7 +2269,11 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		return nil, nil, err
 	}
 
-	outSchema, records, err := (&arrowScan{
+	readRecords := scan.readRecords
+	if readRecords == nil {
+		readRecords = (*arrowScan).GetRecords
+	}
+	outSchema, records, err := readRecords(&arrowScan{
 		metadata:           scan.metadata,
 		fs:                 fs,
 		scanSchema:         effectiveSchema,
@@ -2277,7 +2286,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		options:            scan.options,
 		concurrency:        scan.concurrency,
 		arrowBatchSize:     scan.arrowBatchSize,
-	}).GetRecords(ctx, readTasks)
+	}, ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so release here.
 		if releasePlanIO != nil {
