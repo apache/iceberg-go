@@ -449,7 +449,6 @@ func TestManifestContentCachePanicReleasesInFlightLoad(t *testing.T) {
 	assert.Empty(t, cache.loads)
 }
 
-
 func TestTableRefreshKeepsWarmManifestCacheForMatchingConfig(t *testing.T) {
 	config := iceberg.Properties{IOManifestCacheEnabledKey: "true"}
 	fs := newTrackingCallsIO()

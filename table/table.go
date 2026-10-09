@@ -844,6 +844,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		WithSavedConfig(t.savedConfig),
 	)
 	next.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, next.manifestContentCache)
+
 	return next, nil
 }
 
