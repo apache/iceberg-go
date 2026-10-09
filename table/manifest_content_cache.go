@@ -53,10 +53,10 @@ type manifestContentCache struct {
 }
 
 type manifestContentCacheEntry struct {
-	location     string
-	content      []byte
-	lastAccess   time.Time
-	element      *list.Element
+	location   string
+	content    []byte
+	lastAccess time.Time
+	element    *list.Element
 }
 
 type manifestContentCacheLoad struct {
@@ -131,6 +131,7 @@ func reuseManifestContentCache(previous, configured *manifestContentCache) *mani
 		previous.maxContentLength == configured.maxContentLength {
 		return previous
 	}
+
 	return configured
 }
 
@@ -229,6 +230,7 @@ func (c *manifestContentCache) open(
 				return nil, fmt.Errorf("manifest cache population failed: %w (fallback open failed: %v)",
 					err, fallbackErr)
 			}
+
 			return file, nil
 		}
 
@@ -251,6 +253,7 @@ func (c *manifestContentCache) getLocked(location string, expectedLength int64) 
 		now := c.now()
 		if c.expired(entry, now) {
 			c.removeEntryLocked(entry)
+
 			return nil, false
 		}
 		entry.lastAccess = now
