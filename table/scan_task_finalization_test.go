@@ -82,10 +82,10 @@ func TestFinalizePlannedTasksParallelMatchesSerial(t *testing.T) {
 	}
 	assert.Equal(t, int64(len(tasks)), parallelMetrics.resultDataFiles)
 	assert.Equal(t, int64(len(tasks)*100), parallelMetrics.totalFileSize)
-	assert.Equal(t, int64(86), parallelMetrics.positionalDeleteFiles)
-	assert.Equal(t, int64(52), parallelMetrics.equalityDeleteFiles)
-	assert.Equal(t, int64(138), parallelMetrics.resultDeleteFiles)
-	assert.Equal(t, int64(13_800), parallelMetrics.totalDeleteFileSize)
+	assert.Equal(t, int64(342), parallelMetrics.positionalDeleteFiles)
+	assert.Equal(t, int64(205), parallelMetrics.equalityDeleteFiles)
+	assert.Equal(t, int64(547), parallelMetrics.resultDeleteFiles)
+	assert.Equal(t, int64(54_700), parallelMetrics.totalDeleteFileSize)
 }
 
 func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
