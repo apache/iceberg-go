@@ -23,27 +23,31 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	icebergio "github.com/apache/iceberg-go/io"
 )
 
 // ScanPlanningMode is the user-facing scan option: three values
-// (local/remote/auto) selecting how (*Scan).PlanFiles plans a scan. Local
-// planning remains the default; remote is opt-in via WithScanPlanningMode.
+// (local/remote/auto) selecting how (*Scan).PlanFiles plans a scan. Without a
+// catalog directive, local planning is the default and remote is opt-in via
+// WithScanPlanningMode.
 //
-// This is deliberately distinct from the REST table-config key
-// `scan-planning-mode` (values `client`/`server`), which is a server directive
-// resolved separately (OQ4): a `client` table forces local planning, a `server`
-// table forces remote planning, and explicit conflicting scan options fail
-// fast. There is intentionally no fourth `server` value here; the directive
-// lives in the table config, not the user option.
+// This is deliberately distinct from the catalog's `scan-planning-mode`
+// directive (values `client`/`server`, see ScanPlanningDirective), which
+// (*Scan).PlanFiles enforces: a `server` table plans remotely and a `client`
+// table plans locally, whatever the default or ScanPlanningAuto would choose.
+// A scan that explicitly selects the conflicting mode fails. Incremental scans
+// and scans inside a transaction do not apply the directive.
 type ScanPlanningMode string
 
 const (
 	// ScanPlanningLocal always plans locally by reading manifests through the
-	// table's FileIO. This is the default and current behavior.
+	// table's FileIO. This is the default unless the catalog requires
+	// server-side planning.
 	ScanPlanningLocal ScanPlanningMode = "local"
 	// ScanPlanningRemote requires a planner that advertises remote capability
 	// and fails loudly if remote planning is unavailable.
@@ -53,10 +57,119 @@ const (
 	ScanPlanningAuto ScanPlanningMode = "auto"
 )
 
+// ScanPlanningModeKey is the REST table-config key a catalog uses to tell
+// clients which planning mode a table supports. Valid values are `client` and
+// `server`.
+const ScanPlanningModeKey = "scan-planning-mode"
+
+// ScanPlanningDirective is the catalog's `scan-planning-mode` table-config
+// value. It is distinct from ScanPlanningMode, the user-facing scan option.
+type ScanPlanningDirective string
+
+const (
+	// ScanPlanningDirectiveUnknown is the zero-value string denoting an unknown,
+	// unrestricted or missing scan planning directive.
+	ScanPlanningDirectiveUnknown ScanPlanningDirective = ""
+	// ScanPlanningDirectiveClient indicates the catalog requires the client to
+	// plan scans locally.
+	ScanPlanningDirectiveClient ScanPlanningDirective = "client"
+	// ScanPlanningDirectiveServer indicates the catalog requires scans to be
+	// planned remotely by the catalog server.
+	ScanPlanningDirectiveServer ScanPlanningDirective = "server"
+)
+
+// ScanPlanningDirective returns the catalog's `scan-planning-mode` directive
+// recorded when the table was loaded. For a REST catalog this is the value in
+// the `config` block of the table-load response, or, when the server sends
+// none, the catalog's own `scan-planning-mode` property. Table metadata
+// properties are not consulted. Values are matched case-insensitively.
+//
+// It returns an empty directive and a nil error when the catalog supplied no
+// directive, and an error wrapping iceberg.ErrInvalidArgument when the
+// directive holds an unrecognized value.
+//
+// The directive is only known for tables built from a load response
+// (LoadTable, CreateTable, RegisterTable, and their refreshes). Tables returned
+// by a catalog's UpdateTable report no directive, because commit responses do
+// not carry table config; reload the table to obtain it.
+//
+// (*Scan).PlanFiles enforces the directive; see ScanPlanningMode.
+func (t Table) ScanPlanningDirective() (ScanPlanningDirective, error) {
+	if !t.hasScanPlanningDirective {
+		return ScanPlanningDirectiveUnknown, nil
+	}
+
+	for _, d := range []ScanPlanningDirective{ScanPlanningDirectiveClient, ScanPlanningDirectiveServer} {
+		if strings.EqualFold(t.scanPlanningDirective, string(d)) {
+			return d, nil
+		}
+	}
+
+	return ScanPlanningDirectiveUnknown, fmt.Errorf("%w: unrecognized %s %q, expected %q or %q",
+		iceberg.ErrInvalidArgument, ScanPlanningModeKey, t.scanPlanningDirective,
+		ScanPlanningDirectiveClient, ScanPlanningDirectiveServer)
+}
+
+// WithScanPlanningDirective records the raw `scan-planning-mode` value from a
+// catalog's table-load response config. Catalogs should only pass this option
+// when the key is present in that config, so that an empty value is reported
+// as unrecognized rather than absent.
+func WithScanPlanningDirective(value string) Option {
+	return func(t *Table) {
+		t.scanPlanningDirective = value
+		t.hasScanPlanningDirective = true
+	}
+}
+
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
-// ScanPlanningLocal.
+// ScanPlanningLocal, or the mode the catalog's directive requires. Explicitly
+// selecting a mode that conflicts with the directive makes planning fail.
 func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
-	return func(scan *Scan) { scan.planningMode = mode }
+	return func(scan *Scan) {
+		scan.planningMode = mode
+		scan.planningModeSet = true
+	}
+}
+
+// effectivePlanningMode applies the catalog's scan-planning-mode directive to
+// the scan's planning mode. A `server` directive selects remote planning and a
+// `client` directive selects local planning, unless the scan explicitly asked
+// for the other one, which is an error. The directive is checked here rather
+// than when the table is loaded, so metadata-only use of a table keeps working
+// whatever the catalog advertises.
+func (scan *Scan) effectivePlanningMode() (ScanPlanningMode, error) {
+	switch scan.planningMode {
+	case ScanPlanningLocal, ScanPlanningRemote, ScanPlanningAuto:
+	default:
+		return "", fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, scan.planningMode)
+	}
+
+	if scan.directiveErr != nil {
+		return "", scan.directiveErr
+	}
+
+	switch scan.directive {
+	case ScanPlanningDirectiveServer:
+		if scan.planningModeSet && scan.planningMode == ScanPlanningLocal {
+			return "", fmt.Errorf("%w: the catalog requires server-side scan planning (%s=%s) but the scan selected %s planning",
+				ErrInvalidOperation, ScanPlanningModeKey, ScanPlanningDirectiveServer, ScanPlanningLocal)
+		}
+		if scan.planner == nil || !scan.planner.SupportsRemoteScanPlanning() {
+			return "", fmt.Errorf("%w: the catalog requires server-side scan planning (%s=%s) but remote scan planning is unavailable",
+				ErrInvalidOperation, ScanPlanningModeKey, ScanPlanningDirectiveServer)
+		}
+
+		return ScanPlanningRemote, nil
+	case ScanPlanningDirectiveClient:
+		if scan.planningModeSet && scan.planningMode == ScanPlanningRemote {
+			return "", fmt.Errorf("%w: the catalog requires client-side scan planning (%s=%s) but the scan selected %s planning",
+				ErrInvalidOperation, ScanPlanningModeKey, ScanPlanningDirectiveClient, ScanPlanningRemote)
+		}
+
+		return ScanPlanningLocal, nil
+	default:
+		return scan.planningMode, nil
+	}
 }
 
 // ScanPlanningMetadata is the subset of table.Metadata a ScanPlanner needs:
@@ -170,7 +283,7 @@ type FullRemoteScanPlanner interface {
 //
 //	type Scan struct {
 //		// ...existing fields...
-//		planningMode ScanPlanningMode // set by WithScanPlanningMode; default ScanPlanningLocal
+//		planningMode ScanPlanningMode // set by WithScanPlanningMode; default ScanPlanningLocal, overridden by the catalog directive
 //		planner      ScanPlanner      // non-nil only when the catalog supplies one
 //	}
 //
