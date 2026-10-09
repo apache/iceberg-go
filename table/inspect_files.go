@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"math"
@@ -85,7 +84,7 @@ func (i InspectTable) inspectFiles(
 	allSnapshots bool,
 	includeManifest func(iceberg.ManifestFile) bool,
 ) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
@@ -123,29 +122,25 @@ func (i InspectTable) manifestEntryReader(
 	includeManifest func(iceberg.ManifestFile) bool,
 	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
 ) (array.RecordReader, error) {
-	snapshot := i.tbl.metadata.CurrentSnapshot()
+	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
 	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
-	}
 
-	manifestFS := sharedSnapshotManifestFSF(i.tbl.fsF)
-	manifestSet, err := i.tbl.manifestSetWithFSF(ctx, *snapshot, manifestFS)
+	provider := i.tbl.ManifestProvider()
+	manifests, err := provider.Manifests(ctx, *snapshot)
 	if err != nil {
 		return nil, err
 	}
-	fs, err := manifestFS(ctx)
+	fs, err := provider.FS(ctx)
 	if err != nil {
 		return nil, err
 	}
-	manifests := manifestSet.borrowAllManifests()
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
 		func(yield func(iceberg.ManifestFile, error) bool) {
-			for _, manifest := range manifests {
+			for manifest := range manifests {
 				if !yield(manifest, nil) {
 					return
 				}
@@ -163,16 +158,13 @@ func (i InspectTable) allManifestEntryReader(
 	includeManifest func(iceberg.ManifestFile) bool,
 	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
 ) (array.RecordReader, error) {
-	snapshots := i.tbl.metadata.Snapshots()
+	snapshots := i.tbl.Metadata().Snapshots()
 	if len(snapshots) == 0 {
 		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
 	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
-	}
 
-	manifestFS := sharedSnapshotManifestFSF(i.tbl.fsF)
-	fs, err := manifestFS(ctx)
+	provider := i.tbl.ManifestProvider()
+	fs, err := provider.FS(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -187,13 +179,13 @@ func (i InspectTable) allManifestEntryReader(
 
 					return
 				}
-				manifestSet, err := i.tbl.manifestSetWithFSF(ctx, snapshot, manifestFS)
+				manifests, err := provider.Manifests(ctx, snapshot)
 				if err != nil {
 					yield(nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err))
 
 					return
 				}
-				for _, manifest := range manifestSet.borrowAllManifests() {
+				for manifest := range manifests {
 					if _, ok := seen[manifest.FilePath()]; ok {
 						continue
 					}
