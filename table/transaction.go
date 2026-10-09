@@ -99,15 +99,27 @@ type Transaction struct {
 	// removals; see the flag site in commitManifests.
 	noReplay bool
 
-	// pinnedRefs names branches with an explicit AssertRefSnapshotID
-	// requirement. doCommit's refresh-and-replay must not rewrite their
-	// assertions to the fresh branch head between retries: the caller
-	// opted into compare-and-swap semantics, so a branch that has
-	// changed fails the commit.
+	// Explicit ref requirements, rollbacks, and snapshot expiry must fail
+	// on changed refs rather than rebase their assertions during retries.
 	pinnedRefs map[string]struct{}
 
 	mx        sync.Mutex
 	committed bool
+
+	unusable bool
+}
+
+// The caller must hold t.mx.
+func (t *Transaction) checkUsable() error {
+	if t.unusable {
+		return fmt.Errorf("%w: a previous commit failed, build a new transaction",
+			ErrTransactionUnusable)
+	}
+	if t.committed {
+		return errors.New("transaction has already been committed")
+	}
+
+	return nil
 }
 
 func (t *Transaction) ensureInitialized() error {
@@ -156,13 +168,18 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
+	return t.applyLocked(updates, reqs)
+}
+
+// The caller must hold t.mx.
+func (t *Transaction) applyLocked(updates []Update, reqs []Requirement) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
 	}
 
-	if t.committed {
-		return errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return err
 	}
 
 	var stagedMeta *MetadataBuilder
@@ -454,27 +471,26 @@ func (t *Transaction) AssertRefSnapshotID(branch string) error {
 
 	id := t.baseRefSnapshotID(branch)
 
-	// Record the pin before the requirement can become visible to a
-	// concurrent Commit, which would otherwise rewrite the requirement
-	// to the fresh head on retry and silently void the
-	// compare-and-swap. The transient pin is harmless on its own and
-	// is rolled back if the requirement fails to apply.
-	t.mx.Lock()
-	if t.pinnedRefs == nil {
-		t.pinnedRefs = make(map[string]struct{})
-	}
-	_, alreadyPinned := t.pinnedRefs[branch]
-	t.pinnedRefs[branch] = struct{}{}
-	t.mx.Unlock()
+	return t.applyPinned(nil, []Requirement{AssertRefSnapshotID(branch, id)}, []string{branch})
+}
 
-	if err := t.apply(nil, []Requirement{AssertRefSnapshotID(branch, id)}); err != nil {
-		if !alreadyPinned {
-			t.mx.Lock()
-			delete(t.pinnedRefs, branch)
-			t.mx.Unlock()
-		}
-
+// Updates and pins must be published together so a concurrent Commit cannot
+// rebase a guarded assertion. A failed apply must not publish pins.
+func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []string) error {
+	if err := t.checkNotNil(); err != nil {
 		return err
+	}
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	if t.pinnedRefs == nil {
+		t.pinnedRefs = make(map[string]struct{}, len(refs))
+	}
+	for _, ref := range refs {
+		t.pinnedRefs[ref] = struct{}{}
 	}
 
 	return nil
@@ -586,16 +602,14 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 
 	update := meta.NewRetainingSnapshotRefUpdate(branch, snapshotID, BranchRef)
 
-	// Assert the base branch head so a concurrent head move fails the
-	// commit instead of the rollback clobbering it. When the branch was
-	// staged by this transaction (absent on the base), the update that
-	// created it already carries its own base-state requirement.
+	// Pin the head or absence assertion to avoid rolling back a peer's commit,
+	// including a peer's creation of a branch staged by this transaction.
 	var reqs []Requirement
 	if id := t.baseRefSnapshotID(branch); id != nil {
 		reqs = append(reqs, AssertRefSnapshotID(branch, id))
 	}
 
-	return t.apply([]Update{update}, reqs)
+	return t.applyPinned([]Update{update}, reqs, []string{branch})
 }
 
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
@@ -749,6 +763,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		cfg         = expireSnapshotsCfg{postCommit: true}
 		updates     []Update
 		reqs        []Requirement
+		pinned      []string
 		snapsToKeep = make(map[int64]struct{})
 		nowMs       = time.Now().UnixMilli()
 	)
@@ -793,14 +808,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
-		// Assert the ref's base snapshot id so we don't accidentally
-		// expire snapshots that are now referenced by concurrently
-		// updated refs. Refs the transaction itself staged (absent on
-		// the base) get no assertion here: the update that created
-		// them carries its own base-state requirement.
+		// Pin refs to avoid expiring snapshots retained by a concurrent ref update.
+		// Refs staged by this transaction already have absence assertions.
 		if id := t.baseRefSnapshotID(refName); id != nil {
 			reqs = append(reqs, AssertRefSnapshotID(refName, id))
 		}
+		pinned = append(pinned, refName)
 
 		snap, err := meta.SnapshotByID(ref.SnapshotID)
 		if err != nil {
@@ -879,7 +892,13 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit))
 	}
 
-	return t.apply(updates, reqs)
+	// A no-op expiry must not pin the commit branch, which would stop the
+	// transaction's other updates from rebasing on retry.
+	if len(updates) == 0 {
+		return nil
+	}
+
+	return t.applyPinned(updates, reqs, pinned)
 }
 
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
@@ -3375,8 +3394,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		return nil, err
 	}
 
-	if t.committed {
-		return nil, errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return nil, err
 	}
 
 	if len(meta.updates) > 0 {
@@ -3388,12 +3407,16 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			withCommitPinnedRefs(t.pinnedRefs),
 		)
 		if err != nil {
-			// A clean conflict (ErrCommitFailed) committed nothing and stays
-			// retriable. Any other failure leaves the commit state unknown
-			// (the catalog may have accepted it), so mark it terminal to
-			// avoid a double-apply on retry.
+			// A clean conflict (ErrCommitFailed) stays retriable unless the error
+			// also matches ErrTransactionUnusable: cleanup removed files the staged
+			// updates reference, or a requirement failed after a refresh. Any other
+			// failure leaves the commit state unknown, so mark it terminal to avoid
+			// a double-apply.
 			if !errors.Is(err, ErrCommitFailed) {
 				t.committed = true
+			}
+			if errors.Is(err, ErrTransactionUnusable) {
+				t.unusable = true
 			}
 
 			return tbl, err

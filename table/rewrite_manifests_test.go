@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -1031,6 +1032,113 @@ func TestRewriteManifestsCleansSupersededOnExhaustedRetries(t *testing.T) {
 	for _, p := range merged {
 		assert.Truef(t, track.wasRemoved(p), "orphaned manifest %s must be cleaned on the failure path", p)
 	}
+}
+
+func resortedMetadata(t *testing.T, base table.Metadata) table.Metadata {
+	t.Helper()
+	builder, err := table.MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	order, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{1},
+		Transform: iceberg.IdentityTransform{},
+		Direction: table.SortASC,
+		NullOrder: table.NullsFirst,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSortOrder(&order))
+	require.NoError(t, builder.SetDefaultSortOrderID(-1))
+	out, err := builder.Build()
+	require.NoError(t, err)
+
+	return out
+}
+
+// Cleanup after a failed requirement must prevent resubmitting staged updates
+// that reference the deleted manifest, even if the requirement holds again.
+func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	track := &trackingFS{}
+	fsF := func(_ context.Context) (iceio.IO, error) { return track, nil }
+
+	h0, _, _ := stagedRewriteHeads(t, ctx, dir, "2", fsF, track)
+
+	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{resortedMetadata(t, h0)}, failures: 1, location: dir, fsF: fsF}
+	tbl := table.New(table.Identifier{"default", "staged"}, h0, dir+"/metadata/00000.json", fsF, cat)
+
+	preExisting := track.snapshotCreated()
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AssertDefaultShape())
+	_, err := txn.RewriteManifests(ctx)
+	require.NoError(t, err)
+
+	multiCat := &recordingTransactionalCatalog{}
+	queued, err := catalog.NewMultiTableTransaction(multiCat)
+	require.NoError(t, err)
+	require.NoError(t, queued.AddTransaction(txn))
+
+	_, err = txn.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	require.EqualValues(t, 1, cat.commitTableCalls.Load(), "the violated fence must stop the retry loop")
+
+	merged := mergedManifestsCreated(track, preExisting)
+	require.Len(t, merged, 1, "the single attempt writes one merged manifest")
+	for _, p := range merged {
+		assert.NoFileExistsf(t, p, "merged manifest %s must be removed when the commit stops", p)
+	}
+
+	cat.current = h0
+	_, err = txn.Commit(ctx)
+	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
+	_, err = txn.TableCommit()
+	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.ErrorIs(t, queued.Commit(ctx), table.ErrTransactionUnusable)
+	fresh, err := catalog.NewMultiTableTransaction(multiCat)
+	require.NoError(t, err)
+	assert.ErrorIs(t, fresh.AddTransaction(txn), table.ErrTransactionUnusable)
+
+	assert.EqualValues(t, 1, cat.commitTableCalls.Load(), "the unusable transaction must not reach the catalog")
+	assert.Zero(t, multiCat.commitTransactionCalls, "the unusable transaction must not reach CommitTransaction")
+	assert.Same(t, h0, cat.current, "nothing may be committed")
+}
+
+// Only CommitTransaction is implemented. The embedded Catalog is nil.
+type recordingTransactionalCatalog struct {
+	catalog.Catalog
+	commitTransactionCalls int
+}
+
+func (c *recordingTransactionalCatalog) CommitTransaction(context.Context, []table.TableCommit) error {
+	c.commitTransactionCalls++
+
+	return nil
+}
+
+func TestCommitAfterNonRebasedRequirementFailureIsUnusable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	track := &trackingFS{}
+	fsF := func(_ context.Context) (iceio.IO, error) { return track, nil }
+
+	h0, _, _ := stagedRewriteHeads(t, ctx, dir, "2", fsF, track)
+	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{resortedMetadata(t, h0)}, failures: 1, location: dir, fsF: fsF}
+	tbl := table.New(table.Identifier{"default", "staged"}, h0, dir+"/metadata/00000.json", fsF, cat)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AssertDefaultShape())
+	require.NoError(t, txn.SetProperties(iceberg.Properties{"marker": "1"}))
+	_, err := txn.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Empty(t, track.removed)
+
+	cat.current = h0
+	_, err = txn.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.EqualValues(t, 1, cat.commitTableCalls.Load())
+	assert.NotContains(t, cat.current.Properties(), "marker")
 }
 
 // TestRewriteManifestsClusterByReusesOutputOnOCCRetry verifies that a
