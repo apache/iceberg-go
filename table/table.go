@@ -99,13 +99,14 @@ type CatalogIO interface {
 }
 
 type Table struct {
-	identifier       Identifier
-	metadata         Metadata
-	metadataLocation string
-	cat              CatalogIO
-	fsF              FSysF
-	manifestCache    *snapshotManifestCache
-	planner          ScanPlanner
+	identifier           Identifier
+	metadata             Metadata
+	metadataLocation     string
+	cat                  CatalogIO
+	fsF                  FSysF
+	manifestCache        *snapshotManifestCache
+	manifestContentCache *manifestContentCache
+	planner              ScanPlanner
 	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
 	// catalog load response. They are separate from metadata properties because
 	// REST catalogs can return FileIO configuration in the response's config
@@ -248,6 +249,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
+	t.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, fresh.manifestContentCache)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	t.labels = fresh.labels
@@ -830,7 +832,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
-	return New(
+	next := New(
 		t.identifier,
 		newMeta,
 		newLoc,
@@ -840,7 +842,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
-	), nil
+	)
+	next.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, next.manifestContentCache)
+
+	return next, nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -1354,13 +1359,14 @@ func WithArrowBatchSize(n int) ScanOption {
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
-		identifier:          slices.Clone(t.identifier),
-		metadata:            t.metadata,
-		metadataLocation:    t.metadataLocation,
-		ioF:                 t.fsF,
-		manifestCache:       t.manifestCache,
-		planner:             t.planner,
-		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
+		identifier:           slices.Clone(t.identifier),
+		metadata:             t.metadata,
+		metadataLocation:     t.metadataLocation,
+		ioF:                  t.fsF,
+		manifestCache:        t.manifestCache,
+		manifestContentCache: t.manifestContentCache,
+		planner:              t.planner,
+		scanPlanningIOProps:  maps.Clone(t.scanPlanningIOProps),
 		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
@@ -1482,6 +1488,7 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 	for _, opt := range opts {
 		opt(t)
 	}
+	t.manifestContentCache = newManifestContentCacheForConfig(t.savedConfig)
 
 	return t
 }
