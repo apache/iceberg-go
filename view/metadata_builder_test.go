@@ -97,6 +97,88 @@ func TestBuild_NullAndMissingFields(t *testing.T) {
 	assert.ErrorContains(t, err, "cannot set uuid to null")
 }
 
+func TestBuild_DoesNotGrowVersionLog(t *testing.T) {
+	b := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersion(1, LastAddedID)).
+		SetCurrentVersionID(LastAddedID)
+
+	for range 3 {
+		res, err := b.Build()
+		require.NoError(t, err)
+		require.Len(t, res.VersionLog(), 1)
+		require.Empty(t, b.versionLog, "Build must not append to the builder's own log")
+	}
+}
+
+func TestBuild_RepeatedBuildsWithVersionExpiry(t *testing.T) {
+	// With a history size of 1, versions 1 and 2 are expired. The only history entry is
+	// the one for version 3, which is retained, so updateHistory keeps it; its clear
+	// branch is covered by TestBuild_FromBaseDoesNotGrowVersionLog. Repeated builds
+	// return the same one-entry log.
+	b := newTestBuilder().
+		SetLoc("location").
+		SetProperties(iceberg.Properties{VersionHistorySizeKey: "1"}).
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersionWithSQL(1, LastAddedID, "select 1")).
+		AddVersion(newTestVersionWithSQL(2, LastAddedID, "select 2")).
+		AddVersion(newTestVersionWithSQL(3, LastAddedID, "select 3")).
+		SetCurrentVersionID(LastAddedID)
+
+	first, err := b.Build()
+	require.NoError(t, err)
+	require.Len(t, first.VersionLog(), 1)
+	require.Equal(t, int64(3), first.VersionLog()[0].VersionID)
+	for range 2 {
+		res, err := b.Build()
+		require.NoError(t, err)
+		require.Equal(t, first.VersionLog(), res.VersionLog())
+		require.Empty(t, b.versionLog, "Build must not append to the builder's own log")
+	}
+}
+
+func TestBuild_FromBaseDoesNotGrowVersionLog(t *testing.T) {
+	// The commit-retry case: a builder from existing metadata with a three-entry version
+	// log and a history size of 2, replacing the current version, built more than once.
+	res, err := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersionWithSQL(1, LastAddedID, "select 1")).
+		SetCurrentVersionID(LastAddedID).
+		Build()
+	require.NoError(t, err)
+	for id := int64(2); id <= 3; id++ {
+		b, err := MetadataBuilderFromBase(res.Metadata)
+		require.NoError(t, err)
+		schemaID := res.CurrentVersion().SchemaID
+		res, err = b.AddVersion(newTestVersionWithSQL(id, schemaID, fmt.Sprintf("select %d", id))).
+			SetCurrentVersionID(LastAddedID).
+			Build()
+		require.NoError(t, err)
+	}
+	baseLog := res.VersionLog()
+	require.Len(t, baseLog, 3)
+
+	b, err := MetadataBuilderFromBase(res.Metadata)
+	require.NoError(t, err)
+	schemaID := res.CurrentVersion().SchemaID
+	b.SetProperties(iceberg.Properties{VersionHistorySizeKey: "2"}).
+		AddVersion(newTestVersionWithSQL(4, schemaID, "select 4")).
+		SetCurrentVersionID(LastAddedID)
+
+	for range 3 {
+		res, err := b.Build()
+		require.NoError(t, err)
+		ids := make([]int64, 0, 2)
+		for _, entry := range res.VersionLog() {
+			ids = append(ids, entry.VersionID)
+		}
+		require.Equal(t, []int64{3, 4}, ids)
+		require.Equal(t, baseLog, b.versionLog, "Build must not append to the builder's own log")
+	}
+}
+
 func TestNewVersion_RepresentationValidation(t *testing.T) {
 	tests := []struct {
 		name            string
