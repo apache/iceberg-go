@@ -227,7 +227,7 @@ func (c *manifestContentCache) open(
 			// Preserve the existing ordinary-open fallback for the producer.
 			file, fallbackErr := base.Open(location)
 			if fallbackErr != nil {
-				return nil, fmt.Errorf("manifest cache population failed: %w (fallback open failed: %v)",
+				return nil, fmt.Errorf("manifest cache population failed: %v; fallback open failed: %w",
 					err, fallbackErr)
 			}
 
@@ -372,6 +372,7 @@ func readManifestContent(base iceio.IO, location string, expectedLength int64) (
 		if err == nil {
 			return nil, fmt.Errorf("manifest content exceeds expected length %d", expectedLength)
 		}
+
 		return nil, err
 	}
 

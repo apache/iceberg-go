@@ -199,9 +199,12 @@ func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 	cache := newManifestContentCache(0, 1<<20, 1<<20)
 	const callers = 16
 	errs := make(chan error, callers)
+	joined := make(chan struct{}, callers)
 	for range callers {
 		go func() {
-			file, err := cache.open(t.Context(), fs, manifest)
+			// Only followers call Done() while awaiting the blocked load.
+			ctx := &countingContext{Context: t.Context(), entered: joined}
+			file, err := cache.open(ctx, fs, manifest)
 			if err == nil {
 				_, err = io.ReadAll(file)
 				if closeErr := file.Close(); err == nil {
@@ -214,9 +217,19 @@ func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 
 	select {
 	case <-fs.started:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("manifest read did not start")
 	}
+	// All followers must enter the shared-load wait path. Otherwise late
+	// callers could hit the populated cache and mask broken single-flight.
+	for range callers - 1 {
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Fatal("not all callers joined the in-flight manifest read")
+		}
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	waiterCtx := &notifyingContext{Context: ctx, entered: make(chan struct{})}
@@ -397,8 +410,10 @@ type manifestContentCacheFailOnceIO struct {
 func (f *manifestContentCacheFailOnceIO) Open(name string) (iceio.File, error) {
 	if !f.failed {
 		f.failed = true
+
 		return nil, io.ErrUnexpectedEOF
 	}
+
 	return f.IO.Open(name)
 }
 
@@ -432,4 +447,217 @@ func TestManifestContentCachePanicReleasesInFlightLoad(t *testing.T) {
 		_, _ = cache.open(t.Context(), manifestContentCachePanicIO{}, manifest)
 	})
 	assert.Empty(t, cache.loads)
+}
+
+
+func TestTableRefreshKeepsWarmManifestCacheForMatchingConfig(t *testing.T) {
+	config := iceberg.Properties{IOManifestCacheEnabledKey: "true"}
+	fs := newTrackingCallsIO()
+	tbl, _, manifestPath := newManifestContentCacheTestTable(t, fs, config)
+	tasks, err := tbl.Scan(WithMaxConcurrency(1)).PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, 1, fs.openCount[manifestPath])
+	oldCache := tbl.manifestContentCache
+
+	newTable := func(config iceberg.Properties) *Table {
+		return New(tbl.identifier, tbl.metadata, tbl.metadataLocation,
+			tbl.fsF, nil, WithSavedConfig(config))
+	}
+	cat := &snapshotManifestRefreshCatalog{fresh: newTable(config)}
+	tbl.cat = cat
+
+	require.NoError(t, tbl.Refresh(t.Context()))
+	require.Same(t, oldCache, tbl.manifestContentCache)
+	tasks, err = tbl.Scan(WithMaxConcurrency(1)).PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, 1, fs.openCount[manifestPath], "refresh must reuse immutable manifest content")
+
+	changed := iceberg.Properties{
+		IOManifestCacheEnabledKey:          "true",
+		IOManifestCacheMaxContentLengthKey: "1",
+	}
+	cat.fresh = newTable(changed)
+	require.NoError(t, tbl.Refresh(t.Context()))
+	require.NotSame(t, oldCache, tbl.manifestContentCache)
+	tasks, err = tbl.Scan(WithMaxConcurrency(1)).PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, 2, fs.openCount[manifestPath], "changed limits must bypass the old content cache")
+
+	cat.fresh = newTable(nil)
+	require.NoError(t, tbl.Refresh(t.Context()))
+	require.Nil(t, tbl.manifestContentCache)
+}
+
+func TestManifestContentCacheReclaimsExpiredEntriesOnInsert(t *testing.T) {
+	fs := newTrackingCallsIO()
+	const (
+		firstPath  = "mem://manifest-content-cache/expired-1.avro"
+		secondPath = "mem://manifest-content-cache/expired-2.avro"
+		thirdPath  = "mem://manifest-content-cache/new.avro"
+	)
+	for _, name := range []string{firstPath, secondPath, thirdPath} {
+		require.NoError(t, fs.WriteFile(name, []byte("test")))
+	}
+	cache := newManifestContentCache(1000, 16, 4)
+	now := time.Now()
+	cache.now = func() time.Time { return now }
+	for _, name := range []string{firstPath, secondPath} {
+		readCachedManifest(t, cache, fs, iceberg.NewManifestFile(2, name, 4, 0, 1).Build())
+	}
+	require.Equal(t, int64(8), cache.totalBytes)
+
+	now = now.Add(2 * time.Second)
+	readCachedManifest(t, cache, fs, iceberg.NewManifestFile(2, thirdPath, 4, 0, 1).Build())
+	assert.NotContains(t, cache.entries, firstPath)
+	assert.NotContains(t, cache.entries, secondPath)
+	assert.Contains(t, cache.entries, thirdPath)
+	assert.Equal(t, int64(4), cache.totalBytes)
+}
+
+type manifestContentFailingBlockedIO struct {
+	iceio.IO
+	started chan struct{}
+	release chan struct{}
+
+	mu    sync.Mutex
+	opens int
+}
+
+func (f *manifestContentFailingBlockedIO) Open(name string) (iceio.File, error) {
+	f.mu.Lock()
+	f.opens++
+	attempt := f.opens
+	f.mu.Unlock()
+	if attempt == 1 {
+		close(f.started)
+		<-f.release
+
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	return f.IO.Open(name)
+}
+
+func TestManifestContentCacheSharesFailedLoadWithoutRetryStorm(t *testing.T) {
+	const path = "mem://manifest-content-cache/failed-shared.avro"
+	base := iceio.NewMemFS()
+	require.NoError(t, base.WriteFile(path, []byte("test")))
+	fs := &manifestContentFailingBlockedIO{
+		IO: base, started: make(chan struct{}), release: make(chan struct{}),
+	}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
+	cache := newManifestContentCache(0, 16, 16)
+	manifest := iceberg.NewManifestFile(2, path, 4, 0, 1).Build()
+
+	producerErr := make(chan error, 1)
+	go func() {
+		file, err := cache.open(t.Context(), fs, manifest)
+		if err == nil {
+			_, err = io.ReadAll(file)
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		producerErr <- err
+	}()
+	select {
+	case <-fs.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cache producer did not start")
+	}
+
+	const followers = 8
+	entered := make(chan struct{}, followers)
+	waiterErrors := make(chan error, followers)
+	for range followers {
+		go func() {
+			ctx := &countingContext{Context: t.Context(), entered: entered}
+			file, err := cache.open(ctx, fs, manifest)
+			if file != nil {
+				_ = file.Close()
+			}
+			waiterErrors <- err
+		}()
+	}
+	for range followers {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("waiter did not join failed shared load")
+		}
+	}
+	release.Do(func() { close(fs.release) })
+	require.NoError(t, <-producerErr, "the producer should use one ordinary-open fallback")
+	for range followers {
+		require.ErrorIs(t, <-waiterErrors, io.ErrUnexpectedEOF)
+	}
+	fs.mu.Lock()
+	opens := fs.opens
+	fs.mu.Unlock()
+	assert.Equal(t, 2, opens, "one failed population plus one producer fallback")
+	assert.Empty(t, cache.entries, "failed population must not retain fallback bytes")
+
+	readCachedManifest(t, cache, fs, manifest)
+	assert.Contains(t, cache.entries, path, "the next independent scan can populate the cache")
+}
+
+func TestManifestContentCacheRetriesAfterProducerCancellation(t *testing.T) {
+	const path = "mem://manifest-content-cache/canceled-producer.avro"
+	base := iceio.NewMemFS()
+	require.NoError(t, base.WriteFile(path, []byte("test")))
+	fs := &manifestContentFailingBlockedIO{
+		IO: base, started: make(chan struct{}), release: make(chan struct{}),
+	}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
+	cache := newManifestContentCache(0, 16, 16)
+	manifest := iceberg.NewManifestFile(2, path, 4, 0, 1).Build()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	producerErr := make(chan error, 1)
+	go func() {
+		file, err := cache.open(ctx, fs, manifest)
+		if file != nil {
+			_ = file.Close()
+		}
+		producerErr <- err
+	}()
+	select {
+	case <-fs.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cache producer did not start")
+	}
+
+	joined := make(chan struct{}, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		waiterCtx := &countingContext{Context: t.Context(), entered: joined}
+		file, err := cache.open(waiterCtx, fs, manifest)
+		if err == nil {
+			_, err = io.ReadAll(file)
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		waiterErr <- err
+	}()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not join canceled producer")
+	}
+	cancel()
+	release.Do(func() { close(fs.release) })
+	require.ErrorIs(t, <-producerErr, context.Canceled)
+	require.NoError(t, <-waiterErr)
+	fs.mu.Lock()
+	opens := fs.opens
+	fs.mu.Unlock()
+	assert.Equal(t, 2, opens, "a live waiter should retry the canceled producer just once")
+	assert.Contains(t, cache.entries, path)
 }
