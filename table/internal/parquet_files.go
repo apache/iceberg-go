@@ -531,7 +531,15 @@ type geoColumn struct {
 // collectGeoColumns finds top-level WKB-encoded geo columns in the Arrow schema
 // and pairs each with its Iceberg field ID. Geo bounds for columns nested inside
 // structs/lists/maps are not yet computed, which diverges from Java/PyIceberg.
-// TODO(#992): compute geo bounds for geo columns nested in structs/lists/maps.
+//
+// Nested geo leaves also lose their Parquet Statistics block (min, max, null
+// count), because the GEOMETRY/GEOGRAPHY logical types have an undefined sort
+// order. They are not collected here, so their null counts are not recovered
+// either: the manifest omits them, which costs pruning but never gives a wrong
+// answer. The same applies to
+// geo files imported via DataFileStatsFromMeta alone (e.g. AddFiles).
+// TODO(#2158): compute geo bounds and null counts for geo columns nested in
+// structs/lists/maps.
 func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn {
 	var result []geoColumn
 	for i, f := range sc.Fields() {
@@ -1188,25 +1196,31 @@ func normalizeWKBArrayReachable(ext array.ExtensionArray, active []bool, mem mem
 }
 
 // accumulateGeoBounds extends the per-field bounding boxes with the WKB values
-// in this batch. Null rows are skipped; a malformed WKB value fails the write.
+// in this batch and tallies their null counts. Null rows are skipped; a
+// malformed WKB value fails the write.
+//
+// Every geoCols entry comes from a *geoarrow.WKBType field of the writer's
+// schema, so a batch whose column does not match is an error rather than a
+// skip: skipping would leave a partial null count that under-reports nulls.
 func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
 	for _, gc := range w.geoCols {
 		if gc.colIdx >= int(batch.NumCols()) {
-			continue
+			return fmt.Errorf("geo field %d: column %d missing from batch with %d columns",
+				gc.fieldID, gc.colIdx, batch.NumCols())
 		}
 		ext, ok := batch.Column(gc.colIdx).(array.ExtensionArray)
 		if !ok {
-			continue
+			return fmt.Errorf("geo field %d: expected a WKB extension array, got %s",
+				gc.fieldID, batch.Column(gc.colIdx).DataType())
 		}
 		storage, ok := ext.Storage().(wkbStorage)
 		if !ok {
-			continue
+			return fmt.Errorf("geo field %d: unsupported WKB storage type %s",
+				gc.fieldID, ext.Storage().DataType())
 		}
 
-		acc, ok := w.geoAccs[gc.fieldID]
-		if !ok {
-			continue
-		}
+		acc := w.geoAccs[gc.fieldID]
+		acc.nulls += int64(storage.NullN())
 		for i := range storage.Len() {
 			if storage.IsNull(i) {
 				continue
@@ -1268,17 +1282,30 @@ func (w *ParquetFileWriter) Abort() error {
 	return errors.Join(closeErr, removeErr)
 }
 
-// applyGeoBounds injects the WKB single-point bounds accumulated during the
-// write into the file statistics, so they flow through ToDataFile into the
-// manifest entry like any other typed bound.
+// applyGeoBounds injects the WKB single-point bounds and null counts
+// accumulated during the write into the file statistics, so they flow through
+// ToDataFile into the manifest entry like any other typed bound.
+//
+// Parquet GEOMETRY/GEOGRAPHY columns have an undefined sort order, so the
+// Parquet writer omits the standard Statistics block (min, max, null count)
+// from their column chunks and DataFileStatsFromMeta cannot recover null
+// counts for them.
 func (w *ParquetFileWriter) applyGeoBounds(stats *DataFileStatistics) error {
 	for fieldID, acc := range w.geoAccs {
 		// Honor the column's metrics mode: a column the caller never registered
-		// (missing key) or one set to counts/none does not record bounds. Check
-		// presence first — a missing key yields a zero-value mode of "" that would
-		// otherwise fall through and write bounds the caller asked to skip.
+		// (missing key) or one set to none records nothing, and counts records
+		// no bounds. Check presence first — a missing key yields a zero-value
+		// mode of "" that would otherwise fall through and write bounds the
+		// caller asked to skip.
 		sc, ok := w.info.StatsCols[fieldID]
-		if !ok || sc.Mode.Typ == MetricModeNone || sc.Mode.Typ == MetricModeCounts {
+		if !ok || sc.Mode.Typ == MetricModeNone {
+			continue
+		}
+		if stats.NullValueCounts == nil {
+			stats.NullValueCounts = make(map[int]int64)
+		}
+		stats.NullValueCounts[fieldID] = acc.nulls
+		if sc.Mode.Typ == MetricModeCounts {
 			continue
 		}
 

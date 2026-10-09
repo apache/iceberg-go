@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -61,7 +62,7 @@ func wktToWKB(t *testing.T, s string) geoarrow.WKBBytes {
 // exercise the stats-plan dispatch that decides whether geo bounds are recorded.
 //
 // The geo columns are all top-level; nested geo columns are still unhandled in
-// the writer (see the TODO(#992) in parquet_files.go), so nothing here covers
+// the writer (see the TODO(#2158) in parquet_files.go), so nothing here covers
 // them.
 func newGeoTestWriter(t *testing.T, dir string, props iceberg.Properties) (*defaultDataFileWriter, *iceberg.Schema, *arrow.Schema) {
 	t.Helper()
@@ -295,4 +296,116 @@ func TestWriteGeometryColumnCheckedAllocator(t *testing.T) {
 	require.EqualValues(t, 2, df.Count())
 	require.Contains(t, df.LowerBoundValues(), geoTestGeomFieldID, "geometry column must record a lower bound")
 	require.Contains(t, df.UpperBoundValues(), geoTestGeomFieldID, "geometry column must record an upper bound")
+}
+
+// TestWriteGeoColumnMultiRowGroupStats writes geo columns across several row
+// groups and batches. Parquet GEOMETRY/GEOGRAPHY column chunks omit the
+// standard Statistics block (min, max, null count), so DataFileStatsFromMeta
+// invalidates the column in the first row group; value counts and column sizes
+// (which live outside that block) must still sum over every row group, and the
+// null count (tallied from the Arrow data) must sum over every batch. A value
+// count from row group 0 only, paired with the whole-file null count, would make
+// the file look all-null and let NotNull/IsNull evaluators drop live rows.
+func TestWriteGeoColumnMultiRowGroupStats(t *testing.T) {
+	t.Parallel()
+
+	writer, schema, arrowSchema := newGeoTestWriter(t, t.TempDir(), iceberg.Properties{
+		tblutils.ParquetRowGroupLimitKey: "2",
+	})
+
+	pt := wktToWKB(t, "POINT (1 2)").String()
+	// Nulls fill row group 0 only. The second batch has none, so a null tally
+	// that overwrote rather than summed across batches would record 0.
+	first, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 1, "geom": null, "geog": null},
+		{"id": 2, "geom": null, "geog": null},
+		{"id": 3, "geom": "`+pt+`", "geog": "`+pt+`"}
+	]`))
+	require.NoError(t, err)
+	defer first.Release()
+	second, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 4, "geom": "`+pt+`", "geog": "`+pt+`"},
+		{"id": 5, "geom": "`+pt+`", "geog": "`+pt+`"},
+		{"id": 6, "geom": "`+pt+`", "geog": "`+pt+`"}
+	]`))
+	require.NoError(t, err)
+	defer second.Release()
+
+	df, err := writer.writeFile(t.Context(), nil, WriteTask{
+		Uuid:      uuid.New(),
+		ID:        0,
+		FileCount: 1,
+		Schema:    schema,
+		Batches:   []arrow.RecordBatch{first, second},
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 6, df.Count())
+	require.Len(t, df.SplitOffsets(), 3, "row group limit of 2 must produce 3 row groups")
+
+	for _, tt := range []struct {
+		name    string
+		fieldID int
+	}{
+		{"geom", geoTestGeomFieldID},
+		{"geog", geoTestGeogFieldID},
+	} {
+		require.Contains(t, df.ValueCounts(), tt.fieldID)
+		assert.EqualValues(t, 6, df.ValueCounts()[tt.fieldID], "value count must cover every row group")
+		require.Contains(t, df.NullValueCounts(), tt.fieldID)
+		assert.EqualValues(t, 2, df.NullValueCounts()[tt.fieldID], "null count must cover every batch")
+
+		// Recompute the column's compressed size directly from the row groups
+		// on disk, independently of DataFileStatsFromMeta, and require an exact
+		// match. A regression that only summed row group 0 would still produce
+		// a non-zero, Contains-passing size, so the independent total is the
+		// only thing that actually pins the multi-row-group sum.
+		require.Contains(t, df.ColumnSizes(), tt.fieldID)
+		wantSize := sumColumnChunkCompressedSize(t, df.FilePath(), tt.name)
+		assert.Greater(t, wantSize, int64(0), "sanity: the column must occupy some space across 3 row groups")
+		assert.EqualValues(t, wantSize, df.ColumnSizes()[tt.fieldID], "column size must sum TotalCompressedSize over every row group")
+	}
+
+	for _, name := range []string{"geom", "geog"} {
+		notNull, err := newInclusiveMetricsEvaluator(schema, iceberg.NotNull(iceberg.Reference(name)), true, true)
+		require.NoError(t, err)
+		mightMatch, err := notNull(df)
+		require.NoError(t, err)
+		assert.True(t, mightMatch, "NotNull(%s) must not prune a file with non-null rows", name)
+
+		isNull, err := newStrictMetricsEvaluator(schema, iceberg.IsNull(iceberg.Reference(name)), true, true)
+		require.NoError(t, err)
+		mustMatch, err := isNull(df)
+		require.NoError(t, err)
+		assert.False(t, mustMatch, "IsNull(%s) must not match every row of a file with non-null rows", name)
+	}
+}
+
+// sumColumnChunkCompressedSize opens the Parquet file at path and sums
+// TotalCompressedSize for colName's column chunk across every row group, the
+// same quantity DataFileStatsFromMeta accumulates into DataFile.ColumnSizes.
+// Computing it independently here, straight from the file's row groups,
+// catches a regression that only tallies row group 0.
+func sumColumnChunkCompressedSize(t *testing.T, path, colName string) int64 {
+	t.Helper()
+
+	f, err := (io.LocalFS{}).Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	rdr, err := file.NewParquetReader(f)
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	meta := rdr.MetaData()
+	pos := meta.Schema.ColumnIndexByName(colName)
+	require.GreaterOrEqual(t, pos, 0, "column %q not found in Parquet schema", colName)
+
+	var total int64
+	for rg := range meta.NumRowGroups() {
+		colChunk, err := meta.RowGroup(rg).ColumnChunk(pos)
+		require.NoError(t, err)
+		total += colChunk.TotalCompressedSize()
+	}
+
+	return total
 }
