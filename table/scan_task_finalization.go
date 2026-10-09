@@ -175,6 +175,7 @@ func (scan *Scan) finalizeTaskRange(
 				if err != nil {
 					result.err = fmt.Errorf(
 						"evaluate partition residual for %s: %w", task.File.FilePath(), err)
+
 					return result
 				}
 				if !simplified {

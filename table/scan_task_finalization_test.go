@@ -54,19 +54,15 @@ func TestFinalizePlannedTasksParallelMatchesSerial(t *testing.T) {
 		}
 	}
 
-	serialScan := &Scan{
-		metadata: metadata, rowFilter: iceberg.AlwaysTrue{}, caseSensitive: true, concurrency: 1,
-	}
-	parallelScan := &Scan{
+	scan := &Scan{
 		metadata: metadata, rowFilter: iceberg.AlwaysTrue{}, caseSensitive: true, concurrency: 8,
 	}
-	serialInput := append([]FileScanTask(nil), tasks...)
-	parallelInput := append([]FileScanTask(nil), tasks...)
-	var serialMetrics, parallelMetrics scanMetricsAccumulator
-
-	serial, err := serialScan.finalizePlannedTasks(serialInput, schema, &serialMetrics)
+	serial, serialMetrics, err := serialFinalizationReference(
+		scan, append([]FileScanTask(nil), tasks...), schema)
 	require.NoError(t, err)
-	parallel, err := parallelScan.finalizePlannedTasks(parallelInput, schema, &parallelMetrics)
+	var parallelMetrics scanMetricsAccumulator
+	parallel, err := scan.finalizePlannedTasks(
+		append([]FileScanTask(nil), tasks...), schema, &parallelMetrics)
 	require.NoError(t, err)
 
 	assert.Equal(t, serial, parallel)
@@ -124,15 +120,13 @@ func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
 	}
 
 	filter := iceberg.EqualTo(iceberg.Reference("id"), int32(7))
-	serialScan := &Scan{metadata: metadata, rowFilter: filter, caseSensitive: true, concurrency: 1}
-	parallelScan := &Scan{metadata: metadata, rowFilter: filter, caseSensitive: true, concurrency: 8}
-	serialInput := append([]FileScanTask(nil), tasks...)
-	parallelInput := append([]FileScanTask(nil), tasks...)
-	var serialMetrics, parallelMetrics scanMetricsAccumulator
-
-	serial, err := serialScan.finalizePlannedTasks(serialInput, schema, &serialMetrics)
+	scan := &Scan{metadata: metadata, rowFilter: filter, caseSensitive: true, concurrency: 8}
+	serial, serialMetrics, err := serialFinalizationReference(
+		scan, append([]FileScanTask(nil), tasks...), schema)
 	require.NoError(t, err)
-	parallel, err := parallelScan.finalizePlannedTasks(parallelInput, schema, &parallelMetrics)
+	var parallelMetrics scanMetricsAccumulator
+	parallel, err := scan.finalizePlannedTasks(
+		append([]FileScanTask(nil), tasks...), schema, &parallelMetrics)
 	require.NoError(t, err)
 
 	assert.Equal(t, serial, parallel)
@@ -264,6 +258,7 @@ func serialFinalizationReference(
 			result = append(result, task)
 		}
 	}
+
 	return result, acc, nil
 }
 
