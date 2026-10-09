@@ -173,7 +173,7 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 		}
 
 		config = maps.Clone(v.props)
-		maps.Copy(config, freshCreds)
+		mergeVendedCredentials(config, freshCreds)
 	}
 
 	// The IO is cached and shared by every later caller, so it must not
@@ -432,12 +432,24 @@ func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
 	props := make(iceberg.Properties, len(p.baseProps))
 	maps.Copy(props, p.baseProps)
 	if credentialIndex >= 0 {
-		credentialConfig := p.credentials[credentialIndex].Config
-		clearOverriddenCredentialProperties(props, credentialConfig)
-		maps.Copy(props, credentialConfig)
+		mergeVendedCredentials(props, p.credentials[credentialIndex].Config)
 	}
 
 	return props
+}
+
+// mergeVendedCredentials applies a matched storage credential over config,
+// first dropping any inherited property that the credential is meant to
+// replace. Every site that merges vended credentials must go through here:
+// merging with maps.Copy alone leaves stale higher-precedence credentials in
+// place, which then shadow the freshly vended ones.
+func mergeVendedCredentials(config, credentialConfig iceberg.Properties) {
+	if len(credentialConfig) == 0 {
+		return
+	}
+
+	clearOverriddenCredentialProperties(config, credentialConfig)
+	maps.Copy(config, credentialConfig)
 }
 
 // clearOverriddenCredentialProperties prevents a matched credential from being
@@ -472,6 +484,26 @@ func clearOverriddenCredentialProperties(props, credentialConfig iceberg.Propert
 			suffix := strings.TrimPrefix(key, keyAdlsSasExpiresAtMs+".")
 			delete(props, iceio.ADLSSasTokenPrefix+suffix)
 			delete(props, keyAdlsSasExpiresAtMs+"."+suffix)
+		}
+	}
+
+	if credentialConfig[iceio.ADLSToken] != "" {
+		// adls.token is evaluated after shared-key, SAS-token, and connection-string
+		// auth, so any of those left over from the table or catalog configuration
+		// would shadow a freshly vended token and the read would 403. props is a
+		// per-location copy, so clearing them cannot affect another location's IO.
+		//
+		// The value must be nonempty: the Azure bucket factory skips an empty
+		// adls.token, so clearing on mere key presence would discard working
+		// credentials and fall through to a weaker auth method.
+		delete(props, iceio.ADLSSharedKeyAccountName)
+		delete(props, iceio.ADLSSharedKeyAccountKey)
+		for key := range props {
+			if strings.HasPrefix(key, iceio.ADLSSasTokenPrefix) ||
+				strings.HasPrefix(key, keyAdlsSasExpiresAtMs+".") ||
+				strings.HasPrefix(key, iceio.ADLSConnectionStringPrefix) {
+				delete(props, key)
+			}
 		}
 	}
 }

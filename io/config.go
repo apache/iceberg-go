@@ -64,9 +64,9 @@ const (
 	// managed identity.
 	//
 	// It is evaluated only after shared-key credentials, a SAS-token property for
-	// the target hostname, and a connection-string property for the target account
-	// name, all of which take precedence over it; if any of them is configured,
-	// this flag has no effect.
+	// the target hostname, a connection-string property for the target account
+	// name, and a nonempty ADLSToken, all of which take precedence over it; if any
+	// of them is configured, this flag has no effect.
 	//
 	// This property is specific to this implementation. Neither the Java nor the
 	// PyIceberg implementation defines an equivalent property, so catalog properties
@@ -84,6 +84,16 @@ const (
 	// user-assigned managed identity ID here. Java's AzureProperties defines no
 	// "adls.client-id" at all.
 	ADLSClientID = "adls.client-id"
+
+	// ADLSToken is a static OAuth2 access token for Azure Storage, without the
+	// "Bearer " prefix. A nonempty token takes precedence over managed identity
+	// and the default credential chain, but not shared-key credentials, a SAS-token
+	// property for the target hostname, or a connection-string property for the
+	// target account name. An empty token is ignored.
+	//
+	// The token is not refreshed. Azure enforces its expiration; callers must
+	// recreate the FileIO with a new token when it expires.
+	ADLSToken = "adls.token"
 
 	// Not in use yet
 	// ADLSReadBlockSize          = "adls.read.block-size-bytes"

@@ -1334,7 +1334,7 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 	config := maps.Clone(r.props)
 	maps.Copy(config, tbl.SavedConfig())
 	scanCfg := maps.Clone(config)
-	maps.Copy(config, resp)
+	mergeVendedCredentials(config, resp)
 
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.
@@ -1566,7 +1566,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
-	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
+	mergeVendedCredentials(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
@@ -1796,7 +1796,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
-	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
+	mergeVendedCredentials(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
@@ -1844,7 +1844,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
-	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
+	mergeVendedCredentials(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }

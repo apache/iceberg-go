@@ -466,3 +466,63 @@ func TestRefreshTableCredentialsNotFound(t *testing.T) {
 	assert.Nil(t, refreshed)
 	assert.ErrorIs(t, err, catalog.ErrNoSuchTable)
 }
+
+// TestRefreshTableCredentialsDropsStaleCredentials checks that refreshed
+// credentials replace, rather than sit beside, credentials of the same kind left
+// in the table's saved config. A stale higher-precedence credential would
+// otherwise shadow the freshly vended one.
+func TestRefreshTableCredentialsDropsStaleCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		scheme  string
+		saved   iceberg.Properties
+		vended  map[string]string
+		removed []string
+	}{
+		{
+			name:   "adls token replaces shared key and sas",
+			scheme: "restcreds-stale-adls",
+			saved: iceberg.Properties{
+				iceio.ADLSSharedKeyAccountName:                         "stale-account",
+				iceio.ADLSSharedKeyAccountKey:                          "stale-key",
+				iceio.ADLSSasTokenPrefix + "acct.dfs.core.windows.net": "stale-sas",
+				iceio.ADLSConnectionStringPrefix + "acct":              "stale-conn",
+			},
+			vended:  map[string]string{iceio.ADLSToken: "vended-token"},
+			removed: []string{iceio.ADLSSharedKeyAccountName, iceio.ADLSSharedKeyAccountKey, iceio.ADLSSasTokenPrefix + "acct.dfs.core.windows.net", iceio.ADLSConnectionStringPrefix + "acct"},
+		},
+		{
+			name:    "s3 key pair drops stale session token",
+			scheme:  "restcreds-stale-s3",
+			saved:   iceberg.Properties{"s3.session-token": "stale-token"},
+			vended:  map[string]string{"s3.access-key-id": "vended-key", "s3.secret-access-key": "vended-secret"},
+			removed: []string{"s3.session-token"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &ioPropsRecorder{}
+			rec.register(t, tc.scheme)
+
+			cat := newCredsTestCatalog(t, credsCatalogOpts{
+				creds: func(w http.ResponseWriter, _ *http.Request) {
+					assert.NoError(t, json.NewEncoder(w).Encode(
+						storageCredentialsBody(tc.scheme+"://warehouse/database/table", tc.vended)))
+				},
+			})
+			tbl, _ := newExternalTable(t, cat, tc.scheme, table.WithSavedConfig(tc.saved))
+
+			refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
+			require.NoError(t, err)
+			_, err = refreshed.FS(context.Background())
+			require.NoError(t, err)
+
+			props := rec.lastLoad(t)
+			for k, v := range tc.vended {
+				assert.Equal(t, v, props[k], "vended property %q", k)
+			}
+			for _, k := range tc.removed {
+				assert.NotContains(t, props, k, "stale credential %q must not survive the refresh", k)
+			}
+		})
+	}
+}
