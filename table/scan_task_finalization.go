@@ -19,31 +19,27 @@ package table
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/apache/iceberg-go"
 )
 
-// Keep enough work in each finalization worker to amortize goroutine and
-// result-merging overhead on small scans.
-const scanTaskFinalizationMinTasksPerWorker = 64
-
-type scanTaskSplitReplacement struct {
-	index int
-	tasks []FileScanTask
-}
+// CPU-heavy finalization needs enough work to amortize worker and merge costs.
+const scanTaskFinalizationMinTasksPerWorker = 256
 
 type scanTaskFinalizationResult struct {
-	metrics      scanMetricsAccumulator
-	replacements []scanTaskSplitReplacement
-	err          error
+	metrics  scanMetricsAccumulator
+	tasks    []FileScanTask
+	expanded bool
+	err      error
 }
 
-// finalizePlannedTasks applies task residuals, records result metrics, and
-// expands Parquet byte-range splits. Workers own disjoint task ranges, so base
-// tasks can be updated in place. Only tasks that actually split need replacement
-// slices; unsplit scans return plannedTasks directly without another O(files)
-// copy.
+// finalizePlannedTasks applies residuals, records result metrics, and expands
+// Parquet byte-range splits. The caller transfers ownership of plannedTasks:
+// workers mutate residuals in that slice, even when an error is returned.
+// Callers must not reuse it after this call. If no task splits, the returned
+// slice aliases the original backing array.
 func (scan *Scan) finalizePlannedTasks(
 	plannedTasks []FileScanTask,
 	schema *iceberg.Schema,
@@ -73,11 +69,18 @@ func (scan *Scan) finalizePlannedTasks(
 		return []FileScanTask{}, nil
 	}
 
-	workerCount := min(max(scan.concurrency, 1), max(1, len(plannedTasks)/scanTaskFinalizationMinTasksPerWorker))
+	workerCount := min(max(scan.concurrency, 1), runtime.GOMAXPROCS(0),
+		max(1, len(plannedTasks)/scanTaskFinalizationMinTasksPerWorker))
 	results := make([]scanTaskFinalizationResult, workerCount)
 	chunkSize := (len(plannedTasks) + workerCount - 1) / workerCount
 
 	finalizeRange := func(worker, start, end int) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				results[worker].err = fmt.Errorf("finalize scan tasks [%d:%d]: panic: %v",
+					start, end, recovered)
+			}
+		}()
 		results[worker] = scan.finalizeTaskRange(
 			plannedTasks, start, end, residualEvaluators, splitTargetSize)
 	}
@@ -99,37 +102,42 @@ func (scan *Scan) finalizePlannedTasks(
 		wg.Wait()
 	}
 
-	// Each worker stops at its first error, and results follow contiguous task
-	// ranges. The first error in result order is therefore also the first error
-	// in task order, regardless of which worker finished first.
+	// Ranges follow task order, regardless of the order workers completed.
 	for i := range results {
 		if results[i].err != nil {
 			return nil, results[i].err
 		}
 	}
 
-	totalTasks := len(plannedTasks)
+	totalTasks := 0
+	anySplit := false
 	for i := range results {
 		mergeTaskFinalizationMetrics(acc, &results[i].metrics)
-		for _, replacement := range results[i].replacements {
-			totalTasks += len(replacement.tasks) - 1
+		if results[i].expanded {
+			anySplit = true
+			totalTasks += len(results[i].tasks)
+		} else {
+			start := i * chunkSize
+			totalTasks += min(start+chunkSize, len(plannedTasks)) - start
 		}
 	}
-	if totalTasks == len(plannedTasks) {
+	if !anySplit {
 		return plannedTasks, nil
 	}
 
+	// Workers that split files emit their ranges in task order. Unsplit
+	// workers reuse their input ranges without temporary replacement lists.
+	// Concatenate once; do not hold an allocation per individual split.
 	finalized := make([]FileScanTask, 0, totalTasks)
-	next := 0
 	for i := range results {
-		for _, replacement := range results[i].replacements {
-			finalized = append(finalized, plannedTasks[next:replacement.index]...)
-			finalized = append(finalized, replacement.tasks...)
-			next = replacement.index + 1
+		if results[i].expanded {
+			finalized = append(finalized, results[i].tasks...)
+		} else {
+			start := i * chunkSize
+			end := min(start+chunkSize, len(plannedTasks))
+			finalized = append(finalized, plannedTasks[start:end]...)
 		}
 	}
-	finalized = append(finalized, plannedTasks[next:]...)
-
 	return finalized, nil
 }
 
@@ -153,12 +161,10 @@ func (scan *Scan) finalizeTaskRange(
 				if err != nil {
 					result.err = fmt.Errorf(
 						"build partition residual evaluator for spec %d: %w", specID, err)
-
 					return result
 				}
 				// Manifest-order runs normally share one spec. Evaluators are
-				// immutable, so each worker can reuse its last lookup without
-				// acquiring the shared cache lock for every file.
+				// immutable; a worker caches the last lookup for a file run.
 				cachedSpecID, hasCachedSpec = specID, true
 			}
 			if residualEvaluator != nil {
@@ -167,7 +173,6 @@ func (scan *Scan) finalizeTaskRange(
 				if err != nil {
 					result.err = fmt.Errorf(
 						"evaluate partition residual for %s: %w", task.File.FilePath(), err)
-
 					return result
 				}
 				if !simplified {
@@ -179,13 +184,15 @@ func (scan *Scan) finalizeTaskRange(
 		result.metrics.addResultDeleteMetrics(*task)
 		result.metrics.totalFileSize += task.File.FileSizeBytes()
 		if splitTasks, split := splitParquetScanTask(*task, splitTargetSize); split {
-			result.replacements = append(result.replacements, scanTaskSplitReplacement{
-				index: index,
-				tasks: splitTasks,
-			})
+			if !result.expanded {
+				result.expanded = true
+				result.tasks = append(result.tasks, plannedTasks[start:index]...)
+			}
+			result.tasks = append(result.tasks, splitTasks...)
+		} else if result.expanded {
+			result.tasks = append(result.tasks, *task)
 		}
 	}
-
 	return result
 }
 

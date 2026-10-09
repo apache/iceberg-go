@@ -39,7 +39,7 @@ func TestFinalizePlannedTasksParallelMatchesSerial(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	tasks := make([]FileScanTask, 256)
+	tasks := make([]FileScanTask, 1024)
 	for i := range tasks {
 		file := finalizationTestDataFile(
 			t, *iceberg.UnpartitionedSpec,
@@ -106,7 +106,7 @@ func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
 	metadata, err = builder.Build()
 	require.NoError(t, err)
 
-	tasks := make([]FileScanTask, 256)
+	tasks := make([]FileScanTask, 1024)
 	for i := range tasks {
 		partitionValue := int32(7)
 		if i%2 != 0 {
@@ -156,12 +156,12 @@ func TestFinalizePlannedTasksReturnsFirstErrorInTaskOrder(t *testing.T) {
 	metadata, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://table", nil)
 	require.NoError(t, err)
 
-	tasks := make([]FileScanTask, 256)
+	tasks := make([]FileScanTask, 1024)
 	for i := range tasks {
 		var partitionValue any = int32(7)
-		if i == 1 || i == 128 {
-			// Put failures in separate worker ranges. Both must retain the
-			// first file's diagnostic even if a later range finishes first.
+		if i == 255 || i == 256 {
+			// The earlier failing task is at the end of worker range 0;
+			// worker 1 can fail first at the start of its own range.
 			partitionValue = "invalid integer partition"
 		}
 		file := finalizationTestDataFile(t, spec,
@@ -171,13 +171,16 @@ func TestFinalizePlannedTasksReturnsFirstErrorInTaskOrder(t *testing.T) {
 	}
 
 	for _, concurrency := range []int{1, 8} {
-		scan := &Scan{
-			metadata: metadata, concurrency: concurrency, caseSensitive: true,
-			rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7)),
-		}
-		result, err := scan.finalizePlannedTasks(tasks, schema, &scanMetricsAccumulator{})
-		require.ErrorContains(t, err, "evaluate partition residual for mem://table/data/file-1.parquet")
-		assert.Nil(t, result)
+		t.Run(fmt.Sprintf("concurrency=%d", concurrency), func(t *testing.T) {
+			scan := &Scan{
+				metadata: metadata, concurrency: concurrency, caseSensitive: true,
+				rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7)),
+			}
+			input := append([]FileScanTask(nil), tasks...)
+			result, planErr := scan.finalizePlannedTasks(input, schema, &scanMetricsAccumulator{})
+			require.ErrorContains(t, planErr, "evaluate partition residual for mem://table/data/file-255.parquet")
+			assert.Nil(t, result)
+		})
 	}
 }
 
@@ -193,13 +196,158 @@ func TestFinalizePlannedTasksUnsplitReusesInput(t *testing.T) {
 	require.NoError(t, err)
 	file := finalizationTestDataFile(
 		t, *iceberg.UnpartitionedSpec, "mem://table/data/file.parquet", nil, 100, nil)
-	tasks := []FileScanTask{{File: file, Start: 0, Length: file.FileSizeBytes()}}
+	tasks := make([]FileScanTask, 512)
+	for i := range tasks {
+		tasks[i] = FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
+	}
 	scan := &Scan{metadata: metadata, rowFilter: iceberg.AlwaysTrue{}, caseSensitive: true, concurrency: 8}
 
 	got, err := scan.finalizePlannedTasks(tasks, schema, &scanMetricsAccumulator{})
 	require.NoError(t, err)
-	require.Len(t, got, 1)
+	require.Len(t, got, len(tasks))
 	assert.Same(t, &tasks[0], &got[0])
+	assert.Same(t, &tasks[len(tasks)-1], &got[len(got)-1])
+	assert.Nil(t, got[0].Residual)
+}
+
+
+// serialFinalizationReference reproduces the pre-parallelization loop. It is
+// deliberately independent of finalizeTaskRange and the worker merge logic.
+func serialFinalizationReference(
+	scan *Scan,
+	tasks []FileScanTask,
+	schema *iceberg.Schema,
+) ([]FileScanTask, scanMetricsAccumulator, error) {
+	var acc scanMetricsAccumulator
+	var filter iceberg.BooleanExpression
+	if scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}) {
+		var err error
+		filter, err = iceberg.BindExpr(schema, scan.rowFilter, scan.caseSensitive)
+		if err != nil {
+			return nil, acc, err
+		}
+	}
+	evaluators := make(map[int]*partitionResidualEvaluator)
+	acc.resultDataFiles = int64(len(tasks))
+	result := make([]FileScanTask, 0, len(tasks))
+	target := scan.metadata.Properties().GetInt64(ReadSplitTargetSizeKey, ReadSplitTargetSizeDefault)
+	for _, task := range tasks {
+		if filter != nil {
+			specID := int(task.File.SpecID())
+			evaluator, ok := evaluators[specID]
+			if !ok {
+				var err error
+				evaluator, err = newPartitionResidualEvaluator(
+					schema, scan.metadata.PartitionSpecByID(specID), filter, scan.caseSensitive)
+				if err != nil {
+					return nil, acc, fmt.Errorf("build partition residual evaluator for spec %d: %w", specID, err)
+				}
+				evaluators[specID] = evaluator
+			}
+			if evaluator != nil {
+				var err error
+				var simplified bool
+				task.Residual, simplified, err = evaluator.residual(dataFilePartition(task.File))
+				if err != nil {
+					return nil, acc, fmt.Errorf(
+						"evaluate partition residual for %s: %w", task.File.FilePath(), err)
+				}
+				if !simplified {
+					task.Residual = nil
+				}
+			}
+		}
+		acc.addResultDeleteMetrics(task)
+		acc.totalFileSize += task.File.FileSizeBytes()
+		if splits, ok := splitParquetScanTask(task, target); ok {
+			result = append(result, splits...)
+		} else {
+			result = append(result, task)
+		}
+	}
+	return result, acc, nil
+}
+
+func TestFinalizePlannedTasksMixedSplitsAgainstIndependentReference(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://table", iceberg.Properties{ReadSplitTargetSizeKey: "25"})
+	require.NoError(t, err)
+
+	dvBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		"mem://table/deletes.dv.puffin", iceberg.PuffinFile, nil, nil, nil, 1, 2048)
+	require.NoError(t, err)
+	dv := dvBuilder.ContentSizeInBytes(17).ContentOffset(100).Build()
+
+	for _, count := range []int{0, 1, 255, 256, 257, 512, 1024} {
+		t.Run(fmt.Sprintf("files=%d", count), func(t *testing.T) {
+			tasks := make([]FileScanTask, count)
+			splits := 0
+			for i := range tasks {
+				offsets := []int64(nil)
+				if i%7 < 2 || i == count-1 || i == 255 || i == 256 {
+					offsets = []int64{8, 25, 50, 75}
+					splits++
+				}
+				file := finalizationTestDataFile(t, *iceberg.UnpartitionedSpec,
+					fmt.Sprintf("mem://table/data/file-%d.parquet", i), nil, 100, offsets)
+				tasks[i] = FileScanTask{File: file, Length: 100}
+				if i%9 == 0 {
+					tasks[i].DeleteFiles = []iceberg.DataFile{file}
+				}
+				if i%11 == 0 {
+					tasks[i].EqualityDeleteFiles = []iceberg.DataFile{file}
+				}
+				if i%13 == 0 {
+					tasks[i].DeletionVectorFiles = []iceberg.DataFile{dv}
+				}
+			}
+			scan := &Scan{metadata: metadata, rowFilter: iceberg.AlwaysTrue{},
+				caseSensitive: true, concurrency: 8}
+			expected, expectedMetrics, err := serialFinalizationReference(
+				scan, append([]FileScanTask(nil), tasks...), schema)
+			require.NoError(t, err)
+			var actualMetrics scanMetricsAccumulator
+			actual, err := scan.finalizePlannedTasks(
+				append([]FileScanTask(nil), tasks...), schema, &actualMetrics)
+			require.NoError(t, err)
+			assert.Equal(t, expected, actual)
+			assert.Equal(t, expectedMetrics, actualMetrics)
+			assert.Len(t, actual, count+3*splits)
+			assert.Equal(t, int64((count+12)/13), actualMetrics.dvs)
+			assert.Equal(t, int64((count+8)/9*100+(count+10)/11*100+(count+12)/13*17),
+				actualMetrics.totalDeleteFileSize)
+		})
+	}
+}
+
+type panicSizeFinalizationFile struct {
+	iceberg.DataFile
+}
+
+func (panicSizeFinalizationFile) FileSizeBytes() int64 {
+	panic("injected file size panic")
+}
+
+func TestFinalizePlannedTasksWorkerPanicReturnsError(t *testing.T) {
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://table", nil)
+	require.NoError(t, err)
+	file := finalizationTestDataFile(t, *iceberg.UnpartitionedSpec,
+		"mem://table/data/file.parquet", nil, 100, nil)
+	tasks := make([]FileScanTask, 512)
+	for i := range tasks {
+		tasks[i] = FileScanTask{File: file, Length: 100}
+	}
+	tasks[256].File = panicSizeFinalizationFile{DataFile: file}
+
+	scan := &Scan{metadata: meta, rowFilter: iceberg.AlwaysTrue{}, caseSensitive: true, concurrency: 8}
+	actual, err := scan.finalizePlannedTasks(tasks, schema, &scanMetricsAccumulator{})
+	require.ErrorContains(t, err, "injected file size panic")
+	require.Nil(t, actual)
 }
 
 func finalizationTestDataFile(
@@ -284,6 +432,20 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 				tasks[i] = FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
 			}
 
+			b.Run("old_serial_loop", func(b *testing.B) {
+				scan := &Scan{
+					metadata: metadata, rowFilter: tc.rowFilter, caseSensitive: true, concurrency: 1,
+				}
+				b.ReportAllocs()
+				for b.Loop() {
+					result, _, err := serialFinalizationReference(scan, tasks, schema)
+					if err != nil {
+						b.Fatal(err)
+					}
+					scanTaskFinalizationBenchmarkSink += len(result)
+				}
+			})
+
 			for _, concurrency := range []int{1, 2, 4, 8} {
 				b.Run(fmt.Sprintf("concurrency=%d", concurrency), func(b *testing.B) {
 					scan := &Scan{
@@ -292,7 +454,6 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 					}
 					b.ReportAllocs()
 					b.ReportMetric(float64(tc.fileCount), "files/op")
-					b.ResetTimer()
 					for b.Loop() {
 						var acc scanMetricsAccumulator
 						finalized, err := scan.finalizePlannedTasks(tasks, schema, &acc)
