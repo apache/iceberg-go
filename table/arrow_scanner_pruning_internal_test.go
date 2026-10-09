@@ -253,16 +253,26 @@ func TestBindTaskFilterValidatesBoundSchema(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("matching schema is accepted", func(t *testing.T) {
-		got, err := bindTaskFilter(int64Schema, bound, true)
+		got, changed, err := bindTaskFilter(int64Schema, bound, true)
 		require.NoError(t, err)
+		require.False(t, changed)
 		require.Same(t, bound, got)
+	})
+
+	t.Run("unbound filter is bound", func(t *testing.T) {
+		unbound := iceberg.EqualTo(iceberg.Reference("id"), int64(42))
+		got, changed, err := bindTaskFilter(int64Schema, unbound, true)
+		require.NoError(t, err)
+		require.True(t, changed)
+		require.NotNil(t, got)
+		require.NotSame(t, unbound, got)
 	})
 
 	t.Run("missing field is rejected", func(t *testing.T) {
 		otherSchema := iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 2, Name: "other", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		)
-		_, err := bindTaskFilter(otherSchema, bound, true)
+		_, _, err := bindTaskFilter(otherSchema, bound, true)
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		require.ErrorContains(t, err, "field ID 1")
 	})
@@ -271,7 +281,7 @@ func TestBindTaskFilterValidatesBoundSchema(t *testing.T) {
 		otherSchema := iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		)
-		_, err := bindTaskFilter(otherSchema, bound, true)
+		_, _, err := bindTaskFilter(otherSchema, bound, true)
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		require.ErrorContains(t, err, "type")
 	})
@@ -289,7 +299,7 @@ func TestBindTaskFilterValidatesBoundSchema(t *testing.T) {
 			iceberg.NestedField{ID: 10, Name: "payload", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{field}}},
 		)
 
-		_, err = bindTaskFilter(otherSchema, boundNested, true)
+		_, _, err = bindTaskFilter(otherSchema, boundNested, true)
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		require.ErrorContains(t, err, "accessor path")
 	})

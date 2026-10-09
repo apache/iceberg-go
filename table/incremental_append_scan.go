@@ -123,7 +123,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if err != nil {
 		return nil, err
 	}
-	residual, err := bindTaskFilter(schema, planningScan.rowFilter, planningScan.caseSensitive)
+	residual, _, err := bindTaskFilter(schema, planningScan.rowFilter, planningScan.caseSensitive)
 	if err != nil {
 		return nil, fmt.Errorf("bind incremental scan residual: %w", err)
 	}
