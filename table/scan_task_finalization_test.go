@@ -19,6 +19,7 @@ package table
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -171,11 +172,45 @@ func TestFinalizePlannedTasksReturnsFirstErrorInTaskOrder(t *testing.T) {
 				rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7)),
 			}
 			input := append([]FileScanTask(nil), tasks...)
+			if concurrency > 1 {
+				// With four CPU workers and 1024 tasks, worker 0 owns
+				// [0:256] and worker 1 owns [256:512].
+				previous := runtime.GOMAXPROCS(4)
+				defer runtime.GOMAXPROCS(previous)
+
+				laterErrorReached := make(chan struct{})
+				input[255].File = finalizationOrderFile{
+					DataFile: input[255].File, wait: laterErrorReached,
+				}
+				input[256].File = finalizationOrderFile{
+					DataFile: input[256].File, signal: laterErrorReached,
+				}
+			}
 			result, planErr := scan.finalizePlannedTasks(input, schema, &scanMetricsAccumulator{})
 			require.ErrorContains(t, planErr, "evaluate partition residual for mem://table/data/file-255.parquet")
 			assert.Nil(t, result)
 		})
 	}
+}
+
+// Controls which worker reaches its partition error first, without relying on
+// scheduler timing. The wrapper intentionally does not forward the built-in
+// borrowed-partition interface, so residual evaluation calls Partition.
+type finalizationOrderFile struct {
+	iceberg.DataFile
+	wait   <-chan struct{}
+	signal chan struct{}
+}
+
+func (f finalizationOrderFile) Partition() map[int]any {
+	if f.signal != nil {
+		close(f.signal)
+	}
+	if f.wait != nil {
+		<-f.wait
+	}
+
+	return f.DataFile.Partition()
 }
 
 func TestFinalizePlannedTasksUnsplitReusesInput(t *testing.T) {
