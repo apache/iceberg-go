@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -94,6 +95,106 @@ func TestWriteDataFileBatchesAbortsOnWriteError(t *testing.T) {
 			assert.False(t, writer.closeCalled)
 		})
 	}
+}
+
+// TestWriteRejectsMismatchedGeoBatch drives the public Write method with a
+// batch that doesn't match the geo columns collected from the writer's Arrow
+// schema, pinning accumulateGeoBounds's error returns against a regression
+// back to silently skipping
+func TestWriteRejectsMismatchedGeoBatch(t *testing.T) {
+	mem := memory.DefaultAllocator
+
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "geom", Type: typeDef, Nullable: true},
+	}, nil)
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "geom", Type: iceberg.GeometryType{}, Required: false},
+	)
+	format := parquetFormat{}
+
+	newWriter := func(t *testing.T) FileWriter {
+		t.Helper()
+
+		writer, err := format.NewFileWriter(context.Background(), iceio.NewMemFS(), nil, WriteFileInfo{
+			FileSchema: fileSchema,
+			Spec:       *iceberg.UnpartitionedSpec,
+			FileName:   "mismatched-geo.parquet",
+			WriteProps: format.GetWriteProperties(iceberg.Properties{}),
+		}, arrowSchema)
+		require.NoError(t, err)
+
+		return writer
+	}
+
+	idField := arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int32}
+	idBuilder := array.NewInt32Builder(mem)
+	idBuilder.AppendValues([]int32{1, 2}, nil)
+	idArr := idBuilder.NewArray()
+	idBuilder.Release()
+	defer idArr.Release()
+
+	t.Run("column missing from batch", func(t *testing.T) {
+		writer := newWriter(t)
+		defer func() { require.NoError(t, writer.Abort()) }()
+
+		sc := arrow.NewSchema([]arrow.Field{idField}, nil)
+		batch := array.NewRecordBatch(sc, []arrow.Array{idArr}, int64(idArr.Len()))
+		defer batch.Release()
+
+		err := writer.Write(batch)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing from batch")
+	})
+
+	t.Run("column is not a WKB extension array", func(t *testing.T) {
+		writer := newWriter(t)
+		defer func() { require.NoError(t, writer.Abort()) }()
+
+		geomBuilder := array.NewInt32Builder(mem)
+		geomBuilder.AppendValues([]int32{10, 20}, nil)
+		geomArr := geomBuilder.NewArray()
+		geomBuilder.Release()
+		defer geomArr.Release()
+
+		sc := arrow.NewSchema([]arrow.Field{idField, {Name: "geom", Type: arrow.PrimitiveTypes.Int32}}, nil)
+		batch := array.NewRecordBatch(sc, []arrow.Array{idArr, geomArr}, int64(idArr.Len()))
+		defer batch.Release()
+
+		err := writer.Write(batch)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "expected a WKB extension array")
+	})
+
+	t.Run("extension storage is not a WKB-compatible array", func(t *testing.T) {
+		writer := newWriter(t)
+		defer func() { require.NoError(t, writer.Abort()) }()
+
+		// OpaqueType lets the test pick an arbitrary storage type (here Int32,
+		// which has no Value(int) []byte method) without implementing a whole
+		// fake extension type by hand. normalizeGeoBatch leaves it untouched
+		// (it only rewrites *geoarrow.WKBType extensions), so it reaches
+		// accumulateGeoBounds exactly as built here.
+		opaqueType := extensions.NewOpaqueType(arrow.PrimitiveTypes.Int32, "fake-wkb", "test")
+		storageBuilder := array.NewInt32Builder(mem)
+		storageBuilder.AppendValues([]int32{1, 2}, nil)
+		storage := storageBuilder.NewArray()
+		storageBuilder.Release()
+		defer storage.Release()
+
+		geomArr := array.NewExtensionArrayWithStorage(opaqueType, storage)
+		defer geomArr.Release()
+
+		sc := arrow.NewSchema([]arrow.Field{idField, {Name: "geom", Type: opaqueType}}, nil)
+		batch := array.NewRecordBatch(sc, []arrow.Array{idArr, geomArr}, int64(idArr.Len()))
+		defer batch.Release()
+
+		err := writer.Write(batch)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported WKB storage type")
+	})
 }
 
 func TestNewFileWriterCachesGeoNormalizationColumns(t *testing.T) {

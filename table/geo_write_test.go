@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -341,12 +342,27 @@ func TestWriteGeoColumnMultiRowGroupStats(t *testing.T) {
 	require.EqualValues(t, 6, df.Count())
 	require.Len(t, df.SplitOffsets(), 3, "row group limit of 2 must produce 3 row groups")
 
-	for _, fieldID := range []int{geoTestGeomFieldID, geoTestGeogFieldID} {
-		require.Contains(t, df.ValueCounts(), fieldID)
-		assert.EqualValues(t, 6, df.ValueCounts()[fieldID], "value count must cover every row group")
-		require.Contains(t, df.NullValueCounts(), fieldID)
-		assert.EqualValues(t, 2, df.NullValueCounts()[fieldID], "null count must cover every batch")
-		require.Contains(t, df.ColumnSizes(), fieldID)
+	for _, tt := range []struct {
+		name    string
+		fieldID int
+	}{
+		{"geom", geoTestGeomFieldID},
+		{"geog", geoTestGeogFieldID},
+	} {
+		require.Contains(t, df.ValueCounts(), tt.fieldID)
+		assert.EqualValues(t, 6, df.ValueCounts()[tt.fieldID], "value count must cover every row group")
+		require.Contains(t, df.NullValueCounts(), tt.fieldID)
+		assert.EqualValues(t, 2, df.NullValueCounts()[tt.fieldID], "null count must cover every batch")
+
+		// Recompute the column's compressed size directly from the row groups
+		// on disk, independently of DataFileStatsFromMeta, and require an exact
+		// match. A regression that only summed row group 0 would still produce
+		// a non-zero, Contains-passing size, so the independent total is the
+		// only thing that actually pins the multi-row-group sum.
+		require.Contains(t, df.ColumnSizes(), tt.fieldID)
+		wantSize := sumColumnChunkCompressedSize(t, df.FilePath(), tt.name)
+		assert.Greater(t, wantSize, int64(0), "sanity: the column must occupy some space across 3 row groups")
+		assert.EqualValues(t, wantSize, df.ColumnSizes()[tt.fieldID], "column size must sum TotalCompressedSize over every row group")
 	}
 
 	for _, name := range []string{"geom", "geog"} {
@@ -362,4 +378,34 @@ func TestWriteGeoColumnMultiRowGroupStats(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, mustMatch, "IsNull(%s) must not match every row of a file with non-null rows", name)
 	}
+}
+
+// sumColumnChunkCompressedSize opens the Parquet file at path and sums
+// TotalCompressedSize for colName's column chunk across every row group, the
+// same quantity DataFileStatsFromMeta accumulates into DataFile.ColumnSizes.
+// Computing it independently here, straight from the file's row groups,
+// catches a regression that only tallies row group 0.
+func sumColumnChunkCompressedSize(t *testing.T, path, colName string) int64 {
+	t.Helper()
+
+	f, err := (io.LocalFS{}).Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	rdr, err := file.NewParquetReader(f)
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	meta := rdr.MetaData()
+	pos := meta.Schema.ColumnIndexByName(colName)
+	require.GreaterOrEqual(t, pos, 0, "column %q not found in Parquet schema", colName)
+
+	var total int64
+	for rg := range meta.NumRowGroups() {
+		colChunk, err := meta.RowGroup(rg).ColumnChunk(pos)
+		require.NoError(t, err)
+		total += colChunk.TotalCompressedSize()
+	}
+
+	return total
 }
