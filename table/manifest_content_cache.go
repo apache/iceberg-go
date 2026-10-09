@@ -23,9 +23,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"io"
 	"io/fs"
+	"log"
 	"path"
 	"strconv"
 	"sync"
@@ -100,6 +100,7 @@ func newManifestContentCacheForConfig(config iceberg.Properties) *manifestConten
 	if expirationIntervalMs < 0 || maxTotalBytes <= 0 || maxContentLength <= 0 {
 		log.Printf("Warning: disabling manifest content cache: invalid limits (expiration=%d, total=%d, content=%d)",
 			expirationIntervalMs, maxTotalBytes, maxContentLength)
+
 		return nil
 	}
 
@@ -114,8 +115,10 @@ func manifestContentCacheConfigInt64(config iceberg.Properties, key string, fall
 	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		log.Printf("Warning: disabling manifest content cache: invalid %s=%q: %v", key, raw, err)
+
 		return 0, false
 	}
+
 	return value, true
 }
 
@@ -304,6 +307,7 @@ func (c *manifestContentCache) addEntryLocked(location string, content []byte) {
 			oldest, ok := tail.Value.(*manifestContentCacheEntry)
 			if !ok {
 				c.lru.Remove(tail)
+
 				continue
 			}
 			if !c.expired(oldest, now) {
@@ -317,6 +321,7 @@ func (c *manifestContentCache) addEntryLocked(location string, content []byte) {
 		oldest, ok := tail.Value.(*manifestContentCacheEntry)
 		if !ok {
 			c.lru.Remove(tail)
+
 			continue
 		}
 		c.removeEntryLocked(oldest)

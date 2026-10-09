@@ -383,10 +383,8 @@ func TestManifestContentCacheReuseAcrossCompatibleConfig(t *testing.T) {
 
 func TestManifestContentCacheInvalidNumericConfig(t *testing.T) {
 	for _, bad := range []string{"bad", "-1", "0"} {
-		config := iceberg.Properties{
-			IOManifestCacheEnabledKey: "true",
-			IOManifestCacheMaxTotalBytesKey: bad,
-		}
+		config := iceberg.Properties{IOManifestCacheEnabledKey: "true"}
+		config[IOManifestCacheMaxTotalBytesKey] = bad
 		assert.Nil(t, newManifestContentCacheForConfig(config))
 	}
 }
