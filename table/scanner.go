@@ -672,7 +672,7 @@ func (scan *Scan) ResolveSnapshot() (*Snapshot, error) {
 	}
 
 	if scan.asOfTimestamp != nil {
-		entry, ok := snapshotLogEntryAsOf(scan.metadata.SnapshotLogs(), *scan.asOfTimestamp, true)
+		entry, ok := SnapshotLogEntryAsOf(scan.metadata.SnapshotLogs(), *scan.asOfTimestamp, true)
 		if !ok {
 			return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
 		}

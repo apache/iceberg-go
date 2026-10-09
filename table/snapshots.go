@@ -548,11 +548,13 @@ type SnapshotLogEntry struct {
 	TimestampMs int64 `json:"timestamp-ms"`
 }
 
-// snapshotLogEntryAsOf returns the log entry with the greatest eligible
-// timestamp. Snapshot-log entries can be out of chronological order when
-// commits have small clock skews, so the result must not depend on iteration
-// order.
-func snapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64, inclusive bool) (SnapshotLogEntry, bool) {
+// SnapshotLogEntryAsOf returns the snapshot-log entry with the greatest
+// timestamp at or before timestampMs (or strictly before it when inclusive is
+// false), and whether one was found. Snapshot-log entries can be out of
+// chronological order when commits have small clock skews, so the result must
+// not depend on iteration order. It is the time-travel resolution used by the
+// as-of-timestamp scan and the metadata_log_entries metadata table.
+func SnapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64, inclusive bool) (SnapshotLogEntry, bool) {
 	var (
 		best  SnapshotLogEntry
 		found bool
