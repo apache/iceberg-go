@@ -1361,6 +1361,7 @@ func WithArrowBatchSize(n int) ScanOption {
 }
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
+	directive, directiveErr := t.ScanPlanningDirective()
 	s := &Scan{
 		identifier:          slices.Clone(t.identifier),
 		metadata:            t.metadata,
@@ -1369,14 +1370,15 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		manifestCache:       t.manifestCache,
 		planner:             t.planner,
 		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
-		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
-		planningMode:   ScanPlanningLocal,
-		rowFilter:      iceberg.AlwaysTrue{},
-		selectedFields: []string{"*"},
-		caseSensitive:  true,
-		limit:          ScanNoLimit,
-		concurrency:    runtime.GOMAXPROCS(0),
-		reporter:       t.MetricsReporter(),
+		directive:           directive,
+		directiveErr:        directiveErr,
+		planningMode:        ScanPlanningLocal,
+		rowFilter:           iceberg.AlwaysTrue{},
+		selectedFields:      []string{"*"},
+		caseSensitive:       true,
+		limit:               ScanNoLimit,
+		concurrency:         runtime.GOMAXPROCS(0),
+		reporter:            t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {

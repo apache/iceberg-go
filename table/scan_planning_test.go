@@ -780,3 +780,78 @@ func TestTableScanPlanningDirective(t *testing.T) {
 		})
 	}
 }
+
+func TestScanEnforcesPlanningDirective(t *testing.T) {
+	t.Parallel()
+
+	remoteTasks := ScanPlanningResult{Tasks: []FileScanTask{{}}}
+	tests := []struct {
+		name      string
+		directive *string
+		opts      []ScanOption
+		supports  bool
+		wantErr   error
+		// wantRemote reports whether the planner was asked to plan.
+		wantRemote bool
+	}{
+		{name: "server default", directive: new("server"), supports: true, wantRemote: true},
+		{name: "server auto", directive: new("server"), opts: []ScanOption{WithScanPlanningMode(ScanPlanningAuto)}, supports: true, wantRemote: true},
+		{name: "server remote", directive: new("server"), opts: []ScanOption{WithScanPlanningMode(ScanPlanningRemote)}, supports: true, wantRemote: true},
+		{name: "server case insensitive", directive: new("SERVER"), supports: true, wantRemote: true},
+		{name: "server explicit local", directive: new("server"), opts: []ScanOption{WithScanPlanningMode(ScanPlanningLocal)}, supports: true, wantErr: ErrInvalidOperation},
+		{name: "server without capable planner", directive: new("server"), supports: false, wantErr: ErrInvalidOperation},
+		{name: "server unknown mode", directive: new("server"), opts: []ScanOption{WithScanPlanningMode("bogus")}, supports: true, wantErr: iceberg.ErrInvalidArgument},
+		{name: "client default", directive: new("client"), supports: true},
+		{name: "client auto with capable planner", directive: new("client"), opts: []ScanOption{WithScanPlanningMode(ScanPlanningAuto)}, supports: true},
+		{name: "client explicit remote", directive: new("client"), opts: []ScanOption{WithScanPlanningMode(ScanPlanningRemote)}, supports: true, wantErr: ErrInvalidOperation},
+		{name: "unrecognized directive", directive: new("bogus"), supports: true, wantErr: iceberg.ErrInvalidArgument},
+		{name: "no directive default", supports: true},
+		{name: "no directive auto", opts: []ScanOption{WithScanPlanningMode(ScanPlanningAuto)}, supports: true, wantRemote: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+			tbl := txn.tbl
+			planner := &fakeScanPlanner{result: remoteTasks, supports: tt.supports}
+			tbl.planner = planner
+			if tt.directive != nil {
+				WithScanPlanningDirective(*tt.directive)(tbl)
+			}
+
+			// The directive never blocks building a scan, only planning it.
+			scan := tbl.Scan(tt.opts...)
+			require.NotNil(t, scan)
+
+			tasks, err := scan.PlanFiles(context.Background())
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				assert.False(t, planner.called, "planner must not be called when planning fails")
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantRemote, planner.called)
+			if tt.wantRemote {
+				assert.Len(t, tasks, 1)
+			}
+		})
+	}
+}
+
+func TestTransactionScanIgnoresPlanningDirective(t *testing.T) {
+	t.Parallel()
+
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	planner := &fakeScanPlanner{supports: true}
+	txn.tbl.planner = planner
+	WithScanPlanningDirective("server")(txn.tbl)
+
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.False(t, planner.called, "transaction scans plan staged metadata locally")
+}

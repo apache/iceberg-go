@@ -1275,9 +1275,8 @@ func (r *Catalog) tableFromResponse(
 		table.WithScanPlanningIOProperties(scanPlanningConfig),
 		table.WithLabels(labels),
 	}
-	// The scan-planning directive comes only from the load response's config
-	// block, never from table metadata or catalog properties, matching Java's
-	// RESTSessionCatalog.
+	// The scan-planning directive never comes from table metadata. Load paths
+	// pass a config resolved by scanPlanningDirectiveConfig.
 	if directive, ok := loadConfig[table.ScanPlanningModeKey]; ok {
 		defaults = append(defaults, table.WithScanPlanningDirective(directive))
 	}
@@ -1285,6 +1284,30 @@ func (r *Catalog) tableFromResponse(
 	// Caller-supplied opts are applied last so they can override the defaults
 	// derived above.
 	return table.New(identifier, metadata, loc, fsF, r, append(defaults, opts...)...), nil
+}
+
+// scanPlanningDirectiveConfig resolves a table's scan-planning-mode directive
+// from a table-load response, as Java's RESTSessionCatalog does: the server's
+// load config takes precedence, and the catalog's own scan-planning-mode
+// property applies when the server sends none. A mismatch between the two is
+// logged. The result is the load config passed to tableFromResponse.
+func (r *Catalog) scanPlanningDirectiveConfig(identifier []string, loadConfig iceberg.Properties) iceberg.Properties {
+	server, hasServer := loadConfig[table.ScanPlanningModeKey]
+	client, hasClient := r.props[table.ScanPlanningModeKey]
+
+	switch {
+	case hasServer:
+		if hasClient && !strings.EqualFold(client, server) {
+			slog.Warn("iceberg: scan-planning-mode mismatch between catalog and server; using the server value",
+				"table", strings.Join(identifier, "."), "client", client, "server", server)
+		}
+
+		return iceberg.Properties{table.ScanPlanningModeKey: server}
+	case hasClient:
+		return iceberg.Properties{table.ScanPlanningModeKey: client}
+	default:
+		return nil
+	}
 }
 
 func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location string) (iceberg.Properties, error) {
@@ -1579,7 +1602,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, ret.Config, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, r.scanPlanningDirectiveConfig(identifier, ret.Config), table.WithSavedConfig(saved))
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1809,7 +1832,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, ret.Config, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, r.scanPlanningDirectiveConfig(identifier, ret.Config), table.WithSavedConfig(saved))
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1857,7 +1880,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, ret.Config, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, r.scanPlanningDirectiveConfig(identifier, ret.Config), table.WithSavedConfig(saved))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {

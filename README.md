@@ -138,18 +138,27 @@ submission, polling, and task retrieval. Cancellation is best-effort and is not
 required for automatic remote planning. In `auto` mode, catalogs
 without a planner retain local planning.
 
-The scanner does not yet enforce the REST `scan-planning-mode` configuration
-key (`client`/`server`). A catalog requiring `server` mode may rely on planning
-to vend plan-scoped storage credentials. Default local planning, explicit
-`local`, or an `auto` fallback can instead read manifests with the table's
-storage credentials, which may use a different identity or lack the required
-access. Read the directive with `tbl.ScanPlanningDirective()`, which reports
-the value from the table-load response's `config` block (or an error for an
-unrecognized value), and select `table.ScanPlanningRemote` on every scan when
-it returns `table.ScanPlanningDirectiveServer`; do not rely on `auto` to
-enforce remote planning. Tables returned by `UpdateTable` report no directive
-because commit responses carry no table config; reload the table to obtain it.
-Remote mode returns an error if a required capability is missing.
+Scans follow the catalog's `scan-planning-mode` directive (`client`/`server`).
+As in the Java client, the directive comes from the table-load response's
+`config` block; when the server sends none, the catalog's own
+`scan-planning-mode` property applies, and a mismatch between the two is
+logged with the server value winning. Read it with `tbl.ScanPlanningDirective()`.
+
+| Directive | Scan option | Result |
+| :-------- | :---------- | :----- |
+| `server` | none, `auto`, or `remote` | Plan remotely. |
+| `server` | `local` | Error. |
+| `client` | none, `auto`, or `local` | Plan locally. |
+| `client` | `remote` | Error. |
+| none | any | As described above. |
+
+The directive is checked when a scan is planned, not when the table is loaded,
+so a `server` table whose catalog does not advertise the plan endpoint can
+still be loaded and committed to; planning it returns an error. An unrecognized
+directive value also fails only at planning. Incremental scans and scans inside
+a transaction plan as before and do not apply the directive. Tables returned by
+`UpdateTable` report no directive because commit responses carry no table
+config; reload the table to obtain it.
 
 ```go
 // tbl is a table loaded from a rest.Catalog.

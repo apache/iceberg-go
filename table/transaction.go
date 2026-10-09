@@ -3286,9 +3286,9 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		manifestCache:    newSnapshotManifestCacheForMetadata(updatedMeta),
 		// Catalog planners can only see committed table state, not metadata
 		// staged inside this transaction. Keep transaction scans local so auto
-		// mode cannot silently return stale tasks.
-		planner: nil,
-		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
+		// mode cannot silently return stale tasks. For the same reason the
+		// catalog's scan-planning-mode directive is not applied here.
+		planner:        nil,
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
