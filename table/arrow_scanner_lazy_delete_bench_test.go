@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 )
 
 const (
@@ -146,14 +147,227 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 		b.ResetTimer()
 		for b.Loop() {
 			loader := newLazyPositionDeleteLoader(fixture.fs, fixture.tasks)
-			deletes, err := loader.load(b.Context(), fixture.tasks[0])
+			bitmap, err := loader.load(b.Context(), 0)
 			if err != nil {
 				b.Fatal(err)
 			}
-			if len(deletes) != 1 {
-				b.Fatalf("expected one delete chunk for the first task, got %d", len(deletes))
+			if bitmap == nil || bitmap.Cardinality() != 1 {
+				b.Fatalf("expected one indexed delete for the first task")
 			}
 			loader.release()
 		}
 	})
+}
+
+var positionDeleteSplitReuseBenchmarkSink int64
+
+func BenchmarkPositionDeleteBitmapNoDeletes(b *testing.B) {
+	for _, taskCount := range []int{1, 10_000} {
+		b.Run(fmt.Sprintf("tasks=%d", taskCount), func(b *testing.B) {
+			tasks := make([]FileScanTask, taskCount)
+			dataFile := &mockDataFile{path: "mem://benchmark/data/no-deletes.parquet"}
+			for i := range tasks {
+				tasks[i].File = dataFile
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				loader := newLazyPositionDeleteLoader(nil, tasks)
+				if loader != nil {
+					b.Fatal("expected no position delete loader")
+				}
+				loader.release()
+			}
+		})
+	}
+}
+
+// BenchmarkPositionDeleteBitmapUnion isolates merging already decoded delete
+// files. Separate high-bit buckets make repeated copies of the growing union
+// visible as the number of applicable delete files increases.
+func BenchmarkPositionDeleteBitmapUnion(b *testing.B) {
+	const (
+		dataPath         = "mem://benchmark/data/union.parquet"
+		positionsPerFile = 16_384
+	)
+
+	for _, fileCount := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("files=%d", fileCount), func(b *testing.B) {
+			loader := &lazyPositionDeleteLoader{
+				files: make(map[string]*lazyPositionDeleteFile, fileCount),
+			}
+			paths := make([]string, fileCount)
+			for i := range paths {
+				paths[i] = fmt.Sprintf("delete-%d.parquet", i)
+				bitmap := dv.NewRoaringPositionBitmap()
+				for position := range positionsPerFile {
+					bitmap.Set(uint64(i)<<32 | uint64(position*37))
+				}
+				cached := &lazyPositionDeleteFile{
+					bitmaps: map[string]*dv.RoaringPositionBitmap{dataPath: bitmap},
+				}
+				cached.once.Do(func() {})
+				loader.files[paths[i]] = cached
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				bitmap, err := loader.buildIndex(b.Context(), dataPath, paths)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if bitmap.Cardinality() != int64(fileCount*positionsPerFile) {
+					b.Fatal("merged bitmap has unexpected cardinality")
+				}
+				positionDeleteSplitReuseBenchmarkSink = bitmap.Cardinality()
+			}
+		})
+	}
+}
+
+// BenchmarkPositionDeleteBitmapCachedLoad measures the per-split lookup after
+// the delete files and merged bitmap are already cached. Each operation visits
+// 16 splits of the same data file without any Parquet decoding or row filtering.
+func BenchmarkPositionDeleteBitmapCachedLoad(b *testing.B) {
+	const (
+		dataPath = "mem://benchmark/data/cached-position-delete-index.parquet"
+		splits   = 16
+	)
+
+	for _, fileCount := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("files=%d", fileCount), func(b *testing.B) {
+			deleteFiles := make([]iceberg.DataFile, fileCount)
+			for i := range deleteFiles {
+				deleteFiles[i] = &mockDataFile{
+					path:        fmt.Sprintf("mem://benchmark/deletes/cached-index-%02d.parquet", i),
+					contentType: iceberg.EntryContentPosDeletes,
+				}
+			}
+			tasks := make([]FileScanTask, splits)
+			for i := range tasks {
+				tasks[i] = FileScanTask{
+					File: &mockDataFile{path: dataPath}, DeleteFiles: deleteFiles,
+					Start: int64(i * 128), Length: 128,
+				}
+			}
+			loader := newLazyPositionDeleteLoader(nil, tasks)
+			defer loader.release()
+			for i, deleteFile := range deleteFiles {
+				cached := loader.files[deleteFile.FilePath()]
+				bitmap := dv.NewRoaringPositionBitmap()
+				bitmap.Set(uint64(i))
+				cached.bitmaps = map[string]*dv.RoaringPositionBitmap{dataPath: bitmap}
+				cached.once.Do(func() {})
+			}
+			if _, err := loader.load(b.Context(), 0); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				for taskIndex := range tasks {
+					bitmap, err := loader.load(b.Context(), taskIndex)
+					if err != nil {
+						b.Fatal(err)
+					}
+					positionDeleteSplitReuseBenchmarkSink = bitmap.Cardinality()
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkPositionDeleteBitmapReuseAcrossSplits(b *testing.B) {
+	const deleteRows = 100_000
+
+	deletePath := "mem://benchmark/deletes/split-reuse.parquet"
+	dataPath := "mem://benchmark/data/split-reuse.parquet"
+	fs := iceio.NewMemFS()
+
+	var content strings.Builder
+	content.Grow(deleteRows * 72)
+	content.WriteByte('[')
+	for pos := range deleteRows {
+		if pos > 0 {
+			content.WriteByte(',')
+		}
+		fmt.Fprintf(&content, `{"file_path":"%s","pos":%d}`, dataPath, pos)
+	}
+	content.WriteByte(']')
+	benchmarkWritePosDeleteParquet(b, fs, deletePath, content.String())
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, deleteRows, 128)
+	if err != nil {
+		b.Fatal(err)
+	}
+	deleteFile := deleteBuilder.Build()
+
+	dataBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		dataPath, iceberg.ParquetFile, nil, nil, nil, deleteRows*2, 16*128)
+	if err != nil {
+		b.Fatal(err)
+	}
+	dataFile := dataBuilder.Build()
+	targets := map[string]struct{}{dataPath: {}}
+
+	for _, splitCount := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("splits=%d", splitCount), func(b *testing.B) {
+			tasks := make([]FileScanTask, splitCount)
+			for i := range tasks {
+				tasks[i] = FileScanTask{
+					File:        dataFile,
+					DeleteFiles: []iceberg.DataFile{deleteFile},
+					Start:       int64(i * 128),
+					Length:      128,
+				}
+			}
+
+			b.Run("task_local_hash_sets", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					deletes, err := readDeletesForPaths(b.Context(), fs, deleteFile, targets)
+					if err != nil {
+						b.Fatal(err)
+					}
+					positions := positionDeletes{deletes[dataPath]}
+					for range splitCount {
+						set, err := collectPosDeletePositions(positions)
+						if err != nil {
+							releasePosDeletes(deletes)
+							b.Fatal(err)
+						}
+						positionDeleteSplitReuseBenchmarkSink = int64(len(set))
+					}
+					releasePosDeletes(deletes)
+				}
+			})
+
+			b.Run("shared_roaring_bitmap", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					loader := newLazyPositionDeleteLoader(fs, tasks)
+					for taskIndex := range tasks {
+						bitmap, err := loader.load(b.Context(), taskIndex)
+						if err != nil {
+							loader.release()
+							b.Fatal(err)
+						}
+						if bitmap == nil {
+							loader.release()
+							b.Fatal("expected position delete bitmap")
+						}
+						positionDeleteSplitReuseBenchmarkSink = bitmap.Cardinality()
+					}
+					loader.release()
+				}
+			})
+		})
+	}
 }
