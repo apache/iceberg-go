@@ -174,27 +174,29 @@ func TestCopyOnWriteConflict_ConcurrentAppendCommits(t *testing.T) {
 // TestCopyOnWriteConflict_ConcurrentDeleteOnUntouchedFileCommits pins the
 // validator's scope: a concurrent delete against a data file this commit does
 // not remove must not reject it. v3 deletion vectors carry
-// referenced_data_file, so the delete resolves to its exact target; v2 position
-// deletes written here are partition-scoped and conservatively conflict.
+// referenced_data_file, and v2 position deletes keep full file_path bounds
+// (#2141), so either resolves to its exact target.
 func TestCopyOnWriteConflict_ConcurrentDeleteOnUntouchedFileCommits(t *testing.T) {
-	for _, isolation := range cowIsolations {
-		for _, op := range cowOps {
-			t.Run(fmt.Sprintf("v3/%s/%s", isolation, op), func(t *testing.T) {
-				ctx := context.Background()
-				tbl := appendTenRows(t, newCoWConflictTestTable(t, "3", isolation))
-				// A second data file that the id==2 removal does not touch.
-				tbl, err := tbl.Append(ctx, cowTestRecords(t, `[{"id":11,"data":"k"},{"id":12,"data":"l"}]`), nil)
-				require.NoError(t, err)
+	for _, version := range cowFormatVersions {
+		for _, isolation := range cowIsolations {
+			for _, op := range cowOps {
+				t.Run(fmt.Sprintf("v%s/%s/%s", version, isolation, op), func(t *testing.T) {
+					ctx := context.Background()
+					tbl := appendTenRows(t, newCoWConflictTestTable(t, version, isolation))
+					// A second data file that the id==2 removal does not touch.
+					tbl, err := tbl.Append(ctx, cowTestRecords(t, `[{"id":11,"data":"k"},{"id":12,"data":"l"}]`), nil)
+					require.NoError(t, err)
 
-				txn := stageCopyOnWrite(t, tbl, op, iceberg.EqualTo(iceberg.Reference("id"), int64(2)))
+					txn := stageCopyOnWrite(t, tbl, op, iceberg.EqualTo(iceberg.Reference("id"), int64(2)))
 
-				_, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(12)), nil)
-				require.NoError(t, err)
+					_, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(12)), nil)
+					require.NoError(t, err)
 
-				committed, err := txn.Commit(ctx)
-				require.NoError(t, err)
-				require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 11}, idsInTable(t, committed))
-			})
+					committed, err := txn.Commit(ctx)
+					require.NoError(t, err)
+					require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 11}, idsInTable(t, committed))
+				})
+			}
 		}
 	}
 }
