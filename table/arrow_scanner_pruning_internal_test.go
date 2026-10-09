@@ -118,6 +118,7 @@ func TestProcessRecordsUsesRowGroupFilterForPruning(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, reader.tester)
+	assert.ElementsMatch(t, []int{1}, reader.tester.StatsFieldIDs)
 	require.Len(t, reader.tester.BloomPreds, 1)
 	assert.Equal(t, 1, reader.tester.BloomPreds[0].FieldID)
 	assert.Len(t, reader.tester.BloomPreds[0].PhysBytes, 1)
@@ -183,6 +184,7 @@ func TestProcessRecordsRebindsRowGroupFilterToPromotedFileSchema(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, reader.statsResult, "matching INT32 row-group stats should be retained")
+	assert.Equal(t, []int{1}, reader.tester.StatsFieldIDs)
 	require.Len(t, reader.tester.BloomPreds, 1)
 	assert.Equal(t, []byte{1, 0, 0, 0}, reader.tester.BloomPreds[0].PhysBytes[0],
 		"the bloom predicate should use the INT32 file encoding")
@@ -231,6 +233,8 @@ func TestProcessRecordsDoesNotPruneMissingInitialDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, reader.tester)
+	require.NotNil(t, reader.tester.StatsFieldIDs)
+	assert.Empty(t, reader.tester.StatsFieldIDs)
 	assert.Empty(t, reader.tester.BloomPreds,
 		"a missing field with an initial-default must disable bloom pruning")
 	assert.Empty(t, reader.tester.DictionaryPreds,
