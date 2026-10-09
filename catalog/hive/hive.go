@@ -539,6 +539,14 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (_
 			table.ErrCommitFailed, fromDB, fromTable, sourceMetadataLocation, lockedMetadataLocation)
 	}
 
+	destExists, err := c.CheckTableExists(ctx, to)
+	if err != nil {
+		return nil, err
+	}
+	if destExists {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, toDB, toTable)
+	}
+
 	hiveTbl.TableName = toTable
 	hiveTbl.DbName = toDB
 

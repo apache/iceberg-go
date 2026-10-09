@@ -1980,7 +1980,7 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	}
 
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, allowNoContent())
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: catalog.ErrTableAlreadyExists}, allowNoContent())
 	if err != nil {
 		return nil, err
 	}
