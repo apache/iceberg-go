@@ -268,6 +268,117 @@ func TestRefreshTableCredentialsPreservesMetricsReporter(t *testing.T) {
 	assert.Same(t, reporter, refreshed.MetricsReporter())
 }
 
+// TestRefreshTableCredentialsPreservesScanPlanningDirective checks that the
+// load-time scan-planning directive survives a credential refresh, whose
+// response carries no table config to re-derive it from. The directive is
+// copied from the table, never reconstructed from its saved config.
+func TestRefreshTableCredentialsPreservesScanPlanningDirective(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    []table.Option
+		want    table.ScanPlanningDirective
+		wantErr string
+	}{
+		{name: "absent", want: table.ScanPlanningDirectiveNone},
+		{
+			name: "server",
+			opts: []table.Option{table.WithScanPlanningDirective("server", true)},
+			want: table.ScanPlanningDirectiveServer,
+		},
+		{
+			name:    "unrecognized",
+			opts:    []table.Option{table.WithScanPlanningDirective("hybrid", true)},
+			wantErr: `"hybrid"`,
+		},
+		{
+			// A saved config built from metadata properties, as the method's doc
+			// tells external callers to pass, must not leak into the directive.
+			name: "unrecognized_with_saved_metadata_property",
+			opts: []table.Option{
+				table.WithScanPlanningDirective("hybrid", true),
+				table.WithSavedConfig(iceberg.Properties{table.ScanPlanningModeKey: "server"}),
+			},
+			wantErr: `"hybrid"`,
+		},
+		{
+			name: "absent_with_saved_metadata_property",
+			opts: []table.Option{
+				table.WithSavedConfig(iceberg.Properties{table.ScanPlanningModeKey: "server"}),
+			},
+			want: table.ScanPlanningDirectiveNone,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := "restcreds-directive-" + strings.ReplaceAll(tc.name, "_", "-")
+
+			cat := newCredsTestCatalog(t, credsCatalogOpts{
+				creds: func(w http.ResponseWriter, _ *http.Request) {
+					assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+						scheme+"://warehouse/database/table",
+						map[string]string{"s3.access-key-id": "vended-key"},
+					)))
+				},
+			})
+
+			tbl, _ := newExternalTable(t, cat, scheme, tc.opts...)
+
+			refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
+			require.NoError(t, err)
+			require.NotSame(t, tbl, refreshed)
+
+			got, err := refreshed.ScanPlanningDirective()
+			if tc.wantErr != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+				assert.Contains(t, err.Error(), tc.wantErr)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestRefreshTableCredentialsAfterLoadTableKeepsScanPlanningDirective covers
+// the directive end to end: an unrecognized value from the load response's
+// config block must still be reported verbatim after a credential refresh.
+func TestRefreshTableCredentialsAfterLoadTableKeepsScanPlanningDirective(t *testing.T) {
+	const scheme = "restcreds-loaded-directive"
+
+	metadataLoc := scheme + "://warehouse/database/table/metadata/00000-a.metadata.json"
+	cat := newCredsTestCatalog(t, credsCatalogOpts{
+		loadTable: func(w http.ResponseWriter, req *http.Request) {
+			assert.Equal(t, http.MethodGet, req.Method)
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"metadata-location": metadataLoc,
+				"metadata": json.RawMessage(strings.ReplaceAll(
+					exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://")),
+				"config": map[string]string{table.ScanPlanningModeKey: "Hybrid"},
+			}))
+		},
+		creds: func(w http.ResponseWriter, _ *http.Request) {
+			assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+				scheme+"://warehouse/database/table",
+				map[string]string{iceio.S3AccessKeyID: "vended-key"},
+			)))
+		},
+	})
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("db", "tbl"))
+	require.NoError(t, err)
+	_, err = tbl.ScanPlanningDirective()
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.Contains(t, err.Error(), `"Hybrid"`)
+
+	refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
+	require.NoError(t, err)
+	require.NotSame(t, tbl, refreshed)
+
+	_, err = refreshed.ScanPlanningDirective()
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), `"Hybrid"`)
+}
+
 // TestRefreshTableCredentialsAfterLoadTable covers a table loaded through
 // LoadTable: the per-table config block of the load response is in neither the
 // catalog's props nor the table's metadata properties, so only the table's

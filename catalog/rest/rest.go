@@ -1285,6 +1285,16 @@ func (r *Catalog) tableFromResponse(
 	), nil
 }
 
+// scanPlanningDirectiveFromConfig records the scan-planning directive from a
+// load response's config block. The directive comes only from that block,
+// never from table metadata or catalog properties, matching Java's
+// RESTSessionCatalog.
+func scanPlanningDirectiveFromConfig(loadConfig iceberg.Properties) table.Option {
+	directive, ok := loadConfig[table.ScanPlanningModeKey]
+
+	return table.WithScanPlanningDirective(directive, ok)
+}
+
 func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location string) (iceberg.Properties, error) {
 	if err := r.endpoints.check(endpointTableCredentials); err != nil {
 		return nil, err
@@ -1336,9 +1346,14 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 	scanCfg := maps.Clone(config)
 	maps.Copy(config, resp)
 
+	opts := []table.Option{
+		table.WithSavedConfig(tbl.SavedConfig()),
+		// Credential refresh does not return table config, so carry the
+		// existing scan-planning directive over verbatim.
+		table.WithScanPlanningDirectiveFrom(tbl),
+	}
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.
-	opts := []table.Option{table.WithSavedConfig(tbl.SavedConfig())}
 	if reporter := tbl.MetricsReporter(); !metrics.IsNop(reporter) {
 		opts = append(opts, table.WithMetricsReporter(reporter))
 	}
@@ -1568,7 +1583,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved), scanPlanningDirectiveFromConfig(ret.Config))
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1798,7 +1813,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved), scanPlanningDirectiveFromConfig(ret.Config))
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1846,7 +1861,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved), scanPlanningDirectiveFromConfig(ret.Config))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1894,7 +1909,8 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, metadata.Properties())
 
-	// A commit response carries no labels (they are load-time enrichment).
+	// A commit response carries no labels or table config (they are load-time
+	// enrichment), so the returned table reports no scan-planning directive.
 	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil, table.WithSavedConfig(metadata.Properties()))
 }
 
