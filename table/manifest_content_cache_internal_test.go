@@ -168,8 +168,10 @@ func TestManifestContentCacheExpiresIdleEntries(t *testing.T) {
 	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
 	cache := newManifestContentCache(60_000, 8, 4)
 
+	now := time.Now()
+	cache.now = func() time.Time { return now }
 	readCachedManifest(t, cache, fs, manifest)
-	cache.entries[location].lastAccessMs = time.Now().Add(-time.Hour).UnixMilli()
+	now = now.Add(time.Hour)
 	readCachedManifest(t, cache, fs, manifest)
 
 	assert.Equal(t, 2, fs.openCount[location])
@@ -367,4 +369,69 @@ func readCachedManifest(
 	_, err = io.ReadAll(file)
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
+}
+
+func TestManifestContentCacheReuseAcrossCompatibleConfig(t *testing.T) {
+	config := iceberg.Properties{IOManifestCacheEnabledKey: "true"}
+	previous := newManifestContentCacheForConfig(config)
+	require.Same(t, previous, reuseManifestContentCache(previous, newManifestContentCacheForConfig(config)))
+
+	changed := iceberg.Properties{IOManifestCacheEnabledKey: "true", IOManifestCacheMaxTotalBytesKey: "12345"}
+	require.NotSame(t, previous, reuseManifestContentCache(previous, newManifestContentCacheForConfig(changed)))
+	require.Nil(t, reuseManifestContentCache(previous, newManifestContentCacheForConfig(nil)))
+}
+
+func TestManifestContentCacheInvalidNumericConfig(t *testing.T) {
+	for _, bad := range []string{"bad", "-1", "0"} {
+		config := iceberg.Properties{
+			IOManifestCacheEnabledKey: "true",
+			IOManifestCacheMaxTotalBytesKey: bad,
+		}
+		assert.Nil(t, newManifestContentCacheForConfig(config))
+	}
+}
+
+type manifestContentCacheFailOnceIO struct {
+	iceio.IO
+	failed bool
+}
+
+func (f *manifestContentCacheFailOnceIO) Open(name string) (iceio.File, error) {
+	if !f.failed {
+		f.failed = true
+		return nil, io.ErrUnexpectedEOF
+	}
+	return f.IO.Open(name)
+}
+
+func TestManifestContentCacheFailedPopulationFallsBackWithoutCaching(t *testing.T) {
+	const location = "mem://manifest-content-cache/fallback.avro"
+	base := iceio.NewMemFS()
+	require.NoError(t, base.WriteFile(location, []byte("test")))
+	fs := &manifestContentCacheFailOnceIO{IO: base}
+	cache := newManifestContentCache(0, 16, 16)
+	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+
+	readCachedManifest(t, cache, fs, manifest)
+	assert.Empty(t, cache.entries, "ordinary-open fallback must not populate the cache")
+	readCachedManifest(t, cache, fs, manifest)
+	assert.Contains(t, cache.entries, location)
+}
+
+type manifestContentCachePanicIO struct {
+	iceio.IO
+}
+
+func (manifestContentCachePanicIO) Open(string) (iceio.File, error) {
+	panic("unexpected backend panic")
+}
+
+func TestManifestContentCachePanicReleasesInFlightLoad(t *testing.T) {
+	cache := newManifestContentCache(0, 16, 16)
+	const location = "mem://manifest-content-cache/panic.avro"
+	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+	assert.Panics(t, func() {
+		_, _ = cache.open(t.Context(), manifestContentCachePanicIO{}, manifest)
+	})
+	assert.Empty(t, cache.loads)
 }

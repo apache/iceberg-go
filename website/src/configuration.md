@@ -356,9 +356,9 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
 | `read.manifest-list-cache.enabled` | `true` | Reuse decoded snapshot manifest lists across scans of a table handle. Set to `false` to disable retention and shared in-flight reads. Applied when loading or refreshing a table, and when creating a transaction scan. |
 | `io.manifest.cache-enabled` | `false` | Reuse raw manifest file content across local scans. This mirrors Java's FileIO/catalog setting and is read from the table's saved catalog config. |
-| `io.manifest.cache.expiration-interval-ms` | `60000` | Expire manifest content after this many milliseconds without access. Zero disables time-based expiration. |
-| `io.manifest.cache.max-total-bytes` | `104857600` | Maximum total raw manifest bytes retained by the content cache. |
-| `io.manifest.cache.max-content-length` | `8388608` | Maximum size of one manifest eligible for content caching. |
+| `io.manifest.cache.expiration-interval-ms` | `60000` | Idle expiration in milliseconds. Zero disables time-based expiration; negative values disable the cache. Expired entries are reclaimed on cache access/insertion, without a background cleanup task. |
+| `io.manifest.cache.max-total-bytes` | `104857600` | Retained raw bytes per table handle, not a global budget. Concurrent population buffers and bytes held by active readers are not counted. |
+| `io.manifest.cache.max-content-length` | `8388608` | Maximum size of one manifest eligible for content caching. Compatible cache entries survive table refresh and commit; separate table handles have separate caches. |
 
 The manifest-list cache retains at most 64 snapshots and 32,768 manifest
 descriptors in total per table handle. These are count limits, not byte limits:

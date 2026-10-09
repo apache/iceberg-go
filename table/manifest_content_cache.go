@@ -21,10 +21,13 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"io"
 	"io/fs"
 	"path"
+	"strconv"
 	"sync"
 	"time"
 
@@ -39,6 +42,7 @@ type manifestContentCache struct {
 	mu sync.Mutex
 
 	expirationIntervalMs int64
+	now                  func() time.Time
 	maxTotalBytes        int64
 	maxContentLength     int64
 	totalBytes           int64
@@ -51,7 +55,7 @@ type manifestContentCache struct {
 type manifestContentCacheEntry struct {
 	location     string
 	content      []byte
-	lastAccessMs int64
+	lastAccess   time.Time
 	element      *list.Element
 }
 
@@ -65,6 +69,7 @@ type manifestContentCacheLoad struct {
 func newManifestContentCache(expirationIntervalMs, maxTotalBytes, maxContentLength int64) *manifestContentCache {
 	return &manifestContentCache{
 		expirationIntervalMs: expirationIntervalMs,
+		now:                  time.Now,
 		maxTotalBytes:        maxTotalBytes,
 		maxContentLength:     maxContentLength,
 		entries:              make(map[string]*manifestContentCacheEntry),
@@ -77,20 +82,53 @@ func newManifestContentCacheForConfig(config iceberg.Properties) *manifestConten
 		return nil
 	}
 
-	expirationIntervalMs := config.GetInt64(
-		IOManifestCacheExpirationIntervalMsKey,
-		IOManifestCacheExpirationIntervalMsDefault,
-	)
-	maxTotalBytes := config.GetInt64(IOManifestCacheMaxTotalBytesKey, IOManifestCacheMaxTotalBytesDefault)
-	maxContentLength := config.GetInt64(
-		IOManifestCacheMaxContentLengthKey,
-		IOManifestCacheMaxContentLengthDefault,
-	)
+	expirationIntervalMs, ok := manifestContentCacheConfigInt64(config,
+		IOManifestCacheExpirationIntervalMsKey, IOManifestCacheExpirationIntervalMsDefault)
+	if !ok {
+		return nil
+	}
+	maxTotalBytes, ok := manifestContentCacheConfigInt64(config,
+		IOManifestCacheMaxTotalBytesKey, IOManifestCacheMaxTotalBytesDefault)
+	if !ok {
+		return nil
+	}
+	maxContentLength, ok := manifestContentCacheConfigInt64(config,
+		IOManifestCacheMaxContentLengthKey, IOManifestCacheMaxContentLengthDefault)
+	if !ok {
+		return nil
+	}
 	if expirationIntervalMs < 0 || maxTotalBytes <= 0 || maxContentLength <= 0 {
+		log.Printf("Warning: disabling manifest content cache: invalid limits (expiration=%d, total=%d, content=%d)",
+			expirationIntervalMs, maxTotalBytes, maxContentLength)
 		return nil
 	}
 
 	return newManifestContentCache(expirationIntervalMs, maxTotalBytes, maxContentLength)
+}
+
+func manifestContentCacheConfigInt64(config iceberg.Properties, key string, fallback int64) (int64, bool) {
+	raw, ok := config[key]
+	if !ok {
+		return fallback, true
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		log.Printf("Warning: disabling manifest content cache: invalid %s=%q: %v", key, raw, err)
+		return 0, false
+	}
+	return value, true
+}
+
+// Reuse retained immutable manifests when a table is refreshed or committed.
+// Independent table handles still have independent byte budgets.
+func reuseManifestContentCache(previous, configured *manifestContentCache) *manifestContentCache {
+	if previous != nil && configured != nil &&
+		previous.expirationIntervalMs == configured.expirationIntervalMs &&
+		previous.maxTotalBytes == configured.maxTotalBytes &&
+		previous.maxContentLength == configured.maxContentLength {
+		return previous
+	}
+	return configured
 }
 
 func (c *manifestContentCache) wrap(
@@ -144,7 +182,12 @@ func (c *manifestContentCache) open(
 			}
 			// Concurrent callers may describe the same path with different lengths.
 			// Never reuse in-flight bytes that do not match this caller's descriptor.
-			if load.err != nil || int64(len(load.content)) != expectedLength {
+			if load.err != nil {
+				// A failed shared population should not fan out into one
+				// backend retry per waiter.
+				return nil, load.err
+			}
+			if int64(len(load.content)) != expectedLength {
 				return base.Open(location)
 			}
 
@@ -155,18 +198,35 @@ func (c *manifestContentCache) open(
 		c.loads[location] = load
 		c.mu.Unlock()
 
-		content, err := readManifestContent(base, location, expectedLength)
-		canceled := err != nil && ctx.Err() != nil
-		c.finishLoad(location, expectedLength, load, content, err, canceled)
+		var content []byte
+		var err error
+		var canceled bool
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					// Always release the single-flight waiters, even if a
+					// FileIO implementation panics during population.
+					c.finishLoad(location, expectedLength, load, nil,
+						fmt.Errorf("manifest content load panicked: %v", recovered), false)
+					panic(recovered)
+				}
+				c.finishLoad(location, expectedLength, load, content, err, canceled)
+			}()
+			content, err = readManifestContent(base, location, expectedLength)
+			canceled = err != nil && ctx.Err() != nil
+		}()
 		if err != nil {
 			if canceled {
 				return nil, ctx.Err()
 			}
 
-			// Match Java's manifest-content cache behavior: a cache population
-			// failure falls back to an ordinary file open instead of changing
-			// the manifest read's error semantics.
-			return base.Open(location)
+			// Preserve the existing ordinary-open fallback for the producer.
+			file, fallbackErr := base.Open(location)
+			if fallbackErr != nil {
+				return nil, fmt.Errorf("manifest cache population failed: %w (fallback open failed: %v)",
+					err, fallbackErr)
+			}
+			return file, nil
 		}
 
 		return newCachedManifestFile(location, content), nil
@@ -185,17 +245,23 @@ func (c *manifestContentCache) getLocked(location string, expectedLength int64) 
 	}
 
 	if c.expirationIntervalMs > 0 {
-		now := time.Now().UnixMilli()
-		if now-entry.lastAccessMs >= c.expirationIntervalMs {
+		now := c.now()
+		if c.expired(entry, now) {
 			c.removeEntryLocked(entry)
-
 			return nil, false
 		}
-		entry.lastAccessMs = now
+		entry.lastAccess = now
 	}
 	c.lru.MoveToFront(entry.element)
 
 	return entry.content, true
+}
+
+func (c *manifestContentCache) expired(entry *manifestContentCacheEntry, now time.Time) bool {
+	// Dividing a monotonic duration avoids overflowing on large configured
+	// millisecond values and is immune to wall-clock jumps.
+	return c.expirationIntervalMs > 0 &&
+		now.Sub(entry.lastAccess)/time.Millisecond >= time.Duration(c.expirationIntervalMs)
 }
 
 func (c *manifestContentCache) finishLoad(
@@ -230,8 +296,29 @@ func (c *manifestContentCache) addEntryLocked(location string, content []byte) {
 	if previous, ok := c.entries[location]; ok {
 		c.removeEntryLocked(previous)
 	}
+	if c.expirationIntervalMs > 0 {
+		now := c.now()
+		// The tail is the least recently accessed entry. Reclaim expired
+		// entries when inserting, without a background expiration goroutine.
+		for tail := c.lru.Back(); tail != nil; tail = c.lru.Back() {
+			oldest, ok := tail.Value.(*manifestContentCacheEntry)
+			if !ok {
+				c.lru.Remove(tail)
+				continue
+			}
+			if !c.expired(oldest, now) {
+				break
+			}
+			c.removeEntryLocked(oldest)
+		}
+	}
 	for c.totalBytes > c.maxTotalBytes-size && c.lru.Len() > 0 {
-		oldest := c.lru.Back().Value.(*manifestContentCacheEntry)
+		tail := c.lru.Back()
+		oldest, ok := tail.Value.(*manifestContentCacheEntry)
+		if !ok {
+			c.lru.Remove(tail)
+			continue
+		}
 		c.removeEntryLocked(oldest)
 	}
 
@@ -240,7 +327,7 @@ func (c *manifestContentCache) addEntryLocked(location string, content []byte) {
 		content:  content,
 	}
 	if c.expirationIntervalMs > 0 {
-		entry.lastAccessMs = time.Now().UnixMilli()
+		entry.lastAccess = c.now()
 	}
 	entry.element = c.lru.PushFront(entry)
 	c.entries[location] = entry
@@ -268,22 +355,23 @@ func readManifestContent(base iceio.IO, location string, expectedLength int64) (
 	// into an exact-sized buffer so retained capacity matches byte accounting
 	// and a larger actual file cannot grow the population buffer without bound.
 	content = make([]byte, expectedLength)
-	if _, err := io.ReadFull(file, content); err != nil {
+	if _, err = io.ReadFull(file, content); err != nil {
 		return nil, err
 	}
 
 	var extra [1]byte
-	if _, err := io.ReadFull(file, extra[:]); err != io.EOF {
+	if _, err = io.ReadFull(file, extra[:]); !errors.Is(err, io.EOF) {
 		if err == nil {
-			err = fmt.Errorf("manifest content exceeds expected length %d", expectedLength)
+			return nil, fmt.Errorf("manifest content exceeds expected length %d", expectedLength)
 		}
-
 		return nil, err
 	}
 
 	return content, nil
 }
 
+// Used only while the owning scan goroutine is active. Manifest reads call
+// Open; other optional FileIO interfaces are deliberately not forwarded.
 type manifestContentCacheIO struct {
 	ctx      context.Context
 	base     iceio.IO

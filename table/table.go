@@ -249,7 +249,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
-	t.manifestContentCache = fresh.manifestContentCache
+	t.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, fresh.manifestContentCache)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	t.labels = fresh.labels
@@ -832,7 +832,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
-	return New(
+	next := New(
 		t.identifier,
 		newMeta,
 		newLoc,
@@ -842,7 +842,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
-	), nil
+	)
+	next.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, next.manifestContentCache)
+	return next, nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
