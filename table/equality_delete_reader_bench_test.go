@@ -564,12 +564,76 @@ func buildBenchDeleteSetSingleInt64NoMatch(numDeletes int) *equalityDeleteSet {
 	}
 }
 
+func buildBenchRecordNullableInt(mem memory.Allocator, numRows int) arrow.RecordBatch {
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "category", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	builder := array.NewRecordBuilder(mem, schema)
+	defer builder.Release()
+	ids := builder.Field(0).(*array.Int64Builder)
+	categories := builder.Field(1).(*array.Int64Builder)
+
+	for i := range numRows {
+		// Keep 25% of rows null to exercise the null-aware lookup loop.
+		if i%4 == 0 {
+			ids.AppendNull()
+		} else {
+			ids.Append(int64(i))
+		}
+		categories.Append(int64(i % 100))
+	}
+
+	return builder.NewRecordBatch()
+}
+
+func benchSingleInt64EqualityDeletes(
+	b *testing.B,
+	buildRec func(memory.Allocator, int) arrow.RecordBatch,
+	buildDel func(int) *equalityDeleteSet,
+) {
+	b.Helper()
+
+	for _, benchmark := range []struct {
+		name string
+		fast bool
+	}{
+		{name: "generic"},
+		{name: "fast", fast: true},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			benchEqDeletesForFile(b, buildRec, func(numDeletes int) *equalityDeleteSet {
+				deleteSet := buildDel(numDeletes)
+				if !benchmark.fast {
+					// Keep the same schema and keys while disabling the optional index.
+					deleteSet.singleInt64Once.Do(func() {})
+				}
+
+				return deleteSet
+			}, benchIntFileSchema())
+		})
+	}
+}
+
 func BenchmarkProcessEqualityDeletesSingleInt64(b *testing.B) {
-	benchEqDeletesForFile(b, buildBenchRecordInt, buildBenchDeleteSetSingleInt64, benchIntFileSchema())
+	benchSingleInt64EqualityDeletes(b, buildBenchRecordInt, buildBenchDeleteSetSingleInt64)
 }
 
 func BenchmarkProcessEqualityDeletesSingleInt64NoMatch(b *testing.B) {
-	benchEqDeletesForFile(b, buildBenchRecordInt, buildBenchDeleteSetSingleInt64NoMatch, benchIntFileSchema())
+	benchSingleInt64EqualityDeletes(b, buildBenchRecordInt, buildBenchDeleteSetSingleInt64NoMatch)
+}
+
+func BenchmarkProcessEqualityDeletesSingleInt64NullsRetained(b *testing.B) {
+	benchSingleInt64EqualityDeletes(b, buildBenchRecordNullableInt, buildBenchDeleteSetSingleInt64)
+}
+
+func BenchmarkProcessEqualityDeletesSingleInt64NullsDeleted(b *testing.B) {
+	benchSingleInt64EqualityDeletes(b, buildBenchRecordNullableInt, func(numDeletes int) *equalityDeleteSet {
+		deleteSet := buildBenchDeleteSetSingleInt64(numDeletes)
+		deleteSet.keys[string([]byte{0})] = struct{}{}
+
+		return deleteSet
+	})
 }
 
 func BenchmarkProcessEqualityDeletesInt(b *testing.B) {

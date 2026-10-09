@@ -53,6 +53,8 @@ var ErrConflictingEqualityDeleteMetadata = errors.New("conflicting equality dele
 // group of equality field IDs — delete files with different field IDs
 // produce separate sets. Key material and metadata are immutable after
 // construction; derived typed indexes are built once and shared safely.
+// Typed indexes retain additional map storage alongside keys for the lifetime
+// of the set. Do not copy the set after the first use of an index.
 type equalityDeleteSet struct {
 	keys     set[string]
 	fieldIDs []int
@@ -1320,6 +1322,7 @@ func (e *equalityDeleteSet) singleInt64Set(fileSchema *iceberg.Schema) *singleIn
 				continue
 			}
 			if len(key) != 9 || key[0] != 1 {
+				// Unexpected key formats must keep using the generic path.
 				return
 			}
 
@@ -1391,10 +1394,15 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		numRows := int(r.NumRows())
 
 		var maskBuf *memory.Buffer
-		var maskBytes []byte
-		ensureMask := func() bool {
+		defer func() {
 			if maskBuf != nil {
-				return false
+				maskBuf.Release()
+			}
+		}()
+		var maskBytes []byte
+		ensureMask := func() {
+			if maskBuf != nil {
+				return
 			}
 
 			maskBuf = memory.NewResizableBuffer(mem)
@@ -1404,8 +1412,6 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 			for i := range maskBytes {
 				maskBytes[i] = 0xFF
 			}
-
-			return true
 		}
 
 		var keyBuf bytes.Buffer
@@ -1426,9 +1432,7 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 									continue
 								}
 								if _, deleted := int64Set.keys[uint64(rawValues[row])]; deleted {
-									if ensureMask() {
-										defer maskBuf.Release()
-									}
+									ensureMask()
 									bitutil.ClearBit(maskBytes, row)
 								}
 							}
@@ -1438,18 +1442,15 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 									continue
 								}
 
-								deleted := false
 								if values.IsNull(row) {
-									deleted = int64Set.hasNull
-								} else {
-									_, deleted = int64Set.keys[uint64(rawValues[row])]
-								}
-								if deleted {
-									if ensureMask() {
-										defer maskBuf.Release()
+									if !int64Set.hasNull {
+										continue
 									}
-									bitutil.ClearBit(maskBytes, row)
+								} else if _, deleted := int64Set.keys[uint64(rawValues[row])]; !deleted {
+									continue
 								}
+								ensureMask()
+								bitutil.ClearBit(maskBytes, row)
 							}
 						}
 
@@ -1482,9 +1483,7 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 					continue
 				}
 
-				if ensureMask() {
-					defer maskBuf.Release()
-				}
+				ensureMask()
 				bitutil.ClearBit(maskBytes, row)
 			}
 		}
