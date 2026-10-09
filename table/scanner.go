@@ -1778,59 +1778,7 @@ func (scan *Scan) planFilesLocal(
 		eqDeleteIndex = nil
 	}
 
-	var boundRowFilter iceberg.BooleanExpression
-	if scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}) {
-		boundRowFilter, err = iceberg.BindExpr(schema, scan.rowFilter, scan.caseSensitive)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var residualEvaluators map[int]*partitionResidualEvaluator
-	if boundRowFilter != nil {
-		residualEvaluators = make(map[int]*partitionResidualEvaluator)
-	}
-
-	// Apply residuals, metrics, and parquet range splitting in manifest order.
-	// These operations stay outside the concurrent manifest workers so the
-	// residual evaluator cache and scan metrics remain race-free.
-	results = make([]FileScanTask, 0, len(plannedTasks))
-	splitTargetSize := scan.metadata.Properties().GetInt64(
-		ReadSplitTargetSizeKey, ReadSplitTargetSizeDefault)
-	acc.resultDataFiles = int64(len(plannedTasks))
-	for _, task := range plannedTasks {
-		if boundRowFilter != nil {
-			specID := int(task.File.SpecID())
-			residualEvaluator, found := residualEvaluators[specID]
-			if !found {
-				residualEvaluator, err = newPartitionResidualEvaluator(
-					schema, scan.metadata.PartitionSpecByID(specID), boundRowFilter, scan.caseSensitive)
-				if err != nil {
-					return nil, fmt.Errorf("build partition residual evaluator for spec %d: %w", specID, err)
-				}
-				residualEvaluators[specID] = residualEvaluator
-			}
-			if residualEvaluator != nil {
-				var simplified bool
-				task.Residual, simplified, err = residualEvaluator.residual(dataFilePartition(task.File))
-				if err != nil {
-					return nil, fmt.Errorf("evaluate partition residual for %s: %w", task.File.FilePath(), err)
-				}
-				if !simplified {
-					task.Residual = nil
-				}
-			}
-		}
-
-		acc.addResultDeleteMetrics(task)
-		acc.totalFileSize += task.File.FileSizeBytes()
-		if splitTasks, split := splitParquetScanTask(task, splitTargetSize); split {
-			results = append(results, splitTasks...)
-		} else {
-			results = append(results, task)
-		}
-	}
-
-	return results, nil
+	return scan.finalizePlannedTasks(plannedTasks, schema, acc)
 }
 
 func dataFilesWithoutColumnStats(
