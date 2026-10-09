@@ -89,6 +89,11 @@ type Config struct {
 	// are directories with nowhere to keep them. Loading is required of every
 	// catalog and is tested either way.
 	SupportsNamespaceProperties bool
+
+	// SupportsRenameTable reports whether the catalog can rename tables.
+	// Rename tests are skipped when it is false, as they are for the Hadoop
+	// catalog, which does not implement rename.
+	SupportsRenameTable bool
 }
 
 // RunCatalogTests runs the conformance suite against the catalog described by
@@ -101,6 +106,13 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Run("BasicCreateTableThatAlreadyExists", func(t *testing.T) { testBasicCreateTableThatAlreadyExists(t, cfg) })
 	t.Run("LoadMissingTable", func(t *testing.T) { testLoadMissingTable(t, cfg) })
 	t.Run("LoadTableWithNonExistingNamespace", func(t *testing.T) { testLoadTableWithNonExistingNamespace(t, cfg) })
+
+	t.Run("ListTables", func(t *testing.T) { testListTables(t, cfg) })
+	t.Run("DropTable", func(t *testing.T) { testDropTable(t, cfg) })
+	t.Run("DropMissingTable", func(t *testing.T) { testDropMissingTable(t, cfg) })
+	t.Run("RenameTable", func(t *testing.T) { testRenameTable(t, cfg) })
+	t.Run("RenameTableToExisting", func(t *testing.T) { testRenameTableToExisting(t, cfg) })
+	t.Run("RenameMissingTable", func(t *testing.T) { testRenameMissingTable(t, cfg) })
 
 	t.Run("CreateNamespace", func(t *testing.T) { testCreateNamespace(t, cfg) })
 	t.Run("CreateNamespaceThatAlreadyExists", func(t *testing.T) { testCreateNamespaceThatAlreadyExists(t, cfg) })
