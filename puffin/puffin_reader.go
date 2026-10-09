@@ -20,6 +20,7 @@ package puffin
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -28,7 +29,6 @@ import (
 	"maps"
 	"math"
 	"slices"
-	"sort"
 
 	"github.com/pierrec/lz4/v4"
 )
@@ -620,29 +620,25 @@ func (r *Reader) ReadAllBlobs() ([]*BlobData, error) {
 		return nil, nil
 	}
 
-	// Create index mapping to preserve original order
-	type indexedBlob struct {
-		index int
-		meta  BlobMetadata
+	// Sort indexes instead of copying BlobMetadata into a temporary slice.
+	// Results are still stored in footer order.
+	order := make([]int, len(footer.Blobs))
+	for i := range order {
+		order[i] = i
 	}
-	indexed := make([]indexedBlob, len(footer.Blobs))
-	for i, meta := range footer.Blobs {
-		indexed[i] = indexedBlob{index: i, meta: meta}
-	}
-
-	// Sort by offset for sequential I/O
-	sort.Slice(indexed, func(i, j int) bool {
-		return indexed[i].meta.Offset < indexed[j].meta.Offset
+	slices.SortFunc(order, func(a, b int) int {
+		return cmp.Compare(footer.Blobs[a].Offset, footer.Blobs[b].Offset)
 	})
 
 	// Read blobs in offset order, store in original order
 	results := make([]*BlobData, len(footer.Blobs))
-	for _, ib := range indexed {
-		data, err := r.readBlobData(ib.meta)
+	for _, index := range order {
+		meta := footer.Blobs[index]
+		data, err := r.readBlobData(meta)
 		if err != nil {
-			return nil, fmt.Errorf("puffin: read blob %d: %w", ib.index, err)
+			return nil, fmt.Errorf("puffin: read blob %d: %w", index, err)
 		}
-		results[ib.index] = &BlobData{Metadata: cloneBlobMetadata(ib.meta), Data: data}
+		results[index] = &BlobData{Metadata: cloneBlobMetadata(meta), Data: data}
 	}
 
 	return results, nil
