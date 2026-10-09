@@ -175,7 +175,8 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 // it. Delete-file reads are cached by delete path, while the merged position
 // bitmap is cached by target data file plus its delete-file set. Split tasks
 // therefore share one immutable bitmap instead of rebuilding a hash set per
-// task.
+// task. Unions of multiple non-empty inputs are retained alongside the
+// per-file bitmaps until release.
 //
 // The loader has the lifetime of exactly one scan. Each delete file and merged
 // bitmap locks in its first result, including context errors, for every caller;
@@ -183,7 +184,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 type lazyPositionDeleteLoader struct {
 	fs      iceio.IO
 	files   map[string]*lazyPositionDeleteFile
-	indexes map[string]*lazyPositionDeleteIndex
+	indexes []*lazyPositionDeleteIndex
 
 	releaseOnce sync.Once
 	released    atomic.Bool
@@ -246,10 +247,13 @@ func positionDeleteIndexKey(task FileScanTask) (key, targetPath string, deletePa
 
 func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositionDeleteLoader {
 	uniqueDeletes, targetsByDelete := collectPositionDeleteFilesAndTargets(tasks)
+	if len(uniqueDeletes) == 0 {
+		return nil
+	}
 	loader := &lazyPositionDeleteLoader{
 		fs:      fs,
 		files:   make(map[string]*lazyPositionDeleteFile, len(uniqueDeletes)),
-		indexes: make(map[string]*lazyPositionDeleteIndex),
+		indexes: make([]*lazyPositionDeleteIndex, len(tasks)),
 	}
 
 	for path, deleteFile := range uniqueDeletes {
@@ -258,18 +262,21 @@ func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositio
 			targets:  targetsByDelete[path],
 		}
 	}
-	for _, task := range tasks {
+	indexesByKey := make(map[string]*lazyPositionDeleteIndex)
+	for i, task := range tasks {
 		key, targetPath, deletePaths := positionDeleteIndexKey(task)
 		if key == "" {
 			continue
 		}
-		if _, ok := loader.indexes[key]; ok {
-			continue
+		index := indexesByKey[key]
+		if index == nil {
+			index = &lazyPositionDeleteIndex{
+				targetPath:  targetPath,
+				deletePaths: deletePaths,
+			}
+			indexesByKey[key] = index
 		}
-		loader.indexes[key] = &lazyPositionDeleteIndex{
-			targetPath:  targetPath,
-			deletePaths: deletePaths,
-		}
+		loader.indexes[i] = index
 	}
 
 	return loader
@@ -337,21 +344,21 @@ func (l *lazyPositionDeleteLoader) buildIndex(
 	return bitmap, nil
 }
 
-func (l *lazyPositionDeleteLoader) load(ctx context.Context, task FileScanTask) (*dv.RoaringPositionBitmap, error) {
+// load uses the ordinal in the task slice passed to newLazyPositionDeleteLoader.
+// Workers preserve that ordinal even when they finish out of order, so this
+// lookup does not rebuild or hash a key for every split.
+func (l *lazyPositionDeleteLoader) load(ctx context.Context, taskIndex int) (*dv.RoaringPositionBitmap, error) {
 	if l.released.Load() {
 		return nil, errPositionDeleteLoaderReleased
 	}
-
-	key, targetPath, deletePaths := positionDeleteIndexKey(task)
-	if key == "" {
-		return nil, nil
+	if taskIndex < 0 || taskIndex >= len(l.indexes) {
+		return nil, fmt.Errorf("%w: position delete task index %d out of range [0, %d)",
+			iceberg.ErrInvalidArgument, taskIndex, len(l.indexes))
 	}
 
-	index := l.indexes[key]
+	index := l.indexes[taskIndex]
 	if index == nil {
-		// The loader is normally built from the same task slice supplied here.
-		// Keep mutated or hand-built tasks safe without mutating the shared cache.
-		return l.buildIndex(ctx, targetPath, deletePaths)
+		return nil, nil
 	}
 
 	index.once.Do(func() {
@@ -375,7 +382,9 @@ func (l *lazyPositionDeleteLoader) release() {
 			cached.bitmaps = nil
 		}
 		for _, index := range l.indexes {
-			index.bitmap = nil
+			if index != nil {
+				index.bitmap = nil
+			}
 		}
 	})
 }
@@ -814,6 +823,8 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 
 const maxPositionalDeletePreallocation = 64 * 1024
 
+// collectPosDeletePositions serves producePosDeletesFromTask when a
+// transaction creates new delete records. Scan tasks use cached bitmaps instead.
 func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], error) {
 	totalPositions := 0
 	for _, chunk := range positionalDeletes {
@@ -1215,9 +1226,13 @@ func combinePositionalDeleteBitmap(
 		if deletes.Contains(uint64(cursor.next())) {
 			if bldr == nil {
 				bldr = array.NewInt64Builder(mem)
-				bldr.Reserve(int(i))
+				if i > 0 {
+					// This row is deleted. Resize avoids rounding the maximum
+					// survivor count up to a power of two as Reserve would.
+					bldr.Resize(int(nrows - 1))
+				}
 				for j := range i {
-					bldr.Append(j)
+					bldr.UnsafeAppend(j)
 				}
 			}
 
@@ -1225,7 +1240,12 @@ func combinePositionalDeleteBitmap(
 		}
 
 		if bldr != nil {
-			bldr.Append(i)
+			// A leading run of deletes needs no values buffer until a row
+			// survives. Size it once for the remaining possible survivors.
+			if bldr.Cap() == 0 {
+				bldr.Resize(int(nrows - i))
+			}
+			bldr.UnsafeAppend(i)
 		}
 	}
 
@@ -2705,7 +2725,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 						var positionalDeleteBitmap *dv.RoaringPositionBitmap
 						if positionDeleteLoader != nil {
 							var err error
-							positionalDeleteBitmap, err = positionDeleteLoader.load(scanCtx, task.Value)
+							positionalDeleteBitmap, err = positionDeleteLoader.load(scanCtx, task.Index)
 							if err != nil {
 								sink.fail(task, err)
 								cancel(err)

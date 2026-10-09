@@ -142,7 +142,7 @@ func TestLazyPositionDeleteLoaderDefersReadsAndSharesResults(t *testing.T) {
 
 	assert.Zero(t, memFS.opens.Load(), "constructing the scan loader must not open delete files")
 
-	gotA, err := loader.load(ctx, tasks[0])
+	gotA, err := loader.load(ctx, 0)
 	require.NoError(t, err)
 	require.NotNil(t, gotA)
 	assert.Equal(t, int64(1), gotA.Cardinality(),
@@ -156,7 +156,7 @@ func TestLazyPositionDeleteLoaderDefersReadsAndSharesResults(t *testing.T) {
 	assert.NotContains(t, cached.bitmaps, unrelatedPath,
 		"lazy delete reads must filter paths that are not referenced by scan tasks")
 
-	gotB, err := loader.load(ctx, tasks[1])
+	gotB, err := loader.load(ctx, 1)
 	require.NoError(t, err)
 	require.NotNil(t, gotB)
 	assert.Equal(t, int64(1), gotB.Cardinality())
@@ -164,6 +164,77 @@ func TestLazyPositionDeleteLoaderDefersReadsAndSharesResults(t *testing.T) {
 	assert.Equal(t, int64(1), memFS.opens.Load(), "shared delete files must use one read")
 
 	loader.release()
+}
+
+func TestLazyPositionDeleteLoaderSkipsPlansWithoutPositionDeletes(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		equalityDeleteFiles []iceberg.DataFile
+	}{
+		{name: "no deletes"},
+		{name: "equality deletes only", equalityDeleteFiles: []iceberg.DataFile{&mockDataFile{
+			path: "mem://bucket/deletes/equality.parquet", contentType: iceberg.EntryContentEqDeletes,
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tasks := make([]FileScanTask, 10_000)
+			dataFile := newLazyDataFile(t, "mem://bucket/data/a.parquet")
+			for i := range tasks {
+				tasks[i] = FileScanTask{File: dataFile, EqualityDeleteFiles: tc.equalityDeleteFiles}
+			}
+			loader := newLazyPositionDeleteLoader(nil, tasks)
+			require.Nil(t, loader, "a scan without position deletes must not allocate a task-sized index")
+			loader.release()
+		})
+	}
+}
+
+func TestLazyPositionDeleteLoaderKeepsOriginalTaskOrdinals(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	const (
+		dataPathA  = "mem://bucket/data/a.parquet"
+		dataPathB  = "mem://bucket/data/b.parquet"
+		deletePath = "mem://bucket/deletes/task-ordinals.parquet"
+	)
+	fs := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
+	writePosDeleteParquetToMemFS(t, fs.MemFS, deletePath, `[
+		{"file_path":"`+dataPathA+`","pos":1},
+		{"file_path":"`+dataPathB+`","pos":2}
+	]`)
+	deleteFile := newPosDeleteFile(t, deletePath, 2, 128)
+	tasks := []FileScanTask{
+		{File: newLazyDataFile(t, dataPathA)},
+		{File: newLazyDataFile(t, dataPathB), DeleteFiles: []iceberg.DataFile{deleteFile}},
+		{File: newLazyDataFile(t, dataPathA), DeleteFiles: []iceberg.DataFile{deleteFile}},
+		{File: newLazyDataFile(t, dataPathB), DeleteFiles: []iceberg.DataFile{deleteFile}},
+	}
+	loader := newLazyPositionDeleteLoader(fs, tasks)
+	defer loader.release()
+	for _, taskIndex := range []int{3, 0, 2, 1} {
+		bitmap, err := loader.load(ctx, taskIndex)
+		require.NoError(t, err)
+		if taskIndex == 0 {
+			assert.Nil(t, bitmap, "tasks without deletes must keep their place in the index slice")
+
+			continue
+		}
+		require.NotNil(t, bitmap)
+		assert.Equal(t, int64(1), bitmap.Cardinality())
+		if taskIndex == 2 {
+			assert.True(t, bitmap.Contains(1))
+		} else {
+			assert.True(t, bitmap.Contains(2))
+		}
+	}
+	assert.Same(t, loader.indexes[1], loader.indexes[3], "split tasks must share the same cached index")
+	assert.Equal(t, int64(1), fs.opens.Load())
+	for _, taskIndex := range []int{-1, len(tasks)} {
+		bitmap, err := loader.load(ctx, taskIndex)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		assert.Nil(t, bitmap)
+	}
 }
 
 func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T) {
@@ -197,10 +268,10 @@ func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T
 	}
 	loader := newLazyPositionDeleteLoader(fs, tasks)
 
-	first, err := loader.load(ctx, tasks[0])
+	first, err := loader.load(ctx, 0)
 	require.NoError(t, err)
 	require.NotNil(t, first)
-	second, err := loader.load(ctx, tasks[1])
+	second, err := loader.load(ctx, 1)
 	require.NoError(t, err)
 	require.NotNil(t, second)
 
@@ -212,12 +283,12 @@ func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T
 
 	// Merging three or more files must not change cached source bitmaps used
 	// by another task with a smaller set of applicable delete files.
-	single, err := loader.load(ctx, tasks[2])
+	single, err := loader.load(ctx, 2)
 	require.NoError(t, err)
 	require.NotNil(t, single)
 	assert.Equal(t, int64(1), single.Cardinality())
 	assert.True(t, single.Contains(1))
-	subset, err := loader.load(ctx, tasks[3])
+	subset, err := loader.load(ctx, 3)
 	require.NoError(t, err)
 	require.NotNil(t, subset)
 	assert.Equal(t, int64(2), subset.Cardinality())
@@ -226,6 +297,95 @@ func TestLazyPositionDeleteLoaderReusesMergedBitmapAcrossSplitTasks(t *testing.T
 	assert.Equal(t, int64(3), fs.opens.Load(), "each delete file must be read once")
 
 	loader.release()
+}
+
+func TestLazyPositionDeleteLoaderUnionSkipsEmptyTargetsWithoutMutatingInputs(t *testing.T) {
+	for _, emptyIndex := range []int{0, 1} {
+		t.Run(fmt.Sprintf("empty file %d", emptyIndex), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			const dataPath = "mem://bucket/data/union.parquet"
+			fs := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
+			deleteFiles := make([]iceberg.DataFile, 3)
+			var want []uint64
+			for i := range deleteFiles {
+				path := dataPath
+				if i == emptyIndex {
+					path = "mem://bucket/data/unrelated.parquet"
+				} else {
+					want = append(want, uint64(i))
+				}
+				deletePath := fmt.Sprintf("mem://bucket/deletes/union-%d.parquet", i)
+				writePosDeleteParquetToMemFS(t, fs.MemFS, deletePath,
+					fmt.Sprintf(`[{"file_path":%q,"pos":%d}]`, path, i))
+				deleteFiles[i] = newPosDeleteFile(t, deletePath, 1, 128)
+			}
+			firstPresent := int(want[0])
+			tasks := []FileScanTask{
+				{File: newLazyDataFile(t, dataPath), DeleteFiles: deleteFiles},
+				{File: newLazyDataFile(t, dataPath), DeleteFiles: []iceberg.DataFile{deleteFiles[firstPresent]}},
+			}
+			loader := newLazyPositionDeleteLoader(fs, tasks)
+			defer loader.release()
+
+			single, err := loader.load(ctx, 1)
+			require.NoError(t, err)
+			merged, err := loader.load(ctx, 0)
+			require.NoError(t, err)
+			require.NotNil(t, merged)
+			assert.Equal(t, int64(len(want)), merged.Cardinality())
+			for _, position := range want {
+				assert.True(t, merged.Contains(position))
+			}
+			cached := loader.files[deleteFiles[firstPresent].FilePath()].bitmaps[dataPath]
+			assert.Same(t, single, cached)
+			assert.Equal(t, int64(1), cached.Cardinality(), "the first non-empty input must stay immutable")
+			assert.True(t, cached.Contains(uint64(firstPresent)))
+			assert.Equal(t, int64(3), fs.opens.Load())
+		})
+	}
+}
+
+func TestLazyPositionDeleteLoaderPreservesOtherTargetValidation(t *testing.T) {
+	for _, invalidPos := range []string{"-1", "null"} {
+		t.Run(invalidPos, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			const (
+				dataPathA  = "mem://bucket/data/a.parquet"
+				dataPathB  = "mem://bucket/data/b.parquet"
+				deletePath = "mem://bucket/deletes/invalid-other-target.parquet"
+			)
+			fs := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
+			fields := PositionalDeleteArrowSchema.Fields()
+			fields[1].Nullable = true
+			writePosDeleteParquetToMemFSWithSchema(t, fs.MemFS, deletePath, arrow.NewSchema(fields, nil), `[
+				{"file_path":"`+dataPathA+`","pos":1},
+				{"file_path":"`+dataPathB+`","pos":`+invalidPos+`}
+			]`)
+			deleteFile := newPosDeleteFile(t, deletePath, 2, 128)
+			tasks := []FileScanTask{{
+				File: newLazyDataFile(t, dataPathA), DeleteFiles: []iceberg.DataFile{deleteFile},
+			}}
+
+			// The existing Arrow reader validates every decoded row before target
+			// filtering. Bitmap conversion must preserve that error behavior.
+			deletes, err := readDeletesForPaths(ctx, fs, deleteFile, map[string]struct{}{dataPathA: {}})
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Nil(t, deletes)
+
+			loader := newLazyPositionDeleteLoader(fs, tasks)
+			defer loader.release()
+			bitmap, err := loader.load(ctx, 0)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Nil(t, bitmap)
+			_, cachedErr := loader.load(ctx, 0)
+			assert.ErrorIs(t, cachedErr, err)
+			assert.Equal(t, int64(2), fs.opens.Load(), "one read per loader, including the legacy reader")
+		})
+	}
 }
 
 func TestLazyPositionDeleteLoaderSingleflightsConcurrentLoads(t *testing.T) {
@@ -255,7 +415,7 @@ func TestLazyPositionDeleteLoaderSingleflightsConcurrentLoads(t *testing.T) {
 	for range callers {
 		go func() {
 			defer wg.Done()
-			deletes, err := loader.load(ctx, task)
+			deletes, err := loader.load(ctx, 0)
 			results <- deletes
 			errs <- err
 		}()
@@ -292,13 +452,13 @@ func TestLazyPositionDeleteLoaderCachesErrors(t *testing.T) {
 	}
 	loader := newLazyPositionDeleteLoader(fs, []FileScanTask{task})
 
-	first, err := loader.load(context.Background(), task)
+	first, err := loader.load(context.Background(), 0)
 	require.Error(t, err)
 	assert.Nil(t, first)
 	assert.ErrorContains(t, err, "read position deletes from "+deleteFile.FilePath())
 	assert.Equal(t, int64(1), fs.opens.Load())
 
-	second, secondErr := loader.load(context.Background(), task)
+	second, secondErr := loader.load(context.Background(), 0)
 	require.Error(t, secondErr)
 	assert.Nil(t, second)
 	assert.ErrorIs(t, secondErr, err)
@@ -317,7 +477,7 @@ func TestLazyPositionDeleteLoaderWrapsErrorsWithoutFilePath(t *testing.T) {
 	}
 	loader := newLazyPositionDeleteLoader(fs, []FileScanTask{task})
 
-	_, err := loader.load(context.Background(), task)
+	_, err := loader.load(context.Background(), 0)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "read position deletes from "+deletePath)
 	loader.release()
@@ -339,9 +499,9 @@ func TestLazyPositionDeleteLoaderCachesCancellation(t *testing.T) {
 	}
 	loader := newLazyPositionDeleteLoader(fs, []FileScanTask{task})
 
-	_, firstErr := loader.load(ctx, task)
+	_, firstErr := loader.load(ctx, 0)
 	require.ErrorIs(t, firstErr, context.Canceled)
-	_, secondErr := loader.load(context.Background(), task)
+	_, secondErr := loader.load(context.Background(), 0)
 	require.ErrorIs(t, secondErr, context.Canceled)
 	assert.Equal(t, int64(1), fs.opens.Load(), "cancellation must not cause a second read")
 
@@ -535,9 +695,7 @@ func TestLazyPositionDeleteLoaderClearsBitmapsWhenIteratorStops(t *testing.T) {
 				},
 			},
 		},
-		indexes: map[string]*lazyPositionDeleteIndex{
-			"index": {bitmap: bitmap},
-		},
+		indexes: []*lazyPositionDeleteIndex{{bitmap: bitmap}},
 	}
 
 	batch := checkedInt64RecordBatch(mem, 1)
@@ -573,7 +731,7 @@ func TestLazyPositionDeleteLoaderRejectsLoadAfterRelease(t *testing.T) {
 	loader := &lazyPositionDeleteLoader{}
 	loader.release()
 
-	_, err := loader.load(context.Background(), FileScanTask{})
+	_, err := loader.load(context.Background(), 0)
 	require.ErrorIs(t, err, errPositionDeleteLoaderReleased)
 }
 

@@ -147,7 +147,7 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 		b.ResetTimer()
 		for b.Loop() {
 			loader := newLazyPositionDeleteLoader(fixture.fs, fixture.tasks)
-			bitmap, err := loader.load(b.Context(), fixture.tasks[0])
+			bitmap, err := loader.load(b.Context(), 0)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -160,6 +160,27 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 }
 
 var positionDeleteSplitReuseBenchmarkSink int64
+
+func BenchmarkPositionDeleteBitmapNoDeletes(b *testing.B) {
+	for _, taskCount := range []int{1, 10_000} {
+		b.Run(fmt.Sprintf("tasks=%d", taskCount), func(b *testing.B) {
+			tasks := make([]FileScanTask, taskCount)
+			dataFile := &mockDataFile{path: "mem://benchmark/data/no-deletes.parquet"}
+			for i := range tasks {
+				tasks[i].File = dataFile
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				loader := newLazyPositionDeleteLoader(nil, tasks)
+				if loader != nil {
+					b.Fatal("expected no position delete loader")
+				}
+				loader.release()
+			}
+		})
+	}
+}
 
 // BenchmarkPositionDeleteBitmapUnion isolates merging already decoded delete
 // files. Separate high-bit buckets make repeated copies of the growing union
@@ -200,6 +221,59 @@ func BenchmarkPositionDeleteBitmapUnion(b *testing.B) {
 					b.Fatal("merged bitmap has unexpected cardinality")
 				}
 				positionDeleteSplitReuseBenchmarkSink = bitmap.Cardinality()
+			}
+		})
+	}
+}
+
+// BenchmarkPositionDeleteBitmapCachedLoad measures the per-split lookup after
+// the delete files and merged bitmap are already cached. Each operation visits
+// 16 splits of the same data file without any Parquet decoding or row filtering.
+func BenchmarkPositionDeleteBitmapCachedLoad(b *testing.B) {
+	const (
+		dataPath = "mem://benchmark/data/cached-position-delete-index.parquet"
+		splits   = 16
+	)
+
+	for _, fileCount := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("files=%d", fileCount), func(b *testing.B) {
+			deleteFiles := make([]iceberg.DataFile, fileCount)
+			for i := range deleteFiles {
+				deleteFiles[i] = &mockDataFile{
+					path:        fmt.Sprintf("mem://benchmark/deletes/cached-index-%02d.parquet", i),
+					contentType: iceberg.EntryContentPosDeletes,
+				}
+			}
+			tasks := make([]FileScanTask, splits)
+			for i := range tasks {
+				tasks[i] = FileScanTask{
+					File: &mockDataFile{path: dataPath}, DeleteFiles: deleteFiles,
+					Start: int64(i * 128), Length: 128,
+				}
+			}
+			loader := newLazyPositionDeleteLoader(nil, tasks)
+			defer loader.release()
+			for i, deleteFile := range deleteFiles {
+				cached := loader.files[deleteFile.FilePath()]
+				bitmap := dv.NewRoaringPositionBitmap()
+				bitmap.Set(uint64(i))
+				cached.bitmaps = map[string]*dv.RoaringPositionBitmap{dataPath: bitmap}
+				cached.once.Do(func() {})
+			}
+			if _, err := loader.load(b.Context(), 0); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				for taskIndex := range tasks {
+					bitmap, err := loader.load(b.Context(), taskIndex)
+					if err != nil {
+						b.Fatal(err)
+					}
+					positionDeleteSplitReuseBenchmarkSink = bitmap.Cardinality()
+				}
 			}
 		})
 	}
@@ -279,8 +353,8 @@ func BenchmarkPositionDeleteBitmapReuseAcrossSplits(b *testing.B) {
 				b.ResetTimer()
 				for b.Loop() {
 					loader := newLazyPositionDeleteLoader(fs, tasks)
-					for _, task := range tasks {
-						bitmap, err := loader.load(b.Context(), task)
+					for taskIndex := range tasks {
+						bitmap, err := loader.load(b.Context(), taskIndex)
 						if err != nil {
 							loader.release()
 							b.Fatal(err)
