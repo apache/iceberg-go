@@ -35,7 +35,7 @@ func TestCompareBoundLiteralsMatchesGetCmpLiteral(t *testing.T) {
 	}
 	// Both dispatchers must recognize every orderable concrete literal type.
 	tests := []struct {
-		name        string
+		name         string
 		lower, upper iceberg.Literal
 	}{
 		{"bool", iceberg.NewLiteral(false), iceberg.NewLiteral(true)},
