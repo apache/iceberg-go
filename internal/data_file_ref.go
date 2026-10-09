@@ -17,6 +17,8 @@
 
 package internal
 
+import "slices"
+
 // DataFileRef authorizes zero-copy access to immutable DataFile state from
 // trusted packages within this module. Go's internal-package rule prevents
 // external callers from constructing this token.
@@ -78,6 +80,33 @@ type DataFileCollectionsRef interface {
 		splitOffsets []int64,
 		equalityFieldIDs []int,
 	)
+}
+
+// DataFileSplitOffsets is the public getter needed by the internal split-offset
+// helper. It intentionally excludes unrelated collection and statistics getters.
+type DataFileSplitOffsets interface {
+	SplitOffsets() []int64
+}
+
+// DataFileSplitOffsetsRef exposes only split offsets so callers that do not
+// need column statistics do not trigger their lazy materialization.
+type DataFileSplitOffsetsRef interface {
+	DataFileSplitOffsetsRef(DataFileRef) []int64
+}
+
+// BorrowedDataFileSplitOffsets returns split offsets without copying for the
+// built-in data file and falls back to the public getter for external
+// implementations. The returned slice is read-only and must not be mutated or
+// retained beyond the current planning or read operation.
+func BorrowedDataFileSplitOffsets(file DataFileSplitOffsets) []int64 {
+	var splitOffsets []int64
+	if ref, ok := file.(DataFileSplitOffsetsRef); ok {
+		splitOffsets = ref.DataFileSplitOffsetsRef(DataFileRef{})
+	} else {
+		splitOffsets = file.SplitOffsets()
+	}
+
+	return slices.Clip(splitOffsets)
 }
 
 func BorrowedDataFileCollections(file DataFileCollections) (
