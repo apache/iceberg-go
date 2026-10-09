@@ -138,6 +138,7 @@ func (scan *Scan) finalizePlannedTasks(
 			finalized = append(finalized, plannedTasks[start:end]...)
 		}
 	}
+
 	return finalized, nil
 }
 
@@ -161,6 +162,7 @@ func (scan *Scan) finalizeTaskRange(
 				if err != nil {
 					result.err = fmt.Errorf(
 						"build partition residual evaluator for spec %d: %w", specID, err)
+
 					return result
 				}
 				// Manifest-order runs normally share one spec. Evaluators are
@@ -193,6 +195,7 @@ func (scan *Scan) finalizeTaskRange(
 			result.tasks = append(result.tasks, *task)
 		}
 	}
+
 	return result
 }
 

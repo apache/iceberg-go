@@ -210,7 +210,6 @@ func TestFinalizePlannedTasksUnsplitReusesInput(t *testing.T) {
 	assert.Nil(t, got[0].Residual)
 }
 
-
 // serialFinalizationReference reproduces the pre-parallelization loop. It is
 // deliberately independent of finalizeTaskRange and the worker merge logic.
 func serialFinalizationReference(
@@ -305,8 +304,10 @@ func TestFinalizePlannedTasksMixedSplitsAgainstIndependentReference(t *testing.T
 					tasks[i].DeletionVectorFiles = []iceberg.DataFile{dv}
 				}
 			}
-			scan := &Scan{metadata: metadata, rowFilter: iceberg.AlwaysTrue{},
-				caseSensitive: true, concurrency: 8}
+			scan := &Scan{
+				metadata: metadata, rowFilter: iceberg.AlwaysTrue{},
+				caseSensitive: true, concurrency: 8,
+			}
 			expected, expectedMetrics, err := serialFinalizationReference(
 				scan, append([]FileScanTask(nil), tasks...), schema)
 			require.NoError(t, err)
