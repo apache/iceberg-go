@@ -110,7 +110,7 @@ func (t *ViewTestSuite) TestCreateViewJoinsTrailingSlashMetadataLocation() {
 
 	fs, err := iceio.LoadFS(t.T().Context(), nil, metadataLocation)
 	t.Require().NoError(err)
-	metadataFile, err := fs.Open(metadataLocation)
+	metadataFile, err := fs.Open(context.Background(), metadataLocation)
 	t.Require().NoError(err)
 	t.Require().NoError(metadataFile.Close())
 }

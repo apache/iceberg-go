@@ -19,6 +19,7 @@ package iomock
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	sio "io"
 	"io/fs"
@@ -31,7 +32,7 @@ type MockFS struct {
 	mock.Mock
 }
 
-func (m *MockFS) Open(name string) (io.File, error) {
+func (m *MockFS) Open(_ context.Context, name string) (io.File, error) {
 	args := m.Called(name)
 
 	return args.Get(0).(io.File), args.Error(1)
@@ -47,7 +48,7 @@ func (m *MockFS) WriteFile(name string, content []byte) error {
 	return m.Called(name, content).Error(0)
 }
 
-func (m *MockFS) Remove(name string) error {
+func (m *MockFS) Remove(_ context.Context, name string) error {
 	return m.Called(name).Error(0)
 }
 

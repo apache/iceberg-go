@@ -82,12 +82,12 @@ type expiringManifestIO struct {
 	expired      atomic.Bool
 }
 
-func (fs *expiringManifestIO) Open(name string) (iceio.File, error) {
+func (fs *expiringManifestIO) Open(_ context.Context, name string) (iceio.File, error) {
 	if name != fs.manifestList && fs.expired.Load() {
 		return nil, errors.New("credentials expired")
 	}
 
-	file, err := fs.base.Open(name)
+	file, err := fs.base.Open(context.Background(), name)
 	if err == nil && name == fs.manifestList {
 		fs.expired.Store(true)
 	}
@@ -95,8 +95,8 @@ func (fs *expiringManifestIO) Open(name string) (iceio.File, error) {
 	return file, err
 }
 
-func (fs *expiringManifestIO) Remove(name string) error {
-	return fs.base.Remove(name)
+func (fs *expiringManifestIO) Remove(_ context.Context, name string) error {
+	return fs.base.Remove(context.Background(), name)
 }
 
 type failingManifestIO struct {
@@ -105,18 +105,18 @@ type failingManifestIO struct {
 	laterOpens  atomic.Int64
 }
 
-func (fs *failingManifestIO) Open(name string) (iceio.File, error) {
+func (fs *failingManifestIO) Open(_ context.Context, name string) (iceio.File, error) {
 	if name == fs.failingPath {
 		return nil, errors.New("manifest failed")
 	}
 
 	fs.laterOpens.Add(1)
 
-	return fs.base.Open(name)
+	return fs.base.Open(context.Background(), name)
 }
 
-func (fs *failingManifestIO) Remove(name string) error {
-	return fs.base.Remove(name)
+func (fs *failingManifestIO) Remove(_ context.Context, name string) error {
+	return fs.base.Remove(context.Background(), name)
 }
 
 func TestPlanFilesRefreshesFileIODuringManifestPlanning(t *testing.T) {

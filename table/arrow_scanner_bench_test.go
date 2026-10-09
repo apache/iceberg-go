@@ -576,7 +576,7 @@ func BenchmarkArrowScanTaskResidual(b *testing.B) {
 	if err := writer.Close(); err != nil {
 		b.Fatal(err)
 	}
-	file, err := fs.Open(dataPath)
+	file, err := fs.Open(context.Background(), dataPath)
 	if err != nil {
 		b.Fatal(err)
 	}

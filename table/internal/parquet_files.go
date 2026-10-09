@@ -105,7 +105,7 @@ const (
 type parquetFormat struct{}
 
 func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ FileReader, err error) {
-	inputfile, err := fs.Open(path)
+	inputfile, err := fs.Open(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -1260,7 +1260,8 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 
 func (w *ParquetFileWriter) Abort() error {
 	closeErr := w.fileCloser.Close()
-	removeErr := w.fs.Remove(w.info.FileName)
+	// Abort is a best-effort cleanup with no caller context to thread.
+	removeErr := w.fs.Remove(context.Background(), w.info.FileName)
 	if errors.Is(removeErr, fs.ErrNotExist) || os.IsNotExist(removeErr) {
 		removeErr = nil
 	}
@@ -2621,7 +2622,7 @@ func checkRowGroupBloomFilters(
 }
 
 func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader, err error) {
-	pf, err := pfs.fs.Open(pfs.file.FilePath())
+	pf, err := pfs.fs.Open(ctx, pfs.file.FilePath())
 	if err != nil {
 		return nil, err
 	}

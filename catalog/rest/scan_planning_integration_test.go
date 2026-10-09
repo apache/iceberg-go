@@ -262,7 +262,7 @@ func (s *RestIntegrationSuite) createScanPlanningTable(cat *rest.Catalog, ident 
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(arrowTable, file, arrowTable.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
-	s.T().Cleanup(func() { s.Require().NoError(mustFS(s.T(), tbl).Remove(dataPath)) })
+	s.T().Cleanup(func() { s.Require().NoError(mustFS(s.T(), tbl).Remove(s.ctx, dataPath)) })
 
 	txn := tbl.NewTransaction()
 	s.Require().NoError(txn.AddFiles(s.ctx, []string{dataPath}, nil, false))

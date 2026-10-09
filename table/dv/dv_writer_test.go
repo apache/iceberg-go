@@ -520,7 +520,7 @@ func TestDVWriterFlushUnknownSpecID(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown partition spec id 99")
 
-	_, openErr := fs.Open(location)
+	_, openErr := fs.Open(context.Background(), location)
 	assert.ErrorIs(t, openErr, stdfs.ErrNotExist)
 }
 

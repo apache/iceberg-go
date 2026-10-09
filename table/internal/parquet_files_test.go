@@ -102,11 +102,11 @@ type trackingFileSystem struct {
 	file *trackingOpenFile
 }
 
-func (f *trackingFileSystem) Open(name string) (iceio.File, error) {
+func (f *trackingFileSystem) Open(_ context.Context, name string) (iceio.File, error) {
 	return f.file, nil
 }
 
-func (f *trackingFileSystem) Remove(name string) error {
+func (f *trackingFileSystem) Remove(_ context.Context, name string) error {
 	return nil
 }
 
@@ -1249,7 +1249,7 @@ func TestWriteDataFileNormalizesEWKBOnDisk(t *testing.T) {
 	}, []arrow.RecordBatch{record})
 	require.NoError(t, err)
 
-	output, err := fs.Open("geo.parquet")
+	output, err := fs.Open(context.Background(), "geo.parquet")
 	require.NoError(t, err)
 	data, err := io.ReadAll(output)
 	closeErr := output.Close()
@@ -1400,7 +1400,7 @@ func TestParquetFileWriterAbortRemovesFile(t *testing.T) {
 
 	require.NoError(t, writer.Abort())
 
-	_, err := memFS.Open(fileName)
+	_, err := memFS.Open(context.Background(), fileName)
 	require.ErrorIs(t, err, iofs.ErrNotExist)
 }
 
@@ -2004,7 +2004,7 @@ func TestParquetRowGroupTargetRotatesBeforeNextBatch(t *testing.T) {
 			}, []arrow.RecordBatch{first, second})
 			require.NoError(t, err)
 
-			input, err := fsys.Open("row-groups.parquet")
+			input, err := fsys.Open(context.Background(), "row-groups.parquet")
 			require.NoError(t, err)
 			defer input.Close()
 
