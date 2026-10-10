@@ -241,7 +241,23 @@ func (s *IncrementalChangelogScan) planDeletedRowTasks(
 		if err != nil {
 			return nil, fmt.Errorf("incremental changelog scan snapshot %d: %w", snapshot.SnapshotID, err)
 		}
-		live, err := liveDataEntries(ctx, plan.fs, plan.manifestsBySnapshot[snapshot.SnapshotID])
+		manifests := plan.manifestsBySnapshot[snapshot.SnapshotID]
+		dataManifests := make([]iceberg.ManifestFile, 0, len(manifests))
+		for _, manifest := range manifests {
+			if manifest.ManifestContent() == iceberg.ManifestContentData {
+				dataManifests = append(dataManifests, manifest)
+			}
+		}
+		// Prune with the scan partition filters before opening manifests.
+		// A local accumulator keeps carried-forward data manifests out of the
+		// changelog scan report, which already counted them.
+		var pruned scanMetricsAccumulator
+		dataManifests, err = plan.scan.filterManifestsWithSchemaOptions(
+			dataManifests, plan.schema, &pruned, plan.partitionFilters, true)
+		if err != nil {
+			return nil, err
+		}
+		live, err := liveDataEntries(ctx, plan.fs, dataManifests)
 		if err != nil {
 			return nil, err
 		}
@@ -481,18 +497,24 @@ func liveDataEntries(ctx context.Context, fs io.IO, manifests []iceberg.Manifest
 	return liveManifestEntries(dataEntries), nil
 }
 
-// liveManifestEntries keeps the last entry for each path and drops paths whose
-// last entry is a deletion. Manifest order is oldest to newest, so a later
-// add brings a path back.
+// liveManifestEntries keeps the highest-sequence entry for each path and
+// drops paths whose winning entry is a deletion. Equal sequence numbers
+// keep the later entry.
 func liveManifestEntries(entries []iceberg.ManifestEntry) []iceberg.ManifestEntry {
 	latest := make(map[string]iceberg.ManifestEntry, len(entries))
 	order := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		path := entry.DataFile().FilePath()
-		if _, ok := latest[path]; !ok {
+		current, seen := latest[path]
+		if !seen {
 			order = append(order, path)
+			latest[path] = entry
+
+			continue
 		}
-		latest[path] = entry
+		if entry.SequenceNum() >= current.SequenceNum() {
+			latest[path] = entry
+		}
 	}
 	out := make([]iceberg.ManifestEntry, 0, len(latest))
 	for _, path := range order {

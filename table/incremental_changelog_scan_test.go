@@ -984,14 +984,26 @@ func TestIncrementalChangelogScanFiltersDeleteBackedTasks(t *testing.T) {
 func TestLiveManifestEntriesUsesTheLatestStatus(t *testing.T) {
 	file := changelogTestDataFile(t, "data.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
 	added := changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, file)
-	deleted := changelogManifestEntry(iceberg.EntryStatusDELETED, 2, 1, file)
+	deleted := changelogManifestEntry(iceberg.EntryStatusDELETED, 2, 2, file)
 	readded := changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, file)
 
-	require.Empty(t, liveManifestEntries([]iceberg.ManifestEntry{added, deleted}))
-	got := liveManifestEntries([]iceberg.ManifestEntry{added, deleted, readded})
-	require.Len(t, got, 1)
-	require.Equal(t, iceberg.EntryStatusADDED, got[0].Status())
-	require.Equal(t, int64(3), got[0].SnapshotID())
+	for _, entries := range [][]iceberg.ManifestEntry{
+		{added, deleted},
+		{deleted, added},
+	} {
+		require.Empty(t, liveManifestEntries(entries))
+	}
+
+	for _, entries := range [][]iceberg.ManifestEntry{
+		{added, deleted, readded},
+		{readded, deleted, added},
+	} {
+		got := liveManifestEntries(entries)
+		require.Len(t, got, 1)
+		require.Equal(t, iceberg.EntryStatusADDED, got[0].Status())
+		require.Equal(t, int64(3), got[0].SnapshotID())
+		require.Equal(t, int64(3), got[0].SequenceNum())
+	}
 }
 
 func TestEntriesBeforeDropsRemovedDeleteFiles(t *testing.T) {
