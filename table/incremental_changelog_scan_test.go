@@ -981,6 +981,50 @@ func TestIncrementalChangelogScanFiltersDeleteBackedTasks(t *testing.T) {
 	require.Equal(t, ChangelogOpInsert, tasks[0].Operation())
 }
 
+func TestIncrementalChangelogScanFiltersDeletedRowsByPartition(t *testing.T) {
+	spec := partitionedSpec()
+	partOne := newTestDataFile(t, spec, "mem://default/changelog-part/data-1.parquet", map[int]any{1000: int32(1)})
+	partTwo := newTestDataFile(t, spec, "mem://default/changelog-part/data-2.parquet", map[int]any{1000: int32(2)})
+	deleteOne := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-part/delete-1.parquet", map[int]any{1000: int32(1)}, partOne.FilePath())
+	deleteTwo := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-part/delete-2.parquet", map[int]any{1000: int32(2)}, partTwo.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-part", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, partOne),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, partTwo),
+			},
+		},
+		{
+			operation: OpDelete,
+			deletes: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, deleteOne),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, deleteTwo),
+			},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan(
+		WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(1))),
+	).PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	var deleted []DeletedRowsScanTask
+	for _, task := range tasks {
+		require.NotEqual(t, partTwo.FilePath(), task.ScanTask().File.FilePath())
+		rows, ok := task.(DeletedRowsScanTask)
+		if !ok {
+			continue
+		}
+		deleted = append(deleted, rows)
+	}
+	require.Len(t, deleted, 1)
+	require.Equal(t, partOne.FilePath(), deleted[0].ScanTask().File.FilePath())
+	require.Equal(t, []string{deleteOne.FilePath()}, changelogFilePaths(deleted[0].AddedDeletes()))
+}
+
 func TestLiveManifestEntriesUsesTheLatestStatus(t *testing.T) {
 	file := changelogTestDataFile(t, "data.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
 	added := changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, file)
