@@ -297,6 +297,26 @@ if err != nil { /* ... */ }
 arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 ```
 
+### Incremental changelog scans
+
+`NewIncrementalChangelogScan` returns rows added or deleted between snapshots. `PlanFiles` returns the tasks. `Read` reads a planned task list, and `ToArrowRecords` plans and reads. Remote planning is not supported.
+
+```go
+schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields("id", "name"),
+).FromSnapshotExclusive(startSnapshotID).ToArrowRecords(ctx)
+```
+
+`FromSnapshotInclusive`, `FromSnapshotExclusive`, and `ToSnapshot` bound the snapshot range. Projection, row filters, and limits apply while the rows are read.
+
+Each batch is the scan projection followed by three columns:
+
+- `_change_type` — `INSERT` or `DELETE`
+- `_change_ordinal` — zero-based ordinal of the snapshot that produced the change
+- `_commit_snapshot_id` — snapshot ID that committed the change
+
+Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove.
+
 ## Writing data
 
 The shortcut methods on `Table` open a transaction, perform the write, and commit. Use `NewTransaction` directly when you need to combine multiple operations.
