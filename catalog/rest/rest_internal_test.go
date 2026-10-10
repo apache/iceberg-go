@@ -102,7 +102,7 @@ func TestSignerDoesNotSignCrossOriginRedirect(t *testing.T) {
 	require.Empty(t, gotToken, "the redirect target must not receive the session token")
 }
 
-func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
+func TestIdentifierPathsRequireNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}
 
 	for _, ident := range []table.Identifier{
@@ -114,38 +114,42 @@ func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 		{"namespace", "table/name"},
 		{"namespace", "table\nname"},
 	} {
-		_, _, err := cat.splitIdentForPath(ident)
+		_, err := cat.tableIdentifierPath(ident)
 		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
 	}
 
-	_, _, err := cat.splitViewIdentForPath(table.Identifier{"view"})
+	_, err := cat.viewIdentifierPath(table.Identifier{"view"})
 	require.ErrorIs(t, err, catalog.ErrNoSuchView)
 	require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
 
-	ns, tbl, err := cat.splitIdentForPath(table.Identifier{"namespace", "table"})
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"namespace", "table"})
 	require.NoError(t, err)
-	assert.Equal(t, "namespace", ns)
-	assert.Equal(t, "table", tbl)
+	assert.Equal(t, "namespace", identPath.encodedNamespace)
+	assert.Equal(t, "table", identPath.rawName)
+	assert.Equal(t, "table", identPath.encodedName)
 
-	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"parent", "namespace", "table"})
+	identPath, err = cat.tableIdentifierPath(table.Identifier{"parent", "namespace", "table"})
 	require.NoError(t, err)
-	assert.Equal(t, "parent%1Fnamespace", ns)
-	assert.Equal(t, "table", tbl)
+	assert.Equal(t, "parent%1Fnamespace", identPath.encodedNamespace)
+	assert.Equal(t, "table", identPath.rawName)
+	assert.Equal(t, "table", identPath.encodedName)
 
-	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"namespace+name", "table+name"})
+	identPath, err = cat.tableIdentifierPath(table.Identifier{"namespace+name", "table+name"})
 	require.NoError(t, err)
-	assert.Equal(t, "namespace%2Bname", ns)
-	assert.Equal(t, "table%2Bname", tbl)
+	assert.Equal(t, "namespace%2Bname", identPath.encodedNamespace)
+	assert.Equal(t, "table+name", identPath.rawName)
+	assert.Equal(t, "table%2Bname", identPath.encodedName)
 
-	for name, split := range map[string]func(table.Identifier) (string, string, error){
-		"view":     cat.splitViewIdentForPath,
-		"function": cat.splitFunctionIdentForPath,
+	for name, buildPath := range map[string]func(table.Identifier) (identifierPath, error){
+		"view":     cat.viewIdentifierPath,
+		"function": cat.functionIdentifierPath,
 	} {
 		t.Run(name, func(t *testing.T) {
-			ns, object, err := split(table.Identifier{"namespace+name", name + "+name"})
+			identPath, err := buildPath(table.Identifier{"namespace+name", name + "+name"})
 			require.NoError(t, err)
-			assert.Equal(t, "namespace%2Bname", ns)
-			assert.Equal(t, name+"%2Bname", object)
+			assert.Equal(t, "namespace%2Bname", identPath.encodedNamespace)
+			assert.Equal(t, name+"+name", identPath.rawName)
+			assert.Equal(t, name+"%2Bname", identPath.encodedName)
 		})
 	}
 }
@@ -160,6 +164,9 @@ func TestEncodePathSegment(t *testing.T) {
 		{name: "plus", value: "+", want: "%2B"},
 		{name: "percent", value: "%", want: "%25"},
 		{name: "slash", value: "/", want: "%2F"},
+		{name: "dot", value: ".", want: "%2E"},
+		{name: "double dot", value: "..", want: "%2E%2E"},
+		{name: "dots in name", value: "a..b", want: "a..b"},
 		{name: "unicode", value: "£€", want: "%C2%A3%E2%82%AC"},
 	}
 
