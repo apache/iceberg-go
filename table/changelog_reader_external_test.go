@@ -374,6 +374,20 @@ func TestIncrementalChangelogReadPartitionedRowFilter(t *testing.T) {
 	))
 	require.Equal(t, []int64{2}, changelogIDs(filtered, table.ChangelogOpInsert))
 	require.Equal(t, []int64{2}, changelogIDs(filtered, table.ChangelogOpDelete))
+
+	partZero := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan(
+		table.WithSelectedFields("id"),
+		table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("part"), int64(0))),
+	))
+	require.Equal(t, []int64{1, 2}, changelogIDs(partZero, table.ChangelogOpInsert))
+	require.Equal(t, []int64{2}, changelogIDs(partZero, table.ChangelogOpDelete))
+
+	partOne := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan(
+		table.WithSelectedFields("id"),
+		table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("part"), int64(1))),
+	))
+	require.Equal(t, []int64{3}, changelogIDs(partOne, table.ChangelogOpInsert))
+	require.Empty(t, changelogIDs(partOne, table.ChangelogOpDelete))
 }
 
 func TestIncrementalChangelogReadDeletedRowLineage(t *testing.T) {
