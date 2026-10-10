@@ -2605,6 +2605,9 @@ func WithDeleteCaseInsensitive() DeleteOption {
 //   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
 //   - Files where no rows match the filter are kept unchanged
 //
+// A row matches only if the filter is true for it. Rows where the filter evaluates to NULL, for example
+// `age = 30` on a NULL age, do not match and are kept.
+//
 // The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
@@ -2732,7 +2735,16 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 		return nil, nil, nil, fmt.Errorf("failed to create inclusive metrics evaluator: %w", err)
 	}
 
-	strictEvaluator, err := newStrictMetricsEvaluator(schema, filter, caseSensitive, false)
+	// A file is deleted as a whole only if the filter is true for all of its
+	// rows. The strict evaluator treats predicates as two-valued, so NotEqual
+	// and NotIn would also count rows where the filter is NULL. Evaluate the
+	// negation of the rows the rewrite keeps instead, so that both paths agree.
+	notTrue, err := isNotTrueExpr(filter)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to build negated filter: %w", err)
+	}
+
+	strictEvaluator, err := newStrictMetricsEvaluator(schema, iceberg.NewNot(notTrue), caseSensitive, false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
 	}
@@ -2849,7 +2861,10 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 		return err
 	}
 
-	complementFilter := iceberg.NewNot(filter)
+	complementFilter, err := isNotTrueExpr(filter)
+	if err != nil {
+		return fmt.Errorf("failed to build complement filter: %w", err)
+	}
 
 	// Bind + convert the complement filter once for the whole rewrite. The
 	// per-batch filter function is reused across every record batch from
@@ -2885,6 +2900,91 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 	}
 
 	return nil
+}
+
+// isNotTrueExpr returns an expression that holds exactly for the rows where
+// filter is not true, i.e. where it is false or NULL. Plain NOT(filter) is not
+// enough: under three-valued logic `v = 5` is NULL when v is NULL, and so is
+// NOT(v = 5), so a copy-on-write rewrite would drop rows that never matched.
+//
+// The result contains no NOT. Row-group pruning pushes a NOT down with
+// RewriteNotExpr, which turns NOT(x < 5) into x >= 5, and that is false for
+// NaN. Negating the predicates here keeps NaN rows in both places.
+func isNotTrueExpr(filter iceberg.BooleanExpression) (iceberg.BooleanExpression, error) {
+	res, err := iceberg.VisitExpr(filter, isNotTrueVisitor{})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.notTrue, nil
+}
+
+// truthExprs holds two never-NULL expressions for a sub-expression e:
+// notTrue holds iff e is false or NULL, notFalse holds iff e is true or NULL.
+type truthExprs struct {
+	notTrue, notFalse iceberg.BooleanExpression
+}
+
+type isNotTrueVisitor struct{}
+
+func (isNotTrueVisitor) VisitTrue() truthExprs {
+	return truthExprs{notTrue: iceberg.AlwaysFalse{}, notFalse: iceberg.AlwaysTrue{}}
+}
+
+func (isNotTrueVisitor) VisitFalse() truthExprs {
+	return truthExprs{notTrue: iceberg.AlwaysTrue{}, notFalse: iceberg.AlwaysFalse{}}
+}
+
+func (isNotTrueVisitor) VisitNot(child truthExprs) truthExprs {
+	return truthExprs{notTrue: child.notFalse, notFalse: child.notTrue}
+}
+
+func (isNotTrueVisitor) VisitAnd(left, right truthExprs) truthExprs {
+	return truthExprs{
+		notTrue:  iceberg.NewOr(left.notTrue, right.notTrue),
+		notFalse: iceberg.NewAnd(left.notFalse, right.notFalse),
+	}
+}
+
+func (isNotTrueVisitor) VisitOr(left, right truthExprs) truthExprs {
+	return truthExprs{
+		notTrue:  iceberg.NewAnd(left.notTrue, right.notTrue),
+		notFalse: iceberg.NewOr(left.notFalse, right.notFalse),
+	}
+}
+
+func (isNotTrueVisitor) VisitUnbound(pred iceberg.UnboundPredicate) truthExprs {
+	negated := pred.Negate()
+	switch pred.Op() {
+	case iceberg.OpIsNull, iceberg.OpNotNull, iceberg.OpNotNan:
+		// never evaluates to NULL
+		return truthExprs{notTrue: negated, notFalse: pred}
+	case iceberg.OpIsNan:
+		// is_nan(NULL) is false, so NULL rows survive. The guard also covers
+		// files written before the column existed, where NotNaN on the missing
+		// column translates to AlwaysFalse.
+		return truthExprs{notTrue: iceberg.NewOr(negated, iceberg.IsNull(pred.Term())), notFalse: pred}
+	case iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ:
+		// NaN fails both x < 5 and x >= 5. IsNaN binds to AlwaysFalse for
+		// non-floating-point terms.
+		negated = iceberg.NewOr(negated, iceberg.IsNaN(pred.Term()))
+	}
+
+	// Any other predicate is NULL when its term is NULL. Guard In and NotIn
+	// too: binding turns a set that ends up with one value into Equal or
+	// NotEqual, which are NULL for a NULL term. A scan with a multi-valued
+	// NotIn still matches NULL rows, see
+	// https://github.com/apache/iceberg-go/issues/2132.
+	isNull := iceberg.IsNull(pred.Term())
+
+	return truthExprs{
+		notTrue:  iceberg.NewOr(negated, isNull),
+		notFalse: iceberg.NewOr(pred, isNull),
+	}
+}
+
+func (isNotTrueVisitor) VisitBound(pred iceberg.BoundPredicate) truthExprs {
+	panic(fmt.Errorf("%w: found already bound predicate: %s", iceberg.ErrInvalidArgument, pred))
 }
 
 // rewriteSingleFileArgs bundles the parameters for [Transaction.rewriteSingleFile]
