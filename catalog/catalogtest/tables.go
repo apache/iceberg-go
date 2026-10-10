@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -96,18 +97,33 @@ func testDropMissingTable(t *testing.T, cfg Config) {
 	assert.ErrorIs(t, cat.DropTable(ctx, ident), catalog.ErrNoSuchTable)
 }
 
-func skipWithoutRenameTable(t *testing.T, cfg Config) {
-	t.Helper()
-	if !cfg.SupportsRenameTable {
-		t.Skip("catalog does not support renaming tables")
-	}
+// testRenameTableNotSupported asserts that a catalog without rename support
+// reports it with iceberg.ErrNotImplemented and leaves the source table in
+// place, so an unsupported rename is a verified behavior rather than a skip.
+func testRenameTableNotSupported(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, from := newIdentifiers()
+	to := table.Identifier{namespace[0], "renamed"}
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	_, err := cat.CreateTable(ctx, from, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
+
+	_, err = cat.RenameTable(ctx, from, to)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+
+	exists, err := cat.CheckTableExists(ctx, from)
+	require.NoError(t, err)
+	assert.True(t, exists, "source table should still exist after an unsupported rename")
 }
 
 // testRenameTable asserts that a renamed table is reachable only under its new
-// identifier and keeps its schema.
+// identifier and keeps its identity, metadata and schema.
 func testRenameTable(t *testing.T, cfg Config) {
-	skipWithoutRenameTable(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, from := newIdentifiers()
@@ -121,6 +137,7 @@ func testRenameTable(t *testing.T, cfg Config) {
 	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
 
 	originalUUID := created.Metadata().TableUUID()
+	originalMetadataLocation := created.MetadataLocation()
 
 	_, err = cat.RenameTable(ctx, from, to)
 	require.NoError(t, err)
@@ -134,14 +151,13 @@ func testRenameTable(t *testing.T, cfg Config) {
 	require.NoError(t, err)
 	assert.Equal(t, to, tbl.Identifier())
 	assert.Equal(t, originalUUID, tbl.Metadata().TableUUID(), "rename must preserve table identity")
+	assert.Equal(t, originalMetadataLocation, tbl.MetadataLocation(), "rename should not rewrite table metadata")
 	assert.Equal(t, TableSchema.AsStruct(), tbl.Schema().AsStruct(), "rename should keep the schema")
 }
 
 // testRenameTableToExisting asserts that renaming onto an existing table is
 // rejected and leaves both tables in place.
 func testRenameTableToExisting(t *testing.T, cfg Config) {
-	skipWithoutRenameTable(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, from := newIdentifiers()
@@ -169,8 +185,6 @@ func testRenameTableToExisting(t *testing.T, cfg Config) {
 // testRenameMissingTable asserts that renaming a table that was never created
 // reports that the table does not exist.
 func testRenameMissingTable(t *testing.T, cfg Config) {
-	skipWithoutRenameTable(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, from := newIdentifiers()

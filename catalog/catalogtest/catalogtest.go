@@ -91,8 +91,9 @@ type Config struct {
 	SupportsNamespaceProperties bool
 
 	// SupportsRenameTable reports whether the catalog can rename tables.
-	// Rename tests are skipped when it is false, as they are for the Hadoop
-	// catalog, which does not implement rename.
+	// When it is false, as it is for the Hadoop catalog until #1097 lands,
+	// the rename tests are replaced by one asserting that RenameTable returns
+	// iceberg.ErrNotImplemented and leaves the source table in place.
 	SupportsRenameTable bool
 }
 
@@ -110,9 +111,13 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Run("ListTables", func(t *testing.T) { testListTables(t, cfg) })
 	t.Run("DropTable", func(t *testing.T) { testDropTable(t, cfg) })
 	t.Run("DropMissingTable", func(t *testing.T) { testDropMissingTable(t, cfg) })
-	t.Run("RenameTable", func(t *testing.T) { testRenameTable(t, cfg) })
-	t.Run("RenameTableToExisting", func(t *testing.T) { testRenameTableToExisting(t, cfg) })
-	t.Run("RenameMissingTable", func(t *testing.T) { testRenameMissingTable(t, cfg) })
+	if cfg.SupportsRenameTable {
+		t.Run("RenameTable", func(t *testing.T) { testRenameTable(t, cfg) })
+		t.Run("RenameTableToExisting", func(t *testing.T) { testRenameTableToExisting(t, cfg) })
+		t.Run("RenameMissingTable", func(t *testing.T) { testRenameMissingTable(t, cfg) })
+	} else {
+		t.Run("RenameTableNotSupported", func(t *testing.T) { testRenameTableNotSupported(t, cfg) })
+	}
 
 	t.Run("CreateNamespace", func(t *testing.T) { testCreateNamespace(t, cfg) })
 	t.Run("CreateNamespaceThatAlreadyExists", func(t *testing.T) { testCreateNamespaceThatAlreadyExists(t, cfg) })
