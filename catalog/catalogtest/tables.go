@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	iceberg "github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -101,6 +102,26 @@ func skipWithoutRenameTable(t *testing.T, cfg Config) {
 	if !cfg.SupportsRenameTable {
 		t.Skip("catalog does not support renaming tables")
 	}
+}
+
+// testRenameTableNotSupported asserts that a catalog which does not support
+// rename returns ErrNotImplemented rather than silently succeeding or
+// returning an untyped error.
+func testRenameTableNotSupported(t *testing.T, cfg Config) {
+	if cfg.SupportsRenameTable {
+		t.Skip("catalog supports renaming tables")
+	}
+
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, from := newIdentifiers()
+	to := table.Identifier{namespace[0], "renamed"}
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	_, err := cat.RenameTable(ctx, from, to)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
 
 // testRenameTable asserts that a renamed table is reachable only under its new

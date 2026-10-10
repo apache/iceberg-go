@@ -91,8 +91,9 @@ type Config struct {
 	SupportsNamespaceProperties bool
 
 	// SupportsRenameTable reports whether the catalog can rename tables.
-	// Rename tests are skipped when it is false, as they are for the Hadoop
-	// catalog, which does not implement rename.
+	// When false the suite verifies that RenameTable returns
+	// iceberg.ErrNotImplemented, and the remaining rename subtests are
+	// skipped. See #1097 for Hadoop rename support.
 	SupportsRenameTable bool
 }
 
@@ -113,6 +114,7 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Run("RenameTable", func(t *testing.T) { testRenameTable(t, cfg) })
 	t.Run("RenameTableToExisting", func(t *testing.T) { testRenameTableToExisting(t, cfg) })
 	t.Run("RenameMissingTable", func(t *testing.T) { testRenameMissingTable(t, cfg) })
+	t.Run("RenameTableNotSupported", func(t *testing.T) { testRenameTableNotSupported(t, cfg) })
 
 	t.Run("CreateNamespace", func(t *testing.T) { testCreateNamespace(t, cfg) })
 	t.Run("CreateNamespaceThatAlreadyExists", func(t *testing.T) { testCreateNamespaceThatAlreadyExists(t, cfg) })
