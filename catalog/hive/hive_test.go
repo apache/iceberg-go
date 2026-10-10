@@ -891,6 +891,33 @@ func TestHiveRenameTableRejectsChangedMetadataAfterLock(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHiveRenameTableToExistingTable(t *testing.T) {
+	mockClient := &mockHiveClient{}
+	destination := *testIcebergHiveTable1
+	destination.TableName = "renamed"
+	destination.DbName = "target_database"
+
+	mockClient.On("GetDatabase", mock.Anything, "target_database").
+		Return(&hive_metastore.Database{Name: "target_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(testIcebergHiveTable1, nil).Twice()
+	mockClient.On("Lock", mock.Anything, mock.Anything).
+		Return(&hive_metastore.LockResponse{Lockid: 2, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "target_database", "renamed").
+		Return(&destination, nil).Once()
+	mockClient.On("Unlock", mock.Anything, int64(2)).Return(nil).Once()
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RenameTable(
+		context.Background(),
+		TableIdentifier("test_database", "test_table"),
+		TableIdentifier("target_database", "renamed"),
+	)
+	require.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+	mockClient.AssertNotCalled(t, "AlterTable", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	mockClient.AssertExpectations(t)
+}
+
 func TestHivePurgeTable(t *testing.T) {
 	assert := require.New(t)
 	ctx := context.Background()

@@ -23,7 +23,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -188,7 +187,7 @@ func (s *HadoopIntegrationSuite) TestDropTableNamespacePreserved() {
 func (s *HadoopIntegrationSuite) TestRenameTableUnsupported() {
 	_, err := s.cat.RenameTable(s.ctx, []string{"ns", "old"}, []string{"ns", "new"})
 	s.Require().Error(err)
-	s.True(strings.Contains(err.Error(), "not supported"))
+	s.ErrorIs(err, iceberg.ErrNotImplemented)
 }
 
 // TestNamespaceRoundTrip creates a namespace in Go, creates a table in

@@ -928,7 +928,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
-	return nil, errors.New("hadoop catalog: rename table is not supported")
+	return nil, fmt.Errorf("%w: hadoop catalog rename table is not supported", iceberg.ErrNotImplemented)
 }
 
 func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {
