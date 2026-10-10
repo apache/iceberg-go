@@ -243,6 +243,14 @@ type dataFileWriter interface {
 // position delete files keep full file_path and pos bounds whatever the table
 // metrics settings are, so readers and conflict checks can resolve the data
 // file a delete file targets from equal file_path bounds.
+//
+// The default mode is none on purpose, as in Java: any column besides
+// file_path and pos, such as a future row column, gets no value counts, null
+// counts, column sizes or bounds. The table's write.metadata.metrics.*
+// settings do not apply to position delete files.
+//
+// The map is shared and handed to computeStatsPlan as is; treat it as
+// read-only.
 var positionDeleteMetricsProps = iceberg.Properties{
 	DefaultWriteMetricsModeKey:                 string(tblutils.MetricModeNone),
 	MetricsModeColumnConfPrefix + ".file_path": string(tblutils.MetricModeFull),
