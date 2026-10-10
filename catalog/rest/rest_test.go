@@ -1944,6 +1944,67 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
 	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
 }
 
+func (r *RestCatalogSuite) TestRenameTable409() {
+	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table already exists: fokko.destination",
+				"type":    "AlreadyExistsException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("fokko", "destination"))
+	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+// renameTable404 has the rename endpoint answer 404 with errType and returns
+// the error RenameTable reports.
+func (r *RestCatalogSuite) renameTable404(errType string) error {
+	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "not found",
+				"type":    errType,
+				"code":    404,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("missing", "destination"))
+
+	return err
+}
+
+func (r *RestCatalogSuite) TestRenameTable404MissingTable() {
+	err := r.renameTable404("NoSuchTableException")
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (r *RestCatalogSuite) TestRenameTable404MissingNamespace() {
+	err := r.renameTable404("NoSuchNamespaceException")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrNoSuchTable)
+}
+
 func (r *RestCatalogSuite) TestRenameTable204() {
 	// Mock the rename table endpoint
 	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
