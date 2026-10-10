@@ -196,3 +196,59 @@ func testRenameMissingTable(t *testing.T, cfg Config) {
 	_, err := cat.RenameTable(ctx, from, to)
 	assert.ErrorIs(t, err, catalog.ErrNoSuchTable)
 }
+
+// testRenameTableAcrossNamespaces asserts that a table can move to another
+// namespace, keeping its identity, and is listed only in the destination.
+func testRenameTableAcrossNamespaces(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	fromNamespace, from := newIdentifiers()
+	toNamespace, _ := newIdentifiers()
+	to := table.Identifier{toNamespace[0], "renamed"}
+
+	for _, ns := range []table.Identifier{fromNamespace, toNamespace} {
+		require.NoError(t, cat.CreateNamespace(ctx, ns, nil))
+		t.Cleanup(func() { _ = cat.DropNamespace(ctx, ns) })
+	}
+
+	created, err := cat.CreateTable(ctx, from, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
+
+	_, err = cat.RenameTable(ctx, from, to)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, to) })
+
+	tbl, err := cat.LoadTable(ctx, to)
+	require.NoError(t, err)
+	assert.Equal(t, to, tbl.Identifier())
+	assert.Equal(t, created.Metadata().TableUUID(), tbl.Metadata().TableUUID(), "rename must preserve table identity")
+
+	assert.Empty(t, listTables(t, cat, fromNamespace), "source namespace should be empty after rename")
+	assert.Equal(t, []table.Identifier{to}, listTables(t, cat, toNamespace))
+}
+
+// testRenameTableToMissingNamespace asserts that renaming into a namespace
+// that does not exist reports the missing namespace and leaves the source
+// table in place.
+func testRenameTableToMissingNamespace(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, from := newIdentifiers()
+	missingNamespace, _ := newIdentifiers()
+	to := table.Identifier{missingNamespace[0], "renamed"}
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	_, err := cat.CreateTable(ctx, from, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
+
+	_, err = cat.RenameTable(ctx, from, to)
+	assert.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
+
+	exists, err := cat.CheckTableExists(ctx, from)
+	require.NoError(t, err)
+	assert.True(t, exists, "source table should still exist after a rejected rename")
+}

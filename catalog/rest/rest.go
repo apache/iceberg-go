@@ -1982,6 +1982,16 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: catalog.ErrTableAlreadyExists}, allowNoContent())
 	if err != nil {
+		// The spec's rename 404 covers both a missing source table and a
+		// missing destination namespace; discriminate on the error type so a
+		// missing namespace is not reported as a missing table.
+		var errRsp errorResponse
+		if errors.As(err, &errRsp) && errRsp.Type == errTypeNoSuchNamespace {
+			errRsp.wrapping = catalog.ErrNoSuchNamespace
+
+			return nil, errRsp
+		}
+
 		return nil, err
 	}
 
