@@ -265,3 +265,25 @@ func TestWriteFileRejectsPosDeleteSortOrderClaim(t *testing.T) {
 	assert.Nil(t, df)
 	assert.Contains(t, err.Error(), "position delete")
 }
+
+func TestMetricsPropsFor(t *testing.T) {
+	tableProps := iceberg.Properties{
+		DefaultWriteMetricsModeKey:                 "counts",
+		MetricsModeColumnConfPrefix + ".file_path": "none",
+	}
+
+	tests := []struct {
+		content iceberg.ManifestEntryContent
+		want    iceberg.Properties
+	}{
+		{iceberg.EntryContentData, tableProps},
+		{iceberg.EntryContentEqDeletes, tableProps},
+		{iceberg.EntryContentPosDeletes, positionDeleteMetricsProps},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.content.String(), func(t *testing.T) {
+			assert.Equal(t, tt.want, metricsPropsFor(tt.content, tableProps))
+		})
+	}
+}
