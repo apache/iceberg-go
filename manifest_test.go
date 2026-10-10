@@ -2447,9 +2447,6 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	}).ValueCounts(map[int]int64{
 		1: 1,
 		2: 2,
-	}).DistinctValueCounts(map[int]int64{
-		1: 1,
-		2: 2,
 	}).NullValueCounts(map[int]int64{
 		1: 0,
 		2: 0,
@@ -2494,10 +2491,6 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		1: 0,
 		2: 0,
 	}, data.NullValueCounts())
-	m.Assert().Equal(map[int]int64{
-		1: 1,
-		2: 2,
-	}, data.DistinctValueCounts())
 	m.Assert().Equal(map[int]int64{
 		1: 0,
 		2: 0,
@@ -3895,7 +3888,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	valueCounts := map[int]int64{1: 2}
 	nullCounts := map[int]int64{1: 1}
 	nanCounts := map[int]int64{1: 0}
-	distinctCounts := map[int]int64{1: 2}
 	lower := map[int][]byte{1: {0x03, 0x04}}
 	upper := map[int][]byte{1: {0x05, 0x06}}
 	key := []byte{0x07, 0x08}
@@ -3907,7 +3899,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 		ValueCounts(valueCounts).
 		NullValueCounts(nullCounts).
 		NaNValueCounts(nanCounts).
-		DistinctValueCounts(distinctCounts).
 		LowerBoundValues(lower).
 		UpperBoundValues(upper).
 		KeyMetadata(key).
@@ -3922,7 +3913,7 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 
 	partition[0], lower[1][0], upper[1][0], key[0], splits[0], equalityIDs[0] = 0xff, 0xff, 0xff, 0xff, 99, 99
 	partitionData[1000] = []byte{0xff}
-	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
+	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1] = 99, 99, 99, 99
 
 	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
 	dataFile.Partition()[1000].([]byte)[0] = 0xff
@@ -3930,7 +3921,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	dataFile.ValueCounts()[1] = 99
 	dataFile.NullValueCounts()[1] = 99
 	dataFile.NaNValueCounts()[1] = 99
-	dataFile.DistinctValueCounts()[1] = 99
 	dataFile.LowerBoundValues()[1][0] = 0xff
 	dataFile.UpperBoundValues()[1][0] = 0xff
 	dataFile.KeyMetadata()[0] = 0xff
@@ -3947,7 +3937,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	m.Equal(map[int]int64{1: 2}, dataFile.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, dataFile.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, dataFile.NaNValueCounts())
-	m.Equal(map[int]int64{1: 2}, dataFile.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, dataFile.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, dataFile.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, dataFile.KeyMetadata())
@@ -4006,7 +3995,6 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
-	m.Empty(decoded.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
@@ -4048,7 +4036,6 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
-	m.Empty(decoded.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
@@ -4399,7 +4386,11 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 		1,
 	)
 	m.Require().NoError(err)
-	dataFileBuilder.DistinctValueCounts(map[int]int64{1: 42})
+	// There is no public setter for distinct_counts any more, but a DataFile
+	// decoded from a legacy manifest can still carry it, so set the Avro
+	// field directly.
+	df := dataFileBuilder.Build()
+	df.(*dataFile).DistinctCounts = mapToAvroColMap(map[int]int64{1: 42})
 
 	var buf bytes.Buffer
 	file, err := WriteManifest(
@@ -4414,7 +4405,7 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 			EntryStatusADDED,
 			&snapshotID,
 			&seqNum, &seqNum,
-			dataFileBuilder.Build(),
+			df,
 		)},
 	)
 	m.Require().NoError(err)
@@ -4422,7 +4413,7 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 	entries, err := ReadManifest(file, &buf, false)
 	m.Require().NoError(err)
 	m.Require().Len(entries, 1)
-	m.Empty(entries[0].DataFile().DistinctValueCounts(),
+	m.Empty(avroColMapToMap(entries[0].DataFile().(*dataFile).DistinctCounts),
 		"manifest writer must drop distinct_counts on the wire for every format version; "+
 			"see internal/avro_schemas.go data_file_v"+strconv.Itoa(version))
 }
@@ -4490,7 +4481,8 @@ func (m *ManifestTestSuite) TestReadManifestLegacyDistinctCounts() {
 	entries, err := ReadManifest(file, &buf, false)
 	m.Require().NoError(err)
 	m.Require().Len(entries, 1)
-	m.Equal(map[int]int64{1: 99, 2: 88}, entries[0].DataFile().DistinctValueCounts(),
+	m.Equal(map[int]int64{1: 99, 2: 88},
+		avroColMapToMap(entries[0].DataFile().(*dataFile).DistinctCounts),
 		"ReadManifest must decode distinct_counts (field 111) from legacy "+
 			"manifests where the file's writer schema still carries the field")
 }
