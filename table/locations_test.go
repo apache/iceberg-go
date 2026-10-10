@@ -18,15 +18,86 @@
 package table_test
 
 import (
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLocationProviderLocalPaths(t *testing.T) {
+	for _, objectStore := range []string{"false", "true"} {
+		for _, partitionPaths := range []string{"false", "true"} {
+			for _, name := range []string{"my table", "literal%20table", "100% complete", "table#fragment", "table?query"} {
+				t.Run(objectStore+"/"+partitionPaths+"/"+name, func(t *testing.T) {
+					if strings.Contains(name, "?") && os.PathSeparator == '\\' {
+						t.Skip("question marks are not valid in Windows filenames")
+					}
+					root := filepath.Join(t.TempDir(), name)
+					for _, custom := range []bool{false, true} {
+						props := iceberg.Properties{
+							table.ObjectStoreEnabledKey:               objectStore,
+							table.WriteObjectStorePartitionedPathsKey: partitionPaths,
+						}
+						dataDir, metadataDir := filepath.Join(root, "data"), filepath.Join(root, "metadata")
+						if custom {
+							dataDir, metadataDir = filepath.Join(root, "custom data"), filepath.Join(root, "custom metadata")
+							props[table.WriteDataPathKey] = dataDir
+							props[table.WriteMetadataPathKey] = metadataDir
+						}
+						provider, err := table.LoadLocationProvider(root, props)
+						require.NoError(t, err)
+						metadataFile, err := provider.NewTableMetadataFileLocation(1)
+						require.NoError(t, err)
+						for _, file := range []struct{ location, dir string }{
+							{provider.NewDataLocation("data.parquet"), dataDir},
+							{provider.NewDataLocation("partition=value/data.parquet"), dataDir},
+							{provider.NewMetadataLocation("manifest.avro"), metadataDir},
+							{metadataFile, metadataDir},
+						} {
+							require.True(t, strings.HasPrefix(file.location, file.dir+string(os.PathSeparator)), "%q is outside %q", file.location, file.dir)
+							writer, err := (io.LocalFS{}).Create(file.location)
+							require.NoError(t, err)
+							require.NoError(t, writer.Close())
+							_, err = os.Stat(file.location)
+							require.NoError(t, err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLocationProviderEscapedURIs(t *testing.T) {
+	for _, scheme := range []string{"file", "s3", "gs", "az"} {
+		t.Run(scheme, func(t *testing.T) {
+			location := (&url.URL{Scheme: scheme, Host: "bucket", Path: "/my table/literal%20#?"}).String()
+			provider, err := table.LoadLocationProvider(location, nil)
+			require.NoError(t, err)
+			assert.Equal(t, location+"/data/data.parquet", provider.NewDataLocation("data.parquet"))
+			assert.Equal(t, location+"/metadata/manifest.avro", provider.NewMetadataLocation("manifest.avro"))
+		})
+	}
+}
+
+func TestLocationProviderRelativePaths(t *testing.T) {
+	for _, location := range []string{"my table", "100% complete", "literal%20table", "table#fragment", "table?query", "dir/table:part%20"} {
+		t.Run(location, func(t *testing.T) {
+			provider, err := table.LoadLocationProvider(location, nil)
+			require.NoError(t, err)
+			assert.Equal(t, filepath.Join(location, "data", "data.parquet"), provider.NewDataLocation("data.parquet"))
+			assert.Equal(t, filepath.Join(location, "metadata", "manifest.avro"), provider.NewMetadataLocation("manifest.avro"))
+		})
+	}
+}
 
 func TestLocationProviderMetadataDefaultLocation(t *testing.T) {
 	provider, err := table.LoadLocationProvider("table_location", nil)
