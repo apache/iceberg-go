@@ -116,9 +116,11 @@ func testRenameTable(t *testing.T, cfg Config) {
 	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
 	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
 
-	_, err := cat.CreateTable(ctx, from, Schema)
+	created, err := cat.CreateTable(ctx, from, Schema)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
+
+	originalUUID := created.Metadata().TableUUID()
 
 	_, err = cat.RenameTable(ctx, from, to)
 	require.NoError(t, err)
@@ -131,6 +133,7 @@ func testRenameTable(t *testing.T, cfg Config) {
 	tbl, err := cat.LoadTable(ctx, to)
 	require.NoError(t, err)
 	assert.Equal(t, to, tbl.Identifier())
+	assert.Equal(t, originalUUID, tbl.Metadata().TableUUID(), "rename must preserve table identity")
 	assert.Equal(t, TableSchema.AsStruct(), tbl.Schema().AsStruct(), "rename should keep the schema")
 }
 
