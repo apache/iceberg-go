@@ -18,7 +18,6 @@
 package table
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -29,11 +28,11 @@ import (
 	"github.com/apache/iceberg-go/metrics"
 )
 
-// IncrementalChangelogScan plans data-file changes between snapshots. It
-// emits insert and delete tasks for data-manifest entries and skips replace
-// snapshots. PlanFiles returns an error if any in-range snapshot's manifest
-// list references a delete manifest, including ones carried forward from
-// earlier snapshots.
+// IncrementalChangelogScan plans data-file and delete-file changes between
+// snapshots. It emits insert tasks for added data files, delete tasks for
+// removed data files, and row-level delete tasks for existing data files
+// affected by delete files added in the range. Replace snapshots are skipped.
+// Remote planning is not supported.
 type IncrementalChangelogScan struct {
 	scan           *Scan
 	fromSnapshotID *int64
@@ -43,15 +42,18 @@ type IncrementalChangelogScan struct {
 
 type plannedChangelogTask struct {
 	task ChangelogScanTask
-	file FileScanTask
 }
 
 // NewIncrementalChangelogScan creates an incremental changelog planner.
 // Projection and row limits are not applied to returned tasks. Auto planning
-// falls back to local planning, while remote planning is not supported. Use
-// ChangelogScanTask.ScanTask with Scan.ReadTasks to read the returned files.
-// Row filters are attached to each task as residuals without partition-specific
-// simplification, matching the existing incremental append scan behavior.
+// falls back to local planning. Remote planning is not supported.
+//
+// ScanTask carries the data file and the deletes applied before the change is
+// interpreted: deletes committed with an added data file, or deletes that
+// already applied to a removed data file or a row-level delete. AddedDeletes
+// on a row-level delete are the deletes that produce the change and are not
+// part of ScanTask. Row filters are attached to each task as residuals without
+// partition-specific simplification, matching incremental append scans.
 func (t Table) NewIncrementalChangelogScan(opts ...ScanOption) *IncrementalChangelogScan {
 	return &IncrementalChangelogScan{scan: t.Scan(opts...)}
 }
@@ -86,14 +88,16 @@ func (s *IncrementalChangelogScan) ToSnapshot(snapshotID int64) *IncrementalChan
 	return &out
 }
 
-// PlanFiles returns one task for each added or deleted data-file entry. A
-// cancelled context returns its cancellation error before planning starts.
-// Tasks are ordered by change ordinal, then by DELETE before INSERT within an
-// ordinal, and finally by data-file path. When an ending snapshot is
-// available, it emits a ScanReport through the configured reporter on
-// successful planning. Changelog reports count every returned task in
-// ResultDataFiles and TotalFileSizeInBytes, so a file inserted and deleted
-// within the range is counted twice.
+// PlanFiles returns one task for each added or deleted data file, plus one
+// row-level delete task for each existing data file affected by delete files
+// added in a snapshot. A cancelled context returns its cancellation error
+// before planning starts. Tasks are ordered by change ordinal, then by DELETE
+// before INSERT within an ordinal, and finally by data-file path. When an
+// ending snapshot is available, it emits a ScanReport through the configured
+// reporter on successful planning. Changelog reports count every returned task
+// in ResultDataFiles and TotalFileSizeInBytes, so a file inserted and deleted
+// within the range is counted twice. Delete files are counted once per task
+// they apply to.
 func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogScanTask, error) {
 	if s == nil || s.scan == nil {
 		return nil, fmt.Errorf("%w: incremental changelog scan is not initialized", ErrInvalidOperation)
@@ -147,8 +151,8 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		fileTasks := make([]FileScanTask, len(plannedTasks))
 		for i, planned := range plannedTasks {
 			tasks[i] = planned.task
-			fileTasks[i] = planned.file
-			acc.totalFileSize += planned.file.File.FileSizeBytes()
+			fileTasks[i] = changelogMetricsTask(planned.task)
+			acc.totalFileSize += fileTasks[i].File.FileSizeBytes()
 		}
 		acc.applyResultDeleteMetrics(fileTasks)
 		planningDuration := time.Since(start)
@@ -190,6 +194,8 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 	}
 
 	manifestsByPath := make(map[string]iceberg.ManifestFile)
+	manifestsBySnapshot := make(map[int64][]iceberg.ManifestFile, len(snapshots))
+	deleteManifestsBySnapshot := make(map[int64][]iceberg.ManifestFile)
 	for _, snapshot := range snapshots {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -198,18 +204,25 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		if err != nil {
 			return nil, err
 		}
+		manifestsBySnapshot[snapshot.SnapshotID] = manifests
 		for _, manifest := range manifests {
-			if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
-				return nil, fmt.Errorf("%w: incremental changelog scan range references a delete manifest originating in snapshot %d",
-					ErrInvalidOperation, manifest.SnapshotID())
-			}
-			if manifest.ManifestContent() != iceberg.ManifestContentData {
+			switch manifest.ManifestContent() {
+			case iceberg.ManifestContentDeletes:
+				// Only manifests written by this snapshot are new delete-file
+				// changes. Carried-forward delete manifests stay available as
+				// deletes that already applied.
+				if manifest.SnapshotID() == snapshot.SnapshotID {
+					deleteManifestsBySnapshot[snapshot.SnapshotID] = append(
+						deleteManifestsBySnapshot[snapshot.SnapshotID], manifest)
+				}
+			case iceberg.ManifestContentData:
+				if _, ok := changelogSnapshotIDs[manifest.SnapshotID()]; !ok {
+					continue
+				}
+				manifestsByPath[manifest.FilePath()] = manifest
+			default:
 				continue
 			}
-			if _, ok := changelogSnapshotIDs[manifest.SnapshotID()]; !ok {
-				continue
-			}
-			manifestsByPath[manifest.FilePath()] = manifest
 		}
 	}
 
@@ -236,45 +249,36 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 	if err != nil {
 		return nil, err
 	}
-	if len(manifestList) == 0 {
-		return finish(nil), nil
+	var dataEntries []iceberg.ManifestEntry
+	if len(manifestList) > 0 {
+		entries, err := planningScan.collectManifestEntriesWithSchemaOptions(
+			ctx, manifestList, schema,
+			partitionFilters,
+			/* discardDeleted= */ false,
+			/* discardExisting= */ true,
+		)
+		if err != nil {
+			return nil, err
+		}
+		dataEntries = entries.dataEntries
 	}
-	entries, err := planningScan.collectManifestEntriesWithSchemaOptions(
-		ctx, manifestList, schema,
-		partitionFilters,
-		/* discardDeleted= */ false,
-		/* discardExisting= */ true,
-	)
+
+	plannedTasks, err := s.planChangelogTasks(ctx, changelogTaskPlan{
+		scan:                &planningScan,
+		fs:                  fs,
+		snapshots:           snapshots,
+		manifestsBySnapshot: manifestsBySnapshot,
+		deleteManifests:     deleteManifestsBySnapshot,
+		dataEntries:         dataEntries,
+		snapshotOrdinals:    snapshotOrdinals,
+		schema:              schema,
+		partitionFilters:    partitionFilters,
+		residual:            residual,
+		metrics:             &acc,
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	plannedTasks := make([]plannedChangelogTask, 0, len(entries.dataEntries))
-	for _, entry := range entries.dataEntries {
-		ordinal, ok := snapshotOrdinals[entry.SnapshotID()]
-		if !ok {
-			continue
-		}
-
-		task, err := newChangelogScanTask(entry, ordinal, residual)
-		if err != nil {
-			return nil, fmt.Errorf("incremental changelog scan snapshot %d: %w", entry.SnapshotID(), err)
-		}
-		plannedTasks = append(plannedTasks, plannedChangelogTask{
-			task: task,
-			file: task.ScanTask(),
-		})
-	}
-	slices.SortFunc(plannedTasks, func(left, right plannedChangelogTask) int {
-		if ordinal := cmp.Compare(left.task.ChangeOrdinal(), right.task.ChangeOrdinal()); ordinal != 0 {
-			return ordinal
-		}
-		if operation := cmp.Compare(changelogOperationOrder(left.task.Operation()), changelogOperationOrder(right.task.Operation())); operation != 0 {
-			return operation
-		}
-
-		return cmp.Compare(left.file.File.FilePath(), right.file.File.FilePath())
-	})
 
 	return finish(plannedTasks), nil
 }
@@ -313,42 +317,42 @@ func changelogOperation(status iceberg.ManifestEntryStatus) (ChangelogOperation,
 	}
 }
 
-func newChangelogScanTask(entry iceberg.ManifestEntry, ordinal int, residual iceberg.BooleanExpression) (ChangelogScanTask, error) {
+func newChangelogScanTask(entry iceberg.ManifestEntry, ordinal int, residual iceberg.BooleanExpression, deletes []iceberg.DataFile) (ChangelogScanTask, error) {
 	operation, err := changelogOperation(entry.Status())
 	if err != nil {
 		return nil, err
 	}
 
-	file := entry.DataFile()
-	configureFileScanTask := func(task *FileScanTask) {
-		task.Start = 0
-		task.Length = file.FileSizeBytes()
-		task.Residual = residual
-		task.FirstRowID = file.FirstRowID()
-		if sequenceNumber := entry.SequenceNum(); sequenceNumber >= 0 {
-			task.DataSequenceNumber = &sequenceNumber
-		}
-	}
-
 	switch operation {
 	case ChangelogOpInsert:
-		task, err := NewAddedRowsScanTask(file, nil, ordinal, entry.SnapshotID())
+		task, err := NewAddedRowsScanTask(entry.DataFile(), deletes, ordinal, entry.SnapshotID())
 		if err != nil {
 			return nil, err
 		}
-		configureFileScanTask(&task.FileScanTask)
+		configureChangelogFileTask(&task.FileScanTask, entry, residual)
 
 		return task, nil
 	case ChangelogOpDelete:
-		task, err := NewDeletedDataFileScanTask(file, nil, ordinal, entry.SnapshotID())
+		task, err := NewDeletedDataFileScanTask(entry.DataFile(), deletes, ordinal, entry.SnapshotID())
 		if err != nil {
 			return nil, err
 		}
-		configureFileScanTask(&task.FileScanTask)
+		configureChangelogFileTask(&task.FileScanTask, entry, residual)
 
 		return task, nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported changelog operation %q", ErrInvalidOperation, operation)
+	}
+}
+
+func configureChangelogFileTask(task *FileScanTask, entry iceberg.ManifestEntry, residual iceberg.BooleanExpression) {
+	file := entry.DataFile()
+	task.Start = 0
+	task.Length = file.FileSizeBytes()
+	task.Residual = residual
+	task.FirstRowID = file.FirstRowID()
+	if sequenceNumber := entry.SequenceNum(); sequenceNumber >= 0 {
+		task.DataSequenceNumber = &sequenceNumber
 	}
 }
 
