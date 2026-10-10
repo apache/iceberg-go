@@ -31,13 +31,11 @@ func TestChangelogReadRejectsNilScan(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidOperation)
 }
 
-func TestChangelogReadRejectsDeletedRowTasks(t *testing.T) {
+func TestChangelogReadAcceptsDeletedRowTasks(t *testing.T) {
 	data := changelogTestDataFile(t, "data/f2.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
 	added := changelogTestDataFile(t, "deletes/d2.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
 	task, err := NewDeletedRowsScanTask(data, []iceberg.DataFile{added}, nil, 1, 44)
 	require.NoError(t, err)
 
-	scan := &IncrementalChangelogScan{scan: &Scan{limit: ScanNoLimit}}
-	_, _, err = scan.Read(context.Background(), []ChangelogScanTask{task})
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	require.NoError(t, readableChangelogTask(task))
 }

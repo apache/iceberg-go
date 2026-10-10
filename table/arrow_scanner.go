@@ -1255,6 +1255,13 @@ type arrowScan struct {
 	// arrowBatchSize, when positive, overrides the table's
 	// read.parquet.batch-size property for this scan's reads.
 	arrowBatchSize int
+
+	// addedDeletes, when set, keeps rows matched by these delete files after
+	// the task's own deletes have been applied. Nil for every normal scan.
+	addedDeletes   *FileScanTask
+	addedPosLoader *lazyPositionDeleteLoader
+	addedDVLoader  *lazyDeletionVectorLoader
+	addedEqLoader  *lazyEqualityDeleteLoader
 }
 
 // preparedFileRead contains the physical schema projection shared by all
@@ -2200,8 +2207,17 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	// row-dropping position step in the pipeline so cursors never run over a
 	// sequence an earlier step already shortened.
 	applyPosDeletes := len(positionalDeletes) > 0 && !hasDV
+	addedPos, addedBitmap, addedEq, err := as.loadAddedDeletes(ctx, task.Value)
+	if err != nil {
+		return err
+	}
+	addedHasDV := addedBitmap != nil && !addedBitmap.IsEmpty()
+	// An added deletion vector supersedes added position deletes, matching the
+	// rule used for the deletes already on the task.
+	addedHasPos := len(addedPos) > 0 && !addedHasDV
+	stampPos := addedHasPos || addedHasDV
 	var posSource *rowPositionSource
-	if synthesizeRowID || applyPosDeletes || hasDV {
+	if synthesizeRowID || applyPosDeletes || hasDV || stampPos {
 		posSource = &rowPositionSource{}
 	}
 
@@ -2220,6 +2236,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 
 			return synthesizeRowLineageColumns(ctx, cursor, taskVal, r, synthesizeRowID, synthesizeSeq)
 		})
+	}
+
+	if stampPos {
+		pipeline = append(pipeline, stampChangelogFilePos(ctx, posSource.cursor()))
 	}
 
 	if applyPosDeletes {
@@ -2242,6 +2262,20 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		}
 
 		pipeline = append(pipeline, eqFn)
+	}
+
+	if as.addedDeletes != nil {
+		var addedPosSet set[int64]
+		if addedHasPos {
+			addedPosSet, err = collectPosDeletePositions(addedPos)
+			if err != nil {
+				return err
+			}
+		}
+		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPosSet, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos))
+		if stampPos {
+			pipeline = append(pipeline, dropChangelogFilePos)
+		}
 	}
 
 	if filterPlans != nil {
@@ -2570,8 +2604,15 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 		}()
 
 		var cleanup func()
-		if positionDeleteLoader != nil {
-			cleanup = positionDeleteLoader.release
+		if positionDeleteLoader != nil || as.addedPosLoader != nil {
+			cleanup = func() {
+				if positionDeleteLoader != nil {
+					positionDeleteLoader.release()
+				}
+				if as.addedPosLoader != nil {
+					as.addedPosLoader.release()
+				}
+			}
 		}
 		createIteratorWithCleanup(scanCtx, uint(numWorkers), records, nil,
 			cancel, as.rowLimit, cleanup)(yield)
@@ -2651,6 +2692,12 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 
 	positionDeleteLoader := newLazyPositionDeleteLoader(as.fs, tasks)
+
+	if as.addedDeletes != nil {
+		if err := as.prepareAddedDeleteLoaders(invariants); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks,
 		positionDeleteLoader, dvLoader, equalityDeleteLoader, invariants), nil

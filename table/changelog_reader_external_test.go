@@ -19,13 +19,18 @@ package table_test
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
@@ -183,6 +188,233 @@ func schemaFieldNames(schema *arrow.Schema) []string {
 	}
 
 	return names
+}
+
+func TestIncrementalChangelogReadPositionDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendChangelogRows(t, ctx, newChangelogMORTable(t, 2))
+	tbl = deleteChangelogID(t, ctx, tbl, 2)
+	firstDelete := tbl.CurrentSnapshot().SnapshotID
+	tbl = deleteChangelogID(t, ctx, tbl, 3)
+
+	got := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan())
+	require.Equal(t, []int64{1, 2, 3}, changelogIDs(got, table.ChangelogOpInsert))
+	require.Equal(t, []int64{2, 3}, changelogIDs(got, table.ChangelogOpDelete))
+
+	later := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan().FromSnapshotExclusive(firstDelete))
+	require.Equal(t, []int64{3}, changelogIDs(later, table.ChangelogOpDelete))
+	require.Empty(t, changelogIDs(later, table.ChangelogOpInsert))
+
+	filtered := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan(
+		table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int64(2))),
+	))
+	require.Equal(t, []int64{2}, changelogIDs(filtered, table.ChangelogOpInsert))
+	require.Equal(t, []int64{2}, changelogIDs(filtered, table.ChangelogOpDelete))
+}
+
+func TestIncrementalChangelogReadDeletionVectors(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendChangelogRows(t, ctx, newChangelogMORTable(t, 3))
+	tbl = deleteChangelogID(t, ctx, tbl, 2)
+
+	got := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan())
+	require.Equal(t, []int64{1, 2, 3}, changelogIDs(got, table.ChangelogOpInsert))
+	require.Equal(t, []int64{2}, changelogIDs(got, table.ChangelogOpDelete))
+	require.Equal(t, "b", changelogData(got, table.ChangelogOpDelete)[0])
+}
+
+func TestIncrementalChangelogReadEqualityDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := newChangelogMORTable(t, 2)
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/data-001.parquet"
+	writeParquetFile(t, dataPath, arrowSchema, `[
+		{"id": 1, "data": "a"},
+		{"id": 2, "data": "b"},
+		{"id": 3, "data": "c"}
+	]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(ctx, []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	eqPath := tbl.Location() + "/data/eq-del.parquet"
+	eqSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, eqPath, eqSchema, `[{"id": 2}]`)
+
+	eqBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		eqPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	eqBuilder.EqualityFieldIDs([]int{1})
+
+	tx = tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(eqBuilder.Build())
+	require.NoError(t, rd.Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	got := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan())
+	require.Equal(t, []int64{1, 2, 3}, changelogIDs(got, table.ChangelogOpInsert))
+	require.Equal(t, []int64{2}, changelogIDs(got, table.ChangelogOpDelete))
+}
+
+func TestIncrementalChangelogReadSameSnapshotPositionDelete(t *testing.T) {
+	ctx := t.Context()
+	tbl := newChangelogMORTable(t, 2)
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, true, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/data-001.parquet"
+	writeParquetFile(t, dataPath, arrowSchema, `[
+		{"id": 1, "data": "a"},
+		{"id": 2, "data": "b"},
+		{"id": 3, "data": "c"}
+	]`)
+	posPath := tbl.Location() + "/data/pos-del.parquet"
+	writeParquetFile(t, posPath, table.PositionalDeleteArrowSchema, fmt.Sprintf(`[{"file_path": %q, "pos": 1}]`, dataPath))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddRows(changelogDataFile(t, dataPath, 3)).AddDeletes(changelogPosDeleteFile(t, posPath)).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	got := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan())
+	require.Equal(t, []int64{1, 3}, changelogIDs(got, table.ChangelogOpInsert))
+	require.Empty(t, changelogIDs(got, table.ChangelogOpDelete))
+}
+
+func TestIncrementalChangelogReadSchemaEvolution(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendChangelogRows(t, ctx, newChangelogMORTable(t, 3))
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, false).
+		AddColumn([]string{"extra"}, iceberg.PrimitiveTypes.String, "", false, iceberg.StringLiteral("x")).
+		Commit())
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	tbl = deleteChangelogID(t, ctx, tbl, 2)
+
+	schema, records, err := tbl.NewIncrementalChangelogScan(table.WithSelectedFields("id", "extra")).ToArrowRecords(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"id", "extra", table.ChangelogChangeTypeColumn, table.ChangelogChangeOrdinalColumn, table.ChangelogCommitSnapshotIDColumn}, schemaFieldNames(schema))
+
+	got := collectChangelogRows(t, records)
+	require.Equal(t, []int64{2}, changelogIDs(got, table.ChangelogOpDelete))
+	require.Equal(t, []string{"x"}, changelogData(got, table.ChangelogOpDelete))
+}
+
+func newChangelogMORTable(t *testing.T, version int) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{
+			table.PropertyFormatVersion: strconv.Itoa(version),
+			table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+		})
+	require.NoError(t, err)
+
+	metaLoc := location + "/metadata/v1.metadata.json"
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
+
+	return table.New(table.Identifier{"db", "changelog_read"}, meta, metaLoc, fsF, cat)
+}
+
+func appendChangelogRows(t *testing.T, ctx context.Context, tbl *table.Table) *table.Table {
+	t.Helper()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}, {"id": 3, "data": "c"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	return tbl
+}
+
+func changelogDataFile(t *testing.T, path string, records int64) iceberg.DataFile {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	b, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, nil, nil, nil, records, info.Size())
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func changelogPosDeleteFile(t *testing.T, path string) iceberg.DataFile {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	b, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		path, iceberg.ParquetFile, nil, nil, nil, 1, info.Size())
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func deleteChangelogID(t *testing.T, ctx context.Context, tbl *table.Table, id int64) *table.Table {
+	t.Helper()
+
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), id), nil)
+	require.NoError(t, err)
+
+	return tbl
+}
+
+func readChangelog(t *testing.T, ctx context.Context, scan *table.IncrementalChangelogScan) []changelogRow {
+	t.Helper()
+
+	_, records, err := scan.ToArrowRecords(ctx)
+	require.NoError(t, err)
+
+	return collectChangelogRows(t, records)
+}
+
+func changelogIDs(rows []changelogRow, op table.ChangelogOperation) []int64 {
+	var ids []int64
+	for _, row := range rows {
+		if row.op == string(op) {
+			ids = append(ids, row.id)
+		}
+	}
+
+	return ids
+}
+
+func changelogData(rows []changelogRow, op table.ChangelogOperation) []string {
+	var data []string
+	for _, row := range rows {
+		if row.op == string(op) {
+			data = append(data, row.data)
+		}
+	}
+
+	return data
 }
 
 func clearChangelogSnapshot(rows []changelogRow) []changelogRow {
