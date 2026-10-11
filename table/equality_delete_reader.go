@@ -54,7 +54,8 @@ var ErrConflictingEqualityDeleteMetadata = errors.New("conflicting equality dele
 // produce separate sets. Key material and metadata are immutable after
 // construction; derived typed indexes are built once and shared safely.
 // Typed indexes retain additional map storage alongside keys for the lifetime
-// of the set. Do not copy the set after the first use of an index.
+// of the set. Merged groups can hold their own indexes on top of per-file ones.
+// Do not copy the set after the first use of an index.
 type equalityDeleteSet struct {
 	keys     set[string]
 	fieldIDs []int
@@ -1343,6 +1344,75 @@ func (e *equalityDeleteSet) singleInt64Set(fileSchema *iceberg.Schema) *singleIn
 	return e.singleInt64
 }
 
+type equalityDeleteMask struct {
+	buffer *memory.Buffer
+	bits   []byte
+}
+
+func (m *equalityDeleteMask) ensure(mem memory.Allocator, numRows int) {
+	if m.buffer != nil {
+		return
+	}
+
+	m.buffer = memory.NewResizableBuffer(mem)
+	m.buffer.Resize(int(bitutil.BytesForBits(int64(numRows))))
+	m.bits = m.buffer.Bytes()
+	for i := range m.bits {
+		m.bits[i] = 0xFF
+	}
+}
+
+func (m *equalityDeleteMask) release() {
+	if m.buffer != nil {
+		m.buffer.Release()
+	}
+}
+
+// applySingleInt64 returns false for unexpected Arrow column types, allowing
+// the caller to fall back to the generic field encoder.
+func (m *equalityDeleteMask) applySingleInt64(
+	column arrow.Array,
+	deleteSet *singleInt64EqualityDeleteSet,
+	mem memory.Allocator,
+) bool {
+	values, ok := column.(*array.Int64)
+	if !ok {
+		return false
+	}
+
+	rawValues := values.Int64Values()
+	numRows := values.Len()
+	if values.NullN() == 0 {
+		for row := range numRows {
+			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+				continue
+			}
+			if _, deleted := deleteSet.keys[uint64(rawValues[row])]; deleted {
+				m.ensure(mem, numRows)
+				bitutil.ClearBit(m.bits, row)
+			}
+		}
+	} else {
+		for row := range numRows {
+			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+				continue
+			}
+
+			if values.IsNull(row) {
+				if !deleteSet.hasNull {
+					continue
+				}
+			} else if _, deleted := deleteSet.keys[uint64(rawValues[row])]; !deleted {
+				continue
+			}
+			m.ensure(mem, numRows)
+			bitutil.ClearBit(m.bits, row)
+		}
+	}
+
+	return true
+}
+
 // processEqualityDeletesColumnarForFile resolves field paths once per file and
 // typed column encoders once per batch, then iterates rows without per-row type
 // switches. Each delete set is applied independently because sets may have
@@ -1393,69 +1463,20 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		mem := compute.GetAllocator(ctx)
 		numRows := int(r.NumRows())
 
-		var maskBuf *memory.Buffer
-		defer func() {
-			if maskBuf != nil {
-				maskBuf.Release()
-			}
-		}()
-		var maskBytes []byte
-		ensureMask := func() {
-			if maskBuf != nil {
-				return
-			}
-
-			maskBuf = memory.NewResizableBuffer(mem)
-			maskBuf.Resize(int(bitutil.BytesForBits(int64(numRows))))
-			maskBytes = maskBuf.Bytes()
-
-			for i := range maskBytes {
-				maskBytes[i] = 0xFF
-			}
-		}
+		var mask equalityDeleteMask
+		defer mask.release()
 
 		var keyBuf bytes.Buffer
 
 		for setIdx, eqDel := range eqDeleteSets {
 			if int64Set := singleInt64Sets[setIdx]; int64Set != nil {
-				column, parents, err := arrowArraysAtField(
+				column, _, err := arrowArraysAtField(
 					r, fieldRefs[setIdx][0], eqDel.fieldIDs[0], eqDel.colNames[0], dataFilePath)
 				if err != nil {
 					return nil, err
 				}
-				if len(parents) == 0 {
-					if values, ok := column.(*array.Int64); ok {
-						rawValues := values.Int64Values()
-						if values.NullN() == 0 {
-							for row := range numRows {
-								if maskBytes != nil && !bitutil.BitIsSet(maskBytes, row) {
-									continue
-								}
-								if _, deleted := int64Set.keys[uint64(rawValues[row])]; deleted {
-									ensureMask()
-									bitutil.ClearBit(maskBytes, row)
-								}
-							}
-						} else {
-							for row := range numRows {
-								if maskBytes != nil && !bitutil.BitIsSet(maskBytes, row) {
-									continue
-								}
-
-								if values.IsNull(row) {
-									if !int64Set.hasNull {
-										continue
-									}
-								} else if _, deleted := int64Set.keys[uint64(rawValues[row])]; !deleted {
-									continue
-								}
-								ensureMask()
-								bitutil.ClearBit(maskBytes, row)
-							}
-						}
-
-						continue
-					}
+				if mask.applySingleInt64(column, int64Set, mem) {
+					continue
 				}
 			}
 
@@ -1469,7 +1490,7 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 			}
 
 			for row := range numRows {
-				if maskBytes != nil && !bitutil.BitIsSet(maskBytes, row) {
+				if mask.bits != nil && !bitutil.BitIsSet(mask.bits, row) {
 					continue
 				}
 
@@ -1483,12 +1504,12 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 					continue
 				}
 
-				ensureMask()
-				bitutil.ClearBit(maskBytes, row)
+				mask.ensure(mem, numRows)
+				bitutil.ClearBit(mask.bits, row)
 			}
 		}
 
-		if maskBuf == nil {
+		if mask.buffer == nil {
 			r.Retain()
 
 			return r, nil
@@ -1496,14 +1517,14 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 
 		maskData := array.NewData(
 			arrow.FixedWidthTypes.Boolean, numRows,
-			[]*memory.Buffer{nil, maskBuf}, nil, 0, 0)
-		mask := array.NewBooleanData(maskData)
+			[]*memory.Buffer{nil, mask.buffer}, nil, 0, 0)
+		filterMask := array.NewBooleanData(maskData)
 		maskData.Release()
-		defer mask.Release()
+		defer filterMask.Release()
 
 		filtered, err := compute.Filter(ctx,
 			compute.NewDatumWithoutOwning(r),
-			compute.NewDatumWithoutOwning(mask),
+			compute.NewDatumWithoutOwning(filterMask),
 			*compute.DefaultFilterOptions())
 		if err != nil {
 			return nil, err
