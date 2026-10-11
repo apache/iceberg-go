@@ -97,14 +97,24 @@ _, err := cat.CreateTable(ctx, ident, schema,
 Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including schema, spec, sort order, and refs pinned
 by `AssertRefSnapshotID`, `RollbackToSnapshot`, or `ExpireSnapshots`, must still
-hold. Otherwise, the commit fails without another attempt, with an error that
-matches both `ErrCommitFailed` and `ErrTransactionUnusable`. The same transaction
-cannot be committed again. Reload the table and build a new transaction.
+hold. Otherwise, the commit fails without another attempt and the transaction
+is unusable.
 
-A transaction also becomes unusable when its commit conflicts with retries
-disabled, or while it carries delete-file removals that cannot be replayed,
-since a re-commit sends the same requirements. It becomes unusable
-once a failed commit cleaned up files the staged updates reference too. That
-happens on any failure after an attempt was rebuilt against a refreshed table,
-or after a rewrite staged files, including a refresh error or a cancelled
-context. A failure whose commit state is unknown deletes nothing.
+After a conflict, calling `Commit` again on the same transaction refreshes the
+table and replays the staged changes like the next retry attempt, so it can
+rebase onto a peer's commit even with retries disabled. Each call gets the
+configured retry budget. A commit carrying delete-file removals that cannot be
+replayed resubmits only if its branch has not moved. The rejections after a
+refresh that make the transaction unusable are listed on
+`ErrTransactionUnusable`.
+
+A failed commit keeps the files it staged until a later commit lands. A
+transaction you abandon leaves them for orphan file removal, as one with
+retries disabled always has. An abandoned manifest rewrite also leaves the
+manifests that later attempts merged. `TableCommit` refuses a transaction whose
+commit failed, since the multi-table path does not refresh. Call `Commit` to
+resume it, or build a new transaction.
+
+An `ExpireSnapshots` that removes something deliberately pins the commit
+branch. A transaction that also appends then fails instead of rebasing onto a
+peer's append, since the expiry was computed from the old head.

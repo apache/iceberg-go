@@ -749,6 +749,11 @@ func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, 
 //	}
 //	newTbl, err := txn.Commit(ctx)
 //
+// An expiry that removes something pins every ref it read, including the
+// commit branch. A transaction that also appends then fails rather than
+// rebasing onto a peer's append, since the expiry was computed from the old
+// head.
+//
 // The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
@@ -3362,6 +3367,13 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 // deferred when applying an operation adds no new requirement to the transaction.
 // The staged metadata is validated when a later transaction operation needs an
 // immutable metadata view, or while the catalog applies the commit.
+//
+// After a failed commit, calling Commit again refreshes the table and replays
+// the staged changes like the next retry attempt, with a fresh retry budget.
+// The staged files are kept until a commit lands, so an abandoned transaction
+// leaves them, and for a rewrite the manifests later attempts merged, for
+// orphan file removal. TableCommit refuses a transaction whose commit failed,
+// since it does not refresh.
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	if err := t.checkNotNil(); err != nil {
 		return nil, err

@@ -50,20 +50,20 @@ import (
 // commit fails due to a concurrent modification (e.g. HTTP 409 Conflict
 // from the REST catalog). Catalog implementations should wrap this
 // error so that callers using errors.Is(err, table.ErrCommitFailed)
-// can detect commit conflicts, which are retryable unless the error also
-// matches ErrTransactionUnusable. In that case, reload the table and build a
-// new transaction. Failed requirements also wrap it. Requirements other than
-// the implicit commit-branch assertion are not rebased.
+// can detect commit conflicts. Failed requirements also wrap it. Calling
+// Transaction.Commit again retries the conflict unless the error also matches
+// ErrTransactionUnusable.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrTransactionUnusable is returned when no later commit of the same
-// transaction can succeed: the commit conflicted with retries disabled or
-// while carrying delete-file removals that cannot be replayed, a requirement
-// the retry loop does not rebase failed against the refreshed table, or files
-// the staged updates reference were cleaned up. Cleanup
-// follows any failure of known state once an attempt was rebuilt or a
-// rewrite staged files, including a refresh error or a cancelled context.
-// Build a new transaction to retry.
+// transaction can succeed, because after a refresh the commit fails a check
+// that every later attempt would fail too. The checks are a requirement the
+// retry loop does not rebase (a pinned ref, the schema, partition spec or sort
+// order, or a non-replayable commit whose branch has moved), a validator
+// conflict with a concurrent commit, a diverged base snapshot, files to
+// rewrite that a concurrent commit removed, a commit branch that became a tag
+// or was deleted, and a replaced table. Only the commit branch's head
+// assertion is rebased. Build a new transaction to retry.
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
