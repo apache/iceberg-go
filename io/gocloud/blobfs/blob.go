@@ -429,14 +429,8 @@ func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
 	return ok && obj.Key == directoryMarker(walkRootKey)
 }
 
-// walkFS adapts a bucket to fs.WalkDir. gocloud's own fs.FS decides whether a
-// key is a directory by checking that no object has that exact key. ADLS Gen2
-// hierarchical namespaces (such as OneLake) store every directory as a 0-byte
-// blob named after it, so gocloud opens those directories as files and the
-// walk never descends.
-//
-// walkFS treats any key with children as a directory and hides those
-// directory blobs from directory listings.
+// walkFS walks a bucket for fs.WalkDir, treating any key with children as a directory,
+// so the 0-byte directory blobs of ADLS hierarchical namespaces (OneLake) aren't files.
 type walkFS struct{ bfs *FileIO }
 
 var (
@@ -514,7 +508,8 @@ func (w walkFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	for _, obj := range files {
 		child := strings.TrimPrefix(obj.Key, prefix)
 		if obj.Size == 0 && dirs[child] {
-			// A hierarchical-namespace blob for a child directory.
+			// A hierarchical-namespace blob for a child directory. An empty directory's blob
+			// can't be told apart without hdi_isfolder metadata, so it stays a 0-byte file.
 			continue
 		}
 
