@@ -1967,20 +1967,24 @@ func (r *RestCatalogSuite) TestRenameTable409() {
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
 }
 
-// renameTable404 has the rename endpoint answer 404 with errType and returns
-// the error RenameTable reports.
-func (r *RestCatalogSuite) renameTable404(errType string) error {
+// renameTableErrors registers a rename endpoint that fails and returns a
+// function that sets the failure's status and error.type, renames a table, and
+// returns the error RenameTable reports. The handler is registered once, so the
+// returned function can be called repeatedly within one test.
+func (r *RestCatalogSuite) renameTableErrors() func(status int, errType string) error {
+	var status int
+	var errType string
 	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
 		if !r.Equal(http.MethodPost, req.Method) {
 			return
 		}
 
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
-				"message": "not found",
+				"message": "rename failed",
 				"type":    errType,
-				"code":    404,
+				"code":    status,
 			},
 		})
 	})
@@ -1988,21 +1992,60 @@ func (r *RestCatalogSuite) renameTable404(errType string) error {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("missing", "destination"))
+	return func(s int, t string) error {
+		status, errType = s, t
+		_, err := cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("missing", "destination"))
 
-	return err
+		return err
+	}
 }
 
 func (r *RestCatalogSuite) TestRenameTable404MissingTable() {
-	err := r.renameTable404("NoSuchTableException")
+	err := r.renameTableErrors()(http.StatusNotFound, "NoSuchTableException")
 	r.ErrorIs(err, catalog.ErrNoSuchTable)
 	r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (r *RestCatalogSuite) TestRenameTable404MissingNamespace() {
-	err := r.renameTable404("NoSuchNamespaceException")
+	err := r.renameTableErrors()(http.StatusNotFound, "NoSuchNamespaceException")
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.NotErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+// TestRenameTable404UntypedFallsBackToNoSuchTable pins the fallback for servers
+// that omit or send an unrecognized error.type on a rename 404.
+func (r *RestCatalogSuite) TestRenameTable404UntypedFallsBackToNoSuchTable() {
+	rename := r.renameTableErrors()
+	for _, errType := range []string{"", "SomeUnknownException"} {
+		r.Run("type="+errType, func() {
+			err := rename(http.StatusNotFound, errType)
+			r.ErrorIs(err, catalog.ErrNoSuchTable)
+			r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+		})
+	}
+}
+
+// TestRenameTableNoSuchNamespaceTypeIsStatusGated asserts that only a 404 is
+// refined by error.type: a retryable or auth failure that happens to carry
+// NoSuchNamespaceException must not read as a missing namespace.
+func (r *RestCatalogSuite) TestRenameTableNoSuchNamespaceTypeIsStatusGated() {
+	rename := r.renameTableErrors()
+	tests := []struct {
+		status int
+		want   error
+	}{
+		{http.StatusServiceUnavailable, rest.ErrServiceUnavailable},
+		{http.StatusInternalServerError, rest.ErrServerError},
+		{http.StatusUnauthorized, rest.ErrUnauthorized},
+		{http.StatusForbidden, rest.ErrForbidden},
+	}
+	for _, tt := range tests {
+		r.Run(http.StatusText(tt.status), func() {
+			err := rename(tt.status, "NoSuchNamespaceException")
+			r.ErrorIs(err, tt.want)
+			r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+		})
+	}
 }
 
 func (r *RestCatalogSuite) TestRenameTable204() {

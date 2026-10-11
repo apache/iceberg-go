@@ -166,19 +166,28 @@ func testRenameTableToExisting(t *testing.T, cfg Config) {
 	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
 	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
 
-	for _, ident := range []table.Identifier{from, to} {
-		_, err := cat.CreateTable(ctx, ident, Schema)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
-	}
+	createdFrom, err := cat.CreateTable(ctx, from, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
 
-	_, err := cat.RenameTable(ctx, from, to)
+	createdTo, err := cat.CreateTable(ctx, to, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, to) })
+
+	_, err = cat.RenameTable(ctx, from, to)
 	assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
 
-	for _, ident := range []table.Identifier{from, to} {
-		exists, err := cat.CheckTableExists(ctx, ident)
-		require.NoError(t, err)
-		assert.True(t, exists, "%v should still exist after a rejected rename", ident)
+	// Existence alone would pass an implementation that overwrote the
+	// destination and then failed, so check that each identifier still names
+	// the table originally created there.
+	for _, tc := range []struct {
+		ident   table.Identifier
+		created *table.Table
+	}{{from, createdFrom}, {to, createdTo}} {
+		tbl, err := cat.LoadTable(ctx, tc.ident)
+		require.NoError(t, err, "%v should still exist after a rejected rename", tc.ident)
+		assert.Equal(t, tc.created.Metadata().TableUUID(), tbl.Metadata().TableUUID(),
+			"%v should be unchanged by a rejected rename", tc.ident)
 	}
 }
 

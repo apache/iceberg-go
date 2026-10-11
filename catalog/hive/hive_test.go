@@ -918,6 +918,33 @@ func TestHiveRenameTableToExistingTable(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+// TestHiveRenameTableDestinationCreatedConcurrently covers a destination that
+// appears after the pre-check, e.g. from Hive DDL that skips the HMS locks: the
+// metastore rejects AlterTable, and that must surface as ErrTableAlreadyExists.
+func TestHiveRenameTableDestinationCreatedConcurrently(t *testing.T) {
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "target_database").
+		Return(&hive_metastore.Database{Name: "target_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(testIcebergHiveTable1, nil).Twice()
+	mockClient.On("Lock", mock.Anything, mock.Anything).
+		Return(&hive_metastore.LockResponse{Lockid: 2, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "target_database", "renamed").
+		Return(nil, errNoSuchObject).Once()
+	mockClient.On("AlterTable", mock.Anything, "test_database", "test_table", mock.Anything).
+		Return(errors.New("InvalidOperationException: new table target_database.renamed already exists")).Once()
+	mockClient.On("Unlock", mock.Anything, int64(2)).Return(nil).Once()
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RenameTable(
+		context.Background(),
+		TableIdentifier("test_database", "test_table"),
+		TableIdentifier("target_database", "renamed"),
+	)
+	require.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+	mockClient.AssertExpectations(t)
+}
+
 func TestHivePurgeTable(t *testing.T) {
 	assert := require.New(t)
 	ctx := context.Background()
