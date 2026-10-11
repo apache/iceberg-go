@@ -482,7 +482,14 @@ func scopedFilesystemKey(credentialIndex int, location string) string {
 		return fmt.Sprintf("%d:%s", credentialIndex, location)
 	}
 
-	return fmt.Sprintf("%d:%s://%s", credentialIndex, parsed.Scheme, parsed.Host)
+	// The key must name everything a filesystem is bound to. An Azure IO serves
+	// one container@host authority, and url.URL.Host leaves out the container.
+	authority := parsed.Host
+	if parsed.User != nil {
+		authority = parsed.User.Username() + "@" + authority
+	}
+
+	return fmt.Sprintf("%d:%s://%s", credentialIndex, parsed.Scheme, authority)
 }
 
 func closeOptionalIO(fs iceio.IO) error {

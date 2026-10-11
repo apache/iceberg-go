@@ -902,6 +902,57 @@ func TestPrefixScopedIODoesNotHoldLockDuringFilesystemClose(t *testing.T) {
 	require.NoError(t, <-closeDone)
 }
 
+// An Azure IO is bound to one container@host authority, so two containers in
+// the same account need their own filesystems, whether or not a credential
+// matches them.
+func TestPrefixScopedIOKeysFilesystemsByContainer(t *testing.T) {
+	const scheme = "prefix-scoped-container-test"
+
+	var (
+		mu     sync.Mutex
+		opened []string
+	)
+	iceio.Register(scheme, func(_ context.Context, parsed *url.URL, _ map[string]string) (iceio.IO, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		opened = append(opened, parsed.User.Username())
+
+		return iceio.LocalFS{}, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	for _, tc := range []struct {
+		name        string
+		credentials []StorageCredential
+	}{
+		{name: "no matching credential"},
+		{name: "one credential covering both containers", credentials: []StorageCredential{{
+			Prefix: scheme + "://",
+			Config: iceberg.Properties{iceio.ADLSSasTokenPrefix + "acct.dfs.core.windows.net": "sig=sas"},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			opened = nil
+			mu.Unlock()
+
+			p := newPrefixScopedIO(context.Background(), nil, tc.credentials)
+			for _, location := range []string{
+				scheme + "://c1@acct.dfs.core.windows.net/a.parquet",
+				scheme + "://c2@acct.dfs.core.windows.net/b.parquet",
+				scheme + "://c1@acct.dfs.core.windows.net/c.parquet",
+			} {
+				_, err := p.filesystemFor(location)
+				require.NoError(t, err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, []string{"c1", "c2"}, opened)
+		})
+	}
+}
+
 func TestPrefixScopedIODoesNotApplyCredentialOutsidePrefix(t *testing.T) {
 	t.Parallel()
 
