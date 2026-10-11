@@ -692,6 +692,196 @@ func TestPrefixScopedIOReplacesS3CredentialAtomically(t *testing.T) {
 	assert.NotContains(t, props, keyS3TokenExpiresAtMs)
 }
 
+func TestPrefixScopedIOClearsStaleADLSAuthForVendedToken(t *testing.T) {
+	t.Parallel()
+
+	const (
+		host      = "acct.dfs.core.windows.net"
+		otherHost = "other.dfs.core.windows.net"
+	)
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.ADLSEndpoint:                         "dfs.core.windows.net",
+		iceio.ADLSSharedKeyAccountName:             "acct",
+		iceio.ADLSSharedKeyAccountKey:              "stale-key",
+		iceio.ADLSSasTokenPrefix + host:            "stale-sas",
+		keyAdlsSasExpiresAtMs + "." + host:         "1000",
+		keyAdlsSasExpiresAtMs:                      "1000",
+		iceio.ADLSConnectionStringPrefix + "acct":  "stale-connection-string",
+		iceio.ADLSSasTokenPrefix + otherHost:       "other-sas",
+		keyAdlsSasExpiresAtMs + "." + otherHost:    "1000",
+		iceio.ADLSConnectionStringPrefix + "other": "other-connection-string",
+	}, []StorageCredential{{
+		Prefix: "abfss://container@" + host + "/",
+		Config: iceberg.Properties{iceio.ADLSToken: "vended-token"},
+	}})
+
+	props := p.propertiesForLocation("abfss://container@" + host + "/table/metadata.json")
+
+	// The vended token and unrelated tuning properties survive.
+	assert.Equal(t, "vended-token", props[iceio.ADLSToken])
+	assert.Equal(t, "dfs.core.windows.net", props[iceio.ADLSEndpoint])
+
+	// Everything that outranks adls.token in the Azure auth chain is gone, so the
+	// vended token is what actually authenticates the read.
+	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountName)
+	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountKey)
+	assert.NotContains(t, props, iceio.ADLSSasTokenPrefix+host)
+	assert.NotContains(t, props, keyAdlsSasExpiresAtMs+"."+host)
+	assert.NotContains(t, props, keyAdlsSasExpiresAtMs)
+	assert.NotContains(t, props, iceio.ADLSConnectionStringPrefix+"acct")
+
+	// Another account's SAS expiry would still set this IO's expiry, so it goes;
+	// its SAS token and connection string never apply here and are kept.
+	assert.NotContains(t, props, keyAdlsSasExpiresAtMs+"."+otherHost)
+	assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost])
+	assert.Equal(t, "other-connection-string", props[iceio.ADLSConnectionStringPrefix+"other"])
+}
+
+func TestPrefixScopedIOKeepsCredentialsWhenVendedADLSTokenIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	const host = "acct.dfs.core.windows.net"
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.ADLSSharedKeyAccountName:  "acct",
+		iceio.ADLSSharedKeyAccountKey:   "working-key",
+		iceio.ADLSSasTokenPrefix + host: "working-sas",
+	}, []StorageCredential{{
+		Prefix: "abfss://container@" + host + "/",
+		Config: iceberg.Properties{iceio.ADLSToken: ""},
+	}})
+
+	props := p.propertiesForLocation("abfss://container@" + host + "/table/metadata.json")
+
+	// The Azure bucket factory skips an empty adls.token, so clearing on key
+	// presence alone would discard these working credentials and fall through to
+	// a weaker auth method.
+	assert.Equal(t, "acct", props[iceio.ADLSSharedKeyAccountName])
+	assert.Equal(t, "working-key", props[iceio.ADLSSharedKeyAccountKey])
+	assert.Equal(t, "working-sas", props[iceio.ADLSSasTokenPrefix+host])
+}
+
+func TestVendedCredsRefreshClearsStaleADLSAuth(t *testing.T) {
+	const (
+		scheme    = "vended-adls-refresh-test"
+		host      = "acct.dfs.core.windows.net"
+		otherHost = "other.dfs.core.windows.net"
+	)
+
+	// loadFS calls the factory synchronously, so captured needs no lock.
+	var captured iceberg.Properties
+	iceio.Register(scheme, func(_ context.Context, _ *url.URL, props map[string]string) (iceio.IO, error) {
+		captured = iceberg.Properties(props)
+
+		return iceio.LocalFS{}, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
+		return iceberg.Properties{iceio.ADLSToken: "fresh-token"}, nil
+	})
+	r.location = scheme + "://container@" + host + "/table/metadata.json"
+	r.props = iceberg.Properties{
+		iceio.ADLSSharedKeyAccountName:       "acct",
+		iceio.ADLSSharedKeyAccountKey:        "stale-key",
+		iceio.ADLSSasTokenPrefix + host:      "stale-sas",
+		iceio.ADLSSasTokenPrefix + otherHost: "other-sas",
+	}
+	// Force the refresh branch: a cached IO whose credentials have expired.
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = time.Now().Add(-time.Hour)
+
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+
+	// The refresher merges through mergeVendedCredentials, so the freshly vended
+	// token is not shadowed by credentials inherited from the catalog config.
+	assert.Equal(t, "fresh-token", captured[iceio.ADLSToken])
+	assert.NotContains(t, captured, iceio.ADLSSharedKeyAccountName)
+	assert.NotContains(t, captured, iceio.ADLSSharedKeyAccountKey)
+	assert.NotContains(t, captured, iceio.ADLSSasTokenPrefix+host)
+	assert.Equal(t, "other-sas", captured[iceio.ADLSSasTokenPrefix+otherHost])
+}
+
+// TestVendedCredsRefreshedADLSTokenExpiry checks that a vended adls.token gets
+// its expiry from expiration-time, or the default TTL without one, and never
+// from an inherited expiry, whether a SAS expiry for its own account or another
+// or an expiry for another kind of credential, which would otherwise win as the
+// earliest expiry. An already-expired one would make every
+// later filesystem load fetch credentials and rebuild the IO again.
+func TestVendedCredsRefreshedADLSTokenExpiry(t *testing.T) {
+	const (
+		scheme    = "vended-adls-expiry-test"
+		host      = "acct.dfs.core.windows.net"
+		otherHost = "other.dfs.core.windows.net"
+	)
+
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return iceio.LocalFS{}, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	now := time.Now()
+	tokenExpiry := now.Add(45 * time.Minute)
+	staleExpiry := strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10)
+
+	for _, tc := range []struct {
+		name   string
+		vended iceberg.Properties
+		want   time.Time
+	}{
+		{
+			name: "expiration-time is honored",
+			vended: iceberg.Properties{
+				iceio.ADLSToken:   "fresh-token",
+				keyExpirationTime: strconv.FormatInt(tokenExpiry.UnixMilli(), 10),
+			},
+			want: tokenExpiry,
+		},
+		{
+			name:   "no expiry falls back to the default TTL",
+			vended: iceberg.Properties{iceio.ADLSToken: "fresh-token"},
+			want:   now.Add(defaultVendedCredentialsTTL),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fetches atomic.Int32
+			r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
+				fetches.Add(1)
+
+				return tc.vended, nil
+			})
+			r.nowFunc = func() time.Time { return now }
+			r.location = scheme + "://container@" + host + "/table/metadata.json"
+			r.props = iceberg.Properties{
+				iceio.ADLSSasTokenPrefix + host:    "stale-sas",
+				keyAdlsSasExpiresAtMs + "." + host: staleExpiry,
+				keyAdlsSasExpiresAtMs:              staleExpiry,
+				keyS3TokenExpiresAtMs:              staleExpiry,
+				keyGcsOAuthExpiresAt:               staleExpiry,
+				// Overwritten when the token is vended with its own expiration-time.
+				keyExpirationTime:                       staleExpiry,
+				iceio.ADLSSasTokenPrefix + otherHost:    "other-sas",
+				keyAdlsSasExpiresAtMs + "." + otherHost: staleExpiry,
+			}
+			// Force the refresh branch: a cached IO whose credentials have expired.
+			r.cachedIO = iceio.LocalFS{}
+			r.expiresAt = now.Add(-time.Minute)
+
+			_, err := r.loadFS(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tc.want.UnixMilli(), r.expiresAt.UnixMilli())
+
+			// The token is still valid, so the next load reuses the IO instead of
+			// fetching credentials again.
+			_, err = r.loadFS(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, int32(1), fetches.Load())
+		})
+	}
+}
+
 func TestPrefixScopedIODoesNotHoldLockDuringFilesystemLoad(t *testing.T) {
 	loadStarted := make(chan struct{})
 	releaseLoad := make(chan struct{})
