@@ -54,9 +54,6 @@ type headTrackingCatalog struct {
 	metadata Metadata
 	attempts atomic.Int32
 	loads    atomic.Int32
-	// opaque rejects without naming the failed requirement, as a REST
-	// 409 does.
-	opaque bool
 }
 
 type identifierCapturingCatalog struct {
@@ -77,10 +74,6 @@ func (c *headTrackingCatalog) CommitTable(_ context.Context, _ Identifier, reqs 
 	c.attempts.Add(1)
 	for _, req := range reqs {
 		if err := req.Validate(c.metadata); err != nil {
-			if c.opaque {
-				return nil, "", fmt.Errorf("%w: 409 conflict", ErrCommitFailed)
-			}
-
 			return nil, "", fmt.Errorf("%w: %w", ErrCommitFailed, err)
 		}
 	}
@@ -227,32 +220,229 @@ func TestDoCommit_ValidatorRejectsOnRefresh(t *testing.T) {
 		"validator rejection on retry must abort before re-issuing CommitTable")
 }
 
-// A stale schema requirement cannot be rebased, but a valid one must not
-// prevent retrying against a changed branch head.
-func TestUnusableCommitErrorMatchesBothSentinels(t *testing.T) {
-	cause := errors.New("requirement failed: ref \"main\" is a tag, tags cannot be transaction targets")
-	err := &unusableCommitError{reason: "requirement no longer holds after refresh", cause: cause, conflict: true}
+// Why: after a refresh, a rejection that does not depend on timing fails
+// every later attempt and every re-commit the same way, so the transaction
+// must become unusable rather than leave an errors.Is(ErrCommitFailed) loop
+// spinning, and its message must not tell the caller to try again. A
+// validator that fails to read must stay resumable.
+func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
+	head := int64(100)
+	noRetries := iceberg.Properties{}
+	// Rejections formatted like the validators in conflict_validation.go.
+	rejectConcurrent := func(sentinel error) conflictValidatorFunc {
+		return func(cc *conflictContext) error {
+			if len(cc.concurrent) > 0 {
+				return fmt.Errorf("%w: snapshot %d added f.parquet", sentinel, cc.concurrent[0].SnapshotID)
+			}
 
-	assert.ErrorIs(t, err, ErrTransactionUnusable)
-	assert.ErrorIs(t, err, ErrCommitFailed)
-	assert.ErrorIs(t, err, cause)
-	assert.Equal(t, "transaction cannot be committed again: requirement no longer holds after refresh: "+cause.Error(), err.Error())
-
-	cleanup := &unusableCommitError{reason: "staged files were cleaned up", cause: cause}
-	assert.ErrorIs(t, cleanup, ErrTransactionUnusable)
-	assert.NotErrorIs(t, cleanup, ErrCommitFailed, "a cleanup after a non-conflict failure is not a conflict")
-}
-
-func TestDoCommit_NonRebasedRequirementFailsAfterOneRefresh(t *testing.T) {
-	writerHead := int64(100)
-	retryProps := func(numRetries string) iceberg.Properties {
-		return iceberg.Properties{
-			CommitNumRetriesKey:     numRetries,
-			CommitMinRetryWaitMsKey: "1",
-			CommitMaxRetryWaitMsKey: "2",
+			return nil
 		}
 	}
-	props := retryProps("3")
+	withFeature := func(t *testing.T, base Metadata) Metadata {
+		b, err := MetadataBuilderFromBase(base, "")
+		require.NoError(t, err)
+		require.NoError(t, b.SetSnapshotRef("feature", head, BranchRef))
+		out, err := b.Build()
+		require.NoError(t, err)
+
+		return out
+	}
+	rebuild := func(t *testing.T, base Metadata, edit func(*MetadataBuilder)) Metadata {
+		b, err := MetadataBuilderFromBase(base, "")
+		require.NoError(t, err)
+		edit(b)
+		out, err := b.Build()
+		require.NoError(t, err)
+
+		return out
+	}
+
+	tests := []struct {
+		name      string
+		branch    string
+		stage     func(t *testing.T, tx *Transaction)
+		validator conflictValidatorFunc
+		peer      func(t *testing.T, base Metadata) Metadata
+		want      error
+		message   string
+	}{
+		{
+			name: "diverged base", validator: func(*conflictContext) error { return nil },
+			peer: func(t *testing.T, base Metadata) Metadata {
+				return rebuild(t, base, func(b *MetadataBuilder) {
+					require.NoError(t, b.AddSnapshot(&Snapshot{
+						SnapshotID: 300, SequenceNumber: 2, TimestampMs: base.LastUpdatedMillis() + 1,
+						Summary: &Summary{Operation: OpAppend},
+					}))
+					require.NoError(t, b.SetSnapshotRef(MainBranch, 300, BranchRef))
+				})
+			},
+			want:    ErrCommitDiverged,
+			message: "transaction cannot be committed again: base diverged: commit diverged: base snapshot is no longer on the branch: ",
+		},
+		{
+			name: "conflicting data files", validator: rejectConcurrent(ErrConflictingDataFiles),
+			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:    ErrConflictingDataFiles,
+			message: "transaction cannot be committed again: validation conflict: concurrent data files added: snapshot 200 added f.parquet",
+		},
+		{
+			name: "conflicting delete files", validator: rejectConcurrent(ErrConflictingDeleteFiles),
+			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:    ErrConflictingDeleteFiles,
+			message: "transaction cannot be committed again: validation conflict: concurrent delete files added: snapshot 200 added f.parquet",
+		},
+		{
+			name: "data files missing", validator: rejectConcurrent(ErrDataFilesMissing),
+			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:    ErrDataFilesMissing,
+			message: "transaction cannot be committed again: validation conflict: referenced data files missing: snapshot 200 added f.parquet",
+		},
+		{
+			name: "wrapped conflict from any validator",
+			validator: func(cc *conflictContext) error {
+				if len(cc.concurrent) > 0 {
+					return fmt.Errorf("custom validator: %w", ErrCommitFailed)
+				}
+
+				return nil
+			},
+			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:    ErrCommitFailed,
+			message: "transaction cannot be committed again: validation conflict: a concurrent commit conflicts with the staged changes",
+		},
+		{
+			name: "commit branch became a tag", branch: "feature",
+			peer: func(t *testing.T, base Metadata) Metadata {
+				return rebuild(t, base, func(b *MetadataBuilder) {
+					require.NoError(t, b.RemoveSnapshotRef("feature"))
+					require.NoError(t, b.SetSnapshotRef("feature", head, TagRef))
+				})
+			},
+			message: `transaction cannot be committed again: commit branch is no longer a branch: requirement failed: ref "feature" is a tag; tags cannot be transaction targets`,
+		},
+		{
+			name: "commit branch was deleted", branch: "feature",
+			peer: func(t *testing.T, base Metadata) Metadata {
+				return rebuild(t, base, func(b *MetadataBuilder) { require.NoError(t, b.RemoveSnapshotRef("feature")) })
+			},
+			want:    ErrCommitFailed,
+			message: `transaction cannot be committed again: commit branch is no longer a branch: requirement failed: branch or tag "feature" is missing, expected 100`,
+		},
+		{
+			name: "stale schema",
+			stage: func(t *testing.T, tx *Transaction) {
+				require.NoError(t, tx.UpdateSchema(true, false).
+					AddColumn([]string{"writer"}, iceberg.PrimitiveTypes.String, "", false, nil).Commit())
+			},
+			peer: func(t *testing.T, base Metadata) Metadata {
+				return rebuild(t, base, func(b *MetadataBuilder) {
+					require.NoError(t, b.AddSchema(iceberg.NewSchema(1,
+						iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+						iceberg.NestedField{ID: 2, Name: "peer", Type: iceberg.PrimitiveTypes.String},
+					)))
+					require.NoError(t, b.SetCurrentSchemaID(-1))
+				})
+			},
+			want: ErrCommitFailed,
+			message: "transaction cannot be committed again: requirement no longer holds after refresh: " +
+				"Requirement failed: current schema id has changed: expected 0, found 1",
+		},
+		{
+			name:  "non-replayable commit whose branch moved",
+			stage: func(_ *testing.T, tx *Transaction) { tx.noReplay = true },
+			peer:  func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:  ErrCommitFailed,
+			message: "transaction cannot be committed again: requirement no longer holds after refresh (" + noReplayHint + "): " +
+				`requirement failed: branch "main" has changed: expected id 100, found 200`,
+		},
+		{
+			name: "table was replaced",
+			peer: func(t *testing.T, base Metadata) Metadata {
+				return rebuild(t, base, func(b *MetadataBuilder) { require.NoError(t, b.SetUUID(uuid.New())) })
+			},
+			want: ErrInvalidMetadata,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := withFeature(t, newConflictTestMetadataWithProps(t, &head, noRetries))
+			tbl, cat := newAssertRefTestTable(t, base, tt.peer(t, base))
+			tx := tbl.NewTransaction()
+			if tt.branch != "" {
+				tx = tbl.NewTransactionOnBranch(tt.branch)
+			}
+			require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
+			if tt.stage != nil {
+				tt.stage(t, tx)
+			}
+			if tt.validator != nil {
+				tx.addValidator(tt.validator)
+			}
+
+			_, err := tx.Commit(t.Context())
+			require.ErrorIs(t, err, ErrCommitFailed)
+			require.NotErrorIs(t, err, ErrTransactionUnusable)
+			require.Equal(t, int32(1), cat.attempts.Load())
+			require.Equal(t, int32(0), cat.loads.Load(), "retries are disabled")
+
+			_, err = tx.Commit(t.Context())
+			require.ErrorIs(t, err, ErrTransactionUnusable)
+			assert.Equal(t, int32(1), cat.loads.Load(), "the re-commit refreshes once")
+			if tt.want != nil {
+				require.ErrorIs(t, err, tt.want)
+			}
+			if tt.message != "" {
+				assert.True(t, strings.HasPrefix(err.Error(), tt.message), err.Error())
+			}
+			assert.NotContains(t, err.Error(), "refresh and try again")
+			assert.Equal(t, int32(1), cat.attempts.Load(), "the resume must stop before the catalog")
+
+			_, err = tx.Commit(t.Context())
+			assert.EqualError(t, err, "transaction cannot be committed again: a previous commit failed, build a new transaction")
+			assert.Equal(t, int32(1), cat.attempts.Load())
+			assert.Equal(t, int32(1), cat.loads.Load(), "an unusable transaction must not refresh again")
+		})
+	}
+
+	t.Run("validator read failure stays resumable", func(t *testing.T) {
+		base := newConflictTestMetadataWithProps(t, &head, noRetries)
+		tbl, cat := newAssertRefTestTable(t, base, graftSnapshotOnto(t, base, MainBranch, 200))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
+		readFailures := 1
+		tx.addValidator(func(cc *conflictContext) error {
+			if len(cc.concurrent) > 0 && readFailures > 0 {
+				readFailures--
+
+				return errors.New("simulated manifest read failure")
+			}
+
+			return nil
+		})
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitFailed)
+
+		_, err = tx.Commit(t.Context())
+		require.EqualError(t, err, "simulated manifest read failure")
+
+		_, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), cat.attempts.Load())
+	})
+}
+
+// A stale schema requirement cannot be rebased, but a valid one must not
+// prevent retrying against a changed branch head.
+func TestDoCommit_NonRebasedRequirementFailsAfterOneRefresh(t *testing.T) {
+	writerHead := int64(100)
+	props := iceberg.Properties{
+		CommitNumRetriesKey:     "3",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}
 
 	stalePeerSchema := func(t *testing.T, props iceberg.Properties) (*headTrackingCatalog, *Transaction) {
 		writerBase := newConflictTestMetadataWithProps(t, &writerHead, props)
@@ -277,35 +467,19 @@ func TestDoCommit_NonRebasedRequirementFailsAfterOneRefresh(t *testing.T) {
 		return cat, tx
 	}
 
+	const staleSchema = "transaction cannot be committed again: requirement no longer holds after refresh: " +
+		"Requirement failed: current schema id has changed: expected 0, found 1"
+
 	t.Run("stale schema update fails after one refresh", func(t *testing.T) {
 		cat, tx := stalePeerSchema(t, props)
-		cat.opaque = true
 
 		_, err := tx.Commit(t.Context())
 		require.ErrorIs(t, err, ErrCommitFailed)
 		require.ErrorIs(t, err, ErrTransactionUnusable)
-		assert.True(t, strings.HasPrefix(err.Error(),
-			"transaction cannot be committed again: requirement no longer holds after refresh: "), err.Error())
+		assert.EqualError(t, err, staleSchema)
 		assert.Equal(t, int32(1), cat.attempts.Load(), "the stale requirement must not be resubmitted")
 		assert.Equal(t, int32(1), cat.loads.Load(), "the commit must stop after the first refresh")
 		assert.Equal(t, 1, cat.metadata.CurrentSchema().ID, "the peer's schema must survive")
-	})
-
-	t.Run("retries disabled ends the commit without a refresh", func(t *testing.T) {
-		cat, tx := stalePeerSchema(t, retryProps("0"))
-		cat.opaque = true
-
-		_, err := tx.Commit(t.Context())
-		require.ErrorIs(t, err, ErrCommitFailed)
-		require.ErrorIs(t, err, ErrTransactionUnusable)
-		assert.True(t, strings.HasPrefix(err.Error(),
-			"transaction cannot be committed again: commit conflicted with retries disabled: "), err.Error())
-		assert.Equal(t, int32(1), cat.attempts.Load())
-		assert.Equal(t, int32(0), cat.loads.Load())
-
-		_, err = tx.Commit(t.Context())
-		require.ErrorIs(t, err, ErrTransactionUnusable)
-		assert.Equal(t, int32(1), cat.attempts.Load())
 	})
 
 	t.Run("requirements that still hold do not block the rebase", func(t *testing.T) {

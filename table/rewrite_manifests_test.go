@@ -34,7 +34,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -999,10 +998,12 @@ func TestRewriteManifestsCleansEverySupersededGeneration(t *testing.T) {
 	assert.Equal(t, 2, removed, "both superseded generations must be cleaned up")
 }
 
-// TestRewriteManifestsCleansSupersededOnExhaustedRetries asserts that when every
-// commit attempt fails with ErrCommitFailed, every merged manifest written —
-// the superseded attempts and the final one — is cleaned up rather than leaked.
-func TestRewriteManifestsCleansSupersededOnExhaustedRetries(t *testing.T) {
+// TestRewriteManifestsKeepsMergedManifestsUntilResumeLands asserts that a
+// rewrite whose retries are exhausted deletes none of its merged manifests,
+// since the transaction can still commit, and that the resume that lands
+// deletes every merged manifest the committed snapshot does not reference,
+// from both calls.
+func TestRewriteManifestsKeepsMergedManifestsUntilResumeLands(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	track := &trackingFS{}
@@ -1010,27 +1011,66 @@ func TestRewriteManifestsCleansSupersededOnExhaustedRetries(t *testing.T) {
 
 	h0, h1, h2 := stagedRewriteHeads(t, ctx, dir, "2", fsF, track) // 3 attempts
 
-	// Never succeed: every attempt conflicts, exhausting the retry budget.
-	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{h1, h2}, failures: 99, location: dir, fsF: fsF}
+	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{h1, h2}, failures: 3, location: dir, fsF: fsF}
 	tbl := table.New(table.Identifier{"default", "staged"}, h0, dir+"/metadata/00000.json", fsF, cat)
 
 	preExisting := track.snapshotCreated()
 
 	txn := tbl.NewTransaction()
-	_, err := txn.RewriteManifests(ctx)
+	res, err := txn.RewriteManifests(ctx)
 	require.NoError(t, err)
 	_, err = txn.Commit(ctx)
-	require.Error(t, err, "commit must fail once retries are exhausted")
 	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.NotErrorIs(t, err, table.ErrTransactionUnusable)
 
-	// Three attempts wrote three merged manifests. None is referenced (no commit
-	// succeeded), so all three — the superseded ones and the final attempt's —
-	// must be cleaned on the exhausted-failure path.
 	merged := mergedManifestsCreated(track, preExisting)
 	require.Len(t, merged, 3, "three attempts each write one merged manifest")
-
 	for _, p := range merged {
-		assert.Truef(t, track.wasRemoved(p), "orphaned manifest %s must be cleaned on the failure path", p)
+		assert.Falsef(t, track.wasRemoved(p), "merged manifest %s must be kept while the transaction can commit", p)
+	}
+
+	committed, err := txn.Commit(ctx)
+	require.NoError(t, err)
+	assertCommittedManifestsExist(t, committed, track, res)
+
+	merged = mergedManifestsCreated(track, preExisting)
+	require.Len(t, merged, 4, "the resume merges once more")
+	referenced := committedManifestPaths(t, committed, track)
+	for _, p := range merged {
+		if _, ok := referenced[p]; ok {
+			continue
+		}
+		assert.Truef(t, track.wasRemoved(p), "superseded manifest %s must be deleted once the commit lands", p)
+	}
+}
+
+func committedManifestPaths(t *testing.T, committed *table.Table, fs iceio.IO) map[string]struct{} {
+	t.Helper()
+	manifests, err := committed.CurrentSnapshot().Manifests(fs)
+	require.NoError(t, err)
+	paths := make(map[string]struct{}, len(manifests))
+	for _, m := range manifests {
+		paths[m.FilePath()] = struct{}{}
+	}
+
+	return paths
+}
+
+// assertCommittedManifestsExist checks that the committed snapshot's
+// manifest list and manifests exist and that res reports the manifests the
+// committed snapshot added.
+func assertCommittedManifestsExist(t *testing.T, committed *table.Table, track *trackingFS, res *table.RewriteManifestsResult) {
+	t.Helper()
+	snap := committed.CurrentSnapshot()
+	require.NotNil(t, snap)
+	assert.FileExists(t, snap.ManifestList)
+	referenced := committedManifestPaths(t, committed, track)
+	for p := range referenced {
+		assert.FileExistsf(t, p, "committed manifest %s must exist", p)
+	}
+	require.NotEmpty(t, res.AddedManifests)
+	for _, m := range res.AddedManifests {
+		assert.Containsf(t, referenced, m.FilePath(), "result manifest %s must be in the committed snapshot", m.FilePath())
 	}
 }
 
@@ -1053,9 +1093,7 @@ func resortedMetadata(t *testing.T, base table.Metadata) table.Metadata {
 	return out
 }
 
-// Cleanup after a failed requirement must prevent resubmitting staged updates
-// that reference the deleted manifest, even if the requirement holds again.
-func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
+func TestRewriteManifestsNonRebasedRequirementFailureKeepsStagedFiles(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	track := &trackingFS{}
@@ -1073,73 +1111,76 @@ func TestRewriteManifestsCleansOnNonRebasedRequirementFailure(t *testing.T) {
 	_, err := txn.RewriteManifests(ctx)
 	require.NoError(t, err)
 
-	multiCat := &recordingTransactionalCatalog{}
-	queued, err := catalog.NewMultiTableTransaction(multiCat)
-	require.NoError(t, err)
-	require.NoError(t, queued.AddTransaction(txn))
-
 	_, err = txn.Commit(ctx)
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	require.ErrorIs(t, err, table.ErrTransactionUnusable)
-	assert.Equal(t, 1, strings.Count(err.Error(), table.ErrTransactionUnusable.Error()), err.Error())
+	assert.EqualError(t, err, "transaction cannot be committed again: requirement no longer holds after refresh: "+
+		"requirement failed: default sort order id has changed: expected 0, found 1")
 	require.EqualValues(t, 1, cat.commitTableCalls.Load(), "the violated fence must stop the retry loop")
 
-	merged := mergedManifestsCreated(track, preExisting)
-	require.Len(t, merged, 1, "the single attempt writes one merged manifest")
-	for _, p := range merged {
-		assert.NoFileExistsf(t, p, "merged manifest %s must be removed when the commit stops", p)
+	created := track.snapshotCreated()
+	for p := range created {
+		if _, ok := preExisting[p]; !ok {
+			assert.Falsef(t, track.wasRemoved(p), "staged file %s must be kept", p)
+		}
 	}
+	require.Len(t, mergedManifestsCreated(track, preExisting), 1)
 
 	cat.current = h0
 	_, err = txn.Commit(ctx)
 	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
-	_, err = txn.TableCommit()
-	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
-	assert.ErrorIs(t, queued.Commit(ctx), table.ErrTransactionUnusable)
-	fresh, err := catalog.NewMultiTableTransaction(multiCat)
-	require.NoError(t, err)
-	assert.ErrorIs(t, fresh.AddTransaction(txn), table.ErrTransactionUnusable)
-
 	assert.EqualValues(t, 1, cat.commitTableCalls.Load(), "the unusable transaction must not reach the catalog")
-	assert.Zero(t, multiCat.commitTransactionCalls, "the unusable transaction must not reach CommitTransaction")
 	assert.Same(t, h0, cat.current, "nothing may be committed")
 }
 
-// Only CommitTransaction is implemented. The embedded Catalog is nil.
-type recordingTransactionalCatalog struct {
-	catalog.Catalog
-	commitTransactionCalls int
-}
-
-func (c *recordingTransactionalCatalog) CommitTransaction(context.Context, []table.TableCommit) error {
-	c.commitTransactionCalls++
-
-	return nil
-}
-
-func TestCommitAfterNonRebasedRequirementFailureIsUnusable(t *testing.T) {
+// A peer that rolls main back to the transaction's base head between two
+// Commit calls must not let the resume submit the staged snapshot: the
+// rewrite producer has already moved past it and would delete its merged
+// manifests as superseded once the commit lands. On a v1 table the
+// sequence-number check that would otherwise force a rebuild is skipped.
+func TestRewriteManifestsResumeAfterPeerRollsBackToBaseHead(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	track := &trackingFS{}
 	fsF := func(_ context.Context) (iceio.IO, error) { return track, nil }
 
-	h0, _, _ := stagedRewriteHeads(t, ctx, dir, "2", fsF, track)
-	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{resortedMetadata(t, h0)}, failures: 1, location: dir, fsF: fsF}
+	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec, table.UnsortedSortOrder, dir,
+		iceberg.Properties{
+			table.PropertyFormatVersion:   "1",
+			table.ManifestMergeEnabledKey: "false",
+			table.CommitMinRetryWaitMsKey: "0",
+			table.CommitMaxRetryWaitMsKey: "0",
+			table.CommitNumRetriesKey:     "1",
+		})
+	require.NoError(t, err)
+	setup := table.New(table.Identifier{"default", "staged"}, meta, dir+"/metadata/00000.json", fsF, &mergeCatalog{meta: meta})
+	setup = appendSeparateManifests(t, ctx, setup, track, dir, "stale", 3)
+	h0 := setup.Metadata()
+	baseHead := h0.CurrentSnapshot().SnapshotID
+	h1 := appendOne(t, ctx, setup, track, dir, "peer").Metadata()
+
+	// The first call conflicts twice, rebuilding onto the peer's append in
+	// between. Every later submission lands.
+	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{h1}, failures: 2, location: dir, fsF: fsF}
 	tbl := table.New(table.Identifier{"default", "staged"}, h0, dir+"/metadata/00000.json", fsF, cat)
 
 	txn := tbl.NewTransaction()
-	require.NoError(t, txn.AssertDefaultShape())
-	require.NoError(t, txn.SetProperties(iceberg.Properties{"marker": "1"}))
-	_, err := txn.Commit(ctx)
-	require.ErrorIs(t, err, table.ErrCommitFailed)
-	require.ErrorIs(t, err, table.ErrTransactionUnusable)
-	assert.Empty(t, track.removed)
-
-	cat.current = h0
+	res, err := txn.RewriteManifests(ctx)
+	require.NoError(t, err)
 	_, err = txn.Commit(ctx)
-	require.ErrorIs(t, err, table.ErrTransactionUnusable)
-	assert.EqualValues(t, 1, cat.commitTableCalls.Load())
-	assert.NotContains(t, cat.current.Properties(), "marker")
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+
+	peer, err := cat.LoadTable(ctx, table.Identifier{"default", "staged"})
+	require.NoError(t, err)
+	rollback := peer.NewTransaction()
+	require.NoError(t, rollback.RollbackToSnapshot(baseHead))
+	_, err = rollback.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, baseHead, cat.current.CurrentSnapshot().SnapshotID)
+
+	committed, err := txn.Commit(ctx)
+	require.NoError(t, err)
+	assertCommittedManifestsExist(t, committed, track, res)
 }
 
 // TestRewriteManifestsClusterByReusesOutputOnOCCRetry verifies that a

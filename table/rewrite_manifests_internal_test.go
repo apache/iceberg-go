@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -380,5 +381,57 @@ func TestRewriteManifestsCleansOrphansOnMergeFailure(t *testing.T) {
 	for path := range memKeys(mem.memIO) {
 		_, preexisting := before[path]
 		require.Truef(t, preexisting, "merged manifest %s from the bin that succeeded must be cleaned up", path)
+	}
+}
+
+// A pass that fails the file-count guard deletes the files it merged. The
+// producer must keep the previous pass's state, which a resumed commit can
+// reuse, rather than point at the deleted files.
+func TestRewriteManifestsFailedPassKeepsPreviousState(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{targetSizeBytes: 8 << 20})
+	r := prod.producerImpl.(*rewriteManifests)
+
+	inputs := func(name string, addedFiles int32) []iceberg.ManifestFile {
+		out := make([]iceberg.ManifestFile, 2)
+		sequenceNumber := int64(1)
+		for i := range out {
+			df := newTestDataFile(t, spec, "file://"+name+"-"+string(rune('a'+i))+".parquet", nil)
+			entries := []iceberg.ManifestEntry{
+				iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &prod.snapshotID, &sequenceNumber, nil, df),
+			}
+			path := "table-location/metadata/" + name + "-" + string(rune('a'+i)) + ".avro"
+			var buf bytes.Buffer
+			_, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
+			require.NoError(t, err)
+			require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+			out[i] = iceberg.NewManifestFile(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
+				AddedFiles(addedFiles).Content(iceberg.ManifestContentData).Build()
+		}
+
+		return out
+	}
+
+	_, err := r.processManifests(inputs("good", 1))
+	require.NoError(t, err)
+	added, rewritten, superseded := slices.Clone(r.added), slices.Clone(r.rewritten), slices.Clone(r.superseded)
+	require.NotEmpty(t, added)
+
+	// A header count that lies trips the guard after the merged file is written.
+	_, err = r.processManifests(inputs("lying", 99))
+	require.Error(t, err)
+
+	assert.Equal(t, added, r.added)
+	assert.Equal(t, rewritten, r.rewritten)
+	assert.Equal(t, superseded, r.superseded)
+	assert.Equal(t, added, r.result.AddedManifests)
+	assert.Equal(t, rewritten, r.result.RewrittenManifests)
+	files := memKeys(mem)
+	for _, m := range r.added {
+		assert.Containsf(t, files, m.FilePath(), "manifest %s the producer would commit must exist", m.FilePath())
 	}
 }

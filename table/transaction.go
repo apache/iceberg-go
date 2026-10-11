@@ -107,6 +107,10 @@ type Transaction struct {
 	committed bool
 
 	unusable bool
+
+	// failedCommits counts Commit calls that failed without committing. The
+	// next Commit resumes from a refresh, as the next retry attempt would.
+	failedCommits int
 }
 
 // The caller must hold t.mx.
@@ -883,7 +887,10 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	// A no-op expiry must not pin the commit branch, which would stop the
 	// transaction's other updates from rebasing on retry.
 	if len(updates) == 0 {
-		return nil
+		t.mx.Lock()
+		defer t.mx.Unlock()
+
+		return t.checkUsable()
 	}
 
 	return t.applyPinned(updates, reqs, pinned)
@@ -3378,20 +3385,21 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			withCommitValidators(t.validators...),
 			withCommitNoReplay(t.noReplay),
 			withCommitPinnedRefs(t.pinnedRefs),
+			withCommitResume(t.failedCommits),
 		)
 		if err != nil {
-			// A clean conflict (ErrCommitFailed) stays retriable unless the error
-			// also matches ErrTransactionUnusable. That happens when retries are
-			// disabled or the commit cannot be replayed, when a non-rebased
-			// requirement fails against the refreshed table, and on any failure
-			// once files were cleaned up after a rebuilt attempt or a rewrite,
-			// including a refresh error or a cancelled context. Any other failure leaves the commit state
-			// unknown, so mark it terminal to avoid a double-apply.
-			if !errors.Is(err, ErrCommitFailed) {
-				t.committed = true
-			}
-			if errors.Is(err, ErrTransactionUnusable) {
+			// A failure that committed nothing stays committable, and the next
+			// Commit resumes from a refresh. See ErrTransactionUnusable for
+			// when it is not. A failure of unknown commit state is terminal to
+			// avoid a double-apply.
+			var unknown *commitStateUnknownError
+			switch {
+			case errors.Is(err, ErrTransactionUnusable):
 				t.unusable = true
+			case errors.As(err, &unknown):
+				t.committed = true
+			default:
+				t.failedCommits++
 			}
 
 			return tbl, err
