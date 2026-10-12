@@ -53,13 +53,15 @@ const (
 	IOManifestCacheEnabledDefault = false
 
 	// IOManifestCacheExpirationIntervalMsKey controls how long an unused cached
-	// manifest stays resident. Zero disables time-based expiration, matching
+	// manifest remains eligible for reuse. Expired bytes are removed lazily on
+	// cache access or insertion. Zero disables time-based expiration, matching
 	// Java Iceberg's ContentCache. Invalid negative values warn and disable
 	// the Go cache rather than throwing a Java ValidationException.
 	IOManifestCacheExpirationIntervalMsKey     = "io.manifest.cache.expiration-interval-ms"
 	IOManifestCacheExpirationIntervalMsDefault = 60 * 1000
 
-	// IOManifestCacheMaxTotalBytesKey bounds total retained manifest content.
+	// IOManifestCacheMaxTotalBytesKey bounds total retained manifest content per
+	// independently loaded table. Commit-derived handles share the same budget.
 	IOManifestCacheMaxTotalBytesKey     = "io.manifest.cache.max-total-bytes"
 	IOManifestCacheMaxTotalBytesDefault = 100 * 1024 * 1024
 

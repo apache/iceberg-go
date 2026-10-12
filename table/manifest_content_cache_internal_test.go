@@ -46,6 +46,34 @@ func TestTableScansReuseManifestContent(t *testing.T) {
 	assert.Equal(t, 1, fs.openCount[manifestPath], "manifest bytes should be read once across scans")
 }
 
+func TestTransactionScansAndCommitReuseManifestContent(t *testing.T) {
+	fs := newTrackingCallsIO()
+	tbl, _, manifestPath := newManifestContentCacheTestTable(t, fs,
+		iceberg.Properties{IOManifestCacheEnabledKey: "true"})
+	tbl.cat = &committingLabelCatalog{metadata: tbl.metadata}
+	tasks, err := tbl.Scan(WithMaxConcurrency(1)).PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(iceberg.Properties{"updated": "true"}))
+	scan, err := txn.Scan(WithMaxConcurrency(1))
+	require.NoError(t, err)
+	tasks, err = scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	committed, err := txn.Commit(t.Context())
+	require.NoError(t, err)
+	tasks, err = committed.Scan(WithMaxConcurrency(1)).PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	assert.Equal(t, 1, fs.openCount[manifestPath],
+		"transaction and committed scans must reuse the warm immutable manifests")
+	assert.Equal(t, "true", committed.Properties()["updated"])
+	assert.NotContains(t, tbl.Properties(), "updated", "metadata stays independent of cached bytes")
+}
+
 func TestManifestContentCacheSkipsOversizedManifest(t *testing.T) {
 	fs := newTrackingCallsIO()
 	tbl, _, manifestPath := newManifestContentCacheTestTable(t, fs, iceberg.Properties{
@@ -429,6 +457,34 @@ func TestManifestContentCacheFailedPopulationFallsBackWithoutCaching(t *testing.
 	assert.Empty(t, cache.entries, "ordinary-open fallback must not populate the cache")
 	readCachedManifest(t, cache, fs, manifest)
 	assert.Contains(t, cache.entries, location)
+}
+
+type manifestContentCacheOpenErrorsIO struct {
+	iceio.IO
+	openErrors []error
+}
+
+func (f *manifestContentCacheOpenErrorsIO) Open(string) (iceio.File, error) {
+	err := f.openErrors[0]
+	f.openErrors = f.openErrors[1:]
+
+	return nil, err
+}
+
+func TestManifestContentCachePreservesPopulationAndFallbackErrors(t *testing.T) {
+	fs := &manifestContentCacheOpenErrorsIO{
+		openErrors: []error{io.ErrUnexpectedEOF, io.ErrClosedPipe},
+	}
+	cache := newManifestContentCache(0, 16, 16)
+	manifest := iceberg.NewManifestFile(2, "mem://manifest-content-cache/errors.avro", 4, 0, 1).Build()
+
+	file, err := cache.open(t.Context(), fs, manifest)
+	assert.Nil(t, file)
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF, "retain the original population failure")
+	assert.ErrorIs(t, err, io.ErrClosedPipe, "retain the fallback failure")
+	assert.Empty(t, fs.openErrors, "only the producer's single fallback should run")
+	assert.Empty(t, cache.entries)
+	assert.Empty(t, cache.loads)
 }
 
 type manifestContentCachePanicIO struct {
