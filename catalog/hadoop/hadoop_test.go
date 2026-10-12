@@ -2105,7 +2105,7 @@ func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
 
 func (s *HadoopCatalogTestSuite) TestRenameTableUnsupported() {
 	_, err := s.cat.RenameTable(context.Background(), []string{"ns", "old"}, []string{"ns", "new"})
-	s.Require().Error(err)
+	s.Require().ErrorIs(err, iceberg.ErrNotImplemented)
 	s.Contains(err.Error(), "not supported")
 }
 
