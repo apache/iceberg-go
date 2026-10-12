@@ -551,17 +551,13 @@ func (idx *equalityDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]
 	return out, nil
 }
 
-func appendEqualityDeletesAfter(
-	out []iceberg.DataFile,
+func firstEqualityDeleteAfter(
 	entries []equalityDeleteIndexEntry,
 	dataSeqNum int64,
-	dataStats *equalityDeleteDataFileStats,
-) []iceberg.DataFile {
-	start := sort.Search(len(entries), func(i int) bool {
+) int {
+	return sort.Search(len(entries), func(i int) bool {
 		return entries[i].entry.SequenceNum() > dataSeqNum
 	})
-
-	return appendEqualityDeletesFrom(out, entries, start, dataStats)
 }
 
 func appendEqualityDeletesAfterIndexed(
@@ -571,15 +567,14 @@ func appendEqualityDeletesAfterIndexed(
 	dataStats *equalityDeleteDataFileStats,
 	rangeIndex *equalityDeleteRangeIndex,
 ) []iceberg.DataFile {
-	start := sort.Search(len(entries), func(i int) bool {
-		return entries[i].entry.SequenceNum() > dataSeqNum
-	})
+	start := firstEqualityDeleteAfter(entries, dataSeqNum)
 	if rangeIndex == nil || dataStats == nil ||
+		len(dataStats.lowerBounds) == 0 || len(dataStats.upperBounds) == 0 ||
 		len(entries)-start < equalityDeleteRangeIndexMinLookupEntries {
 		return appendEqualityDeletesFrom(out, entries, start, dataStats)
 	}
 
-	candidates, ok := rangeIndex.candidates(entries, start, dataSeqNum, dataStats)
+	candidates, ok := rangeIndex.candidates(start, dataSeqNum, dataStats)
 	if !ok {
 		return appendEqualityDeletesFrom(out, entries, start, dataStats)
 	}

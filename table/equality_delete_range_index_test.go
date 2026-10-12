@@ -25,6 +25,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// appendEqualityDeletesAfterLinear is an independent reference matcher. It
+// scans every entry so neither the sequence search nor range tree can hide a
+// false negative in the production path.
+func appendEqualityDeletesAfterLinear(
+	out []iceberg.DataFile,
+	entries []equalityDeleteIndexEntry,
+	dataSeqNum int64,
+	dataStats *equalityDeleteDataFileStats,
+) []iceberg.DataFile {
+	for _, entry := range entries {
+		if entry.entry.SequenceNum() > dataSeqNum && equalityDeleteCanContainData(dataStats, entry.fields) {
+			out = append(out, entry.entry.DataFile())
+		}
+	}
+
+	return out
+}
+
 func TestEqualityDeleteRangeIndexMatchesLinearReference(t *testing.T) {
 	const deleteFileCount = 512
 
@@ -66,18 +84,17 @@ func TestEqualityDeleteRangeIndexMatchesLinearReference(t *testing.T) {
 		sequence int64
 		lower    int32
 		upper    int32
+		indexed  bool
 	}{
-		{name: "selective middle", sequence: 0, lower: 2000, upper: 2099},
-		{name: "selective with sequence pruning", sequence: 200, lower: 4000, upper: 4099},
-		{name: "no ranged overlap keeps fallback", sequence: 0, lower: 9000, upper: 9100},
-		{name: "just below fallback threshold", sequence: 0, lower: 0, upper: 2454},
-		{name: "at fallback threshold", sequence: 0, lower: 0, upper: 2464},
+		{name: "selective middle", sequence: 0, lower: 2000, upper: 2099, indexed: true},
+		{name: "selective with sequence pruning", sequence: 200, lower: 4000, upper: 4099, indexed: true},
+		{name: "no ranged overlap keeps fallback", sequence: 0, lower: 9000, upper: 9100, indexed: true},
 		{name: "unselective range uses linear fallback", sequence: 0, lower: 0, upper: 5200},
 		{name: "unselective sequence suffix", sequence: 200, lower: 0, upper: 5200},
 		{name: "small sequence suffix", sequence: 450, lower: 0, upper: 5200},
 		{name: "no applicable sequences", sequence: 513, lower: 0, upper: 5200},
-		{name: "equal lower endpoint overlaps", sequence: 0, lower: 2000, upper: 2000},
-		{name: "equal upper endpoint overlaps", sequence: 0, lower: 2004, upper: 2004},
+		{name: "equal lower endpoint overlaps", sequence: 0, lower: 2000, upper: 2000, indexed: true},
+		{name: "equal upper endpoint overlaps", sequence: 0, lower: 2004, upper: 2004, indexed: true},
 	}
 
 	for _, tt := range tests {
@@ -101,9 +118,17 @@ func TestEqualityDeleteRangeIndexMatchesLinearReference(t *testing.T) {
 			require.NoError(t, err)
 
 			stats := equalityDeleteDataFileStatsFor(dataEntry.DataFile())
-			want := appendEqualityDeletesAfter(
+			want := appendEqualityDeletesAfterLinear(
 				nil, entries, dataEntry.SequenceNum(), &stats)
 			assert.Equal(t, equalityDeleteMetricPaths(want), equalityDeleteMetricPaths(got))
+			start := firstEqualityDeleteAfter(entries, dataEntry.SequenceNum())
+			if len(entries)-start >= equalityDeleteRangeIndexMinLookupEntries {
+				candidates, ok := idx.rangeIndexesByPartition[key].candidates(start, dataEntry.SequenceNum(), &stats)
+				assert.Equal(t, tt.indexed, ok, "the expected fast path must actually run")
+				if ok {
+					assert.Less(t, len(candidates), len(entries)-start)
+				}
+			}
 		})
 	}
 }
@@ -176,6 +201,8 @@ func BenchmarkEqualityDeleteRangeIndexLookup(b *testing.B) {
 		b.Fatal("range index was not built")
 	}
 
+	// This benchmark isolates warm lookups; construction is measured separately.
+	rangeIndex.once.Do(rangeIndex.build)
 	benchmark := func(b *testing.B, indexed bool, dataEntries []iceberg.ManifestEntry) {
 		b.ReportAllocs()
 		matched := 0
@@ -189,8 +216,8 @@ func BenchmarkEqualityDeleteRangeIndexLookup(b *testing.B) {
 					files = appendEqualityDeletesAfterIndexed(
 						nil, entries, dataEntry.SequenceNum(), &stats, rangeIndex)
 				} else {
-					files = appendEqualityDeletesAfter(
-						nil, entries, dataEntry.SequenceNum(), &stats)
+					files = appendEqualityDeletesAfterIndexed(
+						nil, entries, dataEntry.SequenceNum(), &stats, nil)
 				}
 				matched += len(files)
 			}

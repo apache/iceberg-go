@@ -20,15 +20,29 @@ import (
 	"cmp"
 	"slices"
 	"sort"
+	"sync"
 )
 
+// These floors do not guarantee that the first lookup amortizes construction.
+// BenchmarkEqualityDeleteRangeIndexThreshold measures the cold and repeated
+// lookup tradeoff against linear matching.
 const (
-	equalityDeleteRangeIndexMinEntries       = 256
-	equalityDeleteRangeIndexMinGroupEntries  = 64
+	// Small buckets rarely amortize tree construction; keep them linear.
+	equalityDeleteRangeIndexMinEntries = 256
+	// Avoid a separate tree for a field represented by only a few deletes.
+	equalityDeleteRangeIndexMinGroupEntries = 64
+	// Even a large bucket should use its sequence-sorted suffix directly once
+	// fewer than 128 entries remain. At that floor, the half-remaining limit
+	// below allows fewer than 64 candidates.
 	equalityDeleteRangeIndexMinLookupEntries = 128
 )
 
 type equalityDeleteRangeIndex struct {
+	// Entries and their decoded bounds are immutable after index construction.
+	// Build the tree only when a lookup has a large enough sequence suffix, so
+	// unvisited partitions do not pay for sorting or allocating range nodes.
+	entries  []equalityDeleteIndexEntry
+	once     sync.Once
 	groups   []equalityDeleteRangeGroup
 	fallback []int
 }
@@ -62,6 +76,11 @@ func newEqualityDeleteRangeIndex(entries []equalityDeleteIndexEntry) *equalityDe
 		return nil
 	}
 
+	return &equalityDeleteRangeIndex{entries: entries}
+}
+
+func (idx *equalityDeleteRangeIndex) build() {
+	entries := idx.entries
 	itemsByField := make(map[int][]equalityDeleteRangeItem)
 	fieldsByID := make(map[int]equalityDeleteFieldMetrics)
 	fallback := make([]int, 0)
@@ -104,18 +123,14 @@ func newEqualityDeleteRangeIndex(entries []equalityDeleteIndexEntry) *equalityDe
 		groups = append(groups, newEqualityDeleteRangeGroup(fieldsByID[fieldID], items))
 	}
 
-	if len(groups) == 0 {
-		return nil
-	}
-
 	slices.Sort(fallback)
-
-	return &equalityDeleteRangeIndex{
-		groups:   groups,
-		fallback: fallback,
-	}
+	idx.groups = groups
+	idx.fallback = fallback
 }
 
+// The index may exclude only deletes that equalityDeleteCanContainData would
+// also reject. A ranged field must prove it cannot match null or NaN keys before
+// the tree can use its bounds. Anything uncertain stays on the linear path.
 func equalityDeleteRangeIndexField(
 	fields []equalityDeleteFieldMetrics,
 ) (*equalityDeleteFieldMetrics, bool) {
@@ -131,6 +146,9 @@ func equalityDeleteRangeIndexField(
 			continue
 		}
 
+		// Index one field per delete to keep candidates unique. The first safe
+		// field may be less selective than a later composite-key field; the
+		// candidate limit falls back to linear matching in that case.
 		return field, true
 	}
 
@@ -141,7 +159,7 @@ func newEqualityDeleteRangeGroup(
 	field equalityDeleteFieldMetrics,
 	items []equalityDeleteRangeItem,
 ) equalityDeleteRangeGroup {
-	slices.SortStableFunc(items, func(a, b equalityDeleteRangeItem) int {
+	slices.SortFunc(items, func(a, b equalityDeleteRangeItem) int {
 		if order := equalityDeleteMetricValueCompare(&a.lower, &b.lower); order != 0 {
 			return order
 		}
@@ -152,7 +170,7 @@ func newEqualityDeleteRangeGroup(
 	group := equalityDeleteRangeGroup{
 		field: field,
 		root:  -1,
-		nodes: make([]equalityDeleteRangeNode, 0, len(items)),
+		nodes: make([]equalityDeleteRangeNode, len(items)),
 	}
 	var build func(int, int) int
 	build = func(start, end int) int {
@@ -162,11 +180,12 @@ func newEqualityDeleteRangeGroup(
 
 		middle := start + (end-start)/2
 		item := items[middle]
-		nodeIndex := len(group.nodes)
-		group.nodes = append(group.nodes, equalityDeleteRangeNode{})
+		nodeIndex := middle
 
 		left := build(start, middle)
 		right := build(middle+1, end)
+		// Bound values copy scalars or references to bytes already owned by
+		// entries. Nodes do not clone the string/binary payload again.
 		node := equalityDeleteRangeNode{
 			entryIndex:  item.entryIndex,
 			left:        left,
@@ -200,13 +219,17 @@ func newEqualityDeleteRangeGroup(
 }
 
 func (idx *equalityDeleteRangeIndex) candidates(
-	entries []equalityDeleteIndexEntry,
 	start int,
 	dataSeqNum int64,
 	dataStats *equalityDeleteDataFileStats,
 ) ([]int, bool) {
-	remaining := len(entries) - start
-	// Use the linear path once at least half the applicable entries remain.
+	idx.once.Do(idx.build)
+	if len(idx.groups) == 0 {
+		return nil, false
+	}
+
+	remaining := len(idx.entries) - start
+	// Use the linear path once candidates include at least half the applicable entries.
 	// Stop at that threshold instead of allocating a full candidate list that
 	// will be discarded before the same entries are scanned again.
 	candidateLimit := remaining / 2
@@ -264,6 +287,9 @@ func (group *equalityDeleteRangeGroup) appendNodeCandidates(
 	}
 
 	node := &group.nodes[nodeIndex]
+	// These strict disjoint-range checks must remain a subset of the rejects
+	// in equalityDeleteCanContainData. Equal endpoints still overlap, and the
+	// strict sequence comparison retains only deletes newer than the data.
 	if node.maxSequence <= dataSeqNum ||
 		equalityDeleteMetricValueCompare(&node.maxUpper, &dataBounds.lower) < 0 {
 		return out
