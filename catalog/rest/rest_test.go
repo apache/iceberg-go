@@ -3115,6 +3115,8 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	}
 
 	r.mux.HandleFunc("/v1/namespaces/create-ns/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/create-ns/tables", req.URL.EscapedPath())
+
 		var payload namedPayload
 		if !decodePayload(req, &payload) {
 			return
@@ -3124,6 +3126,8 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	})
 
 	r.mux.HandleFunc("/v1/namespaces/register-ns/register", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/register-ns/register", req.URL.EscapedPath())
+
 		var payload namedPayload
 		if !decodePayload(req, &payload) {
 			return

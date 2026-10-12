@@ -154,6 +154,38 @@ func TestIdentifierPathsRequireNamespaceAndName(t *testing.T) {
 	}
 }
 
+func TestIdentifierPathsRejectDotComponents(t *testing.T) {
+	cat := &Catalog{}
+
+	for _, builder := range []struct {
+		name      string
+		buildPath func(table.Identifier) (identifierPath, error)
+		wantErr   error
+	}{
+		{name: "table", buildPath: cat.tableIdentifierPath, wantErr: catalog.ErrNoSuchTable},
+		{name: "view", buildPath: cat.viewIdentifierPath, wantErr: catalog.ErrNoSuchView},
+		{name: "function", buildPath: cat.functionIdentifierPath, wantErr: catalog.ErrNoSuchFunction},
+	} {
+		t.Run(builder.name, func(t *testing.T) {
+			for _, tt := range []struct {
+				name  string
+				ident table.Identifier
+			}{
+				{name: "dot namespace", ident: table.Identifier{".", "object"}},
+				{name: "double dot namespace", ident: table.Identifier{"..", "object"}},
+				{name: "dot name", ident: table.Identifier{"namespace", "."}},
+				{name: "double dot name", ident: table.Identifier{"namespace", ".."}},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					path, err := builder.buildPath(tt.ident)
+					require.ErrorIs(t, err, builder.wantErr)
+					assert.Equal(t, identifierPath{}, path)
+				})
+			}
+		})
+	}
+}
+
 func TestEncodePathSegment(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1811,6 +1843,47 @@ func TestCheckValidNamespaceRejectsDecodedSeparator(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestLoadNamespacePropertiesPreservesDotSegments(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		namespace table.Identifier
+		wantPath  string
+	}{
+		{name: "dot", namespace: table.Identifier{"."}, wantPath: "/v1/namespaces/%2E"},
+		{name: "double dot", namespace: table.Identifier{".."}, wantPath: "/v1/namespaces/%2E%2E"},
+		{name: "nested dots", namespace: table.Identifier{"..", "."}, wantPath: "/v1/namespaces/%2E%2E%1F%2E"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"defaults": map[string]any{}, "overrides": map[string]any{},
+				}))
+			})
+			mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
+				if !assert.Equal(t, http.MethodGet, r.Method) || !assert.Equal(t, tt.wantPath, r.URL.EscapedPath()) {
+					return
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"namespace":  tt.namespace,
+					"properties": iceberg.Properties{"owner": "data-team"},
+				}))
+			})
+
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, cat.Close()) })
+
+			props, err := cat.LoadNamespaceProperties(context.Background(), tt.namespace)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.Properties{"owner": "data-team"}, props)
 		})
 	}
 }

@@ -1481,12 +1481,16 @@ func (r *Catalog) namespaceToQueryParam(namespace table.Identifier) string {
 	return strings.Join(namespace, r.decodedNamespaceSeparator())
 }
 
+// identifierPath keeps rawName for JSON request bodies separate from
+// encodedNamespace and encodedName for URL paths. The validated table, view, and
+// function path builders return a zero value only alongside a non-nil error.
 type identifierPath struct {
 	encodedNamespace string
 	rawName          string
 	encodedName      string
 }
 
+// newIdentifierPath builds path components from an already validated identifier.
 func (r *Catalog) newIdentifierPath(ident table.Identifier) identifierPath {
 	rawName := catalog.ObjectNameFromIdent(ident)
 
