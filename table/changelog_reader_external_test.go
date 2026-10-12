@@ -426,6 +426,59 @@ func TestIncrementalChangelogReadReplacedDeletionVector(t *testing.T) {
 	require.Equal(t, []int64{3}, changelogIDs(later, table.ChangelogOpDelete))
 }
 
+func TestIncrementalChangelogReadReplacedSharedPuffinDeletionVector(t *testing.T) {
+	ctx := t.Context()
+	tbl, location, pathA, pathB, dvA, dvB := newTableWithSharedPuffinDVs(t)
+	shared := tbl.CurrentSnapshot().SnapshotID
+
+	dvA2 := writeDV(t, location, "dv-a2.puffin", pathA, []int64{0, 1})
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvA2).RemoveDeletes(dvA).Commit(ctx))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	dvB2 := writeDV(t, location, "dv-b2.puffin", pathB, []int64{0, 1})
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvB2).RemoveDeletes(dvB).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	later := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan().FromSnapshotExclusive(shared))
+	require.ElementsMatch(t, []int64{2, 4}, changelogIDs(later, table.ChangelogOpDelete))
+}
+
+func TestIncrementalChangelogReadExpiredParentKeepsPreRangeDelete(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendChangelogRows(t, ctx, newChangelogMORTable(t, 2))
+	tbl = deleteChangelogID(t, ctx, tbl, 1)
+	deletedParent := tbl.CurrentSnapshot().SnapshotID
+
+	replacementSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	replacement, err := array.TableFromJSON(memory.DefaultAllocator, replacementSchema, []string{
+		`[{"id": 4, "data": "d"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(replacement.Release)
+	tbl, err = tbl.Overwrite(ctx, array.NewTableReader(replacement, -1), nil, table.WithOverwriteConcurrency(1))
+	require.NoError(t, err)
+
+	builder, err := table.MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshots([]int64{deletedParent}, false))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	tbl = table.New(tbl.Identifier(), meta, tbl.MetadataLocation(), func(context.Context) (iceio.IO, error) {
+		return iceio.LocalFS{}, nil
+	}, nil)
+
+	got := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan().FromSnapshotExclusive(deletedParent))
+	require.Equal(t, []int64{4}, changelogIDs(got, table.ChangelogOpInsert))
+	require.ElementsMatch(t, []int64{2, 3}, changelogIDs(got, table.ChangelogOpDelete))
+}
+
 func TestIncrementalChangelogReadSkipsReplaceBeforeRowDelete(t *testing.T) {
 	ctx := t.Context()
 	tbl := newChangelogMORTable(t, 3)
