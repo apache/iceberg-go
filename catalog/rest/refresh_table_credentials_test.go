@@ -24,10 +24,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -580,9 +582,9 @@ func tableResponseFSProps(t *testing.T, scheme, metadataLoc string, tableConfig,
 // table-wide merge sites, where config is the whole table config rather than a
 // per-location copy. The table's FileIO serves only the metadata location's
 // account, so a vended adls.token drops what would apply to that account ahead
-// of it or set its lifetime: that account's SAS token and connection string,
-// any shared key, and every inherited credential expiry. Another account's SAS token and
-// connection string never apply to it and are kept.
+// of it: that account's SAS token and connection string, and any shared key.
+// Another account's SAS token and connection string never apply to it and are
+// kept.
 func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 	const (
 		scheme    = "restcreds-table-adls"
@@ -595,15 +597,12 @@ func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 		map[string]string{
 			// The factory would sign this account's requests with another
 			// account's shared key.
-			iceio.ADLSSharedKeyAccountName:              "other",
-			iceio.ADLSSharedKeyAccountKey:               "other-key",
-			iceio.ADLSSasTokenPrefix + host:             "stale-sas",
-			"adls.sas-token-expires-at-ms." + host:      "1000",
-			iceio.ADLSConnectionStringPrefix + "acct":   "stale-conn",
-			iceio.ADLSSasTokenPrefix + otherHost:        "other-sas",
-			"adls.sas-token-expires-at-ms." + otherHost: "1000",
-			iceio.ADLSConnectionStringPrefix + "other":  "other-conn",
-			"expiration-time":                           "1000",
+			iceio.ADLSSharedKeyAccountName:             "other",
+			iceio.ADLSSharedKeyAccountKey:              "other-key",
+			iceio.ADLSSasTokenPrefix + host:            "stale-sas",
+			iceio.ADLSConnectionStringPrefix + "acct":  "stale-conn",
+			iceio.ADLSSasTokenPrefix + otherHost:       "other-sas",
+			iceio.ADLSConnectionStringPrefix + "other": "other-conn",
 		},
 		map[string]string{iceio.ADLSToken: "vended-token"})
 
@@ -617,16 +616,62 @@ func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 		} {
 			assert.NotContains(t, props, k, "%s: credential %q would be selected ahead of the token", name, k)
 		}
-		for _, k := range []string{
-			"adls.sas-token-expires-at-ms." + host,
-			"adls.sas-token-expires-at-ms." + otherHost,
-			"expiration-time",
-		} {
-			assert.NotContains(t, props, k, "%s: inherited expiry %q would set the token's lifetime", name, k)
-		}
 		assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost], name)
 		assert.Equal(t, "other-conn", props[iceio.ADLSConnectionStringPrefix+"other"], name)
 	}
+}
+
+// TestTableResponseExpiryComesFromVendedCredential checks that a table's FileIO
+// renews on the expiry of the credential vended with it, not on an expiry
+// inherited from the table config. The inherited one has already passed, so
+// taking it would refetch credentials on every load.
+func TestTableResponseExpiryComesFromVendedCredential(t *testing.T) {
+	const scheme = "restcreds-table-expiry"
+
+	rec := &ioPropsRecorder{}
+	rec.register(t, scheme)
+
+	metadataLoc := scheme + "://warehouse/database/table/metadata/00000-a.metadata.json"
+	respond := func(w http.ResponseWriter, _ *http.Request) {
+		body := storageCredentialsBody(scheme+"://warehouse/database/table", map[string]string{
+			iceio.S3AccessKeyID:              "vended-key",
+			"s3.session-token-expires-at-ms": strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10),
+		})
+		body["metadata-location"] = metadataLoc
+		body["metadata"] = json.RawMessage(strings.ReplaceAll(
+			exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://"))
+		body["config"] = map[string]string{
+			"gcs.oauth2.token-expires-at": "1000",
+			"expiration-time":             "1000",
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(body))
+	}
+
+	var credsCalls atomic.Int32
+	cat := newCredsTestCatalog(t, credsCatalogOpts{
+		creds: func(w http.ResponseWriter, _ *http.Request) {
+			credsCalls.Add(1)
+			assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+				scheme+"://warehouse/database/table",
+				map[string]string{iceio.S3AccessKeyID: "renewed-key"})))
+		},
+		loadTable: respond,
+		routes: map[string]http.HandlerFunc{
+			"/v1/namespaces/db/tables":   respond,
+			"/v1/namespaces/db/register": respond,
+		},
+	})
+
+	for _, tc := range tableResponseCalls {
+		tbl, err := tc.call(context.Background(), cat)
+		require.NoError(t, err, tc.name)
+		for range 2 {
+			_, err = tbl.FS(context.Background())
+			require.NoError(t, err, tc.name)
+		}
+		assert.Equal(t, "vended-key", rec.lastLoad(t)[iceio.S3AccessKeyID], tc.name)
+	}
+	assert.Zero(t, credsCalls.Load(), "the vended credential is still valid")
 }
 
 // TestTableResponseLayersPartialS3Credential pins the existing behavior at the
