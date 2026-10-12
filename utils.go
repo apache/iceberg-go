@@ -123,8 +123,15 @@ var lzseed = maphash.MakeSeed()
 type literalSet map[any]struct{ orig Literal }
 
 // variantKey hashes the metadata and value bytes that VariantLiteral.Equals
-// compares. The metadata is length-prefixed so values that differ only in where
-// the metadata ends and the value begins hash different input.
+// compares. It must hash exactly what Equals compares: if Equals changes (e.g.
+// to logical equality), this key has to change with it.
+//
+// The metadata is length-prefixed so values that differ only in where the
+// metadata ends and the value begins hash different input. This matters for
+// correctness, not just collision odds: addliteral overwrites on a key match
+// without calling Equals, and metadata may carry trailing bytes, so such pairs
+// are constructible. A genuine 64-bit hash collision still drops the earlier
+// member, the same trade-off as the Binary, Fixed, and Geo cases.
 func variantKey(v VariantLiteral) uint64 {
 	val := variant.Value(v)
 	meta := val.Metadata().Bytes()
