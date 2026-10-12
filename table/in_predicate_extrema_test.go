@@ -48,6 +48,7 @@ func TestCompareBoundLiteralsMatchesGetCmpLiteral(t *testing.T) {
 		{"timestamp", iceberg.NewLiteral(iceberg.Timestamp(1)), iceberg.NewLiteral(iceberg.Timestamp(2))},
 		{"timestamp nanos", iceberg.NewLiteral(iceberg.TimestampNano(1)), iceberg.NewLiteral(iceberg.TimestampNano(2))},
 		{"binary", iceberg.NewLiteral([]byte("a")), iceberg.NewLiteral([]byte("b"))},
+		{"fixed", iceberg.FixedLiteral("a"), iceberg.FixedLiteral("b")},
 		{"string", iceberg.NewLiteral("a"), iceberg.NewLiteral("b")},
 		{"uuid", iceberg.NewLiteral(uuid.Nil), iceberg.NewLiteral(uuid.MustParse("00000000-0000-0000-0000-000000000001"))},
 		{"decimal", iceberg.NewLiteral(decimal(100)), iceberg.NewLiteral(decimal(200))},

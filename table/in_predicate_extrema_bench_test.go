@@ -18,6 +18,7 @@
 package table
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -25,10 +26,7 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-var (
-	manifestInPredicateBenchmarkSink         bool
-	inclusiveMetricsInPredicateBenchmarkSink int
-)
+var manifestInPredicateBenchmarkSink bool
 
 func BenchmarkManifestEvaluatorInPredicate(b *testing.B) {
 	for _, literalCount := range []int{2, 10, 50, 200} {
@@ -122,48 +120,59 @@ func benchmarkManifestIn[T iceberg.LiteralType](b *testing.B, values []T, lower,
 
 func BenchmarkInclusiveMetricsEvalInPredicate(b *testing.B) {
 	for _, literalCount := range []int{10, 50, 200} {
-		values := make([]int32, literalCount)
-		for i := range values {
-			values[i] = int32(i * 2)
-		}
-
-		maxValue := values[len(values)-1]
-		// below-set and above-set measure the extrema short-circuit. overlap and
-		// sparse-gap stay inside the set envelope as regression baselines for the
-		// existing per-member removeBoundCheck path.
-		for _, bounds := range []struct {
-			name      string
-			lower     int32
-			upper     int32
-			wantMatch bool
+		for _, typ := range []struct {
+			name    string
+			typ     iceberg.Type
+			literal func(int) iceberg.Literal
 		}{
-			{name: "below-set", lower: -2, upper: -2},
-			{name: "above-set", lower: maxValue + 2, upper: maxValue + 2},
-			{name: "overlap", lower: values[0], upper: maxValue, wantMatch: true},
-			{name: "sparse-gap", lower: values[literalCount/2] + 1, upper: values[literalCount/2] + 1},
+			{"int32", iceberg.PrimitiveTypes.Int32, func(value int) iceberg.Literal {
+				return iceberg.NewLiteral(int32(value))
+			}},
+			{"string", iceberg.PrimitiveTypes.String, func(value int) iceberg.Literal {
+				// Keep lexical and numeric order identical, including the below-set bound.
+				return iceberg.NewLiteral(fmt.Sprintf("value-%06d", value+1000))
+			}},
+			{"decimal", iceberg.DecimalTypeOf(12, 2), func(value int) iceberg.Literal {
+				return iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(int64(value)), Scale: 2})
+			}},
 		} {
-			b.Run("int32/in="+strconv.Itoa(literalCount)+"/"+bounds.name, func(b *testing.B) {
-				benchmarkInclusiveMetricsIn(b, values, bounds.lower, bounds.upper, literalCount, bounds.wantMatch)
+			b.Run(typ.name+"/in="+strconv.Itoa(literalCount), func(b *testing.B) {
+				values := make([]iceberg.Literal, literalCount)
+				for i := range values {
+					values[i] = typ.literal(i * 2)
+				}
+
+				below := typ.literal(-2)
+				above := typ.literal(literalCount * 2)
+				gap := typ.literal((literalCount/2)*2 + 1)
+				// Disjoint bounds exercise the extrema short-circuit. Overlap,
+				// sparse gaps and missing bounds catch regressions on the fallback path.
+				for _, bounds := range []struct {
+					name         string
+					lower, upper iceberg.Literal
+					wantMatch    bool
+				}{
+					{name: "below-set", lower: below, upper: below},
+					{name: "above-set", lower: above, upper: above},
+					{name: "overlap", lower: values[0], upper: values[len(values)-1], wantMatch: true},
+					{name: "sparse-gap", lower: gap, upper: gap},
+					{name: "missing-bounds", wantMatch: true},
+				} {
+					b.Run(bounds.name, func(b *testing.B) {
+						benchmarkInclusiveMetricsIn(b, typ.typ, values, bounds.lower, bounds.upper, bounds.wantMatch)
+					})
+				}
 			})
 		}
 	}
 }
 
-func benchmarkInclusiveMetricsIn(b *testing.B, values []int32, lower, upper int32, literalCount int, wantMatch bool) {
+func benchmarkInclusiveMetricsIn(b *testing.B, typ iceberg.Type, values []iceberg.Literal, lower, upper iceberg.Literal, wantMatch bool) {
 	b.Helper()
 
-	lowerBytes, err := iceberg.NewLiteral(lower).MarshalBinary()
-	if err != nil {
-		b.Fatal(err)
-	}
-	upperBytes, err := iceberg.NewLiteral(upper).MarshalBinary()
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: typ})
 	eval, err := newInclusiveMetricsEvaluator(
-		schema, iceberg.IsIn(iceberg.Reference("value"), values...), true, true,
+		schema, iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), values), true, true,
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -176,23 +185,32 @@ func benchmarkInclusiveMetricsIn(b *testing.B, values []int32, lower, upper int3
 	if err != nil {
 		b.Fatal(err)
 	}
-	file := builder.
+	builder.
 		ValueCounts(map[int]int64{1: 10}).
 		NullValueCounts(map[int]int64{1: 0}).
-		NaNValueCounts(map[int]int64{1: 0}).
-		LowerBoundValues(map[int][]byte{1: lowerBytes}).
-		UpperBoundValues(map[int][]byte{1: upperBytes}).
-		Build()
+		NaNValueCounts(map[int]int64{1: 0})
+	if lower != nil {
+		encoded, err := lower.MarshalBinary()
+		if err != nil {
+			b.Fatal(err)
+		}
+		builder.LowerBoundValues(map[int][]byte{1: encoded})
+	}
+	if upper != nil {
+		encoded, err := upper.MarshalBinary()
+		if err != nil {
+			b.Fatal(err)
+		}
+		builder.UpperBoundValues(map[int][]byte{1: encoded})
+	}
+	file := builder.Build()
 	files := make([]iceberg.DataFile, 10_000)
 	for i := range files {
 		files[i] = file
 	}
 
 	b.ReportAllocs()
-	b.ReportMetric(float64(len(files)), "files/op")
-	b.ReportMetric(float64(literalCount), "literals/file")
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		matchedFiles := 0
 		for _, f := range files {
 			matched, err := eval(f)
@@ -210,6 +228,7 @@ func benchmarkInclusiveMetricsIn(b *testing.B, values []int32, lower, upper int3
 		if matchedFiles != wantFiles {
 			b.Fatalf("matched %d files, want %d", matchedFiles, wantFiles)
 		}
-		inclusiveMetricsInPredicateBenchmarkSink = matchedFiles
 	}
+	b.ReportMetric(float64(len(files)), "files/op")
+	b.ReportMetric(float64(len(values)), "literals/file")
 }
