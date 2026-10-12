@@ -50,7 +50,7 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 				return nil, err
 			}
 
-			return manifestSet.allManifests(), nil
+			return manifestSet.borrowAllManifests(), nil
 		}
 	}
 

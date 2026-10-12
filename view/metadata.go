@@ -304,7 +304,7 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 // The extractKey function will be called on each item in the slice and assign the
 // item as a value for that key in the resultant map.
 func indexBy[T any, K comparable](s []T, extractKey func(T) K) map[K]T {
-	index := make(map[K]T)
+	index := make(map[K]T, len(s))
 	for _, v := range s {
 		index[extractKey(v)] = v
 	}

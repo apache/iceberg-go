@@ -77,6 +77,18 @@ func (s snapshotManifestSet) dataManifests() []iceberg.ManifestFile {
 	return slices.Clone(s.data)
 }
 
+// borrowAllManifests returns the cache-owned manifest slice without copying.
+// Callers must treat the slice as read-only and must not reorder or replace entries.
+func (s snapshotManifestSet) borrowAllManifests() []iceberg.ManifestFile {
+	return s.all
+}
+
+// borrowDataManifests returns the cache-owned data-manifest slice without copying.
+// Callers must treat the slice as read-only and must not reorder or replace entries.
+func (s snapshotManifestSet) borrowDataManifests() []iceberg.ManifestFile {
+	return s.data
+}
+
 func snapshotManifestSetSize(set snapshotManifestSet) int {
 	return len(set.all)
 }

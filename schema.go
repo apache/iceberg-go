@@ -542,13 +542,15 @@ func (s *Schema) columnPathSegments(id int) []string {
 		if !ok {
 			return nil
 		}
-		segs = append([]string{f.Name}, segs...)
+		segs = append(segs, f.Name)
 		p, ok := parents[cur]
 		if !ok {
 			break
 		}
 		cur = p
 	}
+
+	slices.Reverse(segs)
 
 	return segs
 }

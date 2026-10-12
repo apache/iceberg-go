@@ -18,17 +18,11 @@
 package table
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestDeleteOrphanFilesRejectsNegativeAgeBeforeScan(t *testing.T) {
-	_, err := (Table{}).DeleteOrphanFiles(context.Background(), WithFilesOlderThan(-time.Nanosecond))
-	require.EqualError(t, err, "orphan cleanup age must be non-negative")
-}
 
 func TestExpireSnapshotsRejectsInvalidRetentionBeforeMetadataAccess(t *testing.T) {
 	tests := []struct {
@@ -51,10 +45,6 @@ func TestExpireSnapshotsRejectsInvalidRetentionBeforeMetadataAccess(t *testing.T
 }
 
 func TestRetentionOptionsAcceptZeroAgeAndOneSnapshot(t *testing.T) {
-	cleanupCfg := &orphanCleanupConfig{}
-	WithFilesOlderThan(0)(cleanupCfg)
-	require.NoError(t, cleanupCfg.validationErr)
-
 	expireCfg := &expireSnapshotsCfg{}
 	WithOlderThan(0)(expireCfg)
 	WithRetainLast(1)(expireCfg)

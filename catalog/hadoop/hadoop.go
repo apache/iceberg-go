@@ -45,6 +45,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/google/uuid"
 )
 
@@ -915,7 +916,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// For Hadoop catalog, physical files walk must run BEFORE deleting the table directory root
-	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+	if purgeErr := maintenance.PurgeFiles(ctx, tbl); purgeErr != nil {
 		log.Printf("WARNING: failing to purge some files in Hadoop table %s: %v", identifier, purgeErr)
 	}
 
@@ -927,7 +928,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
-	return nil, errors.New("hadoop catalog: rename table is not supported")
+	return nil, fmt.Errorf("%w: hadoop catalog: rename table is not supported", iceberg.ErrNotImplemented)
 }
 
 func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {

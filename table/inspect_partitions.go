@@ -154,10 +154,11 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 	if err != nil {
 		return nil, err
 	}
-	manifests := manifestSet.allManifests()
+	manifests := manifestSet.borrowAllManifests()
 
-	snapshotTimes := make(map[int64]int64, len(i.tbl.metadata.Snapshots()))
-	for _, snapshot := range i.tbl.metadata.Snapshots() {
+	snapshots := i.tbl.metadata.Snapshots()
+	snapshotTimes := make(map[int64]int64, len(snapshots))
+	for _, snapshot := range snapshots {
 		snapshotTimes[snapshot.SnapshotID] = snapshot.TimestampMs
 	}
 

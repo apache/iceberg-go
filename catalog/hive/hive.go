@@ -32,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
 )
@@ -466,7 +467,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// Physically delete all table files on storage best-effort
-	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+	if purgeErr := maintenance.PurgeFiles(ctx, tbl); purgeErr != nil {
 		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 
@@ -536,6 +537,16 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (_
 	if lockedMetadataLocation != sourceMetadataLocation {
 		return nil, fmt.Errorf("%w: source table %s.%s metadata location changed from %s to %s",
 			table.ErrCommitFailed, fromDB, fromTable, sourceMetadataLocation, lockedMetadataLocation)
+	}
+
+	// Use a raw GetTable instead of CheckTableExists so that non-Iceberg
+	// Hive tables at the destination are also detected as conflicts.
+	_, err = c.client.GetTable(ctx, toDB, toTable)
+	if err == nil {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, toDB, toTable)
+	}
+	if !isNoSuchObjectError(err) {
+		return nil, fmt.Errorf("failed to check destination table %s.%s: %w", toDB, toTable, err)
 	}
 
 	hiveTbl.TableName = toTable

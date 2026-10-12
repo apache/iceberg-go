@@ -89,7 +89,7 @@ func (i InspectTable) currentPositionDeleteManifests(
 		return nil, nil, err
 	}
 
-	return fs, manifestSet.allManifests(), nil
+	return fs, manifestSet.borrowAllManifests(), nil
 }
 
 type positionDeleteRecordAppender struct {

@@ -657,7 +657,7 @@ func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
 }
 
 func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table, postTable *Table) error {
-	if !u.postCommit || postTable == nil || !isGCEnabled(postTable.Properties()) {
+	if !u.postCommit || postTable == nil || !IsGCEnabled(postTable.Properties()) {
 		return nil
 	}
 
