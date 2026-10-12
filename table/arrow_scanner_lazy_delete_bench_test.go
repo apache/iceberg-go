@@ -147,7 +147,7 @@ func BenchmarkLazyPositionDeleteLoading(b *testing.B) {
 		b.ResetTimer()
 		for b.Loop() {
 			loader := newLazyPositionDeleteLoader(fixture.fs, fixture.tasks)
-			bitmap, err := loader.load(b.Context(), 0)
+			bitmap, err := loader.load(b.Context(), 0, fixture.tasks[0].File.FilePath())
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -260,7 +260,7 @@ func BenchmarkPositionDeleteBitmapCachedLoad(b *testing.B) {
 				cached.bitmaps = map[string]*dv.RoaringPositionBitmap{dataPath: bitmap}
 				cached.once.Do(func() {})
 			}
-			if _, err := loader.load(b.Context(), 0); err != nil {
+			if _, err := loader.load(b.Context(), 0, dataPath); err != nil {
 				b.Fatal(err)
 			}
 
@@ -268,7 +268,7 @@ func BenchmarkPositionDeleteBitmapCachedLoad(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				for taskIndex := range tasks {
-					bitmap, err := loader.load(b.Context(), taskIndex)
+					bitmap, err := loader.load(b.Context(), taskIndex, dataPath)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -354,7 +354,7 @@ func BenchmarkPositionDeleteBitmapReuseAcrossSplits(b *testing.B) {
 				for b.Loop() {
 					loader := newLazyPositionDeleteLoader(fs, tasks)
 					for taskIndex := range tasks {
-						bitmap, err := loader.load(b.Context(), taskIndex)
+						bitmap, err := loader.load(b.Context(), taskIndex, dataPath)
 						if err != nil {
 							loader.release()
 							b.Fatal(err)

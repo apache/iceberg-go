@@ -184,7 +184,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 type lazyPositionDeleteLoader struct {
 	fs      iceio.IO
 	files   map[string]*lazyPositionDeleteFile
-	indexes []*lazyPositionDeleteIndex
+	indexes []positionDeleteTaskIndex
 
 	releaseOnce sync.Once
 	released    atomic.Bool
@@ -210,6 +210,11 @@ type lazyPositionDeleteIndex struct {
 	err    error
 }
 
+type positionDeleteTaskIndex struct {
+	targetPath string
+	index      *lazyPositionDeleteIndex
+}
+
 func positionDeleteIndexKey(task FileScanTask) (key, targetPath string, deletePaths []string) {
 	if task.File == nil {
 		return "", "", nil
@@ -217,6 +222,11 @@ func positionDeleteIndexKey(task FileScanTask) (key, targetPath string, deletePa
 	targetPath = task.File.FilePath()
 	if targetPath == "" {
 		return "", "", nil
+	}
+	// An applicable DV contains all earlier position deletes for this file.
+	// Skip superseded files before loading or validating their contents.
+	if len(task.DeletionVectorFiles) > 0 {
+		return "", targetPath, nil
 	}
 
 	for _, deleteFile := range task.DeleteFiles {
@@ -253,7 +263,7 @@ func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositio
 	loader := &lazyPositionDeleteLoader{
 		fs:      fs,
 		files:   make(map[string]*lazyPositionDeleteFile, len(uniqueDeletes)),
-		indexes: make([]*lazyPositionDeleteIndex, len(tasks)),
+		indexes: make([]positionDeleteTaskIndex, len(tasks)),
 	}
 
 	for path, deleteFile := range uniqueDeletes {
@@ -265,6 +275,7 @@ func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositio
 	indexesByKey := make(map[string]*lazyPositionDeleteIndex)
 	for i, task := range tasks {
 		key, targetPath, deletePaths := positionDeleteIndexKey(task)
+		loader.indexes[i].targetPath = targetPath
 		if key == "" {
 			continue
 		}
@@ -276,7 +287,7 @@ func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositio
 			}
 			indexesByKey[key] = index
 		}
-		loader.indexes[i] = index
+		loader.indexes[i].index = index
 	}
 
 	return loader
@@ -346,8 +357,13 @@ func (l *lazyPositionDeleteLoader) buildIndex(
 
 // load uses the ordinal in the task slice passed to newLazyPositionDeleteLoader.
 // Workers preserve that ordinal even when they finish out of order, so this
-// lookup does not rebuild or hash a key for every split.
-func (l *lazyPositionDeleteLoader) load(ctx context.Context, taskIndex int) (*dv.RoaringPositionBitmap, error) {
+// lookup does not rebuild or hash a key for every split. The target path rejects
+// ordinals paired with another data file after reordering or filtering tasks,
+// including ordinals that originally had no position deletes.
+//
+// The returned bitmap is shared and read-only. Callers must not mutate it with
+// Set, Or, or RunLengthEncode; other split tasks may be reading the same bitmap.
+func (l *lazyPositionDeleteLoader) load(ctx context.Context, taskIndex int, targetPath string) (*dv.RoaringPositionBitmap, error) {
 	if l.released.Load() {
 		return nil, errPositionDeleteLoaderReleased
 	}
@@ -356,7 +372,12 @@ func (l *lazyPositionDeleteLoader) load(ctx context.Context, taskIndex int) (*dv
 			iceberg.ErrInvalidArgument, taskIndex, len(l.indexes))
 	}
 
-	index := l.indexes[taskIndex]
+	task := l.indexes[taskIndex]
+	if task.targetPath != targetPath {
+		return nil, fmt.Errorf("%w: position delete task index %d targets %q, got %q",
+			iceberg.ErrInvalidArgument, taskIndex, task.targetPath, targetPath)
+	}
+	index := task.index
 	if index == nil {
 		return nil, nil
 	}
@@ -381,9 +402,9 @@ func (l *lazyPositionDeleteLoader) release() {
 		for _, cached := range l.files {
 			cached.bitmaps = nil
 		}
-		for _, index := range l.indexes {
-			if index != nil {
-				index.bitmap = nil
+		for _, task := range l.indexes {
+			if task.index != nil {
+				task.index.bitmap = nil
 			}
 		}
 	})
@@ -2752,7 +2773,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 						var positionalDeleteBitmap *dv.RoaringPositionBitmap
 						if positionDeleteLoader != nil {
 							var err error
-							positionalDeleteBitmap, err = positionDeleteLoader.load(scanCtx, task.Index)
+							positionalDeleteBitmap, err = positionDeleteLoader.load(scanCtx, task.Index, filePath)
 							if err != nil {
 								sink.fail(task, err)
 								cancel(err)

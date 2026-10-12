@@ -217,31 +217,36 @@ func TestDVScanEndToEnd(t *testing.T) {
 			"first and last positions must be removable")
 	})
 
-	t.Run("DV supersedes position delete bitmap", func(t *testing.T) {
-		fs, tmp, tbl := newDVScanTestEnv(t)
-		dataPath := filepath.Join(tmp, "data-with-both-deletes.parquet")
-		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
-		deletePath := filepath.Join(tmp, "position-deletes.parquet")
-		record := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
-			fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, dataPath))
-		defer record.Release()
-		deleteTable := array.NewTableFromRecords(PositionalDeleteArrowSchema, []arrow.RecordBatch{record})
-		defer deleteTable.Release()
-		deleteFile, err := fs.Create(deletePath)
-		require.NoError(t, err)
-		defer deleteFile.Close()
-		require.NoError(t, pqarrow.WriteTable(deleteTable, deleteFile, 1, nil, pqarrow.DefaultWriterProps()))
+	for _, position := range []string{"0", "-1", "null"} {
+		t.Run("DV supersedes position delete "+position, func(t *testing.T) {
+			fs, tmp, tbl := newDVScanTestEnv(t)
+			dataPath := filepath.Join(tmp, "data-with-both-deletes.parquet")
+			df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
+			deletePath := filepath.Join(tmp, "position-deletes.parquet")
+			fields := PositionalDeleteArrowSchema.Fields()
+			fields[1].Nullable = true
+			deleteSchema := arrow.NewSchema(fields, nil)
+			record := mustLoadRecordBatchFromJSON(deleteSchema,
+				fmt.Sprintf(`[{"file_path":%q,"pos":%s}]`, dataPath, position))
+			defer record.Release()
+			deleteTable := array.NewTableFromRecords(deleteSchema, []arrow.RecordBatch{record})
+			defer deleteTable.Release()
+			deleteFile, err := fs.Create(deletePath)
+			require.NoError(t, err)
+			defer deleteFile.Close()
+			require.NoError(t, pqarrow.WriteTable(deleteTable, deleteFile, 1, nil, pqarrow.DefaultWriterProps()))
 
-		// Hand-built tasks can carry both inputs. Distinct positions make the
-		// DV precedence observable instead of masking a second filtering step.
-		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{3}, dataPath)
-		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
-			File:                df,
-			DeleteFiles:         []iceberg.DataFile{newPosDeleteFile(t, deletePath, 1, 128)},
-			DeletionVectorFiles: []iceberg.DataFile{newDVMockDataFile(puffinPath, dataPath, offset, length, card)},
-		}})
-		assert.Equal(t, []int64{0, 1, 2, 4}, got)
-	})
+			// A DV takes precedence for hand-built tasks too. Superseded
+			// position files must not affect rows or fail validation.
+			puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{3}, dataPath)
+			got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
+				File:                df,
+				DeleteFiles:         []iceberg.DataFile{newPosDeleteFile(t, deletePath, 1, 128)},
+				DeletionVectorFiles: []iceberg.DataFile{newDVMockDataFile(puffinPath, dataPath, offset, length, card)},
+			}})
+			assert.Equal(t, []int64{0, 1, 2, 4}, got)
+		})
+	}
 
 	t.Run("DV deletes all rows", func(t *testing.T) {
 		fs, tmp, tbl := newDVScanTestEnv(t)
