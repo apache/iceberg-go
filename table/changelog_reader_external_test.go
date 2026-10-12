@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -123,6 +124,44 @@ func TestIncrementalChangelogReadLimitCutsABatch(t *testing.T) {
 		{id: 1, op: string(table.ChangelogOpInsert), ordinal: 0},
 		{id: 2, op: string(table.ChangelogOpInsert), ordinal: 0},
 	}, clearChangelogSnapshot(got))
+}
+
+func TestIncrementalChangelogReadReleasesCheckedAllocator(t *testing.T) {
+	tbl := newV3RowLineageTestTable(t)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}, {"id": 3, "data": "c"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+	tbl, err = tbl.Append(t.Context(), array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	read := func(t *testing.T, stopEarly bool) {
+		t.Helper()
+
+		mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		ctx := compute.WithAllocator(t.Context(), mem)
+		defer mem.AssertSize(t, 0)
+
+		_, records, err := tbl.NewIncrementalChangelogScan(
+			table.WithSelectedFields("id"),
+		).ToArrowRecords(ctx)
+		require.NoError(t, err)
+		for rec, err := range records {
+			require.NoError(t, err)
+			rec.Release()
+			if stopEarly {
+				break
+			}
+		}
+	}
+
+	t.Run("full drain", func(t *testing.T) { read(t, false) })
+	t.Run("early break", func(t *testing.T) { read(t, true) })
 }
 
 func TestIncrementalChangelogReadAppliesFileDeletes(t *testing.T) {
