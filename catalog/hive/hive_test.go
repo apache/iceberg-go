@@ -932,6 +932,8 @@ func TestHiveRenameTableDestinationCreatedConcurrently(t *testing.T) {
 	mockClient.On("GetTable", mock.Anything, "target_database", "renamed").
 		Return(nil, errNoSuchObject).Once()
 	mockClient.On("AlterTable", mock.Anything, "test_database", "test_table", mock.Anything).
+		// Verbatim HMS InvalidOperationException text; isAlreadyExistsError matches
+		// on the "already exists" substring, which is what the metastore emits.
 		Return(errors.New("InvalidOperationException: new table target_database.renamed already exists")).Once()
 	mockClient.On("Unlock", mock.Anything, int64(2)).Return(nil).Once()
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})

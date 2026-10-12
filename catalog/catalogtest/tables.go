@@ -261,3 +261,26 @@ func testRenameTableToMissingNamespace(t *testing.T, cfg Config) {
 	require.NoError(t, err)
 	assert.True(t, exists, "source table should still exist after a rejected rename")
 }
+
+// testRenameTableToSelf asserts that renaming a table to its own identifier is
+// rejected and leaves the table in place.
+func testRenameTableToSelf(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, ident := newIdentifiers()
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	created, err := cat.CreateTable(ctx, ident, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
+
+	_, err = cat.RenameTable(ctx, ident, ident)
+	assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+
+	tbl, err := cat.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	assert.Equal(t, created.Metadata().TableUUID(), tbl.Metadata().TableUUID(),
+		"table should be unchanged after a rejected self-rename")
+}

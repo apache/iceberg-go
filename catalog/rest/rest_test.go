@@ -2025,9 +2025,10 @@ func (r *RestCatalogSuite) TestRenameTable404UntypedFallsBackToNoSuchTable() {
 	}
 }
 
-// TestRenameTableNoSuchNamespaceTypeIsStatusGated asserts that only a 404 is
-// refined by error.type: a retryable or auth failure that happens to carry
-// NoSuchNamespaceException must not read as a missing namespace.
+// TestRenameTableNoSuchNamespaceTypeIsStatusGated asserts that the error.type
+// refinement only applies to statuses in the rename status map (404 and 409).
+// An unmapped status carrying NoSuchNamespaceException must not read as a
+// missing namespace.
 func (r *RestCatalogSuite) TestRenameTableNoSuchNamespaceTypeIsStatusGated() {
 	rename := r.renameTableErrors()
 	tests := []struct {
@@ -2046,6 +2047,17 @@ func (r *RestCatalogSuite) TestRenameTableNoSuchNamespaceTypeIsStatusGated() {
 			r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 		})
 	}
+}
+
+// TestRenameTable409WithNamespaceTypeResolvesToNamespace pins the edge where a
+// 409 carries NoSuchNamespaceException. No real server sends this combo, but
+// 409 is in the rename status map, so the type override refines it. The test
+// documents that behavior: if status-aware overrides are added later, this
+// catches the change.
+func (r *RestCatalogSuite) TestRenameTable409WithNamespaceTypeResolvesToNamespace() {
+	err := r.renameTableErrors()(http.StatusConflict, "NoSuchNamespaceException")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrTableAlreadyExists)
 }
 
 func (r *RestCatalogSuite) TestRenameTable204() {
