@@ -31,8 +31,13 @@ import (
 // IncrementalChangelogScan plans data-file and delete-file changes between
 // snapshots. It emits insert tasks for added data files, delete tasks for
 // removed data files, and row-level delete tasks for existing data files
-// affected by delete files added in the range. Replace snapshots are skipped.
+// affected by delete files added in the range. Replace snapshots are not
+// emitted. Delete files they add or remove still apply to later tasks.
 // Remote planning is not supported.
+//
+// Java's changelog scan rejects delete manifests. The delete-aware tasks
+// here, including same-snapshot position deletes and deletion vectors on an
+// added file, are iceberg-go behavior.
 type IncrementalChangelogScan struct {
 	scan           *Scan
 	fromSnapshotID *int64
@@ -196,7 +201,7 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 	manifestsByPath := make(map[string]iceberg.ManifestFile)
 	manifestsBySnapshot := make(map[int64][]iceberg.ManifestFile, len(snapshots))
 	deleteManifestsBySnapshot := make(map[int64][]iceberg.ManifestFile)
-	for _, snapshot := range snapshots {
+	for _, snapshot := range snapshotRange {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -204,18 +209,25 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		if err != nil {
 			return nil, err
 		}
-		manifestsBySnapshot[snapshot.SnapshotID] = manifests
+		replace := snapshot.Summary != nil && snapshot.Summary.Operation == OpReplace
+		if !replace {
+			manifestsBySnapshot[snapshot.SnapshotID] = manifests
+		}
 		for _, manifest := range manifests {
 			switch manifest.ManifestContent() {
 			case iceberg.ManifestContentDeletes:
 				// Only manifests written by this snapshot are new delete-file
 				// changes. Carried-forward delete manifests stay available as
-				// deletes that already applied.
+				// deletes that already applied. Replace snapshots are included
+				// so a rewrite of delete files updates later tasks.
 				if manifest.SnapshotID() == snapshot.SnapshotID {
 					deleteManifestsBySnapshot[snapshot.SnapshotID] = append(
 						deleteManifestsBySnapshot[snapshot.SnapshotID], manifest)
 				}
 			case iceberg.ManifestContentData:
+				if replace {
+					continue
+				}
 				if _, ok := changelogSnapshotIDs[manifest.SnapshotID()]; !ok {
 					continue
 				}
@@ -267,6 +279,7 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		scan:                &planningScan,
 		fs:                  fs,
 		snapshots:           snapshots,
+		timeline:            snapshotRange,
 		manifestsBySnapshot: manifestsBySnapshot,
 		deleteManifests:     deleteManifestsBySnapshot,
 		dataEntries:         dataEntries,
@@ -370,8 +383,10 @@ func (s *IncrementalChangelogScan) toSnapshot() (*Snapshot, error) {
 }
 
 // changelogSnapshots retains every snapshot with a non-empty operation except
-// replace snapshots. Keeping unknown future operations matches Java's
-// incremental changelog scan behavior; only a missing operation is rejected.
+// replace snapshots, which are not emitted as changelog tasks. Delete-file
+// changes from those replace snapshots are still tracked. Keeping unknown
+// future operations matches Java's incremental changelog scan behavior; only
+// a missing operation is rejected.
 func changelogSnapshots(snapshots []Snapshot) ([]Snapshot, error) {
 	result := make([]Snapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
