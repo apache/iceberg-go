@@ -167,22 +167,7 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 		paths = append(paths, entryPath)
 	}
 	sort.Slice(paths, func(i, j int) bool {
-		if paths[i] == root {
-			return true
-		}
-		if paths[j] == root {
-			return false
-		}
-
-		left := strings.Split(strings.TrimPrefix(paths[i], root+"/"), "/")
-		right := strings.Split(strings.TrimPrefix(paths[j], root+"/"), "/")
-		for index := range min(len(left), len(right)) {
-			if left[index] != right[index] {
-				return left[index] < right[index]
-			}
-		}
-
-		return len(left) < len(right)
+		return memWalkPathLess(root, paths[i], paths[j])
 	})
 
 	var skipPrefix string
@@ -214,6 +199,40 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 func memPathInRoot(path, root string) bool {
 	return root == "" || path == root || strings.HasPrefix(path, root+"/")
+}
+
+func memWalkPathLess(root, left, right string) bool {
+	if left == root {
+		return true
+	}
+	if right == root {
+		return false
+	}
+
+	left = strings.TrimPrefix(strings.TrimPrefix(left, root), "/")
+	right = strings.TrimPrefix(strings.TrimPrefix(right, root), "/")
+	for {
+		leftEnd := strings.IndexByte(left, '/')
+		rightEnd := strings.IndexByte(right, '/')
+
+		leftPart, rightPart := left, right
+		if leftEnd >= 0 {
+			leftPart = left[:leftEnd]
+		}
+		if rightEnd >= 0 {
+			rightPart = right[:rightEnd]
+		}
+
+		if leftPart != rightPart {
+			return leftPart < rightPart
+		}
+		if leftEnd < 0 || rightEnd < 0 {
+			return leftEnd < 0 && rightEnd >= 0
+		}
+
+		left = left[leftEnd+1:]
+		right = right[rightEnd+1:]
+	}
 }
 
 type memFile struct {
