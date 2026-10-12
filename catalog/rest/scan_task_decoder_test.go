@@ -237,6 +237,27 @@ func TestDecodeScanTasksKeepsDeleteReferencesEnvelopeLocal(t *testing.T) {
 	assert.Equal(t, "s3://bucket/table/second-delete.parquet", secondTasks[0].DeleteFiles[0].FilePath())
 }
 
+func TestDecodeScanTasksAllowsDeleteReferenceAcrossTasks(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	wire := validScanTasksWire()
+	secondDataFile := *wire.FileScanTasks[0].DataFile
+	secondDataFile.FilePath = "s3://bucket/table/second-data.parquet"
+	wire.FileScanTasks = append(wire.FileScanTasks, RESTFileScanTask{
+		DataFile:             &secondDataFile,
+		DeleteFileReferences: []int{0},
+	})
+
+	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	require.Len(t, tasks[0].DeleteFiles, 1)
+	require.Len(t, tasks[1].DeleteFiles, 1)
+	assert.Equal(t, "s3://bucket/table/delete.parquet", tasks[0].DeleteFiles[0].FilePath())
+	assert.Equal(t, "s3://bucket/table/delete.parquet", tasks[1].DeleteFiles[0].FilePath())
+}
+
 func TestDecodeScanTasksReusesPartitionDecodePlan(t *testing.T) {
 	t.Parallel()
 

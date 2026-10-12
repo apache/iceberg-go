@@ -1060,6 +1060,52 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 		TimestampMs: snapshot2.TimestampMs,
 	}, "expected snapshot to match added snapshot")
 	require.True(t, res.CurrentSnapshot().Equals(snapshot2))
+
+	require.Len(t, builder.snapshotLog, 2, "Build must not prune the builder's own log")
+	again, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, res.(*metadataV2).SnapshotLog, again.(*metadataV2).SnapshotLog)
+}
+
+func TestSnapshotLogAfterMovingMainBackAfterBuild(t *testing.T) {
+	// add A, set main to A, add B, set main to B, build, set main back to A, build.
+	// In the first build main moved from A to B, so A is the intermediate snapshot and
+	// that build logs [B]. Moving main back to A makes B the intermediate one, while
+	// both of A's entries stay, so the second build logs [A, A]. Before the fix, the
+	// first build wrote its pruned [B] back to the builder and the second returned [A].
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	newSnapshot := func(id int64) *Snapshot {
+		return &Snapshot{
+			SnapshotID:   id,
+			TimestampMs:  builder.base.LastUpdatedMillis() + id,
+			ManifestList: fmt.Sprintf("/snap-%d.avro", id),
+			Summary:      &Summary{Operation: OpAppend},
+			SchemaID:     &schemaID,
+		}
+	}
+
+	require.NoError(t, builder.AddSnapshot(newSnapshot(1)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	require.NoError(t, builder.AddSnapshot(newSnapshot(2)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
+	_, err := builder.Build()
+	require.NoError(t, err)
+
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	res, err := builder.Build()
+	require.NoError(t, err)
+
+	ids := make([]int64, 0, 2)
+	for entry := range res.SnapshotLogs() {
+		ids = append(ids, entry.SnapshotID)
+	}
+	require.Equal(t, []int64{1, 1}, ids)
+
+	// Committing the same updates gives the same log.
+	committed, err := UpdateTableMetadata(builder.base, builder.updates, "")
+	require.NoError(t, err)
+	require.Equal(t, slices.Collect(committed.SnapshotLogs()), slices.Collect(res.SnapshotLogs()))
 }
 
 func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
@@ -1104,6 +1150,12 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 		SnapshotID:  snapshot3ID,
 		TimestampMs: baseTimestamp + 3,
 	}}, slices.Collect(rebuilt.SnapshotLogs()))
+
+	// Building again prunes the same entries from the builder's log, which keeps them.
+	again, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.Equal(t, slices.Collect(rebuilt.SnapshotLogs()), slices.Collect(again.SnapshotLogs()))
+	require.Len(t, newBuilder.snapshotLog, 3, "Build must not prune the builder's own log")
 }
 
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
