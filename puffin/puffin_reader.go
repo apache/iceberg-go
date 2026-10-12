@@ -620,8 +620,8 @@ func (r *Reader) ReadAllBlobs() ([]*BlobData, error) {
 		return nil, nil
 	}
 
-	// Sort indexes instead of copying BlobMetadata into a temporary slice.
-	// Results are still stored in footer order.
+	// Keep only indexes in the temporary read-order slice.
+	// Results retain defensive metadata copies in footer order.
 	order := make([]int, len(footer.Blobs))
 	for i := range order {
 		order[i] = i
