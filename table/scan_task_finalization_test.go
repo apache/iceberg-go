@@ -239,6 +239,54 @@ func TestFinalizePlannedTasksUnsplitReusesInput(t *testing.T) {
 	assert.Nil(t, got[0].Residual)
 }
 
+func TestFinalizePlannedTasksManyWorkersCoverEveryTask(t *testing.T) {
+	// A rounded-up chunk size can put the last worker past the input when
+	// there are more workers than tasks per worker and a short remainder.
+	const workers = 300
+	previous := runtime.GOMAXPROCS(workers)
+	defer runtime.GOMAXPROCS(previous)
+
+	schema := simpleSchema()
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://table", iceberg.Properties{ReadSplitTargetSizeKey: "25"})
+	require.NoError(t, err)
+	file := finalizationTestDataFile(t, *iceberg.UnpartitionedSpec,
+		"mem://table/data/unsplit.parquet", nil, 100, nil)
+	splitFile := finalizationTestDataFile(t, *iceberg.UnpartitionedSpec,
+		"mem://table/data/split.parquet", nil, 100, []int64{8, 25, 50, 75})
+	lastFile := finalizationTestDataFile(t, *iceberg.UnpartitionedSpec,
+		"mem://table/data/last.parquet", nil, 100, nil)
+	tasks := make([]FileScanTask, workers*scanTaskFinalizationMinTasksPerWorker+1)
+	firstRowIDs := make([]int64, len(tasks))
+	for i := range tasks {
+		firstRowIDs[i] = int64(i * 100)
+		tasks[i] = FileScanTask{File: file, Length: 100, FirstRowID: &firstRowIDs[i]}
+	}
+	tasks[0].File = splitFile
+	tasks[len(tasks)-1].File = lastFile
+	scan := &Scan{metadata: metadata, rowFilter: iceberg.AlwaysTrue{}, concurrency: workers}
+
+	var acc scanMetricsAccumulator
+	got, err := scan.finalizePlannedTasks(tasks, schema, &acc)
+	require.NoError(t, err)
+	require.Len(t, got, len(tasks)+3)
+	for i := range 4 {
+		assert.Equal(t, splitFile.FilePath(), got[i].File.FilePath())
+		assert.Equal(t, int64(i*25), got[i].Start)
+		assert.Equal(t, int64(25), got[i].Length)
+		assert.Same(t, tasks[0].FirstRowID, got[i].FirstRowID)
+	}
+	for i, task := range got[4 : len(got)-1] {
+		if task.File != file || task.Start != 0 || task.Length != 100 || task.FirstRowID != tasks[i+1].FirstRowID {
+			t.Fatalf("unsplit task %d changed or moved: %+v", i+1, task)
+		}
+	}
+	assert.Equal(t, lastFile.FilePath(), got[len(got)-1].File.FilePath())
+	assert.Same(t, tasks[len(tasks)-1].FirstRowID, got[len(got)-1].FirstRowID)
+	assert.Equal(t, int64(len(tasks)), acc.resultDataFiles)
+	assert.Equal(t, int64(len(tasks)*100), acc.totalFileSize)
+}
+
 // serialFinalizationReference reproduces the pre-parallelization loop. It is
 // deliberately independent of finalizeTaskRange and the worker merge logic.
 func serialFinalizationReference(

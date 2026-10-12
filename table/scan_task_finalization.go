@@ -72,7 +72,6 @@ func (scan *Scan) finalizePlannedTasks(
 	workerCount := min(max(scan.concurrency, 1), runtime.GOMAXPROCS(0),
 		max(1, len(plannedTasks)/scanTaskFinalizationMinTasksPerWorker))
 	results := make([]scanTaskFinalizationResult, workerCount)
-	chunkSize := (len(plannedTasks) + workerCount - 1) / workerCount
 
 	finalizeRange := func(worker, start, end int) {
 		defer func() {
@@ -89,15 +88,22 @@ func (scan *Scan) finalizePlannedTasks(
 		finalizeRange(0, 0, len(plannedTasks))
 	} else {
 		var wg sync.WaitGroup
+		chunkSize, remainder := len(plannedTasks)/workerCount, len(plannedTasks)%workerCount
+		start := 0
 		for worker := range workerCount {
-			start := worker * chunkSize
-			end := min(start+chunkSize, len(plannedTasks))
+			// Distribute the remainder instead of rounding every range up:
+			// even large worker counts must stay within the input slice.
+			end := start + chunkSize
+			if worker < remainder {
+				end++
+			}
 
 			wg.Add(1)
 			go func(worker, start, end int) {
 				defer wg.Done()
 				finalizeRange(worker, start, end)
 			}(worker, start, end)
+			start = end
 		}
 		wg.Wait()
 	}
@@ -113,16 +119,14 @@ func (scan *Scan) finalizePlannedTasks(
 	anySplit := false
 	for i := range results {
 		mergeTaskFinalizationMetrics(acc, &results[i].metrics)
-		if results[i].expanded {
-			anySplit = true
-			totalTasks += len(results[i].tasks)
-		} else {
-			start := i * chunkSize
-			totalTasks += min(start+chunkSize, len(plannedTasks)) - start
-		}
+		anySplit = anySplit || results[i].expanded
+		totalTasks += len(results[i].tasks)
 	}
 	if !anySplit {
 		return plannedTasks, nil
+	}
+	if workerCount == 1 {
+		return results[0].tasks, nil
 	}
 
 	// Workers that split files emit their ranges in task order. Unsplit
@@ -130,13 +134,7 @@ func (scan *Scan) finalizePlannedTasks(
 	// Concatenate once; do not hold an allocation per individual split.
 	finalized := make([]FileScanTask, 0, totalTasks)
 	for i := range results {
-		if results[i].expanded {
-			finalized = append(finalized, results[i].tasks...)
-		} else {
-			start := i * chunkSize
-			end := min(start+chunkSize, len(plannedTasks))
-			finalized = append(finalized, plannedTasks[start:end]...)
-		}
+		finalized = append(finalized, results[i].tasks...)
 	}
 
 	return finalized, nil
@@ -195,6 +193,9 @@ func (scan *Scan) finalizeTaskRange(
 		} else if result.expanded {
 			result.tasks = append(result.tasks, *task)
 		}
+	}
+	if !result.expanded {
+		result.tasks = plannedTasks[start:end]
 	}
 
 	return result
