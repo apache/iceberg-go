@@ -881,6 +881,10 @@ func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]st
 	if err != nil {
 		return nil, err
 	}
+	statsFieldIDs, err := iceberg.ExtractFieldIDs(filter)
+	if err != nil {
+		return nil, err
+	}
 
 	statsFn, err := newParquetRowGroupStatsEvaluator(iceberg.PositionalDeleteSchema, filter, false)
 	if err != nil {
@@ -892,8 +896,9 @@ func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]st
 	}
 
 	return &tblutils.ParquetRowGroupTester{
-		StatsFn:    statsFn,
-		BloomPreds: bloomPreds,
+		StatsFn:       statsFn,
+		StatsFieldIDs: statsFieldIDs,
+		BloomPreds:    bloomPreds,
 	}, nil
 }
 
@@ -1243,6 +1248,9 @@ type arrowScan struct {
 	filterPlanCache   compiledFileFilterPlanCache
 	fileReadPlanCache preparedFileReadPlanCache
 	cacheFileReadPlan bool
+	// taskResidualsBound means every non-nil residual passed to GetRecords was
+	// bound and validated against filterSchema, so rowFilterForTask can skip binding.
+	taskResidualsBound bool
 
 	useLargeTypes bool
 	concurrency   int
@@ -1689,34 +1697,45 @@ func validateBoundFilter(schema *iceberg.Schema, filter iceberg.BooleanExpressio
 	return validationErr
 }
 
-func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
+// bindTaskFilter returns changed=true only when binding an unbound residual
+// produces a new expression. When changed is false, the returned expression is
+// the exact input value, after validating any already-bound predicates.
+func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, bool, error) {
 	if filter == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	state, err := iceberg.VisitExpr(filter, filterBindingVisitor{})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if state.hasBound && state.hasUnbound {
-		return nil, fmt.Errorf("%w: scan task residual mixes bound and unbound predicates", iceberg.ErrInvalidArgument)
+		return nil, false, fmt.Errorf("%w: scan task residual mixes bound and unbound predicates", iceberg.ErrInvalidArgument)
 	}
 	if !state.hasUnbound {
 		if state.hasBound {
 			if err := validateBoundFilter(schema, filter); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 
-		return filter, nil
+		return filter, false, nil
 	}
 
-	return iceberg.BindExpr(schema, filter, caseSensitive)
+	bound, err := iceberg.BindExpr(schema, filter, caseSensitive)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return bound, true, nil
 }
 
 func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpression, error) {
 	if task.Residual == nil {
 		return as.boundRowFilter, nil
+	}
+	if as.taskResidualsBound {
+		return task.Residual, nil
 	}
 
 	filterSchema := as.scanSchema
@@ -1724,7 +1743,9 @@ func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpress
 		filterSchema = as.filterSchema
 	}
 
-	return bindTaskFilter(filterSchema, task.Residual, as.caseSensitive)
+	bound, _, err := bindTaskFilter(filterSchema, task.Residual, as.caseSensitive)
+
+	return bound, err
 }
 
 // fieldIndexByID returns the index of the field carrying fieldID in its Arrow
@@ -1968,6 +1989,7 @@ func (as *arrowScan) processRecordsWithPlans(
 		if plans != nil && plans.pruning != nil {
 			tester = &tblutils.ParquetRowGroupTester{
 				StatsFn:         plans.pruning.statsEvaluator(),
+				StatsFieldIDs:   plans.pruning.statsFieldIDs,
 				BloomPreds:      plans.pruning.bloomPreds,
 				DictionaryPreds: plans.pruning.dictionaryPreds,
 			}
@@ -2004,6 +2026,10 @@ func (as *arrowScan) processRecordsWithPlans(
 			if err != nil {
 				return err
 			}
+			statsFieldIDs, err := iceberg.ExtractFieldIDs(filePruningFilter)
+			if err != nil {
+				return err
+			}
 
 			statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, filePruningFilter, false)
 			if err != nil {
@@ -2022,6 +2048,7 @@ func (as *arrowScan) processRecordsWithPlans(
 
 			tester = &tblutils.ParquetRowGroupTester{
 				StatsFn:         statsFn,
+				StatsFieldIDs:   statsFieldIDs,
 				BloomPreds:      bloomPreds,
 				DictionaryPreds: dictionaryPreds,
 			}

@@ -582,6 +582,10 @@ type Scan struct {
 	// map cannot silently drop it.
 	arrowBatchSize int
 
+	// readRecords is a scan-local reader seam; nil uses (*arrowScan).GetRecords.
+	// Tests can wrap it to observe the task slice handed to the Arrow reader.
+	readRecords func(*arrowScan, context.Context, []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error)
+
 	reporter metrics.Reporter
 }
 
@@ -2121,8 +2125,11 @@ type FileScanTask struct {
 	Start, Length       int64
 	// Residual is the portion of the scan filter that must still be evaluated
 	// for this task. Local and remote planners may simplify the original filter using
-	// file metadata; nil means the caller did not provide a task residual.
-	// ReadTasks applies the scan's original row filter and each task residual.
+	// file metadata; nil means the caller did not provide a task residual. Callers
+	// may supply either a bound or unbound expression; ReadTasks validates bound
+	// residuals and binds unbound residuals against the scan's effective schema.
+	// Residuals that mix bound and unbound predicates are rejected. ReadTasks
+	// applies the scan's original row filter and each task residual.
 	Residual iceberg.BooleanExpression
 
 	// Row lineage (v3): constants used when reading to synthesize _row_id and _last_updated_sequence_number.
@@ -2155,6 +2162,37 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 	return scan.ReadTasks(ctx, tasks)
 }
 
+// bindReadTasksResiduals keeps the caller's task slice untouched. If every
+// residual is nil or already bound, the returned top-level slice aliases tasks.
+// Otherwise it shallow-clones once, on the first residual that needs binding.
+// Nested slices remain shared in either case.
+func bindReadTasksResiduals(
+	schema *iceberg.Schema, tasks []FileScanTask, caseSensitive bool,
+) ([]FileScanTask, error) {
+	readTasks := tasks
+	clonedTasks := false
+	for i := range tasks {
+		if tasks[i].Residual == nil {
+			continue
+		}
+
+		boundResidual, changed, err := bindTaskFilter(schema, tasks[i].Residual, caseSensitive)
+		if err != nil {
+			return nil, fmt.Errorf("bind residual for task %d: %w", i, err)
+		}
+		if !changed {
+			continue
+		}
+		if !clonedTasks {
+			readTasks = slices.Clone(tasks)
+			clonedTasks = true
+		}
+		readTasks[i].Residual = boundResidual
+	}
+
+	return readTasks, nil
+}
+
 // ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
 // scan's projection, per-task residual filters, and delete handling. This is useful
 // when the caller has already planned or selected specific tasks to read.
@@ -2166,6 +2204,13 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // read errors are delivered through the iterator when a task referencing that file is
 // reached; if no such task is processed, the file is not read and its error is not
 // returned. The returned iterator is single-use.
+//
+// On success, callers must not modify tasks or its elements until
+// the range over the returned iterator has finished, including an early break.
+// If the iterator is never ranged over, callers must ensure it will not be used
+// before modifying tasks. ReadTasks retains the caller's backing array when no
+// residual needs binding (each is nil or already bound). Any clone is shallow,
+// so nested slices (for example DeleteFiles) remain shared with the caller.
 //
 // With [WithMaxConcurrency] above one, tasks are decoded in parallel and the
 // batches are returned in task order. Each worker holds the decoded batches of
@@ -2206,19 +2251,10 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	}
 
 	// Bind task residuals against the schema selected by this scan, which may
-	// be an older snapshot schema rather than the table's current schema. Keep
-	// the caller's task slice untouched because the same plan may be reused.
-	readTasks := slices.Clone(tasks)
-	for i := range readTasks {
-		if readTasks[i].Residual == nil {
-			continue
-		}
-
-		readTasks[i].Residual, err = bindTaskFilter(effectiveSchema,
-			readTasks[i].Residual, scan.caseSensitive)
-		if err != nil {
-			return nil, nil, fmt.Errorf("bind residual for task %d: %w", i, err)
-		}
+	// be an older snapshot schema rather than the table's current schema.
+	readTasks, err := bindReadTasksResiduals(effectiveSchema, tasks, scan.caseSensitive)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// A plan-scoped FileIO (from remote planning) takes precedence over the
@@ -2239,19 +2275,24 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		return nil, nil, err
 	}
 
-	outSchema, records, err := (&arrowScan{
-		metadata:        scan.metadata,
-		fs:              fs,
-		scanSchema:      effectiveSchema,
-		projectedSchema: schema,
-		boundRowFilter:  boundFilter,
-		filterSchema:    effectiveSchema,
-		caseSensitive:   scan.caseSensitive,
-		rowLimit:        scan.limit,
-		options:         scan.options,
-		concurrency:     scan.concurrency,
-		arrowBatchSize:  scan.arrowBatchSize,
-	}).GetRecords(ctx, readTasks)
+	readRecords := scan.readRecords
+	if readRecords == nil {
+		readRecords = (*arrowScan).GetRecords
+	}
+	outSchema, records, err := readRecords(&arrowScan{
+		metadata:           scan.metadata,
+		fs:                 fs,
+		scanSchema:         effectiveSchema,
+		projectedSchema:    schema,
+		boundRowFilter:     boundFilter,
+		filterSchema:       effectiveSchema,
+		caseSensitive:      scan.caseSensitive,
+		taskResidualsBound: true,
+		rowLimit:           scan.limit,
+		options:            scan.options,
+		concurrency:        scan.concurrency,
+		arrowBatchSize:     scan.arrowBatchSize,
+	}, ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so release here.
 		if releasePlanIO != nil {
