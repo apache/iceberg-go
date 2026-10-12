@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -862,6 +863,249 @@ func TestProcessEqualityDeletesReturnsOriginalBatchWhenNoRowsMatch(t *testing.T)
 	assert.Same(t, record, result)
 	assert.Equal(t, int64(2), result.NumRows())
 	result.Release()
+}
+
+func TestProcessEqualityDeletesSingleInt64MatchesGeneric(t *testing.T) {
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true,
+	}}, nil)
+	values := []int64{math.MinInt64, math.MaxInt64, -1, 0, 1, 7, 0, 42}
+	deleteValues := []int64{math.MinInt64, math.MaxInt64, -1, 0}
+	valid := []bool{true, true, true, false, true, true, false, true}
+
+	for _, tt := range []struct {
+		name      string
+		valid     []bool
+		deletes   []int64
+		hasNull   bool
+		wantRows  int64
+		wantNulls int
+	}{
+		{name: "integer extremes", deletes: deleteValues, wantRows: 3},
+		{name: "nulls retained", valid: valid, deletes: deleteValues, wantRows: 5, wantNulls: 2},
+		{name: "nulls deleted", valid: valid, deletes: deleteValues, hasNull: true, wantRows: 3},
+		{name: "no matches", valid: valid, deletes: []int64{99}, wantRows: 8, wantNulls: 2},
+		{name: "empty set", valid: valid, wantRows: 8, wantNulls: 2},
+	} {
+		for _, offset := range []int{0, 3, 9} {
+			t.Run(fmt.Sprintf("%s/offset=%d", tt.name, offset), func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+				ctx := compute.WithAllocator(t.Context(), mem)
+
+				builder := array.NewInt64Builder(mem)
+				builder.AppendValues(make([]int64, offset), nil)
+				builder.AppendValues(values, tt.valid)
+				full := builder.NewArray()
+				builder.Release()
+				sliced := array.NewSlice(full, int64(offset), int64(offset+len(values)))
+				full.Release()
+				record := array.NewRecordBatch(schema, []arrow.Array{sliced}, int64(len(values)))
+				sliced.Release()
+				defer record.Release()
+
+				deleteSet := int64EqualityDeleteSet(tt.deletes...)
+				if tt.hasNull {
+					deleteSet.keys[string([]byte{0})] = struct{}{}
+				}
+				genericSet := &equalityDeleteSet{
+					keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs, colNames: deleteSet.colNames,
+				}
+				// Disable only the optional index, keeping the same schema and keys.
+				genericSet.singleInt64Once.Do(func() {})
+				generic, err := processEqualityDeletesColumnarForFile(ctx,
+					[]*equalityDeleteSet{genericSet}, fileSchema, "data.parquet")
+				require.NoError(t, err)
+				require.Nil(t, genericSet.singleInt64)
+				record.Retain()
+				want, err := generic(record)
+				require.NoError(t, err)
+				defer want.Release()
+
+				fast, err := processEqualityDeletesColumnarForFile(ctx,
+					[]*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")
+				require.NoError(t, err)
+				require.NotNil(t, deleteSet.singleInt64, "the typed path must be exercised")
+				record.Retain()
+				got, err := fast(record)
+				require.NoError(t, err)
+				defer got.Release()
+
+				assert.True(t, array.RecordEqual(want, got), "generic: %s; fast: %s", want, got)
+				assert.Equal(t, tt.wantRows, got.NumRows())
+				assert.Equal(t, tt.wantNulls, got.Column(0).NullN())
+				if tt.wantRows == record.NumRows() {
+					assert.Same(t, record, want)
+					assert.Same(t, record, got)
+				}
+			})
+		}
+	}
+}
+
+func TestProcessEqualityDeletesCombinesFastAndGenericSets(t *testing.T) {
+	for _, nullable := range []bool{false, true} {
+		for _, genericFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("nullable=%t/generic_first=%t", nullable, genericFirst), func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+				ctx := compute.WithAllocator(t.Context(), mem)
+
+				schema := arrow.NewSchema([]arrow.Field{
+					{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+					{Name: "category", Type: arrow.BinaryTypes.String},
+				}, nil)
+				builder := array.NewRecordBuilder(mem, schema)
+				ids := builder.Field(0).(*array.Int64Builder)
+				ids.AppendValues([]int64{1, 2, 3, 4, 5, 6}, nil)
+				if nullable {
+					ids.AppendNull()
+				} else {
+					ids.Append(0)
+				}
+				ids.Append(7)
+				builder.Field(1).(*array.StringBuilder).AppendValues(
+					[]string{"keep", "drop", "drop", "keep", "keep", "drop", "keep", "keep"}, nil)
+				record := builder.NewRecordBatch()
+				builder.Release()
+				defer record.Release()
+
+				fastSet := int64EqualityDeleteSet(1, 2, 5, 0)
+				fastSet.keys[string([]byte{0})] = struct{}{}
+				var key bytes.Buffer
+				encodeArrowValue(&key, record.Column(1), 1)
+				genericSet := &equalityDeleteSet{
+					keys: set[string]{key.String(): {}}, fieldIDs: []int{2}, colNames: []string{"category"},
+				}
+				deleteSets := []*equalityDeleteSet{fastSet, genericSet}
+				if genericFirst {
+					deleteSets[0], deleteSets[1] = deleteSets[1], deleteSets[0]
+				}
+				fileSchema := iceberg.NewSchema(0,
+					iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+					iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String},
+				)
+				process, err := processEqualityDeletesColumnarForFile(ctx, deleteSets, fileSchema, "data.parquet")
+				require.NoError(t, err)
+				require.NotNil(t, fastSet.singleInt64)
+				require.Nil(t, genericSet.singleInt64)
+
+				record.Retain()
+				result, err := process(record)
+				require.NoError(t, err)
+				defer result.Release()
+				require.Equal(t, int64(2), result.NumRows())
+				assert.Equal(t, []int64{4, 7}, result.Column(0).(*array.Int64).Int64Values())
+			})
+		}
+	}
+}
+
+func TestProcessEqualityDeletesSingleInt64FallsBackForUnexpectedKeys(t *testing.T) {
+	for _, key := range []string{"", "\x01\x00", "\x02\x00\x00\x00\x00\x00\x00\x00\x00"} {
+		t.Run(fmt.Sprintf("key=%x", key), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			builder := array.NewInt64Builder(mem)
+			builder.AppendValues([]int64{math.MinInt64, -1, 42}, nil)
+			values := builder.NewArray()
+			builder.Release()
+			schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+			record := array.NewRecordBatch(schema, []arrow.Array{values}, 3)
+			values.Release()
+			defer record.Release()
+
+			deleteSet := int64EqualityDeleteSet(math.MinInt64, -1)
+			deleteSet.keys[key] = struct{}{}
+			fileSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+			)
+			process, err := processEqualityDeletesColumnarForFile(ctx,
+				[]*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")
+			require.NoError(t, err)
+			require.Nil(t, deleteSet.singleInt64, "unexpected key formats must use the generic path")
+			record.Retain()
+			result, err := process(record)
+			require.NoError(t, err)
+			defer result.Release()
+			assert.Equal(t, []int64{42}, result.Column(0).(*array.Int64).Int64Values())
+		})
+	}
+}
+
+func TestProcessEqualityDeletesReleasesMaskAfterLaterSetError(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	builder := array.NewInt64Builder(mem)
+	builder.AppendValues([]int64{1, 2}, nil)
+	values := builder.NewArray()
+	builder.Release()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	record := array.NewRecordBatch(schema, []arrow.Array{values}, 2)
+	values.Release()
+	defer record.Release()
+
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "missing", Type: iceberg.PrimitiveTypes.String},
+	)
+	process, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{
+		int64EqualityDeleteSet(1),
+		{fieldIDs: []int{2}, colNames: []string{"missing"}},
+	}, fileSchema, "data.parquet")
+	require.NoError(t, err)
+
+	record.Retain()
+	result, err := process(record)
+	require.ErrorContains(t, err, "equality field ID 2 (missing) not found in data.parquet")
+	assert.Nil(t, result)
+}
+
+func TestProcessEqualityDeletesNestedInt64DoesNotBuildUnusedIndex(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	builder := array.NewInt64Builder(mem)
+	builder.AppendValues([]int64{123, 456, 789}, nil)
+	child := builder.NewArray()
+	builder.Release()
+	defer child.Release()
+	validity := memory.NewBufferBytes([]byte{0x06})
+	defer validity.Release()
+	parent, err := array.NewStructArrayWithNulls(
+		[]arrow.Array{child}, []string{"id"}, validity, 1, 0)
+	require.NoError(t, err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "person", Type: parent.DataType(), Nullable: true,
+	}}, nil)
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{parent}, 3)
+	parent.Release()
+
+	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 2, Name: "person", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		}},
+	})
+	deleteSet := int64EqualityDeleteSet(456)
+	deleteSet.colNames[0] = "person.id"
+	deleteSet.keys[string([]byte{0})] = struct{}{}
+	process, err := processEqualityDeletesColumnarForFile(ctx,
+		[]*equalityDeleteSet{deleteSet}, fileSchema, "nested.parquet")
+	require.NoError(t, err)
+	assert.Nil(t, deleteSet.singleInt64, "nested fields must not allocate an unused typed index")
+
+	result, err := process(record)
+	require.NoError(t, err)
+	defer result.Release()
+	require.Equal(t, int64(1), result.NumRows())
+	assert.Equal(t, int64(789), result.Column(0).(*array.Struct).Field(0).(*array.Int64).Value(0))
 }
 
 func int64EqualityDeleteSet(values ...int64) *equalityDeleteSet {

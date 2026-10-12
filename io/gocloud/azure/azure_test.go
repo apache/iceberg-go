@@ -80,7 +80,7 @@ func TestCreateAzureBucketDefaultCredentialCalled(t *testing.T) {
 		},
 	}
 
-	bucket, err := createAzureBucketWithCredentialFactories(ctx, parsedURL, nil, credentialFactories)
+	bucket, err := createAzureBucketWithOptions(ctx, parsedURL, nil, credentialFactories, nil)
 
 	require.NoError(t, err)
 	assert.NotNil(t, bucket)
@@ -160,7 +160,7 @@ func TestCreateAzureBucketManagedIdentityCredentialCalled(t *testing.T) {
 				},
 			}
 
-			bucket, err := createAzureBucketWithCredentialFactories(ctx, parsedURL, test.props, credentialFactories)
+			bucket, err := createAzureBucketWithOptions(ctx, parsedURL, test.props, credentialFactories, nil)
 
 			require.NoError(t, err)
 			assert.NotNil(t, bucket)

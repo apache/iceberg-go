@@ -742,8 +742,12 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			val := v.(int32)
 			width := int32(t.Width)
+			remainder := val % width
+			if remainder < 0 {
+				remainder += width
+			}
 
-			return val - (((val % width) + width) % width)
+			return val - remainder
 		}, nil
 	case Int64Type:
 		return func(v any) any {
@@ -753,8 +757,12 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			val := v.(int64)
 			width := int64(t.Width)
+			remainder := val % width
+			if remainder < 0 {
+				remainder += width
+			}
 
-			return val - (((val % width) + width) % width)
+			return val - remainder
 		}, nil
 	case StringType:
 		return func(v any) any {
@@ -784,9 +792,8 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			val := v.(Decimal)
 			unscaled := val.Val.BigInt()
-			// unscaled - (((unscaled % width) + width) % width)
+			// big.Int.Mod already gives a non-negative remainder for positive widths.
 			applied := (&big.Int{}).Mod(unscaled, bigWidth)
-			applied.Add(applied, bigWidth).Mod(applied, bigWidth)
 			val.Val = decimal128.FromBigInt(unscaled.Sub(unscaled, applied))
 
 			return val

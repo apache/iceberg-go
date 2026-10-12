@@ -421,3 +421,156 @@ func TestUpdateNameMapping(t *testing.T) {
 		assert.Equal(t, expected, result)
 	})
 }
+
+func TestUpdateNameMappingReassignedAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		names     []string
+		remaining []string
+		anonymous bool
+		emptyName bool
+	}{
+		{name: "leading", names: []string{"taken", "old", "historical"}, remaining: []string{"old", "historical"}},
+		{name: "middle", names: []string{"old", "taken", "historical"}, remaining: []string{"old", "historical"}},
+		{name: "trailing", names: []string{"old", "historical", "taken"}, remaining: []string{"old", "historical"}},
+		{name: "duplicates and empty alias", names: []string{"taken", "old", "taken", "old", ""}, remaining: []string{"old", "old", ""}},
+		{name: "all removed", names: []string{"taken", "taken"}},
+		{name: "nil names"},
+		{name: "empty names", names: []string{}},
+		{name: "anonymous", names: []string{"taken", "anonymous"}, remaining: []string{"anonymous"}, anonymous: true},
+		{name: "anonymous removed", names: []string{"taken"}, anonymous: true},
+		{name: "empty alias assigned", names: []string{"old", "", "", "last"}, remaining: []string{"old", "last"}, emptyName: true},
+		{name: "anonymous empty alias removed", names: []string{""}, anonymous: true, emptyName: true},
+	}
+	for _, tt := range tests {
+		for _, operation := range []string{"rename", "add"} {
+			t.Run(tt.name+"/"+operation, func(t *testing.T) {
+				t.Parallel()
+
+				backing := make([]string, len(tt.names)+1)
+				copy(backing, tt.names)
+				backing[len(tt.names)] = "spare"
+				names := backing[:len(tt.names)]
+				if tt.names == nil {
+					names = nil
+				}
+				fieldID := new(1)
+				if tt.anonymous {
+					fieldID = nil
+				}
+				original := iceberg.NameMapping{
+					{FieldID: fieldID, Names: names, Fields: []iceberg.MappedField{{FieldID: new(4), Names: []string{"child"}}}},
+					{FieldID: new(2), Names: []string{"other"}},
+				}
+				before, err := json.Marshal(original)
+				require.NoError(t, err)
+				var updates map[int]iceberg.NestedField
+				var adds map[int][]iceberg.NestedField
+				assignedName := "taken"
+				if tt.emptyName {
+					assignedName = ""
+				}
+				if operation == "rename" {
+					updates = map[int]iceberg.NestedField{2: {ID: 2, Name: assignedName}}
+				} else {
+					adds = map[int][]iceberg.NestedField{-1: {{ID: 3, Name: assignedName, Type: iceberg.PrimitiveTypes.Int32}}}
+				}
+
+				var expected iceberg.NameMapping
+				if len(tt.remaining) > 0 {
+					expected = append(expected, iceberg.MappedField{
+						FieldID: fieldID,
+						Names:   tt.remaining,
+						Fields:  []iceberg.MappedField{{FieldID: new(4), Names: []string{"child"}}},
+					})
+				}
+				expected = append(expected, iceberg.MappedField{FieldID: new(2), Names: []string{"other"}})
+				if operation == "rename" {
+					expected[len(expected)-1].Names = []string{"other", assignedName}
+				} else {
+					expected = append(expected, iceberg.MappedField{FieldID: new(3), Names: []string{assignedName}})
+				}
+
+				result, err := iceberg.UpdateNameMapping(original, updates, adds)
+				require.NoError(t, err)
+				assert.Equal(t, expected, result)
+				assert.Equal(t, "spare", backing[len(tt.names)])
+				again, err := iceberg.UpdateNameMapping(original, updates, adds)
+				require.NoError(t, err)
+				assert.Equal(t, expected, again)
+
+				for i := range result {
+					for _, name := range result[i].Names[len(result[i].Names):cap(result[i].Names)] {
+						assert.Empty(t, name)
+					}
+					if result[i].FieldID != nil {
+						*result[i].FieldID = 99
+					}
+					result[i].Names[0] = "changed"
+					if len(result[i].Fields) > 0 {
+						*result[i].Fields[0].FieldID = 98
+						result[i].Fields[0].Names[0] = "changed-child"
+					}
+				}
+				after, err := json.Marshal(original)
+				require.NoError(t, err)
+				assert.Equal(t, before, after)
+				assert.Equal(t, expected, again)
+			})
+		}
+	}
+}
+
+func TestUpdateNameMappingNestedReassignments(t *testing.T) {
+	t.Parallel()
+
+	original := iceberg.NameMapping{{
+		FieldID: new(10),
+		Names:   []string{"parent"},
+		Fields: []iceberg.MappedField{
+			{FieldID: new(1), Names: []string{"first", "taken", "keep", "taken", "added", "last"}},
+			{FieldID: new(2), Names: []string{"other"}},
+		},
+	}}
+	before, err := json.Marshal(original)
+	require.NoError(t, err)
+	result, err := iceberg.UpdateNameMapping(original,
+		map[int]iceberg.NestedField{2: {ID: 2, Name: "taken"}},
+		map[int][]iceberg.NestedField{10: {{ID: 3, Name: "added", Type: iceberg.PrimitiveTypes.String}}},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.NameMapping{{
+		FieldID: new(10),
+		Names:   []string{"parent"},
+		Fields: []iceberg.MappedField{
+			{FieldID: new(1), Names: []string{"first", "keep", "last"}},
+			{FieldID: new(2), Names: []string{"other", "taken"}},
+			{FieldID: new(3), Names: []string{"added"}},
+		},
+	}}, result)
+	result[0].Names[0] = "changed-parent"
+	result[0].Fields[0].Names[0] = "changed-child"
+	*result[0].Fields[0].FieldID = 99
+	after, err := json.Marshal(original)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}
+
+func TestUpdateNameMappingKeepsAliasesAssignedToSameField(t *testing.T) {
+	t.Parallel()
+
+	original := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"old", "taken", "taken", "old"}},
+		{FieldID: new(2), Names: []string{"taken", "other"}},
+	}
+	result, err := iceberg.UpdateNameMapping(original, map[int]iceberg.NestedField{1: {ID: 1, Name: "taken"}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"old", "taken", "taken", "old"}},
+		{FieldID: new(2), Names: []string{"other"}},
+	}, result)
+	assert.Equal(t, []string{"old", "taken", "taken", "old"}, original[0].Names)
+	assert.Equal(t, []string{"taken", "other"}, original[1].Names)
+}
