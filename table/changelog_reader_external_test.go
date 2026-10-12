@@ -19,7 +19,9 @@ package table_test
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"os"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -96,6 +98,76 @@ func TestIncrementalChangelogReadHonorsProjectionFilterAndLimit(t *testing.T) {
 	}, clearChangelogSnapshot(got))
 }
 
+func TestIncrementalChangelogReadLimitCutsABatch(t *testing.T) {
+	ctx := t.Context()
+	tbl := newV3RowLineageTestTable(t)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}, {"id": 3, "data": "c"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	_, records, err := tbl.NewIncrementalChangelogScan(
+		table.WithSelectedFields("id"),
+		table.WithLimit(2),
+	).ToArrowRecords(ctx)
+	require.NoError(t, err)
+	got := collectChangelogRows(t, records)
+	require.Equal(t, []changelogRow{
+		{id: 1, op: string(table.ChangelogOpInsert), ordinal: 0},
+		{id: 2, op: string(table.ChangelogOpInsert), ordinal: 0},
+	}, clearChangelogSnapshot(got))
+}
+
+func TestIncrementalChangelogReadAppliesFileDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := newV2RowLineageTestTable(t)
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, true, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/data-001.parquet"
+	writeParquetFile(t, dataPath, arrowSchema, `[
+		{"id": 1, "data": "a"},
+		{"id": 2, "data": "b"},
+		{"id": 3, "data": "c"}
+	]`)
+	posPath := tbl.Location() + "/data/pos-del.parquet"
+	writeParquetFile(t, posPath, table.PositionalDeleteArrowSchema, fmt.Sprintf(`[{"file_path": %q, "pos": 1}]`, dataPath))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).
+		AddRows(changelogDataFile(t, dataPath, 3)).
+		AddDeletes(changelogPosDeleteFile(t, posPath)).
+		Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	replacementSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	replacement, err := array.TableFromJSON(memory.DefaultAllocator, replacementSchema, []string{
+		`[{"id": 4, "data": "d"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(replacement.Release)
+	tbl, err = tbl.Overwrite(ctx, array.NewTableReader(replacement, -1), nil, table.WithOverwriteConcurrency(1))
+	require.NoError(t, err)
+
+	_, records, err := tbl.NewIncrementalChangelogScan().ToArrowRecords(ctx)
+	require.NoError(t, err)
+	got := collectChangelogRows(t, records)
+	require.Equal(t, []int64{1, 3}, changelogIDs(got, table.ChangelogOpInsert, 0))
+	require.Equal(t, []int64{1, 3}, changelogIDs(got, table.ChangelogOpDelete, 1))
+	require.Equal(t, []int64{4}, changelogIDs(got, table.ChangelogOpInsert, 1))
+}
+
 func changelogOverwriteTable(t *testing.T, ctx context.Context) *table.Table {
 	t.Helper()
 
@@ -156,7 +228,7 @@ func changelogRowsFromBatch(rec arrow.RecordBatch) []changelogRow {
 		opIdx = 2
 	}
 	ops := rec.Column(opIdx).(*array.String)
-	ordinals := rec.Column(opIdx + 1).(*array.Int64)
+	ordinals := rec.Column(opIdx + 1).(*array.Int32)
 	snapshots := rec.Column(opIdx + 2).(*array.Int64)
 
 	rows := make([]changelogRow, 0, rec.NumRows())
@@ -164,7 +236,7 @@ func changelogRowsFromBatch(rec arrow.RecordBatch) []changelogRow {
 		row := changelogRow{
 			id:       ids.Value(i),
 			op:       ops.Value(i),
-			ordinal:  ordinals.Value(i),
+			ordinal:  int64(ordinals.Value(i)),
 			snapshot: snapshots.Value(i),
 		}
 		if data != nil && !data.IsNull(i) {
@@ -193,4 +265,41 @@ func clearChangelogSnapshot(rows []changelogRow) []changelogRow {
 	}
 
 	return out
+}
+
+func changelogIDs(rows []changelogRow, op table.ChangelogOperation, ordinal int64) []int64 {
+	var ids []int64
+	for _, row := range rows {
+		if row.op == string(op) && row.ordinal == ordinal {
+			ids = append(ids, row.id)
+		}
+	}
+
+	return ids
+}
+
+func changelogDataFile(t *testing.T, path string, records int64) iceberg.DataFile {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	b, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, nil, nil, nil, records, info.Size())
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func changelogPosDeleteFile(t *testing.T, path string) iceberg.DataFile {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	b, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		path, iceberg.ParquetFile, nil, nil, nil, 1, info.Size())
+	require.NoError(t, err)
+
+	return b.Build()
 }

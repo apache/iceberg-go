@@ -33,20 +33,25 @@ import (
 )
 
 const (
-	// ChangelogChangeTypeColumn is the changelog operation: INSERT, DELETE,
-	// UPDATE_BEFORE, or UPDATE_AFTER.
+	// ChangelogChangeTypeColumn is INSERT or DELETE. A copy-on-write overwrite
+	// emits both for rows that did not change. UPDATE_BEFORE and UPDATE_AFTER
+	// are not produced.
 	ChangelogChangeTypeColumn = "_change_type"
 	// ChangelogChangeOrdinalColumn is the zero-based ordinal of the snapshot
-	// that produced the change, shared by every row from that snapshot.
+	// that produced the change, shared by every row from that snapshot. The
+	// Arrow type is int32, matching Java MetadataColumns.CHANGE_ORDINAL.
 	ChangelogChangeOrdinalColumn = "_change_ordinal"
 	// ChangelogCommitSnapshotIDColumn is the snapshot ID that committed the change.
 	ChangelogCommitSnapshotIDColumn = "_commit_snapshot_id"
 )
 
-// ToArrowRecords plans the changelog and reads it. Added and removed data
-// files are read with the deletes already stored on their scan task. A plan
-// that includes a row-level delete returns an error instead of dropping those
-// rows.
+// ToArrowRecords plans the changelog and reads it. The result is a raw
+// file-level changelog: a copy-on-write overwrite emits a DELETE and an
+// INSERT for every row in the rewritten files, including rows that did not
+// change, and UPDATE_BEFORE and UPDATE_AFTER are not produced. Added and
+// removed data files are read with the deletes already stored on their scan
+// task. A plan that includes a row-level delete returns an error instead of
+// dropping those rows.
 func (s *IncrementalChangelogScan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	tasks, err := s.PlanFiles(ctx)
 	if err != nil {
@@ -58,12 +63,14 @@ func (s *IncrementalChangelogScan) ToArrowRecords(ctx context.Context) (*arrow.S
 
 // Read materializes changelog rows for tasks. Each batch has the scan
 // projection followed by _change_type, _change_ordinal, and
-// _commit_snapshot_id. AddedRowsScanTask and DeletedDataFileScanTask are read
-// with Scan.ReadTasks, so same-snapshot deletes and deletes that already
-// applied to a removed file are applied before the changelog columns are
-// added. DeletedRowsScanTask returns an error; those rows are produced by a
-// later reader. The returned iterator is single-use. The caller releases every
-// batch.
+// _commit_snapshot_id. This is a raw file-level changelog: unchanged rows in
+// a rewritten file are emitted as DELETE and INSERT, and UPDATE_BEFORE and
+// UPDATE_AFTER are not produced. AddedRowsScanTask and DeletedDataFileScanTask
+// are read with Scan.ReadTasks, so same-snapshot deletes and deletes that
+// already applied to a removed file are applied before the changelog columns
+// are added. DeletedRowsScanTask returns an error; those rows are produced by
+// a later reader. The returned iterator is single-use. The caller releases
+// every batch.
 func (s *IncrementalChangelogScan) Read(ctx context.Context, tasks []ChangelogScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if s == nil || s.scan == nil {
 		return nil, nil, fmt.Errorf("%w: incremental changelog scan is not initialized", ErrInvalidOperation)
@@ -182,6 +189,10 @@ func changelogArrowSchema(scan *Scan) (*arrow.Schema, bool, error) {
 		return nil, false, err
 	}
 
+	if err := rejectChangelogColumnCollision(dataSchema); err != nil {
+		return nil, false, err
+	}
+
 	schema := dataSchema
 	for _, field := range changelogArrowFields(useLargeTypes) {
 		schema, err = schema.AddField(schema.NumFields(), field)
@@ -193,6 +204,37 @@ func changelogArrowSchema(scan *Scan) (*arrow.Schema, bool, error) {
 	return schema, useLargeTypes, nil
 }
 
+func rejectChangelogColumnCollision(schema *arrow.Schema) error {
+	for _, name := range []string{
+		ChangelogChangeTypeColumn,
+		ChangelogChangeOrdinalColumn,
+		ChangelogCommitSnapshotIDColumn,
+	} {
+		if len(schema.FieldIndices(name)) > 0 {
+			return fmt.Errorf("%w: projected column %q conflicts with a changelog column",
+				iceberg.ErrInvalidSchema, name)
+		}
+	}
+
+	return nil
+}
+
+func changelogBatchMatches(out, data *arrow.Schema) error {
+	want := out.NumFields() - 3
+	if data.NumFields() != want {
+		return fmt.Errorf("%w: read batch has %d columns, changelog schema expects %d",
+			iceberg.ErrInvalidSchema, data.NumFields(), want)
+	}
+	for i := range want {
+		if !data.Field(i).Equal(out.Field(i)) {
+			return fmt.Errorf("%w: read column %q does not match the changelog schema",
+				iceberg.ErrInvalidSchema, data.Field(i).Name)
+		}
+	}
+
+	return nil
+}
+
 func changelogArrowFields(useLargeTypes bool) []arrow.Field {
 	changeType := arrow.BinaryTypes.String
 	if useLargeTypes {
@@ -201,7 +243,7 @@ func changelogArrowFields(useLargeTypes bool) []arrow.Field {
 
 	return []arrow.Field{
 		{Name: ChangelogChangeTypeColumn, Type: changeType, Nullable: false},
-		{Name: ChangelogChangeOrdinalColumn, Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: ChangelogChangeOrdinalColumn, Type: arrow.PrimitiveTypes.Int32, Nullable: false},
 		{Name: ChangelogCommitSnapshotIDColumn, Type: arrow.PrimitiveTypes.Int64, Nullable: false},
 	}
 }
@@ -234,12 +276,16 @@ func stampChangelogBatch(ctx context.Context, schema *arrow.Schema, useLargeType
 }
 
 func appendChangelogColumns(ctx context.Context, schema *arrow.Schema, useLargeTypes bool, rec arrow.RecordBatch, task ChangelogScanTask) (arrow.RecordBatch, error) {
+	if err := changelogBatchMatches(schema, rec.Schema()); err != nil {
+		return nil, err
+	}
+
 	mem := allocatorFrom(ctx)
 	n := int(rec.NumRows())
 	changeType := constantStringArray(mem, useLargeTypes, string(task.Operation()), n)
 	defer changeType.Release()
 
-	ordinal := constantInt64Array(mem, int64(task.ChangeOrdinal()), n)
+	ordinal := constantInt32Array(mem, int32(task.ChangeOrdinal()), n)
 	defer ordinal.Release()
 	snapshotID := constantInt64Array(mem, task.CommitSnapshotID(), n)
 	defer snapshotID.Release()
@@ -272,6 +318,17 @@ func constantStringArray(mem memory.Allocator, useLargeTypes bool, value string,
 	}
 
 	bldr := array.NewStringBuilder(mem)
+	defer bldr.Release()
+	bldr.Reserve(n)
+	for range n {
+		bldr.Append(value)
+	}
+
+	return bldr.NewArray()
+}
+
+func constantInt32Array(mem memory.Allocator, value int32, n int) arrow.Array {
+	bldr := array.NewInt32Builder(mem)
 	defer bldr.Release()
 	bldr.Reserve(n)
 	for range n {
