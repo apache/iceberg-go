@@ -2695,6 +2695,8 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 
 	if as.addedDeletes != nil {
 		if err := as.prepareAddedDeleteLoaders(invariants); err != nil {
+			positionDeleteLoader.release()
+
 			return nil, nil, err
 		}
 	}

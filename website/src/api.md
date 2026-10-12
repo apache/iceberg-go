@@ -312,10 +312,10 @@ schema, batches, err := tbl.NewIncrementalChangelogScan(
 Each batch is the scan projection followed by three columns:
 
 - `_change_type` — `INSERT` or `DELETE`
-- `_change_ordinal` — zero-based ordinal of the snapshot that produced the change
+- `_change_ordinal` — int32 ordinal of the snapshot that produced the change
 - `_commit_snapshot_id` — snapshot ID that committed the change
 
-Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove.
+Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. `UPDATE` rows are not produced. Delete-file handling is iceberg-go behavior.
 
 ## Writing data
 

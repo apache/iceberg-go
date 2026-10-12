@@ -46,22 +46,19 @@ func (scan *Scan) readDeletedRows(ctx context.Context, task DeletedRowsScanTask)
 
 func (as *arrowScan) prepareAddedDeleteLoaders(invariants *arrowScanInvariants) error {
 	tasks := []FileScanTask{*as.addedDeletes}
-	as.addedPosLoader = newLazyPositionDeleteLoader(as.fs, tasks)
+	posLoader := newLazyPositionDeleteLoader(as.fs, tasks)
 
 	dvLoader, err := newLazyDeletionVectorLoader(as.fs, tasks)
 	if err != nil {
-		as.addedPosLoader.release()
-		as.addedPosLoader = nil
+		posLoader.release()
 
 		return err
 	}
-	as.addedDVLoader = dvLoader
 
 	eqLoader, err := newLazyEqualityDeleteLoader(
 		as.fs, invariants.tableSchema, nil, invariants.nameMapping, tasks)
 	if err != nil {
-		as.addedPosLoader.release()
-		as.addedPosLoader = nil
+		posLoader.release()
 
 		return err
 	}
@@ -69,6 +66,9 @@ func (as *arrowScan) prepareAddedDeleteLoaders(invariants *arrowScanInvariants) 
 		eqLoader.tableSchemas = as.metadata.Schemas()
 	}
 	eqLoader.addFieldIDs(invariants.projectedIDs)
+
+	as.addedPosLoader = posLoader
+	as.addedDVLoader = dvLoader
 	as.addedEqLoader = eqLoader
 
 	return nil
@@ -108,7 +108,7 @@ func stampChangelogFilePos(ctx context.Context, cursor *rowPositionCursor) recPr
 	return func(in arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer in.Release()
 
-		mem := compute.GetAllocator(ctx)
+		mem := allocatorFrom(ctx)
 		bldr := array.NewInt64Builder(mem)
 		defer bldr.Release()
 		n := int(in.NumRows())
@@ -139,19 +139,23 @@ func stampChangelogFilePos(ctx context.Context, cursor *rowPositionCursor) recPr
 func dropChangelogFilePos(in arrow.RecordBatch) (arrow.RecordBatch, error) {
 	defer in.Release()
 
-	n := int(in.NumCols())
-	if n == 0 {
-		in.Retain()
-
-		return in, nil
+	idx := in.Schema().FieldIndices(changelogFilePosColumn)
+	if len(idx) != 1 {
+		return nil, fmt.Errorf("%w: missing changelog file position column %s",
+			iceberg.ErrInvalidSchema, changelogFilePosColumn)
+	}
+	drop := idx[0]
+	fields := make([]arrow.Field, 0, in.NumCols()-1)
+	cols := make([]arrow.Array, 0, in.NumCols()-1)
+	for i, field := range in.Schema().Fields() {
+		if i == drop {
+			continue
+		}
+		fields = append(fields, field)
+		cols = append(cols, in.Column(i))
 	}
 
-	fields := in.Schema().Fields()
-	schema := arrow.NewSchema(fields[:n-1], nil)
-	cols := make([]arrow.Array, n-1)
-	copy(cols, in.Columns()[:n-1])
-
-	return array.NewRecordBatch(schema, cols, in.NumRows()), nil
+	return array.NewRecordBatch(arrow.NewSchema(fields, nil), cols, in.NumRows()), nil
 }
 
 // keepAddedDeleteRows keeps rows removed by the added deletes. Existing
@@ -187,10 +191,15 @@ func keepAddedDeleteRows(
 
 		var posCol *array.Int64
 		if stampPos {
-			col, ok := r.Column(int(r.NumCols()) - 1).(*array.Int64)
+			indices := r.Schema().FieldIndices(changelogFilePosColumn)
+			if len(indices) != 1 {
+				return nil, fmt.Errorf("%w: missing changelog file position column %s",
+					iceberg.ErrInvalidSchema, changelogFilePosColumn)
+			}
+			col, ok := r.Column(indices[0]).(*array.Int64)
 			if !ok {
 				return nil, fmt.Errorf("%w: changelog file position column is %s",
-					iceberg.ErrInvalidSchema, r.Column(int(r.NumCols())-1).DataType())
+					iceberg.ErrInvalidSchema, r.Column(indices[0]).DataType())
 			}
 			posCol = col
 		}
@@ -218,7 +227,7 @@ func keepAddedDeleteRows(
 			}
 		}
 
-		mem := compute.GetAllocator(ctx)
+		mem := allocatorFrom(ctx)
 		bldr := array.NewBooleanBuilder(mem)
 		defer bldr.Release()
 		bldr.Reserve(n)

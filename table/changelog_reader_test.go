@@ -39,3 +39,16 @@ func TestChangelogReadAcceptsDeletedRowTasks(t *testing.T) {
 
 	require.NoError(t, readableChangelogTask(task))
 }
+
+func TestChangelogArrowSchemaRejectsReservedName(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: ChangelogChangeTypeColumn, Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://changelog-reserved", nil)
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "changelog"}, meta, "metadata.json", nil, nil)
+
+	_, _, err = changelogArrowSchema(tbl.NewIncrementalChangelogScan().scan)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, ChangelogChangeTypeColumn)
+}
