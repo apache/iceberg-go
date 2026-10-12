@@ -2221,6 +2221,13 @@ func bindReadTasksResiduals(
 // therefore still hold its whole decoded contents while it waits. The bound for
 // a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	return scan.readFileTasks(ctx, tasks, nil)
+}
+
+// readFileTasks reads tasks. addedDeletes, when non-nil, is paired with the
+// single data file in tasks: rows that survive that task's own deletes are
+// kept only when they match addedDeletes. Normal scans pass nil.
+func (scan *Scan) readFileTasks(ctx context.Context, tasks []FileScanTask, addedDeletes *FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
 	}
@@ -2292,6 +2299,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		options:            scan.options,
 		concurrency:        scan.concurrency,
 		arrowBatchSize:     scan.arrowBatchSize,
+		addedDeletes:       addedDeletes,
 	}, ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so release here.
