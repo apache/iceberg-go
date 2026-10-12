@@ -637,14 +637,13 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 
 func (s *SnapshotSummaryCollector) partitionSummary(metrics *updateMetrics) string {
 	props := metrics.toProps()
+	parts := make([]string, 0, len(props))
+	for k, v := range props {
+		parts = append(parts, k+"="+v)
+	}
+	slices.Sort(parts)
 
-	return strings.Join(slices.Sorted(func(yield func(s string) bool) {
-		for k, v := range props {
-			if !yield(fmt.Sprintf("%s=%s", k, v)) {
-				return
-			}
-		}
-	}), ",")
+	return strings.Join(parts, ",")
 }
 
 func (s *SnapshotSummaryCollector) build() iceberg.Properties {
