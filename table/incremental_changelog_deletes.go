@@ -189,19 +189,52 @@ func (s *IncrementalChangelogScan) loadChangelogDeleteState(ctx context.Context,
 }
 
 // liveDeletesBeforeRange returns delete files that were already live on the
-// snapshot immediately before the changelog range.
+// snapshot immediately before the changelog range. When that snapshot has been
+// expired, the first in-range snapshot's own delete manifests are used instead.
 func (s *IncrementalChangelogScan) liveDeletesBeforeRange(ctx context.Context, plan changelogTaskPlan) ([]iceberg.ManifestEntry, error) {
-	parent, err := s.snapshotBeforeRange(timelineSnapshots(plan))
-	if err != nil {
-		return nil, err
-	}
+	snapshots := timelineSnapshots(plan)
+	parent := s.snapshotBeforeRange(snapshots)
 	if parent == nil {
-		return nil, nil
+		if len(snapshots) == 0 || snapshots[0].ParentSnapshotID == nil {
+			return nil, nil
+		}
+
+		return s.deletesLiveBeforeExpiredParent(ctx, plan, snapshots[0])
 	}
 	manifests, err := parent.Manifests(plan.fs)
 	if err != nil {
 		return nil, err
 	}
+	entries, err := s.readDeleteManifestEntries(ctx, plan, manifests)
+	if err != nil {
+		return nil, err
+	}
+
+	return liveDeleteEntries(entries, snapshotSequences(plan.scan.metadata)), nil
+}
+
+// deletesLiveBeforeExpiredParent rebuilds deletes that applied before the
+// range from the first timeline snapshot. A non-deleted entry written by an
+// earlier snapshot was still live. A deleted entry written by this snapshot
+// was live until this snapshot removed it.
+func (s *IncrementalChangelogScan) deletesLiveBeforeExpiredParent(
+	ctx context.Context, plan changelogTaskPlan, snapshot Snapshot,
+) ([]iceberg.ManifestEntry, error) {
+	manifests, err := snapshot.Manifests(plan.fs)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := s.readDeleteManifestEntries(ctx, plan, manifests)
+	if err != nil {
+		return nil, err
+	}
+
+	return entriesLiveBefore(entries, snapshot.SnapshotID), nil
+}
+
+func (s *IncrementalChangelogScan) readDeleteManifestEntries(
+	ctx context.Context, plan changelogTaskPlan, manifests []iceberg.ManifestFile,
+) ([]iceberg.ManifestEntry, error) {
 	deleteManifests := make([]iceberg.ManifestFile, 0)
 	for _, manifest := range manifests {
 		if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
@@ -211,41 +244,31 @@ func (s *IncrementalChangelogScan) liveDeletesBeforeRange(ctx context.Context, p
 	// Prune with the scan partition filters. A local accumulator keeps this
 	// pass from counting the same delete manifests in the changelog report.
 	var pruned scanMetricsAccumulator
-	deleteManifests, err = plan.scan.filterManifestsWithSchemaOptions(
+	deleteManifests, err := plan.scan.filterManifestsWithSchemaOptions(
 		deleteManifests, plan.schema, &pruned, plan.partitionFilters, true)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := readManifestEntries(ctx, plan.fs, deleteManifests, false, false)
-	if err != nil {
-		return nil, err
-	}
 
-	return liveDeleteEntries(entries), nil
+	return readManifestEntries(ctx, plan.fs, deleteManifests, false, false)
 }
 
 // snapshotBeforeRange returns the snapshot whose live delete files already
 // applied before the range. An exclusive start that is still present is that
 // snapshot. When it has been expired, the parent of the first snapshot in the
-// range is used instead. A recorded parent that is also gone is an error:
-// planning with an empty pre-range would re-emit deletes that already applied.
-func (s *IncrementalChangelogScan) snapshotBeforeRange(snapshots []Snapshot) (*Snapshot, error) {
+// range is used instead. A nil result with a recorded parent means that parent
+// has expired.
+func (s *IncrementalChangelogScan) snapshotBeforeRange(snapshots []Snapshot) *Snapshot {
 	if s.fromSnapshotID != nil && !s.fromInclusive {
 		if snapshot := s.scan.metadata.SnapshotByID(*s.fromSnapshotID); snapshot != nil {
-			return snapshot, nil
+			return snapshot
 		}
 	}
 	if len(snapshots) == 0 || snapshots[0].ParentSnapshotID == nil {
-		return nil, nil
-	}
-	parentID := *snapshots[0].ParentSnapshotID
-	parent := s.scan.metadata.SnapshotByID(parentID)
-	if parent == nil {
-		return nil, fmt.Errorf("%w: snapshot %d is not available; cannot determine deletes that already applied",
-			iceberg.ErrInvalidArgument, parentID)
+		return nil
 	}
 
-	return parent, nil
+	return s.scan.metadata.SnapshotByID(*snapshots[0].ParentSnapshotID)
 }
 
 func timelineSnapshots(plan changelogTaskPlan) []Snapshot {
@@ -271,6 +294,10 @@ func (s *IncrementalChangelogScan) planDeletedRowTasks(
 	}
 
 	var tasks []plannedChangelogTask
+	// Manifest files are immutable, so entries decoded for one snapshot can be
+	// reused when a later snapshot carries the same manifest forward.
+	decodedManifests := make(map[string][]iceberg.ManifestEntry)
+	sequences := snapshotSequences(plan.scan.metadata)
 	for _, snapshot := range plan.snapshots {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -301,8 +328,9 @@ func (s *IncrementalChangelogScan) planDeletedRowTasks(
 		// Each snapshot that adds deletes reads that snapshot's live data
 		// manifests. Equality deletes and position deletes without a referenced
 		// data file cannot be narrowed to one path, so those snapshots scan the
-		// manifests the partition filter keeps.
-		live, err := liveDataEntries(ctx, plan.fs, dataManifests)
+		// manifests the partition filter keeps. Decoded entries are cached by
+		// manifest path across snapshots.
+		live, err := liveDataEntries(ctx, plan.fs, dataManifests, decodedManifests, sequences)
 		if err != nil {
 			return nil, err
 		}
@@ -525,14 +553,20 @@ func (scan *Scan) dataFileMatcher(
 	}, nil
 }
 
-func liveDataEntries(ctx context.Context, fs io.IO, manifests []iceberg.ManifestFile) ([]iceberg.ManifestEntry, error) {
+func liveDataEntries(
+	ctx context.Context,
+	fs io.IO,
+	manifests []iceberg.ManifestFile,
+	decoded map[string][]iceberg.ManifestEntry,
+	sequences snapshotSequenceLookup,
+) ([]iceberg.ManifestEntry, error) {
 	dataManifests := make([]iceberg.ManifestFile, 0, len(manifests))
 	for _, manifest := range manifests {
 		if manifest.ManifestContent() == iceberg.ManifestContentData {
 			dataManifests = append(dataManifests, manifest)
 		}
 	}
-	entries, err := readManifestEntries(ctx, fs, dataManifests, false, false)
+	entries, err := readCachedManifestEntries(ctx, fs, dataManifests, decoded)
 	if err != nil {
 		return nil, err
 	}
@@ -543,31 +577,46 @@ func liveDataEntries(ctx context.Context, fs io.IO, manifests []iceberg.Manifest
 		}
 	}
 
-	return liveManifestEntries(dataEntries), nil
+	return liveManifestEntries(dataEntries, sequences), nil
+}
+
+// snapshotSequenceLookup returns the sequence number of the snapshot that
+// wrote an entry. Snapshot IDs are random, so they are not an order. The
+// boolean is false when that snapshot is not in table metadata.
+type snapshotSequenceLookup func(snapshotID int64) (sequence int64, ok bool)
+
+func snapshotSequences(metadata Metadata) snapshotSequenceLookup {
+	return func(snapshotID int64) (int64, bool) {
+		snapshot := metadata.SnapshotByID(snapshotID)
+		if snapshot == nil {
+			return 0, false
+		}
+
+		return snapshot.SequenceNumber, true
+	}
 }
 
 // liveManifestEntries keeps the winning entry for each data-file path and
-// drops paths whose winning entry is a deletion. A higher sequence number
-// wins. Equal sequence numbers use the higher snapshot ID, and a deletion
-// wins when the snapshot ID is also equal. A deleted entry often keeps the
-// sequence number of the add it supersedes, so snapshot ID is the tie-break
-// that does not depend on manifest order.
-func liveManifestEntries(entries []iceberg.ManifestEntry) []iceberg.ManifestEntry {
+// drops paths whose winning entry is a deletion. A higher entry sequence
+// number wins. Equal entry sequence numbers use the sequence number of the
+// snapshot that wrote each entry. When those are equal or unknown, a deletion
+// wins.
+func liveManifestEntries(entries []iceberg.ManifestEntry, sequences snapshotSequenceLookup) []iceberg.ManifestEntry {
 	return liveEntriesByKey(entries, func(entry iceberg.ManifestEntry) string {
 		return entry.DataFile().FilePath()
-	})
+	}, sequences)
 }
 
 // liveDeleteEntries is liveManifestEntries for delete files. Deletion vectors
 // that share a Puffin path stay distinct, keyed by that path plus the
 // referenced data file and content offset.
-func liveDeleteEntries(entries []iceberg.ManifestEntry) []iceberg.ManifestEntry {
+func liveDeleteEntries(entries []iceberg.ManifestEntry, sequences snapshotSequenceLookup) []iceberg.ManifestEntry {
 	return liveEntriesByKey(entries, func(entry iceberg.ManifestEntry) string {
 		return deleteEntryKey(entry.DataFile())
-	})
+	}, sequences)
 }
 
-func liveEntriesByKey(entries []iceberg.ManifestEntry, key func(iceberg.ManifestEntry) string) []iceberg.ManifestEntry {
+func liveEntriesByKey(entries []iceberg.ManifestEntry, key func(iceberg.ManifestEntry) string, sequences snapshotSequenceLookup) []iceberg.ManifestEntry {
 	latest := make(map[string]iceberg.ManifestEntry, len(entries))
 	order := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -579,7 +628,7 @@ func liveEntriesByKey(entries []iceberg.ManifestEntry, key func(iceberg.Manifest
 
 			continue
 		}
-		if changelogEntrySupersedes(entry, current) {
+		if changelogEntrySupersedes(entry, current, sequences) {
 			latest[id] = entry
 		}
 	}
@@ -595,18 +644,57 @@ func liveEntriesByKey(entries []iceberg.ManifestEntry, key func(iceberg.Manifest
 	return out
 }
 
-// changelogEntrySupersedes reports whether next replaces current. Sequence
-// number wins first. Equal sequence numbers use snapshot ID, then deletion
-// status, so the result does not depend on manifest order.
-func changelogEntrySupersedes(next, current iceberg.ManifestEntry) bool {
+// changelogEntrySupersedes reports whether next replaces current. The entry
+// sequence number wins first. Equal entry sequence numbers use the sequence
+// number of the snapshot that wrote each entry. Snapshot IDs are not compared.
+// When the snapshot sequence numbers are equal, or either snapshot is unknown,
+// a deletion wins.
+func changelogEntrySupersedes(next, current iceberg.ManifestEntry, sequences snapshotSequenceLookup) bool {
 	if next.SequenceNum() != current.SequenceNum() {
 		return next.SequenceNum() > current.SequenceNum()
 	}
-	if next.SnapshotID() != current.SnapshotID() {
-		return next.SnapshotID() > current.SnapshotID()
+	if sequences != nil {
+		nextSequence, nextOK := sequences(next.SnapshotID())
+		currentSequence, currentOK := sequences(current.SnapshotID())
+		if nextOK && currentOK && nextSequence != currentSequence {
+			return nextSequence > currentSequence
+		}
 	}
 
 	return next.Status() == iceberg.EntryStatusDELETED && current.Status() != iceberg.EntryStatusDELETED
+}
+
+// entriesLiveBefore selects delete entries that were live before snapshotID.
+// A non-deleted entry written by another snapshot was carried forward. A
+// deleted entry written by snapshotID was live until this snapshot removed it.
+// One entry is kept per delete identity, preferring a non-deleted entry.
+func entriesLiveBefore(entries []iceberg.ManifestEntry, snapshotID int64) []iceberg.ManifestEntry {
+	latest := make(map[string]iceberg.ManifestEntry)
+	order := make([]string, 0)
+	for _, entry := range entries {
+		carried := entry.Status() != iceberg.EntryStatusDELETED && entry.SnapshotID() != snapshotID
+		removedHere := entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == snapshotID
+		if !carried && !removedHere {
+			continue
+		}
+		key := deleteEntryKey(entry.DataFile())
+		current, seen := latest[key]
+		if !seen {
+			order = append(order, key)
+			latest[key] = entry
+
+			continue
+		}
+		if current.Status() == iceberg.EntryStatusDELETED && entry.Status() != iceberg.EntryStatusDELETED {
+			latest[key] = entry
+		}
+	}
+	out := make([]iceberg.ManifestEntry, 0, len(order))
+	for _, key := range order {
+		out = append(out, latest[key])
+	}
+
+	return out
 }
 
 // deleteEntryKey identifies a delete file. Position and equality deletes use
@@ -622,6 +710,43 @@ func deleteEntryKey(file iceberg.DataFile) string {
 	}
 
 	return file.FilePath() + "\x00" + referencedDataFilePath(file) + "\x00" + strconv.FormatInt(offset, 10)
+}
+
+// readCachedManifestEntries returns manifest entries, reusing entries already
+// decoded for the same manifest path. Manifest files are immutable.
+func readCachedManifestEntries(
+	ctx context.Context,
+	fs io.IO,
+	manifests []iceberg.ManifestFile,
+	decoded map[string][]iceberg.ManifestEntry,
+) ([]iceberg.ManifestEntry, error) {
+	if len(manifests) == 0 {
+		return nil, nil
+	}
+	out := make([]iceberg.ManifestEntry, 0)
+	for _, manifest := range manifests {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		path := manifest.FilePath()
+		entries, ok := decoded[path]
+		if !ok {
+			var err error
+			entries, err = readManifestEntries(ctx, fs, []iceberg.ManifestFile{manifest}, false, false)
+			if err != nil {
+				return nil, err
+			}
+			if entries == nil {
+				entries = []iceberg.ManifestEntry{}
+			}
+			if decoded != nil {
+				decoded[path] = entries
+			}
+		}
+		out = append(out, entries...)
+	}
+
+	return out, nil
 }
 
 func readManifestEntries(
