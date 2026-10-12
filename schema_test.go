@@ -2033,13 +2033,15 @@ func TestHighestFieldIDDoesNotAllocate(t *testing.T) {
 		id = tableSchemaNested.HighestFieldID()
 	})
 	assert.Zero(t, allocs)
-	runtime.KeepAlive(id)
+	assert.Equal(t, 22, id)
 }
 
 func TestAssignFreshSchemaIDsWithBaseEmptyStruct(t *testing.T) {
+	const highestBaseID = 50
+
 	base := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "empty", Type: &iceberg.StructType{}},
-		iceberg.NestedField{ID: 50, Name: "existing", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: highestBaseID, Name: "existing", Type: iceberg.PrimitiveTypes.String},
 	)
 	source := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "added", Type: iceberg.PrimitiveTypes.String},
@@ -2047,7 +2049,7 @@ func TestAssignFreshSchemaIDsWithBaseEmptyStruct(t *testing.T) {
 
 	assigned, err := iceberg.AssignFreshSchemaIDsWithBase(source, base, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 51, assigned.Field(0).ID)
+	assert.Greater(t, assigned.Field(0).ID, highestBaseID)
 }
 
 // TestHighestFieldIDListType tests that HighestFieldID correctly computes

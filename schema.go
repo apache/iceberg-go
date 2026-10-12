@@ -614,6 +614,7 @@ func highestFieldIDType(typ Type) int {
 		}
 	}
 
+	// New types with nested field IDs must be included in the traversal above.
 	return 0
 }
 
