@@ -459,7 +459,7 @@ selected.</p>
 <h2 id="concurrency"><a class="header" href="#concurrency">Concurrency</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Setting</th><th>Source</th><th>Effect</th></tr></thead><tbody>
 <tr><td><code>max-workers</code> in <code>~/.iceberg-go.yaml</code> (<code>config.EnvConfig.MaxWorkers</code>)</td><td>YAML config</td><td>Worker pool size used by parallel column writes, snapshot producers, scan plan, equality-delete writers. Default <code>5</code>.</td></tr>
-<tr><td><code>WithMaxConcurrency(n int) ScanOption</code></td><td>Code (<code>table.WithMaxConcurrency</code>)</td><td>Per-scan override. <code>WitMaxConcurrency</code> (missing <code>h</code>) remains as a deprecated alias.</td></tr>
+<tr><td><code>WithMaxConcurrency(n int) ScanOption</code></td><td>Code (<code>table.WithMaxConcurrency</code>)</td><td>Per-scan override.</td></tr>
 <tr><td><code>WithMaxWriteWorkers(n int)</code></td><td>Code (per-write API on <code>WriteRecords</code>)</td><td>Per-write override of the worker count.</td></tr>
 <tr><td><code>WithClusteredWrite()</code></td><td>Code (per-write API on <code>WriteRecords</code>)</td><td>Forces single-threaded writes. Mutually exclusive with <code>WithMaxWriteWorkers</code>.</td></tr>
 </tbody></table>
