@@ -139,6 +139,10 @@ func WithPrefix(prefix string) Option {
 // property, and any server-provided signing-region / signing-name overrides.
 // Use WithSignerFactory (or, for AWS, sigv4.WithAwsConfig) instead if you want
 // the region and service to stay driven by those settings.
+//
+// A signer only runs for requests to the catalog origin. Requests to any other
+// origin, including an OAuth token endpoint set with WithAuthURI, are sent
+// unsigned.
 func WithSigner(signer RequestSigner) Option {
 	return func(o *options) {
 		o.signer = signer
