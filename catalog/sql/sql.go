@@ -432,7 +432,7 @@ func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg
 
 	cat := &Catalog{db: bun.NewDB(db, d), name: name, props: props}
 
-	cat.db.AddQueryHook(bundebug.NewQueryHook(
+	cat.db = cat.db.WithQueryHook(bundebug.NewQueryHook(
 		bundebug.WithEnabled(false),
 		// ICEBERG_SQL_DEBUG=1 logs only failed queries
 		// ICEBERG_SQL_DEBUG=2 log all queries
