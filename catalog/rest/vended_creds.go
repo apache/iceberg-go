@@ -126,10 +126,10 @@ type vendedCredentialRefresher struct {
 	identifier []string
 	location   string
 	props      iceberg.Properties
-	// vended is the credential config the catalog last vended for location:
-	// the one resolved at table load, then each renewal's. Renewal timing reads
-	// expiry from it alone. props also carries catalog and table config, whose
-	// expiries belong to other credentials or to an earlier vend.
+	// vended is the credential config resolved for location at table load. The
+	// first IO's expiry is read from it alone, and each renewal's from the
+	// credential that renewal fetched. props also carries catalog and table
+	// config, whose expiries belong to other credentials or to an earlier vend.
 	vended iceberg.Properties
 	// credentials is populated only for scan-plan IO. Unlike table-load
 	// credentials, which are already resolved against the metadata location,
@@ -234,7 +234,6 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	v.replaceIO(newIO, ioCancel)
 	v.expiresAt = expiresAt
 	v.issuedAt = issuedAt
-	v.vended = vended
 
 	return v.cachedIO, nil
 }

@@ -623,8 +623,9 @@ func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 
 // TestTableResponseExpiryComesFromVendedCredential checks that a table's FileIO
 // renews on the expiry of the credential vended with it, not on an expiry
-// inherited from the table config. The inherited one has already passed, so
-// taking it would refetch credentials on every load.
+// inherited from the table config or on the default TTL. The inherited one has
+// already passed, so taking it would refetch credentials on every load; the
+// default TTL would keep an expired vended credential until the TTL elapses.
 func TestTableResponseExpiryComesFromVendedCredential(t *testing.T) {
 	const scheme = "restcreds-table-expiry"
 
@@ -632,46 +633,70 @@ func TestTableResponseExpiryComesFromVendedCredential(t *testing.T) {
 	rec.register(t, scheme)
 
 	metadataLoc := scheme + "://warehouse/database/table/metadata/00000-a.metadata.json"
-	respond := func(w http.ResponseWriter, _ *http.Request) {
-		body := storageCredentialsBody(scheme+"://warehouse/database/table", map[string]string{
-			iceio.S3AccessKeyID:              "vended-key",
-			"s3.session-token-expires-at-ms": strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10),
+
+	for _, ec := range []struct {
+		name         string
+		vendedExpiry string
+		wantKey      string
+		wantFetches  int32
+	}{
+		{
+			name:         "valid vend ignores stale config expiries",
+			vendedExpiry: strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10),
+			wantKey:      "vended-key",
+		},
+		{
+			// Already past, so the next FileIO use must go back to the catalog.
+			name:         "expired vend renews",
+			vendedExpiry: "1",
+			wantKey:      "renewed-key",
+			wantFetches:  1,
+		},
+	} {
+		t.Run(ec.name, func(t *testing.T) {
+			respond := func(w http.ResponseWriter, _ *http.Request) {
+				body := storageCredentialsBody(scheme+"://warehouse/database/table", map[string]string{
+					iceio.S3AccessKeyID:              "vended-key",
+					"s3.session-token-expires-at-ms": ec.vendedExpiry,
+				})
+				body["metadata-location"] = metadataLoc
+				body["metadata"] = json.RawMessage(strings.ReplaceAll(
+					exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://"))
+				body["config"] = map[string]string{
+					"gcs.oauth2.token-expires-at": "1000",
+					"expiration-time":             "1000",
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(body))
+			}
+
+			var credsCalls atomic.Int32
+			cat := newCredsTestCatalog(t, credsCatalogOpts{
+				creds: func(w http.ResponseWriter, _ *http.Request) {
+					credsCalls.Add(1)
+					assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+						scheme+"://warehouse/database/table",
+						map[string]string{iceio.S3AccessKeyID: "renewed-key"})))
+				},
+				loadTable: respond,
+				routes: map[string]http.HandlerFunc{
+					"/v1/namespaces/db/tables":   respond,
+					"/v1/namespaces/db/register": respond,
+				},
+			})
+
+			for _, tc := range tableResponseCalls {
+				before := credsCalls.Load()
+				tbl, err := tc.call(context.Background(), cat)
+				require.NoError(t, err, tc.name)
+				for range 2 {
+					_, err = tbl.FS(context.Background())
+					require.NoError(t, err, tc.name)
+				}
+				assert.Equal(t, ec.wantFetches, credsCalls.Load()-before, tc.name)
+				assert.Equal(t, ec.wantKey, rec.lastLoad(t)[iceio.S3AccessKeyID], tc.name)
+			}
 		})
-		body["metadata-location"] = metadataLoc
-		body["metadata"] = json.RawMessage(strings.ReplaceAll(
-			exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://"))
-		body["config"] = map[string]string{
-			"gcs.oauth2.token-expires-at": "1000",
-			"expiration-time":             "1000",
-		}
-		assert.NoError(t, json.NewEncoder(w).Encode(body))
 	}
-
-	var credsCalls atomic.Int32
-	cat := newCredsTestCatalog(t, credsCatalogOpts{
-		creds: func(w http.ResponseWriter, _ *http.Request) {
-			credsCalls.Add(1)
-			assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
-				scheme+"://warehouse/database/table",
-				map[string]string{iceio.S3AccessKeyID: "renewed-key"})))
-		},
-		loadTable: respond,
-		routes: map[string]http.HandlerFunc{
-			"/v1/namespaces/db/tables":   respond,
-			"/v1/namespaces/db/register": respond,
-		},
-	})
-
-	for _, tc := range tableResponseCalls {
-		tbl, err := tc.call(context.Background(), cat)
-		require.NoError(t, err, tc.name)
-		for range 2 {
-			_, err = tbl.FS(context.Background())
-			require.NoError(t, err, tc.name)
-		}
-		assert.Equal(t, "vended-key", rec.lastLoad(t)[iceio.S3AccessKeyID], tc.name)
-	}
-	assert.Zero(t, credsCalls.Load(), "the vended credential is still valid")
 }
 
 // TestTableResponseLayersPartialS3Credential pins the existing behavior at the
