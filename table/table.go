@@ -111,8 +111,13 @@ type Table struct {
 	// REST catalogs can return FileIO configuration in the response's config
 	// block.
 	scanPlanningIOProps iceberg.Properties
-	savedConfig         iceberg.Properties
-	reporter            metrics.Reporter
+	// scanPlanningDirective is the raw `scan-planning-mode` value from the
+	// catalog load response's config block; hasScanPlanningDirective records
+	// whether the key was present.
+	scanPlanningDirective    string
+	hasScanPlanningDirective bool
+	savedConfig              iceberg.Properties
+	reporter                 metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
 	// explicit NopReporter opt-out) from the construction-time default, so
@@ -250,6 +255,8 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
+	t.scanPlanningDirective = fresh.scanPlanningDirective
+	t.hasScanPlanningDirective = fresh.hasScanPlanningDirective
 	t.labels = fresh.labels
 	t.savedConfig = maps.Clone(fresh.savedConfig)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
@@ -838,6 +845,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		t.cat,
 		withReporterState(t.reporter, t.reporterSet),
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
+		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
 	), nil
