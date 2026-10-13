@@ -52,7 +52,6 @@ func (f *testDataFile) ColumnSizes() map[int]int64                { return nil }
 func (f *testDataFile) ValueCounts() map[int]int64                { return nil }
 func (f *testDataFile) NullValueCounts() map[int]int64            { return nil }
 func (f *testDataFile) NaNValueCounts() map[int]int64             { return nil }
-func (f *testDataFile) DistinctValueCounts() map[int]int64        { return nil }
 func (f *testDataFile) LowerBoundValues() map[int][]byte          { return f.lowerBounds }
 func (f *testDataFile) UpperBoundValues() map[int][]byte          { return f.upperBounds }
 func (f *testDataFile) KeyMetadata() []byte                       { return nil }

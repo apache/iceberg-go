@@ -28,7 +28,7 @@ import "github.com/apache/iceberg-go/internal"
 // not introduce mutable values through this borrowed view.
 //
 // This view intentionally contains only the maps consumed by metric
-// evaluators. ColumnSizes and DistinctValueCounts are excluded because the
+// evaluators. ColumnSizes and distinct_counts are excluded because the
 // evaluator does not read them, and cloning those maps would add work to the
 // hot path without changing its result. Partition has a separate borrowed
 // accessor because partition data is read during scan planning.

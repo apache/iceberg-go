@@ -62,7 +62,6 @@ func (*mockDVFile) ColumnSizes() map[int]int64                { return nil }
 func (*mockDVFile) ValueCounts() map[int]int64                { return nil }
 func (*mockDVFile) NullValueCounts() map[int]int64            { return nil }
 func (*mockDVFile) NaNValueCounts() map[int]int64             { return nil }
-func (*mockDVFile) DistinctValueCounts() map[int]int64        { return nil }
 func (*mockDVFile) LowerBoundValues() map[int][]byte          { return nil }
 func (*mockDVFile) UpperBoundValues() map[int][]byte          { return nil }
 func (*mockDVFile) KeyMetadata() []byte                       { return nil }

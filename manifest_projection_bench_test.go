@@ -65,7 +65,6 @@ func newManifestProjectionBenchmarkFixture(
 	lowerBounds := make(map[int][]byte, fieldCount)
 	upperBounds := make(map[int][]byte, fieldCount)
 	columnSizes := make(map[int]int64, fieldCount)
-	distinctCounts := make(map[int]int64, fieldCount)
 	for i := range fieldCount {
 		id := i + 1
 		fields[i] = NestedField{
@@ -77,7 +76,6 @@ func newManifestProjectionBenchmarkFixture(
 		lowerBounds[id] = []byte{0, 0, 0, 0, 0, 0, 0, 0}
 		upperBounds[id] = []byte{0, 0, 0, 0, 0, 0, 0, 1}
 		columnSizes[id] = 64
-		distinctCounts[id] = 1
 	}
 	schema := NewSchema(1, fields...)
 	builder, err := NewDataFileBuilder(
@@ -99,7 +97,6 @@ func newManifestProjectionBenchmarkFixture(
 		ValueCounts(valueCounts).
 		NullValueCounts(nullCounts).
 		NaNValueCounts(nanCounts).
-		DistinctValueCounts(distinctCounts).
 		LowerBoundValues(lowerBounds).
 		UpperBoundValues(upperBounds)
 
