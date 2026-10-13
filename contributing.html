@@ -252,6 +252,7 @@
 <li>Keep PRs focused — one issue per PR.</li>
 <li>Run <code>make test</code> and <code>make lint</code> before pushing. CI runs all of these too, but catching issues locally saves a round-trip. <code>make lint-install</code> will install the linter if you don't have it yet.</li>
 <li>All commits must have a <code>Signed-off-by</code> line (<a href="https://developercertificate.org/">DCO</a>).</li>
+<li>CI checks the exported API against the base branch with <code>apidiff</code>. If your PR changes it incompatibly on purpose, mark the PR title as breaking with a <code>!</code>, for example <code>refactor(io)!: add context to IO.Open</code>. You can run the same check locally with <code>dev/check-api-compat.sh</code> after installing the <code>apidiff</code> version it names.</li>
 </ul>
 <h2 id="code-review"><a class="header" href="#code-review">Code Review</a></h2>
 <ul>
