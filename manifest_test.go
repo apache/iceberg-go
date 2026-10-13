@@ -2650,6 +2650,34 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Equal("[]", string(md["partition-spec"]))
 }
 
+// TestV2ManifestKeepsReferencedDataFile checks that a v2 delete manifest
+// round-trips referenced_data_file. The spec makes the field optional in v2,
+// and Java's V2Metadata writes it, so rewriting such a manifest must not drop it.
+func (m *ManifestTestSuite) TestV2ManifestKeepsReferencedDataFile() {
+	builder, err := NewDataFileBuilder(*UnpartitionedSpec, EntryContentPosDeletes,
+		"s3://bucket/deletes.parquet", ParquetFile, nil, nil, nil, 1, 10)
+	m.Require().NoError(err)
+	deleteFile := builder.ReferencedDataFile("s3://bucket/data.parquet").Build()
+
+	var out bytes.Buffer
+	writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+		WithManifestWriterContent(ManifestContentDeletes))
+	m.Require().NoError(err)
+	m.Require().NoError(writer.Add(
+		NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, deleteFile).SequenceNum(1).Build()))
+	m.Require().NoError(writer.Close())
+
+	manifest, err := writer.ToManifestFile("manifest.avro", int64(out.Len()))
+	m.Require().NoError(err)
+	entries, err := ReadManifest(manifest, bytes.NewReader(out.Bytes()), false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+
+	ref := entries[0].DataFile().ReferencedDataFile()
+	m.Require().NotNil(ref)
+	m.Equal("s3://bucket/data.parquet", *ref)
+}
+
 func (m *ManifestTestSuite) TestManifestWriterContentConsistency() {
 	deleteEntry := *manifestEntryV2Records[0]
 	deleteFile := cloneDataFileAvroFields(deleteEntry.Data.(*dataFile))
