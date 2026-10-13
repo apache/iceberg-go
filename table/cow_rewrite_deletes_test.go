@@ -201,9 +201,17 @@ func TestCoWRewriteAppliesStackedDeletes(t *testing.T) {
 	}
 }
 
-func TestCoWDeleteRemovesDeletionVectorsOfDroppedFiles(t *testing.T) {
+func TestDroppedFilesTakeTheirDeletionVectors(t *testing.T) {
 	matchY := iceberg.EqualTo(iceberg.Reference("category"), "y")
 	matchYOrID2 := iceberg.NewOr(matchY, iceberg.EqualTo(iceberg.Reference("id"), int64(2)))
+	mergeOnReadDeleteWhere := func(filter iceberg.BooleanExpression) func(*testing.T, *table.Table) *table.Table {
+		return func(t *testing.T, tbl *table.Table) *table.Table {
+			tbl, err := tbl.Delete(t.Context(), filter, nil)
+			require.NoError(t, err)
+
+			return tbl
+		}
+	}
 
 	cases := []struct {
 		name    string
@@ -239,6 +247,19 @@ func TestCoWDeleteRemovesDeletionVectorsOfDroppedFiles(t *testing.T) {
 			wantIDs: []int64{3, 7},
 			wantDVs: 0,
 		},
+		{
+			name:    "merge-on-read delete drops a file",
+			run:     mergeOnReadDeleteWhere(matchY),
+			wantIDs: []int64{2, 3},
+			wantDVs: 1,
+		},
+		{
+			// The partially deleted file's vector is replaced by a merged one, so one DV stays live.
+			name:    "merge-on-read delete drops a file and deletes rows from another",
+			run:     mergeOnReadDeleteWhere(matchYOrID2),
+			wantIDs: []int64{3},
+			wantDVs: 1,
+		},
 	}
 
 	recordsJSON := `[
@@ -258,7 +279,52 @@ func TestCoWDeleteRemovesDeletionVectorsOfDroppedFiles(t *testing.T) {
 			tbl = tc.run(t, tbl)
 
 			assert.Equal(t, tc.wantIDs, idsInTable(t, tbl))
-			assert.Equal(t, tc.wantDVs, liveDVCount(t, tbl), "only the deletion vector of the untouched file may stay live")
+			assert.Equal(t, tc.wantDVs, liveDVCount(t, tbl), "the deletion vector of every dropped file must be removed with it")
+		})
+	}
+}
+
+// TestCoWRewriteToEmptyWritesNoDataFile rewrites a file whose only surviving row is the one the operation removes,
+// so the rewrite has no rows to write.
+// No empty data file may stay live, and the file's deletion vector must go too.
+func TestCoWRewriteToEmptyWritesNoDataFile(t *testing.T) {
+	matchID2 := iceberg.EqualTo(iceberg.Reference("id"), int64(2))
+	cases := []struct {
+		name          string
+		run           func(*testing.T, *table.Table) *table.Table
+		wantIDs       []int64
+		wantDataFiles int
+	}{
+		{
+			name:          "copy-on-write delete",
+			run:           func(t *testing.T, tbl *table.Table) *table.Table { return copyOnWriteDelete(t, tbl, matchID2) },
+			wantIDs:       nil,
+			wantDataFiles: 0,
+		},
+		{
+			name: "filtered overwrite",
+			run: func(t *testing.T, tbl *table.Table) *table.Table {
+				return filteredOverwrite(t, tbl, matchID2, `[{"id": 6}]`)
+			},
+			wantIDs:       []int64{6},
+			wantDataFiles: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := newMergeOnReadTestTableVersion(t, "3")
+			tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2)
+			tbl = mergeOnReadDelete(t, tbl, 1)
+			require.Equal(t, 1, liveDVCount(t, tbl))
+			require.Equal(t, []int64{2}, idsInTable(t, tbl))
+
+			tbl = tc.run(t, tbl)
+
+			assert.Equal(t, tc.wantIDs, idsInTable(t, tbl))
+			dataPaths, _ := liveFilesOnRef(t, tbl, table.MainBranch)
+			assert.Len(t, dataPaths, tc.wantDataFiles, "a rewrite with no surviving rows must not leave an empty data file live")
+			assert.Zero(t, liveDVCount(t, tbl))
 		})
 	}
 }

@@ -2309,6 +2309,11 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 //
 // New data from the provided table is written to the table regardless of the filter.
 //
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
+//
 // The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option.
@@ -2374,6 +2379,11 @@ func WithOverwriteCaseInsensitive() OverwriteOption {
 //   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
 //
 // New data from the provided RecordReader is written to the table regardless of the filter.
+//
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option.
@@ -2568,8 +2578,28 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		return nil, err
 	}
 
+	// SetProperties above may have staged a name mapping, which replaces t.meta, so re-read it.
+	meta, err = t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
+	// On v3 every removed file takes its deletion vector with it, and a partially deleted file's vector is
+	// merged into its replacement. One read serves both. DVs only exist from v3, so v2 skips it.
+	var deletes planningDeletes
+	if meta.formatVersion >= 3 && (len(filesToDelete) > 0 || len(withPartialDeletions) > 0) {
+		builtMeta, err := meta.Build()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build metadata: %w", err)
+		}
+		deletes, err = t.readPlanningDeletes(fs, builtMeta)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	for _, df := range filesToDelete {
-		updater.deleteDataFile(df)
+		deletes.removeDataFile(updater, df)
 	}
 
 	if len(withPartialDeletions) > 0 {
@@ -2577,7 +2607,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		for _, entry := range withPartialDeletions {
 			partialFiles = append(partialFiles, entry.DataFile())
 		}
-		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, partialFiles, filter, caseSensitive, concurrency, commitUUID)
+		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, deletes.dvs, partialFiles, filter, caseSensitive, concurrency, commitUUID)
 		if err != nil {
 			return nil, err
 		}
@@ -2639,6 +2669,12 @@ func WithDeleteCaseInsensitive() DeleteOption {
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
 //   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
+// A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
+//
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -2864,7 +2900,7 @@ type planningDeletes struct {
 // so a delete on id=1 must still be applied.
 //
 // Known limitation (#2160): every live delete manifest of the snapshot is read on each call,
-// with no partition pruning, so a narrow rewrite on a delete-heavy table pays for all of them.
+// with no partition pruning, so a narrow delete or rewrite on a delete-heavy table pays for all of them.
 func (t *Transaction) readPlanningDeletes(fs io.IO, builtMeta Metadata) (planningDeletes, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -2873,6 +2909,8 @@ func (t *Transaction) readPlanningDeletes(fs io.IO, builtMeta Metadata) (plannin
 
 	var liveDeletes []iceberg.ManifestEntry
 	if s := t.planningSnapshot(meta); s != nil {
+		// Skip DELETED entries: a replaced DV stays behind as one, and merging it
+		// into a new DV would bring back deleted rows. See #1372.
 		for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes, true) {
 			if err != nil {
 				return planningDeletes{}, fmt.Errorf("failed to read delete manifests: %w", err)
@@ -2901,7 +2939,8 @@ func (t *Transaction) readPlanningDeletes(fs io.IO, builtMeta Metadata) (plannin
 	return planningDeletes{positional: positional, dvs: dvs, equality: equality}, nil
 }
 
-// removeDataFile removes df together with the deletion vector that references it.
+// removeDataFile removes df and, as the spec requires, the deletion vector that references it.
+// Removing a deletion vector makes the commit non-replayable (see snapshotProducer.commitManifests).
 // Position and equality delete files are left alone, since they can still apply to other files.
 func (d planningDeletes) removeDataFile(updater *snapshotProducer, df iceberg.DataFile) {
 	updater.deleteDataFile(df)
@@ -3131,7 +3170,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 // data-file paths those deletes reference. A position-delete that does not
 // record its referenced data file is omitted from the returned paths (it
 // cannot be existence-checked), matching RowDelta.validate and Java.
-func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs map[string]iceberg.ManifestEntry, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
@@ -3157,24 +3196,20 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	// into the new DV (the incremental deletes) and the superseded DVs are
 	// removed. Without this a second delete on the same file would write a
 	// second live DV, corrupting the table (buildDVIndex rejects it).
-	var (
-		existingDVs       map[string]iceberg.DataFile
-		existingDVBitmaps map[string]*dv.RoaringPositionBitmap
-	)
-	if meta.formatVersion >= 3 {
-		existingDVs, err = t.collectExistingDVs(fs, files)
+	// dvs holds the live DVs keyed by data file path, and is empty on v2.
+	existingDVs := make(map[string]iceberg.DataFile)
+	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap)
+	for _, df := range files {
+		entry, ok := dvs[df.FilePath()]
+		if !ok {
+			continue
+		}
+		bitmap, err := dv.ReadDV(fs, entry.DataFile())
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", df.FilePath(), err)
 		}
-
-		existingDVBitmaps = make(map[string]*dv.RoaringPositionBitmap, len(existingDVs))
-		for ref, dvFile := range existingDVs {
-			bitmap, err := dv.ReadDV(fs, dvFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", ref, err)
-			}
-			existingDVBitmaps[ref] = bitmap
-		}
+		existingDVs[df.FilePath()] = entry.DataFile()
+		existingDVBitmaps[df.FilePath()] = bitmap
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), meta, partitionContextByFilePath, recordWritingArgs{
@@ -3207,49 +3242,6 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	}
 
 	return referenced, nil
-}
-
-// collectExistingDVs returns the live deletion vectors that reference any of
-// files, keyed by the referenced data file path. Used by the v3 merge-on-read
-// delete path to fold prior deletes into a new DV and remove the superseded
-// entries, preserving the spec's one-DV-per-data-file invariant.
-func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (map[string]iceberg.DataFile, error) {
-	meta, err := t.txnMeta()
-	if err != nil {
-		return nil, err
-	}
-
-	s := t.planningSnapshot(meta)
-	if s == nil {
-		return nil, nil
-	}
-
-	wanted := make(map[string]struct{}, len(files))
-	for _, df := range files {
-		wanted[df.FilePath()] = struct{}{}
-	}
-
-	result := make(map[string]iceberg.DataFile)
-	// Skip DELETED entries: an old, replaced DV stays behind as one. Reading it
-	// would build the new DV from old data and bring back deleted rows. See #1372.
-	for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes, true) {
-		if err != nil {
-			return nil, fmt.Errorf("scanning existing deletion vectors: %w", err)
-		}
-		df := entry.DataFile()
-		if !IsDeletionVector(df) {
-			continue
-		}
-		ref := iceberginternal.BorrowedDataFileReferencedDataFile(df)
-		if ref == nil {
-			continue
-		}
-		if _, ok := wanted[*ref]; ok {
-			result[*ref] = df
-		}
-	}
-
-	return result, nil
 }
 
 func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
