@@ -263,12 +263,13 @@ func testRenameTableToMissingNamespace(t *testing.T, cfg Config) {
 }
 
 // testRenameTableToSelf asserts the behavior every catalog agrees on when a
-// table is renamed to its own identifier. Neither the REST spec nor Java's
-// CatalogTests define the outcome, and Java's own catalogs disagree:
-// JdbcCatalog and InMemoryCatalog treat it as a no-op success, while
-// HiveCatalog rejects it because the destination exists. Both outcomes are
-// accepted; any other error is not. Either way the table must survive
-// unchanged and be listed exactly once.
+// table is renamed to its own identifier. The outcome is implementation
+// defined: when REST rename was added (apache/iceberg#4448), a request-level
+// check rejecting source == destination was dropped so that servers could
+// decide, and Java's own catalogs now differ. JdbcCatalog and InMemoryCatalog
+// treat it as a no-op success, while HiveCatalog rejects it because the
+// destination exists. Both outcomes are accepted; any other error is not.
+// Either way the table must survive unchanged and be listed exactly once.
 func testRenameTableToSelf(t *testing.T, cfg Config) {
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
