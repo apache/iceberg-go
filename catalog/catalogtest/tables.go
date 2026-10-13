@@ -262,8 +262,13 @@ func testRenameTableToMissingNamespace(t *testing.T, cfg Config) {
 	assert.True(t, exists, "source table should still exist after a rejected rename")
 }
 
-// testRenameTableToSelf asserts that renaming a table to its own identifier is
-// rejected and leaves the table in place.
+// testRenameTableToSelf asserts the behavior every catalog agrees on when a
+// table is renamed to its own identifier. Neither the REST spec nor Java's
+// CatalogTests define the outcome, and Java's own catalogs disagree:
+// JdbcCatalog and InMemoryCatalog treat it as a no-op success, while
+// HiveCatalog rejects it because the destination exists. Both outcomes are
+// accepted; any other error is not. Either way the table must survive
+// unchanged and be listed exactly once.
 func testRenameTableToSelf(t *testing.T, cfg Config) {
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
@@ -277,10 +282,17 @@ func testRenameTableToSelf(t *testing.T, cfg Config) {
 	t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
 
 	_, err = cat.RenameTable(ctx, ident, ident)
-	assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+	if err != nil {
+		assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists,
+			"a rejected self-rename should report that the table already exists")
+	}
 
 	tbl, err := cat.LoadTable(ctx, ident)
 	require.NoError(t, err)
 	assert.Equal(t, created.Metadata().TableUUID(), tbl.Metadata().TableUUID(),
-		"table should be unchanged after a rejected self-rename")
+		"self-rename must preserve table identity")
+	assert.Equal(t, created.MetadataLocation(), tbl.MetadataLocation(),
+		"self-rename should not rewrite table metadata")
+	assert.Equal(t, []table.Identifier{ident}, listTables(t, cat, namespace),
+		"self-rename should leave exactly one table")
 }
