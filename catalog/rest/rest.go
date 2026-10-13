@@ -2049,8 +2049,13 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
+	// The spec's rename 404 covers both a missing source table and a missing
+	// destination namespace; split it by error.type so a missing namespace is
+	// not reported as a missing table. The type override only refines a
+	// status mapped here, so a 5xx or 401/403 carrying that type is unaffected.
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: catalog.ErrTableAlreadyExists}, allowNoContent())
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: catalog.ErrTableAlreadyExists},
+		allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}))
 	if err != nil {
 		return nil, err
 	}

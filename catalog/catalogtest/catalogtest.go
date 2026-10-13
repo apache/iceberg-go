@@ -115,6 +115,9 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 		t.Run("RenameTable", func(t *testing.T) { testRenameTable(t, cfg) })
 		t.Run("RenameTableToExisting", func(t *testing.T) { testRenameTableToExisting(t, cfg) })
 		t.Run("RenameMissingTable", func(t *testing.T) { testRenameMissingTable(t, cfg) })
+		t.Run("RenameTableAcrossNamespaces", func(t *testing.T) { testRenameTableAcrossNamespaces(t, cfg) })
+		t.Run("RenameTableToMissingNamespace", func(t *testing.T) { testRenameTableToMissingNamespace(t, cfg) })
+		t.Run("RenameTableToSelf", func(t *testing.T) { testRenameTableToSelf(t, cfg) })
 	} else {
 		t.Run("RenameTableNotSupported", func(t *testing.T) { testRenameTableNotSupported(t, cfg) })
 	}
