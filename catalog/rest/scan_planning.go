@@ -1038,19 +1038,7 @@ func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ..
 		return nil, err
 	}
 
-	// extra carries opaque, server-issued path segments (the plan-id). The spec
-	// puts no character restriction on them, and baseURI.JoinPath path.Cleans its
-	// arguments — so an unescaped id containing '/' would split into segments and
-	// a '..'/'.' segment would resolve to a different endpoint (e.g. ".." on the
-	// plan path lands on .../tasks). Use encodePathSegment to preserve each id as
-	// a single literal path segment.
-	params := make([]string, 0, 2+len(extra))
-	params = append(params, identPath.encodedNamespace, identPath.encodedName)
-	for _, seg := range extra {
-		params = append(params, encodePathSegment(seg))
-	}
-
-	return ep.reqPath(params...)
+	return identPath.objectReqPath(ep, extra...)
 }
 
 func scanPlanningHeaders(idempotencyKey, accessDelegation *string, includeIdempotency bool) (map[string]string, error) {

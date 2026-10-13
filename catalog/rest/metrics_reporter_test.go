@@ -552,15 +552,15 @@ func TestMetricsDispatcherCloseIsIdempotent(t *testing.T) {
 }
 
 // TestRESTMetricsReporterBuildsPathThroughProduction runs the real path
-// composition — tableIdentifierPath (encodeNamespace) and endpointReportMetrics
-// .reqPath — for a multi-level namespace with segments needing escaping, so a
-// regression in that composition or in the separator handling is caught rather
-// than bypassed by a hand-built path.
+// composition — tableIdentifierPath and identifierPath.objectReqPath — for a
+// multi-level namespace with segments needing escaping, so a regression in that
+// composition or in the separator handling is caught rather than bypassed by a
+// hand-built path.
 func TestRESTMetricsReporterBuildsPathThroughProduction(t *testing.T) {
 	c := &Catalog{namespaceSeparator: defaultNamespaceSeparator}
 	identPath, err := c.tableIdentifierPath(table.Identifier{"a b", "d e", "t x"})
 	require.NoError(t, err)
-	path, err := endpointReportMetrics.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointReportMetrics)
 	require.NoError(t, err)
 
 	received := make(chan capturedRequest, 1)

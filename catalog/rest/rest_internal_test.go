@@ -186,6 +186,98 @@ func TestIdentifierPathsRejectDotComponents(t *testing.T) {
 	}
 }
 
+func TestIdentifierPathObjectReqPath(t *testing.T) {
+	cat := &Catalog{}
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"a b+c", "d e+f", "t x+y%2F"})
+	require.NoError(t, err)
+	baseURI := mustParseURL(t, "https://catalog.example/base/v1/prefix")
+
+	for _, tt := range []struct {
+		name       string
+		ep         endpoint
+		extra      []string
+		wantSuffix string
+	}{
+		{name: "load table", ep: endpointLoadTable, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "update table", ep: endpointUpdateTable, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "delete table", ep: endpointDeleteTable, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "table exists", ep: endpointTableExists, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "credentials", ep: endpointTableCredentials, wantSuffix: "/tables/t%20x%2By%252F/credentials"},
+		{name: "metrics", ep: endpointReportMetrics, wantSuffix: "/tables/t%20x%2By%252F/metrics"},
+		{name: "plan scan", ep: endpointPlanTableScan, wantSuffix: "/tables/t%20x%2By%252F/plan"},
+		{name: "fetch tasks", ep: endpointFetchScanTasks, wantSuffix: "/tables/t%20x%2By%252F/tasks"},
+		{name: "fetch plan", ep: endpointFetchPlanResult, extra: []string{"a+b/c%2F"}, wantSuffix: "/tables/t%20x%2By%252F/plan/a%2Bb%2Fc%252F"},
+		{name: "cancel plan", ep: endpointCancelPlanning, extra: []string{".."}, wantSuffix: "/tables/t%20x%2By%252F/plan/%2E%2E"},
+		{name: "load view", ep: endpointLoadView, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "update view", ep: endpointUpdateView, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "delete view", ep: endpointDeleteView, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "view exists", ep: endpointViewExists, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "load function", ep: endpointLoadFunction, wantSuffix: "/functions/t%20x%2By%252F"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, err := identPath.objectReqPath(tt.ep, tt.extra...)
+			require.NoError(t, err)
+			assert.Equal(t, "/base/v1/prefix/namespaces/a%20b%2Bc%1Fd%20e%2Bf"+tt.wantSuffix,
+				baseURI.JoinPath(path...).EscapedPath())
+		})
+	}
+}
+
+func TestIdentifierPathNamespaceReqPath(t *testing.T) {
+	cat := &Catalog{}
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"a b+c", "d e+f", "t x+y"})
+	require.NoError(t, err)
+	baseURI := mustParseURL(t, "https://catalog.example/base/v1/prefix")
+
+	for _, tt := range []struct {
+		name       string
+		ep         endpoint
+		wantSuffix string
+	}{
+		{name: "create table", ep: endpointCreateTable, wantSuffix: "/tables"},
+		{name: "register table", ep: endpointRegisterTable, wantSuffix: "/register"},
+		{name: "create view", ep: endpointCreateView, wantSuffix: "/views"},
+		{name: "register view", ep: endpointRegisterView, wantSuffix: "/register-view"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, err := identPath.namespaceReqPath(tt.ep)
+			require.NoError(t, err)
+			assert.Equal(t, "/base/v1/prefix/namespaces/a%20b%2Bc%1Fd%20e%2Bf"+tt.wantSuffix,
+				baseURI.JoinPath(path...).EscapedPath())
+		})
+	}
+}
+
+func TestIdentifierPathMethodsRejectWrongParameterCount(t *testing.T) {
+	cat := &Catalog{}
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"namespace", "table"})
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name      string
+		buildPath func() ([]string, error)
+	}{
+		{name: "object method on namespace endpoint", buildPath: func() ([]string, error) {
+			return identPath.objectReqPath(endpointCreateTable)
+		}},
+		{name: "namespace method on object endpoint", buildPath: func() ([]string, error) {
+			return identPath.namespaceReqPath(endpointLoadTable)
+		}},
+		{name: "missing plan id", buildPath: func() ([]string, error) {
+			return identPath.objectReqPath(endpointFetchPlanResult)
+		}},
+		{name: "unexpected extra segment", buildPath: func() ([]string, error) {
+			return identPath.objectReqPath(endpointLoadTable, "extra")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, err := tt.buildPath()
+			require.ErrorIs(t, err, ErrRESTError)
+			assert.Nil(t, path)
+		})
+	}
+}
+
 func TestEncodePathSegment(t *testing.T) {
 	tests := []struct {
 		name  string

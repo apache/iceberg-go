@@ -1256,7 +1256,7 @@ func (r *Catalog) tableFromResponse(
 			// metrics silently vanish with no signal.
 			slog.Debug("iceberg: skipping REST metrics reporter, cannot split identifier",
 				"error", idErr)
-		} else if path, pErr := endpointReportMetrics.reqPath(identPath.encodedNamespace, identPath.encodedName); pErr != nil {
+		} else if path, pErr := identPath.objectReqPath(endpointReportMetrics); pErr != nil {
 			slog.Debug("iceberg: skipping REST metrics reporter, cannot build metrics path",
 				"error", pErr)
 		} else {
@@ -1295,7 +1295,7 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 		return nil, err
 	}
 
-	path, err := endpointTableCredentials.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointTableCredentials)
 	if err != nil {
 		return nil, err
 	}
@@ -1490,6 +1490,25 @@ type identifierPath struct {
 	encodedName      string
 }
 
+// namespaceReqPath builds a namespace-scoped path, such as a create or register
+// endpoint, without including the object name.
+func (p identifierPath) namespaceReqPath(ep endpoint) ([]string, error) {
+	return ep.reqPath(p.encodedNamespace)
+}
+
+// objectReqPath builds an object-scoped path using the encoded identifier components.
+// extra contains raw opaque path segments, such as scan plan IDs. Encode each
+// segment here so slashes, plus signs, and pure-dot segments remain literal.
+func (p identifierPath) objectReqPath(ep endpoint, extra ...string) ([]string, error) {
+	params := make([]string, 0, 2+len(extra))
+	params = append(params, p.encodedNamespace, p.encodedName)
+	for _, seg := range extra {
+		params = append(params, encodePathSegment(seg))
+	}
+
+	return ep.reqPath(params...)
+}
+
 // newIdentifierPath builds path components from an already validated identifier.
 func (r *Catalog) newIdentifierPath(ident table.Identifier) identifierPath {
 	rawName := catalog.ObjectNameFromIdent(ident)
@@ -1566,7 +1585,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		Props:         cfg.Properties,
 	}
 
-	path, err := endpointCreateTable.reqPath(identPath.encodedNamespace)
+	path, err := identPath.namespaceReqPath(endpointCreateTable)
 	if err != nil {
 		return nil, err
 	}
@@ -1671,7 +1690,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		Updates      []table.Update      `json:"updates"`
 	}
 
-	path, err := endpointUpdateTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointUpdateTable)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1804,7 +1823,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
-	path, err := endpointRegisterTable.reqPath(identPath.encodedNamespace)
+	path, err := identPath.namespaceReqPath(endpointRegisterTable)
 	if err != nil {
 		return nil, err
 	}
@@ -1848,7 +1867,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 		return nil, err
 	}
 
-	path, err := endpointLoadTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointLoadTable)
 	if err != nil {
 		return nil, err
 	}
@@ -1896,7 +1915,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointUpdateTable)
 	if err != nil {
 		return nil, err
 	}
@@ -1936,7 +1955,7 @@ func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 
-	path, err := endpointDeleteTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointDeleteTable)
 	if err != nil {
 		return err
 	}
@@ -1962,7 +1981,7 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		return err
 	}
 
-	path, err := endpointDeleteTable.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointDeleteTable)
 	if err != nil {
 		return err
 	}
@@ -2240,7 +2259,7 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		return true, nil
 	}
 
-	path, err := endpointTableExists.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointTableExists)
 	if err != nil {
 		return false, err
 	}
@@ -2338,7 +2357,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return err
 	}
 
-	path, err := endpointDeleteView.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointDeleteView)
 	if err != nil {
 		return err
 	}
@@ -2370,7 +2389,7 @@ func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		return true, nil
 	}
 
-	path, err := endpointViewExists.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointViewExists)
 	if err != nil {
 		return false, err
 	}
@@ -2462,7 +2481,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		ViewVersion: version,
 	}
 
-	path, err := endpointCreateView.reqPath(identPath.encodedNamespace)
+	path, err := identPath.namespaceReqPath(endpointCreateView)
 	if err != nil {
 		return nil, err
 	}
@@ -2499,7 +2518,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		Requirements []view.Requirement `json:"requirements"`
 		Updates      []view.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateView.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointUpdateView)
 	if err != nil {
 		return nil, err
 	}
@@ -2541,7 +2560,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		MetadataLoc string `json:"metadata-location"`
 	}
 
-	path, err := endpointRegisterView.reqPath(identPath.encodedNamespace)
+	path, err := identPath.namespaceReqPath(endpointRegisterView)
 	if err != nil {
 		return nil, err
 	}
@@ -2573,7 +2592,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, err
 	}
 
-	path, err := endpointLoadView.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointLoadView)
 	if err != nil {
 		return nil, err
 	}
@@ -2752,7 +2771,7 @@ func (r *Catalog) LoadFunction(ctx context.Context, identifier table.Identifier)
 // loadFunction fetches and parses a function after endpoint negotiation and
 // identifier validation, so its ErrNoSuchFunction is always server-reported.
 func (r *Catalog) loadFunction(ctx context.Context, identifier table.Identifier, identPath identifierPath) (*udf.UDF, error) {
-	path, err := endpointLoadFunction.reqPath(identPath.encodedNamespace, identPath.encodedName)
+	path, err := identPath.objectReqPath(endpointLoadFunction)
 	if err != nil {
 		return nil, err
 	}
