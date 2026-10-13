@@ -235,10 +235,43 @@ type sessionTransport struct {
 	authManager    AuthManager
 	defaultHeaders http.Header
 	signer         RequestSigner
-	// signingOrigin is the configured catalog origin. A request to a different
-	// origin (e.g. a redirect hop) is not signed, so the signer's Authorization
-	// header and any session token never reach an unconfigured host.
-	signingOrigin *url.URL
+
+	// builtinHeaders is the subset of defaultHeaders under the built-in keys
+	// (with any operator override applied), which identify the client and
+	// carry no credentials. It is all a request to an origin other than
+	// catalogOrigin or authOrigin (e.g. a redirect hop) receives.
+	builtinHeaders http.Header
+	// catalogOrigin is the configured catalog origin: the only origin that
+	// receives the auth header and the signer's signature. authOrigin is the
+	// configured OAuth token endpoint, if any, which also receives
+	// user-supplied default headers.
+	// These are compared against the request URL rather than derived from
+	// the redirect chain, so a transport that omits Response.Request cannot
+	// widen them. A nil catalogOrigin trusts no origin.
+	catalogOrigin *url.URL
+	authOrigin    *url.URL
+}
+
+// maxRedirects matches net/http's default redirect policy, which a custom
+// CheckRedirect replaces.
+const maxRedirects = 10
+
+// sameOriginRedirectsOnly is the CheckRedirect policy for every client the
+// catalog builds. A redirect is followed only while it stays on the origin of
+// the request that started the chain. A cross-origin hop would otherwise
+// replay a 307/308 body (such as the client_credentials form, client_secret
+// included) to the other origin, and a hop that redirects back to a different
+// catalog path would be sent with the catalog's credentials.
+func sameOriginRedirectsOnly(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if from := via[0].URL; !sameOrigin(from, req.URL) {
+		return fmt.Errorf("%w: refusing redirect from %s://%s to a different origin %s://%s",
+			ErrRESTError, from.Scheme, from.Host, req.URL.Scheme, req.URL.Host)
+	}
+
+	return nil
 }
 
 // sameOrigin reports whether two URLs share scheme, host, and effective port.
@@ -263,12 +296,25 @@ func defaultedPort(u *url.URL) string {
 }
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// This transport adds the auth header, the signature and the session
+	// defaults to every request it sends, including each redirect hop.
+	// net/http's redirect stripping only covers Authorization and cookies set
+	// on the request passed to Client.Do, and never custom headers, so these
+	// are applied only for the configured origins. sameOriginRedirectsOnly
+	// keeps the clients from following a cross-origin hop at all; this gate
+	// is the second line of defense.
+	toCatalog := s.catalogOrigin != nil && sameOrigin(s.catalogOrigin, r.URL)
+	defaults := s.builtinHeaders
+	if toCatalog || (s.authOrigin != nil && sameOrigin(s.authOrigin, r.URL)) {
+		defaults = s.defaultHeaders
+	}
+
 	// A session default is applied unless the request already carries that
 	// header (a per-request override of any default, not just Content-Type
 	// wins) or explicitly opted out of it via withSuppressedHeaders (carried on
 	// the context as an explicit set, never inferred from header values).
 	suppressed := suppressedHeadersFrom(r.Context())
-	for k, v := range s.defaultHeaders {
+	for k, v := range defaults {
 		ck := http.CanonicalHeaderKey(k)
 		if _, ok := r.Header[ck]; ok {
 			continue
@@ -287,7 +333,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// session default of the same key. A caller cannot suppress or spoof the
 	// Authorization header by supplying its own. Do not reorder this before the
 	// default-header loop.
-	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
+	if s.authManager != nil && toCatalog && r.Context().Value(skipOAuth) == nil {
 		var (
 			k, v string
 			err  error
@@ -306,7 +352,12 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r.Header.Set(k, v)
 	}
 
-	if s.signer != nil && (s.signingOrigin == nil || sameOrigin(s.signingOrigin, r.URL)) {
+	// A signer only signs requests to the configured catalog origin: a request
+	// to a different origin (e.g. a redirect hop) is left unsigned, so the
+	// signer's Authorization header and any session token never reach an
+	// unconfigured host. The guard lives here, in core, so it covers every
+	// signer, including one installed verbatim via WithSigner.
+	if s.signer != nil && toCatalog {
 		if err := s.signer.SignRequest(r); err != nil {
 			return nil, err
 		}
@@ -953,7 +1004,11 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 	// this reuses the catalog client's transport — preserving its TLS, proxy and
 	// header behavior — but as a distinct *http.Client so the Timeout applies to
 	// refresh alone and not to ordinary catalog requests.
-	oauthClient := &http.Client{Transport: cl.Transport, Timeout: defaultOAuthTimeout}
+	oauthClient := &http.Client{
+		Transport:     cl.Transport,
+		Timeout:       defaultOAuthTimeout,
+		CheckRedirect: sameOriginRedirectsOnly,
+	}
 	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
 		transport := &http.Transport{
@@ -961,8 +1016,9 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 			TLSClientConfig: opts.oauthTLSConfig,
 		}
 		oauthClient = &http.Client{
-			Transport: transport,
-			Timeout:   defaultOAuthTimeout,
+			Transport:     transport,
+			Timeout:       defaultOAuthTimeout,
+			CheckRedirect: sameOriginRedirectsOnly,
 		}
 		closeIdleConnections = transport.CloseIdleConnections
 	}
@@ -1020,6 +1076,19 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
+// builtinHeaderDefaults returns the headers every session sends by default.
+// They identify the client and carry no credentials, so they are the only
+// defaults a request to an unconfigured origin receives (see
+// sessionTransport.builtinHeaders).
+func builtinHeaderDefaults() []struct{ key, value string } {
+	return []struct{ key, value string }{
+		{"X-Client-Version", icebergRestSpecVersion},
+		{"Content-Type", "application/json"},
+		{"User-Agent", "GoIceberg/" + iceberg.Version()},
+		{headerIcebergAccessDelegation, defaultAccessDelegation},
+	}
+}
+
 // createSession returns a cleanup that closes only transports created by this
 // function, never transports supplied by the caller.
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, func(), error) {
@@ -1047,8 +1116,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session := &sessionTransport{
 		RoundTripper:   baseTransport,
 		defaultHeaders: http.Header{},
+		catalogOrigin:  r.baseURI,
+		authOrigin:     opts.authUri,
 	}
-	cl := &http.Client{Transport: session}
+	cl := &http.Client{Transport: session, CheckRedirect: sameOriginRedirectsOnly}
 
 	// If the user does not set an AuthManager, construct one for this session
 	// without storing it in opts. Bootstrap authentication must not leak into
@@ -1062,10 +1133,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
-	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
-	session.defaultHeaders.Set("Content-Type", "application/json")
-	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	session.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
+	builtins := builtinHeaderDefaults()
+	for _, h := range builtins {
+		session.defaultHeaders.Set(h.key, h.value)
+	}
 
 	for k, v := range opts.headers {
 		session.defaultHeaders.Set(k, v)
@@ -1074,6 +1145,13 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	for k, v := range opts.additionalProps {
 		if headerKey, found := strings.CutPrefix(k, "header."); found {
 			session.defaultHeaders.Set(headerKey, v)
+		}
+	}
+
+	session.builtinHeaders = http.Header{}
+	for _, h := range builtins {
+		if v := session.defaultHeaders.Values(h.key); len(v) > 0 {
+			session.builtinHeaders[http.CanonicalHeaderKey(h.key)] = slices.Clone(v)
 		}
 	}
 
@@ -1088,14 +1166,6 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		return nil, nil, err
 	}
 	session.signer = signer
-	// A signer only signs requests to the configured catalog origin: a request
-	// to a different origin (e.g. a redirect hop) is left unsigned, so the
-	// signer's Authorization header and any session token never reach an
-	// unconfigured host. The guard lives here, in core, so it covers every
-	// signer, including one installed verbatim via WithSigner.
-	if signer != nil {
-		session.signingOrigin = r.baseURI
-	}
 
 	return cl, cleanup, nil
 }

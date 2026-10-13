@@ -95,6 +95,35 @@ func TestDataFileCodecWithDroppedPartitionSource(t *testing.T) {
 	require.Equal(t, map[int]any{1000: nil, 1001: int32(3)}, decoded.Partition())
 }
 
+// TestMarshalAvroEntryOmitsDistinctCounts checks that the data_file schema the
+// entry codec encodes with has no distinct_counts (field 111), which the spec
+// deprecates in every version (apache/iceberg#12182). The encoder and decoder
+// share this schema, so a round trip alone could not show the field leaking;
+// strict readers such as PyIceberg reject manifests that emit it.
+func TestMarshalAvroEntryOmitsDistinctCounts(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			spec, schema, _ := fullyPopulatedDataFileForCodec(t, version)
+			s, _, err := manifestEntrySchemaFor(spec, schema, version)
+			require.NoError(t, err)
+
+			root := s.Root()
+			found := false
+			for _, field := range root.Fields {
+				if field.Name != "data_file" {
+					continue
+				}
+				found = true
+				for _, dfField := range field.Type.Fields {
+					require.NotEqual(t, "distinct_counts", dfField.Name)
+					require.NotEqual(t, 111, dfField.Props["field-id"])
+				}
+			}
+			require.True(t, found, "data_file field not found on manifest_entry v%d schema", version)
+		})
+	}
+}
+
 // TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes
 // guards against the cache-key collision that would occur if the cache
 // were keyed only by spec.ID(). Two tables can both use
@@ -292,13 +321,6 @@ func fullyPopulatedDataFileForCodec(t testing.TB, version int) (PartitionSpec, *
 		SplitOffsets([]int64{0, 4096}).
 		SortOrderID(0).
 		KeyMetadata([]byte("kms-key-1"))
-	if version < 3 {
-		// distinct_counts is deprecated in the spec for all versions
-		// (apache/iceberg#12182); the fixture sets it to cover the
-		// read-compatibility round-trip path for legacy manifests, not
-		// to model what a new DataFile should carry.
-		builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128})
-	}
 	if version >= 2 {
 		builder.EqualityFieldIDs([]int{1})
 	}
@@ -309,7 +331,16 @@ func fullyPopulatedDataFileForCodec(t testing.TB, version int) (PartitionSpec, *
 			ContentSizeInBytes(2048)
 	}
 
-	return spec, schema, builder.Build()
+	df := builder.Build()
+	if version < 3 {
+		// distinct_counts is deprecated in the spec for all versions
+		// (apache/iceberg#12182) and has no public setter. The fixture sets
+		// the Avro field directly to cover the read-compatibility path for
+		// legacy manifests, not to model what a new DataFile should carry.
+		df.(*dataFile).DistinctCounts = mapToAvroColMap(map[int]int64{1: 64, 2: 128})
+	}
+
+	return spec, schema, df
 }
 
 var (

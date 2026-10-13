@@ -544,7 +544,7 @@ func TestRewriteFiles_RejectsNilDataFile(t *testing.T) {
 // [Transaction.RewriteDataFiles]: workers run [table.ExecuteCompactionGroup]
 // per group (here inline; in distributed compaction this happens on
 // remote peers and the results travel over the wire), then a single
-// leader transaction stages [table.RewriteFiles.Apply] +
+// leader transaction stages [table.RewriteFiles.ApplyResult] +
 // [table.RewriteFiles.Commit] for one atomic snapshot.
 func TestRewriteFiles_DistributedEquivalence(t *testing.T) {
 	tbl := newRewriteTestTable(t)

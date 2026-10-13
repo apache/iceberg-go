@@ -344,6 +344,7 @@ func reporterWithSession(t *testing.T, auth AuthManager, tr http.RoundTripper) *
 		RoundTripper:   tr,
 		authManager:    auth,
 		defaultHeaders: http.Header{},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "catalog.invalid"},
 	}
 	session.defaultHeaders.Set("Content-Type", "application/json")
 
@@ -384,6 +385,7 @@ func TestRESTMetricsReporterRefetchesCredentialPerReport(t *testing.T) {
 		RoundTripper:   &captureTransport{ch: received},
 		authManager:    &rotatingAuthManager{},
 		defaultHeaders: http.Header{},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "catalog.invalid"},
 	}
 	rep := reporterWith(t, session, d, nil)
 

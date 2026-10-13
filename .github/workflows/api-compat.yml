@@ -1,0 +1,82 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: API compatibility
+
+on:
+  pull_request:
+    # edited re-runs the check when the title gains or loses its "!" marker.
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apidiff:
+    name: apidiff
+    runs-on: ubuntu-latest
+    env:
+      GOMODCACHE: ${{ github.workspace }}/.gocache/mod
+      GOCACHE: ${{ github.workspace }}/.gocache/build
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        # The PR merge commit plus its first parent, the base branch tip it
+        # was merged onto, which is what the API is compared against.
+        fetch-depth: 2
+    # The Go version and cache key match go-ci.yml's ubuntu-latest / 1.27.1
+    # matrix entry, whose cache main saves; keep them in step when it changes.
+    - name: Install Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: '1.27.1'
+        cache: false
+    # Reuse the Go job's cache from main; this job never saves one.
+    - name: Restore Go module and build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ github.workspace }}/.gocache/mod
+          ${{ github.workspace }}/.gocache/build
+        key: go-ubuntu-latest-go1.27.1-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          go-ubuntu-latest-go1.27.1-
+    # The version is pinned once, as APIDIFF_VERSION in the script.
+    - name: Install apidiff
+      run: |
+        version="$(sed -n 's/^APIDIFF_VERSION="\(.*\)"$/\1/p' dev/check-api-compat.sh)"
+        if [[ -z "${version}" ]]; then
+          echo "::error::APIDIFF_VERSION not found in dev/check-api-compat.sh"
+          exit 2
+        fi
+        go install "golang.org/x/exp/cmd/apidiff@${version}"
+    - name: Check for incompatible API changes
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+      run: |
+        # HEAD^1 is only the base tip when HEAD is the PR merge commit; refuse
+        # to compare against anything else.
+        if ! git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+          echo "::error::expected the pull request merge commit to be checked out"
+          exit 2
+        fi
+        dev/check-api-compat.sh HEAD^1

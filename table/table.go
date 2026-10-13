@@ -366,6 +366,9 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 //   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
 //   - Files where no rows match the filter are kept unchanged
 //
+// A row matches only if the filter is true for it. Rows where the filter evaluates to NULL, for example
+// `age = 30` on a NULL age, do not match and are kept.
+//
 // The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
@@ -1306,14 +1309,6 @@ func WithMaxConcurrency(n int) ScanOption {
 	return func(scan *Scan) {
 		scan.concurrency = n
 	}
-}
-
-// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
-// backward compatibility with the pre-existing typo'd name.
-//
-// Deprecated: use [WithMaxConcurrency].
-func WitMaxConcurrency(n int) ScanOption {
-	return WithMaxConcurrency(n)
 }
 
 func WithOptions(opts iceberg.Properties) ScanOption {
