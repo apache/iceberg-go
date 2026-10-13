@@ -19,9 +19,7 @@ package table
 
 import (
 	"fmt"
-	"net/url"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -46,30 +44,16 @@ type LocationProvider interface {
 }
 
 type simpleLocationProvider struct {
-	tableLoc     *url.URL
 	tableProps   iceberg.Properties
-	dataPath     *url.URL
-	metadataPath *url.URL
+	dataPath     string
+	metadataPath string
 }
 
-// Native paths must not be parsed as URLs: percent signs, fragments, and
-// query delimiters are literal filename characters.
-func parseLocationPath(location string) (*url.URL, error) {
-	schemeEnd := strings.IndexByte(location, ':')
-	separator := strings.IndexAny(location, `/\`)
-	if filepath.VolumeName(location) != "" || schemeEnd < 0 || (separator >= 0 && separator < schemeEnd) {
-		return &url.URL{Path: location}, nil
-	}
-
-	return url.Parse(location)
-}
-
-func joinLocationPath(location *url.URL, elem ...string) string {
-	if location.Scheme == "" {
-		return filepath.Join(append([]string{location.Path}, elem...)...)
-	}
-
-	return location.JoinPath(elem...).String()
+// joinLocationPath appends components using forward slashes.
+// It trims trailing slashes from the base but does not otherwise clean,
+// encode, or decode the local path or URI.
+func joinLocationPath(location string, elem ...string) string {
+	return strings.TrimRight(location, "/") + "/" + strings.Join(elem, "/")
 }
 
 func (slp *simpleLocationProvider) NewDataLocation(dataFileName string) string {
@@ -109,32 +93,12 @@ func (slp *simpleLocationProvider) NewMetadataLocation(metadataFileName string) 
 	return joinLocationPath(slp.metadataPath, metadataFileName)
 }
 
-func newSimpleLocationProvider(tableLoc *url.URL, tableProps iceberg.Properties) (*simpleLocationProvider, error) {
-	out := &simpleLocationProvider{
-		tableLoc:   tableLoc,
-		tableProps: tableProps,
+func newSimpleLocationProvider(tableLoc string, tableProps iceberg.Properties) *simpleLocationProvider {
+	return &simpleLocationProvider{
+		tableProps:   tableProps,
+		dataPath:     tableProps.Get(WriteDataPathKey, joinLocationPath(tableLoc, "data")),
+		metadataPath: tableProps.Get(WriteMetadataPathKey, joinLocationPath(tableLoc, "metadata")),
 	}
-
-	var err error
-	if propPath, ok := tableProps[WriteDataPathKey]; ok {
-		out.dataPath, err = parseLocationPath(propPath)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		out.dataPath = out.tableLoc.JoinPath("data")
-	}
-
-	if propPath, ok := tableProps[WriteMetadataPathKey]; ok {
-		out.metadataPath, err = parseLocationPath(propPath)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		out.metadataPath = out.tableLoc.JoinPath("metadata")
-	}
-
-	return out, nil
 }
 
 type objectStoreLocationProvider struct {
@@ -177,28 +141,18 @@ func (p *objectStoreLocationProvider) NewDataLocation(dataFileName string) strin
 	}
 }
 
-func newObjectStoreLocationProvider(tableLoc *url.URL, tableProps iceberg.Properties) (*objectStoreLocationProvider, error) {
-	slp, err := newSimpleLocationProvider(tableLoc, tableProps)
-	if err != nil {
-		return nil, err
-	}
-
+func newObjectStoreLocationProvider(tableLoc string, tableProps iceberg.Properties) *objectStoreLocationProvider {
 	return &objectStoreLocationProvider{
-		simpleLocationProvider: slp,
+		simpleLocationProvider: newSimpleLocationProvider(tableLoc, tableProps),
 		includePartitionPaths: tableProps.GetBool(WriteObjectStorePartitionedPathsKey,
 			WriteObjectStorePartitionedPathsDefault),
-	}, nil
+	}
 }
 
 func LoadLocationProvider(tableLocation string, tableProps iceberg.Properties) (LocationProvider, error) {
-	u, err := parseLocationPath(tableLocation)
-	if err != nil {
-		return nil, err
-	}
-
 	if tableProps.GetBool(ObjectStoreEnabledKey, ObjectStoreEnabledDefault) {
-		return newObjectStoreLocationProvider(u, tableProps)
+		return newObjectStoreLocationProvider(tableLocation, tableProps), nil
 	}
 
-	return newSimpleLocationProvider(u, tableProps)
+	return newSimpleLocationProvider(tableLocation, tableProps), nil
 }
