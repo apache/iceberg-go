@@ -1246,7 +1246,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	return stats.ToDataFile(DataFileOpts{
+	opts := DataFileOpts{
 		Schema:          w.info.FileSchema,
 		Spec:            w.info.Spec,
 		Path:            w.info.FileName,
@@ -1255,7 +1255,42 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		FileSize:        w.counter.Count,
 		PartitionValues: w.partition,
 		SortOrderID:     w.info.SortOrderID,
-	}), nil
+	}
+	if w.info.Content == iceberg.EntryContentPosDeletes {
+		opts.ReferencedDataFile = singleReferencedDataFile(stats)
+	}
+
+	return stats.ToDataFile(opts), nil
+}
+
+// posDeleteFilePathFieldID is the reserved field ID of the file_path column
+// in a position delete file.
+const posDeleteFilePathFieldID = 2147483546
+
+// singleReferencedDataFile returns the data file path when every delete in a
+// position delete file targets that one file, or nil otherwise. It compares
+// the untruncated file_path min and max, which position delete writers always
+// collect (see table.positionDeleteMetricsProps). Java's v2
+// PositionDeleteWriter leaves the field unset; the spec allows it on position
+// delete files with a single target.
+func singleReferencedDataFile(stats *DataFileStatistics) *string {
+	agg, ok := stats.ColAggs[posDeleteFilePathFieldID]
+	if !ok {
+		return nil
+	}
+
+	lower, ok := agg.Min().(iceberg.StringLiteral)
+	if !ok || lower == "" {
+		return nil
+	}
+	upper, ok := agg.Max().(iceberg.StringLiteral)
+	if !ok || lower != upper {
+		return nil
+	}
+
+	path := string(lower)
+
+	return &path
 }
 
 func (w *ParquetFileWriter) Abort() error {
