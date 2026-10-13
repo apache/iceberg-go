@@ -112,6 +112,14 @@ func avroKeyMetadata(dek, aadPrefix []byte, fileLength int64) []byte {
 	return slices.Concat([]byte{1}, avroBytes(dek), avroLong(1), avroBytes(aadPrefix), avroLong(1), avroLong(fileLength))
 }
 
+// javaKeyMetadata hand-encodes StandardKeyMetadata the way Java's
+// StandardEncryptionManager writes it for data files and manifests,
+// new StandardKeyMetadata(fileDek, aadPrefix): file_length takes the null
+// union branch.
+func javaKeyMetadata(dek, aadPrefix []byte) []byte {
+	return slices.Concat([]byte{1}, avroBytes(dek), avroLong(1), avroBytes(aadPrefix), avroLong(0))
+}
+
 type parsedKeyMetadata struct {
 	dek, aadPrefix []byte
 	fileLength     int64
@@ -383,6 +391,69 @@ func TestStandardEncryptionManager_ReadsSpecBuiltStream(t *testing.T) {
 	}
 }
 
+// Java records no file_length for data files and manifests; the reader then
+// takes the encrypted length from the caller (DataFile.FileSizeBytes or
+// ManifestFile.Length).
+func TestStandardEncryptionManager_ReadsJavaKeyMetadataWithCallerLength(t *testing.T) {
+	dek, err := hex.DecodeString("000102030405060708090a0b0c0d0e0f")
+	require.NoError(t, err)
+	aadPrefix, err := hex.DecodeString("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf")
+	require.NoError(t, err)
+
+	// Known-answer vector for new StandardKeyMetadata(dek, aadPrefix): the
+	// trailing 0x00 selects the null branch of the file_length union.
+	const wantJava = "01" + "20" + "000102030405060708090a0b0c0d0e0f" + "02" + "20" + "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf" + "00"
+	keyMetadata := javaKeyMetadata(dek, aadPrefix)
+	assert.Equal(t, wantJava, hex.EncodeToString(keyMetadata), "the test encoder must match the hand-written vector")
+
+	mgr := newTestManager()
+	for _, size := range []int{0, 1, plainBlockSize, 2*plainBlockSize + 17} {
+		t.Run(fmt.Sprintf("%d bytes", size), func(t *testing.T) {
+			plaintext := testData(size)
+			stream := encodeAGS1(t, plaintext, dek, aadPrefix)
+
+			in, err := mgr.NewDecryptedInputFileWithLength(t.Context(), newMemFile(stream), int64(len(stream)), keyMetadata)
+			require.NoError(t, err)
+			got, err := io.ReadAll(in)
+			require.NoError(t, err)
+			assert.True(t, bytes.Equal(plaintext, got))
+
+			_, err = mgr.NewDecryptedInputFile(t.Context(), newMemFile(stream), keyMetadata)
+			assert.ErrorIs(t, err, encryption.ErrInvalidKeyMetadata, "without file_length or a caller length there is no trusted length")
+		})
+	}
+
+	t.Run("file_length takes precedence over the caller length", func(t *testing.T) {
+		plaintext := testData(plainBlockSize + 5)
+		stream := encodeAGS1(t, plaintext, dek, aadPrefix)
+		meta := avroKeyMetadata(dek, aadPrefix, int64(len(stream)))
+
+		in, err := mgr.NewDecryptedInputFileWithLength(t.Context(), newMemFile(stream), headerLength+blockOverhead, meta)
+		require.NoError(t, err)
+		got, err := io.ReadAll(in)
+		require.NoError(t, err)
+		assert.True(t, bytes.Equal(plaintext, got))
+	})
+
+	t.Run("caller length is validated", func(t *testing.T) {
+		stream := encodeAGS1(t, nil, dek, aadPrefix)
+		for _, length := range []int64{-1, 0, headerLength + blockOverhead - 1} {
+			_, err := mgr.NewDecryptedInputFileWithLength(t.Context(), newMemFile(stream), length, keyMetadata)
+			assert.ErrorIs(t, err, encryption.ErrInvalidKeyMetadata, "length %d", length)
+		}
+	})
+
+	t.Run("short caller length fails authentication", func(t *testing.T) {
+		// A caller length that drops the tail of the last block makes that
+		// block fail authentication.
+		stream := encodeAGS1(t, testData(100), dek, aadPrefix)
+		in, err := mgr.NewDecryptedInputFileWithLength(t.Context(), newMemFile(stream), int64(len(stream)-10), keyMetadata)
+		require.NoError(t, err)
+		_, err = io.ReadAll(in)
+		assert.ErrorIs(t, err, encryption.ErrAuthenticationFailed)
+	})
+}
+
 // TestStandardEncryptionManager_BlockNoncesAreUnique pins the one GCM
 // property whose loss is catastrophic and silent: reusing a nonce under a
 // single key leaks the plaintext XOR of the two blocks and the GHASH
@@ -569,7 +640,7 @@ func TestStandardEncryptionManager_InvalidKeyMetadataRejectedOnRead(t *testing.T
 		{"empty aad prefix", avroKeyMetadata(dek, nil, 36), encryption.ErrInvalidKeyMetadata, "aad-prefix must be exactly 16 bytes, got 0"},
 		{"short aad prefix", avroKeyMetadata(dek, aad[:15], 36), encryption.ErrInvalidKeyMetadata, "aad-prefix must be exactly 16 bytes, got 15"},
 		{"long aad prefix", avroKeyMetadata(dek, append(slices.Clone(aad), 0), 36), encryption.ErrInvalidKeyMetadata, "aad-prefix must be exactly 16 bytes, got 17"},
-		{"missing file length", slices.Concat([]byte{1}, avroBytes(dek), avroLong(1), avroBytes(aad), avroLong(0)), encryption.ErrInvalidKeyMetadata, "file-length is required"},
+		{"missing file length and no caller length", javaKeyMetadata(dek, aad), encryption.ErrInvalidKeyMetadata, "file-length is required"},
 		{"negative file length", valid(-1), encryption.ErrInvalidKeyMetadata, "shorter than"},
 		{"file length below the 36-byte minimum", valid(35), encryption.ErrInvalidKeyMetadata, "shorter than"},
 		{"file length ends inside a nonce", valid(headerLength + physical + 5), encryption.ErrInvalidKeyMetadata, "nonce and tag"},
@@ -648,9 +719,8 @@ func TestStandardEncryptionManager_TruncatedBackendReadReportsBlockTruncated(t *
 	assert.NotErrorIs(t, err, encryption.ErrAuthenticationFailed, "a truncated read must not be misreported as tampering")
 }
 
-// The plaintext length comes from the file length in key metadata, not from
-// the storage size, so bytes appended after the last block are ignored, as
-// the AES GCM Stream spec's "File length" rule implies.
+// The plaintext length is derived from the file length in key metadata, so
+// bytes appended after the last block are ignored.
 func TestStandardEncryptionManager_TrailingBytesAfterLastBlockIgnored(t *testing.T) {
 	mgr := newTestManager()
 	plaintext := testData(plainBlockSize + 10)
@@ -722,6 +792,14 @@ func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.
 	closeErr2 := out.Close()
 	require.Error(t, closeErr2)
 	assert.Equal(t, 1, fw.closes, "a retried Close must not close the underlying writer again")
+}
+
+func TestStandardEncryptionManager_HeaderWriteFailureClosesWriter(t *testing.T) {
+	fw := &failAfterNWriter{failAt: 1}
+	out, err := newTestManager().NewEncryptedOutputFile(t.Context(), fw, testKeyID)
+	require.Error(t, err)
+	assert.Nil(t, out)
+	assert.Equal(t, 1, fw.closes, "a failed header write must close the underlying writer, not leak it")
 }
 
 func TestStandardEncryptionManager_WriteAfterCloseRejected(t *testing.T) {

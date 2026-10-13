@@ -50,8 +50,9 @@ var (
 	ErrKeyIDRequired = errors.New("encryption: StandardEncryptionManager requires a non-empty keyID")
 
 	// ErrKeyMetadataRequired is returned by
-	// [StandardEncryptionManager.NewDecryptedInputFile] when keyMetadata is
-	// empty. StandardEncryptionManager always decrypts, so it requires the
+	// [StandardEncryptionManager.NewDecryptedInputFile] and
+	// [StandardEncryptionManager.NewDecryptedInputFileWithLength] when
+	// keyMetadata is empty. StandardEncryptionManager always decrypts, so it requires the
 	// per-file key metadata produced by
 	// [StandardEncryptionManager.NewEncryptedOutputFile].
 	ErrKeyMetadataRequired = errors.New("encryption: StandardEncryptionManager requires non-empty key metadata")
@@ -67,11 +68,13 @@ var (
 	ErrInvalidStreamHeader = errors.New("encryption: invalid AES GCM Stream header")
 
 	// ErrInvalidKeyMetadata is returned by
-	// [StandardEncryptionManager.NewDecryptedInputFile] when key metadata is
-	// not a well-formed StandardKeyMetadata record or fails basic sanity
-	// checks (e.g. a truncated record, a missing or wrong-sized AAD prefix, or
-	// a missing or impossible file length). Key metadata is untrusted input on
-	// a crypto read path, so it is validated rather than trusted blindly.
+	// [StandardEncryptionManager.NewDecryptedInputFile] and
+	// [StandardEncryptionManager.NewDecryptedInputFileWithLength] when key
+	// metadata is not a well-formed StandardKeyMetadata record or fails basic
+	// sanity checks (e.g. a truncated record, a missing or wrong-sized AAD
+	// prefix, or a missing or impossible encrypted length). Key metadata is
+	// untrusted input on a crypto read path, so it is validated rather than
+	// trusted blindly.
 	ErrInvalidKeyMetadata = errors.New("encryption: invalid key metadata")
 
 	// ErrOutputFileClosed is returned by [standardOutputFile.Write] when
@@ -158,11 +161,9 @@ type standardKeyMetadata struct {
 	aadPrefix []byte
 
 	// fileLength is the length of the encrypted stream, header included.
-	// Per the AES GCM Stream spec's "File length" note, a reader must take
-	// the length from a trusted source rather than the underlying storage's
-	// reported size, since storage size alone cannot distinguish a genuinely
-	// short file from one truncated by an attacker who does not also control
-	// this metadata. hasFileLength is false when the record omits it.
+	// The reader derives the plaintext length from it, per the AES GCM
+	// Stream spec's "File length" note. hasFileLength is false when the
+	// record omits it.
 	fileLength    int64
 	hasFileLength bool
 }
@@ -302,8 +303,7 @@ func plaintextLengthFromStreamLength(streamLength int64) (int64, error) {
 //
 // The key metadata returned by Close contains the raw DEK, so it is a secret:
 // persist it only where something protects it, such as a manifest or manifest
-// list that is itself encrypted under a key encryption key. Wrapping the DEK
-// that way is not done by this type.
+// list that is itself encrypted under a key encryption key.
 //
 // StandardEncryptionManager always encrypts and always decrypts: it fails
 // closed, returning [ErrKeyIDRequired] or [ErrKeyMetadataRequired] rather
@@ -339,8 +339,8 @@ func NewStandardEncryptionManager(opts ...StandardManagerOption) *StandardEncryp
 
 // NewEncryptedOutputFile creates a new AES-GCM block-encrypted output file.
 // keyID is the table's encryption key ID and must be non-empty; otherwise
-// [ErrKeyIDRequired] is returned. It is not recorded in the file's key
-// metadata.
+// [ErrKeyIDRequired] is returned. keyID is only checked: the file's key
+// metadata holds the raw DEK.
 func (m *StandardEncryptionManager) NewEncryptedOutputFile(_ context.Context, writer icebergio.FileWriter, keyID string) (EncryptedOutputFile, error) {
 	if keyID == "" {
 		return nil, ErrKeyIDRequired
@@ -375,6 +375,8 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(_ context.Context, wr
 	copy(header, gcmStreamMagic)
 	binary.LittleEndian.PutUint32(header[len(gcmStreamMagic):], gcmStreamPlainBlockSize)
 	if _, err := writer.Write(header); err != nil {
+		_ = writer.Close()
+
 		return nil, fmt.Errorf("encryption: failed to write stream header: %w", err)
 	}
 
@@ -383,21 +385,41 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(_ context.Context, wr
 		aead:            aead,
 		dek:             dek,
 		aadPrefix:       aadPrefix,
+		buf:             make([]byte, 0, gcmStreamPlainBlockSize),
+		sealBuf:         make([]byte, 0, gcmStreamCipherBlockSize),
 		encryptedLength: gcmStreamHeaderLength,
 	}, nil
 }
 
 // NewDecryptedInputFile wraps file for transparent block-level AES-GCM
-// decryption. keyMetadata must be the non-empty StandardKeyMetadata blob
-// produced by [StandardEncryptionManager.NewEncryptedOutputFile] or by another
-// Iceberg implementation; otherwise [ErrKeyMetadataRequired] is returned.
+// decryption. keyMetadata must be a non-empty StandardKeyMetadata record, as
+// produced by [StandardEncryptionManager.NewEncryptedOutputFile] or another
+// Iceberg implementation; otherwise [ErrKeyMetadataRequired] is returned. The
+// record must carry a 16-byte AAD prefix and a file length.
 //
-// The plaintext length is derived from the file length recorded in key
-// metadata, never from the underlying file's size. Key metadata without a file
-// length is rejected, because there is no other trusted source for it here.
-// Key metadata without an AAD prefix, which the encoding permits, is rejected
-// too: the prefix is what binds a block to its file.
-func (m *StandardEncryptionManager) NewDecryptedInputFile(_ context.Context, file icebergio.File, keyMetadata EncryptionKeyMetadata) (EncryptedInputFile, error) {
+// The plaintext length is derived from that file length. For key metadata
+// without one, use [StandardEncryptionManager.NewDecryptedInputFileWithLength].
+func (m *StandardEncryptionManager) NewDecryptedInputFile(ctx context.Context, file icebergio.File, keyMetadata EncryptionKeyMetadata) (EncryptedInputFile, error) {
+	return m.newDecryptedInputFile(ctx, file, -1, keyMetadata)
+}
+
+// NewDecryptedInputFileWithLength is like
+// [StandardEncryptionManager.NewDecryptedInputFile], but accepts key metadata
+// without a file length, as Java writes for data files and manifests.
+// encryptedLength is the length of the encrypted file, header included, as
+// recorded in table metadata (DataFile.FileSizeBytes, ManifestFile.Length). A
+// file length in the key metadata takes precedence.
+func (m *StandardEncryptionManager) NewDecryptedInputFileWithLength(ctx context.Context, file icebergio.File, encryptedLength int64, keyMetadata EncryptionKeyMetadata) (EncryptedInputFile, error) {
+	if encryptedLength < 0 {
+		return nil, fmt.Errorf("%w: encrypted length must be non-negative, got %d", ErrInvalidKeyMetadata, encryptedLength)
+	}
+
+	return m.newDecryptedInputFile(ctx, file, encryptedLength, keyMetadata)
+}
+
+// newDecryptedInputFile implements both read entry points. callerLength is the
+// caller-supplied encrypted length, or -1 when there is none.
+func (m *StandardEncryptionManager) newDecryptedInputFile(_ context.Context, file icebergio.File, callerLength int64, keyMetadata EncryptionKeyMetadata) (EncryptedInputFile, error) {
 	if len(keyMetadata) == 0 {
 		return nil, ErrKeyMetadataRequired
 	}
@@ -411,10 +433,14 @@ func (m *StandardEncryptionManager) NewDecryptedInputFile(_ context.Context, fil
 	if len(meta.aadPrefix) != gcmStreamAADPrefixLength {
 		return nil, fmt.Errorf("%w: aad-prefix must be exactly %d bytes, got %d", ErrInvalidKeyMetadata, gcmStreamAADPrefixLength, len(meta.aadPrefix))
 	}
-	if !meta.hasFileLength {
-		return nil, fmt.Errorf("%w: file-length is required; the plaintext length is not taken from the underlying file's size", ErrInvalidKeyMetadata)
+	streamLength := callerLength
+	switch {
+	case meta.hasFileLength:
+		streamLength = meta.fileLength
+	case callerLength < 0:
+		return nil, fmt.Errorf("%w: file-length is required when no encrypted length is supplied", ErrInvalidKeyMetadata)
 	}
-	plaintextLength, err := plaintextLengthFromStreamLength(meta.fileLength)
+	plaintextLength, err := plaintextLengthFromStreamLength(streamLength)
 	if err != nil {
 		return nil, err
 	}
@@ -452,9 +478,7 @@ func newStandardAEAD(key []byte) (cipher.AEAD, error) {
 
 // validateGCMStreamHeader reads the AES GCM Stream header at the start of
 // file and checks that it is the "AGS1" magic followed by the fixed 1 MiB
-// plain block length. The header is unauthenticated storage data, so it is
-// only validated here: the block size comes from [gcmStreamPlainBlockSize],
-// never from the header.
+// plain block length. Reads use [gcmStreamPlainBlockSize] as the block size.
 func validateGCMStreamHeader(file icebergio.File) error {
 	header := make([]byte, gcmStreamHeaderLength)
 	n, err := file.ReadAt(header, 0)
@@ -498,7 +522,11 @@ type standardOutputFile struct {
 	dek       []byte
 	aadPrefix []byte
 
+	// buf holds the pending plaintext block and sealBuf is scratch for its
+	// nonce, ciphertext and tag. Each is allocated once at its full-block
+	// size and reused for every block.
 	buf        []byte
+	sealBuf    []byte
 	blockIndex uint32
 	closed     bool
 	err        error
@@ -569,7 +597,7 @@ func (f *standardOutputFile) flushBlock() error {
 		return errors.New("encryption: cannot write block: exceeded maximum block count")
 	}
 
-	nonce := make([]byte, gcmStreamNonceLength)
+	nonce := f.sealBuf[:gcmStreamNonceLength]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return fmt.Errorf("encryption: failed to generate block nonce: %w", err)
 	}
@@ -658,9 +686,9 @@ func (f *standardOutputFile) KeyMetadata() EncryptionKeyMetadata { return f.keyM
 // standardInputFile is an [EncryptedInputFile] that decrypts fixed-size
 // AES-GCM blocks on demand, supporting random access via ReadAt/Seek.
 //
-// The plaintext length comes from the trusted file length in key metadata, so
-// ciphertext appended after the last block is ignored, and truncating the
-// ciphertext while also editing that metadata cannot be detected. Both follow
+// The plaintext length is derived from the encrypted length (the file length
+// in key metadata, or the caller's), so ciphertext appended after the last
+// block is ignored. Both follow
 // from the AES GCM Stream spec's "File length" rule.
 //
 // ReadAt is safe, and intended, for concurrent use, matching the io.ReaderAt
@@ -682,9 +710,8 @@ type standardInputFile struct {
 
 	pos int64
 
-	// cacheMu guards cacheIdx/cacheBlock/cacheValid below. It is only held
-	// around the cache check and the cache publish, never across the
-	// underlying ReadAt or AEAD decryption in readBlock.
+	// cacheMu guards cacheIdx/cacheBlock/cacheValid below. It is held only
+	// around the cache check and the cache publish in readBlock.
 	cacheMu    sync.Mutex
 	cacheIdx   int64
 	cacheBlock []byte
@@ -698,8 +725,8 @@ func (f *standardInputFile) numBlocks() int64 {
 		return 0
 	}
 
-	// plaintextLength is derived from a file length in key metadata, so it
-	// can be close to math.MaxInt64; 1 + (n-1)/size avoids the overflow that
+	// plaintextLength comes from key metadata or the caller and can be close
+	// to math.MaxInt64; 1 + (n-1)/size avoids the overflow that
 	// (n + size - 1)/size would hit there.
 	return 1 + (f.plaintextLength-1)/gcmStreamPlainBlockSize
 }
@@ -720,11 +747,9 @@ func (f *standardInputFile) blockPlainLen(idx, numBlocks int64) int64 {
 // (truncated storage), since zero-padding it into the AEAD would surface as a
 // misleading [ErrAuthenticationFailed].
 //
-// cacheMu is only held around the cache check and the cache publish at the
-// end, never across the underlying ReadAt or aead.Open below: holding it
-// across I/O would serialize all concurrent readers, including remote
-// backends. A lost race between two goroutines decrypting the same block is
-// harmless (redundant work, not a correctness issue).
+// cacheMu is held only around the cache check and the cache publish at the
+// end, so concurrent readers do their I/O and decryption in parallel. Two
+// goroutines may decrypt the same block; the last one to finish publishes it.
 func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
 	f.cacheMu.Lock()
 	if f.cacheValid && f.cacheIdx == idx {
@@ -739,8 +764,8 @@ func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
 	if idx < 0 || idx >= numBlocks {
 		return nil, fmt.Errorf("%w: block index %d out of range [0, %d)", ErrInvalidKeyMetadata, idx, numBlocks)
 	}
-	// The AAD carries the block index as 32 bits, and a file-length near
-	// math.MaxInt64 would otherwise imply more blocks than that.
+	// The AAD carries the block index as 32 bits, and an encrypted length
+	// near math.MaxInt64 would otherwise imply more blocks than that.
 	if idx > math.MaxUint32 {
 		return nil, fmt.Errorf("%w: block index %d exceeds the maximum supported block count", ErrInvalidKeyMetadata, idx)
 	}
@@ -763,7 +788,8 @@ func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
 	nonce, sealed := ciphertext[:gcmStreamNonceLength], ciphertext[gcmStreamNonceLength:]
 	aad := gcmStreamBlockAAD(f.aadPrefix, uint32(idx))
 
-	plaintext, err := f.aead.Open(nil, nonce, sealed, aad)
+	// Decrypt in place into this block's ciphertext buffer.
+	plaintext, err := f.aead.Open(sealed[:0], nonce, sealed, aad)
 	if err != nil {
 		return nil, fmt.Errorf("%w: block %d: %w", ErrAuthenticationFailed, idx, err)
 	}
