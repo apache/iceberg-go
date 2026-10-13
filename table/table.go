@@ -1295,14 +1295,6 @@ func WithMaxConcurrency(n int) ScanOption {
 	}
 }
 
-// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
-// backward compatibility with the pre-existing typo'd name.
-//
-// Deprecated: use [WithMaxConcurrency].
-func WitMaxConcurrency(n int) ScanOption {
-	return WithMaxConcurrency(n)
-}
-
 func WithOptions(opts iceberg.Properties) ScanOption {
 	if opts == nil {
 		return noopOption
