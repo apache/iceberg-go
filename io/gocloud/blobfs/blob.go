@@ -429,6 +429,130 @@ func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
 	return ok && obj.Key == directoryMarker(walkRootKey)
 }
 
+// walkFS walks a bucket for fs.WalkDir, treating any key with children as a directory,
+// so the 0-byte directory blobs of ADLS hierarchical namespaces (OneLake) aren't files.
+type walkFS struct{ bfs *FileIO }
+
+var (
+	_ fs.StatFS    = walkFS{}
+	_ fs.ReadDirFS = walkFS{}
+)
+
+func (w walkFS) Open(name string) (fs.File, error) { return w.bfs.Bucket.Open(name) }
+
+func (w walkFS) Stat(name string) (fs.FileInfo, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
+	}
+
+	if name == "." {
+		return walkDirEntry{name: "."}, nil
+	}
+
+	// One child is enough to make name a directory, so fetch a single key.
+	children, _, err := w.bfs.ListPage(w.bfs.ctx, blob.FirstPageToken, 1, &blob.ListOptions{Prefix: name + "/"})
+	if err != nil {
+		return nil, blobErrToFsErr("stat", name, err)
+	}
+	if len(children) > 0 {
+		return walkDirEntry{name: pathpkg.Base(name)}, nil
+	}
+
+	attrs, err := w.bfs.Attributes(w.bfs.ctx, name)
+	if err != nil {
+		return nil, blobErrToFsErr("stat", name, err)
+	}
+
+	return blobFileInfo{
+		name:    pathpkg.Base(name),
+		size:    attrs.Size,
+		mode:    fs.ModeIrregular,
+		modTime: attrs.ModTime,
+		sys:     attrs,
+	}, nil
+}
+
+func (w walkFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
+	}
+
+	prefix := ""
+	if name != "." {
+		prefix = name + "/"
+	}
+
+	var files []*blob.ListObject
+	dirs := map[string]bool{}
+	iter := w.bfs.List(&blob.ListOptions{Prefix: prefix, Delimiter: "/"})
+	for {
+		obj, err := iter.Next(w.bfs.ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, blobErrToFsErr("readdir", name, err)
+		}
+
+		if obj.IsDir {
+			dirs[strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), "/")] = true
+		} else {
+			files = append(files, obj)
+		}
+	}
+
+	entries := make([]fs.DirEntry, 0, len(dirs)+len(files))
+	for child := range dirs {
+		entries = append(entries, walkDirEntry{name: child})
+	}
+	for _, obj := range files {
+		child := strings.TrimPrefix(obj.Key, prefix)
+		if obj.Size == 0 && dirs[child] {
+			// A hierarchical-namespace blob for a child directory. An empty directory's blob
+			// can't be told apart without hdi_isfolder metadata, so it stays a 0-byte file.
+			continue
+		}
+
+		// Name entries the way gocloud's fs.FS does, so a "dir/" marker keeps
+		// the name it had before walkFS.
+		entries = append(entries, walkFileEntry{blobFileInfo{
+			name:    pathpkg.Base(obj.Key),
+			size:    obj.Size,
+			mode:    fs.ModeIrregular,
+			modTime: obj.ModTime,
+			sys:     obj,
+		}})
+	}
+
+	if len(entries) == 0 && name != "." {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
+	}
+
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+
+	return entries, nil
+}
+
+// walkDirEntry is a directory found by walkFS. It implements fs.FileInfo and
+// fs.DirEntry.
+type walkDirEntry struct{ name string }
+
+func (d walkDirEntry) Name() string               { return d.name }
+func (d walkDirEntry) Size() int64                { return 0 }
+func (d walkDirEntry) Mode() fs.FileMode          { return fs.ModeDir }
+func (d walkDirEntry) Type() fs.FileMode          { return fs.ModeDir }
+func (d walkDirEntry) ModTime() time.Time         { return time.Time{} }
+func (d walkDirEntry) IsDir() bool                { return true }
+func (d walkDirEntry) Sys() any                   { return nil }
+func (d walkDirEntry) Info() (fs.FileInfo, error) { return d, nil }
+
+// walkFileEntry is an object found by walkFS. Its Info().Sys() is the
+// *blob.ListObject it was listed from.
+type walkFileEntry struct{ blobFileInfo }
+
+func (f walkFileEntry) Type() fs.FileMode          { return f.mode.Type() }
+func (f walkFileEntry) Info() (fs.FileInfo, error) { return f.blobFileInfo, nil }
+
 func (bfs *FileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	location, err := bfs.resolveLocation(root)
 	var walkPath string
@@ -442,7 +566,7 @@ func (bfs *FileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 		walkPath = location.key
 	}
 
-	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(walkFS{bfs}, walkPath, func(path string, d fs.DirEntry, err error) error {
 		// Skip the marker for the path passed to WalkDir. Otherwise walking
 		// "warehouse/ns" reports "warehouse/ns/" as a child file.
 		if err == nil && isDirectoryMarker(walkPath, d) {
