@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -247,6 +248,75 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 	rr, err := singleBatchReader(arrowSchema, bldr)
 	if err != nil {
 		return nil, fmt.Errorf("inspect snapshots: %w", err)
+	}
+
+	return rr, nil
+}
+
+// Labels returns the catalog-provided labels for the table, one row per
+// key-value pair. Object labels use scope="object" with null field_id and
+// field_name; field labels use scope="field", resolving field_name against the
+// current schema (null when the field has been dropped). Object labels come
+// first, then field labels in catalog order, matching Java; keys are sorted
+// within each group because Go maps have no stable order. A table with no
+// labels yields an empty result.
+//
+// The returned reader holds a single record batch. The caller must Release it.
+func (i InspectTable) Labels(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := SchemaToArrowSchema(LabelsSchema(), nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("inspect labels: build arrow schema: %w", err)
+	}
+
+	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+	defer bldr.Release()
+
+	scope := bldr.Field(0).(*array.StringBuilder)
+	fieldID := bldr.Field(1).(*array.Int32Builder)
+	fieldName := bldr.Field(2).(*array.StringBuilder)
+	key := bldr.Field(3).(*array.StringBuilder)
+	value := bldr.Field(4).(*array.StringBuilder)
+
+	if labels := i.tbl.labels; labels != nil {
+		schema := i.tbl.metadata.CurrentSchema()
+
+		for _, k := range slices.Sorted(maps.Keys(labels.ObjectLabels)) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			scope.Append("object")
+			fieldID.AppendNull()
+			fieldName.AppendNull()
+			key.Append(k)
+			value.Append(labels.ObjectLabels[k])
+		}
+
+		for _, fl := range labels.Fields {
+			name, resolved := "", false
+			if schema != nil {
+				name, resolved = schema.FindColumnName(fl.FieldID)
+			}
+			for _, k := range slices.Sorted(maps.Keys(fl.Labels)) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				scope.Append("field")
+				//nolint:gosec // field IDs are spec-bounded to int32
+				fieldID.Append(int32(fl.FieldID))
+				if resolved {
+					fieldName.Append(name)
+				} else {
+					fieldName.AppendNull()
+				}
+				key.Append(k)
+				value.Append(fl.Labels[k])
+			}
+		}
+	}
+
+	rr, err := singleBatchReader(arrowSchema, bldr)
+	if err != nil {
+		return nil, fmt.Errorf("inspect labels: %w", err)
 	}
 
 	return rr, nil
@@ -735,6 +805,19 @@ func RefsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 4, Name: "max_reference_age_in_ms", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 		iceberg.NestedField{ID: 5, Name: "min_snapshots_to_keep", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 6, Name: "max_snapshot_age_in_ms", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+	)
+}
+
+// LabelsSchema returns a fresh Iceberg schema for the labels metadata table.
+// The field IDs and names match Java's labels metadata table for cross-client
+// parity; callers should not rely on pointer identity.
+func LabelsSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "scope", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 2, Name: "field_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 3, Name: "field_name", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 4, Name: "key", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 5, Name: "value", Type: iceberg.PrimitiveTypes.String, Required: true},
 	)
 }
 

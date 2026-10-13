@@ -480,6 +480,127 @@ func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
 	require.Equal(t, int32(math.MaxInt32), minSnapshots.Value(0))
 }
 
+// labelsTestTable builds a minimal table carrying the given labels and a
+// two-column schema (id=1 "id", id=2 "data") for the labels metadata table.
+func labelsTestTable(t *testing.T, labels *iceberg.Labels) *Table {
+	t.Helper()
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://default/table-location", nil)
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "tbl"}, meta, "metadata.json", nil, nil, WithLabels(labels))
+}
+
+func TestInspectLabels(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+
+	// Fields are given in descending field-id order to prove the metadata table
+	// preserves the catalog's field order rather than re-sorting by field id.
+	tbl := labelsTestTable(t, &iceberg.Labels{
+		ObjectLabels: iceberg.Properties{"owner": "data-eng", "cost-center": "42"},
+		Fields: []iceberg.FieldLabel{
+			{FieldID: 99, Labels: iceberg.Properties{"classification": "dropped"}},
+			{FieldID: 2, Labels: iceberg.Properties{"pii": "true", "classification": "restricted"}},
+		},
+	})
+
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Labels(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 5, rec.NumCols())
+	require.EqualValues(t, 5, rec.NumRows())
+
+	scope := rec.Column(0).(*array.String)
+	fieldID := rec.Column(1).(*array.Int32)
+	fieldName := rec.Column(2).(*array.String)
+	key := rec.Column(3).(*array.String)
+	value := rec.Column(4).(*array.String)
+
+	// Object labels first, keys sorted: cost-center, owner.
+	require.Equal(t, "object", scope.Value(0))
+	require.True(t, fieldID.IsNull(0))
+	require.True(t, fieldName.IsNull(0))
+	require.Equal(t, "cost-center", key.Value(0))
+	require.Equal(t, "42", value.Value(0))
+
+	require.Equal(t, "object", scope.Value(1))
+	require.True(t, fieldID.IsNull(1))
+	require.True(t, fieldName.IsNull(1))
+	require.Equal(t, "owner", key.Value(1))
+	require.Equal(t, "data-eng", value.Value(1))
+
+	// Field labels follow in the catalog's field order (99 before 2). Field 99
+	// is not in the current schema, so its field_name is null.
+	require.Equal(t, "field", scope.Value(2))
+	require.Equal(t, int32(99), fieldID.Value(2))
+	require.True(t, fieldName.IsNull(2))
+	require.Equal(t, "classification", key.Value(2))
+	require.Equal(t, "dropped", value.Value(2))
+
+	// Field 2 ("data") resolves its name; its two keys sort classification < pii.
+	require.Equal(t, "field", scope.Value(3))
+	require.Equal(t, int32(2), fieldID.Value(3))
+	require.Equal(t, "data", fieldName.Value(3))
+	require.Equal(t, "classification", key.Value(3))
+	require.Equal(t, "restricted", value.Value(3))
+
+	require.Equal(t, "field", scope.Value(4))
+	require.Equal(t, int32(2), fieldID.Value(4))
+	require.Equal(t, "data", fieldName.Value(4))
+	require.Equal(t, "pii", key.Value(4))
+	require.Equal(t, "true", value.Value(4))
+}
+
+func TestInspectLabelsEmpty(t *testing.T) {
+	// A table with no catalog labels yields an empty result, not an error.
+	tbl := labelsTestTable(t, nil)
+
+	rr, err := tbl.Inspect().Labels(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 5, rec.NumCols())
+	require.EqualValues(t, 0, rec.NumRows())
+}
+
+func TestInspectLabelsSchema(t *testing.T) {
+	sc := LabelsSchema()
+
+	require.Equal(t, []string{
+		"scope",
+		"field_id",
+		"field_name",
+		"key",
+		"value",
+	}, testFieldNames(sc))
+
+	fields := sc.Fields()
+	require.Equal(t, []int{1, 2, 3, 4, 5}, []int{
+		fields[0].ID, fields[1].ID, fields[2].ID, fields[3].ID, fields[4].ID,
+	})
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[0].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int32, fields[1].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[2].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[3].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[4].Type)
+	require.True(t, fields[0].Required)
+	require.False(t, fields[1].Required)
+	require.False(t, fields[2].Required)
+	require.True(t, fields[3].Required)
+	require.True(t, fields[4].Required)
+}
+
 // snapshotsTestTable builds a table with two snapshots: a root carrying a
 // summary (operation + properties) and a child with no summary at all, to
 // exercise both the populated and null operation/summary paths.
