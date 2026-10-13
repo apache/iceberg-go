@@ -275,6 +275,26 @@ func TestInclusiveMetricsEvaluatorInPredicateExtrema(t *testing.T) {
 		got, err = largeEval(inclusiveMetricsInTestFile(t, encode(50), encode(60)))
 		require.NoError(t, err)
 		assert.True(t, got)
+
+		// An overlapping oversized set must return before scanning its members.
+		// This guards the size limit even when extrema cannot prune the file.
+		bound, err := iceberg.BindExpr(schema, iceberg.IsIn(iceberg.Reference("value"), values...), true)
+		require.NoError(t, err)
+		pred, ok := bound.(iceberg.BoundSetPredicate)
+		require.True(t, ok)
+
+		tracked := &inExtremaTrackingSet{Set: pred.Literals()}
+		visitor := &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+			valueCounts: map[int]int64{1: 10},
+			nullCounts:  map[int]int64{1: 0},
+			nanCounts:   map[int]int64{1: 0},
+			lowerBounds: map[int][]byte{1: encode(50)},
+			upperBounds: map[int][]byte{1: encode(60)},
+		}}
+		require.True(t, visitor.VisitInWithExtrema(
+			pred.Term(), tracked, iceberg.NewLiteral(int32(0)), iceberg.NewLiteral(int32(inPredicateLimit)),
+		))
+		require.Zero(t, tracked.memberCalls)
 	})
 }
 
