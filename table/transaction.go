@@ -3413,9 +3413,11 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		manifestCache:    newSnapshotManifestCacheForMetadata(updatedMeta),
 		// Catalog planners can only see committed table state, not metadata
 		// staged inside this transaction. Keep transaction scans local so auto
-		// mode cannot silently return stale tasks.
-		planner: nil,
-		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
+		// mode cannot silently return stale tasks. The catalog's
+		// scan-planning-mode directive is not applied either: the server cannot
+		// plan staged state, and committing a transaction reads the table's
+		// manifests locally whatever the directive says.
+		planner:        nil,
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
@@ -3454,6 +3456,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			t.tbl.cat,
 			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
 			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
+			WithScanPlanningDirective(t.tbl.scanPlanningDirective, t.tbl.hasScanPlanningDirective),
 			WithLabels(t.tbl.labels),
 			WithSavedConfig(t.tbl.savedConfig),
 		),

@@ -552,6 +552,13 @@ type Scan struct {
 	planner             ScanPlanner
 	scanPlanningIOProps iceberg.Properties
 	planningMode        ScanPlanningMode
+	// planningModeSet records an explicit WithScanPlanningMode, so a mode that
+	// conflicts with the catalog directive fails instead of being overridden.
+	planningModeSet bool
+	// directive and directiveErr are the table's scan-planning-mode directive
+	// (see ScanPlanningDirective). An unrecognized directive fails planning only.
+	directive    ScanPlanningDirective
+	directiveErr error
 	// planIO, when non-nil, is a plan-scoped FileIO loader set by remote scan
 	// planning. ReadTasks leases it instead of falling back to ioF, and replacing
 	// the plan retires it after all active readers finish. See PlanIO.
@@ -1637,7 +1644,12 @@ func (scan *Scan) planFiles(ctx context.Context, projectScanColumns bool) ([]Fil
 		scan.asOfTimestamp = nil
 	}
 
-	switch scan.planningMode {
+	mode, err := scan.effectivePlanningMode()
+	if err != nil {
+		return nil, err
+	}
+
+	switch mode {
 	case ScanPlanningRemote:
 		return scan.planFilesRemote(ctx)
 	case ScanPlanningAuto:
@@ -1650,7 +1662,9 @@ func (scan *Scan) planFiles(ctx context.Context, projectScanColumns bool) ([]Fil
 		}
 	case ScanPlanningLocal:
 	default:
-		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, scan.planningMode)
+		// effectivePlanningMode validates the mode first; this keeps a mode it
+		// accepts but this switch does not handle from planning locally.
+		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, mode)
 	}
 
 	start := time.Now()

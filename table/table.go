@@ -111,8 +111,13 @@ type Table struct {
 	// REST catalogs can return FileIO configuration in the response's config
 	// block.
 	scanPlanningIOProps iceberg.Properties
-	savedConfig         iceberg.Properties
-	reporter            metrics.Reporter
+	// scanPlanningDirective is the raw `scan-planning-mode` value from the
+	// catalog load response's config block; hasScanPlanningDirective records
+	// whether the key was present.
+	scanPlanningDirective    string
+	hasScanPlanningDirective bool
+	savedConfig              iceberg.Properties
+	reporter                 metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
 	// explicit NopReporter opt-out) from the construction-time default, so
@@ -250,6 +255,8 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
+	t.scanPlanningDirective = fresh.scanPlanningDirective
+	t.hasScanPlanningDirective = fresh.hasScanPlanningDirective
 	t.labels = fresh.labels
 	t.savedConfig = maps.Clone(fresh.savedConfig)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
@@ -841,6 +848,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		t.cat,
 		withReporterState(t.reporter, t.reporterSet),
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
+		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
 	), nil
@@ -1348,6 +1356,7 @@ func WithArrowBatchSize(n int) ScanOption {
 }
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
+	directive, directiveErr := t.ScanPlanningDirective()
 	s := &Scan{
 		identifier:          slices.Clone(t.identifier),
 		metadata:            t.metadata,
@@ -1356,14 +1365,15 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		manifestCache:       t.manifestCache,
 		planner:             t.planner,
 		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
-		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
-		planningMode:   ScanPlanningLocal,
-		rowFilter:      iceberg.AlwaysTrue{},
-		selectedFields: []string{"*"},
-		caseSensitive:  true,
-		limit:          ScanNoLimit,
-		concurrency:    runtime.GOMAXPROCS(0),
-		reporter:       t.MetricsReporter(),
+		directive:           directive,
+		directiveErr:        directiveErr,
+		planningMode:        ScanPlanningLocal,
+		rowFilter:           iceberg.AlwaysTrue{},
+		selectedFields:      []string{"*"},
+		caseSensitive:       true,
+		limit:               ScanNoLimit,
+		concurrency:         runtime.GOMAXPROCS(0),
+		reporter:            t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
