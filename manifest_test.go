@@ -2435,13 +2435,13 @@ func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
 	m.Require().NoError(err)
 
 	tests := []struct {
-		name          string
-		version       int
-		content       ManifestContent
-		entryContent  ManifestEntryContent
-		written       FileFormat
-		expected      FileFormat
-		errorContains string
+		name         string
+		version      int
+		content      ManifestContent
+		entryContent ManifestEntryContent
+		written      FileFormat
+		expected     FileFormat
+		expectErr    bool
 	}{
 		{name: "spec lowercase", written: "parquet", expected: ParquetFile},
 		{name: "mixed case", written: "Parquet", expected: ParquetFile},
@@ -2453,8 +2453,8 @@ func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
 			entryContent: EntryContentPosDeletes, written: "puffin", expected: PuffinFile,
 		},
 		{name: "v1 fallback entry", version: 1, written: "parquet", expected: ParquetFile},
-		{name: "unknown format", written: "csv", errorContains: "unknown file format: csv"},
-		{name: "empty format", written: "", errorContains: "unknown file format: "},
+		{name: "unknown format", written: "csv", expectErr: true},
+		{name: "empty format", written: "", expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -2501,8 +2501,9 @@ func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
 			defer reader.Close()
 
 			got, err := reader.ReadEntry()
-			if tt.errorContains != "" {
-				m.ErrorContains(err, tt.errorContains)
+			if tt.expectErr {
+				m.Require().EqualError(err,
+					fmt.Sprintf("data file %q: unknown file format: %s", file.Path, tt.written))
 
 				return
 			}
