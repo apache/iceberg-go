@@ -315,7 +315,10 @@ func TestScanCloseReleasesPlanIO(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidOperation)
 }
 
-func TestScanCloseWaitsForActiveReadTasks(t *testing.T) {
+// TestScanCloseKeepsPlanIOOpenForActiveReadTasks checks that Close returns
+// without waiting for an active ReadTasks iterator, and that the iterator keeps
+// the plan IO open until it finishes.
+func TestScanCloseKeepsPlanIOOpenForActiveReadTasks(t *testing.T) {
 	t.Parallel()
 
 	pio := &countingPlanIO{fs: icebergio.LocalFS{}}
@@ -326,14 +329,12 @@ func TestScanCloseWaitsForActiveReadTasks(t *testing.T) {
 
 	_, records, err := scan.ReadTasks(context.Background(), nil)
 	require.NoError(t, err)
-	closeDone := make(chan error, 1)
-	go func() { closeDone <- scan.Close() }()
-	assert.Equal(t, 0, pio.closeCalls)
+	require.NoError(t, scan.Close())
+	assert.Equal(t, 0, pio.closeCalls, "the active iterator still holds the plan IO")
 
 	for _, err := range records {
 		require.NoError(t, err)
 	}
-	require.NoError(t, <-closeDone)
 	assert.Equal(t, 1, pio.closeCalls)
 }
 
