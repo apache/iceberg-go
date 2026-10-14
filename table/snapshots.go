@@ -508,8 +508,9 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 // matters.
 //
 // manifestContent < 0 yields entries across both data and delete
-// manifests.
-func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent) iter.Seq2[iceberg.ManifestEntry, error] {
+// manifests. Set discardDeleted to skip DELETED entries: they are files
+// already removed from the table, not files still in it.
+func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
 	return func(yield func(iceberg.ManifestEntry, error) bool) {
 		manifests, err := s.Manifests(fio)
 		if err != nil {
@@ -523,7 +524,7 @@ func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent)
 				continue
 			}
 
-			for entry, err := range m.Entries(fio, false) {
+			for entry, err := range m.Entries(fio, discardDeleted) {
 				if err != nil {
 					yield(nil, err)
 
@@ -636,14 +637,13 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 
 func (s *SnapshotSummaryCollector) partitionSummary(metrics *updateMetrics) string {
 	props := metrics.toProps()
+	parts := make([]string, 0, len(props))
+	for k, v := range props {
+		parts = append(parts, k+"="+v)
+	}
+	slices.Sort(parts)
 
-	return strings.Join(slices.Sorted(func(yield func(s string) bool) {
-		for k, v := range props {
-			if !yield(fmt.Sprintf("%s=%s", k, v)) {
-				return
-			}
-		}
-	}), ",")
+	return strings.Join(parts, ",")
 }
 
 func (s *SnapshotSummaryCollector) build() iceberg.Properties {

@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/apache/iceberg-go/internal"
 )
 
 const (
@@ -228,8 +230,7 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 
 func unmarshalJSONField(data json.RawMessage, field string, value any) error {
 	if err := json.Unmarshal(data, value); err != nil {
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
+		if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 			typeErr.Struct = ""
 			typeErr.Field = field
 		}
@@ -409,6 +410,9 @@ func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, 
 	if err := validateTransform(transform); err != nil {
 		return err
 	}
+	if _, ok := field.Type.(VariantType); ok {
+		return fmt.Errorf("%w: cannot partition by %s source field: %s", ErrInvalidArgument, field.Type, field.Name)
+	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {
 			return errors.New("duplicate partition name: " + targetName)
@@ -543,6 +547,18 @@ func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	return ret
 }
 
+// Clone returns a deep copy of the partition spec, including mutable transform
+// values and the source-ID lookup index.
+func (ps *PartitionSpec) Clone() PartitionSpec {
+	clone := PartitionSpec{id: ps.id, fields: make([]PartitionField, len(ps.fields))}
+	for i, field := range ps.fields {
+		clone.fields[i] = clonePartitionField(field)
+	}
+	clone.initialize()
+
+	return clone
+}
+
 // CompatibleWith returns true if this partition spec is considered
 // compatible with the passed in partition spec. This means that the two
 // specs have equivalent field lists regardless of the spec id.
@@ -578,6 +594,13 @@ func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
 			}
 		}
 	}
+}
+
+// FieldsRef returns the partition fields owned by this spec for trusted
+// internal callers. The returned slice and everything reachable through the
+// fields must be treated as read-only.
+func (ps *PartitionSpec) FieldsRef(_ internal.PartitionSpecRef) []PartitionField {
+	return ps.fields
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
@@ -753,7 +776,13 @@ func (ps PartitionSpec) IsUnpartitioned() bool {
 	}
 
 	for _, f := range ps.fields {
-		if _, ok := f.Transform.(VoidTransform); !ok {
+		switch transform := f.Transform.(type) {
+		case VoidTransform:
+		case *VoidTransform:
+			if transform == nil {
+				return false
+			}
+		default:
 			return false
 		}
 	}
@@ -838,8 +867,8 @@ func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedParti
 	fields := make([]resolvedPartitionField, 0, len(ps.fields))
 	for _, field := range ps.fields {
 		sourceType := Type(UnknownType{})
-		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
-			sourceType = typ
+		if sourceField, ok := schema.FindFieldByIDRef(field.SourceID(), internal.SchemaRef{}); ok {
+			sourceType = sourceField.Type
 		}
 
 		fields = append(fields, resolvedPartitionField{
@@ -867,15 +896,19 @@ func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedParti
 // retains the field's position and lets transforms with fixed result types,
 // such as bucket, continue to resolve their result type.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	resolvedFields := ps.resolvedPartitionFields(schema)
-	nestedFields := make([]NestedField, 0, len(resolvedFields))
-	for _, field := range resolvedFields {
-		nestedFields = append(nestedFields, NestedField{
-			ID:       field.field.FieldID,
-			Name:     field.field.Name,
-			Type:     field.resultType,
+	nestedFields := make([]NestedField, len(ps.fields))
+	for i, field := range ps.fields {
+		sourceType := Type(UnknownType{})
+		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+			sourceType = typ
+		}
+
+		nestedFields[i] = NestedField{
+			ID:       field.FieldID,
+			Name:     field.Name,
+			Type:     field.Transform.ResultType(sourceType),
 			Required: false,
-		})
+		}
 	}
 
 	return &StructType{FieldList: nestedFields}

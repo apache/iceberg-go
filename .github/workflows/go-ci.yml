@@ -46,7 +46,7 @@ jobs:
       max-parallel: 15
       fail-fast: false
       matrix:
-        go: [ '1.25.9', '1.26.1' ]
+        go: [ '1.26.8', '1.27.1' ]
         os:
           - 'ubuntu-latest'
           - 'macos-latest'
@@ -83,7 +83,7 @@ jobs:
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
-        version: v2.12.2
+        version: v2.14.0
         args: --timeout=10m
         # The action's own cache key omits the Go version, so all matrix cells
         # collide on one entry; we manage the cache explicitly above instead.
@@ -91,8 +91,11 @@ jobs:
     - name: Run tests with race detector 
       run: make test-race
     - name: Run Arrow ownership assertions
-      if: matrix.os == 'ubuntu-latest' && matrix.go == '1.26.1'
+      if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.1'
       run: make test-assert
+    - name: Vet (including integration-tagged files)
+      if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.1'
+      run: make vet
     - name: Save Go module and build cache
       if: github.ref == 'refs/heads/main'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -126,7 +129,7 @@ jobs:
     - name: Install Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.26.1'
+        go-version: '1.27.1'
         cache: false
     - name: Restore Go module and build cache
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

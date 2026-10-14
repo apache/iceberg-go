@@ -183,13 +183,6 @@ func fullyPopulatedDataFile(t *testing.T, version int) (iceberg.PartitionSpec, *
 		SplitOffsets([]int64{0, 4096}).
 		SortOrderID(0).
 		KeyMetadata([]byte("kms-key-1"))
-	// distinct_counts (field 111) is deprecated in the spec for every
-	// version (apache/iceberg#12182). The fixture populates it on every
-	// version to assert that the wire codec drops the field on encode
-	// regardless of what the in-memory DataFile carries — strict readers
-	// (e.g. PyIceberg) reject manifests that emit it. The deprecated
-	// setter is invoked here intentionally to exercise that drop path.
-	builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128}) //nolint:staticcheck // SA1019: deliberate use of deprecated setter to assert the encoder drops the field
 	if version >= 2 {
 		builder.EqualityFieldIDs([]int{1})
 	}
@@ -221,11 +214,6 @@ func assertDataFileEqual(t *testing.T, want, got iceberg.DataFile, version int) 
 	require.Equal(t, want.SortOrderID(), got.SortOrderID())
 	require.Equal(t, want.SpecID(), got.SpecID())
 	require.Equal(t, want.ContentType(), got.ContentType())
-	require.Empty(t, got.DistinctValueCounts(),
-		"distinct_counts (field 111) is deprecated in every version "+
-			"(apache/iceberg#12182); the manifest-entry schemas in "+
-			"internal/avro_schemas.go omit it for v1/v2/v3 so the encoder "+
-			"drops it on the wire regardless of what the source DataFile carries")
 	if version >= 2 {
 		require.Equal(t, want.EqualityFieldIDs(), got.EqualityFieldIDs())
 	}
@@ -253,7 +241,6 @@ var expectedDataFileMethods = []string{
 	"ContentSizeInBytes",
 	"ContentType",
 	"Count",
-	"DistinctValueCounts",
 	"EqualityFieldIDs",
 	"FileFormat",
 	"FilePath",
@@ -279,8 +266,8 @@ var expectedDataFileMethods = []string{
 func dataFileInterfaceMethods() []string {
 	t := reflect.TypeFor[iceberg.DataFile]()
 	out := make([]string, 0, t.NumMethod())
-	for i := range t.NumMethod() {
-		out = append(out, t.Method(i).Name)
+	for method := range t.Methods() {
+		out = append(out, method.Name)
 	}
 	sort.Strings(out)
 
@@ -299,7 +286,6 @@ func (stubDataFile) ColumnSizes() map[int]int64                { return nil }
 func (stubDataFile) ValueCounts() map[int]int64                { return nil }
 func (stubDataFile) NullValueCounts() map[int]int64            { return nil }
 func (stubDataFile) NaNValueCounts() map[int]int64             { return nil }
-func (stubDataFile) DistinctValueCounts() map[int]int64        { return nil }
 func (stubDataFile) LowerBoundValues() map[int][]byte          { return nil }
 func (stubDataFile) UpperBoundValues() map[int][]byte          { return nil }
 func (stubDataFile) KeyMetadata() []byte                       { return nil }
@@ -311,3 +297,20 @@ func (stubDataFile) FirstRowID() *int64                        { return nil }
 func (stubDataFile) ReferencedDataFile() *string               { return nil }
 func (stubDataFile) ContentOffset() *int64                     { return nil }
 func (stubDataFile) ContentSizeInBytes() *int64                { return nil }
+
+func TestEncodeDataFileRejectsProjectedMetadata(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			spec, schema, original := fullyPopulatedDataFile(t, version)
+			projected := iceberg.DataFileWithoutColumnStats(original)
+			encoded, err := codec.EncodeDataFile(projected, spec, schema, version)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.Nil(t, encoded)
+			require.ErrorContains(t, err, "projected data file")
+
+			encoded, err = codec.EncodeDataFile(original, spec, schema, version)
+			require.NoError(t, err)
+			require.NotEmpty(t, encoded)
+		})
+	}
+}

@@ -405,6 +405,97 @@ func BenchmarkArrowScanFilterPlanSetup(b *testing.B) {
 	})
 }
 
+func BenchmarkArrowScanFilterPlanCacheHit(b *testing.B) {
+	for _, tc := range benchmarkPhysicalSchemaCases() {
+		b.Run(tc.name, func(b *testing.B) {
+			scan := &arrowScan{boundRowFilter: iceberg.AlwaysTrue{}, caseSensitive: true}
+			if _, err := scan.cachedFileFilterPlans(tc.schema, true); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			for b.Loop() {
+				plans, err := scan.cachedFileFilterPlans(tc.schema, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkCompiledFilterPlansSink = plans
+			}
+		})
+	}
+}
+
+var benchmarkPhysicalSchemaKeySink string
+
+func BenchmarkPhysicalSchemaKey(b *testing.B) {
+	for _, tc := range benchmarkPhysicalSchemaCases() {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				key, err := physicalSchemaKey(tc.schema)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkPhysicalSchemaKeySink = key
+			}
+		})
+	}
+}
+
+func benchmarkPhysicalSchemaCases() []struct {
+	name   string
+	schema *iceberg.Schema
+} {
+	flatFields := make([]iceberg.NestedField, 10)
+	for i := range flatFields {
+		flatFields[i] = iceberg.NestedField{
+			ID: i + 1, Name: fmt.Sprintf("field_%d", i), Type: iceberg.PrimitiveTypes.Int64,
+		}
+	}
+	wideFields := make([]iceberg.NestedField, 100)
+	for i := range wideFields {
+		wideFields[i] = iceberg.NestedField{
+			ID: i + 2, Name: fmt.Sprintf("field_%d", i), Type: iceberg.PrimitiveTypes.Int64,
+		}
+	}
+	mixedFields := []iceberg.NestedField{
+		{ID: 1, Name: "flag", Type: iceberg.PrimitiveTypes.Bool},
+		{ID: 2, Name: "count", Type: iceberg.PrimitiveTypes.Int32},
+		{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64},
+		{ID: 4, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
+		{ID: 5, Name: "price", Type: iceberg.DecimalTypeOf(20, 4)},
+		{ID: 6, Name: "created", Type: iceberg.PrimitiveTypes.TimestampTzNs},
+		{ID: 7, Name: "payload", Type: iceberg.VariantType{}},
+		{ID: 8, Name: "tags", Type: &iceberg.ListType{
+			ElementID: 9, Element: iceberg.PrimitiveTypes.String,
+		}},
+	}
+	nestedSchema := func(depth int) *iceberg.Schema {
+		var typ iceberg.Type = iceberg.PrimitiveTypes.Int64
+		for id := depth + 1; id > 1; id-- {
+			typ = &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: id, Name: "child", Type: typ},
+			}}
+		}
+
+		return iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "root", Type: typ})
+	}
+
+	return []struct {
+		name   string
+		schema *iceberg.Schema
+	}{
+		{"flat_10", iceberg.NewSchema(1, flatFields...)},
+		{"nested_depth_3", nestedSchema(3)},
+		{"nested_depth_8", nestedSchema(8)},
+		{"wide_struct_100", iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "root", Type: &iceberg.StructType{FieldList: wideFields},
+		})},
+		{"mixed_types", iceberg.NewSchema(1, mixedFields...)},
+	}
+}
+
 func BenchmarkArrowScanAddTaskProjectedFieldIDs(b *testing.B) {
 	schema := benchmarkScanSchema(8)
 	filter := benchmarkComplexBoundFilter(b, schema)
@@ -595,4 +686,62 @@ func benchmarkTaskResidualJSON(rowCount int) string {
 	result.WriteByte(']')
 
 	return result.String()
+}
+
+func BenchmarkArrowScanReadTasksResidualBinding(b *testing.B) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	metadata, err := NewMetadata(
+		schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://benchmark/read-tasks", nil,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	fs := iceio.NewMemFS()
+	scan := New(Identifier{"benchmark", "read_tasks"}, metadata, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil).Scan()
+	boundResidual, err := iceberg.BindExpr(schema,
+		iceberg.GreaterThan(iceberg.Reference("id"), int64(1)), true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	unboundResidual := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
+
+	for _, workload := range []struct {
+		taskCount int
+		name      string
+		residual  iceberg.BooleanExpression
+	}{
+		{taskCount: 1_000, name: "bound", residual: boundResidual},
+		{taskCount: 10_000, name: "bound", residual: boundResidual},
+		{taskCount: 100_000, name: "bound", residual: boundResidual},
+		{taskCount: 100_000, name: "nil"},
+		{taskCount: 100_000, name: "unbound", residual: unboundResidual},
+		{taskCount: 100_000, name: "late_unbound", residual: boundResidual},
+	} {
+		b.Run(fmt.Sprintf("tasks=%d/residual=%s", workload.taskCount, workload.name), func(b *testing.B) {
+			tasks := make([]FileScanTask, workload.taskCount)
+			for i := range tasks {
+				tasks[i].Residual = workload.residual
+			}
+			if workload.name == "late_unbound" {
+				tasks[len(tasks)-1].Residual = unboundResidual
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, records, err := scan.ReadTasks(b.Context(), tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if records == nil {
+					b.Fatal("ReadTasks returned a nil iterator")
+				}
+				// Do not drain the iterator: this benchmark isolates setup and residual binding.
+			}
+			b.ReportMetric(float64(len(tasks)), "tasks/op")
+		})
+	}
 }

@@ -393,3 +393,30 @@ func newScanTaskDataFileWithFileSize(t *testing.T, spec iceberg.PartitionSpec, p
 
 	return builder.Build()
 }
+
+func TestEncodeFileScanTaskRejectsProjectedFiles(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		project func(*table.FileScanTask)
+	}{
+		{"data", func(task *table.FileScanTask) { task.File = iceberg.DataFileWithoutColumnStats(task.File) }},
+		{"positional delete", func(task *table.FileScanTask) {
+			task.DeleteFiles[0] = iceberg.DataFileWithoutColumnStats(task.DeleteFiles[0])
+		}},
+		{"equality delete", func(task *table.FileScanTask) {
+			task.EqualityDeleteFiles[0] = iceberg.DataFileWithoutColumnStats(task.EqualityDeleteFiles[0])
+		}},
+		{"deletion vector", func(task *table.FileScanTask) {
+			task.DeletionVectorFiles[0] = iceberg.DataFileWithoutColumnStats(task.DeletionVectorFiles[0])
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, schema, task := fullyPopulatedFileScanTask(t, 3)
+			tt.project(&task)
+			encoded, err := codec.EncodeFileScanTask(task, spec, schema, 3)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.Nil(t, encoded)
+			require.ErrorContains(t, err, "projected data file")
+		})
+	}
+}

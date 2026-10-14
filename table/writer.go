@@ -138,7 +138,7 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 		apply(&w)
 	}
 
-	statsCols, err := computeStatsPlan(w.fileSchema, meta.props)
+	statsCols, err := computeStatsPlan(w.fileSchema, metricsPropsFor(w.content, meta.props))
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +237,34 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 
 type dataFileWriter interface {
 	writeFile(ctx context.Context, partitionValues map[int]any, task WriteTask) (iceberg.DataFile, error)
+}
+
+// positionDeleteMetricsProps mirrors Java's MetricsConfig.forPositionDelete:
+// position delete files keep full file_path and pos bounds whatever the table
+// metrics settings are, so readers and conflict checks can resolve the data
+// file a delete file targets from equal file_path bounds.
+//
+// The default mode is none on purpose, as in Java: any column besides
+// file_path and pos, such as a future row column, gets no value counts, null
+// counts, column sizes or bounds. The table's write.metadata.metrics.*
+// settings do not apply to position delete files.
+//
+// The map is shared and handed to computeStatsPlan as is; treat it as
+// read-only.
+var positionDeleteMetricsProps = iceberg.Properties{
+	DefaultWriteMetricsModeKey:                 string(tblutils.MetricModeNone),
+	MetricsModeColumnConfPrefix + ".file_path": string(tblutils.MetricModeFull),
+	MetricsModeColumnConfPrefix + ".pos":       string(tblutils.MetricModeFull),
+}
+
+// metricsPropsFor returns the properties that drive column metrics for files
+// of the given content type.
+func metricsPropsFor(content iceberg.ManifestEntryContent, props iceberg.Properties) iceberg.Properties {
+	if content == iceberg.EntryContentPosDeletes {
+		return positionDeleteMetricsProps
+	}
+
+	return props
 }
 
 func newPositionDeleteWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (*defaultDataFileWriter, error) {

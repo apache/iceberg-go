@@ -418,7 +418,12 @@ func (r Reference) Bind(s *Schema, caseSensitive bool) (BoundTerm, error) {
 		return nil, ErrInvalidSchema
 	}
 
-	return createBoundRef(field, acc), nil
+	name, ok := s.FindColumnName(field.ID)
+	if !ok {
+		return nil, ErrInvalidSchema
+	}
+
+	return createBoundRef(field, acc, name), nil
 }
 
 // BoundReference is a named reference that has been bound to a particular field
@@ -432,40 +437,41 @@ type BoundReference interface {
 }
 
 type boundRef[T LiteralType] struct {
-	field NestedField
-	acc   accessor
+	field    NestedField
+	acc      accessor
+	fullName string
 }
 
-func createBoundRef(field NestedField, acc accessor) BoundReference {
+func createBoundRef(field NestedField, acc accessor, name string) BoundReference {
 	switch field.Type.(type) {
 	case BooleanType:
-		return &boundRef[bool]{field: field, acc: acc}
+		return &boundRef[bool]{field: field, acc: acc, fullName: name}
 	case Int32Type:
-		return &boundRef[int32]{field: field, acc: acc}
+		return &boundRef[int32]{field: field, acc: acc, fullName: name}
 	case Int64Type:
-		return &boundRef[int64]{field: field, acc: acc}
+		return &boundRef[int64]{field: field, acc: acc, fullName: name}
 	case Float32Type:
-		return &boundRef[float32]{field: field, acc: acc}
+		return &boundRef[float32]{field: field, acc: acc, fullName: name}
 	case Float64Type:
-		return &boundRef[float64]{field: field, acc: acc}
+		return &boundRef[float64]{field: field, acc: acc, fullName: name}
 	case DateType:
-		return &boundRef[Date]{field: field, acc: acc}
+		return &boundRef[Date]{field: field, acc: acc, fullName: name}
 	case TimeType:
-		return &boundRef[Time]{field: field, acc: acc}
+		return &boundRef[Time]{field: field, acc: acc, fullName: name}
 	case TimestampType, TimestampTzType:
-		return &boundRef[Timestamp]{field: field, acc: acc}
+		return &boundRef[Timestamp]{field: field, acc: acc, fullName: name}
 	case TimestampNsType, TimestampTzNsType:
-		return &boundRef[TimestampNano]{field: field, acc: acc}
+		return &boundRef[TimestampNano]{field: field, acc: acc, fullName: name}
 	case StringType:
-		return &boundRef[string]{field: field, acc: acc}
+		return &boundRef[string]{field: field, acc: acc, fullName: name}
 	case FixedType, BinaryType, GeographyType, GeometryType:
-		return &boundRef[[]byte]{field: field, acc: acc}
+		return &boundRef[[]byte]{field: field, acc: acc, fullName: name}
 	case DecimalType:
-		return &boundRef[Decimal]{field: field, acc: acc}
+		return &boundRef[Decimal]{field: field, acc: acc, fullName: name}
 	case UUIDType:
-		return &boundRef[uuid.UUID]{field: field, acc: acc}
+		return &boundRef[uuid.UUID]{field: field, acc: acc, fullName: name}
 	case VariantType:
-		return &boundRef[variant.Value]{field: field, acc: acc}
+		return &boundRef[variant.Value]{field: field, acc: acc, fullName: name}
 	}
 	panic("unhandled bound reference type: " + field.Type.String())
 }
@@ -500,6 +506,10 @@ func (b *boundRef[T]) Equals(other BoundTerm) bool {
 func (b *boundRef[T]) Ref() BoundReference { return b }
 func (b *boundRef[T]) Field() NestedField  { return b.field }
 func (b *boundRef[T]) Type() Type          { return b.field.Type }
+
+// referenceName preserves the canonical schema path without changing the
+// leaf field's name (which is part of the bound reference's type metadata).
+func (b *boundRef[T]) referenceName() string { return b.fullName }
 
 func (b *boundRef[T]) eval(st StructLike) Optional[T] {
 	switch v := b.acc.Get(st).(type) {
@@ -588,6 +598,8 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 		return nil, err
 	}
 	// fast case optimizations
+	// An extract term's Ref() is the variant column, not the addressed sub-path; skip the required-field fast path.
+	_, isExtract := bound.(BoundExtract)
 	switch up.op {
 	case OpIsNull:
 		if transform, ok := bound.(*BoundTransform); ok {
@@ -595,7 +607,7 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 				return AlwaysTrue{}, nil
 			}
 		}
-		if ref, ok := bound.(BoundReference); ok &&
+		if ref, ok := bound.(BoundReference); ok && !isExtract &&
 			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysFalse{}, nil
 		}
@@ -605,7 +617,7 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 				return AlwaysFalse{}, nil
 			}
 		}
-		if ref, ok := bound.(BoundReference); ok &&
+		if ref, ok := bound.(BoundReference); ok && !isExtract &&
 			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysTrue{}, nil
 		}
@@ -1020,7 +1032,7 @@ func newBoundSetPredicate[T LiteralType](op Operation, term BoundTerm, lits lite
 type boundSetPredicate[T LiteralType] struct {
 	op         Operation
 	term       BoundTerm
-	lits       Set[Literal]
+	lits       literalSet
 	minLiteral Literal
 	maxLiteral Literal
 	hasExtrema bool
@@ -1395,7 +1407,7 @@ type BoundBBoxPredicate interface {
 // as a generic unary predicate (it would reach substrait and error, or be
 // dropped to AlwaysFalse when a column is absent). It has no record-filter or
 // REST-JSON form at all, so the two visitors that would otherwise rebuild a bound
-// predicate - columnNameTranslator.VisitBound and sanitizeVisitor.VisitBound -
+// predicate - scanTranslator.VisitBound and sanitizeVisitor.VisitBound -
 // special-case *boundBBoxPredicate and collapse it to AlwaysTrue. Data-file
 // pruning is done separately by inclusiveMetricsEval.
 type boundBBoxPredicate struct {

@@ -198,6 +198,75 @@ func BenchmarkMetadataBuilderCloneAndBuild(b *testing.B) {
 	}
 }
 
+func BenchmarkTransactionApplyNoRequirements(b *testing.B) {
+	for _, snapshotCount := range []int{1, 100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("snapshots=%d", snapshotCount), func(b *testing.B) {
+			template := benchmarkSnapshotBuilder(snapshotCount)
+			template.ensureSnapshotIndex()
+			txn := &Transaction{meta: template.clone()}
+
+			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
+			b.ResetTimer()
+
+			for b.Loop() {
+				if err := txn.apply(nil, nil); err != nil {
+					b.Fatal(err)
+				}
+				metadataBuilderBenchmarkSink = len(txn.meta.snapshotList)
+			}
+		})
+	}
+}
+
+func BenchmarkTransactionApplyDuplicateRequirement(b *testing.B) {
+	for _, snapshotCount := range []int{1, 100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("snapshots=%d", snapshotCount), func(b *testing.B) {
+			template := benchmarkSnapshotBuilder(snapshotCount)
+			template.ensureSnapshotIndex()
+			requirement := AssertCurrentSchemaID(0)
+			txn := &Transaction{
+				meta: template.clone(),
+				reqs: []Requirement{requirement},
+			}
+
+			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
+			b.ResetTimer()
+
+			for b.Loop() {
+				if err := txn.apply(nil, []Requirement{requirement}); err != nil {
+					b.Fatal(err)
+				}
+				metadataBuilderBenchmarkSink = len(txn.meta.snapshotList)
+			}
+		})
+	}
+}
+
+func BenchmarkTransactionApplyNewRequirement(b *testing.B) {
+	for _, snapshotCount := range []int{1, 100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("snapshots=%d", snapshotCount), func(b *testing.B) {
+			template := benchmarkSnapshotBuilder(snapshotCount)
+			template.ensureSnapshotIndex()
+			txn := &Transaction{meta: template.clone()}
+			requirement := AssertCurrentSchemaID(0)
+
+			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
+			b.ResetTimer()
+
+			for b.Loop() {
+				txn.reqs = nil
+				if err := txn.apply(nil, []Requirement{requirement}); err != nil {
+					b.Fatal(err)
+				}
+				metadataBuilderBenchmarkSink = len(txn.meta.snapshotList)
+			}
+		})
+	}
+}
+
 func BenchmarkMetadataBuilderFromBase(b *testing.B) {
 	for _, snapshotCount := range []int{1_000, 10_000} {
 		b.Run(fmt.Sprintf("snapshots=%d", snapshotCount), func(b *testing.B) {

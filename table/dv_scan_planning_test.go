@@ -38,9 +38,6 @@ func (d *dvMockDataFile) ReferencedDataFile() *string { return d.referencedDataF
 func (d *dvMockDataFile) ContentOffset() *int64       { return d.contentOffset }
 func (d *dvMockDataFile) ContentSizeInBytes() *int64  { return d.contentSizeInBytes }
 
-func strPtr(s string) *string { return &s }
-func int64Ptr(v int64) *int64 { return &v }
-
 func TestIsDeletionVector(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -71,9 +68,9 @@ func TestIsDeletionVector(t *testing.T) {
 					contentType: iceberg.EntryContentPosDeletes,
 					format:      iceberg.PuffinFile,
 				},
-				referencedDataFile: strPtr("s3://bucket/data/file.parquet"),
-				contentOffset:      int64Ptr(100),
-				contentSizeInBytes: int64Ptr(256),
+				referencedDataFile: new("s3://bucket/data/file.parquet"),
+				contentOffset:      new(int64(100)),
+				contentSizeInBytes: new(int64(256)),
 			},
 			expected: true,
 		},
@@ -116,9 +113,9 @@ func TestManifestEntries_DVClassification(t *testing.T) {
 			contentType: iceberg.EntryContentPosDeletes,
 			format:      iceberg.PuffinFile,
 		},
-		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
-		contentOffset:      int64Ptr(0),
-		contentSizeInBytes: int64Ptr(128),
+		referencedDataFile: new("s3://bucket/data/data-001.parquet"),
+		contentOffset:      new(int64(0)),
+		contentSizeInBytes: new(int64(128)),
 	}
 
 	// Equality delete entry
@@ -220,9 +217,9 @@ func TestManifestEntries_ConcurrentMerge(t *testing.T) {
 				contentType: iceberg.EntryContentPosDeletes,
 				format:      iceberg.PuffinFile,
 			},
-			referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
-			contentOffset:      int64Ptr(0),
-			contentSizeInBytes: int64Ptr(128),
+			referencedDataFile: new("s3://bucket/data/data-001.parquet"),
+			contentOffset:      new(int64(0)),
+			contentSizeInBytes: new(int64(128)),
 		}),
 	}
 
@@ -230,11 +227,9 @@ func TestManifestEntries_ConcurrentMerge(t *testing.T) {
 	entries := newManifestEntries()
 	var wg sync.WaitGroup
 	for range manifestCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			assert.NoError(t, entries.merge(batch))
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -253,9 +248,9 @@ func TestDVMatchingToDataFiles(t *testing.T) {
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
 		},
-		referencedDataFile: strPtr(dataFilePath),
-		contentOffset:      int64Ptr(0),
-		contentSizeInBytes: int64Ptr(128),
+		referencedDataFile: new(dataFilePath),
+		contentOffset:      new(int64(0)),
+		contentSizeInBytes: new(int64(128)),
 	}
 
 	dvForData2 := &dvMockDataFile{
@@ -263,9 +258,9 @@ func TestDVMatchingToDataFiles(t *testing.T) {
 			path:        "s3://bucket/data/dv-002.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
 		},
-		referencedDataFile: strPtr(otherDataFilePath),
-		contentOffset:      int64Ptr(0),
-		contentSizeInBytes: int64Ptr(64),
+		referencedDataFile: new(otherDataFilePath),
+		contentOffset:      new(int64(0)),
+		contentSizeInBytes: new(int64(64)),
 	}
 
 	snapshotID := int64(1)
@@ -303,9 +298,9 @@ func TestDVMatchingNoMatch(t *testing.T) {
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
 		},
-		referencedDataFile: strPtr("s3://bucket/data/data-999.parquet"),
-		contentOffset:      int64Ptr(0),
-		contentSizeInBytes: int64Ptr(128),
+		referencedDataFile: new("s3://bucket/data/data-999.parquet"),
+		contentOffset:      new(int64(0)),
+		contentSizeInBytes: new(int64(128)),
 	}
 
 	dvEntries := []iceberg.ManifestEntry{
@@ -331,9 +326,9 @@ func TestBuildDVIndex_RejectsMultipleDVsPerDataFile(t *testing.T) {
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
 		},
-		referencedDataFile: strPtr(dataFilePath),
-		contentOffset:      int64Ptr(0),
-		contentSizeInBytes: int64Ptr(128),
+		referencedDataFile: new(dataFilePath),
+		contentOffset:      new(int64(0)),
+		contentSizeInBytes: new(int64(128)),
 	}
 
 	dv2 := &dvMockDataFile{
@@ -341,9 +336,9 @@ func TestBuildDVIndex_RejectsMultipleDVsPerDataFile(t *testing.T) {
 			path:        "s3://bucket/data/dv-002.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
 		},
-		referencedDataFile: strPtr(dataFilePath),
-		contentOffset:      int64Ptr(256),
-		contentSizeInBytes: int64Ptr(64),
+		referencedDataFile: new(dataFilePath),
+		contentOffset:      new(int64(256)),
+		contentSizeInBytes: new(int64(64)),
 	}
 
 	dvEntries := []iceberg.ManifestEntry{
@@ -366,9 +361,9 @@ func TestMatchDVToData_SequenceNumberGuard(t *testing.T) {
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
 		},
-		referencedDataFile: strPtr(dataFilePath),
-		contentOffset:      int64Ptr(0),
-		contentSizeInBytes: int64Ptr(128),
+		referencedDataFile: new(dataFilePath),
+		contentOffset:      new(int64(0)),
+		contentSizeInBytes: new(int64(128)),
 	}
 
 	dvSeqNum := int64(5)
@@ -422,10 +417,10 @@ func TestMatchDVToData_NilDVSequenceNumber(t *testing.T) {
 		dataSeq  *int64 // nil → unset
 		expectDV bool
 	}{
-		{"unset DV seq, real data seq — applies (regression)", nil, int64Ptr(7), true},
+		{"unset DV seq, real data seq — applies (regression)", nil, new(int64(7)), true},
 		{"unset DV seq and unset data seq — applies", nil, nil, true},
-		{"known DV seq 0, newer data — skipped (guard stays tight)", int64Ptr(0), int64Ptr(5), false},
-		{"known DV seq 0, same data seq 0 — applies", int64Ptr(0), int64Ptr(0), true},
+		{"known DV seq 0, newer data — skipped (guard stays tight)", new(int64(0)), new(int64(5)), false},
+		{"known DV seq 0, same data seq 0 — applies", new(int64(0)), new(int64(0)), true},
 	}
 
 	for _, tt := range tests {
@@ -435,9 +430,9 @@ func TestMatchDVToData_NilDVSequenceNumber(t *testing.T) {
 					path:        "s3://bucket/data/dv-001.puffin",
 					contentType: iceberg.EntryContentPosDeletes,
 				},
-				referencedDataFile: strPtr(dataFilePath),
-				contentOffset:      int64Ptr(0),
-				contentSizeInBytes: int64Ptr(128),
+				referencedDataFile: new(dataFilePath),
+				contentOffset:      new(int64(0)),
+				contentSizeInBytes: new(int64(128)),
 			}
 			dvEntries := []iceberg.ManifestEntry{
 				iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, tt.dvSeq, nil, dvFile),
@@ -472,9 +467,9 @@ func TestFileScanTask_DeletionVectorFilesField(t *testing.T) {
 			contentType: iceberg.EntryContentPosDeletes,
 			format:      iceberg.PuffinFile,
 		},
-		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
-		contentOffset:      int64Ptr(0),
-		contentSizeInBytes: int64Ptr(128),
+		referencedDataFile: new("s3://bucket/data/data-001.parquet"),
+		contentOffset:      new(int64(0)),
+		contentSizeInBytes: new(int64(128)),
 	}
 
 	task := FileScanTask{

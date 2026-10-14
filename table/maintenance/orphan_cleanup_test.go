@@ -15,24 +15,29 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package maintenance
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	stdfs "io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/io"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -58,18 +63,18 @@ func TestPrefixMismatchMode_String(t *testing.T) {
 func TestOrphanCleanupOptions(t *testing.T) {
 	cfg := &orphanCleanupConfig{}
 
-	WithLocation("/test/location")(cfg)
+	WithCleanupLocation("/test/location")(cfg)
 	assert.Equal(t, "/test/location", cfg.location)
 
 	testDuration := 24 * time.Hour
-	WithFilesOlderThan(testDuration)(cfg)
+	WithCleanupFilesOlderThan(testDuration)(cfg)
 	assert.Equal(t, testDuration, cfg.olderThan)
 
-	WithDryRun(true)(cfg)
+	WithCleanupDryRun(true)(cfg)
 	assert.True(t, cfg.dryRun)
 
 	deleteFunc := func(string) error { return nil }
-	WithDeleteFunc(deleteFunc)(cfg)
+	WithCleanupDeleteFunc(deleteFunc)(cfg)
 	assert.NotNil(t, cfg.deleteFunc)
 
 	WithCleanupMaxConcurrency(8)(cfg)
@@ -161,11 +166,11 @@ func TestNewOrphanCleanupConfigFlattensURIEquivalences(t *testing.T) {
 
 func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	ctx := context.Background()
-	fs := io.NewMemFS()
+	fs := iceio.NewMemFS()
 	location := "mem://plan-race/table"
 	metadataLocation := location + "/metadata/v1.metadata.json"
 
-	meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, location, nil)
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
 	require.NoError(t, err)
 	require.NoError(t, fs.WriteFile(metadataLocation, nil))
 
@@ -173,25 +178,25 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	newOrphan := location + "/data/appeared-after-confirmation.parquet"
 	require.NoError(t, fs.WriteFile(plannedOrphan, []byte("planned")))
 
-	tbl := New(
+	tbl := table.New(
 		[]string{"db", "plan_race"},
 		meta,
 		metadataLocation,
-		func(context.Context) (io.IO, error) { return fs, nil },
+		func(context.Context) (iceio.IO, error) { return fs, nil },
 		nil,
 	)
 
-	plan, err := tbl.PlanOrphanFiles(ctx, WithFilesOlderThan(time.Hour))
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(time.Hour))
 	require.NoError(t, err)
 	assert.Equal(t, []string{plannedOrphan}, plan.Files())
 	assert.Equal(t, []OrphanFile{{Path: plannedOrphan, SizeBytes: int64(len("planned"))}}, plan.OrphanFiles())
 	assert.False(t, plan.Cutoff().IsZero())
 
 	require.NoError(t, fs.WriteFile(newOrphan, []byte("new")))
-	_, err = tbl.ExecuteOrphanCleanup(ctx, plan, WithFilesOlderThan(time.Hour))
-	require.ErrorContains(t, err, "WithFilesOlderThan")
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan, WithCleanupFilesOlderThan(time.Hour))
+	require.ErrorContains(t, err, "WithCleanupFilesOlderThan")
 
-	result, err := tbl.ExecuteOrphanCleanup(ctx, plan, WithCleanupMaxConcurrency(1))
+	result, err := ExecuteOrphanCleanup(ctx, tbl, plan, WithCleanupMaxConcurrency(1))
 	require.NoError(t, err)
 	assert.Equal(t, []string{plannedOrphan}, result.DeletedFiles)
 
@@ -207,8 +212,8 @@ func TestExecuteOrphanCleanupRejectsPlanningOptions(t *testing.T) {
 		name string
 		opt  OrphanCleanupOption
 	}{
-		{name: "location", opt: WithLocation("mem://other")},
-		{name: "age", opt: WithFilesOlderThan(time.Hour)},
+		{name: "location", opt: WithCleanupLocation("mem://other")},
+		{name: "age", opt: WithCleanupFilesOlderThan(time.Hour)},
 		{name: "prefix mismatch mode", opt: WithPrefixMismatchMode(PrefixMismatchIgnore)},
 		{name: "equal schemes", opt: WithEqualSchemes(map[string]string{"s3a": "s3"})},
 		{name: "equal authorities", opt: WithEqualAuthorities(map[string]string{"old": "new"})},
@@ -216,7 +221,7 @@ func TestExecuteOrphanCleanupRejectsPlanningOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := (Table{}).ExecuteOrphanCleanup(context.Background(), OrphanCleanupPlan{}, tt.opt)
+			_, err := ExecuteOrphanCleanup(context.Background(), &table.Table{}, OrphanCleanupPlan{}, tt.opt)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "only valid while planning")
 		})
@@ -231,7 +236,7 @@ func TestPlanOrphanFilesHonorsModificationTimes(t *testing.T) {
 	recentPath := location + "/data/recent.parquet"
 	now := time.Now()
 
-	meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, location, nil)
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
 	require.NoError(t, err)
 	mockFS := &mockListableIO{
 		entries: []mockWalkEntry{
@@ -241,15 +246,15 @@ func TestPlanOrphanFilesHonorsModificationTimes(t *testing.T) {
 			{path: recentPath, info: mockFileInfo{name: "recent.parquet", size: 20, modTime: now.Add(-10 * time.Minute)}},
 		},
 	}
-	tbl := New(
-		Identifier{"db", "mtime"},
+	tbl := table.New(
+		table.Identifier{"db", "mtime"},
 		meta,
 		metadataLocation,
-		func(context.Context) (io.IO, error) { return mockFS, nil },
+		func(context.Context) (iceio.IO, error) { return mockFS, nil },
 		nil,
 	)
 
-	plan, err := tbl.PlanOrphanFiles(ctx, WithFilesOlderThan(time.Hour))
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(time.Hour))
 	require.NoError(t, err)
 	assert.Equal(t, []string{oldPath}, plan.Files())
 	assert.Equal(t, []OrphanFile{{Path: oldPath, SizeBytes: 10}}, plan.OrphanFiles())
@@ -283,14 +288,14 @@ func TestPlanOrphanFilesPreservesPOSIXInterpretationOfAmbiguousUNCReference(t *t
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, tt.tableLocation, nil)
+			meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, tt.tableLocation, nil)
 			require.NoError(t, err)
-			builder, err := MetadataBuilderFromBase(meta, tt.metadataPath)
+			builder, err := table.MetadataBuilderFromBase(meta, tt.metadataPath)
 			require.NoError(t, err)
-			require.NoError(t, builder.SetStatistics(StatisticsFile{
+			require.NoError(t, builder.SetStatistics(table.StatisticsFile{
 				SnapshotID:      1,
 				StatisticsPath:  tt.referencedPath,
-				BlobMetadata:    []BlobMetadata{},
+				BlobMetadata:    []table.BlobMetadata{},
 				FileSizeInBytes: 4,
 			}))
 			meta, err = builder.Build()
@@ -300,15 +305,15 @@ func TestPlanOrphanFilesPreservesPOSIXInterpretationOfAmbiguousUNCReference(t *t
 				path: tt.listedPath,
 				info: mockFileInfo{name: "file.parquet", size: 4},
 			}}}
-			tbl := New(
-				Identifier{"db", "tbl"},
+			tbl := table.New(
+				table.Identifier{"db", "tbl"},
 				meta,
 				tt.metadataPath,
-				func(context.Context) (io.IO, error) { return fsys, nil },
+				func(context.Context) (iceio.IO, error) { return fsys, nil },
 				nil,
 			)
 
-			plan, err := tbl.PlanOrphanFiles(context.Background(), WithFilesOlderThan(0))
+			plan, err := PlanOrphanFiles(context.Background(), tbl, WithCleanupFilesOlderThan(0))
 			require.NoError(t, err)
 			assert.Empty(t, plan.Files())
 		})
@@ -331,14 +336,14 @@ func TestPlanOrphanFilesMatchesNativeHierarchicalFileURIPath(t *testing.T) {
 		"file://localhost/C:/Warehouse/Table/Data/file.parquet",
 	} {
 		t.Run(reference, func(t *testing.T) {
-			meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, tableLocation, nil)
+			meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, tableLocation, nil)
 			require.NoError(t, err)
-			builder, err := MetadataBuilderFromBase(meta, metadataPath)
+			builder, err := table.MetadataBuilderFromBase(meta, metadataPath)
 			require.NoError(t, err)
-			require.NoError(t, builder.SetStatistics(StatisticsFile{
+			require.NoError(t, builder.SetStatistics(table.StatisticsFile{
 				SnapshotID:      1,
 				StatisticsPath:  reference,
-				BlobMetadata:    []BlobMetadata{},
+				BlobMetadata:    []table.BlobMetadata{},
 				FileSizeInBytes: 4,
 			}))
 			meta, err = builder.Build()
@@ -348,15 +353,15 @@ func TestPlanOrphanFilesMatchesNativeHierarchicalFileURIPath(t *testing.T) {
 				path: listedPath,
 				info: mockFileInfo{name: "file.parquet", size: 4},
 			}}}
-			tbl := New(
-				Identifier{"db", "tbl"},
+			tbl := table.New(
+				table.Identifier{"db", "tbl"},
 				meta,
 				metadataPath,
-				func(context.Context) (io.IO, error) { return fsys, nil },
+				func(context.Context) (iceio.IO, error) { return fsys, nil },
 				nil,
 			)
 
-			plan, err := tbl.PlanOrphanFiles(context.Background(), WithFilesOlderThan(0))
+			plan, err := PlanOrphanFiles(context.Background(), tbl, WithCleanupFilesOlderThan(0))
 			require.NoError(t, err)
 			assert.Empty(t, plan.Files())
 		})
@@ -1484,21 +1489,24 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
   ]
 }`
 
-	meta, err := ParseMetadataString(metaJSON)
+	meta, err := table.ParseMetadataString(metaJSON)
 	require.NoError(t, err)
 
-	tbl := Table{
-		metadata:         meta,
-		metadataLocation: "s3://bucket/test/location/metadata/v1.metadata.json",
-	}
+	tbl := table.New(
+		table.Identifier{"db", "tbl"},
+		meta,
+		"s3://bucket/test/location/metadata/v1.metadata.json",
+		nil,
+		nil,
+	)
 
 	// No snapshots: FileIO is not used; statistics paths must still be referenced.
-	refs, err := tbl.getReferencedFiles(context.Background(), nil, 1, true)
+	refs, err := getReferencedFiles(context.Background(), tbl, nil, 1, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/table-stats.puffin"))
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/part-stats.puffin"))
-	assert.Contains(t, refs, normalizeFilePath(tbl.metadataLocation))
+	assert.Contains(t, refs, normalizeFilePath(tbl.MetadataLocation()))
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/test/location/metadata/version-hint.text"))
 	assert.NotContains(t, refs, normalizeFilePath("s3:/bucket/test/location/metadata/version-hint.text"))
 	assert.NotContains(t, refs, normalizeFilePath("s3://bucket/stats/not-referenced.puffin"))
@@ -1511,7 +1519,7 @@ type mockBulkRemovableIO struct {
 	bulkPaths  []string
 }
 
-func (m *mockBulkRemovableIO) Open(string) (io.File, error) {
+func (m *mockBulkRemovableIO) Open(string) (iceio.File, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -1567,14 +1575,18 @@ func TestDeleteFilesEmpty(t *testing.T) {
 
 // mockPlainIO implements only IO, without optional delete or listing capabilities.
 type mockPlainIO struct {
+	mu      sync.Mutex
 	removed []string
 }
 
-func (m *mockPlainIO) Open(string) (io.File, error) {
+func (m *mockPlainIO) Open(string) (iceio.File, error) {
 	return nil, errors.New("not implemented")
 }
 
 func (m *mockPlainIO) Remove(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.removed = append(m.removed, name)
 
 	return nil
@@ -1616,17 +1628,298 @@ func (m mockFileInfo) ModTime() time.Time   { return m.modTime }
 func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
 func (m mockFileInfo) Sys() any             { return nil }
 
+type purgeDeleteTrackingIO struct {
+	mockListableIO
+
+	release chan struct{}
+
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	removed   []string
+}
+
+func (m *purgeDeleteTrackingIO) Remove(name string) error {
+	m.mu.Lock()
+	m.active++
+	m.maxActive = max(m.maxActive, m.active)
+	m.mu.Unlock()
+
+	<-m.release
+
+	m.mu.Lock()
+	m.active--
+	m.removed = append(m.removed, name)
+	m.mu.Unlock()
+
+	return nil
+}
+
+func (m *purgeDeleteTrackingIO) MaxActive() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.maxActive
+}
+
+func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
+	const (
+		firstPath   = "s3://bucket/table/first.parquet"
+		missingPath = "s3://bucket/table/missing.parquet"
+		slowPath    = "s3://bucket/table/slow.parquet"
+		fastPath    = "s3://bucket/table/fast.parquet"
+	)
+
+	slowErr := errors.New("slow removal failed")
+	fastErr := errors.New("fast removal failed")
+	files := []string{firstPath, missingPath, slowPath, fastPath}
+	var mu sync.Mutex
+	calls := make(map[string]int)
+
+	deleted, err := deleteFilesParallel(
+		context.Background(),
+		files,
+		4,
+		func(path string) error {
+			mu.Lock()
+			calls[path]++
+			mu.Unlock()
+
+			var err error
+			switch path {
+			case missingPath:
+				err = stdfs.ErrNotExist
+			case slowPath:
+				time.Sleep(10 * time.Millisecond)
+
+				err = slowErr
+			case fastPath:
+				err = fastErr
+			}
+			if os.IsNotExist(err) {
+				return nil
+			}
+
+			return err
+		},
+		func(path string, err error) error {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		},
+	)
+
+	assert.Equal(t, []string{firstPath, missingPath}, deleted)
+	require.ErrorIs(t, err, slowErr)
+	require.ErrorIs(t, err, fastErr)
+	assert.NotContains(t, err.Error(), missingPath)
+	assert.Less(t, strings.Index(err.Error(), slowPath), strings.Index(err.Error(), fastPath))
+
+	mu.Lock()
+	assert.Equal(t, map[string]int{
+		firstPath:   1,
+		missingPath: 1,
+		slowPath:    1,
+		fastPath:    1,
+	}, calls)
+	mu.Unlock()
+}
+
+func TestDeleteFilesParallelPreservesErrorWithNilWrapper(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	files := []string{
+		"s3://bucket/table/ok.parquet",
+		"s3://bucket/table/failed.parquet",
+	}
+
+	deleted, err := deleteFilesParallel(
+		context.Background(),
+		files,
+		2,
+		func(path string) error {
+			if path == files[1] {
+				return deleteErr
+			}
+
+			return nil
+		},
+		func(string, error) error { return nil },
+	)
+
+	assert.Equal(t, []string{files[0]}, deleted)
+	require.ErrorIs(t, err, deleteErr)
+}
+
+func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	called := false
+	_, err := deleteFilesParallel(
+		ctx,
+		[]string{"s3://bucket/table/file.parquet"},
+		4,
+		func(string) error {
+			called = true
+
+			return nil
+		},
+		func(path string, err error) error {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called)
+}
+
+// gatedErrContext lets a test cancel after a job is received, before Err returns.
+type gatedErrContext struct {
+	context.Context
+	checks   <-chan struct{}
+	errCalls chan<- struct{}
+}
+
+func (c gatedErrContext) Err() error {
+	c.errCalls <- struct{}{}
+	<-c.checks
+
+	return c.Context.Err()
+}
+
+func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			fileCount      = 50
+			maxConcurrency = 4
+		)
+
+		files := make([]string, fileCount)
+		for i := range files {
+			files[i] = fmt.Sprintf("s3://bucket/table/file-%02d.parquet", i)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		checks := make(chan struct{}, maxConcurrency)
+		for range maxConcurrency {
+			checks <- struct{}{}
+		}
+		errCalls := make(chan struct{}, fileCount)
+		extraCalls := make(chan struct{}, 1)
+		var calls atomic.Int32
+		release := make(chan struct{})
+		var deleted []string
+		var err error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			deleted, err = deleteFilesParallel(
+				gatedErrContext{Context: ctx, checks: checks, errCalls: errCalls},
+				files,
+				maxConcurrency,
+				func(string) error {
+					if calls.Add(1) > maxConcurrency {
+						extraCalls <- struct{}{}
+					}
+					<-release
+
+					return nil
+				},
+				func(path string, err error) error {
+					return fmt.Errorf("failed to remove %s: %w", path, err)
+				},
+			)
+		}()
+
+		synctest.Wait()
+		assert.Equal(t, int32(maxConcurrency), calls.Load())
+		for range maxConcurrency {
+			<-errCalls
+		}
+
+		// Let one worker receive another job and wait until its Err check is paused.
+		release <- struct{}{}
+		synctest.Wait()
+
+		cleanup := func() {
+			cancel()
+			close(checks)
+			close(release)
+			<-done
+		}
+		select {
+		case <-errCalls:
+		case <-extraCalls:
+			cleanup()
+			t.Fatal("worker started a deletion before checking cancellation")
+		}
+		cleanup()
+
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int32(maxConcurrency), calls.Load())
+		assert.Equal(t, files[:maxConcurrency], deleted)
+	})
+}
+
+func TestPurgeFilesDeletesNonBulkFilesConcurrently(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const maxWorkers = defaultPurgeMaxConcurrency
+		const fileCount = maxWorkers * 2
+		entries := make([]mockWalkEntry, 0, fileCount)
+		for i := range fileCount {
+			entries = append(entries, mockWalkEntry{
+				path: fmt.Sprintf("s3://bucket/table/data/file-%02d.parquet", i),
+				info: mockFileInfo{name: fmt.Sprintf("file-%02d.parquet", i)},
+			})
+		}
+
+		fsys := &purgeDeleteTrackingIO{
+			mockListableIO: mockListableIO{entries: entries},
+			release:        make(chan struct{}),
+		}
+
+		meta, err := table.NewMetadata(
+			iceberg.NewSchema(0),
+			iceberg.UnpartitionedSpec,
+			table.UnsortedSortOrder,
+			"s3://bucket/table",
+			iceberg.Properties{},
+		)
+		require.NoError(t, err)
+		tbl := table.New(
+			table.Identifier{"db", "tbl"},
+			meta,
+			"s3://bucket/table/metadata/v1.metadata.json",
+			testFSF(fsys),
+			nil,
+		)
+
+		done := make(chan error, 1)
+		go func() { done <- PurgeFiles(context.Background(), tbl) }()
+
+		// Every worker remains blocked in Remove until the full pool is observable.
+		synctest.Wait()
+		assert.Greater(t, maxWorkers, 1)
+		assert.Equal(t, maxWorkers, fsys.MaxActive())
+		close(fsys.release)
+
+		require.NoError(t, <-done)
+		assert.Equal(t, maxWorkers, fsys.MaxActive())
+		assert.Len(t, fsys.removed, fileCount+2) // Data files, metadata, and version hint.
+	})
+}
+
 func TestPurgeFilesSkipsDataFilesForMalformedGCEnabled(t *testing.T) {
 	const orphanDataPath = "s3://bucket/table/data/orphan.parquet"
 
 	for _, gcValue := range []string{"1", "garbage", "false ", "true "} {
 		t.Run(gcValue, func(t *testing.T) {
-			meta, err := NewMetadata(
+			meta, err := table.NewMetadata(
 				iceberg.NewSchema(0),
 				iceberg.UnpartitionedSpec,
-				UnsortedSortOrder,
+				table.UnsortedSortOrder,
 				"s3://bucket/table",
-				iceberg.Properties{GCEnabledKey: gcValue},
+				iceberg.Properties{table.GCEnabledKey: gcValue},
 			)
 			require.NoError(t, err)
 
@@ -1634,15 +1927,15 @@ func TestPurgeFilesSkipsDataFilesForMalformedGCEnabled(t *testing.T) {
 				path: orphanDataPath,
 				info: mockFileInfo{name: "orphan.parquet"},
 			}}}
-			tbl := New(
-				Identifier{"db", "tbl"},
+			tbl := table.New(
+				table.Identifier{"db", "tbl"},
 				meta,
 				"s3://bucket/table/metadata/v1.metadata.json",
-				func(context.Context) (io.IO, error) { return fsys, nil },
+				func(context.Context) (iceio.IO, error) { return fsys, nil },
 				nil,
 			)
 
-			require.NoError(t, tbl.PurgeFiles(context.Background()))
+			require.NoError(t, PurgeFiles(context.Background(), tbl))
 			assert.NotContains(t, fsys.removed, orphanDataPath)
 		})
 	}
@@ -1676,20 +1969,20 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 			schema := iceberg.NewSchema(0, iceberg.NestedField{
 				ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 			})
-			meta, err := NewMetadata(
+			meta, err := table.NewMetadata(
 				schema,
 				iceberg.UnpartitionedSpec,
-				UnsortedSortOrder,
+				table.UnsortedSortOrder,
 				"s3://bucket/table",
-				iceberg.Properties{PropertyFormatVersion: "2"},
+				iceberg.Properties{table.PropertyFormatVersion: "2"},
 			)
 			require.NoError(t, err)
-			builder, err := MetadataBuilderFromBase(meta, "")
+			builder, err := table.MetadataBuilderFromBase(meta, "")
 			require.NoError(t, err)
-			require.NoError(t, builder.SetStatistics(StatisticsFile{
+			require.NoError(t, builder.SetStatistics(table.StatisticsFile{
 				SnapshotID:      1,
 				StatisticsPath:  tt.referencedPath,
-				BlobMetadata:    []BlobMetadata{},
+				BlobMetadata:    []table.BlobMetadata{},
 				FileSizeInBytes: 4,
 			}))
 			meta, err = builder.Build()
@@ -1701,11 +1994,11 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 					info: mockFileInfo{name: "file.parquet", size: 4},
 				}},
 			}
-			tbl := New(
-				Identifier{"db", "tbl"},
+			tbl := table.New(
+				table.Identifier{"db", "tbl"},
 				meta,
 				"s3://bucket/table/metadata/v1.metadata.json",
-				func(context.Context) (io.IO, error) { return fsys, nil },
+				func(context.Context) (iceio.IO, error) { return fsys, nil },
 				nil,
 			)
 
@@ -1716,12 +2009,13 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 			} {
 				t.Run(mode.String(), func(t *testing.T) {
 					var deleted []string
-					result, err := tbl.DeleteOrphanFiles(
+					result, err := DeleteOrphanFiles(
 						context.Background(),
-						WithLocation("s3://bucket/path"),
-						WithFilesOlderThan(0),
+						tbl,
+						WithCleanupLocation("s3://bucket/path"),
+						WithCleanupFilesOlderThan(0),
 						WithPrefixMismatchMode(mode),
-						WithDeleteFunc(func(path string) error {
+						WithCleanupDeleteFunc(func(path string) error {
 							deleted = append(deleted, path)
 
 							return nil
@@ -1751,20 +2045,20 @@ func TestDeleteOrphanFilesDryRunKeepsMixedCaseWindowsReference(t *testing.T) {
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 	})
-	meta, err := NewMetadata(
+	meta, err := table.NewMetadata(
 		schema,
 		iceberg.UnpartitionedSpec,
-		UnsortedSortOrder,
+		table.UnsortedSortOrder,
 		`C:\Warehouse`,
-		iceberg.Properties{PropertyFormatVersion: "2"},
+		iceberg.Properties{table.PropertyFormatVersion: "2"},
 	)
 	require.NoError(t, err)
-	builder, err := MetadataBuilderFromBase(meta, "")
+	builder, err := table.MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
-	require.NoError(t, builder.SetStatistics(StatisticsFile{
+	require.NoError(t, builder.SetStatistics(table.StatisticsFile{
 		SnapshotID:      1,
 		StatisticsPath:  `C:\Warehouse\Data\File.parquet`,
-		BlobMetadata:    []BlobMetadata{},
+		BlobMetadata:    []table.BlobMetadata{},
 		FileSizeInBytes: 4,
 	}))
 	meta, err = builder.Build()
@@ -1777,18 +2071,19 @@ func TestDeleteOrphanFilesDryRunKeepsMixedCaseWindowsReference(t *testing.T) {
 			info: mockFileInfo{name: "FILE.PARQUET", size: 4},
 		}},
 	}
-	tbl := New(
-		Identifier{"db", "tbl"},
+	tbl := table.New(
+		table.Identifier{"db", "tbl"},
 		meta,
 		`C:\Warehouse\metadata\v1.metadata.json`,
-		func(context.Context) (io.IO, error) { return fsys, nil },
+		func(context.Context) (iceio.IO, error) { return fsys, nil },
 		nil,
 	)
 
-	result, err := tbl.DeleteOrphanFiles(
+	result, err := DeleteOrphanFiles(
 		context.Background(),
-		WithFilesOlderThan(0),
-		WithDryRun(true),
+		tbl,
+		WithCleanupFilesOlderThan(0),
+		WithCleanupDryRun(true),
 	)
 	require.NoError(t, err)
 	assert.Empty(t, result.OrphanFileLocations)
@@ -1824,20 +2119,20 @@ func TestDeleteOrphanFilesDryRunKeepsPortableWindowsReferences(t *testing.T) {
 			schema := iceberg.NewSchema(0, iceberg.NestedField{
 				ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 			})
-			meta, err := NewMetadata(
+			meta, err := table.NewMetadata(
 				schema,
 				iceberg.UnpartitionedSpec,
-				UnsortedSortOrder,
+				table.UnsortedSortOrder,
 				tt.tableLocation,
-				iceberg.Properties{PropertyFormatVersion: "2"},
+				iceberg.Properties{table.PropertyFormatVersion: "2"},
 			)
 			require.NoError(t, err)
-			builder, err := MetadataBuilderFromBase(meta, "")
+			builder, err := table.MetadataBuilderFromBase(meta, "")
 			require.NoError(t, err)
-			require.NoError(t, builder.SetStatistics(StatisticsFile{
+			require.NoError(t, builder.SetStatistics(table.StatisticsFile{
 				SnapshotID:      1,
 				StatisticsPath:  tt.referencedPath,
-				BlobMetadata:    []BlobMetadata{},
+				BlobMetadata:    []table.BlobMetadata{},
 				FileSizeInBytes: 4,
 			}))
 			meta, err = builder.Build()
@@ -1851,18 +2146,19 @@ func TestDeleteOrphanFilesDryRunKeepsPortableWindowsReferences(t *testing.T) {
 				})
 			}
 			fsys := &mockListableIO{entries: entries}
-			tbl := New(
-				Identifier{"db", "tbl"},
+			tbl := table.New(
+				table.Identifier{"db", "tbl"},
 				meta,
 				tt.tableLocation+"/metadata/v1.metadata.json",
-				func(context.Context) (io.IO, error) { return fsys, nil },
+				func(context.Context) (iceio.IO, error) { return fsys, nil },
 				nil,
 			)
 
-			result, err := tbl.DeleteOrphanFiles(
+			result, err := DeleteOrphanFiles(
 				context.Background(),
-				WithFilesOlderThan(0),
-				WithDryRun(true),
+				tbl,
+				WithCleanupFilesOlderThan(0),
+				WithCleanupDryRun(true),
 			)
 			require.NoError(t, err)
 			assert.Empty(t, result.OrphanFileLocations)
@@ -1876,12 +2172,12 @@ func TestDeleteOrphanFilesDryRunKeepsOpaqueVersionHint(t *testing.T) {
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 	})
-	meta, err := NewMetadata(
+	meta, err := table.NewMetadata(
 		schema,
 		iceberg.UnpartitionedSpec,
-		UnsortedSortOrder,
+		table.UnsortedSortOrder,
 		tableLocation,
-		iceberg.Properties{PropertyFormatVersion: "2"},
+		iceberg.Properties{table.PropertyFormatVersion: "2"},
 	)
 	require.NoError(t, err)
 
@@ -1892,18 +2188,19 @@ func TestDeleteOrphanFilesDryRunKeepsOpaqueVersionHint(t *testing.T) {
 			info: mockFileInfo{name: "version-hint.text", size: 2},
 		}},
 	}
-	tbl := New(
-		Identifier{"db", "tbl"},
+	tbl := table.New(
+		table.Identifier{"db", "tbl"},
 		meta,
 		tableLocation+"/metadata/v1.metadata.json",
-		func(context.Context) (io.IO, error) { return fsys, nil },
+		func(context.Context) (iceio.IO, error) { return fsys, nil },
 		nil,
 	)
 
-	result, err := tbl.DeleteOrphanFiles(
+	result, err := DeleteOrphanFiles(
 		context.Background(),
-		WithFilesOlderThan(0),
-		WithDryRun(true),
+		tbl,
+		WithCleanupFilesOlderThan(0),
+		WithCleanupDryRun(true),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, tableLocation, fsys.root)
@@ -1976,7 +2273,7 @@ func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
         "refs": {}
     }`
 
-	meta, err := ParseMetadataString(metaJSON)
+	meta, err := table.ParseMetadataString(metaJSON)
 	require.NoError(t, err)
 
 	mockFS := &mockListableIO{
@@ -1988,19 +2285,19 @@ func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
 		},
 	}
 
-	tbl := New(
-		Identifier{"db", "tbl"},
+	tbl := table.New(
+		table.Identifier{"db", "tbl"},
 		meta,
 		"s3://bucket/table/metadata/v1.metadata.json",
-		func(context.Context) (io.IO, error) { return mockFS, nil },
+		func(context.Context) (iceio.IO, error) { return mockFS, nil },
 		nil,
 	)
 
-	result, err := tbl.DeleteOrphanFiles(context.Background(),
-		WithDryRun(true),
-		WithLocation("s3://bucket/table"),
+	result, err := DeleteOrphanFiles(context.Background(), tbl,
+		WithCleanupDryRun(true),
+		WithCleanupLocation("s3://bucket/table"),
 		WithCleanupMaxConcurrency(1),
-		WithFilesOlderThan(0), // Consider files created before the scan.
+		WithCleanupFilesOlderThan(0), // Consider files created before the scan.
 	)
 
 	require.NoError(t, err)
@@ -2022,20 +2319,26 @@ func TestWalkDirectoryRequiresListableIO(t *testing.T) {
 		return nil
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not implement iceio.ListableIO")
+	assert.Contains(t, err.Error(), "does not implement io.ListableIO")
+}
+
+// testFSF wraps an IO object in a function that returns it.
+// This is a local copy of the helper from table/updates_test.go
+func testFSF(io iceio.IO) func(context.Context) (iceio.IO, error) {
+	return func(context.Context) (iceio.IO, error) { return io, nil }
 }
 
 type inMemoryCatalog struct {
-	metadata Metadata
+	metadata table.Metadata
 }
 
 func (c *inMemoryCatalog) CommitTable(
 	ctx context.Context,
-	ident Identifier,
-	reqs []Requirement,
-	updates []Update,
-) (Metadata, string, error) {
-	meta, err := UpdateTableMetadata(c.metadata, updates, "")
+	ident table.Identifier,
+	reqs []table.Requirement,
+	updates []table.Update,
+) (table.Metadata, string, error) {
+	meta, err := table.UpdateTableMetadata(c.metadata, updates, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -2044,7 +2347,7 @@ func (c *inMemoryCatalog) CommitTable(
 	return meta, "", nil
 }
 
-func (c *inMemoryCatalog) LoadTable(ctx context.Context, ident Identifier) (*Table, error) {
+func (c *inMemoryCatalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
 
@@ -2060,16 +2363,16 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 	}, nil)
 	spec := *iceberg.UnpartitionedSpec
 
-	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation,
-		iceberg.Properties{PropertyFormatVersion: "2"})
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, tableLocation,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
 	require.NoError(t, err)
 
-	fs := io.LocalFS{}
-	tbl := New(
-		Identifier{"db", "tbl"},
+	fs := iceio.LocalFS{}
+	tbl := table.New(
+		table.Identifier{"db", "tbl"},
 		meta,
 		tableLocation+"/metadata/v0.metadata.json",
-		func(context.Context) (io.IO, error) { return fs, nil },
+		func(context.Context) (iceio.IO, error) { return fs, nil },
 		&inMemoryCatalog{meta},
 	)
 
@@ -2105,9 +2408,9 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 	// metadata reachability, not the side-effect of file removal.
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.ExpireSnapshots(
-		WithRetainLast(1),
-		WithOlderThan(0),
-		WithPostCommit(false),
+		table.WithRetainLast(1),
+		table.WithOlderThan(0),
+		table.WithPostCommit(false),
 	))
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
@@ -2116,7 +2419,7 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 
 	// fileA is now referenced only via a DELETED entry in the surviving
 	// snapshot's tombstone manifest. The fix must exclude it.
-	refs, err := tbl.getReferencedFiles(ctx, fs, 1, true)
+	refs, err := getReferencedFiles(ctx, tbl, fs, 1, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, normalizeFilePath(fileB),
@@ -2129,8 +2432,8 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 // given snapshot's manifests, filtered to entries matching wantStatus.
 func dataFilePathsFromSnapshot(
 	t *testing.T,
-	snap *Snapshot,
-	fs io.IO,
+	snap *table.Snapshot,
+	fs iceio.IO,
 	wantStatus iceberg.ManifestEntryStatus,
 ) []string {
 	t.Helper()
@@ -2167,7 +2470,7 @@ func TestGetReferencedFiles_SharedManifestReadOnce(t *testing.T) {
 	writeManifestList(t, tio.trackingIO, 2, manifestList2, []iceberg.ManifestFile{mf})
 	tio.files[dataPath] = []byte("data")
 
-	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+	meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{
 		snapshots: fmt.Sprintf(
 			`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q},`+
 				`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":%q}`,
@@ -2175,8 +2478,8 @@ func TestGetReferencedFiles_SharedManifestReadOnce(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
-	refs, err := tbl.getReferencedFiles(context.Background(), tio, 1, true)
+	tbl := table.New(table.Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
+	refs, err := getReferencedFiles(context.Background(), tbl, tio, 1, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, dataPath)
@@ -2206,7 +2509,7 @@ func TestGetReferencedFiles_DisjointManifestsAllRead(t *testing.T) {
 	writeManifestList(t, tio.trackingIO, 1, manifestList1, []iceberg.ManifestFile{mf1})
 	writeManifestList(t, tio.trackingIO, 2, manifestList2, []iceberg.ManifestFile{mf2})
 
-	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+	meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{
 		snapshots: fmt.Sprintf(
 			`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q},`+
 				`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":%q}`,
@@ -2214,8 +2517,8 @@ func TestGetReferencedFiles_DisjointManifestsAllRead(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
-	refs, err := tbl.getReferencedFiles(context.Background(), tio, 1, true)
+	tbl := table.New(table.Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
+	refs, err := getReferencedFiles(context.Background(), tbl, tio, 1, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, dataPath1)
@@ -2245,13 +2548,13 @@ func TestGetReferencedFiles_ManySnapshotsShareManifest(t *testing.T) {
 				i, i*1000, listPath))
 	}
 
-	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+	meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{
 		snapshots: strings.Join(snapJSON, ","),
 	}))
 	require.NoError(t, err)
 
-	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
-	refs, err := tbl.getReferencedFiles(context.Background(), tio, 4, true)
+	tbl := table.New(table.Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
+	refs, err := getReferencedFiles(context.Background(), tbl, tio, 4, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, dataPath)
@@ -2279,14 +2582,14 @@ func TestGetReferencedFilesFetchesManifestListsConcurrently(t *testing.T) {
 				i, i*1000, listPath))
 	}
 
-	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+	meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{
 		snapshots: strings.Join(snapshotJSON, ","),
 	}))
 	require.NoError(t, err)
 
 	trackingFS := &manifestTrackingIO{IO: baseIO, delay: 10 * time.Millisecond}
-	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(trackingFS), nil)
-	refs, err := tbl.getReferencedFiles(context.Background(), trackingFS, maxWorkers, true)
+	tbl := table.New(table.Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(trackingFS), nil)
+	refs, err := getReferencedFiles(context.Background(), tbl, trackingFS, maxWorkers, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, dataPath)

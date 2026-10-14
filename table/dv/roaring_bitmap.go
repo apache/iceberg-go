@@ -299,10 +299,7 @@ func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
 		if bucketBitBase >= uint64(length) {
 			continue
 		}
-		bucketBits := uint64(length) - bucketBitBase
-		if bucketBits > 1<<32 {
-			bucketBits = 1 << 32
-		}
+		bucketBits := min(uint64(length)-bucketBitBase, 1<<32)
 		if bm.CardinalityInRange(0, bucketBits) < bm.DenseSize() {
 			it := bm.Iterator()
 			for it.HasNext() {
@@ -322,10 +319,7 @@ func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
 			continue
 		}
 		// Cap the bucket's bit range to what fits in `length`.
-		bucketBits = uint64(len(dense)) * 64
-		if bucketBits > uint64(length)-bucketBitBase {
-			bucketBits = uint64(length) - bucketBitBase
-		}
+		bucketBits = min(uint64(len(dense))*64, uint64(length)-bucketBitBase)
 		// bucketBitBase = key << 32 is always 8-byte-aligned, so the
 		// BitmapWordWriter runs with offset=0 internally. The trailing-byte
 		// loop below relies on that alignment — PutNextTrailingByte's

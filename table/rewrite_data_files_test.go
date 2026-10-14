@@ -29,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -359,6 +360,71 @@ func TestExecuteCompactionGroup_TargetFileSizeForwarded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, withDefault.NewDataFiles, 1,
 		"without the option, the same group consolidates into a single file")
+}
+
+// TestExecuteCompactionGroup_ParquetRowGroupLimitForwarded verifies
+// that WithCompactionParquetRowGroupLimit reaches the underlying
+// WriteRecords call: with the limit set, no output row group may
+// exceed it, while the no-option baseline packs all rows into one.
+// It doubles as the end-to-end pin for the option-forwarding block in
+// ExecuteCompactionGroup (the row-group limit is the cheapest
+// observable of the three forwarded tuning options).
+func TestExecuteCompactionGroup_ParquetRowGroupLimitForwarded(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	var rows strings.Builder
+	rows.WriteString("[")
+	for i := range 100 {
+		if i > 0 {
+			rows.WriteString(",")
+		}
+		fmt.Fprintf(&rows, `{"id": %d, "data": "row-%d"}`, i+1, i+1)
+	}
+	rows.WriteString("]")
+
+	dataPath := tbl.Location() + "/data/rg-limit.parquet"
+	writeParquetFile(t, dataPath, arrowSc, rows.String())
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	group := table.CompactionTaskGroup{
+		PartitionKey:   "single",
+		Tasks:          []table.FileScanTask{tasks[0]},
+		TotalSizeBytes: tasks[0].File.FileSizeBytes(),
+	}
+
+	withLimit, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
+		table.WithCompactionParquetRowGroupLimit(10))
+	require.NoError(t, err)
+	require.Len(t, withLimit.NewDataFiles, 1)
+
+	limited, err := file.OpenParquetFile(strings.TrimPrefix(withLimit.NewDataFiles[0].FilePath(), "file://"), false)
+	require.NoError(t, err)
+	defer limited.Close()
+	assert.GreaterOrEqual(t, limited.NumRowGroups(), 10,
+		"100 rows with a 10-row limit need at least 10 row groups")
+	for rg := range limited.NumRowGroups() {
+		assert.LessOrEqual(t, limited.RowGroup(rg).NumRows(), int64(10))
+	}
+
+	baseline, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+	require.NoError(t, err)
+	require.Len(t, baseline.NewDataFiles, 1)
+
+	unlimited, err := file.OpenParquetFile(strings.TrimPrefix(baseline.NewDataFiles[0].FilePath(), "file://"), false)
+	require.NoError(t, err)
+	defer unlimited.Close()
+	assert.Equal(t, 1, unlimited.NumRowGroups(),
+		"without the option, 100 rows fit in one row group")
 }
 
 // TestExecuteCompactionGroup_ScanConcurrencyForwarded is a smoke test

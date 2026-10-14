@@ -33,9 +33,10 @@ func schemaToHiveColumns(schema *iceberg.Schema) []*hive_metastore.FieldSchema {
 		return nil
 	}
 
-	columns := make([]*hive_metastore.FieldSchema, 0, len(schema.Fields()))
-	for _, field := range schema.Fields() {
-		columns = append(columns, fieldToHiveColumn(field))
+	fields := schema.Fields()
+	columns := make([]*hive_metastore.FieldSchema, len(fields))
+	for i, field := range fields {
+		columns[i] = fieldToHiveColumn(field)
 	}
 
 	return columns

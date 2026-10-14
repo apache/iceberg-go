@@ -59,6 +59,7 @@ type IO interface {
 	// Remove removes the named file or (empty) directory.
 	//
 	// If there is an error, it will be of type *PathError.
+	// Implementations must be safe for concurrent use by multiple goroutines.
 	Remove(name string) error
 }
 

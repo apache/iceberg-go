@@ -183,6 +183,17 @@ func TestDataFileCollectionsUsesBorrowedView(t *testing.T) {
 	assert.Equal(t, map[int]int64{1: 10}, measuredColumnSizes)
 }
 
+func TestDataFileEqualityFieldIDsClonesBorrowedView(t *testing.T) {
+	file := testDataFileWithStats(t)
+	require.Implements(t, (*internal.DataFileCollectionsRef)(nil), file)
+
+	fieldIDs := dataFileEqualityFieldIDs(file)
+	require.Equal(t, []int{1}, fieldIDs)
+	fieldIDs[0] = 99
+
+	assert.Equal(t, []int{1}, file.EqualityFieldIDs())
+}
+
 func TestDataFileCollectionsFallsBackToPublicGetters(t *testing.T) {
 	file := &publicStatsDataFile{DataFile: testDataFileWithStats(t)}
 

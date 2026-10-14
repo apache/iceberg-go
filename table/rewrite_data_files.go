@@ -224,8 +224,11 @@ type RewriteDataFilesOptions struct {
 type CompactionGroupOption func(*compactionGroupConfig)
 
 type compactionGroupConfig struct {
-	targetFileSize  int64
-	scanConcurrency int
+	targetFileSize        int64
+	scanConcurrency       int
+	arrowBatchSize        int
+	recordBatchBufferSize int
+	parquetRowGroupLimit  int
 }
 
 // WithCompactionTargetFileSize sets the size target for output files
@@ -246,9 +249,66 @@ func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
 // WithCompactionScanConcurrency sets the scan concurrency used when
 // reading the group's tasks. Forwarded to [Table.Scan] as
 // [WithMaxConcurrency]. Zero (the default) means runtime.GOMAXPROCS.
+// The scan runs min(n, number of tasks) workers, and each worker holds
+// the decoded batches of at most one task until the writer has taken
+// them, so the worker count multiplies the read-side term of the
+// memory bound stated on [WithCompactionArrowBatchSize].
 func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.scanConcurrency = n
+	}
+}
+
+// WithCompactionArrowBatchSize caps the number of rows decoded per
+// Arrow record batch while reading the group's tasks, forwarded to the
+// scan as [WithArrowBatchSize]. The record pipeline holds at most
+//
+//	workers x (rows in the largest task + n) + (recordBatchBufferSize + 2) x n
+//
+// rows, where workers is the scan's worker count (see
+// [WithCompactionScanConcurrency]) and recordBatchBufferSize is the
+// [WithCompactionRecordBatchBufferSize] value. Each scan worker holds
+// the batches of at most one task at a time, in its hands, in the
+// records channel, in the reorder heap or in the sequenced channel,
+// and does not start its next task until the last batch of the
+// previous one has been consumed; a task's batches total at most its
+// row count rounded up to a multiple of n. The clustered writer holds
+// one batch while routing it, recordBatchBufferSize batches in its
+// input channel and one batch while encoding. Not covered: the Parquet
+// reader's own buffers, including the raw batch it last returned, and
+// delete-side memory, since positional deletes and deletion-vector
+// bitmaps for the group's tasks are materialized up front and sized by
+// delete volume, not by these knobs. A non-positive value keeps the
+// table's read.parquet.batch-size property.
+func WithCompactionArrowBatchSize(n int) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		if n > 0 {
+			c.arrowBatchSize = n
+		}
+	}
+}
+
+// WithCompactionRecordBatchBufferSize sets the capacity, in record
+// batches, of the write pipeline's per-writer input buffer, forwarded
+// to [WriteRecords] as [WithRecordBatchBufferSize]. The default is 64
+// batches. A non-positive value is ignored.
+func WithCompactionRecordBatchBufferSize(n int) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		if n > 0 {
+			c.recordBatchBufferSize = n
+		}
+	}
+}
+
+// WithCompactionParquetRowGroupLimit caps the rows per Parquet row
+// group in the compacted output files, forwarded to [WriteRecords] as
+// [WithParquetRowGroupLimit]. A non-positive value keeps the table's
+// write.parquet.row-group-limit property.
+func WithCompactionParquetRowGroupLimit(n int) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		if n > 0 {
+			c.parquetRowGroupLimit = n
+		}
 	}
 }
 
@@ -378,6 +438,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	if cfg.scanConcurrency > 0 {
 		scanOpts = append(scanOpts, WithMaxConcurrency(cfg.scanConcurrency))
 	}
+	if cfg.arrowBatchSize > 0 {
+		scanOpts = append(scanOpts, WithArrowBatchSize(cfg.arrowBatchSize))
+	}
 
 	// Preserve row lineage only when every source file in the group carries
 	// it. A mixed group (some files with FirstRowID, some without — e.g.
@@ -421,6 +484,12 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	writeOpts := []WriteRecordOption{WithClusteredWrite()}
 	if cfg.targetFileSize > 0 {
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
+	}
+	if cfg.recordBatchBufferSize > 0 {
+		writeOpts = append(writeOpts, WithRecordBatchBufferSize(cfg.recordBatchBufferSize))
+	}
+	if cfg.parquetRowGroupLimit > 0 {
+		writeOpts = append(writeOpts, WithParquetRowGroupLimit(cfg.parquetRowGroupLimit))
 	}
 	if preserveLineage {
 		// Rebuild the arrow schema from the projected iceberg schema so the

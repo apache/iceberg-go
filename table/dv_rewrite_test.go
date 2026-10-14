@@ -225,7 +225,7 @@ func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 
-	assert.Equal(t, oldEqualitySequence, deleteFileSequence(t, tbl, newEqualityPath))
+	assert.Equal(t, oldEqualitySequence, currentManifestEntry(t, tbl, newEqualityPath).SequenceNum())
 	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten))
 	assertRowCount(t, tbl, 3)
 }
@@ -246,7 +246,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	oldData := tasks[0].File
-	oldDataSequence := fileDataSequence(t, tbl, oldDataPath)
+	oldDataSequence := currentManifestEntry(t, tbl, oldDataPath).SequenceNum()
 
 	oldDeletePath := tbl.Location() + "/data/old-pos-delete.parquet"
 	writeParquetFile(t, oldDeletePath, table.PositionalDeleteArrowSchema,
@@ -260,7 +260,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	oldDeleteSequence := fileDataSequence(t, tbl, oldDeletePath)
+	oldDeleteSequence := currentManifestEntry(t, tbl, oldDeletePath).SequenceNum()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -302,8 +302,8 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	assert.Equal(t, oldDataSequence, fileDataSequence(t, tbl, newDataPath))
-	assert.Equal(t, oldDeleteSequence, fileDataSequence(t, tbl, newDVs[0].FilePath()))
+	assert.Equal(t, oldDataSequence, currentManifestEntry(t, tbl, newDataPath).SequenceNum())
+	assert.Equal(t, oldDeleteSequence, currentManifestEntry(t, tbl, newDVs[0].FilePath()).SequenceNum())
 	assert.Equal(t, []int64{2}, scanIDs(t, tbl),
 		"the deletion vector must remain applicable to the replacement data file")
 }

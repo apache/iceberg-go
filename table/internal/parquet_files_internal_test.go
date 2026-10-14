@@ -23,6 +23,10 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/geoarrow/geoarrow-go"
@@ -143,4 +147,104 @@ func TestNewFileWriterUsesProvidedSchemaMetadata(t *testing.T) {
 	assert.Equal(t, colMapping, parquetWriter.colMapping)
 	assert.Equal(t, variantFieldIDs, parquetWriter.variantFieldIDs)
 	assert.Equal(t, 99, parquetWriter.colMapping["provided"])
+}
+
+// getWriteProperties must enable the cost-based dictionary fallback for every leaf column
+// (parquet-mr parity); arrow-go leaves it off for compressed columns, and Iceberg writes zstd.
+func TestGetWritePropertiesEnablesDictCostFallback(t *testing.T) {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "s", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "n", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	}, nil)
+
+	format := parquetFormat{}
+	wp, err := getWriteProperties(format.GetWriteProperties(iceberg.Properties{}), arrowSchema, writeArrowProps(memory.DefaultAllocator))
+	require.NoError(t, err)
+
+	assert.True(t, wp.DictionaryCostFallbackEnabledFor("s"))
+	assert.True(t, wp.DictionaryCostFallbackEnabledFor("n"))
+}
+
+// TestDictCostFallbackWalkMatchesToParquet locks the arrow-leaf walk to pqarrow.ToParquet's leaf paths (flat, nested, variant, decimal).
+func TestDictCostFallbackWalkMatchesToParquet(t *testing.T) {
+	variantType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
+		arrow.Field{Name: "b", Type: arrow.BinaryTypes.String},
+	))
+	schemas := map[string]*arrow.Schema{
+		"flat": arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+			{Name: "s", Type: arrow.BinaryTypes.String},
+		}, nil),
+		"nested": arrow.NewSchema([]arrow.Field{
+			{Name: "w", Type: arrow.StructOf(
+				arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Int64},
+				arrow.Field{Name: "y", Type: arrow.StructOf(arrow.Field{Name: "z", Type: arrow.BinaryTypes.String})},
+			)},
+		}, nil),
+		"variant": arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+			{Name: "payload", Type: variantType},
+		}, nil),
+		"decimal": arrow.NewSchema([]arrow.Field{
+			{Name: "d", Type: &arrow.Decimal128Type{Precision: 10, Scale: 2}},
+		}, nil),
+		"dict": arrow.NewSchema([]arrow.Field{
+			{Name: "c", Type: &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}},
+		}, nil),
+		"null": arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+			{Name: "z", Type: arrow.Null, Nullable: true},
+		}, nil),
+	}
+
+	for name, sc := range schemas {
+		t.Run(name, func(t *testing.T) {
+			require.False(t, schemaHasListOrMap(sc), "walk path should apply")
+			ps, err := pqarrow.ToParquet(sc, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
+			require.NoError(t, err)
+
+			walk, err := dictCostFallbackProps(sc, nil, writeArrowProps(memory.DefaultAllocator))
+			require.NoError(t, err)
+			wp := parquet.NewWriterProperties(walk...)
+
+			require.Equal(t, ps.NumColumns(), len(walk), "leaf count differs from pqarrow")
+			for i := range ps.NumColumns() {
+				path := ps.Column(i).Path()
+				require.Truef(t, wp.DictionaryCostFallbackEnabledFor(path), "walk missing leaf path %q", path)
+			}
+		})
+	}
+}
+
+// TestDictCostFallbackListSchemaUsesToParquet exercises the list/map branch (dictCostFallbackViaParquet).
+func TestDictCostFallbackListSchemaUsesToParquet(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "tags", Type: arrow.ListOf(arrow.BinaryTypes.String)},
+	}, nil)
+	require.True(t, schemaHasListOrMap(sc), "list schema must route to ToParquet")
+
+	ps, err := pqarrow.ToParquet(sc, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	props, err := dictCostFallbackProps(sc, nil, writeArrowProps(memory.DefaultAllocator))
+	require.NoError(t, err)
+	wp := parquet.NewWriterProperties(props...)
+
+	require.Equal(t, ps.NumColumns(), len(props))
+	for i := range ps.NumColumns() {
+		require.Truef(t, wp.DictionaryCostFallbackEnabledFor(ps.Column(i).Path()), "missing leaf path %q", ps.Column(i).Path())
+	}
+}
+
+func TestDictCostFallbackWalkRunEndEncoded(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "r", Type: arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.String)},
+	}, nil)
+	require.False(t, schemaHasListOrMap(sc), "rle-over-primitive must take the walk path")
+
+	walk, err := dictCostFallbackProps(sc, nil, writeArrowProps(memory.DefaultAllocator))
+	require.NoError(t, err)
+	require.Len(t, walk, 1, "rle unwraps to a single encoded leaf")
+	require.True(t, parquet.NewWriterProperties(walk...).DictionaryCostFallbackEnabledFor("r"))
 }

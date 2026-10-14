@@ -104,18 +104,23 @@ type Table struct {
 	metadataLocation string
 	cat              CatalogIO
 	fsF              FSysF
+	manifestCache    *snapshotManifestCache
 	planner          ScanPlanner
 	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
 	// catalog load response. They are separate from metadata properties because
 	// REST catalogs can return FileIO configuration in the response's config
 	// block.
 	scanPlanningIOProps iceberg.Properties
+	savedConfig         iceberg.Properties
 	reporter            metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
 	// explicit NopReporter opt-out) from the construction-time default, so
 	// Refresh knows whether it may overwrite reporter with the catalog default.
 	reporterSet bool
+	// labels is transient catalog enrichment from the load response; nil when
+	// the catalog returned none. It is excluded from Equals.
+	labels *iceberg.Labels
 }
 
 func (t Table) Equals(other Table) bool {
@@ -132,6 +137,13 @@ func (t Table) Schema() *iceberg.Schema                      { return t.metadata
 func (t Table) Spec() iceberg.PartitionSpec                  { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                         { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties               { return t.metadata.Properties() }
+func (t Table) SavedConfig() iceberg.Properties              { return maps.Clone(t.savedConfig) }
+
+// Labels returns the catalog-provided labels from the load response, or nil if
+// the catalog returned none. Labels are transient enrichment, not table state.
+// The returned pointer aliases the table's labels and must be treated as
+// read-only; mutating it affects the shared table value.
+func (t Table) Labels() *iceberg.Labels { return t.labels }
 
 // MetricsReporter returns the table's metrics reporter, never nil.
 func (t Table) MetricsReporter() metrics.Reporter {
@@ -235,8 +247,11 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
+	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
+	t.labels = fresh.labels
+	t.savedConfig = maps.Clone(fresh.savedConfig)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
 	// of their own. Refresh runs inside commit retry loops, so unconditionally
 	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
@@ -341,6 +356,9 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 //   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
 //   - Files where no rows match the filter are kept unchanged
 //
+// A row matches only if the filter is true for it. Rows where the filter evaluates to NULL, for example
+// `age = 30` on a NULL age, do not match and are kept.
+//
 // The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
@@ -357,14 +375,23 @@ func (t Table) Delete(ctx context.Context, filter iceberg.BooleanExpression, sna
 	return txn.Commit(ctx)
 }
 
-func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
-	fs, err := t.fsF(ctx)
-	if err != nil {
-		return func(yield func(iceberg.ManifestFile, error) bool) {
-			yield(nil, err)
-		}
-	}
+func (t Table) manifestSet(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
+	return t.manifestSetWithFSF(ctx, snapshot, t.fsF)
+}
 
+func (t Table) manifestSetWithFSF(
+	ctx context.Context,
+	snapshot Snapshot,
+	fsF FSysF,
+) (snapshotManifestSet, error) {
+	return t.manifestCache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
+		return readSnapshotManifestSet(loadCtx, snapshot, fsF)
+	})
+}
+
+// AllManifests returns the manifests referenced by the table's snapshots.
+// Tables without snapshots return an empty sequence without resolving file IO.
+func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
 	snapshots := t.metadata.Snapshots()
 	n := len(snapshots)
@@ -376,6 +403,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	ch := make(chan list, allManifestsWorkerCount(n))
 	workers := allManifestsWorkerCount(n)
 	g, groupCtx := errgroup.WithContext(workCtx)
+	manifestFS := sharedSnapshotManifestFSF(t.fsF)
 
 	for range workers {
 		g.Go(func() error {
@@ -388,10 +416,11 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 						return nil
 					}
 
-					manifests, err := snapshots[i].Manifests(fs)
+					manifestSet, err := t.manifestSetWithFSF(groupCtx, snapshots[i], manifestFS)
 					if err != nil {
 						return err
 					}
+					manifests := manifestSet.borrowAllManifests()
 
 					select {
 					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:
@@ -812,6 +841,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		t.cat,
 		withReporterState(t.reporter, t.reporterSet),
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
+		WithLabels(t.labels),
+		WithSavedConfig(t.savedConfig),
 	), nil
 }
 
@@ -1251,7 +1282,9 @@ func WithLimit(n int64) ScanOption {
 }
 
 // WithMaxConcurrency sets the maximum concurrency for table scan and plan
-// operations. When unset it defaults to runtime.GOMAXPROCS.
+// operations. When unset it defaults to runtime.GOMAXPROCS. Above one, a
+// scan holds the decoded batches of up to n tasks at once while it returns
+// them in task order; [Scan.ReadTasks] states the bound.
 func WithMaxConcurrency(n int) ScanOption {
 	if n <= 0 {
 		return noopOption
@@ -1260,14 +1293,6 @@ func WithMaxConcurrency(n int) ScanOption {
 	return func(scan *Scan) {
 		scan.concurrency = n
 	}
-}
-
-// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
-// backward compatibility with the pre-existing typo'd name.
-//
-// Deprecated: use [WithMaxConcurrency].
-func WitMaxConcurrency(n int) ScanOption {
-	return WithMaxConcurrency(n)
 }
 
 func WithOptions(opts iceberg.Properties) ScanOption {
@@ -1304,12 +1329,31 @@ func WithRowLineage() ScanOption {
 	}
 }
 
+// WithArrowBatchSize caps the number of rows decoded per Arrow record
+// batch when reading data files, overriding the table's
+// read.parquet.batch-size property for this scan. Smaller batches bound
+// the memory a scan holds per decoded batch, which matters when the
+// consumer buffers batches (e.g. a compaction's read+write pipeline).
+// The cap is stored on the scan itself rather than in the options map,
+// so it applies regardless of ordering relative to [WithOptions]. A
+// non-positive value is ignored.
+func WithArrowBatchSize(n int) ScanOption {
+	if n <= 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.arrowBatchSize = n
+	}
+}
+
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
 		identifier:          slices.Clone(t.identifier),
 		metadata:            t.metadata,
 		metadataLocation:    t.metadataLocation,
 		ioF:                 t.fsF,
+		manifestCache:       t.manifestCache,
 		planner:             t.planner,
 		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
 		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
@@ -1366,6 +1410,33 @@ func WithScanPlanningIOProperties(props iceberg.Properties) Option {
 	}
 }
 
+// WithLabels attaches catalog-provided labels from a load response to the
+// table. A nil value is ignored, leaving the table's labels nil.
+func WithLabels(l *iceberg.Labels) Option {
+	if l == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.labels = l
+	}
+}
+
+// WithSavedConfig supplies a set of properties used to create a *Table
+// instance. This saved config is exposed through table.SavedConfig() and
+// can be used by callers to save properties along with a table instance, for
+// reuse later if the table instance were to be cloned in a new call to
+// table.New.
+func WithSavedConfig(config iceberg.Properties) Option {
+	if config == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.savedConfig = maps.Clone(config)
+	}
+}
+
 // withReporterState copies both the reporter and the reporterSet flag verbatim.
 // Unlike WithMetricsReporter it does not force reporterSet true, so a table
 // riding the catalog default (reporterSet == false) stays defaulted across a
@@ -1398,6 +1469,7 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
+		manifestCache:    newSnapshotManifestCacheForMetadata(meta),
 		cat:              cat,
 		planner:          planner,
 		reporter:         metrics.NopReporter{},

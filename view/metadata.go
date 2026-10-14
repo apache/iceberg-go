@@ -304,7 +304,7 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 // The extractKey function will be called on each item in the slice and assign the
 // item as a value for that key in the resultant map.
 func indexBy[T any, K comparable](s []T, extractKey func(T) K) map[K]T {
-	index := make(map[K]T)
+	index := make(map[K]T, len(s))
 	for _, v := range s {
 		index[extractKey(v)] = v
 	}
@@ -422,7 +422,7 @@ func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
 	return iceberg.NewSchemaWithIdentifiers(
 		schema.ID,
 		slices.Clone(schema.IdentifierFieldIDs),
-		cloneNestedFields(schema.Fields())...,
+		schema.Fields()...,
 	)
 }
 
@@ -437,40 +437,6 @@ func cloneSchemas(schemas []*iceberg.Schema) []*iceberg.Schema {
 	}
 
 	return clones
-}
-
-func cloneNestedFields(fields []iceberg.NestedField) []iceberg.NestedField {
-	clones := slices.Clone(fields)
-	for i := range clones {
-		clones[i].Type = cloneSchemaType(clones[i].Type)
-		clones[i].InitialDefault = iceberg.CloneDefaultValue(clones[i].InitialDefault)
-		clones[i].WriteDefault = iceberg.CloneDefaultValue(clones[i].WriteDefault)
-	}
-
-	return clones
-}
-
-func cloneSchemaType(typ iceberg.Type) iceberg.Type {
-	switch typ := typ.(type) {
-	case *iceberg.StructType:
-		return &iceberg.StructType{FieldList: cloneNestedFields(typ.FieldList)}
-	case *iceberg.ListType:
-		return &iceberg.ListType{
-			ElementID:       typ.ElementID,
-			Element:         cloneSchemaType(typ.Element),
-			ElementRequired: typ.ElementRequired,
-		}
-	case *iceberg.MapType:
-		return &iceberg.MapType{
-			KeyID:         typ.KeyID,
-			KeyType:       cloneSchemaType(typ.KeyType),
-			ValueID:       typ.ValueID,
-			ValueType:     cloneSchemaType(typ.ValueType),
-			ValueRequired: typ.ValueRequired,
-		}
-	default:
-		return typ
-	}
 }
 
 func (m *metadata) validate() error {

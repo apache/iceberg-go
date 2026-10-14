@@ -315,16 +315,14 @@ func (s *RollingDataWriterTestSuite) TestConcurrentGetOrCreateCreatesOneWriter()
 
 	var wg sync.WaitGroup
 	for range goroutineCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "partition", nil, outputCh)
 			results <- struct {
 				writer *RollingDataWriter
 				err    error
 			}{writer, err}
-		}()
+		})
 	}
 
 	close(start)
@@ -1129,16 +1127,14 @@ func (s *RollingDataWriterTestSuite) TestConcurrentAddDuringStreamErrorLeaksNoth
 	var atRetain, done sync.WaitGroup
 	atRetain.Add(senders)
 	for range senders {
-		done.Add(1)
-		go func() {
-			defer done.Done()
+		done.Go(func() {
 			record := s.buildRecord(arrSchema, 3)
 			// Add retains (via gatedRetainRecord.Retain, which parks the sender
 			// between the closed check and the enqueue) then enqueues or aborts;
 			// the caller always drops its own reference afterward.
 			_ = writer.Add(gatedRetainRecord{RecordBatch: record, retainGate: retainGate, atRetain: &atRetain})
 			record.Release()
-		}()
+		})
 	}
 
 	atRetain.Wait() // every sender is past its closed check, parked in Retain

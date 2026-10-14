@@ -484,19 +484,19 @@ Tune retention with the `history.expire.min-snapshots-to-keep`, `history.expire.
 import (
     "time"
 
-    "github.com/apache/iceberg-go/table"
+    "github.com/apache/iceberg-go/table/maintenance"
 )
 
-result, err := tbl.DeleteOrphanFiles(ctx,
-    table.WithFilesOlderThan(72*time.Hour),
-    table.WithDryRun(false),
-    table.WithCleanupMaxConcurrency(8),
+result, err := maintenance.DeleteOrphanFiles(ctx, tbl,
+    maintenance.WithCleanupFilesOlderThan(72*time.Hour),
+    maintenance.WithCleanupDryRun(false),
+    maintenance.WithCleanupMaxConcurrency(8),
 )
 if err != nil { /* ... */ }
 fmt.Printf("removed %d files\n", len(result.DeletedFiles))
 ```
 
-Also see `table.WithLocation`, `table.WithDeleteFunc`, `table.WithPrefixMismatchMode`, `table.WithEqualSchemes`, and `table.WithEqualAuthorities` in `table/orphan_cleanup.go`.
+Also see `maintenance.WithCleanupLocation`, `maintenance.WithCleanupDeleteFunc`, `maintenance.WithPrefixMismatchMode`, `maintenance.WithEqualSchemes`, and `maintenance.WithEqualAuthorities` in `table/maintenance/orphan_cleanup.go`.
 
 ### Compaction (rewrite data files)
 
@@ -589,7 +589,7 @@ When iceberg-go converts an Iceberg schema to Arrow (e.g. for the scanner output
 | `struct<...>` | `arrow.StructOf(...)` |
 | `list<E>` | `arrow.ListOf(E)` (or `LargeListOf` if `useLargeTypes`) |
 | `map<K, V>` | `arrow.MapOf(K, V)` |
-| `variant` | `arrow.ExtensionType` for Variant |
+| `variant` | `arrow.ExtensionType` for Variant (see [Variant Type](./variant.md)) |
 
 Helpers in [`table/arrow_utils.go`](https://github.com/apache/iceberg-go/blob/main/table/arrow_utils.go):
 

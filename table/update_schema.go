@@ -834,7 +834,7 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 		// else (non-primitive, cross-kind, or a disallowed promotion) is an error.
 		existingPrim, existingIsPrim := existing.Type.(iceberg.PrimitiveType)
 		newPrim, newIsPrim := newField.Type.(iceberg.PrimitiveType)
-		if !existingIsPrim || !newIsPrim || !isPromotionAllowed(existingPrim, newPrim) {
+		if !existingIsPrim || !newIsPrim || !iceberg.IsPromotionAllowed(existingPrim, newPrim) {
 			return fmt.Errorf("cannot change column type: %s: %s -> %s",
 				strings.Join(path, "."), existing.Type, newField.Type)
 		}
@@ -1010,7 +1010,7 @@ func isIgnorableTypeUpdate(existingType, newType iceberg.Type) bool {
 			return false
 		}
 
-		return isPromotionAllowed(newPrimitive, existingPrim)
+		return iceberg.IsPromotionAllowed(newPrimitive, existingPrim)
 	}
 
 	switch existingType.(type) {
@@ -1026,31 +1026,6 @@ func isIgnorableTypeUpdate(existingType, newType iceberg.Type) bool {
 		_, ok := newType.(*iceberg.MapType)
 
 		return ok
-	}
-
-	return false
-}
-
-func isPromotionAllowed(from, to iceberg.PrimitiveType) bool {
-	if from.Equals(to) {
-		return true
-	}
-	switch f := from.(type) {
-	case iceberg.Int32Type:
-		_, ok := to.(iceberg.Int64Type)
-
-		return ok
-	case iceberg.Float32Type:
-		_, ok := to.(iceberg.Float64Type)
-
-		return ok
-	case iceberg.DecimalType:
-		t, ok := to.(iceberg.DecimalType)
-		if !ok {
-			return false
-		}
-
-		return f.Scale() == t.Scale() && f.Precision() <= t.Precision()
 	}
 
 	return false

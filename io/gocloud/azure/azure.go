@@ -24,10 +24,14 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+	"github.com/apache/iceberg-go/internal/adlsauth"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 	"gocloud.dev/blob"
@@ -44,6 +48,33 @@ type adlsLocation struct {
 	containerName string // Container (bucket) name
 	hostname      string // Hostname of the Azure storage account
 	path          string // Object path within the container
+}
+
+type azureCredentialFactories struct {
+	newDefaultCredential func(*azidentity.DefaultAzureCredentialOptions) (azcore.TokenCredential, error)
+	newManagedIdentity   func(*azidentity.ManagedIdentityCredentialOptions) (azcore.TokenCredential, error)
+}
+
+type staticTokenCredential struct {
+	token string
+}
+
+func (c staticTokenCredential) GetToken(context.Context, policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	// adls.token carries no expiration metadata. Like Java and PyIceberg, use a
+	// one-hour SDK cache window. This does not refresh the token or extend its
+	// actual validity, which Azure enforces.
+	return azcore.AccessToken{Token: c.token, ExpiresOn: time.Now().Add(time.Hour)}, nil
+}
+
+func productionAzureCredentialFactories() azureCredentialFactories {
+	return azureCredentialFactories{
+		newDefaultCredential: func(opts *azidentity.DefaultAzureCredentialOptions) (azcore.TokenCredential, error) {
+			return azidentity.NewDefaultAzureCredential(opts)
+		},
+		newManagedIdentity: func(opts *azidentity.ManagedIdentityCredentialOptions) (azcore.TokenCredential, error) {
+			return azidentity.NewManagedIdentityCredential(opts)
+		},
+	}
 }
 
 // createServiceURL creates an Azure blob service URL with the given parameters
@@ -85,30 +116,38 @@ func newAdlsLocation(adlsURI *url.URL) (*adlsLocation, error) {
 		return nil, errors.New("container name is required for azure bucket")
 	}
 
-	hostname := adlsURI.Hostname()
-	if hostname == "" {
+	if adlsURI.Hostname() == "" {
 		return nil, errors.New("hostname is required for azure bucket")
 	}
 
-	// Extract account name from hostname (ignore the storage domain)
-	parts := strings.Split(hostname, ".")
-	if len(parts) == 0 || parts[0] == "" {
+	// The account name is the hostname's first label (ignore the storage domain).
+	acct, ok := adlsauth.AccountForURL(adlsURI)
+	if !ok {
 		return nil, errors.New("account name is required for azure bucket")
 	}
-	accountName := parts[0]
 
 	path := adlsURI.Path
 
 	return &adlsLocation{
-		accountName:   accountName,
+		accountName:   acct.Name,
 		containerName: containerName,
-		hostname:      hostname,
+		hostname:      acct.Host,
 		path:          path,
 	}, nil
 }
 
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+	return createAzureBucketWithOptions(ctx, parsed, props, productionAzureCredentialFactories(), nil)
+}
+
+func createAzureBucketWithOptions(
+	ctx context.Context,
+	parsed *url.URL,
+	props map[string]string,
+	credentialFactories azureCredentialFactories,
+	clientOptions *container.ClientOptions,
+) (*blob.Bucket, error) {
 	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSasTokenPrefix)
 	adlsConnectionStrings := propertiesWithPrefix(props, io.ADLSConnectionStringPrefix)
 
@@ -140,7 +179,7 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			return nil, fmt.Errorf("failed azblob.NewSharedKeyCredential: %w", err)
 		}
 
-		client, err = container.NewClientWithSharedKeyCredential(containerURL, sharedKeyCred, nil)
+		client, err = container.NewClientWithSharedKeyCredential(containerURL, sharedKeyCred, clientOptions)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientWithSharedKeyCredential: %w", err)
 		}
@@ -150,15 +189,25 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			return nil, err
 		}
 
-		client, err = container.NewClientWithNoCredential(containerURL, nil)
+		client, err = container.NewClientWithNoCredential(containerURL, clientOptions)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientWithNoCredential: %w", err)
 		}
 	} else if connectionString, ok := adlsConnectionStrings[location.accountName]; ok {
 		var err error
-		client, err = container.NewClientFromConnectionString(connectionString, location.containerName, nil)
+		client, err = container.NewClientFromConnectionString(connectionString, location.containerName, clientOptions)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
+		}
+	} else if token := props[io.ADLSToken]; token != "" {
+		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
+		if err != nil {
+			return nil, err
+		}
+
+		client, err = container.NewClient(containerURL, staticTokenCredential{token: token}, clientOptions)
+		if err != nil {
+			return nil, fmt.Errorf("failed container.NewClient: %w", err)
 		}
 	} else if props[io.ADLSManagedIdentityEnabled] == "true" {
 		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
@@ -173,12 +222,12 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			}
 		}
 
-		cred, err := azidentity.NewManagedIdentityCredential(miOpts)
+		cred, err := credentialFactories.newManagedIdentity(miOpts)
 		if err != nil {
 			return nil, fmt.Errorf("failed azidentity.NewManagedIdentityCredential: %w", err)
 		}
 
-		client, err = container.NewClient(containerURL, cred, nil)
+		client, err = container.NewClient(containerURL, cred, clientOptions)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClient: %w", err)
 		}
@@ -188,12 +237,12 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			return nil, err
 		}
 
-		cred, err := azidentity.NewDefaultAzureCredential(nil)
+		cred, err := credentialFactories.newDefaultCredential(nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed azidentity.NewDefaultAzureCredential: %w", err)
 		}
 
-		client, err = container.NewClient(containerURL, cred, nil)
+		client, err = container.NewClient(containerURL, cred, clientOptions)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClient: %w", err)
 		}

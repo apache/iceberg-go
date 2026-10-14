@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -46,7 +47,6 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
-	"github.com/pterm/pterm"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -436,7 +436,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		switch dt.ExtensionName() {
 		case "arrow.uuid":
 			result.Type = iceberg.PrimitiveTypes.UUID
-		case "parquet.variant":
+		case extensions.VariantExtensionName, extensions.LegacyVariantExtensionName:
 			result.Type = iceberg.VariantType{}
 		case "geoarrow.wkb":
 			wkb, ok := dt.(*geoarrow.WKBType)
@@ -662,7 +662,8 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
-func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field     { panic("shouldn't be called") }
+
+func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field { panic("shouldn't be called") }
 
 func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
 	return arrow.Field{Type: &arrow.FixedSizeBinaryType{ByteWidth: f.Len()}}
@@ -1507,13 +1508,13 @@ func arrowSchemaEqual(left, right *arrow.Schema) bool {
 type schemaCompatVisitor struct {
 	provided *iceberg.Schema
 
-	errorData pterm.TableData
+	errorData [][]string
 }
 
 func checkSchemaCompat(requested, provided *iceberg.Schema) error {
 	sc := &schemaCompatVisitor{
 		provided:  provided,
-		errorData: pterm.TableData{{"", "Table Field", "Requested Field"}},
+		errorData: [][]string{{"", "Table Field", "Requested Field"}},
 	}
 
 	_, compat := iceberg.PreOrderVisit(requested, sc)
@@ -1615,12 +1616,20 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 
 func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
 	if !v() {
-		pterm.DisableColor()
-		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
-		tbl.Render()
-		txt, _ := tbl.Srender()
-		pterm.EnableColor()
-		panic("mismatch in fields:\n" + txt)
+		// Render the collected mismatch rows into the error message with the
+		// stdlib tabwriter. Unlike the former pterm renderer this writes only to
+		// the returned error and has no stdout side effect. tabwriter measures
+		// column width by rune count, so the leading status column (✅/❌) may be
+		// off by one display cell in terminals that render those double-width;
+		// the reported content is unaffected.
+		var buf strings.Builder
+		w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
+		for _, row := range sc.errorData {
+			fmt.Fprintln(w, strings.Join(row, "\t"))
+		}
+		_ = w.Flush()
+
+		panic("mismatch in fields:\n" + buf.String())
 	}
 
 	return true
@@ -1664,66 +1673,33 @@ func must[T any](v T, err error) T {
 }
 
 type arrowStatsCollector struct {
-	fieldID     int
-	schema      *iceberg.Schema
-	props       iceberg.Properties
-	defaultMode string
-}
-
-func (a *arrowStatsCollector) Schema(_ *iceberg.Schema, results func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	return results()
-}
-
-func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	result := make([]tblutils.StatisticsCollector, 0, len(results))
-	for _, res := range results {
-		result = append(result, res()...)
-	}
-
-	return result
-}
-
-func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	a.fieldID = field.ID
-
-	return fieldRes()
-}
-
-func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	a.fieldID = list.ElementID
-
-	return elemResult()
-}
-
-func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult, valResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
-	a.fieldID = m.KeyID
-	keyRes := keyResult()
-
-	a.fieldID = m.ValueID
-	valRes := valResult()
-
-	return append(keyRes, valRes...)
+	fieldID          int
+	schema           *iceberg.Schema
+	defaultMode      tblutils.MetricsMode
+	defaultModeError error
+	columnModes      map[string]tblutils.MetricsMode
+	columnModeErrors map[string]error
 }
 
 func (a *arrowStatsCollector) resolveColumnMetricsMode(colName string) tblutils.MetricsMode {
-	metMode, err := tblutils.MatchMetricsMode(a.defaultMode)
-	if err != nil {
+	if a.defaultModeError != nil {
+		panic(a.defaultModeError)
+	}
+
+	if metMode, ok := a.columnModes[colName]; ok {
+		return metMode
+	}
+	if err, ok := a.columnModeErrors[colName]; ok {
 		panic(err)
 	}
-	if colMode, ok := a.props[MetricsModeColumnConfPrefix+"."+colName]; ok {
-		metMode, err = tblutils.MatchMetricsMode(colMode)
-		if err != nil {
-			panic(err)
-		}
-	}
 
-	return metMode
+	return a.defaultMode
 }
 
-func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.StatisticsCollector {
+func (a *arrowStatsCollector) primitiveCollector(dt iceberg.PrimitiveType, isNested bool) (tblutils.StatisticsCollector, bool) {
 	colName, ok := a.schema.FindColumnName(a.fieldID)
 	if !ok {
-		return []tblutils.StatisticsCollector{}
+		return tblutils.StatisticsCollector{}, false
 	}
 
 	metMode := a.resolveColumnMetricsMode(colName)
@@ -1737,47 +1713,141 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 		}
 	}
 
-	isNested := strings.Contains(colName, ".")
 	if isNested && (metMode.Typ == tblutils.MetricModeTruncate || metMode.Typ == tblutils.MetricModeFull) {
 		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
 	}
 
-	return []tblutils.StatisticsCollector{{
+	return tblutils.StatisticsCollector{
 		FieldID:    a.fieldID,
 		IcebergTyp: dt,
 		ColName:    colName,
 		Mode:       metMode,
-	}}
+	}, true
 }
 
-func (a *arrowStatsCollector) Variant(_ iceberg.VariantType) []tblutils.StatisticsCollector {
+func (a *arrowStatsCollector) variantCollector() (tblutils.StatisticsCollector, bool) {
 	colName, ok := a.schema.FindColumnName(a.fieldID)
 	if !ok {
-		return []tblutils.StatisticsCollector{}
+		return tblutils.StatisticsCollector{}, false
 	}
 
-	return []tblutils.StatisticsCollector{{
+	return tblutils.StatisticsCollector{
 		FieldID: a.fieldID,
 		ColName: colName,
 		Mode:    a.resolveColumnMetricsMode(colName),
-	}}
+	}, true
 }
 
-func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tblutils.StatisticsCollector, error) {
-	result := make(map[int]tblutils.StatisticsCollector)
+func statsPlanFieldCount(field iceberg.NestedField) int {
+	switch typ := field.Type.(type) {
+	case *iceberg.StructType:
+		count := 0
+		for _, nestedField := range typ.FieldList {
+			count += statsPlanFieldCount(nestedField)
+		}
+
+		return count
+	case *iceberg.ListType:
+		return statsPlanFieldCount(typ.ElementField())
+	case *iceberg.MapType:
+		return statsPlanFieldCount(typ.KeyField()) + statsPlanFieldCount(typ.ValueField())
+	default:
+		return 1
+	}
+}
+
+func collectStatsPlanField(visitor *arrowStatsCollector, result map[int]tblutils.StatisticsCollector, field iceberg.NestedField, isNested bool) {
+	switch typ := field.Type.(type) {
+	case *iceberg.StructType:
+		for _, nestedField := range typ.FieldList {
+			collectStatsPlanField(visitor, result, nestedField, true)
+		}
+	case *iceberg.ListType:
+		collectStatsPlanField(visitor, result, typ.ElementField(), true)
+	case *iceberg.MapType:
+		collectStatsPlanField(visitor, result, typ.KeyField(), true)
+		collectStatsPlanField(visitor, result, typ.ValueField(), true)
+	case iceberg.VariantType:
+		visitor.fieldID = field.ID
+		if collector, ok := visitor.variantCollector(); ok {
+			result[collector.FieldID] = collector
+		}
+	default:
+		visitor.fieldID = field.ID
+		collector, ok := visitor.primitiveCollector(field.Type.(iceberg.PrimitiveType), isNested)
+		if ok {
+			result[collector.FieldID] = collector
+		}
+	}
+}
+
+func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (result map[int]tblutils.StatisticsCollector, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			switch e := r.(type) {
+			case string:
+				err = fmt.Errorf("%w: %s", iceberg.ErrInvalidSchema, e)
+			case error:
+				err = fmt.Errorf("error encountered during schema visitor: %w", e)
+			}
+		}
+	}()
+
+	if sc == nil {
+		return nil, fmt.Errorf("%w: cannot visit nil schema", iceberg.ErrInvalidArgument)
+	}
+
+	defaultMode, defaultModeErr := tblutils.MatchMetricsMode(
+		props.Get(DefaultWriteMetricsModeKey, DefaultWriteMetricsModeDefault))
+	overrideCount := 0
+	for key := range props {
+		if strings.HasPrefix(key, MetricsModeColumnConfPrefix+".") {
+			overrideCount++
+		}
+	}
+
+	var columnModes map[string]tblutils.MetricsMode
+	var columnModeErrors map[string]error
+	for key, rawMode := range props {
+		colName, ok := strings.CutPrefix(key, MetricsModeColumnConfPrefix+".")
+		if !ok {
+			continue
+		}
+
+		mode, err := tblutils.MatchMetricsMode(rawMode)
+		if err != nil {
+			if columnModeErrors == nil {
+				columnModeErrors = make(map[string]error, overrideCount)
+			}
+
+			columnModeErrors[colName] = err
+
+			continue
+		}
+		if columnModes == nil {
+			columnModes = make(map[string]tblutils.MetricsMode, overrideCount)
+		}
+		columnModes[colName] = mode
+	}
 
 	visitor := &arrowStatsCollector{
-		schema: sc, props: props,
-		defaultMode: props.Get(DefaultWriteMetricsModeKey, DefaultWriteMetricsModeDefault),
+		schema:           sc,
+		defaultMode:      defaultMode,
+		defaultModeError: defaultModeErr,
+		columnModes:      columnModes,
+		columnModeErrors: columnModeErrors,
 	}
 
-	collectors, err := iceberg.PreOrderVisit(sc, visitor)
-	if err != nil {
-		return nil, err
+	fields := sc.FieldsRef(internal.SchemaRef{})
+	resultCount := 0
+	for _, field := range fields {
+		resultCount += statsPlanFieldCount(field)
 	}
 
-	for _, entry := range collectors {
-		result[entry.FieldID] = entry
+	result = make(map[int]tblutils.StatisticsCollector, resultCount)
+	for _, field := range fields {
+		collectStatsPlanField(visitor, result, field, strings.Contains(field.Name, "."))
 	}
 
 	return result, nil
@@ -1933,6 +2003,11 @@ type recordWritingArgs struct {
 	maxWriteWorkers int
 	clustered       bool
 	factoryOpts     []writerFactoryOption
+
+	// recordBatchBufferSize overrides the rolling writers' record
+	// channel capacity; non-positive uses the default (see
+	// rollingDataWriterQueueCapacity).
+	recordBatchBufferSize int
 	// existingDVs maps a data file path to the positions already recorded in
 	// its current deletion vector. On the v3 DV write path these are folded
 	// into the newly written DV so a data file that already had a DV ends up

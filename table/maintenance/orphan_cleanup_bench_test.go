@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package maintenance
 
 import (
 	"context"
@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 )
 
 var orphanCleanupBenchmarkSink string
@@ -86,7 +86,7 @@ func BenchmarkGetReferencedFilesManifestLists(b *testing.B) {
 							i, i*1000, listPath))
 				}
 
-				meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+				meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{
 					snapshots: strings.Join(snapshotJSON, ","),
 				}))
 				if err != nil {
@@ -94,14 +94,14 @@ func BenchmarkGetReferencedFilesManifestLists(b *testing.B) {
 				}
 
 				fs := &benchmarkDelayIO{IO: baseIO, delay: time.Millisecond}
-				tbl := New(Identifier{"ns", "orphan-cleanup-benchmark"}, meta,
+				tbl := table.New(table.Identifier{"ns", "orphan-cleanup-benchmark"}, meta,
 					"metadata.json", testFSF(fs), nil)
 
 				b.ReportAllocs()
 				b.ReportMetric(float64(snapshotCount), "manifest_lists/op")
 				b.ResetTimer()
 				for b.Loop() {
-					if _, err := tbl.getReferencedFiles(context.Background(), fs, maxWorkers, true); err != nil {
+					if _, err := getReferencedFiles(context.Background(), tbl, fs, maxWorkers, true); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -110,17 +110,44 @@ func BenchmarkGetReferencedFilesManifestLists(b *testing.B) {
 	}
 }
 
-type benchmarkDelayIO struct {
-	iceio.IO
-	delay time.Duration
-}
+// BenchmarkPurgeFilesNonBulkDeletion measures the bounded fallback used when
+// the filesystem does not implement BulkRemovableIO. The delay models the
+// round trip to a remote object store; the zero-delay cases show the worker
+// pool overhead on local-style deletes.
+func BenchmarkPurgeFilesNonBulkDeletion(b *testing.B) {
+	for _, fileCount := range []int{100, 1_000, 10_000} {
+		files := make([]string, fileCount)
+		for i := range files {
+			files[i] = fmt.Sprintf("s3://bucket/table/data/file-%d.parquet", i)
+		}
 
-func (fs *benchmarkDelayIO) Open(name string) (iceio.File, error) {
-	f, err := fs.IO.Open(name)
-	if err != nil {
-		return nil, err
+		for _, delay := range []time.Duration{0, 100 * time.Microsecond, time.Millisecond} {
+			for _, concurrency := range []int{1, 4, 16, 32, 64} {
+				b.Run(fmt.Sprintf("files=%d/delay=%s/concurrency=%d", fileCount, delay, concurrency), func(b *testing.B) {
+					deleteFunc := func(string) error {
+						time.Sleep(delay)
+
+						return nil
+					}
+
+					b.ReportAllocs()
+					b.ReportMetric(float64(fileCount), "files/op")
+					b.ResetTimer()
+					for b.Loop() {
+						deleted, err := deleteFilesParallel(
+							context.Background(),
+							files,
+							concurrency,
+							deleteFunc,
+							func(_ string, err error) error { return err },
+						)
+						if err != nil {
+							b.Fatal(err)
+						}
+						orphanCleanupBenchmarkSink = deleted[len(deleted)-1]
+					}
+				})
+			}
+		}
 	}
-	time.Sleep(fs.delay)
-
-	return f, nil
 }

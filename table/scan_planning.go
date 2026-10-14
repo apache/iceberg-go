@@ -76,7 +76,7 @@ type ScanPlanningMetadata interface {
 
 // Compile-time guard that the full Metadata interface still satisfies the
 // narrowed planner view, so callers can pass a table.Metadata directly.
-var _ ScanPlanningMetadata = (Metadata)(nil)
+var _ ScanPlanningMetadata = Metadata(nil)
 
 // Compile-time guard that Scan exposes the lifecycle contract as io.Closer.
 var _ io.Closer = (*Scan)(nil)
@@ -105,6 +105,9 @@ type ScanPlanningRequest struct {
 	RowFilter        iceberg.BooleanExpression
 	MinRowsRequested *int64
 	StatsFields      []string
+	// MaxConcurrency is the maximum number of concurrent operations a planner
+	// may use for this scan. Zero means use the planner's default.
+	MaxConcurrency int
 	// CaseSensitive must carry the Scan's value (which defaults to true), not
 	// Go's false zero value, or the wire request would flip the spec default.
 	// Nil means use the scan default.

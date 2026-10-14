@@ -228,7 +228,7 @@ func TestParseRequirementAcceptsExplicitZero(t *testing.T) {
 		{name: "default sort order id", data: `{"type":"assert-default-sort-order-id","default-sort-order-id":0}`, expected: table.AssertDefaultSortOrderID(0)},
 		{name: "last assigned field id", data: `{"type":"assert-last-assigned-field-id","last-assigned-field-id":0}`, expected: table.AssertLastAssignedFieldID(0)},
 		{name: "last assigned partition id", data: `{"type":"assert-last-assigned-partition-id","last-assigned-partition-id":0}`, expected: table.AssertLastAssignedPartitionID(0)},
-		{name: "snapshot id", data: `{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":0}`, expected: table.AssertRefSnapshotID("main", ptr(int64(0)))},
+		{name: "snapshot id", data: `{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":0}`, expected: table.AssertRefSnapshotID("main", new(int64(0)))},
 	}
 
 	for _, tt := range tests {
@@ -261,7 +261,7 @@ func TestParseRequirementRefRequiresRefButAllowsNullSnapshotID(t *testing.T) {
 func TestParseRequirementRefAcceptsNumericSnapshotID(t *testing.T) {
 	actual, err := table.ParseRequirementBytes([]byte(`{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":42}`))
 	require.NoError(t, err)
-	assert.Equal(t, table.AssertRefSnapshotID("main", ptr(int64(42))), actual)
+	assert.Equal(t, table.AssertRefSnapshotID("main", new(int64(42))), actual)
 }
 
 func TestAssertRefSnapshotIDValidate(t *testing.T) {
@@ -269,12 +269,12 @@ func TestAssertRefSnapshotIDValidate(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("matching ref passes", func(t *testing.T) {
-		req := table.AssertRefSnapshotID("test", ptr(int64(3051729675574597004)))
+		req := table.AssertRefSnapshotID("test", new(int64(3051729675574597004)))
 		assert.NoError(t, req.Validate(meta))
 	})
 
 	t.Run("mismatched snapshot id includes expected and found", func(t *testing.T) {
-		req := table.AssertRefSnapshotID("test", ptr(int64(1)))
+		req := table.AssertRefSnapshotID("test", new(int64(1)))
 		err := req.Validate(meta)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `"test"`)
@@ -292,7 +292,7 @@ func TestAssertRefSnapshotIDValidate(t *testing.T) {
 	})
 
 	t.Run("ref missing but expected includes expected snapshot", func(t *testing.T) {
-		req := table.AssertRefSnapshotID("nonexistent", ptr(int64(42)))
+		req := table.AssertRefSnapshotID("nonexistent", new(int64(42)))
 		err := req.Validate(meta)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `"nonexistent"`)
@@ -301,7 +301,7 @@ func TestAssertRefSnapshotIDValidate(t *testing.T) {
 	})
 
 	t.Run("nil metadata returns error", func(t *testing.T) {
-		req := table.AssertRefSnapshotID("main", ptr(int64(1)))
+		req := table.AssertRefSnapshotID("main", new(int64(1)))
 		assert.Error(t, req.Validate(nil))
 	})
 

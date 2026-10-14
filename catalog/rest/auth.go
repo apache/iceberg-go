@@ -76,8 +76,7 @@ func (o *Oauth2AuthManager) AuthHeaderWithContext(ctx context.Context) (string, 
 func (o *Oauth2AuthManager) authHeader() (string, string, error) {
 	tok, err := o.tokenSource.Token()
 	if err != nil {
-		var re *oauth2.RetrieveError
-		if errors.As(err, &re) {
+		if re, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
 			return "", "", oauthError{
 				code: re.ErrorCode,
 				desc: re.ErrorDescription,

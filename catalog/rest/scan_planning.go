@@ -30,6 +30,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,9 +39,11 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/internal/scanmetrics"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -247,7 +250,8 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 			"%w: unexpected plan status %q from planTableScan", ErrRESTError, resp.Status)
 	}
 
-	envelopes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
+	envelopes, err := r.collectScanTasksWithConcurrency(
+		ctx, req.Identifier, completed.ScanTasks, req.MaxConcurrency)
 	if err != nil {
 		cleanup()
 
@@ -293,33 +297,151 @@ func (r *Catalog) planIOBaseProps(req table.ScanPlanningRequest) iceberg.Propert
 	return props
 }
 
-// collectScanTasks expands plan-task handles into their task envelopes, walking
-// the fanout: a fetchScanTasks response can itself return more plan-tasks. A
-// handle is fetched at most once; a server that re-issues one would otherwise
-// loop forever. The envelope boundaries are retained because delete-file
-// references are local to each response.
-func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]ScanTasks, error) {
+// collectScanTasksWithConcurrency expands plan-task handles into their task
+// envelopes, walking the fanout: a response can itself return more plan-tasks. Each
+// frontier is fetched concurrently, but its responses are appended in handle
+// order so completion timing cannot change the result order. A handle is
+// fetched at most once; a server that re-issues one would otherwise loop
+// forever. The envelope boundaries are retained because delete-file references
+// are local to each response.
+//
+// maxConcurrency bounds the number of concurrent fetches. A non-positive limit
+// uses runtime.GOMAXPROCS. On a fetch error, at most the configured number of
+// requests can already be in flight when cancellation reaches their contexts.
+func (r *Catalog) collectScanTasksWithConcurrency(
+	ctx context.Context,
+	ident table.Identifier,
+	tasks ScanTasks,
+	maxConcurrency int,
+) ([]ScanTasks, error) {
+	if maxConcurrency <= 0 {
+		maxConcurrency = runtime.GOMAXPROCS(0)
+	}
+
 	envelopes := []ScanTasks{tasks}
 
-	queue := append([]string(nil), tasks.PlanTasks...)
-	seen := make(map[string]bool, len(queue))
-	for len(queue) > 0 {
-		handle := queue[0]
-		queue = queue[1:]
-		if seen[handle] {
-			continue
+	frontier := append([]string(nil), tasks.PlanTasks...)
+	seen := make(map[string]bool, len(frontier))
+	for len(frontier) > 0 {
+		handles := make([]string, 0, len(frontier))
+		for _, handle := range frontier {
+			if seen[handle] {
+				continue
+			}
+			seen[handle] = true
+			handles = append(handles, handle)
 		}
-		seen[handle] = true
+		if len(handles) == 0 {
+			break
+		}
 
-		resp, err := r.FetchScanTasks(ctx, ident, FetchScanTasksRequest{PlanTask: handle})
+		responses, err := r.fetchScanTaskFrontier(ctx, ident, handles, maxConcurrency)
 		if err != nil {
 			return nil, err
 		}
-		envelopes = append(envelopes, resp.ScanTasks)
-		queue = append(queue, resp.PlanTasks...)
+
+		var nextFrontier []string
+		for _, response := range responses {
+			envelopes = append(envelopes, response.ScanTasks)
+			nextFrontier = append(nextFrontier, response.PlanTasks...)
+		}
+		frontier = nextFrontier
 	}
 
 	return envelopes, nil
+}
+
+// fetchScanTaskFrontier fetches one breadth-first frontier concurrently while
+// placing responses back into handle order. When a handle fails, unfinished
+// later handles are canceled, but earlier handles are allowed to finish so the
+// first error in the old serial handle order remains deterministic.
+func (r *Catalog) fetchScanTaskFrontier(
+	ctx context.Context,
+	ident table.Identifier,
+	handles []string,
+	maxConcurrency int,
+) ([]FetchScanTasksResponse, error) {
+	responses := make([]FetchScanTasksResponse, len(handles))
+	errs := make([]error, len(handles))
+	if len(handles) == 0 {
+		return responses, nil
+	}
+	if maxConcurrency <= 0 {
+		maxConcurrency = runtime.GOMAXPROCS(0)
+	}
+	maxConcurrency = min(maxConcurrency, len(handles))
+
+	requestCtxs := make([]context.Context, len(handles))
+	requestCancels := make([]context.CancelFunc, len(handles))
+	for i := range handles {
+		requestCtxs[i], requestCancels[i] = context.WithCancel(ctx)
+	}
+	defer func() {
+		for _, cancel := range requestCancels {
+			cancel()
+		}
+	}()
+
+	var (
+		mu               sync.Mutex
+		completed        = make([]bool, len(handles))
+		siblingCanceled  = make([]bool, len(handles))
+		lowestFailureIdx = -1
+	)
+
+	var group errgroup.Group
+	group.SetLimit(maxConcurrency)
+
+	for i, handle := range handles {
+		group.Go(func() error {
+			response, fetchErr := r.FetchScanTasks(requestCtxs[i], ident, FetchScanTasksRequest{PlanTask: handle})
+
+			mu.Lock()
+			defer mu.Unlock()
+			completed[i] = true
+			if fetchErr == nil {
+				responses[i] = response
+
+				return nil
+			}
+
+			errs[i] = fmt.Errorf("fetching scan tasks for handle %q: %w", handle, fetchErr)
+			if siblingCanceled[i] || (lowestFailureIdx >= 0 && i > lowestFailureIdx) {
+				return fetchErr
+			}
+
+			if lowestFailureIdx < 0 || i < lowestFailureIdx {
+				lowestFailureIdx = i
+				for j := i + 1; j < len(handles); j++ {
+					if completed[j] || siblingCanceled[j] {
+						continue
+					}
+					siblingCanceled[j] = true
+					requestCancels[j]()
+				}
+			}
+
+			return fetchErr
+		})
+	}
+
+	if waitErr := group.Wait(); waitErr != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		for i, err := range errs {
+			if err != nil && !siblingCanceled[i] {
+				return nil, err
+			}
+		}
+
+		return nil, waitErr
+	}
+
+	return responses, nil
 }
 
 // remoteScanTasks decodes each server task envelope into domain FileScanTasks.
@@ -473,7 +595,17 @@ func marshalScanFilter(req table.ScanPlanningRequest) ([]byte, error) {
 // Any other status — including the empty status of a 200 with no body, which
 // bypasses the response UnmarshalJSON validation — returns an ErrRESTError so a
 // malformed response cannot masquerade as an empty completed plan.
-func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (PlanTableScanResponse, error) {
+//
+// Transient HTTP responses (408, 429, 500, 502, 503, 504) are retried up to
+// three times with jittered backoff and the same idempotency key. Retry-After
+// is honored, capped at five seconds when ctx has no deadline. Transport
+// failures and malformed successful responses are not retried.
+func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (result PlanTableScanResponse, err error) {
+	ctx, finish := scanmetrics.Start(ctx, "plan")
+	defer func() {
+		finish(err)
+	}()
+
 	if err := r.endpoints.check(endpointPlanTableScan); err != nil {
 		return PlanTableScanResponse{}, err
 	}
@@ -488,10 +620,12 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 		return PlanTableScanResponse{}, err
 	}
 
-	resp, err := doPost[PlanTableScanRequest, PlanTableScanResponse](
-		ctx, r.baseURI, path, req, r.cl,
-		map[int]error{http.StatusNotFound: ErrRESTError},
-		withHeaders(headers), withErrorTypeOverride(planTableScanErrorTypes))
+	resp, err := retryScanPlanning(ctx, "plan", func() (PlanTableScanResponse, error) {
+		return doPost[PlanTableScanRequest, PlanTableScanResponse](
+			ctx, r.baseURI, path, req, r.cl,
+			map[int]error{http.StatusNotFound: ErrRESTError},
+			withHeaders(headers), withErrorTypeOverride(planTableScanErrorTypes))
+	})
 	if err != nil {
 		return PlanTableScanResponse{}, err
 	}
@@ -520,7 +654,15 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 // namespace is catalog.ErrNoSuchTable / catalog.ErrNoSuchNamespace, so the poller
 // can tell retry-with-a-new-plan from abort. A bare or unrecognized 404 stays an
 // ambiguous ErrRESTError rather than being guessed as an expiry.
-func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (FetchPlanningResultResponse, error) {
+func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (result FetchPlanningResultResponse, err error) {
+	ctx, finish := scanmetrics.Start(ctx, "fetch-result")
+	defer func() {
+		if errors.Is(err, ErrPlanExpired) {
+			scanmetrics.Expired(ctx, "fetch-result")
+		}
+		finish(err)
+	}()
+
 	if err := r.endpoints.check(endpointFetchPlanResult); err != nil {
 		return FetchPlanningResultResponse{}, err
 	}
@@ -559,7 +701,9 @@ func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifie
 // the session-default access-delegation header (cancel vends no credentials). A
 // 404 (already-expired or unknown plan) is not special-cased: cancel is
 // best-effort, so the generic REST error is acceptable.
-func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) error {
+func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) (err error) {
+	ctx, finish := scanmetrics.Start(ctx, "cancel")
+	defer func() { finish(err) }()
 	if err := r.endpoints.check(endpointCancelPlanning); err != nil {
 		return err
 	}
@@ -584,7 +728,17 @@ func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, pl
 // vanishing. A bare or unrecognized 404 stays an ambiguous ErrRESTError. An
 // empty 200 body is rejected (requireBody) so a truncated response is not read
 // as a successfully completed empty task set.
-func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (FetchScanTasksResponse, error) {
+// Transient HTTP responses use the same retry policy as [Catalog.PlanTableScan],
+// retaining the idempotency key and plan-task handle across attempts.
+func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (result FetchScanTasksResponse, err error) {
+	ctx, finish := scanmetrics.Start(ctx, "fetch-tasks")
+	defer func() {
+		if errors.Is(err, ErrNoSuchPlanTask) {
+			scanmetrics.Expired(ctx, "fetch-tasks")
+		}
+		finish(err)
+	}()
+
 	if err := r.endpoints.check(endpointFetchScanTasks); err != nil {
 		return FetchScanTasksResponse{}, err
 	}
@@ -599,11 +753,13 @@ func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, re
 		return FetchScanTasksResponse{}, err
 	}
 
-	return doPost[FetchScanTasksRequest, FetchScanTasksResponse](
-		ctx, r.baseURI, path, req, r.cl,
-		map[int]error{http.StatusNotFound: ErrRESTError},
-		withHeaders(headers), withSuppressedHeaders(headerIcebergAccessDelegation),
-		withErrorTypeOverride(fetchScanTasksErrorTypes), requireBody())
+	return retryScanPlanning(ctx, "fetch-tasks", func() (FetchScanTasksResponse, error) {
+		return doPost[FetchScanTasksRequest, FetchScanTasksResponse](
+			ctx, r.baseURI, path, req, r.cl,
+			map[int]error{http.StatusNotFound: ErrRESTError},
+			withHeaders(headers), withSuppressedHeaders(headerIcebergAccessDelegation),
+			withErrorTypeOverride(fetchScanTasksErrorTypes), requireBody())
+	})
 }
 
 // WaitForPlan polls a submitted plan to completion using jittered backoff. It
@@ -724,6 +880,9 @@ func (r *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planI
 
 			return CompletedPlanningResult{}, fmt.Errorf("waiting for plan %q on %v: %w", planID, ident, ctx.Err())
 		case <-timer.C:
+			if err != nil {
+				scanmetrics.Retry(ctx, "fetch-result")
+			}
 		}
 	}
 }
@@ -734,8 +893,7 @@ func (r *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planI
 // ErrServiceUnavailable preserves compatibility with callers or transports that
 // return the sentinel without the package's concrete errorResponse wrapper.
 func scanPlanPollRetry(err error) (time.Duration, bool) {
-	var restErr errorResponse
-	if errors.As(err, &restErr) {
+	if restErr, ok := errors.AsType[errorResponse](err); ok {
 		switch restErr.statusCode {
 		case http.StatusRequestTimeout,
 			http.StatusTooManyRequests,
@@ -935,8 +1093,8 @@ func idempotencyHeaderValue(idempotencyKey *string) (string, error) {
 		// Plan and task POSTs always send an idempotency key. The spec pins it
 		// to a UUIDv7 string (RFC 9562) so a server can key its dedup window off
 		// the embedded timestamp, matching Java's UUIDUtil.generateUuidV7(). A
-		// v4 key would be treated as undefined by such servers. There is no
-		// transport retry here, so nil means a fresh key for this call.
+		// v4 key would be treated as undefined by such servers. All automatic
+		// retries within this call reuse the generated key.
 		key, err := uuid.NewV7()
 		if err != nil {
 			return "", fmt.Errorf("generating idempotency key: %w", err)
@@ -1024,9 +1182,8 @@ type CompletedPlanningResult struct {
 type PlanTableScanRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
 	// If set, it must be a UUIDv7 string (RFC 9562). If nil, a fresh UUIDv7 is
-	// generated per call and not returned, so passing nil and retrying on a
-	// transient error sends a different key each attempt and defeats server-side
-	// dedup: pass an explicit key to get idempotency across retries.
+	// generated per call and reused for automatic retries. Supply an explicit
+	// key to preserve idempotency across separate calls.
 	IdempotencyKey *string `json:"-"`
 	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header, not
 	// in the JSON body. Nil uses the catalog default.
@@ -1165,9 +1322,8 @@ func decodePlanningError(raw json.RawMessage) *PlanningError {
 type FetchScanTasksRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
 	// If set, it must be a UUIDv7 string (RFC 9562). If nil, a fresh UUIDv7 is
-	// generated per call and not returned, so passing nil and retrying on a
-	// transient error sends a different key each attempt and defeats server-side
-	// dedup: pass an explicit key to get idempotency across retries.
+	// generated per call and reused for automatic retries. Supply an explicit
+	// key to preserve idempotency across separate calls.
 	IdempotencyKey *string `json:"-"`
 
 	PlanTask string `json:"plan-task"`

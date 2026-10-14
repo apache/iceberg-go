@@ -97,8 +97,8 @@ func positionalDeletePartitionKeyBenchmarkFiles(
 		partition := make(map[int]any, fieldCount)
 		for field, partitionField := range partitionFields {
 			if binaryValue {
-				partition[partitionField.FieldID] = []byte(fmt.Sprintf(
-					"partition-%02d-%02d", i%100, field))
+				partition[partitionField.FieldID] = fmt.Appendf(nil,
+					"partition-%02d-%02d", i%100, field)
 			} else {
 				partition[partitionField.FieldID] = int32(i % 100)
 			}

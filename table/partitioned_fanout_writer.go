@@ -25,6 +25,7 @@ import (
 	"math"
 	"math/bits"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -66,7 +67,7 @@ type partitionFieldInfo struct {
 	sourceName  string
 	fieldID     int
 	sourceType  iceberg.Type
-	columnIndex int
+	columnPath  []int
 	valueAt     func(arrow.Array, int) (any, error)
 }
 
@@ -75,6 +76,7 @@ type partitionExtractionPlan struct {
 	schema       *iceberg.Schema
 	recordSchema *arrow.Schema
 	fields       []partitionFieldInfo
+	pathPlan     partitionPathPlan
 }
 
 type (
@@ -154,7 +156,7 @@ func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *ice
 }
 
 func (p *partitionedFanoutWriter) partitionPath(data partitionRecord) string {
-	return p.partitionSpec.PartitionToPath(data, p.schema)
+	return p.plan.pathPlan.format(data)
 }
 
 // Write writes the Arrow records to the specified location using a fanout pattern with
@@ -355,24 +357,31 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Schema, recordSchema *arrow.Schema) (*partitionExtractionPlan, error) {
 	partitionFields := spec.PartitionType(schema).FieldList
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
+	pathPlan := partitionPathPlan{fields: make([]partitionPathField, len(partitionFields))}
 	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
 	for _, field := range spec.Fields() {
 		specFieldsByID[field.FieldID] = field
 	}
 
 	for i, partitionField := range partitionFields {
-		partitionFieldsInfo[i].columnIndex = -1
 		sourceField, ok := specFieldsByID[partitionField.ID]
 		if !ok {
 			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
 		}
+		pathField := partitionPathField{
+			escapedName: sourceField.EscapedName(),
+			transform:   sourceField.Transform,
+			resultType:  partitionField.Type,
+		}
+		pathPlan.fields[i] = pathField
+		pathPlan.estimatedSize += len(pathField.escapedName) + 20
 		partitionFieldsInfo[i].fieldID = partitionField.ID
 		colName, ok := schema.FindColumnName(sourceField.SourceID())
 		if !ok {
 			continue
 		}
-		colIndices := recordSchema.FieldIndices(colName)
-		if len(colIndices) == 0 {
+		columnPath, ok := resolveArrowColumnPath(recordSchema, colName)
+		if !ok {
 			return nil, fmt.Errorf("failed to find source column %q in record schema", colName)
 		}
 		sourceType, ok := schema.FindTypeByID(sourceField.SourceID())
@@ -384,7 +393,7 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 			sourceName:  colName,
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
-			columnIndex: colIndices[0],
+			columnPath:  columnPath,
 			valueAt:     bindPartitionValue(sourceField.Transform, sourceType),
 		}
 	}
@@ -394,7 +403,81 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		schema:       schema,
 		recordSchema: recordSchema,
 		fields:       partitionFieldsInfo,
+		pathPlan:     pathPlan,
 	}, nil
+}
+
+// arrowFieldContainer is a proxy for both [arrow.Schema] and [arrow.StructType],
+type arrowFieldContainer interface {
+	FieldIndices(name string) []int
+	Field(i int) arrow.Field
+}
+
+// resolveArrowColumnPath resolves a dot-joined nested field name into a path of Arrow field indices.
+func resolveArrowColumnPath(recordSchema *arrow.Schema, colName string) ([]int, bool) {
+	// note that a pathological schema could lead to a stack overflow as this is recursive
+	return resolveArrowColumnPathIn(recordSchema, colName)
+}
+
+func resolveArrowColumnPathIn(container arrowFieldContainer, remaining string) ([]int, bool) {
+	// any field name COULD contain a literal `.` so we try the longest possible name and backtrack
+	for prefixEnd := len(remaining); prefixEnd > 0; prefixEnd = strings.LastIndex(remaining[:prefixEnd], ".") {
+		candidate := remaining[:prefixEnd]
+		indices := container.FieldIndices(candidate)
+		if indices == nil {
+			continue
+		}
+
+		if prefixEnd == len(remaining) {
+			return []int{indices[0]}, true
+		}
+
+		structType, ok := container.Field(indices[0]).Type.(*arrow.StructType)
+		if !ok {
+			continue
+		}
+
+		if subPath, ok := resolveArrowColumnPathIn(structType, remaining[prefixEnd+1:]); ok {
+			return append([]int{indices[0]}, subPath...), true
+		}
+	}
+
+	return nil, false
+}
+
+// resolveColumnChain walks a resolved column path from the record's top-level column
+// down to the leaf, returning the array at each step of the path.
+func resolveColumnChain(record arrow.RecordBatch, path []int) ([]arrow.Array, error) {
+	chain := make([]arrow.Array, len(path))
+	col := record.Column(path[0])
+	chain[0] = col
+	for i, fieldIdx := range path[1:] {
+		structCol, ok := col.(*array.Struct)
+		if !ok {
+			return nil, fmt.Errorf("expected struct array in column path, got %T", col)
+		}
+		col = structCol.Field(fieldIdx)
+		chain[i+1] = col
+	}
+
+	return chain, nil
+}
+
+// leafColumnAt returns the leaf array for a resolved column chain at the given row,
+// or false if the leaf or any ancestor struct is null at that row.
+func leafColumnAt(chain []arrow.Array, row int) (arrow.Array, bool) {
+	for _, col := range chain[:len(chain)-1] {
+		if col.IsNull(row) {
+			return nil, false
+		}
+	}
+
+	leaf := chain[len(chain)-1]
+	if leaf.IsNull(row) {
+		return nil, false
+	}
+
+	return leaf, true
 }
 
 func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
@@ -411,17 +494,43 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 
 	partitionMap := newPartitionMapNode()
 	partitionRec := make(partitionRecord, len(p.fields))
-	partitionColumns := make([]arrow.Array, len(p.fields))
+
+	// we track these separately to avoid traversing the chain for top level fields.
+	topLevelColumns := make([]arrow.Array, len(p.fields))
+	columnChains := make([][]arrow.Array, len(p.fields))
 	for i, fieldInfo := range p.fields {
-		if fieldInfo.columnIndex >= 0 {
-			partitionColumns[i] = record.Column(fieldInfo.columnIndex)
+		switch len(fieldInfo.columnPath) {
+		case 0: // an empty (nil) path means the source field isn't in the schema
+		case 1:
+			topLevelColumns[i] = record.Column(fieldInfo.columnPath[0])
+		default:
+			chain, err := resolveColumnChain(record, fieldInfo.columnPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve source column %q (field ID %d): %w",
+					fieldInfo.sourceName, fieldInfo.sourceField.SourceID(), err)
+			}
+			columnChains[i] = chain
 		}
 	}
 
 	for row := range record.NumRows() {
 		for i, fieldInfo := range p.fields {
-			col := partitionColumns[i]
-			if col != nil && !col.IsNull(int(row)) {
+			var col arrow.Array
+			var ok bool
+
+			switch {
+			case topLevelColumns[i] != nil:
+				col = topLevelColumns[i]
+				ok = !col.IsNull(int(row))
+			case columnChains[i] != nil:
+				col, ok = leafColumnAt(columnChains[i], int(row))
+			default:
+				partitionRec[i] = nil
+
+				continue
+			}
+
+			if ok {
 				value, err := fieldInfo.valueAt(col, int(row))
 				if err != nil {
 					return nil, fmt.Errorf(
@@ -549,38 +658,68 @@ func bindPartitionTransform(transform iceberg.Transform, sourceType iceberg.Type
 // is in the order of the partition spec.
 // The value is either a *partitionMapNode or a *partitionInfo.
 type partitionMapNode struct {
-	children map[any]any
+	children       map[any]any
+	binaryChildren map[string]any
 	// partitionCount is maintained by the root node for the current batch and
 	// sizes the single result slice returned by collectPartitions.
 	partitionCount int
 }
 
 func newPartitionMapNode() *partitionMapNode {
-	return &partitionMapNode{
-		children: make(map[any]any),
+	return &partitionMapNode{}
+}
+
+// child looks up binary partition values through a typed string map. Converting a
+// byte slice to string for a map lookup does not allocate, while storing a new
+// partition still copies the key into map-owned storage.
+func (n *partitionMapNode) child(part any) (any, bool) {
+	if bytes, ok := part.([]byte); ok {
+		child, found := n.binaryChildren[string(bytes)]
+
+		return child, found
 	}
+
+	child, found := n.children[comparablePartitionKey(part)]
+
+	return child, found
+}
+
+func (n *partitionMapNode) setChild(part, child any) {
+	if bytes, ok := part.([]byte); ok {
+		if n.binaryChildren == nil {
+			n.binaryChildren = make(map[string]any)
+		}
+		n.binaryChildren[string(bytes)] = child
+
+		return
+	}
+
+	if n.children == nil {
+		n.children = make(map[any]any)
+	}
+	n.children[comparablePartitionKey(part)] = child
 }
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
 // creating nodes along the way if they don't exist
 func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []partitionFieldInfo, numRows int64) *partitionInfo {
-	// Navigate through all but the last partition field
+	// Navigate through all but the last partition field.
 	node := n
 	for _, part := range partitionRec[:len(partitionRec)-1] {
-		key := comparablePartitionKey(part)
-		val, ok := node.children[key]
+		val, ok := node.child(part)
 		if !ok {
 			newNode := newPartitionMapNode()
-			node.children[key] = newNode
+			node.setChild(part, newNode)
 			node = newNode
 		} else {
 			node = val.(*partitionMapNode)
 		}
 	}
 
-	// Last level stores the actual partitionInfo
-	lastKey := comparablePartitionKey(partitionRec[len(partitionRec)-1])
-	partVal, ok := node.children[lastKey].(*partitionInfo)
+	// Last level stores the actual partitionInfo.
+	lastPart := partitionRec[len(partitionRec)-1]
+	child, _ := node.child(lastPart)
+	partVal, ok := child.(*partitionInfo)
 	if ok {
 		return partVal
 	}
@@ -601,7 +740,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 		partitionValues: partitionValues,
 		partitionRec:    partRecCopy,
 	}
-	node.children[lastKey] = partVal
+	node.setChild(lastPart, partVal)
 	n.partitionCount++
 
 	return partVal
@@ -639,13 +778,20 @@ func (n *partitionMapNode) collectPartitions() []*partitionInfo {
 }
 
 func (n *partitionMapNode) appendPartitions(result []*partitionInfo) []*partitionInfo {
-	for _, v := range n.children {
+	appendChild := func(v any) {
 		switch node := v.(type) {
 		case *partitionInfo:
 			result = append(result, node)
 		case *partitionMapNode:
 			result = node.appendPartitions(result)
 		}
+	}
+
+	for _, v := range n.children {
+		appendChild(v)
+	}
+	for _, v := range n.binaryChildren {
+		appendChild(v)
 	}
 
 	return result

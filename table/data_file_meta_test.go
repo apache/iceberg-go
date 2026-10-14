@@ -1228,7 +1228,7 @@ func TestDataFileFromMetadata_V3RewriteAcceptsNilFirstRowID(t *testing.T) {
 }
 
 func TestDataFileFromMetadata_EndToEndRowDelta(t *testing.T) {
-	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	tbl := newRowDeltaCommitTestTableVersion(t, 2)
 	sch := tbl.Schema()
 
 	const dataPath = "s3://bucket/test/data/insert.parquet"

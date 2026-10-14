@@ -271,38 +271,9 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 	}
 }
 
-// Apply is a bulk shortcut that routes three slices onto this builder:
-// every entry in deletes is queued via
-// [RewriteFiles.DeleteFile] (which routes data vs. delete files by
-// content type), every entry in adds via [RewriteFiles.AddFile], and every
-// entry in safeDeletes as an automatic delete-file removal.
-//
-// Deprecated: use [RewriteFiles.ApplyResult], which also carries
-// SafeDeletionVectors. Apply has no slot for them, so a coordinator wiring
-// worker output through Apply leaves deletion vectors for the rewritten files
-// orphaned.
-func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *RewriteFiles {
-	if r.err != nil {
-		return r
-	}
-
-	for _, df := range deletes {
-		r.DeleteFile(df)
-	}
-	for _, df := range adds {
-		r.AddFile(df)
-	}
-	for _, df := range safeDeletes {
-		r.removeAutomaticDeleteFile(df)
-	}
-
-	return r
-}
-
 // ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
 // routing OldDataFiles (DeleteFile), NewDataFiles (AddFile), SafePosDeletes
-// and SafeDeletionVectors as automatic delete-file removals. Prefer it over
-// [RewriteFiles.Apply], which cannot carry SafeDeletionVectors.
+// and SafeDeletionVectors as automatic delete-file removals.
 //
 // Typical distributed-coordinator pattern:
 //

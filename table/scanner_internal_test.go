@@ -998,6 +998,19 @@ func TestSplitLineageMetadataFields(t *testing.T) {
 	}
 }
 
+func TestAppendMissingLineageFields(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1}, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64,
+	})
+
+	withLineage := appendMissingLineageFields(schema, []iceberg.NestedField{iceberg.RowID()})
+
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	assert.Len(t, schema.Fields(), 1)
+	assert.Len(t, withLineage.Fields(), 2)
+	assert.Equal(t, iceberg.RowIDColumnName, withLineage.Fields()[1].Name)
+}
+
 func TestKeyDefaultMapRaceCondition(t *testing.T) {
 	var factoryCallCount atomic.Int64
 	factory := func(key string) int {
@@ -1242,7 +1255,7 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	snapshot, err := scan.ResolveSnapshot()
 	require.NoError(t, err)
 	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
-		snapshot, memIO, schema, &acc, scan.partitionFiltersForSchema(schema))
+		context.Background(), snapshot, schema, &acc, scan.partitionFiltersForSchema(schema))
 	require.NoError(t, err)
 
 	// Two data manifests, one delete manifest.
@@ -1559,6 +1572,47 @@ func TestBuildPartitionEvaluatorMatchesPartitionValues(t *testing.T) {
 	matches, err = evaluator(dataFile.Build())
 	require.NoError(t, err)
 	assert.False(t, matches)
+}
+
+type noPartitionAccessDataFile struct {
+	iceberg.DataFile
+}
+
+func (noPartitionAccessDataFile) Partition() map[int]any {
+	panic("partition should not be read")
+}
+
+func TestBuildPartitionEvaluatorAlwaysTrue(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_part",
+		Transform: iceberg.IdentityTransform{},
+	})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	metadata, err := NewMetadata(
+		schema, &spec, UnsortedSortOrder, "s3://test-bucket/test_table", iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	partitionFilters := newKeyDefaultMapWrapErr(func(int) (iceberg.BooleanExpression, error) {
+		return iceberg.AlwaysTrue{}, nil
+	})
+	evaluator, err := buildPartitionEvaluator(spec.ID(), metadata, schema, partitionFilters, true)
+	require.NoError(t, err)
+
+	matches, err := evaluator(noPartitionAccessDataFile{})
+	require.NoError(t, err)
+	assert.True(t, matches)
+
+	filterErr := errors.New("partition filter failed")
+	partitionFilters = newKeyDefaultMapWrapErr(func(int) (iceberg.BooleanExpression, error) {
+		return iceberg.AlwaysTrue{}, filterErr
+	})
+	_, err = buildPartitionEvaluator(spec.ID(), metadata, schema, partitionFilters, true)
+	require.ErrorIs(t, err, filterErr)
 }
 
 func TestTimeTravelManifestPruningUsesSnapshotSchema(t *testing.T) {

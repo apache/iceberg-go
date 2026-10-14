@@ -87,3 +87,23 @@ func splitParquetScanTask(task FileScanTask, targetSize int64) ([]FileScanTask, 
 
 	return result, true
 }
+
+// splitRemoteScanTasks allocates a new task slice only if a file needs splitting.
+func splitRemoteScanTasks(tasks []FileScanTask, targetSize int64) []FileScanTask {
+	var result []FileScanTask
+	for i, task := range tasks {
+		if splits, ok := splitParquetScanTask(task, targetSize); ok {
+			if result == nil {
+				result = append(make([]FileScanTask, 0, len(tasks)+len(splits)-1), tasks[:i]...)
+			}
+			result = append(result, splits...)
+		} else if result != nil {
+			result = append(result, task)
+		}
+	}
+	if result == nil {
+		return tasks
+	}
+
+	return result
+}

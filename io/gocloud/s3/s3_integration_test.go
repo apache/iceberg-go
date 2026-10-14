@@ -34,7 +34,7 @@ import (
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
-func TestMinioWarehouse(t *testing.T) {
+func TestS3Warehouse(t *testing.T) {
 	_, err := recipe.Start(t)
 	require.NoError(t, err)
 
@@ -66,7 +66,7 @@ func TestMinioWarehouse(t *testing.T) {
 	require.NotNil(t, tbl)
 }
 
-func TestMinioWarehouseNoLocation(t *testing.T) {
+func TestS3WarehouseNoLocation(t *testing.T) {
 	_, err := recipe.Start(t)
 	require.NoError(t, err)
 

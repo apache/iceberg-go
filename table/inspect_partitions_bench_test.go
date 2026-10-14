@@ -133,7 +133,7 @@ func benchmarkInspectPartitionFiles(
 		partition := make(map[int]any, benchmark.fieldCount)
 		for field, partitionField := range partitionFields {
 			if benchmark.binary {
-				partition[partitionField.FieldID] = []byte(fmt.Sprintf("partition-%d-field-%d", partitionID, field))
+				partition[partitionField.FieldID] = fmt.Appendf(nil, "partition-%d-field-%d", partitionID, field)
 			} else {
 				partition[partitionField.FieldID] = int32(partitionID + field)
 			}

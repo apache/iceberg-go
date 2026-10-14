@@ -25,7 +25,6 @@ import (
 	"log"
 	"maps"
 	"strings"
-	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -33,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
 )
@@ -467,7 +467,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// Physically delete all table files on storage best-effort
-	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+	if purgeErr := maintenance.PurgeFiles(ctx, tbl); purgeErr != nil {
 		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 
@@ -539,10 +539,28 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (_
 			table.ErrCommitFailed, fromDB, fromTable, sourceMetadataLocation, lockedMetadataLocation)
 	}
 
+	// Use a raw GetTable instead of CheckTableExists so that non-Iceberg
+	// Hive tables at the destination are also detected as conflicts.
+	_, err = c.client.GetTable(ctx, toDB, toTable)
+	if err == nil {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, toDB, toTable)
+	}
+	if !isNoSuchObjectError(err) {
+		return nil, fmt.Errorf("failed to check destination table %s.%s: %w", toDB, toTable, err)
+	}
+
 	hiveTbl.TableName = toTable
 	hiveTbl.DbName = toDB
 
+	// The pre-check above is best-effort: a writer that does not take these HMS
+	// locks (Hive DDL, say) can create the destination before AlterTable runs.
+	// The metastore then rejects the rename, which is mapped to the same
+	// sentinel so callers can match it either way.
 	if err := c.client.AlterTable(ctx, fromDB, fromTable, hiveTbl); err != nil {
+		if isAlreadyExistsError(err) {
+			return nil, fmt.Errorf("%w: %s.%s: %w", catalog.ErrTableAlreadyExists, toDB, toTable, err)
+		}
+
 		return nil, fmt.Errorf("failed to rename table %s.%s to %s.%s: %w", fromDB, fromTable, toDB, toTable, err)
 	}
 
@@ -934,9 +952,6 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	return props, nil
 }
 
-//go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
-func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
-
 // UpdateNamespaceProperties updates the properties for a namespace.
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
 	removals []string, updates iceberg.Properties,
@@ -946,7 +961,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
-	updatedProperties, propertiesUpdateSummary, err := getUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
+	updatedProperties, propertiesUpdateSummary, err := internal.GetUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
 	if err != nil {
 		return catalog.PropertiesUpdateSummary{}, err
 	}
@@ -1036,8 +1051,7 @@ func isNoSuchObjectError(err error) bool {
 		return false
 	}
 
-	var noSuchObjectErr *hive_metastore.NoSuchObjectException
-	if errors.As(err, &noSuchObjectErr) {
+	if _, ok := errors.AsType[*hive_metastore.NoSuchObjectException](err); ok {
 		return true
 	}
 

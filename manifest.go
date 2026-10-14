@@ -416,38 +416,7 @@ func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
 
 func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
-	return func(yield func(ManifestEntry, error) bool) {
-		f, err := fs.Open(m.FilePath())
-		if err != nil {
-			yield(nil, err)
-
-			return
-		}
-		aborted := false
-		defer func() {
-			if cerr := f.Close(); cerr != nil && !aborted {
-				yield(nil, cerr)
-			}
-		}()
-
-		for entry, err := range iterManifest(m, f, discardDeleted) {
-			if !yield(entry, err) {
-				aborted = true
-
-				return
-			}
-		}
-	}
-}
-
-func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
-	f, openErr := fs.Open(m.FilePath())
-	if openErr != nil {
-		return nil, openErr
-	}
-	defer internal.CheckedClose(f, &err)
-
-	return ReadManifest(m, f, discardDeleted)
+	return manifestEntries(fs, m, discardDeleted, nil)
 }
 
 func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
@@ -603,8 +572,8 @@ type ManifestFile interface {
 	// the provided file system IO interface. Entries that have been
 	// marked as deleted are skipped if discardDeleted is true.
 	//
-	// Prefer Entries over FetchEntries when walking large manifests
-	// since it avoids loading every entry into memory at once.
+	// Entries avoids loading every manifest entry into memory at once,
+	// making it suitable for walking large manifests.
 	//
 	// Iteration contract:
 	//
@@ -624,14 +593,6 @@ type ManifestFile interface {
 	//     longer interested in further values, so an extra synthetic
 	//     (nil, closeErr) tail would be discarded anyway.
 	Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
-	// FetchEntries reads the manifest list file to fetch the list of
-	// manifest entries using the provided file system IO interface.
-	// If discardDeleted is true, entries for files containing deleted rows
-	// will be skipped.
-	//
-	// Deprecated: Use Entries instead, which streams manifest entries via an
-	// iterator and avoids loading every entry into memory at once.
-	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
 	// // WriteEntries writes a list of manifest entries to a provided
 	// // io.Writer. The version of the manifest file is used to determine the
 	// // schema to use for writing the entries.
@@ -698,6 +659,7 @@ type ManifestReader struct {
 	file           ManifestFile
 	formatVersion  int
 	isFallback     bool
+	projected      bool
 	content        ManifestContent
 	fieldNameToID  map[string]int
 	fieldIDToType  map[int]string
@@ -723,13 +685,51 @@ type ManifestReader struct {
 // file. If the caller is interested in the manifest entries in the file, it must call
 // [ManifestReader.Entries] before closing the provided reader.
 func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error) {
-	rd, err := ocf.NewReader(in)
+	return newManifestReader(file, in, nil)
+}
+
+// NewManifestReaderWithProjection returns a manifest reader that decodes the
+// standard scan fields and optionally the column statistics selected by
+// projection. Manifest metadata validation and entry inheritance are the same
+// as in NewManifestReader; fields omitted by the projection retain their zero
+// values in the returned DataFile. Entries returned by this reader are
+// read-only planning values and must not be passed to a ManifestWriter, because
+// omitted statistics cannot be recovered on rewrite. ManifestWriter and the
+// DataFile Avro codec reject these values with ErrInvalidArgument.
+func NewManifestReaderWithProjection(
+	file ManifestFile,
+	in io.Reader,
+	projection ManifestEntryProjection,
+) (*ManifestReader, error) {
+	return newManifestReader(file, in, &projection)
+}
+
+func newManifestReader(
+	file ManifestFile,
+	in io.Reader,
+	projection *ManifestEntryProjection,
+) (*ManifestReader, error) {
+	var writerSchema *avro.Schema
+	var rd *ocf.Reader
+	var err error
+	if projection == nil {
+		rd, err = ocf.NewReader(in)
+	} else {
+		rd, err = ocf.NewReader(in, ocf.WithReaderSchemaFunc(func(reader *ocf.Reader) (*avro.Schema, error) {
+			writerSchema = reader.Schema()
+
+			return projectedManifestEntrySchema(writerSchema, *projection)
+		}))
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	metadata := rd.Metadata()
-	sc := rd.Schema()
+	if writerSchema == nil {
+		writerSchema = rd.Schema()
+	}
+	sc := writerSchema
 
 	formatVersion := 1
 	// format-version is optional for v1 manifest files, so default to v1.
@@ -817,6 +817,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		file:           file,
 		formatVersion:  formatVersion,
 		isFallback:     isFallback,
+		projected:      projection != nil,
 		content:        content,
 		fieldNameToID:  fieldMaps.nameToID,
 		fieldIDToType:  fieldMaps.idToType,
@@ -917,10 +918,10 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.isFallback {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
-	if df, ok := tmp.DataFile().(*dataFile); ok {
-		if err := df.normalizeFormat(); err != nil {
-			return nil, err
-		}
+	df := tmp.DataFile().(*dataFile)
+	df.projected = c.projected
+	if err := df.normalizeFormat(); err != nil {
+		return nil, err
 	}
 	switch tmp.Status() {
 	case EntryStatusEXISTING, EntryStatusADDED, EntryStatusDELETED:
@@ -977,9 +978,20 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 // iterManifest returns an iterator that streams manifest entries from
 // the provided reader without buffering them. If discardDeleted is true,
 // entries whose status is "deleted" are skipped.
-func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
+func iterManifest(
+	m ManifestFile,
+	f io.Reader,
+	discardDeleted bool,
+	projection *ManifestEntryProjection,
+) iter.Seq2[ManifestEntry, error] {
 	return func(yield func(ManifestEntry, error) bool) {
-		manifestReader, err := NewManifestReader(m, f)
+		var manifestReader *ManifestReader
+		var err error
+		if projection == nil {
+			manifestReader, err = NewManifestReader(m, f)
+		} else {
+			manifestReader, err = NewManifestReaderWithProjection(m, f, *projection)
+		}
 		if err != nil {
 			yield(nil, err)
 
@@ -1021,7 +1033,7 @@ func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[Ma
 // is true, the returned slice omits entries whose status is "deleted".
 func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestEntry, error) {
 	var results []ManifestEntry
-	for entry, err := range iterManifest(m, f, discardDeleted) {
+	for entry, err := range iterManifest(m, f, discardDeleted, nil) {
 		if err != nil {
 			return results, err
 		}
@@ -1546,6 +1558,12 @@ func convertPartitionTimestamp(value any) (Timestamp, bool) {
 	return Timestamp(converted), ok
 }
 
+func convertPartitionTimestampNano(value any) (TimestampNano, bool) {
+	converted, ok := convertPartitionInt64(value)
+
+	return TimestampNano(converted), ok
+}
+
 func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	switch typ.(type) {
 	case UnknownType:
@@ -1570,6 +1588,8 @@ func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
 	case TimestampTzType:
 		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
+	case TimestampNsType, TimestampTzNsType:
+		return makePartitionFieldStats[TimestampNano](convertPartitionTimestampNano), nil
 	case UUIDType:
 		return makePartitionFieldStats[uuid.UUID](convertPartitionUUID), nil
 	case BinaryType:
@@ -1947,6 +1967,9 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	var partition map[int]any
 	entryToEncode := *entry
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		if err := dataFile.validateForWrite(); err != nil {
+			return err
+		}
 		partition = dataFile.DataFilePartitionRef(internal.DataFileRef{})
 		encodeDataFile := cloneDataFileAvroFields(dataFile)
 		encodePartition, err := avroEncodePartitionData(
@@ -2200,7 +2223,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) (err error) {
 					ErrInvalidArgument, m.version, file.Version())
 			}
 
-			wrapped := *(file.(*manifestFile))
+			wrapped := *file.(*manifestFile)
 			ensurePartitionList(&wrapped.PartitionList)
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
@@ -2576,17 +2599,21 @@ func fitDecimalBytes(bytes []byte, size int) ([]byte, error) {
 }
 
 type dataFile struct {
-	Content                 ManifestEntryContent   `avro:"content"`
-	Path                    string                 `avro:"file_path"`
-	Format                  FileFormat             `avro:"file_format"`
-	PartitionData           map[string]any         `avro:"partition"`
-	RecordCount             int64                  `avro:"record_count"`
-	FileSize                int64                  `avro:"file_size_in_bytes"`
-	BlockSizeInBytes        int64                  `avro:"block_size_in_bytes"`
-	ColSizes                *[]colMap[int, int64]  `avro:"column_sizes"`
-	ValCounts               *[]colMap[int, int64]  `avro:"value_counts"`
-	NullCounts              *[]colMap[int, int64]  `avro:"null_value_counts"`
-	NaNCounts               *[]colMap[int, int64]  `avro:"nan_value_counts"`
+	Content          ManifestEntryContent `avro:"content"`
+	projected        bool
+	Path             string                `avro:"file_path"`
+	Format           FileFormat            `avro:"file_format"`
+	PartitionData    map[string]any        `avro:"partition"`
+	RecordCount      int64                 `avro:"record_count"`
+	FileSize         int64                 `avro:"file_size_in_bytes"`
+	BlockSizeInBytes int64                 `avro:"block_size_in_bytes"`
+	ColSizes         *[]colMap[int, int64] `avro:"column_sizes"`
+	ValCounts        *[]colMap[int, int64] `avro:"value_counts"`
+	NullCounts       *[]colMap[int, int64] `avro:"null_value_counts"`
+	NaNCounts        *[]colMap[int, int64] `avro:"nan_value_counts"`
+	// DistinctCounts holds distinct_counts (field 111), deprecated in the
+	// spec. It has no accessor and writers never encode it; it stays so
+	// legacy manifests that carry the field still decode.
 	DistinctCounts          *[]colMap[int, int64]  `avro:"distinct_counts"`
 	LowerBounds             *[]colMap[int, []byte] `avro:"lower_bounds"`
 	UpperBounds             *[]colMap[int, []byte] `avro:"upper_bounds"`
@@ -2599,13 +2626,12 @@ type dataFile struct {
 	ContentOffsetField      *int64                 `avro:"content_offset"`
 	ContentSizeInBytesField *int64                 `avro:"content_size_in_bytes"`
 
-	colSizeMap     map[int]int64
-	valCntMap      map[int]int64
-	nullCntMap     map[int]int64
-	nanCntMap      map[int]int64
-	distinctCntMap map[int]int64
-	lowerBoundMap  map[int][]byte
-	upperBoundMap  map[int][]byte
+	colSizeMap    map[int]int64
+	valCntMap     map[int]int64
+	nullCntMap    map[int]int64
+	nanCntMap     map[int]int64
+	lowerBoundMap map[int][]byte
+	upperBoundMap map[int][]byte
 
 	// used for partition retrieval
 	fieldNameToID          map[string]int
@@ -2638,7 +2664,6 @@ func (d *dataFile) initColumnStatsData() {
 		d.valCntMap = avroColMapToMap(d.ValCounts)
 		d.nullCntMap = avroColMapToMap(d.NullCounts)
 		d.nanCntMap = avroColMapToMap(d.NaNCounts)
-		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
 	})
@@ -2881,12 +2906,6 @@ func (d *dataFile) NaNValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
 	return maps.Clone(d.nanCntMap)
-}
-
-func (d *dataFile) DistinctValueCounts() map[int]int64 {
-	d.initColumnStatsData()
-
-	return maps.Clone(d.distinctCntMap)
 }
 
 func (d *dataFile) LowerBoundValues() map[int][]byte {
@@ -3175,20 +3194,6 @@ func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder 
 	return b
 }
 
-// DistinctValueCounts sets the distinct value counts for the data file.
-//
-// Deprecated: distinct_counts (field 111) is deprecated in every
-// version of the Iceberg spec (apache/iceberg#12182). The Avro
-// manifest-entry schemas omit the field for v1, v2, and v3, so values
-// set here are not transported in manifests written by this library.
-// The setter is retained for round-tripping legacy DataFiles read from
-// older manifests; new code should not call it.
-func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
-	b.d.DistinctCounts = mapToAvroColMap(counts)
-
-	return b
-}
-
 // LowerBoundValues sets the lower bound values for the data file.
 func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
 	b.d.LowerBounds = mapToAvroColMapClonedBytes(bounds)
@@ -3294,11 +3299,6 @@ type DataFile interface {
 	// NaNValueCounts is a mapping from column id to the number of NaN
 	// values in the column.
 	NaNValueCounts() map[int]int64
-	// DistictValueCounts is a mapping from column id to the number of
-	// distinct values in the column. Distinct counts must be derived
-	// using values in the file by counting or using sketches, but not
-	// using methods like merging existing distinct counts.
-	DistinctValueCounts() map[int]int64
 	// LowerBoundValues is a mapping from column id to the lower bounded
 	// value of the column, serialized as binary. Each value in the column
 	// must be less than or requal to all non-null, non-NaN values in the
@@ -3337,7 +3337,8 @@ type DataFile interface {
 // ManifestEntry is an interface for both v1 and v2 manifest entries.
 type ManifestEntry interface {
 	// Status returns the type of the file tracked by this entry.
-	// Deletes are informational only and not used in scans.
+	// Whether entries with EntryStatusDELETED are returned depends on the
+	// caller's discardDeleted option.
 	Status() ManifestEntryStatus
 	// SnapshotID is the id where the file was added, or deleted,
 	// if null it is inherited from the manifest list.

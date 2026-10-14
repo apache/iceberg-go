@@ -33,7 +33,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/internal"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -52,21 +52,21 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 	if err != nil {
 		return err
 	}
-	defer internal.CheckedClose(out, &err)
+	defer iceinternal.CheckedClose(out, &err)
 
 	var writer io.Writer = out
 	switch compression {
 	case table.MetadataCompressionCodecGzip:
 		gzw := gzip.NewWriter(out)
 		writer = gzw
-		defer internal.CheckedClose(gzw, &err)
+		defer iceinternal.CheckedClose(gzw, &err)
 	case table.MetadataCompressionCodecZstd:
 		enc, zErr := zstd.NewWriter(out)
 		if zErr != nil {
 			return zErr
 		}
 		writer = enc
-		defer internal.CheckedClose(enc, &err)
+		defer iceinternal.CheckedClose(enc, &err)
 	}
 
 	err = json.NewEncoder(writer).Encode(metadata)
@@ -323,4 +323,54 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 			cat,
 		),
 	}, nil
+}
+
+func checkForOverlap(removals []string, updates iceberg.Properties) error {
+	overlap := []string{}
+	for _, key := range removals {
+		if _, ok := updates[key]; ok {
+			overlap = append(overlap, key)
+		}
+	}
+	if len(overlap) > 0 {
+		return fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
+	}
+
+	return nil
+}
+
+// GetUpdatedPropsAndUpdateSummary applies removals and updates to currentProps
+// and returns the updated properties alongside a summary of the changes. It is
+// shared by the catalog backend implementations.
+func GetUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error) {
+	if err := checkForOverlap(removals, updates); err != nil {
+		return nil, catalog.PropertiesUpdateSummary{}, err
+	}
+	var (
+		updatedProps = maps.Clone(currentProps)
+		removed      = make([]string, 0, len(removals))
+		updated      = make([]string, 0, len(updates))
+	)
+
+	for _, key := range removals {
+		if _, exists := updatedProps[key]; exists {
+			delete(updatedProps, key)
+			removed = append(removed, key)
+		}
+	}
+
+	for key, value := range updates {
+		if updatedProps[key] != value {
+			updated = append(updated, key)
+			updatedProps[key] = value
+		}
+	}
+
+	summary := catalog.PropertiesUpdateSummary{
+		Removed: removed,
+		Updated: updated,
+		Missing: iceinternal.Difference(removals, removed),
+	}
+
+	return updatedProps, summary, nil
 }

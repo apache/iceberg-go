@@ -40,6 +40,12 @@ const (
 	ReadSplitTargetSizeKey     = "read.split.target-size"
 	ReadSplitTargetSizeDefault = 128 * 1024 * 1024 // 128 MiB
 
+	// ReadManifestListCacheEnabledKey controls reuse of decoded snapshot
+	// manifest lists across scans of a table handle. Disable it to avoid
+	// retaining manifest descriptors between operations.
+	ReadManifestListCacheEnabledKey     = "read.manifest-list-cache.enabled"
+	ReadManifestListCacheEnabledDefault = true
+
 	// These Java-compatible properties are reserved for future task-group
 	// planning. They are exported so applications can share configuration
 	// names across Iceberg implementations.
@@ -170,7 +176,15 @@ const (
 	CommitTotalRetryTimeoutMsDefault = 30 * 60 * 1000
 )
 
-func isGCEnabled(props iceberg.Properties) bool {
+// IsGCEnabled reports whether garbage collection (physical file deletion) is
+// enabled for the given table properties. A missing "gc.enabled" key returns
+// [GCEnabledDefault]. Otherwise GC is enabled only when the value is a
+// case-insensitive "true"; any other value, including "1", "true " (with
+// surrounding whitespace), or arbitrary text, disables it.
+//
+// This is exported so the table/maintenance package can gate destructive
+// operations on it; the parsing rules above are part of that contract.
+func IsGCEnabled(props iceberg.Properties) bool {
 	value, ok := props[GCEnabledKey]
 	if !ok {
 		return GCEnabledDefault

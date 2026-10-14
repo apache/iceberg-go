@@ -290,8 +290,6 @@ func TestArrowSchemaToIceberg(t *testing.T) {
 	}
 }
 
-func makeID(v int) *int { return &v }
-
 var (
 	icebergSchemaNested = iceberg.NewSchema(0,
 		iceberg.NestedField{
@@ -389,7 +387,7 @@ func TestVariantArrowConversion(t *testing.T) {
 		dataField := arrowSc.Field(1)
 		ext, ok := dataField.Type.(arrow.ExtensionType)
 		require.True(t, ok, "expected extension type, got %T", dataField.Type)
-		assert.Equal(t, "parquet.variant", ext.ExtensionName())
+		assert.Equal(t, extensions.VariantExtensionName, ext.ExtensionName())
 
 		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
 		require.NoError(t, err)
@@ -427,7 +425,7 @@ func TestVariantArrowConversion(t *testing.T) {
 		for _, idx := range []int{1, 2} {
 			ext, ok := arrowSc.Field(idx).Type.(arrow.ExtensionType)
 			require.True(t, ok, "field %d should be extension type", idx)
-			assert.Equal(t, "parquet.variant", ext.ExtensionName())
+			assert.Equal(t, extensions.VariantExtensionName, ext.ExtensionName())
 		}
 
 		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
@@ -1103,37 +1101,37 @@ func TestArrowSchemaWithNameMapping(t *testing.T) {
 		err      string
 	}{
 		{"simple", schemaWithoutIDs, iceberg.NameMapping{
-			{FieldID: makeID(1), Names: []string{"foo"}},
-			{FieldID: makeID(2), Names: []string{"bar"}},
-			{FieldID: makeID(3), Names: []string{"baz"}},
+			{FieldID: new(1), Names: []string{"foo"}},
+			{FieldID: new(2), Names: []string{"bar"}},
+			{FieldID: new(3), Names: []string{"baz"}},
 		}, icebergSchemaSimple, ""},
 		{"field missing", schemaWithoutIDs, iceberg.NameMapping{
-			{FieldID: makeID(1), Names: []string{"foo"}},
+			{FieldID: new(1), Names: []string{"foo"}},
 		}, nil, "field missing from name mapping: bar"},
 		{"nested schema", schemaNestedWithoutIDs, iceberg.NameMapping{
-			{FieldID: makeID(1), Names: []string{"foo"}},
-			{FieldID: makeID(2), Names: []string{"bar"}},
-			{FieldID: makeID(3), Names: []string{"baz"}},
+			{FieldID: new(1), Names: []string{"foo"}},
+			{FieldID: new(2), Names: []string{"bar"}},
+			{FieldID: new(3), Names: []string{"baz"}},
 			{
-				FieldID: makeID(4), Names: []string{"qux"},
-				Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
+				FieldID: new(4), Names: []string{"qux"},
+				Fields: []iceberg.MappedField{{FieldID: new(5), Names: []string{"element"}}},
 			},
-			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(7), Names: []string{"key"}},
-				{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
-					{FieldID: makeID(9), Names: []string{"key"}},
-					{FieldID: makeID(10), Names: []string{"value"}},
+			{FieldID: new(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+				{FieldID: new(7), Names: []string{"key"}},
+				{FieldID: new(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+					{FieldID: new(9), Names: []string{"key"}},
+					{FieldID: new(10), Names: []string{"value"}},
 				}},
 			}},
-			{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
-					{FieldID: makeID(13), Names: []string{"latitude"}},
-					{FieldID: makeID(14), Names: []string{"longitude"}},
+			{FieldID: new(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+				{FieldID: new(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+					{FieldID: new(13), Names: []string{"latitude"}},
+					{FieldID: new(14), Names: []string{"longitude"}},
 				}},
 			}},
-			{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(16), Names: []string{"name"}},
-				{FieldID: makeID(17), Names: []string{"age"}},
+			{FieldID: new(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+				{FieldID: new(16), Names: []string{"name"}},
+				{FieldID: new(17), Names: []string{"age"}},
 			}},
 		}, icebergSchemaNested, ""},
 	}
@@ -1199,28 +1197,28 @@ func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.RecordBatch {
 	batch, _, err := array.RecordFromJSON(mem, ArrowSchemaWithAllTimestampPrec,
 		strings.NewReader(`[
 		{
-			"timestamp_s": "2023-01-01T19:25:00-05:00",
+			"timestamp_s": "2023-01-01T19:25:00",
 			"timestamptz_s": "2023-01-01T19:25:00Z",
-			"timestamp_ms": "2023-01-01T19:25:00.123-05:00",
+			"timestamp_ms": "2023-01-01T19:25:00.123",
 			"timestamptz_ms": "2023-01-01T19:25:00.123Z",
-			"timestamp_us": "2023-01-01T19:25:00.123456-05:00",
+			"timestamp_us": "2023-01-01T19:25:00.123456",
 			"timestamptz_us": "2023-01-01T19:25:00.123456Z",
-			"timestamp_ns": "2024-07-11T03:30:00.123456789-05:00",
+			"timestamp_ns": "2024-07-11T03:30:00.123456789",
 			"timestamptz_ns": "2023-01-01T19:25:00.123456789Z",
 			"timestamptz_us_etc_utc": "2023-01-01T19:25:00.123456Z",
 			"timestamptz_ns_z": "2024-07-11T03:30:00.123456789Z",
 			"timestamptz_s_0000": "2023-01-01T19:25:00Z"
 		}, {}, {
-			"timestamp_s": "2023-03-01T19:25:00-05:00",
+			"timestamp_s": "2023-03-01T19:25:00",
 			"timestamptz_s": "2023-03-01T19:25:00Z",
-			"timestamp_ms": "2023-03-01T19:25:00.123-05:00",
+			"timestamp_ms": "2023-03-01T19:25:00.123",
 			"timestamptz_ms": "2023-03-01T19:25:00.123Z",
-			"timestamp_us": "2023-03-01T19:25:00.123456-05:00",
+			"timestamp_us": "2023-03-01T19:25:00.123456",
 			"timestamptz_us": "2023-03-01T19:25:00.123456Z",
-			"timestamp_ns": "2024-07-11T03:30:00.9876543210-05:00",
-			"timestamptz_ns": "2023-03-01T19:25:00.9876543210Z",
+			"timestamp_ns": "2024-07-11T03:30:00.987654321",
+			"timestamptz_ns": "2023-03-01T19:25:00.987654321Z",
 			"timestamptz_us_etc_utc": "2023-03-01T19:25:00.123456Z",
-			"timestamptz_ns_z": "2024-07-11T03:30:00.9876543210Z",
+			"timestamptz_ns_z": "2024-07-11T03:30:00.987654321Z",
 			"timestamptz_s_0000": "2023-03-01T19:25:00Z"
 		}
 	]`))

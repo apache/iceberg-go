@@ -136,7 +136,8 @@ func (c convertToSubstrait) Map(m iceberg.MapType, keyResult, valResult types.Ty
 }
 
 func (convertToSubstrait) Primitive(iceberg.PrimitiveType) types.Type { panic("should not be called") }
-func (convertToSubstrait) Variant(iceberg.VariantType) types.Type     { panic("should not be called") }
+
+func (convertToSubstrait) Variant(iceberg.VariantType) types.Type { panic("should not be called") }
 
 func (convertToSubstrait) VisitFixed(f iceberg.FixedType) types.Type {
 	return &types.FixedBinaryType{Length: int32(f.Len())}
@@ -350,13 +351,32 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 		return nil
 	}
 
-	sort.Slice(lits, func(i, j int) bool {
-		return lits[i].String() < lits[j].String()
-	})
+	switch typ.(type) {
+	case iceberg.BooleanType, iceberg.StringType:
+		sort.Slice(lits, func(i, j int) bool {
+			return lits[i].String() < lits[j].String()
+		})
+	default:
+		type keyedLiteral struct {
+			literal iceberg.Literal
+			key     string
+		}
+
+		keyed := make([]keyedLiteral, len(lits))
+		for i, lit := range lits {
+			keyed[i] = keyedLiteral{literal: lit, key: lit.String()}
+		}
+		sort.Slice(keyed, func(i, j int) bool {
+			return keyed[i].key < keyed[j].key
+		})
+		for i, item := range keyed {
+			lits[i] = item.literal
+		}
+	}
 
 	out := make([]expr.Literal, len(lits))
-	for i, l := range lits {
-		out[i] = toSubstraitLiteral(typ, l)
+	for i, lit := range lits {
+		out[i] = toSubstraitLiteral(typ, lit)
 	}
 
 	return out

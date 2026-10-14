@@ -37,10 +37,13 @@ func cloneBoundLiteral(lit Literal) Literal {
 	}
 }
 
-func cloneBoundLiteralSet(lits Set[Literal]) Set[Literal] {
-	cloned := newLiteralSet()
-	for _, literal := range lits.Members() {
-		cloned.Add(cloneBoundLiteral(literal))
+func cloneBoundLiteralSet(lits literalSet) Set[Literal] {
+	cloned := make(literalSet, len(lits))
+	for key, value := range lits {
+		if value.orig != nil {
+			value.orig = cloneBoundLiteral(value.orig)
+		}
+		cloned[key] = value
 	}
 
 	return cloned

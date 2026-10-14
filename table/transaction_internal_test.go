@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -29,6 +30,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPrepareBatchFilterRejectsTransformedTerms(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	term := iceberg.NewUnboundTransform(
+		iceberg.TruncateTransform{Width: 3},
+		iceberg.Reference("category"),
+	)
+
+	_, err := prepareBatchFilter(iceberg.EqualTo(term, "boo"), schema, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	assert.Contains(t, err.Error(), "transformed terms")
+}
 
 func TestTransactionApplyKeepsDistinctRequirementsOfSameType(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
@@ -173,11 +189,8 @@ func liveDataFilePathsForSnapshot(t *testing.T, snap *Snapshot, fs iceio.IO) []s
 	t.Helper()
 	require.NotNil(t, snap)
 	var paths []string
-	for e, err := range snap.entries(fs, iceberg.ManifestContentData) {
+	for e, err := range snap.entries(fs, iceberg.ManifestContentData, true) {
 		require.NoError(t, err)
-		if e.Status() == iceberg.EntryStatusDELETED {
-			continue
-		}
 		if e.DataFile().ContentType() == iceberg.EntryContentData {
 			paths = append(paths, e.DataFile().FilePath())
 		}
@@ -711,7 +724,7 @@ func TestExpireSnapshotsRetainsYoungUnreferencedSnapshots(t *testing.T) {
 			now := time.Now().UnixMilli()
 			require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 				SnapshotID:       30,
-				ParentSnapshotID: transactionTestPtr(int64(10)),
+				ParentSnapshotID: new(int64(10)),
 				SequenceNumber:   3,
 				ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
 				Summary:          &Summary{Operation: OpAppend},
@@ -789,7 +802,7 @@ func TestExpireSnapshotsRetainsOnlyRefHeadsWhenMinSnapshotsToKeepIsZero(t *testi
 	// interior ancestor held by no ref head.
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       30,
-		ParentSnapshotID: transactionTestPtr(int64(20)),
+		ParentSnapshotID: new(int64(20)),
 		SequenceNumber:   3,
 		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -819,7 +832,7 @@ func TestExpireSnapshotsRetainsOnlyRefHeadsWhenMinSnapshotsToKeepIsZero(t *testi
 // the retention walk, leaving AncestorsOf's cycle guard as the only exit.
 func TestExpireSnapshotsTerminatesOnParentCycle(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
-	expireSnapshotsSnapshot(t, txn, 10).ParentSnapshotID = transactionTestPtr(int64(20))
+	expireSnapshotsSnapshot(t, txn, 10).ParentSnapshotID = new(int64(20))
 
 	done := make(chan error, 1)
 	go func() { done <- txn.ExpireSnapshots() }()
@@ -899,7 +912,7 @@ func TestIsGCEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, isGCEnabled(tt.props))
+			require.Equal(t, tt.want, IsGCEnabled(tt.props))
 		})
 	}
 }
@@ -916,8 +929,10 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 
+	meta := txn.meta
 	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &mainSnapshotID)})
 	require.NoError(t, err)
+	require.Same(t, meta, txn.meta)
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 }
@@ -1266,6 +1281,72 @@ func TestTransactionApplyKeepsRequirementsUnchangedOnUpdateFailure(t *testing.T)
 	require.Equal(t, AssertTableUUID(baseMeta.TableUUID()), txn.reqs[0])
 }
 
+func TestTransactionApplyDefersMetadataBuildForNoopRequirements(t *testing.T) {
+	t.Run("no requirements", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		txn.meta.defaultSpecID = 999
+
+		require.NoError(t, txn.apply(nil, nil))
+		_, err := txn.meta.Build()
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+	})
+
+	t.Run("duplicate requirement", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		requirement := AssertCurrentSchemaID(0)
+		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+
+		// A duplicate requirement only needs its conflict check. Make Build fail
+		// after the first apply so this path cannot accidentally rebuild metadata.
+		txn.meta.defaultSpecID = 999
+		meta := txn.meta
+		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+		require.Same(t, meta, txn.meta)
+		_, err := txn.meta.Build()
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+	})
+}
+
+func TestTransactionStagedTableBuildsSinglePreviousMetadataLogEntryAfterNoRequirementApplies(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+	for range 3 {
+		require.NoError(t, txn.SetProperties(iceberg.Properties{"key": "value"}))
+	}
+
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	require.Len(t, slices.Collect(staged.Metadata().PreviousFiles()), 1)
+}
+
+func TestTransactionApplyBuildsMetadataForNewRequirement(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	txn.meta.defaultSpecID = 999
+
+	err := txn.apply(nil, []Requirement{AssertDefaultSpecID(0)})
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+}
+
+func TestTransactionApplyPreservesRequirementValidationErrorAfterDuplicate(t *testing.T) {
+	const expected = "Requirement failed: current schema id has changed: expected 1, found 0"
+
+	t.Run("new requirement", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+		err := txn.apply(nil, []Requirement{AssertCurrentSchemaID(1)})
+		require.EqualError(t, err, expected)
+	})
+
+	t.Run("new requirement after duplicate", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		requirement := AssertCurrentSchemaID(0)
+		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+
+		err := txn.apply(nil, []Requirement{requirement, AssertCurrentSchemaID(1)})
+		require.EqualError(t, err, expected)
+	})
+}
+
 // TestTransactionApplyDedupesIdenticalSameRefAssertions covers repeated
 // producer commits in one transaction: producers build their assertion from
 // the BASE table's branch head, so a second commit re-asserts exactly the
@@ -1403,12 +1484,12 @@ func TestTransactionApplyKeepsRefAssertionsForDistinctRefs(t *testing.T) {
 	base := int64(10)
 	err := txn.apply(nil, []Requirement{
 		AssertRefSnapshotID(MainBranch, &base),
-		AssertRefSnapshotID("feature", transactionTestPtr(int64(20))),
+		AssertRefSnapshotID("feature", new(int64(20))),
 	})
 	require.NoError(t, err)
 	require.Len(t, txn.reqs, 2)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &base)
-	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", transactionTestPtr(int64(20)))
+	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", new(int64(20)))
 }
 
 // TestTransactionApplyDedupesIdenticalNonRefRequirements confirms that non-ref
@@ -1464,7 +1545,7 @@ func TestRollbackToSnapshotPreservesRetention(t *testing.T) {
 
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       20,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   2,
 		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1505,7 +1586,7 @@ func newTransactionWithSnapshotRefs(t *testing.T) *Transaction {
 
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       20,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   2,
 		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1529,10 +1610,6 @@ func requireContainsRefSnapshotRequirement(t *testing.T, requirements []Requirem
 	}
 
 	t.Fatalf("expected assertRefSnapshotID requirement for ref %q and snapshot id %v not found", ref, snapshotID)
-}
-
-func transactionTestPtr[T any](v T) *T {
-	return &v
 }
 
 func transactionTestInt64PtrEqual(left, right *int64) bool {
@@ -1567,7 +1644,7 @@ func newRollbackBranchTable(t *testing.T) *Table {
 	}))
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       20,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   2,
 		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1575,7 +1652,7 @@ func newRollbackBranchTable(t *testing.T) *Table {
 	}))
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       30,
-		ParentSnapshotID: transactionTestPtr(int64(20)),
+		ParentSnapshotID: new(int64(20)),
 		SequenceNumber:   3,
 		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1583,7 +1660,7 @@ func newRollbackBranchTable(t *testing.T) *Table {
 	}))
 	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
 		SnapshotID:       40,
-		ParentSnapshotID: transactionTestPtr(int64(10)),
+		ParentSnapshotID: new(int64(10)),
 		SequenceNumber:   4,
 		ManifestList:     "mem://default/table-location/metadata/manifest-40.avro",
 		Summary:          &Summary{Operation: OpAppend},
@@ -1648,7 +1725,7 @@ func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
 	require.Equal(t, BranchRef, featureRef.SnapshotRefType, "the rolled-back ref must stay a branch")
 	requireUntouchedRollbackRefs(t, branchTxn, "feature")
 
-	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", transactionTestPtr(int64(30)))
+	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", new(int64(30)))
 }
 
 // TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch rejects snapshot 20:
@@ -1745,7 +1822,7 @@ func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
 		require.Equal(t, int64(10), *txn.meta.currentSnapshotID,
 			"rolling main back must also move the current-snapshot pointer")
 		requireUntouchedRollbackRefs(t, txn, MainBranch)
-		requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, transactionTestPtr(int64(20)))
+		requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, new(int64(20)))
 	})
 
 	t.Run("refuses when only a branch has a head", func(t *testing.T) {
@@ -1771,7 +1848,7 @@ func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
 func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
 	producerAssertion := func(txn *Transaction) error {
 		return txn.apply(nil, []Requirement{
-			AssertRefSnapshotID("feature", transactionTestPtr(int64(30))),
+			AssertRefSnapshotID("feature", new(int64(30))),
 		})
 	}
 
@@ -2097,4 +2174,36 @@ func TestTableCommitWithoutUpdatesStaysEmpty(t *testing.T) {
 
 	assert.Equal(t, []Requirement{}, tc.Requirements, "an empty payload must serialize as [], not null")
 	assert.Equal(t, []Update{}, tc.Updates, "an empty payload must serialize as [], not null")
+}
+
+func TestTransactionApplyDuplicateRequirementWithUpdates(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%t", fail), func(t *testing.T) {
+			txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+			requirement := AssertCurrentSchemaID(0)
+			require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+			before, err := txn.meta.Build()
+			require.NoError(t, err)
+			original := txn.meta
+			updates := []Update{NewSetPropertiesUpdate(iceberg.Properties{"test-key": "test-value"})}
+			if fail {
+				updates = append(updates, NewSetCurrentSchemaUpdate(9999))
+			}
+			err = txn.apply(updates, []Requirement{requirement})
+			require.Equal(t, []Requirement{requirement}, txn.reqs)
+			after, buildErr := txn.meta.Build()
+			require.NoError(t, buildErr)
+			if fail {
+				require.Error(t, err)
+				require.Same(t, original, txn.meta)
+				require.True(t, before.Equals(after))
+
+				return
+			}
+			require.NoError(t, err)
+			require.NotSame(t, original, txn.meta)
+			require.Equal(t, "test-value", after.Properties()["test-key"])
+			require.Empty(t, before.Properties()["test-key"])
+		})
+	}
 }

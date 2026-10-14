@@ -20,13 +20,10 @@ package rest
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"iter"
 	"log/slog"
@@ -46,17 +43,15 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"golang.org/x/sync/semaphore"
 )
 
 var (
-	_ catalog.Catalog              = (*Catalog)(nil)
-	_ catalog.TransactionalCatalog = (*Catalog)(nil)
+	_ catalog.Catalog                      = (*Catalog)(nil)
+	_ catalog.TransactionalCatalog         = (*Catalog)(nil)
+	_ catalog.RefreshableCredentialCatalog = (*Catalog)(nil)
 )
 
 const (
@@ -179,18 +174,6 @@ type identifier struct {
 type commitTableResponse struct {
 	MetadataLoc string          `json:"metadata-location"`
 	RawMetadata json.RawMessage `json:"metadata"`
-	Metadata    table.Metadata  `json:"-"`
-}
-
-func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
-	type Alias commitTableResponse
-	if err = json.Unmarshal(b, (*Alias)(t)); err != nil {
-		return err
-	}
-
-	t.Metadata, err = table.ParseMetadataBytes(t.RawMetadata)
-
-	return err
 }
 
 // StorageCredential carries REST-vended storage credentials scoped to matching
@@ -205,6 +188,7 @@ type loadTableResponse struct {
 	RawMetadata        json.RawMessage     `json:"metadata"`
 	Config             iceberg.Properties  `json:"config"`
 	StorageCredentials []StorageCredential `json:"storage-credentials"`
+	Labels             *iceberg.Labels     `json:"labels,omitempty"`
 	Metadata           table.Metadata      `json:"-"`
 }
 
@@ -250,22 +234,87 @@ type sessionTransport struct {
 
 	authManager    AuthManager
 	defaultHeaders http.Header
-	signer         v4.HTTPSigner
-	cfg            aws.Config
-	service        string
-	newHash        func() hash.Hash
+	signer         RequestSigner
+
+	// builtinHeaders is the subset of defaultHeaders under the built-in keys
+	// (with any operator override applied), which identify the client and
+	// carry no credentials. It is all a request to an origin other than
+	// catalogOrigin or authOrigin (e.g. a redirect hop) receives.
+	builtinHeaders http.Header
+	// catalogOrigin is the configured catalog origin: the only origin that
+	// receives the auth header and the signer's signature. authOrigin is the
+	// configured OAuth token endpoint, if any, which also receives
+	// user-supplied default headers.
+	// These are compared against the request URL rather than derived from
+	// the redirect chain, so a transport that omits Response.Request cannot
+	// widen them. A nil catalogOrigin trusts no origin.
+	catalogOrigin *url.URL
+	authOrigin    *url.URL
 }
 
-// from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
-const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+// maxRedirects matches net/http's default redirect policy, which a custom
+// CheckRedirect replaces.
+const maxRedirects = 10
+
+// sameOriginRedirectsOnly is the CheckRedirect policy for every client the
+// catalog builds. A redirect is followed only while it stays on the origin of
+// the request that started the chain. A cross-origin hop would otherwise
+// replay a 307/308 body (such as the client_credentials form, client_secret
+// included) to the other origin, and a hop that redirects back to a different
+// catalog path would be sent with the catalog's credentials.
+func sameOriginRedirectsOnly(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if from := via[0].URL; !sameOrigin(from, req.URL) {
+		return fmt.Errorf("%w: refusing redirect from %s://%s to a different origin %s://%s",
+			ErrRESTError, from.Scheme, from.Host, req.URL.Scheme, req.URL.Host)
+	}
+
+	return nil
+}
+
+// sameOrigin reports whether two URLs share scheme, host, and effective port.
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		defaultedPort(a) == defaultedPort(b)
+}
+
+func defaultedPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// This transport adds the auth header, the signature and the session
+	// defaults to every request it sends, including each redirect hop.
+	// net/http's redirect stripping only covers Authorization and cookies set
+	// on the request passed to Client.Do, and never custom headers, so these
+	// are applied only for the configured origins. sameOriginRedirectsOnly
+	// keeps the clients from following a cross-origin hop at all; this gate
+	// is the second line of defense.
+	toCatalog := s.catalogOrigin != nil && sameOrigin(s.catalogOrigin, r.URL)
+	defaults := s.builtinHeaders
+	if toCatalog || (s.authOrigin != nil && sameOrigin(s.authOrigin, r.URL)) {
+		defaults = s.defaultHeaders
+	}
+
 	// A session default is applied unless the request already carries that
 	// header (a per-request override of any default, not just Content-Type
 	// wins) or explicitly opted out of it via withSuppressedHeaders (carried on
 	// the context as an explicit set, never inferred from header values).
 	suppressed := suppressedHeadersFrom(r.Context())
-	for k, v := range s.defaultHeaders {
+	for k, v := range defaults {
 		ck := http.CanonicalHeaderKey(k)
 		if _, ok := r.Header[ck]; ok {
 			continue
@@ -284,7 +333,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// session default of the same key. A caller cannot suppress or spoof the
 	// Authorization header by supplying its own. Do not reorder this before the
 	// default-header loop.
-	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
+	if s.authManager != nil && toCatalog && r.Context().Value(skipOAuth) == nil {
 		var (
 			k, v string
 			err  error
@@ -303,45 +352,13 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r.Header.Set(k, v)
 	}
 
-	if s.signer != nil {
-		var payloadHash string
-		if r.Body == nil {
-			payloadHash = emptyStringHash
-		} else {
-			rdr, err := r.GetBody()
-			if err != nil {
-				return nil, err
-			}
-
-			h := s.newHash()
-			if _, err = io.Copy(h, rdr); err != nil {
-				if closeErr := rdr.Close(); closeErr != nil {
-					err = errors.Join(err, closeErr)
-				}
-
-				return nil, err
-			}
-
-			if err = rdr.Close(); err != nil {
-				return nil, err
-			}
-
-			payloadHash = hex.EncodeToString(h.Sum(nil))
-		}
-
-		creds, err := s.cfg.Credentials.Retrieve(r.Context())
-		if err != nil {
-			return nil, err
-		}
-
-		// Set the x-amz-content-sha256 header before signing.
-		// This header is required for AWS SigV4 signature verification.
-		r.Header.Set("x-amz-content-sha256", payloadHash)
-
-		// modifies the request in place
-		err = s.signer.SignHTTP(r.Context(), creds, r, payloadHash,
-			s.service, s.cfg.Region, time.Now())
-		if err != nil {
+	// A signer only signs requests to the configured catalog origin: a request
+	// to a different origin (e.g. a redirect hop) is left unsigned, so the
+	// signer's Authorization header and any session token never reach an
+	// unconfigured host. The guard lives here, in core, so it covers every
+	// signer, including one installed verbatim via WithSigner.
+	if s.signer != nil && toCatalog {
+		if err := s.signer.SignRequest(r); err != nil {
 			return nil, err
 		}
 	}
@@ -987,7 +1004,11 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 	// this reuses the catalog client's transport — preserving its TLS, proxy and
 	// header behavior — but as a distinct *http.Client so the Timeout applies to
 	// refresh alone and not to ordinary catalog requests.
-	oauthClient := &http.Client{Transport: cl.Transport, Timeout: defaultOAuthTimeout}
+	oauthClient := &http.Client{
+		Transport:     cl.Transport,
+		Timeout:       defaultOAuthTimeout,
+		CheckRedirect: sameOriginRedirectsOnly,
+	}
 	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
 		transport := &http.Transport{
@@ -995,8 +1016,9 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 			TLSClientConfig: opts.oauthTLSConfig,
 		}
 		oauthClient = &http.Client{
-			Transport: transport,
-			Timeout:   defaultOAuthTimeout,
+			Transport:     transport,
+			Timeout:       defaultOAuthTimeout,
+			CheckRedirect: sameOriginRedirectsOnly,
 		}
 		closeIdleConnections = transport.CloseIdleConnections
 	}
@@ -1054,6 +1076,19 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
+// builtinHeaderDefaults returns the headers every session sends by default.
+// They identify the client and carry no credentials, so they are the only
+// defaults a request to an unconfigured origin receives (see
+// sessionTransport.builtinHeaders).
+func builtinHeaderDefaults() []struct{ key, value string } {
+	return []struct{ key, value string }{
+		{"X-Client-Version", icebergRestSpecVersion},
+		{"Content-Type", "application/json"},
+		{"User-Agent", "GoIceberg/" + iceberg.Version()},
+		{headerIcebergAccessDelegation, defaultAccessDelegation},
+	}
+}
+
 // createSession returns a cleanup that closes only transports created by this
 // function, never transports supplied by the caller.
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, func(), error) {
@@ -1081,8 +1116,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session := &sessionTransport{
 		RoundTripper:   baseTransport,
 		defaultHeaders: http.Header{},
+		catalogOrigin:  r.baseURI,
+		authOrigin:     opts.authUri,
 	}
-	cl := &http.Client{Transport: session}
+	cl := &http.Client{Transport: session, CheckRedirect: sameOriginRedirectsOnly}
 
 	// If the user does not set an AuthManager, construct one for this session
 	// without storing it in opts. Bootstrap authentication must not leak into
@@ -1096,10 +1133,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
-	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
-	session.defaultHeaders.Set("Content-Type", "application/json")
-	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	session.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
+	builtins := builtinHeaderDefaults()
+	for _, h := range builtins {
+		session.defaultHeaders.Set(h.key, h.value)
+	}
 
 	for k, v := range opts.headers {
 		session.defaultHeaders.Set(k, v)
@@ -1111,29 +1148,24 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
+	session.builtinHeaders = http.Header{}
+	for _, h := range builtins {
+		if v := session.defaultHeaders.Values(h.key); len(v) > 0 {
+			session.builtinHeaders[http.CanonicalHeaderKey(h.key)] = slices.Clone(v)
+		}
+	}
+
 	if authManager != nil {
 		session.authManager = authManager
 	}
 
-	if opts.enableSigv4 {
-		cfg := opts.awsConfig
-		if !opts.awsConfigSet {
-			// If no config provided, load defaults from environment.
-			var err error
-			cfg, err = config.LoadDefaultConfig(ctx)
-			if err != nil {
-				cleanup()
+	signer, err := resolveSigner(ctx, opts)
+	if err != nil {
+		cleanup()
 
-				return nil, nil, err
-			}
-		}
-		if opts.sigv4Region != "" {
-			cfg.Region = opts.sigv4Region
-		}
-
-		session.cfg, session.service = cfg, opts.sigv4Service
-		session.signer, session.newHash = v4.NewSigner(), sha256.New
+		return nil, nil, err
 	}
+	session.signer = signer
 
 	return cl, cleanup, nil
 }
@@ -1255,6 +1287,8 @@ func (r *Catalog) tableFromResponse(
 	config iceberg.Properties,
 	scanPlanningConfig iceberg.Properties,
 	credsVended bool,
+	labels *iceberg.Labels,
+	opts ...table.Option,
 ) (*table.Table, error) {
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
@@ -1305,14 +1339,19 @@ func (r *Catalog) tableFromResponse(
 		}
 	}
 
+	// Caller-supplied opts are applied last so they can override the defaults
+	// derived above.
 	return table.New(
 		identifier,
 		metadata,
 		loc,
 		fsF,
 		r,
-		table.WithMetricsReporter(reporter),
-		table.WithScanPlanningIOProperties(scanPlanningConfig),
+		append([]table.Option{
+			table.WithMetricsReporter(reporter),
+			table.WithScanPlanningIOProperties(scanPlanningConfig),
+			table.WithLabels(labels),
+		}, opts...)...,
 	), nil
 }
 
@@ -1338,6 +1377,43 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 	}
 
 	return resolveStorageCredentials(ret.StorageCredentials, location), nil
+}
+
+// RefreshTableCredentials updates a *table.Table with newly-vended credentials from the catalog
+// without updating any other table-internal state that a full Refresh() would.
+// Allows for a quick table credential refresh if the table was created without any pre-seeded
+// credentials. If the catalog did not vend any credentials, the table is returned unmodified.
+//
+// Note that the passed-in table instance should be created with the table.WithSavedConfig() option to
+// save any table-specific configs for reuse in the newly-created instance. All tables created by this
+// catalog pass in that option. Callers of table.New() that use this method should also pass
+// metadata.Properties() into table.WithSavedConfig().
+func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table) (*table.Table, error) {
+	metadataLoc := tbl.MetadataLocation()
+	resp, err := r.fetchTableCreds(ctx, tbl.Identifier(), metadataLoc)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp) == 0 {
+		// No new credentials vended. Return as-is.
+		return tbl, nil
+	}
+
+	// Return a new *table.Table with newly-merged credentials coming from the
+	// fetchTableCreds call.
+	config := maps.Clone(r.props)
+	maps.Copy(config, tbl.SavedConfig())
+	scanCfg := maps.Clone(config)
+	mergeVendedCredentials(config, resp, metadataLoc)
+
+	// Keep a reporter the caller set on the table rather than reverting it to
+	// the catalog default, as Refresh does.
+	opts := []table.Option{table.WithSavedConfig(tbl.SavedConfig())}
+	if reporter := tbl.MetricsReporter(); !metrics.IsNop(reporter) {
+		opts = append(opts, table.WithMetricsReporter(reporter))
+	}
+
+	return r.tableFromResponse(ctx, tbl.Identifier(), tbl.Metadata(), metadataLoc, config, scanCfg, true, tbl.Labels(), opts...)
 }
 
 type identifierPageFetcher func(pageToken string) ([]table.Identifier, string, error)
@@ -1432,13 +1508,20 @@ func (r *Catalog) nsSeparator() string {
 	return r.namespaceSeparator
 }
 
+// encodePathSegment escapes a REST path segment per RFC 3986. PathEscape
+// leaves plus signs literal, so encode them explicitly to avoid form decoders
+// interpreting them as spaces.
+func encodePathSegment(value string) string {
+	return strings.ReplaceAll(url.PathEscape(value), "+", "%2B")
+}
+
 // encodeNamespace URL-encodes each namespace level and joins them with the
 // server-advertised, URL-encoded namespace separator for use as a REST path
-// segment. Mirrors RESTUtil.encodeNamespace in the Java implementation.
+// segment.
 func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
 	encoded := make([]string, len(namespace))
 	for i, level := range namespace {
-		encoded[i] = url.PathEscape(level)
+		encoded[i] = encodePathSegment(level)
 	}
 
 	return strings.Join(encoded, r.nsSeparator())
@@ -1465,7 +1548,7 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1473,7 +1556,7 @@ func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string,
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1481,7 +1564,7 @@ func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, str
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), encodePathSegment(catalog.ObjectNameFromIdent(ident)), nil
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
@@ -1489,7 +1572,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1516,7 +1599,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	stagedCreate := len(cfg.StagedUpdates) > 0
 
 	payload := createTableRequest{
-		Name:          tbl,
+		Name:          catalog.ObjectNameFromIdent(identifier),
 		Schema:        schema,
 		Location:      cfg.Location,
 		PartitionSpec: cfg.PartitionSpec,
@@ -1547,12 +1630,15 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	// Save only the per-table configs.
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
-	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
+	mergeVendedCredentials(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc), ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1611,14 +1697,14 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		return nil, "", err
 	}
 
-	ns, tblName, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, "", err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tblName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 
 	type payload struct {
@@ -1627,7 +1713,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		Updates      []table.Update      `json:"updates"`
 	}
 
-	path, err := endpointUpdateTable.reqPath(ns, tblName)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1645,8 +1731,20 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 	if err != nil {
 		return nil, "", err
 	}
+	metadata, err := r.parseCommitMetadata(ret.RawMetadata)
+	if err != nil {
+		return nil, "", err
+	}
 
-	return ret.Metadata, ret.MetadataLoc, nil
+	return metadata, ret.MetadataLoc, nil
+}
+
+func (r *Catalog) parseCommitMetadata(raw json.RawMessage) (table.Metadata, error) {
+	if r.snapshotMode == SnapshotModeRefs {
+		return table.ParseMetadataBytesDeferredSnapshots(raw)
+	}
+
+	return table.ParseMetadataBytes(raw)
 }
 
 // CommitTransaction atomically commits changes to multiple tables in a
@@ -1729,7 +1827,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(identifier)
+	ns, _, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1754,7 +1852,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 
 	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, path,
-		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
 	if err != nil {
@@ -1763,12 +1861,14 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
-	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
+	mergeVendedCredentials(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc), ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -1808,12 +1908,15 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+	// Save only the per-table configs, not r.props.
+	saved := maps.Clone(ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(saved, ret.Config)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
-	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
+	mergeVendedCredentials(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc), ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, ret.Labels, table.WithSavedConfig(saved))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1821,21 +1924,21 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		return nil, err
 	}
 
-	ns, tbl, err := r.splitIdentForPath(ident)
+	ns, encodedTbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      tbl,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier          `json:"identifier"`
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateTable.reqPath(ns, tbl)
+	path, err := endpointUpdateTable.reqPath(ns, encodedTbl)
 	if err != nil {
 		return nil, err
 	}
@@ -1853,11 +1956,16 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	if err != nil {
 		return nil, err
 	}
+	metadata, err := r.parseCommitMetadata(ret.RawMetadata)
+	if err != nil {
+		return nil, err
+	}
 
 	config := maps.Clone(r.props)
-	maps.Copy(config, ret.Metadata.Properties())
+	maps.Copy(config, metadata.Properties())
 
-	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config, config, false)
+	// A commit response carries no labels (they are load-time enrichment).
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil, table.WithSavedConfig(metadata.Properties()))
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
@@ -1941,8 +2049,13 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
+	// The spec's rename 404 covers both a missing source table and a missing
+	// destination namespace; split it by error.type so a missing namespace is
+	// not reported as a missing table. The type override only refines a
+	// status mapped here, so a 5xx or 401/403 carrying that type is unaffected.
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, allowNoContent())
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: catalog.ErrTableAlreadyExists},
+		allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}))
 	if err != nil {
 		return nil, err
 	}
@@ -2334,6 +2447,7 @@ type viewResponse struct {
 	MetadataLoc string             `json:"metadata-location"`
 	RawMetadata json.RawMessage    `json:"metadata"`
 	Config      iceberg.Properties `json:"config"`
+	Labels      *iceberg.Labels    `json:"labels,omitempty"`
 	Metadata    view.Metadata      `json:"-"`
 }
 
@@ -2357,7 +2471,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, fmt.Errorf("%w: view version cannot be nil", iceberg.ErrInvalidArgument)
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2388,7 +2502,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	payload := createViewRequest{
-		Name:        viewName,
+		Name:        catalog.ObjectNameFromIdent(identifier),
 		Location:    cfg.Location,
 		Schema:      freshSchema,
 		Props:       cfg.Properties,
@@ -2409,7 +2523,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	return view.New(identifier, ret.Metadata, ret.MetadataLoc), nil
+	return view.New(identifier, ret.Metadata, ret.MetadataLoc, view.WithLabels(ret.Labels)), nil
 }
 
 // UpdateView updates a view in the catalog.
@@ -2418,21 +2532,21 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitViewIdentForPath(ident)
+	ns, encodedView, err := r.splitViewIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
 		Namespace: catalog.NamespaceFromIdent(ident),
-		Name:      viewName,
+		Name:      catalog.ObjectNameFromIdent(ident),
 	}
 	type payload struct {
 		Identifier   identifier         `json:"identifier"`
 		Requirements []view.Requirement `json:"requirements"`
 		Updates      []view.Update      `json:"updates"`
 	}
-	path, err := endpointUpdateView.reqPath(ns, viewName)
+	path, err := endpointUpdateView.reqPath(ns, encodedView)
 	if err != nil {
 		return nil, err
 	}
@@ -2444,7 +2558,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	return view.New(ident, ret.Metadata, ret.MetadataLoc), nil
+	return view.New(ident, ret.Metadata, ret.MetadataLoc, view.WithLabels(ret.Labels)), nil
 }
 
 // loadViewResponse contains the response from loading a view
@@ -2452,6 +2566,7 @@ type loadViewResponse struct {
 	MetadataLoc string             `json:"metadata-location"`
 	RawMetadata json.RawMessage    `json:"metadata"`
 	Config      iceberg.Properties `json:"config"`
+	Labels      *iceberg.Labels    `json:"labels,omitempty"`
 }
 
 // RegisterView registers an existing view in the catalog using its metadata file location.
@@ -2463,7 +2578,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := r.splitViewIdentForPath(identifier)
+	ns, _, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -2479,7 +2594,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 	}
 
 	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, path,
-		payload{Name: v, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+		payload{Name: catalog.ObjectNameFromIdent(identifier), MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
 		})
 	if err != nil {
@@ -2491,7 +2606,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
 	}
 
-	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+	return view.New(identifier, metadata, rsp.MetadataLoc, view.WithLabels(rsp.Labels)), nil
 }
 
 // LoadView loads a view from the catalog.
@@ -2523,7 +2638,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
 	}
 
-	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+	return view.New(identifier, metadata, rsp.MetadataLoc, view.WithLabels(rsp.Labels)), nil
 }
 
 func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*view.View, error) {

@@ -146,9 +146,9 @@ func benchmarkManifestEntries(count int, content iceberg.ManifestContent) []iceb
 			&mockDataFile{path: "eq-delete.parquet", contentType: iceberg.EntryContentEqDeletes},
 			&dvMockDataFile{
 				mockDataFile:       mockDataFile{path: "dv.puffin", contentType: iceberg.EntryContentPosDeletes, format: iceberg.PuffinFile},
-				referencedDataFile: strPtr("data.parquet"),
-				contentOffset:      int64Ptr(0),
-				contentSizeInBytes: int64Ptr(128),
+				referencedDataFile: new("data.parquet"),
+				contentOffset:      new(int64(0)),
+				contentSizeInBytes: new(int64(128)),
 			},
 		}
 	}

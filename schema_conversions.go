@@ -48,6 +48,10 @@ func partitionTypeToAvroSchema(t *StructType) (*avro.Schema, error) {
 			node = internal.NullableNode(internal.TimestampNode)
 		case TimestampTzType:
 			node = internal.NullableNode(internal.TimestampTzNode)
+		case TimestampNsType:
+			node = internal.NullableNode(internal.TimestampNsNode)
+		case TimestampTzNsType:
+			node = internal.NullableNode(internal.TimestampTzNsNode)
 		case UUIDType:
 			node = internal.NullableNode(internal.UUIDNode)
 		case BooleanType:

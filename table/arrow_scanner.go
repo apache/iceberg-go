@@ -19,13 +19,16 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -54,18 +57,18 @@ const (
 var PositionalDeleteArrowSchema, _ = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, true, false)
 
 type (
-	positionDeletes   = []*arrow.Chunked
-	perFilePosDeletes = map[string]positionDeletes
+	positionDeletes      = []*arrow.Chunked
+	perFilePosDeletes    = map[string]positionDeletes
+	perDeleteFileTargets = map[string]map[string]struct{}
 )
 
 // releasePerFilePosDeletes releases every Arrow chunk in a positional-delete
 // map. Required on every error return between readAllDeleteFiles and the
 // iterator returned by createIterator — Arrow allocations are not freed by
 // GC, so dropping the map on the floor leaks the chunks. Safe to call on a
-// nil map; the nil-chunk guard is defensive — readDeletes never inserts a
+// nil map; the nil-chunk guard is defensive — position-delete readers never insert a
 // nil *arrow.Chunked, but the guard keeps callers safe if that invariant
-// ever changes (e.g. when readAllDeletionVectors lands and starts merging
-// into the same map).
+// ever changes.
 func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
 	for _, chunks := range deletesPerFile {
 		for _, chunk := range chunks {
@@ -76,21 +79,50 @@ func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
 	}
 }
 
-func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
-	deletesPerFile := make(perFilePosDeletes)
+// collectPositionDeleteFilesAndTargets indexes each positional-delete file and
+// the data-file paths of tasks that reference it. A nil target set preserves
+// the whole-file fallback when any referencing task lacks a usable data path.
+func collectPositionDeleteFilesAndTargets(tasks []FileScanTask) (map[string]iceberg.DataFile, perDeleteFileTargets) {
 	uniqueDeletes := make(map[string]iceberg.DataFile)
+	targetsByDelete := make(perDeleteFileTargets)
 
-	for _, t := range tasks {
-		for _, d := range t.DeleteFiles {
-			if d.ContentType() != iceberg.EntryContentPosDeletes {
+	for _, task := range tasks {
+		for _, deleteFile := range task.DeleteFiles {
+			if deleteFile.ContentType() != iceberg.EntryContentPosDeletes {
 				continue
 			}
 
-			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
-				uniqueDeletes[d.FilePath()] = d
+			deletePath := deleteFile.FilePath()
+			if _, ok := uniqueDeletes[deletePath]; !ok {
+				uniqueDeletes[deletePath] = deleteFile
 			}
+
+			targets, ok := targetsByDelete[deletePath]
+			if !ok {
+				targets = make(map[string]struct{})
+				targetsByDelete[deletePath] = targets
+			}
+			if targets == nil {
+				continue
+			}
+			if task.File == nil || task.File.FilePath() == "" {
+				targetsByDelete[deletePath] = nil
+
+				continue
+			}
+			targets[task.File.FilePath()] = struct{}{}
 		}
 	}
+
+	return uniqueDeletes, targetsByDelete
+}
+
+// readAllDeleteFiles reads every referenced positional-delete file up front. It
+// remains the path used by Transaction.makePositionDeleteRecordsForFilter and by
+// the eager-vs-lazy benchmark; arrowScan.GetRecords uses lazyPositionDeleteLoader.
+func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
+	deletesPerFile := make(perFilePosDeletes)
+	uniqueDeletes, targetsByDelete := collectPositionDeleteFilesAndTargets(tasks)
 
 	if len(uniqueDeletes) == 0 {
 		return deletesPerFile, nil
@@ -107,9 +139,9 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 		defer close(perFileChan)
 		for _, v := range uniqueDeletes {
 			g.Go(func() error {
-				deletes, err := readDeletes(gctx, fs, v)
+				deletes, err := readDeletesForPaths(gctx, fs, v, targetsByDelete[v.FilePath()])
 				if err != nil {
-					return err
+					return fmt.Errorf("read position deletes from %s: %w", v.FilePath(), err)
 				}
 				if deletes == nil {
 					return nil
@@ -138,37 +170,341 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 	return deletesPerFile, nil
 }
 
+// lazyPositionDeleteLoader indexes positional-delete metadata for a scan, but
+// waits to open each delete file until a worker reaches a task that references
+// it. Delete-file reads are cached by delete path, while the merged position
+// bitmap is cached by target data file plus its delete-file set. Split tasks
+// therefore share one immutable bitmap instead of rebuilding a hash set per
+// task. Unions of multiple non-empty inputs are retained alongside the
+// per-file bitmaps until release.
+//
+// The loader has the lifetime of exactly one scan. Each delete file and merged
+// bitmap locks in its first result, including context errors, for every caller;
+// a loader must not be reused for a retry with a different context.
+type lazyPositionDeleteLoader struct {
+	fs      iceio.IO
+	files   map[string]*lazyPositionDeleteFile
+	indexes []positionDeleteTaskIndex
+
+	releaseOnce sync.Once
+	released    atomic.Bool
+}
+
+var errPositionDeleteLoaderReleased = errors.New("position delete loader already released")
+
+type lazyPositionDeleteFile struct {
+	dataFile iceberg.DataFile
+	targets  map[string]struct{}
+
+	once    sync.Once
+	bitmaps map[string]*dv.RoaringPositionBitmap
+	err     error
+}
+
+type lazyPositionDeleteIndex struct {
+	targetPath  string
+	deletePaths []string
+
+	once   sync.Once
+	bitmap *dv.RoaringPositionBitmap
+	err    error
+}
+
+type positionDeleteTaskIndex struct {
+	targetPath string
+	index      *lazyPositionDeleteIndex
+}
+
+func positionDeleteIndexKey(task FileScanTask) (key, targetPath string, deletePaths []string) {
+	if task.File == nil {
+		return "", "", nil
+	}
+	targetPath = task.File.FilePath()
+	if targetPath == "" {
+		return "", "", nil
+	}
+	// An applicable DV contains all earlier position deletes for this file.
+	// Skip superseded files before loading or validating their contents.
+	if len(task.DeletionVectorFiles) > 0 {
+		return "", targetPath, nil
+	}
+
+	for _, deleteFile := range task.DeleteFiles {
+		if deleteFile.ContentType() == iceberg.EntryContentPosDeletes {
+			deletePaths = append(deletePaths, deleteFile.FilePath())
+		}
+	}
+	if len(deletePaths) == 0 {
+		return "", targetPath, nil
+	}
+	slices.Sort(deletePaths)
+	deletePaths = slices.Compact(deletePaths)
+
+	var builder strings.Builder
+	writePart := func(part string) {
+		builder.WriteString(strconv.Itoa(len(part)))
+		builder.WriteByte(':')
+		builder.WriteString(part)
+	}
+	writePart(targetPath)
+	for _, path := range deletePaths {
+		builder.WriteByte('|')
+		writePart(path)
+	}
+
+	return builder.String(), targetPath, deletePaths
+}
+
+func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositionDeleteLoader {
+	uniqueDeletes, targetsByDelete := collectPositionDeleteFilesAndTargets(tasks)
+	if len(uniqueDeletes) == 0 {
+		return nil
+	}
+	loader := &lazyPositionDeleteLoader{
+		fs:      fs,
+		files:   make(map[string]*lazyPositionDeleteFile, len(uniqueDeletes)),
+		indexes: make([]positionDeleteTaskIndex, len(tasks)),
+	}
+
+	for path, deleteFile := range uniqueDeletes {
+		loader.files[path] = &lazyPositionDeleteFile{
+			dataFile: deleteFile,
+			targets:  targetsByDelete[path],
+		}
+	}
+	indexesByKey := make(map[string]*lazyPositionDeleteIndex)
+	for i, task := range tasks {
+		key, targetPath, deletePaths := positionDeleteIndexKey(task)
+		loader.indexes[i].targetPath = targetPath
+		if key == "" {
+			continue
+		}
+		index := indexesByKey[key]
+		if index == nil {
+			index = &lazyPositionDeleteIndex{
+				targetPath:  targetPath,
+				deletePaths: deletePaths,
+			}
+			indexesByKey[key] = index
+		}
+		loader.indexes[i].index = index
+	}
+
+	return loader
+}
+
+func (l *lazyPositionDeleteLoader) loadDeleteFile(
+	ctx context.Context, path string,
+) (*lazyPositionDeleteFile, error) {
+	cached, ok := l.files[path]
+	if !ok {
+		return nil, nil
+	}
+
+	cached.once.Do(func() {
+		cached.bitmaps, cached.err = readPositionDeleteBitmapsForPaths(
+			ctx, l.fs, cached.dataFile, cached.targets)
+		if cached.err != nil {
+			cached.bitmaps = nil
+			cached.err = fmt.Errorf("read position deletes from %s: %w",
+				cached.dataFile.FilePath(), cached.err)
+		}
+	})
+	if cached.err != nil {
+		return nil, cached.err
+	}
+
+	return cached, nil
+}
+
+func (l *lazyPositionDeleteLoader) buildIndex(
+	ctx context.Context, targetPath string, deletePaths []string,
+) (*dv.RoaringPositionBitmap, error) {
+	var bitmap *dv.RoaringPositionBitmap
+	owned := false
+	for _, path := range deletePaths {
+		cached, err := l.loadDeleteFile(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		if cached == nil {
+			continue
+		}
+
+		deleteBitmap := cached.bitmaps[targetPath]
+		if deleteBitmap == nil || deleteBitmap.IsEmpty() {
+			continue
+		}
+		if bitmap == nil {
+			bitmap = deleteBitmap
+
+			continue
+		}
+
+		// Detach from the first cached bitmap once, then accumulate into the
+		// private union. Cached inputs stay immutable for other split tasks.
+		if !owned {
+			merged := dv.NewRoaringPositionBitmap()
+			merged.Or(bitmap)
+			bitmap = merged
+			owned = true
+		}
+		bitmap.Or(deleteBitmap)
+	}
+
+	return bitmap, nil
+}
+
+// load uses the ordinal in the task slice passed to newLazyPositionDeleteLoader.
+// Workers preserve that ordinal even when they finish out of order, so this
+// lookup does not rebuild or hash a key for every split. The target path rejects
+// ordinals paired with another data file after reordering or filtering tasks,
+// including ordinals that originally had no position deletes.
+//
+// The returned bitmap is shared and read-only. Callers must not mutate it with
+// Set, Or, or RunLengthEncode; other split tasks may be reading the same bitmap.
+func (l *lazyPositionDeleteLoader) load(ctx context.Context, taskIndex int, targetPath string) (*dv.RoaringPositionBitmap, error) {
+	if l.released.Load() {
+		return nil, errPositionDeleteLoaderReleased
+	}
+	if taskIndex < 0 || taskIndex >= len(l.indexes) {
+		return nil, fmt.Errorf("%w: position delete task index %d out of range [0, %d)",
+			iceberg.ErrInvalidArgument, taskIndex, len(l.indexes))
+	}
+
+	task := l.indexes[taskIndex]
+	if task.targetPath != targetPath {
+		return nil, fmt.Errorf("%w: position delete task index %d targets %q, got %q",
+			iceberg.ErrInvalidArgument, taskIndex, task.targetPath, targetPath)
+	}
+	index := task.index
+	if index == nil {
+		return nil, nil
+	}
+
+	index.once.Do(func() {
+		index.bitmap, index.err = l.buildIndex(ctx, index.targetPath, index.deletePaths)
+	})
+	if index.err != nil {
+		return nil, index.err
+	}
+
+	return index.bitmap, nil
+}
+
+func (l *lazyPositionDeleteLoader) release() {
+	if l == nil {
+		return
+	}
+
+	l.releaseOnce.Do(func() {
+		l.released.Store(true)
+		for _, cached := range l.files {
+			cached.bitmaps = nil
+		}
+		for _, task := range l.indexes {
+			if task.index != nil {
+				task.index.bitmap = nil
+			}
+		}
+	})
+}
+
 // perFileDVBitmaps maps each data-file path to the deletion-vector bitmap
 // that applies to it. Kept separate from perFilePosDeletes so the row-filter
 // pipeline can use compute.Filter on a Boolean mask built from Contains()
 // directly, instead of materializing positions into a set[int64] + Take.
 type perFileDVBitmaps = map[string]*dv.RoaringPositionBitmap
 
-// readAllDeletionVectors reads every deletion-vector puffin blob referenced
-// by the input tasks and returns a perFileDVBitmaps map keyed by the
-// referenced data-file path.
-//
-// Dedup is by referenced-data-file path, not by puffin file path: a single
-// puffin file can carry multiple DV blobs (one per data file). Keying by the
-// puffin path would silently drop all but the first blob. This matches Java's
-// DeleteFileIndex.findDV, which keys by data-file path. As a side-effect we
-// can detect spec violations: two distinct DV blobs targeting the same data
-// file is rejected (mirrors Java's "Can't index multiple DVs for %s"
-// ValidationException — over-deletion risk if silently unioned).
-//
-// Validation happens up front, before any goroutines are launched, so the
-// goroutine fan-out has no early-exit path. (An early return after g.Go
-// dispatches but before g.Wait would close resultsChan while in-flight
-// workers were still sending, panicking with "send on closed channel".)
-func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFileDVBitmaps, error) {
-	out := make(perFileDVBitmaps)
+// lazyDeletionVectorLoader indexes deletion-vector metadata for a scan, but
+// waits to read a Puffin file until a task for one of its data files is
+// processed. Each Puffin group is loaded once and all of its bitmaps are kept
+// in the scan-scoped cache so tasks sharing a file do not repeat the read.
+type lazyDeletionVectorLoader struct {
+	fs iceio.IO
+
+	byDataFile map[string]*lazyDeletionVectorGroup
+}
+
+type lazyDeletionVectorGroup struct {
+	puffinPath          string
+	referencedDataFiles []string
+	files               []iceberg.DataFile
+
+	once    sync.Once
+	bitmaps perFileDVBitmaps
+	err     error
+}
+
+func newLazyDeletionVectorLoader(fs iceio.IO, tasks []FileScanTask) (*lazyDeletionVectorLoader, error) {
+	uniqueDVs, err := collectUniqueDeletionVectors(tasks)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := groupDeletionVectors(uniqueDVs)
+	loader := &lazyDeletionVectorLoader{
+		fs:         fs,
+		byDataFile: make(map[string]*lazyDeletionVectorGroup, len(uniqueDVs)),
+	}
+	for _, group := range groups {
+		for _, ref := range group.referencedDataFiles {
+			loader.byDataFile[ref] = group
+		}
+	}
+
+	return loader, nil
+}
+
+func (l *lazyDeletionVectorLoader) load(ctx context.Context, dataFilePath string) (*dv.RoaringPositionBitmap, error) {
+	if l == nil {
+		return nil, nil
+	}
+
+	group := l.byDataFile[dataFilePath]
+	if group == nil {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	group.once.Do(func() {
+		bitmaps, err := dv.ReadDVs(l.fs, group.files)
+		if err != nil {
+			group.err = fmt.Errorf("read deletion vectors from %s: %w", group.puffinPath, err)
+
+			return
+		}
+		group.bitmaps = make(perFileDVBitmaps, len(bitmaps))
+		for i, ref := range group.referencedDataFiles {
+			group.bitmaps[ref] = bitmaps[i]
+		}
+	})
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if group.err != nil {
+		return nil, group.err
+	}
+
+	return group.bitmaps[dataFilePath], nil
+}
+
+func collectUniqueDeletionVectors(tasks []FileScanTask) (map[string]iceberg.DataFile, error) {
 	uniqueDVs := make(map[string]iceberg.DataFile)
 
 	for _, t := range tasks {
 		for _, d := range t.DeletionVectorFiles {
 			_, _, ref, contentOffset, contentSize := iceinternal.BorrowedDataFilePointers(d)
 			if ref == nil {
-				return nil, fmt.Errorf("deletion vector %s missing referenced_data_file", d.FilePath())
+				return nil, fmt.Errorf("%w: deletion vector %s missing referenced_data_file",
+					dv.ErrInvalidDeletionVector, d.FilePath())
+			}
+			if *ref == "" {
+				return nil, fmt.Errorf("%w: deletion vector %s missing or empty referenced_data_file",
+					dv.ErrInvalidDeletionVector, d.FilePath())
 			}
 			if contentOffset == nil || contentSize == nil {
 				// Spec §Manifest Files: content_offset and content_size_in_
@@ -176,7 +512,8 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 				// field cause directly here — otherwise the dedup check
 				// below would produce the misleading "multiple deletion
 				// vectors" error when two equally-broken entries collide.
-				return nil, fmt.Errorf("deletion vector %s missing content_offset/content_size_in_bytes", d.FilePath())
+				return nil, fmt.Errorf("%w: deletion vector %s missing content_offset/content_size_in_bytes",
+					dv.ErrInvalidDeletionVector, d.FilePath())
 			}
 			if existing, seen := uniqueDVs[*ref]; seen {
 				if !sameDVBlob(existing, d) {
@@ -191,95 +528,37 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 		}
 	}
 
-	if len(uniqueDVs) == 0 {
-		return out, nil
-	}
-	if len(uniqueDVs) == 1 {
-		for ref, dvFile := range uniqueDVs {
-			bitmap, err := dv.ReadDV(fs, dvFile)
-			if err != nil {
-				return nil, fmt.Errorf("read deletion vector %s: %w", dvFile.FilePath(), err)
-			}
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			out[ref] = bitmap
-		}
+	return uniqueDVs, nil
+}
 
-		return out, nil
-	}
-
-	type dvGroup struct {
-		referencedDataFiles []string
-		files               []iceberg.DataFile
-	}
-	groups := make(map[string]*dvGroup)
+func groupDeletionVectors(uniqueDVs map[string]iceberg.DataFile) map[string]*lazyDeletionVectorGroup {
+	groups := make(map[string]*lazyDeletionVectorGroup)
 	for ref, dvFile := range uniqueDVs {
 		group := groups[dvFile.FilePath()]
 		if group == nil {
-			group = &dvGroup{}
+			group = &lazyDeletionVectorGroup{puffinPath: dvFile.FilePath()}
 			groups[dvFile.FilePath()] = group
 		}
+
 		group.referencedDataFiles = append(group.referencedDataFiles, ref)
 		group.files = append(group.files, dvFile)
 	}
 
-	type dvResult struct {
-		referencedDataFiles []string
-		bitmaps             []*dv.RoaringPositionBitmap
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(concurrency)
-
-	resultsChan := make(chan dvResult, concurrency)
-	go func() {
-		// g.Wait() before the deferred close so workers finish sending
-		// before the channel is closed — otherwise a late worker would
-		// panic on send to a closed channel. The error is collected via
-		// the outer g.Wait() below, not stored on a shared variable.
-		defer close(resultsChan)
-		for puffinPath, group := range groups {
-			g.Go(func() error {
-				bitmaps, err := dv.ReadDVs(fs, group.files)
-				if err != nil {
-					return fmt.Errorf("read deletion vectors from %s: %w", puffinPath, err)
-				}
-				select {
-				case resultsChan <- dvResult{referencedDataFiles: group.referencedDataFiles, bitmaps: bitmaps}:
-					return nil
-				case <-gctx.Done():
-					return gctx.Err()
-				}
-			})
-		}
-		_ = g.Wait()
-	}()
-
-	for r := range resultsChan {
-		for i, ref := range r.referencedDataFiles {
-			out[ref] = r.bitmaps[i]
-		}
-	}
-
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-
-	return out, nil
+	return groups
 }
 
 // sameDVBlob reports whether two DV manifest entries point at the same puffin
 // blob — identical puffin file path and content offset. Different of either
 // means two distinct DVs for the same data file, the over-deletion case
-// readAllDeletionVectors rejects.
+// collectUniqueDeletionVectors rejects.
 //
 // Java's DeleteFileIndex is stricter: any second DV for the same data file is
 // rejected with ValidationException("Can't index multiple DVs for %s"), even
 // when both entries reference the same underlying blob. Same-blob dedup here
 // is a deliberate divergence — reading the same blob twice is wasteful, not
 // incorrect. ContentOffset is required to be non-nil by the spec and by the
-// pre-pass in readAllDeletionVectors, so the comparison below assumes both.
+// pre-pass in collectUniqueDeletionVectors, so the comparison below assumes
+// both.
 func sameDVBlob(a, b iceberg.DataFile) bool {
 	if a.FilePath() != b.FilePath() {
 		return false
@@ -366,12 +645,14 @@ func (c *posDeleteCursor) next() (int64, bool) {
 
 type posDeleteAccumulator struct {
 	mem      memory.Allocator
+	targets  map[string]struct{}
 	builders map[string]*array.Int64Builder
 }
 
-func newPosDeleteAccumulator(ctx context.Context) *posDeleteAccumulator {
+func newPosDeleteAccumulator(ctx context.Context, targets map[string]struct{}) *posDeleteAccumulator {
 	return &posDeleteAccumulator{
 		mem:      compute.GetAllocator(ctx),
+		targets:  targets,
 		builders: make(map[string]*array.Int64Builder),
 	}
 }
@@ -472,6 +753,12 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 		}
 
 		path := paths.Value(i)
+		if len(a.targets) > 0 {
+			if _, ok := a.targets[path]; !ok {
+				continue
+			}
+		}
+
 		builder, ok := a.builders[path]
 		if !ok {
 			path = strings.Clone(path)
@@ -510,6 +797,7 @@ func (a *posDeleteAccumulator) appendChunked(ctx context.Context, filePathCol, p
 	return ctx.Err()
 }
 
+// appendRecord requires columns projected in file_path, pos order.
 func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.RecordBatch) error {
 	if record.NumCols() != 2 {
 		return fmt.Errorf("%w: projected position delete record has %d columns, expected 2",
@@ -522,8 +810,15 @@ func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.Re
 		posCol.DataType(), posCol.NullN()); err != nil {
 		return err
 	}
+	if err := validatePosDeleteColumnLengths(filePathCol.Len(), posCol.Len()); err != nil {
+		return err
+	}
 
-	posArr := posCol.(*array.Int64)
+	posArr, ok := posCol.(*array.Int64)
+	if !ok {
+		return fmt.Errorf("%w: unsupported pos record array type %T in position delete file",
+			iceberg.ErrInvalidSchema, posCol)
+	}
 	posCursor := posDeleteCursor{chunks: []*array.Int64{posArr}}
 	if err := a.appendFilePathChunk(ctx, filePathCol, &posCursor); err != nil {
 		return err
@@ -533,7 +828,7 @@ func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.Re
 }
 
 func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
-	acc := newPosDeleteAccumulator(ctx)
+	acc := newPosDeleteAccumulator(ctx, nil)
 	defer func() {
 		if err != nil {
 			acc.release()
@@ -549,6 +844,8 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 
 const maxPositionalDeletePreallocation = 64 * 1024
 
+// collectPosDeletePositions serves producePosDeletesFromTask when a
+// transaction creates new delete records. Scan tasks use cached bitmaps instead.
 func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], error) {
 	totalPositions := 0
 	for _, chunk := range positionalDeletes {
@@ -607,7 +904,71 @@ func releasePosDeletes(deletes map[string]*arrow.Chunked) {
 	}
 }
 
-func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_ map[string]*arrow.Chunked, err error) {
+func collectPosDeleteBitmap(positionalDeletes positionDeletes) (*dv.RoaringPositionBitmap, error) {
+	bitmap := dv.NewRoaringPositionBitmap()
+	for _, chunk := range positionalDeletes {
+		if chunk == nil {
+			return nil, fmt.Errorf("%w: nil pos column chunk in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+		if chunk.DataType().ID() != arrow.INT64 {
+			return nil, fmt.Errorf("%w: unsupported pos column type %s in position delete file",
+				iceberg.ErrInvalidSchema, chunk.DataType())
+		}
+		for _, arr := range chunk.Chunks() {
+			posArr, ok := arr.(*array.Int64)
+			if !ok {
+				return nil, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
+					iceberg.ErrInvalidSchema, arr)
+			}
+			if posArr.NullN() > 0 {
+				return nil, fmt.Errorf("%w: null pos in position delete file",
+					iceberg.ErrInvalidSchema)
+			}
+			for _, position := range posArr.Int64Values() {
+				if position < 0 {
+					return nil, fmt.Errorf("%w: negative pos %d in position delete file",
+						iceberg.ErrInvalidSchema, position)
+				}
+				bitmap.Set(uint64(position))
+			}
+		}
+	}
+
+	return bitmap, nil
+}
+
+func readPositionDeleteBitmapsForPaths(
+	ctx context.Context,
+	fs iceio.IO,
+	dataFile iceberg.DataFile,
+	targets map[string]struct{},
+) (map[string]*dv.RoaringPositionBitmap, error) {
+	deletes, err := readDeletesForPaths(ctx, fs, dataFile, targets)
+	if err != nil {
+		return nil, err
+	}
+	defer releasePosDeletes(deletes)
+
+	bitmaps := make(map[string]*dv.RoaringPositionBitmap, len(deletes))
+	for path, positions := range deletes {
+		bitmap, err := collectPosDeleteBitmap(positionDeletes{positions})
+		if err != nil {
+			return nil, err
+		}
+		bitmaps[path] = bitmap
+	}
+
+	return bitmaps, nil
+}
+
+func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
+	return readDeletesForPaths(ctx, fs, dataFile, nil)
+}
+
+func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile,
+	targets map[string]struct{},
+) (_ map[string]*arrow.Chunked, err error) {
 	src, err := tblutils.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
 		return nil, err
@@ -629,7 +990,12 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 		return nil, err
 	}
 
-	records, err := rdr.GetRecords(ctx, columns, nil)
+	tester, err := newPositionDeleteRowGroupTester(schema, targets)
+	if err != nil {
+		return nil, err
+	}
+
+	records, err := rdr.GetRecords(ctx, columns, tester)
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +1003,7 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	// string values, so independent dictionaries across batches are safe.
 	defer records.Release()
 
-	acc := newPosDeleteAccumulator(ctx)
+	acc := newPosDeleteAccumulator(ctx, targets)
 	defer func() {
 		// Returning an error assigns the named return value before deferred
 		// functions run, which releases builders on every error path.
@@ -659,6 +1025,126 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 
 	return acc.finish(), nil
+}
+
+func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]struct{}) (*tblutils.ParquetRowGroupTester, error) {
+	if len(targets) == 0 || len(targets) > inPredicateLimit {
+		return nil, nil
+	}
+	pruningEnabled, err := positionDeletePruningEnabled(schema)
+	if err != nil {
+		return nil, err
+	}
+	if !pruningEnabled {
+		return nil, nil
+	}
+
+	paths := make([]string, 0, len(targets))
+	for path := range targets {
+		paths = append(paths, path)
+	}
+
+	var filter iceberg.BooleanExpression
+	if len(paths) == 1 {
+		// A single target is the common case. EqualTo avoids building the
+		// set literal used by IsIn and gives the stats/bloom planners the
+		// simpler predicate directly.
+		filter = iceberg.EqualTo(iceberg.Reference("file_path"), paths[0])
+	} else {
+		slices.Sort(paths)
+		filter = iceberg.IsIn(iceberg.Reference("file_path"), paths...)
+	}
+	filter, err = iceberg.BindExpr(iceberg.PositionalDeleteSchema, filter, true)
+	if err != nil {
+		return nil, err
+	}
+	statsFieldIDs, err := iceberg.ExtractFieldIDs(filter)
+	if err != nil {
+		return nil, err
+	}
+
+	statsFn, err := newParquetRowGroupStatsEvaluator(iceberg.PositionalDeleteSchema, filter, false)
+	if err != nil {
+		return nil, err
+	}
+	bloomPreds, err := newBloomFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+
+	return &tblutils.ParquetRowGroupTester{
+		StatsFn:       statsFn,
+		StatsFieldIDs: statsFieldIDs,
+		BloomPreds:    bloomPreds,
+	}, nil
+}
+
+func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
+	// Row-group stats and Bloom predicates are keyed by Parquet physical field
+	// IDs, while projection resolves these columns by their spec-defined names.
+	// pqarrow carries the Parquet IDs into Arrow metadata, so only enable
+	// pushdown when those two views agree for the reserved delete columns.
+	physicalIDs := make(map[int]int)
+	var collectIDs func([]arrow.Field)
+	collectIDs = func(fields []arrow.Field) {
+		for _, field := range fields {
+			if id := getFieldID(field); id != nil {
+				physicalIDs[*id]++
+			}
+			if nested, ok := field.Type.(arrow.NestedType); ok {
+				collectIDs(nested.Fields())
+			}
+		}
+	}
+	collectIDs(schema.Fields())
+	if len(physicalIDs) == 0 {
+		// External position-delete files are allowed to omit Iceberg field IDs.
+		// The name-based projection and row-level target filter remain safe, but
+		// stats and Bloom pruning cannot be trusted without the IDs.
+		return false, nil
+	}
+
+	deleteFields := iceberg.PositionalDeleteSchema.Fields()
+	for _, field := range deleteFields {
+		if physicalIDs[field.ID] > 1 {
+			return false, fmt.Errorf("%w: position delete field ID %d is not unique",
+				iceberg.ErrInvalidSchema, field.ID)
+		}
+	}
+
+	pruningEnabled := true
+	for _, want := range deleteFields {
+		indices := schema.FieldIndices(want.Name)
+		if len(indices) != 1 {
+			return false, fmt.Errorf("%w: position delete file must contain exactly one %q column, found %d",
+				iceberg.ErrInvalidSchema, want.Name, len(indices))
+		}
+
+		fieldID := getFieldID(schema.Field(indices[0]))
+		if fieldID == nil {
+			if physicalIDs[want.ID] != 0 {
+				return false, fmt.Errorf("%w: position delete field ID %d is assigned to another column instead of %q",
+					iceberg.ErrInvalidSchema, want.ID, want.Name)
+			}
+			// Missing IDs only disable pruning. Keep checking the remaining
+			// columns so this fallback cannot hide an invalid ID mapping.
+			pruningEnabled = false
+
+			continue
+		}
+		if *fieldID != want.ID {
+			if physicalIDs[want.ID] != 0 {
+				return false, fmt.Errorf("%w: position delete column %q has field ID %d, want %d; field ID %d is assigned to another column",
+					iceberg.ErrInvalidSchema, want.Name, *fieldID, want.ID, want.ID)
+			}
+			// A non-canonical ID is safe for name-based reading, but not for
+			// stats or Bloom pruning. Keep the pre-pruning read compatible with
+			// external writers that renumber fields.
+			pruningEnabled = false
+		}
+	}
+
+	return pruningEnabled, nil
 }
 
 func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {
@@ -753,6 +1239,77 @@ func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], cursor *
 }
 
 type recProcessFn func(arrow.RecordBatch) (arrow.RecordBatch, error)
+
+func combinePositionalDeleteBitmap(
+	mem memory.Allocator,
+	deletes *dv.RoaringPositionBitmap,
+	cursor *rowPositionCursor,
+	nrows int64,
+) arrow.Array {
+	var bldr *array.Int64Builder
+
+	for i := range nrows {
+		if deletes.Contains(uint64(cursor.next())) {
+			if bldr == nil {
+				bldr = array.NewInt64Builder(mem)
+				if i > 0 {
+					// This row is deleted. Resize avoids rounding the maximum
+					// survivor count up to a power of two as Reserve would.
+					bldr.Resize(int(nrows - 1))
+				}
+				for j := range i {
+					bldr.UnsafeAppend(j)
+				}
+			}
+
+			continue
+		}
+
+		if bldr != nil {
+			// A leading run of deletes needs no values buffer until a row
+			// survives. Size it once for the remaining possible survivors.
+			if bldr.Cap() == 0 {
+				bldr.Resize(int(nrows - i))
+			}
+			bldr.UnsafeAppend(i)
+		}
+	}
+
+	if bldr == nil {
+		return nil
+	}
+	defer bldr.Release()
+
+	return bldr.NewArray()
+}
+
+func processPositionalDeleteBitmap(
+	ctx context.Context,
+	deletes *dv.RoaringPositionBitmap,
+	cursor *rowPositionCursor,
+) recProcessFn {
+	mem := compute.GetAllocator(ctx)
+
+	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+		defer r.Release()
+
+		indices := combinePositionalDeleteBitmap(mem, deletes, cursor, r.NumRows())
+		if indices == nil {
+			r.Retain()
+
+			return r, nil
+		}
+		defer indices.Release()
+
+		out, err := compute.Take(ctx, *compute.DefaultTakeOptions(),
+			compute.NewDatumWithoutOwning(r), compute.NewDatumWithoutOwning(indices))
+		if err != nil {
+			return nil, err
+		}
+
+		return out.(*compute.RecordDatum).Value, nil
+	}
+}
 
 func processPositionalDeletes(ctx context.Context, deletes set[int64], cursor *rowPositionCursor) recProcessFn {
 	mem := compute.GetAllocator(ctx)
@@ -939,9 +1496,16 @@ type arrowScan struct {
 	filterPlanCache   compiledFileFilterPlanCache
 	fileReadPlanCache preparedFileReadPlanCache
 	cacheFileReadPlan bool
+	// taskResidualsBound means every non-nil residual passed to GetRecords was
+	// bound and validated against filterSchema, so rowFilterForTask can skip binding.
+	taskResidualsBound bool
 
 	useLargeTypes bool
 	concurrency   int
+
+	// arrowBatchSize, when positive, overrides the table's
+	// read.parquet.batch-size property for this scan's reads.
+	arrowBatchSize int
 }
 
 // preparedFileRead contains the physical schema projection shared by all
@@ -1098,10 +1662,73 @@ func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, t
 	return nil
 }
 
+const maxInFlightTasksPerWorker = 1
+
+type taskCredits chan struct{}
+
+func newTaskCredits() taskCredits {
+	return make(taskCredits, maxInFlightTasksPerWorker)
+}
+
+func (c taskCredits) acquire(ctx context.Context) error {
+	select {
+	case c <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (c taskCredits) release() {
+	if c != nil {
+		<-c
+	}
+}
+
 type enumeratedRecord struct {
-	Record tblutils.Enumerated[arrow.RecordBatch]
-	Task   tblutils.Enumerated[FileScanTask]
-	Err    error
+	Record  tblutils.Enumerated[arrow.RecordBatch]
+	Task    tblutils.Enumerated[FileScanTask]
+	Err     error
+	credits taskCredits
+}
+
+type recordSink struct {
+	out     chan<- enumeratedRecord
+	credits taskCredits
+	held    bool
+}
+
+func newRecordSink(out chan<- enumeratedRecord) *recordSink {
+	return &recordSink{out: out, credits: newTaskCredits()}
+}
+
+func (s *recordSink) reserve(ctx context.Context) error {
+	if err := s.credits.acquire(ctx); err != nil {
+		return err
+	}
+	s.held = true
+
+	return nil
+}
+
+func (s *recordSink) send(rec enumeratedRecord) {
+	if rec.Record.Last {
+		rec.credits = s.handOff()
+	}
+	s.out <- rec
+}
+
+func (s *recordSink) fail(task tblutils.Enumerated[FileScanTask], err error) {
+	s.out <- enumeratedRecord{Task: task, Err: err, credits: s.handOff()}
+}
+
+func (s *recordSink) handOff() taskCredits {
+	if !s.held {
+		return nil
+	}
+	s.held = false
+
+	return s.credits
 }
 
 func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (iceSchema *iceberg.Schema, colIndices []int, rdr tblutils.FileReader, err error) {
@@ -1185,7 +1812,22 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 		return nil, false, err
 	}
 
-	return plan.recordProcessor(ctx), plan.dropFile, nil
+	return as.recordProcessorWithExtracts(ctx, plan), plan.dropFile, nil
+}
+
+// recordProcessorWithExtracts returns the plan's record filter, wrapped with the
+// per-batch variant extract residual when the plan carries extract terms.
+func (as *arrowScan) recordProcessorWithExtracts(ctx context.Context, plan *compiledFileFilterPlan) recProcessFn {
+	base := plan.recordProcessor(ctx)
+	if base == nil {
+		// No record filter (nil plan or filter folded to AlwaysTrue): keep every row, no residual.
+		return nil
+	}
+	if len(plan.extracts) == 0 {
+		return base
+	}
+
+	return as.extractResidualFilter(ctx, plan.extracts, base)
 }
 
 func (as *arrowScan) getRecordFilterFromPlan(ctx context.Context, plan *compiledFileFilterPlan) (recProcessFn, bool, error) {
@@ -1193,7 +1835,7 @@ func (as *arrowScan) getRecordFilterFromPlan(ctx context.Context, plan *compiled
 		return nil, false, nil
 	}
 
-	return plan.recordProcessor(ctx), plan.dropFile, nil
+	return as.recordProcessorWithExtracts(ctx, plan), plan.dropFile, nil
 }
 
 type filterBindingState struct {
@@ -1303,34 +1945,45 @@ func validateBoundFilter(schema *iceberg.Schema, filter iceberg.BooleanExpressio
 	return validationErr
 }
 
-func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
+// bindTaskFilter returns changed=true only when binding an unbound residual
+// produces a new expression. When changed is false, the returned expression is
+// the exact input value, after validating any already-bound predicates.
+func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, bool, error) {
 	if filter == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	state, err := iceberg.VisitExpr(filter, filterBindingVisitor{})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if state.hasBound && state.hasUnbound {
-		return nil, fmt.Errorf("%w: scan task residual mixes bound and unbound predicates", iceberg.ErrInvalidArgument)
+		return nil, false, fmt.Errorf("%w: scan task residual mixes bound and unbound predicates", iceberg.ErrInvalidArgument)
 	}
 	if !state.hasUnbound {
 		if state.hasBound {
 			if err := validateBoundFilter(schema, filter); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 
-		return filter, nil
+		return filter, false, nil
 	}
 
-	return iceberg.BindExpr(schema, filter, caseSensitive)
+	bound, err := iceberg.BindExpr(schema, filter, caseSensitive)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return bound, true, nil
 }
 
 func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpression, error) {
 	if task.Residual == nil {
 		return as.boundRowFilter, nil
+	}
+	if as.taskResidualsBound {
+		return task.Residual, nil
 	}
 
 	filterSchema := as.scanSchema
@@ -1338,7 +1991,9 @@ func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpress
 		filterSchema = as.filterSchema
 	}
 
-	return bindTaskFilter(filterSchema, task.Residual, as.caseSensitive)
+	bound, _, err := bindTaskFilter(filterSchema, task.Residual, as.caseSensitive)
+
+	return bound, err
 }
 
 // fieldIndexByID returns the index of the field carrying fieldID in its Arrow
@@ -1524,9 +2179,9 @@ func (as *arrowScan) processRecords(
 	columns []int,
 	pipeline []recProcessFn,
 	posSource *rowPositionSource,
-	out chan<- enumeratedRecord,
+	sink *recordSink,
 ) error {
-	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, out, nil)
+	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, sink, nil)
 }
 
 // adjustParquetTaskRange keeps a planned range within the physical file when
@@ -1555,7 +2210,7 @@ func (as *arrowScan) processRecordsWithPlans(
 	columns []int,
 	pipeline []recProcessFn,
 	posSource *rowPositionSource,
-	out chan<- enumeratedRecord,
+	sink *recordSink,
 	plans *compiledFileFilterPlans,
 ) (err error) {
 	var (
@@ -1570,7 +2225,7 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
-	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
+	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position
 	// deletes) recover it from posSource, which the tester seeds with each
@@ -1581,8 +2236,10 @@ func (as *arrowScan) processRecordsWithPlans(
 		var tester *tblutils.ParquetRowGroupTester
 		if plans != nil && plans.pruning != nil {
 			tester = &tblutils.ParquetRowGroupTester{
-				StatsFn:    plans.pruning.statsEvaluator(),
-				BloomPreds: plans.pruning.bloomPreds,
+				StatsFn:         plans.pruning.statsEvaluator(),
+				StatsFieldIDs:   plans.pruning.statsFieldIDs,
+				BloomPreds:      plans.pruning.bloomPreds,
+				DictionaryPreds: plans.pruning.dictionaryPreds,
 			}
 		} else {
 			logicalSchema := as.filterSchema
@@ -1603,12 +2260,21 @@ func (as *arrowScan) processRecordsWithPlans(
 				pruningFilter = iceberg.AlwaysTrue{}
 			}
 
+			pruningFilter, err = stripExtractPredicates(pruningFilter)
+			if err != nil {
+				return err
+			}
+
 			filePruningFilter, err := iceberg.TranslateColumnNames(pruningFilter, fileSchema)
 			if err != nil {
 				return err
 			}
 
 			filePruningFilter, err = iceberg.BindExpr(fileSchema, filePruningFilter, as.caseSensitive)
+			if err != nil {
+				return err
+			}
+			statsFieldIDs, err := iceberg.ExtractFieldIDs(filePruningFilter)
 			if err != nil {
 				return err
 			}
@@ -1623,9 +2289,16 @@ func (as *arrowScan) processRecordsWithPlans(
 				return err
 			}
 
+			dictionaryPreds, err := newDictionaryPredicates(filePruningFilter)
+			if err != nil {
+				return err
+			}
+
 			tester = &tblutils.ParquetRowGroupTester{
-				StatsFn:    statsFn,
-				BloomPreds: bloomPreds,
+				StatsFn:         statsFn,
+				StatsFieldIDs:   statsFieldIDs,
+				BloomPreds:      bloomPreds,
+				DictionaryPreds: dictionaryPreds,
 			}
 		}
 		// A complete task already reads every row group. Leave its byte range
@@ -1658,9 +2331,9 @@ func (as *arrowScan) processRecordsWithPlans(
 
 	for recRdr.Next() {
 		if prev != nil {
-			out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
+			sink.send(enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 				Value: prev, Index: idx, Last: false,
-			}, Task: task}
+			}, Task: task})
 			idx++
 		}
 
@@ -1676,9 +2349,9 @@ func (as *arrowScan) processRecordsWithPlans(
 	}
 
 	if prev != nil {
-		out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: prev, Index: idx, Last: true,
-		}, Task: task}
+		}, Task: task})
 	} else {
 		// The reader produced no batches (e.g. every row group was pruned by
 		// stats). The sequenced channel in createIterator still needs this
@@ -1690,9 +2363,9 @@ func (as *arrowScan) processRecordsWithPlans(
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: idx, Last: true,
-		}, Task: task}
+		}, Task: task})
 	}
 
 	if recRdr.Err() != nil && recRdr.Err() != io.EOF {
@@ -1729,10 +2402,10 @@ func pruningFilterHasMissingInitialDefault(
 	return false, nil
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
+func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], sink *recordSink, positionalDeleteBitmap *dv.RoaringPositionBitmap, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
-			out <- enumeratedRecord{Task: task, Err: err}
+			sink.fail(task, err)
 		}
 	}()
 
@@ -1790,7 +2463,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	// the planner (scanner.go) and Java's DeleteFileIndex, and keeps at most one
 	// row-dropping position step in the pipeline so cursors never run over a
 	// sequence an earlier step already shortened.
-	applyPosDeletes := len(positionalDeletes) > 0 && !hasDV
+	applyPosDeletes := positionalDeleteBitmap != nil && !positionalDeleteBitmap.IsEmpty() && !hasDV
 	var posSource *rowPositionSource
 	if synthesizeRowID || applyPosDeletes || hasDV {
 		posSource = &rowPositionSource{}
@@ -1814,12 +2487,8 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if applyPosDeletes {
-		deletes, err := collectPosDeletePositions(positionalDeletes)
-		if err != nil {
-			return err
-		}
-
-		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes, posSource.cursor()))
+		pipeline = append(pipeline,
+			processPositionalDeleteBitmap(ctx, positionalDeleteBitmap, posSource.cursor()))
 	}
 
 	if hasDV {
@@ -1850,9 +2519,9 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
-		}}
+		}})
 
 		return err
 	}
@@ -1870,15 +2539,15 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	})
 
-	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, out, filterPlans)
+	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)
 
 	return err
 }
 
-func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, out chan<- enumeratedRecord, invariants *arrowScanInvariants) (err error) {
+func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, sink *recordSink, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
-			out <- enumeratedRecord{Task: task, Err: err}
+			sink.fail(task, err)
 		}
 	}()
 
@@ -1934,9 +2603,9 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
+		sink.send(enumeratedRecord{Task: task, Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
-		}}
+		}})
 
 		return err
 	}
@@ -1950,12 +2619,16 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecordsWithPlans(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, out, filterPlans)
+	err = as.processRecordsWithPlans(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)
 
 	return err
 }
 
 func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFilePosDeletes, cancel context.CancelCauseFunc, rowLimit int64) iter.Seq2[arrow.RecordBatch, error] {
+	return createIteratorWithCleanup(ctx, numWorkers, records, deletesPerFile, cancel, rowLimit, nil)
+}
+
+func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFilePosDeletes, cancel context.CancelCauseFunc, rowLimit int64, cleanup func()) iter.Seq2[arrow.RecordBatch, error] {
 	isBeforeAny := func(batch enumeratedRecord) bool {
 		return batch.Task.Index < 0
 	}
@@ -1987,6 +2660,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 					prev.Record.Last && next.Record.Index == 0
 			}
 		}, enumeratedRecord{Task: tblutils.Enumerated[FileScanTask]{Index: -1}}, func(rec enumeratedRecord) {
+			rec.credits.release()
 			if rec.Record.Value != nil {
 				rec.Record.Value.Release()
 			}
@@ -1997,12 +2671,16 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	return func(yield func(arrow.RecordBatch, error) bool) {
 		defer func() {
 			for rec := range sequenced {
+				rec.credits.release()
 				if rec.Record.Value != nil {
 					rec.Record.Value.Release()
 				}
 			}
 
 			releasePerFilePosDeletes(deletesPerFile)
+			if cleanup != nil {
+				cleanup()
+			}
 		}()
 
 		defer cancel(nil)
@@ -2017,9 +2695,14 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 				return
 			case enum, ok := <-sequenced:
 				if !ok {
+					if err := context.Cause(ctx); err != nil {
+						yield(nil, err)
+					}
+
 					return
 				}
 
+				enum.credits.release()
 				if enum.Err != nil {
 					yield(nil, enum.Err)
 
@@ -2057,15 +2740,12 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, dvBitmaps perFileDVBitmaps, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, positionDeleteLoader *lazyPositionDeleteLoader, dvLoader *lazyDeletionVectorLoader, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
 	return func(yield func(arrow.RecordBatch, error) bool) {
 		extSet := substrait.NewExtensionSet()
-
 		scanCtx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
-		taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
-
-		// numWorkers := 1
 		numWorkers := min(as.concurrency, len(tasks))
+		taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
 		records := make(chan enumeratedRecord, numWorkers)
 
 		var wg sync.WaitGroup
@@ -2073,7 +2753,11 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 		for range numWorkers {
 			go func() {
 				defer wg.Done()
+				sink := newRecordSink(records)
 				for {
+					if err := sink.reserve(scanCtx); err != nil {
+						return
+					}
 					select {
 					case <-scanCtx.Done():
 						return
@@ -2086,17 +2770,36 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 						}
 
 						filePath := task.Value.File.FilePath()
+						var positionalDeleteBitmap *dv.RoaringPositionBitmap
+						if positionDeleteLoader != nil {
+							var err error
+							positionalDeleteBitmap, err = positionDeleteLoader.load(scanCtx, task.Index, filePath)
+							if err != nil {
+								sink.fail(task, err)
+								cancel(err)
+
+								return
+							}
+						}
+
+						dvBitmap, err := dvLoader.load(scanCtx, filePath)
+						if err != nil {
+							sink.fail(task, err)
+							cancel(err)
+
+							return
+						}
 						eqDeleteSets, err := equalityDeleteLoader.load(scanCtx, task.Value)
 						if err != nil {
-							records <- enumeratedRecord{Task: task, Err: err}
+							sink.fail(task, err)
 							cancel(err)
 
 							return
 						}
 
-						if err := as.recordsFromTask(scanCtx, task, records,
-							deletesPerFile[filePath],
-							dvBitmaps[filePath],
+						if err := as.recordsFromTask(scanCtx, task, sink,
+							positionalDeleteBitmap,
+							dvBitmap,
 							eqDeleteSets,
 							invariants); err != nil {
 							cancel(err)
@@ -2126,11 +2829,21 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 			}
 		}()
 
-		createIterator(scanCtx, uint(numWorkers), records, deletesPerFile,
-			cancel, as.rowLimit)(yield)
+		var cleanup func()
+		if positionDeleteLoader != nil {
+			cleanup = positionDeleteLoader.release
+		}
+		createIteratorWithCleanup(scanCtx, uint(numWorkers), records, nil,
+			cancel, as.rowLimit, cleanup)(yield)
 	}
 }
 
+// GetRecords prepares the projected Arrow schema and a single-use record
+// iterator. Positional- and equality-delete files are opened and read during
+// iteration. Errors from those files are delivered through the iterator only if
+// iteration reaches the task that encounters the error; a row limit or early
+// termination may finish the scan before the error is observed. Deletion-vector
+// errors are returned before the iterator is created.
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	var err error
 	as.useLargeTypes, err = strconv.ParseBool(as.options.Get(ScanOptionArrowUseLargeTypes, "false"))
@@ -2139,6 +2852,17 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	}
 
 	tableProperties := as.metadata.Properties()
+	batchSize := as.options.Get(ParquetBatchSizeKey, "")
+	if as.arrowBatchSize > 0 {
+		batchSize = strconv.Itoa(as.arrowBatchSize)
+	}
+	if batchSize != "" {
+		tableProperties = maps.Clone(tableProperties)
+		if tableProperties == nil {
+			tableProperties = iceberg.Properties{}
+		}
+		tableProperties[ParquetBatchSizeKey] = batchSize
+	}
 	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
@@ -2168,50 +2892,26 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		return nil, nil, err
 	}
 
-	deletesPerFile, err := readAllDeleteFiles(ctx, as.fs, tasks, as.concurrency)
+	// Index DV ownership up front, but defer Puffin reads until a task using a
+	// referenced data file enters the iterator. The loader keeps each shared
+	// Puffin group cached after its first read.
+	dvLoader, err := newLazyDeletionVectorLoader(as.fs, tasks)
 	if err != nil {
-		// readAllDeleteFiles can return a partially-populated map alongside
-		// the error if some goroutines completed before the failure.
-		releasePerFilePosDeletes(deletesPerFile)
-
 		return nil, nil, err
 	}
 
-	// DV bitmaps stay in their native form rather than being materialized
-	// into int64 positions and merged with the Parquet pos-delete map.
-	// filterByDeletionVector applies the bitmap to each batch via a Boolean
-	// keep-mask + compute.Filter — O(1) Contains lookups, vectorized Filter,
-	// no intermediate position set.
-	dvBitmaps, err := readAllDeletionVectors(ctx, as.fs, tasks, as.concurrency)
-	if err != nil {
-		releasePerFilePosDeletes(deletesPerFile)
-
-		return nil, nil, err
-	}
-
-	var tableSchemas []*iceberg.Schema
-
-loadSchemaHistory:
-	for _, task := range tasks {
-		for _, deleteFile := range task.EqualityDeleteFiles {
-			for _, fieldID := range deleteFile.EqualityFieldIDs() {
-				if _, found := invariants.tableSchema.FindFieldByID(fieldID); !found {
-					tableSchemas = as.metadata.Schemas()
-
-					break loadSchemaHistory
-				}
-			}
-		}
-	}
 	equalityDeleteLoader, err := newLazyEqualityDeleteLoader(
-		as.fs, invariants.tableSchema, tableSchemas, invariants.nameMapping, tasks)
+		as.fs, invariants.tableSchema, nil, invariants.nameMapping, tasks)
 	if err != nil {
-		releasePerFilePosDeletes(deletesPerFile)
-
 		return nil, nil, err
+	}
+	if equalityDeleteLoader.needsSchemaHistory() {
+		equalityDeleteLoader.tableSchemas = as.metadata.Schemas()
 	}
 	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 
+	positionDeleteLoader := newLazyPositionDeleteLoader(as.fs, tasks)
+
 	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks,
-		deletesPerFile, dvBitmaps, equalityDeleteLoader, invariants), nil
+		positionDeleteLoader, dvLoader, equalityDeleteLoader, invariants), nil
 }

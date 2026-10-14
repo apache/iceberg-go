@@ -30,7 +30,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -38,6 +37,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/apache/iceberg-go/view"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/uptrace/bun"
@@ -308,7 +308,20 @@ func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.T
 }
 
 const (
-	serializableWriteMaxAttempts = 3
+	// The retry budget has to outlast a competing writer's transaction, not just a
+	// scheduling hiccup. SQLite serializes writers and reports a lock conflict on
+	// upgrade immediately, without consulting the busy handler, so a losing
+	// CreateTable/CreateView only observes the catalog-level conflict it should
+	// report once the winner commits. At 3 attempts the budget was 30ms, which a
+	// loaded machine exceeds, surfacing SQLITE_BUSY instead of
+	// ErrTableAlreadyExists/ErrViewAlreadyExists.
+	//
+	// Attempts fire at 0/10/30/70/150/310ms (delay doubles per attempt), so the
+	// worst case is ~310ms of waiting, and nothing when there is no contention.
+	// The same budget gates retrySerializableWriteTx for every dialect that
+	// isRetryableSerializableError recognises (Postgres 40001/40P01, MySQL
+	// 1205/1213, ...), so changing either constant changes their worst case too.
+	serializableWriteMaxAttempts = 6
 	serializableWriteRetryDelay  = 10 * time.Millisecond
 )
 
@@ -353,8 +366,7 @@ func isRetryableSerializableError(err error) bool {
 		}
 	}
 
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
+	if mysqlErr, ok := errors.AsType[*mysql.MySQLError](err); ok {
 		switch mysqlErr.Number {
 		case 1205, 1213: // lock wait timeout, deadlock
 			return true
@@ -1090,7 +1102,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// Physically delete all table files on storage best-effort
-	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+	if purgeErr := maintenance.PurgeFiles(ctx, tbl); purgeErr != nil {
 		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 
@@ -1273,9 +1285,46 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 			})
 		}
 
-		_, err := tx.NewInsert().Model(&toInsert).Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, err)
+		// A concurrent writer may have won the race; return the sentinel in the same
+		// form as the pre-check above. This must stay the first read on the outer tx
+		// so MySQL's REPEATABLE READ snapshot lands after the winner committed.
+		recheck := func(insertErr error) error {
+			_, exists, checkErr := c.resolveNamespaceKeyInTx(ctx, tx, namespace)
+			if checkErr == nil && exists {
+				return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(namespace, "."))
+			}
+			if checkErr != nil {
+				return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, errors.Join(insertErr, checkErr))
+			}
+
+			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, insertErr)
+		}
+
+		// Postgres aborts the whole tx on a failed insert, so only it needs the
+		// savepoint for the re-check; SQLite/MySQL don't, and Oracle can't RELEASE it.
+		if tx.Dialect().Name() == dialect.PG {
+			sp, err := tx.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("error creating savepoint for namespace '%s': %w", namespace, err)
+			}
+
+			if _, err = sp.NewInsert().Model(&toInsert).Exec(ctx); err != nil {
+				if rbErr := sp.Rollback(); rbErr != nil {
+					return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, errors.Join(err, rbErr))
+				}
+
+				return recheck(err)
+			}
+
+			if err = sp.Commit(); err != nil {
+				return fmt.Errorf("error releasing savepoint for namespace '%s': %w", namespace, err)
+			}
+
+			return nil
+		}
+
+		if _, err := tx.NewInsert().Model(&toInsert).Exec(ctx); err != nil {
+			return recheck(err)
 		}
 
 		return nil
@@ -1481,12 +1530,6 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 	return ret, nil
 }
 
-// avoid circular dependency while still avoiding having to export the getUpdatedPropsAndUpdateSummary function
-// so that we can re-use it in the catalog implementations without duplicating the code.
-
-//go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
-func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
-
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
 	var summary catalog.PropertiesUpdateSummary
 	if err := checkValidNamespace(namespace); err != nil {
@@ -1518,7 +1561,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 			currentProps[prop.PropertyKey] = prop.PropertyValue.String
 		}
 
-		_, nextSummary, err := getUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
+		_, nextSummary, err := internal.GetUpdatedPropsAndUpdateSummary(currentProps, removals, updates)
 		if err != nil {
 			return err
 		}

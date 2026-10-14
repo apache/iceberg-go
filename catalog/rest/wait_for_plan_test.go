@@ -42,19 +42,25 @@ func TestWaitForPlanCompletesAfterPolling(t *testing.T) {
 	var polls atomic.Int32
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
-			require.Equal(t, http.MethodGet, req.Method)
+			if !assert.Equal(t, http.MethodGet, req.Method) {
+				return
+			}
 			// Two "submitted" responses, then a "completed" one carrying tasks and
 			// vended credentials.
 			if polls.Add(1) <= 2 {
 				_, err := w.Write([]byte(`{"status":"submitted"}`))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 
 				return
 			}
 			_, err := w.Write([]byte(`{"status":"completed","plan-tasks":["t1","t2"],` +
 				`"file-scan-tasks":[{}],"delete-files":[{}],` +
 				`"storage-credentials":[{"prefix":"s3://bucket/","config":{"k":"v"}}]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -82,7 +88,9 @@ func TestWaitForPlanReturnsImmediatelyWhenCompleted(t *testing.T) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			polls.Add(1)
 			_, err := w.Write([]byte(`{"status":"completed","plan-tasks":["t1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -103,7 +111,9 @@ func TestWaitForPlanPropagatesFailed(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"failed","error":{"message":"boom","type":"ValidationException","code":400}}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -126,7 +136,9 @@ func TestWaitForPlanPropagatesFailedWithoutUsableError(t *testing.T) {
 		cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 				_, err := w.Write([]byte(payload))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 			})
 		})
 
@@ -144,7 +156,9 @@ func TestWaitForPlanPropagatesCancelled(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"cancelled"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -177,7 +191,9 @@ func TestWaitForPlanRetriesServiceUnavailable(t *testing.T) {
 				return
 			}
 			_, err := w.Write([]byte(`{"status":"completed","plan-tasks":["t1"]}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -215,7 +231,9 @@ func TestWaitForPlanRetriesJavaIdempotentGETStatuses(t *testing.T) {
 						return
 					}
 					_, err := w.Write([]byte(`{"status":"completed"}`))
-					require.NoError(t, err)
+					if !assert.NoError(t, err) {
+						return
+					}
 				})
 			})
 
@@ -238,12 +256,16 @@ func TestWaitForPlanRetriesStatusWithMalformedErrorBody(t *testing.T) {
 			if polls.Add(1) == 1 {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, err := w.Write([]byte("not json"))
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					return
+				}
 
 				return
 			}
 			_, err := w.Write([]byte(`{"status":"completed"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -385,7 +407,9 @@ func TestWaitForPlanCancelsServerSideOnContextCancel(t *testing.T) {
 			default:
 			}
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("DELETE /v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			deleteHit.Store(true)
@@ -420,7 +444,9 @@ func TestWaitForPlanBoundsSlowServerSideCancel(t *testing.T) {
 			default:
 			}
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		// The cancel endpoint stalls: it never responds until the client (bounded
 		// by the grace) gives up and drops the connection.
@@ -438,7 +464,8 @@ func TestWaitForPlanBoundsSlowServerSideCancel(t *testing.T) {
 	}()
 
 	opts := fastWaitOpts
-	opts.CancelGracePeriod = 100 * time.Millisecond
+	// The grace bounds the whole DELETE, including reaching the handler, not just the stall.
+	opts.CancelGracePeriod = time.Second
 
 	// Run in a goroutine: without the grace bound a stalled cancel would hang
 	// WaitForPlan forever (its DELETE runs on a context detached from the caller's
@@ -452,12 +479,12 @@ func TestWaitForPlanBoundsSlowServerSideCancel(t *testing.T) {
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
-		// The server-side cancel runs on a context detached from the caller, so it
-		// may be issued slightly after WaitForPlan returns. Poll instead of reading
-		// the flag once to avoid a race with the detached cancel on slower runners.
+		// The DELETE is sent before WaitForPlan returns.
+		// But, the stalling handler records it concurrently with the client that already gave up at grace.
+		// Thus, poll instead of reading the flag once.
 		assert.Eventually(t, cancelStarted.Load, time.Second, 5*time.Millisecond,
 			"expected the server-side cancel to be attempted")
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("WaitForPlan hung on a stalled server-side cancel; CancelGracePeriod not enforced")
 	}
 }
@@ -468,7 +495,9 @@ func TestWaitForPlanReturnsDeadlineWhileSubmitted(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -491,7 +520,9 @@ func TestWaitForPlanExhaustsMaxRetries(t *testing.T) {
 		mux.HandleFunc("GET /v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			polls.Add(1)
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 		mux.HandleFunc("DELETE /v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			deleteHit.Store(true)
@@ -519,7 +550,9 @@ func TestWaitForPlanDeadlineDisablesDefaultRetryCap(t *testing.T) {
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			_, err := w.Write([]byte(`{"status":"submitted"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
@@ -661,12 +694,14 @@ func TestWaitForPlanForwardsAccessDelegation(t *testing.T) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
 			assert.Equal(t, "remote-signing", req.Header.Get(headerIcebergAccessDelegation))
 			_, err := w.Write([]byte(`{"status":"completed"}`))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 		})
 	})
 
 	_, err := cat.WaitForPlan(context.Background(), table.Identifier{"db", "tbl"}, "plan-1", WaitForPlanOptions{
-		AccessDelegation: stringPtr("remote-signing"),
+		AccessDelegation: new("remote-signing"),
 	})
 	require.NoError(t, err)
 }

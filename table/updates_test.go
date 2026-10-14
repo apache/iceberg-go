@@ -730,7 +730,7 @@ func TestUnmarshalUpdatesRejectsMissingRequiredFields(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.action, func(t *testing.T) {
 			var updates Updates
-			data := []byte(fmt.Sprintf(`[{"action":%q}]`, tt.action))
+			data := fmt.Appendf(nil, `[{"action":%q}]`, tt.action)
 			if tt.action == UpdateSetSnapshotRef {
 				data = snapshotRefPayload(tt.field, false)
 			}
@@ -797,7 +797,7 @@ func TestUnmarshalUpdatesRejectsNullRequiredPayload(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.action+"/"+tt.field, func(t *testing.T) {
 			var updates Updates
-			data := []byte(fmt.Sprintf(`[{"action":%q,%q:null}]`, tt.action, tt.field))
+			data := fmt.Appendf(nil, `[{"action":%q,%q:null}]`, tt.action, tt.field)
 			if tt.action == UpdateSetSnapshotRef {
 				data = snapshotRefPayload(tt.field, true)
 			}

@@ -17,9 +17,23 @@
 
 package internal
 
-import "github.com/apache/arrow-go/v18/parquet/pqarrow"
+import (
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+)
 
 // WrapParquetFileReader exposes wrapPqArrowReader for testing.
 func WrapParquetFileReader(fr *pqarrow.FileReader) FileReader {
 	return wrapPqArrowReader{FileReader: fr}
+}
+
+// WrapParquetFileReaderWithDictionarySource exposes the dictionary source for
+// tests that need to exercise the section-read path used by production scans.
+func WrapParquetFileReaderWithDictionarySource(fr *pqarrow.FileReader, source parquet.ReaderAtSeeker) FileReader {
+	return wrapPqArrowReader{
+		FileReader:       fr,
+		dictionarySource: source,
+		dictionaryMem:    memory.DefaultAllocator,
+	}
 }

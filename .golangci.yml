@@ -25,6 +25,7 @@ linters:
     - copyloopvar
     - usestdlibvars
     - misspell
+    - modernize
     - nlreturn
     - perfsprint
     - staticcheck

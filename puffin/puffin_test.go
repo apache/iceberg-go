@@ -20,6 +20,7 @@ package puffin_test
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -653,8 +654,11 @@ func TestReaderInvalidFile(t *testing.T) {
 		data    func() []byte
 		wantErr string
 	}{
-		// file too small: Minimum valid puffin file has header magic + footer, rejects truncated files.
-		{"file too small", func() []byte { return []byte("tiny") }, "too small"},
+		// file too small: Minimum valid puffin file has header magic + footer, rejects truncated files
+		// (magic is valid here, so this is a damaged Puffin file, not ErrNotPuffinFile).
+		{"file too small", func() []byte { return []byte("PFA1tiny") }, "too small"},
+		// too small to hold the magic: cannot be identified as Puffin at all.
+		{"too small for magic", func() []byte { return []byte("ti") }, "too small to hold header magic"},
 		// invalid header magic: First 4 bytes must be 'PFA1' to identify puffin format.
 		{"invalid header magic", func() []byte {
 			d := validFile()
@@ -963,6 +967,36 @@ func TestReaderBlobAccess(t *testing.T) {
 			assert.Equal(t, expected, all[i].Data)
 		}
 	})
+}
+
+func TestReadAllBlobsPreservesFooterOrder(t *testing.T) {
+	// Blob metadata may be listed in a different order from the payloads.
+	footer := puffin.Footer{Blobs: []puffin.BlobMetadata{
+		{Type: "third", Fields: []int32{3}, Offset: 15, Length: 5},
+		{Type: "first", Fields: []int32{1}, Offset: 4, Length: 5},
+		{Type: "second", Fields: []int32{2}, Offset: 9, Length: 6},
+	}}
+	payload, err := json.Marshal(footer)
+	require.NoError(t, err)
+	data := append([]byte("PFA1firstsecondthird"), fileWithFooterPayload(payload)[puffin.MagicSize:]...)
+	input := &countingReaderAtSeeker{Reader: bytes.NewReader(data)}
+	r, err := puffin.NewReader(input)
+	require.NoError(t, err)
+	input.reads = nil
+
+	blobs, err := r.ReadAllBlobs()
+	require.NoError(t, err)
+	require.Len(t, blobs, len(footer.Blobs))
+	for i, expected := range []string{"third", "first", "second"} {
+		assert.Equal(t, expected, string(blobs[i].Data))
+		assert.Equal(t, footer.Blobs[i], blobs[i].Metadata)
+	}
+	assert.Equal(t, []readCall{
+		{offset: 4, length: 5},
+		{offset: 9, length: 6},
+		{offset: 15, length: 5},
+	}, input.reads)
+	assert.Equal(t, footer.Blobs, r.Blobs())
 }
 
 // TestReadBlobByMetadataValidation verifies validation of blob metadata.

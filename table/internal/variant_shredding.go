@@ -388,10 +388,7 @@ func decimalArrowType(info *fieldInfo) arrow.DataType {
 	// Always Decimal128: arrow-go's pqarrow maps it to INT32/INT64/FLBA by
 	// precision and cannot serialize Decimal32/Decimal64.
 	intDigits := max(info.maxDecimalIntDigits, 0)
-	prec := min(intDigits+info.maxDecimalScale, 38)
-	if prec < 1 {
-		prec = 1
-	}
+	prec := max(min(intDigits+info.maxDecimalScale, 38), 1)
 	scale := info.maxDecimalScale
 	if maxScale := 38 - intDigits; scale > maxScale {
 		if maxScale < 0 {

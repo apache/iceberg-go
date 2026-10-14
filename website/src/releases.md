@@ -40,6 +40,17 @@ To track `main`, use `@main` instead of a version tag.
 
 Per-release notes (highlights, breaking changes, contributors) are published on the [GitHub Releases page](https://github.com/apache/iceberg-go/releases). Iceberg Go does not maintain a curated `CHANGELOG.md` in the repository; the GitHub Releases page is the canonical source.
 
+### Unreleased compatibility notes
+
+- **Orphan file cleanup moved to `table/maintenance`.** The orphan-cleanup and file-purge API is no longer on `table.Table`; it now lives in the `table/maintenance` package as free functions that take the table as their first argument (matching `table/compaction`). For example, `tbl.DeleteOrphanFiles(ctx, ...)` becomes `maintenance.DeleteOrphanFiles(ctx, tbl, ...)`. Because `table/maintenance` imports `table` (and not the reverse), this cannot be offered as a deprecation shim on `table.Table` without an import cycle, so callers must switch to the new package. The following moved from `table` to `table/maintenance`:
+    - Functions (now free functions taking `*table.Table`): `DeleteOrphanFiles`, `PlanOrphanFiles`, `ExecuteOrphanCleanup`, `PurgeFiles`.
+    - Types: `OrphanCleanupOption`, `OrphanCleanupResult`, `OrphanFile`, `OrphanCleanupPlan`, `PrefixMismatchMode`.
+    - Constants: `PrefixMismatchError`, `PrefixMismatchIgnore`, `PrefixMismatchDelete`.
+    - Option constructors: `WithCleanupLocation`, `WithCleanupFilesOlderThan`, `WithCleanupDryRun`, `WithCleanupDeleteFunc`, `WithCleanupMaxConcurrency`, `WithPrefixMismatchMode`, `WithEqualSchemes`, `WithEqualAuthorities`. The four generic names (`WithLocation`, `WithFilesOlderThan`, `WithDryRun`, `WithDeleteFunc`) gained the `WithCleanup` prefix for consistency.
+
+    Relatedly, the previously unexported `isGCEnabled` is now `table.IsGCEnabled`, so the new package can gate destructive operations on the `gc.enabled` table property.
+- `maintenance.PurgeFiles` (previously `Table.PurgeFiles`) now calls `IO.Remove` concurrently, with up to 32 calls in flight, when the filesystem does not implement `BulkRemovableIO`. Custom IO implementations, including those registered with `io.Register`, must make `Remove` safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.
+
 ## Verifying and producing releases
 
 If you are validating an RC or cutting a new release, see:

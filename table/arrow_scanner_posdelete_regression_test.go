@@ -18,7 +18,9 @@
 package table
 
 import (
+	"bytes"
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -26,6 +28,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -91,10 +95,377 @@ func TestReadDeletesRejectsMissingFilePath(t *testing.T) {
 		pqarrow.DefaultWriterProps()))
 	require.NoError(t, fw.Close())
 
-	deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128))
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128), nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Nil(t, deletes)
 	assert.Contains(t, err.Error(), `exactly one "file_path" column, found 0`)
+}
+
+func TestReadDeletesForPathsFiltersUnneededRows(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	deletePath := "mem://bucket/deletes/filtered.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	otherPath := "mem://bucket/data/unneeded.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 10},
+		{"file_path": "`+otherPath+`", "pos": 20},
+		{"file_path": "`+dataPath+`", "pos": 30}
+	]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128), map[string]struct{}{dataPath: {}})
+	require.NoError(t, err)
+	defer releasePosDeletes(deletes)
+
+	assert.Equal(t, []int64{10, 30}, int64Values(deletes[dataPath]))
+	assert.NotContains(t, deletes, otherPath)
+}
+
+func TestReadDeletesForPathsTreatsEmptyTargetsAsUnfiltered(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	deletePath := "mem://bucket/deletes/empty-targets.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	otherPath := "mem://bucket/data/other.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 10},
+		{"file_path": "`+otherPath+`", "pos": 20}
+	]`)
+
+	for _, targets := range []map[string]struct{}{nil, {}} {
+		deletes, err := readDeletesForPaths(ctx, memFS,
+			newPosDeleteFile(t, deletePath, 2, 128), targets)
+		require.NoError(t, err)
+		assert.Equal(t, []int64{10}, int64Values(deletes[dataPath]))
+		assert.Equal(t, []int64{20}, int64Values(deletes[otherPath]))
+		releasePosDeletes(deletes)
+	}
+}
+
+func TestReadDeletesForPathsMatchesFilePathsExactly(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	deletePath := "mem://bucket/deletes/exact-target.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 10}
+	]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS,
+		newPosDeleteFile(t, deletePath, 1, 128),
+		map[string]struct{}{dataPath + "/": {}})
+	require.NoError(t, err)
+	defer releasePosDeletes(deletes)
+	assert.Empty(t, deletes)
+}
+
+func TestReadDeletesForPathsHandlesDictionaryFilePath(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := internal.WithTableProperties(
+		compute.WithAllocator(t.Context(), mem),
+		iceberg.Properties{internal.ParquetBatchSizeKey: "2"},
+	)
+	defer mem.AssertSize(t, 0)
+
+	deletePath := "mem://bucket/deletes/dictionary-filtered.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	otherPath := "mem://bucket/data/unneeded.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath, PositionalDeleteArrowSchema, `[
+		{"file_path": "`+dataPath+`", "pos": 10},
+		{"file_path": "`+otherPath+`", "pos": 20},
+		{"file_path": "`+dataPath+`", "pos": 30},
+		{"file_path": "`+dataPath+`", "pos": 40}
+	]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 4, 128), map[string]struct{}{dataPath: {}})
+	require.NoError(t, err)
+	defer releasePosDeletes(deletes)
+
+	assert.Equal(t, []int64{10, 30, 40}, int64Values(deletes[dataPath]))
+	assert.NotContains(t, deletes, otherPath)
+}
+
+func TestReadDeletesForPathsHandlesReversedPhysicalSchema(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	deleteSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+	}, nil)
+	deletePath := "mem://bucket/deletes/reversed-filtered.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	otherPath := "mem://bucket/data/unneeded.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath, deleteSchema, `[
+		{"pos": 10, "file_path": "`+dataPath+`"},
+		{"pos": 20, "file_path": "`+otherPath+`"},
+		{"pos": 30, "file_path": "`+dataPath+`"}
+	]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128), map[string]struct{}{dataPath: {}})
+	require.NoError(t, err)
+	defer releasePosDeletes(deletes)
+
+	assert.Equal(t, []int64{10, 30}, int64Values(deletes[dataPath]))
+	assert.NotContains(t, deletes, otherPath)
+}
+
+func TestReadAllDeleteFilesUsesTaskDataFilePaths(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	deletePath := "mem://bucket/deletes/task-target.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	otherPath := "mem://bucket/data/unneeded.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 10},
+		{"file_path": "`+otherPath+`", "pos": 20}
+	]`)
+
+	dataBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		dataPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+
+	deletes, err := readAllDeleteFiles(ctx, memFS, []FileScanTask{{
+		File: dataBuilder.Build(),
+		DeleteFiles: []iceberg.DataFile{
+			newPosDeleteFile(t, deletePath, 2, 128),
+		},
+	}}, 1)
+	require.NoError(t, err)
+	defer releasePerFilePosDeletes(deletes)
+
+	assert.Equal(t, []int64{10}, int64Values(deletes[dataPath][0]))
+	assert.NotContains(t, deletes, otherPath)
+}
+
+func TestReadAllDeleteFilesFallsBackForMixedTasks(t *testing.T) {
+	for _, missingFile := range []struct {
+		name string
+		file iceberg.DataFile
+	}{
+		{name: "nil file"},
+		{name: "empty path", file: &mockDataFile{}},
+	} {
+		for _, missingFirst := range []bool{false, true} {
+			t.Run(missingFile.name+"/missing first="+strconv.FormatBool(missingFirst), func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				ctx := compute.WithAllocator(t.Context(), mem)
+				defer mem.AssertSize(t, 0)
+
+				deletePath := "mem://bucket/deletes/mixed-tasks.parquet"
+				dataPath := "mem://bucket/data/data-A.parquet"
+				otherPath := "mem://bucket/data/data-B.parquet"
+				memFS := iceio.NewMemFS()
+				writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+					{"file_path": "`+dataPath+`", "pos": 10},
+					{"file_path": "`+otherPath+`", "pos": 20}
+				]`)
+				deleteFile := newPosDeleteFile(t, deletePath, 2, 128)
+				tasks := []FileScanTask{
+					{File: &mockDataFile{path: dataPath}, DeleteFiles: []iceberg.DataFile{deleteFile}},
+					{File: missingFile.file, DeleteFiles: []iceberg.DataFile{deleteFile}},
+				}
+				if missingFirst {
+					tasks[0], tasks[1] = tasks[1], tasks[0]
+				}
+
+				deletes, err := readAllDeleteFiles(ctx, memFS, tasks, 2)
+				require.NoError(t, err)
+				defer releasePerFilePosDeletes(deletes)
+				require.Len(t, deletes, 2)
+				require.Len(t, deletes[dataPath], 1)
+				require.Len(t, deletes[otherPath], 1)
+				assert.Equal(t, []int64{10}, int64Values(deletes[dataPath][0]))
+				assert.Equal(t, []int64{20}, int64Values(deletes[otherPath][0]))
+			})
+		}
+	}
+}
+
+func TestReadDeletesForPathsAtPredicateLimit(t *testing.T) {
+	for _, targetCount := range []int{inPredicateLimit - 1, inPredicateLimit, inPredicateLimit + 1} {
+		t.Run(strconv.Itoa(targetCount), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			defer mem.AssertSize(t, 0)
+
+			targets := make(map[string]struct{}, targetCount)
+			for i := range targetCount {
+				targets["mem://bucket/data/target-"+strconv.Itoa(i)+".parquet"] = struct{}{}
+			}
+			tester, err := newPositionDeleteRowGroupTester(PositionalDeleteArrowSchema, targets)
+			require.NoError(t, err)
+			if targetCount > inPredicateLimit {
+				assert.Nil(t, tester)
+			} else {
+				require.NotNil(t, tester)
+			}
+
+			deletePath := "mem://bucket/deletes/predicate-limit.parquet"
+			dataPath := "mem://bucket/data/target-0.parquet"
+			memFS := iceio.NewMemFS()
+			writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+				{"file_path": "`+dataPath+`", "pos": 10},
+				{"file_path": "mem://bucket/data/unneeded.parquet", "pos": 20},
+				{"file_path": "`+dataPath+`", "pos": 30}
+			]`)
+			deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128), targets)
+			require.NoError(t, err)
+			defer releasePosDeletes(deletes)
+			require.Len(t, deletes, 1)
+			require.Contains(t, deletes, dataPath)
+			assert.Equal(t, []int64{10, 30}, int64Values(deletes[dataPath]))
+		})
+	}
+}
+
+func TestReadDeletesForPathsFallsBackForPartialFieldIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		missing []int
+	}{
+		{name: "file_path ID absent", missing: []int{0}},
+		{name: "pos ID absent", missing: []int{1}},
+		{name: "IDs only on row", missing: []int{0, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			defer mem.AssertSize(t, 0)
+
+			fields := PositionalDeleteArrowSchema.Fields()
+			for _, index := range tc.missing {
+				fields[index].Metadata = arrow.Metadata{}
+			}
+			fields = append(fields, arrow.Field{
+				Name: "row", Type: arrow.StructOf(arrow.Field{
+					Name: "id", Type: arrow.PrimitiveTypes.Int64,
+					Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "101"}),
+				}),
+				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "100"}),
+			})
+			schema := arrow.NewSchema(fields, nil)
+			deletePath := "mem://bucket/deletes/partial-ids.parquet"
+			dataPath := "mem://bucket/data/needed.parquet"
+			targets := map[string]struct{}{dataPath: {}}
+			tester, err := newPositionDeleteRowGroupTester(schema, targets)
+			require.NoError(t, err)
+			assert.Nil(t, tester)
+
+			memFS := iceio.NewMemFS()
+			writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath, schema, `[
+				{"file_path": "`+dataPath+`", "pos": 10, "row": {"id": 1}},
+				{"file_path": "mem://bucket/data/unneeded.parquet", "pos": 20, "row": {"id": 2}},
+				{"file_path": "`+dataPath+`", "pos": 30, "row": {"id": 3}}
+			]`, parquet.WithBloomFilterEnabled(true))
+			deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128), targets)
+			require.NoError(t, err)
+			defer releasePosDeletes(deletes)
+			require.Len(t, deletes, 1)
+			require.Contains(t, deletes, dataPath)
+			assert.Equal(t, []int64{10, 30}, int64Values(deletes[dataPath]))
+		})
+	}
+}
+
+func TestReadDeletesForPathsFallsBackForNoncanonicalFieldIDs(t *testing.T) {
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
+	for _, tc := range []struct {
+		name       string
+		filePathID int
+		posID      int
+	}{
+		{name: "both IDs renumbered", filePathID: 1, posID: 2},
+		{name: "file_path ID renumbered", filePathID: 1, posID: posField.ID},
+		{name: "pos ID renumbered", filePathID: filePathField.ID, posID: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			defer mem.AssertSize(t, 0)
+
+			deletePath := "mem://bucket/deletes/noncanonical-ids.parquet"
+			dataPath := "mem://bucket/data/needed.parquet"
+			otherPath := "mem://bucket/data/unneeded.parquet"
+			targets := map[string]struct{}{dataPath: {}}
+			schema := positionDeleteSchemaWithFieldIDs(tc.filePathID, tc.posID)
+			tester, err := newPositionDeleteRowGroupTester(schema, targets)
+			require.NoError(t, err)
+			assert.Nil(t, tester)
+
+			memFS := iceio.NewMemFS()
+			writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath, schema, `[
+				{"file_path": "`+dataPath+`", "pos": 10},
+				{"file_path": "`+otherPath+`", "pos": 20},
+				{"file_path": "`+dataPath+`", "pos": 30}
+			]`)
+			deletes, err := readDeletesForPaths(ctx, memFS,
+				newPosDeleteFile(t, deletePath, 3, 128), targets)
+			require.NoError(t, err)
+			defer releasePosDeletes(deletes)
+			assert.Equal(t, []int64{10, 30}, int64Values(deletes[dataPath]))
+			assert.NotContains(t, deletes, otherPath)
+		})
+	}
+}
+
+func TestPositionDeleteRowGroupTesterUsesFilePathStats(t *testing.T) {
+	dataPath := "mem://bucket/data/needed.parquet"
+	otherPath := "mem://bucket/data/unneeded.parquet"
+	rec := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[
+		{"file_path": "`+otherPath+`", "pos": 10},
+		{"file_path": "`+otherPath+`", "pos": 20},
+		{"file_path": "`+dataPath+`", "pos": 30},
+		{"file_path": "`+dataPath+`", "pos": 40}
+	]`)
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	writer, err := pqarrow.NewFileWriter(
+		PositionalDeleteArrowSchema, &buf,
+		parquet.NewWriterProperties(
+			parquet.WithStats(true),
+			parquet.WithMaxRowGroupLength(2),
+		),
+		pqarrow.DefaultWriterProps(),
+	)
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(rec))
+	require.NoError(t, writer.Close())
+
+	reader, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer reader.Close()
+	assert.Equal(t, 2, reader.NumRowGroups())
+
+	tester, err := newPositionDeleteRowGroupTester(PositionalDeleteArrowSchema, map[string]struct{}{dataPath: {}})
+	require.NoError(t, err)
+	require.NotNil(t, tester)
+
+	use, err := tester.StatsFn(reader.MetaData().RowGroup(0), []int{0, 1})
+	require.NoError(t, err)
+	assert.False(t, use)
+
+	use, err = tester.StatsFn(reader.MetaData().RowGroup(1), []int{0, 1})
+	require.NoError(t, err)
+	assert.True(t, use)
 }
 
 func TestReadDeletesProjectsColumnsAndAccumulatesBatches(t *testing.T) {
@@ -150,7 +521,7 @@ func TestReadDeletesProjectsColumnsAndAccumulatesBatches(t *testing.T) {
 	projected.Release()
 	assert.Equal(t, 3, batchCount)
 
-	deletes, err := readDeletes(ctx, memFS, dataFile)
+	deletes, err := readDeletesForPaths(ctx, memFS, dataFile, nil)
 	require.NoError(t, err)
 	defer releasePosDeletes(deletes)
 
@@ -198,7 +569,7 @@ func TestReadDeletesHandlesDictionaryEncodedFilePath(t *testing.T) {
 	require.NoError(t, records.Err())
 	assert.Greater(t, dictionaryBatches, 0)
 
-	deletes, err := readDeletes(ctx, memFS, dataFile)
+	deletes, err := readDeletesForPaths(ctx, memFS, dataFile, nil)
 	require.NoError(t, err)
 	defer releasePosDeletes(deletes)
 
@@ -225,7 +596,7 @@ func TestReadDeletesHandlesReversedPhysicalSchema(t *testing.T) {
 		{"pos": 30, "file_path": "`+dataPath+`"}
 	]`)
 
-	deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128))
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128), nil)
 	require.NoError(t, err)
 	defer releasePosDeletes(deletes)
 
@@ -234,12 +605,254 @@ func TestReadDeletesHandlesReversedPhysicalSchema(t *testing.T) {
 }
 
 func TestPosDeleteAccumulatorFinishAfterReleasePanics(t *testing.T) {
-	acc := newPosDeleteAccumulator(t.Context())
+	acc := newPosDeleteAccumulator(t.Context(), nil)
 	acc.release()
 
 	assert.PanicsWithValue(t, "position delete accumulator is already finished or released", func() {
 		acc.finish()
 	})
+}
+
+func TestPositionDeleteRowGroupTesterUsesFilePathBloomFilters(t *testing.T) {
+	dataPath := "mem://bucket/data/needed.parquet"
+	otherPath := "mem://bucket/data/unneeded.parquet"
+	deletePath := "mem://bucket/deletes/bloom-filtered.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath, PositionalDeleteArrowSchema, `[
+		{"file_path": "`+otherPath+`", "pos": 10},
+		{"file_path": "`+otherPath+`", "pos": 20},
+		{"file_path": "`+dataPath+`", "pos": 30},
+		{"file_path": "`+dataPath+`", "pos": 40}
+	]`, parquet.WithStats(false), parquet.WithBloomFilterEnabledFor("file_path", true),
+		parquet.WithMaxRowGroupLength(2))
+	deleteFile := newPosDeleteFile(t, deletePath, 4, 128)
+
+	for _, useBloom := range []bool{false, true} {
+		t.Run("bloom="+strconv.FormatBool(useBloom), func(t *testing.T) {
+			ctx := t.Context()
+			source, err := internal.GetFile(ctx, memFS, deleteFile, true)
+			require.NoError(t, err)
+			reader, err := source.GetReader(ctx)
+			require.NoError(t, err)
+			defer reader.Close()
+			fileMetadata := reader.Metadata().(*metadata.FileMetaData)
+			require.Len(t, fileMetadata.RowGroups, 2)
+			schema, err := reader.Schema()
+			require.NoError(t, err)
+			tester, err := newPositionDeleteRowGroupTester(schema, map[string]struct{}{dataPath: {}})
+			require.NoError(t, err)
+			require.NotNil(t, tester)
+			require.NotEmpty(t, tester.BloomPreds)
+			if !useBloom {
+				tester.BloomPreds = nil
+			}
+			for i := range fileMetadata.RowGroups {
+				use, err := tester.StatsFn(fileMetadata.RowGroup(i), []int{0, 1})
+				require.NoError(t, err)
+				require.True(t, use, "statistics must not prune either row group")
+			}
+
+			var survivors []internal.RowGroupSpan
+			tester.Survivors = &survivors
+			records, err := reader.GetRecords(ctx, []int{0, 1}, tester)
+			require.NoError(t, err)
+			defer records.Release()
+			var positions []int64
+			for records.Next() {
+				positions = append(positions, records.RecordBatch().Column(1).(*array.Int64).Int64Values()...)
+			}
+			require.NoError(t, records.Err())
+			if useBloom {
+				assert.Equal(t, []int64{30, 40}, positions)
+				assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: 2, NumRows: 2}}, survivors)
+				deletes, err := readDeletesForPaths(ctx, memFS, deleteFile, map[string]struct{}{dataPath: {}})
+				require.NoError(t, err)
+				defer releasePosDeletes(deletes)
+				require.Len(t, deletes, 1)
+				require.Contains(t, deletes, dataPath)
+				assert.Equal(t, []int64{30, 40}, int64Values(deletes[dataPath]))
+			} else {
+				assert.Equal(t, []int64{10, 20, 30, 40}, positions)
+				assert.Nil(t, survivors)
+			}
+		})
+	}
+}
+
+func TestPositionDeleteRowGroupTesterValidatesPartialFieldIDs(t *testing.T) {
+	for _, missingIndex := range []int{0, 1} {
+		for _, tc := range []struct {
+			name    string
+			fields  func([]arrow.Field) []arrow.Field
+			wantErr bool
+		}{
+			{
+				name:    "reserved ID on another column",
+				wantErr: true,
+				fields: func(fields []arrow.Field) []arrow.Field {
+					return append(fields, arrow.Field{
+						Name: "row", Type: arrow.BinaryTypes.String,
+						Metadata: PositionalDeleteArrowSchema.Field(missingIndex).Metadata,
+					})
+				},
+			},
+			{
+				name:    "duplicate reserved ID",
+				wantErr: true,
+				fields: func(fields []arrow.Field) []arrow.Field {
+					return append(fields, arrow.Field{
+						Name: "row", Type: arrow.BinaryTypes.String,
+						Metadata: fields[1-missingIndex].Metadata,
+					})
+				},
+			},
+			{
+				name: "noncanonical ID on other delete column",
+				fields: func(fields []arrow.Field) []arrow.Field {
+					fields[1-missingIndex].Metadata = arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "100"})
+
+					return fields
+				},
+			},
+		} {
+			t.Run("missing="+strconv.Itoa(missingIndex)+"/"+tc.name, func(t *testing.T) {
+				fields := PositionalDeleteArrowSchema.Fields()
+				fields[missingIndex].Metadata = arrow.Metadata{}
+				tester, err := newPositionDeleteRowGroupTester(
+					arrow.NewSchema(tc.fields(fields), nil), map[string]struct{}{"data.parquet": {}})
+				if !tc.wantErr {
+					require.NoError(t, err)
+					assert.Nil(t, tester)
+
+					return
+				}
+
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				assert.Nil(t, tester)
+			})
+		}
+	}
+}
+
+func TestPositionDeleteRowGroupTesterValidatesPhysicalFieldIDs(t *testing.T) {
+	t.Parallel()
+
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
+	dataPath := "mem://bucket/data/needed.parquet"
+
+	tests := []struct {
+		name       string
+		schema     *arrow.Schema
+		wantTester bool
+		wantErr    string
+	}{
+		{
+			name:       "canonical IDs",
+			schema:     positionDeleteSchemaWithFieldIDs(filePathField.ID, posField.ID),
+			wantTester: true,
+		},
+		{
+			name:   "IDs absent",
+			schema: positionDeleteSchemaWithoutFieldIDs(),
+		},
+		{
+			name:   "noncanonical IDs",
+			schema: positionDeleteSchemaWithFieldIDs(1, 2),
+		},
+		{
+			name:    "swapped IDs",
+			schema:  positionDeleteSchemaWithFieldIDs(posField.ID, filePathField.ID),
+			wantErr: `position delete column "file_path" has field ID`,
+		},
+		{
+			name:    "duplicate IDs",
+			schema:  positionDeleteSchemaWithFieldIDs(filePathField.ID, filePathField.ID),
+			wantErr: "is not unique",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tester, err := newPositionDeleteRowGroupTester(tt.schema, map[string]struct{}{dataPath: {}})
+			if tt.wantErr != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			if tt.wantTester {
+				require.NotNil(t, tester)
+				assert.NotEmpty(t, tester.BloomPreds)
+			} else {
+				assert.Nil(t, tester)
+			}
+		})
+	}
+}
+
+func TestReadDeletesForPathsRejectsSwappedPhysicalFieldIDs(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
+	deletePath := "mem://bucket/deletes/swapped-ids.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath,
+		positionDeleteSchemaWithFieldIDs(posField.ID, filePathField.ID),
+		`[{"file_path": "`+dataPath+`", "pos": 0}]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128),
+		map[string]struct{}{dataPath: {}})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, deletes)
+}
+
+func TestReadDeletesForPathsRejectsDuplicatePhysicalFieldIDs(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	deletePath := "mem://bucket/deletes/duplicate-ids.parquet"
+	dataPath := "mem://bucket/data/needed.parquet"
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath,
+		positionDeleteSchemaWithFieldIDs(filePathField.ID, filePathField.ID),
+		`[{"file_path": "`+dataPath+`", "pos": 0}]`)
+
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128),
+		map[string]struct{}{dataPath: {}})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, deletes)
+}
+
+func positionDeleteSchemaWithFieldIDs(filePathID, posID int) *arrow.Schema {
+	return arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "file_path",
+			Type:     arrow.BinaryTypes.String,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(filePathID)}),
+		},
+		{
+			Name:     "pos",
+			Type:     arrow.PrimitiveTypes.Int64,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(posID)}),
+		},
+	}, nil)
+}
+
+func positionDeleteSchemaWithoutFieldIDs() *arrow.Schema {
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
 }
 
 func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
@@ -452,6 +1065,37 @@ func TestGroupPosDeletesByFilePathRejectsMismatchedLengths(t *testing.T) {
 	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Contains(t, err.Error(), "file_path and pos columns have different lengths: 2 and 1")
+}
+
+func TestPosDeleteAccumulatorAppendRecordRejectsMismatchedLengths(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		filePaths []string
+		positions []int64
+	}{
+		{name: "extra positions", filePaths: []string{"file-a.parquet"}, positions: []int64{1, 2}},
+		{name: "extra file paths", filePaths: []string{"file-a.parquet", "file-b.parquet"}, positions: []int64{1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+
+			filePathArr := stringArray(mem, tc.filePaths...)
+			defer filePathArr.Release()
+			posArr := int64Array(mem, tc.positions...)
+			defer posArr.Release()
+			record := array.NewRecordBatch(PositionalDeleteArrowSchema,
+				[]arrow.Array{filePathArr, posArr}, int64(min(len(tc.filePaths), len(tc.positions))))
+			defer record.Release()
+
+			acc := newPosDeleteAccumulator(ctx, nil)
+			defer acc.release()
+			err := acc.appendRecord(ctx, record)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), "file_path and pos columns have different lengths")
+		})
+	}
 }
 
 func TestGroupPosDeletesByFilePathRejectsNegativePositions(t *testing.T) {
@@ -835,7 +1479,7 @@ func TestReadDeletesRejectsNullPos(t *testing.T) {
 		pqarrow.DefaultWriterProps()))
 	require.NoError(t, fw.Close())
 
-	deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128))
+	deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128), nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Nil(t, deletes)
 	assert.Contains(t, err.Error(), "null pos in position delete file")
@@ -1091,10 +1735,36 @@ func TestReadDeletesProjectsLeafColumnsAroundNestedRow(t *testing.T) {
                 {"file_path": "other.parquet", "pos": 2, "row": {"id": 20, "name": "b"}},
                 {"file_path": "`+dataPath+`", "pos": 3, "row": {"id": 30, "name": "c"}}
             ]`)
-			deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128))
+			deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128), map[string]struct{}{dataPath: {}})
 			require.NoError(t, err)
 			defer releasePosDeletes(deletes)
 			assert.Equal(t, []int64{1, 3}, int64Values(deletes[dataPath]))
+		})
+	}
+}
+
+func TestPositionDeleteRowGroupTesterRejectsNestedDuplicateFieldIDs(t *testing.T) {
+	duplicate := arrow.Field{
+		Name: "value", Type: arrow.BinaryTypes.String,
+		Metadata: PositionalDeleteArrowSchema.Field(0).Metadata,
+	}
+	for _, tc := range []struct {
+		name string
+		typ  arrow.DataType
+	}{
+		{"struct", arrow.StructOf(duplicate)},
+		{"list", arrow.ListOfField(duplicate)},
+		{"large list", arrow.LargeListOfField(duplicate)},
+		{"map key", arrow.MapOfFields(duplicate, arrow.Field{Name: "value", Type: arrow.BinaryTypes.String})},
+		{"map value", arrow.MapOfFields(arrow.Field{Name: "key", Type: arrow.BinaryTypes.String}, duplicate)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := PositionalDeleteArrowSchema.Fields()
+			fields = append(fields, arrow.Field{Name: "row", Type: tc.typ})
+			tester, err := newPositionDeleteRowGroupTester(
+				arrow.NewSchema(fields, nil), map[string]struct{}{"data.parquet": {}})
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.Nil(t, tester)
 		})
 	}
 }

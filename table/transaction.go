@@ -67,9 +67,7 @@ func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID, filter iceberg.Boo
 		op = OpAppend
 	}
 	prod := newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
-	if filter != nil {
-		prod.producerImpl.(*overwriteFiles).filter = filter
-	}
+	prod.setOverwriteFilter(filter)
 
 	return prod
 }
@@ -167,15 +165,12 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return errors.New("transaction has already been committed")
 	}
 
-	stagedMeta := meta.clone()
-	if stagedMeta == nil {
-		return errors.New("cannot apply updates to nil metadata")
-	}
+	var stagedMeta *MetadataBuilder
 
-	current, err := stagedMeta.Build()
-	if err != nil {
-		return err
-	}
+	// Only new requirement validation needs the immutable metadata view.
+	// Updates can be applied directly to the staged builder, and duplicate
+	// requirements only need conflict checks.
+	var current Metadata
 
 	// Deduplicate requirements by semantic key, rejecting pairs that
 	// share a key but cannot both hold (see checkRequirementConflict).
@@ -183,36 +178,65 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	// staged metadata: a deduplicated twin re-asserts base state the
 	// staged metadata has intentionally moved past, and its kept twin
 	// was validated when first added.
-	existing := make(map[string]Requirement, len(t.reqs))
-	stagedReqs := make([]Requirement, 0, len(t.reqs)+len(reqs))
-	for _, r := range t.reqs {
-		key, err := requirementSemanticKey(r)
-		if err != nil {
-			return err
-		}
-
-		existing[key] = r
-		stagedReqs = append(stagedReqs, r)
-	}
-
-	for _, r := range reqs {
-		key, err := requirementSemanticKey(r)
-		if err != nil {
-			return err
-		}
-
-		if prev, ok := existing[key]; ok {
-			if err := checkRequirementConflict(prev, r); err != nil {
+	stagedReqs := t.reqs
+	if len(reqs) > 0 {
+		existing := make(map[string]Requirement, len(t.reqs))
+		for _, r := range t.reqs {
+			key, err := requirementSemanticKey(r)
+			if err != nil {
 				return err
 			}
 
-			continue
+			existing[key] = r
 		}
-		if err := r.Validate(current); err != nil {
-			return err
+
+		copiedReqs := false
+		for _, r := range reqs {
+			key, err := requirementSemanticKey(r)
+			if err != nil {
+				return err
+			}
+
+			if prev, ok := existing[key]; ok {
+				if err := checkRequirementConflict(prev, r); err != nil {
+					return err
+				}
+
+				continue
+			}
+			if stagedMeta == nil {
+				stagedMeta = meta.clone()
+				if stagedMeta == nil {
+					return errors.New("cannot apply updates to nil metadata")
+				}
+			}
+			if current == nil {
+				built, err := stagedMeta.Build()
+				if err != nil {
+					return err
+				}
+				current = built
+			}
+			if err := r.Validate(current); err != nil {
+				return err
+			}
+			if !copiedReqs {
+				stagedReqs = make([]Requirement, len(t.reqs), len(t.reqs)+len(reqs))
+				copy(stagedReqs, t.reqs)
+				copiedReqs = true
+			}
+			existing[key] = r
+			stagedReqs = append(stagedReqs, r)
 		}
-		existing[key] = r
-		stagedReqs = append(stagedReqs, r)
+	}
+	if stagedMeta == nil {
+		if len(updates) == 0 {
+			return nil
+		}
+		stagedMeta = meta.clone()
+		if stagedMeta == nil {
+			return errors.New("cannot apply updates to nil metadata")
+		}
 	}
 
 	prevUpdates, prevLastUpdated := len(stagedMeta.updates), stagedMeta.lastUpdatedMS
@@ -1018,22 +1042,55 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
-// validateDataFilePartitionData verifies that DataFile partition values match
-// the given partition spec's fields by ID without reading file contents.
-func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
+type partitionValidationField struct {
+	id   int
+	name string
+}
+
+// partitionValidationPlan contains the metadata needed to validate
+// a data file's partition tuple against one partition spec. The field slice
+// preserves spec order for deterministic missing-field errors. The plan is
+// immutable after construction and can be reused for concurrent validation.
+type partitionValidationPlan struct {
+	specID           int
+	fields           []partitionValidationField
+	expectedFieldIDs map[int]struct{}
+}
+
+func newPartitionValidationPlan(spec *iceberg.PartitionSpec) *partitionValidationPlan {
+	plan := &partitionValidationPlan{
+		specID:           spec.ID(),
+		fields:           make([]partitionValidationField, 0, spec.NumFields()),
+		expectedFieldIDs: make(map[int]struct{}, spec.NumFields()),
+	}
+
+	for _, field := range spec.Fields() {
+		plan.expectedFieldIDs[field.FieldID] = struct{}{}
+		plan.fields = append(plan.fields, partitionValidationField{
+			id:   field.FieldID,
+			name: field.Name,
+		})
+	}
+
+	return plan
+}
+
+func (p *partitionValidationPlan) validate(df iceberg.DataFile) error {
 	partitionData := dataFilePartition(df)
 
-	expectedFieldIDs := make(map[int]string)
-	for _, field := range spec.Fields() {
-		expectedFieldIDs[field.FieldID] = field.Name
-		if _, ok := partitionData[field.FieldID]; !ok {
-			return fmt.Errorf("missing partition value for field id %d (%s)", field.FieldID, field.Name)
+	for _, field := range p.fields {
+		if _, ok := partitionData[field.id]; !ok {
+			return fmt.Errorf("missing partition value for field id %d (%s)", field.id, field.name)
 		}
 	}
 
+	if len(partitionData) == len(p.expectedFieldIDs) {
+		return nil
+	}
+
 	for fieldID := range partitionData {
-		if _, ok := expectedFieldIDs[fieldID]; !ok {
-			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, spec.ID())
+		if _, ok := p.expectedFieldIDs[fieldID]; !ok {
+			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, p.specID)
 		}
 	}
 
@@ -1071,9 +1128,9 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 
 	// A data file may target any partition spec registered in the table
 	// metadata, not just the default: its manifest is written with that
-	// spec (see snapshotProducer.manifestProducer). Cache lookups since
-	// files typically share a handful of specs.
-	specsByID := make(map[int32]*iceberg.PartitionSpec)
+	// spec (see snapshotProducer.manifestProducer). Cache validation plans
+	// since files typically share a handful of specs.
+	validationPlansByID := make(map[int32]*partitionValidationPlan)
 
 	setToAdd := make(map[string]struct{}, len(dataFiles))
 
@@ -1102,9 +1159,9 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid file format %s for %s", path, df.FileFormat(), operation)
 		}
 
-		spec, ok := specsByID[df.SpecID()]
+		plan, ok := validationPlansByID[df.SpecID()]
 		if !ok {
-			spec, err = meta.GetSpecByID(int(df.SpecID()))
+			spec, err := meta.GetSpecByID(int(df.SpecID()))
 			if err != nil || spec == nil {
 				return nil, fmt.Errorf("data file %s has unregistered partition spec id %d for %s",
 					path, df.SpecID(), operation)
@@ -1112,10 +1169,11 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			if err := checkNoUnknownTransform(spec); err != nil {
 				return nil, fmt.Errorf("data file %s for %s: %w", path, operation, err)
 			}
-			specsByID[df.SpecID()] = spec
+			plan = newPartitionValidationPlan(spec)
+			validationPlansByID[df.SpecID()] = plan
 		}
 
-		if err := validateDataFilePartitionData(df, spec); err != nil {
+		if err := plan.validate(df); err != nil {
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
@@ -1137,11 +1195,40 @@ type deletionVectorBlobKey struct {
 }
 
 type deleteFilesToAddSet struct {
-	paths        map[string]struct{}
-	regularPaths map[string]struct{}
-	dvPaths      map[string]struct{}
-	dvBlobs      map[deletionVectorBlobKey]struct{}
-	dvsByRef     map[string]rewriteDeleteFileAddition
+	paths    map[string]struct{}
+	dvPaths  map[string]struct{}
+	dvBlobs  map[deletionVectorBlobKey]struct{}
+	dvsByRef map[string]rewriteDeleteFileAddition
+}
+
+// validateDeletionVectorToAdd is safe on any DataFile and no-ops on non-DVs.
+func validateDeletionVectorToAdd(df iceberg.DataFile, formatVersion int, operation string) error {
+	if !IsDeletionVector(df) {
+		return nil
+	}
+	path := df.FilePath()
+	if formatVersion < 3 {
+		return fmt.Errorf("deletion vector %s requires table format version >= 3 for %s", path, operation)
+	}
+	if ref := df.ReferencedDataFile(); ref == nil || *ref == "" {
+		return fmt.Errorf("deletion vector %s is missing referenced_data_file for %s", path, operation)
+	}
+	offset := df.ContentOffset()
+	if offset == nil {
+		return fmt.Errorf("deletion vector %s is missing content_offset for %s", path, operation)
+	}
+	if *offset < 0 {
+		return fmt.Errorf("deletion vector %s has invalid content_offset %d for %s", path, *offset, operation)
+	}
+	length := df.ContentSizeInBytes()
+	if length == nil {
+		return fmt.Errorf("deletion vector %s is missing content_size_in_bytes for %s", path, operation)
+	}
+	if *length <= 0 {
+		return fmt.Errorf("deletion vector %s has invalid content_size_in_bytes %d for %s", path, *length, operation)
+	}
+
+	return nil
 }
 
 // validateDeleteFilesToAdd performs metadata-only validation for delete files
@@ -1154,11 +1241,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		return nil, err
 	}
 	setToAdd := &deleteFilesToAddSet{
-		paths:        make(map[string]struct{}, len(deleteFiles)),
-		regularPaths: make(map[string]struct{}, len(deleteFiles)),
-		dvPaths:      make(map[string]struct{}, len(deleteFiles)),
-		dvBlobs:      make(map[deletionVectorBlobKey]struct{}, len(deleteFiles)),
-		dvsByRef:     make(map[string]rewriteDeleteFileAddition, len(deleteFiles)),
+		paths: make(map[string]struct{}, len(deleteFiles)),
 	}
 	if len(deleteFiles) == 0 {
 		return setToAdd, nil
@@ -1166,6 +1249,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 	if meta.formatVersion < 2 {
 		return nil, fmt.Errorf("delete files require table format version >= 2, got v%d", meta.formatVersion)
 	}
+	validationPlansByID := make(map[int32]*partitionValidationPlan)
 
 	for i, addition := range deleteFiles {
 		df := addition.file
@@ -1180,6 +1264,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		if path == "" {
 			return nil, fmt.Errorf("delete file path cannot be empty for %s", operation)
 		}
+		_, pathAlreadyAdded := setToAdd.paths[path]
 		setToAdd.paths[path] = struct{}{}
 
 		switch df.ContentType() {
@@ -1188,14 +1273,19 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			return nil, fmt.Errorf("adding non-delete file %s has content type %s for %s", path, df.ContentType(), operation)
 		}
 
-		spec, err := meta.GetSpecByID(int(df.SpecID()))
-		if err != nil {
-			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+		plan, ok := validationPlansByID[df.SpecID()]
+		if !ok {
+			spec, err := meta.GetSpecByID(int(df.SpecID()))
+			if err != nil {
+				return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+			}
+			if spec == nil {
+				return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
+			}
+			plan = newPartitionValidationPlan(spec)
+			validationPlansByID[df.SpecID()] = plan
 		}
-		if spec == nil {
-			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
-		}
-		if err := validateDataFilePartitionData(df, spec); err != nil {
+		if err := plan.validate(df); err != nil {
 			return nil, fmt.Errorf("delete file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
@@ -1214,59 +1304,51 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 				return nil, fmt.Errorf("position delete file %s must be a deletion vector for v%d table for %s",
 					path, meta.formatVersion, operation)
 			}
-			if _, ok := setToAdd.regularPaths[path]; ok {
+			if pathAlreadyAdded {
+				if _, ok := setToAdd.dvPaths[path]; ok {
+					return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+						path, operation)
+				}
+
 				return nil, fmt.Errorf("add delete file paths must be unique for %s", operation)
 			}
-			if _, ok := setToAdd.dvPaths[path]; ok {
-				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
-					path, operation)
-			}
-			setToAdd.regularPaths[path] = struct{}{}
 
 			continue
 		}
 
-		if IsDeletionVector(df) {
-			if meta.formatVersion < 3 {
-				return nil, fmt.Errorf("deletion vector %s requires table format version >= 3 for %s",
-					path, operation)
-			}
-			ref := df.ReferencedDataFile()
-			if ref == nil || *ref == "" {
-				return nil, fmt.Errorf("deletion vector to add is missing referenced_data_file for %s", operation)
-			}
-			offset := df.ContentOffset()
-			if offset == nil {
-				return nil, fmt.Errorf("deletion vector %s is missing content_offset for %s", path, operation)
-			}
-			if *offset < 0 {
-				return nil, fmt.Errorf("deletion vector %s has invalid content_offset %d for %s", path, *offset, operation)
-			}
-			length := df.ContentSizeInBytes()
-			if length == nil {
-				return nil, fmt.Errorf("deletion vector %s is missing content_size_in_bytes for %s", path, operation)
-			}
-			if *length <= 0 {
-				return nil, fmt.Errorf("deletion vector %s has invalid content_size_in_bytes %d for %s", path, *length, operation)
-			}
+		if err := validateDeletionVectorToAdd(df, meta.formatVersion, operation); err != nil {
+			return nil, err
+		}
+		// non-nil: validateDeletionVectorToAdd checked all three.
+		ref, offset, length := df.ReferencedDataFile(), df.ContentOffset(), df.ContentSizeInBytes()
 
-			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
-			if _, ok := setToAdd.dvBlobs[blob]; ok {
-				return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
-					operation, path, *offset, *length)
-			}
-			if _, ok := setToAdd.dvsByRef[*ref]; ok {
-				return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
-					operation, *ref)
-			}
-			if _, ok := setToAdd.regularPaths[path]; ok {
+		blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
+		if setToAdd.dvBlobs == nil {
+			setToAdd.dvBlobs = make(map[deletionVectorBlobKey]struct{}, len(deleteFiles))
+		}
+		if _, ok := setToAdd.dvBlobs[blob]; ok {
+			return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
+				operation, path, *offset, *length)
+		}
+		if _, ok := setToAdd.dvsByRef[*ref]; ok {
+			return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
+				operation, *ref)
+		}
+		if pathAlreadyAdded {
+			if _, ok := setToAdd.dvPaths[path]; !ok {
 				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
 					path, operation)
 			}
-			setToAdd.dvPaths[path] = struct{}{}
-			setToAdd.dvBlobs[blob] = struct{}{}
-			setToAdd.dvsByRef[*ref] = addition
 		}
+		if setToAdd.dvPaths == nil {
+			setToAdd.dvPaths = make(map[string]struct{}, len(deleteFiles))
+		}
+		if setToAdd.dvsByRef == nil {
+			setToAdd.dvsByRef = make(map[string]rewriteDeleteFileAddition, len(deleteFiles))
+		}
+		setToAdd.dvPaths[path] = struct{}{}
+		setToAdd.dvBlobs[blob] = struct{}{}
+		setToAdd.dvsByRef[*ref] = addition
 	}
 
 	return setToAdd, nil
@@ -1661,8 +1743,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
-		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
-		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+		updater.setSkipDefaultValidator(true)
 	}
 	if cfg.dataSequenceNumber != nil {
 		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
@@ -1777,7 +1858,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	setDeleteFilesToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
-	dvRefsToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
+	dvsToRemoveByRef := make(map[string]iceberg.DataFile, len(deleteFilesToRemove))
 	for i, df := range deleteFilesToRemove {
 		if df == nil {
 			return fmt.Errorf("nil delete file at index %d for ReplaceFiles", i)
@@ -1791,10 +1872,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if ref == nil {
 				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
 			}
-			if _, ok := dvRefsToRemove[*ref]; ok {
+			if _, ok := dvsToRemoveByRef[*ref]; ok {
 				return errors.New("deletion vectors to remove must reference distinct data files for ReplaceFiles")
 			}
-			dvRefsToRemove[*ref] = struct{}{}
+			dvsToRemoveByRef[*ref] = df
 
 			continue
 		}
@@ -1804,7 +1885,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		setDeleteFilesToRemove[path] = struct{}{}
 	}
 	autoSetDeleteFilesToRemove := make(map[string]struct{}, len(autoDeleteFilesToRemove))
-	autoDVRefsToRemove := make(map[string]struct{}, len(autoDeleteFilesToRemove))
+	autoDVsToRemoveByRef := make(map[string]iceberg.DataFile, len(autoDeleteFilesToRemove))
 	for i, df := range autoDeleteFilesToRemove {
 		if df == nil {
 			return fmt.Errorf("nil automatic delete file at index %d for ReplaceFiles", i)
@@ -1818,13 +1899,13 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if ref == nil {
 				return errors.New("automatic deletion vector to remove is missing referenced_data_file for ReplaceFiles")
 			}
-			if _, ok := dvRefsToRemove[*ref]; ok {
+			if _, ok := dvsToRemoveByRef[*ref]; ok {
 				return errors.New("delete vectors to remove must reference distinct data files for ReplaceFiles")
 			}
-			if _, ok := autoDVRefsToRemove[*ref]; ok {
+			if _, ok := autoDVsToRemoveByRef[*ref]; ok {
 				return errors.New("automatic deletion vectors to remove must reference distinct data files for ReplaceFiles")
 			}
-			autoDVRefsToRemove[*ref] = struct{}{}
+			autoDVsToRemoveByRef[*ref] = df
 
 			continue
 		}
@@ -1856,26 +1937,28 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
 	markedAutoDeleteForRemoval := make([]iceberg.DataFile, 0, len(autoSetDeleteFilesToRemove))
-	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
+	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvsToRemoveByRef))
 	removedDeleteSequenceNumbers := make([]int64, 0, len(deleteFilesToRemove))
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
 	liveDataFiles := make(map[string]rewriteFileState)
 	survivingPositionDeletes := make([]rewriteFileState, 0)
-	for entry, err := range s.entries(fs, -1) {
+	for entry, err := range s.entries(fs, -1, false) {
 		if err != nil {
 			return err
 		}
 		df := entry.DataFile()
 		path := df.FilePath()
 		isData := df.ContentType() == iceberg.EntryContentData
+		// A DELETED entry is a file already removed from the table. It must not
+		// count as found when removing files, but it still blocks re-adding its path.
 		isLive := entry.Status() != iceberg.EntryStatusDELETED
 		if isData && isLive {
 			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.SequenceNum()}
+			if _, ok := setToDelete[path]; ok {
+				markedDataForDeletion = append(markedDataForDeletion, df)
+			}
 		}
-		if _, ok := setToDelete[path]; ok && isData {
-			markedDataForDeletion = append(markedDataForDeletion, df)
-		}
-		if !isData {
+		if !isData && isLive {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
 				if seq := entry.SequenceNum(); seq >= 0 {
@@ -1887,7 +1970,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			} else if _, ok := autoSetDeleteFilesToRemove[path]; ok {
 				markedAutoDeleteForRemoval = append(markedAutoDeleteForRemoval, df)
 			} else if ref := iceberginternal.BorrowedDataFileReferencedDataFile(df); IsDeletionVector(df) && ref != nil {
-				if _, ok := dvRefsToRemove[*ref]; ok {
+				// Match the DV's path too, not only its data file. Otherwise an old DV that
+				// was already replaced would match the newer DV, which holds more deletes.
+				if want, ok := dvsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
 					if seq := entry.SequenceNum(); seq >= 0 {
 						removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
@@ -1895,7 +1980,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 					} else {
 						return fmt.Errorf("deletion vector %s has no data sequence number in the current snapshot", path)
 					}
-				} else if _, ok := autoDVRefsToRemove[*ref]; ok {
+				} else if want, ok := autoDVsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
 				}
 			}
@@ -1903,8 +1988,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
 		}
-		if _, ok := setDeleteFilesToAdd.regularPaths[path]; ok {
-			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+		if _, ok := setDeleteFilesToAdd.paths[path]; ok {
+			if _, isDeletionVector := setDeleteFilesToAdd.dvPaths[path]; !isDeletionVector {
+				return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+			}
 		}
 		if _, ok := setDeleteFilesToAdd.dvPaths[path]; ok && isLive {
 			if !IsDeletionVector(df) {
@@ -1930,10 +2017,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if _, addingReplacement := setDeleteFilesToAdd.dvsByRef[*ref]; !addingReplacement {
 				continue
 			}
-			if _, explicitlyRemoved := dvRefsToRemove[*ref]; explicitlyRemoved {
+			if _, explicitlyRemoved := dvsToRemoveByRef[*ref]; explicitlyRemoved {
 				continue
 			}
-			if _, automaticallyRemoved := autoDVRefsToRemove[*ref]; automaticallyRemoved {
+			if _, automaticallyRemoved := autoDVsToRemoveByRef[*ref]; automaticallyRemoved {
 				continue
 			}
 
@@ -1972,9 +2059,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if len(markedAutoDeleteForRemoval) != len(autoSetDeleteFilesToRemove) {
 		return errors.New("cannot remove automatic delete files that do not belong to the table")
 	}
-	// Keyed by referenced data file, so duplicate DV entries for one ref collapse
-	// to one slot; equality then means every requested ref exists in the table.
-	if len(markedDVsForRemoval) != len(dvRefsToRemove)+len(autoDVRefsToRemove) {
+	// markedDVsForRemoval has one slot per data file, so equal counts mean
+	// every requested DV was found live in the table.
+	if len(markedDVsForRemoval) != len(dvsToRemoveByRef)+len(autoDVsToRemoveByRef) {
 		return errors.New("cannot remove deletion vectors that do not belong to the table")
 	}
 
@@ -2063,8 +2150,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
-		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
-		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+		updater.setSkipDefaultValidator(true)
 	}
 	if cfg.dataSequenceNumber != nil {
 		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
@@ -2387,6 +2473,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
+	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, filesToRewrite, fileSeqByPath, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -2401,6 +2488,21 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, fileSeqByPath, filter, caseSensitive, concurrency); err != nil {
 			return nil, nil, err
 		}
+	}
+
+	// Reject the commit if a concurrent snapshot added deletes against any
+	// data file this operation removes. The overwriteFiles producer only
+	// checks added data files (and only under serializable isolation);
+	// without this check a refresh-and-replay would swap the original file
+	// for a rewrite built from the stale snapshot, dropping the concurrent
+	// deletes and resurrecting their rows. Mirrors Java's copy-on-write
+	// validateNoConflictingDeletes: no isolation gating. The check is
+	// shared with RewriteDataFiles via rewriteValidator, so changes there
+	// apply here too. A concurrent removal of one of these files is caught
+	// earlier, by the retry rebuild's checkRemovedFiles (ErrCommitDiverged).
+	removed := slices.Concat(filesToDelete, filesToRewrite)
+	if len(removed) > 0 {
+		t.addValidator(rewriteValidator(removed))
 	}
 
 	return updater, wfs, nil
@@ -2434,6 +2536,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
+	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, withPartialDeletions, _, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -2502,6 +2605,9 @@ func WithDeleteCaseInsensitive() DeleteOption {
 //   - Files where all rows match the filter (strict match) are completely deleted
 //   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
 //   - Files where no rows match the filter are kept unchanged
+//
+// A row matches only if the filter is true for it. Rows where the filter evaluates to NULL, for example
+// `age = 30` on a NULL age, do not match and are kept.
 //
 // The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
@@ -2630,7 +2736,16 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 		return nil, nil, nil, fmt.Errorf("failed to create inclusive metrics evaluator: %w", err)
 	}
 
-	strictEvaluator, err := newStrictMetricsEvaluator(schema, filter, caseSensitive, false)
+	// A file is deleted as a whole only if the filter is true for all of its
+	// rows. The strict evaluator treats predicates as two-valued, so NotEqual
+	// and NotIn would also count rows where the filter is NULL. Evaluate the
+	// negation of the rows the rewrite keeps instead, so that both paths agree.
+	notTrue, err := isNotTrueExpr(filter)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to build negated filter: %w", err)
+	}
+
+	strictEvaluator, err := newStrictMetricsEvaluator(schema, iceberg.NewNot(notTrue), caseSensitive, false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
 	}
@@ -2747,7 +2862,10 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 		return err
 	}
 
-	complementFilter := iceberg.NewNot(filter)
+	complementFilter, err := isNotTrueExpr(filter)
+	if err != nil {
+		return fmt.Errorf("failed to build complement filter: %w", err)
+	}
 
 	// Bind + convert the complement filter once for the whole rewrite. The
 	// per-batch filter function is reused across every record batch from
@@ -2783,6 +2901,91 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 	}
 
 	return nil
+}
+
+// isNotTrueExpr returns an expression that holds exactly for the rows where
+// filter is not true, i.e. where it is false or NULL. Plain NOT(filter) is not
+// enough: under three-valued logic `v = 5` is NULL when v is NULL, and so is
+// NOT(v = 5), so a copy-on-write rewrite would drop rows that never matched.
+//
+// The result contains no NOT. Row-group pruning pushes a NOT down with
+// RewriteNotExpr, which turns NOT(x < 5) into x >= 5, and that is false for
+// NaN. Negating the predicates here keeps NaN rows in both places.
+func isNotTrueExpr(filter iceberg.BooleanExpression) (iceberg.BooleanExpression, error) {
+	res, err := iceberg.VisitExpr(filter, isNotTrueVisitor{})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.notTrue, nil
+}
+
+// truthExprs holds two never-NULL expressions for a sub-expression e:
+// notTrue holds iff e is false or NULL, notFalse holds iff e is true or NULL.
+type truthExprs struct {
+	notTrue, notFalse iceberg.BooleanExpression
+}
+
+type isNotTrueVisitor struct{}
+
+func (isNotTrueVisitor) VisitTrue() truthExprs {
+	return truthExprs{notTrue: iceberg.AlwaysFalse{}, notFalse: iceberg.AlwaysTrue{}}
+}
+
+func (isNotTrueVisitor) VisitFalse() truthExprs {
+	return truthExprs{notTrue: iceberg.AlwaysTrue{}, notFalse: iceberg.AlwaysFalse{}}
+}
+
+func (isNotTrueVisitor) VisitNot(child truthExprs) truthExprs {
+	return truthExprs{notTrue: child.notFalse, notFalse: child.notTrue}
+}
+
+func (isNotTrueVisitor) VisitAnd(left, right truthExprs) truthExprs {
+	return truthExprs{
+		notTrue:  iceberg.NewOr(left.notTrue, right.notTrue),
+		notFalse: iceberg.NewAnd(left.notFalse, right.notFalse),
+	}
+}
+
+func (isNotTrueVisitor) VisitOr(left, right truthExprs) truthExprs {
+	return truthExprs{
+		notTrue:  iceberg.NewAnd(left.notTrue, right.notTrue),
+		notFalse: iceberg.NewOr(left.notFalse, right.notFalse),
+	}
+}
+
+func (isNotTrueVisitor) VisitUnbound(pred iceberg.UnboundPredicate) truthExprs {
+	negated := pred.Negate()
+	switch pred.Op() {
+	case iceberg.OpIsNull, iceberg.OpNotNull, iceberg.OpNotNan:
+		// never evaluates to NULL
+		return truthExprs{notTrue: negated, notFalse: pred}
+	case iceberg.OpIsNan:
+		// is_nan(NULL) is false, so NULL rows survive. The guard also covers
+		// files written before the column existed, where NotNaN on the missing
+		// column translates to AlwaysFalse.
+		return truthExprs{notTrue: iceberg.NewOr(negated, iceberg.IsNull(pred.Term())), notFalse: pred}
+	case iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ:
+		// NaN fails both x < 5 and x >= 5. IsNaN binds to AlwaysFalse for
+		// non-floating-point terms.
+		negated = iceberg.NewOr(negated, iceberg.IsNaN(pred.Term()))
+	}
+
+	// Any other predicate is NULL when its term is NULL. Guard In and NotIn
+	// too: binding turns a set that ends up with one value into Equal or
+	// NotEqual, which are NULL for a NULL term. A scan with a multi-valued
+	// NotIn still matches NULL rows, see
+	// https://github.com/apache/iceberg-go/issues/2132.
+	isNull := iceberg.IsNull(pred.Term())
+
+	return truthExprs{
+		notTrue:  iceberg.NewOr(negated, isNull),
+		notFalse: iceberg.NewOr(pred, isNull),
+	}
+}
+
+func (isNotTrueVisitor) VisitBound(pred iceberg.BoundPredicate) truthExprs {
+	panic(fmt.Errorf("%w: found already bound predicate: %s", iceberg.ErrInvalidArgument, pred))
 }
 
 // rewriteSingleFileArgs bundles the parameters for [Transaction.rewriteSingleFile]
@@ -3070,18 +3273,11 @@ func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (ma
 	}
 
 	result := make(map[string]iceberg.DataFile)
-	// Iterate delete manifests only and skip DELETED-status entries: a
-	// superseded DV lingers as a DELETED entry in the deleted-files manifest
-	// against the same referenced data file. Including it here would let the
-	// stale ghost win the last-write into result (manifest concat order places
-	// deleted entries last), seeding the new DV from an outdated bitmap and
-	// resurrecting rows removed by the prior delete. See issue #1372.
-	for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes) {
+	// Skip DELETED entries: an old, replaced DV stays behind as one. Reading it
+	// would build the new DV from old data and bring back deleted rows. See #1372.
+	for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return nil, fmt.Errorf("scanning existing deletion vectors: %w", err)
-		}
-		if entry.Status() == iceberg.EntryStatusDELETED {
-			continue
 		}
 		df := entry.DataFile()
 		if !IsDeletionVector(df) {
@@ -3161,7 +3357,11 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	for range numWorkers {
 		go func() {
 			defer wg.Done()
+			sink := newRecordSink(records)
 			for {
+				if err := sink.reserve(ctx); err != nil {
+					return
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -3170,7 +3370,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 						return
 					}
 
-					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], records, invariants); err != nil {
+					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], sink, invariants); err != nil {
 						cancel(err)
 
 						return
@@ -3210,6 +3410,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		metadata:         updatedMeta,
 		metadataLocation: t.tbl.metadataLocation,
 		ioF:              t.tbl.fsF,
+		manifestCache:    newSnapshotManifestCacheForMetadata(updatedMeta),
 		// Catalog planners can only see committed table state, not metadata
 		// staged inside this transaction. Keep transaction scans local so auto
 		// mode cannot silently return stale tasks.
@@ -3253,10 +3454,16 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			t.tbl.cat,
 			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
 			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
+			WithLabels(t.tbl.labels),
+			WithSavedConfig(t.tbl.savedConfig),
 		),
 	}, nil
 }
 
+// Commit persists the transaction's staged changes. Metadata validation may be
+// deferred when applying an operation adds no new requirement to the transaction.
+// The staged metadata is validated when a later transaction operation needs an
+// immutable metadata view, or while the catalog applies the commit.
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	if err := t.checkNotNil(); err != nil {
 		return nil, err
@@ -3313,7 +3520,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 }
 
 func validateGCEnabledForSnapshotExpiration(props iceberg.Properties) error {
-	if !isGCEnabled(props) {
+	if !IsGCEnabled(props) {
 		return errors.New("cannot expire snapshots: GC is disabled (deleting files may corrupt other tables)")
 	}
 

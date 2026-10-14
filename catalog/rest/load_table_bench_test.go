@@ -145,7 +145,7 @@ func makeTableResponseWithSnapshots(snapshotCount int64) []byte {
 		panic(fmt.Errorf("failed to generate load table response: %w", err))
 	}
 
-	return []byte(fmt.Sprintf(`{
+	return fmt.Appendf(nil, `{
 			"metadata-location": "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json",
 			"metadata": {
 				"format-version": 1,
@@ -190,5 +190,5 @@ func makeTableResponseWithSnapshots(snapshotCount int64) []byte {
 					}
 				]
 			}
-		}`, snapshotTimestamp, snapshotID, snapshotID, snapshotsJson, snapshotsLogEntriesJson))
+		}`, snapshotTimestamp, snapshotID, snapshotID, snapshotsJson, snapshotsLogEntriesJson)
 }
