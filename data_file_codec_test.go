@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"fmt"
 	"reflect"
 	"strconv"
 	"sync"
@@ -120,6 +121,61 @@ func TestMarshalAvroEntryOmitsDistinctCounts(t *testing.T) {
 				}
 			}
 			require.True(t, found, "data_file field not found on manifest_entry v%d schema", version)
+		})
+	}
+}
+
+func TestUnmarshalAvroDataFileEntryNormalizesFileFormat(t *testing.T) {
+	spec := NewPartitionSpec()
+	schema := NewSchema(0)
+
+	const path = "s3://bucket/table/data.parquet"
+
+	tests := []struct {
+		name      string
+		content   ManifestEntryContent
+		written   FileFormat
+		expected  FileFormat
+		expectErr bool
+	}{
+		{name: "spec lowercase", written: "parquet", expected: ParquetFile},
+		{name: "mixed case", written: "Parquet", expected: ParquetFile},
+		{name: "uppercase", written: ParquetFile, expected: ParquetFile},
+		{name: "lowercase avro", written: "avro", expected: AvroFile},
+		{name: "lowercase orc", written: "orc", expected: OrcFile},
+		{
+			name: "lowercase puffin in delete entry", content: EntryContentPosDeletes,
+			written: "puffin", expected: PuffinFile,
+		},
+		{name: "unknown format", written: "csv", expectErr: true},
+		{name: "empty format", written: "", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := tt.content
+			if content == 0 {
+				content = EntryContentData
+			}
+			builder, err := NewDataFileBuilder(spec, content,
+				path, ParquetFile, nil, nil, nil, 1, 1024)
+			require.NoError(t, err)
+			source := builder.Build().(*dataFile)
+			source.Format = tt.written
+
+			encoded, err := source.MarshalAvroEntry(spec, schema, 2)
+			require.NoError(t, err)
+
+			decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, 2)
+			if tt.expectErr {
+				require.EqualError(t, err, fmt.Sprintf(
+					"iceberg: unmarshalAvroDataFileEntry: data file %q: unknown file format: %s",
+					path, tt.written))
+
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, decoded.FileFormat())
 		})
 	}
 }
