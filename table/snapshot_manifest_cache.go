@@ -306,6 +306,12 @@ func readSnapshotManifestSet(
 // the all_* metadata tables) resolves the storage backend only once. Obtain one
 // with [Table.ManifestProvider].
 //
+// A provider is meant for a single operation. The FileIO is resolved on the
+// first call and that result, success or error, is kept for the provider's
+// lifetime: if resolution fails (including because the first call's context was
+// canceled), every later call on the same provider returns that error. Get a
+// new provider from [Table.ManifestProvider] to retry.
+//
 // The zero value is not usable; callers outside this package use
 // Table.ManifestProvider. Reads honor the caller's context, and a table with no
 // configured FileIO returns an error from every method.
@@ -323,7 +329,7 @@ func (t Table) ManifestProvider() ManifestProvider {
 
 // FS returns the table FileIO, resolved once and shared with this provider's
 // manifest reads. Use it to read the entries of the manifests returned by
-// Manifests / DataManifests.
+// Manifests.
 func (p ManifestProvider) FS(ctx context.Context) (iceio.IO, error) {
 	return p.fsF(ctx)
 }
@@ -338,18 +344,6 @@ func (p ManifestProvider) Manifests(ctx context.Context, snapshot Snapshot) (ite
 	}
 
 	return slices.Values(set.borrowAllManifests()), nil
-}
-
-// DataManifests returns an iterator over only the data manifest files in the
-// snapshot's manifest list, filtering out delete manifests. Like Manifests, it
-// reads the shared cache without copying it.
-func (p ManifestProvider) DataManifests(ctx context.Context, snapshot Snapshot) (iter.Seq[iceberg.ManifestFile], error) {
-	set, err := p.set(ctx, snapshot)
-	if err != nil {
-		return nil, err
-	}
-
-	return slices.Values(set.borrowDataManifests()), nil
 }
 
 func (p ManifestProvider) set(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
