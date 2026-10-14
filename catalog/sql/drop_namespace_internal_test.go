@@ -269,7 +269,7 @@ func TestDropNamespaceDoesNotRaceWithObjectCreation(t *testing.T) {
 				releaseDrop:    make(chan struct{}),
 				dropDone:       make(chan struct{}),
 			}
-			cat.db.AddQueryHook(hook)
+			cat.db = cat.db.WithQueryHook(hook)
 
 			released := false
 			defer func() {
@@ -337,7 +337,7 @@ func TestDropNamespaceDoesNotRaceWithUpdateNamespaceProperties(t *testing.T) {
 		updateAtInsert: make(chan struct{}),
 		releaseUpdate:  make(chan struct{}),
 	}
-	cat.db.AddQueryHook(hook)
+	cat.db = cat.db.WithQueryHook(hook)
 
 	released := false
 	defer func() {

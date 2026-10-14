@@ -20,19 +20,19 @@ module github.com/apache/iceberg-go
 go 1.26.3
 
 require (
-	cloud.google.com/go/storage v1.68.0
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.1
+	cloud.google.com/go/storage v1.69.0
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.2
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.1
-	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.1
+	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.2
 	github.com/RoaringBitmap/roaring/v2 v2.29.0
 	github.com/alexflint/go-arg v1.6.1
 	github.com/apache/arrow-go/v18 v18.8.0
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
-	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.10
-	github.com/aws/aws-sdk-go-v2/service/glue v1.164.0
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
+	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.13
+	github.com/aws/aws-sdk-go-v2/service/glue v1.167.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.0
 	github.com/aws/smithy-go v1.28.2
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
 	github.com/beltran/gohive v1.8.1
@@ -44,7 +44,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/klauspost/compress v1.20.1
-	github.com/pierrec/lz4/v4 v4.1.30
+	github.com/pierrec/lz4/v4 v4.1.33
 	github.com/pterm/pterm v0.12.83
 	github.com/stretchr/testify v1.12.1
 	github.com/substrait-io/substrait-go/v8 v8.1.1
@@ -52,25 +52,25 @@ require (
 	github.com/twmb/avro v1.9.0
 	github.com/twmb/murmur3 v1.2.0
 	github.com/twpayne/go-geom v1.7.0
-	github.com/uptrace/bun v1.2.18
-	github.com/uptrace/bun/dialect/mssqldialect v1.2.18
-	github.com/uptrace/bun/dialect/mysqldialect v1.2.18
-	github.com/uptrace/bun/dialect/oracledialect v1.2.18
-	github.com/uptrace/bun/dialect/pgdialect v1.2.18
-	github.com/uptrace/bun/dialect/sqlitedialect v1.2.18
-	github.com/uptrace/bun/driver/sqliteshim v1.2.18
-	github.com/uptrace/bun/extra/bundebug v1.2.18
-	go.opentelemetry.io/otel v1.46.0
-	go.opentelemetry.io/otel/metric v1.46.0
-	go.opentelemetry.io/otel/sdk v1.46.0
-	go.opentelemetry.io/otel/sdk/metric v1.46.0
-	go.opentelemetry.io/otel/trace v1.46.0
+	github.com/uptrace/bun v1.3.0
+	github.com/uptrace/bun/dialect/mssqldialect v1.3.0
+	github.com/uptrace/bun/dialect/mysqldialect v1.3.0
+	github.com/uptrace/bun/dialect/oracledialect v1.3.0
+	github.com/uptrace/bun/dialect/pgdialect v1.3.0
+	github.com/uptrace/bun/dialect/sqlitedialect v1.3.0
+	github.com/uptrace/bun/driver/sqliteshim v1.3.0
+	github.com/uptrace/bun/extra/bundebug v1.3.0
+	go.opentelemetry.io/otel v1.47.0
+	go.opentelemetry.io/otel/metric v1.47.0
+	go.opentelemetry.io/otel/sdk v1.47.0
+	go.opentelemetry.io/otel/sdk/metric v1.47.0
+	go.opentelemetry.io/otel/trace v1.47.0
 	gocloud.dev v0.46.0
 	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297
 	golang.org/x/oauth2 v0.37.0
-	golang.org/x/sync v0.23.0
+	golang.org/x/sync v0.24.0
 	golang.org/x/term v0.46.0
-	google.golang.org/api v0.299.0
+	google.golang.org/api v0.300.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -80,18 +80,19 @@ require (
 	atomicgo.dev/schedule v0.1.0 // indirect
 	cel.dev/expr v0.25.2 // indirect
 	cloud.google.com/go v0.123.0 // indirect
-	cloud.google.com/go/auth v0.23.3 // indirect
-	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/compute/metadata v0.9.1 // indirect
+	cloud.google.com/go/auth v0.24.0 // indirect
+	cloud.google.com/go/auth/oauth2adapt v0.3.0 // indirect
+	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	cloud.google.com/go/iam v1.12.0 // indirect
 	cloud.google.com/go/monitoring v1.30.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.12.0 // indirect
+	github.com/Azure/azure-sdk-for-go/sdk/storage/internal v0.1.0 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.8.0 // indirect
 	github.com/DefangLabs/secret-detector v0.0.0-20250811234530-d4b4214cd679 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.34.0 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.35.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.57.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.57.0 // indirect
 	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 // indirect
@@ -167,7 +168,7 @@ require (
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/wire v0.7.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.22 // indirect
-	github.com/googleapis/gax-go/v2 v2.24.1 // indirect
+	github.com/googleapis/gax-go/v2 v2.26.2 // indirect
 	github.com/gookit/color v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
@@ -250,7 +251,7 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/contrib/detectors/gcp v1.44.0 // indirect
+	go.opentelemetry.io/contrib/detectors/gcp v1.45.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.69.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect
@@ -259,6 +260,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.45.0 // indirect
+	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
