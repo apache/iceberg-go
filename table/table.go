@@ -965,8 +965,8 @@ func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 	return meta.CurrentSnapshot()
 }
 
-// returns the data manifests the snapshots in udpates write
-// for the data files they add.
+// stagedDataManifests returns the data manifests the snapshots in updates
+// write for the data files they add.
 func stagedDataManifests(updates []Update) []iceberg.ManifestFile {
 	var manifests []iceberg.ManifestFile
 	for _, u := range updates {

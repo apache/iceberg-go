@@ -1880,11 +1880,11 @@ func writeRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...i
 
 	rows := make([]string, 0, len(ids))
 	for _, id := range ids {
-		row := `{"id": `+strconv.FormatInt(id, 10)+`}`
+		row := `{"id": ` + strconv.FormatInt(id, 10) + `}`
 		rows = append(rows, row)
 	}
-	
-	jsonData := "["+strings.Join(rows, ",")+"]"
+
+	jsonData := "[" + strings.Join(rows, ",") + "]"
 	writeParquetFile(t, path, arrowSc, jsonData)
 
 	info, err := os.Stat(path)
@@ -1904,7 +1904,7 @@ func seedRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...in
 	writeRowDeltaDataFile(t, tbl, path, ids...)
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.AddFiles(t.Context(), []string{path}, nil, false))
-	
+
 	tbl, err := tx.Commit(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, tbl.CurrentSnapshot())
@@ -1917,11 +1917,11 @@ func writeRowDeltaPositionDelete(t *testing.T, location, name, dataPath string, 
 
 	rows := make([]string, 0, len(positions))
 	for _, pos := range positions {
-		row := `{"file_path": "`+dataPath+`", "pos": `+strconv.FormatInt(pos, 10)+`}`
+		row := `{"file_path": "` + dataPath + `", "pos": ` + strconv.FormatInt(pos, 10) + `}`
 		rows = append(rows, row)
 	}
 	path := location + "/data/" + name
-	jsonData := "["+strings.Join(rows, ",")+"]"
+	jsonData := "[" + strings.Join(rows, ",") + "]"
 	writeParquetFile(t, path, table.PositionalDeleteArrowSchema, jsonData)
 
 	info, err := os.Stat(path)
@@ -1936,7 +1936,7 @@ func writeRowDeltaPositionDelete(t *testing.T, location, name, dataPath string, 
 }
 
 // A data file added by the commit is not on the branch head yet.
-// 
+//
 // Condition: one commit adds file B and deletes for head file A and for B,
 // via one RowDelta or two in one transaction, as v2 position deletes or DVs.
 // Assertion: the commit succeeds and each delete hides only its own row.
@@ -1994,7 +1994,7 @@ func TestRowDeltaDeletesDataFileAddedInSameCommit(t *testing.T) {
 }
 
 // Exempting files the commit adds must not waive the check for others.
-// 
+//
 // Condition: a RowDelta adds file B with DVs for B and for an unknown file.
 // Assertion: ErrDataFilesMissing names only the unknown file
 // and the catalog never receives a commit.
@@ -2003,7 +2003,7 @@ func TestRowDeltaRejectsDeleteForDataFileNotInCommitOrHead(t *testing.T) {
 	location := tbl.Location()
 	pathB := location + "/data/data-b.parquet"
 	unknownPath := location + "/data/unknown.parquet"
-	
+
 	tbl = seedRowDeltaDataFile(t, tbl, location+"/data/data-a.parquet", 1, 2)
 	headBefore := tbl.CurrentSnapshot().SnapshotID
 	attemptsBefore := cat.attempts.Load()
@@ -2024,7 +2024,7 @@ func TestRowDeltaRejectsDeleteForDataFileNotInCommitOrHead(t *testing.T) {
 }
 
 // A retry re-checks the refreshed head, which still lacks the added B.
-// 
+//
 // Condition: a RowDelta adds B with DVs for head file A and for B
 // and a concurrent append or removal of A commits first.
 // Assertion: the append retries with both DVs; the removal fails naming A.

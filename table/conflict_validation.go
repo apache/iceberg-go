@@ -516,7 +516,7 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 
 // validateDataFilesExist verifies that every file path in
 // referencedPaths is still a live data file on the current branch head,
-// or is a data file added by this commit being validated.
+// or is a data file added by the commit being validated.
 // This is the check a position-delete commit performs to prove the
 // files it references have not been removed by a concurrent commit
 // (at which point the pos-delete would apply to rewritten data and
@@ -555,7 +555,7 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 	for _, mf := range ctx.stagedDataManifests {
 		for entry, err := range mf.Entries(ctx.manifestReadIO(), true) {
 			if err != nil {
-				return fmt.Errorf("iteraing data files added by this commit: %w", err)
+				return fmt.Errorf("iterating data files added by this commit: %w", err)
 			}
 			delete(needed, entry.DataFile().FilePath())
 		}

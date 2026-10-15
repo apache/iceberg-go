@@ -592,8 +592,8 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 //
 //   - Every data file referenced by a position-delete in this RowDelta
 //     must still be reachable from the branch head, or be added by the
-// 	   same commit. A concurrent compaction or overwrite that rewrote a 
-// 	   referenced file would orphan this pos-delete and produce incorrect
+//     same commit. A concurrent compaction or overwrite that rewrote a
+//     referenced file would orphan this pos-delete and produce incorrect
 //     results — reject.
 //     Always runs, no isolation gating.
 //
