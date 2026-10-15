@@ -185,7 +185,7 @@ type conflictContext struct {
 	concurrent []Snapshot
 
 	// Hold the data files this commit adds.
-	// They are not on the branch head yet, but, no concurrent commit can remove them.
+	// They are not on the branch head yet, but no concurrent commit can remove them.
 	stagedDataManifests []iceberg.ManifestFile
 
 	// Lazily caches raw manifest bytes for this validation attempt. The
