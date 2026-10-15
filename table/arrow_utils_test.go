@@ -3498,8 +3498,9 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 // Parquet GEOMETRY logical type to geoarrow.wkb on read, so the file projects
 // onto a matching geometry column. A binary table column currently rejects it,
 // both on read and in the FileToDataFile (AddFiles) schema check. Whether
-// geometry should project onto a binary column is still an open decision; flip
-// the binary cases if that promotion is allowed.
+// geometry should project onto a binary column is still an open decision
+// (https://github.com/apache/iceberg-go/issues/2193); flip the binary cases if
+// that promotion is allowed.
 func TestGeoParquetReadWithoutStoredSchema(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer mem.AssertSize(t, 0)
