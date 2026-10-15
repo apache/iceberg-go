@@ -66,8 +66,13 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 		return TableCommit{}, err
 	}
 
-	if t.committed {
-		return TableCommit{}, errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return TableCommit{}, err
+	}
+	// TableCommit sends the transaction's original requirements and updates,
+	// which may be stale after a failed commit. Only Commit refreshes them.
+	if t.failedCommits > 0 {
+		return TableCommit{}, errors.New("a previous commit of this transaction failed, call Commit to resume it")
 	}
 
 	if len(meta.updates) == 0 {

@@ -573,8 +573,8 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	if err != nil {
 		return nil, err
 	}
-	if t.committed {
-		return nil, errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return nil, err
 	}
 	result := &RewriteResult{Table: t.tbl}
 	if len(meta.updates) > 0 || len(t.reqs) > 0 || len(t.validators) > 0 {
@@ -719,9 +719,10 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 				return result, err
 			}
 
-			// ErrCommitFailed is the only error that proves the catalog did not
-			// commit. Every other error leaves commit state unknown, so continuing
-			// with the old table could apply later batches on stale state.
+			// Only a conflict lets the loop move on to the next batch, since each
+			// batch commits through its own transaction built on the current
+			// table. Any other failure stops the rewrite. It may be of unknown
+			// commit state, so continuing could apply later batches on stale state.
 			if !errors.Is(err, ErrCommitFailed) {
 				t.committed = true
 

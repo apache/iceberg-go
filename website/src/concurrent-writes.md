@@ -35,6 +35,9 @@ state. A failed validation surfaces as one of:
   retried after refreshing (see below).
 - `table.ErrCommitDiverged` — terminal. The base snapshot is no longer on the
   branch at all, so a retry cannot reconcile the change.
+- `table.ErrTransactionUnusable` — terminal for this transaction. It can
+  accompany `ErrCommitFailed` when retrying the same transaction cannot
+  succeed, so check it first.
 
 ```go
 import (
@@ -46,7 +49,7 @@ import (
 
 _, err := txn.Commit(context.Background())
 switch {
-case errors.Is(err, table.ErrCommitDiverged):
+case errors.Is(err, table.ErrCommitDiverged), errors.Is(err, table.ErrTransactionUnusable):
     // unrecoverable: rebuild the operation from the latest table
 case errors.Is(err, table.ErrCommitFailed):
     // retriable: refresh and try again (the retry loop does this for you)
@@ -87,6 +90,31 @@ _, err := cat.CreateTable(ctx, ident, schema,
 )
 ```
 
-> **Catalog support:** retry currently engages on the REST catalog, which wraps
-> commit conflicts as `ErrCommitFailed`. The Glue, SQL, and Hive catalogs do
-> not yet wrap their conflict errors, so the retry loop will not fire on them.
+> **Catalog support:** all built-in catalogs report commit conflicts as
+> `ErrCommitFailed`, including failed commit requirements. The REST catalog
+> maps HTTP 409 Conflict to this error.
+
+Only the implicit assertion on the commit branch's head is rebased after a
+refresh. Other requirements, including schema, spec, sort order, and refs pinned
+by `AssertRefSnapshotID`, `RollbackToSnapshot`, or `ExpireSnapshots`, must still
+hold. Otherwise, the commit fails without another attempt and the transaction
+is unusable.
+
+After a conflict, calling `Commit` again on the same transaction refreshes the
+table and replays the staged changes like the next retry attempt, so it can
+rebase onto a peer's commit even with retries disabled. Each call gets the
+configured retry budget. A commit carrying delete-file removals that cannot be
+replayed resubmits only if its branch has not moved. The rejections after a
+refresh that make the transaction unusable are listed on
+`ErrTransactionUnusable`.
+
+A failed commit keeps the files it staged until a later commit lands. A
+transaction you abandon leaves them for orphan file removal, as one with
+retries disabled always has. An abandoned manifest rewrite also leaves the
+manifests that later attempts merged. `TableCommit` refuses a transaction whose
+commit failed, since the multi-table path does not refresh. Call `Commit` to
+resume it, or build a new transaction.
+
+An `ExpireSnapshots` that removes something deliberately pins the commit
+branch. A transaction that also appends then fails instead of rebasing onto a
+peer's append, since the expiry was computed from the old head.
