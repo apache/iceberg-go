@@ -195,6 +195,34 @@ func TestWriteRejectsMismatchedGeoBatch(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported WKB storage type")
 	})
+
+	t.Run("geo column has no bounds accumulator", func(t *testing.T) {
+		writer := newWriter(t)
+		defer func() { require.NoError(t, writer.Abort()) }()
+
+		// geoAccs is built from the same geoCols today; drop the entry to
+		// simulate the two drifting apart.
+		pw, ok := writer.(*ParquetFileWriter)
+		require.True(t, ok, "expected *ParquetFileWriter, got %T", writer)
+		delete(pw.geoAccs, 2)
+
+		storageBuilder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+		storageBuilder.AppendNull()
+		storageBuilder.AppendNull()
+		storage := storageBuilder.NewArray()
+		storageBuilder.Release()
+		defer storage.Release()
+
+		geomArr := array.NewExtensionArrayWithStorage(typeDef, storage)
+		defer geomArr.Release()
+
+		batch := array.NewRecordBatch(arrowSchema, []arrow.Array{idArr, geomArr}, int64(idArr.Len()))
+		defer batch.Release()
+
+		err := writer.Write(batch)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no bounds accumulator")
+	})
 }
 
 func TestNewFileWriterCachesGeoNormalizationColumns(t *testing.T) {

@@ -1219,7 +1219,10 @@ func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
 				gc.fieldID, ext.Storage().DataType())
 		}
 
-		acc := w.geoAccs[gc.fieldID]
+		acc, ok := w.geoAccs[gc.fieldID]
+		if !ok {
+			return fmt.Errorf("geo field %d: no bounds accumulator", gc.fieldID)
+		}
 		acc.nulls += int64(storage.NullN())
 		for i := range storage.Len() {
 			if storage.IsNull(i) {

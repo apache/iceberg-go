@@ -3347,6 +3347,12 @@ func TestToRequestedSchemaGeoAbsentCRSAgainstSRID0SchemaFails(t *testing.T) {
 // schema.
 // Per the Parquet spec, SRIDs are written as "srid:<id>" and the default
 // OGC:CRS84 is omitted.
+//
+// Two cases differ from what Java writes and are pinned so a geoarrow-go bump
+// can't change them silently: EPSG:4326 collapses to OGC:CRS84 (so no Parquet
+// crs, and it reads back as the default CRS) where Java writes "EPSG:4326"
+// verbatim, and a projjson:<property> reference is written as the inline
+// PROJJSON document where Java writes the reference itself.
 func TestGeoTypeParquetRoundTrip(t *testing.T) {
 	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
 	require.NoError(t, err)
@@ -3356,12 +3362,21 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
 	require.NoError(t, err)
+	geomEPSG4326, err := iceberg.GeometryTypeOf("EPSG:4326")
+	require.NoError(t, err)
+	geomPROJJSON, err := iceberg.GeometryTypeOf("projjson:geo.crs")
+	require.NoError(t, err)
+
+	const projjson = `{"type":"GeographicCRS","name":"Custom WGS 84"}`
 
 	tests := []struct {
 		name             string
 		icebergType      iceberg.Type
+		tableProps       iceberg.Properties
 		geoarrowMetaJSON string
 		parquetLogical   schema.LogicalType
+		// readType is the type read back from the file; nil means icebergType.
+		readType iceberg.Type
 	}{
 		{
 			name:             "geometry_default_crs",
@@ -3399,13 +3414,30 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 			geoarrowMetaJSON: `{"crs":"EPSG:3857","crs_type":"authority_code"}`,
 			parquetLogical:   schema.GeometryLogicalType{Crs: "EPSG:3857"},
 		},
+		{
+			name:             "geometry_epsg_4326",
+			icebergType:      geomEPSG4326,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code"}`,
+			parquetLogical:   schema.GeometryLogicalType{},
+			readType:         iceberg.GeometryType{},
+		},
+		{
+			name:             "geometry_projjson",
+			icebergType:      geomPROJJSON,
+			tableProps:       iceberg.Properties{"geo.crs": projjson},
+			geoarrowMetaJSON: `{"crs":` + projjson + `,"crs_type":"projjson"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: projjson},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mem := memory.NewGoAllocator()
 
-			dt, err := table.TypeToArrowType(tt.icebergType, true, false)
+			dt, err := table.TypeToArrowTypeWithOptions(tt.icebergType, table.ArrowSchemaOptions{
+				IncludeFieldIDs: true,
+				TableProperties: tt.tableProps,
+			})
 			require.NoError(t, err)
 
 			wkb, ok := dt.(*geoarrow.WKBType)
@@ -3441,13 +3473,22 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 			readSchema, err := arrRdr.Schema()
 			require.NoError(t, err)
 
-			readIceberg, err := table.ArrowSchemaToIceberg(readSchema, false, nil)
+			readIceberg, err := table.ArrowSchemaToIcebergWithOptions(readSchema, table.ArrowToIcebergOptions{
+				TableSchema: iceberg.NewSchema(0, iceberg.NestedField{
+					ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+				}),
+				TableProperties: tt.tableProps,
+			})
 			require.NoError(t, err)
 
+			wantType := tt.readType
+			if wantType == nil {
+				wantType = tt.icebergType
+			}
 			field, ok := readIceberg.FindFieldByID(1)
 			require.True(t, ok)
-			assert.Equal(t, tt.icebergType.String(), field.Type.String())
-			assert.True(t, tt.icebergType.Equals(field.Type), "expected %s, got %s", tt.icebergType, field.Type)
+			assert.Equal(t, wantType.String(), field.Type.String())
+			assert.True(t, wantType.Equals(field.Type), "expected %s, got %s", wantType, field.Type)
 		})
 	}
 }
