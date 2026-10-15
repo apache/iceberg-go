@@ -184,6 +184,10 @@ type conflictContext struct {
 	// Resolved once; subsequent validator calls reuse the walk.
 	concurrent []Snapshot
 
+	// Hold the data files this commit adds.
+	// They are not on the branch head yet, but no concurrent commit can remove them.
+	stagedDataManifests []iceberg.ManifestFile
+
 	// Lazily caches raw manifest bytes for this validation attempt. The
 	// cache is intentionally scoped to the context because all validators
 	// inspect the same immutable metadata snapshot, while ManifestFile.Entries
@@ -411,8 +415,9 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // partition-spec projection resolves the same column identifiers.
 //
 // When base and current point at the same snapshot on the branch, the
-// returned context has no concurrent snapshots and validators
-// short-circuit to nil. When the base snapshot is no longer on the
+// returned context has no concurrent snapshots and validators that
+// inspect them short-circuit to nil; validateDataFilesExist still reads
+// the branch head. When the base snapshot is no longer on the
 // branch (divergent commit, expired base), newConflictContext returns
 // ErrCommitDiverged; the commit cannot be safely revalidated without
 // a refresh-and-rebuild.
@@ -510,7 +515,8 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 }
 
 // validateDataFilesExist verifies that every file path in
-// referencedPaths is still a live data file on the current branch head.
+// referencedPaths is still a live data file on the current branch head,
+// or is a data file added by the commit being validated.
 // This is the check a position-delete commit performs to prove the
 // files it references have not been removed by a concurrent commit
 // (at which point the pos-delete would apply to rewritten data and
@@ -544,6 +550,18 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 	head := ctx.current.SnapshotByName(ctx.branch)
 	if head == nil {
 		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, ctx.branch)
+	}
+
+	for _, mf := range ctx.stagedDataManifests {
+		for entry, err := range mf.Entries(ctx.manifestReadIO(), true) {
+			if err != nil {
+				return fmt.Errorf("iterating data files added by this commit: %w", err)
+			}
+			delete(needed, entry.DataFile().FilePath())
+		}
+	}
+	if len(needed) == 0 {
+		return nil
 	}
 
 	manifests, err := ctx.manifestsFor(*head)

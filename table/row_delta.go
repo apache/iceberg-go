@@ -46,7 +46,7 @@ import (
 // Client-side conflict validation runs before the commit is sent to
 // the catalog:
 //   - Position deletes: referenced data files must still be reachable
-//     from the current branch head (validateDataFilesExist).
+//     from the current branch head, or be added by the same commit (validateDataFilesExist).
 //   - Equality deletes under write.delete.isolation-level=serializable
 //     (the default): concurrent data files in the same partition(s) as
 //     the equality deletes are rejected. For partitioned tables an
@@ -60,8 +60,9 @@ import (
 // The pre-flight runs before cat.CommitTable on every commit attempt.
 // On the first attempt the writer's view and the catalog state are the
 // same, so there are no concurrent snapshots to inspect and the checks
-// short-circuit; on retries doCommit refreshes the catalog state and
-// the checks run against the freshly loaded branch head.
+// against them short-circuit, while the position-delete check still
+// reads the branch head; on retries doCommit refreshes the catalog state
+// and the checks run against the freshly loaded branch head.
 //
 // Usage:
 //
@@ -590,9 +591,10 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 // enforced:
 //
 //   - Every data file referenced by a position-delete in this RowDelta
-//     must still be reachable from the branch head. A concurrent
-//     compaction or overwrite that rewrote a referenced file would
-//     orphan this pos-delete and produce incorrect results — reject.
+//     must still be reachable from the branch head, or be added by the
+//     same commit. A concurrent compaction or overwrite that rewrote a
+//     referenced file would orphan this pos-delete and produce incorrect
+//     results — reject.
 //     Always runs, no isolation gating.
 //
 //   - When any equality-delete is included and isolation is
