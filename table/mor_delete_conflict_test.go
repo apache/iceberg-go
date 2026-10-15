@@ -128,3 +128,11 @@ func TestMergeOnReadDeleteConflict_NoConflictCommits(t *testing.T) {
 
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 8, 9, 10}, idsInTable(t, tbl))
 }
+
+func TestMergeOnReadDeleteOfDataFileAddedInSameTransaction(t *testing.T) {
+	ctx := context.Background()
+	tbl := appendTenRows(t, newV3MoRConflictTestTable(t))
+
+	path := tbl.Location() + "/data/added-in-txn.parquet"
+	writeRowDeltaDataFile(t, tbl, path, 11, 12)
+}
