@@ -220,9 +220,9 @@ func writeReorderDataFile(tb testing.TB, arrowSchema *arrow.Schema, path string,
 
 func TestScanTaskChannelCapacity(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		taskCount   int
-		numWorkers  int
+		name         string
+		taskCount    int
+		numWorkers   int
 		wantCapacity int
 	}{
 		{name: "empty", taskCount: 0, numWorkers: 0, wantCapacity: 0},
