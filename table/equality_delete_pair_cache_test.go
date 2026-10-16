@@ -123,6 +123,7 @@ func BenchmarkEqualityDeleteCombinationCache(b *testing.B) {
 		name  string
 		files []*equalityDeleteFileSet
 	}{
+		{name: "one", files: []*equalityDeleteFileSet{first}},
 		{name: "two", files: []*equalityDeleteFileSet{first, second}},
 		{name: "three", files: []*equalityDeleteFileSet{first, second, third}},
 	} {
