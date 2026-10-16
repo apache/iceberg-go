@@ -2740,12 +2740,18 @@ func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-c
 	}
 }
 
+// newScanTaskChannel buffers enough work to keep scan workers busy without
+// copying the entire task list into the channel for large scans.
+func newScanTaskChannel(taskCount, numWorkers int) chan tblutils.Enumerated[FileScanTask] {
+	return make(chan tblutils.Enumerated[FileScanTask], min(taskCount, 2*numWorkers))
+}
+
 func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, positionDeleteLoader *lazyPositionDeleteLoader, dvLoader *lazyDeletionVectorLoader, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
 	return func(yield func(arrow.RecordBatch, error) bool) {
 		extSet := substrait.NewExtensionSet()
 		scanCtx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
 		numWorkers := min(as.concurrency, len(tasks))
-		taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
+		taskChan := newScanTaskChannel(len(tasks), numWorkers)
 		records := make(chan enumeratedRecord, numWorkers)
 
 		var wg sync.WaitGroup
