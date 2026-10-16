@@ -574,7 +574,10 @@ func (l *lazyEqualityDeleteLoader) combine(files []*equalityDeleteFileSet) *equa
 	} else {
 		key = equalityDeleteSetCombinationKey(files)
 	}
-	entryValue, _ := l.combinations.LoadOrStore(key, &lazyEqualityDeleteCombination{})
+	entryValue, ok := l.combinations.Load(key)
+	if !ok {
+		entryValue, _ = l.combinations.LoadOrStore(key, &lazyEqualityDeleteCombination{})
+	}
 	entry := entryValue.(*lazyEqualityDeleteCombination)
 	entry.once.Do(func() {
 		entry.set = mergeEqualityDeleteSets(files)

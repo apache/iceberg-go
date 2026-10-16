@@ -133,7 +133,7 @@ func BenchmarkEqualityDeleteCombinationCache(b *testing.B) {
 			benchmarkEqualityDeletePairCacheResult = equalityDeleteSetForFiles(tc.files, multi, pairs)
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				benchmarkEqualityDeletePairCacheResult = equalityDeleteSetForFiles(tc.files, multi, pairs)
 			}
 		})
@@ -142,7 +142,7 @@ func BenchmarkEqualityDeleteCombinationCache(b *testing.B) {
 			benchmarkEqualityDeletePairCacheResult = loader.combine(tc.files)
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				benchmarkEqualityDeletePairCacheResult = loader.combine(tc.files)
 			}
 		})
