@@ -464,7 +464,7 @@ func TestHeaderDefaultsReachSeparateTokenEndpoint(t *testing.T) {
 	assert.Equal(t, "SECRET-API-KEY", tokenAPIKey, "the configured token endpoint must still receive header.* defaults")
 }
 
-func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
+func TestIdentifierPathsRequireNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}
 
 	for _, ident := range []table.Identifier{
@@ -476,38 +476,166 @@ func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 		{"namespace", "table/name"},
 		{"namespace", "table\nname"},
 	} {
-		_, _, err := cat.splitIdentForPath(ident)
+		_, err := cat.tableIdentifierPath(ident)
 		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
 	}
 
-	_, _, err := cat.splitViewIdentForPath(table.Identifier{"view"})
+	_, err := cat.viewIdentifierPath(table.Identifier{"view"})
 	require.ErrorIs(t, err, catalog.ErrNoSuchView)
 	require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
 
-	ns, tbl, err := cat.splitIdentForPath(table.Identifier{"namespace", "table"})
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"namespace", "table"})
 	require.NoError(t, err)
-	assert.Equal(t, "namespace", ns)
-	assert.Equal(t, "table", tbl)
+	assert.Equal(t, "namespace", identPath.encodedNamespace)
+	assert.Equal(t, "table", identPath.rawName)
+	assert.Equal(t, "table", identPath.encodedName)
 
-	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"parent", "namespace", "table"})
+	identPath, err = cat.tableIdentifierPath(table.Identifier{"parent", "namespace", "table"})
 	require.NoError(t, err)
-	assert.Equal(t, "parent%1Fnamespace", ns)
-	assert.Equal(t, "table", tbl)
+	assert.Equal(t, "parent%1Fnamespace", identPath.encodedNamespace)
+	assert.Equal(t, "table", identPath.rawName)
+	assert.Equal(t, "table", identPath.encodedName)
 
-	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"namespace+name", "table+name"})
+	identPath, err = cat.tableIdentifierPath(table.Identifier{"namespace+name", "table+name"})
 	require.NoError(t, err)
-	assert.Equal(t, "namespace%2Bname", ns)
-	assert.Equal(t, "table%2Bname", tbl)
+	assert.Equal(t, "namespace%2Bname", identPath.encodedNamespace)
+	assert.Equal(t, "table+name", identPath.rawName)
+	assert.Equal(t, "table%2Bname", identPath.encodedName)
 
-	for name, split := range map[string]func(table.Identifier) (string, string, error){
-		"view":     cat.splitViewIdentForPath,
-		"function": cat.splitFunctionIdentForPath,
+	for name, buildPath := range map[string]func(table.Identifier) (identifierPath, error){
+		"view":     cat.viewIdentifierPath,
+		"function": cat.functionIdentifierPath,
 	} {
 		t.Run(name, func(t *testing.T) {
-			ns, object, err := split(table.Identifier{"namespace+name", name + "+name"})
+			identPath, err := buildPath(table.Identifier{"namespace+name", name + "+name"})
 			require.NoError(t, err)
-			assert.Equal(t, "namespace%2Bname", ns)
-			assert.Equal(t, name+"%2Bname", object)
+			assert.Equal(t, "namespace%2Bname", identPath.encodedNamespace)
+			assert.Equal(t, name+"+name", identPath.rawName)
+			assert.Equal(t, name+"%2Bname", identPath.encodedName)
+		})
+	}
+}
+
+func TestIdentifierPathsRejectDotComponents(t *testing.T) {
+	cat := &Catalog{}
+
+	for _, builder := range []struct {
+		name      string
+		buildPath func(table.Identifier) (identifierPath, error)
+		wantErr   error
+	}{
+		{name: "table", buildPath: cat.tableIdentifierPath, wantErr: catalog.ErrNoSuchTable},
+		{name: "view", buildPath: cat.viewIdentifierPath, wantErr: catalog.ErrNoSuchView},
+		{name: "function", buildPath: cat.functionIdentifierPath, wantErr: catalog.ErrNoSuchFunction},
+	} {
+		t.Run(builder.name, func(t *testing.T) {
+			for _, tt := range []struct {
+				name  string
+				ident table.Identifier
+			}{
+				{name: "dot namespace", ident: table.Identifier{".", "object"}},
+				{name: "double dot namespace", ident: table.Identifier{"..", "object"}},
+				{name: "dot name", ident: table.Identifier{"namespace", "."}},
+				{name: "double dot name", ident: table.Identifier{"namespace", ".."}},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					path, err := builder.buildPath(tt.ident)
+					require.ErrorIs(t, err, builder.wantErr)
+					assert.Equal(t, identifierPath{}, path)
+				})
+			}
+		})
+	}
+}
+
+func TestIdentifierPathObjectReqPath(t *testing.T) {
+	cat := &Catalog{}
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"a b+c", "d e+f", "t x+y%2F"})
+	require.NoError(t, err)
+	baseURI := mustParseURL(t, "https://catalog.example/base/v1/prefix")
+
+	for _, tt := range []struct {
+		name       string
+		ep         endpoint
+		extra      []string
+		wantSuffix string
+	}{
+		{name: "load table", ep: endpointLoadTable, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "update table", ep: endpointUpdateTable, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "delete table", ep: endpointDeleteTable, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "table exists", ep: endpointTableExists, wantSuffix: "/tables/t%20x%2By%252F"},
+		{name: "credentials", ep: endpointTableCredentials, wantSuffix: "/tables/t%20x%2By%252F/credentials"},
+		{name: "metrics", ep: endpointReportMetrics, wantSuffix: "/tables/t%20x%2By%252F/metrics"},
+		{name: "plan scan", ep: endpointPlanTableScan, wantSuffix: "/tables/t%20x%2By%252F/plan"},
+		{name: "fetch tasks", ep: endpointFetchScanTasks, wantSuffix: "/tables/t%20x%2By%252F/tasks"},
+		{name: "fetch plan", ep: endpointFetchPlanResult, extra: []string{"a+b/c%2F"}, wantSuffix: "/tables/t%20x%2By%252F/plan/a%2Bb%2Fc%252F"},
+		{name: "cancel plan", ep: endpointCancelPlanning, extra: []string{".."}, wantSuffix: "/tables/t%20x%2By%252F/plan/%2E%2E"},
+		{name: "load view", ep: endpointLoadView, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "update view", ep: endpointUpdateView, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "delete view", ep: endpointDeleteView, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "view exists", ep: endpointViewExists, wantSuffix: "/views/t%20x%2By%252F"},
+		{name: "load function", ep: endpointLoadFunction, wantSuffix: "/functions/t%20x%2By%252F"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, err := identPath.objectReqPath(tt.ep, tt.extra...)
+			require.NoError(t, err)
+			assert.Equal(t, "/base/v1/prefix/namespaces/a%20b%2Bc%1Fd%20e%2Bf"+tt.wantSuffix,
+				baseURI.JoinPath(path...).EscapedPath())
+		})
+	}
+}
+
+func TestIdentifierPathNamespaceReqPath(t *testing.T) {
+	cat := &Catalog{}
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"a b+c", "d e+f", "t x+y"})
+	require.NoError(t, err)
+	baseURI := mustParseURL(t, "https://catalog.example/base/v1/prefix")
+
+	for _, tt := range []struct {
+		name       string
+		ep         endpoint
+		wantSuffix string
+	}{
+		{name: "create table", ep: endpointCreateTable, wantSuffix: "/tables"},
+		{name: "register table", ep: endpointRegisterTable, wantSuffix: "/register"},
+		{name: "create view", ep: endpointCreateView, wantSuffix: "/views"},
+		{name: "register view", ep: endpointRegisterView, wantSuffix: "/register-view"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, err := identPath.namespaceReqPath(tt.ep)
+			require.NoError(t, err)
+			assert.Equal(t, "/base/v1/prefix/namespaces/a%20b%2Bc%1Fd%20e%2Bf"+tt.wantSuffix,
+				baseURI.JoinPath(path...).EscapedPath())
+		})
+	}
+}
+
+func TestIdentifierPathMethodsRejectWrongParameterCount(t *testing.T) {
+	cat := &Catalog{}
+	identPath, err := cat.tableIdentifierPath(table.Identifier{"namespace", "table"})
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name      string
+		buildPath func() ([]string, error)
+	}{
+		{name: "object method on namespace endpoint", buildPath: func() ([]string, error) {
+			return identPath.objectReqPath(endpointCreateTable)
+		}},
+		{name: "namespace method on object endpoint", buildPath: func() ([]string, error) {
+			return identPath.namespaceReqPath(endpointLoadTable)
+		}},
+		{name: "missing plan id", buildPath: func() ([]string, error) {
+			return identPath.objectReqPath(endpointFetchPlanResult)
+		}},
+		{name: "unexpected extra segment", buildPath: func() ([]string, error) {
+			return identPath.objectReqPath(endpointLoadTable, "extra")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, err := tt.buildPath()
+			require.ErrorIs(t, err, ErrRESTError)
+			assert.Nil(t, path)
 		})
 	}
 }
@@ -522,6 +650,9 @@ func TestEncodePathSegment(t *testing.T) {
 		{name: "plus", value: "+", want: "%2B"},
 		{name: "percent", value: "%", want: "%25"},
 		{name: "slash", value: "/", want: "%2F"},
+		{name: "dot", value: ".", want: "%2E"},
+		{name: "double dot", value: "..", want: "%2E%2E"},
+		{name: "dots in name", value: "a..b", want: "a..b"},
 		{name: "unicode", value: "£€", want: "%C2%A3%E2%82%AC"},
 	}
 
@@ -2168,6 +2299,47 @@ func TestCheckValidNamespaceRejectsDecodedSeparator(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestLoadNamespacePropertiesPreservesDotSegments(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		namespace table.Identifier
+		wantPath  string
+	}{
+		{name: "dot", namespace: table.Identifier{"."}, wantPath: "/v1/namespaces/%2E"},
+		{name: "double dot", namespace: table.Identifier{".."}, wantPath: "/v1/namespaces/%2E%2E"},
+		{name: "nested dots", namespace: table.Identifier{"..", "."}, wantPath: "/v1/namespaces/%2E%2E%1F%2E"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"defaults": map[string]any{}, "overrides": map[string]any{},
+				}))
+			})
+			mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
+				if !assert.Equal(t, http.MethodGet, r.Method) || !assert.Equal(t, tt.wantPath, r.URL.EscapedPath()) {
+					return
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"namespace":  tt.namespace,
+					"properties": iceberg.Properties{"owner": "data-team"},
+				}))
+			})
+
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, cat.Close()) })
+
+			props, err := cat.LoadNamespaceProperties(context.Background(), tt.namespace)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.Properties{"owner": "data-team"}, props)
 		})
 	}
 }
