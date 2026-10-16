@@ -27,7 +27,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func setFinalizationTestProcs(t *testing.T, count int) {
+	t.Helper()
+	previous := runtime.GOMAXPROCS(count)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+}
+
 func TestFinalizePlannedTasksParallelMatchesSerial(t *testing.T) {
+	// Exercise the concurrent worker path even on single-core CI runners.
+	setFinalizationTestProcs(t, 4)
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 	})
@@ -86,6 +94,8 @@ func TestFinalizePlannedTasksParallelMatchesSerial(t *testing.T) {
 }
 
 func TestFinalizePlannedTasksParallelResidualsMatchSerial(t *testing.T) {
+	// Exercise the concurrent worker path even on single-core CI runners.
+	setFinalizationTestProcs(t, 4)
 	schema := simpleSchema()
 	spec := partitionedSpec()
 	unpartitioned := iceberg.NewPartitionSpecID(1)
@@ -214,6 +224,8 @@ func (f finalizationOrderFile) Partition() map[int]any {
 }
 
 func TestFinalizePlannedTasksUnsplitReusesInput(t *testing.T) {
+	// Exercise the concurrent worker path even on single-core CI runners.
+	setFinalizationTestProcs(t, 4)
 	schema := simpleSchema()
 	metadata, err := NewMetadata(
 		schema,
@@ -346,6 +358,8 @@ func serialFinalizationReference(
 }
 
 func TestFinalizePlannedTasksMixedSplitsAgainstIndependentReference(t *testing.T) {
+	// Exercise the concurrent worker path even on single-core CI runners.
+	setFinalizationTestProcs(t, 4)
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 	})
@@ -412,6 +426,8 @@ func (panicSizeFinalizationFile) FileSizeBytes() int64 {
 }
 
 func TestFinalizePlannedTasksWorkerPanicReturnsError(t *testing.T) {
+	// Exercise the concurrent worker path even on single-core CI runners.
+	setFinalizationTestProcs(t, 4)
 	schema := simpleSchema()
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://table", nil)
 	require.NoError(t, err)
