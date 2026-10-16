@@ -566,7 +566,14 @@ func (l *lazyEqualityDeleteLoader) combine(files []*equalityDeleteFileSet) *equa
 		return files[0].equalityDeleteSet
 	}
 
-	key := equalityDeleteSetCombinationKey(files)
+	// A comparable pair avoids building a string key for the common two-file case.
+	// Keep the existing string key for larger combinations.
+	var key any
+	if len(files) == 2 {
+		key = equalityDeletePairKey(files)
+	} else {
+		key = equalityDeleteSetCombinationKey(files)
+	}
 	entryValue, _ := l.combinations.LoadOrStore(key, &lazyEqualityDeleteCombination{})
 	entry := entryValue.(*lazyEqualityDeleteCombination)
 	entry.once.Do(func() {
@@ -740,8 +747,9 @@ func buildEqualityDeleteSetsPerTask(
 	// File IDs are sufficient as the cache key because each ID identifies one
 	// immutable delete set with a fixed equality-field group for this call.
 	sharedSets := make(map[string]*equalityDeleteSet)
+	pairSets := make(map[equalityDeleteFilePair]*equalityDeleteSet)
 	combine := func(files []*equalityDeleteFileSet) *equalityDeleteSet {
-		return equalityDeleteSetForFiles(files, sharedSets)
+		return equalityDeleteSetForFiles(files, sharedSets, pairSets)
 	}
 
 	for i, t := range tasks {
@@ -833,10 +841,21 @@ func buildEqualityDeleteSetsForFiles(
 func equalityDeleteSetForFiles(
 	files []*equalityDeleteFileSet,
 	sharedSets map[string]*equalityDeleteSet,
+	pairSets map[equalityDeleteFilePair]*equalityDeleteSet,
 ) *equalityDeleteSet {
 	files = normalizeEqualityDeleteFiles(files)
 	if len(files) == 1 {
 		return files[0].equalityDeleteSet
+	}
+	if len(files) == 2 {
+		key := equalityDeletePairKey(files)
+		if deleteSet, ok := pairSets[key]; ok {
+			return deleteSet
+		}
+		deleteSet := mergeEqualityDeleteSets(files)
+		pairSets[key] = deleteSet
+
+		return deleteSet
 	}
 
 	key := equalityDeleteSetCombinationKey(files)
@@ -872,6 +891,17 @@ func normalizeEqualityDeleteFiles(files []*equalityDeleteFileSet) []*equalityDel
 	return slices.CompactFunc(files, func(a, b *equalityDeleteFileSet) bool {
 		return a.id == b.id
 	})
+}
+
+// equalityDeleteFilePair is a comparable cache key for two delete files.
+// normalizeEqualityDeleteFiles ensures the IDs are distinct and sorted.
+type equalityDeleteFilePair struct {
+	firstID  int
+	secondID int
+}
+
+func equalityDeletePairKey(files []*equalityDeleteFileSet) equalityDeleteFilePair {
+	return equalityDeleteFilePair{firstID: files[0].id, secondID: files[1].id}
 }
 
 func equalityDeleteSetCombinationKey(files []*equalityDeleteFileSet) string {
