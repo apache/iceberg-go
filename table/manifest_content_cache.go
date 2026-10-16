@@ -181,6 +181,11 @@ func (c *manifestContentCache) open(
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
+			// Both channels can become ready together. Prefer cancellation
+			// even if the shared load also finished in the same instant.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if load.canceled {
 				continue
 			}
