@@ -218,6 +218,26 @@ func writeReorderDataFile(tb testing.TB, arrowSchema *arrow.Schema, path string,
 	return bldr.Build()
 }
 
+func TestScanTaskChannelCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		taskCount    int
+		numWorkers   int
+		wantCapacity int
+	}{
+		{name: "empty", taskCount: 0, numWorkers: 0, wantCapacity: 0},
+		{name: "single task", taskCount: 1, numWorkers: 1, wantCapacity: 1},
+		{name: "fewer tasks than capacity", taskCount: 3, numWorkers: 3, wantCapacity: 3},
+		{name: "many tasks", taskCount: 100_000, numWorkers: 4, wantCapacity: 8},
+		{name: "single worker", taskCount: 100_000, numWorkers: 1, wantCapacity: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queue := newScanTaskChannel(tc.taskCount, tc.numWorkers)
+			require.Equal(t, tc.wantCapacity, cap(queue))
+		})
+	}
+}
+
 func TestArrowScanReorderHeapBoundedWhileHeadTaskLags(t *testing.T) {
 	const (
 		files       = 32
@@ -280,6 +300,9 @@ func TestArrowScanReorderCancelWhileWorkersWaitForTaskCredits(t *testing.T) {
 	)
 
 	synctest.Test(t, func(t *testing.T) {
+		// With the first task gated, these tasks also fill and block the producer.
+		require.Greater(t, files, numWorkers+cap(newScanTaskChannel(files, numWorkers)))
+
 		dir := filepath.ToSlash(t.TempDir())
 		gateIO := &reorderGateIO{}
 		tbl, tasks := newReorderScanFixture(t, dir, files, rowsPerFile, gateIO)
