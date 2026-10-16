@@ -207,6 +207,39 @@ func TestManifestContentCacheExpiresIdleEntries(t *testing.T) {
 	assert.Len(t, cache.entries, 1)
 }
 
+// Java's manifest-content cache uses zero for no time-based expiration,
+// unlike the separate catalog table cache, where zero disables caching.
+func TestManifestContentCacheZeroExpirationKeepsWarmEntries(t *testing.T) {
+	const location = "mem://manifest-content-cache/no-expiration.avro"
+	content := []byte("manifest")
+	fs := newTrackingCallsIO()
+	require.NoError(t, fs.WriteFile(location, content))
+	config := iceberg.Properties{
+		IOManifestCacheEnabledKey:              "true",
+		IOManifestCacheExpirationIntervalMsKey: "0",
+	}
+	cache := newManifestContentCacheForConfig(config)
+	require.NotNil(t, cache)
+
+	now := time.Now()
+	cache.now = func() time.Time { return now }
+	manifest := iceberg.NewManifestFile(2, location, int64(len(content)), 0, 1).Build()
+	readCachedManifest(t, cache, fs, manifest)
+	now = now.Add(72 * time.Hour)
+	readCachedManifest(t, cache, fs, manifest)
+
+	assert.Equal(t, 1, fs.openCount[location])
+	assert.Equal(t, int64(len(content)), cache.totalBytes)
+}
+
+func TestManifestContentCacheRejectsNegativeExpiration(t *testing.T) {
+	config := iceberg.Properties{
+		IOManifestCacheEnabledKey:              "true",
+		IOManifestCacheExpirationIntervalMsKey: "-1",
+	}
+	require.Nil(t, newManifestContentCacheForConfig(config))
+}
+
 func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 	const manifestPath = "mem://manifest-content-cache/shared.avro"
 	content := []byte("manifest")
