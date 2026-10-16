@@ -893,6 +893,49 @@ func TestBlobFileIOWalkDirSkipsDirectoryMarker(t *testing.T) {
 	assert.Equal(t, []string{"s3://test-bucket/warehouse/ns"}, paths)
 }
 
+func TestBlobFileIOWalkDirSkipsSubdirectoryMarkers(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	// "tbl/empty/" is a marker with no children, so it is an empty directory.
+	for _, k := range []string{"tbl/", "tbl/data/", "tbl/empty/"} {
+		require.NoError(t, bucket.WriteAll(ctx, k, nil, nil))
+	}
+	require.NoError(t, bucket.WriteAll(ctx, "tbl/data/a.parquet", []byte("a"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "tbl/metadata/v1.metadata.json", []byte("b"), nil))
+
+	bfs := testBlobFileIO(ctx, "mybucket", bucket)
+
+	var dirs, files []string
+	err := bfs.WalkDir("s3://mybucket/tbl", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			dirs = append(dirs, path)
+		} else {
+			files = append(files, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"s3://mybucket/tbl",
+		"s3://mybucket/tbl/data",
+		"s3://mybucket/tbl/empty",
+		"s3://mybucket/tbl/metadata",
+	}, dirs)
+	assert.Equal(t, []string{
+		"s3://mybucket/tbl/data/a.parquet",
+		"s3://mybucket/tbl/metadata/v1.metadata.json",
+	}, files)
+}
+
 func TestBlobFileIORemoveAll(t *testing.T) {
 	ctx := context.Background()
 	bucket := memblob.OpenBucket(nil)
