@@ -47,20 +47,50 @@ type inspectPartitionAggregate struct {
 }
 
 type inspectPartitionAggregateTree struct {
-	children  map[any]*inspectPartitionAggregateTree
-	aggregate *inspectPartitionAggregate
+	children       map[any]*inspectPartitionAggregateTree
+	binaryChildren map[string]*inspectPartitionAggregateTree
+	aggregate      *inspectPartitionAggregate
 }
 
 func newInspectPartitionAggregateTree() *inspectPartitionAggregateTree {
-	return &inspectPartitionAggregateTree{
-		children: make(map[any]*inspectPartitionAggregateTree),
+	return &inspectPartitionAggregateTree{}
+}
+
+// child uses a typed map for binary values to avoid interface-backed keys
+// during repeated lookups. Other values retain their existing key types.
+func (t *inspectPartitionAggregateTree) child(value any) (*inspectPartitionAggregateTree, bool) {
+	if binary, ok := value.([]byte); ok {
+		child, found := t.binaryChildren[string(binary)]
+
+		return child, found
 	}
+
+	child, found := t.children[comparablePartitionKey(value)]
+
+	return child, found
+}
+
+func (t *inspectPartitionAggregateTree) setChild(value any, child *inspectPartitionAggregateTree) {
+	if binary, ok := value.([]byte); ok {
+		if t.binaryChildren == nil {
+			t.binaryChildren = make(map[string]*inspectPartitionAggregateTree)
+		}
+		// A stored string key owns its bytes even if the input buffer changes.
+		t.binaryChildren[string(binary)] = child
+
+		return
+	}
+
+	if t.children == nil {
+		t.children = make(map[any]*inspectPartitionAggregateTree)
+	}
+	t.children[comparablePartitionKey(value)] = child
 }
 
 func (t *inspectPartitionAggregateTree) lookup(record partitionRecord) *inspectPartitionAggregate {
 	node := t
 	for _, value := range record {
-		child, ok := node.children[comparablePartitionKey(value)]
+		child, ok := node.child(value)
 		if !ok {
 			return nil
 		}
@@ -76,7 +106,7 @@ func (t *inspectPartitionAggregateTree) lookupPartition(
 ) *inspectPartitionAggregate {
 	node := t
 	for _, field := range partitionType.FieldList {
-		child, ok := node.children[comparablePartitionKey(partition[field.ID])]
+		child, ok := node.child(partition[field.ID])
 		if !ok {
 			return nil
 		}
@@ -92,11 +122,10 @@ func (t *inspectPartitionAggregateTree) lookupPartition(
 func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate *inspectPartitionAggregate) {
 	node := t
 	for _, value := range record {
-		key := comparablePartitionKey(value)
-		child, ok := node.children[key]
+		child, ok := node.child(value)
 		if !ok {
 			child = newInspectPartitionAggregateTree()
-			node.children[key] = child
+			node.setChild(value, child)
 		}
 		node = child
 	}
