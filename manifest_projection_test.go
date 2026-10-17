@@ -34,8 +34,8 @@ func TestManifestEntryProjectionWhitelistCoversDataFileSchema(t *testing.T) {
 	})
 	dataFileType := reflect.TypeFor[dataFile]()
 	dataFileFields := make(map[string]struct{})
-	for i := range dataFileType.NumField() {
-		if name, ok := dataFileType.Field(i).Tag.Lookup("avro"); ok {
+	for field := range dataFileType.Fields() {
+		if name, ok := field.Tag.Lookup("avro"); ok {
 			dataFileFields[name] = struct{}{}
 		}
 	}
