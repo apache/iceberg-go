@@ -353,3 +353,38 @@ func TestMemIO_WalkDirHonorsSkipAtRootAndSkipAll(t *testing.T) {
 		assert.Equal(t, []string{"mem://bucket/root"}, walked)
 	}
 }
+
+func TestMemIO_WalkDirNestedPrefixes(t *testing.T) {
+	memIO := icebergio.NewMemFS()
+	for _, name := range []string{
+		"mem://bucket/root/a/b/c/deep.parquet",
+		"mem://bucket/root/a/first.parquet",
+		"mem://bucket/root/ab/second.parquet",
+	} {
+		require.NoError(t, memIO.WriteFile(name, nil))
+	}
+
+	type visitedEntry struct {
+		path  string
+		isDir bool
+	}
+	var got []visitedEntry
+	err := memIO.WalkDir("mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		got = append(got, visitedEntry{path: path, isDir: d.IsDir()})
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []visitedEntry{
+		{path: "mem://bucket/root", isDir: true},
+		{path: "mem://bucket/root/a", isDir: true},
+		{path: "mem://bucket/root/a/b", isDir: true},
+		{path: "mem://bucket/root/a/b/c", isDir: true},
+		{path: "mem://bucket/root/a/b/c/deep.parquet"},
+		{path: "mem://bucket/root/a/first.parquet"},
+		{path: "mem://bucket/root/ab", isDir: true},
+		{path: "mem://bucket/root/ab/second.parquet"},
+	}, got)
+}

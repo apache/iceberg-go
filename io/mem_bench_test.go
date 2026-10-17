@@ -20,6 +20,7 @@ package io_test
 import (
 	"fmt"
 	"io/fs"
+	"strings"
 	"testing"
 
 	icebergio "github.com/apache/iceberg-go/io"
@@ -31,6 +32,34 @@ func BenchmarkMemFSWalkDir(b *testing.B) {
 			memIO := icebergio.NewMemFS()
 			for i := range fileCount {
 				name := fmt.Sprintf("mem://bucket/root/dir-%03d/file-%05d.parquet", i%128, i)
+				if err := memIO.WriteFile(name, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if err := memIO.WalkDir("mem://bucket/root", func(_ string, _ fs.DirEntry, err error) error {
+					return err
+				}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkMemFSWalkDirDeep(b *testing.B) {
+	for _, fileCount := range []int{100, 1_000, 5_000} {
+		b.Run(fmt.Sprintf("files=%d", fileCount), func(b *testing.B) {
+			memIO := icebergio.NewMemFS()
+			for i := range fileCount {
+				parts := make([]string, 8)
+				for j := range parts {
+					parts[j] = fmt.Sprintf("dir-%03d", (i+j*13)%128)
+				}
+				name := fmt.Sprintf("mem://bucket/root/%s/file-%05d.parquet", strings.Join(parts, "/"), i)
 				if err := memIO.WriteFile(name, nil); err != nil {
 					b.Fatal(err)
 				}

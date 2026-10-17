@@ -136,18 +136,17 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 		addEntry(walkEntry{path: root, isDir: true})
 		relative := strings.TrimPrefix(key, root+"/")
-		parts := strings.Split(relative, "/")
-		for i := range parts {
-			entryPath := strings.Join(parts[:i+1], "/")
-			if root != "" {
-				entryPath = root + "/" + entryPath
-			}
-			entry := walkEntry{path: entryPath, isDir: i < len(parts)-1}
-			if !entry.isDir {
-				entry.size = int64(len(data))
-			}
-			addEntry(entry)
+		pathBase, prefix := relative, 0
+		if root != "" {
+			pathBase = key
+			prefix = len(key) - len(relative)
 		}
+		for i := 0; i < len(relative); i++ {
+			if relative[i] == '/' {
+				addEntry(walkEntry{path: pathBase[:prefix+i], isDir: true})
+			}
+		}
+		addEntry(walkEntry{path: pathBase, size: int64(len(data))})
 	}
 	m.mu.RUnlock()
 	if len(entriesByPath) == 0 {
