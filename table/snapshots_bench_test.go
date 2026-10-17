@@ -109,3 +109,47 @@ func BenchmarkSnapshotSummaryPartitionPath(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkSnapshotSummaryPartitionPathEscaped(b *testing.B) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "region",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	for _, tc := range []struct {
+		name string
+		value string
+	}{
+		{name: "plain", value: "berlin"},
+		{name: "escaped", value: "berlin/east +%?#"},
+		{name: "unicode", value: "München/東京"},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			partition := map[int]any{1000: tc.value}
+			want := spec.PartitionToPath(newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+			var collector SnapshotSummaryCollector
+			if got := collector.partitionPath(partition, schema, spec); got != want {
+				b.Fatalf("partition path changed: got %q, want %q", got, want)
+			}
+
+			b.Run("baseline", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					snapshotSummaryPathBenchmarkResult = spec.PartitionToPath(
+						newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+				}
+			})
+
+			b.Run("cached", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					snapshotSummaryPathBenchmarkResult = collector.partitionPath(partition, schema, spec)
+				}
+			})
+		})
+	}
+}
