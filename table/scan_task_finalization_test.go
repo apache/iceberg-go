@@ -532,6 +532,7 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 					metadata: metadata, rowFilter: tc.rowFilter, caseSensitive: true, concurrency: 1,
 				}
 				b.ReportAllocs()
+				b.ReportMetric(float64(tc.fileCount), "files/op")
 				for b.Loop() {
 					result, _, err := serialFinalizationReference(scan, tasks, schema)
 					if err != nil {
