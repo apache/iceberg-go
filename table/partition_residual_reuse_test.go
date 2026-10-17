@@ -71,6 +71,10 @@ func TestPartitionResidualEvaluatorReusesUnchangedSubtrees(t *testing.T) {
 				require.False(t, changed)
 				require.Nil(t, got)
 			}
+			got, changed, err = evaluator.residual(map[int]any{1000: tt.partitionValue})
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.True(t, got.Equals(want), "interleaved unchanged files must not affect later residuals")
 		})
 	}
 }
