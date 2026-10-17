@@ -783,6 +783,10 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	if cfg.maxSnapshotAgeMs != nil {
 		defaultMaxSnapshotAgeMs = *cfg.maxSnapshotAgeMs
 	}
+	snapshots, err := meta.snapshotsForFullScan()
+	if err != nil {
+		return err
+	}
 
 	lookup := func(id int64) *Snapshot {
 		s, _ := meta.SnapshotByID(id)
@@ -855,7 +859,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 
 	unreferencedSnapshotCutoff := nowMs - defaultMaxSnapshotAgeMs
-	for _, snap := range meta.snapshotList {
+	for _, snap := range snapshots {
 		if _, referenced := referencedSnapshots[snap.SnapshotID]; referenced {
 			continue
 		}
@@ -867,7 +871,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	var snapsToDelete []int64
 
-	for _, snap := range meta.snapshotList {
+	for _, snap := range snapshots {
 		if _, found := snapsToKeep[snap.SnapshotID]; !found {
 			snapsToDelete = append(snapsToDelete, snap.SnapshotID)
 		}
