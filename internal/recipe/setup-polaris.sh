@@ -36,11 +36,22 @@ warehouse=conformance
 location=file:///tmp/polaris/conformance
 
 for cmd in docker curl jq; do
-	command -v "$cmd" > /dev/null || {
-		echo "setup-polaris: $cmd is required" >&2
-		exit 1
-	}
+  command -v "$cmd" > /dev/null || {
+    echo "setup-polaris: $cmd is required" >&2
+    exit 1
+  }
 done
+
+# call runs curl and prints the response body. On an HTTP error it reports the
+# server's error body, which would otherwise be lost in a pipe or /dev/null.
+call() {
+  local body
+  if ! body=$(curl -sS --fail-with-body "$@"); then
+    echo "setup-polaris: request failed: ${body:-no response body}" >&2
+    exit 1
+  fi
+  printf '%s' "$body"
+}
 
 docker rm -f "$container" > /dev/null 2>&1 || true
 
@@ -48,49 +59,50 @@ docker rm -f "$container" > /dev/null 2>&1 || true
 # told to ignore it: FILE storage is flagged as a severe security risk, which
 # is acceptable for a throwaway local server.
 docker run -d --name "$container" \
-	-p "$api_port:8181" -p "$mgmt_port:8182" \
-	-e POLARIS_BOOTSTRAP_CREDENTIALS="POLARIS,$client_id,$client_secret" \
-	-e 'polaris.features."ALLOW_INSECURE_STORAGE_TYPES"=true' \
-	-e 'polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES"=["FILE"]' \
-	-e 'polaris.readiness.ignore-severe-issues=true' \
-	"$image" > /dev/null
+  -p "$api_port:8181" -p "$mgmt_port:8182" \
+  -e POLARIS_BOOTSTRAP_CREDENTIALS="POLARIS,$client_id,$client_secret" \
+  -e 'polaris.features."ALLOW_INSECURE_STORAGE_TYPES"=true' \
+  -e 'polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES"=["FILE"]' \
+  -e 'polaris.readiness.ignore-severe-issues=true' \
+  "$image" > /dev/null
 
 ready=false
 for _ in $(seq 60); do
-	if curl -sf "localhost:$mgmt_port/q/health/ready" > /dev/null; then
-		ready=true
-		break
-	fi
-	sleep 1
+  if curl -sf "localhost:$mgmt_port/q/health/ready" > /dev/null; then
+    ready=true
+    break
+  fi
+  sleep 1
 done
 if [[ $ready != true ]]; then
-	echo "setup-polaris: Polaris did not become ready within 60s; recent logs:" >&2
-	docker logs --tail 20 "$container" >&2 || true
-	exit 1
+  echo "setup-polaris: Polaris did not become ready within 60s; recent logs:" >&2
+  docker logs --tail 20 "$container" >&2 || true
+  exit 1
 fi
 
 api="http://localhost:$api_port/api"
 
 # jq -e fails when the response has no access_token instead of passing an empty
 # or "null" token to the calls below.
-token=$(curl -sS --fail-with-body -X POST "$api/catalog/v1/oauth/tokens" \
-	-d grant_type=client_credentials -d client_id="$client_id" \
-	-d client_secret="$client_secret" -d scope=PRINCIPAL_ROLE:ALL |
-	jq -er .access_token)
+token=$(call -X POST "$api/catalog/v1/oauth/tokens" \
+  -d grant_type=client_credentials -d client_id="$client_id" \
+  -d client_secret="$client_secret" -d scope=PRINCIPAL_ROLE:ALL |
+  jq -er .access_token)
 
-curl -sS --fail-with-body -o /dev/null -X POST "$api/management/v1/catalogs" \
-	-H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-	-d "{\"catalog\":{\"name\":\"$warehouse\",\"type\":\"INTERNAL\",
-	     \"properties\":{\"default-base-location\":\"$location\"},
-	     \"storageConfigInfo\":{\"storageType\":\"FILE\",\"allowedLocations\":[\"$location\"]}}}"
+call -X POST "$api/management/v1/catalogs" \
+  -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  -d "{\"catalog\":{\"name\":\"$warehouse\",\"type\":\"INTERNAL\",
+       \"properties\":{\"default-base-location\":\"$location\"},
+       \"storageConfigInfo\":{\"storageType\":\"FILE\",\"allowedLocations\":[\"$location\"]}}}" \
+  > /dev/null
 
 # The REST client requests vended credentials (X-Iceberg-Access-Delegation) by
 # default, which Polaris authorizes with TABLE_WRITE_DATA. CATALOG_MANAGE_CONTENT
 # includes it.
-curl -sS --fail-with-body -o /dev/null -X PUT \
-	"$api/management/v1/catalogs/$warehouse/catalog-roles/catalog_admin/grants" \
-	-H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-	-d '{"grant":{"type":"catalog","privilege":"CATALOG_MANAGE_CONTENT"}}'
+call -X PUT "$api/management/v1/catalogs/$warehouse/catalog-roles/catalog_admin/grants" \
+  -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  -d '{"grant":{"type":"catalog","privilege":"CATALOG_MANAGE_CONTENT"}}' \
+  > /dev/null
 
 cat << EOF
 Polaris is running in container $container. Run the conformance suite with:

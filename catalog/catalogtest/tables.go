@@ -286,7 +286,7 @@ func testRenameTableToSelf(t *testing.T, cfg Config) {
 	if err != nil {
 		assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists,
 			"a rejected self-rename should report that the table already exists")
-		t.Log("self-rename rejected with ErrTableAlreadyExists")
+		t.Logf("self-rename rejected: %v", err)
 	} else {
 		t.Log("self-rename succeeded as a no-op")
 	}
