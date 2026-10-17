@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -246,7 +247,8 @@ func partitionBucketKey(specID int32, part map[int]any) string {
 
 func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
 	key := make([]byte, 0, len(tuple)+12)
-	key = fmt.Appendf(key, "%d:", specID)
+	key = strconv.AppendInt(key, int64(specID), 10)
+	key = append(key, ':')
 
 	return string(append(key, tuple...))
 }
@@ -254,13 +256,39 @@ func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
 // appendPartitionTuple emits the sorted "id=value;" tuple into dst.
 // Caller is responsible for any leading prefix (e.g. specID).
 func appendPartitionTuple(dst []byte, part map[int]any) []byte {
-	ids := make([]int, 0, len(part))
+	var inlineIDs [8]int
+	ids := inlineIDs[:0]
+	if len(part) > len(inlineIDs) {
+		ids = make([]int, 0, len(part))
+	}
 	for id := range part {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
+
+	if cap(dst) == 0 && len(part) != 0 {
+		dst = make([]byte, 0, len(part)*16)
+	}
 	for _, id := range ids {
-		dst = fmt.Appendf(dst, "%d=%v;", id, part[id])
+		dst = strconv.AppendInt(dst, int64(id), 10)
+		dst = append(dst, '=')
+		switch value := part[id].(type) {
+		case nil:
+			dst = append(dst, "<nil>"...)
+		case string:
+			dst = append(dst, value...)
+		case int:
+			dst = strconv.AppendInt(dst, int64(value), 10)
+		case int32:
+			dst = strconv.AppendInt(dst, int64(value), 10)
+		case int64:
+			dst = strconv.AppendInt(dst, value, 10)
+		case bool:
+			dst = strconv.AppendBool(dst, value)
+		default:
+			dst = fmt.Append(dst, value)
+		}
+		dst = append(dst, ';')
 	}
 
 	return dst
