@@ -73,6 +73,7 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 	ssc.addFile(dataFile1, sc, spec)
 	ssc.removeFile(dataFile1, sc, spec)
 	ssc.removeFile(dataFile2, sc, spec)
+	require.Len(t, ssc.partitionPathPlans, 1)
 
 	assert.Equal(t, iceberg.Properties{
 		"added-files-size":        "1234",
@@ -96,6 +97,67 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 		"partitions.int_field=1":  "added-data-files=1,added-files-size=1234,added-records=100,deleted-data-files=1,deleted-records=100,removed-files-size=1234",
 		"partitions.int_field=2":  "deleted-data-files=1,deleted-records=200,removed-files-size=4321",
 	}, ssc.build())
+}
+
+func TestSnapshotSummaryCollectorPartitionPathParity(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 2, Name: "text", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "integer", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "bytes", Type: iceberg.PrimitiveTypes.Binary},
+	)
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	spec := iceberg.NewPartitionSpecID(7,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "ts /tz", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "text#part", Transform: iceberg.TruncateTransform{Width: 8}},
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1002, Name: "bucket", Transform: iceberg.BucketTransform{NumBuckets: 16}},
+		iceberg.PartitionField{SourceIDs: []int{9}, FieldID: 1003, Name: "missing", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1004, Name: "custom", Transform: unknown},
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1005, Name: "binary", Transform: iceberg.IdentityTransform{}},
+	)
+
+	partitions := []map[int]any{
+		{1000: iceberg.Timestamp(1705314600000000), 1001: "a/b c", 1002: int32(7), 1003: nil, 1004: int32(42), 1005: []byte{0, 1, 255}},
+		{1000: iceberg.Timestamp(0), 1001: "", 1002: int32(0), 1003: nil, 1004: nil, 1005: []byte{}},
+	}
+
+	var collector SnapshotSummaryCollector
+	for _, partition := range partitions {
+		want := spec.PartitionToPath(newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+		assert.Equal(t, want, collector.partitionPath(partition, schema, spec))
+	}
+	require.Len(t, collector.partitionPathPlans, 1)
+
+	otherSpec := iceberg.NewPartitionSpecID(8,
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1100, Name: "other#text", Transform: iceberg.IdentityTransform{}},
+	)
+	otherPartition := map[int]any{1100: "a/b c"}
+	want := otherSpec.PartitionToPath(newPartitionRecord(otherPartition, otherSpec.PartitionType(schema)), schema)
+	assert.Equal(t, want, collector.partitionPath(otherPartition, schema, otherSpec))
+	require.Len(t, collector.partitionPathPlans, 2)
+
+	// Partition spec IDs are table-local. Reusing an ID must not reuse the
+	// cached plan when a different spec has been supplied.
+	sameIDSpec := iceberg.NewPartitionSpecID(spec.ID(),
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1101, Name: "same-id#text", Transform: iceberg.IdentityTransform{}},
+	)
+	sameIDPartition := map[int]any{1101: "a/b c"}
+	want = sameIDSpec.PartitionToPath(
+		newPartitionRecord(sameIDPartition, sameIDSpec.PartitionType(schema)), schema)
+	assert.Equal(t, want, collector.partitionPath(sameIDPartition, schema, sameIDSpec))
+	require.Len(t, collector.partitionPathPlans, 3)
+
+	// A schema change can also change how an existing spec formats values.
+	alternateSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 2, Name: "text", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "integer", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "bytes", Type: iceberg.PrimitiveTypes.Binary},
+	)
+	want = spec.PartitionToPath(newPartitionRecord(partitions[0], spec.PartitionType(alternateSchema)), alternateSchema)
+	assert.Equal(t, want, collector.partitionPath(partitions[0], alternateSchema, spec))
+	require.Len(t, collector.partitionPathPlans, 4)
 }
 
 func TestMergeSnapshotSummaries(t *testing.T) {
