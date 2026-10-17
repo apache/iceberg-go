@@ -29,11 +29,10 @@ import (
 	"github.com/apache/iceberg-go/metrics"
 )
 
-// scanMetricsAccumulator gathers scan-planning counts. Every field is written
-// from a single goroutine — the manifest counts in
-// fetchPartitionSpecFilteredManifestsWithSchema and the result/delete counts in
-// planFilesLocal after its concurrent manifest/task barrier — so plain
-// integers are race-free; no field is touched from the concurrent workers.
+// scanMetricsAccumulator gathers scan-planning counts. The shared accumulator
+// is written from a single goroutine. Concurrent task-finalization workers use
+// independent local accumulators and merge them after their barrier, so these
+// fields remain plain integers without atomics.
 //
 // The scanned/skipped manifest counts measure partition-spec pruning (the
 // filter applied while listing manifests). The per-entry skipped-data-files /
