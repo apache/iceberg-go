@@ -64,3 +64,15 @@ Integration tests require Docker and are gated behind a build tag:
 docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
 go test -tags integration ./...
 ```
+
+#### Polaris Conformance (optional)
+
+The catalog conformance suite can also run against [Apache Polaris](https://polaris.apache.org/), a second REST catalog implementation. `TestPolarisCatalogConformance` is skipped unless `POLARIS_URI` is set. To start a local Polaris server and run it (requires `jq`):
+
+```bash
+internal/recipe/setup-polaris.sh
+POLARIS_URI=http://localhost:8191/api/catalog \
+POLARIS_CREDENTIAL=root:s3cr3t \
+POLARIS_WAREHOUSE=conformance \
+  go test -tags integration -run TestPolarisCatalogConformance ./catalog/rest
+```
