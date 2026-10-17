@@ -17,7 +17,13 @@
 
 package table
 
-import "testing"
+import (
+	"fmt"
+	"strconv"
+	"testing"
+
+	"github.com/apache/iceberg-go"
+)
 
 var partitionSummaryBenchmarkResult string
 
@@ -51,6 +57,55 @@ func BenchmarkPartitionSummary(b *testing.B) {
 			for b.Loop() {
 				partitionSummaryBenchmarkResult = collector.partitionSummary(&tc.metrics)
 			}
+		})
+	}
+}
+
+var snapshotSummaryPathBenchmarkResult string
+
+func BenchmarkSnapshotSummaryPartitionPath(b *testing.B) {
+	for _, fieldCount := range []int{1, 3, 16, 64} {
+		fields := make([]iceberg.NestedField, fieldCount)
+		partitionFields := make([]iceberg.PartitionField, fieldCount)
+		partition := make(map[int]any, fieldCount)
+		for i := range fields {
+			name := "field_" + strconv.Itoa(i)
+			fields[i] = iceberg.NestedField{ID: i + 1, Name: name, Type: iceberg.PrimitiveTypes.Int32}
+			partitionFields[i] = iceberg.PartitionField{
+				SourceIDs: []int{i + 1}, FieldID: 1000 + i, Name: name,
+				Transform: iceberg.IdentityTransform{},
+			}
+			partition[1000+i] = int32(i)
+		}
+		schema := iceberg.NewSchema(0, fields...)
+		spec := iceberg.NewPartitionSpec(partitionFields...)
+
+		b.Run(fmt.Sprintf("fields=%d", fieldCount), func(b *testing.B) {
+			b.Run("baseline", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					snapshotSummaryPathBenchmarkResult = spec.PartitionToPath(
+						newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+				}
+			})
+
+			b.Run("cold", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					var collector SnapshotSummaryCollector
+					snapshotSummaryPathBenchmarkResult = collector.partitionPath(partition, schema, spec)
+				}
+			})
+
+			b.Run("cached", func(b *testing.B) {
+				var collector SnapshotSummaryCollector
+				snapshotSummaryPathBenchmarkResult = collector.partitionPath(partition, schema, spec)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					snapshotSummaryPathBenchmarkResult = collector.partitionPath(partition, schema, spec)
+				}
+			})
 		})
 	}
 }
