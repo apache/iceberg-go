@@ -580,8 +580,17 @@ func SnapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64,
 type SnapshotSummaryCollector struct {
 	metrics                          updateMetrics
 	partitionMetrics                 map[string]updateMetrics
-	partitionPathPlans               map[int]snapshotPartitionPathPlan
+	partitionPathPlans               map[snapshotPartitionPathKey]snapshotPartitionPathPlan
 	maxChangedPartitionsForSummaries int
+}
+
+// Spec IDs are unique only within a table. Include schema and spec identity
+// so an independently constructed spec with the same ID cannot reuse a stale
+// formatting plan if the collector is used across table metadata.
+type snapshotPartitionPathKey struct {
+	schema     *iceberg.Schema
+	specID     int
+	firstField *iceberg.PartitionField
 }
 
 type snapshotPartitionPathPlan struct {
@@ -590,14 +599,20 @@ type snapshotPartitionPathPlan struct {
 }
 
 // partitionPath reuses schema-dependent formatting state across files in the
-// same snapshot summary. A collector uses one current schema and partition
-// specs are uniquely identified by their IDs within that table metadata.
+// same snapshot summary. The partition field slice is immutable for the
+// lifetime of its spec, so its first element identifies the spec's layout.
 func (s *SnapshotSummaryCollector) partitionPath(partition map[int]any, sc *iceberg.Schema, spec iceberg.PartitionSpec) string {
 	if s.partitionPathPlans == nil {
-		s.partitionPathPlans = make(map[int]snapshotPartitionPathPlan)
+		s.partitionPathPlans = make(map[snapshotPartitionPathKey]snapshotPartitionPathPlan)
 	}
 
-	plan, ok := s.partitionPathPlans[spec.ID()]
+	fields := spec.FieldsRef(internal.PartitionSpecRef{})
+	key := snapshotPartitionPathKey{schema: sc, specID: spec.ID()}
+	if len(fields) > 0 {
+		key.firstField = &fields[0]
+	}
+
+	plan, ok := s.partitionPathPlans[key]
 	if !ok {
 		partitionType := spec.PartitionType(sc)
 		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, len(partitionType.FieldList))}
@@ -612,7 +627,7 @@ func (s *SnapshotSummaryCollector) partitionPath(partition map[int]any, sc *iceb
 		}
 
 		plan = snapshotPartitionPathPlan{partitionType: partitionType, pathPlan: pathPlan}
-		s.partitionPathPlans[spec.ID()] = plan
+		s.partitionPathPlans[key] = plan
 	}
 
 	return plan.pathPlan.format(borrowedPartitionRecord{partition: partition, partitionType: plan.partitionType})

@@ -136,6 +136,28 @@ func TestSnapshotSummaryCollectorPartitionPathParity(t *testing.T) {
 	want := otherSpec.PartitionToPath(newPartitionRecord(otherPartition, otherSpec.PartitionType(schema)), schema)
 	assert.Equal(t, want, collector.partitionPath(otherPartition, schema, otherSpec))
 	require.Len(t, collector.partitionPathPlans, 2)
+
+	// Partition spec IDs are table-local. Reusing an ID must not reuse the
+	// cached plan when a different spec has been supplied.
+	sameIDSpec := iceberg.NewPartitionSpecID(spec.ID(),
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1101, Name: "same-id#text", Transform: iceberg.IdentityTransform{}},
+	)
+	sameIDPartition := map[int]any{1101: "a/b c"}
+	want = sameIDSpec.PartitionToPath(
+		newPartitionRecord(sameIDPartition, sameIDSpec.PartitionType(schema)), schema)
+	assert.Equal(t, want, collector.partitionPath(sameIDPartition, schema, sameIDSpec))
+	require.Len(t, collector.partitionPathPlans, 3)
+
+	// A schema change can also change how an existing spec formats values.
+	alternateSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 2, Name: "text", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "integer", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "bytes", Type: iceberg.PrimitiveTypes.Binary},
+	)
+	want = spec.PartitionToPath(newPartitionRecord(partitions[0], spec.PartitionType(alternateSchema)), alternateSchema)
+	assert.Equal(t, want, collector.partitionPath(partitions[0], alternateSchema, spec))
+	require.Len(t, collector.partitionPathPlans, 4)
 }
 
 func TestMergeSnapshotSummaries(t *testing.T) {
