@@ -61,6 +61,7 @@ func newInspectPartitionAggregateTree() *inspectPartitionAggregateTree {
 func (t *inspectPartitionAggregateTree) child(value any) (*inspectPartitionAggregateTree, bool) {
 	if binary, ok := value.([]byte); ok {
 		child, found := t.binaryChildren[string(binary)]
+
 		return child, found
 	}
 
