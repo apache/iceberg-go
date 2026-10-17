@@ -217,30 +217,84 @@ func TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes(t 
 }
 
 func TestMarshalAvroEntryDoesNotMutateAnyAvroField(t *testing.T) {
-	spec, schema, df := fullyPopulatedDataFileForCodec(t, 2)
-	impl := df.(*dataFile)
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			spec, schema, df := fullyPopulatedDataFileForCodec(t, version)
+			impl := df.(*dataFile)
 
-	before := snapshotAvroFields(impl)
-	_, err := impl.MarshalAvroEntry(spec, schema, 2)
-	require.NoError(t, err)
-	after := snapshotAvroFields(impl)
+			before := snapshotAvroFields(impl)
+			_, err := impl.MarshalAvroEntry(spec, schema, version)
+			require.NoError(t, err)
+			after := snapshotAvroFields(impl)
 
-	require.Equal(t, before, after,
-		"MarshalAvroEntry must not mutate any avro-tagged field of the source DataFile, "+
-			"including pointer-typed fields whose backing storage is shared with the clone")
+			require.Equal(t, before, after,
+				"MarshalAvroEntry must not mutate any avro-tagged field of the source DataFile, "+
+					"including pointer-typed fields whose backing storage is shared with the clone")
+		})
+	}
 }
 
-func TestDataFileAvroFieldIndexesCoverEveryAvroField(t *testing.T) {
+func TestCloneDataFileAvroFieldsCopiesOnlyAvroFields(t *testing.T) {
+	src := &dataFile{}
 	typ := reflect.TypeFor[dataFile]()
-	want := make([]int, 0, typ.NumField())
+	srcVal := reflect.ValueOf(src).Elem()
+
+	// Give every tagged field a nonzero value, including fields added later.
 	for i := range typ.NumField() {
-		if _, ok := typ.Field(i).Tag.Lookup("avro"); ok {
-			want = append(want, i)
+		field := typ.Field(i)
+		if _, tagged := field.Tag.Lookup("avro"); !tagged {
+			continue
+		}
+
+		value := srcVal.Field(i)
+		switch value.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			value.SetInt(17)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			value.SetUint(17)
+		case reflect.String:
+			value.SetString("sentinel")
+		case reflect.Map:
+			value.Set(reflect.MakeMap(value.Type()))
+		case reflect.Pointer:
+			value.Set(reflect.New(value.Type().Elem()))
+		default:
+			t.Fatalf("unhandled Avro field %s of kind %s", field.Name, value.Kind())
 		}
 	}
 
-	require.Equal(t, want, dataFileAvroFieldIndexes,
-		"the precomputed clone indexes must track every avro-tagged dataFile field")
+	// The clone must not carry state from lazily initialized source data.
+	src.projected = true
+	src.specID = 42
+	src.fieldNameToID = map[string]int{"field": 1}
+	src.initPartition.Do(func() {})
+	src.initColumnStats.Do(func() {})
+
+	cloneVal := reflect.ValueOf(cloneDataFileAvroFields(src)).Elem()
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if _, tagged := field.Tag.Lookup("avro"); tagged {
+			source := srcVal.Field(i)
+			cloned := cloneVal.Field(i)
+			require.Equal(t, source.Interface(), cloned.Interface(),
+				"Avro field %s must be copied", field.Name)
+			switch source.Kind() {
+			case reflect.Pointer:
+				require.Same(t, source.Interface(), cloned.Interface(),
+					"pointer-typed Avro field %s must be shallow-copied", field.Name)
+			case reflect.Map:
+				// Mutating the source map must be visible through the clone.
+				// This detects accidental deep copies in this hot path.
+				key := reflect.Zero(source.Type().Key())
+				source.SetMapIndex(key, reflect.Zero(source.Type().Elem()))
+				require.True(t, cloned.MapIndex(key).IsValid(),
+					"map-typed Avro field %s must be shallow-copied", field.Name)
+			}
+		} else {
+			require.True(t, cloneVal.Field(i).IsZero(),
+				"internal field %s must be reset", field.Name)
+		}
+	}
 }
 
 func TestMarshalAvroEntryDecimalPartitionRoundTrip(t *testing.T) {
