@@ -217,17 +217,21 @@ func TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes(t 
 }
 
 func TestMarshalAvroEntryDoesNotMutateAnyAvroField(t *testing.T) {
-	spec, schema, df := fullyPopulatedDataFileForCodec(t, 2)
-	impl := df.(*dataFile)
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			spec, schema, df := fullyPopulatedDataFileForCodec(t, version)
+			impl := df.(*dataFile)
 
-	before := snapshotAvroFields(impl)
-	_, err := impl.MarshalAvroEntry(spec, schema, 2)
-	require.NoError(t, err)
-	after := snapshotAvroFields(impl)
+			before := snapshotAvroFields(impl)
+			_, err := impl.MarshalAvroEntry(spec, schema, version)
+			require.NoError(t, err)
+			after := snapshotAvroFields(impl)
 
-	require.Equal(t, before, after,
-		"MarshalAvroEntry must not mutate any avro-tagged field of the source DataFile, "+
-			"including pointer-typed fields whose backing storage is shared with the clone")
+			require.Equal(t, before, after,
+				"MarshalAvroEntry must not mutate any avro-tagged field of the source DataFile, "+
+					"including pointer-typed fields whose backing storage is shared with the clone")
+		})
+	}
 }
 
 func TestCloneDataFileAvroFieldsCopiesOnlyAvroFields(t *testing.T) {
@@ -270,8 +274,22 @@ func TestCloneDataFileAvroFieldsCopiesOnlyAvroFields(t *testing.T) {
 	for i := range typ.NumField() {
 		field := typ.Field(i)
 		if _, tagged := field.Tag.Lookup("avro"); tagged {
-			require.Equal(t, srcVal.Field(i).Interface(), cloneVal.Field(i).Interface(),
+			source := srcVal.Field(i)
+			cloned := cloneVal.Field(i)
+			require.Equal(t, source.Interface(), cloned.Interface(),
 				"Avro field %s must be copied", field.Name)
+			switch source.Kind() {
+			case reflect.Pointer:
+				require.Same(t, source.Interface(), cloned.Interface(),
+					"pointer-typed Avro field %s must be shallow-copied", field.Name)
+			case reflect.Map:
+				// Mutating the source map must be visible through the clone.
+				// This detects accidental deep copies in this hot path.
+				key := reflect.Zero(source.Type().Key())
+				source.SetMapIndex(key, reflect.Zero(source.Type().Elem()))
+				require.True(t, cloned.MapIndex(key).IsValid(),
+					"map-typed Avro field %s must be shallow-copied", field.Name)
+			}
 		} else {
 			require.True(t, cloneVal.Field(i).IsZero(),
 				"internal field %s must be reset", field.Name)
