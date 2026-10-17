@@ -304,6 +304,7 @@ func (n *partitionResidualNode) residual(
 		if !changed {
 			return n.expr, false, nil
 		}
+
 		return iceberg.NewNot(child), true, nil
 	case partitionResidualAnd:
 		left, leftChanged, err := n.left.residual(partition)
@@ -322,6 +323,7 @@ func (n *partitionResidualNode) residual(
 		if !leftChanged && !rightChanged {
 			return n.expr, false, nil
 		}
+
 		return iceberg.NewAnd(left, right), true, nil
 	case partitionResidualOr:
 		left, leftChanged, err := n.left.residual(partition)
@@ -340,6 +342,7 @@ func (n *partitionResidualNode) residual(
 		if !leftChanged && !rightChanged {
 			return n.expr, false, nil
 		}
+
 		return iceberg.NewOr(left, right), true, nil
 	}
 
