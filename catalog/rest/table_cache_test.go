@@ -39,6 +39,7 @@ type etagServer struct {
 	mu          sync.Mutex
 	etag        string
 	exists      bool
+	body        string
 	ifNoneMatch []string
 }
 
@@ -52,7 +53,7 @@ func (s *etagServer) lastIfNoneMatch() string {
 func newETagCatalog(t *testing.T, props iceberg.Properties) (*rest.Catalog, *etagServer) {
 	t.Helper()
 
-	s := &etagServer{etag: `"v1"`, exists: true}
+	s := &etagServer{etag: `"v1"`, exists: true, body: createTableRestExample}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
 		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
@@ -92,7 +93,7 @@ func newETagCatalog(t *testing.T, props iceberg.Properties) (*rest.Catalog, *eta
 		if s.etag != "" {
 			w.Header().Set("ETag", s.etag)
 		}
-		_, err := w.Write([]byte(createTableRestExample))
+		_, err := w.Write([]byte(s.body))
 		assert.NoError(t, err)
 	})
 	mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, _ *http.Request) {
@@ -133,6 +134,40 @@ func TestLoadTableNotModifiedReusesCachedResponse(t *testing.T) {
 	assert.True(t, first.Equals(*second))
 	assert.Equal(t, first.MetadataLocation(), second.MetadataLocation())
 	assert.Equal(t, first.Properties(), second.Properties())
+}
+
+// TestLoadTableNotModifiedDoesNotShareLabels checks that tables built from one
+// cached response get independent labels. Labels are mutable through the table,
+// so a change made through one table must not reach the cache or another table.
+func TestLoadTableNotModifiedDoesNotShareLabels(t *testing.T) {
+	ctx := context.Background()
+	cat, srv := newETagCatalog(t, nil)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal([]byte(createTableRestExample), &body))
+	body["labels"] = map[string]any{
+		"object-labels": map[string]string{"owner": "data-eng"},
+		"fields":        []any{map[string]any{"field-id": 1, "labels": map[string]string{"pii": "no"}}},
+	}
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	srv.mu.Lock()
+	srv.body = string(raw)
+	srv.mu.Unlock()
+
+	first, err := cat.LoadTable(ctx, etagIdent)
+	require.NoError(t, err)
+	first.Labels().Object()["owner"] = "changed"
+	first.Labels().Field(1)["pii"] = "yes"
+
+	for range 2 {
+		next, err := cat.LoadTable(ctx, etagIdent)
+		require.NoError(t, err)
+		require.Equal(t, `"v1"`, srv.lastIfNoneMatch(), "the load must be served from the cache")
+		assert.Equal(t, "data-eng", next.Labels().Object()["owner"])
+		assert.Equal(t, "no", next.Labels().Field(1)["pii"])
+		next.Labels().Object()["owner"] = "changed-again"
+	}
 }
 
 func TestLoadTableModifiedReplacesCachedETag(t *testing.T) {

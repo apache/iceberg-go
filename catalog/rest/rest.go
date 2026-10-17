@@ -1937,7 +1937,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	if mode != "" {
 		opts = append(opts, withQueryParams(url.Values{"snapshots": {string(mode)}}))
 	}
-	cached, hit := r.tables.get(identifier)
+	cached, hit := r.tables.get(identifier, mode)
 	if hit {
 		opts = append(opts, withIfNoneMatch(cached.etag))
 	}
@@ -1954,7 +1954,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	case err != nil:
 		return nil, err
 	case etag != "":
-		r.tables.put(identifier, etag, ret)
+		r.tables.put(identifier, mode, etag, ret)
 	}
 
 	config := maps.Clone(r.props)

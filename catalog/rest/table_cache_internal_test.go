@@ -34,7 +34,7 @@ func TestTableCacheDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, c.ttl)
 
 	for i := range defaultTableCacheMaxEntries + 1 {
-		c.put(table.Identifier{"ns", string(rune('a' + i%26)), string(rune('a' + i/26))}, "e", loadTableResponse{})
+		c.put(table.Identifier{"ns", string(rune('a' + i%26)), string(rune('a' + i/26))}, SnapshotModeAll, "e", loadTableResponse{})
 	}
 	assert.Equal(t, defaultTableCacheMaxEntries, c.entries.Len())
 }
@@ -47,16 +47,16 @@ func TestTableCacheExpiresAfterWrite(t *testing.T) {
 	c.now = func() time.Time { return now }
 	ident := table.Identifier{"ns", "tbl"}
 
-	c.put(ident, `"v1"`, loadTableResponse{})
+	c.put(ident, SnapshotModeAll, `"v1"`, loadTableResponse{})
 
 	// Reads do not extend an entry's lifetime.
 	now = now.Add(999 * time.Millisecond)
-	e, ok := c.get(ident)
+	e, ok := c.get(ident, SnapshotModeAll)
 	require.True(t, ok)
 	assert.Equal(t, `"v1"`, e.etag)
 
 	now = now.Add(time.Millisecond)
-	_, ok = c.get(ident)
+	_, ok = c.get(ident, SnapshotModeAll)
 	assert.False(t, ok)
 	assert.Zero(t, c.entries.Len())
 }
@@ -68,4 +68,21 @@ func TestTableCacheKeyIsUnambiguous(t *testing.T) {
 	assert.NotEqual(t,
 		tableCacheKey(table.Identifier{`a" "b`, "c"}),
 		tableCacheKey(table.Identifier{"a", "b", "c"}))
+}
+
+// TestTableCacheIgnoresEntryForOtherSnapshotMode checks that a response loaded
+// with one snapshot mode is not reused for a load with another: a refs response
+// replayed for an all request would silently drop snapshots.
+func TestTableCacheIgnoresEntryForOtherSnapshotMode(t *testing.T) {
+	c, err := newTableCache(nil)
+	require.NoError(t, err)
+	ident := table.Identifier{"ns", "tbl"}
+
+	c.put(ident, SnapshotModeRefs, `"v1"`, loadTableResponse{})
+
+	_, ok := c.get(ident, SnapshotModeAll)
+	assert.False(t, ok)
+	e, ok := c.get(ident, SnapshotModeRefs)
+	require.True(t, ok)
+	assert.Equal(t, `"v1"`, e.etag)
 }

@@ -19,6 +19,7 @@ package rest
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"time"
 
@@ -41,9 +42,14 @@ const (
 // tableCacheEntry is a load response the server tagged with an ETag. The
 // parsed response is kept rather than a *table.Table because Table.Refresh
 // mutates its receiver: every 304 builds a fresh table from the response so
-// callers never share one.
+// callers never share one. The response's Labels are mutable through the
+// table, so the entry holds its own copy and hands out a copy on every hit.
 type tableCacheEntry struct {
-	etag    string
+	etag string
+	// mode is the snapshot loading mode the response was loaded with. A refs
+	// response replayed for an all request would silently drop snapshots, so
+	// a load with another mode does not reuse the entry.
+	mode    SnapshotMode
 	rsp     loadTableResponse
 	written time.Time
 }
@@ -99,14 +105,14 @@ func tableCacheKey(ident table.Identifier) string {
 	return fmt.Sprintf("%q", []string(ident))
 }
 
-func (c *tableCache) get(ident table.Identifier) (tableCacheEntry, bool) {
+func (c *tableCache) get(ident table.Identifier, mode SnapshotMode) (tableCacheEntry, bool) {
 	if c == nil {
 		return tableCacheEntry{}, false
 	}
 
 	key := tableCacheKey(ident)
 	e, ok := c.entries.Get(key)
-	if !ok {
+	if !ok || e.mode != mode {
 		return tableCacheEntry{}, false
 	}
 	if c.now().Sub(e.written) >= c.ttl {
@@ -114,16 +120,36 @@ func (c *tableCache) get(ident table.Identifier) (tableCacheEntry, bool) {
 
 		return tableCacheEntry{}, false
 	}
+	e.rsp.Labels = cloneLabels(e.rsp.Labels)
 
 	return e, true
 }
 
-func (c *tableCache) put(ident table.Identifier, etag string, rsp loadTableResponse) {
+func (c *tableCache) put(ident table.Identifier, mode SnapshotMode, etag string, rsp loadTableResponse) {
 	if c == nil {
 		return
 	}
 
-	c.entries.Add(tableCacheKey(ident), tableCacheEntry{etag: etag, rsp: rsp, written: c.now()})
+	rsp.Labels = cloneLabels(rsp.Labels)
+	c.entries.Add(tableCacheKey(ident), tableCacheEntry{etag: etag, mode: mode, rsp: rsp, written: c.now()})
+}
+
+// cloneLabels deep-copies l, so a table built from a cached response cannot
+// change the labels of the cache entry or of another table.
+func cloneLabels(l *iceberg.Labels) *iceberg.Labels {
+	if l == nil {
+		return nil
+	}
+
+	out := &iceberg.Labels{ObjectLabels: maps.Clone(l.ObjectLabels)}
+	if l.Fields != nil {
+		out.Fields = make([]iceberg.FieldLabel, len(l.Fields))
+		for i, f := range l.Fields {
+			out.Fields[i] = iceberg.FieldLabel{FieldID: f.FieldID, Labels: maps.Clone(f.Labels)}
+		}
+	}
+
+	return out
 }
 
 func (c *tableCache) invalidate(ident table.Identifier) {
