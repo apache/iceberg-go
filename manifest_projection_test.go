@@ -33,10 +33,11 @@ func TestManifestEntryProjectionWhitelistCoversDataFileSchema(t *testing.T) {
 		ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true,
 	})
 	dataFileType := reflect.TypeFor[dataFile]()
-	dataFileFields := make(map[string]struct{}, len(dataFileAvroFieldIndexes))
-	for _, index := range dataFileAvroFieldIndexes {
-		name := dataFileType.Field(index).Tag.Get("avro")
-		dataFileFields[name] = struct{}{}
+	dataFileFields := make(map[string]struct{})
+	for i := range dataFileType.NumField() {
+		if name, ok := dataFileType.Field(i).Tag.Lookup("avro"); ok {
+			dataFileFields[name] = struct{}{}
+		}
 	}
 	optionalFields := map[string]struct{}{
 		"column_sizes":      {},
