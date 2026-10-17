@@ -120,8 +120,7 @@ func BenchmarkSnapshotSummaryPartitionPathEscaped(b *testing.B) {
 	})
 
 	for _, tc := range []struct {
-		name string
-		value string
+		name, value string
 	}{
 		{name: "plain", value: "berlin"},
 		{name: "escaped", value: "berlin/east +%?#"},
