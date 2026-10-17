@@ -187,6 +187,7 @@ func benchmarkBalancedPartitionResidualAnd(predicates []iceberg.BooleanExpressio
 		return predicates[0]
 	}
 	mid := len(predicates) / 2
+
 	return iceberg.NewAnd(
 		benchmarkBalancedPartitionResidualAnd(predicates[:mid]),
 		benchmarkBalancedPartitionResidualAnd(predicates[mid:]),
