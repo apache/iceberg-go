@@ -139,16 +139,27 @@ func BenchmarkPartitionResidualUnchangedSubtrees(b *testing.B) {
 			name    string
 			value   any
 			present bool
+			mixed   bool
 		}{
 			{name: "missing"},
 			{name: "null", present: true},
 			{name: "one-simplified", value: "acme", present: true},
+			{name: "mixed", mixed: true},
 		} {
 			b.Run(fmt.Sprintf("predicates=%d/%s/files=4096", predicateCount, tc.name), func(b *testing.B) {
 				partitions := make([]map[int]any, 4096)
 				for i := range partitions {
 					partitions[i] = make(map[int]any, 1)
-					if tc.present {
+					if tc.mixed {
+						switch i % 4 {
+						case 1:
+							partitions[i][1000] = nil
+						case 2:
+							partitions[i][1000] = "acme"
+						case 3:
+							partitions[i][1000] = "other"
+						}
+					} else if tc.present {
 						partitions[i][1000] = tc.value
 					}
 				}
