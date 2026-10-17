@@ -47,8 +47,11 @@ func TestPartitionResidualEvaluatorReusesUnchangedSubtrees(t *testing.T) {
 		want           iceberg.BooleanExpression
 	}{
 		{name: "and", filter: iceberg.NewAnd(tenant, opaque), partitionValue: "acme", want: opaque},
+		{name: "and-right", filter: iceberg.NewAnd(opaque, tenant), partitionValue: "acme", want: opaque},
 		{name: "or", filter: iceberg.NewOr(tenant, opaque), partitionValue: "other", want: opaque},
+		{name: "or-right", filter: iceberg.NewOr(opaque, tenant), partitionValue: "other", want: opaque},
 		{name: "not", filter: iceberg.NewNot(iceberg.NewOr(tenant, opaque)), partitionValue: "other", want: iceberg.NewNot(opaque)},
+		{name: "not-right", filter: iceberg.NewNot(iceberg.NewOr(opaque, tenant)), partitionValue: "other", want: iceberg.NewNot(opaque)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -77,20 +80,47 @@ func TestPartitionResidualEvaluatorUnchangedSubtreeAllocations(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "tenant_id", Transform: iceberg.IdentityTransform{},
 	})
-	filter := iceberg.NewAnd(
-		iceberg.EqualTo(iceberg.Reference("tenant_id"), "acme"),
-		iceberg.NewOr(
-			iceberg.GreaterThan(iceberg.Reference("amount"), int64(100)),
-			iceberg.NewNot(iceberg.LessThan(iceberg.Reference("amount"), int64(20))),
-		),
+	tenant := iceberg.EqualTo(iceberg.Reference("tenant_id"), "acme")
+	opaque := iceberg.NewOr(
+		iceberg.GreaterThan(iceberg.Reference("amount"), int64(100)),
+		iceberg.NewNot(iceberg.LessThan(iceberg.Reference("amount"), int64(20))),
 	)
-	evaluator := boundPartitionResidualEvaluator(t, schema, spec, filter)
-	partition := map[int]any{}
-	allocs := testing.AllocsPerRun(100, func() {
-		_, _, err := evaluator.residual(partition)
-		if err != nil {
-			panic(err)
-		}
-	})
-	require.Zero(t, allocs)
+
+	for _, tt := range []struct {
+		name   string
+		filter iceberg.BooleanExpression
+	}{
+		{name: "and", filter: iceberg.NewAnd(tenant, opaque)},
+		{name: "or", filter: iceberg.NewOr(tenant, opaque)},
+		{name: "not", filter: iceberg.NewNot(iceberg.NewOr(tenant, opaque))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			evaluator := boundPartitionResidualEvaluator(t, schema, spec, tt.filter)
+			for _, tc := range []struct {
+				name      string
+				partition map[int]any
+			}{
+				{name: "missing", partition: map[int]any{}},
+				{name: "null", partition: map[int]any{1000: nil}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					// The node must retain the expression it built at
+					// evaluator creation instead of allocating a new tree.
+					nodeExpr, changed, err := evaluator.root.residual(
+						borrowedPartitionRecord{partition: tc.partition, partitionType: evaluator.partitionType})
+					require.NoError(t, err)
+					require.False(t, changed)
+					require.True(t, nodeExpr.Equals(evaluator.root.expr))
+
+					allocs := testing.AllocsPerRun(100, func() {
+						residual, changed, err := evaluator.residual(tc.partition)
+						if err != nil || changed || residual != nil {
+							panic("unchanged partition residual must be nil without an error")
+						}
+					})
+					require.Zero(t, allocs)
+				})
+			}
+		})
+	}
 }
