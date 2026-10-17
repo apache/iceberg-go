@@ -130,3 +130,81 @@ func BenchmarkSplitParquetScanTask(b *testing.B) {
 		})
 	}
 }
+
+func TestSplitParquetScanTaskSkewedCapacity(t *testing.T) {
+	const rowGroups = 4096
+	const targetSize int64 = 128 << 20
+	offsets := make([]int64, rowGroups)
+	var fileSize int64
+	for i := range offsets {
+		offsets[i] = fileSize
+		if i%2 == 0 {
+			fileSize += 1 << 20
+		} else {
+			fileSize += 96 << 20
+		}
+	}
+
+	file := splitTestDataFile(t, iceberg.ParquetFile, fileSize, offsets)
+	splits, ok := splitParquetScanTask(FileScanTask{File: file, Length: fileSize}, targetSize)
+	if !ok {
+		t.Fatal("expected skewed Parquet row groups to split")
+	}
+	if len(splits) != 2048 {
+		t.Fatalf("got %d splits, want 2048", len(splits))
+	}
+	if cap(splits) > 3105 {
+		t.Fatalf("allocated capacity %d, want at most 3105", cap(splits))
+	}
+
+	var nextStart int64
+	for i, split := range splits {
+		if split.Start != nextStart || split.Length <= 0 {
+			t.Fatalf("invalid split %d: start=%d length=%d, expected start=%d", i, split.Start, split.Length, nextStart)
+		}
+		nextStart += split.Length
+	}
+	if nextStart != fileSize {
+		t.Fatalf("splits cover %d bytes, want %d", nextStart, fileSize)
+	}
+}
+
+func BenchmarkSplitParquetScanTaskSkewed(b *testing.B) {
+	const rowGroups = 4096
+	const targetSize int64 = 128 << 20
+	offsets := make([]int64, rowGroups)
+	var fileSize int64
+	for i := range offsets {
+		offsets[i] = fileSize
+		if i%2 == 0 {
+			fileSize += 1 << 20
+		} else {
+			fileSize += 96 << 20
+		}
+	}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"mem://table/skewed-split-benchmark.parquet",
+		iceberg.ParquetFile,
+		nil, nil, nil,
+		rowGroups,
+		fileSize,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	builder.SplitOffsets(offsets)
+	task := FileScanTask{File: builder.Build(), Length: fileSize}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		splits, ok := splitParquetScanTask(task, targetSize)
+		if !ok {
+			b.Fatal("expected to split Parquet task")
+		}
+		splitParquetScanTaskBenchmarkSink = splits
+	}
+}
