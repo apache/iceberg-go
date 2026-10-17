@@ -46,7 +46,7 @@ const polarisScope = "PRINCIPAL_ROLE:ALL"
 
 // TestPolarisCatalogConformance runs the catalog conformance suite against an
 // Apache Polaris server. It is opt-in: the test is skipped unless POLARIS_URI
-// is set. See CONTRIBUTING.md for how to start a local Polaris server.
+// is set. internal/recipe/setup-polaris.sh starts a local Polaris server.
 func TestPolarisCatalogConformance(t *testing.T) {
 	uri := os.Getenv(polarisURIEnv)
 	if uri == "" {
@@ -54,7 +54,7 @@ func TestPolarisCatalogConformance(t *testing.T) {
 	}
 
 	credential := os.Getenv(polarisCredentialEnv)
-	require.NotEmpty(t, credential, "%s must be set to a client_id:client_secret pair", polarisCredentialEnv)
+	require.Contains(t, credential, ":", "%s must be set to a client_id:client_secret pair", polarisCredentialEnv)
 
 	warehouse := os.Getenv(polarisWarehouseEnv)
 	require.NotEmpty(t, warehouse, "%s must be set to the name of a Polaris catalog", polarisWarehouseEnv)
