@@ -34,10 +34,23 @@ func (s partitionTupleStringer) String() string { return "custom:" + string(s) }
 
 func TestAppendPartitionTupleMatchesFmt(t *testing.T) {
 	values := []any{
-		nil, "", "a=b;:é", -123, int32(-45), int64(1234567890123),
-		true, false, uint64(1 << 63), math.NaN(), math.Inf(1),
-		math.Copysign(0, -1), float32(3.5), []byte{0, 255},
-		[]int{1, 2}, partitionTupleStringer("x"), time.Unix(0, 0).UTC(),
+		nil,
+		"",
+		"a=b;:é",
+		-123,
+		int32(-45),
+		int64(1234567890123),
+		true,
+		false,
+		uint64(1 << 63),
+		math.NaN(),
+		math.Inf(1),
+		math.Copysign(0, -1),
+		float32(3.5),
+		[]byte{0, 255},
+		[]int{1, 2},
+		partitionTupleStringer("x"),
+		time.Unix(0, 0).UTC(),
 		(*int)(nil),
 	}
 
