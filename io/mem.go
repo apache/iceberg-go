@@ -141,7 +141,7 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 			pathBase = key
 			prefix = len(key) - len(relative)
 		}
-		for i := 0; i < len(relative); i++ {
+		for i := range len(relative) {
 			if relative[i] == '/' {
 				addEntry(walkEntry{path: pathBase[:prefix+i], isDir: true})
 			}
