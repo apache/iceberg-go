@@ -28,7 +28,7 @@ func BenchmarkKeepMaskBatchRange(b *testing.B) {
 		batchSize uint64 = 65_536
 	)
 	bitmap := NewRoaringPositionBitmap()
-	for i := uint64(0); i < 16; i++ {
+	for i := range uint64(16) {
 		bitmap.Set(start + 1 + i*2_048)
 	}
 	bitmap.Set(uint64(fileRows - 1))
