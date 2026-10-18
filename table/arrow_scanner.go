@@ -1409,6 +1409,7 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 		}
 		if bldr == nil {
 			r.Retain()
+
 			return r, nil
 		}
 		defer bldr.Release()
