@@ -74,6 +74,7 @@ func assertKeepMaskForRange(t *testing.T, bitmap *RoaringPositionBitmap, start, 
 	for i := range length {
 		if bitmap.Contains(start + i) {
 			hasDelete = true
+
 			break
 		}
 	}
