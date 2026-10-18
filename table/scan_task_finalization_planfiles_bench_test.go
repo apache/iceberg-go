@@ -69,9 +69,9 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB) *Table {
 
 	const (
 		tableLocation = "mem://plan-files-finalization-benchmark"
-		snapshotID    = int64(1)
 		sequenceNum   = int64(1)
 	)
+	snapshotID := int64(1)
 
 	fs := newTrackingIO()
 	schema := simpleSchema()
