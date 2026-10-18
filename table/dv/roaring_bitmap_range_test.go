@@ -82,6 +82,7 @@ func assertKeepMaskForRange(t *testing.T, bitmap *RoaringPositionBitmap, start, 
 		if got != nil {
 			t.Fatalf("clean range [%d, %d): expected nil mask, got %v", start, start+length, got)
 		}
+
 		return
 	}
 	if want := int((length + 7) / 8); len(got) != want {
