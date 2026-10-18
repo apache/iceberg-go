@@ -68,8 +68,8 @@ func TestIndexedFIFOPackingMatchesLinear(t *testing.T) {
 			}
 
 			reversed := func(yield func(int) bool) {
-				for i := len(items) - 1; i >= 0; i-- {
-					if !yield(items[i]) {
+				for _, item := range slices.Backward(items) {
+					if !yield(item) {
 						return
 					}
 				}
