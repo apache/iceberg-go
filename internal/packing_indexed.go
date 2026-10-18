@@ -115,10 +115,11 @@ func indexedFIFOPackingIterator[T any](
 					bin = weights.firstFit(0, head, maxBinWeight)
 				}
 			} else {
-				for i := 0; i < openBins; i++ {
+				for i := range openBins {
 					j := (head + i) % capacity
 					if bins[j].CanAdd(weight) {
 						bin = j
+
 						break
 					}
 				}
@@ -143,7 +144,7 @@ func indexedFIFOPackingIterator[T any](
 
 			if safeToIndex && !indexed && openBins == 32 {
 				weights = newPackingWeightIndex(capacity)
-				for i := 0; i < openBins; i++ {
+				for i := range openBins {
 					j := (head + i) % capacity
 					weights.update(j, bins[j].Weight())
 				}
