@@ -1358,6 +1358,7 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 
 			if currentIdx >= rowCount {
 				r.Retain()
+
 				return r, nil
 			}
 
@@ -1365,12 +1366,14 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 			keepBits := bitmap.KeepMaskForRange(uint64(currentIdx), uint64(maskEnd))
 			if keepBits == nil {
 				r.Retain()
+
 				return r, nil
 			}
 
 			if nextIdx <= rowCount {
 				mask := array.NewBoolean(int(nrows), memory.NewBufferBytes(keepBits), nil, 0)
 				defer mask.Release()
+
 				return compute.FilterRecordBatch(ctx, r, mask, compute.DefaultFilterOptions())
 			}
 
