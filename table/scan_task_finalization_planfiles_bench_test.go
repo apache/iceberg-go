@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	planFilesFinalizationBenchmarkManifestCount = 8
+	planFilesFinalizationBenchmarkManifestCount    = 8
 	planFilesFinalizationBenchmarkFilesPerManifest = 2_500
 )
 
