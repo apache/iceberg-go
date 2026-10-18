@@ -26,8 +26,10 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-const planFilesFinalizationBenchmarkManifestCount = 8
-const planFilesFinalizationBenchmarkFilesPerManifest = 2_500
+const (
+	planFilesFinalizationBenchmarkManifestCount = 8
+	planFilesFinalizationBenchmarkFilesPerManifest = 2_500
+)
 
 var planFilesFinalizationBenchmarkSink int
 
