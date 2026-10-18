@@ -374,6 +374,7 @@ func TestMemIO_WalkDirNestedPrefixes(t *testing.T) {
 			return err
 		}
 		got = append(got, visitedEntry{path: path, isDir: d.IsDir()})
+
 		return nil
 	})
 	require.NoError(t, err)
