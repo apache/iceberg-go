@@ -51,6 +51,7 @@ func makeMaterializedLineageBatch(alloc memory.Allocator, rows, rowIDNullAt, seq
 		builder := array.NewInt64Builder(alloc)
 		defer builder.Release()
 		builder.AppendValues(values, valid)
+
 		return builder.NewArray()
 	}
 
