@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -107,7 +106,7 @@ func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate
 // files from the current snapshot. Files from evolved specs are coerced into
 // the table-wide partition type before grouping.
 func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: %w", err)
 	}
@@ -139,24 +138,21 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 }
 
 func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]inspectPartitionAggregate, error) {
-	snapshot := i.tbl.metadata.CurrentSnapshot()
+	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil
 	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
-	}
-	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
+	provider := i.tbl.ManifestProvider()
+	manifests, err := provider.Manifests(ctx, *snapshot)
 	if err != nil {
 		return nil, err
 	}
-	fs, err := i.tbl.fsF(ctx)
+	fs, err := provider.FS(ctx)
 	if err != nil {
 		return nil, err
 	}
-	manifests := manifestSet.borrowAllManifests()
 
-	snapshots := i.tbl.metadata.Snapshots()
+	snapshots := i.tbl.Metadata().Snapshots()
 	snapshotTimes := make(map[int64]int64, len(snapshots))
 	for _, snapshot := range snapshots {
 		snapshotTimes[snapshot.SnapshotID] = snapshot.TimestampMs
@@ -164,7 +160,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 
 	aggregates := make([]*inspectPartitionAggregate, 0)
 	aggregateTree := newInspectPartitionAggregateTree()
-	for _, manifest := range manifests {
+	for manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
