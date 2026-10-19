@@ -608,6 +608,69 @@ func TestUnmarshalExpressionTransformTermUnknown(t *testing.T) {
 	require.ErrorContains(t, err, "unknown transform in expression term")
 }
 
+// TestUnmarshalExpressionLiteralWrapper checks that a predicate value wrapped as
+// {"type":"literal","value":...}, as the spec's JSON grammar allows, parses the
+// same as the bare value.
+func TestUnmarshalExpressionLiteralWrapper(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "i", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "d", Type: iceberg.PrimitiveTypes.Date},
+	)
+
+	tests := []struct {
+		name    string
+		schema  *iceberg.Schema
+		wrapped string
+		bare    string
+	}{
+		{
+			"value takes the field type", schema,
+			`{"type":"eq","term":"d","value":{"type":"literal","value":"2022-08-14"}}`,
+			`{"type":"eq","term":"d","value":"2022-08-14"}`,
+		},
+		{
+			"data-type is ignored", schema,
+			`{"type":"eq","term":"d","value":{"type":"literal","value":"2022-08-14","data-type":"string"}}`,
+			`{"type":"eq","term":"d","value":"2022-08-14"}`,
+		},
+		{
+			"values mix wrapped and bare", schema,
+			`{"type":"in","term":"i","values":[{"type":"literal","value":1},2]}`,
+			`{"type":"in","term":"i","values":[1,2]}`,
+		},
+		{
+			"schema-less value", nil,
+			`{"type":"lt","term":"x","value":{"type":"literal","value":5}}`,
+			`{"type":"lt","term":"x","value":5}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want, err := iceberg.ParseExpr([]byte(tt.bare), tt.schema)
+			require.NoError(t, err)
+			got, err := iceberg.ParseExpr([]byte(tt.wrapped), tt.schema)
+			require.NoError(t, err)
+			assert.Truef(t, want.Equals(got), "want %s, got %s", want, got)
+		})
+	}
+}
+
+func TestUnmarshalExpressionLiteralWrapperErrors(t *testing.T) {
+	for name, value := range map[string]string{
+		"not a literal": `{"type":"reference","term":"a"}`,
+		"missing type":  `{"value":1}`,
+		"missing value": `{"type":"literal"}`,
+		"null value":    `{"type":"literal","value":null}`,
+		"nested":        `{"type":"literal","value":{"type":"literal","value":1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := iceberg.ParseExpr([]byte(`{"type":"eq","term":"a","value":`+value+`}`), nil)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
 // TestUnmarshalExpressionFixedLength rejects a fixed value whose decoded length
 // doesn't match the column's declared length.
 func TestUnmarshalExpressionFixedLength(t *testing.T) {

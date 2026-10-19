@@ -582,6 +582,38 @@ func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
 	require.True(t, tagExists, "WithOlderThan must not expire a tag without max-ref-age-ms")
 }
 
+func TestExpireSnapshotsMaterializesDeferredHistory(t *testing.T) {
+	const historicalID = int64(3051729675574597004)
+
+	meta, err := ParseMetadataBytesDeferredSnapshots(metadataWithUnreferencedSnapshot(t))
+	require.NoError(t, err)
+	state := commonMetadataOf(meta).deferredSnapshots
+	require.NotNil(t, state)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	txn := &Transaction{
+		tbl:  &Table{metadata: meta},
+		meta: builder,
+		reqs: []Requirement{},
+	}
+
+	require.NoError(t, txn.ExpireSnapshots(
+		WithOlderThan(0),
+		WithRetainLast(1),
+		WithPostCommit(false),
+	))
+	assert.True(t, state.isMaterialized(), "expiration must inspect complete deferred history")
+
+	var removal *removeSnapshotsUpdate
+	for _, update := range txn.meta.updates {
+		if candidate, ok := update.(*removeSnapshotsUpdate); ok {
+			removal = candidate
+		}
+	}
+	require.NotNil(t, removal)
+	assert.Contains(t, removal.SnapshotIDs, historicalID)
+}
+
 func TestExpireSnapshotsUsesStandardRetentionPropertyNames(t *testing.T) {
 	tests := []struct {
 		name            string

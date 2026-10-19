@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"iter"
 	"sync"
 	"testing"
 
@@ -98,7 +99,16 @@ func (fs *snapshotManifestCacheBenchmarkIO) Open(name string) (iceio.File, error
 	return fs.IO.Open(name)
 }
 
-var snapshotManifestSliceBenchmarkSink []iceberg.ManifestFile
+var snapshotManifestSliceBenchmarkSink iter.Seq[iceberg.ManifestFile]
+
+func countManifests(manifests iter.Seq[iceberg.ManifestFile]) int {
+	n := 0
+	for range manifests {
+		n++
+	}
+
+	return n
+}
 
 func BenchmarkInspectSnapshotManifestCacheHit(b *testing.B) {
 	for _, manifestCount := range []int{1, 1000, 10000} {
@@ -110,8 +120,8 @@ func BenchmarkInspectSnapshotManifestCacheHit(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			if len(manifests) != manifestCount {
-				b.Fatalf("got %d manifests, want %d", len(manifests), manifestCount)
+			if n := countManifests(manifests); n != manifestCount {
+				b.Fatalf("got %d manifests, want %d", n, manifestCount)
 			}
 			b.ReportAllocs()
 			for b.Loop() {
@@ -119,8 +129,8 @@ func BenchmarkInspectSnapshotManifestCacheHit(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				if len(manifests) != manifestCount {
-					b.Fatalf("got %d manifests, want %d", len(manifests), manifestCount)
+				if n := countManifests(manifests); n != manifestCount {
+					b.Fatalf("got %d manifests, want %d", n, manifestCount)
 				}
 				snapshotManifestSliceBenchmarkSink = manifests
 			}

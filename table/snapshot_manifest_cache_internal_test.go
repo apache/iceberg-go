@@ -22,7 +22,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -942,4 +944,25 @@ func TestAllManifestsEarlyStopDoesNotFailConcurrentScan(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("scan did not recover from early iterator stop")
 	}
+}
+
+func TestManifestProviderSharesTableManifestListCache(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	baseFS, err := tbl.fsF(t.Context())
+	require.NoError(t, err)
+	var opens atomic.Int64
+	tbl.fsF = func(context.Context) (iceio.IO, error) {
+		return &countingOpenIO{IO: baseFS, opens: &opens}, nil
+	}
+	snapshot := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+
+	// Each iteration gets a new provider, so only the table's shared cache can
+	// serve the second read without reopening the manifest list.
+	for range 2 {
+		manifests, err := tbl.ManifestProvider().Manifests(t.Context(), *snapshot)
+		require.NoError(t, err)
+		require.Len(t, slices.Collect(manifests), 3)
+	}
+	require.Equal(t, int64(1), opens.Load(), "providers from one table should share its manifest-list cache")
 }

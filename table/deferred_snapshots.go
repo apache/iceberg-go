@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 )
@@ -39,6 +40,56 @@ type deferredSnapshotState struct {
 	snapshots []Snapshot
 	index     *snapshotIndexData
 	err       error
+}
+
+// deferredSnapshotOverlay records mutations over an immutable deferred
+// snapshot state. It belongs to immutable built metadata, so the fully applied
+// collection can be cached after the first collection access or marshal.
+type deferredSnapshotOverlay struct {
+	additions []Snapshot
+	removed   map[int64]struct{}
+
+	applyOnce sync.Once
+	applied   []Snapshot
+}
+
+func (o *deferredSnapshotOverlay) clone() *deferredSnapshotOverlay {
+	if o == nil {
+		return nil
+	}
+
+	return &deferredSnapshotOverlay{
+		additions: cloneSnapshots(o.additions),
+		removed:   maps.Clone(o.removed),
+	}
+}
+
+func (o *deferredSnapshotOverlay) isRemoved(id int64) bool {
+	if o == nil {
+		return false
+	}
+
+	_, ok := o.removed[id]
+
+	return ok
+}
+
+func (o *deferredSnapshotOverlay) apply(base []Snapshot) []Snapshot {
+	if o == nil || (len(o.additions) == 0 && len(o.removed) == 0) {
+		return base
+	}
+
+	o.applyOnce.Do(func() {
+		o.applied = make([]Snapshot, 0, len(base)+len(o.additions))
+		for _, snapshot := range base {
+			if !o.isRemoved(snapshot.SnapshotID) {
+				o.applied = append(o.applied, snapshot)
+			}
+		}
+		o.applied = append(o.applied, o.additions...)
+	})
+
+	return o.applied
 }
 
 type deferredSnapshotEntry struct {
@@ -132,6 +183,27 @@ func (s *deferredSnapshotState) snapshotByID(id int64) (*Snapshot, error) {
 	}
 
 	return cloneSnapshotPtr(&entry.snapshot), nil
+}
+
+func (s *deferredSnapshotState) containsID(id int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.snapshots != nil {
+		_, ok := snapshotIndexPosition(s.index, s.snapshots, id)
+
+		return ok
+	}
+	_, ok := s.byID[id]
+
+	return ok
+}
+
+func (s *deferredSnapshotState) isMaterialized() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.raw == nil
 }
 
 type deferredSnapshotFields struct {
