@@ -936,6 +936,39 @@ func TestBlobFileIOWalkDirSkipsSubdirectoryMarkers(t *testing.T) {
 	}, files)
 }
 
+// TestBlobFileIOWalkDirTrailingSlashRoot checks that a root written with a
+// trailing slash walks the same paths as the root without one.
+func TestBlobFileIOWalkDirTrailingSlashRoot(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "tbl/data/a.parquet", []byte("a"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "tbl/metadata/v1.metadata.json", []byte("b"), nil))
+
+	bfs := testBlobFileIO(ctx, "mybucket", bucket)
+
+	walk := func(root string) []string {
+		var paths []string
+		require.NoError(t, bfs.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			paths = append(paths, path)
+
+			return nil
+		}), root)
+
+		return paths
+	}
+
+	want := walk("s3://mybucket/tbl")
+	require.Len(t, want, 5)
+	assert.Equal(t, want, walk("s3://mybucket/tbl/"))
+	assert.Equal(t, want, walk("s3://mybucket/tbl//"))
+}
+
 func TestBlobFileIORemoveAll(t *testing.T) {
 	ctx := context.Background()
 	bucket := memblob.OpenBucket(nil)

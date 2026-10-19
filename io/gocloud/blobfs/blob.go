@@ -550,7 +550,12 @@ func (bfs *FileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 		walkPath = "."
 	} else {
-		walkPath = location.key
+		// fs.WalkDir rejects a path with a trailing slash, and a directory
+		// root is often written with one.
+		walkPath = strings.TrimRight(location.key, "/")
+		if walkPath == "" {
+			walkPath = "."
+		}
 	}
 
 	return fs.WalkDir(walkFS{bfs}, walkPath, func(path string, d fs.DirEntry, err error) error {
