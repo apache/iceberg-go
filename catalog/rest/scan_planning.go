@@ -1032,13 +1032,13 @@ func (r *Catalog) abandonPlan(ctx context.Context, ident table.Identifier, planI
 	_ = r.CancelPlanning(cctx, ident, planID)
 }
 
-func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ...string) ([]string, error) {
+func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, rawExtra ...string) ([]string, error) {
 	identPath, err := r.tableIdentifierPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
-	return identPath.objectReqPath(ep, extra...)
+	return identPath.objectReqPath(ep, rawExtra...)
 }
 
 func scanPlanningHeaders(idempotencyKey, accessDelegation *string, includeIdempotency bool) (map[string]string, error) {

@@ -1254,7 +1254,7 @@ func (r *Catalog) tableFromResponse(
 			// Unreachable for a valid identifier that already loaded above, but if it
 			// ever regresses, log why the REST reporter was dropped rather than let
 			// metrics silently vanish with no signal.
-			slog.Debug("iceberg: skipping REST metrics reporter, cannot split identifier",
+			slog.Debug("iceberg: skipping REST metrics reporter, cannot build identifier path",
 				"error", idErr)
 		} else if path, pErr := identPath.objectReqPath(endpointReportMetrics); pErr != nil {
 			slog.Debug("iceberg: skipping REST metrics reporter, cannot build metrics path",
@@ -1497,12 +1497,12 @@ func (p identifierPath) namespaceReqPath(ep endpoint) ([]string, error) {
 }
 
 // objectReqPath builds an object-scoped path using the encoded identifier components.
-// extra contains raw opaque path segments, such as scan plan IDs. Encode each
+// rawExtra contains raw opaque path segments, such as scan plan IDs. Encode each
 // segment here so slashes, plus signs, and pure-dot segments remain literal.
-func (p identifierPath) objectReqPath(ep endpoint, extra ...string) ([]string, error) {
-	params := make([]string, 0, 2+len(extra))
+func (p identifierPath) objectReqPath(ep endpoint, rawExtra ...string) ([]string, error) {
+	params := make([]string, 0, 2+len(rawExtra))
 	params = append(params, p.encodedNamespace, p.encodedName)
-	for _, seg := range extra {
+	for _, seg := range rawExtra {
 		params = append(params, encodePathSegment(seg))
 	}
 
