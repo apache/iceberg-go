@@ -1280,10 +1280,6 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 	return stats.ToDataFile(opts), nil
 }
 
-// posDeleteFilePathFieldID is the reserved field ID of the file_path column
-// in a position delete file.
-const posDeleteFilePathFieldID = 2147483546
-
 // singleReferencedDataFile returns the data file path when every delete in a
 // position delete file targets that one file, or nil otherwise. It compares
 // the untruncated file_path min and max, which position delete writers always
@@ -1291,7 +1287,7 @@ const posDeleteFilePathFieldID = 2147483546
 // PositionDeleteWriter leaves the field unset; the spec allows it on position
 // delete files with a single target.
 func singleReferencedDataFile(stats *DataFileStatistics) *string {
-	agg, ok := stats.ColAggs[posDeleteFilePathFieldID]
+	agg, ok := stats.ColAggs[iceberg.DeleteFilePathFieldID]
 	if !ok {
 		return nil
 	}

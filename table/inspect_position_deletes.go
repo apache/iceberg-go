@@ -35,8 +35,8 @@ import (
 )
 
 const (
-	positionDeleteFilePathID       = math.MaxInt32 - 101
-	positionDeletePosID            = math.MaxInt32 - 102
+	positionDeleteFilePathID       = iceberg.DeleteFilePathFieldID
+	positionDeletePosID            = iceberg.DeleteFilePosFieldID
 	positionDeleteRowID            = math.MaxInt32 - 103
 	positionDeletePartitionID      = math.MaxInt32 - 5
 	positionDeleteSpecID           = math.MaxInt32 - 4
