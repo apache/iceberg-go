@@ -99,3 +99,37 @@ func BenchmarkDataFileSchemaCache(b *testing.B) {
 		}
 	}
 }
+
+var marshalAvroEntryBatchBenchmarkSink []byte
+
+func BenchmarkMarshalAvroEntryBatch(b *testing.B) {
+	const batchSize = 128
+	for _, version := range []int{1, 2, 3} {
+		b.Run("v"+strconv.Itoa(version)+"/files=128", func(b *testing.B) {
+			spec, schema, first := fullyPopulatedDataFileForCodec(b, version)
+			files := make([]*dataFile, batchSize)
+			files[0] = first.(*dataFile)
+			for i := 1; i < len(files); i++ {
+				_, _, df := fullyPopulatedDataFileForCodec(b, version)
+				files[i] = df.(*dataFile)
+			}
+			if _, err := files[0].MarshalAvroEntry(spec, schema, version); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				for _, df := range files {
+					encoded, err := df.MarshalAvroEntry(spec, schema, version)
+					if err != nil {
+						b.Fatal(err)
+					}
+					marshalAvroEntryBatchBenchmarkSink = encoded
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(batchSize), "files/op")
+		})
+	}
+}
