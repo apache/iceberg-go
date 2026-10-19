@@ -27,20 +27,18 @@ import (
 // RequirementsForCreateTable returns the requirements for committing updates
 // that create a new table, mirroring Java's UpdateRequirements.forCreateTable.
 func RequirementsForCreateTable(updates []Update) []Requirement {
-	b := newRequirementsBuilder(nil, false)
-	b.require(AssertCreate())
-	for _, u := range updates {
-		b.update(u)
-	}
-
-	return b.reqs
+	return deriveRequirements(nil, false, AssertCreate(), updates)
 }
 
 // RequirementsForReplaceTable returns the requirements for committing updates
 // that replace the table described by base. A replace overwrites the current
 // schema, spec, sort order and refs, so only ID assignment is guarded.
 func RequirementsForReplaceTable(base Metadata, updates []Update) ([]Requirement, error) {
-	return requirementsForExisting(base, updates, true)
+	if base == nil {
+		return nil, fmt.Errorf("%w: table metadata is nil", iceberg.ErrInvalidArgument)
+	}
+
+	return deriveRequirements(base, true, AssertTableUUID(base.TableUUID()), updates), nil
 }
 
 // RequirementsForUpdateTable returns the requirements for committing updates
@@ -48,163 +46,108 @@ func RequirementsForReplaceTable(base Metadata, updates []Update) ([]Requirement
 // overwriting a concurrent change. Use it to build the requirements for
 // Catalog.CommitTable when not going through Transaction.
 func RequirementsForUpdateTable(base Metadata, updates []Update) ([]Requirement, error) {
-	return requirementsForExisting(base, updates, false)
-}
-
-func requirementsForExisting(base Metadata, updates []Update, isReplace bool) ([]Requirement, error) {
 	if base == nil {
 		return nil, fmt.Errorf("%w: table metadata is nil", iceberg.ErrInvalidArgument)
 	}
 
-	b := newRequirementsBuilder(base, isReplace)
-	b.require(AssertTableUUID(base.TableUUID()))
+	return deriveRequirements(base, false, AssertTableUUID(base.TableUUID()), updates), nil
+}
+
+// deriveRequirements asserts the base state each update depends on. Every
+// requirement is computed from base, so duplicates are dropped by type (and
+// ref name for ref assertions), like requirementSemanticKey.
+func deriveRequirements(base Metadata, isReplace bool, first Requirement, updates []Update) []Requirement {
+	reqs := []Requirement{first}
+	if base == nil {
+		return reqs
+	}
+
+	seen := make(map[string]bool)
+	add := func(key string, r Requirement) {
+		if !seen[key] {
+			seen[key] = true
+			reqs = append(reqs, r)
+		}
+	}
+	addRef := func(name string) {
+		add(reqAssertRefSnapshotID+"\x00"+name, AssertRefSnapshotID(name, refSnapshotID(base, name)))
+	}
+	// Old schemas and specs must not be written by a branch that changed concurrently.
+	addBranches := func() {
+		for _, name := range nonMainBranches(base) {
+			addRef(name)
+		}
+	}
+	addCurrentSchema := func() {
+		add(reqAssertCurrentSchemaID, AssertCurrentSchemaID(base.CurrentSchema().ID))
+	}
+	addDefaultSpec := func() {
+		add(reqAssertDefaultSpecID, AssertDefaultSpecID(base.DefaultPartitionSpec()))
+	}
+
 	for _, u := range updates {
-		b.update(u)
-	}
-
-	return b.reqs, nil
-}
-
-type requirementsBuilder struct {
-	base      Metadata
-	isReplace bool
-	reqs      []Requirement
-
-	changedRefs map[string]struct{}
-	addedSchema bool
-	setSchemaID bool
-	addedSpec   bool
-	setSpecID   bool
-	setOrderID  bool
-}
-
-func newRequirementsBuilder(base Metadata, isReplace bool) *requirementsBuilder {
-	return &requirementsBuilder{
-		base:        base,
-		isReplace:   isReplace,
-		changedRefs: make(map[string]struct{}),
-	}
-}
-
-func (b *requirementsBuilder) require(r Requirement) {
-	b.reqs = append(b.reqs, r)
-}
-
-func (b *requirementsBuilder) update(u Update) {
-	switch u.Action() {
-	case UpdateSetSnapshotRef:
-		if ref, ok := u.(*setSnapshotRefUpdate); ok {
-			b.setSnapshotRef(ref.RefName)
-		}
-	case UpdateAddSchema:
-		if !b.addedSchema {
-			if b.base != nil {
-				b.require(AssertLastAssignedFieldID(b.base.LastColumnID()))
+		// A replace overwrites the current state, so only ID assignment is guarded.
+		switch u := u.(type) {
+		case *addSchemaUpdate:
+			add(reqAssertLastAssignedFieldID, AssertLastAssignedFieldID(base.LastColumnID()))
+		case *addPartitionSpecUpdate:
+			add(reqAssertLastAssignedPartitionID, AssertLastAssignedPartitionID(lastAssignedPartitionID(base)))
+		case *setSnapshotRefUpdate:
+			if !isReplace {
+				addRef(u.RefName)
 			}
-			b.addedSchema = true
-		}
-	case UpdateSetCurrentSchema:
-		b.requireCurrentSchemaNotChanged()
-	case UpdateAddSpec:
-		if !b.addedSpec {
-			if b.base != nil {
-				b.require(AssertLastAssignedPartitionID(lastAssignedPartitionID(b.base)))
+		case *setCurrentSchemaUpdate:
+			if !isReplace {
+				addCurrentSchema()
 			}
-			b.addedSpec = true
-		}
-	case UpdateSetDefaultSpec:
-		b.requireDefaultSpecNotChanged()
-	case UpdateSetDefaultSortOrder:
-		if !b.setOrderID {
-			if b.base != nil && !b.isReplace {
-				b.require(AssertDefaultSortOrderID(b.base.DefaultSortOrder()))
+		case *setDefaultSpecUpdate:
+			if !isReplace {
+				addDefaultSpec()
 			}
-			b.setOrderID = true
+		case *setDefaultSortOrderUpdate:
+			if !isReplace {
+				add(reqAssertDefaultSortOrderID, AssertDefaultSortOrderID(base.DefaultSortOrder()))
+			}
+		case *removeSpecUpdate:
+			if !isReplace {
+				addDefaultSpec()
+				addBranches()
+			}
+		case *removeSchemasUpdate:
+			if !isReplace {
+				addCurrentSchema()
+				addBranches()
+			}
 		}
-	case UpdateRemoveSpec:
-		b.requireDefaultSpecNotChanged()
-		// Old specs must not be written by a branch that changed concurrently.
-		b.requireNoBranchesChanged()
-	case UpdateRemoveSchemas:
-		b.requireCurrentSchemaNotChanged()
-		// Old schemas must not be written by a branch that changed concurrently.
-		b.requireNoBranchesChanged()
 	}
+
+	return reqs
 }
 
-func (b *requirementsBuilder) setSnapshotRef(name string) {
-	if _, seen := b.changedRefs[name]; seen {
-		return
+// refSnapshotID returns the snapshot the named ref points at, or nil if the
+// ref does not exist.
+func refSnapshotID(meta Metadata, name string) *int64 {
+	for n, ref := range meta.Refs() {
+		if n == name {
+			return &ref.SnapshotID
+		}
 	}
-	b.changedRefs[name] = struct{}{}
 
-	if b.base == nil || b.isReplace {
-		return
-	}
-
-	// The ref must still point at the base snapshot, or still not exist.
-	var id *int64
-	if ref, ok := findRef(b.base, name); ok {
-		id = &ref.SnapshotID
-	}
-	b.require(AssertRefSnapshotID(name, id))
+	return nil
 }
 
-func (b *requirementsBuilder) requireCurrentSchemaNotChanged() {
-	if b.setSchemaID {
-		return
-	}
-	if b.base != nil && !b.isReplace {
-		b.require(AssertCurrentSchemaID(b.base.CurrentSchema().ID))
-	}
-	b.setSchemaID = true
-}
-
-func (b *requirementsBuilder) requireDefaultSpecNotChanged() {
-	if b.setSpecID {
-		return
-	}
-	if b.base != nil && !b.isReplace {
-		b.require(AssertDefaultSpecID(b.base.DefaultPartitionSpec()))
-	}
-	b.setSpecID = true
-}
-
-// requireNoBranchesChanged asserts every non-main branch is unchanged. Unlike
-// Java, branches that are already asserted (by an earlier call or a
-// set-snapshot-ref update) are skipped so the same assertion is not repeated.
-func (b *requirementsBuilder) requireNoBranchesChanged() {
-	if b.base == nil || b.isReplace {
-		return
-	}
-
+// nonMainBranches returns the names of base's branches other than main, sorted
+// so the requirement order is deterministic.
+func nonMainBranches(base Metadata) []string {
 	var names []string
-	for name, ref := range b.base.Refs() {
+	for name, ref := range base.Refs() {
 		if ref.SnapshotRefType == BranchRef && name != MainBranch {
 			names = append(names, name)
 		}
 	}
-	// Refs iterates a map; sort so the requirement order is deterministic.
 	slices.Sort(names)
 
-	for _, name := range names {
-		if _, seen := b.changedRefs[name]; seen {
-			continue
-		}
-		b.changedRefs[name] = struct{}{}
-		ref, _ := findRef(b.base, name)
-		b.require(AssertRefSnapshotID(name, &ref.SnapshotID))
-	}
-}
-
-func findRef(meta Metadata, name string) (SnapshotRef, bool) {
-	for n, ref := range meta.Refs() {
-		if n == name {
-			return ref, true
-		}
-	}
-
-	return SnapshotRef{}, false
+	return names
 }
 
 // lastAssignedPartitionID falls back to the ID before the first partition
