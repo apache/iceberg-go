@@ -1774,9 +1774,7 @@ func (r *Catalog) commitStagedCreate(ctx context.Context, identifier table.Ident
 	// Append user-provided staged updates at the end.
 	updates = append(updates, stagedUpdates...)
 
-	requirements := []table.Requirement{table.AssertCreate()}
-
-	return r.CommitTable(ctx, identifier, requirements, updates)
+	return r.CommitTable(ctx, identifier, table.RequirementsForCreateTable(updates), updates)
 }
 
 func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
