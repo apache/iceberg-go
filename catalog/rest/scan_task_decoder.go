@@ -822,7 +822,13 @@ func (d *taskResidualDecoder) decode(
 	schema *iceberg.Schema,
 	fallback iceberg.BooleanExpression,
 ) (iceberg.BooleanExpression, error) {
-	if len(raw) > 0 && len(d.lastRaw) > 0 && bytes.Equal(raw, d.lastRaw) {
+	// Most scans omit per-task residuals. Preserve that zero-allocation
+	// fallback and do not retain a cached expression across missing filters.
+	if len(raw) == 0 {
+		d.lastRaw, d.lastValue = nil, nil
+		return fallback, nil
+	}
+	if len(d.lastRaw) > 0 && bytes.Equal(raw, d.lastRaw) {
 		return d.lastValue, nil
 	}
 

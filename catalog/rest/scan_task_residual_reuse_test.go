@@ -60,6 +60,7 @@ func TestDecodeScanTasksReusesAdjacentResidualFilters(t *testing.T) {
 	assert.NotSame(t, tasks[0].Residual, tasks[3].Residual, "different filters should invalidate the consecutive cache")
 	assert.Equal(t, fallback, tasks[4].Residual)
 	assert.True(t, tasks[5].Residual.Equals(iceberg.EqualTo(iceberg.Reference("id"), int64(34))))
+	assert.NotSame(t, tasks[3].Residual, tasks[5].Residual, "missing filters should reset the consecutive cache")
 }
 
 func TestDecodeScanTasksResidualReuseDoesNotHideErrors(t *testing.T) {
