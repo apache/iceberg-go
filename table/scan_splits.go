@@ -51,7 +51,15 @@ func splitParquetScanTask(task FileScanTask, targetSize int64) ([]FileScanTask, 
 		}
 	}
 
-	result := make([]FileScanTask, 0, len(offsets))
+	// Each pair of adjacent output tasks covers more than targetSize bytes.
+	// Bound the initial capacity to avoid reserving one task per row group when
+	// most row groups will be coalesced. Compare before multiplying to avoid
+	// overflow for very large files.
+	capacity := len(offsets)
+	if groups := fileSize / targetSize; groups < int64(capacity/2) {
+		capacity = int(2*groups + 1)
+	}
+	result := make([]FileScanTask, 0, capacity)
 	appendTask := func(start, end int64) {
 		split := task
 		split.Start = start
