@@ -189,18 +189,32 @@ type SlicePacker[T any] struct {
 }
 
 func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
+	if s.shouldUseIndexedFIFO(len(items)) {
+		return slices.Collect(indexedFIFOPackingIterator(slices.Values(items),
+			s.TargetWeight, s.Lookback, weightFunc))
+	}
+
 	return slices.Collect(PackingIterator(slices.Values(items), s.TargetWeight,
 		s.Lookback, weightFunc, s.LargestBinFirst))
 }
 
 func (s *SlicePacker[T]) PackEnd(items []T, weightFunc func(T) int64) [][]T {
-	packed := slices.Collect(PackingIterator(func(yield func(T) bool) {
+	reversed := func(yield func(T) bool) {
 		for i := len(items); i > 0; i-- {
 			if !yield(items[i-1]) {
 				return
 			}
 		}
-	}, s.TargetWeight, s.Lookback, weightFunc, s.LargestBinFirst))
+	}
+
+	var packed [][]T
+	if s.shouldUseIndexedFIFO(len(items)) {
+		packed = slices.Collect(indexedFIFOPackingIterator(reversed,
+			s.TargetWeight, s.Lookback, weightFunc))
+	} else {
+		packed = slices.Collect(PackingIterator(reversed,
+			s.TargetWeight, s.Lookback, weightFunc, s.LargestBinFirst))
+	}
 	slices.Reverse(packed)
 
 	for _, items := range packed {
