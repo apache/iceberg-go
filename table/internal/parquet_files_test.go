@@ -3210,7 +3210,8 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
 		{"id": 1, "geom": "`+wkbStr("POINT (30 10)")+`", "geog": "`+wkbStr("POINT (20 5)")+`"},
-		{"id": 2, "geom": "`+wkbStr("POINT (5 40)")+`", "geog": null}
+		{"id": 2, "geom": "`+wkbStr("POINT (5 40)")+`", "geog": null},
+		{"id": 3, "geom": null, "geog": "`+wkbStr("POINT (20 5)")+`"}
 	]`))
 	require.NoError(t, err)
 	defer rec.Release()
@@ -3245,7 +3246,7 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 		df := writeWithGeomMode(t, internal.MetricsMode{Typ: internal.MetricModeFull})
 		lower, upper := df.LowerBoundValues(), df.UpperBoundValues()
 
-		// Geometry bounds span both rows: lower (5, 10), upper (30, 40), encoded as
+		// Geometry bounds span both non-null rows: lower (5, 10), upper (30, 40), encoded as
 		// two little-endian float64 coordinates (16 bytes), not WKB.
 		require.Len(t, lower[2], 16)
 		require.Len(t, upper[2], 16)
@@ -3263,7 +3264,13 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 		assert.True(t, geomType.Equals(lit.Type()), "want geo type, got %s", lit.Type())
 		assert.Equal(t, geoBoundBytes(5, 10), lit.(iceberg.GeoLiteral).Value())
 
-		// Null counts are still recorded for geo columns.
+		// Null counts are still recorded for geo columns. The Parquet writer
+		// omits the Statistics block (min, max, null count) for GEOMETRY/
+		// GEOGRAPHY column chunks, so these come from the Arrow data rather
+		// than the footer.
+		require.Contains(t, df.NullValueCounts(), 2)
+		assert.Equal(t, int64(1), df.NullValueCounts()[2])
+		require.Contains(t, df.NullValueCounts(), 3)
 		assert.Equal(t, int64(1), df.NullValueCounts()[3])
 	})
 
@@ -3282,8 +3289,67 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 			df := writeWithGeomMode(t, tt.mode)
 			assert.NotContains(t, df.LowerBoundValues(), 2, "geometry lower bound must be omitted for %s", tt.mode.Typ)
 			assert.NotContains(t, df.UpperBoundValues(), 2, "geometry upper bound must be omitted for %s", tt.mode.Typ)
+
+			// Counts mode still records the geometry null count; none records nothing.
+			if tt.mode.Typ == internal.MetricModeCounts {
+				require.Contains(t, df.NullValueCounts(), 2, "counts mode must record the geometry null count")
+				assert.Equal(t, int64(1), df.NullValueCounts()[2])
+			} else {
+				assert.NotContains(t, df.NullValueCounts(), 2)
+			}
 		})
 	}
+}
+
+// TestWriteDataFileNestedGeoNullCount pins the current metrics for a geo column
+// nested in a struct. The Parquet GEOMETRY logical type drops the leaf's footer
+// statistics, and only top-level geo columns have their null counts tallied
+// from the Arrow data, so the nested leaf records a value count but no null
+// count. A missing null count only costs pruning. Flip this when nested geo
+// metrics land (TODO(#2158)).
+func TestWriteDataFileNestedGeoNullCount(t *testing.T) {
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "s", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "g", Type: iceberg.GeometryType{}, Required: false},
+			},
+		}},
+	)
+
+	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	pt, err := wktToWKB("POINT (1 2)")
+	require.NoError(t, err)
+
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 1, "s": {"g": "`+pt.String()+`"}},
+		{"id": 2, "s": {"g": null}},
+		{"id": 3, "s": {"g": "`+pt.String()+`"}}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+	df, err := fm.WriteDataFile(context.Background(), iceio.NewMemFS(), nil, internal.WriteFileInfo{
+		FileSchema: iceSchema,
+		Spec:       *iceberg.UnpartitionedSpec,
+		FileName:   "nested-geo.parquet",
+		StatsCols: map[int]internal.StatisticsCollector{
+			1: {FieldID: 1, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "id", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+			3: {FieldID: 3, IcebergTyp: iceberg.GeometryType{}, ColName: "s.g", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+		},
+		WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
+		Content:    iceberg.EntryContentData,
+	}, []arrow.RecordBatch{rec})
+	require.NoError(t, err)
+
+	require.Contains(t, df.ValueCounts(), 3)
+	assert.EqualValues(t, 3, df.ValueCounts()[3])
+	assert.NotContains(t, df.NullValueCounts(), 3, "nested geo null counts are not recovered yet")
+	assert.NotContains(t, df.LowerBoundValues(), 3)
+	assert.NotContains(t, df.UpperBoundValues(), 3)
 }
 
 // geoBoundBytes builds the Iceberg geospatial single-value serialization of a
