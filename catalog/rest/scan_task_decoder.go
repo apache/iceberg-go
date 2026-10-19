@@ -826,6 +826,7 @@ func (d *taskResidualDecoder) decode(
 	// fallback and do not retain a cached expression across missing filters.
 	if len(raw) == 0 {
 		d.lastRaw, d.lastValue = nil, nil
+
 		return fallback, nil
 	}
 	if len(d.lastRaw) > 0 && bytes.Equal(raw, d.lastRaw) {
