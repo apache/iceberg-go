@@ -2071,6 +2071,42 @@ func (c *rowPositionCursor) next() int64 {
 	return pos
 }
 
+// advance consumes rows without materializing their positions. This is used
+// when a row-id column is already complete and only cursor alignment matters.
+// Keep the cursor at an exact span boundary until the next read, matching next.
+func (c *rowPositionCursor) advance(rows int64) {
+	if rows <= 0 {
+		return
+	}
+
+	spans := c.src.spans
+	if len(spans) == 0 {
+		c.consumed += rows
+
+		return
+	}
+
+	for c.spanIdx < len(spans)-1 {
+		remaining := spans[c.spanIdx].NumRows - c.consumed
+		if remaining <= 0 {
+			c.spanIdx++
+			c.consumed = 0
+
+			continue
+		}
+		if rows <= remaining {
+			c.consumed += rows
+
+			return
+		}
+
+		rows -= remaining
+		c.spanIdx++
+		c.consumed = 0
+	}
+	c.consumed += rows
+}
+
 // synthesizeRowLineageColumns fills the requested row-lineage columns from task
 // constants: per the v3 spec a null value inherits first_row_id + position /
 // data_sequence_number, a non-null value is kept. A column absent from the batch
@@ -2092,8 +2128,10 @@ func synthesizeRowLineageColumns(
 	schema := batch.Schema()
 	nrows := batch.NumRows()
 
-	fields := append([]arrow.Field(nil), schema.Fields()...)
-	newCols := append([]arrow.Array(nil), batch.Columns()...)
+	// Copy the schema and column lists only when a value must be synthesized.
+	// Completely materialized lineage columns can reuse the entire input batch.
+	var fields []arrow.Field
+	var newCols []arrow.Array
 	var built []arrow.Array
 	defer func() {
 		for _, a := range built {
@@ -2101,19 +2139,32 @@ func synthesizeRowLineageColumns(
 		}
 	}()
 
-	// perRow, when set, runs once for every physical row in order — including
-	// rows whose explicit value wins — so a cursor stays in lockstep with the
-	// batch even when value is never called.
+	// The row-position cursor must consume every physical row, including
+	// rows whose explicit value wins. A complete row-id column can advance
+	// the cursor in bulk; other cases call perRow for each row.
 	synth := func(name string, fieldID int, perRow func(k int64), value func(k int64) int64) error {
 		idx := fieldIndexByID(schema, fieldID)
 		var existing *array.Int64
 		if idx >= 0 {
 			var ok bool
-			if existing, ok = newCols[idx].(*array.Int64); !ok {
-				return fmt.Errorf("row-lineage column %s is %s, want int64", name, newCols[idx].DataType())
+			if existing, ok = batch.Column(idx).(*array.Int64); !ok {
+				return fmt.Errorf("row-lineage column %s is %s, want int64", name, batch.Column(idx).DataType())
 			}
 		}
+		if existing != nil && existing.NullN() == 0 {
+			// The input already contains every value. In the row-id case,
+			// advance past the batch without reconstructing each position.
+			if perRow != nil {
+				cursor.advance(nrows)
+			}
 
+			return nil
+		}
+
+		if newCols == nil {
+			fields = append([]arrow.Field(nil), schema.Fields()...)
+			newCols = append([]arrow.Array(nil), batch.Columns()...)
+		}
 		bldr := array.NewInt64Builder(alloc)
 		defer bldr.Release()
 		bldr.Reserve(int(nrows))
@@ -2164,6 +2215,12 @@ func synthesizeRowLineageColumns(
 			}); err != nil {
 			return nil, err
 		}
+	}
+
+	if newCols == nil {
+		batch.Retain()
+
+		return batch, nil
 	}
 
 	meta := schema.Metadata()
