@@ -804,18 +804,26 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 		ErrInvalidArgument, src)
 }
 
-// Range yields byte indexes at UTF-8 code point boundaries, so slicing on idx
-// truncates by Unicode characters without copying the whole string to []rune.
+// truncateString truncates by UTF-8 code points without allocating.
+// Strings shorter than the width in bytes need no scan. ASCII prefixes
+// can be sliced directly, while other prefixes still use rune boundaries.
 func truncateString(s string, width int) string {
-	// A string cannot have more code points than UTF-8 bytes. Skip decoding
-	// entirely when even its byte length fits within the truncation width.
 	if width >= len(s) {
 		return s
 	}
 
-	for idx := range s {
+	idx := 0
+	for idx < width && s[idx] < utf8.RuneSelf {
+		idx++
+	}
+	if idx == width {
+		return s[:idx]
+	}
+
+	width -= idx
+	for offset := range s[idx:] {
 		if width == 0 {
-			return s[:idx]
+			return s[:idx+offset]
 		}
 
 		width--

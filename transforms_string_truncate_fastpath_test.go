@@ -45,6 +45,9 @@ func TestTruncateStringFastPath(t *testing.T) {
 		{"unicode_unchanged", "東京🧊Berlin", 32, "東京🧊Berlin"},
 		{"unicode_truncated", "東京🧊Berlin", 4, "東京🧊B"},
 		{"utf8_bytes_exceed_width", "éé", 3, "éé"},
+		{"combining_codepoints", "e\u0301clair", 1, "e"},
+		{"invalid_utf8_prefix", "a\xffb", 2, "a\xff"},
+		{"negative_width", "iceberg", -1, "iceberg"},
 		{"exact_width", "iceberg", 7, "iceberg"},
 		{"empty", "", 1, ""},
 	} {
