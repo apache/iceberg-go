@@ -31,6 +31,7 @@ func truncateStringBefore(s string, width int) string {
 		}
 		width--
 	}
+
 	return s
 }
 
