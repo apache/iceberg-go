@@ -309,30 +309,30 @@ Table default.table-1 created successfully
 
 # Describe the newly created table
 ./iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
-Table format version | 2
-Metadata location    | s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
-Table UUID           | 33fa3fac-e638-4335-a085-343c6d9e7de5
-Last updated         | 1753133512562
-Sort Order           | 1: [
-                     | 1 desc nulls-last
-                     | ]
-Partition Spec       | [
-                     |  1000: foo: identity(1)
-                     | ]
+Table format version │ 2
+Metadata location    │ s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
+Table UUID           │ 33fa3fac-e638-4335-a085-343c6d9e7de5
+Last updated         │ 1753133512562
+Sort Order           │ 1: [
+                     │ 1 desc nulls-last
+                     │ ]
+Partition Spec       │ [
+                     │  1000: foo: identity(1)
+                     │ ]
 
 Current Schema, id=0
-├──1: foo: optional string
-└──2: bar: required int
+├── 1: foo: optional string
+└── 2: bar: required int
 
-Current Snapshot |
+Current Snapshot │
 
 Snapshots
 
 Properties
-key                             | value
+key                             │ value
 -----------------------------------------
-write.format.default            | parquet
-write.parquet.compression-codec | zstd
+write.format.default            │ parquet
+write.parquet.compression-codec │ zstd
 </code></pre>
 <h2 id="inspecting-tables"><a class="header" href="#inspecting-tables">Inspecting tables</a></h2>
 <h3 id="info--single-screen-summary"><a class="header" href="#info--single-screen-summary"><code>info</code> — single-screen summary</a></h3>
