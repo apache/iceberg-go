@@ -604,6 +604,46 @@ func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *t
 	}
 }
 
+// TestTranslateColumnNamesMissingColumnIsNull checks that a predicate over a
+// column absent from the file, with no initial default, folds as it would for
+// a stored null: IsNull and NotNaN match, every other predicate does not.
+func TestTranslateColumnNamesMissingColumnIsNull(t *testing.T) {
+	currentSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	x := iceberg.Reference("x")
+	extracted := iceberg.Extract("payload", "$.v", iceberg.PrimitiveTypes.Float64)
+
+	for _, tt := range []struct {
+		name     string
+		expr     iceberg.BooleanExpression
+		expected iceberg.BooleanExpression
+	}{
+		{"is null", iceberg.IsNull(x), iceberg.AlwaysTrue{}},
+		{"not null", iceberg.NotNull(x), iceberg.AlwaysFalse{}},
+		{"is nan", iceberg.IsNaN(x), iceberg.AlwaysFalse{}},
+		{"not nan", iceberg.NotNaN(x), iceberg.AlwaysTrue{}},
+		{"equal", iceberg.EqualTo(x, 1.0), iceberg.AlwaysFalse{}},
+		{"variant is null", iceberg.IsNull(extracted), iceberg.AlwaysTrue{}},
+		{"variant is nan", iceberg.IsNaN(extracted), iceberg.AlwaysFalse{}},
+		{"variant not nan", iceberg.NotNaN(extracted), iceberg.AlwaysTrue{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(currentSchema, tt.expr, true)
+			require.NoError(t, err)
+
+			translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, translated)
+		})
+	}
+}
+
 func TestBoundBoolExprVisitor(t *testing.T) {
 	tests := []struct {
 		expr     iceberg.BooleanExpression
