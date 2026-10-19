@@ -22,10 +22,11 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/apache/iceberg-go"
 )
 
 type partitionTupleStringer string
@@ -39,6 +40,8 @@ func TestAppendPartitionTupleMatchesFmt(t *testing.T) {
 		"a=b;:é",
 		-123,
 		int32(-45),
+		iceberg.Date(-1),
+		iceberg.Date(20500),
 		int64(1234567890123),
 		true,
 		false,
@@ -90,29 +93,6 @@ func TestPartitionBucketKeyFromTupleMatchesFmt(t *testing.T) {
 			if got != want {
 				t.Fatalf("spec ID %d: got %q, want %q", specID, got, want)
 			}
-		}
-	}
-}
-
-var benchmarkPartitionTuple []byte
-
-func BenchmarkAppendPartitionTuple(b *testing.B) {
-	for _, fields := range []int{1, 3, 8, 16, 32} {
-		for _, kind := range []string{"int64", "string"} {
-			partition := make(map[int]any, fields)
-			for i := range fields {
-				if kind == "string" {
-					partition[1000+i] = "partition-" + strconv.Itoa(i)
-				} else {
-					partition[1000+i] = int64(i * 5)
-				}
-			}
-			b.Run(fmt.Sprintf("%s/fields=%d", kind, fields), func(b *testing.B) {
-				b.ReportAllocs()
-				for range b.N {
-					benchmarkPartitionTuple = appendPartitionTuple(nil, partition)
-				}
-			})
 		}
 	}
 }

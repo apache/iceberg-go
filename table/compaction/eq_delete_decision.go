@@ -272,14 +272,15 @@ func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 	for _, id := range ids {
 		dst = strconv.AppendInt(dst, int64(id), 10)
 		dst = append(dst, '=')
+		// Match fmt's %v output exactly; these partition keys are externally visible.
 		switch value := part[id].(type) {
 		case nil:
 			dst = append(dst, "<nil>"...)
 		case string:
 			dst = append(dst, value...)
-		case int:
-			dst = strconv.AppendInt(dst, int64(value), 10)
 		case int32:
+			dst = strconv.AppendInt(dst, int64(value), 10)
+		case iceberg.Date:
 			dst = strconv.AppendInt(dst, int64(value), 10)
 		case int64:
 			dst = strconv.AppendInt(dst, value, 10)
