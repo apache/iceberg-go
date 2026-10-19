@@ -25,8 +25,7 @@ import (
 )
 
 // RequirementsForCreateTable returns the requirements for committing updates
-// that create a new table: the table must not already exist. It mirrors Java's
-// UpdateRequirements.forCreateTable.
+// that create a new table, mirroring Java's UpdateRequirements.forCreateTable.
 func RequirementsForCreateTable(updates []Update) []Requirement {
 	b := newRequirementsBuilder(nil, false)
 	b.require(AssertCreate())
@@ -38,21 +37,16 @@ func RequirementsForCreateTable(updates []Update) []Requirement {
 }
 
 // RequirementsForReplaceTable returns the requirements for committing updates
-// that replace the table described by base. Only the table UUID and the
-// last-assigned field and partition IDs are asserted, since a replace
-// overwrites the current schema, spec, sort order and refs. It mirrors Java's
-// UpdateRequirements.forReplaceTable.
+// that replace the table described by base. A replace overwrites the current
+// schema, spec, sort order and refs, so only ID assignment is guarded.
 func RequirementsForReplaceTable(base Metadata, updates []Update) ([]Requirement, error) {
 	return requirementsForExisting(base, updates, true)
 }
 
-// RequirementsForUpdateTable returns the optimistic-concurrency requirements
-// for committing updates against the table described by base, so that a
-// commit fails rather than silently overwriting a concurrent change. It
-// mirrors Java's UpdateRequirements.forUpdateTable.
-//
-// Callers that build their own []Update instead of going through Transaction
-// should use this to derive the requirements passed to Catalog.CommitTable.
+// RequirementsForUpdateTable returns the requirements for committing updates
+// against the table described by base, so a commit fails instead of
+// overwriting a concurrent change. Use it to build the requirements for
+// Catalog.CommitTable when not going through Transaction.
 func RequirementsForUpdateTable(base Metadata, updates []Update) ([]Requirement, error) {
 	return requirementsForExisting(base, updates, false)
 }
@@ -213,9 +207,8 @@ func findRef(meta Metadata, name string) (SnapshotRef, bool) {
 	return SnapshotRef{}, false
 }
 
-// lastAssignedPartitionID returns base's last-assigned partition field ID,
-// falling back to the value before the first partition field ID when the
-// metadata has none, as UpdateSpec does.
+// lastAssignedPartitionID falls back to the ID before the first partition
+// field when base has none, as UpdateSpec does.
 func lastAssignedPartitionID(base Metadata) int {
 	if id := base.LastPartitionSpecID(); id != nil {
 		return *id
