@@ -31,7 +31,6 @@ import (
 	"github.com/apache/iceberg-go/internal/recipe"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
 
 type HadoopIntegrationSuite struct {
@@ -40,7 +39,6 @@ type HadoopIntegrationSuite struct {
 	ctx       context.Context
 	cat       *hadoop.Catalog
 	warehouse string
-	stack     *compose.DockerCompose
 }
 
 func (s *HadoopIntegrationSuite) SetupSuite() {
@@ -52,9 +50,7 @@ func (s *HadoopIntegrationSuite) SetupSuite() {
 	s.warehouse = "/tmp/iceberg-hadoop-warehouse"
 	s.Require().NoError(os.MkdirAll(s.warehouse, 0o755))
 
-	var err error
-	s.stack, err = recipe.Start(s.T())
-	s.Require().NoError(err)
+	s.Require().NoError(recipe.Start(s.T()))
 }
 
 func (s *HadoopIntegrationSuite) SetupTest() {
