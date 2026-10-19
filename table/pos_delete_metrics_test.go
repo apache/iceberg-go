@@ -130,3 +130,80 @@ func TestPositionDeleteFilesKeepFullFilePathBounds(t *testing.T) {
 		}
 	}
 }
+
+// TestPositionDeleteFilesSetReferencedDataFile pins #2167: a v2 position
+// delete file whose deletes all target one data file records that file in
+// referenced_data_file, and one spanning several data files leaves it nil.
+// PlanFiles reads the delete files back from v2 manifests, so the field must
+// also survive the manifest round trip.
+func TestPositionDeleteFilesSetReferencedDataFile(t *testing.T) {
+	tests := []struct {
+		name      string
+		filter    iceberg.BooleanExpression
+		wantSaved bool
+	}{
+		{"single target", iceberg.EqualTo(iceberg.Reference("id"), int64(2)), true},
+		{"multiple targets", iceberg.NewOr(
+			iceberg.EqualTo(iceberg.Reference("id"), int64(2)),
+			iceberg.EqualTo(iceberg.Reference("id"), int64(4))), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			location := filepath.ToSlash(t.TempDir())
+			schema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			)
+			meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+				iceberg.Properties{
+					table.PropertyFormatVersion: "2",
+					table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+				})
+			require.NoError(t, err)
+
+			metaLoc := location + "/metadata/v1.metadata.json"
+			fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+			cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
+			tbl := table.New(table.Identifier{"db", "pos_delete_ref"}, meta, metaLoc, fsF, cat)
+
+			arrowSchema := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+			}, nil)
+			for _, rows := range []string{`[{"id":1},{"id":2}]`, `[{"id":3},{"id":4}]`} {
+				data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{rows})
+				require.NoError(t, err)
+				rdr := array.NewTableReader(data, -1)
+				tbl, err = tbl.Append(ctx, rdr, nil)
+				rdr.Release()
+				data.Release()
+				require.NoError(t, err)
+			}
+
+			tbl, err = tbl.Delete(ctx, tc.filter, nil)
+			require.NoError(t, err)
+
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+
+			deleteFiles := make(map[string]iceberg.DataFile)
+			for _, task := range tasks {
+				for _, df := range task.DeleteFiles {
+					require.Equal(t, iceberg.EntryContentPosDeletes, df.ContentType())
+					deleteFiles[df.FilePath()] = df
+					if tc.wantSaved {
+						require.NotNil(t, df.ReferencedDataFile())
+						require.Equal(t, task.File.FilePath(), *df.ReferencedDataFile())
+					}
+				}
+			}
+			require.Len(t, deleteFiles, 1)
+			if !tc.wantSaved {
+				for _, df := range deleteFiles {
+					require.Nil(t, df.ReferencedDataFile())
+				}
+			}
+		})
+	}
+}

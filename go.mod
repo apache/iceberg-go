@@ -37,7 +37,7 @@ require (
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
 	github.com/beltran/gohive v1.8.1
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
-	github.com/geoarrow/geoarrow-go v0.0.0-20260403143023-f54751c3e3a1
+	github.com/geoarrow/geoarrow-go v0.0.0-20261005150217-fc2b33c3141d
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
