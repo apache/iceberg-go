@@ -112,6 +112,9 @@ var (
 	ErrCommitFailed       = fmt.Errorf("%w: %w", ErrRESTError, table.ErrCommitFailed)
 	ErrCommitStateUnknown = fmt.Errorf("%w: commit failed due to unknown reason", ErrRESTError)
 	ErrOAuthError         = fmt.Errorf("%w: oauth error", ErrRESTError)
+
+	// errNotModified reports a 304 to a request sent with withIfNoneMatch.
+	errNotModified = errors.New("not modified")
 )
 
 // SnapshotMode controls which snapshots are included in a loadTable response.
@@ -381,6 +384,11 @@ type reqConfig struct {
 	allowNoContent    bool
 	requireBody       bool
 	queryParams       url.Values
+	// allowNotModified turns a 304 into errNotModified. withIfNoneMatch sets it
+	// together with the header, so a 304 to a request that sent no ETag stays an
+	// error.
+	allowNotModified bool
+	onHeaders        func(http.Header)
 }
 
 type reqOption func(*reqConfig)
@@ -432,6 +440,20 @@ func allowNoContent() reqOption {
 // fetchScanTasks returning "zero tasks" and silently dropping work).
 func requireBody() reqOption {
 	return func(c *reqConfig) { c.requireBody = true }
+}
+
+// withIfNoneMatch sends If-None-Match with etag and reports a 304 Not
+// Modified response as errNotModified instead of an error response.
+func withIfNoneMatch(etag string) reqOption {
+	return func(c *reqConfig) {
+		withHeaders(map[string]string{"If-None-Match": etag})(c)
+		c.allowNotModified = true
+	}
+}
+
+// withResponseHeaders passes the headers of a 200 response to fn.
+func withResponseHeaders(fn func(http.Header)) reqOption {
+	return func(c *reqConfig) { c.onHeaders = fn }
 }
 
 // Appends query parameters to the request.
@@ -511,8 +533,16 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		return ret, err
 	}
 
+	if cfg.allowNotModified && rsp.StatusCode == http.StatusNotModified {
+		return ret, errNotModified
+	}
+
 	if rsp.StatusCode != http.StatusOK {
 		return ret, handleNon200(rsp, override, cfg.errorTypeOverride)
+	}
+
+	if cfg.onHeaders != nil {
+		cfg.onHeaders(rsp.Header)
 	}
 
 	if method == http.MethodHead || method == http.MethodDelete {
@@ -886,6 +916,9 @@ type Catalog struct {
 
 	namespaceSeparator string
 	snapshotMode       SnapshotMode
+	// tables holds ETag-tagged load responses for freshness-aware loading; nil
+	// when rest-table-cache.max-entries is 0.
+	tables *tableCache
 
 	// reporter builds and caches the catalog's metrics reporter once, so it is
 	// constructed per-catalog rather than per table load. Released by Close.
@@ -1213,6 +1246,9 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 		return nil, fmt.Errorf("%w: invalid %s %q (want %q or %q)",
 			ErrRESTError, keySnapshotLoadingMode, r.snapshotMode, SnapshotModeAll, SnapshotModeRefs)
 	}
+	if r.tables, err = newTableCache(cfg); err != nil {
+		return nil, err
+	}
 
 	// Negotiate capabilities from the endpoints the server advertises, falling
 	// back to a backward-compatible default set when none are provided.
@@ -1252,6 +1288,7 @@ func (r *Catalog) Close() error {
 			r.metricsDispatcher.close()
 		}
 		r.closeErr = r.reporter.Close()
+		r.tables.purge()
 	})
 
 	return r.closeErr
@@ -1946,15 +1983,29 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 		return nil, err
 	}
 
-	var opts []reqOption
+	var etag string
+	opts := []reqOption{withResponseHeaders(func(h http.Header) { etag = h.Get("ETag") })}
 	if mode != "" {
 		opts = append(opts, withQueryParams(url.Values{"snapshots": {string(mode)}}))
+	}
+	cached, hit := r.tables.get(identifier, mode)
+	if hit {
+		opts = append(opts, withIfNoneMatch(cached.etag))
 	}
 
 	ret, err := doGet[loadTableResponse](ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, opts...)
-	if err != nil {
+	switch {
+	case errors.Is(err, errNotModified):
+		ret = cached.rsp
+	case errors.Is(err, catalog.ErrNoSuchTable):
+		r.tables.invalidate(identifier)
+
 		return nil, err
+	case err != nil:
+		return nil, err
+	case etag != "":
+		r.tables.put(identifier, mode, etag, ret)
 	}
 
 	config := maps.Clone(r.props)
@@ -2042,6 +2093,7 @@ func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 
 	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+	r.tables.invalidate(identifier)
 
 	return err
 }
@@ -2068,6 +2120,7 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 
 	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+	r.tables.invalidate(identifier)
 
 	return err
 }
@@ -2111,6 +2164,7 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	if err != nil {
 		return nil, err
 	}
+	r.tables.invalidate(from)
 
 	return r.LoadTable(ctx, to)
 }
@@ -2348,6 +2402,8 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchTable) {
+			r.tables.invalidate(identifier)
+
 			return false, nil
 		}
 
