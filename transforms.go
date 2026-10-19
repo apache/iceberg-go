@@ -807,6 +807,12 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 // Range yields byte indexes at UTF-8 code point boundaries, so slicing on idx
 // truncates by Unicode characters without copying the whole string to []rune.
 func truncateString(s string, width int) string {
+	// A string cannot have more code points than UTF-8 bytes. Skip decoding
+	// entirely when even its byte length fits within the truncation width.
+	if width >= len(s) {
+		return s
+	}
+
 	for idx := range s {
 		if width == 0 {
 			return s[:idx]
