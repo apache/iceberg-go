@@ -22,8 +22,10 @@ import (
 	"testing"
 )
 
-var benchmarkSnapshotAncestrySnapshots []Snapshot
-var benchmarkSnapshotAncestryFound bool
+var (
+	benchmarkSnapshotAncestrySnapshots []Snapshot
+	benchmarkSnapshotAncestryFound     bool
+)
 
 // End-to-end ancestry traversals, including snapshot lookups and result slices.
 // Chain setup is outside the timed region. The depth=17 case exercises the

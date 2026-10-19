@@ -63,6 +63,7 @@ func TestSnapshotAncestryMissingParentAcrossInlineBoundary(t *testing.T) {
 				if id == 1 {
 					return nil
 				}
+
 				return chain(id)
 			}
 

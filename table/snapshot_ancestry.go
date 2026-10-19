@@ -17,6 +17,8 @@
 
 package table
 
+import "slices"
+
 // SnapshotLookup returns the snapshot for the given id, or nil if not found.
 // It matches the signature of Metadata.SnapshotByID.
 type SnapshotLookup func(id int64) *Snapshot
@@ -43,10 +45,8 @@ func (s *snapshotVisitSet) seenOrAdd(id int64) bool {
 		return false
 	}
 
-	for _, previous := range s.inline[:s.count] {
-		if previous == id {
-			return true
-		}
+	if slices.Contains(s.inline[:s.count], id) {
+		return true
 	}
 	if s.count < len(s.inline) {
 		s.inline[s.count] = id
