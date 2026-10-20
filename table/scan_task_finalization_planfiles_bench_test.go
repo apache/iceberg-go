@@ -41,14 +41,18 @@ var planFilesFinalizationBenchmarkSink int
 func BenchmarkPlanFilesTaskFinalization(b *testing.B) {
 	const fileCount = planFilesFinalizationBenchmarkManifestCount * planFilesFinalizationBenchmarkFilesPerManifest
 
+	// Four manifests are unpartitioned. Among the four identity-partitioned
+	// manifests, one in four files has id=7. In the split case one in four
+	// files expands into four tasks.
 	for _, tc := range []struct {
-		name         string
-		rowFilter    iceberg.BooleanExpression
-		splitOffsets bool
+		name          string
+		rowFilter     iceberg.BooleanExpression
+		splitOffsets  bool
+		expectedTasks int
 	}{
-		{name: "plain", rowFilter: iceberg.AlwaysTrue{}},
-		{name: "identity_residual", rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7))},
-		{name: "split_offsets", rowFilter: iceberg.AlwaysTrue{}, splitOffsets: true},
+		{name: "plain", rowFilter: iceberg.AlwaysTrue{}, expectedTasks: fileCount},
+		{name: "identity_residual", rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7)), expectedTasks: fileCount*5/8},
+		{name: "split_offsets", rowFilter: iceberg.AlwaysTrue{}, splitOffsets: true, expectedTasks: fileCount*7/4},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			tbl := newPlanFilesFinalizationBenchmarkTable(b, tc.splitOffsets)
@@ -60,12 +64,8 @@ func BenchmarkPlanFilesTaskFinalization(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				// The residual case can prune partitioned files, so report
-				// the real task count instead of assuming it equals input
-				// file count. Split tasks must still expand in their case.
-				if len(tasks) == 0 || (!tc.splitOffsets && len(tasks) > fileCount) ||
-					(tc.splitOffsets && len(tasks) <= fileCount) {
-					b.Fatalf("unexpected PlanFiles task count %d for %s", len(tasks), tc.name)
+				if len(tasks) != tc.expectedTasks {
+					b.Fatalf("PlanFiles returned %d tasks for %s, want %d", len(tasks), tc.name, tc.expectedTasks)
 				}
 				b.ReportMetric(float64(len(tasks)), "tasks/op")
 				planFilesFinalizationBenchmarkSink = len(tasks)
