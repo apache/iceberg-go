@@ -712,6 +712,10 @@ func validatePosDeleteColumnLengths(filePathLen, posLen int) error {
 	return nil
 }
 
+// A position delete file usually references few data files. Do not reserve
+// memory proportional to an unusually large Arrow dictionary.
+const maxPositionDeleteDictionaryCacheEntries = 4096
+
 func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePathChunk arrow.Array,
 	posCursor *posDeleteCursor,
 ) error {
@@ -726,9 +730,19 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 
 	var dictionary arrow.Array
 	var indices *array.Dictionary
-	if dict, ok := filePathChunk.(*array.Dictionary); ok && dict.Dictionary().NullN() > 0 {
-		dictionary = dict.Dictionary()
-		indices = dict
+	var cachedIndices *array.Dictionary
+	var cachedBuilders []*array.Int64Builder
+	var cachedSeen []bool
+	if dict, ok := filePathChunk.(*array.Dictionary); ok {
+		if dict.Dictionary().NullN() > 0 {
+			dictionary = dict.Dictionary()
+			indices = dict
+		}
+		if size := dict.Dictionary().Len(); size > 0 && size <= maxPositionDeleteDictionaryCacheEntries {
+			cachedIndices = dict
+			cachedBuilders = make([]*array.Int64Builder, size)
+			cachedSeen = make([]bool, size)
+		}
 	}
 
 	for i := range filePathChunk.Len() {
@@ -752,9 +766,27 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 				iceberg.ErrInvalidSchema)
 		}
 
+		// Resolve each dictionary index once per chunk. Several indexes may
+		// refer to the same file path, so retain the existing string-keyed
+		// builders as the source of truth.
+		cacheIndex := -1
+		if cachedIndices != nil {
+			cacheIndex = cachedIndices.GetValueIndex(i)
+			if cacheIndex >= 0 && cacheIndex < len(cachedSeen) && cachedSeen[cacheIndex] {
+				if builder := cachedBuilders[cacheIndex]; builder != nil {
+					builder.Append(pos)
+				}
+				continue
+			}
+		}
+
 		path := paths.Value(i)
 		if len(a.targets) > 0 {
 			if _, ok := a.targets[path]; !ok {
+				// A nil builder caches a rejected target as well.
+				if cacheIndex >= 0 && cacheIndex < len(cachedSeen) {
+					cachedSeen[cacheIndex] = true
+				}
 				continue
 			}
 		}
@@ -764,6 +796,10 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 			path = strings.Clone(path)
 			builder = array.NewInt64Builder(a.mem)
 			a.builders[path] = builder
+		}
+		if cacheIndex >= 0 && cacheIndex < len(cachedSeen) {
+			cachedSeen[cacheIndex] = true
+			cachedBuilders[cacheIndex] = builder
 		}
 		builder.Append(pos)
 	}
