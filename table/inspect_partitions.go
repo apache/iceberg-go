@@ -28,6 +28,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"golang.org/x/sync/errgroup"
 )
 
 type inspectPartitionAggregate struct {
@@ -166,6 +168,10 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 	return rr, nil
 }
 
+// inspectPartitionManifestConcurrency bounds concurrent manifest reads and
+// per-manifest partition aggregation state.
+const inspectPartitionManifestConcurrency = 8
+
 func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]inspectPartitionAggregate, error) {
 	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
@@ -189,46 +195,72 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 
 	aggregates := make([]*inspectPartitionAggregate, 0)
 	aggregateTree := newInspectPartitionAggregateTree()
+
+	// Buffer only a bounded number of manifests. Workers group their entries
+	// independently, then their results are merged in manifest order.
+	// This keeps equal-timestamp tie-breaking deterministic.
+	processBatch := func(batch []iceberg.ManifestFile) error {
+		if len(batch) == 1 {
+			return i.foldInspectPartitionManifest(ctx, fs, batch[0], partitionType,
+				snapshotTimes, aggregateTree, &aggregates)
+		}
+
+		partial := make([][]*inspectPartitionAggregate, len(batch))
+		g, gctx := errgroup.WithContext(ctx)
+		for index, manifest := range batch {
+			g.Go(func() error {
+				localTree := newInspectPartitionAggregateTree()
+
+				return i.foldInspectPartitionManifest(gctx, fs, manifest, partitionType,
+					snapshotTimes, localTree, &partial[index])
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return err
+		}
+
+		merged := 0
+		for _, manifestAggregates := range partial {
+			for _, local := range manifestAggregates {
+				// A manifest can contain many distinct partitions. Remain
+				// responsive to cancellation during the ordered merge, too.
+				if merged&1023 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				merged++
+				aggregate := aggregateTree.lookupPartition(local.partition, partitionType)
+				if aggregate == nil {
+					aggregates = append(aggregates, local)
+					aggregateTree.insert(newPartitionRecord(local.partition, partitionType), local)
+
+					continue
+				}
+				mergeInspectPartitionAggregate(aggregate, local)
+			}
+		}
+
+		return nil
+	}
+
+	batch := make([]iceberg.ManifestFile, 0, inspectPartitionManifestConcurrency)
 	for manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		for entry, err := range manifest.Entries(fs, true) {
-			if err != nil {
-				return nil, err
-			}
-			file := entry.DataFile()
-			partitionValues := dataFilePartition(file)
-			aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
-			if aggregate == nil {
-				partition := inspectCoercePartition(partitionValues, partitionType)
-				record := newPartitionRecord(partition, partitionType)
-				aggregate = &inspectPartitionAggregate{
-					partition:   cloneInspectPartition(partition),
-					orderingKey: inspectPartitionKey(partition),
-				}
-				aggregates = append(aggregates, aggregate)
-				aggregateTree.insert(record, aggregate)
-			}
-
-			switch file.ContentType() {
-			case iceberg.EntryContentData:
-				aggregate.dataRecordCount += file.Count()
-				aggregate.dataFileCount++
-				aggregate.dataFileSize += file.FileSizeBytes()
-			case iceberg.EntryContentPosDeletes:
-				aggregate.positionDeleteCount += file.Count()
-				aggregate.positionDeleteFiles++
-			case iceberg.EntryContentEqDeletes:
-				aggregate.equalityDeleteCount += file.Count()
-				aggregate.equalityDeleteFiles++
-			}
-
-			if file.ContentType() == iceberg.EntryContentData ||
-				file.ContentType() == iceberg.EntryContentPosDeletes ||
-				file.ContentType() == iceberg.EntryContentEqDeletes {
-				i.updatePartitionTimestamp(aggregate, snapshotTimes, entry.SnapshotID(), file.SpecID())
-			}
+		batch = append(batch, manifest)
+		if len(batch) < inspectPartitionManifestConcurrency {
+			continue
+		}
+		if err := processBatch(batch); err != nil {
+			return nil, err
+		}
+		batch = batch[:0]
+	}
+	if len(batch) > 0 {
+		if err := processBatch(batch); err != nil {
+			return nil, err
 		}
 	}
 
@@ -239,6 +271,88 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 	sort.Slice(result, func(left, right int) bool { return result[left].orderingKey < result[right].orderingKey })
 
 	return result, nil
+}
+
+// foldInspectPartitionManifest performs the original partition accounting using
+// a caller-owned tree. Each concurrent worker owns its own tree and result slice.
+func (i InspectTable) foldInspectPartitionManifest(
+	ctx context.Context,
+	fs iceio.IO,
+	manifest iceberg.ManifestFile,
+	partitionType *iceberg.StructType,
+	snapshotTimes map[int64]int64,
+	aggregateTree *inspectPartitionAggregateTree,
+	aggregates *[]*inspectPartitionAggregate,
+) error {
+	// Avoid opening remote manifest files after the caller has canceled.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	entryIndex := 0
+	for entry, err := range manifest.Entries(fs, true) {
+		if err != nil {
+			return err
+		}
+		if entryIndex&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		entryIndex++
+
+		file := entry.DataFile()
+		partitionValues := dataFilePartition(file)
+		aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
+		if aggregate == nil {
+			partition := inspectCoercePartition(partitionValues, partitionType)
+			record := newPartitionRecord(partition, partitionType)
+			aggregate = &inspectPartitionAggregate{
+				partition:   cloneInspectPartition(partition),
+				orderingKey: inspectPartitionKey(partition),
+			}
+			*aggregates = append(*aggregates, aggregate)
+			aggregateTree.insert(record, aggregate)
+		}
+
+		switch file.ContentType() {
+		case iceberg.EntryContentData:
+			aggregate.dataRecordCount += file.Count()
+			aggregate.dataFileCount++
+			aggregate.dataFileSize += file.FileSizeBytes()
+		case iceberg.EntryContentPosDeletes:
+			aggregate.positionDeleteCount += file.Count()
+			aggregate.positionDeleteFiles++
+		case iceberg.EntryContentEqDeletes:
+			aggregate.equalityDeleteCount += file.Count()
+			aggregate.equalityDeleteFiles++
+		}
+
+		if file.ContentType() == iceberg.EntryContentData ||
+			file.ContentType() == iceberg.EntryContentPosDeletes ||
+			file.ContentType() == iceberg.EntryContentEqDeletes {
+			i.updatePartitionTimestamp(aggregate, snapshotTimes, entry.SnapshotID(), file.SpecID())
+		}
+	}
+
+	return ctx.Err()
+}
+
+func mergeInspectPartitionAggregate(dst, src *inspectPartitionAggregate) {
+	dst.dataRecordCount += src.dataRecordCount
+	dst.dataFileCount += src.dataFileCount
+	dst.dataFileSize += src.dataFileSize
+	dst.positionDeleteCount += src.positionDeleteCount
+	dst.positionDeleteFiles += src.positionDeleteFiles
+	dst.equalityDeleteCount += src.equalityDeleteCount
+	dst.equalityDeleteFiles += src.equalityDeleteFiles
+
+	if src.lastUpdatedAt != nil &&
+		(dst.lastUpdatedAt == nil || *src.lastUpdatedAt > *dst.lastUpdatedAt) {
+		dst.lastUpdatedAt = src.lastUpdatedAt
+		dst.lastUpdatedSnapshot = src.lastUpdatedSnapshot
+		dst.specID = src.specID
+	}
 }
 
 func (i InspectTable) updatePartitionTimestamp(
