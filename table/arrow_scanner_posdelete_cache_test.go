@@ -139,7 +139,8 @@ func TestPosDeleteDictionaryPathCacheRejectsNullIndices(t *testing.T) {
 			acc := newPosDeleteAccumulator(ctx, nil)
 			defer acc.release()
 			err := acc.appendChunked(ctx, pathCol, posCol)
-			require.ErrorContains(t, err, "null file_path dictionary index")
+			// Column-level validation rejects null dictionary indices before either cache path runs.
+			require.ErrorContains(t, err, "null file_path in position delete file")
 		})
 	}
 }
