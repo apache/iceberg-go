@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -480,6 +481,51 @@ func leafColumnAt(chain []arrow.Array, row int) (arrow.Array, bool) {
 	return leaf, true
 }
 
+// sameAdjacentPartitionSource checks whether two rows have the same raw
+// partition source value. An equal source always gives the same transform
+// result, so callers can reuse the previous value without converting it.
+// Unsupported Arrow types take the original conversion path.
+func sameAdjacentPartitionSource(column arrow.Array, row int) bool {
+	currentNull := column.IsNull(row)
+	previousNull := column.IsNull(row - 1)
+	if currentNull || previousNull {
+		return currentNull && previousNull
+	}
+
+	switch values := column.(type) {
+	case *array.Boolean:
+		return values.Value(row) == values.Value(row-1)
+	case *array.Int32:
+		return values.Value(row) == values.Value(row-1)
+	case *array.Int64:
+		return values.Value(row) == values.Value(row-1)
+	case *array.Date32:
+		return values.Value(row) == values.Value(row-1)
+	case *array.Time64:
+		return values.Value(row) == values.Value(row-1)
+	case *array.Timestamp:
+		return values.Value(row) == values.Value(row-1)
+	case *array.String:
+		return values.Value(row) == values.Value(row-1)
+	case *array.LargeString:
+		return values.Value(row) == values.Value(row-1)
+	case *array.Binary:
+		return bytes.Equal(values.Value(row), values.Value(row-1))
+	case *array.LargeBinary:
+		return bytes.Equal(values.Value(row), values.Value(row-1))
+	case *array.FixedSizeBinary:
+		return bytes.Equal(values.Value(row), values.Value(row-1))
+	case *array.Decimal128:
+		return values.Value(row) == values.Value(row-1)
+	case *array.Float32:
+		return math.Float32bits(values.Value(row)) == math.Float32bits(values.Value(row-1))
+	case *array.Float64:
+		return math.Float64bits(values.Value(row)) == math.Float64bits(values.Value(row-1))
+	default:
+		return false
+	}
+}
+
 func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
 	// Preserve support for iterators whose batch schema changes. The usual path compares
 	// schema pointers; equivalent independently-built schemas also reuse the plan.
@@ -494,6 +540,7 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 
 	partitionMap := newPartitionMapNode()
 	partitionRec := make(partitionRecord, len(p.fields))
+	var previousPartition *partitionInfo
 
 	// we track these separately to avoid traversing the chain for top level fields.
 	topLevelColumns := make([]arrow.Array, len(p.fields))
@@ -514,6 +561,7 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 	}
 
 	for row := range record.NumRows() {
+		unchanged := row > 0
 		for i, fieldInfo := range p.fields {
 			var col arrow.Array
 			var ok bool
@@ -521,6 +569,10 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 			switch {
 			case topLevelColumns[i] != nil:
 				col = topLevelColumns[i]
+				if row > 0 && sameAdjacentPartitionSource(col, int(row)) {
+					// partitionRec[i] already contains this source's transformed value.
+					continue
+				}
 				ok = !col.IsNull(int(row))
 			case columnChains[i] != nil:
 				col, ok = leafColumnAt(columnChains[i], int(row))
@@ -530,6 +582,7 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 				continue
 			}
 
+			unchanged = false
 			if ok {
 				value, err := fieldInfo.valueAt(col, int(row))
 				if err != nil {
@@ -549,9 +602,16 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 			}
 		}
 
+		if unchanged && previousPartition != nil {
+			previousPartition.rows = append(previousPartition.rows, row)
+
+			continue
+		}
+
 		// Get or create partition info for this partition key
 		partVal := partitionMap.getOrCreate(partitionRec, p.fields, record.NumRows())
 		partVal.rows = append(partVal.rows, row)
+		previousPartition = partVal
 	}
 
 	return partitionMap.collectPartitions(), nil
@@ -658,38 +718,68 @@ func bindPartitionTransform(transform iceberg.Transform, sourceType iceberg.Type
 // is in the order of the partition spec.
 // The value is either a *partitionMapNode or a *partitionInfo.
 type partitionMapNode struct {
-	children map[any]any
+	children       map[any]any
+	binaryChildren map[string]any
 	// partitionCount is maintained by the root node for the current batch and
 	// sizes the single result slice returned by collectPartitions.
 	partitionCount int
 }
 
 func newPartitionMapNode() *partitionMapNode {
-	return &partitionMapNode{
-		children: make(map[any]any),
+	return &partitionMapNode{}
+}
+
+// child looks up binary partition values through a typed string map. Converting a
+// byte slice to string for a map lookup does not allocate, while storing a new
+// partition still copies the key into map-owned storage.
+func (n *partitionMapNode) child(part any) (any, bool) {
+	if bytes, ok := part.([]byte); ok {
+		child, found := n.binaryChildren[string(bytes)]
+
+		return child, found
 	}
+
+	child, found := n.children[comparablePartitionKey(part)]
+
+	return child, found
+}
+
+func (n *partitionMapNode) setChild(part, child any) {
+	if bytes, ok := part.([]byte); ok {
+		if n.binaryChildren == nil {
+			n.binaryChildren = make(map[string]any)
+		}
+		n.binaryChildren[string(bytes)] = child
+
+		return
+	}
+
+	if n.children == nil {
+		n.children = make(map[any]any)
+	}
+	n.children[comparablePartitionKey(part)] = child
 }
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
 // creating nodes along the way if they don't exist
 func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []partitionFieldInfo, numRows int64) *partitionInfo {
-	// Navigate through all but the last partition field
+	// Navigate through all but the last partition field.
 	node := n
 	for _, part := range partitionRec[:len(partitionRec)-1] {
-		key := comparablePartitionKey(part)
-		val, ok := node.children[key]
+		val, ok := node.child(part)
 		if !ok {
 			newNode := newPartitionMapNode()
-			node.children[key] = newNode
+			node.setChild(part, newNode)
 			node = newNode
 		} else {
 			node = val.(*partitionMapNode)
 		}
 	}
 
-	// Last level stores the actual partitionInfo
-	lastKey := comparablePartitionKey(partitionRec[len(partitionRec)-1])
-	partVal, ok := node.children[lastKey].(*partitionInfo)
+	// Last level stores the actual partitionInfo.
+	lastPart := partitionRec[len(partitionRec)-1]
+	child, _ := node.child(lastPart)
+	partVal, ok := child.(*partitionInfo)
 	if ok {
 		return partVal
 	}
@@ -710,7 +800,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 		partitionValues: partitionValues,
 		partitionRec:    partRecCopy,
 	}
-	node.children[lastKey] = partVal
+	node.setChild(lastPart, partVal)
 	n.partitionCount++
 
 	return partVal
@@ -748,13 +838,20 @@ func (n *partitionMapNode) collectPartitions() []*partitionInfo {
 }
 
 func (n *partitionMapNode) appendPartitions(result []*partitionInfo) []*partitionInfo {
-	for _, v := range n.children {
+	appendChild := func(v any) {
 		switch node := v.(type) {
 		case *partitionInfo:
 			result = append(result, node)
 		case *partitionMapNode:
 			result = node.appendPartitions(result)
 		}
+	}
+
+	for _, v := range n.children {
+		appendChild(v)
+	}
+	for _, v := range n.binaryChildren {
+		appendChild(v)
 	}
 
 	return result

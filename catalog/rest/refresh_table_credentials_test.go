@@ -24,10 +24,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -85,6 +87,8 @@ type credsCatalogOpts struct {
 	// loadTable handles GET /v1/namespaces/db/tables/tbl. When nil, the
 	// endpoint is left unrouted so a request to it would 404.
 	loadTable http.HandlerFunc
+	// routes are further handlers, keyed by request path.
+	routes map[string]http.HandlerFunc
 }
 
 func newCredsTestCatalog(t *testing.T, opts credsCatalogOpts) *rest.Catalog {
@@ -111,6 +115,9 @@ func newCredsTestCatalog(t *testing.T, opts credsCatalogOpts) *rest.Catalog {
 	}
 	if opts.loadTable != nil {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl", opts.loadTable)
+	}
+	for path, handler := range opts.routes {
+		mux.HandleFunc(path, handler)
 	}
 
 	srv := httptest.NewServer(mux)
@@ -576,4 +583,252 @@ func TestRefreshTableCredentialsNotFound(t *testing.T) {
 	refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
 	assert.Nil(t, refreshed)
 	assert.ErrorIs(t, err, catalog.ErrNoSuchTable)
+}
+
+// TestRefreshTableCredentialsClearsADLSAuthShadowingVendedToken checks that a
+// refreshed adls.token is not shadowed by shared-key, SAS-token, or
+// connection-string credentials left in the table's saved config for the same
+// storage account, which the Azure FileIO would otherwise select ahead of it.
+// Another account's credentials are kept. The recording scheme's host,
+// "warehouse", stands in for the storage account.
+func TestRefreshTableCredentialsClearsADLSAuthShadowingVendedToken(t *testing.T) {
+	const (
+		scheme    = "restcreds-stale-adls"
+		otherHost = "other.dfs.core.windows.net"
+	)
+
+	rec := &ioPropsRecorder{}
+	rec.register(t, scheme)
+
+	cat := newCredsTestCatalog(t, credsCatalogOpts{
+		creds: func(w http.ResponseWriter, _ *http.Request) {
+			assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+				scheme+"://warehouse/database/table",
+				map[string]string{iceio.ADLSToken: "vended-token"})))
+		},
+	})
+	tbl, _ := newExternalTable(t, cat, scheme, table.WithSavedConfig(iceberg.Properties{
+		iceio.ADLSSharedKeyAccountName:                 "warehouse",
+		iceio.ADLSSharedKeyAccountKey:                  "stale-key",
+		iceio.ADLSSasTokenPrefix + "warehouse":         "stale-sas",
+		iceio.ADLSConnectionStringPrefix + "warehouse": "stale-conn",
+		iceio.ADLSSasTokenPrefix + otherHost:           "other-sas",
+	}))
+
+	refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
+	require.NoError(t, err)
+	_, err = refreshed.FS(context.Background())
+	require.NoError(t, err)
+
+	props := rec.lastLoad(t)
+	assert.Equal(t, "vended-token", props[iceio.ADLSToken])
+	for _, k := range []string{
+		iceio.ADLSSharedKeyAccountName,
+		iceio.ADLSSharedKeyAccountKey,
+		iceio.ADLSSasTokenPrefix + "warehouse",
+		iceio.ADLSConnectionStringPrefix + "warehouse",
+	} {
+		assert.NotContains(t, props, k, "stale credential %q must not survive the refresh", k)
+	}
+	assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost])
+}
+
+// tableResponseCalls are the catalog methods that build a table from a
+// load-table response, each of which merges the response's storage credentials
+// over the table-wide config.
+var tableResponseCalls = []struct {
+	name string
+	call func(context.Context, *rest.Catalog) (*table.Table, error)
+}{
+	{"CreateTable", func(ctx context.Context, cat *rest.Catalog) (*table.Table, error) {
+		return cat.CreateTable(ctx, catalog.ToIdentifier("db", "tbl"), tableSchemaSimple)
+	}},
+	{"RegisterTable", func(ctx context.Context, cat *rest.Catalog) (*table.Table, error) {
+		return cat.RegisterTable(ctx, catalog.ToIdentifier("db", "tbl"), "unused-metadata-location")
+	}},
+	{"LoadTable", func(ctx context.Context, cat *rest.Catalog) (*table.Table, error) {
+		return cat.LoadTable(ctx, catalog.ToIdentifier("db", "tbl"))
+	}},
+}
+
+// tableResponseFSProps calls each of tableResponseCalls against a server that
+// answers with a load-table response carrying tableConfig and one storage
+// credential, vended, for metadataLoc's prefix. It returns the properties each
+// call's table FileIO was built from, keyed by call name.
+func tableResponseFSProps(t *testing.T, scheme, metadataLoc string, tableConfig, vended map[string]string) map[string]map[string]string {
+	t.Helper()
+
+	rec := &ioPropsRecorder{}
+	rec.register(t, scheme)
+
+	respond := func(w http.ResponseWriter, _ *http.Request) {
+		body := storageCredentialsBody(metadataLoc[:strings.LastIndex(metadataLoc, "/metadata/")], vended)
+		body["metadata-location"] = metadataLoc
+		body["metadata"] = json.RawMessage(strings.ReplaceAll(
+			exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://"))
+		body["config"] = tableConfig
+		assert.NoError(t, json.NewEncoder(w).Encode(body))
+	}
+	cat := newCredsTestCatalog(t, credsCatalogOpts{
+		loadTable: respond,
+		routes: map[string]http.HandlerFunc{
+			"/v1/namespaces/db/tables":   respond,
+			"/v1/namespaces/db/register": respond,
+		},
+	})
+
+	got := make(map[string]map[string]string, len(tableResponseCalls))
+	for _, tc := range tableResponseCalls {
+		tbl, err := tc.call(context.Background(), cat)
+		require.NoError(t, err, tc.name)
+		_, err = tbl.FS(context.Background())
+		require.NoError(t, err, tc.name)
+		got[tc.name] = rec.lastLoad(t)
+	}
+
+	return got
+}
+
+// TestTableResponseVendedADLSTokenClearsShadowingCredentials covers the
+// table-wide merge sites, where config is the whole table config rather than a
+// per-location copy. The table's FileIO serves only the metadata location's
+// account, so a vended adls.token drops what would apply to that account ahead
+// of it: that account's SAS token and connection string, and any shared key.
+// Another account's SAS token and connection string never apply to it and are
+// kept.
+func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
+	const (
+		scheme    = "restcreds-table-adls"
+		host      = "acct.dfs.core.windows.net"
+		otherHost = "other.dfs.core.windows.net"
+	)
+
+	got := tableResponseFSProps(t, scheme,
+		scheme+"://container@"+host+"/table/metadata/00000-a.metadata.json",
+		map[string]string{
+			// The factory would sign this account's requests with another
+			// account's shared key.
+			iceio.ADLSSharedKeyAccountName:             "other",
+			iceio.ADLSSharedKeyAccountKey:              "other-key",
+			iceio.ADLSSasTokenPrefix + host:            "stale-sas",
+			iceio.ADLSConnectionStringPrefix + "acct":  "stale-conn",
+			iceio.ADLSSasTokenPrefix + otherHost:       "other-sas",
+			iceio.ADLSConnectionStringPrefix + "other": "other-conn",
+		},
+		map[string]string{iceio.ADLSToken: "vended-token"})
+
+	for name, props := range got {
+		assert.Equal(t, "vended-token", props[iceio.ADLSToken], name)
+		for _, k := range []string{
+			iceio.ADLSSharedKeyAccountName,
+			iceio.ADLSSharedKeyAccountKey,
+			iceio.ADLSSasTokenPrefix + host,
+			iceio.ADLSConnectionStringPrefix + "acct",
+		} {
+			assert.NotContains(t, props, k, "%s: credential %q would be selected ahead of the token", name, k)
+		}
+		assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost], name)
+		assert.Equal(t, "other-conn", props[iceio.ADLSConnectionStringPrefix+"other"], name)
+	}
+}
+
+// TestTableResponseExpiryComesFromVendedCredential checks that a table's FileIO
+// renews on the expiry of the credential vended with it, not on an expiry
+// inherited from the table config or on the default TTL. The inherited one has
+// already passed, so taking it would refetch credentials on every load; the
+// default TTL would keep an expired vended credential until the TTL elapses.
+func TestTableResponseExpiryComesFromVendedCredential(t *testing.T) {
+	const scheme = "restcreds-table-expiry"
+
+	rec := &ioPropsRecorder{}
+	rec.register(t, scheme)
+
+	metadataLoc := scheme + "://warehouse/database/table/metadata/00000-a.metadata.json"
+
+	for _, ec := range []struct {
+		name         string
+		vendedExpiry string
+		wantKey      string
+		wantFetches  int32
+	}{
+		{
+			name:         "valid vend ignores stale config expiries",
+			vendedExpiry: strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10),
+			wantKey:      "vended-key",
+		},
+		{
+			// Already past, so the next FileIO use must go back to the catalog.
+			name:         "expired vend renews",
+			vendedExpiry: "1",
+			wantKey:      "renewed-key",
+			wantFetches:  1,
+		},
+	} {
+		t.Run(ec.name, func(t *testing.T) {
+			respond := func(w http.ResponseWriter, _ *http.Request) {
+				body := storageCredentialsBody(scheme+"://warehouse/database/table", map[string]string{
+					iceio.S3AccessKeyID:              "vended-key",
+					"s3.session-token-expires-at-ms": ec.vendedExpiry,
+				})
+				body["metadata-location"] = metadataLoc
+				body["metadata"] = json.RawMessage(strings.ReplaceAll(
+					exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://"))
+				body["config"] = map[string]string{
+					"gcs.oauth2.token-expires-at": "1000",
+					"expiration-time":             "1000",
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(body))
+			}
+
+			var credsCalls atomic.Int32
+			cat := newCredsTestCatalog(t, credsCatalogOpts{
+				creds: func(w http.ResponseWriter, _ *http.Request) {
+					credsCalls.Add(1)
+					assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+						scheme+"://warehouse/database/table",
+						map[string]string{iceio.S3AccessKeyID: "renewed-key"})))
+				},
+				loadTable: respond,
+				routes: map[string]http.HandlerFunc{
+					"/v1/namespaces/db/tables":   respond,
+					"/v1/namespaces/db/register": respond,
+				},
+			})
+
+			for _, tc := range tableResponseCalls {
+				before := credsCalls.Load()
+				tbl, err := tc.call(context.Background(), cat)
+				require.NoError(t, err, tc.name)
+				for range 2 {
+					_, err = tbl.FS(context.Background())
+					require.NoError(t, err, tc.name)
+				}
+				assert.Equal(t, ec.wantFetches, credsCalls.Load()-before, tc.name)
+				assert.Equal(t, ec.wantKey, rec.lastLoad(t)[iceio.S3AccessKeyID], tc.name)
+			}
+		})
+	}
+}
+
+// TestTableResponseLayersPartialS3Credential pins the existing behavior at the
+// table-wide merge sites: a partial vended S3 credential is layered over the
+// table config rather than replacing the key pair there. Whether a partial
+// credential should replace instead is a separate decision from adls.token
+// support.
+func TestTableResponseLayersPartialS3Credential(t *testing.T) {
+	const scheme = "restcreds-table-s3"
+
+	got := tableResponseFSProps(t, scheme,
+		scheme+"://warehouse/database/table/metadata/00000-a.metadata.json",
+		map[string]string{
+			iceio.S3AccessKeyID:     "static-key",
+			iceio.S3SecretAccessKey: "static-secret",
+		},
+		map[string]string{iceio.S3SessionToken: "vended-token"})
+
+	for name, props := range got {
+		assert.Equal(t, "static-key", props[iceio.S3AccessKeyID], name)
+		assert.Equal(t, "static-secret", props[iceio.S3SecretAccessKey], name)
+		assert.Equal(t, "vended-token", props[iceio.S3SessionToken], name)
+	}
 }

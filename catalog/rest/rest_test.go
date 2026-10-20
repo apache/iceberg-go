@@ -2122,6 +2122,122 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
 	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
 }
 
+func (r *RestCatalogSuite) TestRenameTable409() {
+	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table already exists: fokko.destination",
+				"type":    "AlreadyExistsException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("fokko", "destination"))
+	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+// renameTableErrors registers a rename endpoint that fails and returns a
+// function that sets the failure's status and error.type, renames a table, and
+// returns the error RenameTable reports. The handler is registered once, so the
+// returned function can be called repeatedly within one test.
+func (r *RestCatalogSuite) renameTableErrors() func(status int, errType string) error {
+	var status int
+	var errType string
+	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "rename failed",
+				"type":    errType,
+				"code":    status,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	return func(s int, t string) error {
+		status, errType = s, t
+		_, err := cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("missing", "destination"))
+
+		return err
+	}
+}
+
+func (r *RestCatalogSuite) TestRenameTable404MissingTable() {
+	err := r.renameTableErrors()(http.StatusNotFound, "NoSuchTableException")
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (r *RestCatalogSuite) TestRenameTable404MissingNamespace() {
+	err := r.renameTableErrors()(http.StatusNotFound, "NoSuchNamespaceException")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+// TestRenameTable404UntypedFallsBackToNoSuchTable pins the fallback for servers
+// that omit or send an unrecognized error.type on a rename 404.
+func (r *RestCatalogSuite) TestRenameTable404UntypedFallsBackToNoSuchTable() {
+	rename := r.renameTableErrors()
+	for _, errType := range []string{"", "SomeUnknownException"} {
+		r.Run("type="+errType, func() {
+			err := rename(http.StatusNotFound, errType)
+			r.ErrorIs(err, catalog.ErrNoSuchTable)
+			r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+		})
+	}
+}
+
+// TestRenameTableNoSuchNamespaceTypeIsStatusGated asserts that the error.type
+// refinement only applies to statuses in the rename status map (404 and 409).
+// An unmapped status carrying NoSuchNamespaceException must not read as a
+// missing namespace.
+func (r *RestCatalogSuite) TestRenameTableNoSuchNamespaceTypeIsStatusGated() {
+	rename := r.renameTableErrors()
+	tests := []struct {
+		status int
+		want   error
+	}{
+		{http.StatusServiceUnavailable, rest.ErrServiceUnavailable},
+		{http.StatusInternalServerError, rest.ErrServerError},
+		{http.StatusUnauthorized, rest.ErrUnauthorized},
+		{http.StatusForbidden, rest.ErrForbidden},
+	}
+	for _, tt := range tests {
+		r.Run(http.StatusText(tt.status), func() {
+			err := rename(tt.status, "NoSuchNamespaceException")
+			r.ErrorIs(err, tt.want)
+			r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+		})
+	}
+}
+
+// TestRenameTable409WithNamespaceTypeResolvesToNamespace pins the edge where a
+// 409 carries NoSuchNamespaceException. No real server sends this combo, but
+// 409 is in the rename status map, so the type override refines it. The test
+// documents that behavior: if status-aware overrides are added later, this
+// catches the change.
+func (r *RestCatalogSuite) TestRenameTable409WithNamespaceTypeResolvesToNamespace() {
+	err := r.renameTableErrors()(http.StatusConflict, "NoSuchNamespaceException")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
 func (r *RestCatalogSuite) TestRenameTable204() {
 	// Mock the rename table endpoint
 	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
@@ -3293,6 +3409,8 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	}
 
 	r.mux.HandleFunc("/v1/namespaces/create-ns/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/create-ns/tables", req.URL.EscapedPath())
+
 		var payload namedPayload
 		if !decodePayload(req, &payload) {
 			return
@@ -3302,6 +3420,8 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	})
 
 	r.mux.HandleFunc("/v1/namespaces/register-ns/register", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/register-ns/register", req.URL.EscapedPath())
+
 		var payload namedPayload
 		if !decodePayload(req, &payload) {
 			return

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal/adlsauth"
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/semaphore"
 )
@@ -80,13 +81,18 @@ var credentialExpiryKeys = []string{
 	keyExpirationTime,
 }
 
+// isCredentialExpiryKey reports whether key is one parseCredentialExpiry reads.
+func isCredentialExpiryKey(key string) bool {
+	return slices.Contains(credentialExpiryKeys, key) ||
+		key == keyAdlsSasExpiresAtMs ||
+		strings.HasPrefix(key, keyAdlsSasExpiresAtMs+".")
+}
+
 func parseCredentialExpiry(config iceberg.Properties) (time.Time, bool) {
 	var earliest time.Time
 	found := false
 	for key, value := range config {
-		if !slices.Contains(credentialExpiryKeys, key) &&
-			key != keyAdlsSasExpiresAtMs &&
-			!strings.HasPrefix(key, keyAdlsSasExpiresAtMs+".") {
+		if !isCredentialExpiryKey(key) {
 			continue
 		}
 
@@ -120,6 +126,11 @@ type vendedCredentialRefresher struct {
 	identifier []string
 	location   string
 	props      iceberg.Properties
+	// vended is the credential config resolved for location at table load. The
+	// first IO's expiry is read from it alone, and each renewal's from the
+	// credential that renewal fetched. props also carries catalog and table
+	// config, whose expiries belong to other credentials or to an earlier vend.
+	vended iceberg.Properties
 	// credentials is populated only for scan-plan IO. Unlike table-load
 	// credentials, which are already resolved against the metadata location,
 	// plan credentials must be selected against every file path opened later.
@@ -149,6 +160,7 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	}
 
 	var config iceberg.Properties
+	vended := v.vended
 	switch {
 	case v.cachedIO == nil:
 		config = v.props
@@ -173,7 +185,8 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 		}
 
 		config = maps.Clone(v.props)
-		maps.Copy(config, freshCreds)
+		mergeVendedCredentials(config, freshCreds, v.location)
+		vended = freshCreds
 	}
 
 	// The IO is cached and shared by every later caller, so it must not
@@ -214,7 +227,7 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 		}
 
 		newIO = loaded
-		expiresAt = v.expiresAtFromConfig(config)
+		expiresAt = v.expiresAtFrom(config, vended)
 		issuedAt = v.now()
 	}
 
@@ -276,18 +289,25 @@ func (v *vendedCredentialRefresher) refreshBuffer() time.Duration {
 	return buffer
 }
 
-func (v *vendedCredentialRefresher) expiresAtFromConfig(config iceberg.Properties) time.Time {
+// expiresAtFrom returns when the IO built from config expires. A refreshable
+// IO takes the expiry of vended, the credential it was built with, or the
+// default TTL without one: config's other expiries belong to other credentials
+// or an earlier vend, and an already-passed one would refetch on every load.
+func (v *vendedCredentialRefresher) expiresAtFrom(config, vended iceberg.Properties) time.Time {
 	if len(v.credentials) > 0 {
 		return time.Time{}
 	}
 
-	if exp, ok := parseCredentialExpiry(config); ok {
+	// No re-fetch to trigger, so the fallback TTL doesn't apply: without an
+	// expiry in config, never expires.
+	if v.fetchCreds == nil {
+		exp, _ := parseCredentialExpiry(config)
+
 		return exp
 	}
 
-	// No re-fetch to trigger, so the fallback TTL doesn't apply: never expires.
-	if v.fetchCreds == nil {
-		return time.Time{}
+	if exp, ok := parseCredentialExpiry(vended); ok {
+		return exp
 	}
 
 	return v.now().Add(defaultVendedCredentialsTTL)
@@ -434,10 +454,34 @@ func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
 	if credentialIndex >= 0 {
 		credentialConfig := p.credentials[credentialIndex].Config
 		clearOverriddenCredentialProperties(props, credentialConfig)
-		maps.Copy(props, credentialConfig)
+		mergeVendedCredentials(props, credentialConfig, name)
 	}
 
 	return props
+}
+
+// mergeVendedCredentials layers vended storage credential properties over
+// config, the properties an IO for location is built from. Every site that
+// merges storage credentials goes through here.
+//
+// A nonempty adls.token is the one case that also removes properties:
+// credentials the Azure FileIO selects ahead of the token would shadow it and
+// the read would 403; see adlsauth.ClearTokenShadowingCredentials. config is
+// always a copy built for one IO, and the Azure FileIO serves only location's
+// storage account, so the removals cannot reach another account's IO.
+//
+// Unlike the S3 and GCS clearing in clearOverriddenCredentialProperties, which
+// keys on property presence, this keys on a nonempty value: the Azure FileIO
+// skips an empty adls.token, so clearing for one would discard working
+// credentials.
+func mergeVendedCredentials(config, credentialConfig iceberg.Properties, location string) {
+	if credentialConfig[iceio.ADLSToken] != "" {
+		if acct, ok := adlsauth.AccountFor(location); ok {
+			adlsauth.ClearTokenShadowingCredentials(config, acct)
+		}
+	}
+
+	maps.Copy(config, credentialConfig)
 }
 
 // clearOverriddenCredentialProperties prevents a matched credential from being
@@ -482,7 +526,14 @@ func scopedFilesystemKey(credentialIndex int, location string) string {
 		return fmt.Sprintf("%d:%s", credentialIndex, location)
 	}
 
-	return fmt.Sprintf("%d:%s://%s", credentialIndex, parsed.Scheme, parsed.Host)
+	// The key must name everything a filesystem is bound to. An Azure IO serves
+	// one container@host authority, and url.URL.Host leaves out the container.
+	authority := parsed.Host
+	if parsed.User != nil {
+		authority = parsed.User.Username() + "@" + authority
+	}
+
+	return fmt.Sprintf("%d:%s://%s", credentialIndex, parsed.Scheme, authority)
 }
 
 func closeOptionalIO(fs iceio.IO) error {

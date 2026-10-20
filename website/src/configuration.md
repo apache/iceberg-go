@@ -227,15 +227,22 @@ Tuning properties:
 
 ### Azure Data Lake Storage / Blob
 
-Authentication is selected in the following order (`io/gocloud/azure/azure.go`); the first applicable option wins, and if none of 1-4 apply the default credential chain (5) is used:
+Authentication is selected in the following order (`io/gocloud/azure/azure.go`); the first applicable option wins, and if none of 1-5 apply the default credential chain (6) is used:
 
 1. Shared key: a nonempty `adls.auth.shared-key.account.name` selects this path and requires a nonempty `adls.auth.shared-key.account.key`.
 2. Per-host SAS token: `adls.sas-token.<hostname>`, where `<hostname>` exactly matches the storage account hostname (for example, `myaccount.dfs.core.windows.net`).
 3. Per-account connection string: `adls.connection-string.<account-name>` (for example, `adls.connection-string.myaccount`).
-4. Managed identity: `adls.auth.managed-identity.enabled` set to exactly `"true"` selects this path and uses `ManagedIdentityCredential` directly. Set `adls.client-id` to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.
-5. Default credential chain: `DefaultAzureCredential`, which includes managed identity among its credential sources.
+4. Static access token: a nonempty `adls.token`, supplied without the `Bearer ` prefix.
+5. Managed identity: `adls.auth.managed-identity.enabled` set to exactly `"true"` selects this path and uses `ManagedIdentityCredential` directly. Set `adls.client-id` to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.
+6. Default credential chain: `DefaultAzureCredential`, which includes managed identity among its credential sources.
 
-> **Note on cross-client parity.** The two properties in step 4 diverge from the
+`adls.token` accepts an OAuth2 access token for Azure Storage, including a token supplied by a catalog. An empty value is ignored. A rejected or expired token does not fall back to managed identity or the default credential chain.
+
+The token is static and is not refreshed. As in [Java](https://github.com/apache/iceberg/blob/main/azure/src/main/java/org/apache/iceberg/azure/AzureProperties.java) and [PyIceberg](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/fsspec.py), the credential reports a one-hour cache window to the Azure SDK each time the SDK requests the token. This does not extend the token's actual validity: Azure enforces its expiration. Callers must obtain a new token and recreate the FileIO when it expires; changing the original properties map does not update an existing FileIO.
+
+A REST catalog can also vend `adls.token` as a storage credential. The token carries no expiry of its own, so a vended token's expiry comes from `expiration-time` in the same credential when the catalog supplies one. Without it, a table FileIO that can fetch new credentials assumes a 60-minute lifetime and renews them shortly before it ends, and one that cannot, such as a FileIO for a scan plan's credentials, treats them as never expiring. A token whose actual lifetime is shorter than that fails with authorization errors until it is renewed, so catalogs that vend `adls.token` should send `expiration-time` with it. For the storage account it is vended for, a vended token replaces the SAS token and connection string configured for that account and any shared key, which would otherwise take precedence over it; a shared key is not scoped to an account, so one configured for another account would be used for this account too. The SAS tokens and connection strings of other accounts are kept. Expiries configured for other credentials, such as a SAS expiry or an `expiration-time` in the catalog or table configuration, do not affect when the token is renewed.
+
+> **Note on cross-client parity.** The two properties in step 5 diverge from the
 > other clients. `adls.auth.managed-identity.enabled` is Go-specific: neither
 > Iceberg Java nor PyIceberg defines a property that forces
 > `ManagedIdentityCredential`, so catalog properties that set it do not carry
@@ -244,7 +251,7 @@ Authentication is selected in the following order (`io/gocloud/azure/azure.go`);
 > `adls.tenant-id`, neither of which iceberg-go defines (see the
 > [PyIceberg ADLS configuration](https://py.iceberg.apache.org/configuration/#azure-data-lake)),
 > while Java's `AzureProperties` defines no `adls.client-id` at all. Here it is
-> only ever read as a user-assigned managed identity ID, and only when step 4 is
+> only ever read as a user-assigned managed identity ID, and only when step 5 is
 > selected.
 
 Tuning properties:
@@ -255,6 +262,7 @@ Tuning properties:
 | `adls.auth.shared-key.account.key` (`io.ADLSSharedKeyAccountKey`) | Account key. |
 | `adls.sas-token.<host>` (prefix `io.ADLSSasTokenPrefix`) | Per-host SAS token. |
 | `adls.connection-string.<account-name>` (prefix `io.ADLSConnectionStringPrefix`) | Per-account connection string. |
+| `adls.token` (`io.ADLSToken`) | Static Azure Storage access token, without the `Bearer ` prefix. Subject to the precedence above; not refreshed. |
 | `adls.client-id` (`io.ADLSClientID`) | Client ID of a user-assigned managed identity. Used only when the explicit managed-identity authentication path is selected. |
 | `adls.endpoint` (`io.ADLSEndpoint`) | Storage domain (e.g. `blob.core.windows.net`). |
 | `adls.protocol` (`io.ADLSProtocol`) | `http` or `https`. |
@@ -277,7 +285,7 @@ There is no `PYICEBERG_*`-style env var convention. Use the YAML config file or 
 | Setting | Source | Effect |
 |---|---|---|
 | `max-workers` in `~/.iceberg-go.yaml` (`config.EnvConfig.MaxWorkers`) | YAML config | Worker pool size used by parallel column writes, snapshot producers, scan plan, equality-delete writers. Default `5`. |
-| `WithMaxConcurrency(n int) ScanOption` | Code (`table.WithMaxConcurrency`) | Per-scan override. `WitMaxConcurrency` (missing `h`) remains as a deprecated alias. |
+| `WithMaxConcurrency(n int) ScanOption` | Code (`table.WithMaxConcurrency`) | Per-scan override. |
 | `WithMaxWriteWorkers(n int)` | Code (per-write API on `WriteRecords`) | Per-write override of the worker count. |
 | `WithClusteredWrite()` | Code (per-write API on `WriteRecords`) | Forces single-threaded writes. Mutually exclusive with `WithMaxWriteWorkers`. |
 

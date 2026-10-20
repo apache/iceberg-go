@@ -431,15 +431,20 @@ type MetadataBuilder struct {
 	props              iceberg.Properties
 	snapshotList       []Snapshot
 	snapshotIndex      *snapshotIndexData // Derived from snapshotList; not serialized.
-	currentSnapshotID  *int64
-	snapshotLog        []SnapshotLogEntry
-	metadataLog        []MetadataLogEntry
-	sortOrderList      []SortOrder
-	defaultSortOrderID int
-	refs               map[string]SnapshotRef
-	statisticsList     []StatisticsFile
-	partitionStatsList []PartitionStatisticsFile
-	encryptionKeyList  []EncryptionKey
+	deferredSnapshots  *deferredSnapshotState
+	// removedDeferredSnapshotIDs contains tombstones only for IDs in the
+	// immutable deferred base. Additions are derived from snapshotList at Build
+	// time so snapshotList remains the builder's single mutable source of truth.
+	removedDeferredSnapshotIDs map[int64]struct{}
+	currentSnapshotID          *int64
+	snapshotLog                []SnapshotLogEntry
+	metadataLog                []MetadataLogEntry
+	sortOrderList              []SortOrder
+	defaultSortOrderID         int
+	refs                       map[string]SnapshotRef
+	statisticsList             []StatisticsFile
+	partitionStatsList         []PartitionStatisticsFile
+	encryptionKeyList          []EncryptionKey
 
 	previousFileEntry *MetadataLogEntry
 	// >v1 specific
@@ -515,11 +520,14 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 		if b.props == nil {
 			b.props = iceberg.Properties{}
 		}
-		snapshots, err := common.snapshotsForMarshal()
-		if err != nil {
-			return nil, err
+		b.snapshotList = cloneSnapshots(common.SnapshotList)
+		if common.deferredSnapshots != nil {
+			b.deferredSnapshots = common.deferredSnapshots
+			b.removedDeferredSnapshotIDs = make(map[int64]struct{})
+			if common.snapshotOverlay != nil {
+				maps.Copy(b.removedDeferredSnapshotIDs, common.snapshotOverlay.removed)
+			}
 		}
-		b.snapshotList = cloneSnapshots(snapshots)
 		b.snapshotLog = cloneCollected(common.SnapshotLog)
 		b.metadataLog = cloneCollected(common.MetadataLog)
 		b.sortOrderList = cloneSortOrders(common.SortOrderList)
@@ -541,7 +549,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 			b.nextRowID = &nextRowID
 		}
 		if common.CurrentSnapshotID != nil {
-			if _, ok := snapshotIndexPosition(b.snapshotIndex, b.snapshotList, *common.CurrentSnapshotID); ok {
+			if b.containsSnapshotID(*common.CurrentSnapshotID) {
 				b.currentSnapshotID = clonePtr(common.CurrentSnapshotID)
 			}
 		}
@@ -612,35 +620,37 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 	}
 
 	cloned := &MetadataBuilder{
-		base:                 b.base,
-		updates:              append([]Update(nil), b.updates...),
-		formatVersion:        b.formatVersion,
-		uuid:                 b.uuid,
-		loc:                  b.loc,
-		lastUpdatedMS:        b.lastUpdatedMS,
-		lastColumnId:         b.lastColumnId,
-		schemaList:           slices.Clone(b.schemaList),
-		currentSchemaID:      b.currentSchemaID,
-		specs:                slices.Clone(b.specs),
-		defaultSpecID:        b.defaultSpecID,
-		lastPartitionID:      clonePtr(b.lastPartitionID),
-		props:                maps.Clone(b.props),
-		snapshotList:         slices.Clone(b.snapshotList),
-		currentSnapshotID:    clonePtr(b.currentSnapshotID),
-		snapshotLog:          slices.Clone(b.snapshotLog),
-		metadataLog:          slices.Clone(b.metadataLog),
-		sortOrderList:        slices.Clone(b.sortOrderList),
-		defaultSortOrderID:   b.defaultSortOrderID,
-		refs:                 maps.Clone(b.refs),
-		statisticsList:       slices.Clone(b.statisticsList),
-		partitionStatsList:   slices.Clone(b.partitionStatsList),
-		encryptionKeyList:    slices.Clone(b.encryptionKeyList),
-		previousFileEntry:    clonePtr(b.previousFileEntry),
-		lastSequenceNumber:   clonePtr(b.lastSequenceNumber),
-		nextRowID:            clonePtr(b.nextRowID),
-		lastAddedSchemaID:    clonePtr(b.lastAddedSchemaID),
-		lastAddedPartitionID: clonePtr(b.lastAddedPartitionID),
-		lastAddedSortOrderID: clonePtr(b.lastAddedSortOrderID),
+		base:                       b.base,
+		updates:                    append([]Update(nil), b.updates...),
+		formatVersion:              b.formatVersion,
+		uuid:                       b.uuid,
+		loc:                        b.loc,
+		lastUpdatedMS:              b.lastUpdatedMS,
+		lastColumnId:               b.lastColumnId,
+		schemaList:                 slices.Clone(b.schemaList),
+		currentSchemaID:            b.currentSchemaID,
+		specs:                      slices.Clone(b.specs),
+		defaultSpecID:              b.defaultSpecID,
+		lastPartitionID:            clonePtr(b.lastPartitionID),
+		props:                      maps.Clone(b.props),
+		snapshotList:               slices.Clone(b.snapshotList),
+		deferredSnapshots:          b.deferredSnapshots,
+		removedDeferredSnapshotIDs: maps.Clone(b.removedDeferredSnapshotIDs),
+		currentSnapshotID:          clonePtr(b.currentSnapshotID),
+		snapshotLog:                slices.Clone(b.snapshotLog),
+		metadataLog:                slices.Clone(b.metadataLog),
+		sortOrderList:              slices.Clone(b.sortOrderList),
+		defaultSortOrderID:         b.defaultSortOrderID,
+		refs:                       maps.Clone(b.refs),
+		statisticsList:             slices.Clone(b.statisticsList),
+		partitionStatsList:         slices.Clone(b.partitionStatsList),
+		encryptionKeyList:          slices.Clone(b.encryptionKeyList),
+		previousFileEntry:          clonePtr(b.previousFileEntry),
+		lastSequenceNumber:         clonePtr(b.lastSequenceNumber),
+		nextRowID:                  clonePtr(b.nextRowID),
+		lastAddedSchemaID:          clonePtr(b.lastAddedSchemaID),
+		lastAddedPartitionID:       clonePtr(b.lastAddedPartitionID),
+		lastAddedSortOrderID:       clonePtr(b.lastAddedSortOrderID),
 	}
 	if b.schemaIndex != nil {
 		cloned.schemaIndex = &schemaIndexData{
@@ -702,14 +712,24 @@ func (b *MetadataBuilder) nextSequenceNumber() int64 {
 }
 
 func (b *MetadataBuilder) newSnapshotID() int64 {
-	b.ensureSnapshotIndex()
-
 	for {
 		snapshotID := generateSnapshotID()
-		if _, exists := b.snapshotIndex.positions[snapshotID]; !exists {
+		if !b.containsSnapshotID(snapshotID) {
 			return snapshotID
 		}
 	}
+}
+
+func (b *MetadataBuilder) containsSnapshotID(id int64) bool {
+	b.ensureSnapshotIndex()
+	if _, ok := snapshotIndexPosition(b.snapshotIndex, b.snapshotList, id); ok {
+		return true
+	}
+	if _, removed := b.removedDeferredSnapshotIDs[id]; removed {
+		return false
+	}
+
+	return b.deferredSnapshots != nil && b.deferredSnapshots.containsID(id)
 }
 
 func (b *MetadataBuilder) ensureSchemaIndex() {
@@ -1064,17 +1084,19 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	if len(b.snapshotList) != previousSnapshotCount {
 		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
 	}
-	// Snapshot-log pruning is deferred to updateSnapshotLog during Build so
-	// removed entries remain available when trimming history gaps.
-
-	validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
-	for _, snapshot := range b.snapshotList {
-		validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
+	if b.deferredSnapshots != nil {
+		for id := range removedIDs {
+			if b.deferredSnapshots.containsID(id) {
+				b.removedDeferredSnapshotIDs[id] = struct{}{}
+			}
+		}
 	}
+	// Snapshot-log pruning is deferred to updatedSnapshotLog during Build so
+	// removed entries remain available when trimming history gaps.
 
 	newRefs := make(map[string]SnapshotRef, len(b.refs))
 	for name, ref := range b.refs {
-		if _, ok := validSnapshotIDs[ref.SnapshotID]; ok {
+		if b.containsSnapshotID(ref.SnapshotID) {
 			newRefs[name] = ref
 		}
 	}
@@ -1490,6 +1512,43 @@ func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
 	return b
 }
 
+func (b *MetadataBuilder) deferredSnapshotOverlay() *deferredSnapshotOverlay {
+	if b.deferredSnapshots == nil {
+		return nil
+	}
+
+	additions := make([]Snapshot, 0)
+	for _, snapshot := range b.snapshotList {
+		_, removedBase := b.removedDeferredSnapshotIDs[snapshot.SnapshotID]
+		if removedBase || !b.deferredSnapshots.containsID(snapshot.SnapshotID) {
+			additions = append(additions, snapshot)
+		}
+	}
+	if len(additions) == 0 && len(b.removedDeferredSnapshotIDs) == 0 {
+		return nil
+	}
+
+	return &deferredSnapshotOverlay{
+		additions: cloneSnapshots(additions),
+		removed:   maps.Clone(b.removedDeferredSnapshotIDs),
+	}
+}
+
+// snapshotsForFullScan intentionally materializes deferred history for builder
+// operations, such as expiration, whose result depends on every snapshot.
+func (b *MetadataBuilder) snapshotsForFullScan() ([]Snapshot, error) {
+	if b.deferredSnapshots == nil {
+		return b.snapshotList, nil
+	}
+
+	snapshots, _, err := b.deferredSnapshots.load()
+	if err != nil {
+		return nil, err
+	}
+
+	return b.deferredSnapshotOverlay().apply(snapshots), nil
+}
+
 func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	b.ensureSchemaIndex()
 	if b.schemaIndex != nil {
@@ -1509,10 +1568,16 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	}
 	defaultSpecID := b.defaultSpecID
 
-	if err := b.updateSnapshotLog(); err != nil {
+	snapshotLog, err := b.updatedSnapshotLog()
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
+	// If no change has set lastUpdatedMS yet, the first Build sets it and keeps it on
+	// the builder on purpose (Java's TableMetadata.Builder does the same), so repeated
+	// builds of the same changes report the same time. After that only AddSnapshot,
+	// SetSnapshotRef on main and SetLastUpdatedMS move it: a later SetProperties or
+	// AddSchema followed by another Build still reports the first Build's time.
 	if b.lastUpdatedMS == 0 {
 		b.lastUpdatedMS = time.Now().UnixMilli()
 	}
@@ -1525,6 +1590,14 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 			b.props.GetInt(
 				MetadataPreviousVersionsMaxKey, MetadataPreviousVersionsMaxDefault))
 		metadataLog = trimMetadataLog(append(metadataLog, *b.previousFileEntry), maxMetadataLogEntries)
+	}
+	snapshotList := b.snapshotList
+	snapshotIndex := b.snapshotIndex
+	if b.deferredSnapshots != nil {
+		// Deferred builders remain mutable after Build. Keep the eagerly known
+		// snapshots in built metadata independent from later overlay mutations.
+		snapshotList = cloneSnapshots(b.snapshotList)
+		snapshotIndex = buildSnapshotIndex(snapshotList)
 	}
 
 	return &commonMetadata{
@@ -1541,10 +1614,12 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		DefaultSpecID:      defaultSpecID,
 		LastPartitionID:    b.lastPartitionID,
 		Props:              b.props,
-		SnapshotList:       b.snapshotList,
-		snapshotIndex:      b.snapshotIndex,
+		SnapshotList:       snapshotList,
+		snapshotIndex:      snapshotIndex,
+		deferredSnapshots:  b.deferredSnapshots,
+		snapshotOverlay:    b.deferredSnapshotOverlay(),
 		CurrentSnapshotID:  b.currentSnapshotID,
-		SnapshotLog:        b.snapshotLog,
+		SnapshotLog:        snapshotLog,
 		MetadataLog:        metadataLog,
 		SortOrderList:      b.sortOrderList,
 		DefaultSortOrderID: b.defaultSortOrderID,
@@ -1555,7 +1630,13 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	}, nil
 }
 
-func (b *MetadataBuilder) updateSnapshotLog() error {
+// updatedSnapshotLog returns the snapshot log with intermediate and removed
+// snapshots dropped. It leaves b.snapshotLog unchanged, so Build stays free of
+// side effects on the log. The result is always a new slice that never aliases
+// b.snapshotLog, including the slices.Clone when nothing is pruned, so callers
+// may modify it. The pruning is derived again from b.updates on every call, so
+// it relies on b.updates holding every change made through this builder.
+func (b *MetadataBuilder) updatedSnapshotLog() ([]SnapshotLogEntry, error) {
 	addedIDs := make(map[int64]struct{}, 2)
 	hasRemoved := false
 	for _, upd := range b.updates {
@@ -1575,14 +1656,9 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 		}
 	}
 	if len(intermediateIDs) != 0 || hasRemoved {
-		validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
-		for _, snapshot := range b.snapshotList {
-			validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
-		}
-
 		newSnapsLog := make([]SnapshotLogEntry, 0, len(b.snapshotLog))
 		for _, s := range b.snapshotLog {
-			if _, ok := validSnapshotIDs[s.SnapshotID]; ok {
+			if b.containsSnapshotID(s.SnapshotID) {
 				if _, ok := intermediateIDs[s.SnapshotID]; !ok {
 					newSnapsLog = append(newSnapsLog, s)
 				}
@@ -1593,13 +1669,14 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 		if b.currentSnapshotID != nil && len(newSnapsLog) != 0 {
 			last := newSnapsLog[len(newSnapsLog)-1]
 			if last.SnapshotID != *b.currentSnapshotID {
-				return fmt.Errorf("%w: cannot set invalid snapshot log: latest entry is not the current snapshot", iceberg.ErrInvalidArgument)
+				return nil, fmt.Errorf("%w: cannot set invalid snapshot log: latest entry is not the current snapshot", iceberg.ErrInvalidArgument)
 			}
 		}
-		b.snapshotLog = newSnapsLog
+
+		return newSnapsLog, nil
 	}
 
-	return nil
+	return slices.Clone(b.snapshotLog), nil
 }
 
 func (b *MetadataBuilder) GetSchemaByID(id int) (*iceberg.Schema, error) {
@@ -1648,6 +1725,18 @@ func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 		snapshot := b.snapshotList[i]
 
 		return &snapshot, nil
+	}
+	if _, removed := b.removedDeferredSnapshotIDs[id]; removed {
+		return nil, fmt.Errorf("%w: id %d", ErrSnapshotNotFound, id)
+	}
+	if b.deferredSnapshots != nil {
+		snapshot, err := b.deferredSnapshots.snapshotByID(id)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot != nil {
+			return snapshot, nil
+		}
 	}
 
 	return nil, fmt.Errorf("%w: id %d", ErrSnapshotNotFound, id)
@@ -2294,6 +2383,7 @@ type commonMetadata struct {
 	partitionSpecIndex *partitionSpecIndexData
 	snapshotIndex      *snapshotIndexData
 	deferredSnapshots  *deferredSnapshotState
+	snapshotOverlay    *deferredSnapshotOverlay
 }
 
 func (c *commonMetadata) metadataBuilderCommon() *commonMetadata { return c }
@@ -2533,6 +2623,9 @@ func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 	if ok {
 		return cloneSnapshotPtr(&c.SnapshotList[i])
 	}
+	if c.snapshotOverlay != nil && c.snapshotOverlay.isRemoved(id) {
+		return nil
+	}
 	if c.deferredSnapshots != nil {
 		snapshot, err := c.deferredSnapshots.snapshotByID(id)
 		if err != nil {
@@ -2567,8 +2660,11 @@ func (c *commonMetadata) snapshotsForMarshal() ([]Snapshot, error) {
 	}
 
 	snapshots, _, err := c.deferredSnapshots.load()
+	if err != nil {
+		return nil, err
+	}
 
-	return snapshots, err
+	return c.snapshotOverlay.apply(snapshots), nil
 }
 
 func (c *commonMetadata) SnapshotByName(name string) *Snapshot {
@@ -3232,6 +3328,7 @@ func (m *metadataV1) ToV2() metadataV2 {
 	commonOut.SnapshotList = m.allSnapshots()
 	commonOut.snapshotIndex = buildSnapshotIndex(commonOut.SnapshotList)
 	commonOut.deferredSnapshots = nil
+	commonOut.snapshotOverlay = nil
 	commonOut.FormatVersion = 2
 	if commonOut.UUID == uuid.Nil {
 		commonOut.UUID = uuid.New()

@@ -2455,6 +2455,41 @@ func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 	})
 }
 
+// TestArrowScanFiltersMissingColumnWithoutDefault checks that rows of a file
+// written before an optional column was added read the column as null, so a
+// filter matches them as it would a stored null.
+func TestArrowScanFiltersMissingColumnWithoutDefault(t *testing.T) {
+	tbl := buildV3TableWithRows(t, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"x"}, iceberg.PrimitiveTypes.Float64, "", false, nil).
+		Commit())
+	var err error
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	x := iceberg.Reference("x")
+	for _, tt := range []struct {
+		name     string
+		filter   iceberg.BooleanExpression
+		expected int64
+	}{
+		{"is null", iceberg.IsNull(x), 2},
+		{"not null", iceberg.NotNull(x), 0},
+		{"is nan", iceberg.IsNaN(x), 0},
+		{"not nan", iceberg.NotNaN(x), 2},
+		{"not is nan", iceberg.NewNot(iceberg.IsNaN(x)), 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tbl.Scan(WithRowFilter(tt.filter)).ToArrowTable(t.Context())
+			require.NoError(t, err)
+			defer result.Release()
+			assert.Equal(t, tt.expected, result.NumRows())
+		})
+	}
+}
+
 func TestPlanDataManifestTasksHandlesInaccurateCounts(t *testing.T) {
 	for _, counts := range [][]int32{{5, 5, 5}, {0, 2, 1}, {-1, -1, -1}} {
 		scan, schema, manifests, posIndex, dvIndex, eqIndex := newPlanTasksBenchmarkFixture(t, 3, 3)

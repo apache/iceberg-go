@@ -183,13 +183,6 @@ func fullyPopulatedDataFile(t *testing.T, version int) (iceberg.PartitionSpec, *
 		SplitOffsets([]int64{0, 4096}).
 		SortOrderID(0).
 		KeyMetadata([]byte("kms-key-1"))
-	// distinct_counts (field 111) is deprecated in the spec for every
-	// version (apache/iceberg#12182). The fixture populates it on every
-	// version to assert that the wire codec drops the field on encode
-	// regardless of what the in-memory DataFile carries — strict readers
-	// (e.g. PyIceberg) reject manifests that emit it. The deprecated
-	// setter is invoked here intentionally to exercise that drop path.
-	builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128}) //nolint:staticcheck // SA1019: deliberate use of deprecated setter to assert the encoder drops the field
 	if version >= 2 {
 		builder.EqualityFieldIDs([]int{1})
 	}
@@ -221,11 +214,6 @@ func assertDataFileEqual(t *testing.T, want, got iceberg.DataFile, version int) 
 	require.Equal(t, want.SortOrderID(), got.SortOrderID())
 	require.Equal(t, want.SpecID(), got.SpecID())
 	require.Equal(t, want.ContentType(), got.ContentType())
-	require.Empty(t, got.DistinctValueCounts(),
-		"distinct_counts (field 111) is deprecated in every version "+
-			"(apache/iceberg#12182); the manifest-entry schemas in "+
-			"internal/avro_schemas.go omit it for v1/v2/v3 so the encoder "+
-			"drops it on the wire regardless of what the source DataFile carries")
 	if version >= 2 {
 		require.Equal(t, want.EqualityFieldIDs(), got.EqualityFieldIDs())
 	}
@@ -253,7 +241,6 @@ var expectedDataFileMethods = []string{
 	"ContentSizeInBytes",
 	"ContentType",
 	"Count",
-	"DistinctValueCounts",
 	"EqualityFieldIDs",
 	"FileFormat",
 	"FilePath",
@@ -299,7 +286,6 @@ func (stubDataFile) ColumnSizes() map[int]int64                { return nil }
 func (stubDataFile) ValueCounts() map[int]int64                { return nil }
 func (stubDataFile) NullValueCounts() map[int]int64            { return nil }
 func (stubDataFile) NaNValueCounts() map[int]int64             { return nil }
-func (stubDataFile) DistinctValueCounts() map[int]int64        { return nil }
 func (stubDataFile) LowerBoundValues() map[int][]byte          { return nil }
 func (stubDataFile) UpperBoundValues() map[int][]byte          { return nil }
 func (stubDataFile) KeyMetadata() []byte                       { return nil }

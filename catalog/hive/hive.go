@@ -539,10 +539,28 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (_
 			table.ErrCommitFailed, fromDB, fromTable, sourceMetadataLocation, lockedMetadataLocation)
 	}
 
+	// Use a raw GetTable instead of CheckTableExists so that non-Iceberg
+	// Hive tables at the destination are also detected as conflicts.
+	_, err = c.client.GetTable(ctx, toDB, toTable)
+	if err == nil {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, toDB, toTable)
+	}
+	if !isNoSuchObjectError(err) {
+		return nil, fmt.Errorf("failed to check destination table %s.%s: %w", toDB, toTable, err)
+	}
+
 	hiveTbl.TableName = toTable
 	hiveTbl.DbName = toDB
 
+	// The pre-check above is best-effort: a writer that does not take these HMS
+	// locks (Hive DDL, say) can create the destination before AlterTable runs.
+	// The metastore then rejects the rename, which is mapped to the same
+	// sentinel so callers can match it either way.
 	if err := c.client.AlterTable(ctx, fromDB, fromTable, hiveTbl); err != nil {
+		if isAlreadyExistsError(err) {
+			return nil, fmt.Errorf("%w: %s.%s: %w", catalog.ErrTableAlreadyExists, toDB, toTable, err)
+		}
+
 		return nil, fmt.Errorf("failed to rename table %s.%s to %s.%s: %w", fromDB, fromTable, toDB, toTable, err)
 	}
 

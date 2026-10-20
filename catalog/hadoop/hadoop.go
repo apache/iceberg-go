@@ -928,7 +928,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
-	return nil, errors.New("hadoop catalog: rename table is not supported")
+	return nil, fmt.Errorf("%w: hadoop catalog: rename table is not supported", iceberg.ErrNotImplemented)
 }
 
 func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {
@@ -937,7 +937,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	}
 
 	if len(props) > 0 {
-		return errors.New("hadoop catalog: namespace properties are not supported")
+		return fmt.Errorf("%w: hadoop catalog: namespace properties are not supported", iceberg.ErrNotImplemented)
 	}
 
 	// Raise an error if the namespace already exists
@@ -1113,7 +1113,7 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 }
 
 func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifier, _ []string, _ iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
-	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
+	return catalog.PropertiesUpdateSummary{}, fmt.Errorf("%w: hadoop catalog: namespace properties are not supported", iceberg.ErrNotImplemented)
 }
 
 // checkedMkdirAll is a helper function that checks

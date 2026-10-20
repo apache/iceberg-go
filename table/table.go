@@ -317,6 +317,11 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 //
 // New data from the provided table is written to the table regardless of the filter.
 //
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
+//
 // The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -345,6 +350,11 @@ func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize in
 //
 // New data from the provided RecordReader is written to the table regardless of the filter.
 //
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
+//
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
 func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) (*Table, error) {
@@ -363,10 +373,19 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 //   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
 //   - Files where no rows match the filter are kept unchanged
 //
+// A row matches only if the filter is true for it. Rows where the filter evaluates to NULL, for example
+// `age = 30` on a NULL age, do not match and are kept.
+//
 // The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
 //   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
+// A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
+//
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -732,9 +751,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// peers (partition-filter overlap, referenced-file removal)
 		// even when the catalog-side AssertRefSnapshotID would accept
 		// them. On attempt 0 base == current → no concurrent
-		// snapshots → validators short-circuit. Real divergence
-		// detection fires on attempts > 0 once `current` is the
-		// post-conflict state.
+		// snapshots → validators that inspect them short-circuit, but
+		// validateDataFilesExist still reads the branch head. Real
+		// divergence detection fires on attempts > 0 once `current` is the post-conflict state.
 		//
 		// Skipped when the branch does not exist on `current` — that
 		// always means "the committer is creating this branch" (e.g.
@@ -1170,7 +1189,7 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 
 // SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
 func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entry, ok := snapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
 	if ok {
 		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
@@ -1298,14 +1317,6 @@ func WithMaxConcurrency(n int) ScanOption {
 	return func(scan *Scan) {
 		scan.concurrency = n
 	}
-}
-
-// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
-// backward compatibility with the pre-existing typo'd name.
-//
-// Deprecated: use [WithMaxConcurrency].
-func WitMaxConcurrency(n int) ScanOption {
-	return WithMaxConcurrency(n)
 }
 
 func WithOptions(opts iceberg.Properties) ScanOption {

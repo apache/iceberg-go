@@ -619,8 +619,28 @@ func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
 	}
 }
 
-// decodeValue parses one literal value and converts it to typ.
+// decodeValue parses one literal value and converts it to typ. The value is
+// either bare or wrapped as {"type":"literal","value":...}. As in Java, the
+// wrapper's optional data-type is ignored: the field type decides.
 func decodeValue(raw json.RawMessage, typ Type) (Literal, error) {
+	if tok, err := firstToken(raw); err == nil && tok == json.Delim('{') {
+		var wrapper struct {
+			Type  string          `json:"type"`
+			Value json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal(raw, &wrapper); err != nil {
+			return nil, fmt.Errorf("%w: cannot parse literal: %s", ErrInvalidArgument, err)
+		}
+		if wrapper.Type != "literal" {
+			return nil, fmt.Errorf("%w: cannot parse type %q as a literal", ErrInvalidArgument, wrapper.Type)
+		}
+		if len(wrapper.Value) == 0 {
+			return nil, fmt.Errorf("%w: literal is missing a value", ErrInvalidArgument)
+		}
+		// A null or nested object value is rejected by literalValue below.
+		raw = wrapper.Value
+	}
+
 	v := literalValue{typ: typ}
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return nil, err
