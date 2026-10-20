@@ -169,7 +169,7 @@ func TestMemFSOpenConcurrentReplacement(t *testing.T) {
 		}
 	})
 
-	for i := range 300 {
+	for range 300 {
 		file, err := memFS.Open(name)
 		if err != nil {
 			t.Errorf("open: %v", err)
