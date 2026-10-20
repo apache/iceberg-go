@@ -500,6 +500,8 @@ var scanTaskFinalizationBenchmarkSink int
 // Compare the independent old serial loop with the new finalization after
 // identical per-iteration input clones. Smaller sizes exercise the conservative
 // worker threshold; the large sizes measure throughput once workers amortize.
+// Mixed work covers variable partitions, partial splitting, positional deletes,
+// and deletion vectors, without depending on manifest IO.
 func BenchmarkFinalizePlannedTasks(b *testing.B) {
 	schema := simpleSchema()
 	spec := partitionedSpec()
@@ -509,7 +511,9 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 		rowFilter  iceberg.BooleanExpression
 		offsets    []int64
 		targetSize string
-		fileCount  int
+		fileCount   int
+		mixedWork   bool
+		withDeletes bool
 	}{
 		{
 			name:      "plain",
@@ -528,6 +532,15 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 			targetSize: "128",
 			fileCount:  20_000,
 		},
+		{
+			name:        "mixed_split_deletes",
+			rowFilter:   iceberg.EqualTo(iceberg.Reference("id"), int32(7)),
+			offsets:     benchmarkFinalizationOffsets(32, 32),
+			targetSize:  "128",
+			fileCount:   20_000,
+			mixedWork:   true,
+			withDeletes: true,
+		},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			properties := iceberg.Properties{}
@@ -538,17 +551,44 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+			var posDelete, dvDelete iceberg.DataFile
+			if tc.withDeletes {
+				posBuilder, err := iceberg.NewDataFileBuilder(
+					spec, iceberg.EntryContentPosDeletes, "mem://benchmark/deletes/pos.parquet",
+					iceberg.ParquetFile, map[int]any{1000: int32(7)}, nil, nil, 1, 128)
+				if err != nil {
+					b.Fatal(err)
+				}
+				posDelete = posBuilder.Build()
+				dvBuilder, err := iceberg.NewDataFileBuilder(
+					spec, iceberg.EntryContentPosDeletes, "mem://benchmark/deletes/dv.puffin",
+					iceberg.PuffinFile, map[int]any{1000: int32(7)}, nil, nil, 1, 256)
+				if err != nil {
+					b.Fatal(err)
+				}
+				dvDelete = dvBuilder.ContentOffset(64).ContentSizeInBytes(17).Build()
+			}
 			tasks := make([]FileScanTask, tc.fileCount)
 			for i := range tasks {
+				offsets := tc.offsets
+				if tc.mixedWork && i%3 != 0 {
+					offsets = nil
+				}
 				file := finalizationTestDataFile(
 					b,
 					spec,
 					fmt.Sprintf("mem://benchmark/data/file-%d.parquet", i),
-					map[int]any{1000: int32(7)},
+					map[int]any{1000: int32(6 + i%4)},
 					2048,
-					tc.offsets,
+					offsets,
 				)
 				tasks[i] = FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
+				if tc.withDeletes && i%10 == 0 {
+					tasks[i].DeleteFiles = []iceberg.DataFile{posDelete}
+				}
+				if tc.withDeletes && i%13 == 0 {
+					tasks[i].DeletionVectorFiles = []iceberg.DataFile{dvDelete}
+				}
 			}
 
 			for _, fileCount := range []int{512, 1_024, 2_048, 4_096, tc.fileCount} {

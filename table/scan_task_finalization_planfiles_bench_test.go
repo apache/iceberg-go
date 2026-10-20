@@ -51,8 +51,8 @@ func BenchmarkPlanFilesTaskFinalization(b *testing.B) {
 		expectedTasks int
 	}{
 		{name: "plain", rowFilter: iceberg.AlwaysTrue{}, expectedTasks: fileCount},
-		{name: "identity_residual", rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7)), expectedTasks: fileCount*5/8},
-		{name: "split_offsets", rowFilter: iceberg.AlwaysTrue{}, splitOffsets: true, expectedTasks: fileCount*7/4},
+		{name: "identity_residual", rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7)), expectedTasks: fileCount * 5 / 8},
+		{name: "split_offsets", rowFilter: iceberg.AlwaysTrue{}, splitOffsets: true, expectedTasks: fileCount * 7 / 4},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			tbl := newPlanFilesFinalizationBenchmarkTable(b, tc.splitOffsets)
