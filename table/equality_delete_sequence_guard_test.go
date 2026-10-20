@@ -31,14 +31,22 @@ type equalityDeleteStatsForbiddenFile struct {
 	iceberg.DataFile
 }
 
-func (equalityDeleteStatsForbiddenFile) ValueCounts() map[int]int64 { panic("unused value counts") }
+func (equalityDeleteStatsForbiddenFile) ValueCounts() map[int]int64 {
+	panic("unused value counts")
+}
+
 func (equalityDeleteStatsForbiddenFile) NullValueCounts() map[int]int64 {
 	panic("unused null counts")
 }
-func (equalityDeleteStatsForbiddenFile) NaNValueCounts() map[int]int64 { panic("unused NaN counts") }
+
+func (equalityDeleteStatsForbiddenFile) NaNValueCounts() map[int]int64 {
+	panic("unused NaN counts")
+}
+
 func (equalityDeleteStatsForbiddenFile) LowerBoundValues() map[int][]byte {
 	panic("unused lower bounds")
 }
+
 func (equalityDeleteStatsForbiddenFile) UpperBoundValues() map[int][]byte {
 	panic("unused upper bounds")
 }
