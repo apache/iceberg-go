@@ -740,6 +740,7 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 				ctx, paths, dictionary, indices, dict, posCursor)
 		}
 	}
+
 	return a.appendFilePathChunkWithoutCache(
 		ctx, filePathChunk.Len(), paths, dictionary, indices, posCursor)
 }
@@ -832,6 +833,7 @@ func (a *posDeleteAccumulator) appendFilePathChunkWithDictionaryCache(
 			if builder := cachedBuilders[cacheIndex]; builder != nil {
 				builder.Append(pos)
 			}
+
 			continue
 		}
 
@@ -842,6 +844,7 @@ func (a *posDeleteAccumulator) appendFilePathChunkWithDictionaryCache(
 				if cacheIndex >= 0 && cacheIndex < len(cachedSeen) {
 					cachedSeen[cacheIndex] = true
 				}
+
 				continue
 			}
 		}
