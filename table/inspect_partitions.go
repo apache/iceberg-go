@@ -210,6 +210,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 		for index, manifest := range batch {
 			g.Go(func() error {
 				localTree := newInspectPartitionAggregateTree()
+
 				return i.foldInspectPartitionManifest(gctx, fs, manifest, partitionType,
 					snapshotTimes, localTree, &partial[index])
 			})
