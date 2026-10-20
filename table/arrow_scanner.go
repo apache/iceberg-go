@@ -1550,10 +1550,11 @@ func (c *preparedFileReadPlanCache) entry(path string) *preparedFileReadEntry {
 // a scan. The snapshots returned by Metadata are owned by the scan and are
 // safe to share read-only across file workers.
 type arrowScanInvariants struct {
-	tableSchema     *iceberg.Schema
-	tableProperties iceberg.Properties
-	projectedIDs    set[int]
-	nameMapping     iceberg.NameMapping
+	tableSchema       *iceberg.Schema
+	tableProperties   iceberg.Properties
+	projectedIDs      set[int]
+	nameMapping       iceberg.NameMapping
+	outputArrowSchema *arrow.Schema
 }
 
 // collectLeafIDs recursively collects leaf field IDs from a type
@@ -2460,6 +2461,45 @@ func pruningFilterHasMissingInitialDefault(
 	return false, nil
 }
 
+// canReuseFlatProjection detects the common case of flat, already-typed
+// batches. Full schema projection still handles nested types, schema evolution,
+// promotions, defaults, and changed column ordering. A matching Arrow type alone
+// is not enough: the file field ID and Iceberg type must also agree.
+func canReuseFlatProjection(requested, fileSchema *iceberg.Schema, input, output *arrow.Schema) bool {
+	if requested == nil || fileSchema == nil || input == nil || output == nil {
+		return false
+	}
+
+	fields := requested.FieldsRef(iceinternal.SchemaRef{})
+	if len(fields) != input.NumFields() || len(fields) != output.NumFields() {
+		return false
+	}
+
+	for i, field := range fields {
+		if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
+			return false
+		}
+		fileField, ok := fileSchema.FindFieldByIDRef(field.ID, iceinternal.SchemaRef{})
+		if !ok || fileField.Name != field.Name || !fileField.Type.Equals(field.Type) {
+			return false
+		}
+
+		source, target := input.Field(i), output.Field(i)
+		if source.Name != field.Name || target.Name != field.Name ||
+			!arrow.TypeEqual(source.Type, target.Type) || len(input.FieldIndices(field.Name)) != 1 {
+			return false
+		}
+		if id, ok := source.Metadata.GetValue(ArrowParquetFieldIDKey); ok {
+			parsed, err := strconv.Atoi(id)
+			if err != nil || parsed != field.ID {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
 func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], sink *recordSink, positionalDeleteBitmap *dv.RoaringPositionBitmap, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
@@ -2588,8 +2628,21 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		pipeline = append(pipeline, filterFunc)
 	}
 
+	var lastInputSchema *arrow.Schema
+	var reuseFlatProjection bool
 	pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
+
+		if r.Schema() != lastInputSchema {
+			lastInputSchema = r.Schema()
+			reuseFlatProjection = canReuseFlatProjection(
+				as.projectedSchema, readSchema, lastInputSchema, invariants.outputArrowSchema)
+		}
+		if reuseFlatProjection {
+			// Rewrap existing columns with the projected field metadata. Do not
+			// rebuild the arrays or walk the Iceberg schema for every batch.
+			return array.NewRecordBatch(invariants.outputArrowSchema, r.Columns(), r.NumRows()), nil
+		}
 
 		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
 			UseLargeTypes:   as.useLargeTypes,
@@ -2952,6 +3005,7 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	if err != nil {
 		return nil, nil, err
 	}
+	invariants.outputArrowSchema = resultSchema
 	if err := as.addTaskProjectedFieldIDs(invariants, tasks); err != nil {
 		return nil, nil, err
 	}
