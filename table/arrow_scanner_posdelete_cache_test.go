@@ -101,6 +101,49 @@ func TestPosDeleteDictionaryPathCacheValidatesEveryPosition(t *testing.T) {
 	require.ErrorContains(t, err, "negative pos -2")
 }
 
+func TestPosDeleteDictionaryPathCacheRejectsNullIndices(t *testing.T) {
+	for _, dictionarySize := range []int{1, maxPositionDeleteDictionaryCacheEntries + 1} {
+		t.Run(fmt.Sprintf("dictionary-entries=%d", dictionarySize), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+
+			paths := make([]string, dictionarySize)
+			for i := range paths {
+				paths[i] = fmt.Sprintf("file-%d.parquet", i)
+			}
+			dictionary := stringArray(mem, paths...)
+			defer dictionary.Release()
+
+			indexBuilder := array.NewInt32Builder(mem)
+			indexBuilder.Append(0)
+			indexBuilder.AppendNull()
+			indexes := indexBuilder.NewArray()
+			indexBuilder.Release()
+			defer indexes.Release()
+
+			dictType := &arrow.DictionaryType{
+				IndexType: arrow.PrimitiveTypes.Int32,
+				ValueType: arrow.BinaryTypes.String,
+			}
+			pathArray := array.NewDictionaryArray(dictType, indexes, dictionary)
+			defer pathArray.Release()
+			pathCol := arrow.NewChunked(dictType, []arrow.Array{pathArray})
+			defer pathCol.Release()
+
+			posArray := int64Array(mem, 1, 2)
+			defer posArray.Release()
+			posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArray})
+			defer posCol.Release()
+
+			acc := newPosDeleteAccumulator(ctx, nil)
+			defer acc.release()
+			err := acc.appendChunked(ctx, pathCol, posCol)
+			require.ErrorContains(t, err, "null file_path dictionary index")
+		})
+	}
+}
+
 func BenchmarkGroupPosDeletesByDictionaryIndex(b *testing.B) {
 	const numRows = 262_144
 	for _, numPaths := range []int{1, 16, 512, maxPositionDeleteDictionaryCacheEntries + 1} {
