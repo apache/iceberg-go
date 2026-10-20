@@ -44,8 +44,6 @@ func appendEqualityBytesTestValue(t testing.TB, builder array.Builder, value str
 		b.Append(value)
 	case *array.BinaryBuilder:
 		b.Append([]byte(value))
-	case *array.LargeBinaryBuilder:
-		b.Append([]byte(value))
 	default:
 		t.Fatalf("unexpected Arrow builder %T", builder)
 	}
