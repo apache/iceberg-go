@@ -537,6 +537,13 @@ func (idx *equalityDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]
 	}
 
 	dataSeqNum := dataEntry.SequenceNum()
+	// Equality deletes are sorted by sequence within each list. When even
+	// the newest delete is not newer than the data file, no delete applies.
+	// Avoid initializing or copying column statistics in that common case.
+	if (len(idx.global) == 0 || idx.global[len(idx.global)-1].entry.SequenceNum() <= dataSeqNum) &&
+		(len(partitionEntries) == 0 || partitionEntries[len(partitionEntries)-1].entry.SequenceNum() <= dataSeqNum) {
+		return nil, nil
+	}
 	var dataStats *equalityDeleteDataFileStats
 	if idx.schema != nil {
 		stats := equalityDeleteDataFileStatsFor(dataEntry.DataFile())
