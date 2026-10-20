@@ -91,6 +91,60 @@ func TestMemFSOpenPreservesSnapshots(t *testing.T) {
 	}
 }
 
+func TestMemFSOpenPreservesSnapshotAcrossCreate(t *testing.T) {
+	memFS := icebergio.NewMemFS()
+	name := "mem://bucket/created.parquet"
+
+	firstWriter, err := memFS.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstWriter.Write([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldFile, err := memFS.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oldFile.Close()
+
+	secondWriter, err := memFS.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondWriter.Write([]byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := io.ReadAll(oldFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("open reader changed after Create replacement: got %q", got)
+	}
+
+	current, err := memFS.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer current.Close()
+	got, err = io.ReadAll(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "second" {
+		t.Fatalf("new reader did not see Create replacement: got %q", got)
+	}
+}
+
 func TestMemFSOpenConcurrentReplacement(t *testing.T) {
 	memFS := icebergio.NewMemFS()
 	name := "mem://bucket/data.parquet"
