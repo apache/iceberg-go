@@ -556,6 +556,26 @@ func TestTranslateColumnNamesInitialDefaultErrorContext(t *testing.T) {
 	require.ErrorContains(t, err, "invalid hex")
 }
 
+// The {"type":"literal","value":...} wrapper belongs to the expression grammar
+// only. A field default uses the spec's single-value JSON, which has no wrapper,
+// so a wrapped default is malformed and must not be read as its inner value.
+func TestTranslateColumnNamesRejectsWrappedInitialDefault(t *testing.T) {
+	field := iceberg.NestedField{
+		ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+		InitialDefault: map[string]any{"type": "literal", "value": float64(42)},
+	}
+	bound, err := iceberg.BindExpr(
+		iceberg.NewSchema(1, field),
+		iceberg.EqualTo(iceberg.Reference("missing_col"), int32(42)),
+		true,
+	)
+	require.NoError(t, err)
+
+	_, err = iceberg.TranslateColumnNames(bound, iceberg.NewSchema(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, `initial-default for column "missing_col" (id 2)`)
+}
+
 func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *testing.T) {
 	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "location", Type: &iceberg.StructType{
