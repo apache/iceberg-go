@@ -78,14 +78,14 @@ func TestScanPlanningLocalRemoteParity(t *testing.T) {
 		{name: "long", filter: iceberg.EqualTo(iceberg.Reference("big"), int64(9007199254740993)), wantFiles: 3, wantDeletes: 1},
 		{name: "none", filter: iceberg.AlwaysFalse{}, wantFiles: 0},
 		{name: "partition", filter: iceberg.EqualTo(iceberg.Reference("tenant"), int32(1)), wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
-		{name: "metrics", filter: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25)), wantFiles: 2, wantDeletes: 1},
-		{name: "and residual", filter: iceberg.NewAnd(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1)), iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))), wantFiles: 1, wantDeletes: 1},
+		{name: "metrics", filter: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25)), wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))},
+		{name: "and residual", filter: iceberg.NewAnd(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1)), iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))), wantFiles: 1, wantDeletes: 1, wantResidual: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))},
 		{name: "or", filter: iceberg.NewOr(iceberg.EqualTo(iceberg.Reference("tenant"), int32(2)), iceberg.LessThan(iceberg.Reference("renamed"), int64(15))), wantFiles: 3, wantDeletes: 1},
-		{name: "set", filter: iceberg.IsIn(iceberg.Reference("tenant"), int32(1), int32(3)), wantFiles: 2, wantDeletes: 1},
+		{name: "set", filter: iceberg.IsIn(iceberg.Reference("tenant"), int32(1), int32(3)), wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
 		{name: "not set", filter: iceberg.NotIn(iceberg.Reference("tenant"), int32(1), int32(3)), wantFiles: 1, wantDeletes: 1},
-		{name: "not", filter: iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1))), wantFiles: 1, wantDeletes: 1},
+		{name: "not", filter: iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1))), wantFiles: 1, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
 		{name: "null", filter: iceberg.IsNull(iceberg.Reference("tenant")), wantFiles: 0},
-		{name: "case insensitive", filter: iceberg.EqualTo(iceberg.Reference("TENANT"), int32(1)), insensitive: true, wantFiles: 2, wantDeletes: 1},
+		{name: "case insensitive", filter: iceberg.EqualTo(iceberg.Reference("TENANT"), int32(1)), insensitive: true, wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
 		{name: "historical schema", filter: iceberg.GreaterThan(iceberg.Reference("value"), int32(25)), snapshot: 10, wantFiles: 2},
 		{name: "tag schema", filter: iceberg.GreaterThan(iceberg.Reference("value"), int32(25)), ref: "old", wantFiles: 2},
 		{name: "branch current schema", filter: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25)), ref: "history", wantFiles: 2},
@@ -140,7 +140,17 @@ func TestScanPlanningLocalRemoteParity(t *testing.T) {
 					assert.Len(t, task.DeleteFiles, tc.wantDeletes)
 					assert.Len(t, task.EqualityDeleteFiles, tc.wantDeletes)
 					if tc.wantResidual != nil {
-						assert.Equal(t, tc.wantResidual, task.Residual)
+						// Bind both sides, as assertPlanningParity does: a wire
+						// residual is unbound and a nil one means the filter.
+						residual := task.Residual
+						if residual == nil {
+							residual = tc.filter
+						}
+						want, err := bindParityResidual(schema, tc.wantResidual, !tc.insensitive)
+						require.NoError(t, err)
+						got, err := bindParityResidual(schema, residual, !tc.insensitive)
+						require.NoError(t, err)
+						assert.Truef(t, want.Equals(got), "residual for %s: want %s, got %s", task.File.FilePath(), want, got)
 					}
 				}
 			})
