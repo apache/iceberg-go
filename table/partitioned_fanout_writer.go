@@ -511,8 +511,12 @@ func sameAdjacentPartitionSource(column arrow.Array, row int) bool {
 		return values.Value(row) == values.Value(row-1)
 	case *array.Binary:
 		return bytes.Equal(values.Value(row), values.Value(row-1))
+	case *array.LargeBinary:
+		return bytes.Equal(values.Value(row), values.Value(row-1))
 	case *array.FixedSizeBinary:
 		return bytes.Equal(values.Value(row), values.Value(row-1))
+	case *array.Decimal128:
+		return values.Value(row) == values.Value(row-1)
 	case *array.Float32:
 		return math.Float32bits(values.Value(row)) == math.Float32bits(values.Value(row-1))
 	case *array.Float64:
