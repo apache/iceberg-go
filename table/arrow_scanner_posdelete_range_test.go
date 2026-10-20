@@ -87,13 +87,19 @@ func TestCombinePositionalDeleteBitmapRangeParity(t *testing.T) {
 		{name: "all deleted", batches: []int64{3, 5}, rangeEnd: 8},
 		{name: "single surviving row", batches: []int64{9}, rangeStart: 1, rangeEnd: 9},
 		{name: "non-byte-aligned dense deletes", batches: []int64{7, 3}, rangeStart: 0, rangeEnd: 9},
-		{name: "dense deletes across a 32-bit boundary", start: int64(boundary - 4),
-			batches: []int64{8}, rangeStart: boundary - 3, rangeEnd: boundary + 4},
+		{
+			name: "dense deletes across a 32-bit boundary",
+			start: int64(boundary - 4),
+			batches: []int64{8},
+			rangeStart: boundary - 3,
+			rangeEnd: boundary + 4,
+		},
 		{name: "partially deleted", batches: []int64{65, 64}, rangeStart: 32, rangeEnd: 98},
 		{name: "crosses 32-bit buckets", start: int64(boundary - 4), batches: []int64{3, 8}, positions: []uint64{boundary - 3, boundary - 1, boundary, boundary + 5}},
 		{name: "high positions", start: 1 << 40, batches: []int64{3, 8}, positions: []uint64{1<<40 + 1, 1<<40 + 10}},
 		{
-			name: "pruned row groups", batches: []int64{4, 4},
+			name: "pruned row groups",
+			batches: []int64{4, 4},
 			spans: []tblutils.RowGroupSpan{
 				{FirstRowPos: 10, NumRows: 4},
 				{FirstRowPos: int64(boundary), NumRows: 4},
@@ -121,7 +127,7 @@ func TestCombinePositionalDeleteBitmapRangeRandomized(t *testing.T) {
 		start := []int64{0, 73, 1<<32 - 32, 1 << 40}[i%4]
 		nrows := int64(rng.Intn(256))
 		bitmap := dv.NewRoaringPositionBitmap()
-		for j := 0; j < rng.Intn(128); j++ {
+		for range rng.Intn(128) {
 			bitmap.Set(uint64(start) + uint64(rng.Intn(int(nrows)+3)))
 		}
 		checkPosDeleteRangeParity(t, bitmap, start, nil, []int64{nrows / 2, nrows - nrows/2})
