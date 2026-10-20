@@ -60,12 +60,14 @@ func BenchmarkPlanFilesTaskFinalization(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				if len(tasks) < fileCount {
-					b.Fatalf("PlanFiles returned %d tasks, want at least %d", len(tasks), fileCount)
+				// The residual case can prune partitioned files, so report
+				// the real task count instead of assuming it equals input
+				// file count. Split tasks must still expand in their case.
+				if len(tasks) == 0 || (!tc.splitOffsets && len(tasks) > fileCount) ||
+					(tc.splitOffsets && len(tasks) <= fileCount) {
+					b.Fatalf("unexpected PlanFiles task count %d for %s", len(tasks), tc.name)
 				}
-				if !tc.splitOffsets && len(tasks) != fileCount {
-					b.Fatalf("PlanFiles returned %d unsplit tasks, want %d", len(tasks), fileCount)
-				}
+				b.ReportMetric(float64(len(tasks)), "tasks/op")
 				planFilesFinalizationBenchmarkSink = len(tasks)
 			}
 		})
