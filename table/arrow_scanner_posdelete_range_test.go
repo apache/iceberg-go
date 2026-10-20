@@ -98,7 +98,7 @@ func TestCombinePositionalDeleteBitmapRangeParity(t *testing.T) {
 		{name: "crosses 32-bit buckets", start: int64(boundary - 4), batches: []int64{3, 8}, positions: []uint64{boundary - 3, boundary - 1, boundary, boundary + 5}},
 		{name: "high positions", start: 1 << 40, batches: []int64{3, 8}, positions: []uint64{1<<40 + 1, 1<<40 + 10}},
 		{
-			name: "pruned row groups",
+			name:    "pruned row groups",
 			batches: []int64{4, 4},
 			spans: []tblutils.RowGroupSpan{
 				{FirstRowPos: 10, NumRows: 4},
