@@ -937,7 +937,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	}
 
 	if len(props) > 0 {
-		return errors.New("hadoop catalog: namespace properties are not supported")
+		return fmt.Errorf("%w: hadoop catalog: namespace properties are not supported", iceberg.ErrNotImplemented)
 	}
 
 	// Raise an error if the namespace already exists
@@ -1113,7 +1113,7 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 }
 
 func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifier, _ []string, _ iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
-	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
+	return catalog.PropertiesUpdateSummary{}, fmt.Errorf("%w: hadoop catalog: namespace properties are not supported", iceberg.ErrNotImplemented)
 }
 
 // checkedMkdirAll is a helper function that checks

@@ -84,10 +84,11 @@ type Config struct {
 	NewCatalog func(t *testing.T) catalog.Catalog
 
 	// SupportsNamespaceProperties reports whether the catalog can store
-	// properties against a namespace. Tests that write properties are skipped
-	// when it is false, as they are for the Hadoop catalog, whose namespaces
-	// are directories with nowhere to keep them. Loading is required of every
-	// catalog and is tested either way.
+	// properties against a namespace. When it is false, as it is for the
+	// Hadoop catalog, whose namespaces are directories with nowhere to keep
+	// them, the tests that write properties are replaced by one asserting that
+	// writing them returns iceberg.ErrNotImplemented and changes nothing.
+	// Loading is required of every catalog and is tested either way.
 	SupportsNamespaceProperties bool
 
 	// SupportsRenameTable reports whether the catalog can rename tables.
@@ -129,14 +130,18 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Run("DropNamespaceNotEmpty", func(t *testing.T) { testDropNamespaceNotEmpty(t, cfg) })
 	t.Run("ListNamespaces", func(t *testing.T) { testListNamespaces(t, cfg) })
 
-	t.Run("CreateNamespaceWithProperties", func(t *testing.T) { testCreateNamespaceWithProperties(t, cfg) })
 	t.Run("LoadNamespaceProperties", func(t *testing.T) { testLoadNamespaceProperties(t, cfg) })
-	t.Run("SetNamespaceProperties", func(t *testing.T) { testSetNamespaceProperties(t, cfg) })
-	t.Run("UpdateNamespaceProperties", func(t *testing.T) { testUpdateNamespaceProperties(t, cfg) })
-	t.Run("UpdateAndSetNamespaceProperties", func(t *testing.T) { testUpdateAndSetNamespaceProperties(t, cfg) })
-	t.Run("RemoveNamespaceProperties", func(t *testing.T) { testRemoveNamespaceProperties(t, cfg) })
-	t.Run("SetNamespacePropertiesNamespaceDoesNotExist", func(t *testing.T) { testSetNamespacePropertiesNamespaceDoesNotExist(t, cfg) })
-	t.Run("RemoveNamespacePropertiesNamespaceDoesNotExist", func(t *testing.T) { testRemoveNamespacePropertiesNamespaceDoesNotExist(t, cfg) })
+	if cfg.SupportsNamespaceProperties {
+		t.Run("CreateNamespaceWithProperties", func(t *testing.T) { testCreateNamespaceWithProperties(t, cfg) })
+		t.Run("SetNamespaceProperties", func(t *testing.T) { testSetNamespaceProperties(t, cfg) })
+		t.Run("UpdateNamespaceProperties", func(t *testing.T) { testUpdateNamespaceProperties(t, cfg) })
+		t.Run("UpdateAndSetNamespaceProperties", func(t *testing.T) { testUpdateAndSetNamespaceProperties(t, cfg) })
+		t.Run("RemoveNamespaceProperties", func(t *testing.T) { testRemoveNamespaceProperties(t, cfg) })
+		t.Run("SetNamespacePropertiesNamespaceDoesNotExist", func(t *testing.T) { testSetNamespacePropertiesNamespaceDoesNotExist(t, cfg) })
+		t.Run("RemoveNamespacePropertiesNamespaceDoesNotExist", func(t *testing.T) { testRemoveNamespacePropertiesNamespaceDoesNotExist(t, cfg) })
+	} else {
+		t.Run("NamespacePropertiesNotSupported", func(t *testing.T) { testNamespacePropertiesNotSupported(t, cfg) })
+	}
 }
 
 // testBasicCreateTable asserts that a newly created table is visible to the
