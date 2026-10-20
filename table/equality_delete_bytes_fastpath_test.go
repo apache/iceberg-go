@@ -184,6 +184,7 @@ func buildBenchDeleteSetSingleString(numDeletes int, noMatch bool) *equalityDele
 		buf.WriteString(value)
 		keys[buf.String()] = struct{}{}
 	}
+
 	return &equalityDeleteSet{
 		keys:     keys,
 		fieldIDs: []int{2},
@@ -209,6 +210,7 @@ func BenchmarkProcessEqualityDeletesSingleString(b *testing.B) {
 						if !fast {
 							deleteSet.singleBytesOnce.Do(func() {})
 						}
+
 						return deleteSet
 					}, benchStringFileSchema())
 				})
