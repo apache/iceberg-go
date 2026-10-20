@@ -216,4 +216,3 @@ func BenchmarkProcessEqualityDeletesSingleString(b *testing.B) {
 		})
 	}
 }
-

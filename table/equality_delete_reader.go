@@ -1269,42 +1269,45 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		})
 	case *array.String:
 		offsets := a.ValueOffsets()
-
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
 	case *array.LargeString:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
 	case *array.Binary:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
 	case *array.LargeBinary:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
@@ -1378,7 +1381,6 @@ func (e *equalityDeleteSet) singleInt64Set(fileSchema *iceberg.Schema) *singleIn
 
 	return e.singleInt64
 }
-
 
 type singleBytesEqualityDeleteSet struct {
 	keys    set[string]
@@ -1495,7 +1497,6 @@ func (m *equalityDeleteMask) applySingleInt64(
 	return true
 }
 
-
 func applySingleBytesValues[Offset ~int32 | ~int64](
 	m *equalityDeleteMask,
 	column arrow.Array,
@@ -1505,12 +1506,14 @@ func applySingleBytesValues[Offset ~int32 | ~int64](
 	mem memory.Allocator,
 ) {
 	numRows := column.Len()
+	baseOffset := offsets[0]
 	if column.NullN() == 0 {
 		for row := range numRows {
 			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
 				continue
 			}
-			if _, deleted := deleteSet.keys[string(data[offsets[row]:offsets[row+1]])]; !deleted {
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
+			if _, deleted := deleteSet.keys[string(data[start:end])]; !deleted {
 				continue
 			}
 			m.ensure(mem, numRows)
@@ -1528,8 +1531,11 @@ func applySingleBytesValues[Offset ~int32 | ~int64](
 			if !deleteSet.hasNull {
 				continue
 			}
-		} else if _, deleted := deleteSet.keys[string(data[offsets[row]:offsets[row+1]])]; !deleted {
-			continue
+		} else {
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
+			if _, deleted := deleteSet.keys[string(data[start:end])]; !deleted {
+				continue
+			}
 		}
 		m.ensure(mem, numRows)
 		bitutil.ClearBit(m.bits, row)
