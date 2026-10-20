@@ -41,6 +41,7 @@ func partitionExtractionPerRowForTest(plan *partitionExtractionPlan, record arro
 			col := record.Column(field.columnPath[0])
 			if col.IsNull(int(row)) {
 				values[i] = nil
+
 				continue
 			}
 
@@ -102,25 +103,24 @@ func TestPartitionExtractionConsecutiveRows(t *testing.T) {
 		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "host_bucket", Transform: iceberg.BucketTransform{NumBuckets: 32}},
 		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1002, Name: "id", Transform: iceberg.IdentityTransform{}},
 	)
+	at := func(v int64) *int64 { return &v }
+	str := func(v string) *string { return &v }
 	rows := []struct {
 		ts   *int64
 		host *string
 		id   *int64
-	}{}
-	at := func(v int64) *int64 { return &v }
-	str := func(v string) *string { return &v }
-	for _, item := range []struct {
-		ts   *int64
-		host *string
-		id   *int64
 	}{
-		{at(0), str("alpha"), at(1)}, {at(0), str("alpha"), at(1)},
-		{at(0), str("alpha"), at(1)}, {at(0), str("beta"), at(1)},
-		{at(microsPerDay), str("beta"), at(1)}, {at(microsPerDay), str("beta"), at(1)},
-		{nil, nil, nil}, {nil, nil, nil}, {nil, str("beta"), nil},
-		{at(0), str("alpha"), at(1)}, {at(0), str("alpha"), at(1)},
-	} {
-		rows = append(rows, item)
+		{at(0), str("alpha"), at(1)},
+		{at(0), str("alpha"), at(1)},
+		{at(0), str("alpha"), at(1)},
+		{at(0), str("beta"), at(1)},
+		{at(microsPerDay), str("beta"), at(1)},
+		{at(microsPerDay), str("beta"), at(1)},
+		{nil, nil, nil},
+		{nil, nil, nil},
+		{nil, str("beta"), nil},
+		{at(0), str("alpha"), at(1)},
+		{at(0), str("alpha"), at(1)},
 	}
 
 	tb := array.NewTimestampBuilder(memory.DefaultAllocator, tsType)
@@ -174,6 +174,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(true)
 				b.Append(true)
 				b.Append(false)
+
 				return b.NewArray()
 			},
 		},
@@ -185,6 +186,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(1)
 				b.Append(1)
 				b.Append(2)
+
 				return b.NewArray()
 			},
 		},
@@ -196,6 +198,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(1)
 				b.Append(1)
 				b.Append(2)
+
 				return b.NewArray()
 			},
 		},
@@ -207,6 +210,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(arrow.Date32(1))
 				b.Append(arrow.Date32(1))
 				b.Append(arrow.Date32(2))
+
 				return b.NewArray()
 			},
 		},
@@ -218,6 +222,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(arrow.Time64(1))
 				b.Append(arrow.Time64(1))
 				b.Append(arrow.Time64(2))
+
 				return b.NewArray()
 			},
 		},
@@ -230,6 +235,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(arrow.Timestamp(1))
 				b.Append(arrow.Timestamp(1))
 				b.Append(arrow.Timestamp(2))
+
 				return b.NewArray()
 			},
 		},
@@ -241,6 +247,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append("same")
 				b.Append("same")
 				b.Append("other")
+
 				return b.NewArray()
 			},
 		},
@@ -252,6 +259,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append("same")
 				b.Append("same")
 				b.Append("other")
+
 				return b.NewArray()
 			},
 		},
@@ -263,6 +271,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append([]byte("same"))
 				b.Append([]byte("same"))
 				b.Append([]byte("other"))
+
 				return b.NewArray()
 			},
 		},
@@ -274,6 +283,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append([]byte("same"))
 				b.Append([]byte("same"))
 				b.Append([]byte("diff"))
+
 				return b.NewArray()
 			},
 		},
@@ -285,6 +295,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append([]byte("same"))
 				b.Append([]byte("same"))
 				b.Append([]byte("other"))
+
 				return b.NewArray()
 			},
 		},
@@ -296,6 +307,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(decimal128.FromI64(1234))
 				b.Append(decimal128.FromI64(1234))
 				b.Append(decimal128.FromI64(5678))
+
 				return b.NewArray()
 			},
 		},
@@ -309,6 +321,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(first)
 				b.Append(first)
 				b.Append(second)
+
 				return b.NewArray()
 			},
 		},
@@ -320,6 +333,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(0)
 				b.Append(0)
 				b.Append(math.Float32frombits(1 << 31))
+
 				return b.NewArray()
 			},
 		},
@@ -333,6 +347,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(first)
 				b.Append(first)
 				b.Append(second)
+
 				return b.NewArray()
 			},
 		},
@@ -344,6 +359,7 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append(0)
 				b.Append(0)
 				b.Append(math.Float64frombits(1 << 63))
+
 				return b.NewArray()
 			},
 		},
