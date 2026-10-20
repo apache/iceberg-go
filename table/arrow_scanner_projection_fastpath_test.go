@@ -69,6 +69,20 @@ func TestCanReuseFlatProjection(t *testing.T) {
 	require.False(t, canReuseFlatProjection(requested, requested, arrow.NewSchema(fields, nil), output),
 		"renamed Arrow fields must be projected")
 
+	fields = input.Fields()
+	fields[0].Type = arrow.PrimitiveTypes.Int32
+	require.False(t, canReuseFlatProjection(requested, requested, arrow.NewSchema(fields, nil), output),
+		"mismatched physical Arrow types must not be rewrapped")
+
+	fields = input.Fields()
+	fields[1].Name = fields[0].Name
+	require.False(t, canReuseFlatProjection(requested, requested, arrow.NewSchema(fields, nil), output),
+		"duplicate Arrow field names must not bypass projection")
+
+	fields = append(input.Fields(), arrow.Field{Name: "unexpected", Type: arrow.PrimitiveTypes.Int32})
+	require.False(t, canReuseFlatProjection(requested, requested, arrow.NewSchema(fields, nil), output),
+		"extra input columns must still follow schema projection")
+
 	oldName := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "previous_name", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
