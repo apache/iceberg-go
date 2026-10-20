@@ -24,6 +24,8 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"math"
+	"math/bits"
 	"slices"
 	"strconv"
 	"strings"
@@ -1246,6 +1248,38 @@ func combinePositionalDeleteBitmap(
 	cursor *rowPositionCursor,
 	nrows int64,
 ) arrow.Array {
+	// Unpruned batches occupy one contiguous file range. Query the bitmap once
+	// rather than doing a roaring lookup for every row, including clean batches.
+	// Advancing the cursor matters even when no rows are deleted.
+	if !cursor.src.pruned() && cursor.consumed >= 0 && nrows >= 0 &&
+		nrows <= math.MaxInt64-cursor.consumed {
+		start := cursor.consumed
+		cursor.consumed += nrows
+		mask := deletes.KeepMaskForRange(uint64(start), uint64(cursor.consumed))
+		if mask == nil {
+			return nil
+		}
+
+		kept := 0
+		for _, value := range mask {
+			kept += bits.OnesCount8(value)
+		}
+
+		bldr := array.NewInt64Builder(mem)
+		defer bldr.Release()
+		if kept > 0 {
+			bldr.Resize(kept)
+		}
+		for i := range nrows {
+			if mask[i>>3]&(1<<uint(i&7)) != 0 {
+				bldr.UnsafeAppend(i)
+			}
+		}
+
+		return bldr.NewArray()
+	}
+
+	// Keep the row-by-row cursor for scans with skipped row groups.
 	var bldr *array.Int64Builder
 
 	for i := range nrows {
