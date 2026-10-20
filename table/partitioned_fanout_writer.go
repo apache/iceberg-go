@@ -604,6 +604,7 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 
 		if unchanged && previousPartition != nil {
 			previousPartition.rows = append(previousPartition.rows, row)
+
 			continue
 		}
 
