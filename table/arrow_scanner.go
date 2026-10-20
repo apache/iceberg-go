@@ -1270,9 +1270,22 @@ func combinePositionalDeleteBitmap(
 		if kept > 0 {
 			bldr.Resize(kept)
 		}
-		for i := range nrows {
-			if mask[i>>3]&(1<<uint(i&7)) != 0 {
-				bldr.UnsafeAppend(i)
+		if kept <= int(nrows)/2 {
+			// For dense deletes, visit surviving bits instead of every row.
+			// KeepMaskForRange clears padding bits in the final byte.
+			for byteIndex, keep := range mask {
+				for keep != 0 {
+					bit := bits.TrailingZeros8(keep)
+					bldr.UnsafeAppend(int64(byteIndex*8 + bit))
+					keep &= keep - 1
+				}
+			}
+		} else {
+			// Dense keep masks are faster with a straight row scan.
+			for i := range nrows {
+				if mask[i>>3]&(1<<uint(i&7)) != 0 {
+					bldr.UnsafeAppend(i)
+				}
 			}
 		}
 
