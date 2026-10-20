@@ -224,19 +224,32 @@ func TestRowDelta_ValidateNoDeletes(t *testing.T) {
 	cc := newEmptyConflictContext(t)
 	txn := newValidateTestTxn(t, nil)
 	rd := &RowDelta{txn: txn}
-	require.NoError(t, rd.validate(cc))
+	require.NoError(t, rd.validate(cc, nil))
 }
 
 // TestRowDelta_ValidatePosDeleteWithoutReference covers the realistic
 // case where the pos-delete file does not record its referenced data
-// file (ReferencedDataFile returns nil). validate() must skip the
-// referenced-file check, matching Java's behavior.
+// file (ReferencedDataFile returns nil). referencedDataFiles() must
+// leave it out so validate() skips the referenced-file check.
 func TestRowDelta_ValidatePosDeleteWithoutReference(t *testing.T) {
 	cc := newEmptyConflictContext(t)
 	txn := newValidateTestTxn(t, nil)
 	posDelete := newTestPosDeleteFile(t, "pos-1.parquet", nil)
 	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{posDelete}}
-	require.NoError(t, rd.validate(cc))
+	require.NoError(t, rd.validate(cc, rd.referencedDataFiles()))
+}
+
+// TestRowDelta_ReferencedDataFilesAreDistinct pins what Commit checks:
+// each referenced data file once, skipping position deletes that record none and equality deletes.
+func TestRowDelta_ReferencedDataFilesAreDistinct(t *testing.T) {
+	ref := "data.parquet"
+	rd := &RowDelta{delFiles: []iceberg.DataFile{
+		newTestPosDeleteFile(t, "pos-1.parquet", &ref),
+		newTestPosDeleteFile(t, "pos-2.parquet", nil),
+		newTestEqDeleteFile(t, "eq-1.parquet", []int{1}),
+		newTestPosDeleteFile(t, "pos-3.parquet", &ref),
+	}}
+	assert.Equal(t, []string{ref}, rd.referencedDataFiles())
 }
 
 // TestRowDelta_ValidateEqDeleteIsolationGates proves the isolation
@@ -253,7 +266,7 @@ func TestRowDelta_ValidateEqDeleteIsolationGates(t *testing.T) {
 			WriteDeleteIsolationLevelKey: string(level),
 		})
 		rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{eqDelete}}
-		require.NoError(t, rd.validate(cc), "%s + no concurrent should be nil", level)
+		require.NoError(t, rd.validate(cc, nil), "%s + no concurrent should be nil", level)
 	}
 }
 
@@ -267,7 +280,7 @@ func TestRowDelta_ValidateInvalidIsolationLevel(t *testing.T) {
 	})
 	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{eqDelete}}
 
-	assert.ErrorIs(t, rd.validate(cc), ErrInvalidIsolationLevel)
+	assert.ErrorIs(t, rd.validate(cc, nil), ErrInvalidIsolationLevel)
 }
 
 func TestRowDelta_ValidateInvalidIsolationLevelWithPosDeletesOnly(t *testing.T) {
@@ -278,7 +291,7 @@ func TestRowDelta_ValidateInvalidIsolationLevelWithPosDeletesOnly(t *testing.T) 
 	})
 	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{posDelete}}
 
-	assert.ErrorIs(t, rd.validate(cc), ErrInvalidIsolationLevel)
+	assert.ErrorIs(t, rd.validate(cc, nil), ErrInvalidIsolationLevel)
 }
 
 func TestRowDelta_ValidateInvalidIsolationLevelWithNilContext(t *testing.T) {
@@ -287,7 +300,7 @@ func TestRowDelta_ValidateInvalidIsolationLevelWithNilContext(t *testing.T) {
 	})
 	rd := &RowDelta{txn: txn}
 
-	assert.ErrorIs(t, rd.validate(nil), ErrInvalidIsolationLevel)
+	assert.ErrorIs(t, rd.validate(nil, nil), ErrInvalidIsolationLevel)
 }
 
 func TestRewriteValidator_Smokes(t *testing.T) {

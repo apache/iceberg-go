@@ -2137,6 +2137,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			referencedDataFilePaths = append(referencedDataFilePaths, ref)
 		}
 		slices.Sort(referencedDataFilePaths)
+		if referencedDataFilePaths, err = t.headDataFiles(fs, referencedDataFilePaths, nil); err != nil {
+			return err
+		}
 	}
 
 	if !cfg.skipAutoNameMapping {
@@ -2612,8 +2615,13 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		// validates partition-filter overlap; without this check a concurrent
 		// commit that removed a referenced data file would silently orphan the
 		// deletes (they would apply to rewritten data or dangle). Mirrors
-		// RowDelta.validate: collect referenced data-file paths and run
-		// validateDataFilesExist unconditionally (no isolation gating).
+		// RowDelta: collect referenced data-file paths, leave out the ones
+		// staged earlier in the transaction, and run validateDataFilesExist
+		// unconditionally (no isolation gating).
+		referenced, err = t.headDataFiles(fs, referenced, nil)
+		if err != nil {
+			return nil, err
+		}
 		if len(referenced) > 0 {
 			t.addValidator(func(cc *conflictContext) error {
 				return validateDataFilesExist(cc, referenced)
@@ -3291,7 +3299,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 // files that match filter, appends them to updater, and returns the distinct
 // data-file paths those deletes reference. A position-delete that does not
 // record its referenced data file is omitted from the returned paths (it
-// cannot be existence-checked), matching RowDelta.validate and Java.
+// cannot be existence-checked), matching RowDelta.referencedDataFiles.
 func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	meta, err := t.txnMeta()
 	if err != nil {

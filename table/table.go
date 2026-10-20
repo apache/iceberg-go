@@ -744,9 +744,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// peers (partition-filter overlap, referenced-file removal)
 		// even when the catalog-side AssertRefSnapshotID would accept
 		// them. On attempt 0 base == current → no concurrent
-		// snapshots → validators short-circuit. Real divergence
-		// detection fires on attempts > 0 once `current` is the
-		// post-conflict state.
+		// snapshots → validators that inspect them short-circuit, but
+		// validateDataFilesExist still reads the branch head. Real
+		// divergence detection fires on attempts > 0 once `current` is the post-conflict state.
 		//
 		// Skipped when the branch does not exist on `current` — that
 		// always means "the committer is creating this branch" (e.g.
