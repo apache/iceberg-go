@@ -456,10 +456,13 @@ func TestManifestContentCacheReuseAcrossCompatibleConfig(t *testing.T) {
 }
 
 func TestManifestContentCacheInvalidNumericConfig(t *testing.T) {
-	for _, bad := range []string{"bad", "-1", "0"} {
-		config := iceberg.Properties{IOManifestCacheEnabledKey: "true"}
-		config[IOManifestCacheMaxTotalBytesKey] = bad
-		assert.Nil(t, newManifestContentCacheForConfig(config))
+	for _, key := range []string{IOManifestCacheMaxTotalBytesKey, IOManifestCacheMaxContentLengthKey} {
+		for _, bad := range []string{"bad", "-1", "0"} {
+			t.Run(key+"/"+bad, func(t *testing.T) {
+				config := iceberg.Properties{IOManifestCacheEnabledKey: "true", key: bad}
+				assert.Nil(t, newManifestContentCacheForConfig(config))
+			})
+		}
 	}
 }
 
@@ -610,6 +613,8 @@ type manifestContentFailingBlockedIO struct {
 	started          chan struct{}
 	release          chan struct{}
 	firstReadIsShort bool
+	firstOpenPanics  bool
+	fallbackError    error
 
 	mu    sync.Mutex
 	opens int
@@ -623,9 +628,15 @@ func (f *manifestContentFailingBlockedIO) Open(name string) (iceio.File, error) 
 	if attempt == 1 {
 		close(f.started)
 		<-f.release
+		if f.firstOpenPanics {
+			panic("unexpected backend panic")
+		}
 		if !f.firstReadIsShort {
 			return nil, io.ErrUnexpectedEOF
 		}
+	}
+	if f.fallbackError != nil {
+		return nil, f.fallbackError
 	}
 
 	return f.IO.Open(name)
@@ -714,6 +725,136 @@ func TestManifestContentCacheFailedSharedLoadFallsBackForAllCallers(t *testing.T
 			}
 		})
 	}
+}
+
+func TestManifestContentCachePanickingProducerUnblocksWaiter(t *testing.T) {
+	const location = "mem://manifest-content-cache/panicking-producer.avro"
+	base := iceio.NewMemFS()
+	require.NoError(t, base.WriteFile(location, []byte("test")))
+	fs := &manifestContentFailingBlockedIO{
+		IO: base, started: make(chan struct{}), release: make(chan struct{}),
+		firstOpenPanics: true,
+	}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
+	cache := newManifestContentCache(0, 16, 16)
+	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+
+	producerPanic := make(chan any, 1)
+	go func() {
+		defer func() { producerPanic <- recover() }()
+		_, _ = cache.open(t.Context(), fs, manifest)
+	}()
+	select {
+	case <-fs.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("panicking producer did not start")
+	}
+
+	joined := make(chan struct{}, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		ctx := &countingContext{Context: t.Context(), entered: joined}
+		file, err := cache.open(ctx, fs, manifest)
+		if err == nil {
+			_, err = io.ReadAll(file)
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		waiterErr <- err
+	}()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not join the panicking producer")
+	}
+	release.Do(func() { close(fs.release) })
+	select {
+	case got := <-producerPanic:
+		assert.Equal(t, "unexpected backend panic", got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("panicking producer did not finish")
+	}
+	select {
+	case err := <-waiterErr:
+		require.NoError(t, err, "waiter must fall back after a producer panics")
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter remained blocked after producer panic")
+	}
+	fs.mu.Lock()
+	opens := fs.opens
+	fs.mu.Unlock()
+	assert.Equal(t, 2, opens, "one panicking population and one waiter fallback")
+	assert.Empty(t, cache.loads)
+	assert.Empty(t, cache.entries)
+	readCachedManifest(t, cache, fs, manifest)
+	assert.Contains(t, cache.entries, location, "a later scan can fill the cache")
+}
+
+func TestManifestContentCacheFailedSharedLoadPreservesBothErrors(t *testing.T) {
+	const location = "mem://manifest-content-cache/fallback-errors.avro"
+	fs := &manifestContentFailingBlockedIO{
+		IO: iceio.NewMemFS(), started: make(chan struct{}), release: make(chan struct{}),
+		fallbackError: io.ErrClosedPipe,
+	}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
+	cache := newManifestContentCache(0, 16, 16)
+	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+
+	producerErr := make(chan error, 1)
+	go func() {
+		file, err := cache.open(t.Context(), fs, manifest)
+		if file != nil {
+			_ = file.Close()
+		}
+		producerErr <- err
+	}()
+	select {
+	case <-fs.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("producer did not start")
+	}
+	joined := make(chan struct{}, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		ctx := &countingContext{Context: t.Context(), entered: joined}
+		file, err := cache.open(ctx, fs, manifest)
+		if file != nil {
+			_ = file.Close()
+		}
+		waiterErr <- err
+	}()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not join failed population")
+	}
+	release.Do(func() { close(fs.release) })
+
+	for _, result := range []struct {
+		name string
+		errs <-chan error
+	}{
+		{"producer", producerErr},
+		{"waiter", waiterErr},
+	} {
+		select {
+		case err := <-result.errs:
+			require.ErrorIs(t, err, io.ErrUnexpectedEOF, result.name)
+			require.ErrorIs(t, err, io.ErrClosedPipe, result.name)
+			assert.Contains(t, err.Error(), location, result.name)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not finish", result.name)
+		}
+	}
+	fs.mu.Lock()
+	opens := fs.opens
+	fs.mu.Unlock()
+	assert.Equal(t, 3, opens, "failed population plus one fallback per caller")
+	assert.Empty(t, cache.loads)
+	assert.Empty(t, cache.entries)
 }
 
 func TestManifestContentCacheRetriesAfterProducerCancellation(t *testing.T) {

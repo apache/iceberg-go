@@ -196,7 +196,8 @@ func (c *manifestContentCache) open(
 				// when the ordinary FileIO path would have succeeded.
 				file, err := base.Open(location)
 				if err != nil {
-					return nil, fmt.Errorf("open manifest %s after failed cache population: %w", location, err)
+					return nil, fmt.Errorf("open manifest %s: cache population failed: %w; fallback open failed: %w",
+						location, load.err, err)
 				}
 
 				return file, nil
@@ -239,8 +240,8 @@ func (c *manifestContentCache) open(
 			log.Printf("Warning: manifest cache population failed for %s: %v; falling back to FileIO", location, err)
 			file, fallbackErr := base.Open(location)
 			if fallbackErr != nil {
-				return nil, fmt.Errorf("manifest cache population failed: %w; fallback open failed: %w",
-					err, fallbackErr)
+				return nil, fmt.Errorf("open manifest %s: cache population failed: %w; fallback open failed: %w",
+					location, err, fallbackErr)
 			}
 
 			return file, nil
