@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 )
@@ -273,6 +274,28 @@ func TestSameAdjacentPartitionSourceSupportedTypes(t *testing.T) {
 				b.Append([]byte("same"))
 				b.Append([]byte("same"))
 				b.Append([]byte("diff"))
+				return b.NewArray()
+			},
+		},
+		{
+			name: "large binary",
+			newArray: func() arrow.Array {
+				b := array.NewBinaryBuilder(mem, arrow.BinaryTypes.LargeBinary)
+				defer b.Release()
+				b.Append([]byte("same"))
+				b.Append([]byte("same"))
+				b.Append([]byte("other"))
+				return b.NewArray()
+			},
+		},
+		{
+			name: "decimal128",
+			newArray: func() arrow.Array {
+				b := array.NewDecimal128Builder(mem, &arrow.Decimal128Type{Precision: 10, Scale: 2})
+				defer b.Release()
+				b.Append(decimal128.FromI64(1234))
+				b.Append(decimal128.FromI64(1234))
+				b.Append(decimal128.FromI64(5678))
 				return b.NewArray()
 			},
 		},
