@@ -218,8 +218,17 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 			return err
 		}
 
+		merged := 0
 		for _, manifestAggregates := range partial {
 			for _, local := range manifestAggregates {
+				// A manifest can contain many distinct partitions. Remain
+				// responsive to cancellation during the ordered merge, too.
+				if merged&1023 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				merged++
 				aggregate := aggregateTree.lookupPartition(local.partition, partitionType)
 				if aggregate == nil {
 					aggregates = append(aggregates, local)
