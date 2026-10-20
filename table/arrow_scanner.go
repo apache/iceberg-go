@@ -731,9 +731,9 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 	var dictionary arrow.Array
 	var indices *array.Dictionary
 	if dict, ok := filePathChunk.(*array.Dictionary); ok {
+		indices = dict
 		if dict.Dictionary().NullN() > 0 {
 			dictionary = dict.Dictionary()
-			indices = dict
 		}
 		if size := dict.Dictionary().Len(); size > 0 && size <= maxPositionDeleteDictionaryCacheEntries {
 			return a.appendFilePathChunkWithDictionaryCache(
@@ -768,6 +768,10 @@ func (a *posDeleteAccumulator) appendFilePathChunkWithoutCache(
 		if pos < 0 {
 			return fmt.Errorf("%w: negative pos %d in position delete file",
 				iceberg.ErrInvalidSchema, pos)
+		}
+		if indices != nil && indices.IsNull(i) {
+			return fmt.Errorf("%w: null file_path dictionary index in position delete file",
+				iceberg.ErrInvalidSchema)
 		}
 		if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
 			return fmt.Errorf("%w: null file_path dictionary value in position delete file",
@@ -819,6 +823,10 @@ func (a *posDeleteAccumulator) appendFilePathChunkWithDictionaryCache(
 		if pos < 0 {
 			return fmt.Errorf("%w: negative pos %d in position delete file",
 				iceberg.ErrInvalidSchema, pos)
+		}
+		if indices != nil && indices.IsNull(i) {
+			return fmt.Errorf("%w: null file_path dictionary index in position delete file",
+				iceberg.ErrInvalidSchema)
 		}
 		if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
 			return fmt.Errorf("%w: null file_path dictionary value in position delete file",
