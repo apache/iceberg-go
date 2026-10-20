@@ -32,52 +32,63 @@ func NormalizeVariantPath(fields []string) string {
 		return "$"
 	}
 
+	// Reserve space for the unescaped path and its bracket separators.
+	// Escapes may grow beyond this size, but normal member names fit at once.
+	size := 1
+	for _, field := range fields {
+		size += len(field) + 4
+	}
+
 	var b strings.Builder
+	b.Grow(size)
 	b.WriteByte('$')
 	for _, f := range fields {
 		b.WriteString("['")
-		b.WriteString(rfc9535Escape(f))
+		writeRFC9535Escaped(&b, f)
 		b.WriteString("']")
 	}
 
 	return b.String()
 }
 
-func rfc9535Escape(name string) string {
+// writeRFC9535Escaped writes directly to the path builder, avoiding a temporary
+// string for each escaped member. Preserve the rune-based escaping semantics.
+func writeRFC9535Escaped(b *strings.Builder, name string) {
 	if strings.IndexFunc(name, func(r rune) bool {
 		return r < 0x20 || r == '\'' || r == '\\'
 	}) < 0 {
-		return name
+		b.WriteString(name)
+
+		return
 	}
 
-	var b strings.Builder
-	b.Grow(len(name) + 4)
+	const hex = "0123456789abcdef"
 	for _, r := range name {
 		switch r {
 		case '\b':
-			b.WriteString(`\b`)
+			b.WriteString("\\b")
 		case '\t':
-			b.WriteString(`\t`)
+			b.WriteString("\\t")
 		case '\f':
-			b.WriteString(`\f`)
+			b.WriteString("\\f")
 		case '\n':
-			b.WriteString(`\n`)
+			b.WriteString("\\n")
 		case '\r':
-			b.WriteString(`\r`)
+			b.WriteString("\\r")
 		case '\'':
-			b.WriteString(`\'`)
+			b.WriteString("\\'")
 		case '\\':
-			b.WriteString(`\\`)
+			b.WriteString("\\\\")
 		default:
 			if r < 0x20 {
-				fmt.Fprintf(&b, `\u%04x`, r)
+				b.WriteString("\\u00")
+				b.WriteByte(hex[byte(r)>>4])
+				b.WriteByte(hex[byte(r)&0xf])
 			} else {
 				b.WriteRune(r)
 			}
 		}
 	}
-
-	return b.String()
 }
 
 // parseVariantPath parses a variant path into member names, accepting dot ($.a.b) and bracket ($['a']) notation.

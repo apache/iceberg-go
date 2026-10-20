@@ -38,6 +38,10 @@ func TestNormalizeVariantPathEscaping(t *testing.T) {
 		{"backslash escaped", []string{`a\b`}, `$['a\\b']`},
 		{"newline escaped", []string{"a\nb"}, `$['a\nb']`},
 		{"other control char hex-escaped", []string{"a\x01b"}, "$['a\\u0001b']"},
+		{"common control escapes", []string{"\b\t\f\n\r"}, "$['\\b\\t\\f\\n\\r']"},
+		{"nested escaped members", []string{"o'brien", "a\x00\x1fb", "a\\b"}, "$['o\\'brien']['a\\u0000\\u001fb']['a\\\\b']"},
+		{"unicode members", []string{"naïve", "東京"}, "$['naïve']['東京']"},
+		{"empty member", []string{""}, "$['']"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, NormalizeVariantPath(tt.fields))
