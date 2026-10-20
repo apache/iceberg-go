@@ -161,6 +161,7 @@ func decodeScanTasks(
 	out := make([]table.FileScanTask, 0, len(wire.FileScanTasks))
 	dvOwners := make(map[int]string)
 	deleteRefTaskIDs := make([]int, len(deletes))
+	var residuals taskResidualDecoder
 	for i := range wire.FileScanTasks {
 		wireTask := wire.FileScanTasks[i]
 		if wireTask.DataFile == nil {
@@ -172,7 +173,7 @@ func decodeScanTasks(
 			return nil, fmt.Errorf("%w: decoding scan tasks: file-scan-tasks[%d].data-file: %w", ErrRESTError, i, err)
 		}
 
-		residual, err := decodeTaskResidual(wireTask.ResidualFilter, schema, fallbackResidual)
+		residual, err := residuals.decode(wireTask.ResidualFilter, schema, fallbackResidual)
 		if err != nil {
 			return nil, fmt.Errorf("%w: decoding scan tasks: file-scan-tasks[%d].residual-filter: %w", ErrRESTError, i, err)
 		}
@@ -807,6 +808,38 @@ func decodeJSONFloat(raw json.RawMessage, bitSize int) (float64, error) {
 	}
 
 	return parsed, nil
+}
+
+// taskResidualDecoder avoids reparsing an identical residual for adjacent scan
+// tasks. It is local to one envelope: no global cache or retained task JSON.
+type taskResidualDecoder struct {
+	lastRaw   json.RawMessage
+	lastValue iceberg.BooleanExpression
+}
+
+func (d *taskResidualDecoder) decode(
+	raw json.RawMessage,
+	schema *iceberg.Schema,
+	fallback iceberg.BooleanExpression,
+) (iceberg.BooleanExpression, error) {
+	// Most scans omit per-task residuals. Preserve that zero-allocation
+	// fallback and do not retain a cached expression across missing filters.
+	if len(raw) == 0 {
+		d.lastRaw, d.lastValue = nil, nil
+
+		return fallback, nil
+	}
+	if len(d.lastRaw) > 0 && bytes.Equal(raw, d.lastRaw) {
+		return d.lastValue, nil
+	}
+
+	value, err := decodeTaskResidual(raw, schema, fallback)
+	if err != nil {
+		return nil, err
+	}
+	d.lastRaw, d.lastValue = raw, value
+
+	return value, nil
 }
 
 func decodeTaskResidual(
