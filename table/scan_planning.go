@@ -137,8 +137,12 @@ func WithScanPlanningDirective(value string, ok bool) Option {
 // WithScanPlanningDirectiveFrom copies src's scan-planning directive verbatim,
 // including whether one was present and any unrecognized raw value. Catalogs
 // use it when rebuilding a table from a response that carries no table config,
-// such as a credential refresh.
+// such as a credential refresh. A nil src leaves the directive unchanged.
 func WithScanPlanningDirectiveFrom(src *Table) Option {
+	if src == nil {
+		return func(*Table) {}
+	}
+
 	return WithScanPlanningDirective(src.scanPlanningDirective, src.hasScanPlanningDirective)
 }
 

@@ -813,6 +813,18 @@ func TestWithScanPlanningDirectiveFrom(t *testing.T) {
 			assert.Equal(t, src.hasScanPlanningDirective, dst.hasScanPlanningDirective)
 		})
 	}
+
+	t.Run("nil source", func(t *testing.T) {
+		t.Parallel()
+
+		var dst *Table
+		require.NotPanics(t, func() {
+			dst = New(Identifier{"db", "tbl"}, nil, "", nil, nil,
+				WithScanPlanningDirective("client", true), WithScanPlanningDirectiveFrom(nil))
+		})
+		assert.Equal(t, "client", dst.scanPlanningDirective)
+		assert.True(t, dst.hasScanPlanningDirective)
+	})
 }
 
 func TestScanEnforcesPlanningDirective(t *testing.T) {

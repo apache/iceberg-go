@@ -4783,3 +4783,79 @@ func TestCatalogConfigScanPlanningDirective(t *testing.T) {
 		})
 	}
 }
+
+// A commit response carries no table config, so UpdateTable keeps only the
+// catalog's own scan-planning-mode property and drops the per-table directive
+// from the load config. This pins both directions: a per-table server directive
+// is dropped, and a per-table client directive under a catalog-wide server
+// directive comes back as server.
+func TestUpdateTableKeepsOnlyCatalogScanPlanningDirective(t *testing.T) {
+	const metadataLoc = "s3://warehouse/database/table/metadata/00001.metadata.json"
+
+	for _, tc := range []struct {
+		name        string
+		catalogMode string
+		tableConfig string
+		wantLoaded  table.ScanPlanningDirective
+		wantUpdated table.ScanPlanningDirective
+	}{
+		{
+			name:        "per-table server is dropped",
+			tableConfig: `{"scan-planning-mode": "server"}`,
+			wantLoaded:  table.ScanPlanningDirectiveServer,
+			wantUpdated: table.ScanPlanningDirectiveNone,
+		},
+		{
+			name:        "per-table client under catalog server becomes server",
+			catalogMode: "server",
+			tableConfig: `{"scan-planning-mode": "client"}`,
+			wantLoaded:  table.ScanPlanningDirectiveClient,
+			wantUpdated: table.ScanPlanningDirectiveServer,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"defaults": map[string]any{}, "overrides": map[string]any{},
+				}))
+			})
+			mux.HandleFunc("/v1/namespaces/fokko/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+				body := `{"metadata-location": "` + metadataLoc + `", "metadata": ` + directiveTestMetadata
+				if req.Method == http.MethodGet {
+					body += `, "config": ` + tc.tableConfig
+				}
+				_, err := w.Write([]byte(body + `}`))
+				require.NoError(t, err)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			opts := []rest.Option{rest.WithOAuthToken(TestToken)}
+			if tc.catalogMode != "" {
+				opts = append(opts, rest.WithAdditionalProps(iceberg.Properties{"scan-planning-mode": tc.catalogMode}))
+			}
+			cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, opts...)
+			require.NoError(t, err)
+			ident := catalog.ToIdentifier("fokko", "tbl")
+
+			loaded, err := cat.LoadTable(context.Background(), ident)
+			require.NoError(t, err)
+			got, err := loaded.ScanPlanningDirective()
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantLoaded, got)
+
+			updated, err := cat.UpdateTable(context.Background(), ident, nil, nil)
+			require.NoError(t, err)
+			got, err = updated.ScanPlanningDirective()
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantUpdated, got)
+
+			if tc.wantUpdated == table.ScanPlanningDirectiveServer {
+				_, err = updated.Scan(table.WithScanPlanningMode(table.ScanPlanningLocal)).PlanFiles(context.Background())
+				require.ErrorIs(t, err, table.ErrInvalidOperation)
+				assert.ErrorContains(t, err, "requires server-side scan planning")
+			}
+		})
+	}
+}

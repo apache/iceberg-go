@@ -153,16 +153,17 @@ Read it with `tbl.ScanPlanningDirective()`.
 | `client` | `remote` | Error. |
 | none | any | As described above. |
 
-Two behaviors are specific to this client. The directive is checked when a
+Some behaviors are specific to this client. The directive is checked when a
 scan is planned, not when the table is loaded, so a `server` table whose
 catalog does not advertise the plan endpoint can still be loaded and committed
 to; planning it returns an error. An unrecognized directive value likewise
-fails only at planning. And an explicit scan option that conflicts with the
-directive is rejected rather than overridden.
+fails only at planning. An explicit scan option that conflicts with the
+directive is rejected rather than overridden. And incremental append and
+changelog scans, which only plan locally, return an error on a `server` table,
+where the Java client plans them locally.
 
-Incremental append and changelog scans only plan locally, so they return an
-error on a `server` table. Scans inside a transaction plan staged metadata
-locally and do not apply the directive. Commit responses carry no table
+Scans inside a transaction plan staged metadata locally and do not apply the
+directive. Commit responses carry no table
 config, so a table returned by `UpdateTable` keeps only the catalog's own
 `scan-planning-mode` property; reload it to obtain a per-table directive.
 
