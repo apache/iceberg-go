@@ -218,6 +218,21 @@ func (c *snapshotManifestCache) get(
 	}
 }
 
+// tryGetComplete returns a completed manifest list without starting or joining
+// a read. Inspect can use this to keep warm-cache traversal synchronous while
+// still prefetching cache misses concurrently.
+func (c *snapshotManifestCache) tryGetComplete(snapshot Snapshot) (snapshotManifestSet, bool) {
+	if c == nil {
+		return snapshotManifestSet{}, false
+	}
+
+	c.mu.Lock()
+	manifests, ok := c.complete.Get(snapshotManifestCacheKeyFor(snapshot))
+	c.mu.Unlock()
+
+	return manifests, ok
+}
+
 func (c *snapshotManifestCache) load(
 	ctx context.Context,
 	snapshot Snapshot,
@@ -350,6 +365,10 @@ func (p ManifestProvider) set(ctx context.Context, snapshot Snapshot) (snapshotM
 	return p.cache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
 		return readSnapshotManifestSet(loadCtx, snapshot, p.fsF)
 	})
+}
+
+func (p ManifestProvider) cachedSet(snapshot Snapshot) (snapshotManifestSet, bool) {
+	return p.cache.tryGetComplete(snapshot)
 }
 
 func sharedSnapshotManifestFSF(fsF FSysF) FSysF {

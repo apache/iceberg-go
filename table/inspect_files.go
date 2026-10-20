@@ -172,20 +172,7 @@ func (i InspectTable) allManifestEntryReader(
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
 		func(yield func(iceberg.ManifestFile, error) bool) {
-			seen := make(map[string]struct{})
-			streamSnapshotManifests(ctx, snapshots, provider.set, func(manifest iceberg.ManifestFile, err error) bool {
-				if err != nil {
-					return yield(nil, err)
-				}
-
-				path := manifest.FilePath()
-				if _, ok := seen[path]; ok {
-					return true
-				}
-				seen[path] = struct{}{}
-
-				return yield(manifest, nil)
-			})
+			streamSnapshotManifests(ctx, snapshots, provider.cachedSet, provider.set, yield)
 		}), nil
 }
 
