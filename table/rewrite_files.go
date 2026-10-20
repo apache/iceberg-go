@@ -95,7 +95,9 @@ func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles
 // content type: data files are queued as data-file replacements;
 // pos/eq-delete files are queued for delete-file removal alongside
 // the data rewrite (typical when a delete is fully applied to data
-// files being rewritten and is therefore safe to expunge).
+// files being rewritten and is therefore safe to expunge). On v3 a
+// removed data file's live deletion vector is removed with it, so it
+// does not need to be passed here.
 //
 // Any other content type stages an error that is returned from the
 // next [RewriteFiles.Commit] call.
