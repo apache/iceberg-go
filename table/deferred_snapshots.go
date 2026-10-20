@@ -363,6 +363,23 @@ func skipJSONSpace(raw []byte, i int) int {
 }
 
 func scanJSONString(raw []byte, i int) int {
+	// Most snapshot metadata strings contain no escaped quotes. Search for
+	// the closing quote directly instead of examining every byte.
+	start := i + 1
+	if start >= len(raw) {
+		return len(raw)
+	}
+	if offset := bytes.IndexByte(raw[start:], '"'); offset >= 0 {
+		end := start + offset
+		if end == start || raw[end-1] != '\\' {
+			return end + 1
+		}
+	} else {
+		return len(raw)
+	}
+
+	// A quote after a backslash may be escaped. Keep the escape-aware path
+	// for that case, including consecutive backslashes.
 	for i++; i < len(raw); i++ {
 		switch raw[i] {
 		case '\\':
