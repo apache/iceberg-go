@@ -168,22 +168,44 @@ func testListNamespaces(t *testing.T, cfg Config) {
 	assert.Contains(t, namespaces, second, "remaining namespace should still be listed")
 }
 
-// skipWithoutNamespaceProperties exempts catalogs that cannot store namespace
-// properties from the tests that write them.
-func skipWithoutNamespaceProperties(t *testing.T, cfg Config) {
-	t.Helper()
+// testNamespacePropertiesNotSupported asserts that a catalog which cannot store
+// namespace properties rejects writing them with iceberg.ErrNotImplemented and
+// that the rejected call changes nothing: creating with properties must not
+// leave a namespace behind, and a rejected update must not alter the
+// properties already loaded for the namespace.
+func testNamespacePropertiesNotSupported(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, _ := newIdentifiers()
 
-	if !cfg.SupportsNamespaceProperties {
-		t.Skip("catalog does not support namespace properties")
-	}
+	err := cat.CreateNamespace(ctx, namespace, iceberg.Properties{"prop": "val"})
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+
+	exists, err := cat.CheckNamespaceExists(ctx, namespace)
+	require.NoError(t, err)
+	require.False(t, exists, "rejected create should not leave a namespace behind")
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	before, err := cat.LoadNamespaceProperties(ctx, namespace)
+	require.NoError(t, err)
+
+	_, err = cat.UpdateNamespaceProperties(ctx, namespace, nil, iceberg.Properties{"prop": "val"})
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+
+	_, err = cat.UpdateNamespaceProperties(ctx, namespace, []string{"location"}, nil)
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+
+	after, err := cat.LoadNamespaceProperties(ctx, namespace)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "rejected updates should leave properties unchanged")
 }
 
 // testCreateNamespaceWithProperties asserts that properties passed to
 // CreateNamespace are readable afterwards. A catalog may add properties of its
 // own, so only the created one is checked.
 func testCreateNamespaceWithProperties(t *testing.T, cfg Config) {
-	skipWithoutNamespaceProperties(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, _ := newIdentifiers()
@@ -219,8 +241,6 @@ func testLoadNamespaceProperties(t *testing.T, cfg Config) {
 // testSetNamespaceProperties asserts that properties set on an existing
 // namespace are reported as updated and are readable afterwards.
 func testSetNamespaceProperties(t *testing.T, cfg Config) {
-	skipWithoutNamespaceProperties(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, _ := newIdentifiers()
@@ -242,8 +262,6 @@ func testSetNamespaceProperties(t *testing.T, cfg Config) {
 // testUpdateNamespaceProperties asserts that setting a property that already
 // has a value overwrites it.
 func testUpdateNamespaceProperties(t *testing.T, cfg Config) {
-	skipWithoutNamespaceProperties(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, _ := newIdentifiers()
@@ -266,8 +284,6 @@ func testUpdateNamespaceProperties(t *testing.T, cfg Config) {
 // testUpdateAndSetNamespaceProperties asserts that a single update may both
 // overwrite an existing property and add a new one.
 func testUpdateAndSetNamespaceProperties(t *testing.T, cfg Config) {
-	skipWithoutNamespaceProperties(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, _ := newIdentifiers()
@@ -291,8 +307,6 @@ func testUpdateAndSetNamespaceProperties(t *testing.T, cfg Config) {
 // testRemoveNamespaceProperties asserts that a removed property is gone and
 // that the properties left alone survive.
 func testRemoveNamespaceProperties(t *testing.T, cfg Config) {
-	skipWithoutNamespaceProperties(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, _ := newIdentifiers()
@@ -318,8 +332,6 @@ func testRemoveNamespaceProperties(t *testing.T, cfg Config) {
 // testSetNamespacePropertiesNamespaceDoesNotExist asserts that setting
 // properties on a namespace that was never created is an error.
 func testSetNamespacePropertiesNamespaceDoesNotExist(t *testing.T, cfg Config) {
-	skipWithoutNamespaceProperties(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, _ := newIdentifiers()
@@ -331,8 +343,6 @@ func testSetNamespacePropertiesNamespaceDoesNotExist(t *testing.T, cfg Config) {
 // testRemoveNamespacePropertiesNamespaceDoesNotExist asserts that removing
 // properties from a namespace that was never created is an error.
 func testRemoveNamespacePropertiesNamespaceDoesNotExist(t *testing.T, cfg Config) {
-	skipWithoutNamespaceProperties(t, cfg)
-
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	namespace, _ := newIdentifiers()
