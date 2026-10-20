@@ -283,6 +283,11 @@ func (i InspectTable) foldInspectPartitionManifest(
 	aggregateTree *inspectPartitionAggregateTree,
 	aggregates *[]*inspectPartitionAggregate,
 ) error {
+	// Avoid opening remote manifest files after the caller has canceled.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	entryIndex := 0
 	for entry, err := range manifest.Entries(fs, true) {
 		if err != nil {
