@@ -33,22 +33,25 @@ const (
 
 var planFilesFinalizationBenchmarkSink int
 
-// BenchmarkPlanFilesTaskFinalization measures the effect of scan-task
-// finalization in the context of local PlanFiles. The benchmark fixture is
-// shared by the pre-change and parallel implementations, so copy this file to
-// the PR base worktree when comparing the two revisions.
+// BenchmarkPlanFilesTaskFinalization exercises local planning over multiple
+// partition specs and partition values, with an optional mixture of split and
+// unsplit Parquet tasks. It uses in-memory FileIO and no delete manifests,
+// so this is not a full measure of remote IO or delete-index build cost.
+// Copy this fixture unchanged to the PR base worktree for before/after runs.
 func BenchmarkPlanFilesTaskFinalization(b *testing.B) {
-	tbl := newPlanFilesFinalizationBenchmarkTable(b)
-	fileCount := planFilesFinalizationBenchmarkManifestCount * planFilesFinalizationBenchmarkFilesPerManifest
+	const fileCount = planFilesFinalizationBenchmarkManifestCount * planFilesFinalizationBenchmarkFilesPerManifest
 
 	for _, tc := range []struct {
-		name      string
-		rowFilter iceberg.BooleanExpression
+		name         string
+		rowFilter    iceberg.BooleanExpression
+		splitOffsets bool
 	}{
 		{name: "plain", rowFilter: iceberg.AlwaysTrue{}},
 		{name: "identity_residual", rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int32(7))},
+		{name: "split_offsets", rowFilter: iceberg.AlwaysTrue{}, splitOffsets: true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
+			tbl := newPlanFilesFinalizationBenchmarkTable(b, tc.splitOffsets)
 			scan := tbl.Scan(WithMaxConcurrency(8), WithRowFilter(tc.rowFilter))
 			b.ReportAllocs()
 			b.ReportMetric(float64(fileCount), "files/op")
@@ -57,8 +60,11 @@ func BenchmarkPlanFilesTaskFinalization(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				if len(tasks) != fileCount {
-					b.Fatalf("PlanFiles returned %d tasks, want %d", len(tasks), fileCount)
+				if len(tasks) < fileCount {
+					b.Fatalf("PlanFiles returned %d tasks, want at least %d", len(tasks), fileCount)
+				}
+				if !tc.splitOffsets && len(tasks) != fileCount {
+					b.Fatalf("PlanFiles returned %d unsplit tasks, want %d", len(tasks), fileCount)
 				}
 				planFilesFinalizationBenchmarkSink = len(tasks)
 			}
@@ -66,7 +72,7 @@ func BenchmarkPlanFilesTaskFinalization(b *testing.B) {
 	}
 }
 
-func newPlanFilesFinalizationBenchmarkTable(b testing.TB) *Table {
+func newPlanFilesFinalizationBenchmarkTable(b testing.TB, splitOffsets bool) *Table {
 	b.Helper()
 
 	const (
@@ -78,7 +84,11 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB) *Table {
 	fs := newTrackingIO()
 	schema := simpleSchema()
 	spec := partitionedSpec()
-	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation, nil)
+	properties := iceberg.Properties{}
+	if splitOffsets {
+		properties[ReadSplitTargetSizeKey] = "512"
+	}
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation, properties)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -86,18 +96,30 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB) *Table {
 	if err != nil {
 		b.Fatal(err)
 	}
+	// Alternate the identity partition and unpartitioned specs to exercise
+	// residual evaluator lookup and cross-spec manifest planning.
+	unpartitioned := iceberg.NewPartitionSpecID(1)
+	requireNoErrorBenchmark(b, builder.AddPartitionSpec(&unpartitioned, false))
 
 	manifests := make([]iceberg.ManifestFile, planFilesFinalizationBenchmarkManifestCount)
 	for manifestIndex := range manifests {
 		entries := make([]iceberg.ManifestEntry, planFilesFinalizationBenchmarkFilesPerManifest)
+		manifestSpec := spec
+		partition := map[int]any(nil)
+		if manifestIndex%2 == 1 {
+			manifestSpec = unpartitioned
+		}
 		for entryIndex := range entries {
 			dataPath := fmt.Sprintf("%s/data-%d-%d.parquet", tableLocation, manifestIndex, entryIndex)
+			if manifestIndex%2 == 0 {
+				partition = map[int]any{1000: int32(6 + entryIndex%4)}
+			}
 			fileBuilder, err := iceberg.NewDataFileBuilder(
-				spec,
+				manifestSpec,
 				iceberg.EntryContentData,
 				dataPath,
 				iceberg.ParquetFile,
-				map[int]any{1000: int32(7)},
+				partition,
 				nil,
 				nil,
 				1,
@@ -105,6 +127,9 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB) *Table {
 			)
 			if err != nil {
 				b.Fatal(err)
+			}
+			if splitOffsets && entryIndex%4 == 0 {
+				fileBuilder.SplitOffsets([]int64{0, 512, 1024, 1536})
 			}
 			entries[entryIndex] = iceberg.NewManifestEntryBuilder(
 				iceberg.EntryStatusADDED,
@@ -115,7 +140,7 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB) *Table {
 
 		manifestPath := fmt.Sprintf("%s/metadata/manifest-%d.avro", tableLocation, manifestIndex)
 		var manifestBuffer bytes.Buffer
-		_, err := iceberg.WriteManifest(manifestPath, &manifestBuffer, 2, spec, schema, snapshotID, entries)
+		_, err := iceberg.WriteManifest(manifestPath, &manifestBuffer, 2, manifestSpec, schema, snapshotID, entries)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -123,7 +148,7 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB) *Table {
 			b.Fatal(err)
 		}
 		manifests[manifestIndex] = iceberg.NewManifestFile(
-			2, manifestPath, int64(manifestBuffer.Len()), int32(spec.ID()), snapshotID,
+			2, manifestPath, int64(manifestBuffer.Len()), int32(manifestSpec.ID()), snapshotID,
 		).SequenceNum(sequenceNum, sequenceNum).
 			AddedFiles(int32(planFilesFinalizationBenchmarkFilesPerManifest)).
 			AddedRows(int64(planFilesFinalizationBenchmarkFilesPerManifest)).

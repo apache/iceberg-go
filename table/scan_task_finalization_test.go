@@ -497,6 +497,9 @@ func finalizationTestDataFile(
 
 var scanTaskFinalizationBenchmarkSink int
 
+// Compare the independent old serial loop with the new finalization after
+// identical per-iteration input clones. Smaller sizes exercise the conservative
+// worker threshold; the large sizes measure throughput once workers amortize.
 func BenchmarkFinalizePlannedTasks(b *testing.B) {
 	schema := simpleSchema()
 	spec := partitionedSpec()
@@ -548,36 +551,43 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 				tasks[i] = FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
 			}
 
-			b.Run("old_serial_loop", func(b *testing.B) {
-				scan := &Scan{
-					metadata: metadata, rowFilter: tc.rowFilter, caseSensitive: true, concurrency: 1,
-				}
-				b.ReportAllocs()
-				b.ReportMetric(float64(tc.fileCount), "files/op")
-				for b.Loop() {
-					result, _, err := serialFinalizationReference(scan, tasks, schema)
-					if err != nil {
-						b.Fatal(err)
-					}
-					scanTaskFinalizationBenchmarkSink += len(result)
-				}
-			})
-
-			for _, concurrency := range []int{1, 2, 4, 8} {
-				b.Run(fmt.Sprintf("concurrency=%d", concurrency), func(b *testing.B) {
-					scan := &Scan{
-						metadata: metadata, rowFilter: tc.rowFilter,
-						caseSensitive: true, concurrency: concurrency,
-					}
-					b.ReportAllocs()
-					b.ReportMetric(float64(tc.fileCount), "files/op")
-					for b.Loop() {
-						var acc scanMetricsAccumulator
-						finalized, err := scan.finalizePlannedTasks(tasks, schema, &acc)
-						if err != nil {
-							b.Fatal(err)
+			for _, fileCount := range []int{512, 1_024, 2_048, 4_096, tc.fileCount} {
+				b.Run(fmt.Sprintf("files=%d", fileCount), func(b *testing.B) {
+					benchTasks := tasks[:fileCount]
+					b.Run("old_serial_loop", func(b *testing.B) {
+						scan := &Scan{
+							metadata: metadata, rowFilter: tc.rowFilter, caseSensitive: true, concurrency: 1,
 						}
-						scanTaskFinalizationBenchmarkSink += len(finalized)
+						b.ReportAllocs()
+						b.ReportMetric(float64(fileCount), "files/op")
+						for b.Loop() {
+							input := append([]FileScanTask(nil), benchTasks...)
+							result, _, err := serialFinalizationReference(scan, input, schema)
+							if err != nil {
+								b.Fatal(err)
+							}
+							scanTaskFinalizationBenchmarkSink += len(result)
+						}
+					})
+
+					for _, concurrency := range []int{1, 2, 4, 8} {
+						b.Run(fmt.Sprintf("concurrency=%d", concurrency), func(b *testing.B) {
+							scan := &Scan{
+								metadata: metadata, rowFilter: tc.rowFilter,
+								caseSensitive: true, concurrency: concurrency,
+							}
+							b.ReportAllocs()
+							b.ReportMetric(float64(fileCount), "files/op")
+							for b.Loop() {
+								input := append([]FileScanTask(nil), benchTasks...)
+								var acc scanMetricsAccumulator
+								finalized, err := scan.finalizePlannedTasks(input, schema, &acc)
+								if err != nil {
+									b.Fatal(err)
+								}
+								scanTaskFinalizationBenchmarkSink += len(finalized)
+							}
+						})
 					}
 				})
 			}
