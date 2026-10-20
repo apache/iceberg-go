@@ -155,35 +155,37 @@ func TestMemFSOpenConcurrentReplacement(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 300; i++ {
+	wg.Go(func() {
+		for i := range 300 {
 			value := a
 			if i%2 != 0 {
 				value = b
 			}
 			if err := memFS.WriteFile(name, value); err != nil {
 				t.Errorf("write: %v", err)
+
 				return
 			}
 		}
-	}()
+	})
 
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		file, err := memFS.Open(name)
 		if err != nil {
 			t.Errorf("open: %v", err)
+
 			break
 		}
 		data, readErr := io.ReadAll(file)
 		closeErr := file.Close()
 		if readErr != nil || closeErr != nil {
 			t.Errorf("read: %v, close: %v", readErr, closeErr)
+
 			break
 		}
 		if !bytes.Equal(data, a) && !bytes.Equal(data, b) {
 			t.Errorf("file changed while open")
+
 			break
 		}
 	}
