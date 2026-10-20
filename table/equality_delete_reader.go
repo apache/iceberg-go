@@ -63,6 +63,8 @@ type equalityDeleteSet struct {
 
 	singleInt64Once sync.Once
 	singleInt64     *singleInt64EqualityDeleteSet
+	singleBytesOnce sync.Once
+	singleBytes     *singleBytesEqualityDeleteSet
 }
 
 type arrowFieldRef struct {
@@ -1267,42 +1269,45 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		})
 	case *array.String:
 		offsets := a.ValueOffsets()
-
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
 	case *array.LargeString:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
 	case *array.Binary:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
 	case *array.LargeBinary:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
+		baseOffset := offsets[0]
 
 		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
-			start, end := offsets[row], offsets[row+1]
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
 		})
@@ -1377,6 +1382,52 @@ func (e *equalityDeleteSet) singleInt64Set(fileSchema *iceberg.Schema) *singleIn
 	return e.singleInt64
 }
 
+type singleBytesEqualityDeleteSet struct {
+	keys    set[string]
+	hasNull bool
+}
+
+// singleBytesSet indexes one string or binary equality field by its raw
+// value. The encoded representation has a null tag and, for non-null values,
+// a four-byte length prefix. Unexpected keys must use the generic encoder.
+func (e *equalityDeleteSet) singleBytesSet(fileSchema *iceberg.Schema) *singleBytesEqualityDeleteSet {
+	if fileSchema == nil || len(e.fieldIDs) != 1 {
+		return nil
+	}
+
+	field, ok := fileSchema.FindFieldByID(e.fieldIDs[0])
+	if !ok {
+		return nil
+	}
+	switch field.Type.(type) {
+	case iceberg.StringType, iceberg.BinaryType:
+	default:
+		return nil
+	}
+
+	e.singleBytesOnce.Do(func() {
+		result := &singleBytesEqualityDeleteSet{
+			keys: make(set[string], len(e.keys)),
+		}
+		for key := range e.keys {
+			if len(key) == 1 && key[0] == 0 {
+				result.hasNull = true
+
+				continue
+			}
+			if len(key) < 5 || key[0] != 1 ||
+				int(binary.BigEndian.Uint32([]byte(key[1:5]))) != len(key)-5 {
+				return
+			}
+			// A substring retains the immutable encoded key's backing bytes.
+			result.keys[key[5:]] = struct{}{}
+		}
+		e.singleBytes = result
+	})
+
+	return e.singleBytes
+}
+
 type equalityDeleteMask struct {
 	buffer *memory.Buffer
 	bits   []byte
@@ -1446,6 +1497,74 @@ func (m *equalityDeleteMask) applySingleInt64(
 	return true
 }
 
+func applySingleBytesValues[Offset ~int32 | ~int64](
+	m *equalityDeleteMask,
+	column arrow.Array,
+	offsets []Offset,
+	data []byte,
+	deleteSet *singleBytesEqualityDeleteSet,
+	mem memory.Allocator,
+) {
+	numRows := column.Len()
+	baseOffset := offsets[0]
+	if column.NullN() == 0 {
+		for row := range numRows {
+			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+				continue
+			}
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
+			if _, deleted := deleteSet.keys[string(data[start:end])]; !deleted {
+				continue
+			}
+			m.ensure(mem, numRows)
+			bitutil.ClearBit(m.bits, row)
+		}
+
+		return
+	}
+
+	for row := range numRows {
+		if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+			continue
+		}
+		if column.IsNull(row) {
+			if !deleteSet.hasNull {
+				continue
+			}
+		} else {
+			start, end := offsets[row]-baseOffset, offsets[row+1]-baseOffset
+			if _, deleted := deleteSet.keys[string(data[start:end])]; !deleted {
+				continue
+			}
+		}
+		m.ensure(mem, numRows)
+		bitutil.ClearBit(m.bits, row)
+	}
+}
+
+// applySingleBytes avoids length-prefix serialization for flat string/binary
+// columns, including their large-offset Arrow variants.
+func (m *equalityDeleteMask) applySingleBytes(
+	column arrow.Array,
+	deleteSet *singleBytesEqualityDeleteSet,
+	mem memory.Allocator,
+) bool {
+	switch values := column.(type) {
+	case *array.String:
+		applySingleBytesValues(m, column, values.ValueOffsets(), values.ValueBytes(), deleteSet, mem)
+	case *array.LargeString:
+		applySingleBytesValues(m, column, values.ValueOffsets(), values.ValueBytes(), deleteSet, mem)
+	case *array.Binary:
+		applySingleBytesValues(m, column, values.ValueOffsets(), values.ValueBytes(), deleteSet, mem)
+	case *array.LargeBinary:
+		applySingleBytesValues(m, column, values.ValueOffsets(), values.ValueBytes(), deleteSet, mem)
+	default:
+		return false
+	}
+
+	return true
+}
+
 // processEqualityDeletesColumnarForFile resolves field paths once per file and
 // typed column encoders once per batch, then iterates rows without per-row type
 // switches. Each delete set is applied independently because sets may have
@@ -1482,11 +1601,13 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 	}
 
 	singleInt64Sets := make([]*singleInt64EqualityDeleteSet, len(eqDeleteSets))
+	singleBytesSets := make([]*singleBytesEqualityDeleteSet, len(eqDeleteSets))
 	for i, eqDel := range eqDeleteSets {
 		// Nested fields need parent validity checks and use the generic path.
 		// Do not duplicate their encoded keys in an index that cannot be used.
 		if len(fieldRefs[i]) == 1 && len(fieldRefs[i][0].path) == 1 {
 			singleInt64Sets[i] = eqDel.singleInt64Set(fileSchema)
+			singleBytesSets[i] = eqDel.singleBytesSet(fileSchema)
 		}
 	}
 
@@ -1502,13 +1623,16 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		var keyBuf bytes.Buffer
 
 		for setIdx, eqDel := range eqDeleteSets {
-			if int64Set := singleInt64Sets[setIdx]; int64Set != nil {
+			if int64Set, bytesSet := singleInt64Sets[setIdx], singleBytesSets[setIdx]; int64Set != nil || bytesSet != nil {
 				column, _, err := arrowArraysAtField(
 					r, fieldRefs[setIdx][0], eqDel.fieldIDs[0], eqDel.colNames[0], dataFilePath)
 				if err != nil {
 					return nil, err
 				}
-				if mask.applySingleInt64(column, int64Set, mem) {
+				if int64Set != nil && mask.applySingleInt64(column, int64Set, mem) {
+					continue
+				}
+				if bytesSet != nil && mask.applySingleBytes(column, bytesSet, mem) {
 					continue
 				}
 			}
