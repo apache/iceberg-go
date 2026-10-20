@@ -150,3 +150,44 @@ func TestInspectPartitionsParallelManifestReadFailure(t *testing.T) {
 	require.Nil(t, reader)
 	require.EqualValues(t, 0, tracked.active.Load())
 }
+
+func TestInspectPartitionsParallelCancelledContext(t *testing.T) {
+	tbl, tracked := inspectWithTrackingIO(t, inspectParallelPartitionManifestTable(t, 8))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	reader, err := tbl.Inspect().Partitions(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, reader)
+	require.Zero(t, tracked.maxActive.Load())
+}
+
+func TestMergeInspectPartitionAggregateTimestampTies(t *testing.T) {
+	const timestamp = int64(123000)
+	firstSnapshot := int64(10)
+	secondSnapshot := int64(20)
+	dst := &inspectPartitionAggregate{
+		dataRecordCount: 3, dataFileCount: 1, specID: 1,
+		lastUpdatedAt: new(timestamp), lastUpdatedSnapshot: &firstSnapshot,
+	}
+	sameTime := &inspectPartitionAggregate{
+		dataRecordCount: 5, dataFileCount: 2, specID: 2,
+		lastUpdatedAt: new(timestamp), lastUpdatedSnapshot: &secondSnapshot,
+	}
+	mergeInspectPartitionAggregate(dst, sameTime)
+
+	// The earlier manifest wins a timestamp tie, but counts still add up.
+	require.EqualValues(t, 8, dst.dataRecordCount)
+	require.EqualValues(t, 3, dst.dataFileCount)
+	require.EqualValues(t, 1, dst.specID)
+	require.Equal(t, firstSnapshot, *dst.lastUpdatedSnapshot)
+
+	newerTime := timestamp + 1
+	newer := &inspectPartitionAggregate{
+		specID: 3, lastUpdatedAt: &newerTime, lastUpdatedSnapshot: &secondSnapshot,
+	}
+	mergeInspectPartitionAggregate(dst, newer)
+	require.EqualValues(t, 3, dst.specID)
+	require.Equal(t, newerTime, *dst.lastUpdatedAt)
+	require.Equal(t, secondSnapshot, *dst.lastUpdatedSnapshot)
+}
