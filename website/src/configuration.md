@@ -368,6 +368,9 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | `io.manifest.cache.max-total-bytes` | `104857600` | Retained raw bytes per independently loaded table. Handles returned by commit share their source table's cache and budget. Concurrent population buffers and bytes held by active readers are not counted. |
 | `io.manifest.cache.max-content-length` | `8388608` | Maximum size of one manifest eligible for content caching. Compatible cache entries survive table refresh and commit. |
 
+Unlike Java, which rejects invalid manifest-cache limits, Go warns and disables
+the content cache for negative expiration or non-positive/unparsable size limits.
+
 The manifest-list cache retains at most 64 snapshots and 32,768 manifest
 descriptors in total per table handle. These are count limits, not byte limits:
 memory use also depends on manifest paths, partition summaries, and key metadata.
@@ -376,9 +379,9 @@ Refreshing the table replaces its manifest-list cache.
 The optional manifest-content cache is separate. It stores immutable raw manifest
 bytes and still decodes, projects, and filters entries independently for each
 scan. Cache misses for the same manifest share one in-flight read. If population
-fails, its producer attempts one ordinary FileIO open. Existing waiters receive
-the shared error instead of each retrying the backend; if the producer was
-canceled, live waiters can start another shared load. Failed content is not
+fails, its producer and each existing waiter independently fall back to one
+ordinary FileIO open; if the producer was canceled, live waiters can start
+another shared load. Failed content is not
 retained, so a later scan can retry. Manifests larger than the configured
 per-file limit bypass the cache. The current integration covers local scan
 planning; manifest lists continue to use the decoded manifest-list cache.

@@ -192,9 +192,14 @@ func (c *manifestContentCache) open(
 			// Concurrent callers may describe the same path with different lengths.
 			// Never reuse in-flight bytes that do not match this caller's descriptor.
 			if load.err != nil {
-				// A failed shared population should not fan out into one
-				// backend retry per waiter.
-				return nil, load.err
+				// A failed population must not make concurrent scans fail
+				// when the ordinary FileIO path would have succeeded.
+				file, err := base.Open(location)
+				if err != nil {
+					return nil, fmt.Errorf("open manifest %s after failed cache population: %w", location, err)
+				}
+
+				return file, nil
 			}
 			if int64(len(load.content)) != expectedLength {
 				return base.Open(location)
@@ -229,7 +234,9 @@ func (c *manifestContentCache) open(
 				return nil, ctx.Err()
 			}
 
-			// Preserve the existing ordinary-open fallback for the producer.
+			// Preserve the ordinary-open fallback for the producer, and
+			// explain repeated uncached reads for bad manifest descriptors.
+			log.Printf("Warning: manifest cache population failed for %s: %v; falling back to FileIO", location, err)
 			file, fallbackErr := base.Open(location)
 			if fallbackErr != nil {
 				return nil, fmt.Errorf("manifest cache population failed: %w; fallback open failed: %w",

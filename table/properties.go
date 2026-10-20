@@ -62,11 +62,14 @@ const (
 
 	// IOManifestCacheMaxTotalBytesKey bounds total retained manifest content per
 	// independently loaded table. Commit-derived handles share the same budget.
+	// Non-positive or unparsable values warn and disable the Go cache, whereas
+	// Java Iceberg rejects them.
 	IOManifestCacheMaxTotalBytesKey     = "io.manifest.cache.max-total-bytes"
 	IOManifestCacheMaxTotalBytesDefault = 100 * 1024 * 1024
 
 	// IOManifestCacheMaxContentLengthKey skips caching individual manifests
-	// larger than this size.
+	// larger than this size. Non-positive or unparsable values warn and disable
+	// the Go cache, whereas Java Iceberg rejects them.
 	IOManifestCacheMaxContentLengthKey     = "io.manifest.cache.max-content-length"
 	IOManifestCacheMaxContentLengthDefault = 8 * 1024 * 1024
 

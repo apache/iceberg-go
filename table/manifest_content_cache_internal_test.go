@@ -607,8 +607,9 @@ func TestManifestContentCacheReclaimsExpiredEntriesOnInsert(t *testing.T) {
 
 type manifestContentFailingBlockedIO struct {
 	iceio.IO
-	started chan struct{}
-	release chan struct{}
+	started          chan struct{}
+	release          chan struct{}
+	firstReadIsShort bool
 
 	mu    sync.Mutex
 	opens int
@@ -622,75 +623,97 @@ func (f *manifestContentFailingBlockedIO) Open(name string) (iceio.File, error) 
 	if attempt == 1 {
 		close(f.started)
 		<-f.release
-
-		return nil, io.ErrUnexpectedEOF
+		if !f.firstReadIsShort {
+			return nil, io.ErrUnexpectedEOF
+		}
 	}
 
 	return f.IO.Open(name)
 }
 
-func TestManifestContentCacheSharesFailedLoadWithoutRetryStorm(t *testing.T) {
-	const path = "mem://manifest-content-cache/failed-shared.avro"
-	base := iceio.NewMemFS()
-	require.NoError(t, base.WriteFile(path, []byte("test")))
-	fs := &manifestContentFailingBlockedIO{
-		IO: base, started: make(chan struct{}), release: make(chan struct{}),
-	}
-	var release sync.Once
-	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
-	cache := newManifestContentCache(0, 16, 16)
-	manifest := iceberg.NewManifestFile(2, path, 4, 0, 1).Build()
-
-	producerErr := make(chan error, 1)
-	go func() {
-		file, err := cache.open(t.Context(), fs, manifest)
-		if err == nil {
-			_, err = io.ReadAll(file)
-			if closeErr := file.Close(); err == nil {
-				err = closeErr
+// Failed population is a cache optimization failure, not a scan failure.
+// Every in-flight caller must still be able to fall back to ordinary FileIO.
+func TestManifestContentCacheFailedSharedLoadFallsBackForAllCallers(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		expectedLength   int64
+		firstReadIsShort bool
+	}{
+		{name: "backend error", expectedLength: 4},
+		{name: "manifest length mismatch", expectedLength: 5, firstReadIsShort: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const path = "mem://manifest-content-cache/failed-shared.avro"
+			base := iceio.NewMemFS()
+			require.NoError(t, base.WriteFile(path, []byte("test")))
+			fs := &manifestContentFailingBlockedIO{
+				IO: base, started: make(chan struct{}), release: make(chan struct{}),
+				firstReadIsShort: tc.firstReadIsShort,
 			}
-		}
-		producerErr <- err
-	}()
-	select {
-	case <-fs.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("cache producer did not start")
-	}
+			var release sync.Once
+			t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
+			cache := newManifestContentCache(0, 16, 16)
+			manifest := iceberg.NewManifestFile(2, path, tc.expectedLength, 0, 1).Build()
 
-	const followers = 8
-	entered := make(chan struct{}, followers)
-	waiterErrors := make(chan error, followers)
-	for range followers {
-		go func() {
-			ctx := &countingContext{Context: t.Context(), entered: entered}
-			file, err := cache.open(ctx, fs, manifest)
-			if file != nil {
-				_ = file.Close()
+			producerErr := make(chan error, 1)
+			go func() {
+				file, err := cache.open(t.Context(), fs, manifest)
+				if err == nil {
+					_, err = io.ReadAll(file)
+					if closeErr := file.Close(); err == nil {
+						err = closeErr
+					}
+				}
+				producerErr <- err
+			}()
+			select {
+			case <-fs.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("cache producer did not start")
 			}
-			waiterErrors <- err
-		}()
-	}
-	for range followers {
-		select {
-		case <-entered:
-		case <-time.After(5 * time.Second):
-			t.Fatal("waiter did not join failed shared load")
-		}
-	}
-	release.Do(func() { close(fs.release) })
-	require.NoError(t, <-producerErr, "the producer should use one ordinary-open fallback")
-	for range followers {
-		require.ErrorIs(t, <-waiterErrors, io.ErrUnexpectedEOF)
-	}
-	fs.mu.Lock()
-	opens := fs.opens
-	fs.mu.Unlock()
-	assert.Equal(t, 2, opens, "one failed population plus one producer fallback")
-	assert.Empty(t, cache.entries, "failed population must not retain fallback bytes")
 
-	readCachedManifest(t, cache, fs, manifest)
-	assert.Contains(t, cache.entries, path, "the next independent scan can populate the cache")
+			const followers = 8
+			entered := make(chan struct{}, followers)
+			waiterErrors := make(chan error, followers)
+			for range followers {
+				go func() {
+					ctx := &countingContext{Context: t.Context(), entered: entered}
+					file, err := cache.open(ctx, fs, manifest)
+					if err == nil {
+						_, err = io.ReadAll(file)
+						if closeErr := file.Close(); err == nil {
+							err = closeErr
+						}
+					}
+					waiterErrors <- err
+				}()
+			}
+			for range followers {
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("waiter did not join failed shared load")
+				}
+			}
+			release.Do(func() { close(fs.release) })
+			require.NoError(t, <-producerErr, "the producer should use one ordinary-open fallback")
+			for range followers {
+				require.NoError(t, <-waiterErrors, "every waiter should use its own ordinary-open fallback")
+			}
+			fs.mu.Lock()
+			opens := fs.opens
+			fs.mu.Unlock()
+			assert.Equal(t, 2+followers, opens, "one failed population plus one ordinary open per caller")
+			assert.Empty(t, cache.entries, "failed population must not retain fallback bytes")
+
+			readCachedManifest(t, cache, fs, manifest)
+			if tc.firstReadIsShort {
+				assert.Empty(t, cache.entries, "a wrong manifest length must never be cached")
+			} else {
+				assert.Contains(t, cache.entries, path, "a later scan may populate the cache")
+			}
+		})
+	}
 }
 
 func TestManifestContentCacheRetriesAfterProducerCancellation(t *testing.T) {
