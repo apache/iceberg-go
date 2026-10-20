@@ -25,7 +25,8 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-// CPU-heavy finalization needs enough work to amortize worker and merge costs.
+// Conservative worker threshold heuristic; the actual crossover depends on the
+// fraction of residual and split work. BenchmarkFinalizePlannedTasks sweeps it.
 const scanTaskFinalizationMinTasksPerWorker = 256
 
 type scanTaskFinalizationResult struct {
@@ -73,19 +74,11 @@ func (scan *Scan) finalizePlannedTasks(
 		max(1, len(plannedTasks)/scanTaskFinalizationMinTasksPerWorker))
 	results := make([]scanTaskFinalizationResult, workerCount)
 
-	finalizeRange := func(worker, start, end int) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				results[worker].err = fmt.Errorf("finalize scan tasks [%d:%d]: panic: %v",
-					start, end, recovered)
-			}
-		}()
-		results[worker] = scan.finalizeTaskRange(
-			plannedTasks, start, end, residualEvaluators, splitTargetSize)
-	}
-
 	if workerCount == 1 {
-		finalizeRange(0, 0, len(plannedTasks))
+		// Preserve the serial caller's ability to recover a panic and inspect
+		// its stack. Only spawned goroutines need panic-to-error conversion.
+		results[0] = scan.finalizeTaskRange(
+			plannedTasks, 0, len(plannedTasks), residualEvaluators, splitTargetSize)
 	} else {
 		var wg sync.WaitGroup
 		chunkSize, remainder := len(plannedTasks)/workerCount, len(plannedTasks)%workerCount
@@ -101,7 +94,14 @@ func (scan *Scan) finalizePlannedTasks(
 			wg.Add(1)
 			go func(worker, start, end int) {
 				defer wg.Done()
-				finalizeRange(worker, start, end)
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						results[worker].err = fmt.Errorf("finalize scan tasks [%d:%d]: panic: %v",
+							start, end, recovered)
+					}
+				}()
+				results[worker] = scan.finalizeTaskRange(
+					plannedTasks, start, end, residualEvaluators, splitTargetSize)
 			}(worker, start, end)
 			start = end
 		}
@@ -187,6 +187,9 @@ func (scan *Scan) finalizeTaskRange(
 		if splitTasks, split := splitParquetScanTask(*task, splitTargetSize); split {
 			if !result.expanded {
 				result.expanded = true
+				// A mixed range keeps the unsplit prefix; reserve extra space
+				// once to avoid repeated append growth when more files split.
+				result.tasks = make([]FileScanTask, 0, max((end-start)*2, index-start+len(splitTasks)))
 				result.tasks = append(result.tasks, plannedTasks[start:index]...)
 			}
 			result.tasks = append(result.tasks, splitTasks...)

@@ -20,7 +20,9 @@ package table
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
@@ -193,7 +195,7 @@ func TestFinalizePlannedTasksReturnsFirstErrorInTaskOrder(t *testing.T) {
 					DataFile: input[255].File, wait: laterErrorReached,
 				}
 				input[256].File = finalizationOrderFile{
-					DataFile: input[256].File, signal: laterErrorReached,
+					DataFile: input[256].File, signal: laterErrorReached, signalOnce: new(sync.Once),
 				}
 			}
 			result, planErr := scan.finalizePlannedTasks(input, schema, &scanMetricsAccumulator{})
@@ -208,16 +210,21 @@ func TestFinalizePlannedTasksReturnsFirstErrorInTaskOrder(t *testing.T) {
 // borrowed-partition interface, so residual evaluation calls Partition.
 type finalizationOrderFile struct {
 	iceberg.DataFile
-	wait   <-chan struct{}
-	signal chan struct{}
+	wait       <-chan struct{}
+	signal     chan struct{}
+	signalOnce *sync.Once
 }
 
 func (f finalizationOrderFile) Partition() map[int]any {
 	if f.signal != nil {
-		close(f.signal)
+		f.signalOnce.Do(func() { close(f.signal) })
 	}
 	if f.wait != nil {
-		<-f.wait
+		select {
+		case <-f.wait:
+		case <-time.After(5 * time.Second):
+			panic("timed out waiting for later worker to reach its error")
+		}
 	}
 
 	return f.DataFile.Partition()
@@ -443,6 +450,20 @@ func TestFinalizePlannedTasksWorkerPanicReturnsError(t *testing.T) {
 	actual, err := scan.finalizePlannedTasks(tasks, schema, &scanMetricsAccumulator{})
 	require.ErrorContains(t, err, "injected file size panic")
 	require.Nil(t, actual)
+}
+
+// A one-worker scan keeps the original caller-goroutine panic behavior.
+func TestFinalizePlannedTasksSingleWorkerPanicPropagates(t *testing.T) {
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://table", nil)
+	require.NoError(t, err)
+	file := finalizationTestDataFile(t, *iceberg.UnpartitionedSpec,
+		"mem://table/data/file.parquet", nil, 100, nil)
+	tasks := []FileScanTask{{File: panicSizeFinalizationFile{DataFile: file}, Length: 100}}
+	scan := &Scan{metadata: meta, rowFilter: iceberg.AlwaysTrue{}, caseSensitive: true, concurrency: 1}
+	assert.PanicsWithValue(t, "injected file size panic", func() {
+		_, _ = scan.finalizePlannedTasks(tasks, schema, &scanMetricsAccumulator{})
+	})
 }
 
 func finalizationTestDataFile(
