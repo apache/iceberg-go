@@ -939,6 +939,8 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // operation is only valid if the data is exactly the same as the previous snapshot.
 //
 // For now, we'll keep using an overwrite operation.
+//
+// On v3 a removed data file's live deletion vector is removed with it.
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -1004,6 +1006,15 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return errors.New("cannot delete files that do not belong to the table")
 	}
 
+	// On v3 every removed file takes its deletion vector with it.
+	// DVs only exist from v3, so v2 skips the read.
+	var dvs liveDeletionVectors
+	if meta.formatVersion >= 3 && len(markedForDeletion) > 0 {
+		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+			return err
+		}
+	}
+
 	if meta.NameMapping() == nil {
 		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
@@ -1020,7 +1031,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	updater := t.updateSnapshot(wfs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
 
 	for _, df := range markedForDeletion {
-		updater.deleteDataFile(df)
+		dvs.removeDataFile(updater, df)
 	}
 
 	// SetProperties above may have staged a name mapping, rebuilding t.meta;
@@ -1655,6 +1666,8 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 // Callers are responsible for ensuring each DataFile is valid and consistent with the table.
 // Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
 //
+// On v3 a removed data file's live deletion vector is removed with it.
+//
 // This is useful when:
 //   - Files are written via a separate I/O path and metadata is already known
 //   - Avoiding file scanning improves performance or reliability
@@ -1732,6 +1745,15 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		return errors.New("cannot delete files that do not belong to the table")
 	}
 
+	// On v3 every removed file takes its deletion vector with it.
+	// DVs only exist from v3, so v2 skips the read.
+	var dvs liveDeletionVectors
+	if meta.formatVersion >= 3 {
+		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+			return err
+		}
+	}
+
 	if !cfg.skipAutoNameMapping {
 		if err := t.ensureNameMapping(); err != nil {
 			return err
@@ -1753,7 +1775,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	}
 
 	for _, df := range markedForDeletion {
-		updater.deleteDataFile(df)
+		dvs.removeDataFile(updater, df)
 	}
 
 	for _, df := range filesToAdd {
@@ -1783,7 +1805,8 @@ type DeleteFileAddition struct {
 // ReplaceFiles atomically replaces data files and removes associated delete files
 // in a single snapshot. This is the commit primitive for compaction: old data files
 // are replaced with new (compacted) data files, and delete files that are fully
-// applied are removed.
+// applied are removed. On v3 a removed data file's live deletion vector is
+// removed with it, whether or not it is in deleteFilesToRemove.
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, nil, snapshotProps, opts...)
 }
@@ -1941,6 +1964,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
 	markedAutoDeleteForRemoval := make([]iceberg.DataFile, 0, len(autoSetDeleteFilesToRemove))
 	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvsToRemoveByRef))
+	danglingDVs := make(map[string]iceberg.DataFile)
 	removedDeleteSequenceNumbers := make([]int64, 0, len(deleteFilesToRemove))
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
 	liveDataFiles := make(map[string]rewriteFileState)
@@ -1985,6 +2009,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 					}
 				} else if want, ok := autoDVsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
+				} else if _, ok := setToDelete[*ref]; ok {
+					// The spec requires a removed data file to take its DV with it, named or not.
+					// Like automatic removals, it does not set the sequence number of added delete files.
+					danglingDVs[*ref] = df
 				}
 			}
 		}
@@ -2182,6 +2210,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		updater.removeDeleteFile(df)
 	}
 	for _, df := range markedDVsForRemoval {
+		updater.removeDeletionVector(df)
+	}
+	for _, df := range danglingDVs {
 		updater.removeDeletionVector(df)
 	}
 
