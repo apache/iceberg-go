@@ -730,22 +730,80 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 
 	var dictionary arrow.Array
 	var indices *array.Dictionary
-	var cachedIndices *array.Dictionary
-	var cachedBuilders []*array.Int64Builder
-	var cachedSeen []bool
 	if dict, ok := filePathChunk.(*array.Dictionary); ok {
 		if dict.Dictionary().NullN() > 0 {
 			dictionary = dict.Dictionary()
 			indices = dict
 		}
 		if size := dict.Dictionary().Len(); size > 0 && size <= maxPositionDeleteDictionaryCacheEntries {
-			cachedIndices = dict
-			cachedBuilders = make([]*array.Int64Builder, size)
-			cachedSeen = make([]bool, size)
+			return a.appendFilePathChunkWithDictionaryCache(
+				ctx, paths, dictionary, indices, dict, posCursor)
 		}
 	}
+	return a.appendFilePathChunkWithoutCache(
+		ctx, filePathChunk.Len(), paths, dictionary, indices, posCursor)
+}
 
-	for i := range filePathChunk.Len() {
+func (a *posDeleteAccumulator) appendFilePathChunkWithoutCache(
+	ctx context.Context,
+	length int,
+	paths arrow.TypedArray[string],
+	dictionary arrow.Array,
+	indices *array.Dictionary,
+	posCursor *posDeleteCursor,
+) error {
+	for i := range length {
+		if i&(positionalDeleteCancellationCheckInterval-1) == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+
+		pos, ok := posCursor.next()
+		if !ok {
+			return fmt.Errorf("%w: position delete columns ended before file_path column",
+				iceberg.ErrInvalidSchema)
+		}
+		if pos < 0 {
+			return fmt.Errorf("%w: negative pos %d in position delete file",
+				iceberg.ErrInvalidSchema, pos)
+		}
+		if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
+			return fmt.Errorf("%w: null file_path dictionary value in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+
+		path := paths.Value(i)
+		if len(a.targets) > 0 {
+			if _, ok := a.targets[path]; !ok {
+				continue
+			}
+		}
+
+		builder, ok := a.builders[path]
+		if !ok {
+			path = strings.Clone(path)
+			builder = array.NewInt64Builder(a.mem)
+			a.builders[path] = builder
+		}
+		builder.Append(pos)
+	}
+
+	return nil
+}
+
+func (a *posDeleteAccumulator) appendFilePathChunkWithDictionaryCache(
+	ctx context.Context,
+	paths arrow.TypedArray[string],
+	dictionary arrow.Array,
+	indices *array.Dictionary,
+	cachedIndices *array.Dictionary,
+	posCursor *posDeleteCursor,
+) error {
+	cachedBuilders := make([]*array.Int64Builder, cachedIndices.Dictionary().Len())
+	cachedSeen := make([]bool, len(cachedBuilders))
+
+	for i := range cachedIndices.Len() {
 		if i&(positionalDeleteCancellationCheckInterval-1) == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -769,15 +827,12 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 		// Resolve each dictionary index once per chunk. Several indexes may
 		// refer to the same file path, so retain the existing string-keyed
 		// builders as the source of truth.
-		cacheIndex := -1
-		if cachedIndices != nil {
-			cacheIndex = cachedIndices.GetValueIndex(i)
-			if cacheIndex >= 0 && cacheIndex < len(cachedSeen) && cachedSeen[cacheIndex] {
-				if builder := cachedBuilders[cacheIndex]; builder != nil {
-					builder.Append(pos)
-				}
-				continue
+		cacheIndex := cachedIndices.GetValueIndex(i)
+		if cacheIndex >= 0 && cacheIndex < len(cachedSeen) && cachedSeen[cacheIndex] {
+			if builder := cachedBuilders[cacheIndex]; builder != nil {
+				builder.Append(pos)
 			}
+			continue
 		}
 
 		path := paths.Value(i)
