@@ -73,13 +73,13 @@ func combinePositionalDeleteBitmapBefore(
 func TestCombinePositionalDeleteBitmapRangeParity(t *testing.T) {
 	const boundary uint64 = 1 << 32
 	cases := []struct {
-		name        string
-		start       int64
-		batches     []int64
-		positions   []uint64
-		rangeStart  uint64
-		rangeEnd    uint64
-		spans       []tblutils.RowGroupSpan
+		name       string
+		start      int64
+		batches    []int64
+		positions  []uint64
+		rangeStart uint64
+		rangeEnd   uint64
+		spans      []tblutils.RowGroupSpan
 	}{
 		{name: "empty", batches: []int64{0, 0}},
 		{name: "clean across batches", batches: []int64{4, 64, 11}, positions: []uint64{1000}},
