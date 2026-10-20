@@ -507,10 +507,10 @@ func BenchmarkFinalizePlannedTasks(b *testing.B) {
 	spec := partitionedSpec()
 
 	for _, tc := range []struct {
-		name       string
-		rowFilter  iceberg.BooleanExpression
-		offsets    []int64
-		targetSize string
+		name        string
+		rowFilter   iceberg.BooleanExpression
+		offsets     []int64
+		targetSize  string
 		fileCount   int
 		mixedWork   bool
 		withDeletes bool
