@@ -150,4 +150,3 @@ func TestInspectPartitionsParallelManifestReadFailure(t *testing.T) {
 	require.Nil(t, reader)
 	require.EqualValues(t, 0, tracked.active.Load())
 }
-

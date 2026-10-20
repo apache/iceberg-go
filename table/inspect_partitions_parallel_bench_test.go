@@ -95,7 +95,7 @@ func benchmarkInspectPartitionTable(b *testing.B, manifestCount int) *Table {
 	require.NoError(b, builder.AddSnapshot(&Snapshot{
 		SnapshotID:     snapshotID,
 		SequenceNumber: sequenceNumber,
-		TimestampMs:    1_000,
+		TimestampMs:    meta.LastUpdatedMillis() + 1,
 		ManifestList:   manifestListPath,
 		SchemaID:       &schemaID,
 		Summary:        &Summary{Operation: OpAppend},

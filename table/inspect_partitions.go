@@ -162,7 +162,13 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 
 	rr, err := singleBatchReader(arrowSchema, bldr)
 	if err != nil {
-		return// inspectPartitionManifestConcurrency bounds concurrent manifest reads and
+		return nil, fmt.Errorf("inspect partitions: %w", err)
+	}
+
+	return rr, nil
+}
+
+// inspectPartitionManifestConcurrency bounds concurrent manifest reads and
 // per-manifest partition aggregation state.
 const inspectPartitionManifestConcurrency = 8
 
@@ -332,11 +338,6 @@ func mergeInspectPartitionAggregate(dst, src *inspectPartitionAggregate) {
 		dst.lastUpdatedSnapshot = src.lastUpdatedSnapshot
 		dst.specID = src.specID
 	}
-}
-
-ft].orderingKey < result[right].orderingKey })
-
-	return result, nil
 }
 
 func (i InspectTable) updatePartitionTimestamp(
