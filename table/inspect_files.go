@@ -516,7 +516,15 @@ type inspectContentFileBuilder struct {
 	referencedDataFile *array.StringBuilder
 	contentOffset      *array.Int64Builder
 	contentSize        *array.Int64Builder
-	mapFieldIDs        []int
+	// One sorted key-set per statistics column, scoped to this record builder.
+	// Most files in a table use the same metric field IDs. A separate cache
+	// prevents unlike columns from evicting each other's key order.
+	columnSizeFieldIDs []int
+	valueCountFieldIDs []int
+	nullCountFieldIDs  []int
+	nanCountFieldIDs   []int
+	lowerBoundFieldIDs []int
+	upperBoundFieldIDs []int
 }
 
 type inspectPartitionBuilder struct {
@@ -648,23 +656,23 @@ func (b *inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	b.recordCount.Append(file.Count())
 	b.fileSize.Append(file.FileSizeBytes())
 	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
-	if err := appendInspectInt64Map(b.columnSizes, columnSizes, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.columnSizes, columnSizes, &b.columnSizeFieldIDs); err != nil {
 		return err
 	}
 	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(file)
-	if err := appendInspectInt64Map(b.valueCounts, valueCounts, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.valueCounts, valueCounts, &b.valueCountFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nullValueCounts, nullCounts, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.nullValueCounts, nullCounts, &b.nullCountFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nanValueCounts, nanCounts, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.nanValueCounts, nanCounts, &b.nanCountFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.lowerBounds, lowerBounds, &b.mapFieldIDs); err != nil {
+	if err := appendInspectBinaryMap(b.lowerBounds, lowerBounds, &b.lowerBoundFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.upperBounds, upperBounds, &b.mapFieldIDs); err != nil {
+	if err := appendInspectBinaryMap(b.upperBounds, upperBounds, &b.upperBoundFieldIDs); err != nil {
 		return err
 	}
 	appendInspectBytes(b.keyMetadata, keyMetadata)
@@ -944,6 +952,36 @@ func inspectInt32Value(value int, name string) (int32, error) {
 	return int32(value), nil
 }
 
+// cachedInspectFieldIDs returns the sorted map keys, reusing the previous
+// ordering when the next file has exactly the same key set. Length alone is
+// not sufficient: maps with different IDs can have the same number of keys.
+// Keeping only one sorted set makes memory bounded by the widest map seen.
+func cachedInspectFieldIDs[V any](values map[int]V, cached *[]int) []int {
+	ids := *cached
+	if len(ids) == len(values) {
+		sameKeys := true
+		for _, id := range ids {
+			if _, ok := values[id]; !ok {
+				sameKeys = false
+
+				break
+			}
+		}
+		if sameKeys {
+			return ids
+		}
+	}
+
+	ids = ids[:0]
+	for id := range values {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	*cached = ids
+
+	return ids
+}
+
 func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scratch *[]int) error {
 	if values == nil {
 		builder.AppendNull()
@@ -959,12 +997,7 @@ func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scra
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want int64", builder.ItemBuilder())
 	}
-	ids := (*scratch)[:0]
-	for id := range values {
-		ids = append(ids, id)
-	}
-	*scratch = ids
-	sort.Ints(ids)
+	ids := cachedInspectFieldIDs(values, scratch)
 	for _, id := range ids {
 		key, err := inspectInt32Value(id, "field ID")
 		if err != nil {
@@ -992,12 +1025,7 @@ func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte, sc
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want binary", builder.ItemBuilder())
 	}
-	ids := (*scratch)[:0]
-	for id := range values {
-		ids = append(ids, id)
-	}
-	*scratch = ids
-	sort.Ints(ids)
+	ids := cachedInspectFieldIDs(values, scratch)
 	for _, id := range ids {
 		key, err := inspectInt32Value(id, "field ID")
 		if err != nil {
