@@ -516,7 +516,7 @@ type inspectContentFileBuilder struct {
 	referencedDataFile *array.StringBuilder
 	contentOffset      *array.Int64Builder
 	contentSize        *array.Int64Builder
-	mapFieldIDs        []int
+	mapFieldIDs        inspectSortedMapIDs
 }
 
 type inspectPartitionBuilder struct {
@@ -944,7 +944,37 @@ func inspectInt32Value(value int, name string) (int32, error) {
 	return int32(value), nil
 }
 
-func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scratch *[]int) error {
+// inspectSortedMapIDs retains the last sorted keyset while appending statistics.
+// Files using the same schema often have identical statistic field IDs. Keep
+// one bounded cache across the statistics maps, and verify membership before reusing it.
+type inspectSortedMapIDs struct {
+	ids []int
+}
+
+func sortedInspectMapIDs[V any](values map[int]V, cache *inspectSortedMapIDs) []int {
+	if len(values) >= 16 && len(values) == len(cache.ids) {
+		same := true
+		for _, id := range cache.ids {
+			if _, ok := values[id]; !ok {
+				same = false
+				break
+			}
+		}
+		if same {
+			return cache.ids
+		}
+	}
+
+	cache.ids = cache.ids[:0]
+	for id := range values {
+		cache.ids = append(cache.ids, id)
+	}
+	sort.Ints(cache.ids)
+
+	return cache.ids
+}
+
+func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, cache *inspectSortedMapIDs) error {
 	if values == nil {
 		builder.AppendNull()
 
@@ -959,13 +989,7 @@ func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scra
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want int64", builder.ItemBuilder())
 	}
-	ids := (*scratch)[:0]
-	for id := range values {
-		ids = append(ids, id)
-	}
-	*scratch = ids
-	sort.Ints(ids)
-	for _, id := range ids {
+	for _, id := range sortedInspectMapIDs(values, cache) {
 		key, err := inspectInt32Value(id, "field ID")
 		if err != nil {
 			return err
@@ -977,7 +1001,7 @@ func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scra
 	return nil
 }
 
-func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte, scratch *[]int) error {
+func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte, cache *inspectSortedMapIDs) error {
 	if values == nil {
 		builder.AppendNull()
 
@@ -992,13 +1016,7 @@ func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte, sc
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want binary", builder.ItemBuilder())
 	}
-	ids := (*scratch)[:0]
-	for id := range values {
-		ids = append(ids, id)
-	}
-	*scratch = ids
-	sort.Ints(ids)
-	for _, id := range ids {
+	for _, id := range sortedInspectMapIDs(values, cache) {
 		key, err := inspectInt32Value(id, "field ID")
 		if err != nil {
 			return err
