@@ -217,6 +217,7 @@ type Transform interface {
 	Apply(Optional[Literal]) Optional[Literal]
 	Project(name string, pred BoundPredicate) (UnboundPredicate, error)
 
+	// ToHumanStrType formats a partition value using its transformed result type.
 	ToHumanStrType(typ Type, val any) string
 }
 
@@ -283,8 +284,6 @@ func (IdentityTransform) ToHumanStrType(typ Type, val any) string {
 	}
 
 	switch v := val.(type) {
-	case nil:
-		return "null"
 	case string:
 		return v
 	case []byte:
