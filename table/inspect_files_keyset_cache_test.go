@@ -99,7 +99,7 @@ func TestInspectFileAppenderRechecksChangedStatsMapKeys(t *testing.T) {
 
 	rec := builder.NewRecordBatch()
 	defer rec.Release()
-	for _, colIndex := range []int{7, 8, 11} {
+	for _, colIndex := range []int{6, 7, 10} {
 		column := rec.Column(colIndex).(*array.Map)
 		keys := column.Keys().(*array.Int32)
 		for row, counts := range values {
@@ -122,7 +122,7 @@ func TestInspectFileAppenderRechecksChangedStatsMapKeys(t *testing.T) {
 		}
 	}
 	// Verify the cached ordering does not cache map values.
-	column := rec.Column(8).(*array.Map)
+	column := rec.Column(7).(*array.Map)
 	items := column.Items().(*array.Int64)
 	start, end := column.ValueOffsets(1)
 	if end-start != 2 || items.Value(int(start)) != 22 || items.Value(int(start+1)) != 34 {
