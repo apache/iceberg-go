@@ -272,6 +272,15 @@ make test-race # runs all unit tests with race detector
 <pre><code class="language-bash">docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
 go test -tags integration ./...
 </code></pre>
+<h4 id="external-rest-catalog-conformance"><a class="header" href="#external-rest-catalog-conformance">External REST Catalog Conformance</a></h4>
+<p><code>TestExternalRestCatalogConformance</code> runs the catalog conformance suite against any REST catalog server. It is skipped unless <code>REST_CATALOG_URI</code> is set. CI runs it against <a href="https://polaris.apache.org/">Apache Polaris</a>; to do the same locally (requires <code>jq</code>):</p>
+<pre><code class="language-bash">make integration-setup-polaris
+make integration-external-rest
+</code></pre>
+<p>To test another catalog, override the Polaris defaults with <code>REST_CATALOG_URI</code>, <code>REST_CATALOG_CREDENTIAL</code> (<code>client_id:client_secret</code>), <code>REST_CATALOG_SCOPE</code> and <code>REST_CATALOG_WAREHOUSE</code>. Set any of them to an empty value to leave it unset, for example:</p>
+<pre><code class="language-bash">REST_CATALOG_URI=http://localhost:8181 REST_CATALOG_CREDENTIAL= REST_CATALOG_SCOPE= REST_CATALOG_WAREHOUSE= \
+  make integration-external-rest
+</code></pre>
 
                     </main>
 
