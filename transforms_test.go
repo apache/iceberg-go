@@ -143,7 +143,7 @@ func TestParseTransform(t *testing.T) {
 
 			// Human rendering is of the value, never the transform name.
 			u := tr.(iceberg.UnknownTransform)
-			assert.Equal(t, "null", u.ToHumanStr(nil))
+			assert.Equal(t, "null", u.ToHumanStrType(iceberg.StringType{}, nil))
 			assert.Equal(t, "abc", u.ToHumanStrType(iceberg.StringType{}, "abc"))
 		})
 	}
@@ -213,56 +213,57 @@ func TestUnknownTransformRejectsEmptyName(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
 
-func TestToHumanString(t *testing.T) {
+func TestToHumanStrTypeValues(t *testing.T) {
 	decVal, _ := decimal.Decimal128FromString("14.21", 4, 2)
 	negDecVal, _ := decimal.Decimal128FromString("-1.50", 9, 2)
 
 	tests := []struct {
 		transform iceberg.Transform
+		typ       iceberg.Type
 		input     any
 		expected  string
 	}{
-		{iceberg.YearTransform{}, int32(47), "2017"},
-		{iceberg.MonthTransform{}, int32(575), "2017-12"},
-		{iceberg.DayTransform{}, int32(17501), "2017-12-01"},
-		{iceberg.YearTransform{}, nil, "null"},
-		{iceberg.MonthTransform{}, nil, "null"},
-		{iceberg.DayTransform{}, nil, "null"},
-		{iceberg.HourTransform{}, nil, "null"},
-		{iceberg.HourTransform{}, int32(420042), "2017-12-01-18"},
-		{iceberg.HourTransform{}, int32(4645896), "2500-01-01-00"},
-		{iceberg.HourTransform{}, int32(-4119936), "1500-01-01-00"},
-		{iceberg.YearTransform{}, int32(-1), "1969"},
-		{iceberg.MonthTransform{}, int32(-1), "1969-12"},
-		{iceberg.DayTransform{}, int32(-1), "1969-12-31"},
-		{iceberg.HourTransform{}, int32(-1), "1969-12-31-23"},
-		{iceberg.YearTransform{}, int32(0), "1970"},
-		{iceberg.MonthTransform{}, int32(0), "1970-01"},
-		{iceberg.DayTransform{}, int32(0), "1970-01-01"},
-		{iceberg.HourTransform{}, int32(0), "1970-01-01-00"},
-		{iceberg.VoidTransform{}, nil, "null"},
-		{iceberg.IdentityTransform{}, nil, "null"},
-		{iceberg.TruncateTransform{Width: 1}, []byte{0x00, 0x01, 0x02, 0x03}, "AAECAw=="},
-		{iceberg.TruncateTransform{Width: 1}, iceberg.Decimal{
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, int32(47), "2017"},
+		{iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, int32(575), "2017-12"},
+		{iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(17501), "2017-12-01"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, nil, "null"},
+		{iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, nil, "null"},
+		{iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, nil, "null"},
+		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Timestamp, nil, "null"},
+		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Timestamp, int32(420042), "2017-12-01-18"},
+		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Timestamp, int32(4645896), "2500-01-01-00"},
+		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Timestamp, int32(-4119936), "1500-01-01-00"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, int32(-1), "1969"},
+		{iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, int32(-1), "1969-12"},
+		{iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(-1), "1969-12-31"},
+		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Timestamp, int32(-1), "1969-12-31-23"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, int32(0), "1970"},
+		{iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, int32(0), "1970-01"},
+		{iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(0), "1970-01-01"},
+		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Timestamp, int32(0), "1970-01-01-00"},
+		{iceberg.VoidTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
+		{iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Binary, []byte{0x00, 0x01, 0x02, 0x03}, "AAECAw=="},
+		{iceberg.TruncateTransform{Width: 1}, iceberg.DecimalTypeOf(9, 2), iceberg.Decimal{
 			Val: decVal, Scale: 2,
 		}, "14.21"},
-		{iceberg.TruncateTransform{Width: 1}, int32(123), "123"},
-		{iceberg.TruncateTransform{Width: 1}, int64(123), "123"},
-		{iceberg.TruncateTransform{Width: 1}, "foo", "foo"},
-		{iceberg.IdentityTransform{}, nil, "null"},
-		{iceberg.IdentityTransform{}, iceberg.Date(17501), "2017-12-01"},
-		{iceberg.IdentityTransform{}, iceberg.Time(36775038194), "10:12:55.038194"},
-		{iceberg.IdentityTransform{}, iceberg.Timestamp(1512151975038194), "2017-12-01T18:12:55.038194"},
-		{iceberg.IdentityTransform{}, iceberg.TimestampNano(1512151975038194001), "2017-12-01T18:12:55.038194001"},
-		{iceberg.IdentityTransform{}, int64(-1234567890000), "-1234567890000"},
-		{iceberg.IdentityTransform{}, "a/b/c=d", "a/b/c=d"},
-		{iceberg.IdentityTransform{}, []byte("foo"), "Zm9v"},
-		{iceberg.IdentityTransform{}, iceberg.Decimal{Val: negDecVal, Scale: 2}, "-1.50"},
+		{iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Int32, int32(123), "123"},
+		{iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Int64, int64(123), "123"},
+		{iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.String, "foo", "foo"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Date, iceberg.Date(17501), "2017-12-01"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Time, iceberg.Time(36775038194), "10:12:55.038194"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Timestamp, iceberg.Timestamp(1512151975038194), "2017-12-01T18:12:55.038194"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampNs, iceberg.TimestampNano(1512151975038194001), "2017-12-01T18:12:55.038194001"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Int64, int64(-1234567890000), "-1234567890000"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.String, "a/b/c=d", "a/b/c=d"},
+		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Binary, []byte("foo"), "Zm9v"},
+		{iceberg.IdentityTransform{}, iceberg.DecimalTypeOf(9, 2), iceberg.Decimal{Val: negDecVal, Scale: 2}, "-1.50"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.transform.ToHumanStr(tt.input))
+			assert.Equal(t, tt.expected, tt.transform.ToHumanStrType(tt.typ, tt.input))
 		})
 	}
 }
