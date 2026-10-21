@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -935,6 +936,9 @@ type Catalog struct {
 	// from reporterProps) and the server advertises the endpoint. Owned here and
 	// closed by Close.
 	metricsDispatcher *metricsDispatcher
+	// scanPlanningMismatchWarned limits the scan-planning-mode mismatch warning
+	// to once per catalog; see scanPlanningDirective.
+	scanPlanningMismatchWarned atomic.Bool
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
@@ -1394,6 +1398,33 @@ func (r *Catalog) tableFromResponse(
 	), nil
 }
 
+// scanPlanningDirective resolves a table's raw scan-planning-mode directive and
+// whether one is present, in the shape table.WithScanPlanningDirective takes.
+// As in Java's RESTSessionCatalog, the server's table config takes precedence
+// and the catalog's own scan-planning-mode property applies when the server
+// sends none; table metadata is never consulted. r.props already folds in the
+// /v1/config defaults and overrides. A mismatch between the two is logged as a
+// warning once per catalog and at debug level after that, since Refresh
+// reloads the table. A nil loadConfig yields the catalog property alone.
+func (r *Catalog) scanPlanningDirective(ctx context.Context, identifier []string, loadConfig iceberg.Properties) (string, bool) {
+	server, hasServer := loadConfig[table.ScanPlanningModeKey]
+	client, hasClient := r.props[table.ScanPlanningModeKey]
+	if !hasServer {
+		return client, hasClient
+	}
+
+	if hasClient && !strings.EqualFold(client, server) {
+		level := slog.LevelDebug
+		if r.scanPlanningMismatchWarned.CompareAndSwap(false, true) {
+			level = slog.LevelWarn
+		}
+		slog.Log(ctx, level, "iceberg: scan-planning-mode mismatch between catalog and server; using the server value",
+			"table", strings.Join(identifier, "."), "client", client, "server", server)
+	}
+
+	return server, true
+}
+
 func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location string) (iceberg.Properties, error) {
 	if err := r.endpoints.check(endpointTableCredentials); err != nil {
 		return nil, err
@@ -1445,9 +1476,14 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 	scanCfg := maps.Clone(config)
 	mergeVendedCredentials(config, resp, metadataLoc)
 
+	opts := []table.Option{
+		table.WithSavedConfig(tbl.SavedConfig()),
+		// Credential refresh does not return table config, so carry the
+		// existing scan-planning directive over verbatim.
+		table.WithScanPlanningDirectiveFrom(tbl),
+	}
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.
-	opts := []table.Option{table.WithSavedConfig(tbl.SavedConfig())}
 	if reporter := tbl.MetricsReporter(); !metrics.IsNop(reporter) {
 		opts = append(opts, table.WithMetricsReporter(reporter))
 	}
@@ -1725,7 +1761,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
 	mergeVendedCredentials(config, vended, ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved), table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)))
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1954,7 +1990,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
 	mergeVendedCredentials(config, vended, ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved), table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)))
 }
 
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
@@ -2017,7 +2053,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
 	mergeVendedCredentials(config, vended, ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved), table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -2065,8 +2101,13 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, metadata.Properties())
 
-	// A commit response carries no labels (they are load-time enrichment).
-	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil, nil, table.WithSavedConfig(metadata.Properties()))
+	// A commit response carries no labels or table config (they are load-time
+	// enrichment). The catalog's own scan-planning-mode property still applies,
+	// so the returned table enforces a catalog-wide directive; a per-table
+	// directive from the server's load config needs a reload.
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false, nil, nil,
+		table.WithSavedConfig(metadata.Properties()),
+		table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, ident, nil)))
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {

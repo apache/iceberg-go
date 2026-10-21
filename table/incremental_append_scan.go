@@ -47,8 +47,9 @@ type IncrementalAppendScan struct {
 // sensitivity, concurrency, planning mode, and reporting. Projection and row
 // limits are not applied to the returned file tasks; callers can read planned
 // tasks with a separately configured [Scan.ReadTasks]. Auto planning falls back
-// to local planning. Remote planning returns ErrInvalidOperation until
-// incremental remote planning is implemented.
+// to local planning. Remote planning, including a catalog `server`
+// scan-planning-mode directive, returns ErrInvalidOperation until incremental
+// remote planning is implemented.
 func (t Table) NewIncrementalAppendScan(opts ...ScanOption) *IncrementalAppendScan {
 	return &IncrementalAppendScan{scan: t.Scan(opts...)}
 }
@@ -86,12 +87,8 @@ func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) *IncrementalAppendS
 // through the configured reporter on successful planning. Delete files are not
 // applied because appended files are not present before the append snapshot.
 func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
-	switch s.scan.planningMode {
-	case ScanPlanningLocal, ScanPlanningAuto:
-	case ScanPlanningRemote:
-		return nil, fmt.Errorf("%w: incremental append scans do not support remote planning", ErrInvalidOperation)
-	default:
-		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, s.scan.planningMode)
+	if err := s.scan.checkLocalOnlyPlanning("incremental append"); err != nil {
+		return nil, err
 	}
 	start := time.Now()
 
