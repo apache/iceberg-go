@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -399,9 +400,47 @@ func inspectPartitionKey(partition map[int]any) string {
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
+
 	var key strings.Builder
+	key.Grow(len(ids) * 24)
+	var number [32]byte
 	for _, id := range ids {
-		fmt.Fprintf(&key, "%d:%T:%v;", id, partition[id], partition[id])
+		key.Write(strconv.AppendInt(number[:0], int64(id), 10))
+		key.WriteByte(':')
+
+		value := partition[id]
+		switch v := value.(type) {
+		case int32:
+			key.WriteString("int32:")
+			key.Write(strconv.AppendInt(number[:0], int64(v), 10))
+		case int64:
+			key.WriteString("int64:")
+			key.Write(strconv.AppendInt(number[:0], v, 10))
+		case string:
+			key.WriteString("string:")
+			key.WriteString(v)
+		case bool:
+			key.WriteString("bool:")
+			if v {
+				key.WriteString("true")
+			} else {
+				key.WriteString("false")
+			}
+		case []byte:
+			// Match fmt's []uint8:[0 1 ...] representation, including nil slices.
+			key.WriteString("[]uint8:[")
+			for i, byt := range v {
+				if i > 0 {
+					key.WriteByte(' ')
+				}
+				key.Write(strconv.AppendInt(number[:0], int64(byt), 10))
+			}
+			key.WriteByte(']')
+		default:
+			// Preserve formatting for named Iceberg types and uncommon values.
+			fmt.Fprintf(&key, "%T:%v", value, value)
+		}
+		key.WriteByte(';')
 	}
 
 	return key.String()
