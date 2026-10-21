@@ -186,3 +186,44 @@ func TestAnalyze_InvalidConfig(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target file size must be positive")
 }
+
+// remotePlanCatalog plans every scan remotely and returns a plan-scoped IO, as
+// a REST catalog does when it vends storage credentials for a plan.
+type remotePlanCatalog struct {
+	analyzeCatalog
+	planIO *recordingPlanIO
+}
+
+func (c *remotePlanCatalog) SupportsRemoteScanPlanning() bool { return true }
+
+func (c *remotePlanCatalog) PlanFiles(context.Context, table.ScanPlanningRequest) (table.ScanPlanningResult, error) {
+	return table.ScanPlanningResult{IO: c.planIO}, nil
+}
+
+type recordingPlanIO struct {
+	closed int
+}
+
+func (p *recordingPlanIO) Load(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+
+func (p *recordingPlanIO) Close() error {
+	p.closed++
+
+	return nil
+}
+
+// A REST catalog keeps a plan with vended credentials alive until its IO is
+// closed, so Analyze must close the scan it plans with.
+func TestAnalyze_ClosesRemotePlan(t *testing.T) {
+	base := newAnalyzeTestTable(t)
+	planIO := &recordingPlanIO{}
+	cat := &remotePlanCatalog{analyzeCatalog: analyzeCatalog{metadata: base.Metadata()}, planIO: planIO}
+	tbl := table.New(base.Identifier(), base.Metadata(), base.MetadataLocation(),
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		cat, table.WithScanPlanningDirective(string(table.ScanPlanningDirectiveServer), true))
+
+	_, err := compaction.Analyze(t.Context(), tbl, compaction.DefaultConfig())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, planIO.closed)
+}
