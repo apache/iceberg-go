@@ -139,6 +139,10 @@ func parseBracketSelector(s, path string) (string, int, error) {
 			}
 
 			if start == 2 {
+				if i == 2 {
+					// Avoid retaining the input path for an empty member.
+					return "", i + 2, nil
+				}
 				return s[2:i], i + 2, nil
 			}
 			b.WriteString(s[start:i])
