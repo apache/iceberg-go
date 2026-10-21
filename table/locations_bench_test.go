@@ -29,3 +29,23 @@ func BenchmarkComputeHash(b *testing.B) {
 		computeHashBenchmarkSink = computeHash(dataFileName)
 	}
 }
+
+var locationPathBenchmarkSink string
+
+func BenchmarkJoinLocationPath(b *testing.B) {
+	for _, tc := range []struct {
+		name, location string
+		parts          []string
+	}{
+		{"one", "s3://bucket/table/data", []string{"file-000-uuid.parquet"}},
+		{"two", "s3://bucket/table/data/", []string{"0001/0010/0011", "file-000-uuid.parquet"}},
+		{"three", "s3://bucket/table/data//", []string{"part=x", "sha-hash", "file-000-uuid.parquet"}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				locationPathBenchmarkSink = joinLocationPath(tc.location, tc.parts...)
+			}
+		})
+	}
+}
