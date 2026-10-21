@@ -151,32 +151,73 @@ func TestYearMonthPartitionTransformParity(t *testing.T) {
 	}
 }
 
-// referenceCalendarTransformer keeps the previous time.Time-based conversion
-// available as a benchmark baseline, without using it in the production path.
+// referenceCalendarTransformer preserves the previous time.Time-based
+// implementations for paired benchmarks. Keep each source type assertion
+// inside its closure to compare equivalent work.
 func referenceCalendarTransformer(src Type, month bool) func(any) Optional[int32] {
-	var toTime func(any) time.Time
 	switch src.(type) {
 	case DateType:
-		toTime = func(value any) time.Time { return value.(Date).ToTime() }
-	case TimestampType:
-		toTime = func(value any) time.Time { return value.(Timestamp).ToTime() }
-	case TimestampNsType:
-		toTime = func(value any) time.Time { return value.(TimestampNano).ToTime() }
-	}
-
-	return func(value any) Optional[int32] {
-		if value == nil {
-			return Optional[int32]{}
-		}
-		tm := toTime(value)
 		if month {
-			return Optional[int32]{
-				Valid: true,
-				Val:   int32((tm.Year()-epochTM.Year())*12 + int(tm.Month()) - int(epochTM.Month())),
+			return func(value any) Optional[int32] {
+				if value == nil {
+					return Optional[int32]{}
+				}
+				tm := value.(Date).ToTime()
+				return Optional[int32]{
+					Valid: true,
+					Val:   int32((tm.Year()-epochTM.Year())*12 + int(tm.Month()) - int(epochTM.Month())),
+				}
 			}
 		}
-		return Optional[int32]{Valid: true, Val: int32(tm.Year() - epochTM.Year())}
+		return func(value any) Optional[int32] {
+			if value == nil {
+				return Optional[int32]{}
+			}
+			tm := value.(Date).ToTime()
+			return Optional[int32]{Valid: true, Val: int32(tm.Year() - epochTM.Year())}
+		}
+	case TimestampType:
+		if month {
+			return func(value any) Optional[int32] {
+				if value == nil {
+					return Optional[int32]{}
+				}
+				tm := value.(Timestamp).ToTime()
+				return Optional[int32]{
+					Valid: true,
+					Val:   int32((tm.Year()-epochTM.Year())*12 + int(tm.Month()) - int(epochTM.Month())),
+				}
+			}
+		}
+		return func(value any) Optional[int32] {
+			if value == nil {
+				return Optional[int32]{}
+			}
+			tm := value.(Timestamp).ToTime()
+			return Optional[int32]{Valid: true, Val: int32(tm.Year() - epochTM.Year())}
+		}
+	case TimestampNsType:
+		if month {
+			return func(value any) Optional[int32] {
+				if value == nil {
+					return Optional[int32]{}
+				}
+				tm := value.(TimestampNano).ToTime()
+				return Optional[int32]{
+					Valid: true,
+					Val:   int32((tm.Year()-epochTM.Year())*12 + int(tm.Month()) - int(epochTM.Month())),
+				}
+			}
+		}
+		return func(value any) Optional[int32] {
+			if value == nil {
+				return Optional[int32]{}
+			}
+			tm := value.(TimestampNano).ToTime()
+			return Optional[int32]{Valid: true, Val: int32(tm.Year() - epochTM.Year())}
+		}
 	}
+	return nil
 }
 
 var calendarBenchmarkSink int32
