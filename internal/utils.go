@@ -84,14 +84,32 @@ func FloorDiv[T constraints.Integer](a, b T) T {
 
 // Helper function to find the difference between two slices (a - b).
 func Difference(a, b []string) []string {
-	m := make(map[string]bool)
-	for _, item := range b {
-		m[item] = true
+	if len(a) == 0 {
+		return []string{}
+	}
+	if len(b) == 0 {
+		return append(make([]string, 0, len(a)), a...)
+	}
+	if len(b) <= 2 {
+		diff := make([]string, 0, len(a))
+		for _, item := range a {
+			if !slices.Contains(b, item) {
+				diff = append(diff, item)
+			}
+		}
+
+		return diff
 	}
 
-	diff := make([]string, 0)
+	m := make(map[string]struct{}, len(b))
+	for _, item := range b {
+		m[item] = struct{}{}
+	}
+	// Leave room for the likely survivors without reserving for every input.
+	// Append still handles duplicate entries and exclusions outside a.
+	diff := make([]string, 0, max(0, len(a)-len(b)))
 	for _, item := range a {
-		if !m[item] {
+		if _, excluded := m[item]; !excluded {
 			diff = append(diff, item)
 		}
 	}
