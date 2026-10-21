@@ -50,17 +50,18 @@ go run ./cmd/collationsize -compare inline.csv derived.csv
 
 `go run ./cmd/collationsize` without `-csv` prints a table. `-out DIR` keeps every
 manifest so it can be inspected with any Avro tool. `-seed`, `-versions`,
-`-bound-lens`, `-entries`, and `-wide-cols` change the sweep. Output is
+`-bound-lens`, `-entries`, `-wide-cols`, and `-wide-versions` change the sweep. Output is
 deterministic for a given seed.
 
 ## What it does
 
 For each scenario the harness:
 
-1. Builds a 10-column table. The first `cols` columns are strings collated
-   `en_US-ci`; the rest alternate between `long` and plain `string`.
+1. Builds a table of `max(10, cols)` columns. The first `cols` columns are
+   strings collated `en_US-ci`; the rest alternate between `long` and plain
+   `string`. Tables wider than 10 columns are fully collated.
 2. Builds `entries` data files with `iceberg.NewDataFileBuilder`: column sizes,
-   value counts, null counts, byte-order lower/upper bounds for all 10 columns
+   value counts, null counts, byte-order lower/upper bounds for every column
    (strings truncated to 16 bytes), and, for each collated column, collation
    bounds for `versions` collation versions computed with
    `iceberg.ComputeCollatedBounds` from 8 sampled values of `B` bytes. With

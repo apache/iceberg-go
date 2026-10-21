@@ -57,18 +57,22 @@ import (
 )
 
 const (
-	tableCols      = 10 // columns carrying ordinary column stats
+	minTableCols   = 10 // table width when fewer columns are collated; wider tables are all-collated
 	byteBoundTrunc = 16 // byte-order string bounds truncated like Iceberg's default truncate(16)
 	plainStrLen    = 24 // length of values in non-collated string columns
 	samplesPerFile = 8  // values sampled per column per file to derive min/max
 	collationName  = "en_US-ci"
 )
 
-// versionStrings are the collation versions a file can carry bounds for. Bounds
-// for every version are computed with the same collator (one Go process has one
-// CLDR version); only the version tag differs, which is exactly what the
-// on-disk layouts have to store.
-var versionStrings = []string{"153.120.0.0", "153.121.0.0", "153.122.0.0"}
+// versionString returns the v-th collation version tag a file can carry bounds
+// for. Bounds for every version are computed with the same collator (one Go
+// process has one CLDR version); only the version tag differs, which is exactly
+// what the on-disk layouts have to store.
+func versionString(v int) string { return fmt.Sprintf("153.%d.0.0", 120+v) }
+
+// tableWidth is the number of columns in the table: at least minTableCols, and
+// all collated when more columns than that are collated.
+func tableWidth(cols int) int { return max(minTableCols, cols) }
 
 type scenario struct {
 	Cols       int  // collated columns
@@ -97,6 +101,7 @@ func main() {
 		boundsF   = flag.String("bound-lens", "16,48,128", "collated value byte lengths to sweep")
 		entriesF  = flag.String("entries", "1,1000,10000", "data files per manifest to sweep")
 		wideCols  = flag.Int("wide-cols", 5, "collated columns in the wide-table case (0 disables)")
+		wideVersF = flag.String("wide-versions", "2", "collation versions to sweep in the wide-table case")
 		seed      = flag.Int64("seed", 42, "base random seed")
 		outDir    = flag.String("out", "", "if set, keep each manifest OCF in this directory")
 		asCSV     = flag.Bool("csv", false, "emit CSV instead of a table")
@@ -119,6 +124,8 @@ func main() {
 	fail(err)
 	entries, err := ints(*entriesF)
 	fail(err)
+	wideVersions, err := ints(*wideVersF)
+	fail(err)
 
 	var scenarios []scenario
 	for _, v := range versions {
@@ -128,9 +135,11 @@ func main() {
 			}
 		}
 	}
-	for _, n := range entries {
-		if *wideCols > 0 {
-			scenarios = append(scenarios, scenario{Cols: *wideCols, Versions: 2, BoundLen: 48, Entries: n, CodePoints: true})
+	if *wideCols > 0 {
+		for _, v := range wideVersions {
+			for _, n := range entries {
+				scenarios = append(scenarios, scenario{Cols: *wideCols, Versions: v, BoundLen: 48, Entries: n, CodePoints: true})
+			}
 		}
 	}
 	// bounds only: no code-point stats supplied, so every layout stores the same information
@@ -154,16 +163,16 @@ func main() {
 }
 
 func run(sc scenario, seed int64, outDir string) (result, error) {
-	if sc.Versions < 1 || sc.Versions > len(versionStrings) {
-		return result{}, fmt.Errorf("versions must be in [1,%d]", len(versionStrings))
+	if sc.Versions < 1 {
+		return result{}, errors.New("versions must be >= 1")
 	}
-	if sc.Cols < 1 || sc.Cols > tableCols {
-		return result{}, fmt.Errorf("collated columns must be in [1,%d]", tableCols)
+	if sc.Cols < 1 {
+		return result{}, errors.New("collated columns must be >= 1")
 	}
 
 	rng := rand.New(rand.NewSource(seed ^ int64(hash(sc.key()))))
 	base := collation.MustParse(collationName)
-	schema := tableSchema(sc.Cols, base.WithVersion(versionStrings[0]))
+	schema := tableSchema(sc.Cols, base.WithVersion(versionString(0)))
 	spec := *iceberg.UnpartitionedSpec
 
 	snapshotID := int64(1)
@@ -201,7 +210,7 @@ func run(sc scenario, seed int64, outDir string) (result, error) {
 	for c := range sc.Cols {
 		for v := range sc.Versions {
 			refs = append(refs, iceberg.CollationVersionRef{
-				FieldID: c + 1, Collation: base.String(), Version: versionStrings[v],
+				FieldID: c + 1, Collation: base.String(), Version: versionString(v),
 			})
 		}
 	}
@@ -216,11 +225,12 @@ func run(sc scenario, seed int64, outDir string) (result, error) {
 	}, nil
 }
 
-// tableSchema returns a 10-column table whose first cols columns are collated
-// strings; the rest alternate between long and plain string columns.
+// tableSchema returns a tableWidth(cols)-column table whose first cols columns
+// are collated strings; the rest alternate between long and plain string columns.
 func tableSchema(cols int, spec *collation.Spec) *iceberg.Schema {
-	fields := make([]iceberg.NestedField, 0, tableCols)
-	for id := 1; id <= tableCols; id++ {
+	width := tableWidth(cols)
+	fields := make([]iceberg.NestedField, 0, width)
+	for id := 1; id <= width; id++ {
 		f := iceberg.NestedField{ID: id, Name: fmt.Sprintf("c%d", id)}
 		switch {
 		case id <= cols:
@@ -244,14 +254,15 @@ func dataFile(rng *rand.Rand, seq int, sc scenario, base *collation.Spec, spec i
 		return nil, err
 	}
 
-	sizes := make(map[int]int64, tableCols)
-	values := make(map[int]int64, tableCols)
-	nulls := make(map[int]int64, tableCols)
-	lower := make(map[int][]byte, tableCols)
-	upper := make(map[int][]byte, tableCols)
+	width := tableWidth(sc.Cols)
+	sizes := make(map[int]int64, width)
+	values := make(map[int]int64, width)
+	nulls := make(map[int]int64, width)
+	lower := make(map[int][]byte, width)
+	upper := make(map[int][]byte, width)
 	collated := make(map[int]iceberg.CollationColumnStats, sc.Cols)
 
-	for id := 1; id <= tableCols; id++ {
+	for id := 1; id <= width; id++ {
 		sizes[id] = int64(rng.Intn(5_000_000))
 		values[id] = int64(rng.Intn(1_000_000))
 		nulls[id] = int64(rng.Intn(1000))
@@ -286,7 +297,7 @@ func dataFile(rng *rand.Rand, seq int, sc scenario, base *collation.Spec, spec i
 
 		stats := iceberg.CollationColumnStats{}
 		for v := range sc.Versions {
-			entry, ok := iceberg.ComputeCollatedBounds(base.WithVersion(versionStrings[v]), samples)
+			entry, ok := iceberg.ComputeCollatedBounds(base.WithVersion(versionString(v)), samples)
 			if !ok {
 				return nil, errors.New("collated bounds not computed")
 			}
@@ -331,8 +342,8 @@ func verify(mf iceberg.ManifestFile, data []byte, sc scenario, base *collation.S
 		}
 		for id, s := range stats {
 			for v := range sc.Versions {
-				if _, ok := s.BoundFor(base.WithVersion(versionStrings[v])); !ok {
-					return fmt.Errorf("column %d: no usable bound for version %s after round trip", id, versionStrings[v])
+				if _, ok := s.BoundFor(base.WithVersion(versionString(v))); !ok {
+					return fmt.Errorf("column %d: no usable bound for version %s after round trip", id, versionString(v))
 				}
 			}
 		}
