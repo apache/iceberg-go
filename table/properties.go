@@ -47,8 +47,8 @@ const (
 	ReadManifestListCacheEnabledDefault = true
 
 	// IOManifestCacheEnabledKey controls Java-compatible raw manifest-file
-	// content caching. These settings are FileIO/catalog configuration rather
-	// than table metadata and are read from the saved table config.
+	// content caching. These settings come from catalog/FileIO properties;
+	// saved per-table configuration overrides matching catalog keys.
 	IOManifestCacheEnabledKey     = "io.manifest.cache-enabled"
 	IOManifestCacheEnabledDefault = false
 

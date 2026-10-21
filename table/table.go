@@ -107,10 +107,9 @@ type Table struct {
 	manifestCache        *snapshotManifestCache
 	manifestContentCache *manifestContentCache
 	planner              ScanPlanner
-	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
-	// catalog load response. They are separate from metadata properties because
-	// REST catalogs can return FileIO configuration in the response's config
-	// block.
+	// scanPlanningIOProps holds catalog/FileIO settings for remote scan
+	// planning and local manifest content caching. REST can additionally
+	// override these settings through its per-table load response.
 	scanPlanningIOProps iceberg.Properties
 	savedConfig         iceberg.Properties
 	reporter            metrics.Reporter
@@ -1407,10 +1406,9 @@ func WithMetricsReporter(r metrics.Reporter) Option {
 	}
 }
 
-// WithScanPlanningIOProperties supplies the table-scoped FileIO properties
-// that a remote scan planner needs when it builds a plan-scoped FileIO. This
-// is intended for catalog implementations whose table-load response carries
-// FileIO configuration separately from table metadata properties.
+// WithScanPlanningIOProperties supplies FileIO/catalog properties for
+// manifest content caching and remote scan planning. These can include
+// settings returned separately from table metadata by a REST catalog.
 func WithScanPlanningIOProperties(props iceberg.Properties) Option {
 	if props == nil {
 		return noopTableOption
@@ -1488,7 +1486,14 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 	for _, opt := range opts {
 		opt(t)
 	}
-	t.manifestContentCache = newManifestContentCacheForConfig(t.savedConfig)
+	// FileIO/catalog settings are the default. Per-table saved settings
+	// (including REST LoadTable overrides) take precedence when supplied.
+	cacheConfig := t.savedConfig
+	if len(t.scanPlanningIOProps) > 0 {
+		cacheConfig = maps.Clone(t.scanPlanningIOProps)
+		maps.Copy(cacheConfig, t.savedConfig)
+	}
+	t.manifestContentCache = newManifestContentCacheForConfig(cacheConfig)
 
 	return t
 }

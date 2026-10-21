@@ -594,6 +594,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		io.LoadFSFunc(c.props, metaPath),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.props),
 	)
 
 	return tbl, nil
@@ -614,7 +615,11 @@ func (c *Catalog) loadTable(ctx context.Context, ident table.Identifier) (*table
 		return nil, 0, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
-	tbl, err := table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c, table.WithMetricsReporter(reporter))
+	tbl, err := table.NewFromLocation(
+		ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c,
+		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.props),
+	)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -455,9 +455,46 @@ func TestManifestContentCacheReuseAcrossCompatibleConfig(t *testing.T) {
 	require.Nil(t, reuseManifestContentCache(previous, newManifestContentCacheForConfig(nil)))
 }
 
+func TestManifestContentCacheUsesCatalogIOProperties(t *testing.T) {
+	fs := newTrackingCallsIO()
+	base, _, manifestPath := newManifestContentCacheTestTable(t, fs, nil)
+	require.Nil(t, base.manifestContentCache)
+
+	catalogProps := iceberg.Properties{
+		IOManifestCacheEnabledKey:       "true",
+		IOManifestCacheMaxTotalBytesKey: "1048576",
+	}
+	loaded := New(base.identifier, base.metadata, base.metadataLocation,
+		base.fsF, nil, WithScanPlanningIOProperties(catalogProps))
+	require.NotNil(t, loaded.manifestContentCache)
+	require.Equal(t, int64(1048576), loaded.manifestContentCache.maxTotalBytes)
+	require.Empty(t, loaded.SavedConfig(), "catalog FileIO settings must not become saved table config")
+
+	for range 2 {
+		tasks, err := loaded.Scan(WithMaxConcurrency(1)).PlanFiles(t.Context())
+		require.NoError(t, err)
+		require.Len(t, tasks, 1)
+	}
+	assert.Equal(t, 1, fs.openCount[manifestPath], "catalog-configured cache must reuse manifest bytes")
+
+	disabled := New(base.identifier, base.metadata, base.metadataLocation,
+		base.fsF, nil,
+		WithScanPlanningIOProperties(catalogProps),
+		WithSavedConfig(iceberg.Properties{IOManifestCacheEnabledKey: "false"}))
+	require.Nil(t, disabled.manifestContentCache, "saved table settings must override catalog settings")
+}
+
 func TestManifestContentCacheInvalidNumericConfig(t *testing.T) {
-	for _, key := range []string{IOManifestCacheMaxTotalBytesKey, IOManifestCacheMaxContentLengthKey} {
-		for _, bad := range []string{"bad", "-1", "0"} {
+	for _, key := range []string{
+		IOManifestCacheExpirationIntervalMsKey,
+		IOManifestCacheMaxTotalBytesKey,
+		IOManifestCacheMaxContentLengthKey,
+	} {
+		badValues := []string{"bad", "-1"}
+		if key != IOManifestCacheExpirationIntervalMsKey {
+			badValues = append(badValues, "0")
+		}
+		for _, bad := range badValues {
 			t.Run(key+"/"+bad, func(t *testing.T) {
 				config := iceberg.Properties{IOManifestCacheEnabledKey: "true", key: bad}
 				assert.Nil(t, newManifestContentCacheForConfig(config))

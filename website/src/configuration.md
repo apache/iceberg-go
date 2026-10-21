@@ -363,13 +363,21 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 |---|---|---|
 | `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
 | `read.manifest-list-cache.enabled` | `true` | Reuse decoded snapshot manifest lists across scans of a table handle. Set to `false` to disable retention and shared in-flight reads. Applied when loading or refreshing a table, and when creating a transaction scan. |
-| `io.manifest.cache-enabled` | `false` | Reuse raw manifest file content across local scans. This mirrors Java's FileIO/catalog setting and is read from the table's saved catalog config. |
-| `io.manifest.cache.expiration-interval-ms` | `60000` | Idle expiration in milliseconds. Zero disables time-based expiration; negative values disable the cache. Expired entries are reclaimed on cache access/insertion, without a background cleanup task. |
+| `io.manifest.cache-enabled` | `false` | Reuse raw manifest file content across local scans. Read from catalog FileIO properties in REST, Glue, SQL, Hive and Hadoop; REST table metadata and load-response config may override the catalog value. |
+| `io.manifest.cache.expiration-interval-ms` | `60000` | Idle expiration in milliseconds. Zero disables time-based expiration; negative or unparsable values warn and disable the cache. Expired entries are reclaimed on cache access/insertion, without a background cleanup task. |
 | `io.manifest.cache.max-total-bytes` | `104857600` | Retained raw bytes per independently loaded table. Handles returned by commit share their source table's cache and budget. Concurrent population buffers and bytes held by active readers are not counted. Non-positive or unparsable values warn and disable caching. |
-| `io.manifest.cache.max-content-length` | `8388608` | Maximum size of one manifest eligible for content caching. Compatible cache entries survive table refresh and commit. Non-positive or unparsable values warn and disable caching. |
+| `io.manifest.cache.max-content-length` | `8388608` | Maximum size of one manifest eligible for content caching. Non-positive or unparsable values warn and disable caching. |
+
+The catalog's FileIO properties configure manifest caching for all built-in
+catalogs. With direct `table.New` calls, use `WithScanPlanningIOProperties`
+or `WithSavedConfig`; saved config wins when the same key is present in both.
+Matching expiration interval, total byte limit and per-manifest byte limit
+preserve warm cache entries across refresh and commit. Changing a limit replaces
+the cache.
 
 Unlike Java, which rejects invalid manifest-cache limits, Go warns and disables
-the content cache for negative expiration or non-positive/unparsable size limits.
+the content cache for negative or unparsable expiration or
+non-positive/unparsable size limits.
 
 The manifest-list cache retains at most 64 snapshots and 32,768 manifest
 descriptors in total per table handle. These are count limits, not byte limits:
