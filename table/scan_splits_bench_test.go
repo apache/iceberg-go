@@ -116,3 +116,67 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 // Embedding only the public DataFile interface intentionally hides
 // DataFileSplitOffsetsRef, forcing the defensive-copy fallback for comparison.
 type splitOffsetsPublicBenchmarkFile struct{ iceberg.DataFile }
+
+
+// BenchmarkSplitRemoteScanTasksBatch measures the split planner with many
+// Parquet files and shared row-group layouts. Input files are built before
+// timing, and the benchmark reports the complete output task slice.
+func BenchmarkSplitRemoteScanTasksBatch(b *testing.B) {
+	const rowGroupBytes int64 = 4096
+
+	for _, tc := range []struct {
+		files, groups, splittablePercent int
+	}{
+		{1024, 4, 100},
+		{1024, 32, 100},
+		{1024, 128, 100},
+		{8192, 4, 100},
+		{8192, 32, 100},
+		{8192, 32, 50},
+		{8192, 32, 0},
+	} {
+		b.Run(fmt.Sprintf("files=%d/groups=%d/splittable=%d", tc.files, tc.groups, tc.splittablePercent),
+			func(b *testing.B) {
+				offsets := make([]int64, tc.groups)
+				for i := range offsets {
+					offsets[i] = int64(i) * rowGroupBytes
+				}
+				fileSize := int64(tc.groups) * rowGroupBytes
+				targetSize := int64(8192)
+				if tc.groups > 4 {
+					targetSize = 16384
+				}
+
+				tasks := make([]FileScanTask, tc.files)
+				for i := range tasks {
+					builder, err := iceberg.NewDataFileBuilder(
+						*iceberg.UnpartitionedSpec,
+						iceberg.EntryContentData,
+						fmt.Sprintf("mem://split-batch/data-%d.parquet", i),
+						iceberg.ParquetFile, nil, nil, nil, 1, fileSize,
+					)
+					if err != nil {
+						b.Fatal(err)
+					}
+					task := FileScanTask{File: builder.SplitOffsets(offsets).Build(), Length: fileSize}
+					if i%100 >= tc.splittablePercent {
+						task.Start = 1
+						task.Length--
+					}
+					tasks[i] = task
+				}
+
+				probe := splitRemoteScanTasks(tasks, targetSize)
+				if len(probe) < len(tasks) {
+					b.Fatalf("split planner dropped tasks: got %d, want at least %d", len(probe), len(tasks))
+				}
+
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					splitRemoteScanTasksBenchmarkSink = splitRemoteScanTasks(tasks, targetSize)
+				}
+				b.ReportMetric(float64(tc.files), "files/op")
+			})
+	}
+}
