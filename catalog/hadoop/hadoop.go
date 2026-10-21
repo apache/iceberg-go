@@ -659,10 +659,8 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	if current != nil {
 		currentMetadata = current.Metadata()
 	}
-	for _, r := range reqs {
-		if err := r.Validate(currentMetadata); err != nil {
-			return nil, "", err
-		}
+	if err := internal.ValidateRequirements(ident, currentMetadata, reqs); err != nil {
+		return nil, "", err
 	}
 
 	// Step 3: Apply updates to produce new metadata.
