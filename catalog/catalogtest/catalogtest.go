@@ -122,6 +122,12 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 		t.Run("RenameTableNotSupported", func(t *testing.T) { testRenameTableNotSupported(t, cfg) })
 	}
 
+	t.Run("CreateTableWithProperties", func(t *testing.T) { testCreateTableWithProperties(t, cfg) })
+	t.Run("UpdateTableProperties", func(t *testing.T) { testUpdateTableProperties(t, cfg) })
+	t.Run("UpdateTableSchema", func(t *testing.T) { testUpdateTableSchema(t, cfg) })
+	t.Run("CommitWithStaleRequirement", func(t *testing.T) { testCommitWithStaleRequirement(t, cfg) })
+	t.Run("CommitToDroppedTable", func(t *testing.T) { testCommitToDroppedTable(t, cfg) })
+
 	t.Run("CreateNamespace", func(t *testing.T) { testCreateNamespace(t, cfg) })
 	t.Run("CreateNamespaceThatAlreadyExists", func(t *testing.T) { testCreateNamespaceThatAlreadyExists(t, cfg) })
 	t.Run("DropNamespace", func(t *testing.T) { testDropNamespace(t, cfg) })
