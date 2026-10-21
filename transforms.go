@@ -988,7 +988,6 @@ func projectTimeTransform(t TimeTransform, name string, pred BoundPredicate) (Un
 	return nil, nil
 }
 
-// YearTransform transforms a datetime value into a year value.
 // yearMonthFromUnixDays converts days since 1970-01-01 to a Gregorian year
 // and month without constructing a time.Time. The 400-year era calculation
 // handles dates before the Unix epoch and all representable Iceberg dates.
@@ -1025,6 +1024,7 @@ func monthPartitionFromDays(days int64) int32 {
 	return int32((year-1970)*12 + month - 1)
 }
 
+// YearTransform transforms a datetime value into a year value.
 type YearTransform struct{}
 
 func (t YearTransform) MarshalText() ([]byte, error) {
