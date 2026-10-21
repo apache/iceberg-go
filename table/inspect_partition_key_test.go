@@ -137,7 +137,7 @@ func BenchmarkInspectPartitionKey(b *testing.B) {
 				} {
 					b.Run(benchmark.name, func(b *testing.B) {
 						b.ReportAllocs()
-						for i := 0; i < b.N; i++ {
+						for i := range b.N {
 							inspectPartitionKeyBenchmarkSink = benchmark.key(partitions[i%len(partitions)])
 						}
 					})
