@@ -84,13 +84,13 @@ func BenchmarkPartitionPathQueryEscapeComparison(b *testing.B) {
 			b.Run(tc.name+"/"+strconv.Itoa(count)+"Fields", func(b *testing.B) {
 				b.Run("QueryEscape", func(b *testing.B) {
 					b.ReportAllocs()
-					for i := 0; i < b.N; i++ {
+					for range b.N {
 						partitionPathBenchmarkSink = referencePartitionPathQueryEscape(plan, values)
 					}
 				})
 				b.Run("DirectAppend", func(b *testing.B) {
 					b.ReportAllocs()
-					for i := 0; i < b.N; i++ {
+					for range b.N {
 						partitionPathBenchmarkSink = plan.format(values)
 					}
 				})
