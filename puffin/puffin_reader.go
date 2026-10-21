@@ -620,19 +620,30 @@ func (r *Reader) ReadAllBlobs() ([]*BlobData, error) {
 		return nil, nil
 	}
 
-	// Keep only indexes in the temporary read-order slice.
-	// Results retain defensive metadata copies in footer order.
-	order := make([]int, len(footer.Blobs))
-	for i := range order {
-		order[i] = i
-	}
-	slices.SortFunc(order, func(a, b int) int {
-		return cmp.Compare(footer.Blobs[a].Offset, footer.Blobs[b].Offset)
-	})
+	// Footer metadata is usually already in offset order. Only allocate
+	// and sort indexes if it is not, keeping reads in physical order.
+	var order []int
+	for i := 1; i < len(footer.Blobs); i++ {
+		if footer.Blobs[i-1].Offset > footer.Blobs[i].Offset {
+			order = make([]int, len(footer.Blobs))
+			for j := range order {
+				order[j] = j
+			}
+			slices.SortFunc(order, func(a, b int) int {
+				return cmp.Compare(footer.Blobs[a].Offset, footer.Blobs[b].Offset)
+			})
 
-	// Read blobs in offset order, store in original order
+			break
+		}
+	}
+
+	// Read blobs in offset order, store in original order.
 	results := make([]*BlobData, len(footer.Blobs))
-	for _, index := range order {
+	for i := range footer.Blobs {
+		index := i
+		if order != nil {
+			index = order[i]
+		}
 		meta := footer.Blobs[index]
 		data, err := r.readBlobData(meta)
 		if err != nil {
