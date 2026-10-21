@@ -257,6 +257,25 @@ func positionDeleteIndexKey(task FileScanTask) (key, targetPath string, deletePa
 	return builder.String(), targetPath, deletePaths
 }
 
+// sameOrderedPositionDeleteFiles compares only the references used to build a
+// positional-delete index. Other delete types do not affect the index key.
+func sameOrderedPositionDeleteFiles(left, right []iceberg.DataFile) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	for i, file := range left {
+		leftPosDelete := file.ContentType() == iceberg.EntryContentPosDeletes
+		rightPosDelete := right[i].ContentType() == iceberg.EntryContentPosDeletes
+		if leftPosDelete != rightPosDelete ||
+			(leftPosDelete && file.FilePath() != right[i].FilePath()) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositionDeleteLoader {
 	uniqueDeletes, targetsByDelete := collectPositionDeleteFilesAndTargets(tasks)
 	if len(uniqueDeletes) == 0 {
@@ -275,10 +294,29 @@ func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositio
 		}
 	}
 	indexesByKey := make(map[string]*lazyPositionDeleteIndex)
+	var previousIndex *lazyPositionDeleteIndex
+	var previousTargetPath string
 	for i, task := range tasks {
+		// Consecutive splits of a data file usually share its delete set.
+		// Avoid rebuilding and sorting the same long path key for each split.
+		if i > 0 && previousIndex != nil && task.File != nil &&
+			len(task.DeletionVectorFiles) == 0 &&
+			task.File.FilePath() == previousTargetPath &&
+			sameOrderedPositionDeleteFiles(task.DeleteFiles, tasks[i-1].DeleteFiles) {
+			loader.indexes[i] = positionDeleteTaskIndex{
+				targetPath: previousTargetPath,
+				index:      previousIndex,
+			}
+
+			continue
+		}
+
 		key, targetPath, deletePaths := positionDeleteIndexKey(task)
 		loader.indexes[i].targetPath = targetPath
+		previousTargetPath = targetPath
 		if key == "" {
+			previousIndex = nil
+
 			continue
 		}
 		index := indexesByKey[key]
@@ -290,6 +328,7 @@ func newLazyPositionDeleteLoader(fs iceio.IO, tasks []FileScanTask) *lazyPositio
 			indexesByKey[key] = index
 		}
 		loader.indexes[i].index = index
+		previousIndex = index
 	}
 
 	return loader
