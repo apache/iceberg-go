@@ -49,6 +49,17 @@ func TestNormalizeVariantPathEscaping(t *testing.T) {
 	}
 }
 
+// Check every ASCII control byte, including the less common \\u00xx escapes.
+func TestNormalizeVariantPathAllControlBytes(t *testing.T) {
+	for c := byte(0); c < 0x20; c++ {
+		fields := []string{"pre" + string(c) + "post"}
+		path := NormalizeVariantPath(fields)
+		got, err := parseVariantPath(path)
+		require.NoError(t, err, "control byte %#x", c)
+		assert.Equal(t, fields, got, "control byte %#x", c)
+	}
+}
+
 func TestParseVariantPath(t *testing.T) {
 	for _, tt := range []struct {
 		name string
