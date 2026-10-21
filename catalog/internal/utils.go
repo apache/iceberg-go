@@ -261,6 +261,26 @@ func ParseMetadataVersion(location string) int {
 	return v
 }
 
+// ValidateRequirements checks commit requirements against the table's current
+// metadata, which is nil when the table does not exist. A failed requirement
+// on a missing table is reported as catalog.ErrNoSuchTable; any other failure
+// means a concurrent writer changed the table, and is reported as
+// table.ErrCommitFailed so the commit retry loop can refresh and replay, as it
+// does for a REST 409.
+func ValidateRequirements(ident table.Identifier, current table.Metadata, reqs []table.Requirement) error {
+	for _, r := range reqs {
+		if err := r.Validate(current); err != nil {
+			if current == nil {
+				return fmt.Errorf("%w: %s: %w", catalog.ErrNoSuchTable, strings.Join(ident, "."), err)
+			}
+
+			return fmt.Errorf("%w: %w", table.ErrCommitFailed, err)
+		}
+	}
+
+	return nil
+}
+
 func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
 	var (
 		baseMeta        table.Metadata
@@ -287,10 +307,8 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 		}
 		newVersion = metadataVersion + 1
 	}
-	for _, r := range reqs {
-		if err := r.Validate(currentMetadata); err != nil {
-			return nil, err
-		}
+	if err := ValidateRequirements(ident, currentMetadata, reqs); err != nil {
+		return nil, err
 	}
 
 	updated, err := UpdateTableMetadata(baseMeta, updates, metadataLoc)

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
@@ -107,4 +108,34 @@ func TestUpdateAndStageTableUsesVersionZeroForCreate(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, 0, ParseMetadataVersion(staged.MetadataLocation()))
+}
+
+func TestValidateRequirementsClassifiesFailures(t *testing.T) {
+	metadata, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "file:///tmp/table", nil)
+	require.NoError(t, err)
+	ident := table.Identifier{"db", "tbl"}
+
+	tests := []struct {
+		name    string
+		current table.Metadata
+		req     table.Requirement
+		want    error
+	}{
+		{"stale requirement on existing table", metadata, table.AssertCurrentSchemaID(99), table.ErrCommitFailed},
+		{"create onto existing table", metadata, table.AssertCreate(), table.ErrCommitFailed},
+		{"requirement on missing table", nil, table.AssertTableUUID(metadata.TableUUID()), catalog.ErrNoSuchTable},
+		{"satisfied requirement", metadata, table.AssertTableUUID(metadata.TableUUID()), nil},
+		{"create of missing table", nil, table.AssertCreate(), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRequirements(ident, tt.current, []table.Requirement{tt.req})
+			if tt.want == nil {
+				require.NoError(t, err)
+
+				return
+			}
+			require.ErrorIs(t, err, tt.want)
+		})
+	}
 }
