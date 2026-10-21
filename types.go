@@ -1173,6 +1173,10 @@ func PromoteType(fileType, readType Type) (Type, error) {
 		if _, ok := readType.(BinaryType); ok {
 			return readType, nil
 		}
+	// BinaryType never promotes to or from GeometryType/GeographyType: the spec
+	// lists no promotions for geo types, and plain binary isn't guaranteed to
+	// hold valid WKB. Geo types reach the Equals check in default, so a CRS or
+	// edge-algorithm change errors as well.
 	case BinaryType:
 		if _, ok := readType.(StringType); ok {
 			return readType, nil

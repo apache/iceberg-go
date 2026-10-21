@@ -1103,6 +1103,15 @@ func TestNestedFieldEqualsWithNonComparableDefaults(t *testing.T) {
 }
 
 func TestPromoteType(t *testing.T) {
+	geom4326, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geom3857, err := iceberg.GeometryTypeOf("srid:3857")
+	require.NoError(t, err)
+	geog, err := iceberg.GeographyTypeOf("srid:4326", "spherical")
+	require.NoError(t, err)
+	geogKarney, err := iceberg.GeographyTypeOf("srid:4326", "karney")
+	require.NoError(t, err)
+
 	tests := []struct {
 		name     string
 		fileType iceberg.Type
@@ -1123,6 +1132,16 @@ func TestPromoteType(t *testing.T) {
 		{"decimal narrow precision", iceberg.DecimalTypeOf(18, 2), iceberg.DecimalTypeOf(9, 2), nil, true},
 		{"decimal increase scale", iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(18, 4), nil, true},
 		{"decimal decrease scale", iceberg.DecimalTypeOf(9, 4), iceberg.DecimalTypeOf(18, 2), nil, true},
+
+		// Geo types never promote to or from binary; only identical types pass.
+		{"geometry same", geom4326, geom4326, geom4326, false},
+		{"geography same", geog, geog, geog, false},
+		{"geometry to binary", geom4326, iceberg.PrimitiveTypes.Binary, nil, true},
+		{"binary to geometry", iceberg.PrimitiveTypes.Binary, geom4326, nil, true},
+		{"geography to binary", geog, iceberg.PrimitiveTypes.Binary, nil, true},
+		{"binary to geography", iceberg.PrimitiveTypes.Binary, geog, nil, true},
+		{"geometry crs mismatch", geom4326, geom3857, nil, true},
+		{"geography algorithm mismatch", geog, geogKarney, nil, true},
 
 		{"disallowed int to string", iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.String, nil, true},
 		{"disallowed fixed[8] to uuid", iceberg.FixedTypeOf(8), iceberg.PrimitiveTypes.UUID, nil, true},
