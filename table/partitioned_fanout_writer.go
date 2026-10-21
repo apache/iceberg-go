@@ -719,6 +719,9 @@ func bindPartitionTransform(transform iceberg.Transform, sourceType iceberg.Type
 // The value is either a *partitionMapNode or a *partitionInfo.
 type partitionMapNode struct {
 	children       map[any]any
+	int32Children  map[int32]any
+	int64Children  map[int64]any
+	stringChildren map[string]any
 	binaryChildren map[string]any
 	// partitionCount is maintained by the root node for the current batch and
 	// sizes the single result slice returned by collectPartitions.
@@ -729,35 +732,64 @@ func newPartitionMapNode() *partitionMapNode {
 	return &partitionMapNode{}
 }
 
-// child looks up binary partition values through a typed string map. Converting a
-// byte slice to string for a map lookup does not allocate, while storing a new
-// partition still copies the key into map-owned storage.
+// child looks up common primitive keys through typed maps. Binary keys use a
+// separate string map: converting []byte to string for lookup does not allocate,
+// while insertion copies the key into map-owned storage.
 func (n *partitionMapNode) child(part any) (any, bool) {
-	if bytes, ok := part.([]byte); ok {
-		child, found := n.binaryChildren[string(bytes)]
+	// The common primitive partition keys can use typed maps instead of
+	// hashing interface keys for every row.
+	switch value := part.(type) {
+	case int32:
+		child, found := n.int32Children[value]
+
+		return child, found
+	case int64:
+		child, found := n.int64Children[value]
+
+		return child, found
+	case string:
+		child, found := n.stringChildren[value]
+
+		return child, found
+	case []byte:
+		child, found := n.binaryChildren[string(value)]
+
+		return child, found
+	default:
+		child, found := n.children[comparablePartitionKey(part)]
 
 		return child, found
 	}
-
-	child, found := n.children[comparablePartitionKey(part)]
-
-	return child, found
 }
 
 func (n *partitionMapNode) setChild(part, child any) {
-	if bytes, ok := part.([]byte); ok {
+	switch value := part.(type) {
+	case int32:
+		if n.int32Children == nil {
+			n.int32Children = make(map[int32]any)
+		}
+		n.int32Children[value] = child
+	case int64:
+		if n.int64Children == nil {
+			n.int64Children = make(map[int64]any)
+		}
+		n.int64Children[value] = child
+	case string:
+		if n.stringChildren == nil {
+			n.stringChildren = make(map[string]any)
+		}
+		n.stringChildren[value] = child
+	case []byte:
 		if n.binaryChildren == nil {
 			n.binaryChildren = make(map[string]any)
 		}
-		n.binaryChildren[string(bytes)] = child
-
-		return
+		n.binaryChildren[string(value)] = child
+	default:
+		if n.children == nil {
+			n.children = make(map[any]any)
+		}
+		n.children[comparablePartitionKey(part)] = child
 	}
-
-	if n.children == nil {
-		n.children = make(map[any]any)
-	}
-	n.children[comparablePartitionKey(part)] = child
 }
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
@@ -848,6 +880,15 @@ func (n *partitionMapNode) appendPartitions(result []*partitionInfo) []*partitio
 	}
 
 	for _, v := range n.children {
+		appendChild(v)
+	}
+	for _, v := range n.int32Children {
+		appendChild(v)
+	}
+	for _, v := range n.int64Children {
+		appendChild(v)
+	}
+	for _, v := range n.stringChildren {
 		appendChild(v)
 	}
 	for _, v := range n.binaryChildren {
