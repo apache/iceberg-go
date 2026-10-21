@@ -105,7 +105,9 @@ func Difference(a, b []string) []string {
 	for _, item := range b {
 		m[item] = struct{}{}
 	}
-	diff := make([]string, 0)
+	// Leave room for the likely survivors without reserving for every input.
+	// Append still handles duplicate entries and exclusions outside a.
+	diff := make([]string, 0, max(0, len(a)-len(b)))
 	for _, item := range a {
 		if _, excluded := m[item]; !excluded {
 			diff = append(diff, item)
