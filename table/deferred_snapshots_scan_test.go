@@ -23,6 +23,9 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScanJSONStringEscapes(t *testing.T) {
@@ -39,38 +42,46 @@ func TestScanJSONStringEscapes(t *testing.T) {
 		return len(raw)
 	}
 
-	for _, value := range []string{
-		"", "a", "\\", "\"", "\\\"", "a\"b\\c", "東京",
-		strings.Repeat("s3://bucket/long/manifest-location/", 32),
-		strings.Repeat("x", 256) + `"tail`,
-		strings.Repeat("x", 256) + `\\"tail`,
-		strings.Repeat(`a"b`, 80),
-	} {
-		raw, err := json.Marshal(value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := scanJSONString(raw, 0); got != len(raw) {
-			t.Errorf("quoted string %q: got closing position %d, want %d", value, got, len(raw))
-		}
+	testCases := []struct {
+		name  string
+		value string
+	}{
+		{"empty", ""},
+		{"single character", "a"},
+		{"backslash", "\\"},
+		{"quote", "\""},
+		{"backslash and quote", "\\\""},
+		{"mixed escapes", "a\"b\\c"},
+		{"unicode", "東京"},
+		{"long manifest path", strings.Repeat("s3://bucket/long/manifest-location/", 32)},
+		{"long escaped quote", strings.Repeat("x", 256) + `"tail`},
+		{"long backslashes and quote", strings.Repeat("x", 256) + `\\"tail`},
+		{"repeated escaped quotes", strings.Repeat(`a"b`, 80)},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.value)
+			require.NoError(t, err)
+			assert.Equal(t, len(raw), scanJSONString(raw, 0))
+		})
 	}
 
-	// Verify parity for escaped quotes, escaped backslashes, missing closing
-	// quotes and other malformed inputs. scanJSONString is a scanner, not
-	// a JSON validator; its behavior for truncated data must not change.
-	rng := rand.New(rand.NewSource(1))
-	alphabet := []byte{'"', '\\', 'a', 0, '\n', ',', '[', ']', '{', '}'}
-	for caseID := range 5000 {
-		raw := make([]byte, rng.Intn(1024)+1)
-		raw[0] = '"'
-		for i := 1; i < len(raw); i++ {
-			raw[i] = alphabet[rng.Intn(len(alphabet))]
+	t.Run("random parity", func(t *testing.T) {
+		// Verify parity for escaped quotes, escaped backslashes, missing closing
+		// quotes and other malformed inputs. scanJSONString is a scanner, not
+		// a JSON validator; its behavior for truncated data must not change.
+		rng := rand.New(rand.NewSource(1))
+		alphabet := []byte{'"', '\\', 'a', 0, '\n', ',', '[', ']', '{', '}'}
+		for caseID := range 5000 {
+			raw := make([]byte, rng.Intn(1024)+1)
+			raw[0] = '"'
+			for i := 1; i < len(raw); i++ {
+				raw[i] = alphabet[rng.Intn(len(alphabet))]
+			}
+			want := legacyScan(raw, 0)
+			require.Equal(t, want, scanJSONString(raw, 0), "case %d for %q", caseID, raw)
 		}
-		want := legacyScan(raw, 0)
-		if got := scanJSONString(raw, 0); got != want {
-			t.Fatalf("case %d: got %d, want %d for %q", caseID, got, want, raw)
-		}
-	}
+	})
 }
 
 var benchmarkDeferredSnapshotJSONSpans []rawJSONSpan
