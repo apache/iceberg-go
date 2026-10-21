@@ -15,8 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Starts a local Apache Polaris server for TestPolarisCatalogConformance and
-# creates a file-backed catalog the conformance suite can use.
+# Starts a local Apache Polaris server for TestExternalRestCatalogConformance
+# and creates a file-backed catalog the conformance suite can use.
 #
 # Usage: internal/recipe/setup-polaris.sh
 #
@@ -107,10 +107,11 @@ call -X PUT "$api/management/v1/catalogs/$warehouse/catalog-roles/catalog_admin/
 cat << EOF
 Polaris is running in container $container. Run the conformance suite with:
 
-  POLARIS_URI=$api/catalog \\
-  POLARIS_CREDENTIAL=$client_id:$client_secret \\
-  POLARIS_WAREHOUSE=$warehouse \\
-    go test -tags integration -run TestPolarisCatalogConformance ./catalog/rest
+  REST_CATALOG_URI=$api/catalog \\
+  REST_CATALOG_CREDENTIAL=$client_id:$client_secret \\
+  REST_CATALOG_SCOPE=PRINCIPAL_ROLE:ALL \\
+  REST_CATALOG_WAREHOUSE=$warehouse \\
+    go test -tags integration -run TestExternalRestCatalogConformance ./catalog/rest
 
 Remove the server with: docker rm -f $container
 EOF

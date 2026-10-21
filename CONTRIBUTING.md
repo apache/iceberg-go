@@ -65,14 +65,18 @@ docker compose -f internal/recipe/docker-compose.yml up -d rest object-store cre
 go test -tags integration ./...
 ```
 
-#### Polaris Conformance (optional)
+#### External REST Catalog Conformance
 
-The catalog conformance suite can also run against [Apache Polaris](https://polaris.apache.org/), a second REST catalog implementation. `TestPolarisCatalogConformance` is skipped unless `POLARIS_URI` is set. To start a local Polaris server and run it (requires `jq`):
+`TestExternalRestCatalogConformance` runs the catalog conformance suite against any REST catalog server. It is skipped unless `REST_CATALOG_URI` is set. CI runs it against [Apache Polaris](https://polaris.apache.org/); to do the same locally (requires `jq`):
 
 ```bash
-internal/recipe/setup-polaris.sh
-POLARIS_URI=http://localhost:8191/api/catalog \
-POLARIS_CREDENTIAL=root:s3cr3t \
-POLARIS_WAREHOUSE=conformance \
-  go test -tags integration -run TestPolarisCatalogConformance ./catalog/rest
+make integration-setup-polaris
+make integration-external-rest
+```
+
+To test another catalog, override the Polaris defaults with `REST_CATALOG_URI`, `REST_CATALOG_CREDENTIAL` (`client_id:client_secret`), `REST_CATALOG_SCOPE` and `REST_CATALOG_WAREHOUSE`. Set any of them to an empty value to leave it unset, for example:
+
+```bash
+REST_CATALOG_URI=http://localhost:8181 REST_CATALOG_CREDENTIAL= REST_CATALOG_SCOPE= REST_CATALOG_WAREHOUSE= \
+  make integration-external-rest
 ```
