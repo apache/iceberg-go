@@ -111,8 +111,13 @@ type Table struct {
 	// REST catalogs can return FileIO configuration in the response's config
 	// block.
 	scanPlanningIOProps iceberg.Properties
-	savedConfig         iceberg.Properties
-	reporter            metrics.Reporter
+	// scanPlanningDirective is the raw `scan-planning-mode` value from the
+	// catalog load response's config block; hasScanPlanningDirective records
+	// whether the key was present.
+	scanPlanningDirective    string
+	hasScanPlanningDirective bool
+	savedConfig              iceberg.Properties
+	reporter                 metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
 	// explicit NopReporter opt-out) from the construction-time default, so
@@ -250,6 +255,8 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
+	t.scanPlanningDirective = fresh.scanPlanningDirective
+	t.hasScanPlanningDirective = fresh.hasScanPlanningDirective
 	t.labels = fresh.labels
 	t.savedConfig = maps.Clone(fresh.savedConfig)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
@@ -310,6 +317,11 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 //
 // New data from the provided table is written to the table regardless of the filter.
 //
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
+//
 // The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -338,6 +350,11 @@ func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize in
 //
 // New data from the provided RecordReader is written to the table regardless of the filter.
 //
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
+//
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
 func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) (*Table, error) {
@@ -363,6 +380,12 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
 //   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
+// A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
+//
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -728,9 +751,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// peers (partition-filter overlap, referenced-file removal)
 		// even when the catalog-side AssertRefSnapshotID would accept
 		// them. On attempt 0 base == current → no concurrent
-		// snapshots → validators short-circuit. Real divergence
-		// detection fires on attempts > 0 once `current` is the
-		// post-conflict state.
+		// snapshots → validators that inspect them short-circuit, but
+		// validateDataFilesExist still reads the branch head. Real
+		// divergence detection fires on attempts > 0 once `current` is the post-conflict state.
 		//
 		// Skipped when the branch does not exist on `current` — that
 		// always means "the committer is creating this branch" (e.g.
@@ -841,6 +864,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		t.cat,
 		withReporterState(t.reporter, t.reporterSet),
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
+		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
 	), nil
@@ -1165,7 +1189,7 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 
 // SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
 func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entry, ok := snapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
 	if ok {
 		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
@@ -1348,6 +1372,7 @@ func WithArrowBatchSize(n int) ScanOption {
 }
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
+	directive, directiveErr := t.ScanPlanningDirective()
 	s := &Scan{
 		identifier:          slices.Clone(t.identifier),
 		metadata:            t.metadata,
@@ -1356,14 +1381,15 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		manifestCache:       t.manifestCache,
 		planner:             t.planner,
 		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
-		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
-		planningMode:   ScanPlanningLocal,
-		rowFilter:      iceberg.AlwaysTrue{},
-		selectedFields: []string{"*"},
-		caseSensitive:  true,
-		limit:          ScanNoLimit,
-		concurrency:    runtime.GOMAXPROCS(0),
-		reporter:       t.MetricsReporter(),
+		directive:           directive,
+		directiveErr:        directiveErr,
+		planningMode:        ScanPlanningLocal,
+		rowFilter:           iceberg.AlwaysTrue{},
+		selectedFields:      []string{"*"},
+		caseSensitive:       true,
+		limit:               ScanNoLimit,
+		concurrency:         runtime.GOMAXPROCS(0),
+		reporter:            t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {

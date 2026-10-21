@@ -46,7 +46,8 @@ import (
 // Client-side conflict validation runs before the commit is sent to
 // the catalog:
 //   - Position deletes: referenced data files must still be reachable
-//     from the current branch head (validateDataFilesExist).
+//     from the current branch head (validateDataFilesExist), unless
+//     this delta or an operation staged before it in the transaction adds them.
 //   - Equality deletes under write.delete.isolation-level=serializable
 //     (the default): concurrent data files in the same partition(s) as
 //     the equality deletes are rejected. For partitioned tables an
@@ -60,8 +61,9 @@ import (
 // The pre-flight runs before cat.CommitTable on every commit attempt.
 // On the first attempt the writer's view and the catalog state are the
 // same, so there are no concurrent snapshots to inspect and the checks
-// short-circuit; on retries doCommit refreshes the catalog state and
-// the checks run against the freshly loaded branch head.
+// against them short-circuit, while the position-delete check still
+// reads the branch head; on retries doCommit refreshes the catalog state
+// and the checks run against the freshly loaded branch head.
 //
 // Usage:
 //
@@ -149,8 +151,10 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // deletion vector lacks a replacement or is not referenced by the
 // current snapshot, if the delta would leave two live deletion vectors
 // on one data file (a replacement added while the superseded live DV
-// is not removed, or two added replacements for one data file), or if
-// the table format version does not support delete files.
+// is not removed, or two added replacements for one data file), if a
+// position delete references a data file that an operation staged
+// earlier in the transaction removed (ErrDataFilesMissing), or if the
+// table format version does not support delete files.
 // Deletes require v2 or later, DVs require v3 or later.
 //
 // With removals present the staged commit is non-replayable: an
@@ -222,6 +226,16 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		}
 	}
 
+	// A data file may carry at most one live deletion vector, so a single row
+	// delta may add at most one DV per referenced data file. This must be
+	// checked on every path: on the fast-append path no removals are present,
+	// so validateRemovedDeletes (which also enforces it) never runs, and two
+	// DVs added for a data file with no live DV yet would otherwise commit two
+	// live DVs and make scans reject the table.
+	if err := rd.validateAddedDeletionVectors(); err != nil {
+		return err
+	}
+
 	fs, err := rd.txn.tbl.fsF(ctx)
 	if err != nil {
 		return err
@@ -232,7 +246,33 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		return err
 	}
 
+	referenced, err := rd.txn.headDataFiles(fs, rd.referencedDataFiles(), rd.dataFiles)
+	if err != nil {
+		return err
+	}
+
 	op := rd.Operation()
+
+	// Find live DVs that would be superseded by added DVs, regardless of
+	// whether removals are present. If any such live DVs exist and are not
+	// being removed, the commit must fail.
+	replacedLive, err := rd.findReplacedLiveDVs(fs, meta)
+	if err != nil {
+		return err
+	}
+
+	// Validate that any live DV whose referenced data file is being
+	// superseded by an added DV is explicitly removed in this delta.
+	if len(replacedLive) > 0 && len(rd.removedDels) == 0 {
+		// No removals were registered, but there are live DVs that would
+		// be superseded. Return an error with the same message format as
+		// validateRemovedDeletes to guide the caller.
+		live := replacedLive[0]
+		ref := explicitReferencedDataFile(live)
+
+		return fmt.Errorf("cannot add a replacement deletion vector for data file %s: live deletion vector %s is not removed by this row delta; the superseded entry must be removed in the same snapshot",
+			ref, live.FilePath())
+	}
 
 	var producer *snapshotProducer
 	if len(rd.removedDels) > 0 {
@@ -245,7 +285,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		// live DVs whose referenced data file this delta adds a
 		// replacement for; validateRemovedDeletes checks each is
 		// actually removed.
-		resolvedRemovals, replacedLive, err := rd.resolveRemovedDeletes(fs, meta)
+		resolvedRemovals, err := rd.resolveRemovedDeletes(fs, meta)
 		if err != nil {
 			return err
 		}
@@ -290,9 +330,36 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 	// suppressed above; RowDelta semantics (pos-delete references,
 	// eq-delete predicate) require a dedicated check that
 	// snapshot_producers does not know about.
-	rd.txn.addValidator(rd.validate)
+	rd.txn.addValidator(func(cc *conflictContext) error {
+		return rd.validate(cc, referenced)
+	})
 
 	return rd.txn.apply(updates, reqs)
+}
+
+// referencedDataFiles returns the distinct data files that this delta's
+// position deletes name in referenced_data_file. A position delete that
+// leaves the field unset, such as a v2 file covering several data files,
+// names its targets only in its file_path column, which is not read here,
+// so those targets go unchecked.
+func (rd *RowDelta) referencedDataFiles() []string {
+	var referenced []string
+	seen := make(map[string]struct{})
+	for _, f := range rd.delFiles {
+		if f.ContentType() != iceberg.EntryContentPosDeletes {
+			continue
+		}
+		ref := iceberginternal.BorrowedDataFileReferencedDataFile(f)
+		if ref == nil || *ref == "" {
+			continue
+		}
+		if _, ok := seen[*ref]; !ok {
+			seen[*ref] = struct{}{}
+			referenced = append(referenced, *ref)
+		}
+	}
+
+	return referenced
 }
 
 // pathRefKey is the removal identity of a delete-manifest entry: its
@@ -338,13 +405,12 @@ func explicitReferencedDataFile(df iceberg.DataFile) string {
 //     removals — otherwise the commit would leave both the old and the
 //     new DV live on one data file.
 func (rd *RowDelta) validateRemovedDeletes(resolved, replacedLive []iceberg.DataFile) error {
+	// Duplicate added DVs (two references to one data file) are already
+	// rejected unconditionally by validateAddedDeletionVectors before this
+	// runs; here the set only pairs removals with their replacements.
 	addedDVs := make(map[string]struct{}, len(rd.delFiles))
 	for _, f := range rd.delFiles {
 		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
-			if _, ok := addedDVs[ref]; ok {
-				return fmt.Errorf("multiple added deletion vectors reference data file %s; at most one live deletion vector may exist per data file",
-					ref)
-			}
 			addedDVs[ref] = struct{}{}
 		}
 	}
@@ -379,6 +445,66 @@ func (rd *RowDelta) validateRemovedDeletes(resolved, replacedLive []iceberg.Data
 	return nil
 }
 
+// validateAddedDeletionVectors rejects a row delta that adds more than one
+// deletion vector referencing the same data file. Two live DVs on one data
+// file violate the v3 spec and make scan planning reject the table. It runs on
+// every commit path; validateRemovedDeletes enforces the same rule but only
+// runs when removals are present, so the fast-append path relies on this.
+func (rd *RowDelta) validateAddedDeletionVectors() error {
+	addedDVs := make(map[string]struct{}, len(rd.delFiles))
+	for _, f := range rd.delFiles {
+		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
+			if _, ok := addedDVs[ref]; ok {
+				return fmt.Errorf("multiple added deletion vectors reference data file %s; at most one live deletion vector may exist per data file",
+					ref)
+			}
+			addedDVs[ref] = struct{}{}
+		}
+	}
+
+	return nil
+}
+
+// findReplacedLiveDVs walks the current snapshot's delete manifests and
+// collects all live deletion vectors whose referenced data file this delta
+// adds a replacement for. This is used to enforce the v3 spec invariant
+// that at most one live DV can exist per data file: if any such live DVs
+// are found and they are not being explicitly removed, the commit must fail.
+func (rd *RowDelta) findReplacedLiveDVs(fs iceio.IO, meta *MetadataBuilder) ([]iceberg.DataFile, error) {
+	snap := rd.txn.planningSnapshot(meta)
+	if snap == nil {
+		// No existing snapshot means no live DVs to worry about.
+		return nil, nil
+	}
+
+	addedRefs := make(map[string]struct{}, len(rd.delFiles))
+	for _, f := range rd.delFiles {
+		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
+			addedRefs[ref] = struct{}{}
+		}
+	}
+
+	// If no added DVs, there's nothing to replace.
+	if len(addedRefs) == 0 {
+		return nil, nil
+	}
+
+	var replacedLive []iceberg.DataFile
+	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes, true) {
+		if err != nil {
+			return nil, err
+		}
+		df := entry.DataFile()
+		if ref := explicitReferencedDataFile(df); IsDeletionVector(df) && ref != "" {
+			if _, ok := addedRefs[ref]; ok {
+				replacedLive = append(replacedLive, df)
+			}
+		}
+	}
+
+	return replacedLive, nil
+}
+
 // resolveRemovedDeletes walks the current snapshot's delete manifests
 // and resolves each removed file to its live manifest entry, returned
 // in the order the removals were registered.
@@ -408,18 +534,10 @@ func (rd *RowDelta) validateRemovedDeletes(resolved, replacedLive []iceberg.Data
 // than one live entry at the path is rejected: the producer would
 // tombstone every matching entry while the snapshot summary counts
 // only one removal.
-//
-// The walk also collects replacedLive: every live deletion vector
-// whose referenced data file this delta adds a replacement DV for.
-// validateRemovedDeletes requires each to be among the removals, so a
-// delta cannot commit a replacement while leaving the superseded DV
-// live. This piggybacks on the manifest walk the removals already
-// need; deltas without removals do not pay for it (nor get it — see
-// AddDeletes).
-func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (resolved, replacedLive []iceberg.DataFile, _ error) {
+func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (resolved []iceberg.DataFile, _ error) {
 	snap := rd.txn.planningSnapshot(meta)
 	if snap == nil {
-		return nil, nil, errors.New("cannot remove delete files from a table without an existing snapshot")
+		return nil, errors.New("cannot remove delete files from a table without an existing snapshot")
 	}
 
 	want := make(map[string]struct{}, len(rd.removedDels))
@@ -427,26 +545,14 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 		want[f.FilePath()] = struct{}{}
 	}
 
-	addedRefs := make(map[string]struct{}, len(rd.delFiles))
-	for _, f := range rd.delFiles {
-		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
-			addedRefs[ref] = struct{}{}
-		}
-	}
-
 	liveByPath := make(map[string][]iceberg.DataFile, len(rd.removedDels))
 	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		df := entry.DataFile()
 		if _, ok := want[df.FilePath()]; ok {
 			liveByPath[df.FilePath()] = append(liveByPath[df.FilePath()], df)
-		}
-		if ref := explicitReferencedDataFile(df); IsDeletionVector(df) && ref != "" {
-			if _, ok := addedRefs[ref]; ok {
-				replacedLive = append(replacedLive, df)
-			}
 		}
 	}
 
@@ -459,13 +565,13 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 		var live iceberg.DataFile
 		switch {
 		case len(candidates) == 0:
-			return nil, nil, fmt.Errorf("cannot remove delete files that do not belong to the table: %s", f.FilePath())
+			return nil, fmt.Errorf("cannot remove delete files that do not belong to the table: %s", f.FilePath())
 		case len(candidates) == 1:
 			live = candidates[0]
 		default:
 			ref := explicitReferencedDataFile(f)
 			if ref == "" {
-				return nil, nil, fmt.Errorf("ambiguous removal: %d live delete entries share path %s; the removed file must declare a referenced data file to identify one",
+				return nil, fmt.Errorf("ambiguous removal: %d live delete entries share path %s; the removed file must declare a referenced data file to identify one",
 					len(candidates), f.FilePath())
 			}
 			matches := 0
@@ -479,10 +585,10 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 			}
 			switch {
 			case matches == 0:
-				return nil, nil, fmt.Errorf("cannot remove delete file %s: no live delete entry references data file %s",
+				return nil, fmt.Errorf("cannot remove delete file %s: no live delete entry references data file %s",
 					f.FilePath(), ref)
 			case matches > 1:
-				return nil, nil, fmt.Errorf("found %d live delete entries at %s referencing data file %s; the table has duplicate live deletion vectors for one data file",
+				return nil, fmt.Errorf("found %d live delete entries at %s referencing data file %s; the table has duplicate live deletion vectors for one data file",
 					matches, f.FilePath(), ref)
 			}
 		}
@@ -490,7 +596,7 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 		liveRef := explicitReferencedDataFile(live)
 		key := pathRefKey{path: live.FilePath(), ref: liveRef}
 		if _, ok := seenKeys[key]; ok {
-			return nil, nil, fmt.Errorf("removed delete files must be unique: %s (referenced data file %q)",
+			return nil, fmt.Errorf("removed delete files must be unique: %s (referenced data file %q)",
 				live.FilePath(), liveRef)
 		}
 		seenKeys[key] = struct{}{}
@@ -502,7 +608,7 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 		// error, so they are exempt here.
 		if liveRef != "" {
 			if prevPath, ok := seenRefs[liveRef]; ok {
-				return nil, nil, fmt.Errorf("removed delete files %s and %s both reference data file %q; the table has two live deletion vectors for one data file",
+				return nil, fmt.Errorf("removed delete files %s and %s both reference data file %q; the table has two live deletion vectors for one data file",
 					prevPath, live.FilePath(), liveRef)
 			}
 			seenRefs[liveRef] = live.FilePath()
@@ -510,7 +616,7 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 		resolved[i] = live
 	}
 
-	return resolved, replacedLive, nil
+	return resolved, nil
 }
 
 // validate is the client-side conflict check for a RowDelta commit. It
@@ -519,10 +625,12 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 // reflects the freshly refreshed branch state. Two invariants are
 // enforced:
 //
-//   - Every data file referenced by a position-delete in this RowDelta
-//     must still be reachable from the branch head. A concurrent
-//     compaction or overwrite that rewrote a referenced file would
-//     orphan this pos-delete and produce incorrect results — reject.
+//   - Every data file in referenced, the position-delete targets that
+//     Commit did not find among the transaction's staged files
+//     (Transaction.headDataFiles), must still be reachable from the
+//     branch head. A concurrent compaction or overwrite that rewrote a
+//     referenced file would orphan this pos-delete and produce incorrect
+//     results — reject.
 //     Always runs, no isolation gating.
 //
 //   - When any equality-delete is included and isolation is
@@ -538,7 +646,7 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 //
 // Fast appends alongside a RowDelta see no validators from RowDelta:
 // data-only commits are as safe as a fastAppend.
-func (rd *RowDelta) validate(cc *conflictContext) error {
+func (rd *RowDelta) validate(cc *conflictContext, referenced []string) error {
 	meta, err := rd.txn.txnMeta()
 	if err != nil {
 		return err
@@ -550,28 +658,24 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		return err
 	}
 
-	// Collect every data-file path the pos-deletes in this delta
-	// reference. A nil ReferencedDataFile means the pos-delete does
-	// not record its target — we cannot check it here; the file is
-	// still present in the per-row position_delete_file column and
-	// would apply correctly regardless of concurrent removals,
-	// matching Java's behavior when the referenced-file column is
-	// unset.
-	var referenced []string
 	var eqDeleteFiles []iceberg.DataFile
 	for _, f := range rd.delFiles {
-		switch f.ContentType() {
-		case iceberg.EntryContentPosDeletes:
-			if ref := iceberginternal.BorrowedDataFileReferencedDataFile(f); ref != nil && *ref != "" {
-				referenced = append(referenced, *ref)
-			}
-		case iceberg.EntryContentEqDeletes:
+		if f.ContentType() == iceberg.EntryContentEqDeletes {
 			eqDeleteFiles = append(eqDeleteFiles, f)
 		}
 	}
 
 	if cc == nil {
 		return nil
+	}
+
+	// Enforce the v3 single-live-DV invariant against concurrently committed
+	// snapshots. findReplacedLiveDVs caught DVs already live in the base at
+	// Commit time; this catches a concurrent writer that added the first DV
+	// for the same data file after our base, visible once the branch is
+	// refreshed on retry.
+	if err := rd.validateNoConcurrentReplacedDVs(cc); err != nil {
+		return err
 	}
 
 	if len(referenced) > 0 {
@@ -605,6 +709,41 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	}
 
 	return nil
+}
+
+// validateNoConcurrentReplacedDVs enforces the v3 single-live-DV invariant on
+// commit retries. findReplacedLiveDVs (run once at Commit time) rejects DVs
+// already live in the base snapshot, but two writers can each add the FIRST DV
+// for the same data file: both pass that scan against their shared base, and an
+// add-only row delta is replayable. On retry cc carries the concurrently
+// committed snapshots, so a concurrent writer that added a DV for a data file
+// this delta also adds a DV for would strand two live DVs on one data file —
+// reject. A removal-carrying delta is non-replayable (see RemoveDeletes), so a
+// retry never has removals to reconcile against the concurrent DV here.
+func (rd *RowDelta) validateNoConcurrentReplacedDVs(cc *conflictContext) error {
+	addedRefs := make(map[string]struct{}, len(rd.delFiles))
+	for _, f := range rd.delFiles {
+		if ref := explicitReferencedDataFile(f); IsDeletionVector(f) && ref != "" {
+			addedRefs[ref] = struct{}{}
+		}
+	}
+	if len(addedRefs) == 0 {
+		return nil
+	}
+
+	return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, entry iceberg.ManifestEntry) error {
+		df := entry.DataFile()
+		ref := explicitReferencedDataFile(df)
+		if !IsDeletionVector(df) || ref == "" {
+			return nil
+		}
+		if _, ok := addedRefs[ref]; ok {
+			return fmt.Errorf("cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and rewrite the DV to supersede the concurrent one, removing the superseded DV in the same row delta",
+				ref, snap.SnapshotID, df.FilePath())
+		}
+
+		return nil
+	})
 }
 
 // Operation returns the snapshot operation type that will be used when

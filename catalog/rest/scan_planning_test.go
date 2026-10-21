@@ -96,22 +96,37 @@ func TestScanPlanningEscapesOpaquePlanID(t *testing.T) {
 	// literal segment; otherwise "a/b" splits and ".." / "../tasks" resolve to a
 	// different endpoint. Each must survive JoinPath as the final .../plan/ segment
 	// and round-trip.
-	for _, planID := range []string{"a/b", "../tasks", "a b", "a%2Fb", ".", "..", "plan-123"} {
-		path, err := cat.scanPlanningPath(endpointFetchPlanResult, table.Identifier{"db", "tbl"}, planID)
-		require.NoErrorf(t, err, "plan-id %q", planID)
+	for _, tt := range []struct {
+		name    string
+		id      string
+		wantSeg string
+	}{
+		{name: "slash", id: "a/b", wantSeg: "a%2Fb"},
+		{name: "traversal", id: "../tasks", wantSeg: "..%2Ftasks"},
+		{name: "space", id: "a b", wantSeg: "a%20b"},
+		{name: "plus", id: "a+b", wantSeg: "a%2Bb"},
+		{name: "percent", id: "a%2Fb", wantSeg: "a%252Fb"},
+		{name: "dot", id: ".", wantSeg: "%2E"},
+		{name: "double dot", id: "..", wantSeg: "%2E%2E"},
+		{name: "plain", id: "plan-123", wantSeg: "plan-123"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, err := cat.scanPlanningPath(endpointFetchPlanResult, table.Identifier{"db", "tbl"}, tt.id)
+			require.NoError(t, err)
 
-		seg := path[len(path)-1]
-		assert.NotContainsf(t, seg, "/", "plan-id %q split into multiple segments: %q", planID, seg)
+			seg := path[len(path)-1]
+			assert.Equal(t, tt.wantSeg, seg)
 
-		decoded, err := url.PathUnescape(seg)
-		require.NoErrorf(t, err, "plan-id %q", planID)
-		assert.Equalf(t, planID, decoded, "plan-id %q did not round-trip", planID)
+			decoded, err := url.PathUnescape(seg)
+			require.NoError(t, err)
+			assert.Equal(t, tt.id, decoded)
 
-		// The escaped segment must survive JoinPath's path.Clean as the last
-		// .../plan/ segment (no split, no traversal to a different endpoint).
-		escaped := cat.baseURI.JoinPath(path...).EscapedPath()
-		assert.Truef(t, strings.HasSuffix(escaped, "/plan/"+seg),
-			"plan-id %q was mangled by JoinPath: %s", planID, escaped)
+			// The escaped segment must survive JoinPath's path.Clean as the last
+			// .../plan/ segment (no split, no traversal to a different endpoint).
+			escaped := cat.baseURI.JoinPath(path...).EscapedPath()
+			assert.Truef(t, strings.HasSuffix(escaped, "/plan/"+tt.wantSeg),
+				"plan-id %q was mangled by JoinPath: %s", tt.id, escaped)
+		})
 	}
 }
 

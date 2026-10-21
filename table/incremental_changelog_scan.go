@@ -48,7 +48,8 @@ type plannedChangelogTask struct {
 
 // NewIncrementalChangelogScan creates an incremental changelog planner.
 // Projection and row limits are not applied to returned tasks. Auto planning
-// falls back to local planning, while remote planning is not supported. Use
+// falls back to local planning, while remote planning, including a catalog
+// `server` scan-planning-mode directive, is not supported. Use
 // ChangelogScanTask.ScanTask with Scan.ReadTasks to read the returned files.
 // Row filters are attached to each task as residuals without partition-specific
 // simplification, matching the existing incremental append scan behavior.
@@ -102,12 +103,8 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		return nil, err
 	}
 
-	switch s.scan.planningMode {
-	case ScanPlanningLocal, ScanPlanningAuto:
-	case ScanPlanningRemote:
-		return nil, fmt.Errorf("%w: incremental changelog scans do not support remote planning", ErrInvalidOperation)
-	default:
-		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, s.scan.planningMode)
+	if err := s.scan.checkLocalOnlyPlanning("incremental changelog"); err != nil {
+		return nil, err
 	}
 	start := time.Now()
 

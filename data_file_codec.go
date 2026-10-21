@@ -19,7 +19,6 @@ package iceberg
 
 import (
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 
@@ -72,10 +71,9 @@ type AvroEntryMarshaler interface {
 // MarshalAvroEntry encodes this DataFile as Avro bytes using the
 // manifest-entry encoding for the given partition spec, table schema
 // and format version (1, 2, or 3). The wire format is the same one a
-// manifest carries for this data file, so adding a field to the
-// underlying struct (and its avro tags) automatically extends what
-// MarshalAvroEntry transports — there is no separate wire-mirror
-// struct to keep in sync.
+// manifest carries for this data file. The Avro tags define the wire fields;
+// TestCloneDataFileAvroFieldsCopiesOnlyAvroFields checks that the explicit
+// clone list stays synchronized when new fields are added.
 //
 // MarshalAvroEntry is the iceberg-package side of the
 // [github.com/apache/iceberg-go/codec] DataFile codec; callers
@@ -146,6 +144,9 @@ func unmarshalAvroDataFileEntry(data []byte, spec PartitionSpec, schema *Schema,
 	if _, err := s.Decode(data, entry); err != nil {
 		return nil, fmt.Errorf("iceberg: unmarshalAvroDataFileEntry: %w", err)
 	}
+	if err := df.normalizeFormat(); err != nil {
+		return nil, fmt.Errorf("iceberg: unmarshalAvroDataFileEntry: %w", err)
+	}
 	df.specID = int32(spec.ID())
 	df.fieldNameToID = maps.nameToID
 	df.fieldIDToLogicalType = maps.idToType
@@ -180,45 +181,38 @@ func newDecodeEntry(version int) (any, *dataFile) {
 	return &manifestEntry{Data: df}, df
 }
 
-var dataFileAvroFieldIndexes = avroFieldIndexes(reflect.TypeFor[dataFile]())
-
-func avroFieldIndexes(t reflect.Type) []int {
-	indexes := make([]int, 0, t.NumField())
-	for i := range t.NumField() {
-		if _, hasAvroTag := t.Field(i).Tag.Lookup("avro"); hasAvroTag {
-			indexes = append(indexes, i)
-		}
-	}
-
-	return indexes
-}
-
-// cloneDataFileAvroFields returns a fresh *dataFile populated with src's
-// avro-tagged fields. Internal state (sync.Once, lazy-init caches,
-// specID, the field-id lookup maps) is intentionally left at zero
-// values because the avro encoder reads only the avro-tagged fields.
+// cloneDataFileAvroFields shallow-copies the Avro-tagged fields without
+// reflection. Internal state, including sync.Once, caches, and spec IDs, is
+// intentionally left at zero values. The test checks every Avro-tagged field
+// so that new fields cannot be silently omitted from this list.
 //
-// The avro-tagged field indexes are discovered once when the package is
-// initialized. This keeps dataFile as the single source of truth for the
-// wire shape while avoiding a reflect.Type and StructTag lookup for every
-// encoded manifest entry. It also sidesteps the go-vet copies-lock warning
-// that would fire on a struct-literal copy of *dataFile (it embeds sync.Once).
-//
-// Note: this is a shallow copy. Pointer-typed avro fields (ColSizes,
-// LowerBounds, etc.) share their backing storage with the source.
-// The no-mutation guarantee of MarshalAvroEntry depends on the avro
-// encoder being read-only on the values it walks; TestMarshalAvroEntry
-// DoesNotMutate asserts this end-to-end across every avro-tagged
-// field, so a future regression in the encoder surfaces in tests.
+// Pointer-typed fields share backing storage with src. The encoder must not
+// mutate these values (see TestMarshalAvroEntryDoesNotMutateAnyAvroField).
 func cloneDataFileAvroFields(src *dataFile) *dataFile {
-	out := &dataFile{}
-	srcVal := reflect.ValueOf(src).Elem()
-	outVal := reflect.ValueOf(out).Elem()
-	for _, i := range dataFileAvroFieldIndexes {
-		outVal.Field(i).Set(srcVal.Field(i))
+	return &dataFile{
+		Content:                 src.Content,
+		Path:                    src.Path,
+		Format:                  src.Format,
+		PartitionData:           src.PartitionData,
+		RecordCount:             src.RecordCount,
+		FileSize:                src.FileSize,
+		BlockSizeInBytes:        src.BlockSizeInBytes,
+		ColSizes:                src.ColSizes,
+		ValCounts:               src.ValCounts,
+		NullCounts:              src.NullCounts,
+		NaNCounts:               src.NaNCounts,
+		DistinctCounts:          src.DistinctCounts,
+		LowerBounds:             src.LowerBounds,
+		UpperBounds:             src.UpperBounds,
+		Key:                     src.Key,
+		Splits:                  src.Splits,
+		EqualityIDs:             src.EqualityIDs,
+		SortOrder:               src.SortOrder,
+		FirstRowIDField:         src.FirstRowIDField,
+		ReferencedDataFileField: src.ReferencedDataFileField,
+		ContentOffsetField:      src.ContentOffsetField,
+		ContentSizeInBytesField: src.ContentSizeInBytesField,
 	}
-
-	return out
 }
 
 // avroEncodePartitionData converts an id-keyed partition tuple (carrying

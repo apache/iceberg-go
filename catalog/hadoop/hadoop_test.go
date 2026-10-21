@@ -936,7 +936,7 @@ func (s *HadoopCatalogTestSuite) TestCreateNamespaceNestedParentMissing() {
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceWithProperties() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, iceberg.Properties{"key": "val"})
-	s.Require().Error(err)
+	s.Require().ErrorIs(err, iceberg.ErrNotImplemented)
 	s.Contains(err.Error(), "properties are not supported")
 }
 
@@ -1131,8 +1131,8 @@ func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesFileNotDir() {
 
 func (s *HadoopCatalogTestSuite) TestUpdateNamespacePropertiesUnsupported() {
 	_, err := s.cat.UpdateNamespaceProperties(context.Background(), []string{"ns"}, nil, nil)
-	s.Require().Error(err)
-	s.Contains(err.Error(), "not yet implemented")
+	s.Require().ErrorIs(err, iceberg.ErrNotImplemented)
+	s.Contains(err.Error(), "properties are not supported")
 }
 
 func (s *HadoopCatalogTestSuite) TestDropNamespaceWithRegularFilesOnly() {

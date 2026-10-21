@@ -409,26 +409,6 @@ func walkedURIPath(location ObjectLocation, walked string) string {
 	return location.uriPrefix + walked
 }
 
-// isDirectoryMarker reports whether dirEntry is the marker object for the
-// path passed to WalkDir
-func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
-	// Directory entries and nil entries are never the marker object itself.
-	if dirEntry == nil || dirEntry.IsDir() {
-		return false
-	}
-
-	info, err := dirEntry.Info()
-	if err != nil {
-		return false
-	}
-
-	// blob fs is the only implementation that uses directory markers
-	// so we can use a type assertion to check
-	obj, ok := info.Sys().(*blob.ListObject)
-
-	return ok && obj.Key == directoryMarker(walkRootKey)
-}
-
 // walkFS walks a bucket for fs.WalkDir, treating any key with children as a directory,
 // so the 0-byte directory blobs of ADLS hierarchical namespaces (OneLake) aren't files.
 type walkFS struct{ bfs *FileIO }
@@ -484,6 +464,7 @@ func (w walkFS) ReadDir(name string) ([]fs.DirEntry, error) {
 
 	var files []*blob.ListObject
 	dirs := map[string]bool{}
+	hasMarker := false
 	iter := w.bfs.List(&blob.ListOptions{Prefix: prefix, Delimiter: "/"})
 	for {
 		obj, err := iter.Next(w.bfs.ctx)
@@ -492,6 +473,13 @@ func (w walkFS) ReadDir(name string) ([]fs.DirEntry, error) {
 		}
 		if err != nil {
 			return nil, blobErrToFsErr("readdir", name, err)
+		}
+
+		if obj.Key == prefix {
+			// The "name/" marker of the directory being read, not a child of it.
+			hasMarker = true
+
+			continue
 		}
 
 		if obj.IsDir {
@@ -513,8 +501,6 @@ func (w walkFS) ReadDir(name string) ([]fs.DirEntry, error) {
 			continue
 		}
 
-		// Name entries the way gocloud's fs.FS does, so a "dir/" marker keeps
-		// the name it had before walkFS.
 		entries = append(entries, walkFileEntry{blobFileInfo{
 			name:    pathpkg.Base(obj.Key),
 			size:    obj.Size,
@@ -524,7 +510,8 @@ func (w walkFS) ReadDir(name string) ([]fs.DirEntry, error) {
 		}})
 	}
 
-	if len(entries) == 0 && name != "." {
+	// A directory holding only its marker is empty, not missing.
+	if len(entries) == 0 && name != "." && !hasMarker {
 		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
 	}
 
@@ -563,16 +550,15 @@ func (bfs *FileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 		walkPath = "."
 	} else {
-		walkPath = location.key
+		// fs.WalkDir rejects a path with a trailing slash, and a directory
+		// root is often written with one.
+		walkPath = strings.TrimRight(location.key, "/")
+		if walkPath == "" {
+			walkPath = "."
+		}
 	}
 
 	return fs.WalkDir(walkFS{bfs}, walkPath, func(path string, d fs.DirEntry, err error) error {
-		// Skip the marker for the path passed to WalkDir. Otherwise walking
-		// "warehouse/ns" reports "warehouse/ns/" as a child file.
-		if err == nil && isDirectoryMarker(walkPath, d) {
-			return nil
-		}
-
 		if location.hasAuthority {
 			path = walkedURIPath(location, path)
 		}
