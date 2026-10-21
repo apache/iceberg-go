@@ -1016,11 +1016,13 @@ func yearMonthFromUnixDays(days int64) (year, month int) {
 
 func yearPartitionFromDays(days int64) int32 {
 	year, _ := yearMonthFromUnixDays(days)
+
 	return int32(year - 1970)
 }
 
 func monthPartitionFromDays(days int64) int32 {
 	year, month := yearMonthFromUnixDays(days)
+
 	return int32((year-1970)*12 + month - 1)
 }
 

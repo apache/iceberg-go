@@ -217,6 +217,7 @@ func referenceCalendarTransformer(src Type, month bool) func(any) Optional[int32
 			return Optional[int32]{Valid: true, Val: int32(tm.Year() - epochTM.Year())}
 		}
 	}
+
 	return nil
 }
 
