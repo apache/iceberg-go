@@ -632,6 +632,7 @@ func (r *Reader) ReadAllBlobs() ([]*BlobData, error) {
 			slices.SortFunc(order, func(a, b int) int {
 				return cmp.Compare(footer.Blobs[a].Offset, footer.Blobs[b].Offset)
 			})
+
 			break
 		}
 	}
