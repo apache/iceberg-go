@@ -18,6 +18,8 @@
 package table
 
 import (
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -78,4 +80,30 @@ func TestPartitionPathPlanMatchesPartitionToPath(t *testing.T) {
 	assert.Equal(t,
 		"created+ts%2Ftz=2024-01-15T10%3A30%3A00%2B00%3A00/str%23part=partition%2Fvalue/id_bucket=7/missing=null/unknown=42",
 		plan.pathPlan.format(record))
+}
+
+func TestWriteQueryEscapedMatchesQueryEscape(t *testing.T) {
+	values := []string{
+		"", "plain-value_123.~", "a b", "a/b?c=d&x=10%",
+		"2026-10-21T05:53:00+02:00", "東京/🌎", "\x00\xff",
+		strings.Repeat("a/b?c=d&x=10%", 20),
+	}
+	// Cover every byte, including invalid UTF-8, and adjacent escape sequences.
+	for c := 0; c < 256; c++ {
+		values = append(values, string([]byte{byte(c)}))
+	}
+	allBytes := make([]byte, 256)
+	for i := range allBytes {
+		allBytes[i] = byte(i)
+	}
+	values = append(values, string(allBytes))
+
+	for _, value := range values {
+		var sb strings.Builder
+		sb.WriteString("prefix:")
+		writeQueryEscaped(&sb, value)
+		sb.WriteString(":suffix")
+		assert.Equalf(t, "prefix:"+url.QueryEscape(value)+":suffix", sb.String(),
+			"value: %q", value)
+	}
 }
