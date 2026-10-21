@@ -63,6 +63,8 @@ type equalityDeleteSet struct {
 
 	singleInt64Once sync.Once
 	singleInt64     *singleInt64EqualityDeleteSet
+	singleInt32Once sync.Once
+	singleInt32     *singleInt32EqualityDeleteSet
 	singleBytesOnce sync.Once
 	singleBytes     *singleBytesEqualityDeleteSet
 }
@@ -1382,6 +1384,48 @@ func (e *equalityDeleteSet) singleInt64Set(fileSchema *iceberg.Schema) *singleIn
 	return e.singleInt64
 }
 
+// singleInt32EqualityDeleteSet avoids encoding one key buffer per data row.
+// The 4-byte value is stored as its raw bit pattern, preserving negative values.
+type singleInt32EqualityDeleteSet struct {
+	keys    set[uint32]
+	hasNull bool
+}
+
+func (e *equalityDeleteSet) singleInt32Set(fileSchema *iceberg.Schema) *singleInt32EqualityDeleteSet {
+	if fileSchema == nil || len(e.fieldIDs) != 1 {
+		return nil
+	}
+
+	field, ok := fileSchema.FindFieldByID(e.fieldIDs[0])
+	if !ok {
+		return nil
+	}
+	if _, ok := field.Type.(iceberg.Int32Type); !ok {
+		return nil
+	}
+
+	e.singleInt32Once.Do(func() {
+		result := &singleInt32EqualityDeleteSet{
+			keys: make(set[uint32], len(e.keys)),
+		}
+		for key := range e.keys {
+			if len(key) == 1 && key[0] == 0 {
+				result.hasNull = true
+
+				continue
+			}
+			if len(key) != 5 || key[0] != 1 {
+				// An unexpected encoding must use the generic path.
+				return
+			}
+			result.keys[binary.BigEndian.Uint32([]byte(key[1:]))] = struct{}{}
+		}
+		e.singleInt32 = result
+	})
+
+	return e.singleInt32
+}
+
 type singleBytesEqualityDeleteSet struct {
 	keys    set[string]
 	hasNull bool
@@ -1565,6 +1609,50 @@ func (m *equalityDeleteMask) applySingleBytes(
 	return true
 }
 
+// applySingleInt32 returns false for other physical Arrow types, so callers
+// can preserve the generic key encoder for schema evolution.
+func (m *equalityDeleteMask) applySingleInt32(
+	column arrow.Array,
+	deleteSet *singleInt32EqualityDeleteSet,
+	mem memory.Allocator,
+) bool {
+	values, ok := column.(*array.Int32)
+	if !ok {
+		return false
+	}
+
+	rawValues := values.Int32Values()
+	numRows := values.Len()
+	if values.NullN() == 0 {
+		for row := range numRows {
+			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+				continue
+			}
+			if _, deleted := deleteSet.keys[uint32(rawValues[row])]; deleted {
+				m.ensure(mem, numRows)
+				bitutil.ClearBit(m.bits, row)
+			}
+		}
+	} else {
+		for row := range numRows {
+			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+				continue
+			}
+			if values.IsNull(row) {
+				if !deleteSet.hasNull {
+					continue
+				}
+			} else if _, deleted := deleteSet.keys[uint32(rawValues[row])]; !deleted {
+				continue
+			}
+			m.ensure(mem, numRows)
+			bitutil.ClearBit(m.bits, row)
+		}
+	}
+
+	return true
+}
+
 // processEqualityDeletesColumnarForFile resolves field paths once per file and
 // typed column encoders once per batch, then iterates rows without per-row type
 // switches. Each delete set is applied independently because sets may have
@@ -1601,12 +1689,14 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 	}
 
 	singleInt64Sets := make([]*singleInt64EqualityDeleteSet, len(eqDeleteSets))
+	singleInt32Sets := make([]*singleInt32EqualityDeleteSet, len(eqDeleteSets))
 	singleBytesSets := make([]*singleBytesEqualityDeleteSet, len(eqDeleteSets))
 	for i, eqDel := range eqDeleteSets {
 		// Nested fields need parent validity checks and use the generic path.
 		// Do not duplicate their encoded keys in an index that cannot be used.
 		if len(fieldRefs[i]) == 1 && len(fieldRefs[i][0].path) == 1 {
 			singleInt64Sets[i] = eqDel.singleInt64Set(fileSchema)
+			singleInt32Sets[i] = eqDel.singleInt32Set(fileSchema)
 			singleBytesSets[i] = eqDel.singleBytesSet(fileSchema)
 		}
 	}
@@ -1623,11 +1713,15 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		var keyBuf bytes.Buffer
 
 		for setIdx, eqDel := range eqDeleteSets {
-			if int64Set, bytesSet := singleInt64Sets[setIdx], singleBytesSets[setIdx]; int64Set != nil || bytesSet != nil {
+			int32Set, int64Set, bytesSet := singleInt32Sets[setIdx], singleInt64Sets[setIdx], singleBytesSets[setIdx]
+			if int32Set != nil || int64Set != nil || bytesSet != nil {
 				column, _, err := arrowArraysAtField(
 					r, fieldRefs[setIdx][0], eqDel.fieldIDs[0], eqDel.colNames[0], dataFilePath)
 				if err != nil {
 					return nil, err
+				}
+				if int32Set != nil && mask.applySingleInt32(column, int32Set, mem) {
+					continue
 				}
 				if int64Set != nil && mask.applySingleInt64(column, int64Set, mem) {
 					continue
