@@ -117,7 +117,6 @@ func BenchmarkSplitRemoteScanTasksSplitOffsets(b *testing.B) {
 // DataFileSplitOffsetsRef, forcing the defensive-copy fallback for comparison.
 type splitOffsetsPublicBenchmarkFile struct{ iceberg.DataFile }
 
-
 // BenchmarkSplitRemoteScanTasksBatch measures the split planner with many
 // Parquet files and shared row-group layouts. Input files are built before
 // timing, and the benchmark reports the complete output task slice.
