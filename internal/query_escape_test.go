@@ -30,8 +30,8 @@ func TestAppendQueryEscapedMatchesURLQueryEscape(t *testing.T) {
 		strings.Repeat("/ +%", 100), strings.Repeat("ascii-09", 100),
 	}
 	// Cover every possible pair of input bytes, including invalid UTF-8.
-	for i := 0; i < 256; i++ {
-		for j := 0; j < 256; j++ {
+	for i := range 256 {
+		for j := range 256 {
 			values = append(values, string([]byte{byte(i), byte(j)}))
 		}
 	}

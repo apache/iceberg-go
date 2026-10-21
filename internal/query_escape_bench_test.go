@@ -42,7 +42,7 @@ func BenchmarkAppendQueryEscaped(b *testing.B) {
 			for _, method := range []string{"QueryEscape", "AppendQueryEscaped"} {
 				b.Run(method, func(b *testing.B) {
 					b.ReportAllocs()
-					for i := 0; i < b.N; i++ {
+					for range b.N {
 						var builder strings.Builder
 						builder.Grow(len(tc.value) + 20)
 						builder.WriteString("partition=")

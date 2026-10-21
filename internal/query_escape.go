@@ -26,7 +26,7 @@ const queryEscapeHex = "0123456789ABCDEF"
 // when building partition paths, especially for multiple escaped fields.
 func AppendQueryEscaped(builder *strings.Builder, value string) {
 	start := 0
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		char := value[i]
 		if (char >= 'a' && char <= 'z') ||
 			(char >= 'A' && char <= 'Z') ||
