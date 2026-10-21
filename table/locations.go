@@ -54,7 +54,13 @@ type simpleLocationProvider struct {
 // encode, or decode the local path or URI.
 func joinLocationPath(location string, elem ...string) string {
 	base := strings.TrimRight(location, "/")
-	size := len(base) + max(1, len(elem))
+	// The common zero- and one-component cases already need just one
+	// allocation. Keep their direct concatenation path.
+	if len(elem) < 2 {
+		return base + "/" + strings.Join(elem, "/")
+	}
+
+	size := len(base) + len(elem)
 	for _, component := range elem {
 		size += len(component)
 	}
