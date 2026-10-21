@@ -42,6 +42,9 @@ func TestScanJSONStringEscapes(t *testing.T) {
 	for _, value := range []string{
 		"", "a", "\\", "\"", "\\\"", "a\"b\\c", "東京",
 		strings.Repeat("s3://bucket/long/manifest-location/", 32),
+		strings.Repeat("x", 256) + `"tail`,
+		strings.Repeat("x", 256) + `\\"tail`,
+		strings.Repeat(`a"b`, 80),
 	} {
 		raw, err := json.Marshal(value)
 		if err != nil {
