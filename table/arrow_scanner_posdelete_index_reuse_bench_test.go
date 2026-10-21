@@ -75,7 +75,7 @@ func benchmarkPositionDeleteIndexTasks(deleteCount int, interleaved bool) []File
 		deleteFiles[i] = make([]iceberg.DataFile, deleteCount)
 		for j := range deleteFiles[i] {
 			deleteFiles[i][j] = &mockDataFile{
-				path: fmt.Sprintf("s3://bucket/catalog/namespace/table/deletes/%016d-%012d-%032d.parquet", i, j, j),
+				path:        fmt.Sprintf("s3://bucket/catalog/namespace/table/deletes/%016d-%012d-%032d.parquet", i, j, j),
 				contentType: iceberg.EntryContentPosDeletes,
 			}
 		}

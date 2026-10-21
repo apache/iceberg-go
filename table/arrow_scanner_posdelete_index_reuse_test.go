@@ -34,16 +34,16 @@ func TestPositionDeleteIndexReuseAcrossSplits(t *testing.T) {
 
 	tasks := []FileScanTask{
 		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}},
-		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}}, // Adjacent identical set.
-		{File: data, DeleteFiles: []iceberg.DataFile{deleteB, deleteA}}, // Reordered set.
-		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteC}}, // Changed set.
+		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}},          // Adjacent identical set.
+		{File: data, DeleteFiles: []iceberg.DataFile{deleteB, deleteA}},          // Reordered set.
+		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteC}},          // Changed set.
 		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB, deleteB}}, // Duplicate path.
-		{File: otherData, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}}, // Different target.
+		{File: otherData, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}},     // Different target.
 		{
 			File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB},
 			DeletionVectorFiles: []iceberg.DataFile{deleteC}, // Superseding DV.
 		},
-		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}}, // After DV.
+		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}},     // After DV.
 		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, otherDelete}}, // Non-positional delete.
 		{File: data, DeleteFiles: []iceberg.DataFile{deleteA}},
 		{File: data, DeleteFiles: []iceberg.DataFile{deleteA, deleteB}},
@@ -71,7 +71,7 @@ func TestPositionDeleteIndexReuseAcrossSplits(t *testing.T) {
 	require.Equal(t, []string{deleteA.FilePath(), deleteB.FilePath()}, indexes[0].index.deletePaths)
 	require.NotSame(t, indexes[0].index, indexes[3].index) // Changed delete set.
 	require.NotSame(t, indexes[0].index, indexes[5].index) // Changed target path.
-	require.Same(t, indexes[8].index, indexes[9].index)   // Non-positional entries are ignored.
+	require.Same(t, indexes[8].index, indexes[9].index)    // Non-positional entries are ignored.
 	require.NotSame(t, indexes[0].index, indexes[9].index)
 	for _, i := range []int{6, 11, 12} {
 		require.Nil(t, indexes[i].index, "task %d must not have an index", i)
