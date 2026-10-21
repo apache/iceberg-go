@@ -89,6 +89,7 @@ func appendParquetTaskSplits(result []FileScanTask, task FileScanTask, offsets [
 	split := task
 	split.Start = taskStart
 	split.Length = taskEnd - taskStart
+
 	return append(result, split)
 }
 
@@ -109,6 +110,7 @@ func splitParquetScanTask(task FileScanTask, targetSize int64) ([]FileScanTask, 
 	}
 
 	result := make([]FileScanTask, 0, parquetSplitCapacity(len(offsets), fileSize, targetSize))
+
 	return appendParquetTaskSplits(result, task, offsets, fileSize, targetSize), true
 }
 
@@ -123,6 +125,7 @@ func splitRemoteScanTasks(tasks []FileScanTask, targetSize int64) []FileScanTask
 			if result != nil {
 				result = append(result, task)
 			}
+
 			continue
 		}
 
