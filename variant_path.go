@@ -127,20 +127,33 @@ func parseBracketSelector(s, path string) (string, int, error) {
 		return "", 0, fmt.Errorf("%w: unsupported variant path %q (only quoted member selectors like ['name'] are supported)", ErrInvalidArgument, path)
 	}
 
+	// Delay copying until an escape is found. Plain quoted members can
+	// reference the original path without allocating a new string.
 	var b strings.Builder
+	start := 2
 	for i := 2; i < len(s); {
-		c := s[i]
-		switch c {
+		switch s[i] {
 		case '\'':
 			if i+1 >= len(s) || s[i+1] != ']' {
 				return "", 0, fmt.Errorf("%w: invalid variant path %q (expected ']' after quoted member)", ErrInvalidArgument, path)
 			}
+
+			if start == 2 {
+				if i == 2 {
+					// Avoid retaining the input path for an empty member.
+					return "", i + 2, nil
+				}
+
+				return s[2:i], i + 2, nil
+			}
+			b.WriteString(s[start:i])
 
 			return b.String(), i + 2, nil
 		case '\\':
 			if i+1 >= len(s) {
 				return "", 0, fmt.Errorf("%w: invalid variant path %q (dangling escape)", ErrInvalidArgument, path)
 			}
+			b.WriteString(s[start:i])
 			switch e := s[i+1]; e {
 			case 'b':
 				b.WriteByte('\b')
@@ -161,14 +174,15 @@ func parseBracketSelector(s, path string) (string, int, error) {
 				}
 				b.WriteRune(r)
 				i += consumed
+				start = i
 
 				continue
 			default:
 				return "", 0, fmt.Errorf("%w: invalid variant path %q (unknown escape \\%c)", ErrInvalidArgument, path, e)
 			}
 			i += 2
+			start = i
 		default:
-			b.WriteByte(c)
 			i++
 		}
 	}
