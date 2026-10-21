@@ -397,6 +397,7 @@ func scanJSONString(raw []byte, i int) int {
 			return j + 1
 		}
 	}
+
 	return len(raw)
 }
 
