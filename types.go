@@ -1173,23 +1173,13 @@ func PromoteType(fileType, readType Type) (Type, error) {
 		if _, ok := readType.(BinaryType); ok {
 			return readType, nil
 		}
+	// BinaryType never promotes to or from GeometryType/GeographyType: the spec
+	// lists no promotions for geo types, and plain binary isn't guaranteed to
+	// hold valid WKB. Geo types reach the Equals check in default, so a CRS or
+	// edge-algorithm change errors as well.
 	case BinaryType:
 		if _, ok := readType.(StringType); ok {
 			return readType, nil
-		}
-		// Deliberately no case for GeometryType/GeographyType here: a plain
-		// binary column is not known to carry valid WKB, so promoting it to a
-		// geo type is unsafe even though both are physically a BYTE_ARRAY.
-	case GeometryType, GeographyType:
-		// Deliberately no promotion to/from BinaryType, even though a geo
-		// value's wire encoding is WKB bytes inside a BYTE_ARRAY. Allowing it
-		// would let a column slide between the two logical types without
-		// carrying over (or validating) the geo row-group statistics that
-		// readers and query planners rely on, so these fall through to the
-		// same Equals check as default (e.g. for a CRS change) and error on
-		// anything else, including BinaryType.
-		if fileType.Equals(readType) {
-			return fileType, nil
 		}
 	case DecimalType:
 		if rt, ok := readType.(DecimalType); ok {

@@ -3496,11 +3496,11 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 // TestGeoParquetReadWithoutStoredSchema reads a GEOMETRY file that has no
 // stored ARROW:schema, as Java/Spark writers produce. geoarrow-go maps the
 // Parquet GEOMETRY logical type to geoarrow.wkb on read, so the file projects
-// onto a matching geometry column. A binary table column deliberately rejects
-// it, both on read and in the FileToDataFile (AddFiles) schema check: geometry
-// is intentionally not promotable to/from binary (see the GeometryType /
-// GeographyType cases in iceberg.PromoteType), so these binary subtests are
-// expected to keep failing.
+// onto a matching geometry column. A binary table column rejects it, both on
+// read and in the FileToDataFile (AddFiles) schema check: geo types are
+// deliberately not promotable to or from binary (see iceberg.PromoteType and
+// https://github.com/apache/iceberg-go/issues/2193), and the binary subtests
+// assert that rejection.
 func TestGeoParquetReadWithoutStoredSchema(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer mem.AssertSize(t, 0)
