@@ -57,7 +57,7 @@ func writeRFC9535Escaped(b *strings.Builder, name string) {
 	// Only ASCII controls, quotes and backslashes require escaping.
 	// Scan bytes before decoding runes for the uncommon escaped case.
 	needsEscape := false
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		c := name[i]
 		if c < 0x20 || c == '\'' || c == '\\' {
 			needsEscape = true
