@@ -188,43 +188,43 @@ func TestNewVersion_RepresentationValidation(t *testing.T) {
 		{
 			name: "valid",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+				{Type: "sql", SQL: "SELECT 1", Dialect: "spark"},
 			},
 		},
 		{
 			name: "invalid type",
 			representations: Representations{
-				{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+				{Type: "hive", SQL: "SELECT 1", Dialect: "spark"},
 			},
 			wantErr: "type should be \"sql\"",
 		},
 		{
 			name: "missing sql",
 			representations: Representations{
-				{Type: "sql", Sql: "", Dialect: "spark"},
+				{Type: "sql", SQL: "", Dialect: "spark"},
 			},
 			wantErr: "sql is required",
 		},
 		{
 			name: "missing dialect",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: ""},
+				{Type: "sql", SQL: "SELECT 1", Dialect: ""},
 			},
 			wantErr: "dialect is required",
 		},
 		{
 			name: "duplicate dialect",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: "SpArK"},
-				{Type: "sql", Sql: "SELECT 2", Dialect: " spark "},
+				{Type: "sql", SQL: "SELECT 1", Dialect: "SpArK"},
+				{Type: "sql", SQL: "SELECT 2", Dialect: " spark "},
 			},
 			wantErr: "Cannot add multiple queries for dialect  spark ",
 		},
 		{
 			name: "valid then invalid type",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
-				{Type: "hive", Sql: "SELECT 2", Dialect: "hive"},
+				{Type: "sql", SQL: "SELECT 1", Dialect: "spark"},
+				{Type: "hive", SQL: "SELECT 2", Dialect: "hive"},
 			},
 			wantErr: "type should be \"sql\"",
 		},
@@ -251,7 +251,7 @@ func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
 		VersionID: 1,
 		SchemaID:  0,
 		Representations: []Representation{
-			{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+			{Type: "hive", SQL: "SELECT 1", Dialect: "spark"},
 		},
 	}
 
@@ -269,8 +269,8 @@ func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
 		VersionID: 2,
 		SchemaID:  0,
 		Representations: []Representation{
-			{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
-			{Type: "sql", Sql: "SELECT 2", Dialect: "spark "},
+			{Type: "sql", SQL: "SELECT 1", Dialect: "spark"},
+			{Type: "sql", SQL: "SELECT 2", Dialect: "spark "},
 		},
 	}
 
@@ -654,8 +654,8 @@ func TestAddVersion_MultipleSQLForSameDialect(t *testing.T) {
 		VersionID: 1,
 		SchemaID:  0,
 		Representations: []Representation{
-			{Type: "sql", Sql: "select * from ns.tbl", Dialect: "spark"},
-			{Type: "sql", Sql: "select * from ns.tbl3", Dialect: "SpArK"},
+			{Type: "sql", SQL: "select * from ns.tbl", Dialect: "spark"},
+			{Type: "sql", SQL: "select * from ns.tbl3", Dialect: "SpArK"},
 		},
 	}
 	_, err := newTestBuilder().

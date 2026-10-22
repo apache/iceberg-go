@@ -408,10 +408,10 @@ func sqlFromVersion(v *view.Version) (string, error) {
 			continue
 		}
 		if strings.EqualFold(r.Dialect, "hive") {
-			return r.Sql, nil
+			return r.SQL, nil
 		}
 		if fallback == "" {
-			fallback = r.Sql
+			fallback = r.SQL
 		}
 	}
 	if fallback != "" {
