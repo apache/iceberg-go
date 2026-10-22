@@ -948,7 +948,7 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 
 		// Only escape the value (which changes per row)
 		valueStr := resolvedFields[i].field.Transform.ToHumanStrType(resolvedFields[i].resultType, data.Get(i))
-		sb.WriteString(url.QueryEscape(valueStr))
+		internal.AppendQueryEscaped(&sb, valueStr)
 	}
 
 	return sb.String()

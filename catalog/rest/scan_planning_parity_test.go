@@ -53,32 +53,39 @@ func TestScanPlanningLocalRemoteParity(t *testing.T) {
 		insensitive bool
 		split       bool
 		wantFiles   int
+		// wantDeletes is the number of position deletes, and separately of
+		// equality deletes, on every task. The fixture writes one of each per
+		// partition, in snapshot 20 only.
+		wantDeletes int
+		// wantResidual, when set, is every task's expected residual.
+		wantResidual iceberg.BooleanExpression
 	}{
-		{name: "all", filter: iceberg.AlwaysTrue{}, wantFiles: 3},
-		{name: "ranges", filter: iceberg.AlwaysTrue{}, split: true, wantFiles: 9},
-		{name: "decimal", filter: iceberg.EqualTo(iceberg.Reference("amount"), "12.34"), wantFiles: 3},
-		{name: "timestamp", filter: iceberg.EqualTo(iceberg.Reference("ts"), "2026-07-17T10:15:30.123456"), wantFiles: 3},
-		{name: "timestamptz", filter: iceberg.EqualTo(iceberg.Reference("tstz"), "2026-07-17T10:15:30.123456+00:00"), wantFiles: 3},
-		{name: "date", filter: iceberg.EqualTo(iceberg.Reference("day"), "2026-07-17"), wantFiles: 3},
-		{name: "time", filter: iceberg.EqualTo(iceberg.Reference("clock"), "10:15:30.123456"), wantFiles: 3},
-		{name: "uuid", filter: iceberg.EqualTo(iceberg.Reference("uuid"), "f79c3e09-677c-4bbd-a479-3f349cb785e7"), wantFiles: 3},
-		{name: "binary", filter: iceberg.EqualTo(iceberg.Reference("blob"), []byte{0, 255, 16}), wantFiles: 3},
-		{name: "fixed", filter: iceberg.EqualTo(iceberg.Reference("fixed"), []byte{0, 255, 16}), wantFiles: 3},
-		{name: "nested", filter: iceberg.StartsWith(iceberg.Reference("nested.text"), "prefix"), wantFiles: 3},
-		{name: "boolean", filter: iceberg.EqualTo(iceberg.Reference("flag"), true), wantFiles: 3},
-		{name: "double", filter: iceberg.EqualTo(iceberg.Reference("score"), 1.25), wantFiles: 3},
-		{name: "float", filter: iceberg.IsNaN(iceberg.Reference("ratio")), wantFiles: 3},
-		{name: "long", filter: iceberg.EqualTo(iceberg.Reference("big"), int64(9007199254740993)), wantFiles: 3},
+		{name: "all", filter: iceberg.AlwaysTrue{}, wantFiles: 3, wantDeletes: 1},
+		{name: "ranges", filter: iceberg.AlwaysTrue{}, split: true, wantFiles: 9, wantDeletes: 1},
+		{name: "decimal", filter: iceberg.EqualTo(iceberg.Reference("amount"), "12.34"), wantFiles: 3, wantDeletes: 1},
+		{name: "timestamp", filter: iceberg.EqualTo(iceberg.Reference("ts"), "2026-07-17T10:15:30.123456"), wantFiles: 3, wantDeletes: 1},
+		{name: "timestamptz", filter: iceberg.EqualTo(iceberg.Reference("tstz"), "2026-07-17T10:15:30.123456+00:00"), wantFiles: 3, wantDeletes: 1},
+		{name: "date", filter: iceberg.EqualTo(iceberg.Reference("day"), "2026-07-17"), wantFiles: 3, wantDeletes: 1},
+		{name: "time", filter: iceberg.EqualTo(iceberg.Reference("clock"), "10:15:30.123456"), wantFiles: 3, wantDeletes: 1},
+		{name: "uuid", filter: iceberg.EqualTo(iceberg.Reference("uuid"), "f79c3e09-677c-4bbd-a479-3f349cb785e7"), wantFiles: 3, wantDeletes: 1},
+		{name: "binary", filter: iceberg.EqualTo(iceberg.Reference("blob"), []byte{0, 255, 16}), wantFiles: 3, wantDeletes: 1},
+		{name: "fixed", filter: iceberg.EqualTo(iceberg.Reference("fixed"), []byte{0, 255, 16}), wantFiles: 3, wantDeletes: 1},
+		{name: "nested", filter: iceberg.StartsWith(iceberg.Reference("nested.text"), "prefix"), wantFiles: 3, wantDeletes: 1},
+		{name: "nested transform", filter: iceberg.EqualTo(iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 16}, iceberg.Reference("nested.text")), int32(3)), wantFiles: 3, wantDeletes: 1},
+		{name: "boolean", filter: iceberg.EqualTo(iceberg.Reference("flag"), true), wantFiles: 3, wantDeletes: 1},
+		{name: "double", filter: iceberg.EqualTo(iceberg.Reference("score"), 1.25), wantFiles: 3, wantDeletes: 1},
+		{name: "float", filter: iceberg.IsNaN(iceberg.Reference("ratio")), wantFiles: 3, wantDeletes: 1},
+		{name: "long", filter: iceberg.EqualTo(iceberg.Reference("big"), int64(9007199254740993)), wantFiles: 3, wantDeletes: 1},
 		{name: "none", filter: iceberg.AlwaysFalse{}, wantFiles: 0},
-		{name: "partition", filter: iceberg.EqualTo(iceberg.Reference("tenant"), int32(1)), wantFiles: 2},
-		{name: "metrics", filter: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25)), wantFiles: 2},
-		{name: "and residual", filter: iceberg.NewAnd(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1)), iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))), wantFiles: 1},
-		{name: "or", filter: iceberg.NewOr(iceberg.EqualTo(iceberg.Reference("tenant"), int32(2)), iceberg.LessThan(iceberg.Reference("renamed"), int64(15))), wantFiles: 3},
-		{name: "set", filter: iceberg.IsIn(iceberg.Reference("tenant"), int32(1), int32(3)), wantFiles: 2},
-		{name: "not set", filter: iceberg.NotIn(iceberg.Reference("tenant"), int32(1), int32(3)), wantFiles: 1},
-		{name: "not", filter: iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1))), wantFiles: 1},
+		{name: "partition", filter: iceberg.EqualTo(iceberg.Reference("tenant"), int32(1)), wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
+		{name: "metrics", filter: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25)), wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))},
+		{name: "and residual", filter: iceberg.NewAnd(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1)), iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))), wantFiles: 1, wantDeletes: 1, wantResidual: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25))},
+		{name: "or", filter: iceberg.NewOr(iceberg.EqualTo(iceberg.Reference("tenant"), int32(2)), iceberg.LessThan(iceberg.Reference("renamed"), int64(15))), wantFiles: 3, wantDeletes: 1},
+		{name: "set", filter: iceberg.IsIn(iceberg.Reference("tenant"), int32(1), int32(3)), wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
+		{name: "not set", filter: iceberg.NotIn(iceberg.Reference("tenant"), int32(1), int32(3)), wantFiles: 1, wantDeletes: 1},
+		{name: "not", filter: iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("tenant"), int32(1))), wantFiles: 1, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
 		{name: "null", filter: iceberg.IsNull(iceberg.Reference("tenant")), wantFiles: 0},
-		{name: "case insensitive", filter: iceberg.EqualTo(iceberg.Reference("TENANT"), int32(1)), insensitive: true, wantFiles: 2},
+		{name: "case insensitive", filter: iceberg.EqualTo(iceberg.Reference("TENANT"), int32(1)), insensitive: true, wantFiles: 2, wantDeletes: 1, wantResidual: iceberg.AlwaysTrue{}},
 		{name: "historical schema", filter: iceberg.GreaterThan(iceberg.Reference("value"), int32(25)), snapshot: 10, wantFiles: 2},
 		{name: "tag schema", filter: iceberg.GreaterThan(iceberg.Reference("value"), int32(25)), ref: "old", wantFiles: 2},
 		{name: "branch current schema", filter: iceberg.GreaterThan(iceberg.Reference("renamed"), int64(25)), ref: "history", wantFiles: 2},
@@ -129,12 +136,21 @@ func TestScanPlanningLocalRemoteParity(t *testing.T) {
 				schema, err := localScan.Projection()
 				require.NoError(t, err)
 				assertPlanningParity(t, expected, actual, schema, tc.filter, !tc.insensitive)
-				if tc.name == "partition" {
-					require.Len(t, actual, 2)
-					for _, task := range actual {
-						assert.Len(t, task.DeleteFiles, 1)
-						assert.Len(t, task.EqualityDeleteFiles, 1)
-						assert.True(t, task.Residual.Equals(iceberg.AlwaysTrue{}))
+				for _, task := range actual {
+					assert.Len(t, task.DeleteFiles, tc.wantDeletes)
+					assert.Len(t, task.EqualityDeleteFiles, tc.wantDeletes)
+					if tc.wantResidual != nil {
+						// Bind both sides, as assertPlanningParity does: a wire
+						// residual is unbound and a nil one means the filter.
+						residual := task.Residual
+						if residual == nil {
+							residual = tc.filter
+						}
+						want, err := bindParityResidual(schema, tc.wantResidual, !tc.insensitive)
+						require.NoError(t, err)
+						got, err := bindParityResidual(schema, residual, !tc.insensitive)
+						require.NoError(t, err)
+						assert.Truef(t, want.Equals(got), "residual for %s: want %s, got %s", task.File.FilePath(), want, got)
 					}
 				}
 			})
@@ -333,14 +349,14 @@ func newPlanningParityServer(t *testing.T, meta table.Metadata, fs iceio.IO, mod
 		// Each fanout envelope owns its own zero-based delete references.
 		envelopes = nil
 		for _, task := range tasks {
-			envelope, err := parityWireTasks([]table.FileScanTask{task}, filter, schema)
+			envelope, err := parityWireTasks([]table.FileScanTask{task}, filter, schema, meta)
 			if err != nil {
 				return nil, err
 			}
 			envelopes = append(envelopes, envelope)
 		}
 		if mode == "inline" {
-			return parityWireTasks(tasks, filter, schema)
+			return parityWireTasks(tasks, filter, schema, meta)
 		}
 		tokens := make([]string, len(envelopes))
 		for i := range tokens {
@@ -411,7 +427,7 @@ func newPlanningParityServer(t *testing.T, meta table.Metadata, fs iceio.IO, mod
 	})
 }
 
-func parityWireTasks(tasks []table.FileScanTask, filter iceberg.BooleanExpression, schema *iceberg.Schema) (map[string]any, error) {
+func parityWireTasks(tasks []table.FileScanTask, filter iceberg.BooleanExpression, schema *iceberg.Schema, meta table.Metadata) (map[string]any, error) {
 	files := make([]any, 0, len(tasks))
 	deletes := make([]any, 0)
 	for _, task := range tasks {
@@ -419,7 +435,7 @@ func parityWireTasks(tasks []table.FileScanTask, filter iceberg.BooleanExpressio
 		for _, group := range [][]iceberg.DataFile{task.DeleteFiles, task.EqualityDeleteFiles, task.DeletionVectorFiles} {
 			for _, df := range group {
 				refs = append(refs, len(deletes))
-				deletes = append(deletes, parityWireFile(df))
+				deletes = append(deletes, parityWireFile(df, meta))
 			}
 		}
 		residual := task.Residual
@@ -430,16 +446,23 @@ func parityWireTasks(tasks []table.FileScanTask, filter iceberg.BooleanExpressio
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, map[string]any{"data-file": parityWireFile(task.File), "delete-file-references": refs, "residual-filter": bound})
+		files = append(files, map[string]any{"data-file": parityWireFile(task.File, meta), "delete-file-references": refs, "residual-filter": bound})
 	}
 
 	return map[string]any{"file-scan-tasks": files, "delete-files": deletes}, nil
 }
 
-func parityWireFile(file iceberg.DataFile) map[string]any {
+func parityWireFile(file iceberg.DataFile, meta table.Metadata) map[string]any {
 	content := []string{"data", "position-deletes", "equality-deletes"}[file.ContentType()]
+	// The wire partition is positional: value i belongs to the file's spec's
+	// i-th field, as the decoder reads it.
+	spec := meta.PartitionSpecByID(int(file.SpecID()))
+	partition := make([]any, 0, spec.NumFields())
+	for _, field := range spec.Fields() {
+		partition = append(partition, file.Partition()[field.FieldID])
+	}
 	out := map[string]any{
-		"spec-id": file.SpecID(), "partition": []any{file.Partition()[1000]},
+		"spec-id": file.SpecID(), "partition": partition,
 		"content": content, "file-path": file.FilePath(), "file-format": file.FileFormat(),
 		"file-size-in-bytes": file.FileSizeBytes(), "record-count": file.Count(), "split-offsets": file.SplitOffsets(),
 	}

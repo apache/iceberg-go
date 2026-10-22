@@ -20,6 +20,7 @@ package rest
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/url"
 	"strconv"
 	"sync"
@@ -291,10 +292,13 @@ func TestParseCredentialExpiry(t *testing.T) {
 	}
 }
 
-func TestVendedCredsExpiresAtFromConfig(t *testing.T) {
+func TestVendedCredsExpiresAtFrom(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
+	refreshable := func(context.Context, []string) (iceberg.Properties, error) {
+		return nil, nil
+	}
 
 	t.Run("uses server-provided expiry", func(t *testing.T) {
 		t.Parallel()
@@ -306,21 +310,39 @@ func TestVendedCredsExpiresAtFromConfig(t *testing.T) {
 			mu:      semaphore.NewWeighted(1),
 			nowFunc: func() time.Time { return now },
 		}
-		got := r.expiresAtFromConfig(config)
+		got := r.expiresAtFrom(config, nil)
 		assert.Equal(t, serverExpiry.UnixMilli(), got.UnixMilli())
 	})
 
 	t.Run("refreshable creds fall back to default 60m when no expiry key", func(t *testing.T) {
 		t.Parallel()
 		r := &vendedCredentialRefresher{
-			mu:      semaphore.NewWeighted(1),
-			nowFunc: func() time.Time { return now },
-			fetchCreds: func(context.Context, []string) (iceberg.Properties, error) {
-				return nil, nil
-			},
+			mu:         semaphore.NewWeighted(1),
+			nowFunc:    func() time.Time { return now },
+			fetchCreds: refreshable,
 		}
-		got := r.expiresAtFromConfig(iceberg.Properties{})
+		got := r.expiresAtFrom(iceberg.Properties{}, iceberg.Properties{})
 		assert.Equal(t, now.Add(60*time.Minute).UnixMilli(), got.UnixMilli())
+	})
+
+	t.Run("refreshable creds take expiry from the vended credential only", func(t *testing.T) {
+		t.Parallel()
+		vendedExpiry := now.Add(30 * time.Minute)
+		stale := strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10)
+		config := iceberg.Properties{
+			keyGcsOAuthExpiresAt:  stale,
+			keyExpirationTime:     stale,
+			keyS3TokenExpiresAtMs: strconv.FormatInt(vendedExpiry.UnixMilli(), 10),
+		}
+		r := &vendedCredentialRefresher{
+			mu:         semaphore.NewWeighted(1),
+			nowFunc:    func() time.Time { return now },
+			fetchCreds: refreshable,
+		}
+		got := r.expiresAtFrom(config, iceberg.Properties{
+			keyS3TokenExpiresAtMs: strconv.FormatInt(vendedExpiry.UnixMilli(), 10),
+		})
+		assert.Equal(t, vendedExpiry.UnixMilli(), got.UnixMilli())
 	})
 
 	t.Run("non-refreshable creds without expiry never expire", func(t *testing.T) {
@@ -330,9 +352,45 @@ func TestVendedCredsExpiresAtFromConfig(t *testing.T) {
 			mu:      semaphore.NewWeighted(1),
 			nowFunc: func() time.Time { return now },
 		}
-		got := r.expiresAtFromConfig(iceberg.Properties{})
+		got := r.expiresAtFrom(iceberg.Properties{}, nil)
 		assert.True(t, got.IsZero())
 	})
+}
+
+// TestVendedCredsRenewalIgnoresEarlierVendExpiry checks that a renewal whose
+// credential has no expiry gets the default TTL. props still carries the first
+// vend's expiration-time, which has passed; taking it would refetch credentials
+// and rebuild the IO on every load.
+func TestVendedCredsRenewalIgnoresEarlierVendExpiry(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	firstVend := iceberg.Properties{
+		iceio.S3AccessKeyID: "first-key",
+		keyExpirationTime:   strconv.FormatInt(now.Add(-time.Minute).UnixMilli(), 10),
+	}
+
+	var fetches atomic.Int32
+	r := newTestRefresher(func(context.Context, []string) (iceberg.Properties, error) {
+		fetches.Add(1)
+
+		return iceberg.Properties{iceio.S3AccessKeyID: "renewed-key"}, nil
+	})
+	r.nowFunc = func() time.Time { return now }
+	r.props = maps.Clone(firstVend)
+	r.vended = firstVend
+	// Force the refresh branch: a cached IO whose credentials have expired.
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = now.Add(-time.Minute)
+
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, now.Add(defaultVendedCredentialsTTL).UnixMilli(), r.expiresAt.UnixMilli())
+
+	_, err = r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), fetches.Load(),
+		"the renewed credential is valid, so the next load must reuse the IO")
 }
 
 func TestVendedCredsServerExpiryUsedOnRefresh(t *testing.T) {
@@ -705,11 +763,8 @@ func TestPrefixScopedIOClearsStaleADLSAuthForVendedToken(t *testing.T) {
 		iceio.ADLSSharedKeyAccountName:             "acct",
 		iceio.ADLSSharedKeyAccountKey:              "stale-key",
 		iceio.ADLSSasTokenPrefix + host:            "stale-sas",
-		keyAdlsSasExpiresAtMs + "." + host:         "1000",
-		keyAdlsSasExpiresAtMs:                      "1000",
 		iceio.ADLSConnectionStringPrefix + "acct":  "stale-connection-string",
 		iceio.ADLSSasTokenPrefix + otherHost:       "other-sas",
-		keyAdlsSasExpiresAtMs + "." + otherHost:    "1000",
 		iceio.ADLSConnectionStringPrefix + "other": "other-connection-string",
 	}, []StorageCredential{{
 		Prefix: "abfss://container@" + host + "/",
@@ -727,13 +782,10 @@ func TestPrefixScopedIOClearsStaleADLSAuthForVendedToken(t *testing.T) {
 	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountName)
 	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountKey)
 	assert.NotContains(t, props, iceio.ADLSSasTokenPrefix+host)
-	assert.NotContains(t, props, keyAdlsSasExpiresAtMs+"."+host)
-	assert.NotContains(t, props, keyAdlsSasExpiresAtMs)
 	assert.NotContains(t, props, iceio.ADLSConnectionStringPrefix+"acct")
 
-	// Another account's SAS expiry would still set this IO's expiry, so it goes;
-	// its SAS token and connection string never apply here and are kept.
-	assert.NotContains(t, props, keyAdlsSasExpiresAtMs+"."+otherHost)
+	// Another account's SAS token and connection string never apply here and
+	// are kept.
 	assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost])
 	assert.Equal(t, "other-connection-string", props[iceio.ADLSConnectionStringPrefix+"other"])
 }

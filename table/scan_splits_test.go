@@ -525,3 +525,53 @@ func TestPrepareToReadClosesReaderOnSchemaError(t *testing.T) {
 		})
 	}
 }
+
+// TestSplitRemoteScanTasksManyFilesAndInvalidOffsets keeps unsafe tasks intact
+// even after a previous task has produced multiple split ranges.
+func TestSplitRemoteScanTasksManyFilesAndInvalidOffsets(t *testing.T) {
+	valid := splitTestDataFile(t, iceberg.ParquetFile, 100, []int64{8, 40, 70})
+	invalid := splitTestDataFile(t, iceberg.ParquetFile, 100, []int64{8, 40, 40})
+	firstRowID := int64(23)
+	tasks := []FileScanTask{
+		{File: invalid, Length: 100},
+		{File: valid, Length: 100, FirstRowID: &firstRowID},
+		{File: valid, Start: 40, Length: 60},
+		{File: invalid, Length: 100},
+		{File: valid, Length: 100, Residual: iceberg.AlwaysTrue{}},
+	}
+	before := append([]FileScanTask(nil), tasks...)
+
+	got := splitRemoteScanTasks(tasks, 50)
+
+	require.Len(t, got, 9)
+	assert.Equal(t, before, tasks, "planning must not modify caller-owned tasks")
+	assert.Equal(t, before[0], got[0])
+	assert.Equal(t, before[2], got[4])
+	assert.Equal(t, before[3], got[5])
+
+	for _, first := range []int{1, 6} {
+		for splitIndex, wantStart := range []int64{0, 40, 70} {
+			split := got[first+splitIndex]
+			assert.Equal(t, wantStart, split.Start)
+			assert.Equal(t, []int64{40, 30, 30}[splitIndex], split.Length)
+			assert.Equal(t, valid, split.File)
+		}
+	}
+	for _, split := range got[1:4] {
+		assert.Equal(t, &firstRowID, split.FirstRowID)
+	}
+	for _, split := range got[6:9] {
+		assert.Equal(t, iceberg.AlwaysTrue{}, split.Residual)
+	}
+}
+
+func TestSplitRemoteScanTasksAllInvalidOffsetsSharesInput(t *testing.T) {
+	invalid := splitTestDataFile(t, iceberg.ParquetFile, 100, []int64{8, 40, 40})
+	tasks := []FileScanTask{
+		{File: invalid, Length: 100},
+		{File: invalid, Length: 100},
+	}
+	got := splitRemoteScanTasks(tasks, 50)
+	assert.Equal(t, tasks, got)
+	assert.Same(t, &tasks[0], &got[0], "unsplit batches must keep the input slice")
+}

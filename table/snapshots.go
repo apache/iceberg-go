@@ -548,11 +548,15 @@ type SnapshotLogEntry struct {
 	TimestampMs int64 `json:"timestamp-ms"`
 }
 
-// snapshotLogEntryAsOf returns the log entry with the greatest eligible
-// timestamp. Snapshot-log entries can be out of chronological order when
-// commits have small clock skews, so the result must not depend on iteration
-// order.
-func snapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64, inclusive bool) (SnapshotLogEntry, bool) {
+// SnapshotLogEntryAsOf returns the snapshot-log entry with the greatest
+// timestamp at or before timestampMs (or strictly before it when inclusive is
+// false), and whether one was found. Snapshot-log entries can be out of
+// chronological order when commits have small clock skews, so the entry is
+// chosen by timestamp rather than by position. On equal timestamps the earliest
+// entry in log order wins, matching Java's
+// SnapshotUtil.nullableSnapshotIdAsOfTime. It is the time-travel resolution
+// used by the as-of-timestamp scan and the metadata_log_entries metadata table.
+func SnapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64, inclusive bool) (SnapshotLogEntry, bool) {
 	var (
 		best  SnapshotLogEntry
 		found bool
@@ -576,7 +580,57 @@ func snapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64,
 type SnapshotSummaryCollector struct {
 	metrics                          updateMetrics
 	partitionMetrics                 map[string]updateMetrics
+	partitionPathPlans               map[snapshotPartitionPathKey]snapshotPartitionPathPlan
 	maxChangedPartitionsForSummaries int
+}
+
+// Spec IDs are unique only within a table. Include schema and spec identity
+// so an independently constructed spec with the same ID cannot reuse a stale
+// formatting plan if the collector is used across table metadata.
+type snapshotPartitionPathKey struct {
+	schema     *iceberg.Schema
+	specID     int
+	firstField *iceberg.PartitionField
+}
+
+type snapshotPartitionPathPlan struct {
+	partitionType *iceberg.StructType
+	pathPlan      partitionPathPlan
+}
+
+// partitionPath reuses schema-dependent formatting state across files in the
+// same snapshot summary. The partition field slice is immutable for the
+// lifetime of its spec, so its first element identifies the spec's layout.
+func (s *SnapshotSummaryCollector) partitionPath(partition map[int]any, sc *iceberg.Schema, spec iceberg.PartitionSpec) string {
+	if s.partitionPathPlans == nil {
+		s.partitionPathPlans = make(map[snapshotPartitionPathKey]snapshotPartitionPathPlan)
+	}
+
+	fields := spec.FieldsRef(internal.PartitionSpecRef{})
+	key := snapshotPartitionPathKey{schema: sc, specID: spec.ID()}
+	if len(fields) > 0 {
+		key.firstField = &fields[0]
+	}
+
+	plan, ok := s.partitionPathPlans[key]
+	if !ok {
+		partitionType := spec.PartitionType(sc)
+		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, len(partitionType.FieldList))}
+		for i, field := range spec.Fields() {
+			pathField := partitionPathField{
+				escapedName: field.EscapedName(),
+				transform:   field.Transform,
+				resultType:  partitionType.FieldList[i].Type,
+			}
+			pathPlan.fields = append(pathPlan.fields, pathField)
+			pathPlan.estimatedSize += len(pathField.escapedName) + 20
+		}
+
+		plan = snapshotPartitionPathPlan{partitionType: partitionType, pathPlan: pathPlan}
+		s.partitionPathPlans[key] = plan
+	}
+
+	return plan.pathPlan.format(borrowedPartitionRecord{partition: partition, partitionType: plan.partitionType})
 }
 
 func (s *SnapshotSummaryCollector) setPartitionSummaryLimit(limit int) {
@@ -610,8 +664,7 @@ func (s *SnapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Sche
 
 	partition := dataFilePartition(df)
 	if len(partition) > 0 {
-		partitionPath := spec.PartitionToPath(
-			newPartitionRecord(partition, spec.PartitionType(sc)), sc)
+		partitionPath := s.partitionPath(partition, sc, spec)
 
 		return s.updatePartitionMetrics(partitionPath, df, true)
 	}
@@ -626,8 +679,7 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 
 	partition := dataFilePartition(df)
 	if len(partition) > 0 {
-		partitionPath := spec.PartitionToPath(
-			newPartitionRecord(partition, spec.PartitionType(sc)), sc)
+		partitionPath := s.partitionPath(partition, sc, spec)
 
 		return s.updatePartitionMetrics(partitionPath, df, false)
 	}

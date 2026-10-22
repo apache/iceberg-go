@@ -31,8 +31,51 @@ import (
 // and all remaining deletes by partition. Each bucket is sequence-sorted so a
 // data-file lookup only visits deletes that can apply to that file.
 type positionalDeleteIndex struct {
-	byPath      map[string][]iceberg.ManifestEntry
-	byPartition map[string][]iceberg.ManifestEntry
+	byPath             map[string][]iceberg.ManifestEntry
+	byPartition        map[string][]iceberg.ManifestEntry
+	byIntegerPartition map[positionalIntegerPartitionKey][]iceberg.ManifestEntry
+}
+
+// Most integer-backed partition transforms (bucket, day, hour, identity)
+// need only a small comparable key, not a sorted, encoded partition tuple.
+// Use the same integer normalization as canonicalPartitionKey so decoders
+// returning int, int32, int64, or Iceberg temporal types still match.
+type positionalIntegerPartitionKey struct {
+	specID  int32
+	fieldID int
+	value   int64
+}
+
+func singleIntegerPartitionKey(specID int32, partition map[int]any) (positionalIntegerPartitionKey, bool) {
+	if len(partition) != 1 {
+		return positionalIntegerPartitionKey{}, false
+	}
+
+	for fieldID, value := range partition {
+		var number int64
+		switch value := value.(type) {
+		case int:
+			number = int64(value)
+		case int32:
+			number = int64(value)
+		case int64:
+			number = value
+		case iceberg.Date:
+			number = int64(value)
+		case iceberg.Time:
+			number = int64(value)
+		case iceberg.Timestamp:
+			number = int64(value)
+		case iceberg.TimestampNano:
+			number = int64(value)
+		default:
+			return positionalIntegerPartitionKey{}, false
+		}
+
+		return positionalIntegerPartitionKey{specID: specID, fieldID: fieldID, value: number}, true
+	}
+
+	return positionalIntegerPartitionKey{}, false
 }
 
 func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDeleteIndex, error) {
@@ -48,7 +91,17 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 			continue
 		}
 
-		partitionKey, err := canonicalPartitionKey(deleteFile.SpecID(), dataFilePartition(deleteFile))
+		partition := dataFilePartition(deleteFile)
+		if key, ok := singleIntegerPartitionKey(deleteFile.SpecID(), partition); ok {
+			if idx.byIntegerPartition == nil {
+				idx.byIntegerPartition = make(map[positionalIntegerPartitionKey][]iceberg.ManifestEntry)
+			}
+			idx.byIntegerPartition[key] = append(idx.byIntegerPartition[key], entry)
+
+			continue
+		}
+
+		partitionKey, err := canonicalPartitionKey(deleteFile.SpecID(), partition)
 		if err != nil {
 			return nil, fmt.Errorf("indexing positional delete file %s: %w", deleteFile.FilePath(), err)
 		}
@@ -69,6 +122,9 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 	for _, partitionEntries := range idx.byPartition {
 		sortBySequence(partitionEntries)
 	}
+	for _, partitionEntries := range idx.byIntegerPartition {
+		sortBySequence(partitionEntries)
+	}
 
 	return idx, nil
 }
@@ -77,18 +133,23 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 // number. Partition-scoped candidates are pruned using file_path metrics and
 // returned before path-scoped deletes, matching Java's ordering.
 func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]iceberg.DataFile, error) {
-	if len(idx.byPath) == 0 && len(idx.byPartition) == 0 {
+	if len(idx.byPath) == 0 && len(idx.byPartition) == 0 && len(idx.byIntegerPartition) == 0 {
 		return nil, nil
 	}
 
 	dataFile := dataEntry.DataFile()
 	var partitionEntries []iceberg.ManifestEntry
-	if len(idx.byPartition) > 0 {
-		partitionKey, err := canonicalPartitionKey(dataFile.SpecID(), dataFilePartition(dataFile))
-		if err != nil {
-			return nil, fmt.Errorf("matching positional deletes to data file %s: %w", dataFile.FilePath(), err)
+	if len(idx.byPartition) > 0 || len(idx.byIntegerPartition) > 0 {
+		partition := dataFilePartition(dataFile)
+		if key, ok := singleIntegerPartitionKey(dataFile.SpecID(), partition); ok {
+			partitionEntries = idx.byIntegerPartition[key]
+		} else if len(idx.byPartition) > 0 {
+			partitionKey, err := canonicalPartitionKey(dataFile.SpecID(), partition)
+			if err != nil {
+				return nil, fmt.Errorf("matching positional deletes to data file %s: %w", dataFile.FilePath(), err)
+			}
+			partitionEntries = idx.byPartition[partitionKey]
 		}
-		partitionEntries = idx.byPartition[partitionKey]
 	}
 
 	dataSeqNum := dataEntry.SequenceNum()

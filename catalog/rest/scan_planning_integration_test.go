@@ -195,10 +195,13 @@ func (s *RestIntegrationSuite) requireScanPlanningIntegration() {
 	}
 }
 
+// requireJavaScanPlanningCapabilities fails rather than skips: callers have
+// already opted in through requireScanPlanningIntegration, so a fixture that
+// stops advertising the endpoints is a regression that must not pass as a skip.
 func (s *RestIntegrationSuite) requireJavaScanPlanningCapabilities(cat *rest.Catalog) {
 	s.T().Helper()
 	if !cat.SupportsPlanTableScan() || !cat.SupportsFullRemoteScanPlanning() {
-		s.T().Skip("Java fixture does not advertise planTableScan/poll/cancel/task-fetch endpoints; " +
+		s.T().Fatal("Java fixture does not advertise planTableScan/poll/cancel/task-fetch endpoints; " +
 			"is the scan-planning-capable image running?")
 	}
 }

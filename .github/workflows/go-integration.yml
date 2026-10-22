@@ -83,9 +83,19 @@ jobs:
         run: |
           make integration-test
 
+      # Polaris does not depend on Spark, so the external REST catalog
+      # conformance suite runs on one matrix leg only.
+      - name: Run external REST catalog conformance tests (Apache Polaris)
+        if: ${{ matrix.spark.version == '3.5' }}
+        run: |
+          make integration-setup-polaris
+          make integration-external-rest
+
       - name: Show debug logs
         if: ${{ failure() }}
-        run: docker compose -f internal/recipe/docker-compose.yml logs
+        run: |
+          docker compose -f internal/recipe/docker-compose.yml logs
+          docker logs iceberg-go-polaris || true
 
       - name: Save Go module and build cache
         if: github.ref == 'refs/heads/main'

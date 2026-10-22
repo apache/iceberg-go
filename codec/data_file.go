@@ -63,11 +63,9 @@ import (
 // [DecodeDataFile].
 //
 // distinct_counts (field 111) is deprecated in the spec for every
-// version (apache/iceberg#12182). EncodeDataFile drops the field on
-// encode for v1, v2, and v3 alike — values populated on the source
-// DataFile are not transported. Legacy manifests that already carry
-// the field on the wire still decode correctly through
-// [DecodeDataFile]. New DataFiles should not set distinct counts.
+// version (apache/iceberg#12182). EncodeDataFile never encodes it,
+// for v1, v2, and v3 alike. Legacy manifests that already carry the
+// field on the wire still decode correctly through [DecodeDataFile].
 func EncodeDataFile(df iceberg.DataFile, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error) {
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("codec: EncodeDataFile: unsupported format version %d", version)

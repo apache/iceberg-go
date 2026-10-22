@@ -2427,6 +2427,92 @@ func (m *ManifestTestSuite) TestManifestReaderRejectsInvalidEntries() {
 	}
 }
 
+func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	m.Require().NoError(err)
+
+	tests := []struct {
+		name         string
+		version      int
+		content      ManifestContent
+		entryContent ManifestEntryContent
+		written      FileFormat
+		expected     FileFormat
+		expectErr    bool
+	}{
+		{name: "spec lowercase", written: "parquet", expected: ParquetFile},
+		{name: "mixed case", written: "Parquet", expected: ParquetFile},
+		{name: "uppercase", written: ParquetFile, expected: ParquetFile},
+		{name: "lowercase avro", written: "avro", expected: AvroFile},
+		{name: "lowercase orc", written: "orc", expected: OrcFile},
+		{
+			name: "lowercase puffin in delete manifest", content: ManifestContentDeletes,
+			entryContent: EntryContentPosDeletes, written: "puffin", expected: PuffinFile,
+		},
+		{name: "v1 fallback entry", version: 1, written: "parquet", expected: ParquetFile},
+		{name: "unknown format", written: "csv", expectErr: true},
+		{name: "empty format", written: "", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			version := tt.version
+			if version == 0 {
+				version = 2
+			}
+			content := tt.content
+			if content == 0 {
+				content = ManifestContentData
+			}
+			entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, version)
+			m.Require().NoError(err)
+
+			records := manifestEntryV2Records
+			if version == 1 {
+				records = manifestEntryV1Records
+			}
+			entry := *records[0]
+			file := cloneDataFileAvroFields(entry.Data.(*dataFile))
+			file.Format = tt.written
+			file.Content = tt.entryContent
+			entry.Data = file
+
+			mw := ManifestWriter{version: version, spec: partitionSpec, schema: testSchema, content: content}
+			metadata, err := mw.meta()
+			m.Require().NoError(err)
+
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, entrySchema,
+				ocf.WithSchema(entrySchema.String()), ocf.WithMetadata(metadata))
+			m.Require().NoError(err)
+			var toEncode any = &entry
+			if version == 1 {
+				toEncode = &fallbackManifestEntry{manifestEntry: entry}
+			}
+			m.Require().NoError(writer.Encode(toEncode))
+			m.Require().NoError(writer.Close())
+
+			manifest := &manifestFile{version: version, SpecID: 1, Content: content}
+			reader, err := NewManifestReader(manifest, bytes.NewReader(buf.Bytes()))
+			m.Require().NoError(err)
+			defer reader.Close()
+
+			got, err := reader.ReadEntry()
+			if tt.expectErr {
+				m.Require().EqualError(err,
+					fmt.Sprintf("data file %q: unknown file format: %s", file.Path, tt.written))
+
+				return
+			}
+			m.Require().NoError(err)
+			m.Equal(tt.expected, got.DataFile().FileFormat())
+		})
+	}
+}
+
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
 		NewPartitionSpec(),
@@ -2445,9 +2531,6 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		1: 1,
 		2: 2,
 	}).ValueCounts(map[int]int64{
-		1: 1,
-		2: 2,
-	}).DistinctValueCounts(map[int]int64{
 		1: 1,
 		2: 2,
 	}).NullValueCounts(map[int]int64{
@@ -2494,10 +2577,6 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		1: 0,
 		2: 0,
 	}, data.NullValueCounts())
-	m.Assert().Equal(map[int]int64{
-		1: 1,
-		2: 2,
-	}, data.DistinctValueCounts())
 	m.Assert().Equal(map[int]int64{
 		1: 0,
 		2: 0,
@@ -2655,6 +2734,34 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Require().NoError(err)
 	m.NotEqual("null", string(md["partition-spec"]))
 	m.Equal("[]", string(md["partition-spec"]))
+}
+
+// TestV2ManifestKeepsReferencedDataFile checks that a v2 delete manifest
+// round-trips referenced_data_file. The spec makes the field optional in v2,
+// and Java's V2Metadata writes it, so rewriting such a manifest must not drop it.
+func (m *ManifestTestSuite) TestV2ManifestKeepsReferencedDataFile() {
+	builder, err := NewDataFileBuilder(*UnpartitionedSpec, EntryContentPosDeletes,
+		"s3://bucket/deletes.parquet", ParquetFile, nil, nil, nil, 1, 10)
+	m.Require().NoError(err)
+	deleteFile := builder.ReferencedDataFile("s3://bucket/data.parquet").Build()
+
+	var out bytes.Buffer
+	writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+		WithManifestWriterContent(ManifestContentDeletes))
+	m.Require().NoError(err)
+	m.Require().NoError(writer.Add(
+		NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, deleteFile).SequenceNum(1).Build()))
+	m.Require().NoError(writer.Close())
+
+	manifest, err := writer.ToManifestFile("manifest.avro", int64(out.Len()))
+	m.Require().NoError(err)
+	entries, err := ReadManifest(manifest, bytes.NewReader(out.Bytes()), false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+
+	ref := entries[0].DataFile().ReferencedDataFile()
+	m.Require().NotNil(ref)
+	m.Equal("s3://bucket/data.parquet", *ref)
 }
 
 func (m *ManifestTestSuite) TestManifestWriterContentConsistency() {
@@ -3895,7 +4002,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	valueCounts := map[int]int64{1: 2}
 	nullCounts := map[int]int64{1: 1}
 	nanCounts := map[int]int64{1: 0}
-	distinctCounts := map[int]int64{1: 2}
 	lower := map[int][]byte{1: {0x03, 0x04}}
 	upper := map[int][]byte{1: {0x05, 0x06}}
 	key := []byte{0x07, 0x08}
@@ -3907,7 +4013,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 		ValueCounts(valueCounts).
 		NullValueCounts(nullCounts).
 		NaNValueCounts(nanCounts).
-		DistinctValueCounts(distinctCounts).
 		LowerBoundValues(lower).
 		UpperBoundValues(upper).
 		KeyMetadata(key).
@@ -3922,7 +4027,7 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 
 	partition[0], lower[1][0], upper[1][0], key[0], splits[0], equalityIDs[0] = 0xff, 0xff, 0xff, 0xff, 99, 99
 	partitionData[1000] = []byte{0xff}
-	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
+	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1] = 99, 99, 99, 99
 
 	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
 	dataFile.Partition()[1000].([]byte)[0] = 0xff
@@ -3930,7 +4035,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	dataFile.ValueCounts()[1] = 99
 	dataFile.NullValueCounts()[1] = 99
 	dataFile.NaNValueCounts()[1] = 99
-	dataFile.DistinctValueCounts()[1] = 99
 	dataFile.LowerBoundValues()[1][0] = 0xff
 	dataFile.UpperBoundValues()[1][0] = 0xff
 	dataFile.KeyMetadata()[0] = 0xff
@@ -3947,7 +4051,6 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	m.Equal(map[int]int64{1: 2}, dataFile.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, dataFile.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, dataFile.NaNValueCounts())
-	m.Equal(map[int]int64{1: 2}, dataFile.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, dataFile.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, dataFile.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, dataFile.KeyMetadata())
@@ -4006,7 +4109,6 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
-	m.Empty(decoded.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
@@ -4048,7 +4150,6 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
-	m.Empty(decoded.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
@@ -4399,7 +4500,11 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 		1,
 	)
 	m.Require().NoError(err)
-	dataFileBuilder.DistinctValueCounts(map[int]int64{1: 42})
+	// There is no public setter for distinct_counts any more, but a DataFile
+	// decoded from a legacy manifest can still carry it, so set the Avro
+	// field directly.
+	df := dataFileBuilder.Build()
+	df.(*dataFile).DistinctCounts = mapToAvroColMap(map[int]int64{1: 42})
 
 	var buf bytes.Buffer
 	file, err := WriteManifest(
@@ -4414,7 +4519,7 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 			EntryStatusADDED,
 			&snapshotID,
 			&seqNum, &seqNum,
-			dataFileBuilder.Build(),
+			df,
 		)},
 	)
 	m.Require().NoError(err)
@@ -4422,7 +4527,7 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 	entries, err := ReadManifest(file, &buf, false)
 	m.Require().NoError(err)
 	m.Require().Len(entries, 1)
-	m.Empty(entries[0].DataFile().DistinctValueCounts(),
+	m.Empty(avroColMapToMap(entries[0].DataFile().(*dataFile).DistinctCounts),
 		"manifest writer must drop distinct_counts on the wire for every format version; "+
 			"see internal/avro_schemas.go data_file_v"+strconv.Itoa(version))
 }
@@ -4490,7 +4595,8 @@ func (m *ManifestTestSuite) TestReadManifestLegacyDistinctCounts() {
 	entries, err := ReadManifest(file, &buf, false)
 	m.Require().NoError(err)
 	m.Require().Len(entries, 1)
-	m.Equal(map[int]int64{1: 99, 2: 88}, entries[0].DataFile().DistinctValueCounts(),
+	m.Equal(map[int]int64{1: 99, 2: 88},
+		avroColMapToMap(entries[0].DataFile().(*dataFile).DistinctCounts),
 		"ReadManifest must decode distinct_counts (field 111) from legacy "+
 			"manifests where the file's writer schema still carries the field")
 }

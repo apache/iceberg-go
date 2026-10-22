@@ -18,57 +18,57 @@
 package recipe
 
 import (
-	"bytes"
 	"context"
-	_ "embed"
 	"fmt"
-	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
-	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
-
-//go:embed docker-compose.yml
-var composeFile []byte
 
 const sparkContainer = "spark-iceberg"
 
-func Start(t *testing.T) (*compose.DockerCompose, error) {
+func Start(t *testing.T) error {
 	if _, ok := os.LookupEnv("AWS_S3_ENDPOINT"); ok {
-		return nil, nil
+		return nil
 	}
-	stack, err := compose.NewDockerComposeWith(
-		compose.WithStackReaders(bytes.NewBuffer(composeFile)),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fail to start compose: %w", err)
+	if err := startStack(); err != nil {
+		return err
 	}
-	if err := stack.Up(t.Context()); err != nil {
-		return stack, fmt.Errorf("fail to up compose: %w", err)
-	}
-	spark, err := stack.ServiceContainer(t.Context(), sparkContainer)
-	if err != nil {
-		return stack, fmt.Errorf("fail to find spark-iceberg: %w", err)
-	}
-	_, stdout, err := spark.Exec(t.Context(), []string{"ipython", "./provision.py"})
-	if err != nil {
-		return stack, fmt.Errorf("fail to seed provision.py: %w", err)
-	}
-	data, err := io.ReadAll(stdout)
-	if err != nil {
-		return stack, fmt.Errorf("fail to read stdout: %w", err)
-	}
-	fmt.Println(string(data))
 	t.Setenv("AWS_S3_ENDPOINT", "http://localhost:9000")
 	t.Setenv("AWS_REGION", "us-east-1")
 
-	return stack, nil
+	return nil
+}
+
+var startStack = newStartStack()
+
+// newStartStack caches upAndProvision's first result, errors included: provision.py is not idempotent.
+func newStartStack() func() error {
+	return sync.OnceValue(upAndProvision)
+}
+
+func upAndProvision() error {
+	// Compose resolves build: . and ./warehouse relative to the compose file.
+	_, src, _, _ := runtime.Caller(0)
+	composeFile := filepath.Join(filepath.Dir(src), "docker-compose.yml")
+
+	out, err := exec.Command("docker", "compose", "-f", composeFile, "up", "-d", "--wait").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("fail to up compose: %w\n%s", err, out)
+	}
+
+	out, err = exec.Command("docker", "compose", "-f", composeFile,
+		"exec", "-T", sparkContainer, "ipython", "./provision.py").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("fail to seed provision.py: %w\n%s", err, out)
+	}
+	fmt.Println(string(out))
+
+	return nil
 }
 
 func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, error) {
@@ -79,68 +79,16 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 // spark-iceberg container. Decoupled from *testing.T so it can be driven by
 // non-test contexts (e.g. SparkMajorVersion uses context.Background()).
 func executeSparkContainer(ctx context.Context, scriptPath string, args ...string) (string, error) {
-	var cli *client.Client
-	var err error
-
-	if apiVersion, ok := os.LookupEnv("DOCKER_API_VERSION"); ok {
-		cli, err = client.NewClientWithOpts(
-			client.FromEnv,
-			client.WithVersion(apiVersion),
-		)
-	} else {
-		cli, err = client.NewClientWithOpts(
-			client.FromEnv,
-		)
+	container := sparkContainer
+	if id, ok := os.LookupEnv("SPARK_CONTAINER_ID"); ok {
+		container = id
 	}
+
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"exec", container, "python", scriptPath}, args...)...)
+	output, err := cmd.CombinedOutput()
+	fmt.Printf("%s\n", output)
 	if err != nil {
-		return "", err
-	}
-	defer cli.Close()
-
-	var sparkContainerID string
-	if _, ok := os.LookupEnv("SPARK_CONTAINER_ID"); ok {
-		sparkContainerID = os.Getenv("SPARK_CONTAINER_ID")
-	} else {
-		filter := filters.NewArgs(filters.Arg("name", sparkContainer))
-		containers, err := cli.ContainerList(ctx, container.ListOptions{
-			Filters: filter,
-		})
-		if err != nil {
-			return "", err
-		}
-		if len(containers) != 1 {
-			return "", fmt.Errorf("unable to find container: %s", sparkContainer)
-		}
-		sparkContainerID = containers[0].ID
-	}
-
-	response, err := cli.ContainerExecCreate(ctx, sparkContainerID, container.ExecOptions{
-		Cmd:          append([]string{"python", scriptPath}, args...),
-		AttachStdout: true,
-		AttachStderr: true,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	attachResp, err := cli.ContainerExecAttach(ctx, response.ID, container.ExecAttachOptions{})
-	if err != nil {
-		return "", err
-	}
-	defer attachResp.Close()
-
-	output, err := io.ReadAll(attachResp.Reader)
-	if err != nil {
-		return "", err
-	}
-	fmt.Printf("%s\n", string(output))
-
-	inspect, err := cli.ContainerExecInspect(ctx, response.ID)
-	if err != nil {
-		return "", err
-	}
-	if inspect.ExitCode != 0 {
-		return "", fmt.Errorf("failed to execute script with exit code: %d", inspect.ExitCode)
+		return "", fmt.Errorf("failed to execute script %s: %w", scriptPath, err)
 	}
 
 	return string(output), nil

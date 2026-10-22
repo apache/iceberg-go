@@ -166,19 +166,28 @@ func testRenameTableToExisting(t *testing.T, cfg Config) {
 	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
 	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
 
-	for _, ident := range []table.Identifier{from, to} {
-		_, err := cat.CreateTable(ctx, ident, Schema)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
-	}
+	createdFrom, err := cat.CreateTable(ctx, from, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
 
-	_, err := cat.RenameTable(ctx, from, to)
+	createdTo, err := cat.CreateTable(ctx, to, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, to) })
+
+	_, err = cat.RenameTable(ctx, from, to)
 	assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
 
-	for _, ident := range []table.Identifier{from, to} {
-		exists, err := cat.CheckTableExists(ctx, ident)
-		require.NoError(t, err)
-		assert.True(t, exists, "%v should still exist after a rejected rename", ident)
+	// Existence alone would pass an implementation that overwrote the
+	// destination and then failed, so check that each identifier still names
+	// the table originally created there.
+	for _, tc := range []struct {
+		ident   table.Identifier
+		created *table.Table
+	}{{from, createdFrom}, {to, createdTo}} {
+		tbl, err := cat.LoadTable(ctx, tc.ident)
+		require.NoError(t, err, "%v should still exist after a rejected rename", tc.ident)
+		assert.Equal(t, tc.created.Metadata().TableUUID(), tbl.Metadata().TableUUID(),
+			"%v should be unchanged by a rejected rename", tc.ident)
 	}
 }
 
@@ -195,4 +204,99 @@ func testRenameMissingTable(t *testing.T, cfg Config) {
 
 	_, err := cat.RenameTable(ctx, from, to)
 	assert.ErrorIs(t, err, catalog.ErrNoSuchTable)
+}
+
+// testRenameTableAcrossNamespaces asserts that a table can move to another
+// namespace, keeping its identity, and is listed only in the destination.
+func testRenameTableAcrossNamespaces(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	fromNamespace, from := newIdentifiers()
+	toNamespace, _ := newIdentifiers()
+	to := table.Identifier{toNamespace[0], "renamed"}
+
+	for _, ns := range []table.Identifier{fromNamespace, toNamespace} {
+		require.NoError(t, cat.CreateNamespace(ctx, ns, nil))
+		t.Cleanup(func() { _ = cat.DropNamespace(ctx, ns) })
+	}
+
+	created, err := cat.CreateTable(ctx, from, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
+
+	_, err = cat.RenameTable(ctx, from, to)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, to) })
+
+	tbl, err := cat.LoadTable(ctx, to)
+	require.NoError(t, err)
+	assert.Equal(t, to, tbl.Identifier())
+	assert.Equal(t, created.Metadata().TableUUID(), tbl.Metadata().TableUUID(), "rename must preserve table identity")
+
+	assert.Empty(t, listTables(t, cat, fromNamespace), "source namespace should be empty after rename")
+	assert.Equal(t, []table.Identifier{to}, listTables(t, cat, toNamespace))
+}
+
+// testRenameTableToMissingNamespace asserts that renaming into a namespace
+// that does not exist reports the missing namespace and leaves the source
+// table in place.
+func testRenameTableToMissingNamespace(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, from := newIdentifiers()
+	missingNamespace, _ := newIdentifiers()
+	to := table.Identifier{missingNamespace[0], "renamed"}
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	_, err := cat.CreateTable(ctx, from, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, from) })
+
+	_, err = cat.RenameTable(ctx, from, to)
+	assert.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
+
+	exists, err := cat.CheckTableExists(ctx, from)
+	require.NoError(t, err)
+	assert.True(t, exists, "source table should still exist after a rejected rename")
+}
+
+// testRenameTableToSelf asserts the behavior every catalog agrees on when a
+// table is renamed to its own identifier. The outcome is implementation
+// defined: when REST rename was added (apache/iceberg#4448), a request-level
+// check rejecting source == destination was dropped so that servers could
+// decide, and Java's own catalogs now differ. JdbcCatalog and InMemoryCatalog
+// treat it as a no-op success, while HiveCatalog rejects it because the
+// destination exists. Both outcomes are accepted; any other error is not.
+// Either way the table must survive unchanged and be listed exactly once.
+func testRenameTableToSelf(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, ident := newIdentifiers()
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	created, err := cat.CreateTable(ctx, ident, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
+
+	_, err = cat.RenameTable(ctx, ident, ident)
+	if err != nil {
+		assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists,
+			"a rejected self-rename should report that the table already exists")
+		t.Logf("self-rename rejected: %v", err)
+	} else {
+		t.Log("self-rename succeeded as a no-op")
+	}
+
+	tbl, err := cat.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	assert.Equal(t, created.Metadata().TableUUID(), tbl.Metadata().TableUUID(),
+		"self-rename must preserve table identity")
+	assert.Equal(t, created.MetadataLocation(), tbl.MetadataLocation(),
+		"self-rename should not rewrite table metadata")
+	assert.Equal(t, []table.Identifier{ident}, listTables(t, cat, namespace),
+		"self-rename should leave exactly one table")
 }

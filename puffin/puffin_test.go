@@ -20,6 +20,7 @@ package puffin_test
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -187,8 +188,79 @@ func fileWithCompressedFooterPayload(t *testing.T, payload []byte) []byte {
 	return fileWithCompressedFooterPayloadWithOptions(t, payload, lz4.SizeOption(uint64(len(payload))))
 }
 
+// fileWithCompressedFooterPayloadWithSize builds a compressed footer whose LZ4
+// frame advertises size as its content size, even when that differs from
+// len(payload). The lz4 writer refuses to finish such a frame, so it writes a
+// valid frame and then rewrites the content-size field in its header.
 func fileWithCompressedFooterPayloadWithSize(t *testing.T, payload []byte, size uint64) []byte {
-	return fileWithCompressedFooterPayloadWithOptions(t, payload, lz4.SizeOption(size))
+	t.Helper()
+
+	frame := compressedLZ4Frame(t, payload, lz4.SizeOption(uint64(len(payload))))
+
+	return fileWithCompressedFooterFrames(withLZ4ContentSize(t, frame, size))
+}
+
+// LZ4 frame header layout with a content size and no dictionary ID: magic (4),
+// FLG (1), BD (1), content size (8, little-endian), header checksum (1).
+const (
+	lz4FrameFLGOffset         = 4
+	lz4FrameContentSizeOffset = 6
+	lz4FrameHeaderChecksumPos = 14
+	lz4FrameContentSizeFlag   = 1 << 3
+	lz4FrameDictIDFlag        = 1 << 0
+)
+
+// withLZ4ContentSize returns a copy of frame with its advertised content size
+// replaced by size and the header checksum recomputed to match.
+func withLZ4ContentSize(t *testing.T, frame []byte, size uint64) []byte {
+	t.Helper()
+
+	require.Greater(t, len(frame), lz4FrameHeaderChecksumPos)
+	flg := frame[lz4FrameFLGOffset]
+	require.NotZero(t, flg&lz4FrameContentSizeFlag, "frame must carry a content size")
+	require.Zero(t, flg&lz4FrameDictIDFlag, "frame must not carry a dictionary ID")
+
+	descriptor := frame[lz4FrameFLGOffset:lz4FrameHeaderChecksumPos]
+	require.Equal(t, frame[lz4FrameHeaderChecksumPos], lz4HeaderChecksum(descriptor),
+		"header checksum of the unmodified frame must match")
+
+	patched := bytes.Clone(frame)
+	binary.LittleEndian.PutUint64(patched[lz4FrameContentSizeOffset:lz4FrameHeaderChecksumPos], size)
+	patched[lz4FrameHeaderChecksumPos] = lz4HeaderChecksum(patched[lz4FrameFLGOffset:lz4FrameHeaderChecksumPos])
+
+	return patched
+}
+
+// lz4HeaderChecksum is the LZ4 frame header checksum: the second byte of the
+// XXH32 (seed 0) of the frame descriptor. Descriptors are at most 15 bytes, so
+// only XXH32's short-input path is needed.
+func lz4HeaderChecksum(descriptor []byte) byte {
+	const (
+		prime1 uint32 = 2654435761
+		prime2 uint32 = 2246822519
+		prime3 uint32 = 3266489917
+		prime4 uint32 = 668265263
+		prime5 uint32 = 374761393
+	)
+	rotl := func(x uint32, r uint) uint32 { return x<<r | x>>(32-r) }
+
+	h := prime5 + uint32(len(descriptor))
+	b := descriptor
+	for ; len(b) >= 4; b = b[4:] {
+		h += binary.LittleEndian.Uint32(b) * prime3
+		h = rotl(h, 17) * prime4
+	}
+	for _, c := range b {
+		h += uint32(c) * prime5
+		h = rotl(h, 11) * prime1
+	}
+	h ^= h >> 15
+	h *= prime2
+	h ^= h >> 13
+	h *= prime3
+	h ^= h >> 16
+
+	return byte(h >> 8)
 }
 
 func fileWithCompressedFooterPayloadNoSize(t *testing.T, payload []byte) []byte {
@@ -896,7 +968,9 @@ func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
 		payload := []byte(`{"blobs":[]}`)
 		data := fileWithCompressedFooterPayloadWithSize(t, payload, uint64(len(payload)-1))
 		_, err := puffin.NewReader(bytes.NewReader(data))
-		require.ErrorContains(t, err, "decoded size")
+		// lz4 v4.1.31+ verifies the advertised content size itself, so it rejects
+		// the frame before the reader's own decoded-size check runs.
+		require.ErrorIs(t, err, lz4.ErrInvalidContentSize)
 	})
 
 	t.Run("compressed advertised size", func(t *testing.T) {
@@ -966,6 +1040,36 @@ func TestReaderBlobAccess(t *testing.T) {
 			assert.Equal(t, expected, all[i].Data)
 		}
 	})
+}
+
+func TestReadAllBlobsPreservesFooterOrder(t *testing.T) {
+	// Blob metadata may be listed in a different order from the payloads.
+	footer := puffin.Footer{Blobs: []puffin.BlobMetadata{
+		{Type: "third", Fields: []int32{3}, Offset: 15, Length: 5},
+		{Type: "first", Fields: []int32{1}, Offset: 4, Length: 5},
+		{Type: "second", Fields: []int32{2}, Offset: 9, Length: 6},
+	}}
+	payload, err := json.Marshal(footer)
+	require.NoError(t, err)
+	data := append([]byte("PFA1firstsecondthird"), fileWithFooterPayload(payload)[puffin.MagicSize:]...)
+	input := &countingReaderAtSeeker{Reader: bytes.NewReader(data)}
+	r, err := puffin.NewReader(input)
+	require.NoError(t, err)
+	input.reads = nil
+
+	blobs, err := r.ReadAllBlobs()
+	require.NoError(t, err)
+	require.Len(t, blobs, len(footer.Blobs))
+	for i, expected := range []string{"third", "first", "second"} {
+		assert.Equal(t, expected, string(blobs[i].Data))
+		assert.Equal(t, footer.Blobs[i], blobs[i].Metadata)
+	}
+	assert.Equal(t, []readCall{
+		{offset: 4, length: 5},
+		{offset: 9, length: 6},
+		{offset: 15, length: 5},
+	}, input.reads)
+	assert.Equal(t, footer.Blobs, r.Blobs())
 }
 
 // TestReadBlobByMetadataValidation verifies validation of blob metadata.

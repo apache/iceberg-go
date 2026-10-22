@@ -87,6 +87,80 @@ func (s *FanoutWriterTestSuite) TestBinaryPartitionValuesDoNotAliasArrowStorage(
 	}
 }
 
+func (s *FanoutWriterTestSuite) TestBinaryPartitionKeysWorkAtEveryLevel() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "first", Type: arrow.BinaryTypes.Binary, Nullable: true},
+		{Name: "second", Type: arrow.BinaryTypes.Binary, Nullable: true},
+	}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{[]byte("a"), []byte("x")},
+		{[]byte("a"), []byte("x")},
+		{[]byte("a"), []byte("y")},
+		{[]byte("b"), []byte("x")},
+		{[]byte("b"), []byte("x")},
+		{nil, []byte("x")},
+		{[]byte{}, []byte("x")},
+		{nil, []byte("x")},
+		{[]byte{}, []byte("x")},
+		{[]byte("a"), nil},
+		{[]byte("a"), []byte{}},
+		{[]byte("a"), nil},
+		{[]byte("a"), []byte{}},
+		{nil, nil},
+		{[]byte{}, []byte{}},
+		{[]byte("a"), []byte{0, 0xff}},
+		{[]byte("a"), []byte{0, 0xff}},
+		{[]byte("a"), []byte("x/y")},
+		{[]byte("a/x"), []byte("y")},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Binary},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Binary},
+	)
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{},
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001, Name: "second", Transform: iceberg.IdentityTransform{},
+		},
+	)
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 12)
+
+	// Keep NULL separate from an empty binary value at either tree level.
+	// A tuple key also preserves arbitrary bytes and embedded separators.
+	rowsByPartition := make(map[[2]any][]int64)
+	for _, partition := range partitions {
+		var key [2]any
+		for i, value := range partition.partitionRec {
+			if value != nil {
+				key[i] = string(value.([]byte))
+			}
+		}
+		rowsByPartition[key] = partition.rows
+	}
+
+	s.Equal(map[[2]any][]int64{
+		{"a", "x"}:        {0, 1},
+		{"a", "y"}:        {2},
+		{"b", "x"}:        {3, 4},
+		{nil, "x"}:        {5, 7},
+		{"", "x"}:         {6, 8},
+		{"a", nil}:        {9, 11},
+		{"a", ""}:         {10, 12},
+		{nil, nil}:        {13},
+		{"", ""}:          {14},
+		{"a", "\x00\xff"}: {15, 16},
+		{"a", "x/y"}:      {17},
+		{"a/x", "y"}:      {18},
+	}, rowsByPartition)
+}
+
 func (s *FanoutWriterTestSuite) TestFixedSizeBinaryPartitionReportsWidthMismatch() {
 	arrowSchema := arrow.NewSchema([]arrow.Field{{
 		Name: "part",

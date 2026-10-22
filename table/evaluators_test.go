@@ -1308,7 +1308,6 @@ func (m *mockDataFile) ColumnSizes() map[int]int64                { return m.col
 func (m *mockDataFile) ValueCounts() map[int]int64                { return m.valueCounts }
 func (m *mockDataFile) NullValueCounts() map[int]int64            { return m.nullCounts }
 func (m *mockDataFile) NaNValueCounts() map[int]int64             { return m.nanCounts }
-func (*mockDataFile) DistinctValueCounts() map[int]int64          { return nil }
 func (m *mockDataFile) LowerBoundValues() map[int][]byte          { return m.lowerBounds }
 func (m *mockDataFile) UpperBoundValues() map[int][]byte          { return m.upperBounds }
 func (*mockDataFile) KeyMetadata() []byte                         { return nil }
