@@ -42,12 +42,14 @@ func TestPlanCompaction_SkippedFilesDoNotChangeCandidateGroups(t *testing.T) {
 
 	mixedTasks := make([]table.FileScanTask, 0, len(candidateTasks)*2)
 	for i, task := range candidateTasks {
-		// The skipped file has a different partition. In the old planner
-		// it would allocate an unused partition bucket for every such file.
+		// Mix skipped files in existing partitions and in distinct
+		// partitions that do not contain any candidate files.
+		skipPartition := map[int]any{1000: fmt.Sprintf("unrelated-%d", i)}
+		if i%3 == 0 {
+			skipPartition = map[int]any{1000: "a"}
+		}
 		mixedTasks = append(mixedTasks,
-			makeTask(newPartitionedDataFile(fmt.Sprintf("skip-%d.parquet", i), 500, map[int]any{
-				1000: fmt.Sprintf("unrelated-%d", i),
-			}), 0, 0),
+			makeTask(newPartitionedDataFile(fmt.Sprintf("skip-%d.parquet", i), 500, skipPartition), 0, 0),
 			task,
 		)
 	}
