@@ -101,6 +101,7 @@ func TestSnapshotAncestrySelfCycleTerminates(t *testing.T) {
 		if candidate == id {
 			return &snapshot
 		}
+
 		return nil
 	}
 
