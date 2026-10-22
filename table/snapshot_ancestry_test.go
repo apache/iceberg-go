@@ -289,3 +289,46 @@ func snapshotIDs(snaps []Snapshot) []int64 {
 
 	return ids
 }
+
+func TestSnapshotAncestryWalkBoundarySemantics(t *testing.T) {
+	// The parent has expired, but its ID remains recorded on the child.
+	// Conflict checks may use it as an exclusive base while membership must
+	// resolve the requested ancestor.
+	parentID := int64(7)
+	childID := int64(8)
+	child := Snapshot{SnapshotID: childID, ParentSnapshotID: &parentID}
+
+	var lookedUp []int64
+	lookup := func(id int64) *Snapshot {
+		lookedUp = append(lookedUp, id)
+		if id == childID {
+			return &child
+		}
+
+		return nil
+	}
+
+	between, found := AncestorsBetween(childID, parentID, lookup)
+	assert.True(t, found)
+	assert.Equal(t, []int64{childID}, snapshotIDs(between))
+	assert.Equal(t, []int64{childID}, lookedUp, "exclusive base should not be resolved")
+
+	lookedUp = nil
+	assert.False(t, IsAncestorOf(childID, parentID, lookup))
+	assert.Equal(t, []int64{childID, parentID}, lookedUp, "ancestor must resolve")
+
+	lookedUp = nil
+	ancestors, complete := AncestorsOfChecked(childID, lookup)
+	assert.False(t, complete)
+	assert.Equal(t, []int64{childID}, snapshotIDs(ancestors))
+	assert.Equal(t, []int64{childID, parentID}, lookedUp)
+
+	lookedUp = nil
+	between, found = AncestorsBetween(parentID, parentID, lookup)
+	assert.True(t, found)
+	assert.Empty(t, between)
+	assert.Empty(t, lookedUp, "equal base and latest must not be resolved")
+
+	assert.False(t, IsAncestorOf(parentID, parentID, lookup))
+	assert.Equal(t, []int64{parentID}, lookedUp, "equal ancestor and snapshot must resolve")
+}

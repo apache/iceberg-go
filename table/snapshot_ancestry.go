@@ -64,6 +64,51 @@ func (s *snapshotVisitSet) seenOrAdd(id int64) bool {
 	return false
 }
 
+// ancestryWalkMode selects how a snapshot ancestry walk ends.
+// An expired base ID can end a conflict-detection walk, but checking whether
+// an ID is an ancestor requires resolving that snapshot.
+type ancestryWalkMode uint8
+
+const (
+	ancestryToRoot ancestryWalkMode = iota
+	ancestryBeforeBase
+	ancestryToResolvedAncestor
+)
+
+// walkSnapshotAncestry shares parent traversal, missing-snapshot handling and
+// cycle detection. Only the first two modes accumulate snapshot values.
+func walkSnapshotAncestry(startID, boundaryID int64, lookup SnapshotLookup, mode ancestryWalkMode) ([]Snapshot, bool) {
+	var history []Snapshot
+	var visited snapshotVisitSet
+
+	id := startID
+	for {
+		// A base may have expired, so stop before resolving it.
+		if mode == ancestryBeforeBase && id == boundaryID {
+			return history, true
+		}
+		if visited.seenOrAdd(id) {
+			return history, false
+		}
+		snap := lookup(id)
+		if snap == nil {
+			return history, false
+		}
+
+		// Membership requires the candidate ancestor to resolve.
+		if mode == ancestryToResolvedAncestor && id == boundaryID {
+			return nil, true
+		}
+		if mode != ancestryToResolvedAncestor {
+			history = append(history, *snap)
+		}
+		if snap.ParentSnapshotID == nil {
+			return history, mode == ancestryToRoot
+		}
+		id = *snap.ParentSnapshotID
+	}
+}
+
 // AncestorsOf walks the parent chain starting from snapshotID and yields
 // every snapshot reachable via ParentSnapshotID, including the starting
 // snapshot itself. Iteration stops when a snapshot has no parent, the
@@ -99,27 +144,7 @@ func AncestorsOf(snapshotID int64, lookup SnapshotLookup) []Snapshot {
 // Snapshots are returned by value in reverse-chronological order.
 // Returns an empty slice and false when snapshotID cannot be resolved.
 func AncestorsOfChecked(snapshotID int64, lookup SnapshotLookup) ([]Snapshot, bool) {
-	var ancestors []Snapshot
-	var visited snapshotVisitSet
-
-	id := snapshotID
-	for {
-		if visited.seenOrAdd(id) {
-			return ancestors, false
-		}
-
-		snap := lookup(id)
-		if snap == nil {
-			return ancestors, false
-		}
-
-		ancestors = append(ancestors, *snap)
-
-		if snap.ParentSnapshotID == nil {
-			return ancestors, true
-		}
-		id = *snap.ParentSnapshotID
-	}
+	return walkSnapshotAncestry(snapshotID, 0, lookup, ancestryToRoot)
 }
 
 // AncestorsBetween returns the snapshots from latestID (inclusive) down
@@ -147,33 +172,7 @@ func AncestorsBetween(latestID, baseID int64, lookup SnapshotLookup) ([]Snapshot
 		return nil, true
 	}
 
-	var between []Snapshot
-	var visited snapshotVisitSet
-
-	id := latestID
-	for {
-		if id == baseID {
-			return between, true
-		}
-		if visited.seenOrAdd(id) {
-			// Cycle detected before reaching baseID.
-			break
-		}
-
-		snap := lookup(id)
-		if snap == nil {
-			break
-		}
-
-		between = append(between, *snap)
-
-		if snap.ParentSnapshotID == nil {
-			break
-		}
-		id = *snap.ParentSnapshotID
-	}
-
-	return between, false
+	return walkSnapshotAncestry(latestID, baseID, lookup, ancestryBeforeBase)
 }
 
 // IsAncestorOf returns true if ancestorID is in the parent chain of
@@ -189,29 +188,7 @@ func AncestorsBetween(latestID, baseID int64, lookup SnapshotLookup) ([]Snapshot
 // semantics are stricter (conservative) — broken chains return false
 // rather than matching an unreachable ancestor id.
 func IsAncestorOf(snapshotID, ancestorID int64, lookup SnapshotLookup) bool {
-	var visited snapshotVisitSet
+	_, found := walkSnapshotAncestry(snapshotID, ancestorID, lookup, ancestryToResolvedAncestor)
 
-	id := snapshotID
-	for {
-		if visited.seenOrAdd(id) {
-			return false
-		}
-
-		snap := lookup(id)
-		if snap == nil {
-			return false
-		}
-
-		// Resolve before matching, so an absent ancestor ID does not
-		// count as reachable. An ID inside a cycle succeeds on its first
-		// visit, before cycle detection can reject a repeated ID.
-		if id == ancestorID {
-			return true
-		}
-
-		if snap.ParentSnapshotID == nil {
-			return false
-		}
-		id = *snap.ParentSnapshotID
-	}
+	return found
 }
