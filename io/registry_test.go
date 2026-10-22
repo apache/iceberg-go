@@ -281,7 +281,6 @@ func TestRegistryConcurrentRegistrationsAndLoads(t *testing.T) {
 	errs := make(chan error, workers)
 	for i := range workers {
 		wg.Go(func() {
-
 			scheme := fmt.Sprintf("worker-%d", i)
 			if err := reg.Register(scheme, factory); err != nil {
 				errs <- err
