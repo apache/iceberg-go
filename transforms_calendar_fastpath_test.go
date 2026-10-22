@@ -186,17 +186,20 @@ func referenceCalendarTransformer(src Type, month bool) func(any) Optional[int32
 					return Optional[int32]{}
 				}
 				tm := value.(Timestamp).ToTime()
+
 				return Optional[int32]{
 					Valid: true,
 					Val:   int32((tm.Year()-epochTM.Year())*12 + int(tm.Month()) - int(epochTM.Month())),
 				}
 			}
 		}
+
 		return func(value any) Optional[int32] {
 			if value == nil {
 				return Optional[int32]{}
 			}
 			tm := value.(Timestamp).ToTime()
+
 			return Optional[int32]{Valid: true, Val: int32(tm.Year() - epochTM.Year())}
 		}
 	case TimestampNsType:
@@ -206,17 +209,20 @@ func referenceCalendarTransformer(src Type, month bool) func(any) Optional[int32
 					return Optional[int32]{}
 				}
 				tm := value.(TimestampNano).ToTime()
+
 				return Optional[int32]{
 					Valid: true,
 					Val:   int32((tm.Year()-epochTM.Year())*12 + int(tm.Month()) - int(epochTM.Month())),
 				}
 			}
 		}
+
 		return func(value any) Optional[int32] {
 			if value == nil {
 				return Optional[int32]{}
 			}
 			tm := value.(TimestampNano).ToTime()
+
 			return Optional[int32]{Valid: true, Val: int32(tm.Year() - epochTM.Year())}
 		}
 	}
