@@ -15,22 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package catalogtest provides a conformance suite that every
-// [catalog.Catalog] implementation can run against itself, so that shared
-// behavior is specified once rather than re-derived in each implementation's
-// tests. It mirrors the role of CatalogTests in the Java implementation.
-//
-// An implementation opts in from its own test package by describing itself
-// with a [Config] and calling [RunCatalogTests]:
-//
-//	func TestCatalogConformance(t *testing.T) {
-//		catalogtest.RunCatalogTests(t, catalogtest.Config{
-//			NewCatalog: func(t *testing.T) catalog.Catalog { ... },
-//		})
-//	}
-//
-// Each test gets its own catalog from Config.NewCatalog, so tests never share
-// state and may run in any order.
 package catalogtest
 
 import (
