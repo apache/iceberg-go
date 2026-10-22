@@ -58,7 +58,7 @@ func TestInspectContentFileAppenderRebindsAcrossRecordBuilders(t *testing.T) {
 
 			pathIdx := record.Schema().FieldIndices("file_path")[0]
 			countIdx := record.Schema().FieldIndices("record_count")[0]
-			for row := 0; row < 2; row++ {
+			for row := range 2 {
 				require.Equal(t, file.FilePath(), record.Column(pathIdx).(*array.String).Value(row))
 				require.Equal(t, file.Count(), record.Column(countIdx).(*array.Int64).Value(row))
 			}
