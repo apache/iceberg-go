@@ -354,6 +354,14 @@ iceberg refs --type tag    my_db.events
 iceberg partition-stats --snapshot-id 7234981023498 my_db.events
 iceberg partition-stats --all my_db.events                    # all snapshots
 </code></pre>
+<h3 id="files--data-files"><a class="header" href="#files--data-files"><code>files</code> — data files</a></h3>
+<pre><code class="language-shell">iceberg files my_db.events                              # current snapshot
+iceberg files --history my_db.events                    # all snapshots
+iceberg files --scan-planning-mode remote my_db.events  # from a server-side scan plan
+</code></pre>
+<p>By default <code>files</code> reads the manifest list and manifests itself and prints them as a tree: snapshot, manifest, then each manifest entry.</p>
+<p>With <code>--scan-planning-mode remote</code> or <code>auto</code>, or when a REST catalog sets <code>scan-planning-mode=server</code> for the table, <code>files</code> plans a scan of the current snapshot instead and lists the data files it returns, each with its delete files. A scan plan carries no manifests, so the tree has no manifest level, and it only shows live files. <code>--history</code> needs every snapshot's manifests and fails in this mode, as does <code>--scan-planning-mode local</code> on a <code>server</code> table.</p>
+<p><code>compact</code> plans its input with a table scan, so it follows the catalog's <code>scan-planning-mode</code> as well. Every other command reads table metadata directly.</p>
 <h3 id="schema---show-defaults"><a class="header" href="#schema---show-defaults"><code>schema --show-defaults</code></a></h3>
 <pre><code class="language-shell">iceberg schema --show-defaults my_db.events
 </code></pre>
