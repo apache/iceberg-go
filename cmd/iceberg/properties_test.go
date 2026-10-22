@@ -43,6 +43,8 @@ func (m *mockCatalogForProperties) LoadTable(ctx context.Context, ident table.Id
 	return m.tbl, nil
 }
 
+func (m *mockCatalogForProperties) Close() error { return nil }
+
 func (m *mockCatalogForProperties) CatalogType() catalog.Type {
 	panic("CatalogType must not be called")
 }

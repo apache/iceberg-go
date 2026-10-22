@@ -34,6 +34,8 @@ type exampleCatalog struct {
 	tables map[string]*table.Table
 }
 
+func (c *exampleCatalog) Close() error { return nil }
+
 func (c *exampleCatalog) CatalogType() catalog.Type { return catalog.REST }
 
 func (c *exampleCatalog) CommitTransaction(_ context.Context, _ []table.TableCommit) error {
