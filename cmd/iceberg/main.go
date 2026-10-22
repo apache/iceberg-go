@@ -435,7 +435,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			log.Fatal(err)
 		}
 	case catalog.Hadoop:
-		if cat, err = hadoop.NewCatalog("hadoop", args.Warehouse, iceberg.Properties{
+		if cat, err = hadoop.NewCatalog(ctx, "hadoop", args.Warehouse, iceberg.Properties{
 			"warehouse": args.Warehouse,
 		}); err != nil {
 			log.Fatal(err)
