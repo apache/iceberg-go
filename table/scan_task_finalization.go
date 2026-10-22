@@ -187,15 +187,13 @@ func (scan *Scan) finalizeTaskRange(
 		if offsets, fileSize, split := splittableParquetOffsets(*task, splitTargetSize); split {
 			if !result.expanded {
 				result.expanded = true
-				// A mixed range keeps the unsplit prefix. Bound the initial
-				// capacity for coalesced row groups without allocating a
-				// temporary split slice for each file.
+				// A mixed range keeps the unsplit prefix. Reserve space once
+				// without allocating a temporary slice for each split file.
 				result.tasks = make([]FileScanTask, 0, max((end-start)*2,
 					index-start+parquetSplitCapacity(len(offsets), fileSize, splitTargetSize)))
 				result.tasks = append(result.tasks, plannedTasks[start:index]...)
 			}
-			result.tasks = appendParquetTaskSplits(result.tasks, *task,
-				offsets, fileSize, splitTargetSize)
+			result.tasks = appendParquetTaskSplits(result.tasks, *task, offsets, fileSize, splitTargetSize)
 		} else if result.expanded {
 			result.tasks = append(result.tasks, *task)
 		}
