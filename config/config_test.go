@@ -37,6 +37,16 @@ func TestLoadConfig(t *testing.T) {
 		assert.Equal(t, contents, data)
 	})
 
+	t.Run("explicit relative config path", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		contents := []byte("max-workers: 7\n")
+		require.NoError(t, os.WriteFile("relative.yaml", contents, 0o600))
+
+		data, err := LoadConfig("relative.yaml")
+		require.NoError(t, err)
+		assert.Equal(t, contents, data)
+	})
+
 	t.Run("implicit home directory config", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
