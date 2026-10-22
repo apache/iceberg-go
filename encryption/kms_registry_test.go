@@ -160,9 +160,7 @@ func TestKMSRegistry_ConcurrentUse(t *testing.T) {
 	var wg sync.WaitGroup
 	failures := make(chan error, workerCount)
 	for i := range workerCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			name := fmt.Sprintf("worker-%d", i)
 			if err := registry.Register(name, memoryKMSFactory); err != nil {
@@ -175,7 +173,7 @@ func TestKMSRegistry_ConcurrentUse(t *testing.T) {
 			}
 			_ = registry.Names()
 			registry.Unregister(name)
-		}()
+		})
 	}
 	wg.Wait()
 	close(failures)
