@@ -61,6 +61,7 @@ func writeRFC9535Escaped(b *strings.Builder, name string) {
 		c := name[i]
 		if c < 0x20 || c == '\'' || c == '\\' {
 			needsEscape = true
+
 			break
 		}
 	}
