@@ -64,7 +64,7 @@ func TestIndexByNameNestedListAliases(t *testing.T) {
 		"lookup":                           8,
 		"lookup.key":                       9,
 		"lookup.value":                     10,
-		"lookup.value.東京":                 11,
+		"lookup.value.東京":                  11,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("IndexByName() = %v, want %v", got, want)
