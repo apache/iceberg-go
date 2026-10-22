@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"iter"
 	"log"
 	"maps"
 	"slices"
@@ -1420,67 +1419,6 @@ func validateNamespacePropertyUpdates(removals []string, updates iceberg.Propert
 	return nil
 }
 
-func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
-	tables, err := c.listTablesAll(ctx, namespace)
-	if err != nil {
-		return func(yield func(table.Identifier, error) bool) {
-			yield(table.Identifier{}, err)
-		}
-	}
-
-	return func(yield func(table.Identifier, error) bool) {
-		for _, t := range tables {
-			if !yield(t, nil) {
-				return
-			}
-		}
-	}
-}
-
-func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
-	ns := namespaceToString(namespace)
-	if len(namespace) > 0 {
-		var exists bool
-		var err error
-		ns, exists, err = c.resolveNamespaceKey(ctx, namespace)
-		if err != nil {
-			return nil, err
-		}
-		if !exists {
-			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(namespace, "."))
-		}
-	}
-
-	tables, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergTable, error) {
-		var tables []sqlIcebergTable
-		sel := tx.NewSelect().Model(&tables).
-			Where("catalog_name = ?", c.name).
-			Where("table_namespace = ?", ns)
-		if c.isV0() {
-			sel = sel.ExcludeColumn("iceberg_type")
-		} else {
-			sel = sel.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
-		}
-		err := sel.Scan(ctx)
-
-		return tables, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error listing tables for namespace '%s': %w", namespace, err)
-	}
-
-	ret := make([]table.Identifier, len(tables))
-	for i, t := range tables {
-		namespace, err := namespaceFromString(t.TableNamespace)
-		if err != nil {
-			return nil, err
-		}
-		ret[i] = append(namespace, t.TableName)
-	}
-
-	return ret, nil
-}
-
 func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	tableQuery := c.db.NewSelect().Model((*sqlIcebergTable)(nil)).
 		Column("table_namespace").Where("catalog_name = ?", c.name)
@@ -1698,68 +1636,6 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 	}
 
 	return err
-}
-
-// ListViews returns a list of view identifiers in the catalog.
-func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
-	views, err := c.listViewsAll(ctx, namespace)
-	if err != nil {
-		return func(yield func(table.Identifier, error) bool) {
-			yield(table.Identifier{}, err)
-		}
-	}
-
-	return func(yield func(table.Identifier, error) bool) {
-		for _, v := range views {
-			if !yield(v, nil) {
-				return
-			}
-		}
-	}
-}
-
-func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
-	if c.isV0() {
-		return nil, nil
-	}
-
-	ns := namespaceToString(namespace)
-	if len(namespace) > 0 {
-		var exists bool
-		var err error
-		ns, exists, err = c.resolveNamespaceKey(ctx, namespace)
-		if err != nil {
-			return nil, err
-		}
-		if !exists {
-			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(namespace, "."))
-		}
-	}
-
-	views, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergTable, error) {
-		var views []sqlIcebergTable
-		err := tx.NewSelect().Model(&views).
-			Where("catalog_name = ?", c.name).
-			Where("table_namespace = ?", ns).
-			Where("iceberg_type = ?", ViewType).
-			Scan(ctx)
-
-		return views, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error listing views for namespace '%s': %w", namespace, err)
-	}
-
-	ret := make([]table.Identifier, len(views))
-	for i, v := range views {
-		namespace, err := namespaceFromString(v.TableNamespace)
-		if err != nil {
-			return nil, err
-		}
-		ret[i] = append(namespace, v.TableName)
-	}
-
-	return ret, nil
 }
 
 // DropView deletes a view from the catalog.
