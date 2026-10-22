@@ -20,92 +20,120 @@ package encryption
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"sync"
 )
 
 // KMSTypeKey is the catalog property that selects a [KeyManagementClient]
-// implementation registered via [RegisterKMS] (e.g. "memory"). It is a
-// registered short name, not a fully-qualified class name.
-//
-// KMSTypeKey ("kms-type") is an iceberg-go-specific mechanism for wiring up
-// a KMS client at runtime. It is not a standardized Iceberg spec property
-// and has no cross-implementation meaning. It will not be recognized by,
-// or portable to, other Iceberg implementations.
+// implementation registered with a [KMSRegistry] (e.g. "memory").
+// It is an iceberg-go-specific property and is not portable to other Iceberg
+// implementations.
 const KMSTypeKey = "kms-type"
 
-// ErrKMSTypeNotFound is returned by [LoadKeyManagementClient] when the
-// requested kmsType has not been registered via [RegisterKMS].
-var ErrKMSTypeNotFound = errors.New("encryption: kms type not found")
-
-// KMSFactory creates a [KeyManagementClient] from catalog/table properties.
-// props is the full property map (typically catalog properties); factories
-// should read whichever keys they need (e.g. key material, endpoints,
-// credentials) directly from it.
-type KMSFactory func(props map[string]string) (KeyManagementClient, error)
-
 var (
-	kmsRegMutex sync.RWMutex
-	kmsRegistry = map[string]KMSFactory{}
+	// ErrKMSTypeNotFound is returned by [KMSRegistry.Load] when the
+	// requested KMS has not been registered.
+	ErrKMSTypeNotFound = errors.New("encryption: kms type not found")
+
+	// ErrKMSAlreadyRegistered is returned when a factory name is already in use.
+	ErrKMSAlreadyRegistered = errors.New("encryption: kms factory already registered")
+
+	// ErrInvalidKMSRegistration is returned for an empty name or nil factory.
+	ErrInvalidKMSRegistration = errors.New("encryption: invalid kms registration")
 )
 
-// RegisterKMS adds a new named [KMSFactory] to the registry so it can later
-// be selected via the [KMSTypeKey] catalog property. It panics if factory is
-// nil or if name is already registered.
-func RegisterKMS(name string, factory KMSFactory) {
+// KMSFactory creates a [KeyManagementClient] from catalog/table properties.
+// Factories receive the full caller-supplied property map.
+type KMSFactory func(props map[string]string) (KeyManagementClient, error)
+
+// KMSRegistry owns the named factories used to construct KMS clients.
+// A registry is safe for concurrent use and must not be copied after first use.
+// Its zero value is an empty, usable registry. Use [NewKMSRegistry] to include
+// the built-in "memory" factory (which is intended for testing only).
+//
+// Separate registries let tests and catalog clients register the same name
+// without modifying each other's factories.
+type KMSRegistry struct {
+	mu        sync.RWMutex
+	factories map[string]KMSFactory
+}
+
+// NewKMSRegistry creates an independent registry containing the built-in
+// "memory" KMS factory. The memory KMS is intended for testing only.
+func NewKMSRegistry() *KMSRegistry {
+	return &KMSRegistry{
+		factories: map[string]KMSFactory{
+			"memory": func(_ map[string]string) (KeyManagementClient, error) {
+				return NewInMemoryKeyManagementClient(), nil
+			},
+		},
+	}
+}
+
+// Register adds a named KMS factory. It returns an error for an empty name,
+// nil factory, or duplicate name. The registry is unchanged on error.
+func (r *KMSRegistry) Register(name string, factory KMSFactory) error {
+	if name == "" {
+		return fmt.Errorf("%w: name must not be empty", ErrInvalidKMSRegistration)
+	}
 	if factory == nil {
-		panic("encryption: RegisterKMS factory is nil")
+		return fmt.Errorf("%w: factory for %q is nil", ErrInvalidKMSRegistration, name)
 	}
 
-	kmsRegMutex.Lock()
-	defer kmsRegMutex.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	if _, dup := kmsRegistry[name]; dup {
-		panic("encryption: RegisterKMS called twice for name " + name)
+	if _, exists := r.factories[name]; exists {
+		return fmt.Errorf("%w: %q", ErrKMSAlreadyRegistered, name)
 	}
-	kmsRegistry[name] = factory
+	if r.factories == nil {
+		r.factories = make(map[string]KMSFactory)
+	}
+	r.factories[name] = factory
+
+	return nil
 }
 
-// UnregisterKMS removes the requested named factory from the registry.
-func UnregisterKMS(name string) {
-	kmsRegMutex.Lock()
-	defer kmsRegMutex.Unlock()
-	delete(kmsRegistry, name)
+// Unregister removes a named factory. Removing an unknown name is a no-op.
+func (r *KMSRegistry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.factories, name)
 }
 
-// GetRegisteredKMSNames returns the names of all currently registered KMS
-// factories.
-func GetRegisteredKMSNames() []string {
-	kmsRegMutex.RLock()
-	defer kmsRegMutex.RUnlock()
+// Names returns the currently registered factory names in sorted order.
+// The returned slice is independent of the registry.
+func (r *KMSRegistry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	return slices.Collect(maps.Keys(kmsRegistry))
+	names := make([]string, 0, len(r.factories))
+	for name := range r.factories {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	return names
 }
 
-// LoadKeyManagementClient resolves and constructs a [KeyManagementClient]
-// from props. It looks up the KMS name under [KMSTypeKey]; it returns an
-// error wrapping [ErrKMSTypeNotFound] if the property is unset or the named
-// KMS has not been registered via [RegisterKMS].
-func LoadKeyManagementClient(props map[string]string) (KeyManagementClient, error) {
+// Load resolves and constructs a [KeyManagementClient] from props. It looks
+// up the name under [KMSTypeKey] and returns an error wrapping
+// [ErrKMSTypeNotFound] when the property is empty or not registered.
+// The factory is invoked outside the lock, so it may update this registry.
+func (r *KMSRegistry) Load(props map[string]string) (KeyManagementClient, error) {
 	name := props[KMSTypeKey]
 	if name == "" {
 		return nil, fmt.Errorf("%w: %q is not set", ErrKMSTypeNotFound, KMSTypeKey)
 	}
 
-	kmsRegMutex.RLock()
-	factory, ok := kmsRegistry[name]
-	kmsRegMutex.RUnlock()
+	r.mu.RLock()
+	factory, ok := r.factories[name]
+	r.mu.RUnlock()
 
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrKMSTypeNotFound, name)
 	}
 
 	return factory(props)
-}
-
-func init() {
-	RegisterKMS("memory", func(_ map[string]string) (KeyManagementClient, error) {
-		return NewInMemoryKeyManagementClient(), nil
-	})
 }
