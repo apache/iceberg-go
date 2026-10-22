@@ -478,8 +478,8 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 }
 
 func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {
-	t.Parallel()
-
+	// The test compares global goroutine counts, so it must not run alongside
+	// other parallel tests that can start or stop unrelated goroutines.
 	partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{2},
 		Name:      "age_bucket",
