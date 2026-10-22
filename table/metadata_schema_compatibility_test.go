@@ -190,57 +190,57 @@ func TestValidateComplexDefaultRetainsShapeRules(t *testing.T) {
 	}{
 		{
 			name: "struct initial default must be object",
-			typ: &iceberg.StructType{}, initial: "wrong",
+			typ:  &iceberg.StructType{}, initial: "wrong",
 			want: "struct type field 'field' (id: 5) must have null or JSON object initial-default, but got: wrong",
 		},
 		{
 			name: "struct write default must be object",
-			typ: &iceberg.StructType{}, write: "wrong",
+			typ:  &iceberg.StructType{}, write: "wrong",
 			want: "struct type field 'field' (id: 5) must have null or JSON object write-default, but got: wrong",
 		},
 		{
 			name: "list initial default must be array",
-			typ: &iceberg.ListType{}, initial: "wrong",
+			typ:  &iceberg.ListType{}, initial: "wrong",
 			want: "list type field 'field' (id: 5) must have null or JSON array initial-default, but got: wrong",
 		},
 		{
 			name: "list write default must be array",
-			typ: &iceberg.ListType{}, write: "wrong",
+			typ:  &iceberg.ListType{}, write: "wrong",
 			want: "list type field 'field' (id: 5) must have null or JSON array write-default, but got: wrong",
 		},
 		{
 			name: "map initial default must be object",
-			typ: &iceberg.MapType{}, initial: "wrong",
+			typ:  &iceberg.MapType{}, initial: "wrong",
 			want: "map type field 'field' (id: 5) must have null or JSON object initial-default, but got: wrong",
 		},
 		{
 			name: "map write default must be object",
-			typ: &iceberg.MapType{}, write: "wrong",
+			typ:  &iceberg.MapType{}, write: "wrong",
 			want: "map type field 'field' (id: 5) must have null or JSON object write-default, but got: wrong",
 		},
 		{
 			name: "initial default error takes priority",
-			typ: &iceberg.ListType{}, initial: "initial", write: "write",
+			typ:  &iceberg.ListType{}, initial: "initial", write: "write",
 			want: "list type field 'field' (id: 5) must have null or JSON array initial-default, but got: initial",
 		},
 		{
-			name: "struct accepts object defaults",
-			typ: &iceberg.StructType{},
+			name:    "struct accepts object defaults",
+			typ:     &iceberg.StructType{},
 			initial: map[string]any{"a": 1}, write: map[string]any(nil),
 		},
 		{
-			name: "list accepts array defaults",
-			typ: &iceberg.ListType{},
+			name:    "list accepts array defaults",
+			typ:     &iceberg.ListType{},
 			initial: []any{"a"}, write: []any(nil),
 		},
 		{
-			name: "map accepts object defaults",
-			typ: &iceberg.MapType{},
+			name:    "map accepts object defaults",
+			typ:     &iceberg.MapType{},
 			initial: map[string]any{"a": 1}, write: map[string]any{"b": 2},
 		},
 		{
 			name: "primitive defaults unchanged",
-			typ: iceberg.StringType{}, initial: "initial", write: "write",
+			typ:  iceberg.StringType{}, initial: "initial", write: "write",
 		},
 	}
 	for _, tt := range tests {
