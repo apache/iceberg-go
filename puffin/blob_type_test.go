@@ -33,6 +33,17 @@ func TestBlobTypeIsKnown(t *testing.T) {
 	assert.False(t, puffin.BlobType("").IsKnown())
 }
 
+func TestBlobTypeUnmarshalErrorPreservesPreviousValue(t *testing.T) {
+	for _, input := range []string{`""`, "null", "123", `{}`} {
+		t.Run(input, func(t *testing.T) {
+			got := puffin.BlobTypeDeletionVector
+			err := json.Unmarshal([]byte(input), &got)
+			require.Error(t, err)
+			assert.Equal(t, puffin.BlobTypeDeletionVector, got)
+		})
+	}
+}
+
 func TestBlobTypeJSON(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
