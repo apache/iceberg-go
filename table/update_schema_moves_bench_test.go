@@ -71,7 +71,7 @@ func BenchmarkMoveFieldsBulkReorder(b *testing.B) {
 			}{{"linear", moveFieldsLinear}, {"indexed", moveFields}} {
 				b.Run(impl.name, func(b *testing.B) {
 					b.ReportAllocs()
-					for i := 0; i < b.N; i++ {
+					for range b.N {
 						moveFieldsBenchmarkSink = impl.fn(fields, moves)
 					}
 				})
