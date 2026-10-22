@@ -19,6 +19,7 @@ package maintenance
 
 import (
 	"fmt"
+	"strconv"
 	"testing"
 )
 
@@ -45,6 +46,7 @@ func findOrphanFilesEagerForBenchmark(
 		for _, alias := range aliases {
 			if _, ok := referencedIndex.normalized[alias]; ok {
 				matched = true
+
 				break
 			}
 		}
@@ -59,6 +61,7 @@ func findOrphanFilesEagerForBenchmark(
 			}
 			if decision == prefixMismatchKeep {
 				matched = true
+
 				break
 			}
 		}
@@ -112,7 +115,7 @@ func BenchmarkFindOrphanFilesLazyIndex(b *testing.B) {
 						b.ReportAllocs()
 						var plan OrphanCleanupPlan
 						b.ResetTimer()
-						for i := 0; i < b.N; i++ {
+						for range b.N {
 							var err error
 							plan, err = implementation.find(scanned, references, cfg)
 							if err != nil {
@@ -123,7 +126,7 @@ func BenchmarkFindOrphanFilesLazyIndex(b *testing.B) {
 						if len(plan.orphanFiles) != wantOrphans {
 							b.Fatalf("got %d orphans, want %d", len(plan.orphanFiles), wantOrphans)
 						}
-						orphanCleanupBenchmarkSink = fmt.Sprint(plan.totalSizeBytes)
+						orphanCleanupBenchmarkSink = strconv.FormatInt(plan.totalSizeBytes, 10)
 					})
 				}
 			})

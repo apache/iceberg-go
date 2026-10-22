@@ -121,6 +121,7 @@ func TestFindOrphanFilesLazyIndex(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("expected error containing %q, got %v", tt.wantError, err)
 				}
+
 				return
 			}
 			if err != nil {
