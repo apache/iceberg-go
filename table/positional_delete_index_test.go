@@ -349,6 +349,21 @@ func TestPositionalDeleteIndexPrunesPartitionEntriesUsingPathMetrics(t *testing.
 		positionalDeletePaths(matched))
 }
 
+func TestPositionalDeleteCachedBoundsOwnTheirBytes(t *testing.T) {
+	entry := newPositionalDeleteIndexTestEntryWithBounds(
+		"delete.parquet", 1, nil, 5, nil, "alpha", "omega",
+	)
+	file := entry.DataFile().(*positionalDeleteIndexTestFile)
+	metrics := positionalDeletePathMetricsFor(file)
+	assert.True(t, metrics.mayMatch("middle"))
+
+	// Metrics may borrow these byte slices. Cached bounds must not borrow
+	// them, because a caller can reuse the underlying metadata buffers.
+	file.lowerBounds[filePathFieldID][0] = 'z'
+	file.upperBounds[filePathFieldID][0] = 'a'
+	assert.True(t, metrics.mayMatch("middle"))
+}
+
 func TestFilePathMayMatch(t *testing.T) {
 	const dataFilePath = "data-m.parquet"
 
