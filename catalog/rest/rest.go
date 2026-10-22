@@ -1297,7 +1297,6 @@ func (r *Catalog) Close() error {
 	return r.closeErr
 }
 
-
 func (r *Catalog) checkValidNamespace(ident table.Identifier) error {
 	if err := catalog.ValidateNamespaceIdentifier(ident); err != nil {
 		return err

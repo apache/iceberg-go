@@ -276,7 +276,6 @@ func (c *Catalog) CatalogType() catalog.Type {
 // is released. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error { return c.reporter.Close() }
 
-
 // CreateTable creates a new Iceberg table in the Glue catalog.
 // This function will create the metadata file in S3 using the catalog and table properties,
 // to determine the bucket and key for the metadata location.

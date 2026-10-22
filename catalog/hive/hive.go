@@ -123,7 +123,6 @@ func closeIsolated(closeFn func() error) (err error) {
 	return closeFn()
 }
 
-
 // ListTables returns a list of table identifiers in the given namespace.
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {

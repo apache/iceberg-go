@@ -280,7 +280,6 @@ func (c *Catalog) CatalogType() catalog.Type {
 // Close releases the catalog's metrics reporter. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error { return c.reporter.Close() }
 
-
 // joinPath is a helper that allows paths to be joined as both local filesystem
 // paths or as remote URIs needed for filesystems like blob stores.
 func joinPath(isLocal bool, base string, parts ...string) string {

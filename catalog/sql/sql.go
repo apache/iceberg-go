@@ -478,7 +478,6 @@ func (c *Catalog) Close() error {
 	return err
 }
 
-
 func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 	_, err := c.db.NewCreateTable().Model((*sqlIcebergTable)(nil)).
 		IfNotExists().Exec(ctx)
