@@ -210,6 +210,11 @@ func (u *updateNameMappingVisitor) updatedFields(fields []MappedField) []MappedF
 		}
 	}
 
+	// The original visitor returned nil when every alias was discarded.
+	if len(result) == 0 {
+		return nil
+	}
+
 	return result
 }
 

@@ -80,3 +80,10 @@ func TestUpdateNameMappingEmptyAndAnonymous(t *testing.T) {
 	require.Equal(t, 8, *updated[1].FieldID)
 	require.Len(t, mapping, 3)
 }
+
+func TestUpdateNameMappingPrunesNamelessMappingToNil(t *testing.T) {
+	mapping := iceberg.NameMapping{{Names: []string{}}}
+	updated, err := iceberg.UpdateNameMapping(mapping, nil, nil)
+	require.NoError(t, err)
+	require.Nil(t, updated)
+}
