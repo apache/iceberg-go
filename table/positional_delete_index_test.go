@@ -478,6 +478,7 @@ func TestFilePathMayMatch(t *testing.T) {
 				upperBounds: upperBounds,
 			}
 			assert.Equal(t, tt.want, filePathMayMatch(file, dataFilePath))
+			assert.Equal(t, tt.want, positionalDeletePathMetricsFor(file).mayMatch(dataFilePath))
 		})
 	}
 }
@@ -528,6 +529,47 @@ func TestPositionalDeleteIndexRejectsUnsupportedPartitionValue(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "indexing positional delete file delete.parquet")
 	assert.ErrorContains(t, err, "partition field 1000")
+}
+
+// BenchmarkPositionalDeleteIndexPartitionPathBounds exercises repeated data-file
+// lookups against a large partition bucket. The deleted file's bounds usually
+// disqualify nearly every candidate, but the index must remain conservative.
+func BenchmarkPositionalDeleteIndexPartitionPathBounds(b *testing.B) {
+	const numDeletes = 2048
+	const numDataFiles = 512
+
+	partition := map[int]any{1000: int32(7)}
+	deleteEntries := make([]iceberg.ManifestEntry, numDeletes)
+	for i := range deleteEntries {
+		deleteEntries[i] = newPositionalDeleteIndexTestEntryWithBounds(
+			fmt.Sprintf("delete-%04d.parquet", i), 1, partition, 5, nil,
+			fmt.Sprintf("s3://bucket/data-%06d.parquet", i*8),
+			fmt.Sprintf("s3://bucket/data-%06d.parquet", i*8+23))
+		file := deleteEntries[i].DataFile().(*positionalDeleteIndexTestFile)
+		file.valueCounts = map[int]int64{filePathFieldID: 1}
+		file.nullCounts = map[int]int64{filePathFieldID: 0}
+	}
+	idx, err := buildPositionalDeleteIndex(deleteEntries)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	dataEntries := make([]iceberg.ManifestEntry, numDataFiles)
+	for i := range dataEntries {
+		dataEntries[i] = newPositionalDeleteIndexDataEntry(
+			fmt.Sprintf("s3://bucket/data-%06d.parquet", i*32), 1, partition, 5)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		matched, err := idx.forDataFile(dataEntries[i%numDataFiles])
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(matched) == 0 {
+			b.Fatal("expected matching deletes")
+		}
+	}
 }
 
 func positionalDeletePaths(files []iceberg.DataFile) []string {
