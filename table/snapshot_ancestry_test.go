@@ -94,6 +94,28 @@ func TestAncestorsOf_BrokenChain(t *testing.T) {
 	assert.Equal(t, []int64{3}, snapshotIDs(got))
 }
 
+func TestSnapshotAncestrySelfCycleTerminates(t *testing.T) {
+	id := int64(17)
+	snapshot := Snapshot{SnapshotID: id, ParentSnapshotID: &id}
+	lookup := func(candidate int64) *Snapshot {
+		if candidate == id {
+			return &snapshot
+		}
+		return nil
+	}
+
+	ancestors, complete := AncestorsOfChecked(id, lookup)
+	assert.False(t, complete)
+	assert.Equal(t, []int64{id}, snapshotIDs(ancestors))
+
+	between, found := AncestorsBetween(id, 999, lookup)
+	assert.False(t, found)
+	assert.Equal(t, []int64{id}, snapshotIDs(between))
+
+	assert.True(t, IsAncestorOf(id, id, lookup))
+	assert.False(t, IsAncestorOf(id, 999, lookup))
+}
+
 func TestAncestorsOf_CycleDefense(t *testing.T) {
 	got := AncestorsOf(1, buildCycle())
 
