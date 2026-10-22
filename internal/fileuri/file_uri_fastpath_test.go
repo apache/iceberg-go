@@ -43,6 +43,7 @@ func TestParseFileURIEquivalentToURLParser(t *testing.T) {
 		valid := wantErr == nil && strings.EqualFold(want.Scheme, "file")
 		if (gotErr == nil) != valid {
 			t.Errorf("Parse(%q): got error %v; url.Parse error %v; valid=%v", uri, gotErr, wantErr, valid)
+
 			continue
 		}
 		if !valid {
