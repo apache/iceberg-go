@@ -462,8 +462,7 @@ func (c *Catalog) CatalogType() catalog.Type {
 // Close releases the catalog's metrics reporter. When the catalog opened its own
 // database handle (the registry [catalog.Load] path), Close also closes that
 // handle's connection pool; a handle supplied to [NewCatalog] stays owned by the
-// caller and is left open. Callers holding a [catalog.Catalog] can reach this via
-// a [catalog.Closer] type assertion.
+// caller and is left open. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error {
 	err := c.reporter.Close()
 	if c.ownsDB {
@@ -479,7 +478,6 @@ func (c *Catalog) Close() error {
 	return err
 }
 
-var _ catalog.Closer = (*Catalog)(nil)
 
 func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 	_, err := c.db.NewCreateTable().Model((*sqlIcebergTable)(nil)).

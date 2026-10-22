@@ -1281,8 +1281,7 @@ func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 // releases its metrics reporter. Closing the metrics dispatcher cancels any
 // in-flight reports and drains its workers so outbound telemetry stops.
 // Caller-provided transports remain caller-owned. Close is safe to call more
-// than once. Callers holding a [catalog.Catalog] can reach this via a
-// [catalog.Closer] type assertion.
+// than once. Close is required by [catalog.Catalog].
 func (r *Catalog) Close() error {
 	r.closeSessionOnce.Do(func() {
 		if r.closeSession != nil {
@@ -1298,7 +1297,6 @@ func (r *Catalog) Close() error {
 	return r.closeErr
 }
 
-var _ catalog.Closer = (*Catalog)(nil)
 
 func (r *Catalog) checkValidNamespace(ident table.Identifier) error {
 	if err := catalog.ValidateNamespaceIdentifier(ident); err != nil {
