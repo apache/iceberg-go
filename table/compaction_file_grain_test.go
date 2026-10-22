@@ -111,7 +111,11 @@ func TestExecuteCompactionGroupRejectsIncompleteFilesBeforeIO(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
 			tbl := table.New(base.Identifier(), base.Metadata(), base.MetadataLocation(),
-				func(context.Context) (iceio.IO, error) { calls.Add(1); return nil, errors.New("unexpected IO") }, nil)
+				func(context.Context) (iceio.IO, error) {
+					calls.Add(1)
+
+					return nil, errors.New("unexpected IO")
+				}, nil)
 			result, err := table.ExecuteCompactionGroup(t.Context(), tbl, table.CompactionTaskGroup{Tasks: tc.tasks})
 			require.ErrorIs(t, err, table.ErrInvalidOperation)
 			require.Zero(t, calls.Load(), "invalid groups must fail before opening input or output files")
@@ -131,7 +135,11 @@ func TestExecuteCompactionGroupAcceptsWholeFileRanges(t *testing.T) {
 			var calls atomic.Int32
 			ioErr := errors.New("input reached")
 			tbl := table.New(base.Identifier(), base.Metadata(), base.MetadataLocation(),
-				func(context.Context) (iceio.IO, error) { calls.Add(1); return nil, ioErr }, nil)
+				func(context.Context) (iceio.IO, error) {
+					calls.Add(1)
+
+					return nil, ioErr
+				}, nil)
 			_, err := table.ExecuteCompactionGroup(t.Context(), tbl, table.CompactionTaskGroup{Tasks: []table.FileScanTask{
 				{File: file, Length: length, Residual: iceberg.AlwaysTrue{}},
 			}})
