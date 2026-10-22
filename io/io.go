@@ -217,24 +217,34 @@ type MkdirAllIO interface {
 	MkdirAll(path string) error
 }
 
-// FS wraps an io/fs.FS as an IO interface.
-func FS(fsys fs.FS) IO {
-	if _, ok := fsys.(fs.ReadFileFS); ok {
-		return readFileFS{ioFS{fsys, nil}}
+// FS wraps an io/fs.FS as an IO interface. It implements ReadFileIO only
+// if the underlying fsys supports fs.ReadFileFS. Options can configure name
+// processing without requiring a separate adapter constructor.
+func FS(fsys fs.FS, opts ...FSOption) IO {
+	adapter := ioFS{fsys: fsys}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&adapter)
+		}
 	}
 
-	return ioFS{fsys, nil}
+	if _, ok := fsys.(fs.ReadFileFS); ok {
+		return readFileFS{adapter}
+	}
+
+	return adapter
 }
 
-// FSPreProcName wraps an io/fs.FS like FS, only if fn is non-nil then
-// it is called to preprocess any filenames before they are passed to
-// the underlying fsys.
-func FSPreProcName(fsys fs.FS, fn func(string) string) IO {
-	if _, ok := fsys.(fs.ReadFileFS); ok {
-		return readFileFS{ioFS{fsys, fn}}
-	}
+// FSOption configures an IO adapter created by FS.
+type FSOption func(*ioFS)
 
-	return ioFS{fsys, fn}
+// WithNamePreprocessor transforms filenames before FS normalizes leading
+// slashes and passes them to the underlying fs.FS. It applies to Open, Remove,
+// and ReadFile when available. A nil preprocessor leaves names unchanged.
+func WithNamePreprocessor(fn func(string) string) FSOption {
+	return func(adapter *ioFS) {
+		adapter.preProcessName = fn
+	}
 }
 
 type readFileFS struct {
