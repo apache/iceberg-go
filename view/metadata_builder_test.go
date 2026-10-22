@@ -263,7 +263,7 @@ func TestNewVersionCopiesInputSlices(t *testing.T) {
 	defaultNS[0] = "other"
 	defaultNS[1] = "schema"
 
-	assert.Equal(t, Representations{
+	assert.Equal(t, []Representation{
 		NewRepresentation("SELECT 1", "spark"),
 		NewRepresentation("SELECT 2", "trino"),
 	}, version.Representations)
