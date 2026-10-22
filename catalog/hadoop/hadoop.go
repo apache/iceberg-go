@@ -501,4 +501,3 @@ func (c *Catalog) findVersion(ident table.Identifier) (int, error) {
 
 	return version, nil
 }
-
