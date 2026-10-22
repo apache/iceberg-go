@@ -19,6 +19,7 @@ package rest
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +27,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 )
 
@@ -129,6 +131,33 @@ func TestCatalogObjectPagesDoNotFetchUnsupportedEndpoints(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Errorf("requests = %d, want 0", requests.Load())
+	}
+}
+
+func TestCatalogObjectPagesMapNotFoundToMissingNamespace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	baseURI, err := url.Parse(server.URL + "/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := &Catalog{
+		baseURI: baseURI,
+		cl: server.Client(),
+		endpoints: newEndpointSet([]endpoint{
+			endpointListTables, endpointListViews, endpointListFunctions,
+		}),
+	}
+	for _, listPage := range []func(context.Context, table.Identifier, string, int) ([]table.Identifier, string, error){
+		cat.listTablesPage, cat.listViewsPage, cat.listFunctionsPage,
+	} {
+		_, _, err := listPage(t.Context(), table.Identifier{"missing"}, "", 0)
+		if !errors.Is(err, catalog.ErrNoSuchNamespace) {
+			t.Errorf("404 should indicate a missing namespace, got %v", err)
+		}
 	}
 }
 
