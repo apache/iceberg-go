@@ -188,16 +188,38 @@ type Plan struct {
 // PlanCompaction analyzes the given scan tasks and produces a Plan.
 // Tasks are grouped by partition, classified as candidates or skipped,
 // and candidates are bin-packed into groups targeting TargetFileSizeBytes.
+// Tasks should come from one coherent scan plan; split tasks for the same file
+// are collapsed, retaining the first task's per-file delete and lineage data.
 func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	if err := cfg.Validate(); err != nil {
 		return Plan{}, fmt.Errorf("invalid compaction config: %w", err)
 	}
 
-	plan := Plan{
-		TotalInputFiles: len(tasks),
+	// Compaction operates on whole physical files. A scan planner may split a
+	// file into multiple tasks, so collapse tasks by path before counting,
+	// selecting, or packing them. Keep the first task's delete and lineage
+	// metadata while replacing its range with the complete file range.
+	wholeFileTasks := make([]table.FileScanTask, 0, len(tasks))
+	seenFiles := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		if task.File == nil {
+			return Plan{}, fmt.Errorf("%w: compaction task has no data file", table.ErrInvalidOperation)
+		}
+		path := task.File.FilePath()
+		if _, ok := seenFiles[path]; ok {
+			continue
+		}
+		seenFiles[path] = struct{}{}
+		task.Start = 0
+		task.Length = task.File.FileSizeBytes()
+		wholeFileTasks = append(wholeFileTasks, task)
 	}
 
-	for _, t := range tasks {
+	plan := Plan{
+		TotalInputFiles: len(wholeFileTasks),
+	}
+
+	for _, t := range wholeFileTasks {
 		plan.TotalInputBytes += t.File.FileSizeBytes()
 	}
 
@@ -209,7 +231,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	partitions := make(map[string]partitionBucket)
 	var partitionOrder []string
 
-	for _, t := range tasks {
+	for _, t := range wholeFileTasks {
 		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
 		bucket, ok := partitions[key]
 		if !ok {
