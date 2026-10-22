@@ -133,7 +133,7 @@ func TestWriterRejectsOperationsAfterPartialWriteFailure(t *testing.T) {
 			_, err = writer.AddBlob(defaultBlobInput(), []byte("second blob payload"))
 			assert.ErrorIs(t, err, writeErr)
 			assert.ErrorIs(t, writer.Finish(), writeErr)
-			assert.ErrorIs(t, writer.AddProperties(map[string]string{"key": "value"}), writeErr)
+			assert.ErrorIs(t, writer.SetProperties(map[string]string{"key": "value"}), writeErr)
 			assert.ErrorIs(t, writer.ClearProperties(), writeErr)
 			assert.ErrorIs(t, writer.SetCreatedBy("test"), writeErr)
 			assert.Equal(t, callsAfterFailure, output.calls)
@@ -154,7 +154,7 @@ func TestWriterRejectsOperationsAfterShortWrite(t *testing.T) {
 	_, err = writer.AddBlob(defaultBlobInput(), []byte("second blob payload"))
 	assert.ErrorContains(t, err, "short write")
 	assert.ErrorContains(t, writer.Finish(), "short write")
-	assert.ErrorContains(t, writer.AddProperties(map[string]string{"key": "value"}), "short write")
+	assert.ErrorContains(t, writer.SetProperties(map[string]string{"key": "value"}), "short write")
 	assert.ErrorContains(t, writer.ClearProperties(), "short write")
 	assert.ErrorContains(t, writer.SetCreatedBy("test"), "short write")
 	assert.Equal(t, callsAfterFailure, output.calls)
@@ -314,7 +314,7 @@ func TestRoundTrip(t *testing.T) {
 	blob2Data := []byte("another blob with different content")
 
 	w, buf := newWriter()
-	w.AddProperties(map[string]string{"test-property": "test-value"})
+	w.SetProperties(map[string]string{"test-property": "test-value"})
 
 	meta1, err := w.AddBlob(puffin.BlobMetadataInput{
 		Type:           puffin.BlobTypeDataSketchesTheta,
@@ -398,7 +398,7 @@ func TestAddBlobCopiesMetadataInputs(t *testing.T) {
 
 func TestReaderReturnsMetadataCopies(t *testing.T) {
 	w, buf := newWriter()
-	require.NoError(t, w.AddProperties(map[string]string{"file": "original"}))
+	require.NoError(t, w.SetProperties(map[string]string{"file": "original"}))
 	_, err := w.AddBlob(puffin.BlobMetadataInput{
 		Type:       puffin.BlobTypeDataSketchesTheta,
 		Fields:     []int32{1},
@@ -690,11 +690,28 @@ func TestSetCreatedBy(t *testing.T) {
 	})
 }
 
+// TestSetPropertiesMergesAndOverwrites verifies that property updates are merged
+// rather than replacing the entire footer property map.
+func TestSetPropertiesMergesAndOverwrites(t *testing.T) {
+	w, buf := newWriter()
+	initial := map[string]string{"first": "one", "shared": "old"}
+	require.NoError(t, w.SetProperties(initial))
+	initial["first"] = "changed"
+	require.NoError(t, w.SetProperties(map[string]string{"shared": "new", "second": "two"}))
+	require.NoError(t, w.SetProperties(nil))
+	require.NoError(t, w.Finish())
+
+	props := newReader(t, buf).Properties()
+	assert.Equal(t, "one", props["first"])
+	assert.Equal(t, "new", props["shared"])
+	assert.Equal(t, "two", props["second"])
+}
+
 // TestClearProperties verifies the ClearProperties method.
 // Allows resetting properties before finishing if initial values were wrong.
 func TestClearProperties(t *testing.T) {
 	w, buf := newWriter()
-	w.AddProperties(map[string]string{"key": "value"})
+	w.SetProperties(map[string]string{"key": "value"})
 	require.NoError(t, w.ClearProperties())
 	w.Finish()
 
@@ -709,12 +726,12 @@ func TestClearProperties(t *testing.T) {
 	})
 }
 
-// TestAddPropertiesAfterFinish verifies AddProperties rejects calls after finish.
-// Enforces writer state machine - properties cannot be added after footer is written.
-func TestAddPropertiesAfterFinish(t *testing.T) {
+// TestSetPropertiesAfterFinish verifies SetProperties rejects calls after finish.
+// Enforces writer state machine - properties cannot be changed after footer is written.
+func TestSetPropertiesAfterFinish(t *testing.T) {
 	w, _ := newWriter()
 	w.Finish()
-	assert.ErrorContains(t, w.AddProperties(map[string]string{"k": "v"}), "finalized")
+	assert.ErrorContains(t, w.SetProperties(map[string]string{"k": "v"}), "finalized")
 }
 
 // TestReaderInvalidFile verifies that Reader rejects invalid/corrupt files.
