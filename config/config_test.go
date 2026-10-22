@@ -26,17 +26,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadConfigFile(t *testing.T) {
+func TestLoadConfig(t *testing.T) {
+	t.Run("explicit file contents", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		contents := []byte("default-catalog: test\n")
+		require.NoError(t, os.WriteFile(path, contents, 0o600))
+
+		data, err := LoadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, contents, data)
+	})
+
+	t.Run("implicit home directory config", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		contents := []byte("max-workers: 3\n")
+		require.NoError(t, os.WriteFile(filepath.Join(home, cfgFile), contents, 0o600))
+
+		data, err := LoadConfig("")
+		require.NoError(t, err)
+		assert.Equal(t, contents, data)
+	})
+
 	t.Run("implicit missing config", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
-		data, err := LoadConfigFile("")
+		data, err := LoadConfig("")
 		require.NoError(t, err)
 		assert.Nil(t, data)
 	})
 
 	t.Run("explicit missing config", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing.yaml")
-		_, err := LoadConfigFile(path)
+		_, err := LoadConfig(path)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, os.ErrNotExist)
 		assert.ErrorContains(t, err, path)
@@ -44,7 +65,7 @@ func TestLoadConfigFile(t *testing.T) {
 
 	t.Run("explicit path is directory", func(t *testing.T) {
 		path := t.TempDir()
-		_, err := LoadConfigFile(path)
+		_, err := LoadConfig(path)
 		require.Error(t, err)
 		assert.ErrorContains(t, err, path)
 	})
