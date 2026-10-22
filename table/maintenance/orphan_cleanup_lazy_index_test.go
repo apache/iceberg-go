@@ -89,6 +89,20 @@ func TestFindOrphanFilesLazyIndex(t *testing.T) {
 			wantError: "prefix mismatch detected",
 		},
 		{
+			name: "local file URI alias",
+			references: map[string]bool{
+				"file:///tmp/iceberg/table/a.parquet": true,
+			},
+			scanned: []scannedFile{{path: "/tmp/iceberg/table/a.parquet", size: 5}},
+		},
+		{
+			name: "Windows drive case alias",
+			references: map[string]bool{
+				"C:\\Warehouse\\Iceberg\\A.parquet": true,
+			},
+			scanned: []scannedFile{{path: "c:/warehouse/iceberg/a.parquet", size: 5}},
+		},
+		{
 			name:    "no references",
 			scanned: []scannedFile{{path: "s3://bucket/table/new.parquet", size: 75}},
 			want:    []OrphanFile{{Path: "s3://bucket/table/new.parquet", SizeBytes: 75}},
@@ -99,6 +113,10 @@ func TestFindOrphanFilesLazyIndex(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newOrphanCleanupConfig(tt.options...)
 			got, err := findOrphanFiles(tt.scanned, tt.references, cfg)
+			before, beforeErr := findOrphanFilesEagerForBenchmark(tt.scanned, tt.references, cfg)
+			if (err == nil) != (beforeErr == nil) {
+				t.Fatalf("optimized error = %v, legacy error = %v", err, beforeErr)
+			}
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("expected error containing %q, got %v", tt.wantError, err)
@@ -111,12 +129,17 @@ func TestFindOrphanFilesLazyIndex(t *testing.T) {
 			if !slices.Equal(got.OrphanFiles(), tt.want) {
 				t.Fatalf("orphan files = %v, want %v", got.OrphanFiles(), tt.want)
 			}
+			if !slices.Equal(got.OrphanFiles(), before.OrphanFiles()) {
+				t.Fatalf("orphan files = %v, legacy = %v", got.OrphanFiles(), before.OrphanFiles())
+			}
 			var wantSize int64
+			wantPaths := make([]string, len(tt.want))
 			for i, file := range tt.want {
-				if got.Files()[i] != file.Path {
-					t.Fatalf("orphan paths = %v, want %v", got.Files(), tt.want)
-				}
+				wantPaths[i] = file.Path
 				wantSize += file.SizeBytes
+			}
+			if !slices.Equal(got.Files(), wantPaths) {
+				t.Fatalf("orphan paths = %v, want %v", got.Files(), wantPaths)
 			}
 			if got.TotalSizeBytes() != wantSize {
 				t.Fatalf("total size = %d, want %d", got.TotalSizeBytes(), wantSize)
