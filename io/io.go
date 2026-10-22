@@ -333,24 +333,21 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 	return d.ReadDir(count)
 }
 
-// LoadFS takes a map of properties and an optional URI location
-// and attempts to infer an IO object from it using the registered
-// scheme factories.
-//
-// The scheme is extracted from the location URI and used to look up
-// the appropriate factory from the registry. The local filesystem
-// (file:// or empty scheme) is registered by default.
-//
-// Additional schemes can be registered by importing subpackages.
-// Import the backend for each cloud in use, or io/gocloud for all of them:
-//
-//	import _ "github.com/apache/iceberg-go/io/gocloud/s3"
+// LoadFS takes properties and a URI location and resolves a FileIO using
+// the global scheme registry. When location is empty, the warehouse property
+// is used. Import the desired io/gocloud backends for their scheme factories.
 func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
+	return defaultRegistry.LoadFS(ctx, props, location)
+}
+
+// LoadFS loads a FileIO using only this registry's scheme factories.
+// If location is empty, the warehouse property is used instead.
+func (r *Registry) LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]
 	}
 
-	iofs, err := inferFileIOFromScheme(ctx, location, props)
+	iofs, err := r.inferFileIOFromScheme(ctx, location, props)
 	if err != nil {
 		return nil, err
 	}
@@ -362,10 +359,16 @@ func LoadFS(ctx context.Context, props map[string]string, location string) (IO, 
 	return iofs, nil
 }
 
-// LoadFSFunc is a helper function to create IO Func factory for later usage
+// LoadFSFunc constructs a lazy factory backed by the global scheme registry.
 func LoadFSFunc(props map[string]string, location string) func(ctx context.Context) (IO, error) {
+	return defaultRegistry.LoadFSFunc(props, location)
+}
+
+// LoadFSFunc constructs a lazy factory backed by this registry. It keeps the
+// registry selection even when other schemes are registered globally later.
+func (r *Registry) LoadFSFunc(props map[string]string, location string) func(ctx context.Context) (IO, error) {
 	return func(ctx context.Context) (IO, error) {
-		iofs, err := LoadFS(ctx, props, location)
+		iofs, err := r.LoadFS(ctx, props, location)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load metadata file at %s: %w", location, err)
 		}
