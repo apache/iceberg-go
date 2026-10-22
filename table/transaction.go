@@ -3702,7 +3702,7 @@ func prepareBatchFilter(filter iceberg.BooleanExpression, schema *iceberg.Schema
 		}, nil
 	}
 
-	extSet, substraitFilter, err := substrait.ConvertExpr(schema, bound, caseSensitive)
+	extSet, substraitFilter, err := substrait.ConvertExpr(schema, bound)
 	if err != nil {
 		return nil, fmt.Errorf("prepareBatchFilter: convert expression: %w", err)
 	}
