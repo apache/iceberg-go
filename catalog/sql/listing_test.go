@@ -85,3 +85,18 @@ func (s *SqliteCatalogTestSuite) TestListTablesAndViewsShareNamespaceButNotRows(
 	}
 	s.Equal(1, viewErrors)
 }
+
+func (s *SqliteCatalogTestSuite) TestV0ListViewsIgnoresMissingNamespace() {
+	sqldb := s.getDB()
+	s.createLegacyV0Catalog(sqldb)
+	cat := s.loadCatalogV0NoOptIn()
+
+	// V0 has no iceberg_type column or views. Listing must not query a
+	// missing namespace just to discover that the view list is empty.
+	var seen int
+	for _, err := range cat.ListViews(context.Background(), table.Identifier{"missing"}) {
+		s.Require().NoError(err)
+		seen++
+	}
+	s.Zero(seen)
+}
