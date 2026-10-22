@@ -221,6 +221,25 @@ func TestIndependentRegistryIsolation(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRegistryZeroValueIsUsable(t *testing.T) {
+	var reg io.Registry
+	require.Empty(t, reg.RegisteredSchemes())
+
+	factory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	}
+	require.NoError(t, reg.Register("private", factory))
+
+	fs, err := reg.LoadFS(t.Context(), nil, "private://bucket/key")
+	require.NoError(t, err)
+	assert.IsType(t, io.LocalFS{}, fs)
+
+	cloned := reg.Clone()
+	reg.Unregister("private")
+	require.Empty(t, reg.RegisteredSchemes())
+	assert.Equal(t, []string{"private"}, cloned.RegisteredSchemes())
+}
+
 func TestRegistryAllowsFactoriesToRegisterSchemes(t *testing.T) {
 	t.Parallel()
 
