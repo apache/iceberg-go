@@ -168,7 +168,7 @@ func validateLZ4FrameEnvelope(
 	offset := int64(headerSize + 4)
 	reader := bufio.NewReaderSize(
 		io.NewSectionReader(r, offset, payloadSize-offset),
-		lz4FrameReadBufferSize,
+		int(min(payloadSize-offset, lz4FrameReadBufferSize)),
 	)
 	var blockHeader [4]byte
 
@@ -249,7 +249,7 @@ func newCompressedFooterReader(payloadReader *io.SectionReader, payloadSize, max
 	}
 	compressedPayloadReader := bufio.NewReaderSize(
 		io.NewSectionReader(payloadReader, 0, payloadSize),
-		lz4FrameReadBufferSize,
+		int(min(payloadSize, lz4FrameReadBufferSize)),
 	)
 	compressed := &countingReader{reader: lz4.NewReader(compressedPayloadReader)}
 	limit := maxFooterSize
