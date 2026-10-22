@@ -67,7 +67,7 @@ func Parse(name string) (FileURI, error) {
 // untouched. Keeping special characters on the fallback preserves errors,
 // escaping, query strings, fragments and opaque URL semantics.
 func isPlainFilePath(path string) bool {
-	for i := 0; i < len(path); i++ {
+	for i := range len(path) {
 		c := path[i]
 		if (c >= 'a' && c <= 'z') ||
 			(c >= 'A' && c <= 'Z') ||
@@ -75,8 +75,10 @@ func isPlainFilePath(path string) bool {
 			c == '/' || c == '-' || c == '_' || c == '.' || c == '~' {
 			continue
 		}
+
 		return false
 	}
+
 	return true
 }
 
