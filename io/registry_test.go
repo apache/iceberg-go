@@ -280,20 +280,19 @@ func TestRegistryConcurrentRegistrationsAndLoads(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for i := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			scheme := fmt.Sprintf("worker-%d", i)
 			if err := reg.Register(scheme, factory); err != nil {
 				errs <- err
+
 				return
 			}
 
 			if _, err := reg.LoadFS(t.Context(), nil, scheme+"://bucket/key"); err != nil {
 				errs <- err
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
