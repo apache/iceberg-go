@@ -310,6 +310,11 @@ func main() {
 	}
 
 	cat := initCatalog(ctx, args)
+	defer func() {
+		if err := cat.Close(); err != nil {
+			log.Printf("failed to close catalog: %v", err)
+		}
+	}()
 
 	switch {
 	case args.List != nil:

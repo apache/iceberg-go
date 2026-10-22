@@ -78,9 +78,9 @@ var OtherSchema = iceberg.NewSchema(0,
 
 // Config describes the catalog under test.
 type Config struct {
-	// NewCatalog returns a fresh, empty catalog for a single test. It is called
-	// once per test; implementations should register any teardown with
-	// t.Cleanup rather than relying on the suite to release resources.
+	// NewCatalog returns a fresh, empty catalog for a single test. The suite
+	// closes it via t.Cleanup, after the test's table and namespace cleanup.
+	// Factories should clean up separately owned resources themselves.
 	NewCatalog func(t *testing.T) catalog.Catalog
 
 	// SupportsNamespaceProperties reports whether the catalog can store
@@ -98,11 +98,26 @@ type Config struct {
 	SupportsRenameTable bool
 }
 
+// managedCatalog closes the catalog after any cleanup registered by its test.
+func managedCatalog(t *testing.T, factory func(*testing.T) catalog.Catalog) catalog.Catalog {
+	t.Helper()
+	cat := factory(t)
+	require.NotNil(t, cat, "catalogtest.Config.NewCatalog returned nil")
+	t.Cleanup(func() { require.NoError(t, cat.Close()) })
+
+	return cat
+}
+
 // RunCatalogTests runs the conformance suite against the catalog described by
 // cfg. Each test runs as a subtest so a failure names the behavior that broke.
 func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Helper()
 	require.NotNil(t, cfg.NewCatalog, "catalogtest.Config.NewCatalog must be set")
+
+	factory := cfg.NewCatalog
+	cfg.NewCatalog = func(t *testing.T) catalog.Catalog {
+		return managedCatalog(t, factory)
+	}
 
 	t.Run("BasicCreateTable", func(t *testing.T) { testBasicCreateTable(t, cfg) })
 	t.Run("BasicCreateTableThatAlreadyExists", func(t *testing.T) { testBasicCreateTableThatAlreadyExists(t, cfg) })

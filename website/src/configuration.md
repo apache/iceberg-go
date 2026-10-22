@@ -338,7 +338,7 @@ func init() {
 }
 ```
 
-After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Built-in types: `rest`, `hive`, `glue`, `sql`, `hadoop`.
+After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Custom catalogs must implement `Close() error` to satisfy `catalog.Catalog`, and callers must close them when finished. Built-in types: `rest`, `hive`, `glue`, `sql`, `hadoop`.
 
 `catalog.GetRegisteredCatalogs()` returns the current list; `catalog.Unregister(catalogType)` removes one.
 

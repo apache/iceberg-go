@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"strings"
 	"unicode"
@@ -112,8 +113,12 @@ func NewCreateViewCfg() CreateViewCfg {
 	}
 }
 
-// Catalog for iceberg table operations like create, drop, load, list and others.
+// Catalog provides table and namespace operations plus an explicit resource
+// lifecycle. Implementations must release catalog-owned resources in Close.
+// Dependencies provided by the caller remain caller-owned.
 type Catalog interface {
+	io.Closer
+
 	// CatalogType returns the type of the catalog.
 	CatalogType() Type
 
@@ -189,28 +194,6 @@ type TransactionalCatalog interface {
 // remains the single source of truth.
 type PurgeableTable interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
-}
-
-// Closer is an optional interface implemented by catalogs that hold releasable
-// resources — currently a metrics reporter and stateful resources (e.g.
-// HTTP-backed clients). It is not part of [Catalog] because adding a method to that
-// widely-implemented interface would break every external implementation; a
-// follow-up may promote it. Callers holding a [Catalog] from [Load] should
-// release it via a type assertion:
-//
-//	cat, err := catalog.Load(ctx, name, props)
-//	if err != nil {
-//	    return err
-//	}
-//	if closer, ok := cat.(catalog.Closer); ok {
-//	    defer closer.Close()
-//	}
-//
-// All built-in catalogs (REST, SQL, Glue, Hive, Hadoop) implement Closer. Close
-// releases the catalog's own resources; a catalog built on a caller-owned handle
-// (e.g. the SQL catalog's *sql.DB) does not close that handle.
-type Closer interface {
-	Close() error
 }
 
 // RefreshableCredentialCatalog is an optional interface implemented by catalogs that
