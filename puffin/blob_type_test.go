@@ -52,6 +52,7 @@ func TestBlobTypeJSON(t *testing.T) {
 			err := json.Unmarshal([]byte(tc.input), &got)
 			if tc.wantErr {
 				require.Error(t, err)
+
 				return
 			}
 
