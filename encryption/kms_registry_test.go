@@ -161,7 +161,6 @@ func TestKMSRegistry_ConcurrentUse(t *testing.T) {
 	failures := make(chan error, workerCount)
 	for i := range workerCount {
 		wg.Go(func() {
-
 			name := fmt.Sprintf("worker-%d", i)
 			if err := registry.Register(name, memoryKMSFactory); err != nil {
 				failures <- err
