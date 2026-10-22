@@ -149,6 +149,7 @@ func UpdateNameMapping(nameMapping NameMapping, updates map[int]NestedField, add
 	defer internal.RecoverError(&err)
 
 	updater := updateNameMappingVisitor{updates: updates, adds: adds}
+
 	return NameMapping(updater.addNewFields(updater.updatedFields(nameMapping), -1)), nil
 }
 
