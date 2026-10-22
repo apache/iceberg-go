@@ -1440,6 +1440,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 	for idx := head; idx >= 0; idx = links[idx].next {
 		reordered = append(reordered, fields[idx])
 	}
+
 	return reordered
 }
 
