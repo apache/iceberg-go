@@ -32,7 +32,7 @@ var finalizeTaskRangeSplitBenchmarkSink []FileScanTask
 func BenchmarkFinalizeTaskRangeParquetSplits(b *testing.B) {
 	const (
 		rowGroupBytes int64 = 4096
-		targetSize     int64 = 16384
+		targetSize    int64 = 16384
 	)
 
 	for _, tc := range []struct {
