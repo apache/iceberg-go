@@ -32,6 +32,7 @@ func makeMoveTestFields(count int) []iceberg.NestedField {
 	for i := range fields {
 		fields[i] = iceberg.NestedField{ID: i + 1, Name: fmt.Sprintf("col_%d", i)}
 	}
+
 	return fields
 }
 
@@ -41,7 +42,7 @@ func TestMoveFieldsIndexedMatchesLinear(t *testing.T) {
 			t.Run(fmt.Sprintf("%d_fields_%d_moves", count, moveCount), func(t *testing.T) {
 				fields := makeMoveTestFields(count)
 				original := slices.Clone(fields)
-				for seed := int64(0); seed < 10; seed++ {
+				for seed := range int64(10) {
 					rng := rand.New(rand.NewSource(seed))
 					moves := make([]move, moveCount)
 					for i := range moves {
@@ -102,9 +103,16 @@ func TestMoveFieldsIndexedFallbacks(t *testing.T) {
 	t.Run("duplicate IDs", func(t *testing.T) {
 		duplicate := slices.Clone(fields)
 		duplicate[1].ID = duplicate[0].ID
-		moves := []move{{FieldID: 1, Op: MoveOpFirst}, {FieldID: 3, Op: MoveOpFirst}, {FieldID: 4, Op: MoveOpFirst},
-			{FieldID: 5, Op: MoveOpFirst}, {FieldID: 6, Op: MoveOpFirst}, {FieldID: 7, Op: MoveOpFirst},
-			{FieldID: 8, Op: MoveOpFirst}, {FieldID: 9, Op: MoveOpFirst}}
+		moves := []move{
+			{FieldID: 1, Op: MoveOpFirst},
+			{FieldID: 3, Op: MoveOpFirst},
+			{FieldID: 4, Op: MoveOpFirst},
+			{FieldID: 5, Op: MoveOpFirst},
+			{FieldID: 6, Op: MoveOpFirst},
+			{FieldID: 7, Op: MoveOpFirst},
+			{FieldID: 8, Op: MoveOpFirst},
+			{FieldID: 9, Op: MoveOpFirst},
+		}
 		if got, want := moveFields(duplicate, moves), moveFieldsLinear(duplicate, moves); !reflect.DeepEqual(got, want) {
 			t.Fatalf("duplicate field IDs: got %v, want %v", got, want)
 		}
@@ -125,6 +133,7 @@ func assertSameMovePanic(t *testing.T, fields []iceberg.NestedField, moves []mov
 	getPanic := func(fn func([]iceberg.NestedField, []move) []iceberg.NestedField) (panicValue any) {
 		defer func() { panicValue = recover() }()
 		fn(fields, moves)
+
 		return nil
 	}
 	got, want := getPanic(moveFields), getPanic(moveFieldsLinear)
