@@ -31,19 +31,19 @@ import (
 func TestIORegistry(t *testing.T) {
 	ctx := context.Background()
 
-	assert.ElementsMatch(t, []string{
-		"file",
+	assert.Equal(t, []string{
 		"",
+		"abfs",
+		"abfss",
+		"file",
+		"gs",
+		"mem",
+		"oss",
 		"s3",
 		"s3a",
 		"s3n",
-		"gs",
-		"mem",
-		"abfs",
-		"abfss",
 		"wasb",
 		"wasbs",
-		"oss",
 	}, io.GetRegisteredSchemes())
 
 	customFactoryCalled := false
@@ -55,20 +55,20 @@ func TestIORegistry(t *testing.T) {
 		return io.LocalFS{}, nil
 	})
 
-	assert.ElementsMatch(t, []string{
-		"file",
+	assert.Equal(t, []string{
 		"",
+		"abfs",
+		"abfss",
+		"custom",
+		"file",
+		"gs",
+		"mem",
+		"oss",
 		"s3",
 		"s3a",
 		"s3n",
-		"gs",
-		"mem",
-		"abfs",
-		"abfss",
 		"wasb",
 		"wasbs",
-		"custom",
-		"oss",
 	}, io.GetRegisteredSchemes())
 
 	customIO, err := io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")
@@ -77,19 +77,19 @@ func TestIORegistry(t *testing.T) {
 	assert.True(t, customFactoryCalled)
 
 	io.Unregister("custom")
-	assert.ElementsMatch(t, []string{
-		"file",
+	assert.Equal(t, []string{
 		"",
+		"abfs",
+		"abfss",
+		"file",
+		"gs",
+		"mem",
+		"oss",
 		"s3",
 		"s3a",
 		"s3n",
-		"gs",
-		"mem",
-		"abfs",
-		"abfss",
 		"wasb",
 		"wasbs",
-		"oss",
 	}, io.GetRegisteredSchemes())
 
 	_, err = io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")

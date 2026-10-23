@@ -201,30 +201,31 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		plan.TotalInputBytes += t.File.FileSizeBytes()
 	}
 
-	// Group tasks by partition key.
+	// Only candidate files need partition keys. Most tables have many
+	// right-sized files, so avoid encoding their partitions and retaining
+	// empty buckets for files the planner will not rewrite.
 	type partitionBucket struct {
 		key        string
 		candidates []table.FileScanTask
 	}
-	partitions := make(map[string]partitionBucket)
-	var partitionOrder []string
+	partitionIndices := make(map[string]int)
+	var partitionBuckets []partitionBucket
 
 	for _, t := range tasks {
-		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
-		bucket, ok := partitions[key]
-		if !ok {
-			bucket = partitionBucket{key: key}
-			partitionOrder = append(partitionOrder, key)
-		}
-
 		if !cfg.isCandidate(t) {
 			plan.SkippedFiles++
-			partitions[key] = bucket
 
 			continue
 		}
-		bucket.candidates = append(bucket.candidates, t)
-		partitions[key] = bucket
+
+		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
+		index, ok := partitionIndices[key]
+		if !ok {
+			index = len(partitionBuckets)
+			partitionIndices[key] = index
+			partitionBuckets = append(partitionBuckets, partitionBucket{key: key})
+		}
+		partitionBuckets[index].candidates = append(partitionBuckets[index].candidates, t)
 	}
 
 	// Bin-pack candidates per partition.
@@ -234,8 +235,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		LargestBinFirst: false,
 	}
 
-	for _, key := range partitionOrder {
-		bucket := partitions[key]
+	for _, bucket := range partitionBuckets {
 		if len(bucket.candidates) < int(cfg.MinInputFiles) {
 			plan.SkippedFiles += len(bucket.candidates)
 
@@ -254,7 +254,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 			}
 
 			group := Group{
-				PartitionKey: key,
+				PartitionKey: bucket.key,
 				Tasks:        bin,
 			}
 			for _, t := range bin {
