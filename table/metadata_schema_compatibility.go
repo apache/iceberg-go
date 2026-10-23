@@ -270,106 +270,75 @@ func typeRequiresNullDefaults(t iceberg.Type) bool {
 	}
 }
 
+// isRequiredUnknownField identifies unknown fields that violate the optionality
+// rule, regardless of whether they appear in a struct, list, or map.
+func isRequiredUnknownField(field iceberg.NestedField) bool {
+	_, isUnknown := field.Type.(iceberg.UnknownType)
+
+	return isUnknown && field.Required
+}
+
+// validateUnknownFieldDefaults keeps the null-default rule for unknown and
+// variant types in one place for all schema container types.
+func validateUnknownFieldDefaults(field iceberg.NestedField) error {
+	if !typeRequiresNullDefaults(field.Type) {
+		return nil
+	}
+	if field.InitialDefault != nil {
+		return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+			field.Type, field.Name, field.ID, field.InitialDefault)
+	}
+	if field.WriteDefault != nil {
+		return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+			field.Type, field.Name, field.ID, field.WriteDefault)
+	}
+
+	return nil
+}
+
+// Nested list and map fields have historically used slightly different
+// wording from struct fields when reporting a required unknown type.
+func validateNestedUnknownField(field iceberg.NestedField) error {
+	if isRequiredUnknownField(field) {
+		return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
+			field.Name, field.ID)
+	}
+
+	return validateUnknownFieldDefaults(field)
+}
+
 func (v *unknownTypeValidator) Field(field iceberg.NestedField, fieldResult error) error {
 	if fieldResult != nil {
 		return fieldResult
 	}
-	// Optionality: unknown must be optional per spec; variant has no such constraint.
-	// Both require null defaults (enforced below via typeRequiresNullDefaults).
-	if _, isUnknown := field.Type.(iceberg.UnknownType); isUnknown {
-		if field.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required",
-				field.Name, field.ID)
-		}
-	}
-	if typeRequiresNullDefaults(field.Type) {
-		if field.InitialDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
-				field.Type, field.Name, field.ID, field.InitialDefault)
-		}
-		if field.WriteDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
-				field.Type, field.Name, field.ID, field.WriteDefault)
-		}
+	if isRequiredUnknownField(field) {
+		return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required",
+			field.Name, field.ID)
 	}
 
-	return nil
+	return validateUnknownFieldDefaults(field)
 }
 
 func (v *unknownTypeValidator) List(list iceberg.ListType, elemResult error) error {
 	if elemResult != nil {
 		return elemResult
 	}
-	elem := list.ElementField()
 
-	if _, isUnknown := elem.Type.(iceberg.UnknownType); isUnknown {
-		if elem.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
-				elem.Name, elem.ID)
-		}
-	}
-	if typeRequiresNullDefaults(elem.Type) {
-		if elem.InitialDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
-				elem.Type, elem.Name, elem.ID, elem.InitialDefault)
-		}
-		if elem.WriteDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
-				elem.Type, elem.Name, elem.ID, elem.WriteDefault)
-		}
-	}
-
-	return nil
+	return validateNestedUnknownField(list.ElementField())
 }
 
 func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResult error) error {
 	if keyResult != nil {
 		return keyResult
 	}
-
 	if valueResult != nil {
 		return valueResult
 	}
-
-	key := mapType.KeyField()
-
-	if _, isKeyUnknown := key.Type.(iceberg.UnknownType); isKeyUnknown {
-		if key.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
-				key.Name, key.ID)
-		}
-	}
-	if typeRequiresNullDefaults(key.Type) {
-		if key.InitialDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
-				key.Type, key.Name, key.ID, key.InitialDefault)
-		}
-		if key.WriteDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
-				key.Type, key.Name, key.ID, key.WriteDefault)
-		}
+	if err := validateNestedUnknownField(mapType.KeyField()); err != nil {
+		return err
 	}
 
-	value := mapType.ValueField()
-
-	if _, isValueUnknown := value.Type.(iceberg.UnknownType); isValueUnknown {
-		if value.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
-				value.Name, value.ID)
-		}
-	}
-	if typeRequiresNullDefaults(value.Type) {
-		if value.InitialDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
-				value.Type, value.Name, value.ID, value.InitialDefault)
-		}
-		if value.WriteDefault != nil {
-			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
-				value.Type, value.Name, value.ID, value.WriteDefault)
-		}
-	}
-
-	return nil
+	return validateNestedUnknownField(mapType.ValueField())
 }
 
 func (v *unknownTypeValidator) Primitive(_ iceberg.PrimitiveType) error {
@@ -447,40 +416,38 @@ func (v *complexTypeDefaultValidator) Variant(_ iceberg.VariantType) error {
 }
 
 func validateComplexDefault(field iceberg.NestedField) error {
+	if err := validateComplexDefaultValue(field, "initial-default", field.InitialDefault); err != nil {
+		return err
+	}
+
+	return validateComplexDefaultValue(field, "write-default", field.WriteDefault)
+}
+
+// validateComplexDefaultValue checks the expected JSON shape without
+// duplicating the initial-default and write-default error handling.
+func validateComplexDefaultValue(field iceberg.NestedField, name string, value any) error {
+	if value == nil {
+		return nil
+	}
+
+	var typeName, expectedShape string
+	var valid bool
 	switch field.Type.(type) {
 	case *iceberg.StructType:
-		if field.InitialDefault != nil {
-			if _, ok := field.InitialDefault.(map[string]any); !ok {
-				return fmt.Errorf("struct type field '%s' (id: %d) must have null or JSON object initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
-			}
-		}
-		if field.WriteDefault != nil {
-			if _, ok := field.WriteDefault.(map[string]any); !ok {
-				return fmt.Errorf("struct type field '%s' (id: %d) must have null or JSON object write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
-			}
-		}
+		typeName, expectedShape = "struct", "JSON object"
+		_, valid = value.(map[string]any)
 	case *iceberg.ListType:
-		if field.InitialDefault != nil {
-			if _, ok := field.InitialDefault.([]any); !ok {
-				return fmt.Errorf("list type field '%s' (id: %d) must have null or JSON array initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
-			}
-		}
-		if field.WriteDefault != nil {
-			if _, ok := field.WriteDefault.([]any); !ok {
-				return fmt.Errorf("list type field '%s' (id: %d) must have null or JSON array write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
-			}
-		}
+		typeName, expectedShape = "list", "JSON array"
+		_, valid = value.([]any)
 	case *iceberg.MapType:
-		if field.InitialDefault != nil {
-			if _, ok := field.InitialDefault.(map[string]any); !ok {
-				return fmt.Errorf("map type field '%s' (id: %d) must have null or JSON object initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
-			}
-		}
-		if field.WriteDefault != nil {
-			if _, ok := field.WriteDefault.(map[string]any); !ok {
-				return fmt.Errorf("map type field '%s' (id: %d) must have null or JSON object write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
-			}
-		}
+		typeName, expectedShape = "map", "JSON object"
+		_, valid = value.(map[string]any)
+	default:
+		return nil
+	}
+	if !valid {
+		return fmt.Errorf("%s type field '%s' (id: %d) must have null or %s %s, but got: %v",
+			typeName, field.Name, field.ID, expectedShape, name, value)
 	}
 
 	return nil
