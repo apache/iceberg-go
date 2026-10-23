@@ -537,7 +537,7 @@ type geoColumn struct {
 // order. They are not collected here, so their null counts are not recovered
 // either: the manifest omits them, which costs pruning but never gives a wrong
 // answer. The same applies to
-// geo files imported via DataFileStatsFromMeta alone (e.g. AddFiles).
+// geo files imported via DataFileStatsFromMeta alone (e.g. AddDataFilesByPath).
 // TODO(#2158): compute geo bounds and null counts for geo columns nested in
 // structs/lists/maps.
 func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn {

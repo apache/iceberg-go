@@ -348,7 +348,7 @@ When you already have data files (e.g. produced by another writer), register the
 
 ```go
 txn := tbl.NewTransaction()
-err := txn.AddFiles(ctx, []string{
+err := txn.AddDataFilesByPath(ctx, []string{
     "s3://my-bucket/sales/orders/data/file-1.parquet",
     "s3://my-bucket/sales/orders/data/file-2.parquet",
 }, nil /* snapshot props */, false /* ignoreDuplicates */)

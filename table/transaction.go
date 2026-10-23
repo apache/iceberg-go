@@ -948,7 +948,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
-			return t.AddFiles(ctx, filesToAdd, snapshotProps, false)
+			return t.AddDataFilesByPath(ctx, filesToAdd, snapshotProps, false)
 		}
 	}
 
@@ -1559,7 +1559,7 @@ func (t *Transaction) ensureNameMapping() error {
 // This is useful for clients who have already constructed DataFile objects with metadata,
 // avoiding the need to read files to extract schema and statistics.
 //
-// Unlike AddFiles, this method does not read files from storage. It validates only metadata
+// Unlike AddDataFilesByPath, this method does not read files from storage. It validates only metadata
 // that can be checked without opening files (for example spec-id and partition field IDs).
 //
 // Each DataFile may target any partition spec registered in the table metadata,
@@ -2247,7 +2247,8 @@ func WithAddFilesConcurrency(concurrency int) AddFilesOption {
 	}
 }
 
-func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddFilesOption) error {
+// AddDataFilesByPath adds data files at the provided paths to the table.
+func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddFilesOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -2262,7 +2263,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	set := make(map[string]struct{}, len(filePaths))
 	for _, filePath := range filePaths {
 		if _, ok := set[filePath]; ok {
-			return errors.New("file paths must be unique for AddFiles")
+			return errors.New("file paths must be unique for AddDataFilesByPath")
 		}
 		set[filePath] = struct{}{}
 	}
