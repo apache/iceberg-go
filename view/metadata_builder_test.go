@@ -258,7 +258,7 @@ func TestNewVersionCopiesInputSlices(t *testing.T) {
 
 	// These mutations would otherwise change an already validated version,
 	// including making the representation dialects duplicate.
-	representations[0].Sql = "SELECT changed"
+	representations[0].SQL = "SELECT changed"
 	representations[1].Dialect = "spark"
 	defaultNS[0] = "other"
 	defaultNS[1] = "schema"
@@ -270,9 +270,9 @@ func TestNewVersionCopiesInputSlices(t *testing.T) {
 	assert.Equal(t, table.Identifier{"analytics", "reporting"}, version.DefaultNamespace)
 
 	// Neither side should share the backing storage with the other.
-	version.Representations[0].Sql = "SELECT from version"
+	version.Representations[0].SQL = "SELECT from version"
 	version.DefaultNamespace[0] = "version"
-	assert.Equal(t, "SELECT changed", representations[0].Sql)
+	assert.Equal(t, "SELECT changed", representations[0].SQL)
 	assert.Equal(t, "other", defaultNS[0])
 }
 
