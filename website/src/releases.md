@@ -51,6 +51,8 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
     - Option constructors: `WithCleanupLocation`, `WithCleanupFilesOlderThan`, `WithCleanupDryRun`, `WithCleanupDeleteFunc`, `WithCleanupMaxConcurrency`, `WithPrefixMismatchMode`, `WithEqualSchemes`, `WithEqualAuthorities`. The four generic names (`WithLocation`, `WithFilesOlderThan`, `WithDryRun`, `WithDeleteFunc`) gained the `WithCleanup` prefix for consistency.
 
     Relatedly, the previously unexported `isGCEnabled` is now `table.IsGCEnabled`, so the new package can gate destructive operations on the `gc.enabled` table property.
+- **Data-file replacement methods renamed.** Use `ReplaceDataFilesByPath` for string paths. Use `ReplaceDataFiles` for prebuilt `DataFile` values instead of `ReplaceDataFilesWithDataFiles`.
+
 - `maintenance.PurgeFiles` (previously `Table.PurgeFiles`) now calls `IO.Remove` concurrently, with up to 32 calls in flight, when the filesystem does not implement `BulkRemovableIO`. Custom IO implementations, including those registered with `io.Register`, must make `Remove` safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.
 
 ## Verifying and producing releases

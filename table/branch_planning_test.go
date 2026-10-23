@@ -463,7 +463,7 @@ func TestBranchAddFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 // A table written only through a branch has no main head, so a main-based plan
 // rejects the replace outright instead of performing it.
 func TestReplaceOnBranchOnlyTable(t *testing.T) {
-	t.Run("ReplaceDataFiles", func(t *testing.T) {
+	t.Run("ReplaceDataFilesByPath", func(t *testing.T) {
 		tbl := newBranchPlanningTable(t, nil)
 		tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 1, 2)
 		require.Nil(t, tbl.CurrentSnapshot(), "fixture must leave main without a head")
@@ -478,7 +478,7 @@ func TestReplaceOnBranchOnlyTable(t *testing.T) {
 
 		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
 		require.NoError(t, err)
-		require.NoError(t, txn.ReplaceDataFiles(t.Context(), original, []string{replacement}, nil))
+		require.NoError(t, txn.ReplaceDataFilesByPath(t.Context(), original, []string{replacement}, nil))
 		tbl, err = txn.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -486,7 +486,7 @@ func TestReplaceOnBranchOnlyTable(t *testing.T) {
 		assert.Nil(t, tbl.CurrentSnapshot(), "replacing on the branch must not create a main head")
 	})
 
-	t.Run("ReplaceDataFilesWithDataFiles", func(t *testing.T) {
+	t.Run("ReplaceDataFiles", func(t *testing.T) {
 		tbl := newBranchPlanningTable(t, nil)
 		staged := buildDataFile(t, tbl.Location()+"/data/branch-1.parquet")
 
@@ -500,7 +500,7 @@ func TestReplaceOnBranchOnlyTable(t *testing.T) {
 		replacement := buildDataFile(t, tbl.Location()+"/data/branch-2.parquet")
 		txn, err = tbl.NewTransactionOnBranchWithError(branchPlanningRef)
 		require.NoError(t, err)
-		require.NoError(t, txn.ReplaceDataFilesWithDataFiles(t.Context(),
+		require.NoError(t, txn.ReplaceDataFiles(t.Context(),
 			[]iceberg.DataFile{staged}, []iceberg.DataFile{replacement}, nil))
 		tbl, err = txn.Commit(t.Context())
 		require.NoError(t, err)
