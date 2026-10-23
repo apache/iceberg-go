@@ -142,3 +142,32 @@ func TestReaderPreservesLZ4BlockChecksumError(t *testing.T) {
 	_, err := NewReader(bytes.NewReader(data))
 	require.ErrorContains(t, err, "invalid block checksum")
 }
+
+func TestNewCompressedFooterReaderReturnsBoundedStream(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	frame := compressedReaderTestFrame(t, payload, lz4.ChecksumOption(false))
+	payloadReader := io.NewSectionReader(bytes.NewReader(frame), 0, int64(len(frame)))
+
+	compressed, limited, contentSize, err := newCompressedFooterReader(
+		payloadReader, int64(len(frame)), int64(len(payload)),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(payload)), contentSize)
+
+	decoded, err := io.ReadAll(limited)
+	require.NoError(t, err)
+	require.Equal(t, payload, decoded)
+	require.Equal(t, int64(len(payload)), compressed.count)
+	require.Equal(t, int64(1), limited.N)
+}
+
+func TestNewCompressedFooterReaderRejectsOversizedDeclaredContent(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	frame := compressedReaderTestFrame(t, payload)
+	payloadReader := io.NewSectionReader(bytes.NewReader(frame), 0, int64(len(frame)))
+
+	_, _, _, err := newCompressedFooterReader(
+		payloadReader, int64(len(frame)), int64(len(payload)-1),
+	)
+	require.ErrorContains(t, err, "footer exceeds maximum size")
+}
