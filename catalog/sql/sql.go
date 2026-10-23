@@ -1044,6 +1044,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		io.LoadFSFunc(c.props, result.MetadataLocation.String),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.props),
 	)
 }
 

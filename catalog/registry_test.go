@@ -54,11 +54,11 @@ func TestCatalogLoadTypeIsCaseInsensitive(t *testing.T) {
 
 func TestCatalogRegistry(t *testing.T) {
 	ctx := context.Background()
-	assert.ElementsMatch(t, []string{
-		"rest",
+	assert.Equal(t, []string{
+		"glue",
 		"http",
 		"https",
-		"glue",
+		"rest",
 	}, catalog.GetRegisteredCatalogs())
 
 	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
@@ -68,12 +68,12 @@ func TestCatalogRegistry(t *testing.T) {
 		return nil, nil
 	}))
 
-	assert.ElementsMatch(t, []string{
-		"rest",
-		"http",
+	assert.Equal(t, []string{
 		"foobar",
-		"https",
 		"glue",
+		"http",
+		"https",
+		"rest",
 	}, catalog.GetRegisteredCatalogs())
 
 	c, err := catalog.Load(ctx, "foobar", iceberg.Properties{"foo": "baz"})
@@ -107,11 +107,11 @@ func TestCatalogRegistry(t *testing.T) {
 	assert.NoError(t, err)
 
 	catalog.Unregister("foobar")
-	assert.ElementsMatch(t, []string{
-		"rest",
+	assert.Equal(t, []string{
+		"glue",
 		"http",
 		"https",
-		"glue",
+		"rest",
 	}, catalog.GetRegisteredCatalogs())
 }
 

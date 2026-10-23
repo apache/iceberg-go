@@ -41,6 +41,9 @@ func TestNormalizeVariantPathEscaping(t *testing.T) {
 		{"common control escapes", []string{"\b\t\f\n\r"}, "$['\\b\\t\\f\\n\\r']"},
 		{"nested escaped members", []string{"o'brien", "a\x00\x1fb", "a\\b"}, "$['o\\'brien']['a\\u0000\\u001fb']['a\\\\b']"},
 		{"unicode members", []string{"naïve", "東京"}, "$['naïve']['東京']"},
+		{"unescaped invalid UTF8", []string{"bad\xff"}, "$['bad\xff']"},
+		{"escaped invalid UTF8", []string{"bad\xff'\x80"}, "$['bad\uFFFD\\'\uFFFD']"},
+		{"unicode with control", []string{"東京\n🦊"}, "$['東京\\n🦊']"},
 		{"empty member", []string{""}, "$['']"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
