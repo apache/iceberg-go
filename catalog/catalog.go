@@ -267,10 +267,6 @@ func ObjectNameFromIdent(ident table.Identifier) string {
 	return ident[len(ident)-1]
 }
 
-func TableNameFromIdent(ident table.Identifier) string {
-	return ObjectNameFromIdent(ident)
-}
-
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	if len(ident) == 0 {
 		return nil
