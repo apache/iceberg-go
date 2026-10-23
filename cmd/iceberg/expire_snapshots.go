@@ -39,7 +39,7 @@ func runExpireSnapshots(ctx context.Context, output Output, cat catalog.Catalog,
 		d, err := parseDuration(cmd.OlderThan)
 		if err != nil {
 			output.Error(fmt.Errorf("invalid --older-than: %w", err))
-			os.Exit(1)
+			osExit(1)
 		}
 
 		opts = append(opts, table.WithOlderThan(d))
@@ -54,13 +54,13 @@ func runExpireSnapshots(ctx context.Context, output Output, cat catalog.Catalog,
 	tx := tbl.NewTransaction()
 	if err := tx.ExpireSnapshots(opts...); err != nil {
 		output.Error(fmt.Errorf("expire snapshots failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	staged, err := tx.StagedTable()
 	if err != nil {
 		output.Error(fmt.Errorf("staging table failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	expired := diffSnapshots(tbl.Metadata().Snapshots(), staged.Metadata().Snapshots())
@@ -87,7 +87,7 @@ func runExpireSnapshots(ctx context.Context, output Output, cat catalog.Catalog,
 	prompt := fmt.Sprintf("Expire %d snapshot(s) from %s?", len(expired), tableIDString(tbl))
 	if err := confirmAction(prompt, cmd.Yes); err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	realOpts := make([]table.ExpireSnapshotsOpt, 0, len(opts)-1)
@@ -102,12 +102,12 @@ func runExpireSnapshots(ctx context.Context, output Output, cat catalog.Catalog,
 	realTx := tbl.NewTransaction()
 	if err := realTx.ExpireSnapshots(realOpts...); err != nil {
 		output.Error(fmt.Errorf("expire snapshots failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if _, err := realTx.Commit(ctx); err != nil {
 		output.Error(fmt.Errorf("commit failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	result.DryRun = false
