@@ -18,7 +18,6 @@
 package table
 
 import (
-	"bytes"
 	"cmp"
 	"fmt"
 	"slices"
@@ -32,8 +31,61 @@ import (
 // data-file lookup only visits deletes that can apply to that file.
 type positionalDeleteIndex struct {
 	byPath             map[string][]iceberg.ManifestEntry
-	byPartition        map[string][]iceberg.ManifestEntry
-	byIntegerPartition map[positionalIntegerPartitionKey][]iceberg.ManifestEntry
+	byPartition        map[string][]positionalPartitionDeleteEntry
+	byIntegerPartition map[positionalIntegerPartitionKey][]positionalPartitionDeleteEntry
+}
+
+// positionalPartitionDeleteEntry caches the only path statistics needed for
+// matching a partition-scoped delete against many data files. Own the bound
+// strings rather than retaining borrowed DataFile metric byte slices.
+type positionalPartitionDeleteEntry struct {
+	entry       iceberg.ManifestEntry
+	pathMetrics positionalDeletePathMetrics
+}
+
+type positionalDeletePathMetrics struct {
+	lower    string
+	upper    string
+	hasUpper bool
+	skip     bool
+}
+
+func newPositionalPartitionDeleteEntry(entry iceberg.ManifestEntry) positionalPartitionDeleteEntry {
+	return positionalPartitionDeleteEntry{
+		entry:       entry,
+		pathMetrics: positionalDeletePathMetricsFor(entry.DataFile()),
+	}
+}
+
+func positionalDeletePathMetricsFor(deleteFile iceberg.DataFile) positionalDeletePathMetrics {
+	if deleteFile.Count() == 0 {
+		return positionalDeletePathMetrics{skip: true}
+	}
+
+	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(deleteFile)
+	if valueCount, ok := valueCounts[filePathFieldID]; ok {
+		if nullCount, ok := nullCounts[filePathFieldID]; ok && nullCount == valueCount {
+			return positionalDeletePathMetrics{skip: true}
+		}
+		if nanCount, ok := nanCounts[filePathFieldID]; ok && nanCount == valueCount {
+			return positionalDeletePathMetrics{skip: true}
+		}
+	}
+
+	var metrics positionalDeletePathMetrics
+	if lower := lowerBounds[filePathFieldID]; lower != nil {
+		metrics.lower = string(lower)
+	}
+	if upper := upperBounds[filePathFieldID]; upper != nil {
+		metrics.upper = string(upper)
+		metrics.hasUpper = true
+	}
+
+	return metrics
+}
+
+func (m positionalDeletePathMetrics) mayMatch(path string) bool {
+	return !m.skip && m.lower <= path && (!m.hasUpper || path <= m.upper)
 }
 
 // Most integer-backed partition transforms (bucket, day, hour, identity)
@@ -91,12 +143,13 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 			continue
 		}
 
+		indexed := newPositionalPartitionDeleteEntry(entry)
 		partition := dataFilePartition(deleteFile)
 		if key, ok := singleIntegerPartitionKey(deleteFile.SpecID(), partition); ok {
 			if idx.byIntegerPartition == nil {
-				idx.byIntegerPartition = make(map[positionalIntegerPartitionKey][]iceberg.ManifestEntry)
+				idx.byIntegerPartition = make(map[positionalIntegerPartitionKey][]positionalPartitionDeleteEntry)
 			}
-			idx.byIntegerPartition[key] = append(idx.byIntegerPartition[key], entry)
+			idx.byIntegerPartition[key] = append(idx.byIntegerPartition[key], indexed)
 
 			continue
 		}
@@ -106,9 +159,9 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 			return nil, fmt.Errorf("indexing positional delete file %s: %w", deleteFile.FilePath(), err)
 		}
 		if idx.byPartition == nil {
-			idx.byPartition = make(map[string][]iceberg.ManifestEntry)
+			idx.byPartition = make(map[string][]positionalPartitionDeleteEntry)
 		}
-		idx.byPartition[partitionKey] = append(idx.byPartition[partitionKey], entry)
+		idx.byPartition[partitionKey] = append(idx.byPartition[partitionKey], indexed)
 	}
 
 	sortBySequence := func(entries []iceberg.ManifestEntry) {
@@ -119,11 +172,16 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 	for _, pathEntries := range idx.byPath {
 		sortBySequence(pathEntries)
 	}
+	sortPartitionBySequence := func(entries []positionalPartitionDeleteEntry) {
+		slices.SortStableFunc(entries, func(a, b positionalPartitionDeleteEntry) int {
+			return cmp.Compare(a.entry.SequenceNum(), b.entry.SequenceNum())
+		})
+	}
 	for _, partitionEntries := range idx.byPartition {
-		sortBySequence(partitionEntries)
+		sortPartitionBySequence(partitionEntries)
 	}
 	for _, partitionEntries := range idx.byIntegerPartition {
-		sortBySequence(partitionEntries)
+		sortPartitionBySequence(partitionEntries)
 	}
 
 	return idx, nil
@@ -138,7 +196,7 @@ func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) (
 	}
 
 	dataFile := dataEntry.DataFile()
-	var partitionEntries []iceberg.ManifestEntry
+	var partitionEntries []positionalPartitionDeleteEntry
 	if len(idx.byPartition) > 0 || len(idx.byIntegerPartition) > 0 {
 		partition := dataFilePartition(dataFile)
 		if key, ok := singleIntegerPartitionKey(dataFile.SpecID(), partition); ok {
@@ -166,21 +224,20 @@ func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) (
 
 func appendPartitionDeletesFromSequence(
 	out []iceberg.DataFile,
-	entries []iceberg.ManifestEntry,
+	entries []positionalPartitionDeleteEntry,
 	dataSeqNum int64,
 	dataFilePath string,
 ) ([]iceberg.DataFile, error) {
 	start := sort.Search(len(entries), func(i int) bool {
-		return entries[i].SequenceNum() >= dataSeqNum
+		return entries[i].entry.SequenceNum() >= dataSeqNum
 	})
 	if start == len(entries) {
 		return out, nil
 	}
 
-	for _, entry := range entries[start:] {
-		deleteFile := entry.DataFile()
-		if filePathMayMatch(deleteFile, dataFilePath) {
-			out = append(out, deleteFile)
+	for _, indexed := range entries[start:] {
+		if indexed.pathMetrics.mayMatch(dataFilePath) {
+			out = append(out, indexed.entry.DataFile())
 		}
 	}
 
@@ -192,28 +249,7 @@ func appendPartitionDeletesFromSequence(
 // by the positional-delete index and keeps missing or malformed metadata
 // conservative.
 func filePathMayMatch(deleteFile iceberg.DataFile, dataFilePath string) bool {
-	if deleteFile.Count() == 0 {
-		return false
-	}
-
-	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(deleteFile)
-	if valueCount, ok := valueCounts[filePathFieldID]; ok {
-		if nullCount, ok := nullCounts[filePathFieldID]; ok && nullCount == valueCount {
-			return false
-		}
-		if nanCount, ok := nanCounts[filePathFieldID]; ok && nanCount == valueCount {
-			return false
-		}
-	}
-
-	if lower := lowerBounds[filePathFieldID]; lower != nil && bytes.Compare(lower, []byte(dataFilePath)) > 0 {
-		return false
-	}
-	if upper := upperBounds[filePathFieldID]; upper != nil && bytes.Compare(upper, []byte(dataFilePath)) < 0 {
-		return false
-	}
-
-	return true
+	return positionalDeletePathMetricsFor(deleteFile).mayMatch(dataFilePath)
 }
 
 func appendPositionalDeletesFromSequence(

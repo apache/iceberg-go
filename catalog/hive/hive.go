@@ -195,6 +195,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.opts.props),
 	)
 }
 
@@ -287,6 +288,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.opts.props),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
@@ -602,7 +604,10 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		if err != nil {
 			return nil, "", err
 		}
-		current, err = table.NewFromLocation(ctx, identifier, metadataLoc, io.LoadFSFunc(c.opts.props, metadataLoc), c)
+		current, err = table.NewFromLocation(
+			ctx, identifier, metadataLoc, io.LoadFSFunc(c.opts.props, metadataLoc), c,
+			table.WithScanPlanningIOProperties(c.opts.props),
+		)
 		if err != nil {
 			return nil, "", err
 		}
