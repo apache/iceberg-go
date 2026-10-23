@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Orphan cleanup results now expose only <code>OrphanFiles</code>.</strong> Replace <code>result.OrphanFileLocations</code> with <code>result.OrphanFiles</code> (each entry has <code>Path</code> and <code>SizeBytes</code>). <code>OrphanCleanupPlan.Files()</code> still provides path-only lists during planning.</p>
+</li>
+<li>
 <p><strong>Catalog identifier helper renamed.</strong> <code>catalog.TableNameFromIdent</code> is removed. Use <code>catalog.ObjectNameFromIdent</code> for tables, views, and functions.</p>
 </li>
 <li>
