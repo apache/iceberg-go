@@ -227,11 +227,9 @@ func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 	return flattened
 }
 
+// OrphanCleanupResult reports the files found and deleted by orphan cleanup.
 type OrphanCleanupResult struct {
-	// OrphanFileLocations is retained for backward compatibility with callers
-	// that consume only orphan paths. Prefer OrphanFiles for canonical path+size data.
-	OrphanFileLocations []string
-	// OrphanFiles is the canonical richer orphan result, carrying both path and size.
+	// OrphanFiles includes the path and size of each identified orphan.
 	OrphanFiles  []OrphanFile
 	DeletedFiles []string
 	// TotalSizeBytes is the combined size of orphan files only, not all scanned files.
@@ -276,9 +274,8 @@ func (p OrphanCleanupPlan) Cutoff() time.Time {
 
 func (p OrphanCleanupPlan) result() OrphanCleanupResult {
 	return OrphanCleanupResult{
-		OrphanFileLocations: p.Files(),
-		OrphanFiles:         p.OrphanFiles(),
-		TotalSizeBytes:      p.totalSizeBytes,
+		OrphanFiles:    p.OrphanFiles(),
+		TotalSizeBytes: p.totalSizeBytes,
 	}
 }
 
@@ -483,10 +480,9 @@ func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	}
 
 	return OrphanCleanupResult{
-		OrphanFileLocations: orphanFiles,
-		OrphanFiles:         plan.OrphanFiles(),
-		DeletedFiles:        deletedFiles,
-		TotalSizeBytes:      plan.totalSizeBytes,
+		OrphanFiles:    plan.OrphanFiles(),
+		DeletedFiles:   deletedFiles,
+		TotalSizeBytes: plan.totalSizeBytes,
 	}, nil
 }
 
