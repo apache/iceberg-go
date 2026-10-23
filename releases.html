@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>View representation field uses the Go SQL initialism.</strong> Replace <code>view.Representation.Sql</code> with <code>view.Representation.SQL</code>. Serialized view metadata still uses the <code>sql</code> JSON field.</p>
+</li>
+<li>
 <p><strong>Orphan cleanup results now expose only <code>OrphanFiles</code>.</strong> Replace <code>result.OrphanFileLocations</code> with <code>result.OrphanFiles</code> (each entry has <code>Path</code> and <code>SizeBytes</code>). <code>OrphanCleanupPlan.Files()</code> still provides path-only lists during planning.</p>
 </li>
 <li>
