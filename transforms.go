@@ -217,9 +217,8 @@ type Transform interface {
 	Apply(Optional[Literal]) Optional[Literal]
 	Project(name string, pred BoundPredicate) (UnboundPredicate, error)
 
+	// ToHumanStrType formats a partition value using its transformed result type.
 	ToHumanStrType(typ Type, val any) string
-	// Deprecated: ToHumanStr cannot recover source-type information; use ToHumanStrType instead.
-	ToHumanStr(any) string
 }
 
 // IdentityTransform uses the identity function, performing no transformation
@@ -259,32 +258,9 @@ func (IdentityTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return value
 }
 
-func (IdentityTransform) ToHumanStr(val any) string {
-	switch v := val.(type) {
-	case nil:
-		return "null"
-	case string:
-		return v
-	case []byte:
-		return base64.StdEncoding.EncodeToString(v)
-	case bool:
-		return strconv.FormatBool(v)
-	case Date:
-		return v.ToTime().Format("2006-01-02")
-	case Time:
-		return v.ToTime().Format("15:04:05.999999")
-	case Timestamp:
-		return v.ToTime().Format("2006-01-02T15:04:05.999999")
-	case TimestampNano:
-		return v.ToTime().Format("2006-01-02T15:04:05.999999999")
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-// ToHumanStrType is the type-aware form invoked by PartitionToPath.
-// It appends "+00:00" for TimestampTz/TimestampTzNs — information the value-only ToHumanStr(any) cannot recover by design
-func (t IdentityTransform) ToHumanStrType(typ Type, val any) string {
+// ToHumanStrType formats identity partition values, including UTC offsets for
+// timestamp-with-zone source types.
+func (IdentityTransform) ToHumanStrType(typ Type, val any) string {
 	if val == nil {
 		return "null"
 	}
@@ -307,7 +283,24 @@ func (t IdentityTransform) ToHumanStrType(typ Type, val any) string {
 		}
 	}
 
-	return t.ToHumanStr(val)
+	switch v := val.(type) {
+	case string:
+		return v
+	case []byte:
+		return base64.StdEncoding.EncodeToString(v)
+	case bool:
+		return strconv.FormatBool(v)
+	case Date:
+		return v.ToTime().Format("2006-01-02")
+	case Time:
+		return v.ToTime().Format("15:04:05.999999")
+	case Timestamp:
+		return v.ToTime().Format("2006-01-02T15:04:05.999999")
+	case TimestampNano:
+		return v.ToTime().Format("2006-01-02T15:04:05.999999999")
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func (t IdentityTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -354,8 +347,6 @@ func (VoidTransform) Equals(other Transform) bool {
 func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
-
-func (VoidTransform) ToHumanStr(any) string { return "null" }
 
 func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
 
@@ -410,14 +401,8 @@ func (UnknownTransform) Apply(Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
 
-// ToHumanStr renders the value, not the transform name. Java's
-// Transform#toHumanString default does the same and UnknownTransform doesn't
-// override it. Returning the name would be constant for a spec field, which
-// collapses distinct partitions into one PartitionToPath key.
-func (UnknownTransform) ToHumanStr(val any) string {
-	return IdentityTransform{}.ToHumanStr(val)
-}
-
+// ToHumanStrType renders the value, not the unknown transform name. This
+// keeps distinct partition values from collapsing into a single path.
 func (UnknownTransform) ToHumanStrType(typ Type, val any) string {
 	return IdentityTransform{}.ToHumanStrType(typ, val)
 }
@@ -632,16 +617,12 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	}
 }
 
-func (BucketTransform) ToHumanStr(val any) string {
+func (BucketTransform) ToHumanStrType(_ Type, val any) string {
 	if val == nil {
 		return "null"
 	}
 
 	return fmt.Sprintf("%v", val)
-}
-
-func (t BucketTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -859,7 +840,7 @@ func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]
 	return out
 }
 
-func (TruncateTransform) ToHumanStr(val any) string {
+func (TruncateTransform) ToHumanStrType(_ Type, val any) string {
 	switch v := val.(type) {
 	case nil:
 		return "null"
@@ -868,10 +849,6 @@ func (TruncateTransform) ToHumanStr(val any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
-}
-
-func (t TruncateTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1114,17 +1091,13 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (YearTransform) ToHumanStr(val any) string {
+func (YearTransform) ToHumanStrType(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		return strconv.Itoa(int(v) + epochTM.Year())
 	default:
 		return "null"
 	}
-}
-
-func (t YearTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t YearTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1219,7 +1192,7 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (t MonthTransform) ToHumanStr(val any) string {
+func (MonthTransform) ToHumanStrType(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		tm := epochTM.AddDate(0, int(v), 0)
@@ -1228,10 +1201,6 @@ func (t MonthTransform) ToHumanStr(val any) string {
 	default:
 		return "null"
 	}
-}
-
-func (t MonthTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t MonthTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1320,7 +1289,7 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (DayTransform) ToHumanStr(val any) string {
+func (DayTransform) ToHumanStrType(_ Type, val any) string {
 	var days int32
 	switch v := val.(type) {
 	case Date:
@@ -1334,10 +1303,6 @@ func (DayTransform) ToHumanStr(val any) string {
 	tm := epochTM.AddDate(0, 0, int(days))
 
 	return tm.Format("2006-01-02")
-}
-
-func (t DayTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t DayTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1426,7 +1391,7 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (HourTransform) ToHumanStr(val any) string {
+func (HourTransform) ToHumanStrType(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		seconds := int64(v) * int64(time.Hour/time.Second)
@@ -1436,10 +1401,6 @@ func (HourTransform) ToHumanStr(val any) string {
 	default:
 		return "null"
 	}
-}
-
-func (t HourTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t HourTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
