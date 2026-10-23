@@ -2147,6 +2147,65 @@ func (s *HadoopCatalogTestSuite) TestLoadTableNotExists() {
 	s.ErrorIs(err, catalog.ErrNoSuchTable)
 }
 
+func (s *HadoopCatalogTestSuite) TestLoadTableEnablesCatalogManifestContentCache() {
+	ctx := context.Background()
+	cat, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+		table.IOManifestCacheEnabledKey: "true",
+	})
+	s.Require().NoError(err)
+
+	identifier := table.Identifier{"cache-ns", "cache-table"}
+	s.Require().NoError(cat.CreateNamespace(ctx, identifier[:1], nil))
+	created, err := cat.CreateTable(ctx, identifier, s.testSchema())
+	s.Require().NoError(err)
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		filepath.Join(created.Location(), "sample.parquet"), iceberg.ParquetFile,
+		nil, nil, nil, 1, 1,
+	)
+	s.Require().NoError(err)
+	txn := created.NewTransaction()
+	s.Require().NoError(txn.AddDataFiles(ctx, []iceberg.DataFile{builder.Build()}, nil))
+	_, err = txn.Commit(ctx)
+	s.Require().NoError(err)
+
+	loaded, err := cat.LoadTable(ctx, identifier)
+	s.Require().NoError(err)
+	s.NotContains(loaded.SavedConfig(), table.IOManifestCacheEnabledKey)
+
+	plan := func(tbl *table.Table) error {
+		tasks, err := tbl.Scan(table.WithMaxConcurrency(1)).PlanFiles(ctx)
+		if err == nil {
+			s.Len(tasks, 1)
+		}
+
+		return err
+	}
+	s.Require().NoError(plan(loaded))
+
+	fs, err := loaded.FS(ctx)
+	s.Require().NoError(err)
+	manifests, err := loaded.CurrentSnapshot().Manifests(fs)
+	s.Require().NoError(err)
+	s.Require().Len(manifests, 1)
+
+	manifestPath := manifests[0].FilePath()
+	if parsed, parseErr := url.Parse(manifestPath); parseErr == nil && parsed.Scheme == "file" {
+		manifestPath = parsed.Path
+	}
+	movedPath := manifestPath + ".temporarily-moved"
+	s.Require().NoError(os.Rename(manifestPath, movedPath))
+	defer func() { s.Require().NoError(os.Rename(movedPath, manifestPath)) }()
+
+	// A fresh handle cannot read the missing manifest, while the warmed
+	// handle can still plan using its cached immutable manifest bytes.
+	cold, err := cat.LoadTable(ctx, identifier)
+	s.Require().NoError(err)
+	s.Require().Error(plan(cold))
+	s.Require().NoError(plan(loaded))
+}
+
 func (s *HadoopCatalogTestSuite) TestLoadTablePropagatesMetadataReadError() {
 	ctx := context.Background()
 	walkErr := errors.New("metadata walk failed")
