@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -35,8 +36,8 @@ import (
 type hadoopContextKey struct{}
 
 // contextBoundHadoopFS models cloud filesystems that retain their construction
-// context and use it for later operations. The local filesystem supplies the
-// rest of HadoopCatalogFS, while Stat and MkdirAll check the retained context.
+// context and use it for later operations. LocalFS provides the other
+// methods; the overridden operations check the retained context.
 type contextBoundHadoopFS struct {
 	icebergio.LocalFS
 	ctx  context.Context
@@ -68,6 +69,22 @@ func (f *contextBoundHadoopFS) MkdirAll(name string) error {
 	return f.LocalFS.MkdirAll(f.localPath(name))
 }
 
+func (f *contextBoundHadoopFS) ReadFile(name string) ([]byte, error) {
+	if err := f.ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return f.LocalFS.ReadFile(f.localPath(name))
+}
+
+func (f *contextBoundHadoopFS) WriteFile(name string, content []byte) error {
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
+
+	return f.LocalFS.WriteFile(f.localPath(name), content)
+}
+
 func registerHadoopContextFS(t *testing.T, scheme string, factory icebergio.SchemeFactory) {
 	t.Helper()
 	icebergio.Register(scheme, factory)
@@ -88,7 +105,7 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			const scheme = "hadoop-context-lifetime-test"
 			root := t.TempDir()
 			warehouse := scheme + "://bucket/warehouse"
-			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), hadoopContextKey{}, "present"))
+			ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), hadoopContextKey{}, "present"), time.Hour)
 			defer cancel()
 
 			var factoryContext context.Context
@@ -112,11 +129,22 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, "present", factoryContext.Value(hadoopContextKey{}))
-			require.NoError(t, factoryContext.Err())
+			require.Nil(t, factoryContext.Done(), "filesystem context must outlive the caller")
+			_, hasDeadline := factoryContext.Deadline()
+			require.False(t, hasDeadline, "filesystem context must not inherit the caller deadline")
 
 			cancel()
 			require.ErrorIs(t, ctx.Err(), context.Canceled)
+			require.NoError(t, factoryContext.Err())
 			require.NoError(t, cat.CreateNamespace(context.Background(), table.Identifier{"ns"}, nil))
+
+			fs := cat.(*Catalog).filesystem
+			location := warehouse + "/ns/after-cancel.txt"
+			content := []byte("still writable")
+			require.NoError(t, fs.WriteFile(location, content))
+			readBack, err := fs.ReadFile(location)
+			require.NoError(t, err)
+			require.Equal(t, content, readBack)
 		})
 	}
 }

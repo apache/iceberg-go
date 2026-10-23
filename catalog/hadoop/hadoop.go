@@ -194,7 +194,8 @@ type Catalog struct {
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
-// The context is used to initialize the filesystem so callers can cancel setup.
+// The caller context is checked for cancellation around filesystem setup.
+// Its values, but not its cancellation or deadline, are kept for later I/O.
 // When using a local filesystem, the warehouse directory
 // is not created on construction; it is created implicitly by the first CreateNamespace
 // call. When using other schemes, the property `allow-unsafe-commits` must be set to
