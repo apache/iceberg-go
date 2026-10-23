@@ -974,12 +974,12 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				if currentSchema == nil {
 					currentSchema = meta.CurrentSchema()
 				}
-				field, found := currentSchema.FindFieldByID(pf.SourceID())
+				field, found := currentSchema.FindFieldByID(pf.FirstSourceID())
 				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, found: found}
 				specInfo.sourceFields[partFieldID] = sourceField
 			}
 			if !sourceField.found {
-				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.SourceID(), pf.Name)
+				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.FirstSourceID(), pf.Name)
 			}
 
 			value := p[partFieldID]

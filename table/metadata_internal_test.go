@@ -1168,14 +1168,14 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			gotSpec := meta.PartitionSpec()
 			require.Equal(t, len(tt.wantSourceIDs), gotSpec.NumFields())
 			for i, wantSourceID := range tt.wantSourceIDs {
-				assert.Equal(t, wantSourceID, gotSpec.Field(i).SourceID())
+				assert.Equal(t, wantSourceID, gotSpec.Field(i).FirstSourceID())
 				assert.Equal(t, tt.wantNames[i], gotSpec.Field(i).Name)
 			}
 
 			// The sort order references the first column, so it remaps to 1.
 			require.Equal(t, 1, meta.SortOrder().Len())
 			for _, field := range meta.SortOrder().Fields() {
-				assert.Equal(t, wantSortID, field.SourceID())
+				assert.Equal(t, wantSortID, field.FirstSourceID())
 			}
 
 			// Written metadata carries bound IDs only, so it parses back as
@@ -1186,7 +1186,7 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			require.NoError(t, err)
 			reparsedSpec := reparsed.PartitionSpec()
 			for i, wantSourceID := range tt.wantSourceIDs {
-				assert.Equal(t, wantSourceID, reparsedSpec.Field(i).SourceID())
+				assert.Equal(t, wantSourceID, reparsedSpec.Field(i).FirstSourceID())
 			}
 		})
 	}
@@ -2102,7 +2102,7 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 	require.Equal(t, spec.NumFields(), 1)
 	require.Equal(t, spec.Field(0).Name, "y")
 	require.Equal(t, spec.Field(0).Transform, iceberg.IdentityTransform{})
-	require.Equal(t, spec.Field(0).SourceID(), 2)
+	require.Equal(t, spec.Field(0).FirstSourceID(), 2)
 }
 
 func TestTableMetadataV2MissingPartitionSpecs(t *testing.T) {

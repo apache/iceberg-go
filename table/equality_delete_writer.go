@@ -316,14 +316,14 @@ func equalityDeleteWriteSchema(tableSchema *iceberg.Schema, equalityFieldIDs []i
 
 	// Partition source columns not already in the equality key.
 	for _, f := range spec.Fields() {
-		if _, ok := seen[f.SourceID()]; ok {
+		if _, ok := seen[f.FirstSourceID()]; ok {
 			continue
 		}
-		name, ok := tableSchema.FindColumnName(f.SourceID())
+		name, ok := tableSchema.FindColumnName(f.FirstSourceID())
 		if !ok {
-			return nil, fmt.Errorf("%w: partition source field ID %d not found in table schema", iceberg.ErrInvalidSchema, f.SourceID())
+			return nil, fmt.Errorf("%w: partition source field ID %d not found in table schema", iceberg.ErrInvalidSchema, f.FirstSourceID())
 		}
-		seen[f.SourceID()] = struct{}{}
+		seen[f.FirstSourceID()] = struct{}{}
 		names = append(names, name)
 	}
 

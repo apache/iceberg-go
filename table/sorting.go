@@ -76,8 +76,8 @@ type SortField struct {
 	NullOrder NullOrder `json:"null-order"`
 }
 
-// SourceID returns the first source column id.
-func (s SortField) SourceID() int {
+// FirstSourceID returns the first source column id.
+func (s SortField) FirstSourceID() int {
 	if len(s.SourceIDs) == 0 {
 		return 0
 	}
@@ -98,14 +98,14 @@ func (s *SortField) String() string {
 			return fmt.Sprintf("%v %s %s", s.SourceIDs, s.Direction, s.NullOrder)
 		}
 
-		return fmt.Sprintf("%d %s %s", s.SourceID(), s.Direction, s.NullOrder)
+		return fmt.Sprintf("%d %s %s", s.FirstSourceID(), s.Direction, s.NullOrder)
 	}
 
 	if len(s.SourceIDs) > 1 {
 		return fmt.Sprintf("%s(%v) %s %s", s.Transform, s.SourceIDs, s.Direction, s.NullOrder)
 	}
 
-	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.SourceID(), s.Direction, s.NullOrder)
+	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.FirstSourceID(), s.Direction, s.NullOrder)
 }
 
 func (s SortField) MarshalJSON() ([]byte, error) {
@@ -137,7 +137,7 @@ func (s SortField) MarshalJSON() ([]byte, error) {
 		Transform iceberg.Transform `json:"transform"`
 		Direction SortDirection     `json:"direction"`
 		NullOrder NullOrder         `json:"null-order"`
-	}{s.SourceID(), s.Transform, direction, nullOrder})
+	}{s.FirstSourceID(), s.Transform, direction, nullOrder})
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {
@@ -482,7 +482,7 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 
 	for _, field := range s.fields {
 		if field.Transform == nil {
-			return fmt.Errorf("%w: sort field with source id %d has no transform", ErrInvalidTransform, field.SourceID())
+			return fmt.Errorf("%w: sort field with source id %d has no transform", ErrInvalidTransform, field.FirstSourceID())
 		}
 
 		if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
@@ -552,7 +552,7 @@ func AssignFreshSortOrderIDsWithID(sortOrder SortOrder, old, fresh *iceberg.Sche
 
 	fields := make([]SortField, 0, len(sortOrder.fields))
 	for _, field := range sortOrder.fields {
-		originalField, ok := old.FindColumnName(field.SourceID())
+		originalField, ok := old.FindColumnName(field.FirstSourceID())
 		if !ok {
 			return SortOrder{}, fmt.Errorf("cannot find source column id %s in old schema", field.String())
 		}

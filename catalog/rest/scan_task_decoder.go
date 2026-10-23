@@ -608,7 +608,7 @@ func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlan
 		fieldPlan := partitionDecodeField{
 			fieldID:   field.FieldID,
 			fieldName: field.Name,
-			sourceID:  field.SourceID(),
+			sourceID:  field.FirstSourceID(),
 		}
 		sourceType, ok := findFieldType(fieldPlan.sourceID, metadata)
 		fieldPlan.sourceTypeFound = ok
