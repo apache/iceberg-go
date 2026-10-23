@@ -2149,7 +2149,7 @@ func (s *HadoopCatalogTestSuite) TestLoadTableNotExists() {
 
 func (s *HadoopCatalogTestSuite) TestLoadTableEnablesCatalogManifestContentCache() {
 	ctx := context.Background()
-	cat, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+	cat, err := NewCatalog(ctx, "test", s.warehouse, iceberg.Properties{
 		table.IOManifestCacheEnabledKey: "true",
 	})
 	s.Require().NoError(err)

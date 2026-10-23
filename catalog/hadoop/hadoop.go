@@ -238,7 +238,18 @@ func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Prope
 
 		warehouse = absWarehouse
 	}
-	filesystem, err := io.LoadFS(ctx, props, warehouse)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("hadoop catalog: failed to load filesystem: %w", err)
+	}
+
+	// Some filesystem implementations retain their construction context for
+	// every later operation. Keep the caller's values, but not its cancellation
+	// or deadline, for the lifetime of the catalog. The original context is
+	// checked before and after initialization so canceled setup still fails.
+	filesystem, err := io.LoadFS(context.WithoutCancel(ctx), props, warehouse)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("hadoop catalog: failed to load filesystem: %w", ctxErr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to load filesystem: %w", err)
 	}

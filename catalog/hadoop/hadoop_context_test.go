@@ -19,45 +19,169 @@ package hadoop
 
 import (
 	"context"
+	"io/fs"
 	"net/url"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 
-// TestNewCatalogPropagatesContext checks both the direct constructor and the
-// catalog registry, which must forward the context to the filesystem loader.
-func TestNewCatalogPropagatesContext(t *testing.T) {
-	const scheme = "hadoop-context-constructor-test"
+type hadoopContextKey struct{}
 
-	type contextKey struct{}
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "present"))
-	cancel()
+// contextBoundHadoopFS models cloud filesystems that retain their construction
+// context and use it for later operations. The local filesystem supplies the
+// rest of HadoopCatalogFS, while Stat and MkdirAll check the retained context.
+type contextBoundHadoopFS struct {
+	icebergio.LocalFS
+	ctx  context.Context
+	root string
+}
 
-	icebergio.Register(scheme, func(got context.Context, _ *url.URL, _ map[string]string) (icebergio.IO, error) {
-		if got.Value(contextKey{}) != "present" {
-			return nil, context.DeadlineExceeded
+func (f *contextBoundHadoopFS) localPath(name string) string {
+	parsed, err := url.Parse(name)
+	if err != nil {
+		return filepath.Join(f.root, name)
+	}
+
+	return filepath.Join(f.root, parsed.Host, filepath.FromSlash(strings.TrimPrefix(parsed.Path, "/")))
+}
+
+func (f *contextBoundHadoopFS) Stat(name string) (fs.FileInfo, error) {
+	if err := f.ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return f.LocalFS.Stat(f.localPath(name))
+}
+
+func (f *contextBoundHadoopFS) MkdirAll(name string) error {
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
+
+	return f.LocalFS.MkdirAll(f.localPath(name))
+}
+
+func registerHadoopContextFS(t *testing.T, scheme string, factory icebergio.SchemeFactory) {
+	t.Helper()
+	icebergio.Register(scheme, factory)
+	t.Cleanup(func() { icebergio.Unregister(scheme) })
+}
+
+// TestNewCatalogFilesystemContextLifetime checks both the direct constructor
+// and catalog registry. Filesystem operations must keep working after the
+// caller cancels the context used to initialize the catalog.
+func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
+	for _, useRegistry := range []bool{false, true} {
+		name := "direct constructor"
+		if useRegistry {
+			name = "catalog registry"
 		}
 
-		return nil, got.Err()
-	})
-	t.Cleanup(func() { icebergio.Unregister(scheme) })
+		t.Run(name, func(t *testing.T) {
+			const scheme = "hadoop-context-lifetime-test"
+			root := t.TempDir()
+			warehouse := scheme + "://bucket/warehouse"
+			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), hadoopContextKey{}, "present"))
+			defer cancel()
 
-	warehouse := scheme + "://bucket/warehouse"
-	t.Run("direct constructor", func(t *testing.T) {
-		_, err := NewCatalog(ctx, "test", warehouse, iceberg.Properties{"allow-unsafe-commits": "true"})
-		require.ErrorIs(t, err, context.Canceled)
-	})
+			var factoryContext context.Context
+			registerHadoopContextFS(t, scheme, func(got context.Context, _ *url.URL, _ map[string]string) (icebergio.IO, error) {
+				factoryContext = got
 
-	t.Run("catalog registry", func(t *testing.T) {
-		_, err := catalog.Load(ctx, "test", iceberg.Properties{
-			"type":                 string(catalog.Hadoop),
-			"warehouse":            warehouse,
-			"allow-unsafe-commits": "true",
+				return &contextBoundHadoopFS{ctx: got, root: root}, nil
+			})
+
+			props := iceberg.Properties{
+				"warehouse":            warehouse,
+				"allow-unsafe-commits": "true",
+			}
+			var cat catalog.Catalog
+			var err error
+			if useRegistry {
+				props["type"] = string(catalog.Hadoop)
+				cat, err = catalog.Load(ctx, "test", props)
+			} else {
+				cat, err = NewCatalog(ctx, "test", warehouse, props)
+			}
+			require.NoError(t, err)
+			require.Equal(t, "present", factoryContext.Value(hadoopContextKey{}))
+			require.NoError(t, factoryContext.Err())
+
+			cancel()
+			require.ErrorIs(t, ctx.Err(), context.Canceled)
+			require.NoError(t, cat.CreateNamespace(context.Background(), table.Identifier{"ns"}, nil))
 		})
-		require.ErrorIs(t, err, context.Canceled)
+	}
+}
+
+func TestNewCatalogHonorsContextCancellation(t *testing.T) {
+	for _, useRegistry := range []bool{false, true} {
+		name := "direct constructor"
+		if useRegistry {
+			name = "catalog registry"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			const scheme = "hadoop-context-canceled-test"
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			factoryCalled := false
+			registerHadoopContextFS(t, scheme, func(context.Context, *url.URL, map[string]string) (icebergio.IO, error) {
+				factoryCalled = true
+
+				return nil, nil
+			})
+
+			warehouse := scheme + "://bucket/warehouse"
+			props := iceberg.Properties{
+				"warehouse":            warehouse,
+				"allow-unsafe-commits": "true",
+			}
+			var err error
+			if useRegistry {
+				props["type"] = string(catalog.Hadoop)
+				_, err = catalog.Load(ctx, "test", props)
+			} else {
+				_, err = NewCatalog(ctx, "test", warehouse, props)
+			}
+
+			require.ErrorIs(t, err, context.Canceled)
+			require.False(t, factoryCalled, "filesystem initialization must not run for a canceled context")
+		})
+	}
+}
+
+func TestNewCatalogHonorsCancellationDuringFilesystemLoad(t *testing.T) {
+	const scheme = "hadoop-context-load-cancel-test"
+	root := t.TempDir()
+	loadStarted := make(chan struct{})
+	finishLoad := make(chan struct{})
+	registerHadoopContextFS(t, scheme, func(got context.Context, _ *url.URL, _ map[string]string) (icebergio.IO, error) {
+		close(loadStarted)
+		<-finishLoad
+
+		return &contextBoundHadoopFS{ctx: got, root: root}, nil
 	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	warehouse := scheme + "://bucket/warehouse"
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewCatalog(ctx, "test", warehouse, iceberg.Properties{"allow-unsafe-commits": "true"})
+		result <- err
+	}()
+
+	<-loadStarted
+	cancel()
+	close(finishLoad)
+	require.ErrorIs(t, <-result, context.Canceled)
 }
