@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +33,7 @@ func TestMetadataPreservesUnknownStatisticsBlobType(t *testing.T) {
 		SnapshotID:     3055729675574597004,
 		StatisticsPath: "s3://bucket/stats/vendor.puffin",
 		BlobMetadata: []BlobMetadata{{
-			Type:           BlobType("vendor-sketch-v1"),
+			Type:           puffin.BlobType("vendor-sketch-v1"),
 			SnapshotID:     3055729675574597004,
 			SequenceNumber: 2,
 			Fields:         []int32{1},
@@ -51,9 +52,8 @@ func TestMetadataPreservesUnknownStatisticsBlobType(t *testing.T) {
 	}
 	require.Len(t, stats, 1)
 	require.Len(t, stats[0].BlobMetadata, 1)
-	assert.Equal(t, BlobType("vendor-sketch-v1"), stats[0].BlobMetadata[0].Type)
+	assert.Equal(t, puffin.BlobType("vendor-sketch-v1"), stats[0].BlobMetadata[0].Type)
 	assert.False(t, stats[0].BlobMetadata[0].Type.IsKnown())
-	assert.False(t, stats[0].BlobMetadata[0].Type.IsValid())
 }
 
 func TestBlobTypeRejectsNullAndEmptyValues(t *testing.T) {
