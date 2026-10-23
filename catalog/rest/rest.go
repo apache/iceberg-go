@@ -1877,7 +1877,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 		changes[i] = tableChange{
 			Identifier: identifier{
 				Namespace: catalog.NamespaceFromIdent(c.Identifier),
-				Name:      catalog.TableNameFromIdent(c.Identifier),
+				Name:      catalog.ObjectNameFromIdent(c.Identifier),
 			},
 			Requirements: reqs,
 			Updates:      updates,
@@ -2144,11 +2144,11 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	}
 	src := identifier{
 		Namespace: catalog.NamespaceFromIdent(from),
-		Name:      catalog.TableNameFromIdent(from),
+		Name:      catalog.ObjectNameFromIdent(from),
 	}
 	dst := identifier{
 		Namespace: catalog.NamespaceFromIdent(to),
-		Name:      catalog.TableNameFromIdent(to),
+		Name:      catalog.ObjectNameFromIdent(to),
 	}
 
 	path, err := endpointRenameTable.reqPath()
@@ -2724,11 +2724,11 @@ func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 	}
 	src := identifier{
 		Namespace: catalog.NamespaceFromIdent(from),
-		Name:      catalog.TableNameFromIdent(from),
+		Name:      catalog.ObjectNameFromIdent(from),
 	}
 	dst := identifier{
 		Namespace: catalog.NamespaceFromIdent(to),
-		Name:      catalog.TableNameFromIdent(to),
+		Name:      catalog.ObjectNameFromIdent(to),
 	}
 
 	path, err := endpointRenameView.reqPath()

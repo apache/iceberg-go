@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.
 - **Substrait expression conversion no longer takes case sensitivity.** `substrait.ConvertExpr(schema, expression, caseSensitive)` becomes `substrait.ConvertExpr(schema, expression)`. Case sensitivity remains part of expression binding.
 
 - **Transform formatting requires the result type.** `Transform.ToHumanStr(value)` is removed. Use `Transform.ToHumanStrType(resultType, value)` to format partition values, including timestamps with time zones.
