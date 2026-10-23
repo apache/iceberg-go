@@ -70,7 +70,7 @@ func TestRefTypes(t *testing.T) {
 
 			idx := ref.(iceberg.BoundPredicate).Term().Ref().Pos()
 
-			_, converted, err := substrait.ConvertExpr(sc, ref, true)
+			_, converted, err := substrait.ConvertExpr(sc, ref)
 			require.NoError(t, err)
 
 			assert.Equal(t, fmt.Sprintf("is_null(.field(%d) => %s) => boolean", idx,
@@ -112,7 +112,7 @@ func TestNestedReferencesPreserveBoundPath(t *testing.T) {
 			bound, err := tt.predicate.Bind(sc, true)
 			require.NoError(t, err)
 
-			_, converted, err := substrait.ConvertExpr(sc, bound, true)
+			_, converted, err := substrait.ConvertExpr(sc, bound)
 			require.NoError(t, err)
 			assert.Contains(t, converted.String(), tt.expected)
 		})
@@ -128,7 +128,7 @@ func TestNestedReferenceWithoutTopLevelLeafName(t *testing.T) {
 	bound, err := iceberg.EqualTo(iceberg.Reference("customer.id"), int64(123)).Bind(sc, true)
 	require.NoError(t, err)
 
-	_, converted, err := substrait.ConvertExpr(sc, bound, true)
+	_, converted, err := substrait.ConvertExpr(sc, bound)
 	require.NoError(t, err)
 	assert.Contains(t, converted.String(), ".field(0).field(0)")
 }
@@ -184,7 +184,7 @@ func TestExprs(t *testing.T) {
 			bound, err := iceberg.BindExpr(tt.schema, tt.e, false)
 			require.NoError(t, err)
 
-			_, result, err := substrait.ConvertExpr(tt.schema, bound, true)
+			_, result, err := substrait.ConvertExpr(tt.schema, bound)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result.String())
 		})
@@ -206,7 +206,7 @@ func TestTransformPredicatesAreRejected(t *testing.T) {
 		bound, err := predicate.Bind(sc, true)
 		require.NoError(t, err)
 
-		_, _, err = substrait.ConvertExpr(sc, bound, true)
+		_, _, err = substrait.ConvertExpr(sc, bound)
 		require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 		assert.ErrorContains(t, err, "transformed terms")
 	}
@@ -263,7 +263,7 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 			bound, err := iceberg.BindExpr(sc, tt.predicate, true)
 			require.NoError(t, err)
 
-			_, converted, err := substrait.ConvertExpr(sc, bound, true)
+			_, converted, err := substrait.ConvertExpr(sc, bound)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantExpr, converted.String())
 		})
@@ -284,7 +284,7 @@ func TestVariantSchemaConversionDoesNotPanic(t *testing.T) {
 	pred, err := iceberg.EqualTo(iceberg.Reference("id"), int64(1)).Bind(sc, true)
 	require.NoError(t, err)
 
-	_, expr, err := substrait.ConvertExpr(sc, pred, true)
+	_, expr, err := substrait.ConvertExpr(sc, pred)
 	require.NoError(t, err)
 	assert.NotNil(t, expr)
 }
@@ -303,7 +303,7 @@ func TestBBoxPredicateConvertsToTypedError(t *testing.T) {
 		iceberg.BoundingBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10}).Bind(sc, true)
 	require.NoError(t, err)
 
-	_, _, err = substrait.ConvertExpr(sc, bound, true)
+	_, _, err = substrait.ConvertExpr(sc, bound)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }

@@ -55,9 +55,8 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 
 	planFiles := plan.Files()
 	result := maintenance.OrphanCleanupResult{
-		OrphanFileLocations: planFiles,
-		OrphanFiles:         plan.OrphanFiles(),
-		TotalSizeBytes:      plan.TotalSizeBytes(),
+		OrphanFiles:    plan.OrphanFiles(),
+		TotalSizeBytes: plan.TotalSizeBytes(),
 	}
 	cliResult := buildCleanOrphanFilesResult(tbl, result, cmd.DryRun)
 

@@ -701,7 +701,7 @@ func (s *SqliteCatalogTestSuite) TestGenuineV0RowSurvivesMigrationForCommitAndRe
 		var got sql.NullString
 		qErr := sqldb.QueryRow(
 			`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
-			"default", nsStr, catalog.TableNameFromIdent(tblID),
+			"default", nsStr, catalog.ObjectNameFromIdent(tblID),
 		).Scan(&got)
 		s.Require().NoError(qErr)
 
@@ -726,7 +726,7 @@ func (s *SqliteCatalogTestSuite) TestGenuineV0RowSurvivesMigrationForCommitAndRe
 	_, err = sqldb.Exec(
 		`UPDATE iceberg_tables SET iceberg_type = NULL `+
 			`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
-		"default", nsStr, catalog.TableNameFromIdent(tblID),
+		"default", nsStr, catalog.ObjectNameFromIdent(tblID),
 	)
 	s.Require().NoError(err)
 
@@ -1068,7 +1068,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableWithGivenLocation() {
 
 	for _, tt := range tests {
 		ns := catalog.NamespaceFromIdent(tt.tblID)
-		tblName := catalog.TableNameFromIdent(tt.tblID)
+		tblName := catalog.ObjectNameFromIdent(tt.tblID)
 
 		location := fmt.Sprintf("file://%s/%s.db/%s-given",
 			s.warehouse, tt.cat.Name(), tblName)

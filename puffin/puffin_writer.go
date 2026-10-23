@@ -91,8 +91,9 @@ func NewWriter(w io.Writer) (*Writer, error) {
 }
 
 // SetProperties merges the provided properties into the file-level properties
-// written to the footer. Can be called multiple times before Finish.
-func (w *Writer) AddProperties(props map[string]string) error {
+// written to the footer. Repeated calls overwrite matching keys; use
+// ClearProperties to remove previously set custom properties.
+func (w *Writer) SetProperties(props map[string]string) error {
 	if w.done {
 		return errors.New("puffin: cannot set properties: writer already finalized")
 	}
