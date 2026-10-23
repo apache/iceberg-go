@@ -239,7 +239,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	oldDataPath := tbl.Location() + "/data/old-data.parquet"
 	writeParquetFile(t, oldDataPath, arrowSc, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{oldDataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{oldDataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 

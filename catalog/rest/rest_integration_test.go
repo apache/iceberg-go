@@ -385,7 +385,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	defer mustFS(s.T(), tbl).Remove(pqfile)
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{pqfile}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 
@@ -465,10 +465,10 @@ func (s *RestIntegrationSuite) TestMultiTableCommit() {
 
 	// Build transactions that add data files to each table.
 	tx1 := tbl1.NewTransaction()
-	s.Require().NoError(tx1.AddFiles(s.ctx, []string{pq1}, nil, false))
+	s.Require().NoError(tx1.AddDataFilesByPath(s.ctx, []string{pq1}, nil, false))
 
 	tx2 := tbl2.NewTransaction()
-	s.Require().NoError(tx2.AddFiles(s.ctx, []string{pq2}, nil, false))
+	s.Require().NoError(tx2.AddDataFilesByPath(s.ctx, []string{pq2}, nil, false))
 
 	// Commit both atomically via MultiTableTransaction.
 	mtx, err := catalog.NewMultiTableTransaction(s.cat)

@@ -268,7 +268,7 @@ func (s *RestIntegrationSuite) createScanPlanningTable(cat *rest.Catalog, ident 
 	s.T().Cleanup(func() { s.Require().NoError(mustFS(s.T(), tbl).Remove(dataPath)) })
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{dataPath}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{dataPath}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 	s.Require().NotNil(updated.CurrentSnapshot())

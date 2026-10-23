@@ -3497,7 +3497,7 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 // stored ARROW:schema, as Java/Spark writers produce. geoarrow-go maps the
 // Parquet GEOMETRY logical type to geoarrow.wkb on read, so the file projects
 // onto a matching geometry column. A binary table column rejects it, both on
-// read and in the FileToDataFile (AddFiles) schema check: geo types are
+// read and in the FileToDataFile (AddDataFilesByPath) schema check: geo types are
 // deliberately not promotable to or from binary (see iceberg.PromoteType and
 // https://github.com/apache/iceberg-go/issues/2193), and the binary subtests
 // assert that rejection.
@@ -3603,7 +3603,7 @@ func TestGeoParquetReadWithoutStoredSchema(t *testing.T) {
 		assert.ErrorContains(t, err, "cannot promote geometry(srid:4326) to binary")
 	})
 
-	t.Run("AddFiles schema check rejects binary column", func(t *testing.T) {
+	t.Run("AddDataFilesByPath schema check rejects binary column", func(t *testing.T) {
 		binarySchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.PrimitiveTypes.Binary, Required: false})
 		_, err := table.FileToDataFile(context.Background(), iceio.LocalFS{}, path, binarySchema, *iceberg.UnpartitionedSpec, 0, nil)
 		require.Error(t, err)

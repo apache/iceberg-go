@@ -297,7 +297,7 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	}(fs, pqfile)
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{pqfile}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 

@@ -158,7 +158,7 @@ func TestWritePathsReturnErrorForReadOnlyIO(t *testing.T) {
 		{
 			name: "add files",
 			run: func(ctx context.Context, tbl *Table) error {
-				return tbl.NewTransaction().AddFiles(ctx, []string{
+				return tbl.NewTransaction().AddDataFilesByPath(ctx, []string{
 					"file:///tmp/read-only-write/add-files.parquet",
 				}, nil, false)
 			},
