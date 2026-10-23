@@ -310,6 +310,29 @@ func TestDecodeScanTasksDerivesDeletionVectorTargetWhenOmitted(t *testing.T) {
 	assert.Equal(t, new("s3://bucket/table/data.parquet"), tasks[0].DeletionVectorFiles[0].ReferencedDataFile())
 }
 
+func TestDecodeScanTasksSharesDerivedDeletionVector(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	wire := validScanTasksWire()
+	wire.DeleteFiles[0].FileFormat = "PUFFIN"
+	wire.DeleteFiles[0].ContentOffset = new(int64(10))
+	wire.DeleteFiles[0].ContentSizeInBytes = new(int64(20))
+	wire.FileScanTasks[0].DeleteFileReferences = []int{0}
+	// Two file-scan tasks for the same data file share a DV without an
+	// explicit referenced-data-file on the REST wire.
+	wire.FileScanTasks = append(wire.FileScanTasks, wire.FileScanTasks[0])
+
+	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	require.Len(t, tasks[1].DeletionVectorFiles, 1)
+	assert.Equal(t, new("s3://bucket/table/data.parquet"),
+		tasks[0].DeletionVectorFiles[0].ReferencedDataFile())
+	assert.Same(t, tasks[0].DeletionVectorFiles[0], tasks[1].DeletionVectorFiles[0])
+}
+
 func TestRESTValueMapMatchesJavaContentFileParser(t *testing.T) {
 	t.Parallel()
 
