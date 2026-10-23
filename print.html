@@ -2585,6 +2585,9 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Catalog identifier helper renamed.</strong> <code>catalog.TableNameFromIdent</code> is removed. Use <code>catalog.ObjectNameFromIdent</code> for tables, views, and functions.</p>
+</li>
+<li>
 <p><strong>Substrait expression conversion no longer takes case sensitivity.</strong> <code>substrait.ConvertExpr(schema, expression, caseSensitive)</code> becomes <code>substrait.ConvertExpr(schema, expression)</code>. Case sensitivity remains part of expression binding.</p>
 </li>
 <li>
