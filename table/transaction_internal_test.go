@@ -1174,7 +1174,9 @@ func TestTransactionEntryPointsRejectNilAndBrokenTransaction(t *testing.T) {
 		{"Append", func(txn *Transaction) error { return txn.Append(ctx, nil, nil) }},
 		{"AddDataFiles", func(txn *Transaction) error { return txn.AddDataFiles(ctx, []iceberg.DataFile{dataFile}, nil) }},
 		{"AddFiles", func(txn *Transaction) error { return txn.AddFiles(ctx, []string{"file://a.parquet"}, nil, false) }},
-		{"ReplaceDataFilesByPath", func(txn *Transaction) error { return txn.ReplaceDataFilesByPath(ctx, []string{"a"}, []string{"b"}, nil) }},
+		{"ReplaceDataFilesByPath", func(txn *Transaction) error {
+			return txn.ReplaceDataFilesByPath(ctx, []string{"a"}, []string{"b"}, nil)
+		}},
 		{"ReplaceDataFiles", func(txn *Transaction) error {
 			return txn.ReplaceDataFiles(ctx, []iceberg.DataFile{dataFile}, nil, nil)
 		}},
