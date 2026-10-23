@@ -154,7 +154,7 @@ type glueAPI interface {
 	UpdateDatabase(ctx context.Context, params *glue.UpdateDatabaseInput, optFns ...func(*glue.Options)) (*glue.UpdateDatabaseOutput, error)
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.PurgeableCatalog = (*Catalog)(nil)
 
 type Catalog struct {
 	glueSvc   glueAPI

@@ -184,7 +184,7 @@ func validateIdentifierParts(ident table.Identifier, identifierName, componentNa
 // Catalog is a filesystem-based Iceberg catalog that requires no external
 // metastore. All state lives on disk as directories and versioned JSON
 // metadata files. Currently only local filesystem paths are supported.
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.PurgeableCatalog = (*Catalog)(nil)
 
 type Catalog struct {
 	name       string

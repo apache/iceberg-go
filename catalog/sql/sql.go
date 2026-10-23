@@ -383,7 +383,7 @@ func isRetryableSerializableError(err error) bool {
 		strings.Contains(msg, "ORA-00060")
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.PurgeableCatalog = (*Catalog)(nil)
 
 type Catalog struct {
 	db            *bun.DB

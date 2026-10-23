@@ -51,7 +51,7 @@ func init() {
 	}))
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.PurgeableCatalog = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient

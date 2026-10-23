@@ -168,11 +168,11 @@ type TransactionalCatalog interface {
 	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
 }
 
-// PurgeableTable is an optional interface that catalogs can implement
+// PurgeableCatalog is an optional interface that catalogs can implement
 // to support physical table deletion (catalog entry + underlying files).
 // Callers should check for this capability via a type assertion:
 //
-//	if purger, ok := cat.(catalog.PurgeableTable); ok {
+//	if purger, ok := cat.(catalog.PurgeableCatalog); ok {
 //	    err := purger.PurgeTable(ctx, ident)
 //	}
 //
@@ -187,7 +187,7 @@ type TransactionalCatalog interface {
 // Any file-deletion, directory walk, or listing errors encountered are logged
 // as warnings, and the operation succeeds (returns nil) so that the catalog drop
 // remains the single source of truth.
-type PurgeableTable interface {
+type PurgeableCatalog interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
 }
 
