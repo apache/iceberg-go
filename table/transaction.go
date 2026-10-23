@@ -892,6 +892,13 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit))
 	}
 
+	// A no-op expiry must not pin the commit branch, which would stop the
+	// transaction's other updates from rebasing on retry. apply still
+	// rejects a transaction that has already been committed.
+	if len(updates) == 0 {
+		return t.apply(nil, nil)
+	}
+
 	return t.applyPinned(updates, reqs, pinned)
 }
 
