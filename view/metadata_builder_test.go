@@ -246,6 +246,45 @@ func TestNewVersion_RepresentationValidation(t *testing.T) {
 	}
 }
 
+func TestNewVersionCopiesInputSlices(t *testing.T) {
+	representations := Representations{
+		NewRepresentation("SELECT 1", "spark"),
+		NewRepresentation("SELECT 2", "trino"),
+	}
+	defaultNS := table.Identifier{"analytics", "reporting"}
+
+	version, err := NewVersion(1, 0, representations, defaultNS)
+	require.NoError(t, err)
+
+	// These mutations would otherwise change an already validated version,
+	// including making the representation dialects duplicate.
+	representations[0].Sql = "SELECT changed"
+	representations[1].Dialect = "spark"
+	defaultNS[0] = "other"
+	defaultNS[1] = "schema"
+
+	assert.Equal(t, []Representation{
+		NewRepresentation("SELECT 1", "spark"),
+		NewRepresentation("SELECT 2", "trino"),
+	}, version.Representations)
+	assert.Equal(t, table.Identifier{"analytics", "reporting"}, version.DefaultNamespace)
+
+	// Neither side should share the backing storage with the other.
+	version.Representations[0].Sql = "SELECT from version"
+	version.DefaultNamespace[0] = "version"
+	assert.Equal(t, "SELECT changed", representations[0].Sql)
+	assert.Equal(t, "other", defaultNS[0])
+}
+
+func TestNewVersionFromSQLCopiesNamespace(t *testing.T) {
+	defaultNS := table.Identifier{"analytics"}
+	version, err := NewVersionFromSQL(1, 0, "SELECT 1", defaultNS)
+	require.NoError(t, err)
+
+	defaultNS[0] = "other"
+	assert.Equal(t, table.Identifier{"analytics"}, version.DefaultNamespace)
+}
+
 func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
 	invalidVersion := &Version{
 		VersionID: 1,

@@ -54,9 +54,18 @@ func NormalizeVariantPath(fields []string) string {
 // writeRFC9535Escaped writes directly to the path builder, avoiding a temporary
 // string for each escaped member. Preserve the rune-based escaping semantics.
 func writeRFC9535Escaped(b *strings.Builder, name string) {
-	if strings.IndexFunc(name, func(r rune) bool {
-		return r < 0x20 || r == '\'' || r == '\\'
-	}) < 0 {
+	// Only ASCII controls, quotes and backslashes require escaping.
+	// Scan bytes before decoding runes for the uncommon escaped case.
+	needsEscape := false
+	for i := range len(name) {
+		c := name[i]
+		if c < 0x20 || c == '\'' || c == '\\' {
+			needsEscape = true
+
+			break
+		}
+	}
+	if !needsEscape {
 		b.WriteString(name)
 
 		return
