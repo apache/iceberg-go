@@ -21,18 +21,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
-type AwsProperties map[string]string
+type AWSProperties map[string]string
 
 type Option func(*options)
 
-// WithAwsConfig sets the AWS configuration for the catalog.
-func WithAwsConfig(cfg aws.Config) Option {
+// WithAWSConfig sets the AWS configuration for the catalog.
+func WithAWSConfig(cfg aws.Config) Option {
 	return func(o *options) {
 		o.awsConfig = cfg
 	}
 }
 
-func WithAwsProperties(props AwsProperties) Option {
+func WithAWSProperties(props AWSProperties) Option {
 	return func(o *options) {
 		o.awsProperties = props
 	}
@@ -40,5 +40,5 @@ func WithAwsProperties(props AwsProperties) Option {
 
 type options struct {
 	awsConfig     aws.Config
-	awsProperties AwsProperties
+	awsProperties AWSProperties
 }

@@ -257,7 +257,7 @@ func TestArgsParsing(t *testing.T) {
 			name: "aws-profile flag",
 			args: []string{"--catalog", "glue", "--aws-profile", "my-profile", "list"},
 			check: func(t *testing.T, a Args) {
-				assert.Equal(t, "my-profile", a.AwsProfile)
+				assert.Equal(t, "my-profile", a.AWSProfile)
 			},
 		},
 		{
@@ -637,18 +637,18 @@ func TestMergeConfSQLOptions(t *testing.T) {
 	})
 }
 
-func TestMergeConfAwsProfile(t *testing.T) {
-	fileCfg := &config.CatalogConfig{AwsProfile: "file-profile"}
+func TestMergeConfAWSProfile(t *testing.T) {
+	fileCfg := &config.CatalogConfig{AWSProfile: "file-profile"}
 
 	t.Run("file value applied when flag absent", func(t *testing.T) {
 		var a Args
 		mergeConf(fileCfg, &a, map[string]bool{})
-		assert.Equal(t, "file-profile", a.AwsProfile)
+		assert.Equal(t, "file-profile", a.AWSProfile)
 	})
 
 	t.Run("cli value preserved when flag explicit", func(t *testing.T) {
-		a := Args{AwsProfile: "cli-profile"}
+		a := Args{AWSProfile: "cli-profile"}
 		mergeConf(fileCfg, &a, map[string]bool{"aws-profile": true})
-		assert.Equal(t, "cli-profile", a.AwsProfile)
+		assert.Equal(t, "cli-profile", a.AWSProfile)
 	})
 }
