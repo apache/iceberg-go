@@ -1032,7 +1032,7 @@ func newBoundSetPredicate[T LiteralType](op Operation, term BoundTerm, lits lite
 type boundSetPredicate[T LiteralType] struct {
 	op         Operation
 	term       BoundTerm
-	lits       Set[Literal]
+	lits       literalSet
 	minLiteral Literal
 	maxLiteral Literal
 	hasExtrema bool

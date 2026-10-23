@@ -32,21 +32,30 @@ var (
 
 func BenchmarkAddSurvivorWithSpec(b *testing.B) {
 	for _, fields := range []int{1, 8, 32} {
-		b.Run(fmt.Sprintf("fields=%d", fields), func(b *testing.B) {
-			partition := make(map[int]any, fields)
-			for i := range fields {
-				partition[1000+i] = i
-			}
+		for _, kind := range []string{"int32", "string", "date"} {
+			b.Run(fmt.Sprintf("fields=%d/%s", fields, kind), func(b *testing.B) {
+				partition := make(map[int]any, fields)
+				for i := range fields {
+					switch kind {
+					case "int32":
+						partition[1000+i] = int32(i * 5)
+					case "string":
+						partition[1000+i] = fmt.Sprintf("partition-%d", i)
+					case "date":
+						partition[1000+i] = iceberg.Date(20000 + i)
+					}
+				}
 
-			survey := compaction.NewSurvivorSurvey()
-			b.ReportAllocs()
-			b.ResetTimer()
-			for range b.N {
-				survey.AddSurvivorWithSpec(1, partition, 10)
-			}
-			b.StopTimer()
-			benchmarkSurvivorSurvey = survey
-		})
+				survey := compaction.NewSurvivorSurvey()
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					survey.AddSurvivorWithSpec(1, partition, 10)
+				}
+				b.StopTimer()
+				benchmarkSurvivorSurvey = survey
+			})
+		}
 	}
 }
 

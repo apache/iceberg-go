@@ -240,7 +240,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		f.variantFieldIDs = tblutils.VariantFieldIDsFromSchema(f.fileSchema)
 	}
 
-	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
+	f.statsCols, err = computeStatsPlan(f.fileSchema, metricsPropsFor(f.content, meta.props))
 	if err != nil {
 		stopCount()
 

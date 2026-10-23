@@ -38,46 +38,55 @@ func BenchmarkPlanDataManifestTasks(b *testing.B) {
 		{manifestCount: 32, entryCount: 1_000},
 		{manifestCount: 8, entryCount: 10_000},
 	} {
-		b.Run(fmt.Sprintf("manifests=%d/entries=%d", workload.manifestCount, workload.entryCount), func(b *testing.B) {
-			scan, schema, manifests, posDeleteIndex, dvIndex, eqDeleteIndex := newPlanTasksBenchmarkFixture(b, workload.manifestCount, workload.entryCount)
+		for _, filter := range []struct {
+			name string
+			expr iceberg.BooleanExpression
+		}{
+			{name: "always_true", expr: iceberg.AlwaysTrue{}},
+			{name: "real_predicate", expr: iceberg.GreaterThan(iceberg.Reference("id"), int32(0))},
+		} {
+			b.Run(fmt.Sprintf("filter=%s/manifests=%d/entries=%d", filter.name, workload.manifestCount, workload.entryCount), func(b *testing.B) {
+				scan, schema, manifests, posDeleteIndex, dvIndex, eqDeleteIndex := newPlanTasksBenchmarkFixture(b, workload.manifestCount, workload.entryCount)
+				scan.rowFilter = filter.expr
 
-			for _, mode := range []struct {
-				name string
-				plan func(context.Context) ([]FileScanTask, error)
-			}{
-				{
-					name: "buffered",
-					plan: func(ctx context.Context) ([]FileScanTask, error) {
-						return planBufferedDataManifestTasks(scan, ctx, manifests, schema,
-							posDeleteIndex, dvIndex, eqDeleteIndex)
+				for _, mode := range []struct {
+					name string
+					plan func(context.Context) ([]FileScanTask, error)
+				}{
+					{
+						name: "buffered",
+						plan: func(ctx context.Context) ([]FileScanTask, error) {
+							return planBufferedDataManifestTasks(scan, ctx, manifests, schema,
+								posDeleteIndex, dvIndex, eqDeleteIndex)
+						},
 					},
-				},
-				{
-					name: "streamed",
-					plan: func(ctx context.Context) ([]FileScanTask, error) {
-						return scan.planDataManifestTasks(ctx, manifests, schema,
-							minSequenceNum(manifests), posDeleteIndex, dvIndex, eqDeleteIndex)
+					{
+						name: "streamed",
+						plan: func(ctx context.Context) ([]FileScanTask, error) {
+							return scan.planDataManifestTasks(ctx, manifests, schema,
+								minSequenceNum(manifests), posDeleteIndex, dvIndex, eqDeleteIndex)
+						},
 					},
-				},
-			} {
-				b.Run(mode.name, func(b *testing.B) {
-					b.ReportAllocs()
-					b.ResetTimer()
-					for b.Loop() {
-						tasks, err := mode.plan(context.Background())
-						if err != nil {
-							b.Fatal(err)
+				} {
+					b.Run(mode.name, func(b *testing.B) {
+						b.ReportAllocs()
+						b.ResetTimer()
+						for b.Loop() {
+							tasks, err := mode.plan(context.Background())
+							if err != nil {
+								b.Fatal(err)
+							}
+							planTasksBenchmarkSink = len(tasks)
+							runtime.KeepAlive(tasks)
 						}
-						planTasksBenchmarkSink = len(tasks)
-						runtime.KeepAlive(tasks)
-					}
-				})
-			}
-			if planTasksBenchmarkSink != workload.manifestCount*workload.entryCount {
-				b.Fatalf("planned %d tasks, want %d", planTasksBenchmarkSink,
-					workload.manifestCount*workload.entryCount)
-			}
-		})
+					})
+				}
+				if planTasksBenchmarkSink != workload.manifestCount*workload.entryCount {
+					b.Fatalf("planned %d tasks, want %d", planTasksBenchmarkSink,
+						workload.manifestCount*workload.entryCount)
+				}
+			})
+		}
 	}
 }
 

@@ -35,8 +35,7 @@ import (
 )
 
 func TestS3Warehouse(t *testing.T) {
-	_, err := recipe.Start(t)
-	require.NoError(t, err)
+	require.NoError(t, recipe.Start(t))
 
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                ":memory:",
@@ -67,8 +66,7 @@ func TestS3Warehouse(t *testing.T) {
 }
 
 func TestS3WarehouseNoLocation(t *testing.T) {
-	_, err := recipe.Start(t)
-	require.NoError(t, err)
+	require.NoError(t, recipe.Start(t))
 
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                ":memory:",

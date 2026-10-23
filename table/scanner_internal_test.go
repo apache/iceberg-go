@@ -1574,6 +1574,47 @@ func TestBuildPartitionEvaluatorMatchesPartitionValues(t *testing.T) {
 	assert.False(t, matches)
 }
 
+type noPartitionAccessDataFile struct {
+	iceberg.DataFile
+}
+
+func (noPartitionAccessDataFile) Partition() map[int]any {
+	panic("partition should not be read")
+}
+
+func TestBuildPartitionEvaluatorAlwaysTrue(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_part",
+		Transform: iceberg.IdentityTransform{},
+	})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	metadata, err := NewMetadata(
+		schema, &spec, UnsortedSortOrder, "s3://test-bucket/test_table", iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	partitionFilters := newKeyDefaultMapWrapErr(func(int) (iceberg.BooleanExpression, error) {
+		return iceberg.AlwaysTrue{}, nil
+	})
+	evaluator, err := buildPartitionEvaluator(spec.ID(), metadata, schema, partitionFilters, true)
+	require.NoError(t, err)
+
+	matches, err := evaluator(noPartitionAccessDataFile{})
+	require.NoError(t, err)
+	assert.True(t, matches)
+
+	filterErr := errors.New("partition filter failed")
+	partitionFilters = newKeyDefaultMapWrapErr(func(int) (iceberg.BooleanExpression, error) {
+		return iceberg.AlwaysTrue{}, filterErr
+	})
+	_, err = buildPartitionEvaluator(spec.ID(), metadata, schema, partitionFilters, true)
+	require.ErrorIs(t, err, filterErr)
+}
+
 func TestTimeTravelManifestPruningUsesSnapshotSchema(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
 		SourceIDs: []int{1},
@@ -2412,6 +2453,41 @@ func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestArrowScanFiltersMissingColumnWithoutDefault checks that rows of a file
+// written before an optional column was added read the column as null, so a
+// filter matches them as it would a stored null.
+func TestArrowScanFiltersMissingColumnWithoutDefault(t *testing.T) {
+	tbl := buildV3TableWithRows(t, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"x"}, iceberg.PrimitiveTypes.Float64, "", false, nil).
+		Commit())
+	var err error
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	x := iceberg.Reference("x")
+	for _, tt := range []struct {
+		name     string
+		filter   iceberg.BooleanExpression
+		expected int64
+	}{
+		{"is null", iceberg.IsNull(x), 2},
+		{"not null", iceberg.NotNull(x), 0},
+		{"is nan", iceberg.IsNaN(x), 0},
+		{"not nan", iceberg.NotNaN(x), 2},
+		{"not is nan", iceberg.NewNot(iceberg.IsNaN(x)), 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tbl.Scan(WithRowFilter(tt.filter)).ToArrowTable(t.Context())
+			require.NoError(t, err)
+			defer result.Release()
+			assert.Equal(t, tt.expected, result.NumRows())
+		})
+	}
 }
 
 func TestPlanDataManifestTasksHandlesInaccurateCounts(t *testing.T) {

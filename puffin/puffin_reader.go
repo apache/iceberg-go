@@ -20,6 +20,7 @@ package puffin
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -28,7 +29,6 @@ import (
 	"maps"
 	"math"
 	"slices"
-	"sort"
 
 	"github.com/pierrec/lz4/v4"
 )
@@ -620,29 +620,36 @@ func (r *Reader) ReadAllBlobs() ([]*BlobData, error) {
 		return nil, nil
 	}
 
-	// Create index mapping to preserve original order
-	type indexedBlob struct {
-		index int
-		meta  BlobMetadata
-	}
-	indexed := make([]indexedBlob, len(footer.Blobs))
-	for i, meta := range footer.Blobs {
-		indexed[i] = indexedBlob{index: i, meta: meta}
-	}
+	// Footer metadata is usually already in offset order. Only allocate
+	// and sort indexes if it is not, keeping reads in physical order.
+	var order []int
+	for i := 1; i < len(footer.Blobs); i++ {
+		if footer.Blobs[i-1].Offset > footer.Blobs[i].Offset {
+			order = make([]int, len(footer.Blobs))
+			for j := range order {
+				order[j] = j
+			}
+			slices.SortFunc(order, func(a, b int) int {
+				return cmp.Compare(footer.Blobs[a].Offset, footer.Blobs[b].Offset)
+			})
 
-	// Sort by offset for sequential I/O
-	sort.Slice(indexed, func(i, j int) bool {
-		return indexed[i].meta.Offset < indexed[j].meta.Offset
-	})
-
-	// Read blobs in offset order, store in original order
-	results := make([]*BlobData, len(footer.Blobs))
-	for _, ib := range indexed {
-		data, err := r.readBlobData(ib.meta)
-		if err != nil {
-			return nil, fmt.Errorf("puffin: read blob %d: %w", ib.index, err)
+			break
 		}
-		results[ib.index] = &BlobData{Metadata: cloneBlobMetadata(ib.meta), Data: data}
+	}
+
+	// Read blobs in offset order, store in original order.
+	results := make([]*BlobData, len(footer.Blobs))
+	for i := range footer.Blobs {
+		index := i
+		if order != nil {
+			index = order[i]
+		}
+		meta := footer.Blobs[index]
+		data, err := r.readBlobData(meta)
+		if err != nil {
+			return nil, fmt.Errorf("puffin: read blob %d: %w", index, err)
+		}
+		results[index] = &BlobData{Metadata: cloneBlobMetadata(meta), Data: data}
 	}
 
 	return results, nil

@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"math"
@@ -85,7 +84,7 @@ func (i InspectTable) inspectFiles(
 	allSnapshots bool,
 	includeManifest func(iceberg.ManifestFile) bool,
 ) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
@@ -123,29 +122,25 @@ func (i InspectTable) manifestEntryReader(
 	includeManifest func(iceberg.ManifestFile) bool,
 	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
 ) (array.RecordReader, error) {
-	snapshot := i.tbl.metadata.CurrentSnapshot()
+	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
 	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
-	}
 
-	manifestFS := sharedSnapshotManifestFSF(i.tbl.fsF)
-	manifestSet, err := i.tbl.manifestSetWithFSF(ctx, *snapshot, manifestFS)
+	provider := i.tbl.ManifestProvider()
+	manifests, err := provider.Manifests(ctx, *snapshot)
 	if err != nil {
 		return nil, err
 	}
-	fs, err := manifestFS(ctx)
+	fs, err := provider.FS(ctx)
 	if err != nil {
 		return nil, err
 	}
-	manifests := manifestSet.allManifests()
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
 		func(yield func(iceberg.ManifestFile, error) bool) {
-			for _, manifest := range manifests {
+			for manifest := range manifests {
 				if !yield(manifest, nil) {
 					return
 				}
@@ -163,16 +158,13 @@ func (i InspectTable) allManifestEntryReader(
 	includeManifest func(iceberg.ManifestFile) bool,
 	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
 ) (array.RecordReader, error) {
-	snapshots := i.tbl.metadata.Snapshots()
+	snapshots := i.tbl.Metadata().Snapshots()
 	if len(snapshots) == 0 {
 		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
 	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
-	}
 
-	manifestFS := sharedSnapshotManifestFSF(i.tbl.fsF)
-	fs, err := manifestFS(ctx)
+	provider := i.tbl.ManifestProvider()
+	fs, err := provider.FS(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -180,29 +172,7 @@ func (i InspectTable) allManifestEntryReader(
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
 		func(yield func(iceberg.ManifestFile, error) bool) {
-			seen := make(map[string]struct{})
-			for _, snapshot := range snapshots {
-				if err := ctx.Err(); err != nil {
-					yield(nil, err)
-
-					return
-				}
-				manifestSet, err := i.tbl.manifestSetWithFSF(ctx, snapshot, manifestFS)
-				if err != nil {
-					yield(nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err))
-
-					return
-				}
-				for _, manifest := range manifestSet.allManifests() {
-					if _, ok := seen[manifest.FilePath()]; ok {
-						continue
-					}
-					seen[manifest.FilePath()] = struct{}{}
-					if !yield(manifest, nil) {
-						return
-					}
-				}
-			}
+			streamSnapshotManifests(ctx, snapshots, provider.cachedSet, provider.set, yield)
 		}), nil
 }
 
@@ -546,7 +516,15 @@ type inspectContentFileBuilder struct {
 	referencedDataFile *array.StringBuilder
 	contentOffset      *array.Int64Builder
 	contentSize        *array.Int64Builder
-	mapFieldIDs        []int
+	// One sorted key-set per statistics column, scoped to this record builder.
+	// Most files in a table use the same metric field IDs. A separate cache
+	// prevents unlike columns from evicting each other's key order.
+	columnSizeFieldIDs []int
+	valueCountFieldIDs []int
+	nullCountFieldIDs  []int
+	nanCountFieldIDs   []int
+	lowerBoundFieldIDs []int
+	upperBoundFieldIDs []int
 }
 
 type inspectPartitionBuilder struct {
@@ -555,11 +533,12 @@ type inspectPartitionBuilder struct {
 }
 
 type inspectPartitionFieldBuilder struct {
-	id        int
-	name      string
-	typ       iceberg.Type
-	arrowType arrow.DataType
-	builder   array.Builder
+	id          int
+	name        string
+	typ         iceberg.Type
+	arrowType   arrow.DataType
+	builder     array.Builder
+	appendValue func(any) error
 }
 
 func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
@@ -677,23 +656,23 @@ func (b *inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	b.recordCount.Append(file.Count())
 	b.fileSize.Append(file.FileSizeBytes())
 	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
-	if err := appendInspectInt64Map(b.columnSizes, columnSizes, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.columnSizes, columnSizes, &b.columnSizeFieldIDs); err != nil {
 		return err
 	}
 	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(file)
-	if err := appendInspectInt64Map(b.valueCounts, valueCounts, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.valueCounts, valueCounts, &b.valueCountFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nullValueCounts, nullCounts, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.nullValueCounts, nullCounts, &b.nullCountFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nanValueCounts, nanCounts, &b.mapFieldIDs); err != nil {
+	if err := appendInspectInt64Map(b.nanValueCounts, nanCounts, &b.nanCountFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.lowerBounds, lowerBounds, &b.mapFieldIDs); err != nil {
+	if err := appendInspectBinaryMap(b.lowerBounds, lowerBounds, &b.lowerBoundFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.upperBounds, upperBounds, &b.mapFieldIDs); err != nil {
+	if err := appendInspectBinaryMap(b.upperBounds, upperBounds, &b.upperBoundFieldIDs); err != nil {
 		return err
 	}
 	appendInspectBytes(b.keyMetadata, keyMetadata)
@@ -737,13 +716,15 @@ func newInspectPartitionBuilder(
 	fields := make([]inspectPartitionFieldBuilder, 0, len(partitionType.FieldList))
 	for _, field := range partitionType.FieldList {
 		fieldBuilder := lookup[field.ID]
-		fields = append(fields, inspectPartitionFieldBuilder{
+		partitionField := inspectPartitionFieldBuilder{
 			id:        field.ID,
 			name:      field.Name,
 			typ:       field.Type,
 			arrowType: fieldBuilder.Type(),
 			builder:   fieldBuilder,
-		})
+		}
+		partitionField.appendValue = newInspectPartitionFieldAppender(partitionField)
+		fields = append(fields, partitionField)
 	}
 
 	return &inspectPartitionBuilder{builder: builder, fields: fields}, nil
@@ -752,22 +733,88 @@ func newInspectPartitionBuilder(
 func (b *inspectPartitionBuilder) append(values map[int]any) error {
 	b.builder.Append(true)
 	for _, field := range b.fields {
-		value := values[field.id]
-		if value == nil {
-			field.builder.AppendNull()
-
-			continue
-		}
-		sc, err := inspectValueScalar(value, field.typ, field.arrowType)
-		if err != nil {
-			return fmt.Errorf("partition field %q: %w", field.name, err)
-		}
-		if err := scalar.Append(field.builder, sc); err != nil {
+		if err := field.appendValue(values[field.id]); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func newInspectPartitionFieldAppender(field inspectPartitionFieldBuilder) func(any) error {
+	appendScalar := func(value any) error {
+		sc, err := inspectValueScalar(value, field.typ, field.arrowType)
+		if err != nil {
+			return fmt.Errorf("partition field %q: %w", field.name, err)
+		}
+
+		return scalar.Append(field.builder, sc)
+	}
+	appendNull := func() {
+		field.builder.AppendNull()
+	}
+
+	switch field.typ.(type) {
+	case iceberg.BooleanType:
+		if builder, ok := field.builder.(*array.BooleanBuilder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Int32Type:
+		if builder, ok := field.builder.(*array.Int32Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Int64Type:
+		if builder, ok := field.builder.(*array.Int64Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Float32Type:
+		if builder, ok := field.builder.(*array.Float32Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.Float64Type:
+		if builder, ok := field.builder.(*array.Float64Builder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.StringType:
+		if builder, ok := field.builder.(*array.StringBuilder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	case iceberg.BinaryType:
+		if builder, ok := field.builder.(*array.BinaryBuilder); ok {
+			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+		}
+	}
+
+	return func(value any) error {
+		if value == nil {
+			appendNull()
+
+			return nil
+		}
+
+		return appendScalar(value)
+	}
+}
+
+func newInspectTypedPartitionAppender[T any](
+	appendValue func(T),
+	appendNull func(),
+	appendScalar func(any) error,
+) func(any) error {
+	return func(value any) error {
+		if value == nil {
+			appendNull()
+
+			return nil
+		}
+		typed, ok := value.(T)
+		if !ok {
+			return appendScalar(value)
+		}
+		appendValue(typed)
+
+		return nil
+	}
 }
 
 func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
@@ -905,6 +952,36 @@ func inspectInt32Value(value int, name string) (int32, error) {
 	return int32(value), nil
 }
 
+// cachedInspectFieldIDs returns the sorted map keys, reusing the previous
+// ordering when the next file has exactly the same key set. Length alone is
+// not sufficient: maps with different IDs can have the same number of keys.
+// Keeping only one sorted set makes memory bounded by the widest map seen.
+func cachedInspectFieldIDs[V any](values map[int]V, cached *[]int) []int {
+	ids := *cached
+	if len(ids) == len(values) {
+		sameKeys := true
+		for _, id := range ids {
+			if _, ok := values[id]; !ok {
+				sameKeys = false
+
+				break
+			}
+		}
+		if sameKeys {
+			return ids
+		}
+	}
+
+	ids = ids[:0]
+	for id := range values {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	*cached = ids
+
+	return ids
+}
+
 func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scratch *[]int) error {
 	if values == nil {
 		builder.AppendNull()
@@ -920,12 +997,7 @@ func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scra
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want int64", builder.ItemBuilder())
 	}
-	ids := (*scratch)[:0]
-	for id := range values {
-		ids = append(ids, id)
-	}
-	*scratch = ids
-	sort.Ints(ids)
+	ids := cachedInspectFieldIDs(values, scratch)
 	for _, id := range ids {
 		key, err := inspectInt32Value(id, "field ID")
 		if err != nil {
@@ -953,12 +1025,7 @@ func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte, sc
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want binary", builder.ItemBuilder())
 	}
-	ids := (*scratch)[:0]
-	for id := range values {
-		ids = append(ids, id)
-	}
-	*scratch = ids
-	sort.Ints(ids)
+	ids := cachedInspectFieldIDs(values, scratch)
 	for _, id := range ids {
 		key, err := inspectInt32Value(id, "field ID")
 		if err != nil {

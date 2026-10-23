@@ -344,6 +344,7 @@ func reporterWithSession(t *testing.T, auth AuthManager, tr http.RoundTripper) *
 		RoundTripper:   tr,
 		authManager:    auth,
 		defaultHeaders: http.Header{},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "catalog.invalid"},
 	}
 	session.defaultHeaders.Set("Content-Type", "application/json")
 
@@ -384,6 +385,7 @@ func TestRESTMetricsReporterRefetchesCredentialPerReport(t *testing.T) {
 		RoundTripper:   &captureTransport{ch: received},
 		authManager:    &rotatingAuthManager{},
 		defaultHeaders: http.Header{},
+		catalogOrigin:  &url.URL{Scheme: "http", Host: "catalog.invalid"},
 	}
 	rep := reporterWith(t, session, d, nil)
 
@@ -552,15 +554,15 @@ func TestMetricsDispatcherCloseIsIdempotent(t *testing.T) {
 }
 
 // TestRESTMetricsReporterBuildsPathThroughProduction runs the real path
-// composition — splitIdentForPath (encodeNamespace) and endpointReportMetrics
-// .reqPath — for a multi-level namespace with segments needing escaping, so a
-// regression in that composition or in the separator handling is caught rather
-// than bypassed by a hand-built path.
+// composition — tableIdentifierPath and identifierPath.objectReqPath — for a
+// multi-level namespace with segments needing escaping, so a regression in that
+// composition or in the separator handling is caught rather than bypassed by a
+// hand-built path.
 func TestRESTMetricsReporterBuildsPathThroughProduction(t *testing.T) {
 	c := &Catalog{namespaceSeparator: defaultNamespaceSeparator}
-	ns, tbl, err := c.splitIdentForPath(table.Identifier{"a b", "d e", "t x"})
+	identPath, err := c.tableIdentifierPath(table.Identifier{"a b", "d e", "t x"})
 	require.NoError(t, err)
-	path, err := endpointReportMetrics.reqPath(ns, tbl)
+	path, err := identPath.objectReqPath(endpointReportMetrics)
 	require.NoError(t, err)
 
 	received := make(chan capturedRequest, 1)
@@ -573,8 +575,8 @@ func TestRESTMetricsReporterBuildsPathThroughProduction(t *testing.T) {
 
 	select {
 	case req := <-received:
-		// The namespace levels are percent-encoded and joined by the encoded
-		// separator (%1F); the table segment is escaped by the URL builder.
+		// Namespace levels and the table name use path encoding; namespace
+		// levels are joined by the encoded separator (%1F).
 		assert.Equal(t, "/v1/my-prefix/namespaces/a%20b%1Fd%20e/tables/t%20x/metrics", req.escapedPath)
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for the async metrics POST")

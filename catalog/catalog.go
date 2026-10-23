@@ -213,6 +213,38 @@ type Closer interface {
 	Close() error
 }
 
+// RefreshableCredentialCatalog is an optional interface implemented by catalogs that
+// support temporarily-vended credentials. Temporarily-vended credentials scope object
+// storage access to just files allowed by the user making a related request to the
+// catalog. Callers should check for this capability via a type assertion:
+//
+//	if rc, ok := cat.(catalog.RefreshableCredentialCatalog); ok {
+//	    refreshed, err := rc.RefreshTableCredentials(ctx, tbl)
+//	    if err == nil {
+//	        tbl = refreshed
+//	    }
+//	}
+//
+// Passing the type assertion does not guarantee that credentials can be vended.
+// An implementation may still return an error, for example when the catalog
+// service does not support vending credentials (the REST catalog returns
+// rest.ErrEndpointNotSupported if the server does not advertise the credentials
+// endpoint) or no longer knows the table ([ErrNoSuchTable]). On error the
+// returned table is nil, and callers should keep using the original table.
+type RefreshableCredentialCatalog interface {
+	// RefreshTableCredentials loads temporarily-vended credentials for a previously
+	// loaded table, and returns a new/modified table instance with up-to-date credentials
+	// if the catalog is using temporarily-vended credentials for this table.
+	// In this case, the instance should be able to refresh its own credentials internally
+	// making it useful for use as a long-lived instance. For tables that do
+	// not have catalog-vended storage credentials, the table can be returned with no
+	// modifications.
+	//
+	// The main use-case for this method is to be able to make externally-created table
+	// instances compatible with catalog-based credential refreshes.
+	RefreshTableCredentials(ctx context.Context, tbl *table.Table) (*table.Table, error)
+}
+
 func ToIdentifier(ident ...string) table.Identifier {
 	if len(ident) == 1 {
 		if ident[0] == "" {

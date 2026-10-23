@@ -29,7 +29,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net/http"
-	"net/url"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1033,40 +1032,13 @@ func (r *Catalog) abandonPlan(ctx context.Context, ident table.Identifier, planI
 	_ = r.CancelPlanning(cctx, ident, planID)
 }
 
-func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ...string) ([]string, error) {
-	ns, tbl, err := r.splitIdentForPath(ident)
+func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, rawExtra ...string) ([]string, error) {
+	identPath, err := r.tableIdentifierPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
-	// extra carries opaque, server-issued path segments (the plan-id). The spec
-	// puts no character restriction on them, and baseURI.JoinPath path.Cleans its
-	// arguments — so an unescaped id containing '/' would split into segments and
-	// a '..'/'.' segment would resolve to a different endpoint (e.g. ".." on the
-	// plan path lands on .../tasks). Escape each as a single literal path segment.
-	params := make([]string, 0, 2+len(extra))
-	params = append(params, ns, tbl)
-	for _, seg := range extra {
-		params = append(params, escapeOpaquePathSegment(seg))
-	}
-
-	return ep.reqPath(params...)
-}
-
-// escapeOpaquePathSegment percent-encodes an opaque string so it survives
-// url.URL.JoinPath as a single literal path segment. url.PathEscape handles '/',
-// '%', spaces, etc., but leaves a pure-dot segment ("." or "..") unescaped, which
-// JoinPath's path.Clean would then resolve as a dot-segment; encode those dots so
-// the segment is preserved verbatim.
-func escapeOpaquePathSegment(s string) string {
-	switch escaped := url.PathEscape(s); escaped {
-	case ".":
-		return "%2E"
-	case "..":
-		return "%2E%2E"
-	default:
-		return escaped
-	}
+	return identPath.objectReqPath(ep, rawExtra...)
 }
 
 func scanPlanningHeaders(idempotencyKey, accessDelegation *string, includeIdempotency bool) (map[string]string, error) {

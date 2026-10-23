@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1136,8 +1137,24 @@ func TestTruncateTransform(t *testing.T) {
 	}{
 		{10, iceberg.Int32Literal(1), iceberg.Int32Literal(0)},
 		{10, iceberg.Int32Literal(-1), iceberg.Int32Literal(-10)},
+		{10, iceberg.Int32Literal(-10), iceberg.Int32Literal(-10)},
+		{10, iceberg.Int32Literal(-11), iceberg.Int32Literal(-20)},
+		{1, iceberg.Int32Literal(math.MinInt32), iceberg.Int32Literal(math.MinInt32)},
+		{1 << 30, iceberg.Int32Literal((1 << 30) - 1), iceberg.Int32Literal(0)},
+		{(1 << 30) + 1, iceberg.Int32Literal((1 << 30) - 1), iceberg.Int32Literal(0)},
+		{math.MaxInt32, iceberg.Int32Literal(math.MaxInt32 - 1), iceberg.Int32Literal(0)},
+		{math.MaxInt32, iceberg.Int32Literal(math.MaxInt32), iceberg.Int32Literal(math.MaxInt32)},
+		{math.MaxInt32, iceberg.Int32Literal(-1), iceberg.Int32Literal(-math.MaxInt32)},
+		// The final subtraction retains signed integer wraparound at the minimum value.
+		{math.MaxInt32, iceberg.Int32Literal(math.MinInt32), iceberg.Int32Literal(2)},
 		{10, iceberg.Int64Literal(1), iceberg.Int64Literal(0)},
 		{10, iceberg.Int64Literal(-1), iceberg.Int64Literal(-10)},
+		{10, iceberg.Int64Literal(-10), iceberg.Int64Literal(-10)},
+		{10, iceberg.Int64Literal(-11), iceberg.Int64Literal(-20)},
+		{1, iceberg.Int64Literal(math.MinInt64), iceberg.Int64Literal(math.MinInt64)},
+		{10, iceberg.Int64Literal(math.MaxInt64), iceberg.Int64Literal(math.MaxInt64 - 7)},
+		{10, iceberg.Int64Literal(math.MinInt64), iceberg.Int64Literal(math.MaxInt64 - 1)},
+		{math.MaxInt32, iceberg.Int64Literal(math.MaxInt64), iceberg.Int64Literal(math.MaxInt64 - 1)},
 		{50, iceberg.DecimalLiteral{
 			Val:   decimal128.FromI64(1065),
 			Scale: 2,
@@ -1153,13 +1170,69 @@ func TestTruncateTransform(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(fmt.Sprintf("width=%d value=%v", tt.width, tt.value.Any()), func(t *testing.T) {
+		t.Run(fmt.Sprintf("type=%s/width=%d/value=%v", tt.value.Type(), tt.width, tt.value.Any()), func(t *testing.T) {
 			transform := iceberg.TruncateTransform{Width: tt.width}
+			transformer, err := transform.Transformer(tt.value.Type())
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected.Any(), transformer(tt.value.Any()))
+			assert.Nil(t, transformer(nil))
+
 			result := transform.Apply(iceberg.Optional[iceberg.Literal]{Val: tt.value, Valid: true})
 			require.True(t, result.Valid)
 			assert.Equal(t, tt.expected, result.Val)
 		})
 	}
+}
+
+func TestTruncateTransformDecimal(t *testing.T) {
+	t.Parallel()
+
+	values := []string{
+		"0", "1", "-1", "49", "-49", "50", "-50", "51", "-51",
+		"9223372036854775808", "-9223372036854775808",
+		"18446744073709551616", "-18446744073709551616",
+		"99999999999999999999999999999999999999",
+		"-99999999999999999999999999999999999999",
+	}
+	for _, width := range []int{1, 2, 3, 10, 50, 97, math.MaxInt32} {
+		transform := iceberg.TruncateTransform{Width: width}
+		for _, scale := range []int{0, 2, 9, 38} {
+			transformer, err := transform.Transformer(iceberg.DecimalTypeOf(38, scale))
+			require.NoError(t, err)
+			for _, value := range values {
+				t.Run(fmt.Sprintf("width=%d/scale=%d/value=%s", width, scale, value), func(t *testing.T) {
+					t.Parallel()
+
+					unscaled, ok := new(big.Int).SetString(value, 10)
+					require.True(t, ok)
+					input := iceberg.Decimal{Val: decimal128.FromBigInt(unscaled), Scale: scale}
+					divisor := big.NewInt(int64(width))
+					quotient := new(big.Int).Div(unscaled, divisor)
+					expected := iceberg.Decimal{
+						Val:   decimal128.FromBigInt(quotient.Mul(quotient, divisor)),
+						Scale: scale,
+					}
+
+					assert.Equal(t, expected, transformer(input))
+					result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+						Val:   iceberg.DecimalLiteral(input),
+						Valid: true,
+					})
+					require.True(t, result.Valid)
+					assert.Equal(t, iceberg.DecimalLiteral(expected), result.Val)
+					assert.Equal(t, value, input.Val.BigInt().String())
+				})
+			}
+		}
+	}
+
+	t.Run("null", func(t *testing.T) {
+		transform := iceberg.TruncateTransform{Width: 50}
+		transformer, err := transform.Transformer(iceberg.DecimalTypeOf(38, 2))
+		require.NoError(t, err)
+		assert.Nil(t, transformer(nil))
+		assert.False(t, transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: false}).Valid)
+	})
 }
 
 func TestTruncateTransformProjectStrictNumericBounds(t *testing.T) {

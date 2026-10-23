@@ -45,7 +45,6 @@ import (
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
 
 type SparkIntegrationTestSuite struct {
@@ -54,13 +53,10 @@ type SparkIntegrationTestSuite struct {
 	ctx   context.Context
 	cat   catalog.Catalog
 	props iceberg.Properties
-	stack *compose.DockerCompose
 }
 
 func (s *SparkIntegrationTestSuite) SetupSuite() {
-	var err error
-	s.stack, err = recipe.Start(s.T())
-	s.Require().NoError(err)
+	s.Require().NoError(recipe.Start(s.T()))
 }
 
 func (s *SparkIntegrationTestSuite) SetupTest() {

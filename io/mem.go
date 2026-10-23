@@ -136,18 +136,18 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 		addEntry(walkEntry{path: root, isDir: true})
 		relative := strings.TrimPrefix(key, root+"/")
-		parts := strings.Split(relative, "/")
-		for i := range parts {
-			entryPath := strings.Join(parts[:i+1], "/")
-			if root != "" {
-				entryPath = root + "/" + entryPath
-			}
-			entry := walkEntry{path: entryPath, isDir: i < len(parts)-1}
-			if !entry.isDir {
-				entry.size = int64(len(data))
-			}
-			addEntry(entry)
+		// Keep empty-root paths relative (e.g. "/a/b" is walked as "a/b").
+		filePath, start := relative, 0
+		if root != "" {
+			filePath = key
+			start = len(key) - len(relative)
 		}
+		for i := range len(relative) {
+			if relative[i] == '/' {
+				addEntry(walkEntry{path: filePath[:start+i], isDir: true})
+			}
+		}
+		addEntry(walkEntry{path: filePath, size: int64(len(data))})
 	}
 	m.mu.RUnlock()
 	if len(entriesByPath) == 0 {
@@ -167,22 +167,7 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 		paths = append(paths, entryPath)
 	}
 	sort.Slice(paths, func(i, j int) bool {
-		if paths[i] == root {
-			return true
-		}
-		if paths[j] == root {
-			return false
-		}
-
-		left := strings.Split(strings.TrimPrefix(paths[i], root+"/"), "/")
-		right := strings.Split(strings.TrimPrefix(paths[j], root+"/"), "/")
-		for index := range min(len(left), len(right)) {
-			if left[index] != right[index] {
-				return left[index] < right[index]
-			}
-		}
-
-		return len(left) < len(right)
+		return memWalkPathLess(root, paths[i], paths[j])
 	})
 
 	var skipPrefix string
@@ -214,6 +199,40 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 func memPathInRoot(path, root string) bool {
 	return root == "" || path == root || strings.HasPrefix(path, root+"/")
+}
+
+func memWalkPathLess(root, left, right string) bool {
+	if left == root {
+		return true
+	}
+	if right == root {
+		return false
+	}
+
+	left = strings.TrimPrefix(strings.TrimPrefix(left, root), "/")
+	right = strings.TrimPrefix(strings.TrimPrefix(right, root), "/")
+	for {
+		leftEnd := strings.IndexByte(left, '/')
+		rightEnd := strings.IndexByte(right, '/')
+
+		leftPart, rightPart := left, right
+		if leftEnd >= 0 {
+			leftPart = left[:leftEnd]
+		}
+		if rightEnd >= 0 {
+			rightPart = right[:rightEnd]
+		}
+
+		if leftPart != rightPart {
+			return leftPart < rightPart
+		}
+		if leftEnd < 0 || rightEnd < 0 {
+			return leftEnd < 0 && rightEnd >= 0
+		}
+
+		left = left[leftEnd+1:]
+		right = right[rightEnd+1:]
+	}
 }
 
 type memFile struct {

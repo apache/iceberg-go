@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"iter"
 	"slices"
 	"strings"
 	"sync"
@@ -75,6 +76,18 @@ func (s snapshotManifestSet) allManifests() []iceberg.ManifestFile {
 
 func (s snapshotManifestSet) dataManifests() []iceberg.ManifestFile {
 	return slices.Clone(s.data)
+}
+
+// borrowAllManifests returns the cache-owned manifest slice without copying.
+// Callers must treat the slice as read-only and must not reorder or replace entries.
+func (s snapshotManifestSet) borrowAllManifests() []iceberg.ManifestFile {
+	return s.all
+}
+
+// borrowDataManifests returns the cache-owned data-manifest slice without copying.
+// Callers must treat the slice as read-only and must not reorder or replace entries.
+func (s snapshotManifestSet) borrowDataManifests() []iceberg.ManifestFile {
+	return s.data
 }
 
 func snapshotManifestSetSize(set snapshotManifestSet) int {
@@ -205,6 +218,21 @@ func (c *snapshotManifestCache) get(
 	}
 }
 
+// tryGetComplete returns a completed manifest list without starting or joining
+// a read. Inspect can use this to keep warm-cache traversal synchronous while
+// still prefetching cache misses concurrently.
+func (c *snapshotManifestCache) tryGetComplete(snapshot Snapshot) (snapshotManifestSet, bool) {
+	if c == nil {
+		return snapshotManifestSet{}, false
+	}
+
+	c.mu.Lock()
+	manifests, ok := c.complete.Get(snapshotManifestCacheKeyFor(snapshot))
+	c.mu.Unlock()
+
+	return manifests, ok
+}
+
 func (c *snapshotManifestCache) load(
 	ctx context.Context,
 	snapshot Snapshot,
@@ -285,6 +313,62 @@ func readSnapshotManifestSet(
 	}
 
 	return newSnapshotManifestSet(manifests), nil
+}
+
+// ManifestProvider reads snapshots' manifest lists through a table's shared,
+// bounded manifest-list cache. It resolves the table FileIO once and reuses it
+// across every read on the provider, so iterating many snapshots (for example
+// the all_* metadata tables) resolves the storage backend only once. Obtain one
+// with [Table.ManifestProvider].
+//
+// A provider is meant for a single operation. The FileIO is resolved on the
+// first call and that result, success or error, is kept for the provider's
+// lifetime: if resolution fails (including because the first call's context was
+// canceled), every later call on the same provider returns that error. Get a
+// new provider from [Table.ManifestProvider] to retry.
+//
+// The zero value is not usable; callers outside this package use
+// Table.ManifestProvider. Reads honor the caller's context, and a table with no
+// configured FileIO returns an error from every method.
+type ManifestProvider struct {
+	cache *snapshotManifestCache
+	fsF   FSysF
+}
+
+// ManifestProvider returns a provider that reads this table's manifest lists
+// through its shared manifest cache, resolving the table FileIO once and reusing
+// it for every read on the returned provider.
+func (t Table) ManifestProvider() ManifestProvider {
+	return ManifestProvider{cache: t.manifestCache, fsF: sharedSnapshotManifestFSF(t.fsF)}
+}
+
+// FS returns the table FileIO, resolved once and shared with this provider's
+// manifest reads. Use it to read the entries of the manifests returned by
+// Manifests.
+func (p ManifestProvider) FS(ctx context.Context) (iceio.IO, error) {
+	return p.fsF(ctx)
+}
+
+// Manifests returns an iterator over every manifest file in the snapshot's
+// manifest list. The iterator reads the shared cache without copying it, so
+// it is cheap to range over repeatedly.
+func (p ManifestProvider) Manifests(ctx context.Context, snapshot Snapshot) (iter.Seq[iceberg.ManifestFile], error) {
+	set, err := p.set(ctx, snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	return slices.Values(set.borrowAllManifests()), nil
+}
+
+func (p ManifestProvider) set(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
+	return p.cache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
+		return readSnapshotManifestSet(loadCtx, snapshot, p.fsF)
+	})
+}
+
+func (p ManifestProvider) cachedSet(snapshot Snapshot) (snapshotManifestSet, bool) {
+	return p.cache.tryGetComplete(snapshot)
 }
 
 func sharedSnapshotManifestFSF(fsF FSysF) FSysF {

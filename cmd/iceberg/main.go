@@ -36,6 +36,11 @@ import (
 	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
+
+	// Register the AWS SigV4 signer backend so the --sigv4 / signing-region /
+	// signing-name flags work. catalog/rest itself no longer links the AWS SDK;
+	// the CLI already pulls it in via catalog/glue, so this adds no new weight.
+	_ "github.com/apache/iceberg-go/catalog/rest/sigv4"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/config"
 	_ "github.com/apache/iceberg-go/io/gocloud"
@@ -77,8 +82,9 @@ type LocationCmd struct {
 }
 
 type FilesCmd struct {
-	TableID string `arg:"positional,required" help:"full path to a table"`
-	History bool   `arg:"--history" help:"show all snapshots"`
+	TableID          string `arg:"positional,required" help:"full path to a table"`
+	History          bool   `arg:"--history" help:"show all snapshots"`
+	ScanPlanningMode string `arg:"--scan-planning-mode" help:"local walks the manifests; remote or auto lists a scan plan's files (default: follow the catalog's scan-planning-mode)"`
 }
 
 type RenameCmd struct {
@@ -331,8 +337,7 @@ func main() {
 	case args.Drop != nil:
 		runDrop(ctx, output, cat, args.Drop)
 	case args.Files != nil:
-		tbl := loadTable(ctx, output, cat, args.Files.TableID)
-		output.Files(tbl, args.Files.History)
+		runFiles(ctx, output, cat, args.Files)
 	case args.Rename != nil:
 		runRename(ctx, output, cat, args.Rename)
 	case args.Properties != nil:

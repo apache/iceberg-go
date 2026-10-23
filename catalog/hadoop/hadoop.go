@@ -45,6 +45,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/google/uuid"
 )
 
@@ -658,10 +659,8 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	if current != nil {
 		currentMetadata = current.Metadata()
 	}
-	for _, r := range reqs {
-		if err := r.Validate(currentMetadata); err != nil {
-			return nil, "", err
-		}
+	if err := internal.ValidateRequirements(ident, currentMetadata, reqs); err != nil {
+		return nil, "", err
 	}
 
 	// Step 3: Apply updates to produce new metadata.
@@ -915,7 +914,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// For Hadoop catalog, physical files walk must run BEFORE deleting the table directory root
-	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+	if purgeErr := maintenance.PurgeFiles(ctx, tbl); purgeErr != nil {
 		log.Printf("WARNING: failing to purge some files in Hadoop table %s: %v", identifier, purgeErr)
 	}
 
@@ -927,7 +926,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
-	return nil, errors.New("hadoop catalog: rename table is not supported")
+	return nil, fmt.Errorf("%w: hadoop catalog: rename table is not supported", iceberg.ErrNotImplemented)
 }
 
 func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {
@@ -936,7 +935,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	}
 
 	if len(props) > 0 {
-		return errors.New("hadoop catalog: namespace properties are not supported")
+		return fmt.Errorf("%w: hadoop catalog: namespace properties are not supported", iceberg.ErrNotImplemented)
 	}
 
 	// Raise an error if the namespace already exists
@@ -1112,7 +1111,7 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 }
 
 func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifier, _ []string, _ iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
-	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
+	return catalog.PropertiesUpdateSummary{}, fmt.Errorf("%w: hadoop catalog: namespace properties are not supported", iceberg.ErrNotImplemented)
 }
 
 // checkedMkdirAll is a helper function that checks

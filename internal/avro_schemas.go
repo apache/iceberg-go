@@ -313,6 +313,8 @@ func init() {
 				NullableNode(avro.SchemaNode{Type: "array", Items: &IntNode, Props: map[string]any{"element-id": 136}}),
 				135, withDoc("field ids used to determine row equality in equality delete files")),
 			fieldNode("sort_order_id", NullableNode(IntNode), 140, withDoc("Sort order ID")),
+			fieldNode("referenced_data_file", NullableNode(StringNode), 143,
+				withDoc("Fully qualified location of a data file that all deletes reference")),
 		},
 	})
 

@@ -43,6 +43,17 @@ const (
 	LastUpdatedSequenceNumberFieldID = 2147483539
 )
 
+// Position delete file column field IDs. Reserved IDs are Integer.MAX_VALUE - 101
+// and Integer.MAX_VALUE - 102 per the Iceberg spec (Position Delete Files).
+const (
+	// DeleteFilePathFieldID is the field ID for file_path (required string), the
+	// data file a position delete applies to. Reserved as Integer.MAX_VALUE - 101.
+	DeleteFilePathFieldID = 2147483546
+	// DeleteFilePosFieldID is the field ID for pos (required long), the ordinal
+	// of the deleted row in that file. Reserved as Integer.MAX_VALUE - 102.
+	DeleteFilePosFieldID = 2147483545
+)
+
 // Row lineage metadata column names (v3+).
 const (
 	RowIDColumnName                     = "_row_id"

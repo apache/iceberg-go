@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package maintenance
 
 import (
 	"context"
@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 )
 
 var orphanCleanupBenchmarkSink string
@@ -86,7 +86,7 @@ func BenchmarkGetReferencedFilesManifestLists(b *testing.B) {
 							i, i*1000, listPath))
 				}
 
-				meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+				meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{
 					snapshots: strings.Join(snapshotJSON, ","),
 				}))
 				if err != nil {
@@ -94,35 +94,20 @@ func BenchmarkGetReferencedFilesManifestLists(b *testing.B) {
 				}
 
 				fs := &benchmarkDelayIO{IO: baseIO, delay: time.Millisecond}
-				tbl := New(Identifier{"ns", "orphan-cleanup-benchmark"}, meta,
+				tbl := table.New(table.Identifier{"ns", "orphan-cleanup-benchmark"}, meta,
 					"metadata.json", testFSF(fs), nil)
 
 				b.ReportAllocs()
 				b.ReportMetric(float64(snapshotCount), "manifest_lists/op")
 				b.ResetTimer()
 				for b.Loop() {
-					if _, err := tbl.getReferencedFiles(context.Background(), fs, maxWorkers, true); err != nil {
+					if _, err := getReferencedFiles(context.Background(), tbl, fs, maxWorkers, true); err != nil {
 						b.Fatal(err)
 					}
 				}
 			})
 		}
 	}
-}
-
-type benchmarkDelayIO struct {
-	iceio.IO
-	delay time.Duration
-}
-
-func (fs *benchmarkDelayIO) Open(name string) (iceio.File, error) {
-	f, err := fs.IO.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	time.Sleep(fs.delay)
-
-	return f, nil
 }
 
 // BenchmarkPurgeFilesNonBulkDeletion measures the bounded fallback used when

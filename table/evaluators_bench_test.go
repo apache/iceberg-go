@@ -119,3 +119,44 @@ func manifestEvaluatorBenchmarkSummaries(fieldCount int) []iceberg.FieldSummary 
 
 	return summaries
 }
+
+func BenchmarkInclusiveMetricsUnfiltered(b *testing.B) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64})
+	lower, err := iceberg.NewLiteral(int64(0)).MarshalBinary()
+	if err != nil {
+		b.Fatal(err)
+	}
+	upper, err := iceberg.NewLiteral(int64(100)).MarshalBinary()
+	if err != nil {
+		b.Fatal(err)
+	}
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData, "mem://metrics.parquet", iceberg.ParquetFile, nil, nil, nil, 100, 1024)
+	if err != nil {
+		b.Fatal(err)
+	}
+	file := builder.ValueCounts(map[int]int64{1: 100}).NullValueCounts(map[int]int64{1: 0}).LowerBoundValues(map[int][]byte{1: lower}).UpperBoundValues(map[int][]byte{1: upper}).Build()
+	for _, tc := range []struct {
+		name string
+		expr iceberg.BooleanExpression
+	}{
+		{"always_true", iceberg.AlwaysTrue{}},
+		{"real_predicate", iceberg.GreaterThan(iceberg.Reference("id"), int64(10))},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			eval, err := newInclusiveMetricsEvaluator(schema, tc.expr, true, false)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				match, err := eval(file)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if !match {
+					b.Fatal("expected matching file")
+				}
+			}
+		})
+	}
+}

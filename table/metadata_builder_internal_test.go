@@ -1060,6 +1060,52 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 		TimestampMs: snapshot2.TimestampMs,
 	}, "expected snapshot to match added snapshot")
 	require.True(t, res.CurrentSnapshot().Equals(snapshot2))
+
+	require.Len(t, builder.snapshotLog, 2, "Build must not prune the builder's own log")
+	again, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, res.(*metadataV2).SnapshotLog, again.(*metadataV2).SnapshotLog)
+}
+
+func TestSnapshotLogAfterMovingMainBackAfterBuild(t *testing.T) {
+	// add A, set main to A, add B, set main to B, build, set main back to A, build.
+	// In the first build main moved from A to B, so A is the intermediate snapshot and
+	// that build logs [B]. Moving main back to A makes B the intermediate one, while
+	// both of A's entries stay, so the second build logs [A, A]. Before the fix, the
+	// first build wrote its pruned [B] back to the builder and the second returned [A].
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	newSnapshot := func(id int64) *Snapshot {
+		return &Snapshot{
+			SnapshotID:   id,
+			TimestampMs:  builder.base.LastUpdatedMillis() + id,
+			ManifestList: fmt.Sprintf("/snap-%d.avro", id),
+			Summary:      &Summary{Operation: OpAppend},
+			SchemaID:     &schemaID,
+		}
+	}
+
+	require.NoError(t, builder.AddSnapshot(newSnapshot(1)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	require.NoError(t, builder.AddSnapshot(newSnapshot(2)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
+	_, err := builder.Build()
+	require.NoError(t, err)
+
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	res, err := builder.Build()
+	require.NoError(t, err)
+
+	ids := make([]int64, 0, 2)
+	for entry := range res.SnapshotLogs() {
+		ids = append(ids, entry.SnapshotID)
+	}
+	require.Equal(t, []int64{1, 1}, ids)
+
+	// Committing the same updates gives the same log.
+	committed, err := UpdateTableMetadata(builder.base, builder.updates, "")
+	require.NoError(t, err)
+	require.Equal(t, slices.Collect(committed.SnapshotLogs()), slices.Collect(res.SnapshotLogs()))
 }
 
 func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
@@ -1104,6 +1150,12 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 		SnapshotID:  snapshot3ID,
 		TimestampMs: baseTimestamp + 3,
 	}}, slices.Collect(rebuilt.SnapshotLogs()))
+
+	// Building again prunes the same entries from the builder's log, which keeps them.
+	again, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.Equal(t, slices.Collect(rebuilt.SnapshotLogs()), slices.Collect(again.SnapshotLogs()))
+	require.Len(t, newBuilder.snapshotLog, 3, "Build must not prune the builder's own log")
 }
 
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
@@ -1487,6 +1539,60 @@ func TestExpireMetadataLog(t *testing.T) {
 	meta, err = newBuilder.Build()
 	require.NoError(t, err)
 	require.Len(t, meta.(*metadataV2).MetadataLog, 2)
+}
+
+func TestBuildDoesNotGrowMetadataLog(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NoError(t, builder.SetProperties(map[string]string{"test.prop": "value"}))
+
+	for range 3 {
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Len(t, meta.(*metadataV2).MetadataLog, 1)
+		require.Empty(t, builder.metadataLog, "Build must not append to the builder's own log")
+	}
+}
+
+func TestBuildWithoutChangesAddsNoMetadataLogEntry(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NotNil(t, builder.previousFileEntry, "setup: the builder must have a previous file")
+
+	for range 2 {
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Empty(t, meta.(*metadataV2).MetadataLog)
+	}
+}
+
+func TestBuildDoesNotTrimTheBuilderMetadataLog(t *testing.T) {
+	base := builderWithoutChanges(2)
+	require.NoError(t, base.SetProperties(map[string]string{MetadataPreviousVersionsMaxKey: "2"}))
+	meta1, err := base.Build()
+	require.NoError(t, err)
+
+	builder2, err := MetadataBuilderFromBase(meta1, "s3://bucket/test/location/metadata/v2.json")
+	require.NoError(t, err)
+	require.NoError(t, builder2.SetProperties(map[string]string{"test.prop": "value1"}))
+	meta2, err := builder2.Build()
+	require.NoError(t, err)
+
+	builder3, err := MetadataBuilderFromBase(meta2, "s3://bucket/test/location/metadata/v3.json")
+	require.NoError(t, err)
+	require.NoError(t, builder3.SetProperties(map[string]string{"test.prop": "value2"}))
+
+	want := []string{
+		"s3://bucket/test/location/metadata/v2.json",
+		"s3://bucket/test/location/metadata/v3.json",
+	}
+	for range 2 {
+		meta, err := builder3.Build()
+		require.NoError(t, err)
+		var got []string
+		for entry := range meta.PreviousFiles() {
+			got = append(got, entry.MetadataFile)
+		}
+		require.Equal(t, want, got)
+	}
 }
 
 func TestMetadataLogTrimsWithUpdatedProperty(t *testing.T) {
@@ -3679,6 +3785,7 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 // both the drift guard and its filler consult it.
 var sharedCloneFields = map[string]struct{}{
 	"base":               {}, // immutable snapshot, shared by design.
+	"deferredSnapshots":  {}, // immutable snapshot source with concurrency-safe caches.
 	"schemaIndex":        {}, // immutable schema references, copied on schema mutation.
 	"partitionSpecIndex": {}, // immutable index positions, copied on spec mutation.
 	"snapshotIndex":      {}, // immutable index positions, copied on snapshot mutation.

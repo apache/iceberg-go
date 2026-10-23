@@ -425,3 +425,55 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 	assert.Equal(t, []int64{1, 2, 100}, idsInTable(t, committed),
 		"the replay must inherit the peer's append alongside the compacted file")
 }
+
+// A copy-on-write delete that removes a deletion vector must fail on a concurrent append instead of retrying.
+// Without a deletion vector, the same delete still retries and both writes land.
+func TestCoWDeleteRemovingDVFailsInsteadOfReplaying(t *testing.T) {
+	cases := []struct {
+		name         string
+		seededDVs    int
+		wantAttempts int32
+	}{
+		{name: "file with a deletion vector fails on the first conflict", seededDVs: 1, wantAttempts: 1},
+		{name: "file without a deletion vector still retries", seededDVs: 0, wantAttempts: 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, cat := newNoReplayV3Table(t)
+			tbl = appendTenRows(t, tbl)
+			if tc.seededDVs > 0 {
+				tbl = mergeOnReadDelete(t, tbl, 7)
+			}
+			require.Equal(t, tc.seededDVs, liveDVCount(t, tbl))
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.SetProperties(iceberg.Properties{table.WriteDeleteModeKey: table.WriteModeCopyOnWrite}))
+			tbl, err := tx.Commit(ctx)
+			require.NoError(t, err)
+
+			staleTxn := tbl.NewTransaction()
+			require.NoError(t, staleTxn.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil))
+
+			appendRowsOnRef(t, tbl, table.MainBranch, 100)
+
+			attemptsBefore := cat.attempts.Load()
+			_, err = staleTxn.Commit(ctx)
+			assert.Equal(t, attemptsBefore+tc.wantAttempts, cat.attempts.Load())
+
+			committed, loadErr := cat.LoadTable(ctx, table.Identifier{"db", "no_replay_removals"})
+			require.NoError(t, loadErr)
+			if tc.seededDVs > 0 {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, table.ErrCommitFailed)
+				assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 8, 9, 10, 100}, idsInTable(t, committed),
+					"only the peer's append landed; the stale delete of id 2 must not have")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 100}, idsInTable(t, committed),
+					"the delete replays over the peer's append, so both writers land")
+			}
+		})
+	}
+}

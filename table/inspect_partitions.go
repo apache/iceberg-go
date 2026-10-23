@@ -19,16 +19,18 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"golang.org/x/sync/errgroup"
 )
 
 type inspectPartitionAggregate struct {
@@ -47,20 +49,50 @@ type inspectPartitionAggregate struct {
 }
 
 type inspectPartitionAggregateTree struct {
-	children  map[any]*inspectPartitionAggregateTree
-	aggregate *inspectPartitionAggregate
+	children       map[any]*inspectPartitionAggregateTree
+	binaryChildren map[string]*inspectPartitionAggregateTree
+	aggregate      *inspectPartitionAggregate
 }
 
 func newInspectPartitionAggregateTree() *inspectPartitionAggregateTree {
-	return &inspectPartitionAggregateTree{
-		children: make(map[any]*inspectPartitionAggregateTree),
+	return &inspectPartitionAggregateTree{}
+}
+
+// child uses a typed map for binary values to avoid interface-backed keys
+// during repeated lookups. Other values retain their existing key types.
+func (t *inspectPartitionAggregateTree) child(value any) (*inspectPartitionAggregateTree, bool) {
+	if binary, ok := value.([]byte); ok {
+		child, found := t.binaryChildren[string(binary)]
+
+		return child, found
 	}
+
+	child, found := t.children[comparablePartitionKey(value)]
+
+	return child, found
+}
+
+func (t *inspectPartitionAggregateTree) setChild(value any, child *inspectPartitionAggregateTree) {
+	if binary, ok := value.([]byte); ok {
+		if t.binaryChildren == nil {
+			t.binaryChildren = make(map[string]*inspectPartitionAggregateTree)
+		}
+		// A stored string key owns its bytes even if the input buffer changes.
+		t.binaryChildren[string(binary)] = child
+
+		return
+	}
+
+	if t.children == nil {
+		t.children = make(map[any]*inspectPartitionAggregateTree)
+	}
+	t.children[comparablePartitionKey(value)] = child
 }
 
 func (t *inspectPartitionAggregateTree) lookup(record partitionRecord) *inspectPartitionAggregate {
 	node := t
 	for _, value := range record {
-		child, ok := node.children[comparablePartitionKey(value)]
+		child, ok := node.child(value)
 		if !ok {
 			return nil
 		}
@@ -76,7 +108,7 @@ func (t *inspectPartitionAggregateTree) lookupPartition(
 ) *inspectPartitionAggregate {
 	node := t
 	for _, field := range partitionType.FieldList {
-		child, ok := node.children[comparablePartitionKey(partition[field.ID])]
+		child, ok := node.child(partition[field.ID])
 		if !ok {
 			return nil
 		}
@@ -92,11 +124,10 @@ func (t *inspectPartitionAggregateTree) lookupPartition(
 func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate *inspectPartitionAggregate) {
 	node := t
 	for _, value := range record {
-		key := comparablePartitionKey(value)
-		child, ok := node.children[key]
+		child, ok := node.child(value)
 		if !ok {
 			child = newInspectPartitionAggregateTree()
-			node.children[key] = child
+			node.setChild(value, child)
 		}
 		node = child
 	}
@@ -107,7 +138,7 @@ func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate
 // files from the current snapshot. Files from evolved specs are coerced into
 // the table-wide partition type before grouping.
 func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: %w", err)
 	}
@@ -138,71 +169,99 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 	return rr, nil
 }
 
+// inspectPartitionManifestConcurrency bounds concurrent manifest reads and
+// per-manifest partition aggregation state.
+const inspectPartitionManifestConcurrency = 8
+
 func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]inspectPartitionAggregate, error) {
-	snapshot := i.tbl.metadata.CurrentSnapshot()
+	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil
 	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
-	}
-	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
+	provider := i.tbl.ManifestProvider()
+	manifests, err := provider.Manifests(ctx, *snapshot)
 	if err != nil {
 		return nil, err
 	}
-	fs, err := i.tbl.fsF(ctx)
+	fs, err := provider.FS(ctx)
 	if err != nil {
 		return nil, err
 	}
-	manifests := manifestSet.allManifests()
 
-	snapshotTimes := make(map[int64]int64, len(i.tbl.metadata.Snapshots()))
-	for _, snapshot := range i.tbl.metadata.Snapshots() {
+	snapshots := i.tbl.Metadata().Snapshots()
+	snapshotTimes := make(map[int64]int64, len(snapshots))
+	for _, snapshot := range snapshots {
 		snapshotTimes[snapshot.SnapshotID] = snapshot.TimestampMs
 	}
 
 	aggregates := make([]*inspectPartitionAggregate, 0)
 	aggregateTree := newInspectPartitionAggregateTree()
-	for _, manifest := range manifests {
+
+	// Buffer only a bounded number of manifests. Workers group their entries
+	// independently, then their results are merged in manifest order.
+	// This keeps equal-timestamp tie-breaking deterministic.
+	processBatch := func(batch []iceberg.ManifestFile) error {
+		if len(batch) == 1 {
+			return i.foldInspectPartitionManifest(ctx, fs, batch[0], partitionType,
+				snapshotTimes, aggregateTree, &aggregates)
+		}
+
+		partial := make([][]*inspectPartitionAggregate, len(batch))
+		g, gctx := errgroup.WithContext(ctx)
+		for index, manifest := range batch {
+			g.Go(func() error {
+				localTree := newInspectPartitionAggregateTree()
+
+				return i.foldInspectPartitionManifest(gctx, fs, manifest, partitionType,
+					snapshotTimes, localTree, &partial[index])
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return err
+		}
+
+		merged := 0
+		for _, manifestAggregates := range partial {
+			for _, local := range manifestAggregates {
+				// A manifest can contain many distinct partitions. Remain
+				// responsive to cancellation during the ordered merge, too.
+				if merged&1023 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				merged++
+				aggregate := aggregateTree.lookupPartition(local.partition, partitionType)
+				if aggregate == nil {
+					aggregates = append(aggregates, local)
+					aggregateTree.insert(newPartitionRecord(local.partition, partitionType), local)
+
+					continue
+				}
+				mergeInspectPartitionAggregate(aggregate, local)
+			}
+		}
+
+		return nil
+	}
+
+	batch := make([]iceberg.ManifestFile, 0, inspectPartitionManifestConcurrency)
+	for manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		for entry, err := range manifest.Entries(fs, true) {
-			if err != nil {
-				return nil, err
-			}
-			file := entry.DataFile()
-			partitionValues := dataFilePartition(file)
-			aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
-			if aggregate == nil {
-				partition := inspectCoercePartition(partitionValues, partitionType)
-				record := newPartitionRecord(partition, partitionType)
-				aggregate = &inspectPartitionAggregate{
-					partition:   cloneInspectPartition(partition),
-					orderingKey: inspectPartitionKey(partition),
-				}
-				aggregates = append(aggregates, aggregate)
-				aggregateTree.insert(record, aggregate)
-			}
-
-			switch file.ContentType() {
-			case iceberg.EntryContentData:
-				aggregate.dataRecordCount += file.Count()
-				aggregate.dataFileCount++
-				aggregate.dataFileSize += file.FileSizeBytes()
-			case iceberg.EntryContentPosDeletes:
-				aggregate.positionDeleteCount += file.Count()
-				aggregate.positionDeleteFiles++
-			case iceberg.EntryContentEqDeletes:
-				aggregate.equalityDeleteCount += file.Count()
-				aggregate.equalityDeleteFiles++
-			}
-
-			if file.ContentType() == iceberg.EntryContentData ||
-				file.ContentType() == iceberg.EntryContentPosDeletes ||
-				file.ContentType() == iceberg.EntryContentEqDeletes {
-				i.updatePartitionTimestamp(aggregate, snapshotTimes, entry.SnapshotID(), file.SpecID())
-			}
+		batch = append(batch, manifest)
+		if len(batch) < inspectPartitionManifestConcurrency {
+			continue
+		}
+		if err := processBatch(batch); err != nil {
+			return nil, err
+		}
+		batch = batch[:0]
+	}
+	if len(batch) > 0 {
+		if err := processBatch(batch); err != nil {
+			return nil, err
 		}
 	}
 
@@ -213,6 +272,88 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 	sort.Slice(result, func(left, right int) bool { return result[left].orderingKey < result[right].orderingKey })
 
 	return result, nil
+}
+
+// foldInspectPartitionManifest performs the original partition accounting using
+// a caller-owned tree. Each concurrent worker owns its own tree and result slice.
+func (i InspectTable) foldInspectPartitionManifest(
+	ctx context.Context,
+	fs iceio.IO,
+	manifest iceberg.ManifestFile,
+	partitionType *iceberg.StructType,
+	snapshotTimes map[int64]int64,
+	aggregateTree *inspectPartitionAggregateTree,
+	aggregates *[]*inspectPartitionAggregate,
+) error {
+	// Avoid opening remote manifest files after the caller has canceled.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	entryIndex := 0
+	for entry, err := range manifest.Entries(fs, true) {
+		if err != nil {
+			return err
+		}
+		if entryIndex&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		entryIndex++
+
+		file := entry.DataFile()
+		partitionValues := dataFilePartition(file)
+		aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
+		if aggregate == nil {
+			partition := inspectCoercePartition(partitionValues, partitionType)
+			record := newPartitionRecord(partition, partitionType)
+			aggregate = &inspectPartitionAggregate{
+				partition:   cloneInspectPartition(partition),
+				orderingKey: inspectPartitionKey(partition),
+			}
+			*aggregates = append(*aggregates, aggregate)
+			aggregateTree.insert(record, aggregate)
+		}
+
+		switch file.ContentType() {
+		case iceberg.EntryContentData:
+			aggregate.dataRecordCount += file.Count()
+			aggregate.dataFileCount++
+			aggregate.dataFileSize += file.FileSizeBytes()
+		case iceberg.EntryContentPosDeletes:
+			aggregate.positionDeleteCount += file.Count()
+			aggregate.positionDeleteFiles++
+		case iceberg.EntryContentEqDeletes:
+			aggregate.equalityDeleteCount += file.Count()
+			aggregate.equalityDeleteFiles++
+		}
+
+		if file.ContentType() == iceberg.EntryContentData ||
+			file.ContentType() == iceberg.EntryContentPosDeletes ||
+			file.ContentType() == iceberg.EntryContentEqDeletes {
+			i.updatePartitionTimestamp(aggregate, snapshotTimes, entry.SnapshotID(), file.SpecID())
+		}
+	}
+
+	return ctx.Err()
+}
+
+func mergeInspectPartitionAggregate(dst, src *inspectPartitionAggregate) {
+	dst.dataRecordCount += src.dataRecordCount
+	dst.dataFileCount += src.dataFileCount
+	dst.dataFileSize += src.dataFileSize
+	dst.positionDeleteCount += src.positionDeleteCount
+	dst.positionDeleteFiles += src.positionDeleteFiles
+	dst.equalityDeleteCount += src.equalityDeleteCount
+	dst.equalityDeleteFiles += src.equalityDeleteFiles
+
+	if src.lastUpdatedAt != nil &&
+		(dst.lastUpdatedAt == nil || *src.lastUpdatedAt > *dst.lastUpdatedAt) {
+		dst.lastUpdatedAt = src.lastUpdatedAt
+		dst.lastUpdatedSnapshot = src.lastUpdatedSnapshot
+		dst.specID = src.specID
+	}
 }
 
 func (i InspectTable) updatePartitionTimestamp(
@@ -259,9 +400,47 @@ func inspectPartitionKey(partition map[int]any) string {
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
+
 	var key strings.Builder
+	key.Grow(len(ids) * 24)
+	var number [32]byte
 	for _, id := range ids {
-		fmt.Fprintf(&key, "%d:%T:%v;", id, partition[id], partition[id])
+		key.Write(strconv.AppendInt(number[:0], int64(id), 10))
+		key.WriteByte(':')
+
+		value := partition[id]
+		switch v := value.(type) {
+		case int32:
+			key.WriteString("int32:")
+			key.Write(strconv.AppendInt(number[:0], int64(v), 10))
+		case int64:
+			key.WriteString("int64:")
+			key.Write(strconv.AppendInt(number[:0], v, 10))
+		case string:
+			key.WriteString("string:")
+			key.WriteString(v)
+		case bool:
+			key.WriteString("bool:")
+			if v {
+				key.WriteString("true")
+			} else {
+				key.WriteString("false")
+			}
+		case []byte:
+			// Match fmt's []uint8:[0 1 ...] representation, including nil slices.
+			key.WriteString("[]uint8:[")
+			for i, byt := range v {
+				if i > 0 {
+					key.WriteByte(' ')
+				}
+				key.Write(strconv.AppendInt(number[:0], int64(byt), 10))
+			}
+			key.WriteByte(']')
+		default:
+			// Preserve formatting for named Iceberg types and uncommon values.
+			fmt.Fprintf(&key, "%T:%v", value, value)
+		}
+		key.WriteByte(';')
 	}
 
 	return key.String()

@@ -37,6 +37,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/apache/iceberg-go/view"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/uptrace/bun"
@@ -431,7 +432,7 @@ func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg
 
 	cat := &Catalog{db: bun.NewDB(db, d), name: name, props: props}
 
-	cat.db.AddQueryHook(bundebug.NewQueryHook(
+	cat.db = cat.db.WithQueryHook(bundebug.NewQueryHook(
 		bundebug.WithEnabled(false),
 		// ICEBERG_SQL_DEBUG=1 logs only failed queries
 		// ICEBERG_SQL_DEBUG=2 log all queries
@@ -1101,7 +1102,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// Physically delete all table files on storage best-effort
-	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+	if purgeErr := maintenance.PurgeFiles(ctx, tbl); purgeErr != nil {
 		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 

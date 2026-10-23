@@ -22,45 +22,7 @@
 package gocloud
 
 import (
-	"context"
-
-	"github.com/apache/iceberg-go/io/gocloud/blobfs"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"gocloud.dev/blob/gcsblob"
-
 	_ "github.com/apache/iceberg-go/io/gocloud/azure"
-	"github.com/apache/iceberg-go/io/gocloud/gcs"
-	"github.com/apache/iceberg-go/io/gocloud/s3"
+	_ "github.com/apache/iceberg-go/io/gocloud/gcs"
+	_ "github.com/apache/iceberg-go/io/gocloud/s3"
 )
-
-var (
-	// Deprecated: use [blobfs.ErrEmptyObjectKey]
-	ErrEmptyObjectKey = blobfs.ErrEmptyObjectKey
-	// Deprecated: use [blobfs.ErrUnsupportedObjectAuthority]
-	ErrUnsupportedObjectAuthority = blobfs.ErrUnsupportedObjectAuthority
-)
-
-type (
-	// BlobFileIO is the FileIO implementation backed by a gocloud.dev bucket.
-	//
-	// Deprecated: use [blobfs.FileIO]
-	BlobFileIO = blobfs.FileIO
-	// KeyExtractor extracts the object key from an input path.
-	//
-	// Deprecated: use [blobfs.KeyExtractor]
-	KeyExtractor = blobfs.KeyExtractor
-)
-
-// ParseAWSConfig parses the S3 properties and returns a configuration.
-//
-// Deprecated: use [s3.ParseAWSConfig]
-func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
-	return s3.ParseAWSConfig(ctx, props)
-}
-
-// ParseGCSConfig parses GCS properties and returns bucket options.
-//
-// Deprecated: use [gcs.ParseGCSConfig]
-func ParseGCSConfig(props map[string]string) *gcsblob.Options {
-	return gcs.ParseGCSConfig(props)
-}

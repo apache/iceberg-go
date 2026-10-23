@@ -309,7 +309,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	fieldIDToLogicalType := make(map[int]string)
 
 	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
-		fieldIDToPartitionData = make(map[int]any)
+		fieldIDToPartitionData = make(map[int]any, opts.Spec.NumFields())
 		for _, field := range opts.Spec.Fields() {
 			sourceField, sourceFieldFound := opts.Schema.FindFieldByIDRef(
 				field.SourceID(), iceberginternal.SchemaRef{})

@@ -83,8 +83,8 @@ type BoundGeospatialExprVisitor[T any] interface {
 }
 
 // boundSetExtremaExprVisitor is consulted only by the borrowed
-// VisitBoundPredicateRef path. The table package's manifest evaluator is
-// currently the only implementation.
+// VisitBoundPredicateRef path. It is used by trusted evaluators that can prune
+// an IN predicate from its precomputed minimum and maximum literals.
 type boundSetExtremaExprVisitor[T any] interface {
 	VisitInWithExtrema(BoundTerm, Set[Literal], Literal, Literal) T
 }
@@ -714,6 +714,18 @@ func (*scanTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpression {
 	panic(fmt.Errorf("%w: expected bound predicate, got: %s", ErrInvalidArgument, pred.Term()))
 }
 
+// nullColumnResult folds a predicate over a column that is null for every row
+// of a file. IsNull and NotNaN match a null, as they do for a stored null in
+// the row filter; every other predicate does not.
+func nullColumnResult(op Operation) BooleanExpression {
+	switch op {
+	case OpIsNull, OpNotNan:
+		return AlwaysTrue{}
+	default:
+		return AlwaysFalse{}
+	}
+}
+
 func (t *scanTranslator) extractRef(ext BoundExtract) Reference {
 	key := ext.String()
 	idx, ok := t.byKey[key]
@@ -802,14 +814,10 @@ func (t *scanTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
 	var ref Reference
 	if ext, ok := pred.Term().(BoundExtract); ok {
 		// If the variant column is absent from this file, the extracted path is null
-		// for every row: IsNull matches, everything else cannot. Handle it here rather
-		// than fabricating an all-null derived column downstream.
+		// for every row. Handle it here rather than fabricating an all-null derived
+		// column downstream.
 		if _, found := t.fileSchema.FindColumnName(ext.Ref().Field().ID); !found {
-			if pred.Op() == OpIsNull {
-				return AlwaysTrue{}
-			}
-
-			return AlwaysFalse{}
+			return nullColumnResult(pred.Op())
 		}
 		ref = t.extractRef(ext)
 	} else {
@@ -822,11 +830,7 @@ func (t *scanTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
 			// its default is not a file-wide constant. Preserve the existing
 			// missing-column behavior until translation has row-level parent state.
 			if field.InitialDefault == nil || len(pred.Ref().PosPath()) > 1 {
-				if pred.Op() == OpIsNull {
-					return AlwaysTrue{}
-				}
-
-				return AlwaysFalse{}
+				return nullColumnResult(pred.Op())
 			}
 			// The spec requires geo defaults to be null, but fail open for metadata
 			// written by non-conforming V3 writers rather than aborting the scan.

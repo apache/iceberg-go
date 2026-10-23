@@ -742,8 +742,12 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			val := v.(int32)
 			width := int32(t.Width)
+			remainder := val % width
+			if remainder < 0 {
+				remainder += width
+			}
 
-			return val - (((val % width) + width) % width)
+			return val - remainder
 		}, nil
 	case Int64Type:
 		return func(v any) any {
@@ -753,8 +757,12 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			val := v.(int64)
 			width := int64(t.Width)
+			remainder := val % width
+			if remainder < 0 {
+				remainder += width
+			}
 
-			return val - (((val % width) + width) % width)
+			return val - remainder
 		}, nil
 	case StringType:
 		return func(v any) any {
@@ -784,9 +792,8 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			val := v.(Decimal)
 			unscaled := val.Val.BigInt()
-			// unscaled - (((unscaled % width) + width) % width)
+			// big.Int.Mod already gives a non-negative remainder for positive widths.
 			applied := (&big.Int{}).Mod(unscaled, bigWidth)
-			applied.Add(applied, bigWidth).Mod(applied, bigWidth)
 			val.Val = decimal128.FromBigInt(unscaled.Sub(unscaled, applied))
 
 			return val
@@ -797,12 +804,26 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 		ErrInvalidArgument, src)
 }
 
-// Range yields byte indexes at UTF-8 code point boundaries, so slicing on idx
-// truncates by Unicode characters without copying the whole string to []rune.
+// truncateString truncates by UTF-8 code points without allocating.
+// Strings shorter than the width in bytes need no scan. ASCII prefixes
+// can be sliced directly, while other prefixes still use rune boundaries.
 func truncateString(s string, width int) string {
-	for idx := range s {
+	if width >= len(s) {
+		return s
+	}
+
+	idx := 0
+	for idx < width && s[idx] < utf8.RuneSelf {
+		idx++
+	}
+	if idx == width {
+		return s[:idx]
+	}
+
+	width -= idx
+	for offset := range s[idx:] {
 		if width == 0 {
-			return s[:idx]
+			return s[:idx+offset]
 		}
 
 		width--
@@ -967,6 +988,44 @@ func projectTimeTransform(t TimeTransform, name string, pred BoundPredicate) (Un
 	return nil, nil
 }
 
+// yearMonthFromUnixDays converts days since 1970-01-01 to a Gregorian year
+// and month without constructing a time.Time. The 400-year era calculation
+// handles dates before the Unix epoch and all representable Iceberg dates.
+func yearMonthFromUnixDays(days int64) (year, month int) {
+	z := days + 719468
+	era := z / 146097
+	if z < 0 {
+		era = (z - 146096) / 146097
+	}
+
+	dayOfEra := z - era*146097
+	yearOfEra := (dayOfEra - dayOfEra/1460 + dayOfEra/36524 - dayOfEra/146096) / 365
+	y := yearOfEra + era*400
+	dayOfYear := dayOfEra - (365*yearOfEra + yearOfEra/4 - yearOfEra/100)
+	monthIndex := (5*dayOfYear + 2) / 153
+	m := monthIndex + 3
+	if monthIndex >= 10 {
+		m = monthIndex - 9
+	}
+	if m <= 2 {
+		y++
+	}
+
+	return int(y), int(m)
+}
+
+func yearPartitionFromDays(days int64) int32 {
+	year, _ := yearMonthFromUnixDays(days)
+
+	return int32(year - 1970)
+}
+
+func monthPartitionFromDays(days int64) int32 {
+	year, month := yearMonthFromUnixDays(days)
+
+	return int32((year-1970)*12 + month - 1)
+}
+
 // YearTransform transforms a datetime value into a year value.
 type YearTransform struct{}
 
@@ -1001,7 +1060,7 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(v.(Date).ToTime().Year() - epochTM.Year()),
+				Val:   yearPartitionFromDays(int64(v.(Date))),
 			}
 		}, nil
 	case TimestampType, TimestampTzType:
@@ -1012,7 +1071,7 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(v.(Timestamp).ToTime().Year() - epochTM.Year()),
+				Val:   yearPartitionFromDays(int64(v.(Timestamp).ToDate())),
 			}
 		}, nil
 	case TimestampNsType, TimestampTzNsType:
@@ -1023,7 +1082,7 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(v.(TimestampNano).ToTime().Year() - epochTM.Year()),
+				Val:   yearPartitionFromDays(int64(v.(TimestampNano).ToDate())),
 			}
 		}, nil
 	}
@@ -1037,17 +1096,20 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		return out
 	}
 
+	var days int64
 	switch v := value.Val.(type) {
 	case DateLiteral:
-		out.Valid = true
-		out.Val = Int32Literal(Date(v).ToTime().Year() - epochTM.Year())
+		days = int64(v)
 	case TimestampLiteral:
-		out.Valid = true
-		out.Val = Int32Literal(Timestamp(v).ToTime().Year() - epochTM.Year())
+		days = int64(Timestamp(v).ToDate())
 	case TimestampNsLiteral:
-		out.Valid = true
-		out.Val = Int32Literal(TimestampNano(v).ToTime().Year() - epochTM.Year())
+		days = int64(TimestampNano(v).ToDate())
+	default:
+		return out
 	}
+
+	out.Valid = true
+	out.Val = Int32Literal(yearPartitionFromDays(days))
 
 	return out
 }
@@ -1101,11 +1163,9 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				return Optional[int32]{}
 			}
 
-			d := v.(Date).ToTime()
-
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+				Val:   monthPartitionFromDays(int64(v.(Date))),
 			}
 		}, nil
 	case TimestampType, TimestampTzType:
@@ -1114,11 +1174,9 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				return Optional[int32]{}
 			}
 
-			d := v.(Timestamp).ToTime()
-
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+				Val:   monthPartitionFromDays(int64(v.(Timestamp).ToDate())),
 			}
 		}, nil
 	case TimestampNsType, TimestampTzNsType:
@@ -1127,14 +1185,11 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				return Optional[int32]{}
 			}
 
-			d := v.(TimestampNano).ToTime()
-
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+				Val:   monthPartitionFromDays(int64(v.(TimestampNano).ToDate())),
 			}
 		}, nil
-
 	}
 
 	return nil, fmt.Errorf("%w: cannot apply month transform for type %s",
@@ -1146,20 +1201,20 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		return out
 	}
 
-	var tm time.Time
+	var days int64
 	switch v := value.Val.(type) {
 	case DateLiteral:
-		tm = Date(v).ToTime()
+		days = int64(v)
 	case TimestampLiteral:
-		tm = Timestamp(v).ToTime()
+		days = int64(Timestamp(v).ToDate())
 	case TimestampNsLiteral:
-		tm = TimestampNano(v).ToTime()
+		days = int64(TimestampNano(v).ToDate())
 	default:
 		return out
 	}
 
 	out.Valid = true
-	out.Val = Int32Literal(int32((tm.Year()-epochTM.Year())*12 + (int(tm.Month()) - int(epochTM.Month()))))
+	out.Val = Int32Literal(monthPartitionFromDays(days))
 
 	return out
 }

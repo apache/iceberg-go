@@ -419,16 +419,6 @@ func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[Manif
 	return manifestEntries(fs, m, discardDeleted, nil)
 }
 
-func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
-	f, openErr := fs.Open(m.FilePath())
-	if openErr != nil {
-		return nil, openErr
-	}
-	defer internal.CheckedClose(f, &err)
-
-	return ReadManifest(m, f, discardDeleted)
-}
-
 func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 	root := sc.Root()
 	getField := func(node avro.SchemaNode, name string) *avro.SchemaField {
@@ -582,8 +572,8 @@ type ManifestFile interface {
 	// the provided file system IO interface. Entries that have been
 	// marked as deleted are skipped if discardDeleted is true.
 	//
-	// Prefer Entries over FetchEntries when walking large manifests
-	// since it avoids loading every entry into memory at once.
+	// Entries avoids loading every manifest entry into memory at once,
+	// making it suitable for walking large manifests.
 	//
 	// Iteration contract:
 	//
@@ -603,14 +593,6 @@ type ManifestFile interface {
 	//     longer interested in further values, so an extra synthetic
 	//     (nil, closeErr) tail would be discarded anyway.
 	Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
-	// FetchEntries reads the manifest list file to fetch the list of
-	// manifest entries using the provided file system IO interface.
-	// If discardDeleted is true, entries for files containing deleted rows
-	// will be skipped.
-	//
-	// Deprecated: Use Entries instead, which streams manifest entries via an
-	// iterator and avoids loading every entry into memory at once.
-	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
 	// // WriteEntries writes a list of manifest entries to a provided
 	// // io.Writer. The version of the manifest file is used to determine the
 	// // schema to use for writing the entries.
@@ -936,7 +918,11 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.isFallback {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
-	tmp.DataFile().(*dataFile).projected = c.projected
+	df := tmp.DataFile().(*dataFile)
+	df.projected = c.projected
+	if err := df.normalizeFormat(); err != nil {
+		return nil, err
+	}
 	switch tmp.Status() {
 	case EntryStatusEXISTING, EntryStatusADDED, EntryStatusDELETED:
 	default:
@@ -2613,18 +2599,21 @@ func fitDecimalBytes(bytes []byte, size int) ([]byte, error) {
 }
 
 type dataFile struct {
-	Content                 ManifestEntryContent `avro:"content"`
-	projected               bool
-	Path                    string                 `avro:"file_path"`
-	Format                  FileFormat             `avro:"file_format"`
-	PartitionData           map[string]any         `avro:"partition"`
-	RecordCount             int64                  `avro:"record_count"`
-	FileSize                int64                  `avro:"file_size_in_bytes"`
-	BlockSizeInBytes        int64                  `avro:"block_size_in_bytes"`
-	ColSizes                *[]colMap[int, int64]  `avro:"column_sizes"`
-	ValCounts               *[]colMap[int, int64]  `avro:"value_counts"`
-	NullCounts              *[]colMap[int, int64]  `avro:"null_value_counts"`
-	NaNCounts               *[]colMap[int, int64]  `avro:"nan_value_counts"`
+	Content          ManifestEntryContent `avro:"content"`
+	projected        bool
+	Path             string                `avro:"file_path"`
+	Format           FileFormat            `avro:"file_format"`
+	PartitionData    map[string]any        `avro:"partition"`
+	RecordCount      int64                 `avro:"record_count"`
+	FileSize         int64                 `avro:"file_size_in_bytes"`
+	BlockSizeInBytes int64                 `avro:"block_size_in_bytes"`
+	ColSizes         *[]colMap[int, int64] `avro:"column_sizes"`
+	ValCounts        *[]colMap[int, int64] `avro:"value_counts"`
+	NullCounts       *[]colMap[int, int64] `avro:"null_value_counts"`
+	NaNCounts        *[]colMap[int, int64] `avro:"nan_value_counts"`
+	// DistinctCounts holds distinct_counts (field 111), deprecated in the
+	// spec. It has no accessor and writers never encode it; it stays so
+	// legacy manifests that carry the field still decode.
 	DistinctCounts          *[]colMap[int, int64]  `avro:"distinct_counts"`
 	LowerBounds             *[]colMap[int, []byte] `avro:"lower_bounds"`
 	UpperBounds             *[]colMap[int, []byte] `avro:"upper_bounds"`
@@ -2637,13 +2626,12 @@ type dataFile struct {
 	ContentOffsetField      *int64                 `avro:"content_offset"`
 	ContentSizeInBytesField *int64                 `avro:"content_size_in_bytes"`
 
-	colSizeMap     map[int]int64
-	valCntMap      map[int]int64
-	nullCntMap     map[int]int64
-	nanCntMap      map[int]int64
-	distinctCntMap map[int]int64
-	lowerBoundMap  map[int][]byte
-	upperBoundMap  map[int][]byte
+	colSizeMap    map[int]int64
+	valCntMap     map[int]int64
+	nullCntMap    map[int]int64
+	nanCntMap     map[int]int64
+	lowerBoundMap map[int][]byte
+	upperBoundMap map[int][]byte
 
 	// used for partition retrieval
 	fieldNameToID          map[string]int
@@ -2676,7 +2664,6 @@ func (d *dataFile) initColumnStatsData() {
 		d.valCntMap = avroColMapToMap(d.ValCounts)
 		d.nullCntMap = avroColMapToMap(d.NullCounts)
 		d.nanCntMap = avroColMapToMap(d.NaNCounts)
-		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
 	})
@@ -2814,6 +2801,20 @@ func (d *dataFile) setFieldIDToDecimalScaleMap(m map[int]int) {
 	d.fieldIDToDecimalScale = m
 }
 
+// normalizeFormat sets d.Format to the FileFormat constant matching its
+// decoded spelling, or returns an error if it names no known format.
+// Every Avro decode path must call it before the value is compared or
+// exposed.
+func (d *dataFile) normalizeFormat() error {
+	format, err := FileFormatFromString(string(d.Format))
+	if err != nil {
+		return fmt.Errorf("data file %q: %w", d.FilePath(), err)
+	}
+	d.Format = format
+
+	return nil
+}
+
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }
 func (d *dataFile) FilePath() string                  { return d.Path }
 func (d *dataFile) FileFormat() FileFormat            { return d.Format }
@@ -2905,12 +2906,6 @@ func (d *dataFile) NaNValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
 	return maps.Clone(d.nanCntMap)
-}
-
-func (d *dataFile) DistinctValueCounts() map[int]int64 {
-	d.initColumnStatsData()
-
-	return maps.Clone(d.distinctCntMap)
 }
 
 func (d *dataFile) LowerBoundValues() map[int][]byte {
@@ -3199,20 +3194,6 @@ func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder 
 	return b
 }
 
-// DistinctValueCounts sets the distinct value counts for the data file.
-//
-// Deprecated: distinct_counts (field 111) is deprecated in every
-// version of the Iceberg spec (apache/iceberg#12182). The Avro
-// manifest-entry schemas omit the field for v1, v2, and v3, so values
-// set here are not transported in manifests written by this library.
-// The setter is retained for round-tripping legacy DataFiles read from
-// older manifests; new code should not call it.
-func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
-	b.d.DistinctCounts = mapToAvroColMap(counts)
-
-	return b
-}
-
 // LowerBoundValues sets the lower bound values for the data file.
 func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
 	b.d.LowerBounds = mapToAvroColMapClonedBytes(bounds)
@@ -3318,11 +3299,6 @@ type DataFile interface {
 	// NaNValueCounts is a mapping from column id to the number of NaN
 	// values in the column.
 	NaNValueCounts() map[int]int64
-	// DistictValueCounts is a mapping from column id to the number of
-	// distinct values in the column. Distinct counts must be derived
-	// using values in the file by counting or using sketches, but not
-	// using methods like merging existing distinct counts.
-	DistinctValueCounts() map[int]int64
 	// LowerBoundValues is a mapping from column id to the lower bounded
 	// value of the column, serialized as binary. Each value in the column
 	// must be less than or requal to all non-null, non-NaN values in the
@@ -3385,6 +3361,6 @@ type ManifestEntry interface {
 }
 
 var PositionalDeleteSchema = NewSchema(0,
-	NestedField{ID: 2147483546, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
-	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int64, Name: "pos", Required: true},
+	NestedField{ID: DeleteFilePathFieldID, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
+	NestedField{ID: DeleteFilePosFieldID, Type: PrimitiveTypes.Int64, Name: "pos", Required: true},
 )

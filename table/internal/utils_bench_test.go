@@ -37,7 +37,7 @@ func (a *dataFileFinalizationBenchmarkAgg) MinAsBytes() ([]byte, error)         
 func (a *dataFileFinalizationBenchmarkAgg) MaxAsBytes() ([]byte, error)          { return nil, nil }
 
 func BenchmarkDataFileStatisticsToDataFile(b *testing.B) {
-	for _, fieldCount := range []int{1, 8, 32} {
+	for _, fieldCount := range []int{0, 1, 8, 9, 32} {
 		schema, spec, stats := dataFileFinalizationBenchmarkData(fieldCount)
 		opts := DataFileOpts{
 			Schema:   schema,

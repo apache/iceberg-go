@@ -72,6 +72,11 @@ type geoBoundsAccumulator struct {
 	// isGeography marks a column whose edges are geodesics on a sphere, for
 	// which raw vertex min/max is not a safe bounding box (see Bounds).
 	isGeography bool
+
+	// nulls counts the null rows seen across every batch written to the file.
+	// Parquet omits the Statistics block for GEOMETRY/GEOGRAPHY column chunks,
+	// so the footer cannot supply this count.
+	nulls int64
 }
 
 func newGeoBoundsAccumulator(isGeography bool) *geoBoundsAccumulator {
