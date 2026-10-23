@@ -872,7 +872,7 @@ func resolveCatalogName(explicitFlags map[string]bool, flagValue string) string 
 }
 
 func applyConfigFile(args *Args, explicitFlags map[string]bool) error {
-	configData, err := config.LoadConfigFile(args.Config)
+	configData, err := config.LoadConfig(args.Config)
 	if err != nil {
 		return err
 	}
