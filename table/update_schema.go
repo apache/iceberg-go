@@ -1347,7 +1347,104 @@ func addFields(fields []iceberg.NestedField, adds []iceberg.NestedField) []icebe
 	return append(fields, adds...)
 }
 
+// fieldMoveLink stores stable field positions while moves relink their order.
+// Unlike slice insertions, each move changes only the adjacent links.
+type fieldMoveLink struct {
+	prev int
+	next int
+}
+
+// moveFields avoids the repeated linear searches and slice copies involved
+// in bulk reordering wide schemas. Small move sets keep the simpler linear
+// path to avoid allocating an index for the common one- or two-move case.
 func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedField {
+	if len(fields) < 64 || len(moves) < 8 {
+		return moveFieldsLinear(fields, moves)
+	}
+
+	for _, m := range moves {
+		// Preserve the existing handling of unexpected move operations.
+		if m.Op != MoveOpFirst && m.Op != MoveOpBefore && m.Op != MoveOpAfter {
+			return moveFieldsLinear(fields, moves)
+		}
+	}
+
+	links := make([]fieldMoveLink, len(fields))
+	positions := make(map[int]int, len(fields))
+	for i, field := range fields {
+		// Duplicate IDs are invalid for a normal schema, but preserve the
+		// original first-match behavior if they reach this helper.
+		if _, exists := positions[field.ID]; exists {
+			return moveFieldsLinear(fields, moves)
+		}
+		positions[field.ID] = i
+		links[i] = fieldMoveLink{prev: i - 1, next: i + 1}
+	}
+	links[len(links)-1].next = -1
+
+	head := 0
+	for _, m := range moves {
+		idx, ok := positions[m.FieldID]
+		if !ok {
+			panic(fmt.Errorf("cannot move field %d: field not found", m.FieldID))
+		}
+
+		relativeIdx := -1
+		if m.Op == MoveOpBefore || m.Op == MoveOpAfter {
+			var found bool
+			relativeIdx, found = positions[m.RelativeTo]
+			// The original implementation removes the source before finding
+			// the target, so a self-relative move must still fail.
+			if !found || relativeIdx == idx {
+				panic(fmt.Errorf("cannot move field %d: target field %d not found", m.FieldID, m.RelativeTo))
+			}
+		}
+
+		prev, next := links[idx].prev, links[idx].next
+		if prev >= 0 {
+			links[prev].next = next
+		} else {
+			head = next
+		}
+		if next >= 0 {
+			links[next].prev = prev
+		}
+
+		switch m.Op {
+		case MoveOpFirst:
+			links[idx] = fieldMoveLink{prev: -1, next: head}
+			if head >= 0 {
+				links[head].prev = idx
+			}
+			head = idx
+		case MoveOpBefore:
+			prev = links[relativeIdx].prev
+			links[idx] = fieldMoveLink{prev: prev, next: relativeIdx}
+			links[relativeIdx].prev = idx
+			if prev >= 0 {
+				links[prev].next = idx
+			} else {
+				head = idx
+			}
+		case MoveOpAfter:
+			next = links[relativeIdx].next
+			links[idx] = fieldMoveLink{prev: relativeIdx, next: next}
+			links[relativeIdx].next = idx
+			if next >= 0 {
+				links[next].prev = idx
+			}
+		}
+	}
+
+	reordered := make([]iceberg.NestedField, 0, len(fields))
+	for idx := head; idx >= 0; idx = links[idx].next {
+		reordered = append(reordered, fields[idx])
+	}
+
+	return reordered
+}
+
+func moveFieldsLinear(fields []iceberg.NestedField, moves []move) []iceberg.NestedField {
 	reordered := slices.Clone(fields)
 	for _, move := range moves {
 		var fieldToMove iceberg.NestedField

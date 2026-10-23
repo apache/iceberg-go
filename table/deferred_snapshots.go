@@ -363,12 +363,38 @@ func skipJSONSpace(raw []byte, i int) int {
 }
 
 func scanJSONString(raw []byte, i int) int {
-	for i++; i < len(raw); i++ {
-		switch raw[i] {
+	// Find the first quote with the optimized byte scanner.
+	start := i + 1
+	if start >= len(raw) {
+		return len(raw)
+	}
+	offset := bytes.IndexByte(raw[start:], '"')
+	if offset < 0 {
+		return len(raw)
+	}
+	end := start + offset
+	if end == start || raw[end-1] != '\\' {
+		return end + 1
+	}
+
+	// A quote after backslashes closes the string only when the run
+	// contains an even number of backslashes.
+	backslashes := 0
+	for j := end - 1; j > i && raw[j] == '\\'; j-- {
+		backslashes++
+	}
+	if backslashes%2 == 0 {
+		return end + 1
+	}
+
+	// This quote was escaped. Resume after it rather than scanning the
+	// already-checked prefix again.
+	for j := end + 1; j < len(raw); j++ {
+		switch raw[j] {
 		case '\\':
-			i++
+			j++
 		case '"':
-			return i + 1
+			return j + 1
 		}
 	}
 
