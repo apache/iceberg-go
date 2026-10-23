@@ -31,7 +31,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1536,43 +1535,7 @@ func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 }
 
 func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := r.checkValidNamespace(namespace); err != nil {
-		return nil, "", err
-	}
-	// Unsupported listing yields an empty result rather than an error.
-	if !r.endpoints.allowed(endpointListTables) {
-		return nil, "", nil
-	}
-	ns := r.encodeNamespace(namespace)
-	path, err := endpointListTables.reqPath(ns)
-	if err != nil {
-		return nil, "", err
-	}
-	uri := r.baseURI.JoinPath(path...)
-
-	v := url.Values{}
-	if pageSize > 0 {
-		v.Set("pageSize", strconv.Itoa(pageSize))
-	}
-	if pageToken != "" {
-		v.Set("pageToken", pageToken)
-	}
-
-	uri.RawQuery = v.Encode()
-	type resp struct {
-		Identifiers   []identifier `json:"identifiers"`
-		NextPageToken string       `json:"next-page-token,omitempty"`
-	}
-	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
-	if err != nil {
-		return nil, "", err
-	}
-	out := make([]table.Identifier, len(rsp.Identifiers))
-	for i, id := range rsp.Identifiers {
-		out[i] = append(id.Namespace, id.Name)
-	}
-
-	return out, rsp.NextPageToken, nil
+	return listCatalogObjectsPage(r, ctx, endpointListTables, namespace, pageToken, pageSize, objectIdentifier)
 }
 
 func (r *Catalog) nsSeparator() string {
@@ -2291,15 +2254,9 @@ func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifie
 
 	uri := r.baseURI.JoinPath(path...)
 
-	v := url.Values{}
+	v := paginationQueryParams(pageToken, pageSize)
 	if len(parent) != 0 {
 		v.Set("parent", r.namespaceToQueryParam(parent))
-	}
-	if pageSize > 0 {
-		v.Set("pageSize", strconv.Itoa(pageSize))
-	}
-	if pageToken != "" {
-		v.Set("pageToken", pageToken)
 	}
 	if len(v) > 0 {
 		uri.RawQuery = v.Encode()
@@ -2469,45 +2426,7 @@ func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 }
 
 func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := r.checkValidNamespace(namespace); err != nil {
-		return nil, "", err
-	}
-	// Unsupported listing yields an empty result rather than an error.
-	if !r.endpoints.allowed(endpointListViews) {
-		return nil, "", nil
-	}
-	ns := r.encodeNamespace(namespace)
-	path, err := endpointListViews.reqPath(ns)
-	if err != nil {
-		return nil, "", err
-	}
-	uri := r.baseURI.JoinPath(path...)
-
-	v := url.Values{}
-	if pageSize > 0 {
-		v.Set("pageSize", strconv.Itoa(pageSize))
-	}
-	if pageToken != "" {
-		v.Set("pageToken", pageToken)
-	}
-
-	uri.RawQuery = v.Encode()
-	type resp struct {
-		Identifiers   []identifier `json:"identifiers"`
-		NextPageToken string       `json:"next-page-token,omitempty"`
-	}
-
-	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
-	if err != nil {
-		return nil, "", err
-	}
-
-	out := make([]table.Identifier, len(rsp.Identifiers))
-	for i, id := range rsp.Identifiers {
-		out[i] = append(id.Namespace, id.Name)
-	}
-
-	return out, rsp.NextPageToken, nil
+	return listCatalogObjectsPage(r, ctx, endpointListViews, namespace, pageToken, pageSize, objectIdentifier)
 }
 
 func (r *Catalog) getPageSize(ctx context.Context) int {
@@ -2875,48 +2794,7 @@ func (r *Catalog) ListFunctions(ctx context.Context, namespace table.Identifier)
 }
 
 func (r *Catalog) listFunctionsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := r.checkValidNamespace(namespace); err != nil {
-		return nil, "", err
-	}
-	// Unsupported listing yields an empty result rather than an error.
-	if !r.endpoints.allowed(endpointListFunctions) {
-		return nil, "", nil
-	}
-	ns := r.encodeNamespace(namespace)
-	path, err := endpointListFunctions.reqPath(ns)
-	if err != nil {
-		return nil, "", err
-	}
-	uri := r.baseURI.JoinPath(path...)
-
-	v := url.Values{}
-	if pageSize > 0 {
-		v.Set("pageSize", strconv.Itoa(pageSize))
-	}
-	if pageToken != "" {
-		v.Set("pageToken", pageToken)
-	}
-
-	uri.RawQuery = v.Encode()
-	// Function identifiers are CatalogObjectIdentifier values: ordered
-	// hierarchy levels (the namespace levels followed by the function
-	// name), not the {namespace, name} object tables and views use.
-	type resp struct {
-		Identifiers   [][]string `json:"identifiers"`
-		NextPageToken string     `json:"next-page-token,omitempty"`
-	}
-
-	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
-	if err != nil {
-		return nil, "", err
-	}
-
-	out := make([]table.Identifier, len(rsp.Identifiers))
-	for i, levels := range rsp.Identifiers {
-		out[i] = table.Identifier(levels)
-	}
-
-	return out, rsp.NextPageToken, nil
+	return listCatalogObjectsPage(r, ctx, endpointListFunctions, namespace, pageToken, pageSize, functionIdentifier)
 }
 
 // loadFunctionResponse contains the response from loading a function.
