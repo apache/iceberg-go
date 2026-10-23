@@ -703,6 +703,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			newDataFiles = append(newDataFiles, gr.NewDataFiles...)
 		}
 		if err := groupTxn.ReplaceFiles(ctx, oldDataFiles, newDataFiles, deletesToRemove,
+			nil,
 			props, withRewriteSemantics()); err != nil {
 			return result, cleanupBatch(fmt.Errorf("stage partial rewrite batch: %w", err))
 		}

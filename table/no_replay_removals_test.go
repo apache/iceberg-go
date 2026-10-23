@@ -194,6 +194,7 @@ func TestReplaceFilesWithRemovalsFailsInsteadOfReplaying(t *testing.T) {
 		[]iceberg.DataFile{compactedBuilder.Build()},
 		tasks[0].DeleteFiles,
 		nil,
+		nil,
 	))
 
 	// Peer commits a new position delete for row 0 (id 1) against the
@@ -277,6 +278,7 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 	require.NoError(t, staleTxn.ReplaceFiles(t.Context(),
 		[]iceberg.DataFile{tasks[0].File},
 		[]iceberg.DataFile{compactedBuilder.Build()},
+		nil,
 		nil,
 		nil,
 	))

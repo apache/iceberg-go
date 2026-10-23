@@ -529,7 +529,7 @@ func TestBranchReplaceFilesResolvesBranchDeleteFiles(t *testing.T) {
 	txn, err = tbl.NewTransactionOnBranchWithError(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.ReplaceFiles(t.Context(),
-		[]iceberg.DataFile{staged}, []iceberg.DataFile{replacement}, []iceberg.DataFile{posDelete}, nil))
+		[]iceberg.DataFile{staged}, []iceberg.DataFile{replacement}, []iceberg.DataFile{posDelete}, nil, nil))
 	tbl, err = txn.Commit(t.Context())
 	require.NoError(t, err)
 

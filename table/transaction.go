@@ -1802,21 +1802,12 @@ type DeleteFileAddition struct {
 	DataSequenceNumber int64
 }
 
-// ReplaceFiles atomically replaces data files and removes associated delete files
-// in a single snapshot. This is the commit primitive for compaction: old data files
-// are replaced with new (compacted) data files, and delete files that are fully
-// applied are removed. On v3 a removed data file's live deletion vector is
-// removed with it, whether or not it is in deleteFilesToRemove.
-func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
-	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, nil, snapshotProps, opts...)
-}
-
-// ReplaceFilesWithDeleteFiles atomically replaces data files, adds new delete
+// ReplaceFiles atomically replaces data files, adds new delete
 // files, and removes superseded delete files in one snapshot. Every added delete
 // file must carry the data sequence number of the delete files it replaces.
 // This is intended for rewrites that change delete-file representation, such as
 // rewriting position deletes into deletion vectors.
-func (t *Transaction) ReplaceFilesWithDeleteFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []DeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []DeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	additions := make([]rewriteDeleteFileAddition, len(deleteFilesToAdd))
 	for i, addition := range deleteFilesToAdd {
 		seq := addition.DataSequenceNumber
