@@ -295,7 +295,7 @@ Two registries are user-extensible. The third (LocationProvider) is currently in
 
 ### IO scheme registry
 
-Register a custom URL scheme with [`io.Register`](https://github.com/apache/iceberg-go/blob/main/io/registry.go):
+Register a custom URL scheme from an `init` function with [`io.MustRegister`](https://github.com/apache/iceberg-go/blob/main/io/registry.go):
 
 ```go
 import (
@@ -306,16 +306,28 @@ import (
 )
 
 func init() {
-    io.Register("myfs", func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
+    io.MustRegister("myfs", func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
         return newMyFS(parsed, props)
     })
 }
 ```
 
-`io.Register` panics on `nil` factory or duplicate scheme. Built-in schemes: `file`, `""` (the empty scheme).
+`io.MustRegister` panics for invalid or duplicate schemes, so it is suitable for provider `init` functions. `io.Register` now returns `ErrInvalidSchemeFactory` or `ErrSchemeAlreadyRegistered` instead of panicking. Built-in schemes: `file`, `""` (the empty scheme).
 Cloud schemes (`s3`, `gs`, `abfs`, etc.) are registered only when the matching backend package under `io/gocloud` is blank-imported.
 
 `io.GetRegisteredSchemes()` returns the current scheme list; `io.Unregister(scheme)` removes one.
+
+To register schemes at runtime without changing other users of the same process, create an independent registry:
+
+```go
+registry := io.NewRegistry()
+if err := registry.Register("myfs", myFactory); err != nil {
+    return err
+}
+fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
+```
+
+`io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
 ### Catalog type registry
 

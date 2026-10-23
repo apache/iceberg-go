@@ -48,7 +48,7 @@ func openOrCreateMemBucket(bucket string) *MemFS {
 }
 
 func init() {
-	Register("mem", func(_ context.Context, parsed *url.URL, _ map[string]string) (IO, error) {
+	MustRegister("mem", func(_ context.Context, parsed *url.URL, _ map[string]string) (IO, error) {
 		return openOrCreateMemBucket(parsed.Host), nil
 	})
 }

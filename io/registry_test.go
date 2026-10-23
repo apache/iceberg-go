@@ -19,7 +19,11 @@ package io_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/url"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/apache/iceberg-go/io"
@@ -97,23 +101,28 @@ func TestIORegistry(t *testing.T) {
 	assert.ErrorIs(t, err, io.ErrIOSchemeNotFound)
 }
 
-func TestRegistryPanic(t *testing.T) {
-	assert.PanicsWithValue(t, "io: Register factory is nil", func() {
-		io.Register("invalid", nil)
-	})
+func TestRegisterRejectsNilFactory(t *testing.T) {
+	err := io.Register("invalid", nil)
+	require.ErrorIs(t, err, io.ErrInvalidSchemeFactory)
+	assert.NotContains(t, io.GetRegisteredSchemes(), "invalid")
 }
 
-func TestRegisterDuplicatePanic(t *testing.T) {
-	dummyFactory := func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
+func TestRegisterRejectsDuplicate(t *testing.T) {
+	dummyFactory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
 		return io.LocalFS{}, nil
 	}
 
-	io.Register("test-duplicate", dummyFactory)
+	require.NoError(t, io.Register("test-duplicate", dummyFactory))
 	defer io.Unregister("test-duplicate")
 
-	assert.PanicsWithValue(t, "io: Register called twice for scheme test-duplicate", func() {
-		io.Register("test-duplicate", dummyFactory)
-	}, "Attempting to register the same scheme twice should panic")
+	err := io.Register("test-duplicate", dummyFactory)
+	require.ErrorIs(t, err, io.ErrSchemeAlreadyRegistered)
+	assert.ErrorContains(t, err, "test-duplicate")
+}
+
+func TestMustRegisterPanicsOnInvalidRegistration(t *testing.T) {
+	assert.Panics(t, func() { io.MustRegister("nil-factory-test", nil) })
+	assert.NotContains(t, io.GetRegisteredSchemes(), "nil-factory-test")
 }
 
 func TestLoadFS(t *testing.T) {
@@ -175,4 +184,138 @@ func TestLoadFSWithWarehouse(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, iofs)
 	assert.IsType(t, io.LocalFS{}, iofs)
+}
+
+func TestIndependentRegistryIsolation(t *testing.T) {
+	t.Parallel()
+
+	first := io.NewRegistry()
+	second := io.NewRegistry()
+	require.Equal(t, io.GetRegisteredSchemes(), first.RegisteredSchemes())
+	require.Equal(t, first.RegisteredSchemes(), second.RegisteredSchemes())
+	assert.True(t, slices.IsSorted(first.RegisteredSchemes()))
+
+	const scheme = "scoped-registry-test"
+	factory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	}
+	require.NoError(t, first.Register(scheme, factory))
+
+	fs, err := first.LoadFS(t.Context(), nil, scheme+"://bucket/path")
+	require.NoError(t, err)
+	assert.IsType(t, io.LocalFS{}, fs)
+
+	_, err = second.LoadFS(t.Context(), nil, scheme+"://bucket/path")
+	require.ErrorIs(t, err, io.ErrIOSchemeNotFound)
+	_, err = io.LoadFS(t.Context(), nil, scheme+"://bucket/path")
+	require.ErrorIs(t, err, io.ErrIOSchemeNotFound)
+
+	clone := first.Clone()
+	first.Unregister(scheme)
+	_, err = first.LoadFS(t.Context(), nil, scheme+"://bucket/path")
+	require.ErrorIs(t, err, io.ErrIOSchemeNotFound)
+	_, err = clone.LoadFS(t.Context(), nil, scheme+"://bucket/path")
+	require.NoError(t, err)
+
+	_, err = first.LoadFS(t.Context(), nil, "file:///tmp/sample")
+	require.NoError(t, err)
+}
+
+func TestRegistryZeroValueIsUsable(t *testing.T) {
+	var reg io.Registry
+	require.Empty(t, reg.RegisteredSchemes())
+
+	factory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	}
+	require.NoError(t, reg.Register("private", factory))
+
+	fs, err := reg.LoadFS(t.Context(), nil, "private://bucket/key")
+	require.NoError(t, err)
+	assert.IsType(t, io.LocalFS{}, fs)
+
+	cloned := reg.Clone()
+	reg.Unregister("private")
+	require.Empty(t, reg.RegisteredSchemes())
+	assert.Equal(t, []string{"private"}, cloned.RegisteredSchemes())
+}
+
+func TestRegistryAllowsFactoriesToRegisterSchemes(t *testing.T) {
+	t.Parallel()
+
+	reg := io.NewRegistry()
+	factory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		err := reg.Register("second-scheme", func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+			return io.LocalFS{}, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return io.LocalFS{}, nil
+	}
+	require.NoError(t, reg.Register("first-scheme", factory))
+	_, err := reg.LoadFS(t.Context(), nil, "first-scheme://bucket/key")
+	require.NoError(t, err)
+	_, err = reg.LoadFS(t.Context(), nil, "second-scheme://bucket/key")
+	require.NoError(t, err)
+}
+
+func TestRegistryPreservesFactoryErrors(t *testing.T) {
+	t.Parallel()
+
+	reg := io.NewRegistry()
+	want := errors.New("factory failed")
+	require.NoError(t, reg.Register("fails", func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return nil, want
+	}))
+	_, err := reg.LoadFS(t.Context(), nil, "fails://bucket/key")
+	require.ErrorIs(t, err, want)
+}
+
+func TestRegistryLoadFSFuncUsesScopedFactories(t *testing.T) {
+	t.Parallel()
+
+	reg := io.NewRegistry()
+	require.NoError(t, reg.Register("lazy-scheme", func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	}))
+	load := reg.LoadFSFunc(map[string]string{"warehouse": "lazy-scheme://bucket/key"}, "")
+	_, err := load(t.Context())
+	require.NoError(t, err)
+	_, err = io.LoadFS(t.Context(), nil, "lazy-scheme://bucket/key")
+	require.ErrorIs(t, err, io.ErrIOSchemeNotFound)
+}
+
+func TestRegistryConcurrentRegistrationsAndLoads(t *testing.T) {
+	t.Parallel()
+
+	reg := io.NewRegistry()
+	const workers = 32
+	factory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := range workers {
+		wg.Go(func() {
+			scheme := fmt.Sprintf("worker-%d", i)
+			if err := reg.Register(scheme, factory); err != nil {
+				errs <- err
+
+				return
+			}
+
+			if _, err := reg.LoadFS(t.Context(), nil, scheme+"://bucket/key"); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Len(t, reg.RegisteredSchemes(), workers+len(io.NewRegistry().RegisteredSchemes()))
 }
