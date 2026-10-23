@@ -44,6 +44,8 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - **Unify statistics blob types with Puffin.** Replace `table.BlobType` with `puffin.BlobType` when constructing `table.BlobMetadata`. Replace `table.BlobTypeApacheDatasketchesThetaV1` with `puffin.BlobTypeDataSketchesTheta` and `table.BlobTypeDeletionVectorV1` with `puffin.BlobTypeDeletionVector`. Use `puffin.BlobType.IsKnown()` to identify supported standard types; the redundant `table.BlobType.IsValid()` method is removed. Unknown non-empty blob type names still round-trip through table metadata.
 
+- **Transform formatting requires the result type.** `Transform.ToHumanStr(value)` is removed. Use `Transform.ToHumanStrType(resultType, value)` to format partition values, including timestamps with time zones.
+
 - **Orphan file cleanup moved to `table/maintenance`.** The orphan-cleanup and file-purge API is no longer on `table.Table`; it now lives in the `table/maintenance` package as free functions that take the table as their first argument (matching `table/compaction`). For example, `tbl.DeleteOrphanFiles(ctx, ...)` becomes `maintenance.DeleteOrphanFiles(ctx, tbl, ...)`. Because `table/maintenance` imports `table` (and not the reverse), this cannot be offered as a deprecation shim on `table.Table` without an import cycle, so callers must switch to the new package. The following moved from `table` to `table/maintenance`:
     - Functions (now free functions taking `*table.Table`): `DeleteOrphanFiles`, `PlanOrphanFiles`, `ExecuteOrphanCleanup`, `PurgeFiles`.
     - Types: `OrphanCleanupOption`, `OrphanCleanupResult`, `OrphanFile`, `OrphanCleanupPlan`, `PrefixMismatchMode`.
