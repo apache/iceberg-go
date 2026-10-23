@@ -219,7 +219,7 @@ type Args struct {
 	Warehouse   string `arg:"--warehouse" help:"warehouse to use"`
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
-	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
+	AWSProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
 	SQLDriver   string `arg:"--sql-driver" help:"database/sql driver name (SQL catalog; default binary includes sqliteshim only)"`
 	SQLDialect  string `arg:"--sql-dialect" help:"SQL dialect (SQL catalog; default binary includes sqlite via sqliteshim; other dialects need a custom build with their drivers)"`
 
@@ -408,8 +408,8 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}
 	case catalog.Glue:
 		var awsLoadOpts []func(*awsconfig.LoadOptions) error
-		if args.AwsProfile != "" {
-			awsLoadOpts = append(awsLoadOpts, awsconfig.WithSharedConfigProfile(args.AwsProfile))
+		if args.AWSProfile != "" {
+			awsLoadOpts = append(awsLoadOpts, awsconfig.WithSharedConfigProfile(args.AWSProfile))
 		}
 
 		awscfg, err := awsconfig.LoadDefaultConfig(ctx, awsLoadOpts...)
@@ -418,7 +418,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}
 
 		opts := []glue.Option{
-			glue.WithAwsConfig(awscfg),
+			glue.WithAWSConfig(awscfg),
 		}
 		if cat, err = glue.NewCatalog(opts...); err != nil {
 			log.Fatal(err)
@@ -939,8 +939,8 @@ func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[str
 		args.Warehouse = fileConf.Warehouse
 	}
 
-	if !explicitFlags["aws-profile"] && len(fileConf.AwsProfile) > 0 {
-		args.AwsProfile = fileConf.AwsProfile
+	if !explicitFlags["aws-profile"] && len(fileConf.AWSProfile) > 0 {
+		args.AWSProfile = fileConf.AWSProfile
 	}
 
 	if !explicitFlags["sql-driver"] && len(fileConf.SQLDriver) > 0 {
