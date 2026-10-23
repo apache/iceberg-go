@@ -84,8 +84,7 @@ func manifestEntries(
 	projection *ManifestEntryProjection,
 ) iter.Seq2[ManifestEntry, error] {
 	return func(yield func(ManifestEntry, error) bool) {
-		// manifestEntries has no context to thread; Open ignores ctx in every
-		// current IO backend, so Background is safe here.
+		// No caller context to thread here.
 		f, err := fs.Open(context.Background(), m.FilePath())
 		if err != nil {
 			yield(nil, err)

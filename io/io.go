@@ -47,10 +47,9 @@ import (
 type IO interface {
 	// Open opens the named file.
 	//
-	// The context bounds the open itself (e.g. object-store metadata
-	// lookups); implementations backed by a plain io/fs.FS ignore it since
-	// fs.FS.Open takes no context. Reads on the returned File are not bound
-	// by ctx.
+	// Implementations may use ctx to bound the open; those backed by a
+	// plain io/fs.FS ignore it since fs.FS.Open takes no context. Reads on
+	// the returned File are not bound by ctx.
 	//
 	// When Open returns an error, it should be of type *PathError
 	// with the Op field set to "open", the Path field set to name,

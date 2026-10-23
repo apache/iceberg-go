@@ -1104,7 +1104,8 @@ func (sp *snapshotProducer) writeDeletedEntries(ctx context.Context, deleted []i
 			if retErr == nil {
 				return
 			}
-			if cleanupErr := sp.io.Remove(ctx, path); cleanupErr != nil {
+			// retErr may be ctx's cancellation; remove the partial manifest anyway.
+			if cleanupErr := sp.io.Remove(context.WithoutCancel(ctx), path); cleanupErr != nil {
 				retErr = errors.Join(retErr, fmt.Errorf("remove failed delete manifest %s: %w", path, cleanupErr))
 			}
 		}()

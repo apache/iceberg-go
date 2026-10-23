@@ -407,8 +407,7 @@ func (s Snapshot) ValidateRowLineage() error {
 
 func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) {
 	if s.ManifestList != "" {
-		// Manifests has no caller context; Open ignores ctx in every current IO
-		// backend, so Background is safe here.
+		// No caller context to thread here.
 		f, err := fio.Open(context.Background(), s.ManifestList)
 		if err != nil {
 			return nil, fmt.Errorf("could not open manifest file: %w", err)
