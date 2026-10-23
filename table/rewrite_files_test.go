@@ -408,7 +408,7 @@ func TestRewriteFiles_DeleteFile_RoutesByContentType(t *testing.T) {
 	//
 	//   Builder A — DeleteFile(strangerData): if routed correctly, the
 	//   transaction has an empty deleteFilesToRemove slice and falls
-	//   through to ReplaceDataFilesWithDataFiles, which rejects with
+	//   through to ReplaceDataFiles, which rejects with
 	//   "cannot delete files that do not belong to the table". A
 	//   mis-route into deleteFilesToRemove would error with "cannot
 	//   remove delete files that do not belong to the table" instead.
@@ -502,7 +502,7 @@ func TestAddFiles_ReAddsPathDeletedByRewrite(t *testing.T) {
 // TestRewriteFiles_RejectsAddsWithoutDataDeletes proves that staging
 // new data files with no data files to delete is rejected up front —
 // otherwise the chain would slip through ReplaceFiles →
-// ReplaceDataFilesWithDataFiles → AddDataFiles (an OpAppend producer)
+// ReplaceDataFiles → AddDataFiles (an OpAppend producer)
 // and silently tag the snapshot append instead of replace, with no
 // rewrite validator registered.
 func TestRewriteFiles_RejectsAddsWithoutDataDeletes(t *testing.T) {

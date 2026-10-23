@@ -327,7 +327,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return fmt.Errorf("%w: rewrite must have at least one file change", ErrInvalidOperation)
 	}
 	// Adds-without-deletes would route through ReplaceFiles →
-	// ReplaceDataFilesWithDataFiles → AddDataFiles, an OpAppend
+	// ReplaceDataFiles → AddDataFiles, an OpAppend
 	// producer that never reads cfg.rewriteSemantics. The snapshot
 	// would be tagged append with no rewrite validator — silently
 	// wrong for a rewrite. A pure delete-file expunge (only

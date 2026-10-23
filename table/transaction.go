@@ -931,7 +931,10 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 	return t.apply(updates, reqs)
 }
 
-// ReplaceFiles is actually just an overwrite operation with multiple
+// ReplaceDataFilesByPath replaces data files identified by their storage paths.
+// Unlike ReplaceDataFiles, it loads file metadata as needed.
+//
+// It is actually an overwrite operation with multiple
 // files deleted and added.
 //
 // TODO: technically, this could be a REPLACE operation but we aren't performing
@@ -941,7 +944,7 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // For now, we'll keep using an overwrite operation.
 //
 // On v3 a removed data file's live deletion vector is removed with it.
-func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
+func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -966,11 +969,11 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	if len(setToDelete) != len(filesToDelete) {
-		return errors.New("delete file paths must be unique for ReplaceDataFiles")
+		return errors.New("delete file paths must be unique for ReplaceDataFilesByPath")
 	}
 
 	if len(setToAdd) != len(filesToAdd) {
-		return errors.New("add file paths must be unique for ReplaceDataFiles")
+		return errors.New("add file paths must be unique for ReplaceDataFilesByPath")
 	}
 
 	s := t.planningSnapshot(meta)
@@ -1512,7 +1515,7 @@ func withDataSequenceNumber(seq int64) WriteOption {
 
 // WithoutAutoNameMapping disables the automatic setting of the schema name
 // mapping in table properties. By default, methods like [Transaction.AddDataFiles]
-// and [Transaction.ReplaceDataFilesWithDataFiles] will set the name mapping if
+// and [Transaction.ReplaceDataFiles] will set the name mapping if
 // one does not already exist. This option is useful when working with catalogs
 // (such as Databricks Unity Catalog) that reject the name mapping property.
 func WithoutAutoNameMapping() WriteOption {
@@ -1648,7 +1651,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	return t.apply(updates, reqs)
 }
 
-// ReplaceDataFilesWithDataFiles replaces files using pre-built DataFile objects.
+// ReplaceDataFiles replaces files using pre-built DataFile objects.
 // This avoids scanning files to extract schema and statistics - the caller provides
 // DataFile objects directly with all required metadata.
 //
@@ -1672,7 +1675,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 //   - Files are written via a separate I/O path and metadata is already known
 //   - Avoiding file scanning improves performance or reliability
 //   - Working with storage systems where immediate file reads may be unreliable
-func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -1690,7 +1693,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		o(&cfg)
 	}
 
-	setToAdd, err := t.validateDataFilesToAdd(filesToAdd, "ReplaceDataFilesWithDataFiles", !cfg.rewriteSemantics)
+	setToAdd, err := t.validateDataFilesToAdd(filesToAdd, "ReplaceDataFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
@@ -1698,16 +1701,16 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	setToDelete := make(map[string]struct{}, len(filesToDelete))
 	for i, df := range filesToDelete {
 		if df == nil {
-			return fmt.Errorf("nil data file at index %d for ReplaceDataFilesWithDataFiles", i)
+			return fmt.Errorf("nil data file at index %d for ReplaceDataFiles", i)
 		}
 
 		path := df.FilePath()
 		if path == "" {
-			return errors.New("delete data file paths must be non-empty for ReplaceDataFilesWithDataFiles")
+			return errors.New("delete data file paths must be non-empty for ReplaceDataFiles")
 		}
 
 		if _, ok := setToDelete[path]; ok {
-			return errors.New("delete data file paths must be unique for ReplaceDataFilesWithDataFiles")
+			return errors.New("delete data file paths must be unique for ReplaceDataFiles")
 		}
 		setToDelete[path] = struct{}{}
 	}
@@ -1847,7 +1850,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 
 	// Delegate data file replacement to existing logic.
 	if len(deleteFilesToRemove) == 0 && len(autoDeleteFilesToRemove) == 0 && len(deleteFilesToAdd) == 0 {
-		return t.ReplaceDataFilesWithDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
+		return t.ReplaceDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
 	}
 	if len(deleteFilesToAdd) > 0 && len(deleteFilesToRemove) == 0 {
 		return fmt.Errorf("%w: adding delete files requires replacing at least one existing delete file",

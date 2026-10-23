@@ -529,11 +529,11 @@ func TestRemovingDataFileRemovesItsUnnamedDV(t *testing.T) {
 		{"RewriteFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, _ iceberg.DataFile) error {
 			return tx.NewRewrite(nil).DeleteFile(dataB).AddDataFile(dataC).Commit(ctx)
 		}},
-		{"ReplaceDataFilesWithDataFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, _ iceberg.DataFile) error {
-			return tx.ReplaceDataFilesWithDataFiles(ctx, []iceberg.DataFile{dataB}, []iceberg.DataFile{dataC}, nil)
+		{"ReplaceDataFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, _ iceberg.DataFile) error {
+			return tx.ReplaceDataFiles(ctx, []iceberg.DataFile{dataB}, []iceberg.DataFile{dataC}, nil)
 		}},
-		{"ReplaceDataFiles", func(ctx context.Context, tx *table.Transaction, dataB, _, _ iceberg.DataFile) error {
-			return tx.ReplaceDataFiles(ctx, []string{dataB.FilePath()}, nil, nil)
+		{"ReplaceDataFilesByPath", func(ctx context.Context, tx *table.Transaction, dataB, _, _ iceberg.DataFile) error {
+			return tx.ReplaceDataFilesByPath(ctx, []string{dataB.FilePath()}, nil, nil)
 		}},
 		{"ReplaceFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, eqDelete iceberg.DataFile) error {
 			return tx.ReplaceFiles(ctx, []iceberg.DataFile{dataB}, []iceberg.DataFile{dataC}, []iceberg.DataFile{eqDelete}, nil)
