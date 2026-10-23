@@ -94,6 +94,9 @@ func GetRegisteredCatalogs() []string {
 	return defaultRegistry.getKeys()
 }
 
+// Load returns a catalog that must be closed by the caller to release its
+// reporter, transports, and other catalog-owned resources.
+//
 // Load allows loading a specific catalog by URI and properties.
 //
 // This is utilized alongside RegisterCatalog/UnregisterCatalog to not only allow

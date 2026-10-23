@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -158,12 +157,12 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 		afs, err := tbl.FS(context.TODO())
 		if err != nil {
 			t.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 		manifestList, err := snap.Manifests(afs)
 		if err != nil {
 			t.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 
 		for _, m := range manifestList {
@@ -183,7 +182,7 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 			}
 			if iterErr != nil {
 				t.Error(iterErr)
-				os.Exit(1)
+				osExit(1)
 			}
 		}
 	}
@@ -273,7 +272,7 @@ func (textOutput) Uuid(u uuid.UUID) {
 }
 
 func (textOutput) Error(err error) {
-	log.Fatal(err)
+	logFatal(err)
 }
 
 type jsonOutput struct{}
@@ -398,5 +397,5 @@ func (j jsonOutput) Uuid(u uuid.UUID) {
 }
 
 func (j jsonOutput) Error(err error) {
-	log.Fatal(err)
+	logFatal(err)
 }

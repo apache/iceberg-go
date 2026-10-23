@@ -273,11 +273,8 @@ func (c *Catalog) CatalogType() catalog.Type {
 
 // Close releases the catalog's metrics reporter. The Glue catalog does not own
 // the lifetime of the AWS clients it was configured with, so only the reporter
-// is released. Callers holding a [catalog.Catalog] can reach this via a
-// [catalog.Closer] type assertion.
+// is released. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error { return c.reporter.Close() }
-
-var _ catalog.Closer = (*Catalog)(nil)
 
 // CreateTable creates a new Iceberg table in the Glue catalog.
 // This function will create the metadata file in S3 using the catalog and table properties,

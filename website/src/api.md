@@ -112,7 +112,12 @@ cat, err := catalog.Load(ctx, "default", iceberg.Properties{
     "uri":       "http://localhost:8181",
     "warehouse": "s3://my-bucket/warehouse",
 })
+if err != nil { panic(err) }
+defer cat.Close()
 ```
+
+Every catalog implements `Close() error`. Close it when done to release catalog-owned
+resources. A caller-supplied database connection remains caller-owned.
 
 ### Namespaces
 
