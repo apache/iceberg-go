@@ -72,9 +72,11 @@ rejects when concurrent deletes touch the same files.
 iceberg-go can refresh the table and replay the operation against the latest
 snapshot between attempts. On each retry the table metadata is reloaded, the
 producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid. A transaction that calls
-`RollbackToSnapshot`, `ExpireSnapshots`, or `AssertRefSnapshotID` is not
-replayed: if a ref it guards has moved, the commit fails with `ErrCommitFailed`.
+re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`
+and `AssertRefSnapshotID` pin the refs they guard, so a retry does not rebase
+those assertions. If a guarded ref has moved, the commit fails with
+`ErrCommitFailed` instead of retrying. An `ExpireSnapshots` that removes nothing
+adds no guards.
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
 setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
