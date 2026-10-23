@@ -82,8 +82,9 @@ type LocationCmd struct {
 }
 
 type FilesCmd struct {
-	TableID string `arg:"positional,required" help:"full path to a table"`
-	History bool   `arg:"--history" help:"show all snapshots"`
+	TableID          string `arg:"positional,required" help:"full path to a table"`
+	History          bool   `arg:"--history" help:"show all snapshots"`
+	ScanPlanningMode string `arg:"--scan-planning-mode" help:"local walks the manifests; remote or auto lists a scan plan's files (default: follow the catalog's scan-planning-mode)"`
 }
 
 type RenameCmd struct {
@@ -336,8 +337,7 @@ func main() {
 	case args.Drop != nil:
 		runDrop(ctx, output, cat, args.Drop)
 	case args.Files != nil:
-		tbl := loadTable(ctx, output, cat, args.Files.TableID)
-		output.Files(tbl, args.Files.History)
+		runFiles(ctx, output, cat, args.Files)
 	case args.Rename != nil:
 		runRename(ctx, output, cat, args.Rename)
 	case args.Properties != nil:

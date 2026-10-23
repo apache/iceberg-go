@@ -159,6 +159,8 @@ func WithTimestampMS(timestampMS int64) VersionOpt {
 }
 
 // NewVersion creates a Version instance from the provided parameters.
+// It copies the representations and namespace so later changes to the inputs
+// cannot modify the returned version.
 // If building updates using the MetadataBuilder, and one desires to use the last
 // added schema ID, one should use the LastAddedID constant as the provided schemaID
 //
@@ -188,10 +190,10 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 	version := &Version{
 		VersionID:        id,
 		SchemaID:         schemaID,
-		Representations:  representations,
+		Representations:  slices.Clone(representations),
 		Summary:          VersionSummary{viewEngineProperty: defaultViewEngine},
 		TimestampMS:      time.Now().UnixMilli(),
-		DefaultNamespace: defaultNS,
+		DefaultNamespace: slices.Clone(defaultNS),
 	}
 
 	for _, opt := range opts {

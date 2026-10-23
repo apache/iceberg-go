@@ -544,14 +544,15 @@ func classifyDataFile(f iceberg.DataFile) (dataFileKind, error) {
 // close it when they are done, including early exits after remote planning
 // succeeds but before all records are consumed.
 type Scan struct {
-	identifier          Identifier
-	metadata            Metadata
-	metadataLocation    string
-	ioF                 FSysF
-	manifestCache       *snapshotManifestCache
-	planner             ScanPlanner
-	scanPlanningIOProps iceberg.Properties
-	planningMode        ScanPlanningMode
+	identifier           Identifier
+	metadata             Metadata
+	metadataLocation     string
+	ioF                  FSysF
+	manifestCache        *snapshotManifestCache
+	manifestContentCache *manifestContentCache
+	planner              ScanPlanner
+	scanPlanningIOProps  iceberg.Properties
+	planningMode         ScanPlanningMode
 	// planningModeSet records an explicit WithScanPlanningMode, so a mode that
 	// conflicts with the catalog directive fails instead of being overridden.
 	planningModeSet bool
@@ -1298,6 +1299,7 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 			if err != nil {
 				return err
 			}
+			fs = scan.manifestContentCache.wrap(gctx, fs, mf)
 			partEval, err := partitionEvaluators.Get(int(mf.PartitionSpecID()))
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
@@ -1453,6 +1455,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 			if err != nil {
 				return err
 			}
+			fs = scan.manifestContentCache.wrap(gctx, fs, manifest)
 			partEval, err := partitionEvaluators.Get(int(manifest.PartitionSpecID()))
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", manifest.PartitionSpecID(), err)

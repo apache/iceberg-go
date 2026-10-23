@@ -68,7 +68,7 @@ func benchmarkNameMappingFields(count int) iceberg.NameMapping {
 }
 
 func BenchmarkUpdateNameMapping(b *testing.B) {
-	for _, size := range []int{2, 8, 256, 1024} {
+	for _, size := range []int{2, 8, 256, 1024, 4096} {
 		for _, operation := range []string{"no-updates", "rename", "rename-reused", "add-reused"} {
 			b.Run(fmt.Sprintf("%s/%d", operation, size), func(b *testing.B) {
 				mapping := benchmarkNameMappingFields(size)
