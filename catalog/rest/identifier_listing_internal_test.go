@@ -146,7 +146,7 @@ func TestCatalogObjectPagesMapNotFoundToMissingNamespace(t *testing.T) {
 	}
 	cat := &Catalog{
 		baseURI: baseURI,
-		cl: server.Client(),
+		cl:      server.Client(),
 		endpoints: newEndpointSet([]endpoint{
 			endpointListTables, endpointListViews, endpointListFunctions,
 		}),
