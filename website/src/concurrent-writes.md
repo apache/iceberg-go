@@ -91,6 +91,6 @@ _, err := cat.CreateTable(ctx, ident, schema,
 )
 ```
 
-> **Catalog support:** retry currently engages on the REST catalog, which wraps
-> commit conflicts as `ErrCommitFailed`. The Glue, SQL, and Hive catalogs do
-> not yet wrap their conflict errors, so the retry loop will not fire on them.
+> **Catalog support:** the REST, SQL, Glue, Hive, and Hadoop catalogs report
+> commit conflicts, including failed commit requirements, as `ErrCommitFailed`,
+> so the retry loop engages on all of them.
