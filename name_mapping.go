@@ -141,13 +141,16 @@ func visitMappedFields[S, T any](fields []MappedField, visitor NameMappingVisito
 //	After update: {FieldID: 1, Names: ["foo", "foo_update"]}
 //
 // This preserves compatibility with existing data files that reference the old field names.
-func UpdateNameMapping(nameMapping NameMapping, updates map[int]NestedField, adds map[int][]NestedField) (NameMapping, error) {
-	result, err := VisitNameMapping(nameMapping, &updateNameMappingVisitor{updates: updates, adds: adds})
-	if err != nil {
-		return nil, err
+func UpdateNameMapping(nameMapping NameMapping, updates map[int]NestedField, adds map[int][]NestedField) (result NameMapping, err error) {
+	if nameMapping == nil {
+		return nil, fmt.Errorf("%w: cannot visit nil NameMapping", ErrInvalidArgument)
 	}
 
-	return NameMapping(result), nil
+	defer internal.RecoverError(&err)
+
+	updater := updateNameMappingVisitor{updates: updates, adds: adds}
+
+	return NameMapping(updater.addNewFields(updater.updatedFields(nameMapping), -1)), nil
 }
 
 type updateNameMappingVisitor struct {
@@ -155,50 +158,65 @@ type updateNameMappingVisitor struct {
 	adds    map[int][]NestedField
 }
 
-func (u *updateNameMappingVisitor) Mapping(nm NameMapping, fieldResults []MappedField) []MappedField {
-	return u.addNewFields(fieldResults, -1)
-}
+// updatedFields builds independent copies while handling renames at each sibling
+// level. It avoids allocating an intermediate visitor-result slice per level.
+func (u *updateNameMappingVisitor) updatedFields(fields []MappedField) []MappedField {
+	if len(fields) == 0 {
+		return nil
+	}
 
-func (u *updateNameMappingVisitor) Fields(st []MappedField, fieldResults []MappedField) []MappedField {
-	reassignments := make(map[string]int)
-	for _, field := range fieldResults {
-		if field.FieldID != nil {
+	// A rename may take an alias from a sibling, so find the new owners before
+	// building the output. Most levels have no updates and need no map.
+	var reassignments map[string]int
+	if len(u.updates) != 0 {
+		for _, field := range fields {
+			if field.FieldID == nil {
+				continue
+			}
 			if update, exists := u.updates[*field.FieldID]; exists {
+				if reassignments == nil {
+					reassignments = make(map[string]int)
+				}
 				reassignments[update.Name] = update.ID
 			}
 		}
 	}
 
-	var result []MappedField
-	for _, field := range fieldResults {
-		updatedField := u.removeReassignedNames(field, reassignments)
-		if updatedField != nil {
-			result = append(result, *updatedField)
+	result := make([]MappedField, 0, len(fields))
+	// Keep the copied IDs together rather than allocating one int per field.
+	// Every returned FieldID points into this independent backing slice.
+	var copiedIDs []int
+	for _, field := range fields {
+		children := u.updatedFields(field.Fields)
+		updated := MappedField{
+			Names:  slices.Clone(field.Names),
+			Fields: children,
 		}
+		if field.FieldID != nil {
+			if copiedIDs == nil {
+				copiedIDs = make([]int, len(fields))
+			}
+			id := *field.FieldID
+			copiedIDs[len(result)] = id
+			updated.FieldID = &copiedIDs[len(result)]
+
+			if rename, exists := u.updates[id]; exists && !slices.Contains(updated.Names, rename.Name) {
+				updated.Names = append(updated.Names, rename.Name)
+			}
+			updated.Fields = u.addNewFields(children, id)
+		}
+
+		if retained := u.removeReassignedNames(updated, reassignments); retained != nil {
+			result = append(result, *retained)
+		}
+	}
+
+	// The original visitor returned nil when every alias was discarded.
+	if len(result) == 0 {
+		return nil
 	}
 
 	return result
-}
-
-func (u *updateNameMappingVisitor) Field(field MappedField, fieldResult []MappedField) MappedField {
-	if field.FieldID == nil {
-		return MappedField{
-			Names:  slices.Clone(field.Names),
-			Fields: fieldResult,
-		}
-	}
-
-	fieldID := *field.FieldID
-	fieldNames := slices.Clone(field.Names)
-	if update, exists := u.updates[*field.FieldID]; exists && !slices.Contains(fieldNames, update.Name) {
-		fieldNames = append(fieldNames, update.Name)
-	}
-
-	return MappedField{
-		FieldID: &fieldID,
-		Names:   fieldNames,
-		Fields:  u.addNewFields(fieldResult, *field.FieldID),
-	}
 }
 
 func (u *updateNameMappingVisitor) removeReassignedNames(field MappedField, assignments map[string]int) *MappedField {
@@ -214,7 +232,6 @@ func (u *updateNameMappingVisitor) removeReassignedNames(field MappedField, assi
 	if len(remainingNames) == 0 {
 		return nil
 	}
-
 	field.Names = remainingNames
 
 	return &field
@@ -226,32 +243,36 @@ func (u *updateNameMappingVisitor) addNewFields(mappedFields []MappedField, pare
 		return mappedFields
 	}
 
-	newFields := make([]MappedField, 0, len(fieldsToAdd))
-	for _, add := range fieldsToAdd {
-		fields := visitField(add, createMapping{})
-		if len(fields) == 0 {
-			fields = nil
-		}
-
-		newFields = append(newFields, MappedField{
-			FieldID: &add.ID,
-			Names:   []string{add.Name},
-			Fields:  fields,
-		})
-	}
-	reassignments := make(map[string]int)
+	reassignments := make(map[string]int, len(fieldsToAdd))
 	for _, add := range fieldsToAdd {
 		reassignments[add.Name] = add.ID
 	}
 
-	fields := make([]MappedField, 0)
+	// mappedFields was freshly allocated by updatedFields, so compacting it
+	// here cannot change the caller's original mapping.
+	fields := mappedFields[:0]
+	if fields == nil {
+		fields = make([]MappedField, 0, len(fieldsToAdd))
+	}
 	for _, field := range mappedFields {
-		if updatedField := u.removeReassignedNames(field, reassignments); updatedField != nil {
-			fields = append(fields, *updatedField)
+		if retained := u.removeReassignedNames(field, reassignments); retained != nil {
+			fields = append(fields, *retained)
 		}
 	}
 
-	return append(fields, newFields...)
+	for _, add := range fieldsToAdd {
+		children := visitField(add, createMapping{})
+		if len(children) == 0 {
+			children = nil
+		}
+		fields = append(fields, MappedField{
+			FieldID: &add.ID,
+			Names:   []string{add.Name},
+			Fields:  children,
+		})
+	}
+
+	return fields
 }
 
 type NameMappingAccessor struct{}
