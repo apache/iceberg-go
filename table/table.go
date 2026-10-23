@@ -95,13 +95,14 @@ type CatalogIO interface {
 }
 
 type Table struct {
-	identifier       Identifier
-	metadata         Metadata
-	metadataLocation string
-	cat              CatalogIO
-	fsF              FSysF
-	manifestCache    *snapshotManifestCache
-	planner          ScanPlanner
+	identifier           Identifier
+	metadata             Metadata
+	metadataLocation     string
+	cat                  CatalogIO
+	fsF                  FSysF
+	manifestCache        *snapshotManifestCache
+	manifestContentCache *manifestContentCache
+	planner              ScanPlanner
 	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
 	// catalog load response. They are separate from metadata properties because
 	// REST catalogs can return FileIO configuration in the response's config
@@ -249,6 +250,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
+	t.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, fresh.manifestContentCache)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	t.scanPlanningDirective = fresh.scanPlanningDirective
@@ -852,7 +854,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
-	return New(
+	next := New(
 		t.identifier,
 		newMeta,
 		newLoc,
@@ -863,7 +865,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
-	), nil
+	)
+	next.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, next.manifestContentCache)
+
+	return next, nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -1370,22 +1375,23 @@ func WithArrowBatchSize(n int) ScanOption {
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	directive, directiveErr := t.ScanPlanningDirective()
 	s := &Scan{
-		identifier:          slices.Clone(t.identifier),
-		metadata:            t.metadata,
-		metadataLocation:    t.metadataLocation,
-		ioF:                 t.fsF,
-		manifestCache:       t.manifestCache,
-		planner:             t.planner,
-		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
-		directive:           directive,
-		directiveErr:        directiveErr,
-		planningMode:        ScanPlanningLocal,
-		rowFilter:           iceberg.AlwaysTrue{},
-		selectedFields:      []string{"*"},
-		caseSensitive:       true,
-		limit:               ScanNoLimit,
-		concurrency:         runtime.GOMAXPROCS(0),
-		reporter:            t.MetricsReporter(),
+		identifier:           slices.Clone(t.identifier),
+		metadata:             t.metadata,
+		metadataLocation:     t.metadataLocation,
+		ioF:                  t.fsF,
+		manifestCache:        t.manifestCache,
+		manifestContentCache: t.manifestContentCache,
+		planner:              t.planner,
+		scanPlanningIOProps:  maps.Clone(t.scanPlanningIOProps),
+		directive:            directive,
+		directiveErr:         directiveErr,
+		planningMode:         ScanPlanningLocal,
+		rowFilter:            iceberg.AlwaysTrue{},
+		selectedFields:       []string{"*"},
+		caseSensitive:        true,
+		limit:                ScanNoLimit,
+		concurrency:          runtime.GOMAXPROCS(0),
+		reporter:             t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
@@ -1418,10 +1424,9 @@ func WithMetricsReporter(r metrics.Reporter) Option {
 	}
 }
 
-// WithScanPlanningIOProperties supplies the table-scoped FileIO properties
-// that a remote scan planner needs when it builds a plan-scoped FileIO. This
-// is intended for catalog implementations whose table-load response carries
-// FileIO configuration separately from table metadata properties.
+// WithScanPlanningIOProperties supplies FileIO/catalog properties for
+// manifest content caching and remote scan planning. These can include
+// settings returned separately from table metadata by a REST catalog.
 func WithScanPlanningIOProperties(props iceberg.Properties) Option {
 	if props == nil {
 		return noopTableOption
@@ -1499,6 +1504,14 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 	for _, opt := range opts {
 		opt(t)
 	}
+	// FileIO/catalog settings are the default. Per-table saved settings
+	// (including REST LoadTable overrides) take precedence when supplied.
+	cacheConfig := t.savedConfig
+	if len(t.scanPlanningIOProps) > 0 {
+		cacheConfig = maps.Clone(t.scanPlanningIOProps)
+		maps.Copy(cacheConfig, t.savedConfig)
+	}
+	t.manifestContentCache = newManifestContentCacheForConfig(cacheConfig)
 
 	return t
 }
