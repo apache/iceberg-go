@@ -528,7 +528,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		case tbl.Schema != "":
 			var err error
 
-			schema, err = iceberg.NewSchemaFromJsonFields(0, tbl.Schema)
+			schema, err = iceberg.NewSchemaFromJSONFields(0, tbl.Schema)
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
