@@ -422,33 +422,53 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 		return OrphanCleanupPlan{}, err
 	}
 
-	// Identify orphans.
-	referencedIndex := newReferencedFileIndex(referencedFiles, cfg)
+	// Most listed paths already match their metadata references exactly.
+	// Avoid normalizing the entire reference set unless a raw lookup misses.
+	plan, err := findOrphanFiles(scannedFiles, referencedFiles, cfg)
+	if err != nil {
+		return OrphanCleanupPlan{}, err
+	}
+	plan.cutoff = cutoff
 
-	var orphanFiles []string
-	orphanFileEntries := make([]OrphanFile, 0)
-	var totalOrphanSize int64
+	return plan, nil
+}
+
+// findOrphanFiles defers building the URI alias index until it is needed.
+// Exact matches do not need URI parsing or prefix-mismatch handling.
+func findOrphanFiles(
+	scannedFiles []scannedFile, referencedFiles map[string]bool, cfg *orphanCleanupConfig,
+) (OrphanCleanupPlan, error) {
+	plan := OrphanCleanupPlan{orphanFiles: make([]OrphanFile, 0)}
+	var referencedIndex referencedFileIndex
+	indexBuilt := false
+
 	for _, f := range scannedFiles {
+		if _, referenced := referencedFiles[f.path]; referenced {
+			continue
+		}
+
+		if !indexBuilt {
+			referencedIndex = newReferencedFileIndex(referencedFiles, cfg)
+			indexBuilt = true
+		}
+
 		isOrphan, err := isFileOrphan(f.path, referencedFiles, referencedIndex, cfg)
 		if err != nil {
 			return OrphanCleanupPlan{}, fmt.Errorf("failed to identify orphan %s: %w", f.path, err)
 		}
-		if isOrphan {
-			orphanFiles = append(orphanFiles, f.path)
-			orphanFileEntries = append(orphanFileEntries, OrphanFile{
-				Path:      f.path,
-				SizeBytes: f.size,
-			})
-			totalOrphanSize += f.size
+		if !isOrphan {
+			continue
 		}
+
+		plan.orphanFileLocations = append(plan.orphanFileLocations, f.path)
+		plan.orphanFiles = append(plan.orphanFiles, OrphanFile{
+			Path:      f.path,
+			SizeBytes: f.size,
+		})
+		plan.totalSizeBytes += f.size
 	}
 
-	return OrphanCleanupPlan{
-		orphanFileLocations: orphanFiles,
-		orphanFiles:         orphanFileEntries,
-		totalSizeBytes:      totalOrphanSize,
-		cutoff:              cutoff,
-	}, nil
+	return plan, nil
 }
 
 func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
@@ -655,14 +675,14 @@ func isFileOrphan(
 	referencedIndex referencedFileIndex,
 	cfg *orphanCleanupConfig,
 ) (bool, error) {
-	normalizedFiles := normalizedFilePathAliases(file, cfg)
-	normalizedFile := normalizedFiles[0]
-
-	// Any presence in referencedFiles means referenced;
-	// the bool distinguishes data vs metadata for gc.enabled, not membership"
+	// Any presence in referencedFiles means referenced. Its bool value
+	// distinguishes data and metadata, not membership.
 	if _, ok := referencedFiles[file]; ok {
 		return false, nil
 	}
+
+	normalizedFiles := normalizedFilePathAliases(file, cfg)
+	normalizedFile := normalizedFiles[0]
 	if _, ok := referencedFiles[normalizedFile]; ok {
 		return false, nil
 	}
