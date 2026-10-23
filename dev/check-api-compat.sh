@@ -79,7 +79,18 @@ run_apidiff() {
 # apidiff resolves the module from the current directory, so export the base
 # API from inside the base checkout and compare from the repository root.
 (cd "${base_dir}" && run_apidiff -m -w "${work}/base.export" "${MODULE}")
-run_apidiff -m -incompatible "${work}/base.export" "${MODULE}" > "${work}/changes.txt"
+run_apidiff -m -incompatible "${work}/base.export" "${MODULE}" > "${work}/all-changes.txt"
+
+# Commands (package main) cannot be imported, so their exported identifiers
+# are not public API. apidiff reports them anyway, as "- ./<dir>.<name>: ...";
+# drop those lines.
+main_pkgs="$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)"
+cp "${work}/all-changes.txt" "${work}/changes.txt"
+for pkg in ${main_pkgs}; do
+  prefix="- .${pkg#"${MODULE}"}."
+  grep -vF -- "${prefix}" "${work}/changes.txt" > "${work}/filtered.txt" || true
+  mv "${work}/filtered.txt" "${work}/changes.txt"
+done
 
 summary() {
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then

@@ -175,6 +175,19 @@ iceberg partition-stats --snapshot-id 7234981023498 my_db.events
 iceberg partition-stats --all my_db.events                    # all snapshots
 ```
 
+### `files` — data files
+
+```shell
+iceberg files my_db.events                              # current snapshot
+iceberg files --history my_db.events                    # all snapshots
+iceberg files --scan-planning-mode remote my_db.events  # from a server-side scan plan
+```
+By default `files` reads the manifest list and manifests itself and prints them as a tree: snapshot, manifest, then each manifest entry.
+
+With `--scan-planning-mode remote` or `auto`, or when a REST catalog sets `scan-planning-mode=server` for the table, `files` plans a scan of the current snapshot instead and lists the data files it returns, each with its delete files. A scan plan carries no manifests, so the tree has no manifest level, and it only shows live files. `--history` needs every snapshot's manifests and fails in this mode, as does `--scan-planning-mode local` on a `server` table.
+
+`compact` plans its input with a table scan, so it follows the catalog's `scan-planning-mode` as well. Every other command reads table metadata directly.
+
 ### `schema --show-defaults`
 
 ```shell

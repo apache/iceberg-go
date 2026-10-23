@@ -60,12 +60,12 @@ func Unregister(scheme string) {
 	delete(defaultRegistry, scheme)
 }
 
-// GetRegisteredSchemes returns the list of registered scheme names.
+// GetRegisteredSchemes returns registered scheme names in sorted order.
 func GetRegisteredSchemes() []string {
 	regMutex.RLock()
 	defer regMutex.RUnlock()
 
-	return slices.Collect(maps.Keys(defaultRegistry))
+	return slices.Sorted(maps.Keys(defaultRegistry))
 }
 
 func init() {

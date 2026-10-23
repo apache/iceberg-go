@@ -363,12 +363,36 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 |---|---|---|
 | `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
 | `read.manifest-list-cache.enabled` | `true` | Reuse decoded snapshot manifest lists across scans of a table handle. Set to `false` to disable retention and shared in-flight reads. Applied when loading or refreshing a table, and when creating a transaction scan. |
+| `io.manifest.cache-enabled` | `false` | Reuse raw manifest file content across local scans. Read from catalog FileIO properties in REST, Glue, SQL, Hive and Hadoop; REST table metadata and load-response config may override the catalog value. |
+| `io.manifest.cache.expiration-interval-ms` | `60000` | Idle expiration in milliseconds. Zero disables time-based expiration; negative or unparsable values warn and disable the cache. Expired entries are reclaimed on cache access/insertion, without a background cleanup task. |
+| `io.manifest.cache.max-total-bytes` | `104857600` | Retained raw bytes per independently loaded table. Handles returned by commit share their source table's cache and budget. Concurrent population buffers and bytes held by active readers are not counted. Non-positive or unparsable values warn and disable caching. |
+| `io.manifest.cache.max-content-length` | `8388608` | Maximum size of one manifest eligible for content caching. Non-positive or unparsable values warn and disable caching. |
+
+The catalog's FileIO properties configure manifest caching for all built-in
+catalogs. With direct `table.New` calls, use `WithScanPlanningIOProperties`
+or `WithSavedConfig`; saved config wins when the same key is present in both.
+Matching expiration interval, total byte limit and per-manifest byte limit
+preserve warm cache entries across refresh and commit. Changing a limit replaces
+the cache.
+
+Unlike Java, which rejects invalid manifest-cache limits, Go warns and disables
+the content cache for negative or unparsable expiration or
+non-positive/unparsable size limits.
 
 The manifest-list cache retains at most 64 snapshots and 32,768 manifest
 descriptors in total per table handle. These are count limits, not byte limits:
 memory use also depends on manifest paths, partition summaries, and key metadata.
-Refreshing the table replaces its cache. This caches decoded manifest lists;
-it does not implement Java's `io.manifest.cache.*` file-content cache settings.
+Refreshing the table replaces its manifest-list cache.
+
+The optional manifest-content cache is separate. It stores immutable raw manifest
+bytes and still decodes, projects, and filters entries independently for each
+scan. Cache misses for the same manifest share one in-flight read. If population
+fails, its producer and each existing waiter independently fall back to one
+ordinary FileIO open; if the producer was canceled, live waiters can start
+another shared load. Failed content is not
+retained, so a later scan can retry. Manifests larger than the configured
+per-file limit bypass the cache. The current integration covers local scan
+planning; manifest lists continue to use the decoded manifest-list cache.
 
 The Java-compatible `read.split.planning-lookback` and `read.split.open-file-cost`
 names and defaults are also exported by the Go API for shared configuration,
