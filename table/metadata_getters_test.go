@@ -57,7 +57,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 		SnapshotRefs: map[string]SnapshotRef{
 			MainBranch: {
 				SnapshotID:         2,
-				SnapshotRefType:    BranchRef,
+				Type:               BranchRef,
 				MinSnapshotsToKeep: &refMinSnapshots,
 				MaxSnapshotAgeMs:   &refMaxSnapshotAge,
 				MaxRefAgeMs:        &refMaxAge,
