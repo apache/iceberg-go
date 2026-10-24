@@ -383,7 +383,8 @@ newTbl, err := txn.Commit(ctx)
 To target a specific branch:
 
 ```go
-txn := tbl.NewTransactionOnBranch("staging")
+txn, err := tbl.NewTransactionOnBranch("staging")
+if err != nil { /* ... */ }
 ```
 
 `Commit` retries automatically on conflict (`ErrCommitFailed`) - tune via the `commit.retry.*` table properties.
