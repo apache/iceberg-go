@@ -44,6 +44,7 @@ const (
 )
 
 var _ catalog.Catalog = (*Catalog)(nil)
+var _ catalog.RegisterableCatalog = (*Catalog)(nil)
 
 func init() {
 	catalog.Register("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
