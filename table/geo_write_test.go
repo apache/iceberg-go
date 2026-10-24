@@ -388,7 +388,7 @@ func TestWriteGeoColumnMultiRowGroupStats(t *testing.T) {
 func sumColumnChunkCompressedSize(t *testing.T, path, colName string) int64 {
 	t.Helper()
 
-	f, err := (io.LocalFS{}).Open(path)
+	f, err := (io.LocalFS{}).Open(t.Context(), path)
 	require.NoError(t, err)
 	defer f.Close()
 
