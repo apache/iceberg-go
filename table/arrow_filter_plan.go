@@ -393,7 +393,7 @@ func compileFileFilterPlan(
 		return plan, nil
 	}
 
-	extSet, recordFilter, err := substrait.ConvertExpr(recordSchema, boundFilter, caseSensitive)
+	extSet, recordFilter, err := substrait.ConvertExpr(recordSchema, boundFilter)
 	if err != nil {
 		return nil, err
 	}

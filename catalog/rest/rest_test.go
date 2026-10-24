@@ -3655,7 +3655,7 @@ func (r *RestCatalogSuite) TestRegisterView200() {
 	r.Equal(metadataLoc, v.MetadataLocation())
 	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), v.Metadata().ViewUUID())
 	r.EqualValues(1, v.Metadata().CurrentVersionID())
-	r.Equal(exampleViewSQL, v.Metadata().CurrentVersion().Representations[0].Sql)
+	r.Equal(exampleViewSQL, v.Metadata().CurrentVersion().Representations[0].SQL)
 }
 
 func (r *RestCatalogSuite) TestRegisterViewLabels() {
@@ -3865,7 +3865,7 @@ func (r *RestCatalogSuite) TestRenameView204() {
 	r.Equal(toIdent, renamed.Identifier())
 	r.Equal(metadataLoc, renamed.MetadataLocation())
 	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), renamed.Metadata().ViewUUID())
-	r.Equal(exampleViewSQL, renamed.Metadata().CurrentVersion().Representations[0].Sql)
+	r.Equal(exampleViewSQL, renamed.Metadata().CurrentVersion().Representations[0].SQL)
 }
 
 func (r *RestCatalogSuite) TestRenameView404() {

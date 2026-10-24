@@ -103,7 +103,7 @@ type Representation struct {
 	// Must be sql
 	Type string `json:"type"`
 	// A SQL SELECT statement
-	Sql string `json:"sql"`
+	SQL string `json:"sql"`
 	// The dialect of the sql SELECT statement (e.g., "trino" or "spark")
 	Dialect string `json:"dialect"`
 }
@@ -112,7 +112,7 @@ type Representations []Representation
 func NewRepresentation(sql string, dialect string) Representation {
 	return Representation{
 		Type:    "sql",
-		Sql:     sql,
+		SQL:     sql,
 		Dialect: dialect,
 	}
 }
@@ -210,7 +210,7 @@ func validateRepresentation(repr Representation) (string, error) {
 		return "", errors.New("invalid view representation: type should be \"sql\"")
 	}
 
-	if strings.TrimSpace(repr.Sql) == "" {
+	if strings.TrimSpace(repr.SQL) == "" {
 		return "", errors.New("invalid view representation: sql is required")
 	}
 

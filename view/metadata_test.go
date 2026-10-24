@@ -69,6 +69,20 @@ func TestVersionEquals(t *testing.T) {
 	assert.True(t, v1.Equals(v2), fmt.Sprintf("Expected the same SchemaID, Summary, Representation for %v, got %v", v1, v2))
 }
 
+// TestRepresentationSQLJSON keeps the on-disk SQL key unchanged after the Go API rename.
+func TestRepresentationSQLJSON(t *testing.T) {
+	repr := NewRepresentation("SELECT 1", "spark")
+	require.Equal(t, "SELECT 1", repr.SQL)
+
+	data, err := json.Marshal(repr)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"sql","sql":"SELECT 1","dialect":"spark"}`, string(data))
+
+	var decoded Representation
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, repr, decoded)
+}
+
 func TestNewMetadata(t *testing.T) {
 	// VersionID of 3 should be overridden by the ViewMD ctor
 	version := newTestVersion(3, LastAddedID,
@@ -675,7 +689,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 
 	currentVersion := md.CurrentVersion()
 	currentVersion.Summary["summaryProp"] = "changed"
-	currentVersion.Representations[0].Sql = "select changed"
+	currentVersion.Representations[0].SQL = "select changed"
 	currentVersion.DefaultNamespace[0] = "changed"
 
 	versions := md.Versions()
@@ -700,7 +714,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 
 	assert.Equal(t, int64(1), md.CurrentVersion().VersionID)
 	assert.Equal(t, "summaryVal", md.CurrentVersion().Summary["summaryProp"])
-	assert.Equal(t, "select * from ns.tbl", md.CurrentVersion().Representations[0].Sql)
+	assert.Equal(t, "select * from ns.tbl", md.CurrentVersion().Representations[0].SQL)
 	assert.Equal(t, "accounting", md.CurrentVersion().DefaultNamespace[0])
 	assert.Equal(t, 0, md.CurrentSchema().ID)
 	assert.Equal(t, 0, md.CurrentSchema().IdentifierFieldIDs[0])
