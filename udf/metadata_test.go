@@ -288,14 +288,14 @@ func TestMetadataInitDefaults(t *testing.T) {
 }
 
 func TestNewSQLRepresentation(t *testing.T) {
-	repr, err := NewSQLRepresentation("trino", "x + 1")
+	repr, err := NewSQLRepresentation(SQLRepresentation{Dialect: "trino", SQL: "x + 1"})
 	require.NoError(t, err)
 	assert.Equal(t, SQLRepresentation{Dialect: "trino", SQL: "x + 1"}, repr)
 
-	_, err = NewSQLRepresentation("", "x + 1")
+	_, err = NewSQLRepresentation(SQLRepresentation{SQL: "x + 1"})
 	assert.ErrorIs(t, err, ErrInvalidUDFMetadata)
 
-	_, err = NewSQLRepresentation("trino", "")
+	_, err = NewSQLRepresentation(SQLRepresentation{Dialect: "trino"})
 	assert.ErrorIs(t, err, ErrInvalidUDFMetadata)
 }
 
