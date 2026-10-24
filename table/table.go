@@ -1188,9 +1188,11 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	return time.Duration(wait) * time.Millisecond
 }
 
-// SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
-func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+// SnapshotAsOf returns the snapshot that was current at or before timestampMs,
+// measured in milliseconds since the Unix epoch. It returns nil when no
+// snapshot was current at or before that time.
+func (t Table) SnapshotAsOf(timestampMs int64) *Snapshot {
+	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, true)
 	if ok {
 		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
