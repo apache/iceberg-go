@@ -821,7 +821,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(ident)
-	tblIdent := catalog.TableNameFromIdent(ident)
+	tblIdent := catalog.ObjectNameFromIdent(ident)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return nil, err
@@ -893,7 +893,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	ns := catalog.NamespaceFromIdent(ident)
-	tblName := catalog.TableNameFromIdent(ident)
+	tblName := catalog.ObjectNameFromIdent(ident)
 	nsKey, err := c.namespaceKey(ctx, ns)
 	if err != nil {
 		return nil, "", err
@@ -999,7 +999,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 	}
 
 	ns := catalog.NamespaceFromIdent(identifier)
-	tbl := catalog.TableNameFromIdent(identifier)
+	tbl := catalog.ObjectNameFromIdent(identifier)
 	nsKey, err := c.namespaceKey(ctx, ns)
 	if err != nil {
 		return nil, err
@@ -1047,6 +1047,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		io.LoadFSFunc(c.props, result.MetadataLocation.String),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.props),
 	)
 }
 
@@ -1059,7 +1060,7 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 	if err != nil {
 		return err
 	}
-	tbl := catalog.TableNameFromIdent(identifier)
+	tbl := catalog.ObjectNameFromIdent(identifier)
 
 	return withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		del := tx.NewDelete().Model(&sqlIcebergTable{
@@ -1124,13 +1125,13 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	if err != nil {
 		return nil, err
 	}
-	fromTbl := catalog.TableNameFromIdent(from)
+	fromTbl := catalog.ObjectNameFromIdent(from)
 
 	toNs, exists, err := c.resolveNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
 	if err != nil {
 		return nil, err
 	}
-	toTbl := catalog.TableNameFromIdent(to)
+	toTbl := catalog.ObjectNameFromIdent(to)
 
 	if !exists {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, toNs)
@@ -1228,7 +1229,7 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	if err != nil {
 		return false, err
 	}
-	tableName := catalog.TableNameFromIdent(identifier)
+	tableName := catalog.ObjectNameFromIdent(identifier)
 
 	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
 		query := tx.NewSelect().Model(&sqlIcebergTable{
@@ -1640,7 +1641,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(identifier)
-	viewIdent := catalog.TableNameFromIdent(identifier)
+	viewIdent := catalog.ObjectNameFromIdent(identifier)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return err
@@ -1775,7 +1776,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 	if err != nil {
 		return err
 	}
-	viewName := catalog.TableNameFromIdent(identifier)
+	viewName := catalog.ObjectNameFromIdent(identifier)
 
 	metadataLocation := ""
 	view, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
@@ -1854,7 +1855,7 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 	if err != nil {
 		return false, err
 	}
-	viewName := catalog.TableNameFromIdent(identifier)
+	viewName := catalog.ObjectNameFromIdent(identifier)
 
 	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
 		exists, err := tx.NewSelect().Model(&sqlIcebergTable{
@@ -1884,7 +1885,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (vi
 	if err != nil {
 		return nil, err
 	}
-	viewName := catalog.TableNameFromIdent(identifier)
+	viewName := catalog.ObjectNameFromIdent(identifier)
 
 	v, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
 		v := new(sqlIcebergTable)

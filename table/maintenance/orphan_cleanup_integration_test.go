@@ -230,7 +230,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupDryRun() {
 	s.Require().NoError(err)
 	s.Require().NotNil(result)
 
-	s.GreaterOrEqual(len(result.OrphanFileLocations), 3, "Should identify at least 3 orphan files")
+	s.GreaterOrEqual(len(result.OrphanFiles), 3, "Should identify at least 3 orphan files")
 	s.Empty(result.DeletedFiles, "Dry run should not delete any files")
 
 	for _, orphanFile := range orphanFiles {
@@ -239,8 +239,8 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupDryRun() {
 
 	for _, orphanFile := range orphanFiles {
 		found := false
-		for _, identified := range result.OrphanFileLocations {
-			if strings.Contains(identified, filepath.Base(orphanFile)) {
+		for _, identified := range result.OrphanFiles {
+			if strings.Contains(identified.Path, filepath.Base(orphanFile)) {
 				found = true
 				break
 			}
@@ -277,7 +277,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupActualDeletion() {
 	s.Require().NoError(err)
 	s.Require().NotNil(result)
 
-	s.GreaterOrEqual(len(result.OrphanFileLocations), 2, "Should identify at least 2 orphan files")
+	s.GreaterOrEqual(len(result.OrphanFiles), 2, "Should identify at least 2 orphan files")
 	s.GreaterOrEqual(len(result.DeletedFiles), 2, "Should delete at least 2 orphan files")
 
 	for _, orphanFile := range orphanFiles {

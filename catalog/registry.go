@@ -33,10 +33,10 @@ import (
 type registry map[string]Registrar
 
 func (r registry) getKeys() []string {
-	regMutex.Lock()
-	defer regMutex.Unlock()
+	regMutex.RLock()
+	defer regMutex.RUnlock()
 
-	return slices.Collect(maps.Keys(r))
+	return slices.Sorted(maps.Keys(r))
 }
 
 func (r registry) set(catalogType string, reg Registrar) {
@@ -46,8 +46,8 @@ func (r registry) set(catalogType string, reg Registrar) {
 }
 
 func (r registry) get(catalogType string) (Registrar, bool) {
-	regMutex.Lock()
-	defer regMutex.Unlock()
+	regMutex.RLock()
+	defer regMutex.RUnlock()
 	reg, ok := r[catalogType]
 
 	return reg, ok
@@ -60,7 +60,7 @@ func (r registry) remove(catalogType string) {
 }
 
 var (
-	regMutex        sync.Mutex
+	regMutex        sync.RWMutex
 	defaultRegistry = registry{}
 )
 
@@ -89,8 +89,7 @@ func Unregister(catalogType string) {
 	defaultRegistry.remove(strings.ToLower(catalogType))
 }
 
-// GetRegisteredCatalogs returns the list of registered catalog names that can
-// be looked up via LoadCatalog.
+// GetRegisteredCatalogs returns the registered catalog types in sorted order.
 func GetRegisteredCatalogs() []string {
 	return defaultRegistry.getKeys()
 }

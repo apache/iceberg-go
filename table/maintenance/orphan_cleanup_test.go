@@ -2028,11 +2028,12 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 						assert.Empty(t, deleted)
 					case PrefixMismatchIgnore:
 						require.NoError(t, err)
-						assert.Empty(t, result.OrphanFileLocations)
+						assert.Empty(t, result.OrphanFiles)
 						assert.Empty(t, deleted)
 					case PrefixMismatchDelete:
 						require.NoError(t, err)
-						assert.Equal(t, []string{tt.listedPath}, result.OrphanFileLocations)
+						require.Len(t, result.OrphanFiles, 1)
+						assert.Equal(t, tt.listedPath, result.OrphanFiles[0].Path)
 						assert.Equal(t, []string{tt.listedPath}, deleted)
 					}
 				})
@@ -2086,7 +2087,7 @@ func TestDeleteOrphanFilesDryRunKeepsMixedCaseWindowsReference(t *testing.T) {
 		WithCleanupDryRun(true),
 	)
 	require.NoError(t, err)
-	assert.Empty(t, result.OrphanFileLocations)
+	assert.Empty(t, result.OrphanFiles)
 	assert.Empty(t, result.DeletedFiles)
 }
 
@@ -2161,7 +2162,7 @@ func TestDeleteOrphanFilesDryRunKeepsPortableWindowsReferences(t *testing.T) {
 				WithCleanupDryRun(true),
 			)
 			require.NoError(t, err)
-			assert.Empty(t, result.OrphanFileLocations)
+			assert.Empty(t, result.OrphanFiles)
 			assert.Empty(t, result.DeletedFiles)
 		})
 	}
@@ -2204,7 +2205,7 @@ func TestDeleteOrphanFilesDryRunKeepsOpaqueVersionHint(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, tableLocation, fsys.root)
-	assert.Empty(t, result.OrphanFileLocations)
+	assert.Empty(t, result.OrphanFiles)
 	assert.Empty(t, result.DeletedFiles)
 }
 

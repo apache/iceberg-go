@@ -32,6 +32,8 @@ func BenchmarkNormalizeVariantPath(b *testing.B) {
 		{"single", []string{"event_id"}},
 		{"nested4", []string{"location", "latitude", "metadata", "distance"}},
 		{"nested16", strings.Fields(strings.Repeat("partition_column ", 16))},
+		{"nested64", strings.Fields(strings.Repeat("partition_column ", 64))},
+		{"escapedUnicode", []string{"東京\n", "naïve\\field", "🦊'report"}},
 		{"unicode", []string{"naïve", "地名", "la🦊"}},
 		{"escaped", []string{"o'brien", "a\\b", "a\nline", "a\x01b"}},
 		{"controls", []string{strings.Repeat("a\x01\x02\x03\x04\x05\x1f", 8)}},

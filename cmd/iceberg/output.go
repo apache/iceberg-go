@@ -38,6 +38,7 @@ type Output interface {
 	Identifiers([]table.Identifier)
 	DescribeTable(*table.Table)
 	Files(tbl *table.Table, history bool)
+	PlannedFiles(tbl *table.Table, tasks []table.FileScanTask)
 	DescribeProperties(iceberg.Properties)
 	Info(tbl *table.Table)
 	Snapshots(tbl *table.Table)
@@ -192,6 +193,31 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 	pterm.DefaultTree.WithRoot(node).Render()
 }
 
+func (t textOutput) PlannedFiles(tbl *table.Table, tasks []table.FileScanTask) {
+	fileTree := pterm.LeveledList{}
+	if snap := tbl.CurrentSnapshot(); snap != nil {
+		fileTree = append(fileTree, pterm.LeveledListItem{
+			Level: 0,
+			Text:  fmt.Sprintf("Snapshot %d, schema %s", snap.SnapshotID, snapshotSchemaText(snap.SchemaID)),
+		})
+
+		for _, file := range plannedDataFiles(tasks) {
+			fileTree = append(fileTree, pterm.LeveledListItem{
+				Level: 1, Text: "Datafile: " + file.Path,
+			})
+			for _, del := range file.DeleteFiles {
+				fileTree = append(fileTree, pterm.LeveledListItem{
+					Level: 2, Text: "Deletefile: " + del,
+				})
+			}
+		}
+	}
+
+	node := putils.TreeFromLeveledList(fileTree)
+	node.Text = "Planned files: " + strings.Join(tbl.Identifier(), ".")
+	pterm.DefaultTree.WithRoot(node).Render()
+}
+
 func (textOutput) DescribeProperties(props iceberg.Properties) {
 	data := pterm.TableData{[]string{"Key", "Value"}}
 	for k, v := range props {
@@ -309,6 +335,21 @@ func (j jsonOutput) Files(tbl *table.Table, history bool) {
 		if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 			j.Error(err)
 		}
+	}
+}
+
+func (j jsonOutput) PlannedFiles(tbl *table.Table, tasks []table.FileScanTask) {
+	type dataType struct {
+		Snapshot *table.Snapshot `json:"snapshot"`
+		Files    []plannedFile   `json:"files"`
+	}
+
+	data := dataType{
+		Snapshot: tbl.CurrentSnapshot(),
+		Files:    plannedDataFiles(tasks),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+		j.Error(err)
 	}
 }
 
