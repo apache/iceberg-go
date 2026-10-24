@@ -2598,6 +2598,8 @@ func fitDecimalBytes(bytes []byte, size int) ([]byte, error) {
 	return retained, nil
 }
 
+// dataFile retains deprecated block_size_in_bytes for reading legacy v1
+// manifests. New builders leave it at the required default; v2/v3 omit it.
 type dataFile struct {
 	Content          ManifestEntryContent `avro:"content"`
 	projected        bool
@@ -3157,13 +3159,6 @@ func NewDataFileBuilder(
 			fieldIDToLogicalType:   maps.Clone(fieldIDToLogicalType),
 		},
 	}, nil
-}
-
-// BlockSizeInBytes sets the block size in bytes for the data file. Deprecated in v2.
-func (b *DataFileBuilder) BlockSizeInBytes(size int64) *DataFileBuilder {
-	b.d.BlockSizeInBytes = size
-
-	return b
 }
 
 // ColumnSizes sets the column sizes for the data file.

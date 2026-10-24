@@ -213,8 +213,13 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 				128,
 			)
 			require.NoError(t, err)
+			assert.Zero(t, builder.Build().(*dataFile).BlockSizeInBytes)
+			if tt.version == 1 {
+				// Legacy v1 manifests may contain a non-default block size.
+				// Keep verifying that projection preserves it when decoding.
+				builder.d.BlockSizeInBytes = 64 * 1024
+			}
 			builder.
-				BlockSizeInBytes(64 * 1024).
 				ColumnSizes(map[int]int64{1: 64}).
 				ValueCounts(map[int]int64{1: 1}).
 				NullValueCounts(map[int]int64{1: 0}).
