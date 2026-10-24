@@ -536,7 +536,7 @@ func TestRemovingDataFileRemovesItsUnnamedDV(t *testing.T) {
 			return tx.ReplaceDataFiles(ctx, []string{dataB.FilePath()}, nil, nil)
 		}},
 		{"ReplaceFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, eqDelete iceberg.DataFile) error {
-			return tx.ReplaceFiles(ctx, []iceberg.DataFile{dataB}, []iceberg.DataFile{dataC}, []iceberg.DataFile{eqDelete}, nil)
+			return tx.ReplaceFiles(ctx, []iceberg.DataFile{dataB}, []iceberg.DataFile{dataC}, []iceberg.DataFile{eqDelete}, nil, nil)
 		}},
 	}
 

@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **`ReplaceFilesWithDeleteFiles` is now `ReplaceFiles`.** Pass new delete files through `deleteFilesToAdd`. Callers using the old `ReplaceFiles` signature must add `nil` for that argument before `snapshotProps` when they do not add delete files.
 - **View representation field uses the Go SQL initialism.** Replace `view.Representation.Sql` with `view.Representation.SQL`. Serialized view metadata still uses the `sql` JSON field.
 - **Orphan cleanup results now expose only `OrphanFiles`.** Replace `result.OrphanFileLocations` with `result.OrphanFiles` (each entry has `Path` and `SizeBytes`). `OrphanCleanupPlan.Files()` still provides path-only lists during planning.
 - **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.

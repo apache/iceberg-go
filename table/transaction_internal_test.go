@@ -1179,7 +1179,7 @@ func TestTransactionEntryPointsRejectNilAndBrokenTransaction(t *testing.T) {
 			return txn.ReplaceDataFilesWithDataFiles(ctx, []iceberg.DataFile{dataFile}, nil, nil)
 		}},
 		{"ReplaceFiles", func(txn *Transaction) error {
-			return txn.ReplaceFiles(ctx, []iceberg.DataFile{dataFile}, nil, []iceberg.DataFile{dataFile}, nil)
+			return txn.ReplaceFiles(ctx, []iceberg.DataFile{dataFile}, nil, []iceberg.DataFile{dataFile}, nil, nil)
 		}},
 		{"Delete", func(txn *Transaction) error { return txn.Delete(ctx, iceberg.AlwaysTrue{}, nil) }},
 		{"Overwrite", func(txn *Transaction) error { return txn.Overwrite(ctx, nil, nil) }},

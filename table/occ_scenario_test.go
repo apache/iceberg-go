@@ -538,7 +538,7 @@ func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterConflict() {
 
 	txA := writerA.NewTransaction()
 	s.Require().NoError(txA.ReplaceFiles(s.ctx,
-		[]iceberg.DataFile{oldFile}, []iceberg.DataFile{newFile}, nil, nil))
+		[]iceberg.DataFile{oldFile}, []iceberg.DataFile{newFile}, nil, nil, nil))
 	committedA, err := txA.Commit(s.ctx)
 	s.Require().NoError(err, "Writer A replace must succeed after one conflict retry")
 	s.Equal(int32(2), catA.commitTableCalls.Load(),
@@ -636,7 +636,7 @@ func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterTwoConflicts()
 
 	txA := writerA.NewTransaction()
 	s.Require().NoError(txA.ReplaceFiles(s.ctx,
-		[]iceberg.DataFile{oldFile}, []iceberg.DataFile{newFile}, nil, nil))
+		[]iceberg.DataFile{oldFile}, []iceberg.DataFile{newFile}, nil, nil, nil))
 	committedA, err := txA.Commit(s.ctx)
 	s.Require().NoError(err, "Writer A replace must succeed after two conflict retries")
 	s.Equal(int32(3), catA.commitTableCalls.Load(),
