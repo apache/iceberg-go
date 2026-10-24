@@ -1331,7 +1331,7 @@ func TestRemoveSnapshotsRemovesMultipleIDs(t *testing.T) {
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
 		SnapshotRefs: map[string]SnapshotRef{
-			MainBranch: {SnapshotID: currentID, Type: BranchRef},
+			MainBranch:       {SnapshotID: currentID, Type: BranchRef},
 			"removed-branch": {SnapshotID: removedID2, Type: BranchRef},
 			"kept-branch":    {SnapshotID: keptID, Type: BranchRef},
 		},
@@ -1418,7 +1418,7 @@ func TestRemoveSnapshotsPrunesStatistics(t *testing.T) {
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
 		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, Type: BranchRef}},
-		StatisticsList:     []StatisticsFile{
+		StatisticsList: []StatisticsFile{
 			{SnapshotID: removedID, StatisticsPath: "s3://stats/removed.puffin"},
 			{SnapshotID: keptID, StatisticsPath: "s3://stats/kept.puffin"},
 		},
@@ -1481,7 +1481,7 @@ func TestBuildPreservesStatistics(t *testing.T) {
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
 		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, Type: BranchRef}},
-		StatisticsList:     []StatisticsFile{
+		StatisticsList: []StatisticsFile{
 			{SnapshotID: snapID, StatisticsPath: "s3://stats/snap.puffin"},
 		},
 		PartitionStatsList: []PartitionStatisticsFile{
