@@ -23,6 +23,7 @@ import (
 	"fmt"
 
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 )
 
 // AuthManager is an interface for providing custom authorization headers.
@@ -49,32 +50,44 @@ type ContextAuthManager interface {
 // handles caching, thread-safe refresh, and expiry management.
 type Oauth2AuthManager struct {
 	tokenSource oauth2.TokenSource
+	// refresh shares one in-flight Token call, so a caller that stops waiting
+	// leaves nothing queued behind it.
+	refresh singleflight.Group
 }
 
 var _ ContextAuthManager = (*Oauth2AuthManager)(nil)
 
 // AuthHeader returns the authorization header with the bearer token.
 func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
-	return o.authHeader()
+	tok, err, _ := o.refresh.Do("token", o.fetchToken)
+
+	return o.authHeader(tok, err)
 }
 
 // AuthHeaderWithContext returns the authorization header, honoring ctx. A
-// cached, unexpired token is returned without any network call, so a bounded
-// caller (such as the metrics dispatcher) pays no auth latency in the common
-// case. When a refresh is required it goes through the token-refresh HTTP
-// client, whose Timeout bounds how long a stalled token endpoint can block; the
-// ctx check here additionally short-circuits work for a caller whose deadline
-// has already elapsed.
+// cached, unexpired token is returned without a network call. When a refresh
+// is required, the caller waits for it only until ctx is done; the refresh
+// itself keeps running, bounded by the token-refresh client's Timeout, and its
+// result serves later callers.
 func (o *Oauth2AuthManager) AuthHeaderWithContext(ctx context.Context) (string, string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", "", err
 	}
 
-	return o.authHeader()
+	select {
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	case result := <-o.refresh.DoChan("token", o.fetchToken):
+		return o.authHeader(result.Val, result.Err)
+	}
 }
 
-func (o *Oauth2AuthManager) authHeader() (string, string, error) {
-	tok, err := o.tokenSource.Token()
+// fetchToken adapts the token source to singleflight's untyped callback.
+func (o *Oauth2AuthManager) fetchToken() (any, error) {
+	return o.tokenSource.Token()
+}
+
+func (o *Oauth2AuthManager) authHeader(tok any, err error) (string, string, error) {
 	if err != nil {
 		if re, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
 			return "", "", oauthError{
@@ -87,7 +100,9 @@ func (o *Oauth2AuthManager) authHeader() (string, string, error) {
 		return "", "", fmt.Errorf("%w: %s", ErrOAuthError, err)
 	}
 
-	return "Authorization", tok.Type() + " " + tok.AccessToken, nil
+	token := tok.(*oauth2.Token)
+
+	return "Authorization", token.Type() + " " + token.AccessToken, nil
 }
 
 // oauthError wraps OAuth2 error details and implements the error chain

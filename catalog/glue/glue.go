@@ -518,6 +518,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		metadataLocation,
 		io.LoadFSFunc(c.props, metadataLocation),
 		c,
+		table.WithScanPlanningIOProperties(c.props),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
@@ -1120,6 +1121,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 		io.LoadFSFunc(c.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.props),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create iceberg table from location %s: %w", metadataLocation, err)

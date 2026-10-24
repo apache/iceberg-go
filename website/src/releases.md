@@ -42,6 +42,15 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **View representation field uses the Go SQL initialism.** Replace `view.Representation.Sql` with `view.Representation.SQL`. Serialized view metadata still uses the `sql` JSON field.
+- **Orphan cleanup results now expose only `OrphanFiles`.** Replace `result.OrphanFileLocations` with `result.OrphanFiles` (each entry has `Path` and `SizeBytes`). `OrphanCleanupPlan.Files()` still provides path-only lists during planning.
+- **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.
+- **Substrait expression conversion no longer takes case sensitivity.** `substrait.ConvertExpr(schema, expression, caseSensitive)` becomes `substrait.ConvertExpr(schema, expression)`. Case sensitivity remains part of expression binding.
+
+- **Transform formatting requires the result type.** `Transform.ToHumanStr(value)` is removed. Use `Transform.ToHumanStrType(resultType, value)` to format partition values, including timestamps with time zones.
+
+- **Puffin writer property setter renamed.** `puffin.Writer.AddProperties` is now `puffin.Writer.SetProperties`. Repeated calls still merge keys; use `ClearProperties` to clear custom properties before finishing.
+
 - **Orphan file cleanup moved to `table/maintenance`.** The orphan-cleanup and file-purge API is no longer on `table.Table`; it now lives in the `table/maintenance` package as free functions that take the table as their first argument (matching `table/compaction`). For example, `tbl.DeleteOrphanFiles(ctx, ...)` becomes `maintenance.DeleteOrphanFiles(ctx, tbl, ...)`. Because `table/maintenance` imports `table` (and not the reverse), this cannot be offered as a deprecation shim on `table.Table` without an import cycle, so callers must switch to the new package. The following moved from `table` to `table/maintenance`:
     - Functions (now free functions taking `*table.Table`): `DeleteOrphanFiles`, `PlanOrphanFiles`, `ExecuteOrphanCleanup`, `PurgeFiles`.
     - Types: `OrphanCleanupOption`, `OrphanCleanupResult`, `OrphanFile`, `OrphanCleanupPlan`, `PrefixMismatchMode`.

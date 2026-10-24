@@ -135,7 +135,7 @@ func createStagedTable(
 	}
 
 	dbIdent := catalog.NamespaceFromIdent(ident)
-	tblname := catalog.TableNameFromIdent(ident)
+	tblname := catalog.ObjectNameFromIdent(ident)
 	if namespaceKey == "" {
 		namespaceKey = strings.Join(dbIdent, ".")
 	}
