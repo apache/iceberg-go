@@ -27,9 +27,9 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
-	"github.com/substrait-io/substrait-go/v8/expr"
-	"github.com/substrait-io/substrait-go/v8/extensions"
-	"github.com/substrait-io/substrait-go/v8/types"
+	"github.com/substrait-io/substrait-go/v9/expr"
+	"github.com/substrait-io/substrait-go/v9/extensions"
+	"github.com/substrait-io/substrait-go/v9/types"
 )
 
 //go:embed functions_set.yaml
@@ -41,8 +41,8 @@ var (
 )
 
 func init() {
-	if !collection.URILoaded(funcSetURI) {
-		if err := collection.Load(funcSetURI, strings.NewReader(funcsetYAML)); err != nil {
+	if !collection.URNLoaded(funcSetURI) {
+		if err := collection.Load(strings.NewReader(funcsetYAML)); err != nil {
 			panic(err)
 		}
 	}
@@ -196,20 +196,20 @@ var (
 	compareURI = extensions.SubstraitDefaultURNPrefix + "functions_comparison"
 	stringURI  = extensions.SubstraitDefaultURNPrefix + "functions_string"
 
-	notID          = extensions.ID{URN: boolURI, Name: "not"}
-	andID          = extensions.ID{URN: boolURI, Name: "and"}
-	orID           = extensions.ID{URN: boolURI, Name: "or"}
-	isNaNID        = extensions.ID{URN: compareURI, Name: "is_nan"}
-	isNullID       = extensions.ID{URN: compareURI, Name: "is_null"}
-	isNotNullID    = extensions.ID{URN: compareURI, Name: "is_not_null"}
-	equalID        = extensions.ID{URN: compareURI, Name: "equal"}
-	notEqualID     = extensions.ID{URN: compareURI, Name: "not_equal"}
-	greaterEqualID = extensions.ID{URN: compareURI, Name: "gte"}
-	greaterID      = extensions.ID{URN: compareURI, Name: "gt"}
-	lessEqualID    = extensions.ID{URN: compareURI, Name: "lte"}
-	lessID         = extensions.ID{URN: compareURI, Name: "lt"}
-	startsWithID   = extensions.ID{URN: stringURI, Name: "starts_with"}
-	isInID         = extensions.ID{URN: funcSetURI, Name: "is_in"}
+	notID          = extensions.FunctionID{URN: boolURI, Name: "not"}
+	andID          = extensions.FunctionID{URN: boolURI, Name: "and"}
+	orID           = extensions.FunctionID{URN: boolURI, Name: "or"}
+	isNaNID        = extensions.FunctionID{URN: compareURI, Name: "is_nan"}
+	isNullID       = extensions.FunctionID{URN: compareURI, Name: "is_null"}
+	isNotNullID    = extensions.FunctionID{URN: compareURI, Name: "is_not_null"}
+	equalID        = extensions.FunctionID{URN: compareURI, Name: "equal"}
+	notEqualID     = extensions.FunctionID{URN: compareURI, Name: "not_equal"}
+	greaterEqualID = extensions.FunctionID{URN: compareURI, Name: "gte"}
+	greaterID      = extensions.FunctionID{URN: compareURI, Name: "gt"}
+	lessEqualID    = extensions.FunctionID{URN: compareURI, Name: "lte"}
+	lessID         = extensions.FunctionID{URN: compareURI, Name: "lt"}
+	startsWithID   = extensions.FunctionID{URN: stringURI, Name: "starts_with"}
+	isInID         = extensions.FunctionID{URN: funcSetURI, Name: "is_in"}
 )
 
 type toSubstraitExpr struct {
@@ -398,7 +398,7 @@ func (t *toSubstraitExpr) getRef(ref iceberg.BoundReference) expr.Reference {
 	return out
 }
 
-func (t *toSubstraitExpr) makeSetFunc(id extensions.ID, term iceberg.BoundTerm, lits iceberg.Set[iceberg.Literal]) expr.Builder {
+func (t *toSubstraitExpr) makeSetFunc(id extensions.FunctionID, term iceberg.BoundTerm, lits iceberg.Set[iceberg.Literal]) expr.Builder {
 	val := toSubstraitLiteralSet(term.Type(), lits.Members())
 
 	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(t.getRef(term.Ref())),
@@ -413,7 +413,7 @@ func (t *toSubstraitExpr) VisitNotIn(term iceberg.BoundTerm, lits iceberg.Set[ic
 	return t.bldr.ScalarFunc(notID).Args(t.makeSetFunc(isInID, term, lits).(expr.FuncArgBuilder))
 }
 
-func (t *toSubstraitExpr) makeRefFunc(id extensions.ID, term iceberg.BoundTerm) expr.Builder {
+func (t *toSubstraitExpr) makeRefFunc(id extensions.FunctionID, term iceberg.BoundTerm) expr.Builder {
 	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(t.getRef(term.Ref())))
 }
 
@@ -435,7 +435,7 @@ func (t *toSubstraitExpr) VisitNotNull(term iceberg.BoundTerm) expr.Builder {
 	return t.makeRefFunc(isNotNullID, term)
 }
 
-func (t *toSubstraitExpr) makeLitFunc(id extensions.ID, term iceberg.BoundTerm, lit iceberg.Literal) expr.Builder {
+func (t *toSubstraitExpr) makeLitFunc(id extensions.FunctionID, term iceberg.BoundTerm, lit iceberg.Literal) expr.Builder {
 	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(t.getRef(term.Ref())),
 		t.bldr.Literal(toSubstraitLiteral(term.Type(), lit)))
 }
