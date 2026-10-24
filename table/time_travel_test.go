@@ -155,7 +155,7 @@ func TestSnapshotAsOfWithEqualTimestampsUsesFirstLogEntry(t *testing.T) {
 	require.NoError(t, err)
 
 	tbl := Table{metadata: meta}
-	snapshot := tbl.SnapshotAsOf(baseTime+1000)
+	snapshot := tbl.SnapshotAsOf(baseTime + 1000)
 	require.NotNil(t, snapshot)
 	assert.Equal(t, int64(1000), snapshot.SnapshotID)
 
