@@ -468,7 +468,7 @@ func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transfo
 		return nil
 	}
 
-	builder.Append(transform.ToHumanStrType(typ, literal.Any()))
+	builder.Append(transform.ToHumanString(typ, literal.Any()))
 
 	return nil
 }

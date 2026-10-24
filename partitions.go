@@ -947,7 +947,7 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		valueStr := resolvedFields[i].field.Transform.ToHumanStrType(resolvedFields[i].resultType, data.Get(i))
+		valueStr := resolvedFields[i].field.Transform.ToHumanString(resolvedFields[i].resultType, data.Get(i))
 		internal.AppendQueryEscaped(&sb, valueStr)
 	}
 
