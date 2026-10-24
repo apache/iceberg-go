@@ -199,7 +199,7 @@ func tableWithManifestListsUsingIO(t *testing.T, snapshotCount int, readIOFn fun
 		seqNum := snapshotID
 		manifestPath := fmt.Sprintf("%s/metadata/manifest-%02d.avro", tableLocation, snapshotID)
 		manifest := iceberg.NewManifestFile(2, manifestPath, 1, 0, snapshotID).
-			SequenceNum(seqNum, seqNum).
+			SequenceNumber(seqNum, seqNum).
 			AddedFiles(1).
 			AddedRows(1).
 			Build()

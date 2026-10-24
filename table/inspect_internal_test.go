@@ -1198,7 +1198,7 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 	require.NoError(t, err)
 
 	manifest := iceberg.NewManifestFile(2, tableLocation+"/metadata/shared-manifest.avro", 100, 0, 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		AddedFiles(1).
 		KeyMetadata([]byte{1, 2, 3}).
 		Build()
@@ -1251,7 +1251,7 @@ func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
 		manifests[idx] = iceberg.NewManifestFile(2,
 			fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
 			100, 0, 1).
-			SequenceNum(1, 1).
+			SequenceNumber(1, 1).
 			AddedFiles(1).
 			Build()
 	}
@@ -1287,7 +1287,7 @@ func TestInspectAllManifestsAllocator(t *testing.T) {
 				manifests[idx] = iceberg.NewManifestFile(2,
 					fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
 					100, 0, 1).
-					SequenceNum(1, 1).
+					SequenceNumber(1, 1).
 					AddedFiles(1).
 					Build()
 			}
@@ -1370,7 +1370,7 @@ func TestInspectManifestsContainsNaN(t *testing.T) {
 	require.NoError(t, err)
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/contains-nan.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{
 			ContainsNaN: &containsNaN,
 			LowerBound:  &bound,
@@ -1429,7 +1429,7 @@ func TestInspectManifestsPromotedPartitionSummaryBounds(t *testing.T) {
 			require.NoError(t, err)
 			manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/promoted.avro",
 				100, int32(spec.ID()), 1).
-				SequenceNum(1, 1).
+				SequenceNumber(1, 1).
 				Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
 				Build()
 			tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
@@ -1459,7 +1459,7 @@ func TestInspectManifestsDroppedPartitionSource(t *testing.T) {
 	require.NoError(t, err)
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/dropped-source.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
 		Build()
 	tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
@@ -1484,7 +1484,7 @@ func TestInspectManifestsDeleteCounts(t *testing.T) {
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-manifest.avro",
 		100, int32(spec.ID()), 1).
 		Content(iceberg.ManifestContentDeletes).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		AddedFiles(2).
 		ExistingFiles(3).
 		DeletedFiles(4).
@@ -1615,7 +1615,7 @@ func TestInspectManifestsRejectsNegativeCountsForV2AndV3(t *testing.T) {
 			manifest := iceberg.NewManifestFile(tt.version, "mem://default/table-location/metadata/negative-count.avro",
 				100, int32(spec.ID()), 1).
 				Content(tt.content).
-				SequenceNum(1, 1).
+				SequenceNumber(1, 1).
 				AddedFiles(tt.added).
 				ExistingFiles(tt.existing).
 				DeletedFiles(tt.deleted).
@@ -1633,7 +1633,7 @@ func TestInspectManifestsRejectsMissingPartitionSpec(t *testing.T) {
 	spec := partitionedSpec()
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/missing-spec.avro",
 		100, 999, 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{}}).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
@@ -1647,7 +1647,7 @@ func TestInspectManifestsAllowsMissingPartitionSpecWithoutSummaries(t *testing.T
 	spec := partitionedSpec()
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/missing-spec.avro",
 		100, 999, 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
@@ -1668,7 +1668,7 @@ func TestInspectManifestsReportsPartitionFieldNameInBoundErrors(t *testing.T) {
 	invalidBound := []byte{0x01}
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/invalid-bound.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{LowerBound: &invalidBound}}).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
@@ -1681,7 +1681,7 @@ func TestInspectManifestsWrapsFileIOFactoryError(t *testing.T) {
 	spec := partitionedSpec()
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/manifest.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 	factoryErr := errors.New("factory failed")
@@ -1712,7 +1712,7 @@ func TestInspectManifestsRejectsExtraPartitionSummaries(t *testing.T) {
 	spec := partitionedSpec()
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/extra-summary.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{}, {}}).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
@@ -1727,7 +1727,7 @@ func TestInspectManifestsRejectsUnknownContent(t *testing.T) {
 	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/unknown-content.avro",
 		100, int32(spec.ID()), 1).
 		Content(iceberg.ManifestContent(2)).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
@@ -2867,7 +2867,7 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
 	manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
-		SequenceNum(sequenceNumber, sequenceNumber).
+		SequenceNumber(sequenceNumber, sequenceNumber).
 		AddedFiles(1).
 		AddedRows(1).
 		Build()

@@ -126,7 +126,7 @@ func TestReadManifestListInfersVersionWhenKeyAbsent(t *testing.T) {
 	t.Run("v2", func(t *testing.T) {
 		deletes := NewManifestFile(2, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
 			Content(ManifestContentDeletes).
-			SequenceNum(5, 3).
+			SequenceNumber(5, 3).
 			Build()
 
 		var buf bytes.Buffer
@@ -139,19 +139,19 @@ func TestReadManifestListInfersVersionWhenKeyAbsent(t *testing.T) {
 
 		assert.Equal(t, 2, got[0].Version())
 		assert.Equal(t, ManifestContentDeletes, got[0].ManifestContent())
-		assert.Equal(t, int64(5), got[0].SequenceNum())
-		assert.Equal(t, int64(3), got[0].MinSequenceNum())
+		assert.Equal(t, int64(5), got[0].SequenceNumber())
+		assert.Equal(t, int64(3), got[0].MinSequenceNumber())
 		assert.Equal(t, int64(42), got[0].SnapshotID())
 	})
 
 	t.Run("v3", func(t *testing.T) {
 		data := NewManifestFile(3, "s3://bucket/metadata/data-m0.avro", 100, 0, 42).
 			AddedRows(10).
-			SequenceNum(5, 5).
+			SequenceNumber(5, 5).
 			Build()
 		deletes := NewManifestFile(3, "s3://bucket/metadata/deletes-m1.avro", 100, 0, 42).
 			Content(ManifestContentDeletes).
-			SequenceNum(5, 3).
+			SequenceNumber(5, 3).
 			Build()
 
 		var buf bytes.Buffer
@@ -168,8 +168,8 @@ func TestReadManifestListInfersVersionWhenKeyAbsent(t *testing.T) {
 		assert.Equal(t, int64(100), *got[0].FirstRowID())
 
 		assert.Equal(t, ManifestContentDeletes, got[1].ManifestContent())
-		assert.Equal(t, int64(5), got[1].SequenceNum())
-		assert.Equal(t, int64(3), got[1].MinSequenceNum())
+		assert.Equal(t, int64(5), got[1].SequenceNumber())
+		assert.Equal(t, int64(3), got[1].MinSequenceNumber())
 		assert.Nil(t, got[1].FirstRowID())
 	})
 }
@@ -212,15 +212,15 @@ func TestReadManifestListDuckDBFixture(t *testing.T) {
 
 	assert.Equal(t, 3, got[0].Version())
 	assert.Equal(t, ManifestContentData, got[0].ManifestContent())
-	assert.Equal(t, int64(1), got[0].SequenceNum())
-	assert.Equal(t, int64(1), got[0].MinSequenceNum())
+	assert.Equal(t, int64(1), got[0].SequenceNumber())
+	assert.Equal(t, int64(1), got[0].MinSequenceNumber())
 	require.NotNil(t, got[0].FirstRowID())
 	assert.Equal(t, int64(0), *got[0].FirstRowID())
 
 	assert.Equal(t, 3, got[1].Version())
 	assert.Equal(t, ManifestContentDeletes, got[1].ManifestContent())
-	assert.Equal(t, int64(2), got[1].SequenceNum())
-	assert.Equal(t, int64(2), got[1].MinSequenceNum())
+	assert.Equal(t, int64(2), got[1].SequenceNumber())
+	assert.Equal(t, int64(2), got[1].MinSequenceNumber())
 }
 
 // TestReadManifestListKeyContradictsSchema: a "format-version" key claiming
@@ -240,7 +240,7 @@ func TestReadManifestListKeyContradictsSchema(t *testing.T) {
 	for _, tc := range cases {
 		mf := NewManifestFile(tc.writeVersion, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
 			Content(ManifestContentDeletes).
-			SequenceNum(5, 3).
+			SequenceNumber(5, 3).
 			Build()
 
 		var buf bytes.Buffer
