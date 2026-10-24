@@ -1475,13 +1475,13 @@ func TestV2RefCreation(t *testing.T) {
 	maxRefAge := int64(10000000)
 	assert.Equal(t, map[string]SnapshotRef{
 		"main": {
-			SnapshotID:      3055729675574597004,
-			SnapshotRefType: BranchRef,
+			SnapshotID: 3055729675574597004,
+			Type:       BranchRef,
 		},
 		"test": {
-			SnapshotID:      3051729675574597004,
-			SnapshotRefType: TagRef,
-			MaxRefAgeMs:     &maxRefAge,
+			SnapshotID:  3051729675574597004,
+			Type:        TagRef,
+			MaxRefAgeMs: &maxRefAge,
 		},
 	}, meta.SnapshotRefs)
 }
