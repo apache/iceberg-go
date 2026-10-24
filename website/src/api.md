@@ -514,7 +514,7 @@ fmt.Printf("rewrote %d files into %d (%d -> %d bytes)\n",
 
 The `table/compaction` subpackage provides bin-packing planning. The `iceberg compact analyze` and `compact run` CLI commands wrap the same machinery - see [CLI](./cli.md).
 
-Compaction tasks represent complete data files, not independent scan splits. The planner collapses split tasks for the same file into one whole-file task, while direct calls to `ExecuteCompactionGroup` reject partial ranges and residual row filters. Attached delete files are still applied when rewriting each source file.
+Compaction tasks represent complete data files, not independent scan splits. The planner collapses split tasks for the same file into one whole-file task, rejecting inconsistent delete or lineage metadata and dropping residual filters because they select files but do not filter rows during compaction. Direct calls to `ExecuteCompactionGroup` reject partial ranges and residual row filters. Attached delete files are still applied when rewriting each source file.
 
 ### Expiring snapshots
 

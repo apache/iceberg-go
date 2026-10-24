@@ -26,16 +26,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type offsetDataFile struct {
+	iceberg.DataFile
+	offset int64
+}
+
+func (f offsetDataFile) ContentOffset() *int64 { return &f.offset }
+
 func TestPlanCompactionCountsWholeFiles(t *testing.T) {
 	file := newDataFile("split.parquet", 10)
 	firstRowID, sequence := int64(20), int64(3)
 	first := makeTask(file, 1, 1)
 	first.DeletionVectorFiles = []iceberg.DataFile{newScopedDeleteFile("delete.puffin", file.path, 1)}
 	first.FirstRowID, first.DataSequenceNumber = &firstRowID, &sequence
-	first.Residual = iceberg.AlwaysTrue{}
+	first.Residual = iceberg.EqualTo(iceberg.Reference("id"), int64(1))
 	first.Length = file.size / 2
 	second := first
 	second.Start, second.Length = first.Length, file.size-first.Length
+	second.FirstRowID = new(int64)
+	*second.FirstRowID = firstRowID
+	second.DataSequenceNumber = new(int64)
+	*second.DataSequenceNumber = sequence
+	second.DeletionVectorFiles = []iceberg.DataFile{newScopedDeleteFile("delete.puffin", file.path, 1)}
 	duplicate := *file
 	first.File = &duplicate
 	tasks := []table.FileScanTask{second, first, makeTask(newDataFile("other.parquet", 10), 0, 0)}
@@ -51,10 +63,71 @@ func TestPlanCompactionCountsWholeFiles(t *testing.T) {
 	require.Len(t, plan.Groups[0].Tasks, 2)
 	require.Equal(t, 2*file.size, plan.Groups[0].TotalSizeBytes)
 	require.Equal(t, 3, plan.Groups[0].DeleteFileCount)
-	want := second
-	want.Start, want.Length = 0, file.size
-	require.Contains(t, plan.Groups[0].Tasks, want)
+	got := plan.Groups[0].Tasks[0]
+	require.Same(t, second.File, got.File)
+	require.Same(t, second.FirstRowID, got.FirstRowID)
+	require.Same(t, second.DataSequenceNumber, got.DataSequenceNumber)
+	require.Same(t, second.DeletionVectorFiles[0], got.DeletionVectorFiles[0])
+	require.Equal(t, int64(0), got.Start)
+	require.Equal(t, file.size, got.Length)
+	require.Nil(t, got.Residual, "compaction rewrites all rows in the selected file")
 	require.Equal(t, original, tasks, "normalization must not mutate caller tasks")
+}
+
+func TestPlanCompactionRejectsConflictingSplitMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*table.FileScanTask)
+	}{
+		{"first row ID", func(task *table.FileScanTask) { value := int64(21); task.FirstRowID = &value }},
+		{"missing first row ID", func(task *table.FileScanTask) { task.FirstRowID = nil }},
+		{"data sequence number", func(task *table.FileScanTask) { value := int64(4); task.DataSequenceNumber = &value }},
+		{"missing data sequence number", func(task *table.FileScanTask) { task.DataSequenceNumber = nil }},
+		{"positional deletes", func(task *table.FileScanTask) { task.DeleteFiles = []iceberg.DataFile{newDeleteFile("other.pos")} }},
+		{"same delete path, different metadata", func(task *table.FileScanTask) {
+			task.DeleteFiles = []iceberg.DataFile{newDeleteFile("same.pos")}
+		}},
+		{"delete content offset", func(task *table.FileScanTask) {
+			base := newDeleteFile("same.puffin")
+			task.DeleteFiles = []iceberg.DataFile{offsetDataFile{DataFile: base, offset: 2}}
+		}},
+		{"equality deletes", func(task *table.FileScanTask) {
+			task.EqualityDeleteFiles = []iceberg.DataFile{newDeleteFile("other.eq")}
+		}},
+		{"deletion vectors", func(task *table.FileScanTask) {
+			task.DeletionVectorFiles = []iceberg.DataFile{newScopedDeleteFile("other.puffin", "split.parquet", 1)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := newDataFile("split.parquet", 10)
+			first := makeTask(file, 0, 0)
+			first.DeleteFiles = nil
+			if tc.name == "same delete path, different metadata" {
+				first.DeleteFiles = []iceberg.DataFile{newDeleteFile("same.pos")}
+				first.DeleteFiles[0] = &testDataFile{path: "same.pos", size: 1024, records: 5, content: iceberg.EntryContentPosDeletes}
+			}
+			first.FirstRowID, first.DataSequenceNumber = new(int64), new(int64)
+			if tc.name == "delete content offset" {
+				first.DeleteFiles = []iceberg.DataFile{offsetDataFile{DataFile: newDeleteFile("same.puffin"), offset: 1}}
+			}
+			second := first
+			second.Start, second.Length = file.size/2, file.size/2
+			tc.change(&second)
+			_, err := compaction.DefaultConfig().PlanCompaction([]table.FileScanTask{first, second})
+			require.ErrorIs(t, err, table.ErrInvalidOperation)
+		})
+	}
+}
+
+func TestPlanCompactionTreatsNilAndEmptyDeleteListsEqually(t *testing.T) {
+	file := newDataFile("split.parquet", 10)
+	first := makeTask(file, 0, 0)
+	first.DeleteFiles = nil
+	second := first
+	second.Start, second.Length = file.size/2, file.size/2
+	second.DeleteFiles = []iceberg.DataFile{}
+	_, err := compaction.DefaultConfig().PlanCompaction([]table.FileScanTask{first, second})
+	require.NoError(t, err)
 }
 
 func TestPlanCompactionDoesNotCountRangesTowardMinimumFiles(t *testing.T) {

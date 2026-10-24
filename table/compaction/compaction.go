@@ -21,6 +21,8 @@ package compaction
 import (
 	"bytes"
 	"fmt"
+	"reflect"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -190,6 +192,7 @@ type Plan struct {
 // and candidates are bin-packed into groups targeting TargetFileSizeBytes.
 // Tasks should come from one coherent scan plan; split tasks for the same file
 // are collapsed, retaining the first task's per-file delete and lineage data.
+// Residual filters select files to rewrite, but are not applied to file contents.
 func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	if err := cfg.Validate(); err != nil {
 		return Plan{}, fmt.Errorf("invalid compaction config: %w", err)
@@ -200,18 +203,23 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	// selecting, or packing them. Keep the first task's delete and lineage
 	// metadata while replacing its range with the complete file range.
 	wholeFileTasks := make([]table.FileScanTask, 0, len(tasks))
-	seenFiles := make(map[string]struct{}, len(tasks))
+	seenFiles := make(map[string]table.FileScanTask, len(tasks))
 	for _, task := range tasks {
 		if task.File == nil {
 			return Plan{}, fmt.Errorf("%w: compaction task has no data file", table.ErrInvalidOperation)
 		}
 		path := task.File.FilePath()
-		if _, ok := seenFiles[path]; ok {
+		if first, ok := seenFiles[path]; ok {
+			if !sameCompactionMetadata(first, task) {
+				return Plan{}, fmt.Errorf("%w: split tasks for %q have different delete or lineage metadata", table.ErrInvalidOperation, path)
+			}
+
 			continue
 		}
-		seenFiles[path] = struct{}{}
+		seenFiles[path] = task
 		task.Start = 0
 		task.Length = task.File.FileSizeBytes()
+		task.Residual = nil
 		wholeFileTasks = append(wholeFileTasks, task)
 	}
 
@@ -293,6 +301,20 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	}
 
 	return plan, nil
+}
+
+func sameCompactionMetadata(a, b table.FileScanTask) bool {
+	equalDataFiles := func(a, b []iceberg.DataFile) bool {
+		return slices.EqualFunc(a, b, func(a, b iceberg.DataFile) bool {
+			return reflect.DeepEqual(a, b)
+		})
+	}
+
+	return reflect.DeepEqual(a.FirstRowID, b.FirstRowID) &&
+		reflect.DeepEqual(a.DataSequenceNumber, b.DataSequenceNumber) &&
+		equalDataFiles(a.DeleteFiles, b.DeleteFiles) &&
+		equalDataFiles(a.EqualityDeleteFiles, b.EqualityDeleteFiles) &&
+		equalDataFiles(a.DeletionVectorFiles, b.DeletionVectorFiles)
 }
 
 // isCandidate returns true if a file should be considered for compaction.

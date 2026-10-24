@@ -37,49 +37,72 @@ import (
 func TestCompactionPreservesSplitFileRows(t *testing.T) {
 	for _, split := range []bool{false, true} {
 		for _, partial := range []bool{false, true} {
-			t.Run(fmt.Sprintf("split=%t/partial=%t", split, partial), func(t *testing.T) {
-				tbl := newRewriteTestTable(t)
-				sc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
-				require.NoError(t, err)
-				var rows []string
-				var want []int64
-				for i := range 12 {
-					rows = append(rows, fmt.Sprintf(`{"id":%d,"data":"a"}`, i+1))
-					want = append(want, int64(i+1))
-				}
-				path := tbl.Location() + "/data/split.parquet"
-				writeParquetFileWithProperties(t, path, sc, "["+strings.Join(rows, ",")+"]", 1, nil)
-				splitSize := "999999999"
-				if split {
-					splitSize = "1"
-				}
-				tx := tbl.NewTransaction()
-				require.NoError(t, tx.SetProperties(iceberg.Properties{table.ReadSplitTargetSizeKey: splitSize}))
-				require.NoError(t, tx.AddFiles(t.Context(), []string{path}, nil, false))
-				tbl, err = tx.Commit(t.Context())
-				require.NoError(t, err)
-				tasks, err := tbl.Scan().PlanFiles(t.Context())
-				require.NoError(t, err)
-				if split {
-					require.Len(t, tasks, 12)
-				} else {
-					require.Len(t, tasks, 1)
-				}
-				size := tasks[0].File.FileSizeBytes()
-				cfg := defaultTestCompactionCfg
-				cfg.TargetFileSizeBytes, cfg.MinFileSizeBytes, cfg.MaxFileSizeBytes = size+1, size+1, size*2
-				cfg.MinInputFiles = 1
-				plan, err := compaction.Analyze(t.Context(), tbl, cfg)
-				require.NoError(t, err)
-				result, err := tbl.RewriteDataFiles(t.Context(), toTaskGroups(plan.Groups), table.RewriteDataFilesOptions{
-					PartialProgress: partial, MaxCommits: 12,
+			for _, filtered := range []bool{false, true} {
+				t.Run(fmt.Sprintf("split=%t/partial=%t/filtered=%t", split, partial, filtered), func(t *testing.T) {
+					tbl := newRewriteTestTable(t)
+					sc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+					require.NoError(t, err)
+					var rows []string
+					var want []int64
+					for i := range 12 {
+						rows = append(rows, fmt.Sprintf(`{"id":%d,"data":"a"}`, i+1))
+						want = append(want, int64(i+1))
+					}
+					path := tbl.Location() + "/data/split.parquet"
+					writeParquetFileWithProperties(t, path, sc, "["+strings.Join(rows, ",")+"]", 1, nil)
+					splitSize := "999999999"
+					if split {
+						splitSize = "1"
+					}
+					tx := tbl.NewTransaction()
+					require.NoError(t, tx.SetProperties(iceberg.Properties{table.ReadSplitTargetSizeKey: splitSize}))
+					require.NoError(t, tx.AddFiles(t.Context(), []string{path}, nil, false))
+					tbl, err = tx.Commit(t.Context())
+					require.NoError(t, err)
+					scan := tbl.Scan()
+					filter := iceberg.GreaterThan(iceberg.Reference("id"), int64(6))
+					if filtered {
+						scan = tbl.Scan(table.WithRowFilter(filter))
+					}
+					tasks, err := scan.PlanFiles(t.Context())
+					require.NoError(t, err)
+					if filtered {
+						// Exercise a residual a remote planner may leave after scan planning.
+						for i := range tasks {
+							tasks[i].Residual = filter
+						}
+						require.NotNil(t, tasks[0].Residual)
+						require.False(t, tasks[0].Residual.Equals(iceberg.AlwaysTrue{}))
+					}
+					if split {
+						require.Len(t, tasks, 12)
+					} else {
+						require.Len(t, tasks, 1)
+					}
+					size := tasks[0].File.FileSizeBytes()
+					cfg := defaultTestCompactionCfg
+					cfg.TargetFileSizeBytes, cfg.MinFileSizeBytes, cfg.MaxFileSizeBytes = size+1, size+1, size*2
+					cfg.MinInputFiles = 1
+					var groups []compaction.Group
+					if filtered {
+						plan, planErr := cfg.PlanCompaction(tasks)
+						require.NoError(t, planErr)
+						groups = plan.Groups
+					} else {
+						plan, planErr := compaction.Analyze(t.Context(), tbl, cfg)
+						require.NoError(t, planErr)
+						groups = plan.Groups
+					}
+					result, err := tbl.RewriteDataFiles(t.Context(), toTaskGroups(groups), table.RewriteDataFilesOptions{
+						PartialProgress: partial, MaxCommits: 12,
+					})
+					assert.NoError(t, err)
+					require.NotNil(t, result)
+					require.NotNil(t, result.Table)
+					require.Equal(t, 1, result.RewrittenGroups)
+					require.ElementsMatch(t, want, scanIDs(t, result.Table), "a later batch failure must not lose unread source ranges")
 				})
-				assert.NoError(t, err)
-				require.NotNil(t, result)
-				require.NotNil(t, result.Table)
-				require.Equal(t, 1, result.RewrittenGroups)
-				require.ElementsMatch(t, want, scanIDs(t, result.Table), "a later batch failure must not lose unread source ranges")
-			})
+			}
 		}
 	}
 }
