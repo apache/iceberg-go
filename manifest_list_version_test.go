@@ -124,7 +124,7 @@ func stripFormatVersion(t *testing.T, data []byte) []byte {
 // min_sequence_number, and first_row_id.
 func TestReadManifestListInfersVersionWhenKeyAbsent(t *testing.T) {
 	t.Run("v2", func(t *testing.T) {
-		deletes := NewManifestFile(2, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
+		deletes := NewManifestBuilder(2, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
 			Content(ManifestContentDeletes).
 			SequenceNum(5, 3).
 			Build()
@@ -145,11 +145,11 @@ func TestReadManifestListInfersVersionWhenKeyAbsent(t *testing.T) {
 	})
 
 	t.Run("v3", func(t *testing.T) {
-		data := NewManifestFile(3, "s3://bucket/metadata/data-m0.avro", 100, 0, 42).
+		data := NewManifestBuilder(3, "s3://bucket/metadata/data-m0.avro", 100, 0, 42).
 			AddedRows(10).
 			SequenceNum(5, 5).
 			Build()
-		deletes := NewManifestFile(3, "s3://bucket/metadata/deletes-m1.avro", 100, 0, 42).
+		deletes := NewManifestBuilder(3, "s3://bucket/metadata/deletes-m1.avro", 100, 0, 42).
 			Content(ManifestContentDeletes).
 			SequenceNum(5, 3).
 			Build()
@@ -178,7 +178,7 @@ func TestReadManifestListInfersVersionWhenKeyAbsent(t *testing.T) {
 // genuine v1 manifest list without the optional key must still decode as v1,
 // identically to the same list with the key present.
 func TestReadManifestListKeylessV1ReadsAsV1(t *testing.T) {
-	mf := NewManifestFile(1, "s3://bucket/metadata/data-m0.avro", 100, 0, 7).
+	mf := NewManifestBuilder(1, "s3://bucket/metadata/data-m0.avro", 100, 0, 7).
 		AddedFiles(1).
 		AddedRows(10).
 		Build()
@@ -238,7 +238,7 @@ func TestReadManifestListKeyContradictsSchema(t *testing.T) {
 		{writeVersion: 3, claimedKey: "2"},
 	}
 	for _, tc := range cases {
-		mf := NewManifestFile(tc.writeVersion, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
+		mf := NewManifestBuilder(tc.writeVersion, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
 			Content(ManifestContentDeletes).
 			SequenceNum(5, 3).
 			Build()

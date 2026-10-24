@@ -75,7 +75,8 @@ type ManifestBuilder struct {
 	m *manifestFile
 }
 
-func NewManifestFile(version int, path string, length int64, partitionSpecID int32, addedSnapshotID int64) *ManifestBuilder {
+// NewManifestBuilder creates a builder for a manifest file of the given format version.
+func NewManifestBuilder(version int, path string, length int64, partitionSpecID int32, addedSnapshotID int64) *ManifestBuilder {
 	var seqNum int64
 	if version != 1 {
 		seqNum = -1

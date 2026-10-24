@@ -134,7 +134,7 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	require.NoError(t, err)
 	require.NoError(t, tio.WriteFile(manifestPath, buf.Bytes()))
 
-	return iceberg.NewManifestFile(2, manifestPath, int64(buf.Len()), 0, snapshotID).
+	return iceberg.NewManifestBuilder(2, manifestPath, int64(buf.Len()), 0, snapshotID).
 		SequenceNum(seqNum, seqNum).
 		AddedFiles(1).
 		AddedRows(1).

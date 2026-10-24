@@ -50,7 +50,7 @@ var (
 	snapshotID            int64 = 9182715666859759686
 	addedRows             int64 = 237993
 	manifestFileRecordsV1       = []ManifestFile{
-		NewManifestFile(1, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+		NewManifestBuilder(1, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
 			7989, 0, snapshotID).
 			AddedFiles(3).
 			ExistingFiles(0).
@@ -66,7 +66,7 @@ var (
 	}
 
 	manifestFileRecordsV2 = []ManifestFile{
-		NewManifestFile(2, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+		NewManifestBuilder(2, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
 			7989, 0, snapshotID).
 			Content(ManifestContentDeletes).
 			SequenceNum(3, 3).
@@ -85,7 +85,7 @@ var (
 	}
 
 	manifestFileRecordsV3 = []ManifestFile{
-		NewManifestFile(3, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+		NewManifestBuilder(3, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
 			7989, 0, snapshotID).
 			Content(ManifestContentData).
 			SequenceNum(5, 5).
@@ -1803,7 +1803,7 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	var buf bytes.Buffer
 	seqNum := int64(9876)
 	err := WriteManifestList(2, &buf, 1234, nil, &seqNum, 0, []ManifestFile{
-		NewManifestFile(2, "s3://bucket/namespace/table/metadata/abcd-0123.avro", 99, 0, 1234).Build(),
+		NewManifestBuilder(2, "s3://bucket/namespace/table/metadata/abcd-0123.avro", 99, 0, 1234).Build(),
 	})
 	m.NoError(err)
 	files, err := ReadManifestList(&buf)
@@ -2623,7 +2623,7 @@ func (m *ManifestTestSuite) TestManifestBuilderPartitionsCopiesInput() {
 		UpperBound:   &upperBound,
 	}}
 
-	manifest := NewManifestFile(2, "file.avro", 1, 1, entrySnapshotID).Partitions(partitions).Build()
+	manifest := NewManifestBuilder(2, "file.avro", 1, 1, entrySnapshotID).Partitions(partitions).Build()
 
 	containsNaN = false
 	lowerBound[0] = 0x09
@@ -2642,7 +2642,7 @@ func (m *ManifestTestSuite) TestManifestBuilderPartitionsCopiesInput() {
 
 func (m *ManifestTestSuite) TestManifestBuilderKeyMetadataCopiesInput() {
 	keyMetadata := []byte{0x00, 0x01, 0x02}
-	manifest := NewManifestFile(2, "file.avro", 1, 1, entrySnapshotID).KeyMetadata(keyMetadata).Build()
+	manifest := NewManifestBuilder(2, "file.avro", 1, 1, entrySnapshotID).KeyMetadata(keyMetadata).Build()
 
 	keyMetadata[1] = 0x09
 
@@ -2653,7 +2653,7 @@ func (m *ManifestTestSuite) TestManifestFileGettersReturnDefensiveCopies() {
 	containsNaN := true
 	lowerBound := []byte{0x00, 0x01}
 	upperBound := []byte{0x02, 0x03}
-	manifest := NewManifestFile(3, "file.avro", 1, 1, entrySnapshotID).
+	manifest := NewManifestBuilder(3, "file.avro", 1, 1, entrySnapshotID).
 		Partitions([]FieldSummary{{
 			ContainsNull: true,
 			ContainsNaN:  &containsNaN,
@@ -2823,7 +2823,7 @@ func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
 			_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()))
 			m.Same(firstErr, err)
 
-			manifest := NewManifestFile(
+			manifest := NewManifestBuilder(
 				version,
 				"manifest.avro",
 				int64(out.Len()),
@@ -3281,9 +3281,9 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	m.EqualValues(firstRowID, *writer.NextRowID())
 	// Create test manifests with row counts
 	manifests := []ManifestFile{
-		NewManifestFile(3, "test1.avro", 100, 1, snapshotID).
+		NewManifestBuilder(3, "test1.avro", 100, 1, snapshotID).
 			AddedRows(1000).ExistingRows(500).Build(),
-		NewManifestFile(3, "test2.avro", 200, 1, snapshotID).
+		NewManifestBuilder(3, "test2.avro", 200, 1, snapshotID).
 			AddedRows(2000).ExistingRows(300).Build(),
 	}
 	// Add manifests - should update nextRowID
@@ -3314,7 +3314,7 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() 
 		var buf bytes.Buffer
 		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
 		m.Require().NoError(err)
-		manifest := NewManifestFile(3, "negative.avro", 100, 1, snapshotID).AddedRows(-2).Build()
+		manifest := NewManifestBuilder(3, "negative.avro", 100, 1, snapshotID).AddedRows(-2).Build()
 		err = writer.AddManifests([]ManifestFile{manifest})
 		m.Require().ErrorIs(err, ErrInvalidArgument)
 		m.Require().ErrorContains(err, "row counts must be non-negative")
@@ -3324,7 +3324,7 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() 
 		var buf bytes.Buffer
 		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
 		m.Require().NoError(err)
-		manifest := NewManifestFile(3, "negative-existing.avro", 100, 1, snapshotID).ExistingRows(-2).Build()
+		manifest := NewManifestBuilder(3, "negative-existing.avro", 100, 1, snapshotID).ExistingRows(-2).Build()
 		err = writer.AddManifests([]ManifestFile{manifest})
 		m.Require().ErrorIs(err, ErrInvalidArgument)
 		m.Require().ErrorContains(err, "row counts must be non-negative")
@@ -3334,7 +3334,7 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() 
 		var buf bytes.Buffer
 		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
 		m.Require().NoError(err)
-		manifest := NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build()
+		manifest := NewManifestBuilder(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build()
 		err = writer.AddManifests([]ManifestFile{manifest})
 		m.Require().ErrorIs(err, ErrInvalidArgument)
 		m.Require().ErrorContains(err, "overflows int64")
@@ -3345,7 +3345,7 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() 
 		var buf bytes.Buffer
 		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
 		m.Require().NoError(err)
-		manifest := NewManifestFile(3, "overflow-existing.avro", 100, 1, snapshotID).ExistingRows(1).Build()
+		manifest := NewManifestBuilder(3, "overflow-existing.avro", 100, 1, snapshotID).ExistingRows(1).Build()
 		err = writer.AddManifests([]ManifestFile{manifest})
 		m.Require().ErrorIs(err, ErrInvalidArgument)
 		m.Require().ErrorContains(err, "overflows int64")
@@ -3356,7 +3356,7 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() 
 		var buf bytes.Buffer
 		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 10, nil)
 		m.Require().NoError(err)
-		manifest := NewManifestFile(3, "other-snapshot.avro", 100, 1, snapshotID+1).AddedRows(5).Build()
+		manifest := NewManifestBuilder(3, "other-snapshot.avro", 100, 1, snapshotID+1).AddedRows(5).Build()
 		err = writer.AddManifests([]ManifestFile{manifest})
 		m.Require().ErrorContains(err, "unassigned sequence number")
 		m.EqualValues(10, *writer.NextRowID())
@@ -3368,8 +3368,8 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() 
 		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, startRowID, nil)
 		m.Require().NoError(err)
 		manifests := []ManifestFile{
-			NewManifestFile(3, "valid.avro", 100, 1, snapshotID).AddedRows(5).Build(),
-			NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build(),
+			NewManifestBuilder(3, "valid.avro", 100, 1, snapshotID).AddedRows(5).Build(),
+			NewManifestBuilder(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build(),
 		}
 		err = writer.AddManifests(manifests)
 		m.Require().ErrorContains(err, "overflows int64")
@@ -3387,9 +3387,9 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
 	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
 	m.Require().NoError(err)
 	manifests := []ManifestFile{
-		NewManifestFile(3, "current.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
-		NewManifestFile(3, "carried.avro", 200, 1, otherSnapID).SequenceNum(0, 0).AddedRows(100).ExistingRows(50).Build(),
-		NewManifestFile(3, "current2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+		NewManifestBuilder(3, "current.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestBuilder(3, "carried.avro", 200, 1, otherSnapID).SequenceNum(0, 0).AddedRows(100).ExistingRows(50).Build(),
+		NewManifestBuilder(3, "current2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
 	}
 	err = writer.AddManifests(manifests)
 	m.Require().NoError(err)
@@ -3407,9 +3407,9 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterDeltaIgnoresNonDataManifests
 	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
 	m.Require().NoError(err)
 	manifests := []ManifestFile{
-		NewManifestFile(3, "data.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
-		NewManifestFile(3, "deletes.avro", 200, 1, commitSnapID).Content(ManifestContentDeletes).AddedRows(100).Build(),
-		NewManifestFile(3, "data2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+		NewManifestBuilder(3, "data.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestBuilder(3, "deletes.avro", 200, 1, commitSnapID).Content(ManifestContentDeletes).AddedRows(100).Build(),
+		NewManifestBuilder(3, "data2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
 	}
 	err = writer.AddManifests(manifests)
 	m.Require().NoError(err)
@@ -3429,8 +3429,8 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowI
 	m.Require().NoError(err)
 
 	manifests := []ManifestFile{
-		NewManifestFile(3, "m1.avro", 10, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(), // delta = 15
-		NewManifestFile(3, "m2.avro", 10, 1, commitSnapID).AddedRows(7).Build(),                  // delta = 7
+		NewManifestBuilder(3, "m1.avro", 10, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(), // delta = 15
+		NewManifestBuilder(3, "m2.avro", 10, 1, commitSnapID).AddedRows(7).Build(),                  // delta = 7
 	}
 	m.Require().NoError(writer.AddManifests(manifests))
 	m.Require().NoError(writer.Close())
@@ -3745,7 +3745,7 @@ func (m *ManifestTestSuite) TestManifestListWriterPreservesEmptyPartitionArrayWh
 	seqNum := int64(1)
 	emptyPartitions := []FieldSummary{}
 	originalSnapshotID := int64(101)
-	original := NewManifestFile(2, "s3://bucket/table/metadata/m0.avro", 100, 0, originalSnapshotID).
+	original := NewManifestBuilder(2, "s3://bucket/table/metadata/m0.avro", 100, 0, originalSnapshotID).
 		Partitions(emptyPartitions).
 		AddedFiles(1).
 		AddedRows(10).
@@ -3764,7 +3764,7 @@ func (m *ManifestTestSuite) TestManifestListWriterPreservesEmptyPartitionArrayWh
 	m.Require().Len(inherited, 1)
 
 	appendSnapshotID := int64(102)
-	newManifest := NewManifestFile(2, "s3://bucket/table/metadata/m1.avro", 50, 0, appendSnapshotID).
+	newManifest := NewManifestBuilder(2, "s3://bucket/table/metadata/m1.avro", 50, 0, appendSnapshotID).
 		Partitions(emptyPartitions).
 		AddedFiles(1).
 		AddedRows(5).
@@ -3790,7 +3790,7 @@ func (m *ManifestTestSuite) TestManifestListWriterKeepsAbsentPartitionListNull()
 	// No Partitions(...) call: PartitionList stays nil (absent). partitions is
 	// optional in the manifest-list spec, so an absent value must round-trip as
 	// null rather than be normalized into an empty array.
-	manifest := NewManifestFile(2, "s3://bucket/table/metadata/m0.avro", 100, 0, snapshotID).
+	manifest := NewManifestBuilder(2, "s3://bucket/table/metadata/m0.avro", 100, 0, snapshotID).
 		AddedFiles(1).
 		AddedRows(10).
 		Build()
@@ -3810,11 +3810,11 @@ func (m *ManifestTestSuite) TestManifestListV1WriterPartitionListEncoding() {
 	// Exercise the version-1 encode path (the manifestFileV1 toV1 loop, distinct
 	// from the wrapped v2/v3 path): an absent PartitionList must stay null while
 	// a present-but-empty one must encode as an empty array.
-	absent := NewManifestFile(1, "s3://bucket/table/metadata/m0.avro", 100, 0, snapshotID).
+	absent := NewManifestBuilder(1, "s3://bucket/table/metadata/m0.avro", 100, 0, snapshotID).
 		AddedFiles(1).
 		AddedRows(10).
 		Build()
-	emptyPresent := NewManifestFile(1, "s3://bucket/table/metadata/m1.avro", 100, 0, snapshotID).
+	emptyPresent := NewManifestBuilder(1, "s3://bucket/table/metadata/m1.avro", 100, 0, snapshotID).
 		Partitions([]FieldSummary{}).
 		AddedFiles(1).
 		AddedRows(5).
@@ -3853,7 +3853,7 @@ func (m *ManifestTestSuite) TestManifestListWriterPreservesPopulatedPartitionSum
 		UpperBound:   &upper,
 	}}
 
-	original := NewManifestFile(2, "s3://bucket/table/metadata/m0.avro", 100, 1, originalSnapshotID).
+	original := NewManifestBuilder(2, "s3://bucket/table/metadata/m0.avro", 100, 1, originalSnapshotID).
 		Partitions(summaries).
 		AddedFiles(1).
 		AddedRows(10).
@@ -3868,7 +3868,7 @@ func (m *ManifestTestSuite) TestManifestListWriterPreservesPopulatedPartitionSum
 	m.Require().Len(inherited, 1)
 
 	appendSnapshotID := int64(402)
-	newManifest := NewManifestFile(2, "s3://bucket/table/metadata/m1.avro", 50, 1, appendSnapshotID).
+	newManifest := NewManifestBuilder(2, "s3://bucket/table/metadata/m1.avro", 50, 1, appendSnapshotID).
 		Partitions(summaries).
 		AddedFiles(1).
 		AddedRows(5).

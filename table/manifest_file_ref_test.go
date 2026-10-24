@@ -41,7 +41,7 @@ func TestManifestFilePartitionsUsesBorrowedView(t *testing.T) {
 	containsNaN := false
 	lower := []byte{1, 2}
 	upper := []byte{3, 4}
-	manifest := iceberg.NewManifestFile(2, "manifest.avro", 0, 1, 1).Partitions(
+	manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 0, 1, 1).Partitions(
 		[]iceberg.FieldSummary{{
 			ContainsNaN: &containsNaN,
 			LowerBound:  &lower,
@@ -70,7 +70,7 @@ func TestManifestFilePartitionsUsesBorrowedView(t *testing.T) {
 }
 
 func TestManifestFilePartitionsFallsBackToPublicGetter(t *testing.T) {
-	manifest := iceberg.NewManifestFile(2, "manifest.avro", 0, 1, 1).
+	manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 0, 1, 1).
 		Partitions([]iceberg.FieldSummary{{}}).Build()
 	file := &publicManifestFile{ManifestFile: manifest}
 

@@ -71,7 +71,7 @@ func TestInspectSnapshotManifestPrefetchPreservesOrderAndBoundsReads(t *testing.
 				}
 
 				path := fmt.Sprintf("manifest-%d.avro", snapshot.SnapshotID)
-				manifest := iceberg.NewManifestFile(2, path, 10, 0, 1).Build()
+				manifest := iceberg.NewManifestBuilder(2, path, 10, 0, 1).Build()
 
 				return snapshotManifestSet{all: []iceberg.ManifestFile{manifest}}, nil
 			},
@@ -124,7 +124,7 @@ func TestInspectSnapshotManifestPrefetchUsesCachedSets(t *testing.T) {
 		snapshots[i].SnapshotID = int64(i + 1)
 		if i%2 == 0 {
 			path := fmt.Sprintf("manifest-%d.avro", i+1)
-			manifest := iceberg.NewManifestFile(2, path, 10, 0, 1).Build()
+			manifest := iceberg.NewManifestBuilder(2, path, 10, 0, 1).Build()
 			cachedSets[int64(i+1)] = snapshotManifestSet{all: []iceberg.ManifestFile{manifest}}
 		}
 	}
@@ -140,7 +140,7 @@ func TestInspectSnapshotManifestPrefetchUsesCachedSets(t *testing.T) {
 		func(_ context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
 			loaded.Add(1)
 			path := fmt.Sprintf("manifest-%d.avro", snapshot.SnapshotID)
-			manifest := iceberg.NewManifestFile(2, path, 10, 0, 1).Build()
+			manifest := iceberg.NewManifestBuilder(2, path, 10, 0, 1).Build()
 
 			return snapshotManifestSet{all: []iceberg.ManifestFile{manifest}}, nil
 		},
@@ -166,7 +166,7 @@ func TestInspectSnapshotManifestPrefetchDeduplicatesPaths(t *testing.T) {
 		func(_ context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
 			set := snapshotManifestSet{}
 			for _, path := range manifests[snapshot.SnapshotID-1] {
-				set.all = append(set.all, iceberg.NewManifestFile(2, path, 10, 0, 1).Build())
+				set.all = append(set.all, iceberg.NewManifestBuilder(2, path, 10, 0, 1).Build())
 			}
 
 			return set, nil
@@ -195,7 +195,7 @@ func TestInspectSnapshotManifestPrefetchStopsReadersOnEarlyExit(t *testing.T) {
 			defer active.Add(-1)
 
 			if snapshot.SnapshotID == 1 {
-				manifest := iceberg.NewManifestFile(2, "first.avro", 10, 0, 1).Build()
+				manifest := iceberg.NewManifestBuilder(2, "first.avro", 10, 0, 1).Build()
 
 				return snapshotManifestSet{all: []iceberg.ManifestFile{manifest}}, nil
 			}
@@ -224,7 +224,7 @@ func TestInspectSnapshotManifestPrefetchReportsFirstOrderedError(t *testing.T) {
 				return snapshotManifestSet{}, failure
 			}
 			path := fmt.Sprintf("manifest-%d.avro", snapshot.SnapshotID)
-			manifest := iceberg.NewManifestFile(2, path, 10, 0, 1).Build()
+			manifest := iceberg.NewManifestBuilder(2, path, 10, 0, 1).Build()
 
 			return snapshotManifestSet{all: []iceberg.ManifestFile{manifest}}, nil
 		},
@@ -298,7 +298,7 @@ func BenchmarkInspectSnapshotManifestListCacheHit(b *testing.B) {
 			sets := make([]snapshotManifestSet, count)
 			for i := range snapshots {
 				snapshots[i].SnapshotID = int64(i + 1)
-				manifest := iceberg.NewManifestFile(2, fmt.Sprintf("manifest-%d.avro", i+1), 10, 0, 1).Build()
+				manifest := iceberg.NewManifestBuilder(2, fmt.Sprintf("manifest-%d.avro", i+1), 10, 0, 1).Build()
 				sets[i] = snapshotManifestSet{all: []iceberg.ManifestFile{manifest}}
 				_, err := cache.get(context.Background(), snapshots[i], func(context.Context) (snapshotManifestSet, error) {
 					return sets[i], nil

@@ -247,7 +247,7 @@ func TestPlanDataManifestTasksWithProjectionRetainsEqualityDeletePruning(t *test
 	deleteManifest, err := deleteWriter.ToManifestFile("mem://projection-planning/deletes.avro", int64(deleteBytes.Len()))
 	require.NoError(t, err)
 	require.NoError(t, fs.WriteFile(deleteManifest.FilePath(), deleteBytes.Bytes()))
-	deleteManifest = iceberg.NewManifestFile(2, deleteManifest.FilePath(), int64(deleteBytes.Len()), 0, 2).
+	deleteManifest = iceberg.NewManifestBuilder(2, deleteManifest.FilePath(), int64(deleteBytes.Len()), 0, 2).
 		Content(iceberg.ManifestContentDeletes).SequenceNum(2, 2).AddedFiles(2).AddedRows(2).Build()
 	classified, err := scan.collectManifestEntriesWithSchemaMinSequenceNum(t.Context(),
 		[]iceberg.ManifestFile{deleteManifest}, schema, scan.partitionFiltersForSchema(schema), 0, true)
