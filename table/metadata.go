@@ -1163,7 +1163,7 @@ func (b *MetadataBuilder) RemoveProperties(keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	for _, reserved := range ReservedProperties {
+	for _, reserved := range ReservedProperties() {
 		if slices.Contains(keys, reserved) {
 			return fmt.Errorf("can't remove reserved property %s", reserved)
 		}
@@ -1336,7 +1336,7 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 		return nil
 	}
 
-	for _, key := range ReservedProperties {
+	for _, key := range ReservedProperties() {
 		if _, ok := props[key]; ok {
 			return fmt.Errorf("%w: can't set reserved property %s", iceberg.ErrInvalidArgument, key)
 		}
