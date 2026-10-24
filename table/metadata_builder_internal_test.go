@@ -2172,6 +2172,25 @@ func TestDefaultSpecCannotBeRemoved(t *testing.T) {
 	require.ErrorContains(t, builder.RemovePartitionSpecs([]int{0}), "can't remove default partition spec with id 0")
 }
 
+func TestReservedPropertiesCannotBeMutated(t *testing.T) {
+	properties := ReservedProperties()
+	index := slices.Index(properties, PropertyFormatVersion)
+	require.NotEqual(t, -1, index)
+
+	properties[index] = "not-reserved"
+	require.Contains(t, ReservedProperties(), PropertyFormatVersion)
+	require.NotContains(t, ReservedProperties(), "not-reserved")
+
+	builder := builderWithoutChanges(2)
+	require.ErrorContains(t,
+		builder.SetProperties(iceberg.Properties{PropertyFormatVersion: "2"}),
+		"can't set reserved property "+PropertyFormatVersion)
+	require.ErrorContains(t,
+		builder.RemoveProperties([]string{PropertyFormatVersion}),
+		"can't remove reserved property "+PropertyFormatVersion)
+	require.NoError(t, builder.SetProperties(iceberg.Properties{"not-reserved": "allowed"}))
+}
+
 func TestSetReservedPropertiesFails(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
@@ -2184,7 +2203,7 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 	require.True(t, builder.HasChanges())
 
 	// Test setting each reserved property individually
-	for _, reserved := range ReservedProperties {
+	for _, reserved := range ReservedProperties() {
 		err := builder.SetProperties(iceberg.Properties{reserved: "some-value"})
 		require.ErrorContains(t, err, "can't set reserved property "+reserved)
 	}
@@ -2227,7 +2246,7 @@ func TestRemoveReservedPropertiesFails(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
 	// Test removing each reserved property individually
-	for _, reserved := range ReservedProperties {
+	for _, reserved := range ReservedProperties() {
 		err := builder.RemoveProperties([]string{reserved})
 		require.ErrorContains(t, err, "can't remove reserved property "+reserved)
 	}

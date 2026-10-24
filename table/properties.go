@@ -233,16 +233,20 @@ const (
 	PropertyDefaultSortOrder         = "default-sort-order"
 )
 
-var ReservedProperties = [9]string{
-	PropertyFormatVersion,
-	PropertyUuid,
-	PropertySnapshotCount,
-	PropertyCurrentSnapshotId,
-	PropertyCurrentSnapshotSummary,
-	PropertyCurrentSnapshotTimestamp,
-	PropertyCurrentSchema,
-	PropertyDefaultPartitionSpec,
-	PropertyDefaultSortOrder,
+// ReservedProperties returns a new slice of reserved table property names.
+// Mutating the returned slice does not change metadata validation.
+func ReservedProperties() []string {
+	return []string{
+		PropertyFormatVersion,
+		PropertyUuid,
+		PropertySnapshotCount,
+		PropertyCurrentSnapshotId,
+		PropertyCurrentSnapshotSummary,
+		PropertyCurrentSnapshotTimestamp,
+		PropertyCurrentSchema,
+		PropertyDefaultPartitionSpec,
+		PropertyDefaultSortOrder,
+	}
 }
 
 // Metadata compression codecs
