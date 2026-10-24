@@ -157,7 +157,7 @@ func TestBranchWriteCommitsThroughCatalogPath(t *testing.T) {
 			// CommitTable where the branch requirement is validated.
 			cat := &headTrackingCatalog{metadata: divergedMeta}
 			tbl := New(ident, divergedMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
-			txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+			txnFeat, err := tbl.NewTransactionOnBranch("feature")
 			require.NoError(t, err)
 
 			spFeat := tc.newProd(tc.op, txnFeat, memIO, nil, nil)
@@ -218,7 +218,7 @@ func TestBranchCreateForksFromMainHead(t *testing.T) {
 	// First write to the new "feature" branch.
 	cat := &headTrackingCatalog{metadata: mainMeta}
 	tbl := New(ident, mainMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
-	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	txnFeat, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
 	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
@@ -268,7 +268,7 @@ func TestBranchCreateForksFromMainHeadAcrossRetry(t *testing.T) {
 	cat := &flakyCatalog{metadata: mainMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
 	tbl := New(ident, mainMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
 
-	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	txnFeat, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
 	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
@@ -333,7 +333,7 @@ func TestBranchRetryParentsOnPeerAdvancedBranchHead(t *testing.T) {
 	tbl := New(ident, baseMeta, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return wfs, nil }, cat)
 
-	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	txnFeat, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, wfs, nil, nil)
 	spFeat.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/feature.parquet", nil))
@@ -359,7 +359,7 @@ func TestBranchRetryParentsOnPeerAdvancedBranchHead(t *testing.T) {
 
 // TestBranchCommitRejectsNameThatBecomesATagOnRetry covers the absent-branch to
 // tag race. "feature" does not exist when the transaction is constructed, so
-// the ref-type guard in NewTransactionOnBranchWithError has nothing to reject
+// the ref-type guard in NewTransactionOnBranch has nothing to reject
 // and the commit carries an "assert this ref is absent" requirement
 // (baseRefSnapshotID returns nil for a branch absent from the base). If a peer
 // creates that name as a TAG before the retry, the replay must fail: without
@@ -399,7 +399,7 @@ func TestBranchCommitRejectsNameThatBecomesATagOnRetry(t *testing.T) {
 	tbl := New(ident, mainMeta, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
 
-	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	txnFeat, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err, "the name is still absent here, so construction cannot reject it")
 	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
 	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
@@ -450,7 +450,7 @@ func TestOverwriteOnBranchOnlyTableKeepsOverwriteSemantics(t *testing.T) {
 	t.Run("branch with a head overwrites", func(t *testing.T) {
 		tbl := New(ident, branchOnlyMeta, "metadata.json",
 			func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
-		txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+		txnFeat, err := tbl.NewTransactionOnBranch("feature")
 		require.NoError(t, err)
 
 		prod := txnFeat.updateSnapshot(memIO, nil, OpOverwrite).mergeOverwrite(nil, nil)
@@ -525,7 +525,7 @@ func TestBranchMultipleStagedSnapshotsChainOnRetry(t *testing.T) {
 	tbl := New(ident, mainMeta, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
 
-	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	txnFeat, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 
 	// A1 forks from main's head; A2 is staged on top of A1.
@@ -969,7 +969,7 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 }
 
-func TestNewTransactionOnBranchWithErrorReturnsTransactionInitError(t *testing.T) {
+func TestNewTransactionOnBranchReportsInitializationError(t *testing.T) {
 	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
 	require.NoError(t, err, "new metadata")
 
@@ -977,7 +977,7 @@ func TestNewTransactionOnBranchWithErrorReturnsTransactionInitError(t *testing.T
 		Metadata: baseMeta,
 	}, "metadata.json", func(context.Context) (iceio.IO, error) {
 		return nil, nil
-	}, nil).NewTransactionOnBranchWithError(MainBranch)
+	}, nil).NewTransactionOnBranch(MainBranch)
 	require.Error(t, err, "expected metadata builder initialization to fail")
 	require.ErrorContains(t, err, "current schema is missing")
 	require.ErrorIs(t, err, ErrInvalidMetadata)
@@ -993,14 +993,10 @@ func TestNewTransactionOnBranchRejectsTags(t *testing.T) {
 	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", nil, nil)
 
 	before := tbl.Metadata()
-	transaction, err := tbl.NewTransactionOnBranchWithError("release")
+	transaction, err := tbl.NewTransactionOnBranch("release")
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.Nil(t, transaction)
 	require.True(t, before.Equals(tbl.Metadata()))
-
-	legacyTransaction := tbl.NewTransactionOnBranch("release")
-	require.ErrorIs(t, legacyTransaction.initErr, iceberg.ErrInvalidArgument)
-	require.ErrorContains(t, legacyTransaction.SetProperties(iceberg.Properties{"k": "v"}), "tags cannot be transaction targets")
 }
 
 func TestTransactionCommitRejectsSameIDTagRace(t *testing.T) {
@@ -1035,13 +1031,13 @@ func TestNewTransactionOnBranchAllowsBranchesAndNewRefs(t *testing.T) {
 	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", nil, nil)
 
 	for _, branch := range []string{MainBranch, "feature", "new-branch"} {
-		transaction, err := tbl.NewTransactionOnBranchWithError(branch)
+		transaction, err := tbl.NewTransactionOnBranch(branch)
 		require.NoError(t, err, branch)
 		require.NotNil(t, transaction, branch)
 	}
 }
 
-func TestNewTransactionOnBranchKeepsLegacySignatureAndFailsOnUse(t *testing.T) {
+func TestNewTransactionStillDefersInitializationErrors(t *testing.T) {
 	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
 	require.NoError(t, err, "new metadata")
 
@@ -1747,7 +1743,7 @@ func requireUntouchedRollbackRefs(t *testing.T, txn *Transaction, except string)
 func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
 
-	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	branchTxn, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 
 	require.NoError(t, branchTxn.RollbackToSnapshot(10))
@@ -1765,7 +1761,7 @@ func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
 func TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
 
-	branchTxn, err := tbl.NewTransactionOnBranchWithError("diverged")
+	branchTxn, err := tbl.NewTransactionOnBranch("diverged")
 	require.NoError(t, err)
 
 	err = branchTxn.RollbackToSnapshot(20)
@@ -1787,7 +1783,7 @@ func TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch(t *testing.T) {
 func TestRollbackToSnapshotRejectsUnknownBranch(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
 
-	branchTxn, err := tbl.NewTransactionOnBranchWithError("ghost")
+	branchTxn, err := tbl.NewTransactionOnBranch("ghost")
 	require.NoError(t, err)
 
 	err = branchTxn.RollbackToSnapshot(10)
@@ -1806,7 +1802,7 @@ func TestRollbackToSnapshotRejectsUnknownBranch(t *testing.T) {
 func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
 
-	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	branchTxn, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 9999, SnapshotRefType: BranchRef}
 
@@ -1825,7 +1821,7 @@ func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
 func TestRollbackToSnapshotRejectsTagRef(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
 
-	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	branchTxn, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 30, SnapshotRefType: TagRef}
 
@@ -1897,7 +1893,7 @@ func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
 
 	t.Run("producer then rollback", func(t *testing.T) {
 		tbl := newRollbackBranchTable(t)
-		txn, err := tbl.NewTransactionOnBranchWithError("feature")
+		txn, err := tbl.NewTransactionOnBranch("feature")
 		require.NoError(t, err)
 
 		require.NoError(t, producerAssertion(txn))
@@ -1909,7 +1905,7 @@ func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
 
 	t.Run("rollback then producer", func(t *testing.T) {
 		tbl := newRollbackBranchTable(t)
-		txn, err := tbl.NewTransactionOnBranchWithError("feature")
+		txn, err := tbl.NewTransactionOnBranch("feature")
 		require.NoError(t, err)
 
 		require.NoError(t, txn.RollbackToSnapshot(10))
@@ -1937,7 +1933,7 @@ func TestRollbackToSnapshotCommitRejectsBranchTurnedTag(t *testing.T) {
 	raced := New(tbl.Identifier(), baseMeta, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
 
-	txn, err := raced.NewTransactionOnBranchWithError("feature")
+	txn, err := raced.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
 	require.NoError(t, txn.RollbackToSnapshot(10))
 
@@ -2058,7 +2054,8 @@ func TestTableCommitFencesTargetBranch(t *testing.T) {
 
 	t.Run("branch transaction pins only that branch", func(t *testing.T) {
 		base := metadataWithRef(t, newConflictTestMetadata(t, &head), "audit", BranchRef)
-		tx := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		tx, err := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		require.NoError(t, err)
 		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
 
 		tc, err := tx.TableCommit()
@@ -2073,7 +2070,8 @@ func TestTableCommitFencesTargetBranch(t *testing.T) {
 
 	t.Run("absent target branch requires absence", func(t *testing.T) {
 		base := newConflictTestMetadata(t, &head)
-		tx := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		tx, err := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		require.NoError(t, err)
 		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
 
 		tc, err := tx.TableCommit()
@@ -2092,7 +2090,8 @@ func TestTableCommitFencesTargetBranch(t *testing.T) {
 	// enforces snapshot-id equality alone.
 	t.Run("target name created as a tag is rejected locally", func(t *testing.T) {
 		base := newConflictTestMetadata(t, &head)
-		tx := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		tx, err := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		require.NoError(t, err)
 		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
 
 		tc, err := tx.TableCommit()
@@ -2145,13 +2144,15 @@ func TestTableCommitRequirementsMatchCommit(t *testing.T) {
 			require.Equal(t, base, committed.Metadata())
 			require.Equal(t, base, payload.Metadata())
 
-			txCommit := committed.NewTransactionOnBranch(branch)
+			txCommit, err := committed.NewTransactionOnBranch(branch)
+			require.NoError(t, err)
 			require.NoError(t, txCommit.SetProperties(iceberg.Properties{"offsets": "42"}))
-			_, err := txCommit.Commit(t.Context())
+			_, err = txCommit.Commit(t.Context())
 			require.NoError(t, err)
 			require.Len(t, cat.reqs, 1)
 
-			txPayload := payload.NewTransactionOnBranch(branch)
+			txPayload, err := payload.NewTransactionOnBranch(branch)
+			require.NoError(t, err)
 			require.NoError(t, txPayload.SetProperties(iceberg.Properties{"offsets": "42"}))
 			tc, err := txPayload.TableCommit()
 			require.NoError(t, err)
