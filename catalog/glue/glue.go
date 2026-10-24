@@ -92,8 +92,10 @@ const (
 	renameCleanupTimeout    = 5 * time.Second
 )
 
-var _ catalog.Catalog = (*Catalog)(nil)
-var _ catalog.RegisterableCatalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog             = (*Catalog)(nil)
+	_ catalog.RegisterableCatalog = (*Catalog)(nil)
+)
 
 func init() {
 	catalog.Register("glue", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
