@@ -95,7 +95,8 @@ func NewManifestFile(version int, path string, length int64, partitionSpecID int
 	}
 }
 
-func (b *ManifestBuilder) SequenceNum(num, minSeqNum int64) *ManifestBuilder {
+// SequenceNumber sets the manifest sequence number and minimum live data sequence number.
+func (b *ManifestBuilder) SequenceNumber(num, minSeqNum int64) *ManifestBuilder {
 	b.m.SeqNumber, b.m.MinSeqNumber = num, minSeqNum
 
 	return b
@@ -384,8 +385,8 @@ func (m *manifestFile) DeletedDataFiles() int32          { return m.DeletedFiles
 func (m *manifestFile) AddedRows() int64                 { return m.AddedRowsCount }
 func (m *manifestFile) ExistingRows() int64              { return m.ExistingRowsCount }
 func (m *manifestFile) DeletedRows() int64               { return m.DeletedRowsCount }
-func (m *manifestFile) SequenceNum() int64               { return m.SeqNumber }
-func (m *manifestFile) MinSequenceNum() int64            { return m.MinSeqNumber }
+func (m *manifestFile) SequenceNumber() int64            { return m.SeqNumber }
+func (m *manifestFile) MinSequenceNumber() int64         { return m.MinSeqNumber }
 func (m *manifestFile) KeyMetadata() []byte {
 	if m.Key == nil {
 		return nil
@@ -547,12 +548,12 @@ type ManifestFile interface {
 	// DeletedRows returns the number of rows in all files of the manifest
 	// which have status EntryStatusDELETED.
 	DeletedRows() int64
-	// SequenceNum returns the sequence number when this manifest was
+	// SequenceNumber returns the sequence number when this manifest was
 	// added to the table. Will be 0 for v1 manifest lists.
-	SequenceNum() int64
-	// MinSequenceNum is the minimum data sequence number of all live data
+	SequenceNumber() int64
+	// MinSequenceNumber is the minimum data sequence number of all live data
 	// or delete files in the manifest. Will be 0 for v1 manifest lists.
-	MinSequenceNum() int64
+	MinSequenceNumber() int64
 	// KeyMetadata returns implementation-specific key metadata for encryption
 	// if it exists in the manifest list.
 	KeyMetadata() []byte
@@ -2009,7 +2010,7 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	}
 
 	if status == EntryStatusADDED || status == EntryStatusEXISTING {
-		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
+		if seq := entry.DataSequenceNumber(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
 			w.minSeqNum = seq
 		}
 	}
@@ -2024,14 +2025,14 @@ func (w *ManifestWriter) Add(entry ManifestEntry) error {
 }
 
 func (w *ManifestWriter) Delete(entry ManifestEntry) error {
-	w.reusedEntry.wrap(EntryStatusDELETED, &w.snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNum(), entry.DataFile())
+	w.reusedEntry.wrap(EntryStatusDELETED, &w.snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNumber(), entry.DataFile())
 
 	return w.addEntry(&w.reusedEntry)
 }
 
 func (w *ManifestWriter) Existing(entry ManifestEntry) error {
 	snapshotID := entry.SnapshotID()
-	w.reusedEntry.wrap(EntryStatusEXISTING, &snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNum(), entry.DataFile())
+	w.reusedEntry.wrap(EntryStatusEXISTING, &snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNumber(), entry.DataFile())
 
 	return w.addEntry(&w.reusedEntry)
 }
@@ -2965,13 +2966,15 @@ func NewManifestEntryBuilder(status ManifestEntryStatus, snapshotID *int64, data
 	}
 }
 
-func (b *ManifestEntryBuilder) SequenceNum(num int64) *ManifestEntryBuilder {
+// DataSequenceNumber sets the data sequence number of the file.
+func (b *ManifestEntryBuilder) DataSequenceNumber(num int64) *ManifestEntryBuilder {
 	b.m.SeqNum = &num
 
 	return b
 }
 
-func (b *ManifestEntryBuilder) FileSequenceNum(num int64) *ManifestEntryBuilder {
+// FileSequenceNumber sets the file sequence number of the entry.
+func (b *ManifestEntryBuilder) FileSequenceNumber(num int64) *ManifestEntryBuilder {
 	b.m.FileSeqNum = &num
 
 	return b
@@ -2998,7 +3001,7 @@ func (m *manifestEntry) SnapshotID() int64 {
 	return *m.Snapshot
 }
 
-func (m *manifestEntry) SequenceNum() int64 {
+func (m *manifestEntry) DataSequenceNumber() int64 {
 	if m.SeqNum == nil {
 		return -1
 	}
@@ -3006,7 +3009,7 @@ func (m *manifestEntry) SequenceNum() int64 {
 	return *m.SeqNum
 }
 
-func (m *manifestEntry) FileSequenceNum() *int64 {
+func (m *manifestEntry) FileSequenceNumber() *int64 {
 	if m.FileSeqNum == nil {
 		return nil
 	}
@@ -3024,7 +3027,7 @@ func (m *manifestEntry) inherit(manifest ManifestFile) {
 		m.Snapshot = &snap
 	}
 
-	manifestSequenceNum := manifest.SequenceNum()
+	manifestSequenceNum := manifest.SequenceNumber()
 	if manifestSequenceNum != -1 {
 		if m.SeqNum == nil && (manifestSequenceNum == initialSequenceNumber || m.EntryStatus == EntryStatusADDED) {
 			m.SeqNum = &manifestSequenceNum
@@ -3343,14 +3346,14 @@ type ManifestEntry interface {
 	// SnapshotID is the id where the file was added, or deleted,
 	// if null it is inherited from the manifest list.
 	SnapshotID() int64
-	// SequenceNum returns the data sequence number of the file.
+	// DataSequenceNumber returns the data sequence number of the file.
 	// If it was null and the status is EntryStatusADDED then it
 	// is inherited from the manifest list.
-	SequenceNum() int64
-	// FileSequenceNum returns the file sequence number indicating
+	DataSequenceNumber() int64
+	// FileSequenceNumber returns the file sequence number indicating
 	// when the file was added. If it was null and the status is
 	// EntryStatusADDED then it is inherited from the manifest list.
-	FileSequenceNum() *int64
+	FileSequenceNumber() *int64
 	// DataFile provides the information about the data file indicated
 	// by this manifest entry.
 	DataFile() DataFile

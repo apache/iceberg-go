@@ -206,7 +206,7 @@ func newConflictValidationBenchmarkContext(b *testing.B, entryCount int) *confli
 			b.Fatal(err)
 		}
 		entries[i] = iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, dataFile.Build()).
-			SequenceNum(1).
+			DataSequenceNumber(1).
 			Build()
 	}
 
