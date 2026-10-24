@@ -451,10 +451,10 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	// the first v3 manifest-list write after a v1/v2->v3 upgrade, so mixed
 	// groups are expected during migration; for now we degrade gracefully
 	// and do not preserve lineage for the surviving rows.
-	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
+	preserveLineage := tbl.metadata.FormatVersion() >= 3 && allTasksHaveRowLineage(group.Tasks)
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
-	} else if tbl.metadata.Version() >= 3 {
+	} else if tbl.metadata.FormatVersion() >= 3 {
 		// Drop lineage for the whole mixed group. Warn only when at least one
 		// source file already carried lineage; all-legacy groups fall through
 		// silently because there is no lineage to lose.

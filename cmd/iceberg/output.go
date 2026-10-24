@@ -109,7 +109,7 @@ func (t textOutput) DescribeTable(tbl *table.Table) {
 
 	pterm.DefaultTable.
 		WithData(pterm.TableData{
-			{"Table format version", strconv.Itoa(tbl.Metadata().Version())},
+			{"Table format version", strconv.Itoa(tbl.Metadata().FormatVersion())},
 			{"Metadata location", tbl.MetadataLocation()},
 			{"Table UUID", tbl.Metadata().TableUUID().String()},
 			{"Last updated", strconv.Itoa(int(tbl.Metadata().LastUpdatedMillis()))},

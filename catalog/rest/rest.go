@@ -1742,7 +1742,7 @@ func (r *Catalog) commitStagedCreate(ctx context.Context, identifier table.Ident
 	updates := make([]table.Update, 0, len(stagedUpdates)+10)
 	updates = append(updates,
 		table.NewAssignUUIDUpdate(meta.TableUUID()),
-		table.NewUpgradeFormatVersionUpdate(meta.Version()),
+		table.NewUpgradeFormatVersionUpdate(meta.FormatVersion()),
 		table.NewAddSchemaUpdate(meta.CurrentSchema()),
 		table.NewSetCurrentSchemaUpdate(-1),
 	)

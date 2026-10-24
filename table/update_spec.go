@@ -223,7 +223,7 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 				return iceberg.PartitionSpec{}, err
 			}
 			partitionFields = append(partitionFields, newField)
-		} else if us.meta.Version() == 1 {
+		} else if us.meta.FormatVersion() == 1 {
 			if rename, renamed := us.renames[field.Name]; renamed {
 				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
 			} else {
@@ -467,7 +467,7 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 	// Reuse applies to format v2+ (v1 has no permanent field-ID contract) and
 	// resurrects fields removed in an earlier committed update; same-update
 	// remove/re-add is handled ahead of this call by rewriteDeleteAndAddField.
-	if us.meta.Version() >= 2 {
+	if us.meta.FormatVersion() >= 2 {
 		// PartitionSpecs() is ordered by ascending spec ID, so the cached slice
 		// keeps the lowest-spec-ID match first when a field was renamed across
 		// specs. The match's own name is returned, which for the no-name case may

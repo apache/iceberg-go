@@ -197,7 +197,7 @@ func TestUpdateSpecReplacesTimeTransformOverV1VoidTombstone(t *testing.T) {
 	meta, err := table.NewMetadata(testSchema, &baseSpec, table.UnsortedSortOrder, "",
 		iceberg.Properties{"format-version": "1"})
 	require.NoError(t, err)
-	require.Equal(t, 1, meta.Version())
+	require.Equal(t, 1, meta.FormatVersion())
 	tbl := table.New([]string{"v1_year_partitioned"}, meta, "", nil, nil)
 
 	specUpdate := table.NewUpdateSpec(tbl.NewTransaction(), false).
