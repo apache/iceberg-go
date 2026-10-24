@@ -422,7 +422,7 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 				return nil, err
 			}
 
-			manifests[i] = iceberg.NewManifestFile(1, path, length, 0, s.SnapshotID).
+			manifests[i] = iceberg.NewManifestBuilder(1, path, length, 0, s.SnapshotID).
 				AddedFiles(-1).
 				ExistingFiles(-1).
 				DeletedFiles(-1).

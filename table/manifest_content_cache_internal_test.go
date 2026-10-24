@@ -109,7 +109,7 @@ func TestManifestContentCacheBoundsPopulationAndPreservesFullReads(t *testing.T)
 			require.NoError(t, base.WriteFile(location, content))
 			fs := &manifestContentCountingIO{IO: base}
 			cache := newManifestContentCache(0, 128, 64)
-			manifest := iceberg.NewManifestFile(2, location, tt.expectedLength, 0, 1).Build()
+			manifest := iceberg.NewManifestBuilder(2, location, tt.expectedLength, 0, 1).Build()
 
 			file, err := cache.open(t.Context(), fs, manifest)
 			require.NoError(t, err)
@@ -172,9 +172,9 @@ func TestManifestContentCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	require.NoError(t, fs.WriteFile(secondPath, secondBytes))
 	require.NoError(t, fs.WriteFile(thirdPath, []byte("cccc")))
 
-	first := iceberg.NewManifestFile(2, firstPath, int64(len(firstBytes)), 0, 1).Build()
-	second := iceberg.NewManifestFile(2, secondPath, int64(len(secondBytes)), 0, 1).Build()
-	third := iceberg.NewManifestFile(2, thirdPath, 4, 0, 1).Build()
+	first := iceberg.NewManifestBuilder(2, firstPath, int64(len(firstBytes)), 0, 1).Build()
+	second := iceberg.NewManifestBuilder(2, secondPath, int64(len(secondBytes)), 0, 1).Build()
+	third := iceberg.NewManifestBuilder(2, thirdPath, 4, 0, 1).Build()
 	cache := newManifestContentCache(0, 8, 4)
 
 	readCachedManifest(t, cache, fs, first)
@@ -193,7 +193,7 @@ func TestManifestContentCacheExpiresIdleEntries(t *testing.T) {
 	const location = "mem://manifest-content-cache/expired.avro"
 	fs := newTrackingCallsIO()
 	require.NoError(t, fs.WriteFile(location, []byte("aaaa")))
-	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, location, 4, 0, 1).Build()
 	cache := newManifestContentCache(60_000, 8, 4)
 
 	now := time.Now()
@@ -223,7 +223,7 @@ func TestManifestContentCacheZeroExpirationKeepsWarmEntries(t *testing.T) {
 
 	now := time.Now()
 	cache.now = func() time.Time { return now }
-	manifest := iceberg.NewManifestFile(2, location, int64(len(content)), 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, location, int64(len(content)), 0, 1).Build()
 	readCachedManifest(t, cache, fs, manifest)
 	now = now.Add(72 * time.Hour)
 	readCachedManifest(t, cache, fs, manifest)
@@ -256,7 +256,7 @@ func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 
-	manifest := iceberg.NewManifestFile(2, manifestPath, int64(len(content)), 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, manifestPath, int64(len(content)), 0, 1).Build()
 	cache := newManifestContentCache(0, 1<<20, 1<<20)
 	const callers = 16
 	errs := make(chan error, callers)
@@ -339,8 +339,8 @@ func TestManifestContentCacheInFlightLengthMismatch(t *testing.T) {
 	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 
 	cache := newManifestContentCache(0, 1024, 1024)
-	actual := iceberg.NewManifestFile(2, location, int64(len(content)), 0, 1).Build()
-	wrongLength := iceberg.NewManifestFile(2, location, int64(len(content)-1), 0, 1).Build()
+	actual := iceberg.NewManifestBuilder(2, location, int64(len(content)), 0, 1).Build()
+	wrongLength := iceberg.NewManifestBuilder(2, location, int64(len(content)-1), 0, 1).Build()
 	type result struct {
 		content []byte
 		err     error
@@ -524,7 +524,7 @@ func TestManifestContentCacheFailedPopulationFallsBackWithoutCaching(t *testing.
 	require.NoError(t, base.WriteFile(location, []byte("test")))
 	fs := &manifestContentCacheFailOnceIO{IO: base}
 	cache := newManifestContentCache(0, 16, 16)
-	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, location, 4, 0, 1).Build()
 
 	readCachedManifest(t, cache, fs, manifest)
 	assert.Empty(t, cache.entries, "ordinary-open fallback must not populate the cache")
@@ -549,7 +549,7 @@ func TestManifestContentCachePreservesPopulationAndFallbackErrors(t *testing.T) 
 		openErrors: []error{io.ErrUnexpectedEOF, io.ErrClosedPipe},
 	}
 	cache := newManifestContentCache(0, 16, 16)
-	manifest := iceberg.NewManifestFile(2, "mem://manifest-content-cache/errors.avro", 4, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, "mem://manifest-content-cache/errors.avro", 4, 0, 1).Build()
 
 	file, err := cache.open(t.Context(), fs, manifest)
 	assert.Nil(t, file)
@@ -571,7 +571,7 @@ func (manifestContentCachePanicIO) Open(string) (iceio.File, error) {
 func TestManifestContentCachePanicReleasesInFlightLoad(t *testing.T) {
 	cache := newManifestContentCache(0, 16, 16)
 	const location = "mem://manifest-content-cache/panic.avro"
-	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, location, 4, 0, 1).Build()
 	assert.Panics(t, func() {
 		_, _ = cache.open(t.Context(), manifestContentCachePanicIO{}, manifest)
 	})
@@ -633,12 +633,12 @@ func TestManifestContentCacheReclaimsExpiredEntriesOnInsert(t *testing.T) {
 	now := time.Now()
 	cache.now = func() time.Time { return now }
 	for _, name := range []string{firstPath, secondPath} {
-		readCachedManifest(t, cache, fs, iceberg.NewManifestFile(2, name, 4, 0, 1).Build())
+		readCachedManifest(t, cache, fs, iceberg.NewManifestBuilder(2, name, 4, 0, 1).Build())
 	}
 	require.Equal(t, int64(8), cache.totalBytes)
 
 	now = now.Add(2 * time.Second)
-	readCachedManifest(t, cache, fs, iceberg.NewManifestFile(2, thirdPath, 4, 0, 1).Build())
+	readCachedManifest(t, cache, fs, iceberg.NewManifestBuilder(2, thirdPath, 4, 0, 1).Build())
 	assert.NotContains(t, cache.entries, firstPath)
 	assert.NotContains(t, cache.entries, secondPath)
 	assert.Contains(t, cache.entries, thirdPath)
@@ -701,7 +701,7 @@ func TestManifestContentCacheFailedSharedLoadFallsBackForAllCallers(t *testing.T
 			var release sync.Once
 			t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 			cache := newManifestContentCache(0, 16, 16)
-			manifest := iceberg.NewManifestFile(2, path, tc.expectedLength, 0, 1).Build()
+			manifest := iceberg.NewManifestBuilder(2, path, tc.expectedLength, 0, 1).Build()
 
 			producerErr := make(chan error, 1)
 			go func() {
@@ -775,7 +775,7 @@ func TestManifestContentCachePanickingProducerUnblocksWaiter(t *testing.T) {
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 	cache := newManifestContentCache(0, 16, 16)
-	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, location, 4, 0, 1).Build()
 
 	producerPanic := make(chan any, 1)
 	go func() {
@@ -838,7 +838,7 @@ func TestManifestContentCacheFailedSharedLoadPreservesBothErrors(t *testing.T) {
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 	cache := newManifestContentCache(0, 16, 16)
-	manifest := iceberg.NewManifestFile(2, location, 4, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, location, 4, 0, 1).Build()
 
 	producerErr := make(chan error, 1)
 	go func() {
@@ -904,7 +904,7 @@ func TestManifestContentCacheRetriesAfterProducerCancellation(t *testing.T) {
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 	cache := newManifestContentCache(0, 16, 16)
-	manifest := iceberg.NewManifestFile(2, path, 4, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, path, 4, 0, 1).Build()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
