@@ -3491,7 +3491,7 @@ func (r *RestCatalogSuite) TestCreateView200() {
 		"owner":       "admin",
 		"view-format": "iceberg",
 	}
-	reprs := []view.Representation{view.NewRepresentation(exampleViewSQL, "default")}
+	reprs := []view.Representation{view.NewRepresentation(view.Representation{SQL: exampleViewSQL, Dialect: "default"})}
 	version, err := view.NewVersion(1, 0, reprs, table.Identifier{ns},
 		view.WithDefaultViewCatalog("default-catalog"),
 		view.WithTimestampMS(0))
@@ -3555,7 +3555,7 @@ func (r *RestCatalogSuite) TestCreateView409() {
 		Required: true,
 	})
 	sql := "SELECT * FROM table"
-	reprs := []view.Representation{view.NewRepresentation(sql, "default")}
+	reprs := []view.Representation{view.NewRepresentation(view.Representation{SQL: sql, Dialect: "default"})}
 	version, err := view.NewVersion(1, 1, reprs, table.Identifier{ns})
 	r.Require().NoError(err)
 
@@ -3590,7 +3590,7 @@ func (r *RestCatalogSuite) TestCreateView404() {
 	})
 	sql := "SELECT * FROM table"
 	reprs := []view.Representation{
-		view.NewRepresentation(sql, "spark"),
+		view.NewRepresentation(view.Representation{SQL: sql, Dialect: "spark"}),
 	}
 	version, err := view.NewVersion(1, 1, reprs, table.Identifier{ns})
 	r.Require().NoError(err)
@@ -3693,7 +3693,7 @@ func (r *RestCatalogSuite) TestCreateViewLabels() {
 	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1}, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	reprs := []view.Representation{view.NewRepresentation(exampleViewSQL, "default")}
+	reprs := []view.Representation{view.NewRepresentation(view.Representation{SQL: exampleViewSQL, Dialect: "default"})}
 	version, err := view.NewVersion(1, 0, reprs, table.Identifier{ns},
 		view.WithDefaultViewCatalog("default-catalog"), view.WithTimestampMS(0))
 	r.Require().NoError(err)

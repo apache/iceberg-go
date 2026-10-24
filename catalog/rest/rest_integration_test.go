@@ -213,7 +213,7 @@ func (s *RestIntegrationSuite) TestCreateView() {
 	s.True(exists)
 
 	// Create a view
-	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), "trino")
+	viewRepr := view.NewRepresentation(view.Representation{SQL: fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), Dialect: "trino"})
 	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, table.Identifier{TestNamespaceIdent})
 	s.Require().NoError(err)
 
@@ -254,7 +254,7 @@ func (s *RestIntegrationSuite) TestUpdateView() {
 	s.True(exists)
 
 	// Create a view
-	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), "trino")
+	viewRepr := view.NewRepresentation(view.Representation{SQL: fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), Dialect: "trino"})
 	defaultViewNS := catalog.ToIdentifier(location, TestNamespaceIdent)
 	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, defaultViewNS)
 
@@ -309,7 +309,7 @@ func (s *RestIntegrationSuite) TestRenameView() {
 	fromIdent := catalog.ToIdentifier(TestNamespaceIdent, "test-view")
 	toIdent := catalog.ToIdentifier(TestNamespaceIdent, "renamed-view")
 
-	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table"), "trino")
+	viewRepr := view.NewRepresentation(view.Representation{SQL: fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table"), Dialect: "trino"})
 	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, table.Identifier{TestNamespaceIdent})
 	s.Require().NoError(err)
 

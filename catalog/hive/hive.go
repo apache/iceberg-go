@@ -359,7 +359,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	viewSQL, err := sqlFromVersion(version)
+	viewSQL, viewDialect, err := sqlFromVersion(version)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +376,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	createdView, err := view.CreateViewWithIOProperties(
-		ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, ioProps, cfg.Properties,
+		ctx, catalogName, identifier, freshSchema, viewSQL, viewDialect, defaultNS, loc, ioProps, cfg.Properties,
 	)
 	if err != nil {
 		return nil, err
@@ -399,28 +399,30 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	return createdView, nil
 }
 
-// sqlFromVersion returns the SQL from the first SQL representation in version, preferring dialect "hive".
-func sqlFromVersion(v *view.Version) (string, error) {
+// sqlFromVersion selects a SQL representation, preferring the Hive dialect.
+// Return its dialect as well so creating the view does not rewrite it to "default".
+func sqlFromVersion(v *view.Version) (string, string, error) {
 	if v == nil || len(v.Representations) == 0 {
-		return "", errors.New("view version has no representations")
+		return "", "", errors.New("view version has no representations")
 	}
-	var fallback string
-	for _, r := range v.Representations {
+	var fallback *view.Representation
+	for i := range v.Representations {
+		r := &v.Representations[i]
 		if r.Type != "sql" {
 			continue
 		}
 		if strings.EqualFold(r.Dialect, "hive") {
-			return r.SQL, nil
+			return r.SQL, r.Dialect, nil
 		}
-		if fallback == "" {
-			fallback = r.SQL
+		if fallback == nil {
+			fallback = r
 		}
 	}
-	if fallback != "" {
-		return fallback, nil
+	if fallback != nil {
+		return fallback.SQL, fallback.Dialect, nil
 	}
 
-	return "", errors.New("view version has no SQL representation")
+	return "", "", errors.New("view version has no SQL representation")
 }
 
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) (err error) {

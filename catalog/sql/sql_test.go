@@ -638,7 +638,7 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaViewOperationsUnsupported() {
 	})
 	viewID := []string{nsName, tableName()}
 
-	err := cat.CreateView(ctx, viewID, schema, "SELECT 1", nil)
+	err := cat.CreateView(ctx, viewID, schema, "SELECT 1", "spark", nil)
 	s.ErrorContains(err, "V0", "CreateView must be rejected on a V0 catalog")
 
 	_, err = cat.LoadView(ctx, viewID)
@@ -1318,7 +1318,7 @@ func (s *SqliteCatalogTestSuite) TestDottedNamespaceUsesOwnLocationProperties() 
 		s.Equal(location+"/orders", createdTable.Location())
 
 		viewIdent := append(slices.Clone(namespace), "orders_view")
-		s.Require().NoError(cat.CreateView(ctx, viewIdent, tableSchemaNested, "SELECT * FROM orders", nil))
+		s.Require().NoError(cat.CreateView(ctx, viewIdent, tableSchemaNested, "SELECT * FROM orders", "spark", nil))
 		createdView, err := cat.LoadView(ctx, viewIdent)
 		s.Require().NoError(err)
 		s.Equal(location+"/orders_view", createdView.Location())
@@ -1881,7 +1881,7 @@ func (s *SqliteCatalogTestSuite) TestDropNamespaceRejectsViewOnlyNamespace() {
 	})
 
 	s.Require().NoError(cat.CreateNamespace(ctx, namespace, nil))
-	s.Require().NoError(cat.CreateView(ctx, viewID, schema, viewSQL, nil))
+	s.Require().NoError(cat.CreateView(ctx, viewID, schema, viewSQL, "spark", nil))
 
 	err := cat.DropNamespace(ctx, namespace)
 	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
@@ -2618,8 +2618,8 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
-	s.Require().NoError(db.CreateView(context.Background(), append(nestedNamespace, viewName), schema, viewSQL, nil))
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, "spark", nil))
+	s.Require().NoError(db.CreateView(context.Background(), append(nestedNamespace, viewName), schema, viewSQL, "spark", nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
@@ -2665,7 +2665,7 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
-			err := cat.CreateView(context.Background(), test.identifier, nil, "", nil)
+			err := cat.CreateView(context.Background(), test.identifier, nil, "", "spark", nil)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
 			_, err = cat.CheckViewExists(context.Background(), test.identifier)
@@ -2696,7 +2696,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableConflictsWithView() {
 	db := s.getCatalogSqlite()
 	identifier := s.randomTableIdentifier()
 	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
-	s.Require().NoError(db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil))
+	s.Require().NoError(db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", "spark", nil))
 
 	metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
 	before, err := os.ReadDir(metadataDir)
@@ -2722,7 +2722,7 @@ func (s *SqliteCatalogTestSuite) TestCreateViewConflictsWithTable() {
 	before, err := os.ReadDir(metadataDir)
 	s.Require().NoError(err)
 
-	err = db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+	err = db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", "spark", nil)
 	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
 
 	after, err := os.ReadDir(metadataDir)
@@ -2754,7 +2754,7 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionReturnsCatalogS
 	}()
 	go func() {
 		<-start
-		err := db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+		err := db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", "spark", nil)
 		results <- createResult{objectType: sqlcat.ViewType, err: err}
 	}()
 	close(start)
@@ -2825,7 +2825,7 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionUnderLockConten
 	}()
 	go func() {
 		<-start
-		err := db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+		err := db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", "spark", nil)
 		results <- createResult{objectType: sqlcat.ViewType, err: err}
 	}()
 	close(start)
@@ -2876,7 +2876,7 @@ func (s *SqliteCatalogTestSuite) TestCreateRemovesMetadataIfCatalogInsertFails()
 		{
 			name: "view",
 			create: func(identifier table.Identifier) error {
-				return db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+				return db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", "spark", nil)
 			},
 		},
 	}
@@ -2907,7 +2907,7 @@ func (s *SqliteCatalogTestSuite) TestDropView() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, "spark", nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
@@ -2966,7 +2966,7 @@ func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, "spark", nil))
 
 	// Manually update the metadata location to a URL with an unsupported scheme
 	// This will cause io.LoadFS to fail with "IO for file '...' not implemented"
@@ -3002,7 +3002,7 @@ func (s *SqliteCatalogTestSuite) TestCheckViewExists() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, "spark", nil))
 
 	exists, err = db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
@@ -3022,7 +3022,7 @@ func (s *SqliteCatalogTestSuite) TestListViews() {
 		schema := iceberg.NewSchema(1, iceberg.NestedField{
 			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 		})
-		s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+		s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, "spark", nil))
 	}
 
 	var foundViews []table.Identifier
@@ -3076,7 +3076,7 @@ func (s *SqliteCatalogTestSuite) TestLoadView() {
 		"comment": "Test view",
 		"owner":   "test-user",
 	}
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, props))
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, "spark", props))
 
 	viewInfo, err := db.LoadView(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
