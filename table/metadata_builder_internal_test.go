@@ -2198,6 +2198,26 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
 }
 
+func TestSnapshotTimestampReservedPropertyKey(t *testing.T) {
+	const canonical = "current-snapshot-timestamp-ms"
+	const oldKey = "current-snapshot-timestamp"
+
+	require.Equal(t, canonical, PropertyCurrentSnapshotTimestamp)
+	require.Contains(t, ReservedProperties[:], canonical)
+	require.NotContains(t, ReservedProperties[:], oldKey)
+
+	builder := builderWithoutChanges(2)
+	require.ErrorContains(t, builder.SetProperties(iceberg.Properties{canonical: "123"}), "can't set reserved property "+canonical)
+	require.ErrorContains(t, builder.RemoveProperties([]string{canonical}), "can't remove reserved property "+canonical)
+	require.False(t, builder.HasChanges())
+
+	// The old spelling is not reserved by Iceberg.
+	require.NoError(t, builder.SetProperties(iceberg.Properties{oldKey: "custom"}))
+	require.Equal(t, "custom", builder.props[oldKey])
+	require.NoError(t, builder.RemoveProperties([]string{oldKey}))
+	require.NotContains(t, builder.props, oldKey)
+}
+
 func TestSetPropertiesClonesProperties(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
