@@ -983,11 +983,11 @@ func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 		return true
 	}
 
-	if fresh.Version() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
+	if fresh.FormatVersion() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
 		return false
 	}
 
-	if fresh.Version() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
+	if fresh.FormatVersion() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
 		return false
 	}
 
