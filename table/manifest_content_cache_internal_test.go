@@ -136,8 +136,8 @@ type manifestContentCountingIO struct {
 	files []*manifestContentCountingFile
 }
 
-func (f *manifestContentCountingIO) Open(name string) (iceio.File, error) {
-	file, err := f.IO.Open(name)
+func (f *manifestContentCountingIO) Open(ctx context.Context, name string) (iceio.File, error) {
+	file, err := f.IO.Open(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -508,14 +508,14 @@ type manifestContentCacheFailOnceIO struct {
 	failed bool
 }
 
-func (f *manifestContentCacheFailOnceIO) Open(name string) (iceio.File, error) {
+func (f *manifestContentCacheFailOnceIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	if !f.failed {
 		f.failed = true
 
 		return nil, io.ErrUnexpectedEOF
 	}
 
-	return f.IO.Open(name)
+	return f.IO.Open(ctx, name)
 }
 
 func TestManifestContentCacheFailedPopulationFallsBackWithoutCaching(t *testing.T) {
@@ -537,7 +537,7 @@ type manifestContentCacheOpenErrorsIO struct {
 	openErrors []error
 }
 
-func (f *manifestContentCacheOpenErrorsIO) Open(string) (iceio.File, error) {
+func (f *manifestContentCacheOpenErrorsIO) Open(context.Context, string) (iceio.File, error) {
 	err := f.openErrors[0]
 	f.openErrors = f.openErrors[1:]
 
@@ -564,7 +564,7 @@ type manifestContentCachePanicIO struct {
 	iceio.IO
 }
 
-func (manifestContentCachePanicIO) Open(string) (iceio.File, error) {
+func (manifestContentCachePanicIO) Open(context.Context, string) (iceio.File, error) {
 	panic("unexpected backend panic")
 }
 
@@ -657,7 +657,7 @@ type manifestContentFailingBlockedIO struct {
 	opens int
 }
 
-func (f *manifestContentFailingBlockedIO) Open(name string) (iceio.File, error) {
+func (f *manifestContentFailingBlockedIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	f.mu.Lock()
 	f.opens++
 	attempt := f.opens
@@ -676,7 +676,7 @@ func (f *manifestContentFailingBlockedIO) Open(name string) (iceio.File, error) 
 		return nil, f.fallbackError
 	}
 
-	return f.IO.Open(name)
+	return f.IO.Open(ctx, name)
 }
 
 // Failed population is a cache optimization failure, not a scan failure.
