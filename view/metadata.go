@@ -222,9 +222,9 @@ func validateRepresentation(repr Representation) (string, error) {
 }
 
 // NewVersionFromSQL creates a new Version with a single representation
-// using the provided SQL and dialect "default".
-func NewVersionFromSQL(id int64, schemaID int, sql string, defaultNS table.Identifier, opts ...VersionOpt) (*Version, error) {
-	return NewVersion(id, schemaID, Representations{NewRepresentation(Representation{SQL: sql, Dialect: "default"})}, defaultNS, opts...)
+// using the provided SQL and dialect.
+func NewVersionFromSQL(id int64, schemaID int, sql, dialect string, defaultNS table.Identifier, opts ...VersionOpt) (*Version, error) {
+	return NewVersion(id, schemaID, Representations{NewRepresentation(Representation{SQL: sql, Dialect: dialect})}, defaultNS, opts...)
 }
 
 // Equals checks whether the other Version would behave the same

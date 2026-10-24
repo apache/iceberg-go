@@ -1928,7 +1928,7 @@ func TestCreateView_NamespaceNotFound(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"missing_db"})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", "hive", table.Identifier{"missing_db"})
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	_, err := cat.CreateView(context.Background(), TableIdentifier("missing_db", "v1"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
@@ -1947,7 +1947,7 @@ func TestCreateView_ViewAlreadyExists(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", "hive", table.Identifier{"test_database"})
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	_, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "test_view"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
@@ -1967,7 +1967,7 @@ func TestCreateView_TableAlreadyExists(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", "hive", table.Identifier{"test_database"})
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	_, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "test_table"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
@@ -1982,7 +1982,7 @@ func TestCreateView_InvalidIdentifier(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	for _, ident := range []table.Identifier{nil, {}, {"only_db"}} {
-		ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"db"})
+		ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", "hive", table.Identifier{"db"})
 		require.NoError(t, err)
 		_, err = cat.CreateView(context.Background(), ident, ver, schema)
 		require.ErrorIs(t, err, catalog.ErrNoSuchView)
@@ -2015,7 +2015,7 @@ func TestCreateView_Success(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{"test_database"})
+	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", "hive", table.Identifier{"test_database"})
 	assert.NoError(err)
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
@@ -2046,7 +2046,7 @@ func TestCreateViewDoesNotPersistCatalogProperties(t *testing.T) {
 	mockClient.On("CreateTable", mock.Anything, mock.Anything).Return(nil).Once()
 
 	cat := NewCatalogWithClient(mockClient, catalogProps)
-	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{"test_database"})
+	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", "hive", table.Identifier{"test_database"})
 	assert.NoError(err)
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
@@ -2083,7 +2083,7 @@ func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", "hive", table.Identifier{"test_database"})
 	assert.NoError(err)
 	ver.Representations = nil // no SQL representation
 

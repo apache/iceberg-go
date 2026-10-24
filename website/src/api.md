@@ -549,6 +549,7 @@ v, err := view.CreateView(
     table.Identifier{"analytics", "monthly_orders"},
     schema,
     "SELECT month, sum(amount) FROM orders GROUP BY month",
+    "spark",                                      // SQL dialect
     table.Identifier{"sales"},                      // default namespace for unqualified names
     "s3://my-bucket/views/monthly_orders",
     iceberg.Properties{},
