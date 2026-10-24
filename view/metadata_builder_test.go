@@ -42,7 +42,7 @@ func newTestVersion(versionID int64, schemaID int, opts ...VersionOpt) *Version 
 	version, _ := NewVersion(
 		versionID,
 		schemaID,
-		Representations{NewRepresentation("select * from table", "sql")},
+		Representations{NewRepresentation(Representation{SQL: "select * from table", Dialect: "sql"})},
 		table.Identifier{"defaultns"},
 		opts...)
 
@@ -53,7 +53,7 @@ func newTestVersionWithSQL(versionID int64, schemaID int, sql string, opts ...Ve
 	version, _ := NewVersion(
 		versionID,
 		schemaID,
-		Representations{NewRepresentation(sql, "spark")},
+		Representations{NewRepresentation(Representation{SQL: sql, Dialect: "spark"})},
 		table.Identifier{"defaultns"},
 		opts...)
 
@@ -248,8 +248,8 @@ func TestNewVersion_RepresentationValidation(t *testing.T) {
 
 func TestNewVersionCopiesInputSlices(t *testing.T) {
 	representations := Representations{
-		NewRepresentation("SELECT 1", "spark"),
-		NewRepresentation("SELECT 2", "trino"),
+		NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "spark"}),
+		NewRepresentation(Representation{SQL: "SELECT 2", Dialect: "trino"}),
 	}
 	defaultNS := table.Identifier{"analytics", "reporting"}
 
@@ -264,8 +264,8 @@ func TestNewVersionCopiesInputSlices(t *testing.T) {
 	defaultNS[1] = "schema"
 
 	assert.Equal(t, []Representation{
-		NewRepresentation("SELECT 1", "spark"),
-		NewRepresentation("SELECT 2", "trino"),
+		NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "spark"}),
+		NewRepresentation(Representation{SQL: "SELECT 2", Dialect: "trino"}),
 	}, version.Representations)
 	assert.Equal(t, table.Identifier{"analytics", "reporting"}, version.DefaultNamespace)
 
@@ -743,8 +743,8 @@ func TestDroppingDialectFailsByDefault(t *testing.T) {
 	schema := newTestSchema(0, "x")
 	version, _ := NewVersion(1, 0,
 		Representations{
-			NewRepresentation("select \"nested\".\"field\" from tbl", "trino"),
-			NewRepresentation("select `nested`.`field` from tbl", "spark"),
+			NewRepresentation(Representation{SQL: "select \"nested\".\"field\" from tbl", Dialect: "trino"}),
+			NewRepresentation(Representation{SQL: "select `nested`.`field` from tbl", Dialect: "spark"}),
 		},
 		table.Identifier{"defaultns"},
 	)
@@ -769,8 +769,8 @@ func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
 	schema := newTestSchema(0, "x")
 	version, _ := NewVersion(1, 0,
 		Representations{
-			NewRepresentation("select \"nested\".\"field\" from tbl", "trino"),
-			NewRepresentation("select `nested`.`field` from tbl", "spark"),
+			NewRepresentation(Representation{SQL: "select \"nested\".\"field\" from tbl", Dialect: "trino"}),
+			NewRepresentation(Representation{SQL: "select `nested`.`field` from tbl", Dialect: "spark"}),
 		},
 		table.Identifier{"defaultns"},
 	)
@@ -813,7 +813,7 @@ func TestUnknownRepresentationSurvivesBuilderRoundTrip(t *testing.T) {
 	nextVersion, err := NewVersion(
 		2,
 		metadata.CurrentSchemaID(),
-		Representations{NewRepresentation("SELECT 2", "spark")},
+		Representations{NewRepresentation(Representation{SQL: "SELECT 2", Dialect: "spark"})},
 		metadata.CurrentVersion().DefaultNamespace,
 	)
 	require.NoError(t, err)
