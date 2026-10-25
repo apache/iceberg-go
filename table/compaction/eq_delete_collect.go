@@ -132,9 +132,9 @@ func collectDeadEqualityDeletes(
 			}
 			partition := internal.BorrowedDataFilePartition(df)
 			if specs == nil {
-				survey.AddSurvivor(partition, e.SequenceNum())
+				survey.AddSurvivor(partition, e.DataSequenceNumber())
 			} else {
-				survey.AddSurvivorWithSpec(df.SpecID(), partition, e.SequenceNum())
+				survey.AddSurvivorWithSpec(df.SpecID(), partition, e.DataSequenceNumber())
 			}
 		}
 	}

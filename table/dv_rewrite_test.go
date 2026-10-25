@@ -203,7 +203,7 @@ func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.
 				continue
 			}
 			oldEquality = entry.DataFile()
-			oldEqualitySequence = entry.SequenceNum()
+			oldEqualitySequence = entry.DataSequenceNumber()
 		}
 	}
 	require.NotNil(t, oldEquality)
@@ -226,7 +226,7 @@ func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 
-	assert.Equal(t, oldEqualitySequence, currentManifestEntry(t, tbl, newEqualityPath).SequenceNum())
+	assert.Equal(t, oldEqualitySequence, currentManifestEntry(t, tbl, newEqualityPath).DataSequenceNumber())
 	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten))
 	assertRowCount(t, tbl, 3)
 }
@@ -247,7 +247,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	oldData := tasks[0].File
-	oldDataSequence := currentManifestEntry(t, tbl, oldDataPath).SequenceNum()
+	oldDataSequence := currentManifestEntry(t, tbl, oldDataPath).DataSequenceNumber()
 
 	oldDeletePath := tbl.Location() + "/data/old-pos-delete.parquet"
 	writeParquetFile(t, oldDeletePath, table.PositionalDeleteArrowSchema,
@@ -261,7 +261,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	oldDeleteSequence := currentManifestEntry(t, tbl, oldDeletePath).SequenceNum()
+	oldDeleteSequence := currentManifestEntry(t, tbl, oldDeletePath).DataSequenceNumber()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -303,8 +303,8 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	assert.Equal(t, oldDataSequence, currentManifestEntry(t, tbl, newDataPath).SequenceNum())
-	assert.Equal(t, oldDeleteSequence, currentManifestEntry(t, tbl, newDVs[0].FilePath()).SequenceNum())
+	assert.Equal(t, oldDataSequence, currentManifestEntry(t, tbl, newDataPath).DataSequenceNumber())
+	assert.Equal(t, oldDeleteSequence, currentManifestEntry(t, tbl, newDVs[0].FilePath()).DataSequenceNumber())
 	assert.Equal(t, []int64{2}, scanIDs(t, tbl),
 		"the deletion vector must remain applicable to the replacement data file")
 }

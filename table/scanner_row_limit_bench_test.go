@@ -123,7 +123,7 @@ func writeRowLimitPlanningBenchmarkManifest(
 	require.NoError(b, err)
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, dataFile.Build()).
-		SequenceNum(sequenceNumber).
+		DataSequenceNumber(sequenceNumber).
 		Build()
 
 	var manifestBuf bytes.Buffer
@@ -133,7 +133,7 @@ func writeRowLimitPlanningBenchmarkManifest(
 	require.NoError(b, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
 
 	return iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), 0, snapshotID).
-		SequenceNum(sequenceNumber, sequenceNumber).
+		SequenceNumber(sequenceNumber, sequenceNumber).
 		AddedFiles(1).
 		AddedRows(1).
 		Build()

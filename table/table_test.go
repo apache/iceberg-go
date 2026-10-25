@@ -2700,7 +2700,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	for i, entry := range entries {
 		t.Equal(snapshotList[i].SnapshotID, entry.SnapshotID())
 		if t.formatVersion > 1 {
-			t.EqualValues(3-i, entry.SequenceNum())
+			t.EqualValues(3-i, entry.DataSequenceNumber())
 		}
 	}
 

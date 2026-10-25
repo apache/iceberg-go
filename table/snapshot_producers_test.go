@@ -2468,14 +2468,14 @@ func TestOverwriteParentDependentManifestsUsesProductionPath(t *testing.T) {
 	require.Len(t, dataTombstone, 1)
 	require.Equal(t, iceberg.EntryStatusDELETED, dataTombstone[0].Status())
 	require.Equal(t, sp.snapshotID, dataTombstone[0].SnapshotID())
-	require.Equal(t, dataSequenceNumber, dataTombstone[0].SequenceNum())
+	require.Equal(t, dataSequenceNumber, dataTombstone[0].DataSequenceNumber())
 	require.Equal(t, deletedData.FilePath(), dataTombstone[0].DataFile().FilePath())
 
 	deleteTombstone := readEntries(got[1])
 	require.Len(t, deleteTombstone, 1)
 	require.Equal(t, iceberg.EntryStatusDELETED, deleteTombstone[0].Status())
 	require.Equal(t, sp.snapshotID, deleteTombstone[0].SnapshotID())
-	require.Equal(t, deleteSequenceNumber, deleteTombstone[0].SequenceNum())
+	require.Equal(t, deleteSequenceNumber, deleteTombstone[0].DataSequenceNumber())
 	require.Equal(t, removedDelete.FilePath(), deleteTombstone[0].DataFile().FilePath())
 
 	keptDataEntries := readEntries(got[2])

@@ -1979,7 +1979,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		// count as found when removing files, but it still blocks re-adding its path.
 		isLive := entry.Status() != iceberg.EntryStatusDELETED
 		if isData && isLive {
-			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.SequenceNum()}
+			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.DataSequenceNumber()}
 			if _, ok := setToDelete[path]; ok {
 				markedDataForDeletion = append(markedDataForDeletion, df)
 			}
@@ -1987,7 +1987,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData && isLive {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-				if seq := entry.SequenceNum(); seq >= 0 {
+				if seq := entry.DataSequenceNumber(); seq >= 0 {
 					removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
 					removedDeleteContents[df.ContentType()] = struct{}{}
 				} else {
@@ -2000,7 +2000,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 				// was already replaced would match the newer DV, which holds more deletes.
 				if want, ok := dvsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
-					if seq := entry.SequenceNum(); seq >= 0 {
+					if seq := entry.DataSequenceNumber(); seq >= 0 {
 						removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
 						removedDeleteContents[df.ContentType()] = struct{}{}
 					} else {
@@ -2061,7 +2061,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if _, removed := setDeleteFilesToRemove[path]; !removed {
 				if _, automaticallyRemoved := autoSetDeleteFilesToRemove[path]; !automaticallyRemoved {
 					survivingPositionDeletes = append(survivingPositionDeletes, rewriteFileState{
-						file: df, dataSequenceNumber: entry.SequenceNum(),
+						file: df, dataSequenceNumber: entry.DataSequenceNumber(),
 					})
 				}
 			}

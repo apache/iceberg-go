@@ -96,7 +96,7 @@ func (idx *equalityDeleteRangeIndex) build() {
 			entryIndex: entryIndex,
 			lower:      field.lowerValue,
 			upper:      field.upperValue,
-			sequence:   entries[entryIndex].entry.SequenceNum(),
+			sequence:   entries[entryIndex].entry.DataSequenceNumber(),
 		})
 		if _, found := fieldsByID[field.fieldID]; !found {
 			fieldsByID[field.fieldID] = *field
