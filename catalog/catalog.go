@@ -162,11 +162,6 @@ type Catalog interface {
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
 }
 
-// Closer is retained as an alias for io.Closer.
-//
-// Deprecated: Use [io.Closer] instead; Catalog embeds it directly.
-type Closer = io.Closer
-
 // TransactionalCatalog is an optional interface implemented by catalogs
 // that support atomic multi-table commits. Callers should check for this
 // capability via a type assertion:
