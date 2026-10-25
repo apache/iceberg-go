@@ -17,51 +17,7 @@
 
 package table
 
-import (
-	"encoding/json"
-	"fmt"
-)
-
-// BlobType is the type of blob in a Puffin file.
-type BlobType string
-
-const (
-	BlobTypeApacheDatasketchesThetaV1 BlobType = "apache-datasketches-theta-v1"
-	BlobTypeDeletionVectorV1          BlobType = "deletion-vector-v1"
-)
-
-// IsKnown reports whether bt is one of the standard blob types understood by
-// this package. Unknown non-empty wire values may still be preserved for
-// forward compatibility.
-func (bt BlobType) IsKnown() bool {
-	switch bt {
-	case BlobTypeApacheDatasketchesThetaV1, BlobTypeDeletionVectorV1:
-		return true
-	default:
-		return false
-	}
-}
-
-// IsValid reports whether bt is non-nil and names a standard blob type.
-// Unknown non-empty values can be decoded and preserved, but are not valid for
-// operations that require a known blob type.
-func (bt *BlobType) IsValid() bool {
-	return bt != nil && bt.IsKnown()
-}
-
-func (bt *BlobType) UnmarshalJSON(data []byte) error {
-	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
-		return err
-	}
-
-	*bt = BlobType(s)
-	if s == "" {
-		return fmt.Errorf("invalid blob type: %s", s)
-	}
-
-	return nil
-}
+import "github.com/apache/iceberg-go/puffin"
 
 // StatisticsFile represents a statistics file in the Puffin format, that can be used to read table data more
 // efficiently.
@@ -78,8 +34,9 @@ type StatisticsFile struct {
 }
 
 // BlobMetadata is the metadata of a statistics or indices blob.
+// Its type uses the same Puffin blob identifiers as the file reader and writer.
 type BlobMetadata struct {
-	Type           BlobType          `json:"type"`
+	Type           puffin.BlobType   `json:"type"`
 	SnapshotID     int64             `json:"snapshot-id"`
 	SequenceNumber int64             `json:"sequence-number"`
 	Fields         []int32           `json:"fields"`

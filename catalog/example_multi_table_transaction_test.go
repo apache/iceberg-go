@@ -64,6 +64,8 @@ func (c *exampleCatalog) CommitTable(context.Context, table.Identifier, []table.
 
 func (c *exampleCatalog) DropTable(context.Context, table.Identifier) error { return nil }
 
+func (c *exampleCatalog) PurgeTable(context.Context, table.Identifier) error { return nil }
+
 func (c *exampleCatalog) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
