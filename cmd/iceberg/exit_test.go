@@ -90,3 +90,40 @@ func TestCloseCatalogBeforeExit(t *testing.T) {
 		})
 	}
 }
+
+func TestOutputErrorClosesCatalogBeforeExit(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		output Output
+	}{
+		{name: "text", output: textOutput{}},
+		{name: "json", output: jsonOutput{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			previousExit := osExit
+			t.Cleanup(func() { osExit = previousExit })
+
+			cat := &closeCountingCatalog{}
+			exitCode := 0
+			closesAtExit := 0
+			osExit = func(code int) {
+				exitCode = code
+				closesAtExit = cat.closeCalls
+			}
+
+			restore := closeCatalogBeforeExit(cat, nil)
+			tt.output.Error(errors.New("command failed"))
+			restore()
+
+			if exitCode != 1 {
+				t.Fatalf("exit code = %d, want 1", exitCode)
+			}
+			if closesAtExit != 1 {
+				t.Fatalf("Close calls before exit = %d, want 1", closesAtExit)
+			}
+			if cat.closeCalls != 1 {
+				t.Fatalf("Close calls = %d, want 1", cat.closeCalls)
+			}
+		})
+	}
+}
