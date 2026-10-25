@@ -1443,7 +1443,7 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
-<p><code>ReplaceDataFiles(ctx, filesToDelete, filesToAdd, snapshotProps)</code> and <code>ReplaceDataFilesWithDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code> are also available on <code>*Transaction</code> for swapping files atomically.</p>
+<p><code>ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)</code> and <code>ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code> are also available on <code>*Transaction</code> for swapping files atomically.</p>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Group writes and metadata changes into one atomic snapshot:</p>
 <pre><code class="language-go">txn := tbl.NewTransaction()
@@ -2189,7 +2189,7 @@ instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</
 <tr><td>Equality deletes</td><td>Supported (read + write). Write via <code>Transaction.WriteEqualityDeletes</code>; row-level commits via <code>Transaction.NewRowDelta</code>; delete-only CDC via <code>Transaction.CommitEqualityDeletes</code></td></tr>
 <tr><td>Partition spec evolution</td><td>Supported</td></tr>
 <tr><td>Sort order enforcement on write</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1157">#1157</a>, closes <a href="https://github.com/apache/iceberg-go/issues/833">#833</a>)</td></tr>
-<tr><td><code>ReplaceDataFiles</code> using <code>OpReplace</code></td><td>Pending (<a href="https://github.com/apache/iceberg-go/issues/841">#841</a>)</td></tr>
+<tr><td><code>ReplaceDataFilesByPath</code> using <code>OpReplace</code></td><td>Pending (<a href="https://github.com/apache/iceberg-go/issues/841">#841</a>)</td></tr>
 </tbody></table>
 </div>
 <h3 id="v3"><a class="header" href="#v3">V3</a></h3>
@@ -2620,7 +2620,13 @@ make integration-external-rest
 <p>Relatedly, the previously unexported <code>isGCEnabled</code> is now <code>table.IsGCEnabled</code>, so the new package can gate destructive operations on the <code>gc.enabled</code> table property.</p>
 </li>
 <li>
+<p><strong>Data-file replacement methods renamed.</strong> Use <code>ReplaceDataFilesByPath</code> for string paths. Use <code>ReplaceDataFiles</code> for prebuilt <code>DataFile</code> values instead of <code>ReplaceDataFilesWithDataFiles</code>.</p>
+</li>
+<li>
 <p><code>maintenance.PurgeFiles</code> (previously <code>Table.PurgeFiles</code>) now calls <code>IO.Remove</code> concurrently, with up to 32 calls in flight, when the filesystem does not implement <code>BulkRemovableIO</code>. Custom IO implementations, including those registered with <code>io.Register</code>, must make <code>Remove</code> safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.</p>
+</li>
+<li>
+<p><strong>Partition and sort source accessors renamed.</strong> Replace <code>PartitionField.SourceID()</code> and <code>SortField.SourceID()</code> with <code>FirstSourceID()</code>. Their behavior and serialized fields are unchanged.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>

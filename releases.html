@@ -280,7 +280,13 @@
 <p>Relatedly, the previously unexported <code>isGCEnabled</code> is now <code>table.IsGCEnabled</code>, so the new package can gate destructive operations on the <code>gc.enabled</code> table property.</p>
 </li>
 <li>
+<p><strong>Data-file replacement methods renamed.</strong> Use <code>ReplaceDataFilesByPath</code> for string paths. Use <code>ReplaceDataFiles</code> for prebuilt <code>DataFile</code> values instead of <code>ReplaceDataFilesWithDataFiles</code>.</p>
+</li>
+<li>
 <p><code>maintenance.PurgeFiles</code> (previously <code>Table.PurgeFiles</code>) now calls <code>IO.Remove</code> concurrently, with up to 32 calls in flight, when the filesystem does not implement <code>BulkRemovableIO</code>. Custom IO implementations, including those registered with <code>io.Register</code>, must make <code>Remove</code> safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.</p>
+</li>
+<li>
+<p><strong>Partition and sort source accessors renamed.</strong> Replace <code>PartitionField.SourceID()</code> and <code>SortField.SourceID()</code> with <code>FirstSourceID()</code>. Their behavior and serialized fields are unchanged.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>

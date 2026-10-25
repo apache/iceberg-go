@@ -492,7 +492,7 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
-<p><code>ReplaceDataFiles(ctx, filesToDelete, filesToAdd, snapshotProps)</code> and <code>ReplaceDataFilesWithDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code> are also available on <code>*Transaction</code> for swapping files atomically.</p>
+<p><code>ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)</code> and <code>ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code> are also available on <code>*Transaction</code> for swapping files atomically.</p>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Group writes and metadata changes into one atomic snapshot:</p>
 <pre><code class="language-go">txn := tbl.NewTransaction()
