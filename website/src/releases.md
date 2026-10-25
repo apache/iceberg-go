@@ -42,6 +42,8 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Configuration loading now reports errors.** `config.LoadConfig(path)` returns `([]byte, error)` instead of `[]byte`, and `config.LoadConfigFile` is removed. The `LoadConfig` name is retained because it now handles both an explicit path and the default home-directory file. Handle read errors explicitly; `EnvConfig` keeps its best-effort behavior and `GOICEBERG_HOME` handling.
+
 - **View representation field uses the Go SQL initialism.** Replace `view.Representation.Sql` with `view.Representation.SQL`. Serialized view metadata still uses the `sql` JSON field.
 - **Orphan cleanup results now expose only `OrphanFiles`.** Replace `result.OrphanFileLocations` with `result.OrphanFiles` (each entry has `Path` and `SizeBytes`). `OrphanCleanupPlan.Files()` still provides path-only lists during planning.
 - **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.
