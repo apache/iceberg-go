@@ -501,7 +501,7 @@ func init() {
     ))
 }
 </code></pre>
-<p>After registration, <code>catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{&quot;type&quot;: &quot;mycatalog&quot;, ...})</code> will route to the factory. Built-in types: <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</p>
+<p>After registration, <code>catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{&quot;type&quot;: &quot;mycatalog&quot;, ...})</code> will route to the factory. Custom catalogs must implement <code>Close() error</code> to satisfy <code>catalog.Catalog</code>, and callers must close them when finished. Built-in types: <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</p>
 <p><code>catalog.GetRegisteredCatalogs()</code> returns the current list; <code>catalog.Unregister(catalogType)</code> removes one.</p>
 <h3 id="locationprovider"><a class="header" href="#locationprovider">LocationProvider</a></h3>
 <p><a href="https://github.com/apache/iceberg-go/blob/main/table/locations.go"><code>table/locations.go</code></a> defines the <code>LocationProvider</code> interface and ships two implementations: <code>simpleLocationProvider</code> (default) and <code>objectStoreLocationProvider</code> (selected by <code>write.object-storage.enabled = true</code>). The provider is chosen by table properties and is not user-pluggable today.</p>

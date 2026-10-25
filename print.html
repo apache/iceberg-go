@@ -788,7 +788,7 @@ func init() {
     ))
 }
 </code></pre>
-<p>After registration, <code>catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{&quot;type&quot;: &quot;mycatalog&quot;, ...})</code> will route to the factory. Built-in types: <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</p>
+<p>After registration, <code>catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{&quot;type&quot;: &quot;mycatalog&quot;, ...})</code> will route to the factory. Custom catalogs must implement <code>Close() error</code> to satisfy <code>catalog.Catalog</code>, and callers must close them when finished. Built-in types: <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</p>
 <p><code>catalog.GetRegisteredCatalogs()</code> returns the current list; <code>catalog.Unregister(catalogType)</code> removes one.</p>
 <h3 id="locationprovider"><a class="header" href="#locationprovider">LocationProvider</a></h3>
 <p><a href="https://github.com/apache/iceberg-go/blob/main/table/locations.go"><code>table/locations.go</code></a> defines the <code>LocationProvider</code> interface and ships two implementations: <code>simpleLocationProvider</code> (default) and <code>objectStoreLocationProvider</code> (selected by <code>write.object-storage.enabled = true</code>). The provider is chosen by table properties and is not user-pluggable today.</p>
@@ -1254,7 +1254,11 @@ cat, err := catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{
     &quot;uri&quot;:       &quot;http://localhost:8181&quot;,
     &quot;warehouse&quot;: &quot;s3://my-bucket/warehouse&quot;,
 })
+if err != nil { panic(err) }
+defer cat.Close()
 </code></pre>
+<p>Every catalog implements <code>Close() error</code>. Close it when done to release catalog-owned
+resources. A caller-supplied database connection remains caller-owned.</p>
 <h3 id="namespaces"><a class="header" href="#namespaces">Namespaces</a></h3>
 <pre><code class="language-go">ns := table.Identifier{&quot;sales&quot;}
 
@@ -2598,6 +2602,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Transform formatting requires the result type.</strong> <code>Transform.ToHumanStr(value)</code> is removed. Use <code>Transform.ToHumanStrType(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
+</li>
+<li>
+<p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> remains available as an alias for <code>io.Closer</code>.</p>
 </li>
 <li>
 <p><strong>Puffin writer property setter renamed.</strong> <code>puffin.Writer.AddProperties</code> is now <code>puffin.Writer.SetProperties</code>. Repeated calls still merge keys; use <code>ClearProperties</code> to clear custom properties before finishing.</p>
