@@ -81,6 +81,8 @@ func (s *fullStubCatalog) CommitTable(context.Context, table.Identifier, []table
 
 func (s *fullStubCatalog) DropTable(context.Context, table.Identifier) error { return nil }
 
+func (s *fullStubCatalog) PurgeTable(context.Context, table.Identifier) error { return nil }
+
 func (s *fullStubCatalog) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
