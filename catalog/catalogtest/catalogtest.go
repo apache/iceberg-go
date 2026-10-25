@@ -104,7 +104,6 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Helper()
 	require.NotNil(t, cfg.NewCatalog, "catalogtest.Config.NewCatalog must be set")
 
-
 	t.Run("BasicCreateTable", func(t *testing.T) { testBasicCreateTable(t, cfg) })
 	t.Run("BasicCreateTableThatAlreadyExists", func(t *testing.T) { testBasicCreateTableThatAlreadyExists(t, cfg) })
 	t.Run("LoadMissingTable", func(t *testing.T) { testLoadMissingTable(t, cfg) })
