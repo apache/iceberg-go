@@ -76,7 +76,8 @@ type SortField struct {
 	NullOrder NullOrder `json:"null-order"`
 }
 
-// FirstSourceID returns the first source column id.
+// FirstSourceID returns the first source column id, or 0 when SourceIDs is
+// empty. For multi-argument transforms the other ids are only in SourceIDs.
 func (s SortField) FirstSourceID() int {
 	if len(s.SourceIDs) == 0 {
 		return 0
