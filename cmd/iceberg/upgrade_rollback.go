@@ -34,7 +34,7 @@ import (
 func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *UpgradeCmd) {
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
-	currentVersion := meta.Version()
+	currentVersion := meta.FormatVersion()
 
 	result := UpgradeResult{
 		DryRun:          cmd.DryRun,

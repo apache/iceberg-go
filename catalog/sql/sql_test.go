@@ -993,7 +993,7 @@ func (s *SqliteCatalogTestSuite) TestCreateV1Table() {
 
 		s.FileExists(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
 		s.Equal(0, tbl.SortOrder().OrderID())
-		s.Equal(1, tbl.Metadata().Version())
+		s.Equal(1, tbl.Metadata().FormatVersion())
 		s.True(tbl.Spec().Equals(*iceberg.UnpartitionedSpec))
 		s.NoError(tt.cat.DropTable(context.Background(), tt.tblID))
 	}

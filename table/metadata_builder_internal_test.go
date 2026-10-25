@@ -174,7 +174,7 @@ func TestBuildUnpartitionedUnsorted(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 	require.Equal(t, TestLocation, meta.Location())
 	require.Equal(t, 0, meta.CurrentSchema().ID)
 	require.Equal(t, 0, meta.DefaultPartitionSpec())
@@ -3614,7 +3614,7 @@ func TestSetFormatVersionV1ToV2InitializesSequenceNumber(t *testing.T) {
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.LastSequenceNumber())
 }
 
@@ -3624,7 +3624,7 @@ func TestSetFormatVersionV1ToV3InitializesSequenceNumberAndNextRowID(t *testing.
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.LastSequenceNumber())
 	require.Equal(t, int64(0), meta.NextRowID())
 }
@@ -3635,7 +3635,7 @@ func TestSetFormatVersionV2ToV3InitializesNextRowID(t *testing.T) {
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.NextRowID())
 }
 
@@ -3750,7 +3750,7 @@ func TestSetFormatVersionV2ToV3PreservesSequenceNumber(t *testing.T) {
 func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 	meta, err := ParseMetadataString(ExampleTableMetadataV1)
 	require.NoError(t, err)
-	require.Equal(t, 1, meta.Version())
+	require.Equal(t, 1, meta.FormatVersion())
 
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -3758,7 +3758,7 @@ func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 
 	meta3, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, 3, meta3.FormatVersion())
 	require.Equal(t, int64(0), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
 	require.NotEqual(t, uuid.UUID{}, meta3.TableUUID())
@@ -3767,7 +3767,7 @@ func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 	meta, err := ParseMetadataString(ExampleTableMetadataV2)
 	require.NoError(t, err)
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -3775,7 +3775,7 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 
 	meta3, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, 3, meta3.FormatVersion())
 	require.Equal(t, int64(34), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
 }
