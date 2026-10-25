@@ -2589,6 +2589,9 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Table purge is required on catalogs.</strong> The <code>catalog.Catalog</code> interface now embeds <code>catalog.PurgeableCatalog</code>; every custom catalog implementation must provide <code>PurgeTable(ctx, identifier) error</code>. The narrow <code>catalog.PurgeableTable</code> interface is renamed to <code>catalog.PurgeableCatalog</code>. Built-in purge behavior is unchanged.</p>
+</li>
+<li>
 <p><strong>Unify statistics blob types with Puffin.</strong> Replace <code>table.BlobType</code> with <code>puffin.BlobType</code> when constructing <code>table.BlobMetadata</code>. Replace <code>table.BlobTypeApacheDatasketchesThetaV1</code> with <code>puffin.BlobTypeDataSketchesTheta</code> and <code>table.BlobTypeDeletionVectorV1</code> with <code>puffin.BlobTypeDeletionVector</code>. Use <code>puffin.BlobType.IsKnown()</code> to identify the types defined by the Puffin specification; the redundant <code>table.BlobType.IsValid()</code> method is removed. Unknown non-empty blob type names still round-trip through table metadata.</p>
 </li>
 <li>
