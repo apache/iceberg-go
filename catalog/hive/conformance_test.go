@@ -38,6 +38,7 @@ func TestHiveCatalogConformance(t *testing.T) {
 				Warehouse: getTestTableLocation(),
 			})
 			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
 
 			return cat
 		},
