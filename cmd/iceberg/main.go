@@ -615,15 +615,7 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		ident := catalog.ToIdentifier(cmd.Table.Identifier)
 
 		if cmd.Table.Purge {
-			purger, ok := cat.(catalog.PurgeableTable)
-			if !ok {
-				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
-				osExit(1)
-
-				return
-			}
-
-			if err := purger.PurgeTable(ctx, ident); err != nil {
+			if err := cat.PurgeTable(ctx, ident); err != nil {
 				output.Error(err)
 				osExit(1)
 

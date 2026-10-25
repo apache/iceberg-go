@@ -70,6 +70,10 @@ func (m *mockCatalogForDrop) DropTable(ctx context.Context, identifier table.Ide
 	return m.dropErr
 }
 
+func (m *mockCatalogForDrop) PurgeTable(context.Context, table.Identifier) error {
+	return errors.New("catalog does not support purge")
+}
+
 func (m *mockCatalogForDrop) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
