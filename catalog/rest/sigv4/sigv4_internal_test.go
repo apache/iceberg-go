@@ -223,9 +223,9 @@ func TestRegisteredBackendEnablesSigV4(t *testing.T) {
 
 // TestWithAWSConfigUsesConfiguredRegionService verifies that sigv4.WithAWSConfig
 // signs with the region/service from WithSigV4RegionSvc, not the aws.Config's
-// own region. Before WithAwsConfig became a signer factory it froze the scope at
+// own region. Before WithAWSConfig became a signer factory it froze the scope at
 // option-construction time, so the natural migration (keep WithSigV4RegionSvc,
-// swap rest.WithAwsConfig for sigv4.WithAwsConfig) silently signed for the wrong
+// swap rest.WithAwsConfig for sigv4.WithAWSConfig) silently signed for the wrong
 // scope and the server rejected it with a 403.
 func TestWithAWSConfigUsesConfiguredRegionService(t *testing.T) {
 	t.Parallel()
