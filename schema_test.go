@@ -151,7 +151,7 @@ var (
 	)
 )
 
-func TestSchemaFromJson(t *testing.T) {
+func TestSchemaFromJSON(t *testing.T) {
 	testFieldsStr := `[
 		{"id":1,"name":"foo","type":"string","required":false},
 		{"id":2,"name":"bar","type":"int","required":true},
