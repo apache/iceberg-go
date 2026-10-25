@@ -277,11 +277,8 @@ func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hadoop
 }
 
-// Close releases the catalog's metrics reporter. Callers holding a
-// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+// Close releases the catalog's metrics reporter. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error { return c.reporter.Close() }
-
-var _ catalog.Closer = (*Catalog)(nil)
 
 // joinPath is a helper that allows paths to be joined as both local filesystem
 // paths or as remote URIs needed for filesystems like blob stores.

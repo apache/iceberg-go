@@ -103,8 +103,7 @@ func (c *Catalog) CatalogType() catalog.Type {
 // resource — not just when a close returns an error (errors.Join already keeps
 // both), but when it panics: a bare errors.Join(c.client.Close(), c.reporter.Close())
 // would let a panic in the first close abort the second. Recovered panics are
-// converted to errors and joined with any close errors. Callers holding a
-// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+// converted to errors and joined with any close errors. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error {
 	return errors.Join(
 		closeIsolated(c.client.Close),
@@ -123,8 +122,6 @@ func closeIsolated(closeFn func() error) (err error) {
 
 	return closeFn()
 }
-
-var _ catalog.Closer = (*Catalog)(nil)
 
 // ListTables returns a list of table identifiers in the given namespace.
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {

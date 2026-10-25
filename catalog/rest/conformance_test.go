@@ -43,11 +43,7 @@ func TestRestCatalogConformance(t *testing.T) {
 				io.S3SecretAccessKey: "password",
 			})
 			require.NoError(t, err)
-			t.Cleanup(func() {
-				if closer, ok := cat.(catalog.Closer); ok {
-					require.NoError(t, closer.Close())
-				}
-			})
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
 
 			return cat
 		},

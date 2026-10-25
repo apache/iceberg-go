@@ -20,7 +20,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 
 	"github.com/apache/iceberg-go/catalog"
@@ -51,7 +50,7 @@ func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg compac
 	plan, err := compaction.Analyze(ctx, tbl, compCfg)
 	if err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if len(plan.Groups) == 0 {
@@ -138,7 +137,7 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 			fs, err := tbl.FS(ctx)
 			if err != nil {
 				output.Error(fmt.Errorf("open fs for eq-delete cleanup: %w", err))
-				os.Exit(1)
+				osExit(1)
 			}
 			rewrittenSet := make(map[string]struct{})
 			for _, g := range plan.Groups {
@@ -150,7 +149,7 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 				ctx, fs, tbl.Metadata(), snap, rewrittenSet)
 			if err != nil {
 				output.Error(fmt.Errorf("collect dead equality deletes: %w", err))
-				os.Exit(1)
+				osExit(1)
 			}
 			rewriteOpts.ExtraDeleteFilesToRemove = deadEqDeletes
 		}
@@ -162,20 +161,20 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 			output.Text(fmt.Sprintf("  (partial: %d groups committed before failure)", result.RewrittenGroups))
 		}
 		output.Error(fmt.Errorf("compaction failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if !cfg.partialProgress {
 		if _, err := tx.Commit(ctx); err != nil {
 			output.Error(fmt.Errorf("commit failed: %w", err))
-			os.Exit(1)
+			osExit(1)
 		}
 	}
 	if len(result.FailedGroups) > 0 {
 		failure := result.FailedGroups[0]
 		output.Error(fmt.Errorf("compaction failed for %d group(s); first group %q: %w",
 			len(result.FailedGroups), failure.PartitionKey, failure.Err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	totalRemovedDeletes := result.RemovedPositionDeleteFiles + result.RemovedEqualityDeleteFiles
