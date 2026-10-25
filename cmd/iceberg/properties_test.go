@@ -65,6 +65,10 @@ func (m *mockCatalogForProperties) DropTable(context.Context, table.Identifier) 
 	panic("DropTable must not be called")
 }
 
+func (m *mockCatalogForProperties) PurgeTable(context.Context, table.Identifier) error {
+	panic("PurgeTable must not be called")
+}
+
 func (m *mockCatalogForProperties) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {
 	panic("RenameTable must not be called")
 }
