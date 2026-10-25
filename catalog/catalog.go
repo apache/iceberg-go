@@ -115,7 +115,9 @@ func NewCreateViewCfg() CreateViewCfg {
 
 // Catalog provides table and namespace operations plus an explicit resource
 // lifecycle. Implementations must release catalog-owned resources in Close.
-// Dependencies provided by the caller remain caller-owned.
+// Ownership of constructor-supplied dependencies depends on the implementation.
+// Using a catalog after Close is unsupported; repeated Close calls have
+// implementation-specific behavior.
 type Catalog interface {
 	io.Closer
 
@@ -159,7 +161,7 @@ type Catalog interface {
 
 // Closer is retained as an alias for io.Closer.
 //
-// Deprecated: Catalog embeds io.Closer directly.
+// Deprecated: Use [io.Closer] instead; Catalog embeds it directly.
 type Closer = io.Closer
 
 // TransactionalCatalog is an optional interface implemented by catalogs
