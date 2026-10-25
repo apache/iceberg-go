@@ -1132,7 +1132,7 @@ func TestDataFileFromMetadata_V3AddDataFilesRequiresFirstRowID(t *testing.T) {
 	})
 }
 
-func TestDataFileFromMetadata_V3ReplaceDataFilesByPathRequiresFirstRowID(t *testing.T) {
+func TestDataFileFromMetadata_V3ReplaceDataFilesRequiresFirstRowID(t *testing.T) {
 	tbl := newRowDeltaCommitTestTableVersion(t, 3)
 	sch := tbl.Schema()
 	rows := `[{"id": 1, "data": "a"}]`
