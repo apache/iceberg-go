@@ -121,6 +121,9 @@ func NewCreateViewCfg() CreateViewCfg {
 type Catalog interface {
 	io.Closer
 
+	// PurgeableCatalog provides the mandatory physical table deletion API.
+	PurgeableCatalog
+
 	// CatalogType returns the type of the catalog.
 	CatalogType() Type
 
@@ -180,13 +183,9 @@ type TransactionalCatalog interface {
 	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
 }
 
-// PurgeableTable is an optional interface that catalogs can implement
-// to support physical table deletion (catalog entry + underlying files).
-// Callers should check for this capability via a type assertion:
-//
-//	if purger, ok := cat.(catalog.PurgeableTable); ok {
-//	    err := purger.PurgeTable(ctx, ident)
-//	}
+// PurgeableCatalog is the small table purge interface embedded by Catalog.
+// Every Catalog must support PurgeTable, which removes the catalog entry and
+// performs best-effort physical file deletion.
 //
 // For REST catalogs the purge is delegated server-side. For client-side
 // catalogs (SQL, Glue, Hive, Hadoop) the table is first dropped from
@@ -199,7 +198,7 @@ type TransactionalCatalog interface {
 // Any file-deletion, directory walk, or listing errors encountered are logged
 // as warnings, and the operation succeeds (returns nil) so that the catalog drop
 // remains the single source of truth.
-type PurgeableTable interface {
+type PurgeableCatalog interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
 }
 
