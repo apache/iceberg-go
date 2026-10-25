@@ -25,14 +25,14 @@ import (
 
 type awsctxkey struct{}
 
-// WithAwsConfig returns a new context with the given AWS config
-func WithAwsConfig(ctx context.Context, cfg *aws.Config) context.Context {
+// WithAWSConfig returns a new context with the given AWS config
+func WithAWSConfig(ctx context.Context, cfg *aws.Config) context.Context {
 	return context.WithValue(ctx, awsctxkey{}, cfg)
 }
 
-// GetAwsConfig returns the AWS config from the given context. Returns
+// GetAWSConfig returns the AWS config from the given context. Returns
 // nil if no config is set.
-func GetAwsConfig(ctx context.Context) *aws.Config {
+func GetAWSConfig(ctx context.Context) *aws.Config {
 	if v := ctx.Value(awsctxkey{}); v != nil {
 		return v.(*aws.Config)
 	}

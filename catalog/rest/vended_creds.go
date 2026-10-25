@@ -197,7 +197,7 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	// lifetime instead, through ioCancel. fetchCreds above still honours ctx.
 	//
 	// WithoutCancel keeps ctx's values, and the IO depends on them: the S3
-	// factory takes its base AWS config from utils.GetAwsConfig(ctx), so do
+	// factory takes its base AWS config from utils.GetAWSConfig(ctx), so do
 	// not replace this with context.Background(). The flip side is that the
 	// first caller's request-scoped values stay attached to the shared IO.
 	ioCtx, ioCancel := context.WithCancel(context.WithoutCancel(ctx))
