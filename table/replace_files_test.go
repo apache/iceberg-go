@@ -123,7 +123,7 @@ func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assertRowCount(t, tbl, 3)
@@ -164,7 +164,7 @@ func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
 		{"id": 3, "data": "gamma"}
 	]`)
 
-	// Build new DataFile directly (not via AddFiles which would commit it)
+	// Build new DataFile directly (not via AddDataFilesByPath which would commit it)
 	newDataFileBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
 		newDataPath, iceberg.ParquetFile, nil, nil, nil, 2, 512)
@@ -200,7 +200,7 @@ func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 	dataPath := tbl.Location() + "/data/data.parquet"
 	writeParquetFile(t, dataPath, arrowSc, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -497,7 +497,7 @@ func TestReplaceFilesWithDeleteFilesRejectsPartialPositionDeleteToDVRewrite(t *t
 	dataPath := tbl.Location() + "/data/data.parquet"
 	writeParquetFile(t, dataPath, arrowSc, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -802,7 +802,7 @@ func TestReplaceFiles_DelegatesToReplaceDataFilesWhenNoDeleteFiles(t *testing.T)
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "hello"}]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -842,7 +842,7 @@ func TestReplaceFiles_ValidationErrors(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "hello"}]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -968,7 +968,7 @@ func seedDataFilesWithPositionDeletes(t *testing.T) (*table.Table, []table.FileS
 	}
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), dataPaths, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), dataPaths, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 

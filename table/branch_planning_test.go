@@ -430,7 +430,7 @@ func TestBranchAddDataFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 	})
 }
 
-// AddFiles runs the same check from paths, through its own snapshot lookup.
+// AddDataFilesByPath runs the same check from paths, through its own snapshot lookup.
 func TestBranchAddFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 	t.Run("rejects a file the branch already references", func(t *testing.T) {
 		tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
@@ -439,7 +439,7 @@ func TestBranchAddFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
 		require.NoError(t, err)
 
-		err = txn.AddFiles(t.Context(), []string{branchOnly}, nil, false)
+		err = txn.AddDataFilesByPath(t.Context(), []string{branchOnly}, nil, false)
 		require.ErrorContains(t, err, "cannot add files that are already referenced by table")
 		assert.Contains(t, err.Error(), branchOnly)
 	})
@@ -451,7 +451,7 @@ func TestBranchAddFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
 		require.NoError(t, err)
 
-		require.NoError(t, txn.AddFiles(t.Context(), []string{mainOnly}, nil, false))
+		require.NoError(t, txn.AddDataFilesByPath(t.Context(), []string{mainOnly}, nil, false))
 		tbl, err = txn.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -602,7 +602,7 @@ func TestBranchRowDeltaResolvesRemovedDeletesOnBranchHead(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSchema, `[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5}]`)
 
 	txn := tbl.NewTransaction()
-	require.NoError(t, txn.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, txn.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = txn.Commit(t.Context())
 	require.NoError(t, err)
 

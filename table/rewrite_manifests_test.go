@@ -102,7 +102,7 @@ func appendSeparateManifests(t *testing.T, ctx context.Context, tbl *table.Table
 		writeOneRowParquet(t, fs, filePath)
 
 		txn := tbl.NewTransaction()
-		require.NoError(t, txn.AddFiles(ctx, []string{filePath}, nil, false))
+		require.NoError(t, txn.AddDataFilesByPath(ctx, []string{filePath}, nil, false))
 		tbl, err = txn.Commit(ctx)
 		require.NoError(t, err)
 	}
@@ -662,7 +662,7 @@ func TestRewriteManifestsSpecIDFilter(t *testing.T) {
 			specOneFile := dir + "/spec1-0.parquet"
 			writeOneRowParquet(t, fs, specOneFile)
 			txn = tbl.NewTransaction()
-			require.NoError(t, txn.AddFiles(ctx, []string{specOneFile}, nil, false))
+			require.NoError(t, txn.AddDataFilesByPath(ctx, []string{specOneFile}, nil, false))
 			tbl, err = txn.Commit(ctx)
 			require.NoError(t, err)
 
@@ -906,7 +906,7 @@ func appendOne(t *testing.T, ctx context.Context, tbl *table.Table, fs iceio.Wri
 	writeOneRowParquet(t, fs, path)
 
 	txn := tbl.NewTransaction()
-	require.NoError(t, txn.AddFiles(ctx, []string{path}, nil, false))
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
 	out, err := txn.Commit(ctx)
 	require.NoError(t, err)
 

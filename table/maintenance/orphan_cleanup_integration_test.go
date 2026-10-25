@@ -157,7 +157,7 @@ func (s *OrphanCleanupIntegrationSuite) createTableWithData() *table.Table {
 
 	// Commit the data file to the table
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{dataFile}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{dataFile}, nil, false))
 	updatedTable, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 
