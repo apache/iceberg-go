@@ -485,7 +485,10 @@ func createExperimentBranch(ctx context.Context, cat *sqlcat.Catalog, tbl *table
 
 // Step 2: open a transaction on the branch and write.
 func writeOnBranch(ctx context.Context, tbl *table.Table, arrowTbl arrow.Table) (*table.Table, error) {
-    txn := tbl.NewTransactionOnBranch(&quot;experiment&quot;)
+    txn, err := tbl.NewTransactionOnBranch(&quot;experiment&quot;)
+    if err != nil {
+        return nil, err
+    }
     if err := txn.AppendTable(ctx, arrowTbl, 1024, nil); err != nil {
         return nil, err
     }
@@ -1462,7 +1465,8 @@ if err := txn.SetProperties(iceberg.Properties{&quot;commit.user&quot;: &quot;da
 newTbl, err := txn.Commit(ctx)
 </code></pre>
 <p>To target a specific branch:</p>
-<pre><code class="language-go">txn := tbl.NewTransactionOnBranch(&quot;staging&quot;)
+<pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;staging&quot;)
+if err != nil { /* ... */ }
 </code></pre>
 <p><code>Commit</code> retries automatically on conflict (<code>ErrCommitFailed</code>) - tune via the <code>commit.retry.*</code> table properties.</p>
 <h2 id="schema-and-partition-evolution"><a class="header" href="#schema-and-partition-evolution">Schema and partition evolution</a></h2>
