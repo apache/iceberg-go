@@ -551,9 +551,9 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 			iceberg.ErrInvalidArgument, branch)
 	}
 
-	if ref.SnapshotRefType != BranchRef {
+	if ref.Type != BranchRef {
 		return fmt.Errorf("%w: cannot rollback: ref %q is a %s, not a branch",
-			iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+			iceberg.ErrInvalidArgument, branch, ref.Type)
 	}
 
 	// Present but invalid is not the same as absent: metadata validation
@@ -820,7 +820,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		// when min-snapshots-to-keep is 0, and tags never run that walk.
 		snapsToKeep[ref.SnapshotID] = struct{}{}
 
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			continue
 		}
 
@@ -843,7 +843,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	referencedSnapshots := make(map[int64]struct{})
 	for _, ref := range retainedRefs {
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			referencedSnapshots[ref.SnapshotID] = struct{}{}
 
 			continue

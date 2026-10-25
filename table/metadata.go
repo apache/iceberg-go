@@ -1395,8 +1395,8 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	options ...setSnapshotRefOption,
 ) error {
 	ref := SnapshotRef{
-		SnapshotID:      snapshotID,
-		SnapshotRefType: refType,
+		SnapshotID: snapshotID,
+		Type:       refType,
 	}
 	for _, opt := range options {
 		if err := opt(&ref); err != nil {
@@ -1461,7 +1461,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 func (b *MetadataBuilder) NewRetainingSnapshotRefUpdate(name string, snapshotID int64, refType RefType) *setSnapshotRefUpdate {
 	var maxRefAgeMs, maxSnapshotAgeMs int64
 	var minSnapshotsToKeep int
-	if existing, ok := b.refs[name]; ok && existing.SnapshotRefType == refType {
+	if existing, ok := b.refs[name]; ok && existing.Type == refType {
 		if existing.MaxRefAgeMs != nil {
 			maxRefAgeMs = *existing.MaxRefAgeMs
 		}
@@ -2937,8 +2937,8 @@ func (c *commonMetadata) preValidate() {
 	if c.CurrentSnapshotID != nil {
 		if _, ok := c.SnapshotRefs[MainBranch]; !ok {
 			c.SnapshotRefs[MainBranch] = SnapshotRef{
-				SnapshotID:      *c.CurrentSnapshotID,
-				SnapshotRefType: BranchRef,
+				SnapshotID: *c.CurrentSnapshotID,
+				Type:       BranchRef,
 			}
 		}
 	}
@@ -3036,8 +3036,8 @@ func (c *commonMetadata) constructRefs() {
 		_, ok := c.SnapshotRefs[MainBranch]
 		if !ok {
 			c.SnapshotRefs[MainBranch] = SnapshotRef{
-				SnapshotID:      *c.CurrentSnapshotID,
-				SnapshotRefType: BranchRef,
+				SnapshotID: *c.CurrentSnapshotID,
+				Type:       BranchRef,
 			}
 		}
 	}
