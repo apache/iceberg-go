@@ -291,7 +291,7 @@ sub-package one of two ways:</p>
 <code>WithSigV4</code> / <code>WithSigV4RegionSvc</code> or the <code>rest.sigv4-enabled</code> property. The
 backend signs with the <code>s3.*</code> credential properties when set (falling back to
 the <code>rest.*</code> aliases), otherwise with the AWS default credential chain.</li>
-<li>Explicit config: pass <code>sigv4.WithAwsConfig(cfg)</code> to <code>NewCatalog</code> alongside
+<li>Explicit config: pass <code>sigv4.WithAWSConfig(cfg)</code> to <code>NewCatalog</code> alongside
 <code>WithSigV4</code> / <code>WithSigV4RegionSvc</code> (no blank import needed). It supplies the
 <code>aws.Config</code>; the signing service comes from those options (or a server
 <code>/v1/config</code> override), and so does the region when one is set. Otherwise
@@ -346,8 +346,8 @@ assume parity on it in multi-client deployments.</p>
 <h3 id="glue-catalogglue"><a class="header" href="#glue-catalogglue">Glue (<code>catalog/glue</code>)</a></h3>
 <p>Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/glue/options.go"><code>catalog/glue/options.go</code></a>.</p>
 <ul>
-<li><code>WithAwsConfig(cfg aws.Config)</code> - AWS SDK v2 config; respects the AWS default credential chain.</li>
-<li><code>WithAwsProperties(props AwsProperties)</code> - explicit overrides for region/endpoint/access keys.</li>
+<li><code>WithAWSConfig(cfg aws.Config)</code> - AWS SDK v2 config; respects the AWS default credential chain.</li>
+<li><code>WithAWSProperties(props AWSProperties)</code> - catalog properties, such as <code>glue.id</code> and the <code>s3.*</code> FileIO keys. <code>NewCatalog</code> ignores the <code>glue.region</code>, endpoint, credential, and retry keys; only <code>catalog.Load</code> reads them.</li>
 </ul>
 <h3 id="sql-catalogsql"><a class="header" href="#sql-catalogsql">SQL (<code>catalog/sql</code>)</a></h3>
 <p>The SQL catalog has no functional-option surface. Construct it with <code>NewCatalog</code>:</p>
