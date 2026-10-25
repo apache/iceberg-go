@@ -42,7 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
-- **Table purge is required on catalogs.** The `catalog.Catalog` interface now embeds `catalog.PurgeableCatalog`; every custom catalog implementation must provide `PurgeTable(ctx, identifier) error`. The narrow `catalog.PurgeableTable` interface is renamed to `catalog.PurgeableCatalog`. Built-in purge behavior is unchanged.
+- **Unify statistics blob types with Puffin.** Replace `table.BlobType` with `puffin.BlobType` when constructing `table.BlobMetadata`. Replace `table.BlobTypeApacheDatasketchesThetaV1` with `puffin.BlobTypeDataSketchesTheta` and `table.BlobTypeDeletionVectorV1` with `puffin.BlobTypeDeletionVector`. Use `puffin.BlobType.IsKnown()` to identify the types defined by the Puffin specification; the redundant `table.BlobType.IsValid()` method is removed. Unknown non-empty blob type names still round-trip through table metadata.
 - **View representation field uses the Go SQL initialism.** Replace `view.Representation.Sql` with `view.Representation.SQL`. Serialized view metadata still uses the `sql` JSON field.
 - **Orphan cleanup results now expose only `OrphanFiles`.** Replace `result.OrphanFileLocations` with `result.OrphanFiles` (each entry has `Path` and `SizeBytes`). `OrphanCleanupPlan.Files()` still provides path-only lists during planning.
 - **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.
