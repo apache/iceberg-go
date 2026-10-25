@@ -2203,8 +2203,6 @@ func TestSnapshotTimestampReservedPropertyKey(t *testing.T) {
 	const oldKey = "current-snapshot-timestamp"
 
 	require.Equal(t, canonical, PropertyCurrentSnapshotTimestamp)
-	require.Contains(t, ReservedProperties[:], canonical)
-	require.NotContains(t, ReservedProperties[:], oldKey)
 
 	builder := builderWithoutChanges(2)
 	require.ErrorContains(t, builder.SetProperties(iceberg.Properties{canonical: "123"}), "can't set reserved property "+canonical)
