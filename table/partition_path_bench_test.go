@@ -43,7 +43,7 @@ func referencePartitionPathQueryEscape(p partitionPathPlan, data iceberg.StructL
 		}
 		builder.WriteString(field.escapedName)
 		builder.WriteByte('=')
-		value := field.transform.ToHumanStrType(field.resultType, data.Get(i))
+		value := field.transform.ToHumanString(field.resultType, data.Get(i))
 		builder.WriteString(url.QueryEscape(value))
 	}
 
