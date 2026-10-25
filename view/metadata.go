@@ -113,6 +113,7 @@ type Representations []Representation
 // The SQL and Dialect fields are validated by NewVersion.
 func NewRepresentation(repr Representation) Representation {
 	repr.Type = "sql"
+
 	return repr
 }
 

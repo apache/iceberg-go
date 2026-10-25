@@ -62,6 +62,7 @@ func TestSQLFromVersionPreservesDialect(t *testing.T) {
 			sql, dialect, err := sqlFromVersion(tt.version)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
+
 				return
 			}
 			require.NoError(t, err)
