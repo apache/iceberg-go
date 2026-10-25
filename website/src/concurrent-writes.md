@@ -91,8 +91,8 @@ _, err := cat.CreateTable(ctx, ident, schema,
 ```
 
 > **Catalog support:** all built-in catalogs report commit conflicts as
-> `ErrCommitFailed`, including failed commit requirements. The REST catalog
-> maps HTTP 409 Conflict to this error.
+> `ErrCommitFailed`, including requirements that fail because of a concurrent
+> change. The REST catalog maps HTTP 409 Conflict to this error.
 
 Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including schema, spec, sort order, and refs pinned
