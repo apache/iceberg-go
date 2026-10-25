@@ -179,10 +179,7 @@ func createView(
 ) (*View, error) {
 	versionId := int64(1)
 
-	builder, err := NewMetadataBuilder()
-	if err != nil {
-		return nil, err
-	}
+	builder := NewMetadataBuilder()
 
 	viewVersion, err := NewVersionFromSQL(
 		versionId,
