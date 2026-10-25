@@ -235,7 +235,10 @@ func createExperimentBranch(ctx context.Context, cat *sqlcat.Catalog, tbl *table
 
 // Step 2: open a transaction on the branch and write.
 func writeOnBranch(ctx context.Context, tbl *table.Table, arrowTbl arrow.Table) (*table.Table, error) {
-    txn := tbl.NewTransactionOnBranch("experiment")
+    txn, err := tbl.NewTransactionOnBranch("experiment")
+    if err != nil {
+        return nil, err
+    }
     if err := txn.AppendTable(ctx, arrowTbl, 1024, nil); err != nil {
         return nil, err
     }
