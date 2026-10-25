@@ -80,8 +80,8 @@ func TestTableScansReuseSnapshotManifestList(t *testing.T) {
 }
 
 func TestSnapshotManifestCacheSeparatesContentAndProtectsSlices(t *testing.T) {
-	data := iceberg.NewManifestFile(2, "data.avro", 10, 0, 1).Build()
-	deleteManifest := iceberg.NewManifestFile(2, "delete.avro", 20, 0, 1).
+	data := iceberg.NewManifestBuilder(2, "data.avro", 10, 0, 1).Build()
+	deleteManifest := iceberg.NewManifestBuilder(2, "delete.avro", 20, 0, 1).
 		Content(iceberg.ManifestContentDeletes).
 		Build()
 	cache := newSnapshotManifestCache()
@@ -402,7 +402,7 @@ func TestSnapshotManifestCacheKeepsCompletedReadAfterCancellation(t *testing.T) 
 	fs := iceio.NewMemFS()
 	var list bytes.Buffer
 	sequenceNumber := int64(1)
-	manifest := iceberg.NewManifestFile(2, "data.avro", 10, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, "data.avro", 10, 0, 1).Build()
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0, []iceberg.ManifestFile{manifest}))
 	const listPath = "mem://snapshot-manifest-cache/late-cancel.avro"
 	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
@@ -579,12 +579,12 @@ func TestSnapshotManifestCacheUsesCallerContext(t *testing.T) {
 }
 
 func TestSnapshotManifestCacheDoesNotClassifyUnknownContentAsData(t *testing.T) {
-	unknown := iceberg.NewManifestFile(2, "unknown.avro", 1, 0, 1).
+	unknown := iceberg.NewManifestBuilder(2, "unknown.avro", 1, 0, 1).
 		Content(iceberg.ManifestContent(2)).
 		Build()
 	set := newSnapshotManifestSet([]iceberg.ManifestFile{
-		iceberg.NewManifestFile(2, "data.avro", 1, 0, 1).Build(),
-		iceberg.NewManifestFile(2, "delete.avro", 1, 0, 1).
+		iceberg.NewManifestBuilder(2, "data.avro", 1, 0, 1).Build(),
+		iceberg.NewManifestBuilder(2, "delete.avro", 1, 0, 1).
 			Content(iceberg.ManifestContentDeletes).
 			Build(),
 		unknown,
@@ -611,7 +611,7 @@ func TestSnapshotManifestCacheCountsDataDescriptorsOnce(t *testing.T) {
 	cache := newSnapshotManifestCache()
 	manifests := make([]iceberg.ManifestFile, snapshotManifestCacheManifestLimit)
 	for i := range manifests {
-		manifests[i] = iceberg.NewManifestFile(2, fmt.Sprintf("data-%d.avro", i), 10, 0, 1).Build()
+		manifests[i] = iceberg.NewManifestBuilder(2, fmt.Sprintf("data-%d.avro", i), 10, 0, 1).Build()
 	}
 	set := newSnapshotManifestSet(manifests)
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: "full.avro"}

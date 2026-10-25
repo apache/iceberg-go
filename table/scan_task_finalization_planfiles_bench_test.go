@@ -149,7 +149,7 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB, splitOffsets bool) *Ta
 		if err := fs.WriteFile(manifestPath, manifestBuffer.Bytes()); err != nil {
 			b.Fatal(err)
 		}
-		manifests[manifestIndex] = iceberg.NewManifestFile(
+		manifests[manifestIndex] = iceberg.NewManifestBuilder(
 			2, manifestPath, int64(manifestBuffer.Len()), int32(manifestSpec.ID()), snapshotID,
 		).SequenceNum(sequenceNum, sequenceNum).
 			AddedFiles(int32(planFilesFinalizationBenchmarkFilesPerManifest)).
