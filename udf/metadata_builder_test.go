@@ -40,7 +40,7 @@ func newTestDefinition(t *testing.T) *Definition {
 
 func newTestVersion(t *testing.T, sql string, timestampMS int64) *DefinitionVersion {
 	t.Helper()
-	repr, err := NewSQLRepresentation("trino", sql)
+	repr, err := NewSQLRepresentation(SQLRepresentation{Dialect: "trino", SQL: sql})
 	require.NoError(t, err)
 	version, err := NewDefinitionVersion([]Representation{repr},
 		WithTimestampMS(timestampMS), WithDeterministic(true))
@@ -480,7 +480,7 @@ func TestBuilderRejectsHandBuiltUnknownRepresentation(t *testing.T) {
 }
 
 func TestBuilderOnNullInput(t *testing.T) {
-	repr, err := NewSQLRepresentation("trino", "coalesce(x, 0)")
+	repr, err := NewSQLRepresentation(SQLRepresentation{Dialect: "trino", SQL: "coalesce(x, 0)"})
 	require.NoError(t, err)
 	version, err := NewDefinitionVersion([]Representation{repr},
 		WithTimestampMS(1000), WithOnNullInput(OnNullInputReturnNull))
