@@ -454,7 +454,7 @@ func TestHiveIntegrationCreateView(t *testing.T) {
 
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 	viewSQL := "SELECT 1 AS col"
-	ver, err := view.NewVersionFromSQL(1, 0, viewSQL, table.Identifier{dbName})
+	ver, err := view.NewVersionFromSQL(1, 0, viewSQL, "hive", table.Identifier{dbName})
 	assert.NoError(err)
 
 	viewLocation := getTestTableLocation() + "/" + dbName + "/" + viewName
@@ -476,6 +476,7 @@ func TestHiveIntegrationCreateView(t *testing.T) {
 	assert.Len(loaded.CurrentVersion().Representations, 1)
 	assert.Equal("sql", loaded.CurrentVersion().Representations[0].Type)
 	assert.Equal(viewSQL, loaded.CurrentVersion().Representations[0].SQL)
+	assert.Equal("hive", loaded.CurrentVersion().Representations[0].Dialect)
 }
 
 func TestHiveIntegrationCreateViewThenDrop(t *testing.T) {
@@ -494,7 +495,7 @@ func TestHiveIntegrationCreateViewThenDrop(t *testing.T) {
 	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
 
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1 AS id", table.Identifier{dbName})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1 AS id", "hive", table.Identifier{dbName})
 
 	viewLocation := getTestTableLocation() + "/" + dbName + "/" + viewName
 	_, err = cat.CreateView(context.TODO(), TableIdentifier(dbName, viewName), ver, schema,
@@ -541,7 +542,7 @@ func TestHiveIntegrationCreateView_TableConflict(t *testing.T) {
 	assert.NoError(err)
 	defer cat.DropTable(context.TODO(), TableIdentifier(dbName, tableName))
 
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT * FROM t1", table.Identifier{dbName})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT * FROM t1", "hive", table.Identifier{dbName})
 	viewLocation := getTestTableLocation() + "/" + dbName + "/" + tableName + "_view"
 	_, err = cat.CreateView(context.TODO(), TableIdentifier(dbName, tableName), ver, schema,
 		catalog.WithViewLocation(viewLocation),
@@ -566,7 +567,7 @@ func TestHiveIntegrationCreateView_ViewConflict(t *testing.T) {
 	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
 
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{dbName})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", "hive", table.Identifier{dbName})
 	viewLocation := getTestTableLocation() + "/" + dbName + "/" + viewName
 
 	_, err = cat.CreateView(context.TODO(), TableIdentifier(dbName, viewName), ver, schema,

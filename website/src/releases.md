@@ -42,6 +42,9 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **View SQL representation construction uses named fields.** Replace `view.NewRepresentation(sql, dialect)` with `view.NewRepresentation(view.Representation{SQL: sql, Dialect: dialect})`. The constructor still sets the representation type to `sql`; JSON metadata is unchanged.
+- **View creation requires an explicit SQL dialect.** `view.NewVersionFromSQL`, `view.CreateView`, `view.CreateViewWithIOProperties`, and `sql.Catalog.CreateView` now take a dialect immediately after the SQL text. Use the dialect your query targets (for example, `spark`, `hive`, or `trino`). Hive preserves the selected SQL representation's dialect rather than replacing it with `default`.
+
 - **View representation field uses the Go SQL initialism.** Replace `view.Representation.Sql` with `view.Representation.SQL`. Serialized view metadata still uses the `sql` JSON field.
 - **Orphan cleanup results now expose only `OrphanFiles`.** Replace `result.OrphanFileLocations` with `result.OrphanFiles` (each entry has `Path` and `SizeBytes`). `OrphanCleanupPlan.Files()` still provides path-only lists during planning.
 - **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.

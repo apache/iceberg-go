@@ -234,7 +234,7 @@ func TestDropNamespaceDoesNotRaceWithObjectCreation(t *testing.T) {
 		{
 			name: "create view",
 			create: func(_ *testing.T, ctx context.Context, cat *Catalog, ident table.Identifier) error {
-				return cat.CreateView(ctx, ident, schema, "SELECT 1", nil)
+				return cat.CreateView(ctx, ident, schema, "SELECT 1", "spark", nil)
 			},
 			exists: func(ctx context.Context, cat *Catalog, ident table.Identifier) (bool, error) {
 				return cat.CheckViewExists(ctx, ident)
