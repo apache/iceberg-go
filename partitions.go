@@ -69,9 +69,9 @@ type PartitionField struct {
 	escapedName string
 }
 
-// FirstSourceID returns the first source column id. For single-argument transforms
-// this is the only source column. For multi-argument transforms this is the
-// first source column.
+// FirstSourceID returns the first source column id, or 0 when SourceIDs is
+// empty. For single-argument transforms this is the only source column; for
+// multi-argument transforms the other ids are only in SourceIDs.
 func (p PartitionField) FirstSourceID() int {
 	if len(p.SourceIDs) == 0 {
 		return 0
