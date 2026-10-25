@@ -431,6 +431,10 @@ func (p *panicCatalog) DropTable(context.Context, table.Identifier) error {
 	panic("DropTable must not be called")
 }
 
+func (p *panicCatalog) PurgeTable(context.Context, table.Identifier) error {
+	panic("PurgeTable must not be called")
+}
+
 func (p *panicCatalog) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {
 	panic("RenameTable must not be called")
 }

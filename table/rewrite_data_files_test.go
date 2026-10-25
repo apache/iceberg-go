@@ -882,7 +882,7 @@ func addPartitionedRowsOnRef(t *testing.T, tbl *table.Table, ref, name, partitio
 	info, err := os.Stat(dataPath)
 	require.NoError(t, err)
 
-	txn, err := tbl.NewTransactionOnBranchWithError(ref)
+	txn, err := tbl.NewTransactionOnBranch(ref)
 	require.NoError(t, err)
 	builder, err := iceberg.NewDataFileBuilder(
 		tbl.Spec(), iceberg.EntryContentData, dataPath, iceberg.ParquetFile,
@@ -927,7 +927,7 @@ func TestRewriteDataFiles_PartialProgressUsesTargetBranchSnapshot(t *testing.T) 
 		tbl.Spec(), iceberg.EntryContentPosDeletes, posDelPath, iceberg.ParquetFile,
 		map[int]any{1000: "branch"}, nil, nil, 2, info.Size())
 	require.NoError(t, err)
-	txn, err := tbl.NewTransactionOnBranchWithError(branch)
+	txn, err := tbl.NewTransactionOnBranch(branch)
 	require.NoError(t, err)
 	require.NoError(t, txn.NewRowDelta(nil).AddDeletes(delBuilder.Build()).Commit(t.Context()))
 	tbl, err = txn.Commit(t.Context())
@@ -948,7 +948,7 @@ func TestRewriteDataFiles_PartialProgressUsesTargetBranchSnapshot(t *testing.T) 
 	}
 	require.NotNil(t, rewriteTask.File)
 
-	txn, err = tbl.NewTransactionOnBranchWithError(branch)
+	txn, err = tbl.NewTransactionOnBranch(branch)
 	require.NoError(t, err)
 	result, err := txn.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{
 		PartitionKey:   "branch",

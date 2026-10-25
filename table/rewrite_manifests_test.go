@@ -425,7 +425,8 @@ func TestRewriteManifestsOnBranchOnlyTable(t *testing.T) {
 		rec := array.NewRecordBatch(rewriteArrowSchema, []arrow.Array{col}, 1)
 		arrTbl := array.NewTableFromRecords(rewriteArrowSchema, []arrow.RecordBatch{rec})
 
-		txn := tbl.NewTransactionOnBranch("feature")
+		txn, err := tbl.NewTransactionOnBranch("feature")
+		require.NoError(t, err)
 		require.NoError(t, txn.AppendTable(ctx, arrTbl, 1024, nil))
 		tbl, err = txn.Commit(ctx)
 		require.NoError(t, err)
@@ -443,7 +444,8 @@ func TestRewriteManifestsOnBranchOnlyTable(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, before, numData)
 
-	txn := tbl.NewTransactionOnBranch("feature")
+	txn, err := tbl.NewTransactionOnBranch("feature")
+	require.NoError(t, err)
 	res, err := txn.RewriteManifests(ctx)
 	require.NoError(t, err)
 	require.False(t, res.IsNoOp(),
