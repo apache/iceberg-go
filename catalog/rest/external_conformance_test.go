@@ -77,6 +77,7 @@ func TestExternalRestCatalogConformance(t *testing.T) {
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := catalog.Load(context.Background(), "external", props)
 			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
 
 			return cat
 		},
