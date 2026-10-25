@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Unify statistics blob types with Puffin.</strong> Replace <code>table.BlobType</code> with <code>puffin.BlobType</code> when constructing <code>table.BlobMetadata</code>. Replace <code>table.BlobTypeApacheDatasketchesThetaV1</code> with <code>puffin.BlobTypeDataSketchesTheta</code> and <code>table.BlobTypeDeletionVectorV1</code> with <code>puffin.BlobTypeDeletionVector</code>. Use <code>puffin.BlobType.IsKnown()</code> to identify the types defined by the Puffin specification; the redundant <code>table.BlobType.IsValid()</code> method is removed. Unknown non-empty blob type names still round-trip through table metadata.</p>
+</li>
+<li>
 <p><strong>View representation field uses the Go SQL initialism.</strong> Replace <code>view.Representation.Sql</code> with <code>view.Representation.SQL</code>. Serialized view metadata still uses the <code>sql</code> JSON field.</p>
 </li>
 <li>
