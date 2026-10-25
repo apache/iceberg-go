@@ -92,9 +92,10 @@ cat, err := hive.NewCatalog(iceberg.Properties{},
 import (
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog/hadoop"
+    "context"
 )
 
-cat, err := hadoop.NewCatalog("default", "file:///tmp/warehouse", iceberg.Properties{})
+cat, err := hadoop.NewCatalog(context.Background(), "default", "file:///tmp/warehouse", iceberg.Properties{})
 ```
 
 #### Via the registry
