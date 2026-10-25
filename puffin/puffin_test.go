@@ -836,9 +836,9 @@ func TestReaderRejectsMissingBlobTypes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
+		name     string
 		typeJSON string
-		wantErr string
+		wantErr  string
 	}{
 		{name: "empty", typeJSON: `"type":""`, wantErr: "invalid blob type"},
 		{name: "null", typeJSON: `"type":null`, wantErr: "invalid blob type"},
