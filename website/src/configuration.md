@@ -147,7 +147,7 @@ Invalid values (non-positive waits/retries, or min ≥ max) are ignored and the 
 Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/glue/options.go).
 
 - `WithAWSConfig(cfg aws.Config)` - AWS SDK v2 config; respects the AWS default credential chain.
-- `WithAWSProperties(props AWSProperties)` - explicit overrides for region/endpoint/access keys.
+- `WithAWSProperties(props AWSProperties)` - catalog properties, such as `glue.id` and the `s3.*` FileIO keys. `NewCatalog` ignores the `glue.region`, endpoint, credential, and retry keys; only `catalog.Load` reads them.
 
 ### SQL (`catalog/sql`)
 
