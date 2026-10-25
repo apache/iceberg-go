@@ -898,7 +898,7 @@ func toProps(o *options) iceberg.Properties {
 	return props
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	baseURI *url.URL
