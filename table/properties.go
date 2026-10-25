@@ -235,15 +235,15 @@ const (
 )
 
 var reservedProperties = [...]string{
-		PropertyFormatVersion,
-		PropertyUuid,
-		PropertySnapshotCount,
-		PropertyCurrentSnapshotId,
-		PropertyCurrentSnapshotSummary,
-		PropertyCurrentSnapshotTimestamp,
-		PropertyCurrentSchema,
-		PropertyDefaultPartitionSpec,
-		PropertyDefaultSortOrder,
+	PropertyFormatVersion,
+	PropertyUuid,
+	PropertySnapshotCount,
+	PropertyCurrentSnapshotId,
+	PropertyCurrentSnapshotSummary,
+	PropertyCurrentSnapshotTimestamp,
+	PropertyCurrentSchema,
+	PropertyDefaultPartitionSpec,
+	PropertyDefaultSortOrder,
 }
 
 // ReservedProperties returns a new slice of reserved table property names.
