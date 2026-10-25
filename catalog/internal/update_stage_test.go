@@ -19,6 +19,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -110,6 +111,15 @@ func TestUpdateAndStageTableUsesVersionZeroForCreate(t *testing.T) {
 	require.Equal(t, 0, ParseMetadataVersion(staged.MetadataLocation()))
 }
 
+// failingRequirement fails with err, standing in for a requirement whose
+// failure is not a concurrent change, such as a tag used as a transaction
+// target.
+type failingRequirement struct{ err error }
+
+func (r failingRequirement) Validate(table.Metadata) error { return r.err }
+
+func (r failingRequirement) GetType() string { return "failing" }
+
 func TestValidateRequirementsClassifiesFailures(t *testing.T) {
 	metadata, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "file:///tmp/table", nil)
 	require.NoError(t, err)
@@ -138,4 +148,15 @@ func TestValidateRequirementsClassifiesFailures(t *testing.T) {
 			require.ErrorIs(t, err, tt.want)
 		})
 	}
+}
+
+// A requirement failure that is not a concurrent change must not gain
+// ErrCommitFailed, or a retry loop would treat it as one.
+func TestValidateRequirementsReturnsRequirementErrorUnchanged(t *testing.T) {
+	metadata, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "file:///tmp/table", nil)
+	require.NoError(t, err)
+	errTag := errors.New("requirement failed: ref \"t\" is a tag")
+
+	err = ValidateRequirements(table.Identifier{"db", "tbl"}, metadata, []table.Requirement{failingRequirement{errTag}})
+	require.Same(t, errTag, err)
 }
