@@ -31,6 +31,7 @@ func TestHadoopCatalogConformance(t *testing.T) {
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := hadoop.NewCatalog("test", t.TempDir(), nil)
 			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
 
 			return cat
 		},
