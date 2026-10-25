@@ -45,6 +45,19 @@ func (s *SqliteCatalogTestSuite) TestListTablesAndViewsShareNamespaceButNotRows(
 	})
 	s.Require().NoError(cat.CreateView(ctx, viewID, viewSchema, "SELECT 1", nil))
 
+	// A legacy V0 table migrated to V1 can have a NULL iceberg_type.
+	// It must remain visible as a table without appearing in the view list.
+	sqldb := s.getDB()
+	defer sqldb.Close()
+	result, err := sqldb.ExecContext(ctx,
+		`UPDATE iceberg_tables SET iceberg_type = NULL `+
+			`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+		cat.Name(), ns[0], table2[1])
+	s.Require().NoError(err)
+	rows, err := result.RowsAffected()
+	s.Require().NoError(err)
+	s.Equal(int64(1), rows)
+
 	var tables []table.Identifier
 	for identifier, listErr := range cat.ListTables(ctx, ns) {
 		s.Require().NoError(listErr)
