@@ -92,5 +92,5 @@ _, err := cat.CreateTable(ctx, ident, schema,
 ```
 
 > **Catalog support:** the REST, SQL, Glue, Hive, and Hadoop catalogs report
-> commit conflicts, including failed commit requirements, as `ErrCommitFailed`,
-> so the retry loop engages on all of them.
+> commit conflicts, including requirements that fail because of a concurrent
+> change, as `ErrCommitFailed`, so the retry loop engages on all of them.
