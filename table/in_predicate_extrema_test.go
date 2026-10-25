@@ -85,7 +85,7 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 	tests := []testCase{
 		{
 			name:       "decimal below lower bound",
-			typ:        iceberg.DecimalTypeOf(12, 2),
+			typ:        iceberg.MustDecimalTypeOf(12, 2),
 			expr:       iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200), decimal(300)),
 			lower:      iceberg.NewLiteral(decimal(400)),
 			upper:      iceberg.NewLiteral(decimal(500)),
@@ -93,7 +93,7 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 		},
 		{
 			name:       "decimal above upper bound",
-			typ:        iceberg.DecimalTypeOf(12, 2),
+			typ:        iceberg.MustDecimalTypeOf(12, 2),
 			expr:       iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200), decimal(300)),
 			lower:      iceberg.NewLiteral(decimal(-100)),
 			upper:      iceberg.NewLiteral(decimal(0)),
@@ -101,7 +101,7 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 		},
 		{
 			name:       "decimal overlaps bound",
-			typ:        iceberg.DecimalTypeOf(12, 2),
+			typ:        iceberg.MustDecimalTypeOf(12, 2),
 			expr:       iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200), decimal(300)),
 			lower:      iceberg.NewLiteral(decimal(200)),
 			upper:      iceberg.NewLiteral(decimal(250)),
@@ -328,14 +328,14 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaFastPathTypes(t *testing.T) 
 		},
 		{
 			name:   "decimal upper disjoint",
-			typ:    iceberg.DecimalTypeOf(12, 2),
+			typ:    iceberg.MustDecimalTypeOf(12, 2),
 			expr:   iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
 			minLit: iceberg.NewLiteral(decimal(100)), maxLit: iceberg.NewLiteral(decimal(200)),
 			lower: iceberg.NewLiteral(decimal(-200)), upper: iceberg.NewLiteral(decimal(0)),
 		},
 		{
 			name:   "decimal overlaps",
-			typ:    iceberg.DecimalTypeOf(12, 2),
+			typ:    iceberg.MustDecimalTypeOf(12, 2),
 			expr:   iceberg.IsIn(iceberg.Reference("value"), decimal(100), decimal(200)),
 			minLit: iceberg.NewLiteral(decimal(100)), maxLit: iceberg.NewLiteral(decimal(200)),
 			lower: iceberg.NewLiteral(decimal(100)), upper: iceberg.NewLiteral(decimal(150)),
@@ -456,7 +456,7 @@ func TestInclusiveMetricsEvaluatorInPredicateExtremaUsesFastPath(t *testing.T) {
 			iceberg.NewLiteral("a"), iceberg.NewLiteral("b"),
 		},
 		{
-			"decimal", iceberg.DecimalTypeOf(12, 2),
+			"decimal", iceberg.MustDecimalTypeOf(12, 2),
 			[]iceberg.Literal{iceberg.NewLiteral(decimal(5000)), iceberg.NewLiteral(decimal(6000))},
 			iceberg.NewLiteral(decimal(100)), iceberg.NewLiteral(decimal(200)),
 		},

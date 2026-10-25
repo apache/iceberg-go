@@ -48,11 +48,11 @@ func TestPartitionTypeFingerprintMatchesAvroConversion(t *testing.T) {
 		VariantType{},
 		GeometryType{},
 		GeographyType{},
-		FixedTypeOf(8),
-		FixedTypeOf(16),
-		DecimalTypeOf(10, 2),
-		DecimalTypeOf(11, 2),
-		DecimalTypeOf(10, 3),
+		MustFixedTypeOf(8),
+		MustFixedTypeOf(16),
+		MustDecimalTypeOf(10, 2),
+		MustDecimalTypeOf(11, 2),
+		MustDecimalTypeOf(10, 3),
 		&StructType{FieldList: []NestedField{{ID: 2, Name: "child", Type: StringType{}}}},
 		&ListType{ElementID: 2, Element: StringType{}},
 		&MapType{KeyID: 2, KeyType: StringType{}, ValueID: 3, ValueType: Int64Type{}},
@@ -90,11 +90,11 @@ func TestManifestEntrySchemaForMultipleParameterizedFields(t *testing.T) {
 			decimal Type
 			fixed   Type
 		}{
-			{"ordered", NewPartitionSpec(price, code), DecimalTypeOf(10, 2), FixedTypeOf(16)},
-			{"reversed", NewPartitionSpec(code, price), DecimalTypeOf(10, 2), FixedTypeOf(16)},
-			{"precision", NewPartitionSpec(price, code), DecimalTypeOf(11, 2), FixedTypeOf(16)},
-			{"scale", NewPartitionSpec(price, code), DecimalTypeOf(10, 3), FixedTypeOf(16)},
-			{"fixed_size", NewPartitionSpec(price, code), DecimalTypeOf(10, 2), FixedTypeOf(8)},
+			{"ordered", NewPartitionSpec(price, code), MustDecimalTypeOf(10, 2), MustFixedTypeOf(16)},
+			{"reversed", NewPartitionSpec(code, price), MustDecimalTypeOf(10, 2), MustFixedTypeOf(16)},
+			{"precision", NewPartitionSpec(price, code), MustDecimalTypeOf(11, 2), MustFixedTypeOf(16)},
+			{"scale", NewPartitionSpec(price, code), MustDecimalTypeOf(10, 3), MustFixedTypeOf(16)},
+			{"fixed_size", NewPartitionSpec(price, code), MustDecimalTypeOf(10, 2), MustFixedTypeOf(8)},
 		} {
 			t.Run(tc.name+"/v"+strconv.Itoa(version), func(t *testing.T) {
 				t.Parallel()
@@ -120,8 +120,8 @@ func TestManifestEntrySchemaForMultipleParameterizedFields(t *testing.T) {
 
 func TestPartitionSchemaFingerprintNameBoundaries(t *testing.T) {
 	schema := NewSchema(1,
-		NestedField{ID: 1, Name: "source_price", Type: DecimalTypeOf(10, 2)},
-		NestedField{ID: 2, Name: "source_code", Type: FixedTypeOf(16)},
+		NestedField{ID: 1, Name: "source_price", Type: MustDecimalTypeOf(10, 2)},
+		NestedField{ID: 2, Name: "source_code", Type: MustFixedTypeOf(16)},
 	)
 	// Exercise the key's length prefixes independently of Avro name validation.
 	names := []string{"a", "ab", "1:a", "a:q10:2:", "f16:", "λ"}

@@ -2368,7 +2368,7 @@ func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 		).
 		AddColumn(
 			[]string{"new_decimal"},
-			iceberg.DecimalTypeOf(9, 2),
+			iceberg.MustDecimalTypeOf(9, 2),
 			"",
 			false,
 			iceberg.DecimalLiteral(decimalDefault),

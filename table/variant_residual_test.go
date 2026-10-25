@@ -49,12 +49,12 @@ func TestAppendExtractLiteral(t *testing.T) {
 		{"string", iceberg.PrimitiveTypes.String, iceberg.NewLiteral("hi"), "hi"},
 		{"binary", iceberg.PrimitiveTypes.Binary, iceberg.NewLiteral([]byte{1, 2}), []byte{1, 2}},
 		{"uuid", iceberg.PrimitiveTypes.UUID, iceberg.NewLiteral(uuid.UUID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}), uuid.UUID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
-		{"fixed", iceberg.FixedTypeOf(16), iceberg.NewLiteral(make([]byte, 16)), make([]byte, 16)},
+		{"fixed", iceberg.MustFixedTypeOf(16), iceberg.NewLiteral(make([]byte, 16)), make([]byte, 16)},
 		{"date", iceberg.PrimitiveTypes.Date, iceberg.NewLiteral(iceberg.Date(100)), arrow.Date32(100)},
 		{"time", iceberg.PrimitiveTypes.Time, iceberg.NewLiteral(iceberg.Time(1_000_000)), arrow.Time64(1_000_000)},
 		{"timestamp micros", iceberg.PrimitiveTypes.Timestamp, iceberg.NewLiteral(iceberg.Timestamp(123)), arrow.Timestamp(123)},
 		{"timestamp nanos", iceberg.PrimitiveTypes.TimestampNs, iceberg.NewLiteral(iceberg.TimestampNano(123)), arrow.Timestamp(123)},
-		{"decimal", iceberg.DecimalTypeOf(10, 2), iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}), decimal128.FromI64(1234)},
+		{"decimal", iceberg.MustDecimalTypeOf(10, 2), iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}), decimal128.FromI64(1234)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dt, err := TypeToArrowType(tt.typ, false, false)

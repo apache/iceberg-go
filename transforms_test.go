@@ -244,7 +244,7 @@ func TestToHumanStrTypeValues(t *testing.T) {
 		{iceberg.VoidTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
 		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
 		{iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Binary, []byte{0x00, 0x01, 0x02, 0x03}, "AAECAw=="},
-		{iceberg.TruncateTransform{Width: 1}, iceberg.DecimalTypeOf(9, 2), iceberg.Decimal{
+		{iceberg.TruncateTransform{Width: 1}, iceberg.MustDecimalTypeOf(9, 2), iceberg.Decimal{
 			Val: decVal, Scale: 2,
 		}, "14.21"},
 		{iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Int32, int32(123), "123"},
@@ -258,7 +258,7 @@ func TestToHumanStrTypeValues(t *testing.T) {
 		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Int64, int64(-1234567890000), "-1234567890000"},
 		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.String, "a/b/c=d", "a/b/c=d"},
 		{iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Binary, []byte("foo"), "Zm9v"},
-		{iceberg.IdentityTransform{}, iceberg.DecimalTypeOf(9, 2), iceberg.Decimal{Val: negDecVal, Scale: 2}, "-1.50"},
+		{iceberg.IdentityTransform{}, iceberg.MustDecimalTypeOf(9, 2), iceberg.Decimal{Val: negDecVal, Scale: 2}, "-1.50"},
 	}
 
 	for _, tt := range tests {
@@ -297,7 +297,7 @@ func TestToHumanStrType(t *testing.T) {
 		{"truncate_int32", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Int32, int32(123), "123"},
 		{"truncate_string", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.String, "foo", "foo"},
 		{"truncate_bytes", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Binary, []byte{0x00, 0x01, 0x02, 0x03}, "AAECAw=="},
-		{"truncate_decimal", iceberg.TruncateTransform{Width: 1}, iceberg.DecimalTypeOf(4, 2), iceberg.Decimal{Val: decVal, Scale: 2}, "14.21"},
+		{"truncate_decimal", iceberg.TruncateTransform{Width: 1}, iceberg.MustDecimalTypeOf(4, 2), iceberg.Decimal{Val: decVal, Scale: 2}, "14.21"},
 		{"truncate_nil", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.String, nil, "null"},
 		{"void", iceberg.VoidTransform{}, iceberg.PrimitiveTypes.TimestampTz, tsMicros, "null"},
 		{"void_nil", iceberg.VoidTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
@@ -597,7 +597,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Date,
 				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2),
+				iceberg.MustDecimalTypeOf(2, 1), iceberg.MustFixedTypeOf(2),
 			},
 			notAllowed: []iceberg.Type{
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
@@ -614,7 +614,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
 				iceberg.PrimitiveTypes.TimestampNs, iceberg.PrimitiveTypes.TimestampTzNs,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.MustDecimalTypeOf(2, 1), iceberg.MustFixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
 				iceberg.GeographyType{},
 				iceberg.GeometryType{},
@@ -627,7 +627,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Date,
 				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
 				iceberg.PrimitiveTypes.TimestampNs, iceberg.PrimitiveTypes.TimestampTzNs,
-				iceberg.DecimalTypeOf(2, 1), iceberg.PrimitiveTypes.String, iceberg.FixedTypeOf(2), iceberg.PrimitiveTypes.Binary,
+				iceberg.MustDecimalTypeOf(2, 1), iceberg.PrimitiveTypes.String, iceberg.MustFixedTypeOf(2), iceberg.PrimitiveTypes.Binary,
 				iceberg.PrimitiveTypes.UUID,
 			},
 			notAllowed: []iceberg.Type{
@@ -642,12 +642,12 @@ func TestCanTransform(t *testing.T) {
 			transform: iceberg.TruncateTransform{},
 			allowed: []iceberg.Type{
 				iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.String,
-				iceberg.PrimitiveTypes.Binary, iceberg.DecimalTypeOf(2, 1),
+				iceberg.PrimitiveTypes.Binary, iceberg.MustDecimalTypeOf(2, 1),
 			},
 			notAllowed: []iceberg.Type{
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64,
 				iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp,
-				iceberg.PrimitiveTypes.TimestampTz, iceberg.PrimitiveTypes.UUID, iceberg.FixedTypeOf(2),
+				iceberg.PrimitiveTypes.TimestampTz, iceberg.PrimitiveTypes.UUID, iceberg.MustFixedTypeOf(2),
 				iceberg.PrimitiveTypes.TimestampNs, iceberg.PrimitiveTypes.TimestampTzNs,
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
@@ -665,7 +665,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.MustDecimalTypeOf(2, 1), iceberg.MustFixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
 				iceberg.GeographyType{},
 				iceberg.GeometryType{},
@@ -681,7 +681,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.MustDecimalTypeOf(2, 1), iceberg.MustFixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
 				iceberg.GeographyType{},
 				iceberg.GeometryType{},
@@ -697,7 +697,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.MustDecimalTypeOf(2, 1), iceberg.MustFixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
 				iceberg.GeographyType{},
 				iceberg.GeometryType{},
@@ -713,7 +713,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				iceberg.PrimitiveTypes.Date, iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2),
+				iceberg.PrimitiveTypes.Date, iceberg.MustDecimalTypeOf(2, 1), iceberg.MustFixedTypeOf(2),
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
 				iceberg.GeographyType{},
@@ -1198,7 +1198,7 @@ func TestTruncateTransformDecimal(t *testing.T) {
 	for _, width := range []int{1, 2, 3, 10, 50, 97, math.MaxInt32} {
 		transform := iceberg.TruncateTransform{Width: width}
 		for _, scale := range []int{0, 2, 9, 38} {
-			transformer, err := transform.Transformer(iceberg.DecimalTypeOf(38, scale))
+			transformer, err := transform.Transformer(iceberg.MustDecimalTypeOf(38, scale))
 			require.NoError(t, err)
 			for _, value := range values {
 				t.Run(fmt.Sprintf("width=%d/scale=%d/value=%s", width, scale, value), func(t *testing.T) {
@@ -1229,7 +1229,7 @@ func TestTruncateTransformDecimal(t *testing.T) {
 
 	t.Run("null", func(t *testing.T) {
 		transform := iceberg.TruncateTransform{Width: 50}
-		transformer, err := transform.Transformer(iceberg.DecimalTypeOf(38, 2))
+		transformer, err := transform.Transformer(iceberg.MustDecimalTypeOf(38, 2))
 		require.NoError(t, err)
 		assert.Nil(t, transformer(nil))
 		assert.False(t, transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: false}).Valid)

@@ -393,7 +393,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		result.Type = iceberg.PrimitiveTypes.Float64
 	case *arrow.Decimal32Type, *arrow.Decimal64Type, *arrow.Decimal128Type:
 		dec := dt.(arrow.DecimalType)
-		result.Type = iceberg.DecimalTypeOf(int(dec.GetPrecision()), int(dec.GetScale()))
+		result.Type = iceberg.MustDecimalTypeOf(int(dec.GetPrecision()), int(dec.GetScale()))
 	case *arrow.StringType, *arrow.LargeStringType:
 		result.Type = iceberg.PrimitiveTypes.String
 	case *arrow.BinaryType, *arrow.LargeBinaryType:
@@ -431,7 +431,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
 	case *arrow.FixedSizeBinaryType:
-		result.Type = iceberg.FixedTypeOf(dt.ByteWidth)
+		result.Type = iceberg.MustFixedTypeOf(dt.ByteWidth)
 	case arrow.ExtensionType:
 		switch dt.ExtensionName() {
 		case "arrow.uuid":

@@ -236,9 +236,9 @@ func TestPhysicalSchemaKeyDistinguishesNestedLayouts(t *testing.T) {
 			}},
 			{ID: 4, Name: "lookup", Type: &iceberg.MapType{
 				KeyID: 5, KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 6, ValueType: iceberg.DecimalTypeOf(10, 2),
+				ValueID: 6, ValueType: iceberg.MustDecimalTypeOf(10, 2),
 			}},
-			{ID: 7, Name: "fixed", Type: iceberg.FixedTypeOf(8)},
+			{ID: 7, Name: "fixed", Type: iceberg.MustFixedTypeOf(8)},
 			{ID: 8, Name: "variant", Type: iceberg.VariantType{}},
 		}},
 	})
@@ -265,12 +265,12 @@ func TestPhysicalSchemaKeyDistinguishesNestedLayouts(t *testing.T) {
 		{"map_value_id", func(s *iceberg.StructType) { s.FieldList[1].Type.(*iceberg.MapType).ValueID = 60 }},
 		{"map_value_required", func(s *iceberg.StructType) { s.FieldList[1].Type.(*iceberg.MapType).ValueRequired = true }},
 		{"decimal_precision", func(s *iceberg.StructType) {
-			s.FieldList[1].Type.(*iceberg.MapType).ValueType = iceberg.DecimalTypeOf(11, 2)
+			s.FieldList[1].Type.(*iceberg.MapType).ValueType = iceberg.MustDecimalTypeOf(11, 2)
 		}},
 		{"decimal_scale", func(s *iceberg.StructType) {
-			s.FieldList[1].Type.(*iceberg.MapType).ValueType = iceberg.DecimalTypeOf(10, 3)
+			s.FieldList[1].Type.(*iceberg.MapType).ValueType = iceberg.MustDecimalTypeOf(10, 3)
 		}},
-		{"fixed_size", func(s *iceberg.StructType) { s.FieldList[2].Type = iceberg.FixedTypeOf(16) }},
+		{"fixed_size", func(s *iceberg.StructType) { s.FieldList[2].Type = iceberg.MustFixedTypeOf(16) }},
 		{"variant_type", func(s *iceberg.StructType) { s.FieldList[3].Type = iceberg.PrimitiveTypes.Binary }},
 		{"empty_struct", func(s *iceberg.StructType) { s.FieldList = nil }},
 	} {

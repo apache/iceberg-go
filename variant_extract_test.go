@@ -175,7 +175,7 @@ func TestExtractBindAllTargetTypes(t *testing.T) {
 		PrimitiveTypes.Float32, PrimitiveTypes.Float64, PrimitiveTypes.Date,
 		PrimitiveTypes.Time, PrimitiveTypes.Timestamp, PrimitiveTypes.TimestampTz,
 		PrimitiveTypes.TimestampNs, PrimitiveTypes.TimestampTzNs, PrimitiveTypes.String,
-		PrimitiveTypes.Binary, PrimitiveTypes.UUID, FixedTypeOf(16), DecimalTypeOf(10, 2),
+		PrimitiveTypes.Binary, PrimitiveTypes.UUID, MustFixedTypeOf(16), MustDecimalTypeOf(10, 2),
 	} {
 		t.Run(typ.String(), func(t *testing.T) {
 			bound, err := Extract("payload", "$.a", typ).Bind(schema, true)

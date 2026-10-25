@@ -299,7 +299,7 @@ func TestCloneDataFileAvroFieldsCopiesOnlyAvroFields(t *testing.T) {
 
 func TestMarshalAvroEntryDecimalPartitionRoundTrip(t *testing.T) {
 	schema := NewSchema(0,
-		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(10, 2)},
+		NestedField{ID: 1, Name: "price", Type: MustDecimalTypeOf(10, 2)},
 	)
 	spec := NewPartitionSpecID(1,
 		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "price", Transform: IdentityTransform{}},
@@ -501,8 +501,8 @@ func TestManifestEntrySchemaForMatchesPartitionAvroShape(t *testing.T) {
 		UUIDType{},
 		BooleanType{},
 		BinaryType{},
-		FixedTypeOf(8), FixedTypeOf(16),
-		DecimalTypeOf(10, 2), DecimalTypeOf(11, 2), DecimalTypeOf(10, 3),
+		MustFixedTypeOf(8), MustFixedTypeOf(16),
+		MustDecimalTypeOf(10, 2), MustDecimalTypeOf(11, 2), MustDecimalTypeOf(10, 3),
 		UnknownType{},
 	}
 	for _, version := range []int{1, 2, 3} {

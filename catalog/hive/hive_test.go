@@ -1780,8 +1780,8 @@ func TestIcebergTypeToHiveType(t *testing.T) {
 		{"string", iceberg.PrimitiveTypes.String, "string"},
 		{"uuid", iceberg.PrimitiveTypes.UUID, "string"},
 		{"binary", iceberg.PrimitiveTypes.Binary, "binary"},
-		{"decimal", iceberg.DecimalTypeOf(10, 2), "decimal(10,2)"},
-		{"fixed", iceberg.FixedTypeOf(16), "binary(16)"},
+		{"decimal", iceberg.MustDecimalTypeOf(10, 2), "decimal(10,2)"},
+		{"fixed", iceberg.MustFixedTypeOf(16), "binary(16)"},
 	}
 
 	for _, tt := range tests {
