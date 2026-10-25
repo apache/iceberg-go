@@ -42,6 +42,8 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Snapshot timestamp property key corrected.** `PropertyCurrentSnapshotTimestamp` now uses `current-snapshot-timestamp-ms`. The old `current-snapshot-timestamp` spelling is no longer reserved and remains usable as a custom property.
+
 - **View representation field uses the Go SQL initialism.** Replace `view.Representation.Sql` with `view.Representation.SQL`. Serialized view metadata still uses the `sql` JSON field.
 - **Orphan cleanup results now expose only `OrphanFiles`.** Replace `result.OrphanFileLocations` with `result.OrphanFiles` (each entry has `Path` and `SizeBytes`). `OrphanCleanupPlan.Files()` still provides path-only lists during planning.
 - **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.
