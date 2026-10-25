@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/puffin"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
@@ -1725,7 +1726,7 @@ func TestMetadataV1Serialize(t *testing.T) {
 					KeyMetadata:           nil,
 					BlobMetadata: []BlobMetadata{
 						{
-							Type:           BlobTypeApacheDatasketchesThetaV1,
+							Type:           puffin.BlobTypeDataSketchesTheta,
 							SnapshotID:     1234567890,
 							SequenceNumber: 1,
 							Fields:         []int32{1, 2},
@@ -1817,7 +1818,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 					FileFooterSizeInBytes: 1024,
 					BlobMetadata: []BlobMetadata{
 						{
-							Type:           BlobTypeDeletionVectorV1,
+							Type:           puffin.BlobTypeDeletionVector,
 							SnapshotID:     9876543210,
 							SequenceNumber: 5,
 							Fields:         []int32{1},

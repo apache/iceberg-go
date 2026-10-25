@@ -1565,11 +1565,7 @@ func (s *SqliteCatalogTestSuite) TestPurgeTable() {
 		s.Require().NoError(err)
 		s.Require().NoError(os.WriteFile(metaLoc, newMetaBytes, 0o644))
 
-		// Assert that the catalog implements PurgeableTable
-		purger, ok := any(tt.cat).(catalog.PurgeableTable)
-		s.Require().True(ok, "catalog must implement PurgeableTable")
-
-		s.NoError(purger.PurgeTable(context.Background(), tt.tblID))
+		s.NoError(tt.cat.PurgeTable(context.Background(), tt.tblID))
 
 		// The table catalog entry should be gone
 		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)
@@ -1640,10 +1636,7 @@ func (s *SqliteCatalogTestSuite) TestPurgeTableGCDisabled() {
 		metaLoc := strings.TrimPrefix(tbl.MetadataLocation(), "file://")
 		s.FileExists(metaLoc)
 
-		purger, ok := any(tt.cat).(catalog.PurgeableTable)
-		s.Require().True(ok, "catalog must implement PurgeableTable")
-
-		s.NoError(purger.PurgeTable(context.Background(), tt.tblID))
+		s.NoError(tt.cat.PurgeTable(context.Background(), tt.tblID))
 
 		// The table catalog entry should be gone
 		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)

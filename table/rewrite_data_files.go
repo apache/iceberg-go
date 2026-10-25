@@ -93,7 +93,7 @@ type CompactionGroupFailure struct {
 // normally be invoked through this action so callers do not accidentally try
 // to commit the parent transaction again.
 func (t Table) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
-	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	txn, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -692,7 +692,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		}
 		deletesToRemove := append(deadPositionDeletes, safeDVs...)
 
-		groupTxn, err := current.NewTransactionOnBranchWithError(t.branch)
+		groupTxn, err := current.NewTransactionOnBranch(t.branch)
 		if err != nil {
 			return result, cleanupBatch(fmt.Errorf("create transaction for partial rewrite batch: %w", err))
 		}

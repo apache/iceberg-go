@@ -174,20 +174,9 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
-	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	txn, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
 		return t.newBrokenTransaction(MainBranch, err)
-	}
-
-	return txn
-}
-
-// NewTransactionOnBranch creates a new transaction that commits to the named
-// branch. Use [NewTransaction] to commit to the default "main" branch.
-func (t Table) NewTransactionOnBranch(branch string) *Transaction {
-	txn, err := t.NewTransactionOnBranchWithError(branch)
-	if err != nil {
-		return t.newBrokenTransaction(branch, err)
 	}
 
 	return txn
@@ -202,13 +191,12 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 	}
 }
 
-// NewTransactionOnBranchWithError creates a new transaction and returns any metadata
-// initialization error that prevents builder construction.
-//
-// This preserves the old non-failing constructor contract while allowing
-// callers to receive the precise initialization error instead of hitting
-// panic/undefined behavior later.
-func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+// NewTransactionOnBranch creates a transaction that commits to the named
+// branch. Initialization failures and attempts to target a tag are returned
+// immediately instead of being stored in a broken transaction.
+// A missing branch is allowed; its absence is checked at commit time.
+// Use [NewTransaction] to target the default "main" branch.
+func (t Table) NewTransactionOnBranch(branch string) (*Transaction, error) {
 	for name, ref := range t.metadata.Refs() {
 		if name != branch {
 			continue
