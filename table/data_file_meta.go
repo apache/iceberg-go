@@ -119,7 +119,7 @@ type DataFileArgs struct {
 	//   - [Transaction.AddDataFiles]: REQUIRED. These are externally-written
 	//     files, so the library cannot fabricate row IDs for them; a nil
 	//     first_row_id is rejected at commit time.
-	//   - [Transaction.ReplaceDataFilesWithDataFiles]: REQUIRED for the added
+	//   - [Transaction.ReplaceDataFiles]: REQUIRED for the added
 	//     files, except when the caller opts into rewrite/compaction semantics
 	//     (WithRewriteSemantics), where the manifest-list writer assigns it by
 	//     inheritance and it may be left nil.
