@@ -382,7 +382,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
-	defer mustFS(s.T(), tbl).Remove(pqfile)
+	defer mustFS(s.T(), tbl).Remove(s.ctx, pqfile)
 
 	txn := tbl.NewTransaction()
 	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
@@ -458,10 +458,10 @@ func (s *RestIntegrationSuite) TestMultiTableCommit() {
 
 	// Write a parquet data file for each table.
 	pq1 := s.writeParquetFile(tbl1, tableSchemaSimple, "multi-txn-1")
-	defer mustFS(s.T(), tbl1).Remove(pq1)
+	defer mustFS(s.T(), tbl1).Remove(s.ctx, pq1)
 
 	pq2 := s.writeParquetFile(tbl2, tableSchemaSimple, "multi-txn-2")
-	defer mustFS(s.T(), tbl2).Remove(pq2)
+	defer mustFS(s.T(), tbl2).Remove(s.ctx, pq2)
 
 	// Build transactions that add data files to each table.
 	tx1 := tbl1.NewTransaction()
