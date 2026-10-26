@@ -137,13 +137,23 @@ func (LocalFS) RemoveAll(name string) error {
 	return os.RemoveAll(path)
 }
 
-func (LocalFS) WalkDir(root string, fn fs.WalkDirFunc) error {
+func (LocalFS) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	path, err := localPath(root)
 	if err != nil {
 		return err
 	}
 
-	return filepath.WalkDir(path, fn)
+	return filepath.WalkDir(path, func(path string, d fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		return fn(path, d, walkErr)
+	})
 }
 
 func (LocalFS) ReadDir(name string) ([]fs.DirEntry, error) {

@@ -57,7 +57,7 @@ func benchmarkMemFSWalkDir(b *testing.B, nameForFile func(int) string) {
 
 			b.ReportAllocs()
 			for b.Loop() {
-				if err := memIO.WalkDir("mem://bucket/root", func(_ string, _ fs.DirEntry, err error) error {
+				if err := memIO.WalkDir(context.Background(), "mem://bucket/root", func(_ string, _ fs.DirEntry, err error) error {
 					return err
 				}); err != nil {
 					b.Fatal(err)

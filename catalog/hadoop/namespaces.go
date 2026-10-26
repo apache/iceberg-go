@@ -69,7 +69,7 @@ func (c *Catalog) DropNamespace(ctx context.Context, ns table.Identifier) error 
 	// same filesystem view. The root entry preserves file-at-namespace handling.
 	rootNotDir := false
 	foundEntries := false
-	err := c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+	err := c.filesystem.WalkDir(ctx, path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -122,7 +122,7 @@ func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (
 	return info.IsDir(), nil
 }
 
-func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]table.Identifier, error) {
+func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	if len(parent) > 0 {
 		if err := validateIdentifier(parent); err != nil {
 			return nil, err
@@ -143,7 +143,7 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 	}
 
 	result := []table.Identifier{}
-	err := c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+	err := c.filesystem.WalkDir(ctx, path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if p != path && shouldSuppressPermissionError(err) {
 				log.Printf("hadoop catalog: unable to inspect path %s while listing namespaces: %v", p, err)
@@ -161,7 +161,7 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 			// skip plain files
 			return nil
 		}
-		isTable, err := isTableDirForListing(c.filesystem, c.isLocal, p)
+		isTable, err := isTableDirForListing(ctx, c.filesystem, c.isLocal, p)
 		if err != nil {
 			return err
 		}

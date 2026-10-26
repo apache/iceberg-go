@@ -165,7 +165,7 @@ func (s *HadoopCatalogTestSuite) registerScheme(factory icebergio.SchemeFactory)
 }
 
 func (s *HadoopCatalogTestSuite) requireIsTableDir(path string) bool {
-	isTable, err := isTableDir(s.cat.filesystem, s.cat.isLocal, path)
+	isTable, err := isTableDir(context.Background(), s.cat.filesystem, s.cat.isLocal, path)
 	s.Require().NoError(err)
 
 	return isTable
@@ -306,7 +306,7 @@ type failingWalkFS struct {
 	err error
 }
 
-func (f failingWalkFS) WalkDir(string, fs.WalkDirFunc) error {
+func (f failingWalkFS) WalkDir(context.Context, string, fs.WalkDirFunc) error {
 	return f.err
 }
 
@@ -320,7 +320,7 @@ type stagedWalkDirFS struct {
 	staged bool
 }
 
-func (f *stagedWalkDirFS) WalkDir(path string, fn fs.WalkDirFunc) error {
+func (f *stagedWalkDirFS) WalkDir(ctx context.Context, path string, fn fs.WalkDirFunc) error {
 	if path == f.targetPath {
 		stageNow := false
 		f.mu.Lock()
@@ -338,7 +338,7 @@ func (f *stagedWalkDirFS) WalkDir(path string, fn fs.WalkDirFunc) error {
 		}
 	}
 
-	return f.HadoopCatalogFS.WalkDir(path, fn)
+	return f.HadoopCatalogFS.WalkDir(ctx, path, fn)
 }
 
 type selectiveFailingWalkFS struct {
@@ -347,12 +347,12 @@ type selectiveFailingWalkFS struct {
 	err      error
 }
 
-func (f selectiveFailingWalkFS) WalkDir(path string, fn fs.WalkDirFunc) error {
+func (f selectiveFailingWalkFS) WalkDir(ctx context.Context, path string, fn fs.WalkDirFunc) error {
 	if path == f.failPath {
 		return f.err
 	}
 
-	return f.HadoopCatalogFS.WalkDir(path, fn)
+	return f.HadoopCatalogFS.WalkDir(ctx, path, fn)
 }
 
 func (s *HadoopCatalogTestSuite) TestCatalogType() {
@@ -723,7 +723,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionFromHint() {
 	ident := []string{"ns", "tbl"}
 	s.createMetadataFile(ident, 1)
 	s.cat.writeVersionHint(context.Background(), ident, 1)
-	ver, err := s.cat.findVersion(ident)
+	ver, err := s.cat.findVersion(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(1, ver)
 }
@@ -734,7 +734,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionNoHint() {
 		s.createMetadataFile(ident, i)
 	}
 
-	ver, err := s.cat.findVersion(ident)
+	ver, err := s.cat.findVersion(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(3, ver)
 }
@@ -742,7 +742,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionNoHint() {
 func (s *HadoopCatalogTestSuite) TestFindVersionNoMetadata() {
 	ident := []string{"ns", "tbl"}
 	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
-	_, err := s.cat.findVersion(ident)
+	_, err := s.cat.findVersion(context.Background(), ident)
 	s.Require().Error(err)
 	s.ErrorIs(err, catalog.ErrNoSuchTable)
 }
@@ -754,7 +754,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionScanForward() {
 	}
 
 	s.cat.writeVersionHint(context.Background(), ident, 2)
-	ver, err := s.cat.findVersion(ident)
+	ver, err := s.cat.findVersion(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(5, ver)
 }
@@ -766,7 +766,7 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationHintGapKeepsLatest() {
 	}
 
 	s.cat.writeVersionHint(context.Background(), ident, 1)
-	location, version, err := s.cat.findMetadataLocation(ident)
+	location, version, err := s.cat.findMetadataLocation(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(5, version)
 	plainPath, err := s.cat.metadataFilePathForCompression(ident, 5, table.MetadataCompressionCodecNone)
@@ -775,7 +775,7 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationHintGapKeepsLatest() {
 }
 
 func (s *HadoopCatalogTestSuite) TestFindVersionNoMetadataDir() {
-	_, err := s.cat.findVersion([]string{"ns", "tbl"})
+	_, err := s.cat.findVersion(context.Background(), []string{"ns", "tbl"})
 	s.Require().Error(err)
 	s.ErrorIs(err, catalog.ErrNoSuchTable)
 }
@@ -789,7 +789,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionStaleHintPointsToDeletedVersion(
 	}
 
 	s.cat.writeVersionHint(context.Background(), ident, 5)
-	ver, err := s.cat.findVersion(ident)
+	ver, err := s.cat.findVersion(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(3, ver)
 }
@@ -828,7 +828,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionIgnoresTempFiles() {
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "abc123-def456.metadata.json"), nil, 0o644))
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "abc123-version-hint.temp"), nil, 0o644))
 
-	ver, err := s.cat.findVersion(ident)
+	ver, err := s.cat.findVersion(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(2, ver)
 }
@@ -843,7 +843,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionGzipOnlyWithHint() {
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v2.gz.metadata.json"), nil, 0o644))
 	s.cat.writeVersionHint(context.Background(), ident, 1)
 
-	path, ver, err := s.cat.findMetadataLocation(ident)
+	path, ver, err := s.cat.findMetadataLocation(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(2, ver)
 	s.Equal(filepath.Join(dir, "v2.gz.metadata.json"), path)
@@ -860,7 +860,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.gz.metadata.json"), nil, 0o644))
 	s.cat.writeVersionHint(context.Background(), ident, 1)
 
-	path, ver, err := s.cat.findMetadataLocation(ident)
+	path, ver, err := s.cat.findMetadataLocation(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(3, ver)
 	s.Equal(filepath.Join(dir, "v3.gz.metadata.json"), path)
@@ -875,7 +875,7 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationUsesCanonicalPathForDup
 	s.createMetadataFile(ident, 3)
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.gz.metadata.json"), nil, 0o644))
 
-	path, ver, err := s.cat.findMetadataLocation(ident)
+	path, ver, err := s.cat.findMetadataLocation(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(3, ver)
 	s.Equal(filepath.Join(dir, "v3.metadata.json"), path)
@@ -890,7 +890,7 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationSelectsUUIDVersionBeyon
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, previous), nil, 0o644))
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, latest), nil, 0o644))
 
-	path, version, err := s.cat.findMetadataLocation(ident)
+	path, version, err := s.cat.findMetadataLocation(context.Background(), ident)
 	s.Require().NoError(err)
 	s.Equal(100000, version)
 	s.Equal(filepath.Join(dir, latest), path)

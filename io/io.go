@@ -111,7 +111,9 @@ type ListableIO interface {
 	// WalkDir walks the file tree rooted at root, calling fn for each
 	// file or directory in the tree, including root. Paths passed to fn
 	// are full URIs consistent with the root's scheme and authority.
-	WalkDir(root string, fn fs.WalkDirFunc) error
+	// Implementations should pass ctx to backend listing operations and stop
+	// traversal when it is canceled.
+	WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error
 }
 
 // BulkRemovableIO is an optional interface for IO implementations that

@@ -413,7 +413,10 @@ func walkedURIPath(location ObjectLocation, walked string) string {
 
 // walkFS walks a bucket for fs.WalkDir, treating any key with children as a directory,
 // so the 0-byte directory blobs of ADLS hierarchical namespaces (OneLake) aren't files.
-type walkFS struct{ bfs *FileIO }
+type walkFS struct {
+	bfs *FileIO
+	ctx context.Context
+}
 
 var (
 	_ fs.StatFS    = walkFS{}
@@ -432,7 +435,7 @@ func (w walkFS) Stat(name string) (fs.FileInfo, error) {
 	}
 
 	// One child is enough to make name a directory, so fetch a single key.
-	children, _, err := w.bfs.ListPage(w.bfs.ctx, blob.FirstPageToken, 1, &blob.ListOptions{Prefix: name + "/"})
+	children, _, err := w.bfs.ListPage(w.ctx, blob.FirstPageToken, 1, &blob.ListOptions{Prefix: name + "/"})
 	if err != nil {
 		return nil, blobErrToFsErr("stat", name, err)
 	}
@@ -440,7 +443,7 @@ func (w walkFS) Stat(name string) (fs.FileInfo, error) {
 		return walkDirEntry{name: pathpkg.Base(name)}, nil
 	}
 
-	attrs, err := w.bfs.Attributes(w.bfs.ctx, name)
+	attrs, err := w.bfs.Attributes(w.ctx, name)
 	if err != nil {
 		return nil, blobErrToFsErr("stat", name, err)
 	}
@@ -469,7 +472,7 @@ func (w walkFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	hasMarker := false
 	iter := w.bfs.List(&blob.ListOptions{Prefix: prefix, Delimiter: "/"})
 	for {
-		obj, err := iter.Next(w.bfs.ctx)
+		obj, err := iter.Next(w.ctx)
 		if err == io.EOF {
 			break
 		}
@@ -542,7 +545,11 @@ type walkFileEntry struct{ blobFileInfo }
 func (f walkFileEntry) Type() fs.FileMode          { return f.mode.Type() }
 func (f walkFileEntry) Info() (fs.FileInfo, error) { return f.blobFileInfo, nil }
 
-func (bfs *FileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
+func (bfs *FileIO) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	location, err := bfs.resolveLocation(root)
 	var walkPath string
 	if err != nil {
@@ -560,7 +567,11 @@ func (bfs *FileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 		}
 	}
 
-	return fs.WalkDir(walkFS{bfs}, walkPath, func(path string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(walkFS{bfs: bfs, ctx: ctx}, walkPath, func(path string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if location.hasAuthority {
 			path = walkedURIPath(location, path)
 		}

@@ -359,7 +359,7 @@ func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
 
 	bfs := testADLSBlobFileIO(t, ctx, "abfs://container@account.dfs.core.windows.net/", bucket)
 
-	err := bfs.WalkDir("abfs://other@account.dfs.core.windows.net/data", func(string, fs.DirEntry, error) error {
+	err := bfs.WalkDir(context.Background(), "abfs://other@account.dfs.core.windows.net/data", func(string, fs.DirEntry, error) error {
 		t.Fatal("WalkDir callback should not be called")
 
 		return nil
@@ -386,7 +386,7 @@ func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
 	bfs := testADLSBlobFileIO(t, ctx, "abfs://container@account.dfs.core.windows.net/", bucket)
 
 	var walked []string
-	err := bfs.WalkDir("abfs://container@account.dfs.core.windows.net/path", func(path string, d fs.DirEntry, err error) error {
+	err := bfs.WalkDir(context.Background(), "abfs://container@account.dfs.core.windows.net/path", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

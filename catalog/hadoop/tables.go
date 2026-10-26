@@ -72,7 +72,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, errors.New("hadoop catalog: custom table locations are not supported")
 	}
 
-	exists, err := isTableDir(c.filesystem, c.isLocal, loc)
+	exists, err := isTableDir(ctx, c.filesystem, c.isLocal, loc)
 	if err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to inspect table directory: %w", err)
 	}
@@ -135,7 +135,7 @@ func (c *Catalog) loadTable(ctx context.Context, ident table.Identifier) (*table
 		return nil, 0, err
 	}
 
-	metaPath, version, err := c.findMetadataLocation(ident)
+	metaPath, version, err := c.findMetadataLocation(ctx, ident)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -163,14 +163,14 @@ func (c *Catalog) LoadTable(ctx context.Context, ident table.Identifier) (*table
 	return tbl, err
 }
 
-func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (bool, error) {
+func (c *Catalog) CheckTableExists(ctx context.Context, ident table.Identifier) (bool, error) {
 	if err := validateTableIdentifier(ident); err != nil {
 		return false, err
 	}
 
 	// Direct existence checks surface metadata directory read errors; listing
 	// paths use isTableDirForListing to skip unreadable entries.
-	exists, err := isTableDir(c.filesystem, c.isLocal, c.tableToPath(ident))
+	exists, err := isTableDir(ctx, c.filesystem, c.isLocal, c.tableToPath(ident))
 	if err != nil {
 		return false, err
 	}
@@ -273,7 +273,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 				return fmt.Errorf("hadoop catalog: failed to claim metadata version: %w", err)
 			}
 
-			existingPath, exists, err := c.metadataVersionLocation(ident, version)
+			existingPath, exists, err := c.metadataVersionLocation(ctx, ident, version)
 			if err != nil {
 				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
@@ -323,7 +323,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 		}
 	}()
 
-	existingPath, exists, err := c.metadataVersionLocation(ident, version)
+	existingPath, exists, err := c.metadataVersionLocation(ctx, ident, version)
 	if err != nil {
 		return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
 			version, err)
@@ -339,7 +339,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 				conflictErr, strings.Join(ident, "."), metaPath)
 		}
 		if errors.Is(err, fs.ErrNotExist) {
-			existingPath, exists, err := c.metadataVersionLocation(ident, version)
+			existingPath, exists, err := c.metadataVersionLocation(ctx, ident, version)
 			if err != nil {
 				return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
 					version, err)
@@ -361,7 +361,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 	return nil
 }
 
-func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[table.Identifier, error] {
+func (c *Catalog) ListTables(ctx context.Context, ns table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		if err := validateIdentifier(ns); err != nil {
 			yield(nil, err)
@@ -384,7 +384,7 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 			return
 		}
 
-		err = c.filesystem.WalkDir(nsPath, func(path string, d fs.DirEntry, err error) error {
+		err = c.filesystem.WalkDir(ctx, nsPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				if path != nsPath && shouldSuppressPermissionError(err) {
 					log.Printf("hadoop catalog: unable to inspect path %s while listing tables: %v", path, err)
@@ -406,7 +406,7 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 			}
 
 			// Skip anything that is not a table directory.
-			isTable, err := isTableDirForListing(c.filesystem, c.isLocal, path)
+			isTable, err := isTableDirForListing(ctx, c.filesystem, c.isLocal, path)
 			if err != nil {
 				return err
 			}

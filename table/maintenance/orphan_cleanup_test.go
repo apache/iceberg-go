@@ -1603,9 +1603,13 @@ type mockWalkEntry struct {
 	info mockFileInfo
 }
 
-func (m *mockListableIO) WalkDir(root string, fn stdfs.WalkDirFunc) error {
+func (m *mockListableIO) WalkDir(ctx context.Context, root string, fn stdfs.WalkDirFunc) error {
 	m.root = root
 	for _, entry := range m.entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err := fn(entry.path, stdfs.FileInfoToDirEntry(entry.info), nil); err != nil {
 			return err
 		}
@@ -2232,7 +2236,7 @@ func TestWalkDirectoryUsesListableIO(t *testing.T) {
 	var walked []string
 	sizes := make(map[string]int64)
 
-	err := walkDirectory(mock, "s3://bucket/data", func(path string, info stdfs.FileInfo) error {
+	err := walkDirectory(context.Background(), mock, "s3://bucket/data", func(path string, info stdfs.FileInfo) error {
 		walked = append(walked, path)
 		sizes[path] = info.Size()
 
@@ -2314,7 +2318,7 @@ func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
 }
 
 func TestWalkDirectoryRequiresListableIO(t *testing.T) {
-	err := walkDirectory(&mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
+	err := walkDirectory(context.Background(), &mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
 		require.Fail(t, "walk callback should not run for non-listable IO")
 
 		return nil

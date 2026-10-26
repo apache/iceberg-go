@@ -356,11 +356,11 @@ func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
 // loadable metadata files in its metadata/ subdirectory. It recognizes:
 //   - v*.metadata.json (Hadoop catalog format)
 //   - <seq>-<uuid>.metadata.json (Java/PyIceberg format)
-func isTableDir(filesystem HadoopCatalogFS, isLocal bool, tablePath string) (bool, error) {
+func isTableDir(ctx context.Context, filesystem HadoopCatalogFS, isLocal bool, tablePath string) (bool, error) {
 	metaDir := joinPath(isLocal, tablePath, "metadata")
 
 	foundMetadata := false
-	err := filesystem.WalkDir(metaDir, func(path string, d fs.DirEntry, err error) error {
+	err := filesystem.WalkDir(ctx, metaDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -394,8 +394,8 @@ func isTableDir(filesystem HadoopCatalogFS, isLocal bool, tablePath string) (boo
 	return foundMetadata, nil
 }
 
-func isTableDirForListing(filesystem HadoopCatalogFS, isLocal bool, tablePath string) (bool, error) {
-	isTable, err := isTableDir(filesystem, isLocal, tablePath)
+func isTableDirForListing(ctx context.Context, filesystem HadoopCatalogFS, isLocal bool, tablePath string) (bool, error) {
+	isTable, err := isTableDir(ctx, filesystem, isLocal, tablePath)
 	if err != nil && shouldSuppressPermissionError(err) {
 		log.Printf("hadoop catalog: unable to inspect metadata directory %s: %v", joinPath(isLocal, tablePath, "metadata"), err)
 
@@ -438,12 +438,12 @@ func (c *Catalog) writeVersionHint(ctx context.Context, ident table.Identifier, 
 	}
 }
 
-func (c *Catalog) scanMetadataFiles(ident table.Identifier) (map[int]metadataFile, metadataFile, error) {
+func (c *Catalog) scanMetadataFiles(ctx context.Context, ident table.Identifier) (map[int]metadataFile, metadataFile, error) {
 	dir := c.metadataDir(ident)
 	byVersion := map[int]metadataFile{}
 	var latest metadataFile
 
-	err := c.filesystem.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := c.filesystem.WalkDir(ctx, dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -472,8 +472,8 @@ func (c *Catalog) scanMetadataFiles(ident table.Identifier) (map[int]metadataFil
 	return byVersion, latest, err
 }
 
-func (c *Catalog) metadataVersionLocation(ident table.Identifier, version int) (string, bool, error) {
-	files, _, err := c.scanMetadataFiles(ident)
+func (c *Catalog) metadataVersionLocation(ctx context.Context, ident table.Identifier, version int) (string, bool, error) {
+	files, _, err := c.scanMetadataFiles(ctx, ident)
 	if err != nil {
 		return "", false, err
 	}
@@ -483,8 +483,8 @@ func (c *Catalog) metadataVersionLocation(ident table.Identifier, version int) (
 	return file.location, ok, nil
 }
 
-func (c *Catalog) findMetadataLocation(ident table.Identifier) (string, int, error) {
-	_, latest, err := c.scanMetadataFiles(ident)
+func (c *Catalog) findMetadataLocation(ctx context.Context, ident table.Identifier) (string, int, error) {
+	_, latest, err := c.scanMetadataFiles(ctx, ident)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", 0, fmt.Errorf("hadoop catalog: cannot read metadata directory for %s: %w: %w",
@@ -503,8 +503,8 @@ func (c *Catalog) findMetadataLocation(ident table.Identifier) (string, int, err
 	return latest.location, latest.version, nil
 }
 
-func (c *Catalog) findVersion(ident table.Identifier) (int, error) {
-	_, version, err := c.findMetadataLocation(ident)
+func (c *Catalog) findVersion(ctx context.Context, ident table.Identifier) (int, error) {
+	_, version, err := c.findMetadataLocation(ctx, ident)
 	if err != nil {
 		return 0, err
 	}

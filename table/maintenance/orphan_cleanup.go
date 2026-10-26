@@ -402,7 +402,7 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 	})
 
 	g.Go(func() error {
-		return walkDirectory(fs, scanLocation, func(path string, info stdfs.FileInfo) error {
+		return walkDirectory(gctx, fs, scanLocation, func(path string, info stdfs.FileInfo) error {
 			if gctx.Err() != nil {
 				return gctx.Err()
 			}
@@ -642,9 +642,9 @@ func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConc
 	return referenced, nil
 }
 
-func walkDirectory(fsys io.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+func walkDirectory(ctx context.Context, fsys io.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
 	if listable, ok := fsys.(io.ListableIO); ok {
-		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
+		return listable.WalkDir(ctx, root, func(path string, d stdfs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -1372,7 +1372,7 @@ func PurgeFiles(ctx context.Context, tbl *table.Table) error {
 	// of unreferenced branched data files.
 	if gcEnabled {
 		if listable, ok := fs.(io.ListableIO); ok {
-			walkErr := listable.WalkDir(location, func(path string, d stdfs.DirEntry, err error) error {
+			walkErr := listable.WalkDir(ctx, location, func(path string, d stdfs.DirEntry, err error) error {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -1389,6 +1389,9 @@ func PurgeFiles(ctx context.Context, tbl *table.Table) error {
 
 				return nil
 			})
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil && !os.IsNotExist(walkErr) && !errors.Is(walkErr, stdfs.ErrNotExist) {
 				errs = append(errs, fmt.Errorf("failed walking directory %s: %w", location, walkErr))
 			}

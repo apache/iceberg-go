@@ -113,7 +113,11 @@ func (m *MemFS) WriteFile(ctx context.Context, name string, content []byte) erro
 	return nil
 }
 
-func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
+func (m *MemFS) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	type walkEntry struct {
 		path  string
 		size  int64
@@ -131,6 +135,12 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 		}
 	}
 	for key, data := range m.files {
+		if err := ctx.Err(); err != nil {
+			m.mu.RUnlock()
+
+			return err
+		}
+
 		if !memPathInRoot(key, root) {
 			continue
 		}
@@ -157,6 +167,10 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 		addEntry(walkEntry{path: filePath, size: int64(len(data))})
 	}
 	m.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if len(entriesByPath) == 0 {
 		err := fn(root, nil, &fs.PathError{Op: "lstat", Path: root, Err: fs.ErrNotExist})
 		if err == fs.SkipDir || err == fs.SkipAll {
@@ -171,14 +185,25 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 	paths := make([]string, 0, len(entriesByPath))
 	for entryPath := range entriesByPath {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		paths = append(paths, entryPath)
 	}
 	sort.Slice(paths, func(i, j int) bool {
 		return memWalkPathLess(root, paths[i], paths[j])
 	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	var skipPrefix string
 	for _, entryPath := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if skipPrefix != "" && strings.HasPrefix(entryPath, skipPrefix) {
 			continue
 		}

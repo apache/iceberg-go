@@ -2755,7 +2755,7 @@ func metadataFiles(t *testing.T, wfs iceio.WriteFileIO) []string {
 	require.True(t, ok, "test IO must support listing")
 
 	var paths []string
-	require.NoError(t, listable.WalkDir("mem://default/table-location/metadata",
+	require.NoError(t, listable.WalkDir(context.Background(), "mem://default/table-location/metadata",
 		func(path string, d fs.DirEntry, err error) error {
 			require.NoError(t, err)
 			if !d.IsDir() {
