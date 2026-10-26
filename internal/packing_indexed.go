@@ -60,7 +60,12 @@ func (idx *packingWeightIndex) update(bin int, weight int64) {
 	idx.weights[node] = weight
 
 	for node /= 2; node > 0; node /= 2 {
-		idx.weights[node] = min(idx.weights[node*2], idx.weights[node*2+1])
+		minimum := min(idx.weights[node*2], idx.weights[node*2+1])
+		if idx.weights[node] == minimum {
+			// An unchanged minimum cannot affect any ancestor.
+			break
+		}
+		idx.weights[node] = minimum
 	}
 }
 
