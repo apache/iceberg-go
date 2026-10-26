@@ -2599,6 +2599,9 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>SQL UDF representations now use struct literals.</strong> The <code>udf.NewSQLRepresentation(dialect, sql)</code> function, available since v0.7.0, is removed. Use <code>udf.SQLRepresentation{Dialect: &quot;trino&quot;, SQL: &quot;x + 1&quot;}</code> instead. Empty fields and duplicate dialects are checked during metadata validation; serialized JSON is unchanged.</p>
+</li>
+<li>
 <p><strong>Filesystem adapter construction consolidated.</strong> Replace <code>io.FSPreProcName(fsys, fn)</code> with <code>io.FS(fsys, io.WithNamePreprocessor(fn))</code>. Plain <code>io.FS(fsys)</code> remains supported.</p>
 </li>
 <li>
