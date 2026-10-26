@@ -649,8 +649,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		if !cleanupOrphans || len(orphanedManifests) == 0 {
 			return
 		}
+		// The commit may have failed because ctx was canceled; remove the
+		// orphans without that cancellation so they are not left behind.
+		cleanupCtx := context.WithoutCancel(ctx)
 		for _, path := range orphanedManifests {
-			if removeErr := wfs.Remove(path); removeErr != nil {
+			if removeErr := wfs.Remove(cleanupCtx, path); removeErr != nil {
 				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
 			}
 		}
@@ -1214,7 +1217,8 @@ func deleteOldMetadata(fs icebergio.IO, baseMeta, newMeta Metadata) {
 		toRemove := internal.Difference(removedPrevious, currentMetadata)
 
 		for _, file := range toRemove {
-			if err := fs.Remove(file); err != nil {
+			// deleteOldMetadata is best-effort cleanup with no caller context.
+			if err := fs.Remove(context.Background(), file); err != nil {
 				// Log the error instead of raising it when deleting old metadata files, as an external entity like a compactor may have already deleted them
 				log.Printf("Warning: Failed to delete old metadata file: %s error: %v", file, err)
 			}
@@ -1543,7 +1547,7 @@ func NewFromLocation(
 			return nil, err
 		}
 	} else {
-		f, err := fsys.Open(metalocation)
+		f, err := fsys.Open(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}
