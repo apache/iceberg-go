@@ -18,6 +18,7 @@
 package hadoop_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/iceberg-go/catalog"
@@ -29,7 +30,7 @@ import (
 func TestHadoopCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		NewCatalog: func(t *testing.T) catalog.Catalog {
-			cat, err := hadoop.NewCatalog("test", t.TempDir(), nil)
+			cat, err := hadoop.NewCatalog(context.Background(), "test", t.TempDir(), nil)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, cat.Close()) })
 
