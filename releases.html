@@ -276,7 +276,7 @@
 <p><strong>Transform formatting requires the result type and uses the Java-aligned method name.</strong> <code>Transform.ToHumanStr(value)</code> and <code>Transform.ToHumanStrType(resultType, value)</code> are removed. Use <code>Transform.ToHumanString(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
 </li>
 <li>
-<p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> remains available as an alias for <code>io.Closer</code>.</p>
+<p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> is removed. Replace <code>cat.(catalog.Closer)</code> checks with <code>defer cat.Close()</code>; <code>catalog.Catalog</code> already implements <code>io.Closer</code>, so no type assertion is needed.</p>
 </li>
 <li>
 <p><strong>Puffin writer property setter renamed.</strong> <code>puffin.Writer.AddProperties</code> is now <code>puffin.Writer.SetProperties</code>. Repeated calls still merge keys; use <code>ClearProperties</code> to clear custom properties before finishing.</p>
