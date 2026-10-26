@@ -188,7 +188,7 @@ func writePartitionResidualParquet(
 		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
 	require.NoError(t, writer.Close())
 
-	file, err := fs.Open(path)
+	file, err := fs.Open(context.Background(), path)
 	require.NoError(t, err)
 	defer file.Close()
 	info, err := file.Stat()

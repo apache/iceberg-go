@@ -2619,7 +2619,7 @@ func arrowTableWithNull() arrow.Table {
 }
 
 func (t *TableWritingTestSuite) validateManifestFileLength(fs iceio.IO, m iceberg.ManifestFile) {
-	f, err := fs.Open(m.FilePath())
+	f, err := fs.Open(context.Background(), m.FilePath())
 	t.Require().NoError(err)
 	defer f.Close()
 
@@ -3416,7 +3416,7 @@ func (t *TableTestSuite) TestMetadataCompressionRoundTrip() {
 	t.Require().NoError(err)
 
 	// Read the metadata file and verify it's gzipped
-	file, err := fs.Open(metadataLoc)
+	file, err := fs.Open(context.Background(), metadataLoc)
 	t.Require().NoError(err)
 	defer file.Close()
 
@@ -3475,7 +3475,7 @@ func (t *TableTestSuite) TestMetadataCompressionRoundTripZstd() {
 	fs, err := tbl.FS(context.Background())
 	t.Require().NoError(err)
 
-	file, err := fs.Open(metadataLoc)
+	file, err := fs.Open(context.Background(), metadataLoc)
 	t.Require().NoError(err)
 	defer file.Close()
 

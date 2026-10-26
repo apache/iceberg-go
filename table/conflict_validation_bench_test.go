@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -151,10 +152,10 @@ type conflictValidationBenchmarkIO struct {
 	bytes int64
 }
 
-func (f *conflictValidationBenchmarkIO) Open(name string) (iceio.File, error) {
+func (f *conflictValidationBenchmarkIO) Open(_ context.Context, name string) (iceio.File, error) {
 	f.opens++
 
-	file, err := f.IO.Open(name)
+	file, err := f.IO.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}

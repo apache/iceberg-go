@@ -84,7 +84,7 @@ type manifestListRecordV2 struct {
 func readManifestListPartitionFields(t *testing.T, fs iceio.IO, manifestListPath string) []any {
 	t.Helper()
 
-	f, err := fs.Open(manifestListPath)
+	f, err := fs.Open(context.Background(), manifestListPath)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, f.Close()) }()
 

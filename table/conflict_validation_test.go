@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -992,7 +993,7 @@ func TestConflictManifestIODoesNotCachePartialRead(t *testing.T) {
 	tio.files[manifestPath] = []byte("abc")
 	cache := newConflictManifestIO(&conflictValidationStatIO{trackingCallsIO: tio})
 
-	f, err := cache.Open(manifestPath)
+	f, err := cache.Open(context.Background(), manifestPath)
 	require.NoError(t, err)
 	buf := make([]byte, 1)
 	_, err = f.Read(buf)
@@ -1006,7 +1007,7 @@ func TestConflictManifestIOIsReadOnly(t *testing.T) {
 	tio := newTrackingCallsIO()
 	cache := newConflictManifestIO(tio)
 
-	err := cache.Remove("manifest.avro")
+	err := cache.Remove(context.Background(), "manifest.avro")
 	require.Error(t, err)
 	assert.Zero(t, tio.removeCount["manifest.avro"])
 }
@@ -1021,7 +1022,7 @@ func TestConflictManifestIOStopsCachingAtByteLimit(t *testing.T) {
 		cachedBytes: maxConflictManifestCacheBytes - 1,
 	}
 
-	f, err := cache.Open(manifestPath)
+	f, err := cache.Open(context.Background(), manifestPath)
 	require.NoError(t, err)
 	buf := make([]byte, 2)
 	_, err = f.Read(buf)
