@@ -217,7 +217,7 @@ func clusteredPartitionedWrite(
 // tree keyed on each partition field's value, mirroring the layout of
 // partitionMapNode. Go's any-equality at each level distinguishes SQL
 // NULL from the literal string "null" — the same property that
-// PartitionToPath drops via Transform.ToHumanStr.
+// PartitionToPath drops via Transform.ToHumanString.
 type closedPartitionSet map[any]closedPartitionSet
 
 func (s closedPartitionSet) add(rec partitionRecord) {
