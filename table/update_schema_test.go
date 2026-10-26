@@ -2621,3 +2621,19 @@ func TestUnionByNameRejectsOverlappingAdds(t *testing.T) {
 	require.Error(t, err, "re-adding a field already pending must be rejected")
 	assert.Contains(t, err.Error(), "name")
 }
+
+func TestRenameColumnDoesNotMutatePath(t *testing.T) {
+	tbl := New([]string{"id"}, testMetadata, "", nil, nil)
+
+	path := []string{"address", "city"}
+	sc, err := NewUpdateSchema(tbl.NewTransaction(), true, false).
+		RenameColumn(path, "town").
+		UpdateColumn(path, ColumnUpdate{Doc: iceberg.Optional[string]{Valid: true, Val: "the town"}}).
+		Apply()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"address", "city"}, path)
+
+	f, ok := sc.FindFieldByName("address.town")
+	require.True(t, ok)
+	assert.Equal(t, "the town", f.Doc)
+}
