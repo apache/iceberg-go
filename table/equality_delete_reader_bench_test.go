@@ -296,7 +296,7 @@ func newEqualityDeleteLoadingBenchmarkInput(b *testing.B) equalityDeleteLoadingB
 	firstPath := "mem://benchmark-lazy-equality/delete-0000.parquet"
 	writeEqualityDeleteParquetToMemFS(b, fs.MemFS, firstPath,
 		`[{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9}]`)
-	file, err := fs.MemFS.Open(firstPath)
+	file, err := fs.MemFS.Open(context.Background(), firstPath)
 	if err != nil {
 		b.Fatal(err)
 	}

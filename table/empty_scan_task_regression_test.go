@@ -96,7 +96,7 @@ func TestScanSurvivesFullyPrunedTask(t *testing.T) {
 		require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(),
 			nil, pqarrow.DefaultWriterProps()))
 
-		st, err := fs.Open(path)
+		st, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		defer st.Close()
 		info, err := st.Stat()

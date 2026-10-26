@@ -292,7 +292,7 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
 	defer func(fs io.IO, name string) {
-		err = fs.Remove(name)
+		err = fs.Remove(s.ctx, name)
 		s.Require().NoError(err)
 	}(fs, pqfile)
 
