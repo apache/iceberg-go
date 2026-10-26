@@ -70,7 +70,7 @@ import (
 
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
 // handle err
-cat := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 ```
 
 #### Hive
@@ -112,7 +112,12 @@ cat, err := catalog.Load(ctx, "default", iceberg.Properties{
     "uri":       "http://localhost:8181",
     "warehouse": "s3://my-bucket/warehouse",
 })
+if err != nil { panic(err) }
+defer cat.Close()
 ```
+
+Every catalog implements `Close() error`. Close it when done to release catalog-owned
+resources. A caller-supplied database connection remains caller-owned.
 
 ### Namespaces
 
@@ -357,7 +362,7 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
-`ReplaceDataFiles(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFilesWithDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
+`ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
 
 ### Transactions
 
@@ -383,7 +388,8 @@ newTbl, err := txn.Commit(ctx)
 To target a specific branch:
 
 ```go
-txn := tbl.NewTransactionOnBranch("staging")
+txn, err := tbl.NewTransactionOnBranch("staging")
+if err != nil { /* ... */ }
 ```
 
 `Commit` retries automatically on conflict (`ErrCommitFailed`) - tune via the `commit.retry.*` table properties.
@@ -513,6 +519,8 @@ fmt.Printf("rewrote %d files into %d (%d -> %d bytes)\n",
 ```
 
 The `table/compaction` subpackage provides bin-packing planning. The `iceberg compact analyze` and `compact run` CLI commands wrap the same machinery - see [CLI](./cli.md).
+
+Compaction tasks represent complete data files, not independent scan splits. The planner collapses split tasks for the same file into one whole-file task, rejecting inconsistent delete or lineage metadata and dropping residual filters because they select files but do not filter rows during compaction. Direct calls to `ExecuteCompactionGroup` reject partial ranges and residual row filters. Attached delete files are still applied when rewriting each source file.
 
 ### Expiring snapshots
 

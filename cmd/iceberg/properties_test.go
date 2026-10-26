@@ -43,6 +43,8 @@ func (m *mockCatalogForProperties) LoadTable(ctx context.Context, ident table.Id
 	return m.tbl, nil
 }
 
+func (m *mockCatalogForProperties) Close() error { return nil }
+
 func (m *mockCatalogForProperties) CatalogType() catalog.Type {
 	panic("CatalogType must not be called")
 }
@@ -61,6 +63,10 @@ func (m *mockCatalogForProperties) ListTables(context.Context, table.Identifier)
 
 func (m *mockCatalogForProperties) DropTable(context.Context, table.Identifier) error {
 	panic("DropTable must not be called")
+}
+
+func (m *mockCatalogForProperties) PurgeTable(context.Context, table.Identifier) error {
+	panic("PurgeTable must not be called")
 }
 
 func (m *mockCatalogForProperties) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {

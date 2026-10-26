@@ -197,7 +197,7 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	// lifetime instead, through ioCancel. fetchCreds above still honours ctx.
 	//
 	// WithoutCancel keeps ctx's values, and the IO depends on them: the S3
-	// factory takes its base AWS config from utils.GetAwsConfig(ctx), so do
+	// factory takes its base AWS config from utils.GetAWSConfig(ctx), so do
 	// not replace this with context.Background(). The flip side is that the
 	// first caller's request-scoped values stay attached to the shared IO.
 	ioCtx, ioCancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -362,22 +362,22 @@ func newPrefixScopedIO(ctx context.Context, baseProps iceberg.Properties, creden
 	}
 }
 
-func (p *prefixScopedIO) Open(name string) (iceio.File, error) {
+func (p *prefixScopedIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	fs, err := p.filesystemFor(name)
 	if err != nil {
 		return nil, err
 	}
 
-	return fs.Open(name)
+	return fs.Open(ctx, name)
 }
 
-func (p *prefixScopedIO) Remove(name string) error {
+func (p *prefixScopedIO) Remove(ctx context.Context, name string) error {
 	fs, err := p.filesystemFor(name)
 	if err != nil {
 		return err
 	}
 
-	return fs.Remove(name)
+	return fs.Remove(ctx, name)
 }
 
 func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {

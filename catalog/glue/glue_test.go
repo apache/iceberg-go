@@ -913,7 +913,7 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	assert.True(dropCalled.Load())
 	assert.Positive(removeCalls.Load())
 	assert.False(removeBeforeDrop.Load(), "PurgeTable should drop the catalog entry before removing files")
-	file, err := failingFS.Open(dataFile)
+	file, err := failingFS.Open(context.Background(), dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)
 	assert.NoError(file.Close())
@@ -952,7 +952,7 @@ type failRemoveIO struct {
 	onRemove func()
 }
 
-func (f failRemoveIO) Remove(string) error {
+func (f failRemoveIO) Remove(context.Context, string) error {
 	if f.onRemove != nil {
 		f.onRemove()
 	}
@@ -1873,7 +1873,7 @@ func TestGlueListTablesIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 
 	iter := ctlg.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
@@ -1906,7 +1906,7 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 
 	tbl, err := ctlg.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")})
@@ -1923,7 +1923,7 @@ func TestGlueListNamespacesIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 
 	namespaces, err := ctlg.ListNamespaces(context.TODO(), nil)
@@ -1947,7 +1947,7 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName})
 	assert.NoError(err)
@@ -1978,7 +1978,7 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	sourceTableName := os.Getenv("TEST_TABLE_NAME")
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName})
 	assert.NoError(err)
@@ -2138,7 +2138,7 @@ func TestRegisterTableIntegration(t *testing.T) {
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 
 	// Drop table if it exists
@@ -2174,7 +2174,7 @@ func TestAlterTableIntegration(t *testing.T) {
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 
 	// Create a table within the input database and location
@@ -2271,7 +2271,7 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 
 	// clean up table after test
@@ -2496,7 +2496,7 @@ func TestCommitTableOptimisticLockingIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg))
 	assert.NoError(err)
 
 	createOpts := []catalog.CreateTableOpt{
@@ -2939,7 +2939,7 @@ func TestGlueCreateTableS3TablesFederatedIntegration(t *testing.T) {
 	ctx := context.Background()
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAwsConfig(awsCfg), WithAwsProperties(AwsProperties{CatalogIdKey: catalogID}))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg), WithAWSProperties(AWSProperties{CatalogIdKey: catalogID}))
 	assert.NoError(err)
 
 	tableName := fmt.Sprintf("it_%d", time.Now().UnixNano())
@@ -3204,7 +3204,7 @@ func recordingMemFS(t *testing.T, scheme string) (*iceio.MemFS, *[]*aws.Config) 
 	recorded := new([]*aws.Config)
 	iceio.Unregister(scheme)
 	iceio.Register(scheme, func(ctx context.Context, _ *url.URL, _ map[string]string) (iceio.IO, error) {
-		*recorded = append(*recorded, utils.GetAwsConfig(ctx))
+		*recorded = append(*recorded, utils.GetAWSConfig(ctx))
 
 		return memFS, nil
 	})

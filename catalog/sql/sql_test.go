@@ -702,7 +702,7 @@ func (s *SqliteCatalogTestSuite) TestGenuineV0RowSurvivesMigrationForCommitAndRe
 		var got sql.NullString
 		qErr := sqldb.QueryRow(
 			`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
-			"default", nsStr, catalog.TableNameFromIdent(tblID),
+			"default", nsStr, catalog.ObjectNameFromIdent(tblID),
 		).Scan(&got)
 		s.Require().NoError(qErr)
 
@@ -727,7 +727,7 @@ func (s *SqliteCatalogTestSuite) TestGenuineV0RowSurvivesMigrationForCommitAndRe
 	_, err = sqldb.Exec(
 		`UPDATE iceberg_tables SET iceberg_type = NULL `+
 			`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
-		"default", nsStr, catalog.TableNameFromIdent(tblID),
+		"default", nsStr, catalog.ObjectNameFromIdent(tblID),
 	)
 	s.Require().NoError(err)
 
@@ -1069,7 +1069,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableWithGivenLocation() {
 
 	for _, tt := range tests {
 		ns := catalog.NamespaceFromIdent(tt.tblID)
-		tblName := catalog.TableNameFromIdent(tt.tblID)
+		tblName := catalog.ObjectNameFromIdent(tt.tblID)
 
 		location := fmt.Sprintf("file://%s/%s.db/%s-given",
 			s.warehouse, tt.cat.Name(), tblName)
@@ -1516,7 +1516,8 @@ func (s *SqliteCatalogTestSuite) stageStringRow(ctx context.Context, tx *table.T
 // appendStringRow commits one row to branch, creating the branch from
 // main's head if it does not exist.
 func (s *SqliteCatalogTestSuite) appendStringRow(ctx context.Context, tbl *table.Table, branch, value string) *table.Table {
-	tx := tbl.NewTransactionOnBranch(branch)
+	tx, err := tbl.NewTransactionOnBranch(branch)
+	s.Require().NoError(err)
 	s.stageStringRow(ctx, tx, value)
 	out, err := tx.Commit(ctx)
 	s.Require().NoError(err)
@@ -1677,7 +1678,8 @@ func (s *SqliteCatalogTestSuite) TestStaleRollbackOfStagedBranchFailsAfterPeerCr
 	s.Require().NoError(err)
 	mainHead := stale.Metadata().CurrentSnapshot().SnapshotID
 
-	tx := stale.NewTransactionOnBranch("feature")
+	tx, err := stale.NewTransactionOnBranch("feature")
+	s.Require().NoError(err)
 	s.stageStringRow(ctx, tx, "stale")
 	s.Require().NoError(tx.RollbackToSnapshot(mainHead))
 
@@ -1715,7 +1717,8 @@ func (s *SqliteCatalogTestSuite) TestStaleExpireWithStagedBranchFailsAfterPeerCr
 	peerHead := peer.Metadata().SnapshotByName("feature").SnapshotID
 	s.waitPastSnapshots(peer.Metadata())
 
-	tx := stale.NewTransactionOnBranch("feature")
+	tx, err := stale.NewTransactionOnBranch("feature")
+	s.Require().NoError(err)
 	s.stageStringRow(ctx, tx, "stale")
 	s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(1), table.WithOlderThan(0), table.WithPostCommit(false)))
 	_, err = tx.Commit(ctx)
@@ -1805,11 +1808,7 @@ func (s *SqliteCatalogTestSuite) TestPurgeTable() {
 		s.Require().NoError(err)
 		s.Require().NoError(os.WriteFile(metaLoc, newMetaBytes, 0o644))
 
-		// Assert that the catalog implements PurgeableTable
-		purger, ok := any(tt.cat).(catalog.PurgeableTable)
-		s.Require().True(ok, "catalog must implement PurgeableTable")
-
-		s.NoError(purger.PurgeTable(context.Background(), tt.tblID))
+		s.NoError(tt.cat.PurgeTable(context.Background(), tt.tblID))
 
 		// The table catalog entry should be gone
 		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)
@@ -1880,10 +1879,7 @@ func (s *SqliteCatalogTestSuite) TestPurgeTableGCDisabled() {
 		metaLoc := strings.TrimPrefix(tbl.MetadataLocation(), "file://")
 		s.FileExists(metaLoc)
 
-		purger, ok := any(tt.cat).(catalog.PurgeableTable)
-		s.Require().True(ok, "catalog must implement PurgeableTable")
-
-		s.NoError(purger.PurgeTable(context.Background(), tt.tblID))
+		s.NoError(tt.cat.PurgeTable(context.Background(), tt.tblID))
 
 		// The table catalog entry should be gone
 		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)

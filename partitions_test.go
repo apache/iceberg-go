@@ -772,7 +772,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Equal(t, 1, field.SourceID())
+		assert.Equal(t, 1, field.FirstSourceID())
 		assert.Equal(t, 1000, field.FieldID)
 		assert.Equal(t, "str_truncate", field.Name)
 		assert.Equal(t, iceberg.TruncateTransform{Width: 19}, field.Transform)
@@ -789,7 +789,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Equal(t, 2, field.SourceID())
+		assert.Equal(t, 2, field.FirstSourceID())
 		assert.Equal(t, 1001, field.FieldID)
 		assert.Equal(t, "int_bucket", field.Name)
 		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 25}, field.Transform)
@@ -806,7 +806,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Equal(t, 2, field.SourceID(), "SourceID should be first element")
+		assert.Equal(t, 2, field.FirstSourceID(), "FirstSourceID should return the first element")
 		assert.Equal(t, []int{2, 3}, field.SourceIDs, "SourceIDs should contain all elements")
 		assert.Equal(t, 1001, field.FieldID)
 		assert.Equal(t, "int_bucket", field.Name)
@@ -827,7 +827,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var decoded iceberg.PartitionField
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		assert.Equal(t, 2, decoded.SourceID())
+		assert.Equal(t, 2, decoded.FirstSourceID())
 		assert.Equal(t, []int{2, 3}, decoded.SourceIDs)
 	})
 
@@ -886,7 +886,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		}`
 		var field iceberg.PartitionField
 		require.NoError(t, json.Unmarshal([]byte(jsonData), &field))
-		assert.Equal(t, 0, field.SourceID())
+		assert.Equal(t, 0, field.FirstSourceID())
 		assert.Equal(t, []int{0}, field.SourceIDs)
 	})
 
@@ -895,7 +895,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(`{
 			"source-id": 1, "field-id": 1003, "transform": "void", "name": "void"
 		}`), &field))
-		assert.Equal(t, 1, field.SourceID())
+		assert.Equal(t, 1, field.FirstSourceID())
 	})
 }
 
@@ -1172,7 +1172,7 @@ func TestUnboundPartitionSpecUnmarshalAcceptsZeroSourceID(t *testing.T) {
 
 	var spec iceberg.UnboundPartitionSpec
 	require.NoError(t, json.Unmarshal([]byte(data), &spec))
-	assert.Equal(t, 0, spec.Field(0).SourceID())
+	assert.Equal(t, 0, spec.Field(0).FirstSourceID())
 
 	roundTripped, err := json.Marshal(spec)
 	require.NoError(t, err)
@@ -1191,8 +1191,8 @@ func TestUnboundPartitionSpecUnmarshalAcceptsRepeatedZeroSourceID(t *testing.T) 
 	var spec iceberg.UnboundPartitionSpec
 	require.NoError(t, json.Unmarshal([]byte(data), &spec))
 	require.Equal(t, 2, spec.NumFields())
-	assert.Equal(t, 0, spec.Field(0).SourceID())
-	assert.Equal(t, 0, spec.Field(1).SourceID())
+	assert.Equal(t, 0, spec.Field(0).FirstSourceID())
+	assert.Equal(t, 0, spec.Field(1).FirstSourceID())
 }
 
 func TestUnboundPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
@@ -1294,7 +1294,7 @@ func TestUnboundPartitionSpecBindToSchema(t *testing.T) {
 	bound, err := spec.BindToSchema(requestSchema, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, bound.NumFields())
-	source, ok := requestSchema.FindFieldByID(bound.Field(0).SourceID())
+	source, ok := requestSchema.FindFieldByID(bound.Field(0).FirstSourceID())
 	require.True(t, ok)
 	assert.Equal(t, "floats", source.Name)
 
@@ -1689,6 +1689,23 @@ func TestNewPartitionSpecOptsTimeTransformMembership(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, 2, spec.NumFields())
 			assert.Equal(t, tt.trans, spec.Field(1).Transform)
+		})
+	}
+}
+
+func TestPartitionFieldFirstSourceID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sourceIDs []int
+		want      int
+	}{
+		{name: "empty", sourceIDs: nil, want: 0},
+		{name: "single", sourceIDs: []int{7}, want: 7},
+		{name: "multiple", sourceIDs: []int{7, 9}, want: 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			field := iceberg.PartitionField{SourceIDs: tc.sourceIDs}
+			assert.Equal(t, tc.want, field.FirstSourceID())
 		})
 	}
 }

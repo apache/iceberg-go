@@ -93,7 +93,7 @@ type CompactionGroupFailure struct {
 // normally be invoked through this action so callers do not accidentally try
 // to commit the parent transaction again.
 func (t Table) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
-	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	txn, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +418,11 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // Empty groups return a zero [CompactionGroupResult] without doing
 // any I/O.
 //
+// Every task must represent one complete physical data file with no residual
+// row filter. Compaction applies the attached deletes, then replaces each
+// source file in full; partial ranges or residual filters would otherwise
+// silently discard rows when the original task is replaced.
+//
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
 //
@@ -427,6 +432,26 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTaskGroup, opts ...CompactionGroupOption) (CompactionGroupResult, error) {
 	if len(group.Tasks) == 0 {
 		return CompactionGroupResult{PartitionKey: group.PartitionKey}, nil
+	}
+
+	seenFiles := make(map[string]struct{}, len(group.Tasks))
+	for _, task := range group.Tasks {
+		if task.File == nil {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
+		}
+		path := task.File.FilePath()
+		if _, ok := seenFiles[path]; ok {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction group contains duplicate data file %q", ErrInvalidOperation, path)
+		}
+		seenFiles[path] = struct{}{}
+
+		fileSize := task.File.FileSizeBytes()
+		if task.Start != 0 || task.Length < 0 || (task.Length > 0 && task.Length != fileSize) {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task for %q must cover the whole data file", ErrInvalidOperation, path)
+		}
+		if task.Residual != nil && !task.Residual.Equals(iceberg.AlwaysTrue{}) {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task for %q has a residual row filter", ErrInvalidOperation, path)
+		}
 	}
 
 	cfg := compactionGroupConfig{}
@@ -692,7 +717,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		}
 		deletesToRemove := append(deadPositionDeletes, safeDVs...)
 
-		groupTxn, err := current.NewTransactionOnBranchWithError(t.branch)
+		groupTxn, err := current.NewTransactionOnBranch(t.branch)
 		if err != nil {
 			return result, cleanupBatch(fmt.Errorf("create transaction for partial rewrite batch: %w", err))
 		}
@@ -783,7 +808,7 @@ func cleanupCompactionOutputs(fs iceio.IO, batchResults []CompactionGroupResult)
 
 	var cleanupErr error
 	for path := range paths {
-		if err := fs.Remove(path); err != nil && !errors.Is(err, iofs.ErrNotExist) {
+		if err := fs.Remove(context.Background(), path); err != nil && !errors.Is(err, iofs.ErrNotExist) {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove %s: %w", path, err))
 		}
 	}

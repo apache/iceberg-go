@@ -51,7 +51,7 @@ func init() {
 	}))
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient
@@ -103,8 +103,7 @@ func (c *Catalog) CatalogType() catalog.Type {
 // resource — not just when a close returns an error (errors.Join already keeps
 // both), but when it panics: a bare errors.Join(c.client.Close(), c.reporter.Close())
 // would let a panic in the first close abort the second. Recovered panics are
-// converted to errors and joined with any close errors. Callers holding a
-// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+// converted to errors and joined with any close errors. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error {
 	return errors.Join(
 		closeIsolated(c.client.Close),
@@ -123,8 +122,6 @@ func closeIsolated(closeFn func() error) (err error) {
 
 	return closeFn()
 }
-
-var _ catalog.Closer = (*Catalog)(nil)
 
 // ListTables returns a list of table identifiers in the given namespace.
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -195,6 +192,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.opts.props),
 	)
 }
 
@@ -287,6 +285,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.opts.props),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
@@ -408,10 +407,10 @@ func sqlFromVersion(v *view.Version) (string, error) {
 			continue
 		}
 		if strings.EqualFold(r.Dialect, "hive") {
-			return r.Sql, nil
+			return r.SQL, nil
 		}
 		if fallback == "" {
-			fallback = r.Sql
+			fallback = r.SQL
 		}
 	}
 	if fallback != "" {
@@ -602,7 +601,10 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		if err != nil {
 			return nil, "", err
 		}
-		current, err = table.NewFromLocation(ctx, identifier, metadataLoc, io.LoadFSFunc(c.opts.props, metadataLoc), c)
+		current, err = table.NewFromLocation(
+			ctx, identifier, metadataLoc, io.LoadFSFunc(c.opts.props, metadataLoc), c,
+			table.WithScanPlanningIOProperties(c.opts.props),
+		)
 		if err != nil {
 			return nil, "", err
 		}
@@ -782,7 +784,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}
 
-	if err := fs.Remove(metadataLocation); err != nil {
+	if err := fs.Remove(ctx, metadataLocation); err != nil {
 		return fmt.Errorf("failed to remove view metadata file at %s: %w", metadataLocation, err)
 	}
 

@@ -34,7 +34,7 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 	olderThan, err := parseDuration(cmd.OlderThan)
 	if err != nil {
 		output.Error(fmt.Errorf("invalid --older-than: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
@@ -50,14 +50,13 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 	plan, err := maintenance.PlanOrphanFiles(ctx, tbl, opts...)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file scan failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	planFiles := plan.Files()
 	result := maintenance.OrphanCleanupResult{
-		OrphanFileLocations: planFiles,
-		OrphanFiles:         plan.OrphanFiles(),
-		TotalSizeBytes:      plan.TotalSizeBytes(),
+		OrphanFiles:    plan.OrphanFiles(),
+		TotalSizeBytes: plan.TotalSizeBytes(),
 	}
 	cliResult := buildCleanOrphanFilesResult(tbl, result, cmd.DryRun)
 
@@ -84,13 +83,13 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 		len(planFiles), formatBytes(plan.TotalSizeBytes()), tableIDString(tbl))
 	if err := confirmAction(prompt, cmd.Yes); err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	deleteResult, err := maintenance.ExecuteOrphanCleanup(ctx, tbl, plan)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file deletion failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	cliResult = buildCleanOrphanFilesResult(tbl, deleteResult, false)

@@ -88,7 +88,7 @@ func WithMetadataLocation(loc string) Option {
 }
 
 // WithSigV4 enables AWS SigV4 request signing for the REST catalog. The signing
-// identity is resolved in order: an explicit WithAwsConfig, then the s3.* catalog
+// identity is resolved in order: an explicit WithAWSConfig, then the s3.* catalog
 // credential properties (s3.access-key-id / s3.secret-access-key / s3.session-token),
 // then the AWS default credential chain.
 //
@@ -137,7 +137,7 @@ func WithPrefix(prefix string) Option {
 // bypasses the SigV4 machinery entirely, taking precedence over
 // WithSignerFactory, WithSigV4 / WithSigV4RegionSvc, the rest.sigv4-enabled
 // property, and any server-provided signing-region / signing-name overrides.
-// Use WithSignerFactory (or, for AWS, sigv4.WithAwsConfig) instead if you want
+// Use WithSignerFactory (or, for AWS, sigv4.WithAWSConfig) instead if you want
 // the region and service to stay driven by those settings.
 //
 // A signer only runs for requests to the catalog origin. Requests to any other
@@ -155,7 +155,7 @@ func WithSigner(signer RequestSigner) Option {
 // server-provided /v1/config overrides remain the single source of the signing
 // region and service: they are folded into the SignerConfig passed to the
 // factory. Optional backends such as
-// github.com/apache/iceberg-go/catalog/rest/sigv4 (via sigv4.WithAwsConfig) use
+// github.com/apache/iceberg-go/catalog/rest/sigv4 (via sigv4.WithAWSConfig) use
 // this so the AWS SDK stays out of the core package.
 //
 // The factory is consulted only when SigV4 signing is enabled (WithSigV4,

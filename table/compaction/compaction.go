@@ -21,6 +21,8 @@ package compaction
 import (
 	"bytes"
 	"fmt"
+	"reflect"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -188,43 +190,72 @@ type Plan struct {
 // PlanCompaction analyzes the given scan tasks and produces a Plan.
 // Tasks are grouped by partition, classified as candidates or skipped,
 // and candidates are bin-packed into groups targeting TargetFileSizeBytes.
+// Tasks should come from one coherent scan plan; split tasks for the same file
+// are collapsed, retaining the first task's per-file delete and lineage data.
+// Residual filters select files to rewrite, but are not applied to file contents.
 func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	if err := cfg.Validate(); err != nil {
 		return Plan{}, fmt.Errorf("invalid compaction config: %w", err)
 	}
 
-	plan := Plan{
-		TotalInputFiles: len(tasks),
+	// Compaction operates on whole physical files. A scan planner may split a
+	// file into multiple tasks, so collapse tasks by path before counting,
+	// selecting, or packing them. Keep the first task's delete and lineage
+	// metadata while replacing its range with the complete file range.
+	wholeFileTasks := make([]table.FileScanTask, 0, len(tasks))
+	seenFiles := make(map[string]table.FileScanTask, len(tasks))
+	for _, task := range tasks {
+		if task.File == nil {
+			return Plan{}, fmt.Errorf("%w: compaction task has no data file", table.ErrInvalidOperation)
+		}
+		path := task.File.FilePath()
+		if first, ok := seenFiles[path]; ok {
+			if !sameCompactionMetadata(first, task) {
+				return Plan{}, fmt.Errorf("%w: split tasks for %q have different delete or lineage metadata", table.ErrInvalidOperation, path)
+			}
+
+			continue
+		}
+		seenFiles[path] = task
+		task.Start = 0
+		task.Length = task.File.FileSizeBytes()
+		task.Residual = nil
+		wholeFileTasks = append(wholeFileTasks, task)
 	}
 
-	for _, t := range tasks {
+	plan := Plan{
+		TotalInputFiles: len(wholeFileTasks),
+	}
+
+	for _, t := range wholeFileTasks {
 		plan.TotalInputBytes += t.File.FileSizeBytes()
 	}
 
-	// Group tasks by partition key.
+	// Only candidate files need partition keys. Most tables have many
+	// right-sized files, so avoid encoding their partitions and retaining
+	// empty buckets for files the planner will not rewrite.
 	type partitionBucket struct {
 		key        string
 		candidates []table.FileScanTask
 	}
-	partitions := make(map[string]partitionBucket)
-	var partitionOrder []string
+	partitionIndices := make(map[string]int)
+	var partitionBuckets []partitionBucket
 
-	for _, t := range tasks {
-		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
-		bucket, ok := partitions[key]
-		if !ok {
-			bucket = partitionBucket{key: key}
-			partitionOrder = append(partitionOrder, key)
-		}
-
+	for _, t := range wholeFileTasks {
 		if !cfg.isCandidate(t) {
 			plan.SkippedFiles++
-			partitions[key] = bucket
 
 			continue
 		}
-		bucket.candidates = append(bucket.candidates, t)
-		partitions[key] = bucket
+
+		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
+		index, ok := partitionIndices[key]
+		if !ok {
+			index = len(partitionBuckets)
+			partitionIndices[key] = index
+			partitionBuckets = append(partitionBuckets, partitionBucket{key: key})
+		}
+		partitionBuckets[index].candidates = append(partitionBuckets[index].candidates, t)
 	}
 
 	// Bin-pack candidates per partition.
@@ -234,8 +265,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		LargestBinFirst: false,
 	}
 
-	for _, key := range partitionOrder {
-		bucket := partitions[key]
+	for _, bucket := range partitionBuckets {
 		if len(bucket.candidates) < int(cfg.MinInputFiles) {
 			plan.SkippedFiles += len(bucket.candidates)
 
@@ -254,7 +284,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 			}
 
 			group := Group{
-				PartitionKey: key,
+				PartitionKey: bucket.key,
 				Tasks:        bin,
 			}
 			for _, t := range bin {
@@ -271,6 +301,20 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	}
 
 	return plan, nil
+}
+
+func sameCompactionMetadata(a, b table.FileScanTask) bool {
+	equalDataFiles := func(a, b []iceberg.DataFile) bool {
+		return slices.EqualFunc(a, b, func(a, b iceberg.DataFile) bool {
+			return reflect.DeepEqual(a, b)
+		})
+	}
+
+	return reflect.DeepEqual(a.FirstRowID, b.FirstRowID) &&
+		reflect.DeepEqual(a.DataSequenceNumber, b.DataSequenceNumber) &&
+		equalDataFiles(a.DeleteFiles, b.DeleteFiles) &&
+		equalDataFiles(a.EqualityDeleteFiles, b.EqualityDeleteFiles) &&
+		equalDataFiles(a.DeletionVectorFiles, b.DeletionVectorFiles)
 }
 
 // isCandidate returns true if a file should be considered for compaction.

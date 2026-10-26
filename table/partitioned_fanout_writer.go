@@ -377,7 +377,7 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		pathPlan.fields[i] = pathField
 		pathPlan.estimatedSize += len(pathField.escapedName) + 20
 		partitionFieldsInfo[i].fieldID = partitionField.ID
-		colName, ok := schema.FindColumnName(sourceField.SourceID())
+		colName, ok := schema.FindColumnName(sourceField.FirstSourceID())
 		if !ok {
 			continue
 		}
@@ -385,9 +385,9 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		if !ok {
 			return nil, fmt.Errorf("failed to find source column %q in record schema", colName)
 		}
-		sourceType, ok := schema.FindTypeByID(sourceField.SourceID())
+		sourceType, ok := schema.FindTypeByID(sourceField.FirstSourceID())
 		if !ok {
-			return nil, fmt.Errorf("failed to find type for source field ID %d in schema", sourceField.SourceID())
+			return nil, fmt.Errorf("failed to find type for source field ID %d in schema", sourceField.FirstSourceID())
 		}
 		partitionFieldsInfo[i] = partitionFieldInfo{
 			sourceField: sourceField,
@@ -554,7 +554,7 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 			chain, err := resolveColumnChain(record, fieldInfo.columnPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve source column %q (field ID %d): %w",
-					fieldInfo.sourceName, fieldInfo.sourceField.SourceID(), err)
+					fieldInfo.sourceName, fieldInfo.sourceField.FirstSourceID(), err)
 			}
 			columnChains[i] = chain
 		}
@@ -589,7 +589,7 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 					return nil, fmt.Errorf(
 						"failed to convert source column %q (field ID %d) from Arrow type %s to Iceberg type %s: %w",
 						fieldInfo.sourceName,
-						fieldInfo.sourceField.SourceID(),
+						fieldInfo.sourceField.FirstSourceID(),
 						col.DataType(),
 						fieldInfo.sourceType,
 						err,

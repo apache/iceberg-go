@@ -169,7 +169,9 @@ func TestTransactionAssertRefSnapshotID(t *testing.T) {
 		changed := graftSnapshotOnto(t, withFeature, "feature", 200)
 		tbl, cat := newAssertRefTestTable(t, withFeature, changed)
 
-		err = commitPropsWithAssertedRef(t, tbl.NewTransactionOnBranch("feature"), "")
+		branchTxn, err := tbl.NewTransactionOnBranch("feature")
+		require.NoError(t, err)
+		err = commitPropsWithAssertedRef(t, branchTxn, "")
 		assert.ErrorIs(t, err, ErrCommitFailed)
 		assert.NotContains(t, cat.metadata.Properties(), "offsets")
 	})

@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"strings"
 	"unicode"
@@ -112,8 +113,17 @@ func NewCreateViewCfg() CreateViewCfg {
 	}
 }
 
-// Catalog for iceberg table operations like create, drop, load, list and others.
+// Catalog provides table and namespace operations plus an explicit resource
+// lifecycle. Implementations must release catalog-owned resources in Close.
+// Ownership of constructor-supplied dependencies depends on the implementation.
+// Using a catalog after Close is unsupported; repeated Close calls have
+// implementation-specific behavior.
 type Catalog interface {
+	io.Closer
+
+	// PurgeableCatalog provides the mandatory physical table deletion API.
+	PurgeableCatalog
+
 	// CatalogType returns the type of the catalog.
 	CatalogType() Type
 
@@ -152,6 +162,11 @@ type Catalog interface {
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
 }
 
+// Closer is retained as an alias for io.Closer.
+//
+// Deprecated: Use [io.Closer] instead; Catalog embeds it directly.
+type Closer = io.Closer
+
 // TransactionalCatalog is an optional interface implemented by catalogs
 // that support atomic multi-table commits. Callers should check for this
 // capability via a type assertion:
@@ -168,13 +183,9 @@ type TransactionalCatalog interface {
 	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
 }
 
-// PurgeableTable is an optional interface that catalogs can implement
-// to support physical table deletion (catalog entry + underlying files).
-// Callers should check for this capability via a type assertion:
-//
-//	if purger, ok := cat.(catalog.PurgeableTable); ok {
-//	    err := purger.PurgeTable(ctx, ident)
-//	}
+// PurgeableCatalog is the small table purge interface embedded by Catalog.
+// Every Catalog must support PurgeTable, which removes the catalog entry and
+// performs best-effort physical file deletion.
 //
 // For REST catalogs the purge is delegated server-side. For client-side
 // catalogs (SQL, Glue, Hive, Hadoop) the table is first dropped from
@@ -187,30 +198,8 @@ type TransactionalCatalog interface {
 // Any file-deletion, directory walk, or listing errors encountered are logged
 // as warnings, and the operation succeeds (returns nil) so that the catalog drop
 // remains the single source of truth.
-type PurgeableTable interface {
+type PurgeableCatalog interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
-}
-
-// Closer is an optional interface implemented by catalogs that hold releasable
-// resources — currently a metrics reporter and stateful resources (e.g.
-// HTTP-backed clients). It is not part of [Catalog] because adding a method to that
-// widely-implemented interface would break every external implementation; a
-// follow-up may promote it. Callers holding a [Catalog] from [Load] should
-// release it via a type assertion:
-//
-//	cat, err := catalog.Load(ctx, name, props)
-//	if err != nil {
-//	    return err
-//	}
-//	if closer, ok := cat.(catalog.Closer); ok {
-//	    defer closer.Close()
-//	}
-//
-// All built-in catalogs (REST, SQL, Glue, Hive, Hadoop) implement Closer. Close
-// releases the catalog's own resources; a catalog built on a caller-owned handle
-// (e.g. the SQL catalog's *sql.DB) does not close that handle.
-type Closer interface {
-	Close() error
 }
 
 // RefreshableCredentialCatalog is an optional interface implemented by catalogs that
@@ -265,10 +254,6 @@ func ObjectNameFromIdent(ident table.Identifier) string {
 	}
 
 	return ident[len(ident)-1]
-}
-
-func TableNameFromIdent(ident table.Identifier) string {
-	return ObjectNameFromIdent(ident)
 }
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {

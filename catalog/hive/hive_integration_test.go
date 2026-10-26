@@ -475,7 +475,7 @@ func TestHiveIntegrationCreateView(t *testing.T) {
 	assert.True(schema.Equals(loaded.CurrentSchema()))
 	assert.Len(loaded.CurrentVersion().Representations, 1)
 	assert.Equal("sql", loaded.CurrentVersion().Representations[0].Type)
-	assert.Equal(viewSQL, loaded.CurrentVersion().Representations[0].Sql)
+	assert.Equal(viewSQL, loaded.CurrentVersion().Representations[0].SQL)
 }
 
 func TestHiveIntegrationCreateViewThenDrop(t *testing.T) {

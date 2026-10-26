@@ -333,7 +333,7 @@ func partitionSchemaFingerprint(spec PartitionSpec, schema *Schema) (string, err
 		sourceType := Type(UnknownType{})
 		// ResultType only inspects the source type here; borrow it to avoid
 		// cloning nested source types on every schema-cache hit.
-		if sourceField, ok := schema.FindFieldByIDRef(field.SourceID(), internal.SchemaRef{}); ok {
+		if sourceField, ok := schema.FindFieldByIDRef(field.FirstSourceID(), internal.SchemaRef{}); ok {
 			sourceType = sourceField.Type
 		}
 		resultType := field.Transform.ResultType(sourceType)
