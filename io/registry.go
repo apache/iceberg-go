@@ -118,8 +118,8 @@ func (r *Registry) Unregister(scheme string) {
 	delete(r.factories, scheme)
 }
 
-// RegisteredSchemes returns the scheme names in sorted order.
-func (r *Registry) RegisteredSchemes() []string {
+// Names returns the registered scheme names in sorted order.
+func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -154,7 +154,7 @@ func Unregister(scheme string) {
 
 // GetRegisteredSchemes returns the names registered globally in sorted order.
 func GetRegisteredSchemes() []string {
-	return defaultRegistry.RegisteredSchemes()
+	return defaultRegistry.Names()
 }
 
 func schemeImportHint(backend string) string {
