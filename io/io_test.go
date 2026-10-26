@@ -18,6 +18,7 @@
 package io_test
 
 import (
+	"context"
 	"io/fs"
 	"testing"
 	"testing/fstest"
@@ -59,12 +60,12 @@ func TestFSWithNamePreprocessorTransformsAllOperations(t *testing.T) {
 		return "/rewritten/file.txt"
 	}))
 
-	file, err := fsys.Open("file://bucket/original.txt")
+	file, err := fsys.Open(context.Background(), "file://bucket/original.txt")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 	_, err = fsys.(iceio.ReadFileIO).ReadFile("file://bucket/original.txt")
 	require.NoError(t, err)
-	require.NoError(t, fsys.Remove("file://bucket/original.txt"))
+	require.NoError(t, fsys.Remove(context.Background(), "file://bucket/original.txt"))
 
 	require.Equal(t, "rewritten/file.txt", underlying.opened)
 	require.Equal(t, underlying.opened, underlying.read)
@@ -86,7 +87,7 @@ func TestFSDefaultAndNilOptions(t *testing.T) {
 			}}
 			fsys := iceio.FS(underlying, tc.opts...)
 
-			file, err := fsys.Open("/plain.txt")
+			file, err := fsys.Open(context.Background(), "/plain.txt")
 			require.NoError(t, err)
 			require.NoError(t, file.Close())
 
@@ -96,7 +97,7 @@ func TestFSDefaultAndNilOptions(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []byte("data"), data)
 
-			require.NoError(t, fsys.Remove("/plain.txt"))
+			require.NoError(t, fsys.Remove(context.Background(), "/plain.txt"))
 			require.Equal(t, "plain.txt", underlying.opened)
 			require.Equal(t, underlying.opened, underlying.read)
 			require.Equal(t, underlying.opened, underlying.removed)
@@ -116,7 +117,7 @@ func TestFSDoesNotAdvertiseUnsupportedReadFile(t *testing.T) {
 	_, ok := fsys.(iceio.ReadFileIO)
 	require.False(t, ok)
 
-	file, err := fsys.Open("unused")
+	file, err := fsys.Open(context.Background(), "unused")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 }

@@ -38,7 +38,7 @@ type inspectPartitionManifestTrackingIO struct {
 	failPath  string
 }
 
-func (f *inspectPartitionManifestTrackingIO) Open(path string) (iceio.File, error) {
+func (f *inspectPartitionManifestTrackingIO) Open(ctx context.Context, path string) (iceio.File, error) {
 	if strings.Contains(path, "/metadata/inspect-") && strings.HasSuffix(path, ".avro") {
 		if f.failPath != "" && strings.Contains(path, f.failPath) {
 			return nil, fmt.Errorf("injected manifest read error for %s", path)
@@ -57,7 +57,7 @@ func (f *inspectPartitionManifestTrackingIO) Open(path string) (iceio.File, erro
 		f.active.Add(-1)
 	}
 
-	return f.IO.Open(path)
+	return f.IO.Open(ctx, path)
 }
 
 func inspectParallelPartitionManifestTable(t *testing.T, count int) *Table {
