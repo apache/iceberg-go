@@ -50,7 +50,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 - **Substrait expression conversion no longer takes case sensitivity.** `substrait.ConvertExpr(schema, expression, caseSensitive)` becomes `substrait.ConvertExpr(schema, expression)`. Case sensitivity remains part of expression binding.
 
 - **Transform formatting requires the result type.** `Transform.ToHumanStr(value)` is removed. Use `Transform.ToHumanStrType(resultType, value)` to format partition values, including timestamps with time zones.
-- **Catalogs now require cleanup.** The `catalog.Catalog` interface includes `Close() error`. Custom catalog implementations must provide `Close`, and callers should close catalog instances after use. `catalog.Closer` is removed; use `io.Closer` instead.
+- **Catalogs now require cleanup.** The `catalog.Catalog` interface includes `Close() error`. Custom catalog implementations must provide `Close`, and callers should close catalog instances after use. `catalog.Closer` is removed. Replace `cat.(catalog.Closer)` checks with `defer cat.Close()`; `catalog.Catalog` already implements `io.Closer`, so no type assertion is needed.
 
 - **Puffin writer property setter renamed.** `puffin.Writer.AddProperties` is now `puffin.Writer.SetProperties`. Repeated calls still merge keys; use `ClearProperties` to clear custom properties before finishing.
 
