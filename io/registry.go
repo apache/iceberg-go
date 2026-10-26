@@ -141,7 +141,8 @@ func Register(scheme string, factory SchemeFactory) {
 }
 
 // MustRegister registers a global scheme or panics. Use this from backend init
-// functions, and use Register when a caller can handle registration errors.
+// functions. For registration errors instead of panics, create an independent
+// registry and call [Registry.Register].
 func MustRegister(scheme string, factory SchemeFactory) {
 	defaultRegistry.MustRegister(scheme, factory)
 }
