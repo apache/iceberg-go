@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Reserved table properties now use a read-only API.</strong> Replace references to <code>table.ReservedProperties</code> with <code>table.ReservedProperties()</code>. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.</p>
+</li>
+<li>
 <p><strong>Fixed and decimal constructors return errors.</strong> <code>iceberg.FixedTypeOf</code> and <code>iceberg.DecimalTypeOf</code> now return <code>(type, error)</code> instead of panicking for invalid inputs. Use <code>MustFixedTypeOf</code> or <code>MustDecimalTypeOf</code> only for known-valid values.</p>
 </li>
 <li>
