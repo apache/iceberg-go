@@ -44,8 +44,8 @@ func TestBoundSetPredicateLiteralsCloneMutableMembers(t *testing.T) {
 	}{
 		{name: "binary_in", typ: iceberg.PrimitiveTypes.Binary, op: iceberg.OpIn},
 		{name: "binary_not_in", typ: iceberg.PrimitiveTypes.Binary, op: iceberg.OpNotIn},
-		{name: "fixed_in", typ: iceberg.FixedTypeOf(16), op: iceberg.OpIn},
-		{name: "fixed_not_in", typ: iceberg.FixedTypeOf(16), op: iceberg.OpNotIn},
+		{name: "fixed_in", typ: iceberg.MustFixedTypeOf(16), op: iceberg.OpIn},
+		{name: "fixed_not_in", typ: iceberg.MustFixedTypeOf(16), op: iceberg.OpNotIn},
 		{name: "geometry_in", typ: geometry, op: iceberg.OpIn},
 		{name: "geometry_not_in", typ: geometry, op: iceberg.OpNotIn},
 		{name: "geography_in", typ: geography, op: iceberg.OpIn},

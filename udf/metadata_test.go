@@ -287,16 +287,13 @@ func TestMetadataInitDefaults(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestNewSQLRepresentation(t *testing.T) {
-	repr, err := NewSQLRepresentation("trino", "x + 1")
+func TestSQLRepresentation(t *testing.T) {
+	repr := SQLRepresentation{Dialect: "trino", SQL: "x + 1"}
+	assert.Equal(t, "sql", repr.RepresentationType())
+
+	data, err := json.Marshal(repr)
 	require.NoError(t, err)
-	assert.Equal(t, SQLRepresentation{Dialect: "trino", SQL: "x + 1"}, repr)
-
-	_, err = NewSQLRepresentation("", "x + 1")
-	assert.ErrorIs(t, err, ErrInvalidUDFMetadata)
-
-	_, err = NewSQLRepresentation("trino", "")
-	assert.ErrorIs(t, err, ErrInvalidUDFMetadata)
+	assert.JSONEq(t, `{"type":"sql","dialect":"trino","sql":"x + 1"}`, string(data))
 }
 
 // minimalMetadata returns a decoded minimal valid metadata document for

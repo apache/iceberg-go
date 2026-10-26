@@ -313,16 +313,16 @@ func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 	}
 
 	if r != nil {
-		if a.requireBranch && r.SnapshotRefType != BranchRef {
-			return fmt.Errorf("requirement failed: ref %q is a %s; tags cannot be transaction targets", a.Ref, r.SnapshotRefType)
+		if a.requireBranch && r.Type != BranchRef {
+			return fmt.Errorf("requirement failed: ref %q is a %s; tags cannot be transaction targets", a.Ref, r.Type)
 		}
 
 		if a.SnapshotID == nil {
-			return fmt.Errorf("requirement failed: %s %q was created concurrently", r.SnapshotRefType, a.Ref)
+			return fmt.Errorf("requirement failed: %s %q was created concurrently", r.Type, a.Ref)
 		}
 
 		if r.SnapshotID != *a.SnapshotID {
-			return fmt.Errorf("requirement failed: %s %q has changed: expected id %d, found %d", r.SnapshotRefType, a.Ref, *a.SnapshotID, r.SnapshotID)
+			return fmt.Errorf("requirement failed: %s %q has changed: expected id %d, found %d", r.Type, a.Ref, *a.SnapshotID, r.SnapshotID)
 		}
 	} else if a.SnapshotID != nil {
 		return fmt.Errorf("requirement failed: branch or tag %q is missing, expected %d", a.Ref, *a.SnapshotID)

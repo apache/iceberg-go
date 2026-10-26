@@ -129,8 +129,8 @@ type countingDVOpenIO struct {
 	opens atomic.Int64
 }
 
-func (c *countingDVOpenIO) Open(name string) (iceio.File, error) {
-	f, err := c.LocalFS.Open(name)
+func (c *countingDVOpenIO) Open(_ context.Context, name string) (iceio.File, error) {
+	f, err := c.LocalFS.Open(context.Background(), name)
 	if err == nil {
 		c.opens.Add(1)
 	}

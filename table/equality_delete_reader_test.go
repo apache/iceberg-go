@@ -97,7 +97,7 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assertRowCount(t, tbl, 5)
@@ -197,7 +197,7 @@ func TestEqualityDeleteReadPrunesNonOverlappingDeleteFiles(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(ctx, dataPaths, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(ctx, dataPaths, nil, false))
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 
@@ -276,7 +276,7 @@ func TestEqualityDeleteReadResolvesRenamedDataColumnByFieldID(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -400,7 +400,7 @@ func TestEqualityDeleteReadResolvesLiteralDottedColumnName(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err := tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -447,7 +447,7 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	dataPath := tbl.Location() + "/data/data.parquet"
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "one"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -709,7 +709,7 @@ func TestEqualityDeleteMultiColumnKey(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -837,7 +837,7 @@ func TestEqualityDeleteNullableFastPathKeys(t *testing.T) {
 				writeParquetFile(t, dataPath, arrowSc, tt.dataJSON)
 
 				tx := tbl.NewTransaction()
-				require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+				require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 				tbl, err = tx.Commit(t.Context())
 				require.NoError(t, err)
 
@@ -928,7 +928,7 @@ func TestEqualityDeleteNullableCompositeFastPathKey(t *testing.T) {
 			writeParquetFile(t, dataPath, arrowSc, tt.dataJSON)
 
 			tx := tbl.NewTransaction()
-			require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+			require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 			tbl, err = tx.Commit(t.Context())
 			require.NoError(t, err)
 

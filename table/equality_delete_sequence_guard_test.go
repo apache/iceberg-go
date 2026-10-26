@@ -83,7 +83,7 @@ func TestEqualityDeleteIndexSkipsUnusedDataFileStatistics(t *testing.T) {
 			entry := newEqualityDeleteMetricsTestEntry("data.parquet", 1, tc.partition,
 				iceberg.EntryContentData, tc.seq, nil, nil, nil, nil, nil, nil)
 			if tc.skipStats {
-				seq := entry.SequenceNum()
+				seq := entry.DataSequenceNumber()
 				entry = iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &seq, nil,
 					equalityDeleteStatsForbiddenFile{entry.DataFile()})
 			}
@@ -120,7 +120,7 @@ func TestEqualityDeleteIndexSkipsUnusedDataFileStatistics(t *testing.T) {
 
 		data := newEqualityDeleteMetricsTestEntry("data.parquet", 1, partA,
 			iceberg.EntryContentData, 5, nil, nil, nil, nil, nil, nil)
-		seq := data.SequenceNum()
+		seq := data.DataSequenceNumber()
 		entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &seq, nil,
 			equalityDeleteStatsForbiddenFile{data.DataFile()})
 		matched, err := globalIdx.forDataFile(entry)

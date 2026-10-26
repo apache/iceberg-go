@@ -81,15 +81,15 @@ func TestIntToDecimalConversion(t *testing.T) {
 		val iceberg.Decimal
 	}{
 		{
-			iceberg.DecimalTypeOf(9, 0),
+			iceberg.MustDecimalTypeOf(9, 0),
 			iceberg.Decimal{Val: decimal128.FromI64(34), Scale: 0},
 		},
 		{
-			iceberg.DecimalTypeOf(9, 2),
+			iceberg.MustDecimalTypeOf(9, 2),
 			iceberg.Decimal{Val: decimal128.FromI64(3400), Scale: 2},
 		},
 		{
-			iceberg.DecimalTypeOf(9, 4),
+			iceberg.MustDecimalTypeOf(9, 4),
 			iceberg.Decimal{Val: decimal128.FromI64(340000), Scale: 4},
 		},
 	}
@@ -453,23 +453,23 @@ func TestFloat64toFloat32OutsideBounds(t *testing.T) {
 func TestDecimalToDecimalConversion(t *testing.T) {
 	lit := iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(3411), Scale: 2})
 
-	v, err := lit.To(iceberg.DecimalTypeOf(9, 2))
+	v, err := lit.To(iceberg.MustDecimalTypeOf(9, 2))
 	require.NoError(t, err)
 	assert.Equal(t, lit, v)
 
-	v, err = lit.To(iceberg.DecimalTypeOf(11, 2))
+	v, err = lit.To(iceberg.MustDecimalTypeOf(11, 2))
 	require.NoError(t, err)
 	assert.Equal(t, lit, v)
 
-	_, err = lit.To(iceberg.DecimalTypeOf(9, 0))
+	_, err = lit.To(iceberg.MustDecimalTypeOf(9, 0))
 	assert.ErrorIs(t, err, iceberg.ErrBadCast)
 	assert.ErrorContains(t, err, "could not convert 34.11 to decimal(9, 0)")
 
-	_, err = lit.To(iceberg.DecimalTypeOf(9, 1))
+	_, err = lit.To(iceberg.MustDecimalTypeOf(9, 1))
 	assert.ErrorIs(t, err, iceberg.ErrBadCast)
 	assert.ErrorContains(t, err, "could not convert 34.11 to decimal(9, 1)")
 
-	_, err = lit.To(iceberg.DecimalTypeOf(9, 3))
+	_, err = lit.To(iceberg.MustDecimalTypeOf(9, 3))
 	assert.ErrorIs(t, err, iceberg.ErrBadCast)
 	assert.ErrorContains(t, err, "could not convert 34.11 to decimal(9, 3)")
 }
@@ -797,7 +797,7 @@ func TestStringLiteralConversion(t *testing.T) {
 }
 
 func TestLiteralIdentityConversions(t *testing.T) {
-	fixedLit, _ := iceberg.NewLiteral([]byte{0x01, 0x02, 0x03}).To(iceberg.FixedTypeOf(3))
+	fixedLit, _ := iceberg.NewLiteral([]byte{0x01, 0x02, 0x03}).To(iceberg.MustFixedTypeOf(3))
 
 	tests := []struct {
 		lit iceberg.Literal
@@ -810,7 +810,7 @@ func TestLiteralIdentityConversions(t *testing.T) {
 		{iceberg.NewLiteral(float64(3.5028235e38)), iceberg.PrimitiveTypes.Float64},
 		{
 			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(3455), Scale: 2}),
-			iceberg.DecimalTypeOf(9, 2),
+			iceberg.MustDecimalTypeOf(9, 2),
 		},
 		{iceberg.NewLiteral(iceberg.Date(19079)), iceberg.PrimitiveTypes.Date},
 		{
@@ -819,7 +819,7 @@ func TestLiteralIdentityConversions(t *testing.T) {
 		},
 		{iceberg.NewLiteral("abc"), iceberg.PrimitiveTypes.String},
 		{iceberg.NewLiteral(uuid.New()), iceberg.PrimitiveTypes.UUID},
-		{fixedLit, iceberg.FixedTypeOf(3)},
+		{fixedLit, iceberg.MustFixedTypeOf(3)},
 		{iceberg.NewLiteral([]byte{0x01, 0x02, 0x03}), iceberg.PrimitiveTypes.Binary},
 	}
 
@@ -1067,14 +1067,14 @@ func TestFixedLiteral(t *testing.T) {
 	assert.Equal(t, 0, cmp(fixedLit013, fixedLit013))
 
 	testUuid := uuid.New()
-	lit, err := iceberg.NewLiteral(testUuid[:]).To(iceberg.FixedTypeOf(16))
+	lit, err := iceberg.NewLiteral(testUuid[:]).To(iceberg.MustFixedTypeOf(16))
 	require.NoError(t, err)
 	uuidLit, err := lit.To(iceberg.PrimitiveTypes.UUID)
 	require.NoError(t, err)
 
 	assert.EqualValues(t, uuidLit, testUuid)
 
-	fixedUuid, err := uuidLit.To(iceberg.FixedTypeOf(16))
+	fixedUuid, err := uuidLit.To(iceberg.MustFixedTypeOf(16))
 	require.NoError(t, err)
 	assert.EqualValues(t, testUuid[:], fixedUuid)
 
@@ -1107,15 +1107,15 @@ func TestBinaryLiteral(t *testing.T) {
 
 func TestBinaryLiteralConversions(t *testing.T) {
 	binLit012 := iceberg.NewLiteral([]byte{0x00, 0x01, 0x02})
-	fixed, err := binLit012.To(iceberg.FixedTypeOf(3))
+	fixed, err := binLit012.To(iceberg.MustFixedTypeOf(3))
 	require.NoError(t, err)
 	assert.Equal(t, iceberg.FixedLiteral{0x00, 0x01, 0x02}, fixed)
 
-	_, err = binLit012.To(iceberg.FixedTypeOf(4))
+	_, err = binLit012.To(iceberg.MustFixedTypeOf(4))
 	assert.ErrorIs(t, err, iceberg.ErrBadCast)
 	assert.ErrorContains(t, err, "cannot convert BinaryLiteral to fixed[4], different length - 3 <> 4")
 
-	_, err = binLit012.To(iceberg.FixedTypeOf(2))
+	_, err = binLit012.To(iceberg.MustFixedTypeOf(2))
 	assert.ErrorIs(t, err, iceberg.ErrBadCast)
 	assert.ErrorContains(t, err, "cannot convert BinaryLiteral to fixed[2], different length - 3 <> 2")
 
@@ -1151,11 +1151,11 @@ func TestInvalidBoolLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Time,
 		iceberg.PrimitiveTypes.Timestamp,
 		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
 		iceberg.PrimitiveTypes.Binary,
-		iceberg.FixedTypeOf(2),
+		iceberg.MustFixedTypeOf(2),
 	})
 }
 
@@ -1210,7 +1210,7 @@ func TestInvalidNumericConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Bool,
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 		iceberg.PrimitiveTypes.Binary,
 	})
 
@@ -1218,7 +1218,7 @@ func TestInvalidNumericConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Bool,
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 		iceberg.PrimitiveTypes.Binary,
 	})
 
@@ -1232,7 +1232,7 @@ func TestInvalidNumericConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.TimestampTz,
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 		iceberg.PrimitiveTypes.Binary,
 	})
 
@@ -1246,7 +1246,7 @@ func TestInvalidNumericConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.TimestampTz,
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 		iceberg.PrimitiveTypes.Binary,
 	})
 
@@ -1259,7 +1259,7 @@ func TestInvalidNumericConversions(t *testing.T) {
 			iceberg.PrimitiveTypes.TimestampTz,
 			iceberg.PrimitiveTypes.String,
 			iceberg.PrimitiveTypes.UUID,
-			iceberg.FixedTypeOf(1),
+			iceberg.MustFixedTypeOf(1),
 			iceberg.PrimitiveTypes.Binary,
 		})
 }
@@ -1275,10 +1275,10 @@ func TestInvalidDateTimeLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Time,
 		iceberg.PrimitiveTypes.Timestamp,
 		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 		iceberg.PrimitiveTypes.Binary,
 	})
 
@@ -1292,10 +1292,10 @@ func TestInvalidDateTimeLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Date,
 		iceberg.PrimitiveTypes.Timestamp,
 		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 		iceberg.PrimitiveTypes.Binary,
 	})
 
@@ -1307,17 +1307,17 @@ func TestInvalidDateTimeLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Float32,
 		iceberg.PrimitiveTypes.Float64,
 		iceberg.PrimitiveTypes.Time,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 		iceberg.PrimitiveTypes.Binary,
 	})
 }
 
 func TestInvalidStringLiteralConversions(t *testing.T) {
 	testInvalidLiteralConversions(t, iceberg.NewLiteral("abc"), []iceberg.Type{
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 	})
 }
 
@@ -1332,12 +1332,12 @@ func TestInvalidBinaryLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Time,
 		iceberg.PrimitiveTypes.Timestamp,
 		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.String,
-		iceberg.FixedTypeOf(1),
+		iceberg.MustFixedTypeOf(1),
 	})
 
-	lit, _ := iceberg.NewLiteral([]byte{0x00, 0x01, 0x02}).To(iceberg.FixedTypeOf(3))
+	lit, _ := iceberg.NewLiteral([]byte{0x00, 0x01, 0x02}).To(iceberg.MustFixedTypeOf(3))
 	testInvalidLiteralConversions(t, lit, []iceberg.Type{
 		iceberg.PrimitiveTypes.Bool,
 		iceberg.PrimitiveTypes.Int32,
@@ -1348,7 +1348,7 @@ func TestInvalidBinaryLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Time,
 		iceberg.PrimitiveTypes.Timestamp,
 		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
 	})
@@ -1363,7 +1363,7 @@ func TestInvalidBinaryLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Time,
 		iceberg.PrimitiveTypes.Timestamp,
 		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.UUID,
 	})
@@ -1382,11 +1382,11 @@ func TestInvalidVariantLiteralConversions(t *testing.T) {
 			iceberg.PrimitiveTypes.Time,
 			iceberg.PrimitiveTypes.Timestamp,
 			iceberg.PrimitiveTypes.TimestampTz,
-			iceberg.DecimalTypeOf(9, 2),
+			iceberg.MustDecimalTypeOf(9, 2),
 			iceberg.PrimitiveTypes.String,
 			iceberg.PrimitiveTypes.UUID,
 			iceberg.PrimitiveTypes.Binary,
-			iceberg.FixedTypeOf(2),
+			iceberg.MustFixedTypeOf(2),
 		})
 	}
 
@@ -1401,7 +1401,7 @@ func TestInvalidVariantLiteralConversions(t *testing.T) {
 	assert.ErrorContains(t, err, "VariantLiteral: could not cast value: Int32Literal to string")
 
 	// a cast error from the underlying literal that lacks ErrBadCast still gets it
-	_, err = variantLiteralOf(t, float32(1e30)).To(iceberg.DecimalTypeOf(9, 2))
+	_, err = variantLiteralOf(t, float32(1e30)).To(iceberg.MustDecimalTypeOf(9, 2))
 	assert.ErrorIs(t, err, iceberg.ErrBadCast)
 	assert.ErrorContains(t, err, "VariantLiteral: ")
 }
@@ -1417,7 +1417,7 @@ func TestBadStringLiteralCasts(t *testing.T) {
 		iceberg.PrimitiveTypes.Timestamp,
 		iceberg.PrimitiveTypes.TimestampTz,
 		iceberg.PrimitiveTypes.Bool,
-		iceberg.DecimalTypeOf(9, 2),
+		iceberg.MustDecimalTypeOf(9, 2),
 		iceberg.PrimitiveTypes.UUID,
 	}
 
@@ -1500,25 +1500,25 @@ func TestUnmarshalBinary(t *testing.T) {
 			[]byte{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7},
 			iceberg.UUIDLiteral(uuid.UUID{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7}),
 		},
-		{iceberg.FixedTypeOf(3), []byte("foo"), iceberg.FixedLiteral([]byte("foo"))},
+		{iceberg.MustFixedTypeOf(3), []byte("foo"), iceberg.FixedLiteral([]byte("foo"))},
 		{iceberg.PrimitiveTypes.Binary, []byte("foo"), iceberg.BinaryLiteral([]byte("foo"))},
 		{
-			iceberg.DecimalTypeOf(5, 2),
+			iceberg.MustDecimalTypeOf(5, 2),
 			[]byte{0x30, 0x39},
 			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(12345)},
 		},
 		{
-			iceberg.DecimalTypeOf(7, 4),
+			iceberg.MustDecimalTypeOf(7, 4),
 			[]byte{0x12, 0xd6, 0x87},
 			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromU64(1234567)},
 		},
 		{
-			iceberg.DecimalTypeOf(7, 4),
+			iceberg.MustDecimalTypeOf(7, 4),
 			[]byte{0xff, 0xed, 0x29, 0x79},
 			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromI64(-1234567)},
 		},
 		{
-			iceberg.DecimalTypeOf(8, 2),
+			iceberg.MustDecimalTypeOf(8, 2),
 			[]byte{0x00, 0xbc, 0x61, 0x4e},
 			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromI64(12345678)},
 		},
@@ -1554,7 +1554,7 @@ func TestLiteralFromBytesFixedWidth(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			literal, err := iceberg.LiteralFromBytes(iceberg.FixedTypeOf(4), test.data)
+			literal, err := iceberg.LiteralFromBytes(iceberg.MustFixedTypeOf(4), test.data)
 			if test.errContains != "" {
 				require.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
 				if test.oversized {
@@ -1631,10 +1631,10 @@ func TestRoundTripLiteralBinary(t *testing.T) {
 			[]byte{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7},
 			iceberg.UUIDLiteral(uuid.UUID{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7}),
 		},
-		{iceberg.FixedTypeOf(3), []byte("foo"), iceberg.FixedLiteral([]byte("foo"))},
+		{iceberg.MustFixedTypeOf(3), []byte("foo"), iceberg.FixedLiteral([]byte("foo"))},
 		{iceberg.PrimitiveTypes.Binary, []byte("foo"), iceberg.BinaryLiteral([]byte("foo"))},
 		{
-			iceberg.DecimalTypeOf(5, 2),
+			iceberg.MustDecimalTypeOf(5, 2),
 			[]byte{0x30, 0x39},
 			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(12345)},
 		},
@@ -1642,7 +1642,7 @@ func TestRoundTripLiteralBinary(t *testing.T) {
 		// 1234567 is 00010010|11010110|10000111 in binary
 		// 00010010 -> 18, 11010110 -> 214, 10000111 -> 135
 		{
-			iceberg.DecimalTypeOf(7, 4),
+			iceberg.MustDecimalTypeOf(7, 4),
 			[]byte{0x12, 0xd6, 0x87},
 			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromU64(1234567)},
 		},
@@ -1650,15 +1650,15 @@ func TestRoundTripLiteralBinary(t *testing.T) {
 		// -1234567 is 11101101|00101001|01111001 in binary
 		// 11101101 -> 237, 00101001 -> 41, 01111001 -> 121
 		{
-			iceberg.DecimalTypeOf(7, 4),
+			iceberg.MustDecimalTypeOf(7, 4),
 			[]byte{0xed, 0x29, 0x79},
 			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromI64(-1234567)},
 		},
 		// test empty byte in decimal
 		// 11 is 00001011 in binary
 		// 00001011 -> 11
-		{iceberg.DecimalTypeOf(10, 3), []byte{0x0b}, iceberg.DecimalLiteral{Scale: 3, Val: decimal128.FromU64(11)}},
-		{iceberg.DecimalTypeOf(4, 2), []byte{0x04, 0xd2}, iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(1234)}},
+		{iceberg.MustDecimalTypeOf(10, 3), []byte{0x0b}, iceberg.DecimalLiteral{Scale: 3, Val: decimal128.FromU64(11)}},
+		{iceberg.MustDecimalTypeOf(4, 2), []byte{0x04, 0xd2}, iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(1234)}},
 	}
 
 	for _, tt := range tests {
@@ -1683,7 +1683,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 		val string
 	}{
 		{
-			iceberg.DecimalTypeOf(38, 21),
+			iceberg.MustDecimalTypeOf(38, 21),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x18, 0x30, 0x73, 0xb9, 0x1e,
 				0x7e, 0xa2, 0xb3, 0x6a, 0x83,
@@ -1691,7 +1691,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"12345678912345678.123456789123456789123",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 22),
+			iceberg.MustDecimalTypeOf(38, 22),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x16, 0xbb, 0x01, 0x2f,
 				0x4c, 0xc3, 0x2b, 0x42, 0x29, 0x22,
@@ -1699,7 +1699,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"1234567891234567.1234567891234567891234",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 23),
+			iceberg.MustDecimalTypeOf(38, 23),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x0a, 0x42, 0xa1, 0xad,
 				0xe5, 0x2b, 0x33, 0x15, 0x9b, 0x59,
@@ -1707,7 +1707,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"123456789123456.12345678912345678912345",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 24),
+			iceberg.MustDecimalTypeOf(38, 24),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe8, 0xa2, 0xbb, 0xe9, 0x67,
 				0xba, 0x86, 0x77, 0xd8, 0x11, 0x80,
@@ -1715,7 +1715,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"12345678912345.123456789123456789123456",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 25),
+			iceberg.MustDecimalTypeOf(38, 25),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe5, 0x6b, 0x3a, 0xd2, 0x78,
 				0xdd, 0x04, 0xc8, 0x70, 0xaf, 0x07,
@@ -1723,7 +1723,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"1234567891234.1234567891234567891234567",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 26),
+			iceberg.MustDecimalTypeOf(38, 26),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xcd, 0x85, 0xc5, 0x03, 0x38, 0x37,
 				0x3c, 0x38, 0x66, 0xd6, 0x4e,
@@ -1731,7 +1731,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"123456789123.12345678912345678912345678",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 27),
+			iceberg.MustDecimalTypeOf(38, 27),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0x31, 0x46, 0xfd, 0xc7, 0x79,
 				0xca, 0x39, 0x7c, 0x04, 0x5f, 0x15,
@@ -1739,7 +1739,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"12345678912.123456789123456789123456789",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 28),
+			iceberg.MustDecimalTypeOf(38, 28),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x10, 0x52, 0x01, 0x72, 0x11, 0xda,
 				0x08, 0x5b, 0x08, 0x2b, 0xb6, 0xd3,
@@ -1747,7 +1747,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"1234567891.1234567891234567891234567891",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 29),
+			iceberg.MustDecimalTypeOf(38, 29),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x18, 0x5b, 0x37, 0xc1,
 				0x78, 0x0b, 0x91, 0xb5, 0x24, 0x40,
@@ -1755,7 +1755,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"123456789.12345678912345678912345678912",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 30),
+			iceberg.MustDecimalTypeOf(38, 30),
 			[]byte{
 				0x09, 0x49, 0xb0, 0xed, 0x1e, 0xdf, 0x80, 0x03, 0x47, 0x3b,
 				0x16, 0x9b, 0xf1, 0x13, 0x6a, 0x83,
@@ -1763,7 +1763,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"12345678.123456789123456789123456789123",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 31),
+			iceberg.MustDecimalTypeOf(38, 31),
 			[]byte{
 				0x09, 0x49, 0xb0, 0x96, 0x2b, 0xac, 0x29, 0x64, 0x28, 0x70,
 				0x36, 0x29, 0xea, 0xc2, 0x29, 0x22,
@@ -1771,7 +1771,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"1234567.1234567891234567891234567891234",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 32),
+			iceberg.MustDecimalTypeOf(38, 32),
 			[]byte{
 				0x09, 0x49, 0xad, 0xae, 0xe3, 0x68, 0xe7, 0x4f, 0xb5, 0x14,
 				0xbc, 0xdc, 0x2b, 0x95, 0x9b, 0x59,
@@ -1779,7 +1779,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"123456.12345678912345678912345678912345",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 33),
+			iceberg.MustDecimalTypeOf(38, 33),
 			[]byte{
 				0x09, 0x49, 0x95, 0x94, 0x3e, 0x35, 0x93, 0xde, 0xb9, 0x2e,
 				0xef, 0x53, 0xb3, 0xd8, 0x11, 0x80,
@@ -1787,7 +1787,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"12345.123456789123456789123456789123456",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 34),
+			iceberg.MustDecimalTypeOf(38, 34),
 			[]byte{
 				0x09, 0x48, 0xd5, 0xd7, 0x90, 0x78, 0xdf, 0x08, 0x1a, 0xf6,
 				0x43, 0x09, 0x06, 0x70, 0xaf, 0x07,
@@ -1795,7 +1795,7 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"1234.1234567891234567891234567891234567",
 		},
 		{
-			iceberg.DecimalTypeOf(38, 35),
+			iceberg.MustDecimalTypeOf(38, 35),
 			[]byte{
 				0x09, 0x43, 0x45, 0x82, 0x85, 0xc7, 0x56, 0x66, 0x24, 0x4d,
 				0x16, 0x82, 0x40, 0x66, 0xd6, 0x4e,
@@ -1803,57 +1803,57 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 			"123.12345678912345678912345678912345678",
 		},
 		{
-			iceberg.DecimalTypeOf(21, 16),
+			iceberg.MustDecimalTypeOf(21, 16),
 			[]byte{0x06, 0xb1, 0x3a, 0xe3, 0xc4, 0x4e, 0x94, 0xaf, 0x07},
 			"12345.1234567891234567",
 		},
 		{
-			iceberg.DecimalTypeOf(22, 17),
+			iceberg.MustDecimalTypeOf(22, 17),
 			[]byte{0x42, 0xec, 0x4c, 0xe5, 0xab, 0x11, 0xce, 0xd6, 0x4e},
 			"12345.12345678912345678",
 		},
 		{
-			iceberg.DecimalTypeOf(23, 18),
+			iceberg.MustDecimalTypeOf(23, 18),
 			[]byte{0x02, 0x9d, 0x3b, 0x00, 0xf8, 0xae, 0xb2, 0x14, 0x5f, 0x15},
 			"12345.123456789123456789",
 		},
 		{
-			iceberg.DecimalTypeOf(24, 19),
+			iceberg.MustDecimalTypeOf(24, 19),
 			[]byte{0x1a, 0x24, 0x4e, 0x09, 0xb6, 0xd2, 0xf4, 0xcb, 0xb6, 0xd3},
 			"12345.1234567891234567891",
 		},
 		{
-			iceberg.DecimalTypeOf(25, 20),
+			iceberg.MustDecimalTypeOf(25, 20),
 			[]byte{0x01, 0x05, 0x6b, 0x0c, 0x61, 0x24, 0x3d, 0x8f, 0xf5, 0x24, 0x40},
 			"12345.12345678912345678912",
 		},
 		{
-			iceberg.DecimalTypeOf(26, 21),
+			iceberg.MustDecimalTypeOf(26, 21),
 			[]byte{0x0a, 0x36, 0x2e, 0x7b, 0xcb, 0x6a, 0x67, 0x9f, 0x93, 0x6a, 0x83},
 			"12345.123456789123456789123",
 		},
 		{
-			iceberg.DecimalTypeOf(27, 22),
+			iceberg.MustDecimalTypeOf(27, 22),
 			[]byte{0x66, 0x1d, 0xd0, 0xd5, 0xf2, 0x28, 0x0c, 0x3b, 0xc2, 0x29, 0x22},
 			"12345.1234567891234567891234",
 		},
 		{
-			iceberg.DecimalTypeOf(28, 23),
+			iceberg.MustDecimalTypeOf(28, 23),
 			[]byte{0x03, 0xfd, 0x2a, 0x28, 0x5b, 0x75, 0x90, 0x7a, 0x55, 0x95, 0x9b, 0x59},
 			"12345.12345678912345678912345",
 		},
 		{
-			iceberg.DecimalTypeOf(29, 24),
+			iceberg.MustDecimalTypeOf(29, 24),
 			[]byte{0x27, 0xe3, 0xa5, 0x93, 0x92, 0x97, 0xa4, 0xc7, 0x57, 0xd8, 0x11, 0x80},
 			"12345.123456789123456789123456",
 		},
 		{
-			iceberg.DecimalTypeOf(30, 25),
+			iceberg.MustDecimalTypeOf(30, 25),
 			[]byte{0x01, 0x8e, 0xe4, 0x77, 0xc3, 0xb9, 0xec, 0x6f, 0xc9, 0x6e, 0x70, 0xaf, 0x07},
 			"12345.1234567891234567891234567",
 		},
 		{
-			iceberg.DecimalTypeOf(31, 26),
+			iceberg.MustDecimalTypeOf(31, 26),
 			[]byte{0x0f, 0x94, 0xec, 0xad, 0xa5, 0x43, 0x3c, 0x5d, 0xde, 0x50, 0x66, 0xd6, 0x4e},
 			"12345.12345678912345678912345678",
 		},
@@ -1882,16 +1882,16 @@ func TestDecimalMaxMinRoundTrip(t *testing.T) {
 		typ iceberg.DecimalType
 		v   string
 	}{
-		{iceberg.DecimalTypeOf(6, 2), "9999.99"},
-		{iceberg.DecimalTypeOf(10, 10), ".9999999999"},
-		{iceberg.DecimalTypeOf(2, 1), "9.9"},
-		{iceberg.DecimalTypeOf(38, 37), "9.9999999999999999999999999999999999999"},
-		{iceberg.DecimalTypeOf(20, 1), "9999999999999999999.9"},
-		{iceberg.DecimalTypeOf(6, 2), "-9999.99"},
-		{iceberg.DecimalTypeOf(10, 10), "-.9999999999"},
-		{iceberg.DecimalTypeOf(2, 1), "-9.9"},
-		{iceberg.DecimalTypeOf(38, 37), "-9.9999999999999999999999999999999999999"},
-		{iceberg.DecimalTypeOf(20, 1), "-9999999999999999999.9"},
+		{iceberg.MustDecimalTypeOf(6, 2), "9999.99"},
+		{iceberg.MustDecimalTypeOf(10, 10), ".9999999999"},
+		{iceberg.MustDecimalTypeOf(2, 1), "9.9"},
+		{iceberg.MustDecimalTypeOf(38, 37), "9.9999999999999999999999999999999999999"},
+		{iceberg.MustDecimalTypeOf(20, 1), "9999999999999999999.9"},
+		{iceberg.MustDecimalTypeOf(6, 2), "-9999.99"},
+		{iceberg.MustDecimalTypeOf(10, 10), "-.9999999999"},
+		{iceberg.MustDecimalTypeOf(2, 1), "-9.9"},
+		{iceberg.MustDecimalTypeOf(38, 37), "-9.9999999999999999999999999999999999999"},
+		{iceberg.MustDecimalTypeOf(20, 1), "-9999999999999999999.9"},
 	}
 
 	for _, tt := range tests {

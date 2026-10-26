@@ -82,7 +82,7 @@ func TestPartitionResidualEvaluatorElidesSatisfiedIdentityPredicate(t *testing.T
 
 func TestPartitionResidualEvaluatorNormalizesDecodedLiteralValues(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+		ID: 1, Name: "price", Type: iceberg.MustDecimalTypeOf(10, 2),
 	})
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "price", Transform: iceberg.IdentityTransform{},
@@ -372,7 +372,7 @@ func TestPlanFilesLocalPopulatesPartitionResidual(t *testing.T) {
 	dataFile := newTestDataFile(t, spec, dataPath, map[int]any{1000: int32(5)})
 	entry := iceberg.NewManifestEntryBuilder(
 		iceberg.EntryStatusADDED, &snapshotID, dataFile,
-	).SequenceNum(1).Build()
+	).DataSequenceNumber(1).Build()
 
 	var manifestBuffer bytes.Buffer
 	manifest, err := iceberg.WriteManifest(

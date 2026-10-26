@@ -87,7 +87,7 @@ type manifestContentCacheBenchmarkIO struct {
 	opens int64
 }
 
-func (fs *manifestContentCacheBenchmarkIO) Open(name string) (iceio.File, error) {
+func (fs *manifestContentCacheBenchmarkIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	if strings.Contains(name, "/manifest-") {
 		if fs.latency > 0 {
 			time.Sleep(fs.latency)
@@ -97,7 +97,7 @@ func (fs *manifestContentCacheBenchmarkIO) Open(name string) (iceio.File, error)
 		fs.mu.Unlock()
 	}
 
-	return fs.IO.Open(name)
+	return fs.IO.Open(ctx, name)
 }
 
 func (fs *manifestContentCacheBenchmarkIO) reset() {

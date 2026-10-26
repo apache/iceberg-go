@@ -410,7 +410,7 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 		{
 			name: "matching fixed metadata default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				ID: 2, Name: "missing_col", Type: iceberg.MustFixedTypeOf(3),
 				InitialDefault: "010203",
 			},
 			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
@@ -428,7 +428,7 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 		{
 			name: "matching native byte default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				ID: 2, Name: "missing_col", Type: iceberg.MustFixedTypeOf(3),
 				InitialDefault: []byte{1, 2, 3},
 			},
 			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
@@ -482,7 +482,7 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 		{
 			name: "matching decimal metadata default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "missing_col", Type: iceberg.DecimalTypeOf(9, 2),
+				ID: 2, Name: "missing_col", Type: iceberg.MustDecimalTypeOf(9, 2),
 				InitialDefault: "12.34",
 			},
 			expr:     iceberg.EqualTo(ref, "12.34"),
@@ -1093,11 +1093,11 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 		iceberg.NestedField{ID: 6, Name: "f", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 7, Name: "g", Type: iceberg.PrimitiveTypes.Time},
 		iceberg.NestedField{ID: 8, Name: "h", Type: iceberg.PrimitiveTypes.Timestamp},
-		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.DecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.MustDecimalTypeOf(9, 2)},
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
-		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
+		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.MustFixedTypeOf(5)},
 		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.PrimitiveTypes.TimestampNs},
 		iceberg.NestedField{ID: 15, Name: "o", Type: iceberg.PrimitiveTypes.TimestampTzNs})
 

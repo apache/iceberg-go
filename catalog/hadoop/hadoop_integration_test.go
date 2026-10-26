@@ -56,7 +56,7 @@ func (s *HadoopIntegrationSuite) SetupSuite() {
 func (s *HadoopIntegrationSuite) SetupTest() {
 	s.ctx = context.Background()
 
-	cat, err := hadoop.NewCatalog("hadoop_test", s.warehouse, nil)
+	cat, err := hadoop.NewCatalog(s.ctx, "hadoop_test", s.warehouse, nil)
 	s.Require().NoError(err)
 	s.cat = cat
 }

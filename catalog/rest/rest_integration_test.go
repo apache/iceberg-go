@@ -382,10 +382,10 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
-	defer mustFS(s.T(), tbl).Remove(pqfile)
+	defer mustFS(s.T(), tbl).Remove(s.ctx, pqfile)
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{pqfile}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 
@@ -458,17 +458,17 @@ func (s *RestIntegrationSuite) TestMultiTableCommit() {
 
 	// Write a parquet data file for each table.
 	pq1 := s.writeParquetFile(tbl1, tableSchemaSimple, "multi-txn-1")
-	defer mustFS(s.T(), tbl1).Remove(pq1)
+	defer mustFS(s.T(), tbl1).Remove(s.ctx, pq1)
 
 	pq2 := s.writeParquetFile(tbl2, tableSchemaSimple, "multi-txn-2")
-	defer mustFS(s.T(), tbl2).Remove(pq2)
+	defer mustFS(s.T(), tbl2).Remove(s.ctx, pq2)
 
 	// Build transactions that add data files to each table.
 	tx1 := tbl1.NewTransaction()
-	s.Require().NoError(tx1.AddFiles(s.ctx, []string{pq1}, nil, false))
+	s.Require().NoError(tx1.AddDataFilesByPath(s.ctx, []string{pq1}, nil, false))
 
 	tx2 := tbl2.NewTransaction()
-	s.Require().NoError(tx2.AddFiles(s.ctx, []string{pq2}, nil, false))
+	s.Require().NoError(tx2.AddDataFilesByPath(s.ctx, []string{pq2}, nil, false))
 
 	// Commit both atomically via MultiTableTransaction.
 	mtx, err := catalog.NewMultiTableTransaction(s.cat)

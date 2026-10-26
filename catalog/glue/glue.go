@@ -92,7 +92,10 @@ const (
 	renameCleanupTimeout    = 5 * time.Second
 )
 
-var _ catalog.Catalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog             = (*Catalog)(nil)
+	_ catalog.RegisterableCatalog = (*Catalog)(nil)
+)
 
 func init() {
 	catalog.Register("glue", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
@@ -487,8 +490,10 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 	if err != nil {
 		// Best-effort: drop the metadata object we just wrote; for S3 Tables the
 		// managed location may be unreachable, so leave any remainder to the service.
-		if fs, fsErr := staged.FS(ctx); fsErr == nil {
-			_ = fs.Remove(staged.MetadataLocation())
+		// The commit may have failed on ctx's cancellation, so do not inherit it.
+		cleanupCtx := context.WithoutCancel(ctx)
+		if fs, fsErr := staged.FS(cleanupCtx); fsErr == nil {
+			_ = fs.Remove(cleanupCtx, staged.MetadataLocation())
 		}
 
 		return fmt.Errorf("failed to commit S3 Tables table %s.%s: %w", database, tableName, err)

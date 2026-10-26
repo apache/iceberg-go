@@ -78,7 +78,7 @@ func TestManifestActiveFilesCountsEntriesWhenHeaderCountsAbsent(t *testing.T) {
 	// A manifest reporting unknown (-1) added/existing counts, as a manifest
 	// written without the count fields would (V1's toFile maps absent counts to
 	// -1), but pointing at the real file so the fallback has entries to read.
-	unknown := iceberg.NewManifestFile(2, path, length, 0, 1).
+	unknown := iceberg.NewManifestBuilder(2, path, length, 0, 1).
 		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).Build()
 	require.EqualValues(t, -1, unknown.AddedDataFiles(), "precondition: counts must read as unknown")
 
@@ -87,7 +87,7 @@ func TestManifestActiveFilesCountsEntriesWhenHeaderCountsAbsent(t *testing.T) {
 	require.EqualValues(t, n, got, "fallback must count the live entries, not skip the manifest")
 
 	// And the header-count path still wins when the counts are present.
-	known := iceberg.NewManifestFile(2, path, length, 0, 1).
+	known := iceberg.NewManifestBuilder(2, path, length, 0, 1).
 		AddedFiles(n).ExistingFiles(0).DeletedFiles(0).Build()
 	got, err = manifestActiveFiles(fs, []iceberg.ManifestFile{known})
 	require.NoError(t, err)
@@ -194,7 +194,7 @@ func TestRewriteManifestsCleansOrphanOnValidationError(t *testing.T) {
 		// A header count that lies: the merge re-counts the one real entry and
 		// disagrees, tripping the file-count guard after the merged file is
 		// already on disk.
-		inputs[i] = iceberg.NewManifestFile(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
+		inputs[i] = iceberg.NewManifestBuilder(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
 			AddedFiles(99).Content(iceberg.ManifestContentData).Build()
 	}
 
@@ -367,7 +367,7 @@ func TestRewriteManifestsCleansOrphansOnMergeFailure(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
 
-		inputs[i] = iceberg.NewManifestFile(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
+		inputs[i] = iceberg.NewManifestBuilder(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
 			AddedFiles(1).Content(iceberg.ManifestContentData).Build()
 		maxLen = max(maxLen, int64(buf.Len()))
 	}
