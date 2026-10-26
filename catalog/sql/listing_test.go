@@ -23,6 +23,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 )
 
 func (s *SqliteCatalogTestSuite) TestListTablesAndViewsShareNamespaceButNotRows() {
@@ -43,7 +44,7 @@ func (s *SqliteCatalogTestSuite) TestListTablesAndViewsShareNamespaceButNotRows(
 	viewSchema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(cat.CreateView(ctx, viewID, viewSchema, "SELECT 1", "spark", nil))
+	s.Require().NoError(cat.CreateView(ctx, viewID, viewSchema, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil))
 
 	// A legacy V0 table migrated to V1 can have a NULL iceberg_type.
 	// It must remain visible as a table without appearing in the view list.

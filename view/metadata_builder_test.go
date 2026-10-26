@@ -278,7 +278,7 @@ func TestNewVersionCopiesInputSlices(t *testing.T) {
 
 func TestNewVersionFromSQLCopiesNamespace(t *testing.T) {
 	defaultNS := table.Identifier{"analytics"}
-	version, err := NewVersionFromSQL(1, 0, "SELECT 1", "spark", defaultNS)
+	version, err := NewVersionFromSQL(1, 0, Representation{SQL: "SELECT 1", Dialect: "spark"}, defaultNS)
 	require.NoError(t, err)
 
 	defaultNS[0] = "other"
@@ -287,7 +287,7 @@ func TestNewVersionFromSQLCopiesNamespace(t *testing.T) {
 }
 
 func TestNewVersionFromSQLRequiresDialect(t *testing.T) {
-	_, err := NewVersionFromSQL(1, 0, "SELECT 1", "  ", table.Identifier{"analytics"})
+	_, err := NewVersionFromSQL(1, 0, Representation{SQL: "SELECT 1", Dialect: "  "}, table.Identifier{"analytics"})
 	require.ErrorIs(t, err, ErrInvalidViewMetadata)
 	require.ErrorContains(t, err, "dialect is required")
 }

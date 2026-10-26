@@ -36,6 +36,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -237,7 +238,7 @@ func (s *SQLIntegrationSuite) TestCreateView() {
 	// Create a view
 	viewSQL := fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table")
 
-	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, viewSQL, "spark", iceberg.Properties{"foobar": "baz"})
+	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, view.Representation{SQL: viewSQL, Dialect: "spark"}, iceberg.Properties{"foobar": "baz"})
 	s.Require().NoError(err)
 
 	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))

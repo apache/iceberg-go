@@ -59,15 +59,15 @@ func TestSQLFromVersionPreservesDialect(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sql, dialect, err := sqlFromVersion(tt.version)
+			representation, err := sqlFromVersion(tt.version)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tt.wantSQL, sql)
-			require.Equal(t, tt.wantDialect, dialect)
+			require.Equal(t, tt.wantSQL, representation.SQL)
+			require.Equal(t, tt.wantDialect, representation.Dialect)
 		})
 	}
 }

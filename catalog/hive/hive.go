@@ -356,7 +356,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	viewSQL, viewDialect, err := sqlFromVersion(version)
+	representation, err := sqlFromVersion(version)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +373,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	createdView, err := view.CreateViewWithIOProperties(
-		ctx, catalogName, identifier, freshSchema, viewSQL, viewDialect, defaultNS, loc, ioProps, cfg.Properties,
+		ctx, catalogName, identifier, freshSchema, representation, defaultNS, loc, ioProps, cfg.Properties,
 	)
 	if err != nil {
 		return nil, err
@@ -384,7 +384,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		maps.Copy(viewProps, cfg.Properties)
 	}
 
-	hiveTbl := constructHiveViewTable(database, viewName, loc, createdView.MetadataLocation(), freshSchema, viewSQL, viewProps)
+	hiveTbl := constructHiveViewTable(database, viewName, loc, createdView.MetadataLocation(), freshSchema, representation.SQL, viewProps)
 	if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
 		if isAlreadyExistsError(err) {
 			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, viewName)
@@ -397,10 +397,10 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 }
 
 // sqlFromVersion selects a SQL representation, preferring the Hive dialect.
-// Return its dialect as well so creating the view does not rewrite it to "default".
-func sqlFromVersion(v *view.Version) (string, string, error) {
+// Preserve its dialect so creating the view does not rewrite it to "default".
+func sqlFromVersion(v *view.Version) (view.Representation, error) {
 	if v == nil || len(v.Representations) == 0 {
-		return "", "", errors.New("view version has no representations")
+		return view.Representation{}, errors.New("view version has no representations")
 	}
 	var fallback *view.Representation
 	for i := range v.Representations {
@@ -409,17 +409,17 @@ func sqlFromVersion(v *view.Version) (string, string, error) {
 			continue
 		}
 		if strings.EqualFold(r.Dialect, "hive") {
-			return r.SQL, r.Dialect, nil
+			return *r, nil
 		}
 		if fallback == nil {
 			fallback = r
 		}
 	}
 	if fallback != nil {
-		return fallback.SQL, fallback.Dialect, nil
+		return *fallback, nil
 	}
 
-	return "", "", errors.New("view version has no SQL representation")
+	return view.Representation{}, errors.New("view version has no SQL representation")
 }
 
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) (err error) {
