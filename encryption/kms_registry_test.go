@@ -214,3 +214,79 @@ func TestKMSRegistry_ConcurrentUse(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+func TestKMSRegistry_DefaultRegistrySnapshot(t *testing.T) {
+	const name = "test-default-kms-registry-snapshot"
+	before := encryption.NewKMSRegistry()
+
+	// Mimic a provider registering through a side-effect import.
+	encryption.RegisterKMS(name, memoryKMSFactory)
+	t.Cleanup(func() { encryption.UnregisterKMS(name) })
+
+	after := encryption.NewKMSRegistry()
+	assert.Contains(t, encryption.GetRegisteredKMSNames(), name)
+
+	_, err := before.Load(t.Context(), map[string]string{encryption.KMSTypeKey: name})
+	require.ErrorIs(t, err, encryption.ErrKMSTypeNotFound)
+	_, err = after.Load(t.Context(), map[string]string{encryption.KMSTypeKey: name})
+	require.NoError(t, err)
+
+	// Removing a global registration must not mutate an existing snapshot.
+	encryption.UnregisterKMS(name)
+	_, err = after.Load(t.Context(), map[string]string{encryption.KMSTypeKey: name})
+	require.NoError(t, err)
+	_, err = encryption.NewKMSRegistry().Load(t.Context(), map[string]string{encryption.KMSTypeKey: name})
+	require.ErrorIs(t, err, encryption.ErrKMSTypeNotFound)
+}
+
+func TestKMSRegistry_CloneIsIndependent(t *testing.T) {
+	registry := encryption.NewKMSRegistry()
+	clone := registry.Clone()
+	require.NoError(t, clone.Register("only-clone", memoryKMSFactory))
+
+	_, err := registry.Load(t.Context(), map[string]string{encryption.KMSTypeKey: "only-clone"})
+	require.ErrorIs(t, err, encryption.ErrKMSTypeNotFound)
+	_, err = clone.Load(t.Context(), map[string]string{encryption.KMSTypeKey: "only-clone"})
+	require.NoError(t, err)
+
+	registry.Unregister("memory")
+	_, err = clone.Load(t.Context(), map[string]string{encryption.KMSTypeKey: "memory"})
+	require.NoError(t, err)
+
+	// Cloning the zero-value registry must also create an independent instance.
+	var empty encryption.KMSRegistry
+	copied := empty.Clone()
+	require.NoError(t, copied.Register("custom", memoryKMSFactory))
+	assert.Empty(t, empty.Names())
+}
+
+func TestKMSRegistry_GlobalRegistrationCompatibility(t *testing.T) {
+	const name = "test-global-kms-registration"
+	encryption.MustRegisterKMS(name, memoryKMSFactory)
+	t.Cleanup(func() { encryption.UnregisterKMS(name) })
+
+	assert.Panics(t, func() { encryption.RegisterKMS(name, memoryKMSFactory) })
+	assert.Panics(t, func() { encryption.RegisterKMS("test-nil-global-kms", nil) })
+
+	kms, err := encryption.LoadKeyManagementClient(t.Context(), map[string]string{encryption.KMSTypeKey: name})
+	require.NoError(t, err)
+	assert.IsType(t, &encryption.InMemoryKeyManagementClient{}, kms)
+
+	// Registering only on an instance must not change the process-wide default.
+	require.NoError(t, encryption.NewKMSRegistry().Register("instance-only", memoryKMSFactory))
+	_, err = encryption.LoadKeyManagementClient(t.Context(), map[string]string{encryption.KMSTypeKey: "instance-only"})
+	require.ErrorIs(t, err, encryption.ErrKMSTypeNotFound)
+}
+
+func TestKMSRegistry_GlobalLoaderPassesContext(t *testing.T) {
+	const name = "test-global-kms-context"
+	encryption.MustRegisterKMS(name, func(ctx context.Context, _ map[string]string) (encryption.KeyManagementClient, error) {
+		return nil, ctx.Err()
+	})
+	t.Cleanup(func() { encryption.UnregisterKMS(name) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := encryption.LoadKeyManagementClient(ctx, map[string]string{encryption.KMSTypeKey: name})
+	require.ErrorIs(t, err, context.Canceled)
+}
