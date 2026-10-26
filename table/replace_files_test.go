@@ -217,7 +217,7 @@ func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 	require.NoError(t, err)
 
 	oldDelete := oldDeleteBuilder.Build()
-	oldSequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).SequenceNum()
+	oldSequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).DataSequenceNumber()
 	newDeletePath := tbl.Location() + "/data/new-pos-delete.parquet"
 	writeParquetFile(t, newDeletePath, table.PositionalDeleteArrowSchema,
 		fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, dataPath))
@@ -236,7 +236,7 @@ func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	assert.Equal(t, oldSequence, currentManifestEntry(t, tbl, newDeletePath).SequenceNum(),
+	assert.Equal(t, oldSequence, currentManifestEntry(t, tbl, newDeletePath).DataSequenceNumber(),
 		"rewritten delete files must retain the replaced data sequence number")
 	assert.NotEqual(t, tbl.CurrentSnapshot().SequenceNumber, oldSequence,
 		"the new snapshot sequence must not replace the delete data sequence")
@@ -366,7 +366,7 @@ func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorIdentity(t *testing.T
 		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(sourceDelete).Commit(t.Context()))
 		sharedTbl, err := tx.Commit(t.Context())
 		require.NoError(t, err)
-		sequence := currentManifestEntry(t, sharedTbl, sourceDelete.FilePath()).SequenceNum()
+		sequence := currentManifestEntry(t, sharedTbl, sourceDelete.FilePath()).DataSequenceNumber()
 
 		tx = sharedTbl.NewTransaction()
 		require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -458,7 +458,7 @@ func TestReplaceFilesWithDeleteFilesValidatesExistingPaths(t *testing.T) {
 			}
 			tbl, err = tx.Commit(t.Context())
 			require.NoError(t, err)
-			sequence := currentManifestEntry(t, tbl, source.FilePath()).SequenceNum()
+			sequence := currentManifestEntry(t, tbl, source.FilePath()).DataSequenceNumber()
 
 			for _, tt := range []struct {
 				name string
@@ -529,7 +529,7 @@ func TestReplaceFilesWithDeleteFilesRejectsPartialPositionDeleteToDVRewrite(t *t
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	sequence := currentManifestEntry(t, tbl, oldDeletes[0].FilePath()).SequenceNum()
+	sequence := currentManifestEntry(t, tbl, oldDeletes[0].FilePath()).DataSequenceNumber()
 	offset, length := int64(8), int64(16)
 	replacement := newRewriteDeletionVector(t, tbl.Location()+"/data/replacement.puffin", dataPath, &offset, &length)
 
@@ -572,7 +572,7 @@ func TestReplaceFilesWithDeleteFilesRejectsDeletionVectorPartitionMismatch(t *te
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	deleteSequence := currentManifestEntry(t, tbl, oldDeletePath).SequenceNum()
+	deleteSequence := currentManifestEntry(t, tbl, oldDeletePath).DataSequenceNumber()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -624,7 +624,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldPartitionDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	oldPartitionDeleteSequence := currentManifestEntry(t, tbl, oldPartitionDeletePath).SequenceNum()
+	oldPartitionDeleteSequence := currentManifestEntry(t, tbl, oldPartitionDeletePath).DataSequenceNumber()
 
 	dataBPath := tbl.Location() + "/data/data-b.parquet"
 	dataBBuilder, err := iceberg.NewDataFileBuilder(
@@ -635,7 +635,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{dataBBuilder.Build()}, nil))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	dataBSequence := currentManifestEntry(t, tbl, dataBPath).SequenceNum()
+	dataBSequence := currentManifestEntry(t, tbl, dataBPath).DataSequenceNumber()
 	require.Greater(t, dataBSequence, oldPartitionDeleteSequence)
 
 	filePathField, ok := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
@@ -655,7 +655,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(newPositionDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	newPositionDeleteSequence := currentManifestEntry(t, tbl, newPositionDeletePath).SequenceNum()
+	newPositionDeleteSequence := currentManifestEntry(t, tbl, newPositionDeletePath).DataSequenceNumber()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -681,7 +681,7 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 		"an older position delete cannot apply to the newer target data file")
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, newPositionDeleteSequence, currentManifestEntry(t, tbl, replacement.FilePath()).SequenceNum())
+	assert.Equal(t, newPositionDeleteSequence, currentManifestEntry(t, tbl, replacement.FilePath()).DataSequenceNumber())
 }
 
 func TestReplaceFilesWithDeleteFilesRejectsSurvivingDeletionVector(t *testing.T) {
@@ -711,7 +711,7 @@ func TestReplaceFilesWithDeleteFilesRejectsSurvivingDeletionVector(t *testing.T)
 
 	offset, length := int64(8), int64(16)
 	replacement := newRewriteDeletionVector(t, tbl.Location()+"/data/replacement-dv.puffin", target, &offset, &length)
-	sequence := currentManifestEntry(t, tbl, siblingDVs[0].FilePath()).SequenceNum()
+	sequence := currentManifestEntry(t, tbl, siblingDVs[0].FilePath()).DataSequenceNumber()
 	tx = tbl.NewTransaction()
 	err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
 		[]iceberg.DataFile{siblingDVs[0]},
@@ -733,7 +733,7 @@ func TestReplaceFilesWithDeleteFilesAllowsDroppedEqualityField(t *testing.T) {
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	sequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).SequenceNum()
+	sequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).DataSequenceNumber()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpdateSchema(true, false).DeleteColumn([]string{"data"}).Commit())
@@ -1269,7 +1269,7 @@ func TestReplaceFilesRejectsDeletionVectorSupersededByCurrentSnapshot(t *testing
 					[]iceberg.DataFile{superseded},
 					[]table.DeleteFileAddition{{
 						File:               rewritten[0],
-						DataSequenceNumber: currentManifestEntry(t, tbl, superseded.FilePath()).SequenceNum(),
+						DataSequenceNumber: currentManifestEntry(t, tbl, superseded.FilePath()).DataSequenceNumber(),
 					}}, nil)
 			},
 		},
@@ -1324,7 +1324,7 @@ func TestReplaceFilesRemovesLiveDeletionVectorNotSupersededEntry(t *testing.T) {
 			[]iceberg.DataFile{liveDV},
 			[]table.DeleteFileAddition{{
 				File:               rewritten[0],
-				DataSequenceNumber: currentManifestEntry(t, tbl, liveDV.FilePath()).SequenceNum(),
+				DataSequenceNumber: currentManifestEntry(t, tbl, liveDV.FilePath()).DataSequenceNumber(),
 			}}, nil))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)

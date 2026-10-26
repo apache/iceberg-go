@@ -127,7 +127,7 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	require.NoError(t, err)
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df.Build()).
-		SequenceNum(seqNum).
+		DataSequenceNumber(seqNum).
 		Build()
 
 	var buf bytes.Buffer
@@ -136,7 +136,7 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	require.NoError(t, tio.WriteFile(manifestPath, buf.Bytes()))
 
 	return iceberg.NewManifestBuilder(2, manifestPath, int64(buf.Len()), 0, snapshotID).
-		SequenceNum(seqNum, seqNum).
+		SequenceNumber(seqNum, seqNum).
 		AddedFiles(1).
 		AddedRows(1).
 		Build()

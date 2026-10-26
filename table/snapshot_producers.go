@@ -256,10 +256,10 @@ func (of *overwriteFiles) scanManifest(ctx context.Context, m iceberg.ManifestFi
 		isData := content == iceberg.EntryContentData
 		matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
 		if matched {
-			seqNum := entry.SequenceNum()
+			seqNum := entry.DataSequenceNumber()
 			scan.deleted = append(scan.deleted,
 				iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
-					&of.base.snapshotID, &seqNum, entry.FileSequenceNum(),
+					&of.base.snapshotID, &seqNum, entry.FileSequenceNumber(),
 					entry.DataFile()))
 
 			continue

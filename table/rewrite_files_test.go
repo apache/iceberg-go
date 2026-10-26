@@ -327,7 +327,7 @@ func TestRewriteFiles_PreservesIndependentPositionDeleteSequences(t *testing.T) 
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 		oldDeletes = append(oldDeletes, builder)
-		oldSequences = append(oldSequences, currentManifestEntry(t, tbl, path).SequenceNum())
+		oldSequences = append(oldSequences, currentManifestEntry(t, tbl, path).DataSequenceNumber())
 	}
 	require.NotEqual(t, oldSequences[0], oldSequences[1])
 
@@ -349,7 +349,7 @@ func TestRewriteFiles_PreservesIndependentPositionDeleteSequences(t *testing.T) 
 	require.NoError(t, err)
 
 	for i, df := range newDeletes {
-		assert.Equal(t, oldSequences[i], currentManifestEntry(t, tbl, df.FilePath()).SequenceNum())
+		assert.Equal(t, oldSequences[i], currentManifestEntry(t, tbl, df.FilePath()).DataSequenceNumber())
 	}
 	assert.Empty(t, scanIDs(t, tbl),
 		"each replacement must retain the applicability of its corresponding old position delete")
@@ -814,7 +814,7 @@ func TestRewriteFiles_RejectsConcurrentDeleteForAddedDVTarget(t *testing.T) {
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	oldDeleteSequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).SequenceNum()
+	oldDeleteSequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).DataSequenceNumber()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))

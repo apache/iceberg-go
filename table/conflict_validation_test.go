@@ -55,7 +55,7 @@ func writeTestDeleteManifest(
 	t.Helper()
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, delFile).
-		SequenceNum(1).
+		DataSequenceNumber(1).
 		Build()
 
 	manifestPath := filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("delete-manifest-%d.avro", snapshotID)))
@@ -838,7 +838,7 @@ func writeTestMetricsManifestWithValues(
 	}
 	df := builder.Build()
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df).
-		SequenceNum(1).
+		DataSequenceNumber(1).
 		Build()
 
 	manifestPath := filepath.Join(dir, "metrics-manifest.avro")

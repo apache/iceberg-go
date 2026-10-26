@@ -938,14 +938,14 @@ func (scan *Scan) partitionFiltersForSchema(schema *iceberg.Schema) *keyDefaultM
 func (scan *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.ManifestFile) bool {
 	return manifest.ManifestContent() == iceberg.ManifestContentData ||
 		(manifest.ManifestContent() == iceberg.ManifestContentDeletes &&
-			manifest.SequenceNum() >= minSeqNum)
+			manifest.SequenceNumber() >= minSeqNum)
 }
 
 func minSequenceNum(manifests []iceberg.ManifestFile) int64 {
 	var n int64 = math.MaxInt64
 	for _, m := range manifests {
 		if m.ManifestContent() == iceberg.ManifestContentData {
-			n = min(n, m.MinSequenceNum())
+			n = min(n, m.MinSequenceNumber())
 		}
 	}
 	if n == math.MaxInt64 {
@@ -964,14 +964,14 @@ func minSequenceNum(manifests []iceberg.ManifestFile) int64 {
 // snapshot as the equality deletes are not affected — this is how RowDelta
 // atomically adds new rows alongside deletes for old rows.
 func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries []iceberg.ManifestEntry) []iceberg.DataFile {
-	dataSeqNum := dataEntry.SequenceNum()
+	dataSeqNum := dataEntry.DataSequenceNumber()
 	dataPartition := dataEntry.DataFile().Partition()
 
 	out := make([]iceberg.DataFile, 0)
 	for _, del := range eqDeleteEntries {
 		// Equality deletes only apply to data files with a strictly lower
 		// sequence number.
-		if del.SequenceNum() <= dataSeqNum {
+		if del.DataSequenceNumber() <= dataSeqNum {
 			continue
 		}
 
@@ -1031,7 +1031,7 @@ func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.M
 	if !ok {
 		return nil
 	}
-	if dvSeq := dvEntry.SequenceNum(); dvSeq < 0 || dataEntry.SequenceNum() <= dvSeq {
+	if dvSeq := dvEntry.DataSequenceNumber(); dvSeq < 0 || dataEntry.DataSequenceNumber() <= dvSeq {
 		return []iceberg.DataFile{dvEntry.DataFile()}
 	}
 
@@ -1609,7 +1609,7 @@ func fileScanTaskForDataEntry(
 	// _last_updated_sequence_number is the manifest entry's data sequence
 	// number (field id 3), not file sequence number (field id 4).
 	task.FirstRowID = dataFile.FirstRowID()
-	if seq := entry.SequenceNum(); seq >= 0 {
+	if seq := entry.DataSequenceNumber(); seq >= 0 {
 		task.DataSequenceNumber = &seq
 	}
 

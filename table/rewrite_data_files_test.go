@@ -1345,7 +1345,7 @@ func readKeySeqNums(t *testing.T, tbl *table.Table) (eqDelete, smallMin, preserv
 				continue
 			}
 			path := e.DataFile().FilePath()
-			seq := e.SequenceNum()
+			seq := e.DataSequenceNumber()
 			switch {
 			case e.DataFile().ContentType() == iceberg.EntryContentEqDeletes:
 				eqDelete = seq

@@ -72,7 +72,7 @@ func TestReadTasksUsesIdentityPartitionResidual(t *testing.T) {
 		iceberg.EntryStatusADDED,
 		&snapshotID,
 		dataFileBuilder.Build(),
-	).SequenceNum(1).Build()
+	).DataSequenceNumber(1).Build()
 	manifestPath := tableLocation + "/metadata/manifest.avro"
 	var manifestBuffer bytes.Buffer
 	manifest, err := iceberg.WriteManifest(
