@@ -19,6 +19,7 @@ package catalog_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -51,6 +52,49 @@ func TestCatalogRegistryIsolation(t *testing.T) {
 
 	_, err = catalog.Load(context.Background(), "test", iceberg.Properties{"type": "mytype"})
 	require.ErrorIs(t, err, catalog.ErrCatalogNotFound)
+}
+
+func TestCatalogRegistriesWithSameTypeAreIsolated(t *testing.T) {
+	first := catalog.NewRegistry()
+	second := catalog.NewRegistry()
+
+	firstErr := errors.New("first factory")
+	secondErr := errors.New("second factory")
+	registrarFor := func(err error) catalog.Registrar {
+		return catalog.RegistrarFunc(func(context.Context, string, iceberg.Properties) (catalog.Catalog, error) {
+			return nil, err
+		})
+	}
+
+	require.NoError(t, first.Register("shared", registrarFor(firstErr)))
+	require.NoError(t, second.Register("SHARED", registrarFor(secondErr)))
+
+	_, err := first.Load(context.Background(), "test", iceberg.Properties{"type": "shared"})
+	require.ErrorIs(t, err, firstErr)
+
+	_, err = second.Load(context.Background(), "test", iceberg.Properties{"type": "SHARED"})
+	require.ErrorIs(t, err, secondErr)
+
+	first.Unregister("SHARED")
+	_, err = first.Load(context.Background(), "test", iceberg.Properties{"type": "shared"})
+	require.ErrorIs(t, err, catalog.ErrCatalogNotFound)
+
+	_, err = second.Load(context.Background(), "test", iceberg.Properties{"type": "shared"})
+	require.ErrorIs(t, err, secondErr)
+}
+
+func TestCatalogRegistryZeroValue(t *testing.T) {
+	var reg catalog.Registry
+	assert.Empty(t, reg.GetRegisteredCatalogs())
+
+	require.NoError(t, reg.Register("Mock", stubRegistrar()))
+	assert.Equal(t, []string{"mock"}, reg.GetRegisteredCatalogs())
+
+	_, err := reg.Load(context.Background(), "test", iceberg.Properties{"type": "MOCK"})
+	require.NoError(t, err)
+
+	reg.Unregister("MOCK")
+	assert.Empty(t, reg.GetRegisteredCatalogs())
 }
 
 func TestCatalogRegistryCloneIsIndependent(t *testing.T) {
@@ -108,6 +152,7 @@ func TestCatalogRegistryConcurrentAccess(t *testing.T) {
 			name := fmt.Sprintf("mock-%d", i)
 			if err := reg.Register(name, stubRegistrar()); err != nil {
 				t.Errorf("register %s: %v", name, err)
+
 				return
 			}
 			if _, err := reg.Load(context.Background(), "test", iceberg.Properties{"type": name}); err != nil {

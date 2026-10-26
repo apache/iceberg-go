@@ -190,7 +190,8 @@ func Load(ctx context.Context, name string, props iceberg.Properties) (Catalog, 
 }
 
 // Load resolves a catalog using only the factories registered in this registry.
-// Configuration resolution matches the package-level Load function.
+// Configuration resolution matches the package-level Load function and uses
+// the shared config.EnvConfig for named catalog settings.
 func (r *Registry) Load(ctx context.Context, name string, props iceberg.Properties) (Catalog, error) {
 	if name == "" {
 		name = config.EnvConfig.DefaultCatalog
