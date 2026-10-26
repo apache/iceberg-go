@@ -2599,16 +2599,16 @@ func fitDecimalBytes(bytes []byte, size int) ([]byte, error) {
 }
 
 type dataFile struct {
-	Content          ManifestEntryContent `avro:"content"`
-	projected        bool
-	Path             string                `avro:"file_path"`
-	Format           FileFormat            `avro:"file_format"`
-	PartitionData    map[string]any        `avro:"partition"`
-	RecordCount      int64                 `avro:"record_count"`
-	FileSize         int64                 `avro:"file_size_in_bytes"`
+	Content       ManifestEntryContent `avro:"content"`
+	projected     bool
+	Path          string         `avro:"file_path"`
+	Format        FileFormat     `avro:"file_format"`
+	PartitionData map[string]any `avro:"partition"`
+	RecordCount   int64          `avro:"record_count"`
+	FileSize      int64          `avro:"file_size_in_bytes"`
 	// BlockSizeInBytes is kept for reading legacy v1 manifests. When unset,
 	// v1 writes its 64 MiB schema default, while v2/v3 omit the field.
-	BlockSizeInBytes int64 `avro:"block_size_in_bytes,omitzero"`
+	BlockSizeInBytes int64                 `avro:"block_size_in_bytes,omitzero"`
 	ColSizes         *[]colMap[int, int64] `avro:"column_sizes"`
 	ValCounts        *[]colMap[int, int64] `avro:"value_counts"`
 	NullCounts       *[]colMap[int, int64] `avro:"null_value_counts"`
