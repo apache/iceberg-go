@@ -1169,7 +1169,9 @@ func TestTransactionEntryPointsRejectNilAndBrokenTransaction(t *testing.T) {
 		{"AppendTable", func(txn *Transaction) error { return txn.AppendTable(ctx, nil, 0, nil) }},
 		{"Append", func(txn *Transaction) error { return txn.Append(ctx, nil, nil) }},
 		{"AddDataFiles", func(txn *Transaction) error { return txn.AddDataFiles(ctx, []iceberg.DataFile{dataFile}, nil) }},
-		{"AddFiles", func(txn *Transaction) error { return txn.AddFiles(ctx, []string{"file://a.parquet"}, nil, false) }},
+		{"AddDataFilesByPath", func(txn *Transaction) error {
+			return txn.AddDataFilesByPath(ctx, []string{"file://a.parquet"}, nil, false)
+		}},
 		{"ReplaceDataFilesByPath", func(txn *Transaction) error {
 			return txn.ReplaceDataFilesByPath(ctx, []string{"a"}, []string{"b"}, nil)
 		}},
@@ -2170,7 +2172,7 @@ func TestTableCommitWithSnapshotProducerPinsBaseHead(t *testing.T) {
 	tbl, _, _ := newProducerAssertRefTable(t)
 
 	seed := tbl.NewTransaction()
-	require.NoError(t, seed.AddFiles(t.Context(), nil, nil, false))
+	require.NoError(t, seed.AddDataFilesByPath(t.Context(), nil, nil, false))
 	tbl, err := seed.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -2178,7 +2180,7 @@ func TestTableCommitWithSnapshotProducerPinsBaseHead(t *testing.T) {
 	require.NotNil(t, baseHead)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), nil, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), nil, nil, false))
 
 	tc, err := tx.TableCommit()
 	require.NoError(t, err)

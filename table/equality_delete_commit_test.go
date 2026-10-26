@@ -61,7 +61,7 @@ func TestCommitEqualityDeletesUnpartitioned(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assertRowCount(t, tbl, 5)
@@ -190,7 +190,7 @@ func TestCommitEqualityDeletesConcurrentAppendConflict(t *testing.T) {
 		{"id": 3, "data": "c"}
 	]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -205,7 +205,7 @@ func TestCommitEqualityDeletesConcurrentAppendConflict(t *testing.T) {
 	peerPath := tbl.Location() + "/data/peer.parquet"
 	writeParquetFile(t, peerPath, arrowSc, `[{"id": 4, "data": "d"}]`)
 	peerTxn := tbl.NewTransaction()
-	require.NoError(t, peerTxn.AddFiles(t.Context(), []string{peerPath}, nil, false))
+	require.NoError(t, peerTxn.AddDataFilesByPath(t.Context(), []string{peerPath}, nil, false))
 	_, err = peerTxn.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -241,7 +241,7 @@ func TestCommitEqualityDeletesSnapshotIsolationAllowsConcurrentAppend(t *testing
 		{"id": 2, "data": "b"}
 	]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -253,7 +253,7 @@ func TestCommitEqualityDeletesSnapshotIsolationAllowsConcurrentAppend(t *testing
 	peerPath := tbl.Location() + "/data/peer.parquet"
 	writeParquetFile(t, peerPath, arrowSc, `[{"id": 3, "data": "c"}]`)
 	peerTxn := tbl.NewTransaction()
-	require.NoError(t, peerTxn.AddFiles(t.Context(), []string{peerPath}, nil, false))
+	require.NoError(t, peerTxn.AddDataFilesByPath(t.Context(), []string{peerPath}, nil, false))
 	_, err = peerTxn.Commit(t.Context())
 	require.NoError(t, err)
 
