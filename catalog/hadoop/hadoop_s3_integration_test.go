@@ -57,7 +57,7 @@ func (s *HadoopS3IntegrationSuite) SetupTest() {
 		// from `make integration-env` or recipe.Start.
 	}
 
-	cat, err := hadoop.NewCatalog("hadoop_s3_test", s.warehouse, s.props)
+	cat, err := hadoop.NewCatalog(s.ctx, "hadoop_s3_test", s.warehouse, s.props)
 	s.Require().NoError(err)
 	s.cat = cat
 }
