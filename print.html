@@ -1439,7 +1439,7 @@ newTbl, err = tbl.Overwrite(ctx, recordReader, nil,
 <h3 id="add-existing-files"><a class="header" href="#add-existing-files">Add existing files</a></h3>
 <p>When you already have data files (e.g. produced by another writer), register them without rewriting:</p>
 <pre><code class="language-go">txn := tbl.NewTransaction()
-err := txn.AddFiles(ctx, []string{
+err := txn.AddDataFilesByPath(ctx, []string{
     &quot;s3://my-bucket/sales/orders/data/file-1.parquet&quot;,
     &quot;s3://my-bucket/sales/orders/data/file-2.parquet&quot;,
 }, nil /* snapshot props */, false /* ignoreDuplicates */)
