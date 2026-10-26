@@ -40,8 +40,7 @@ func newTestDefinition(t *testing.T) *Definition {
 
 func newTestVersion(t *testing.T, sql string, timestampMS int64) *DefinitionVersion {
 	t.Helper()
-	repr, err := NewSQLRepresentation("trino", sql)
-	require.NoError(t, err)
+	repr := SQLRepresentation{Dialect: "trino", SQL: sql}
 	version, err := NewDefinitionVersion([]Representation{repr},
 		WithTimestampMS(timestampMS), WithDeterministic(true))
 	require.NoError(t, err)
@@ -98,6 +97,40 @@ func TestBuildRejectsNilRepresentation(t *testing.T) {
 		Build()
 	require.ErrorIs(t, err, ErrInvalidUDFMetadata)
 	assert.ErrorContains(t, err, "representations must not contain null entries")
+}
+
+func TestBuildRejectsMissingSQLRepresentationFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		repr    SQLRepresentation
+		wantErr string
+	}{
+		{
+			name:    "missing dialect",
+			repr:    SQLRepresentation{SQL: "x + 1"},
+			wantErr: "without a dialect",
+		},
+		{
+			name:    "missing SQL",
+			repr:    SQLRepresentation{Dialect: "trino"},
+			wantErr: "without a sql expression",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			version, err := NewDefinitionVersion([]Representation{tt.repr}, WithTimestampMS(1000))
+			require.NoError(t, err)
+
+			builder := NewMetadataBuilder()
+			_, err = builder.
+				AddDefinition(newTestDefinition(t)).
+				AddDefinitionVersion("int", version).
+				Build()
+			require.ErrorIs(t, err, ErrInvalidUDFMetadata)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 func TestBuildNewMetadata(t *testing.T) {
@@ -462,8 +495,7 @@ func TestBuilderRejectsHandBuiltUnknownRepresentation(t *testing.T) {
 }
 
 func TestBuilderOnNullInput(t *testing.T) {
-	repr, err := NewSQLRepresentation("trino", "coalesce(x, 0)")
-	require.NoError(t, err)
+	repr := SQLRepresentation{Dialect: "trino", SQL: "coalesce(x, 0)"}
 	version, err := NewDefinitionVersion([]Representation{repr},
 		WithTimestampMS(1000), WithOnNullInput(OnNullInputReturnNull))
 	require.NoError(t, err)
