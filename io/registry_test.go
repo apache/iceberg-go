@@ -193,9 +193,9 @@ func TestIndependentRegistryIsolation(t *testing.T) {
 
 	first := io.NewRegistry()
 	second := io.NewRegistry()
-	require.Equal(t, io.GetRegisteredSchemes(), first.RegisteredSchemes())
-	require.Equal(t, first.RegisteredSchemes(), second.RegisteredSchemes())
-	assert.True(t, slices.IsSorted(first.RegisteredSchemes()))
+	require.Equal(t, io.GetRegisteredSchemes(), first.Names())
+	require.Equal(t, first.Names(), second.Names())
+	assert.True(t, slices.IsSorted(first.Names()))
 
 	const scheme = "scoped-registry-test"
 	factory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
@@ -238,13 +238,13 @@ func TestNewRegistrySnapshotsGlobalRegistrations(t *testing.T) {
 	after := io.NewRegistry()
 	_, err = after.LoadFS(t.Context(), nil, scheme+"://bucket/key")
 	require.NoError(t, err)
-	assert.Contains(t, after.RegisteredSchemes(), scheme)
-	assert.NotContains(t, before.RegisteredSchemes(), scheme)
+	assert.Contains(t, after.Names(), scheme)
+	assert.NotContains(t, before.Names(), scheme)
 }
 
 func TestRegistryZeroValueIsUsable(t *testing.T) {
 	var reg io.Registry
-	require.Empty(t, reg.RegisteredSchemes())
+	require.Empty(t, reg.Names())
 
 	factory := func(context.Context, *url.URL, map[string]string) (io.IO, error) {
 		return io.LocalFS{}, nil
@@ -257,8 +257,8 @@ func TestRegistryZeroValueIsUsable(t *testing.T) {
 
 	cloned := reg.Clone()
 	reg.Unregister("private")
-	require.Empty(t, reg.RegisteredSchemes())
-	assert.Equal(t, []string{"private"}, cloned.RegisteredSchemes())
+	require.Empty(t, reg.Names())
+	assert.Equal(t, []string{"private"}, cloned.Names())
 }
 
 func TestRegistryAllowsFactoriesToRegisterSchemes(t *testing.T) {
@@ -338,5 +338,5 @@ func TestRegistryConcurrentRegistrationsAndLoads(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
-	require.Len(t, reg.RegisteredSchemes(), workers+len(io.NewRegistry().RegisteredSchemes()))
+	require.Len(t, reg.Names(), workers+len(io.NewRegistry().Names()))
 }
