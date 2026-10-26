@@ -18,6 +18,7 @@
 package io_test
 
 import (
+	"context"
 	"io/fs"
 	"testing"
 	"testing/fstest"
@@ -51,22 +52,72 @@ func (f *recordingFS) Remove(name string) error {
 	return nil
 }
 
-func TestFSPreProcNameTransformsAllOperations(t *testing.T) {
+func TestFSWithNamePreprocessorTransformsAllOperations(t *testing.T) {
 	underlying := &recordingFS{files: fstest.MapFS{
 		"rewritten/file.txt": &fstest.MapFile{Data: []byte("data")},
 	}}
-	fsys := iceio.FSPreProcName(underlying, func(string) string {
+	fsys := iceio.FS(underlying, iceio.WithNamePreprocessor(func(string) string {
 		return "/rewritten/file.txt"
-	})
+	}))
 
-	file, err := fsys.Open("file://bucket/original.txt")
+	file, err := fsys.Open(context.Background(), "file://bucket/original.txt")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 	_, err = fsys.(iceio.ReadFileIO).ReadFile("file://bucket/original.txt")
 	require.NoError(t, err)
-	require.NoError(t, fsys.Remove("file://bucket/original.txt"))
+	require.NoError(t, fsys.Remove(context.Background(), "file://bucket/original.txt"))
 
 	require.Equal(t, "rewritten/file.txt", underlying.opened)
 	require.Equal(t, underlying.opened, underlying.read)
 	require.Equal(t, underlying.opened, underlying.removed)
+}
+
+func TestFSDefaultAndNilOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []iceio.FSOption
+	}{
+		{name: "default"},
+		{name: "nil option", opts: []iceio.FSOption{nil}},
+		{name: "nil preprocessor", opts: []iceio.FSOption{iceio.WithNamePreprocessor(nil)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			underlying := &recordingFS{files: fstest.MapFS{
+				"plain.txt": &fstest.MapFile{Data: []byte("data")},
+			}}
+			fsys := iceio.FS(underlying, tc.opts...)
+
+			file, err := fsys.Open(context.Background(), "/plain.txt")
+			require.NoError(t, err)
+			require.NoError(t, file.Close())
+
+			reader, ok := fsys.(iceio.ReadFileIO)
+			require.True(t, ok)
+			data, err := reader.ReadFile("/plain.txt")
+			require.NoError(t, err)
+			require.Equal(t, []byte("data"), data)
+
+			require.NoError(t, fsys.Remove(context.Background(), "/plain.txt"))
+			require.Equal(t, "plain.txt", underlying.opened)
+			require.Equal(t, underlying.opened, underlying.read)
+			require.Equal(t, underlying.opened, underlying.removed)
+		})
+	}
+}
+
+type openOnlyFS struct{ fs.FS }
+
+func TestFSDoesNotAdvertiseUnsupportedReadFile(t *testing.T) {
+	fsys := iceio.FS(openOnlyFS{fstest.MapFS{
+		"plain.txt": &fstest.MapFile{Data: []byte("data")},
+	}}, iceio.WithNamePreprocessor(func(string) string {
+		return "/plain.txt"
+	}))
+
+	_, ok := fsys.(iceio.ReadFileIO)
+	require.False(t, ok)
+
+	file, err := fsys.Open(context.Background(), "unused")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
 }

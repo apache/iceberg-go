@@ -160,7 +160,7 @@ func (c *manifestContentCache) open(
 	location := manifest.FilePath()
 	expectedLength := manifest.Length()
 	if expectedLength <= 0 || expectedLength > c.maxContentLength || expectedLength > c.maxTotalBytes {
-		return base.Open(location)
+		return base.Open(ctx, location)
 	}
 
 	for {
@@ -194,7 +194,7 @@ func (c *manifestContentCache) open(
 			if load.err != nil {
 				// A failed population must not make concurrent scans fail
 				// when the ordinary FileIO path would have succeeded.
-				file, err := base.Open(location)
+				file, err := base.Open(ctx, location)
 				if err != nil {
 					return nil, fmt.Errorf("open manifest %s: cache population failed: %w; fallback open failed: %w",
 						location, load.err, err)
@@ -203,7 +203,7 @@ func (c *manifestContentCache) open(
 				return file, nil
 			}
 			if int64(len(load.content)) != expectedLength {
-				return base.Open(location)
+				return base.Open(ctx, location)
 			}
 
 			return newCachedManifestFile(location, load.content), nil
@@ -227,7 +227,7 @@ func (c *manifestContentCache) open(
 				}
 				c.finishLoad(location, expectedLength, load, content, err, canceled)
 			}()
-			content, err = readManifestContent(base, location, expectedLength)
+			content, err = readManifestContent(ctx, base, location, expectedLength)
 			canceled = err != nil && ctx.Err() != nil
 		}()
 		if err != nil {
@@ -238,7 +238,7 @@ func (c *manifestContentCache) open(
 			// Preserve the ordinary-open fallback for the producer, and
 			// explain repeated uncached reads for bad manifest descriptors.
 			log.Printf("Warning: manifest cache population failed for %s: %v; falling back to FileIO", location, err)
-			file, fallbackErr := base.Open(location)
+			file, fallbackErr := base.Open(ctx, location)
 			if fallbackErr != nil {
 				return nil, fmt.Errorf("open manifest %s: cache population failed: %w; fallback open failed: %w",
 					location, err, fallbackErr)
@@ -361,8 +361,8 @@ func (c *manifestContentCache) removeEntryLocked(entry *manifestContentCacheEntr
 	c.totalBytes -= int64(len(entry.content))
 }
 
-func readManifestContent(base iceio.IO, location string, expectedLength int64) (content []byte, err error) {
-	file, err := base.Open(location)
+func readManifestContent(ctx context.Context, base iceio.IO, location string, expectedLength int64) (content []byte, err error) {
+	file, err := base.Open(ctx, location)
 	if err != nil {
 		return nil, err
 	}
@@ -401,16 +401,18 @@ type manifestContentCacheIO struct {
 	manifest iceberg.ManifestFile
 }
 
-func (m *manifestContentCacheIO) Open(name string) (iceio.File, error) {
+func (m *manifestContentCacheIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	if name != m.manifest.FilePath() {
-		return m.base.Open(name)
+		return m.base.Open(ctx, name)
 	}
 
+	// The manifest readers above this wrapper have no caller context to pass,
+	// so the cached path is bound by the scan context captured in wrap.
 	return m.cache.open(m.ctx, m.base, m.manifest)
 }
 
-func (m *manifestContentCacheIO) Remove(name string) error {
-	return m.base.Remove(name)
+func (m *manifestContentCacheIO) Remove(ctx context.Context, name string) error {
+	return m.base.Remove(ctx, name)
 }
 
 type cachedManifestFile struct {

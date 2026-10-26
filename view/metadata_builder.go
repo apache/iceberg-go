@@ -72,7 +72,8 @@ func (m *MetadataBuildResult) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.Metadata)
 }
 
-func NewMetadataBuilder() (*MetadataBuilder, error) {
+// NewMetadataBuilder creates a builder for new view metadata.
+func NewMetadataBuilder() *MetadataBuilder {
 	return &MetadataBuilder{
 		formatVersion: DefaultViewFormatVersion,
 		updates:       make([]Update, 0),
@@ -82,7 +83,7 @@ func NewMetadataBuilder() (*MetadataBuilder, error) {
 		props:         make(iceberg.Properties),
 		versionsById:  make(map[int64]*Version),
 		schemasById:   make(map[int]*iceberg.Schema),
-	}, nil
+	}
 }
 
 func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {

@@ -80,8 +80,8 @@ func newInspectEntryAppender(
 
 		bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
 		appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
-		appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
-		appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
+		appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.DataSequenceNumber())
+		appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNumber())
 		dataFileBuilder.Append(true)
 
 		return contentFileBuilder.append(entry.DataFile())

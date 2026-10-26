@@ -105,7 +105,7 @@ const (
 type parquetFormat struct{}
 
 func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ FileReader, err error) {
-	inputfile, err := fs.Open(path)
+	inputfile, err := fs.Open(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -521,36 +521,52 @@ type ParquetFileWriter struct {
 	rowGroupBytes    int64
 }
 
-// geoColumn locates a top-level geometry/geography column: its position in the
-// Arrow record batch and the Iceberg field ID its bounds are recorded under.
+// geoColumn locates a geometry/geography leaf: the position of its top-level
+// column in the Arrow record batch, the struct child index taken at each
+// struct (including a map's key/value entries) on the way down to the leaf,
+// and the Iceberg field ID its bounds are recorded under.
 type geoColumn struct {
 	colIdx  int
+	path    []int
 	fieldID int
 }
 
-// collectGeoColumns finds top-level WKB-encoded geo columns in the Arrow schema
-// and pairs each with its Iceberg field ID. Geo bounds for columns nested inside
-// structs/lists/maps are not yet computed, which diverges from Java/PyIceberg.
+// collectGeoColumns finds WKB-encoded geo leaves in the Arrow schema, including
+// those nested in structs/lists/maps, and pairs each with its Iceberg field ID.
 //
-// Nested geo leaves also lose their Parquet Statistics block (min, max, null
-// count), because the GEOMETRY/GEOGRAPHY logical types have an undefined sort
-// order. They are not collected here, so their null counts are not recovered
-// either: the manifest omits them, which costs pruning but never gives a wrong
-// answer. The same applies to
-// geo files imported via DataFileStatsFromMeta alone (e.g. AddFiles).
-// TODO(#2158): compute geo bounds and null counts for geo columns nested in
-// structs/lists/maps.
+// Parquet drops the Statistics block (min, max, null count) for GEOMETRY and
+// GEOGRAPHY columns because their sort order is undefined, so these metrics are
+// computed from the Arrow data instead. Geo files imported via
+// DataFileStatsFromMeta alone (e.g. AddDataFilesByPath) get no geo null counts
+// or bounds, which costs pruning but never gives a wrong answer.
 func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn {
 	var result []geoColumn
 	for i, f := range sc.Fields() {
-		if _, ok := f.Type.(*geoarrow.WKBType); !ok {
-			continue
+		result = appendGeoColumns(result, f.Type, f.Name, i, nil, colMapping)
+	}
+
+	return result
+}
+
+// appendGeoColumns walks dt and appends a geoColumn for each WKB leaf. name is
+// the Parquet column path used as the colMapping key.
+func appendGeoColumns(result []geoColumn, dt arrow.DataType, name string, colIdx int, path []int, colMapping map[string]int) []geoColumn {
+	switch t := dt.(type) {
+	case *geoarrow.WKBType:
+		if fieldID, ok := colMapping[name]; ok {
+			result = append(result, geoColumn{colIdx: colIdx, path: slices.Clone(path), fieldID: fieldID})
 		}
-		fieldID, ok := colMapping[f.Name]
-		if !ok {
-			continue
+	case *arrow.StructType:
+		for i, f := range t.Fields() {
+			result = appendGeoColumns(result, f.Type, name+"."+f.Name, colIdx, append(path, i), colMapping)
 		}
-		result = append(result, geoColumn{colIdx: i, fieldID: fieldID})
+	case *arrow.MapType:
+		kv := name + ".key_value."
+		result = appendGeoColumns(result, t.KeyType(), kv+t.KeyField().Name, colIdx, append(path, 0), colMapping)
+		result = appendGeoColumns(result, t.ItemType(), kv+t.ItemField().Name, colIdx, append(path, 1), colMapping)
+	case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType:
+		elem := dt.(arrow.ListLikeType).ElemField()
+		result = appendGeoColumns(result, elem.Type, name+".list."+elem.Name, colIdx, path, colMapping)
 	}
 
 	return result
@@ -1199,7 +1215,7 @@ func normalizeWKBArrayReachable(ext array.ExtensionArray, active []bool, mem mem
 // in this batch and tallies their null counts. Null rows are skipped; a
 // malformed WKB value fails the write.
 //
-// Every geoCols entry comes from a *geoarrow.WKBType field of the writer's
+// Every geoCols entry comes from a *geoarrow.WKBType leaf of the writer's
 // schema, so a batch whose column does not match is an error rather than a
 // skip: skipping would leave a partial null count that under-reports nulls.
 func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
@@ -1208,29 +1224,82 @@ func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
 			return fmt.Errorf("geo field %d: column %d missing from batch with %d columns",
 				gc.fieldID, gc.colIdx, batch.NumCols())
 		}
-		ext, ok := batch.Column(gc.colIdx).(array.ExtensionArray)
-		if !ok {
-			return fmt.Errorf("geo field %d: expected a WKB extension array, got %s",
-				gc.fieldID, batch.Column(gc.colIdx).DataType())
-		}
-		storage, ok := ext.Storage().(wkbStorage)
-		if !ok {
-			return fmt.Errorf("geo field %d: unsupported WKB storage type %s",
-				gc.fieldID, ext.Storage().DataType())
-		}
 
 		acc, ok := w.geoAccs[gc.fieldID]
 		if !ok {
 			return fmt.Errorf("geo field %d: no bounds accumulator", gc.fieldID)
 		}
-		acc.nulls += int64(storage.NullN())
-		for i := range storage.Len() {
-			if storage.IsNull(i) {
+		col := batch.Column(gc.colIdx)
+		if err := accumulateGeoValues(acc, col, gc.path, 0, col.Len()); err != nil {
+			return fmt.Errorf("geo field %d: %w", gc.fieldID, err)
+		}
+	}
+
+	return nil
+}
+
+// accumulateGeoValues feeds the WKB values in arr[lo:hi] to acc, following path
+// down to the geo leaf. Nulls are counted the way Parquet's leaf null_count
+// does: a null leaf, a null parent, and an empty list or map each count once.
+// Values under a null parent are never decoded.
+func accumulateGeoValues(acc *geoBoundsAccumulator, arr arrow.Array, path []int, lo, hi int) error {
+	switch arr := arr.(type) {
+	case *array.Struct:
+		if len(path) == 0 || path[0] >= arr.NumField() {
+			return fmt.Errorf("struct array %s does not match the geo column path", arr.DataType())
+		}
+		child := arr.Field(path[0])
+		for i := lo; i < hi; i++ {
+			if arr.IsNull(i) {
+				acc.nulls++
+
 				continue
 			}
-			if err := acc.AddWKB(storage.Value(i)); err != nil {
-				return fmt.Errorf("computing geo bounds for field %d: %w", gc.fieldID, err)
+			if err := accumulateGeoValues(acc, child, path[1:], i, i+1); err != nil {
+				return err
 			}
+		}
+	case array.ListLike:
+		for i := lo; i < hi; i++ {
+			start, end := arr.ValueOffsets(i)
+			if arr.IsNull(i) || start == end {
+				acc.nulls++
+
+				continue
+			}
+			if err := accumulateGeoValues(acc, arr.ListValues(), path, int(start), int(end)); err != nil {
+				return err
+			}
+		}
+	default:
+		if len(path) != 0 {
+			return fmt.Errorf("%s array does not match the geo column path", arr.DataType())
+		}
+
+		return accumulateWKBValues(acc, arr, lo, hi)
+	}
+
+	return nil
+}
+
+func accumulateWKBValues(acc *geoBoundsAccumulator, arr arrow.Array, lo, hi int) error {
+	ext, ok := arr.(array.ExtensionArray)
+	if !ok {
+		return fmt.Errorf("expected a WKB extension array, got %s", arr.DataType())
+	}
+	storage, ok := ext.Storage().(wkbStorage)
+	if !ok {
+		return fmt.Errorf("unsupported WKB storage type %s", ext.Storage().DataType())
+	}
+
+	for i := lo; i < hi; i++ {
+		if storage.IsNull(i) {
+			acc.nulls++
+
+			continue
+		}
+		if err := acc.AddWKB(storage.Value(i)); err != nil {
+			return fmt.Errorf("computing geo bounds: %w", err)
 		}
 	}
 
@@ -1308,7 +1377,8 @@ func singleReferencedDataFile(stats *DataFileStatistics) *string {
 
 func (w *ParquetFileWriter) Abort() error {
 	closeErr := w.fileCloser.Close()
-	removeErr := w.fs.Remove(w.info.FileName)
+	// Abort is a best-effort cleanup with no caller context to thread.
+	removeErr := w.fs.Remove(context.Background(), w.info.FileName)
 	if errors.Is(removeErr, fs.ErrNotExist) || os.IsNotExist(removeErr) {
 		removeErr = nil
 	}
@@ -2698,7 +2768,7 @@ func checkRowGroupBloomFilters(
 }
 
 func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader, err error) {
-	pf, err := pfs.fs.Open(pfs.file.FilePath())
+	pf, err := pfs.fs.Open(ctx, pfs.file.FilePath())
 	if err != nil {
 		return nil, err
 	}

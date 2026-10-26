@@ -98,7 +98,7 @@ func writeTestManifest(
 	require.NoError(t, err)
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df.Build()).
-		SequenceNum(1).
+		DataSequenceNumber(1).
 		Build()
 
 	manifestPath := filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("manifest-%d.avro", snapshotID)))

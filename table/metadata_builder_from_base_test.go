@@ -84,7 +84,7 @@ func TestMetadataBuilderFromBaseCopiesBuiltinMetadata(t *testing.T) {
 			SnapshotRefs: map[string]SnapshotRef{
 				MainBranch: {
 					SnapshotID:         currentSnapshotID,
-					SnapshotRefType:    BranchRef,
+					Type:               BranchRef,
 					MinSnapshotsToKeep: &minSnapshotsToKeep,
 					MaxSnapshotAgeMs:   &maxSnapshotAgeMs,
 					MaxRefAgeMs:        &maxRefAgeMs,

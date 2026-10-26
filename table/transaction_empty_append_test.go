@@ -34,10 +34,10 @@ import (
 // such commits for metadata-only bookkeeping (e.g. recording ingestion
 // progress in snapshot or table properties) that must still serialize
 // through the producer's AssertRefSnapshotID requirement, which only
-// engages when a snapshot moves the head. AddFiles with an empty path
+// engages when a snapshot moves the head. AddDataFilesByPath with an empty path
 // list must keep committing an empty append rather than degrading to a
 // silent no-op.
-// Condition: AddFiles with no paths on an empty table, then again on
+// Condition: AddDataFilesByPath with no paths on an empty table, then again on
 // the resulting table after real data was added.
 // Assertion: each commit creates a new "append" snapshot chained to its
 // parent, the branch head moves, and existing data files stay reachable.
@@ -62,7 +62,7 @@ func TestAddFilesEmptyCommitsEmptySnapshot(t *testing.T) {
 
 	// Empty append on an empty table creates the branch head.
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), nil, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), nil, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -80,14 +80,14 @@ func TestAddFilesEmptyCommitsEmptySnapshot(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "alpha"}]`)
 
 	txData := tbl.NewTransaction()
-	require.NoError(t, txData.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, txData.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = txData.Commit(t.Context())
 	require.NoError(t, err)
 	withData := tbl.CurrentSnapshot()
 	require.NotNil(t, withData)
 
 	txEmpty := tbl.NewTransaction()
-	require.NoError(t, txEmpty.AddFiles(t.Context(), nil, nil, false))
+	require.NoError(t, txEmpty.AddDataFilesByPath(t.Context(), nil, nil, false))
 	tbl, err = txEmpty.Commit(t.Context())
 	require.NoError(t, err)
 

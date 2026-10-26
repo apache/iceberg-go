@@ -95,7 +95,7 @@ func buildRefEntries(tbl *table.Table, filterType string) []RefEntry {
 	var entries []RefEntry
 
 	for name, ref := range tbl.Metadata().Refs() {
-		refType := string(ref.SnapshotRefType)
+		refType := string(ref.Type)
 		if filterType != "" && refType != filterType {
 			continue
 		}
