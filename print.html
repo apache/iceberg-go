@@ -1241,9 +1241,10 @@ cat, err := hive.NewCatalog(iceberg.Properties{},
 <pre><code class="language-go">import (
     &quot;github.com/apache/iceberg-go&quot;
     &quot;github.com/apache/iceberg-go/catalog/hadoop&quot;
+    &quot;context&quot;
 )
 
-cat, err := hadoop.NewCatalog(&quot;default&quot;, &quot;file:///tmp/warehouse&quot;, iceberg.Properties{})
+cat, err := hadoop.NewCatalog(context.Background(), &quot;default&quot;, &quot;file:///tmp/warehouse&quot;, iceberg.Properties{})
 </code></pre>
 <h4 id="via-the-registry"><a class="header" href="#via-the-registry">Via the registry</a></h4>
 <p><code>catalog.Load</code> looks up the right backend via the <code>type</code> property (or <code>uri</code> scheme as a fallback) plus your <code>~/.iceberg-go.yaml</code>. Useful when you want runtime selection:</p>
