@@ -187,7 +187,7 @@ const (
 )
 
 func init() {
-	catalog.Register("sql", catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (c catalog.Catalog, err error) {
+	catalog.MustRegister("sql", catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (c catalog.Catalog, err error) {
 		driver, ok := p[DriverKey]
 		if !ok {
 			return nil, errors.New("must provide driver to pass to sql.Open")

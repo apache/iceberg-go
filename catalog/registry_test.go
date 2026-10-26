@@ -133,8 +133,8 @@ func TestCatalogRegistryNormalizesType(t *testing.T) {
 	assert.ErrorIs(t, err, catalog.ErrCatalogNotFound)
 }
 
-func TestRegistryPanic(t *testing.T) {
-	assert.PanicsWithValue(t, "catalog: RegisterCatalog catalog factory is nil", func() { catalog.Register("foobar", nil) })
+func TestRegistryRejectsNilRegistrar(t *testing.T) {
+	assert.ErrorIs(t, catalog.Register("foobar", nil), iceberg.ErrInvalidArgument)
 }
 
 func TestCatalogWithEmptyName(t *testing.T) {
