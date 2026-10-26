@@ -2212,7 +2212,7 @@ instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</
 <tr><td>Geometry / Geography types (schema)</td><td>Supported</td></tr>
 <tr><td>Geometry: statistics and pruning</td><td>Supported</td></tr>
 <tr><td>Geography: read, write, and schema</td><td>Supported (bounds/pruning intentionally omitted for geodesic safety)</td></tr>
-<tr><td>Geometry / Geography: nested-geo bounds</td><td>Deferred</td></tr>
+<tr><td>Geometry / Geography: nested-geo null counts</td><td>Supported (like other nested fields, no bounds are written)</td></tr>
 <tr><td>Multi-argument transforms</td><td>Infrastructure present; no concrete implementations exercised yet</td></tr>
 <tr><td>Statistics files (read / round-trip)</td><td>Supported</td></tr>
 <tr><td>NDV (Theta-sketch) statistics computation</td><td>Roadmap (<a href="https://github.com/apache/iceberg-go/issues/1929">#1929</a>)</td></tr>
