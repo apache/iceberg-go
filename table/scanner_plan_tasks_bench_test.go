@@ -129,7 +129,7 @@ func newPlanTasksBenchmarkFixture(
 				iceberg.EntryStatusADDED,
 				&snapshotID,
 				dataFile.Build(),
-			).SequenceNum(sequenceNumber).Build()
+			).DataSequenceNumber(sequenceNumber).Build()
 		}
 
 		manifestPath := fmt.Sprintf("mem://plan-tasks-benchmark/metadata/manifest-%d.avro", manifestIndex)
@@ -141,10 +141,10 @@ func newPlanTasksBenchmarkFixture(
 		if err := fs.WriteFile(manifestPath, manifestBuf.Bytes()); err != nil {
 			b.Fatal(err)
 		}
-		manifests[manifestIndex] = iceberg.NewManifestFile(
+		manifests[manifestIndex] = iceberg.NewManifestBuilder(
 			2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), snapshotID,
 		).
-			SequenceNum(sequenceNumber, sequenceNumber).
+			SequenceNumber(sequenceNumber, sequenceNumber).
 			AddedFiles(int32(entryCount)).
 			AddedRows(int64(entryCount)).
 			Build()

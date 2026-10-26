@@ -62,7 +62,7 @@ func BenchmarkBucketTransformDecimal(b *testing.B) {
 	})
 
 	b.Run("Transformer", func(b *testing.B) {
-		transformer := transform.Transformer(iceberg.DecimalTypeOf(38, 0))
+		transformer := transform.Transformer(iceberg.MustDecimalTypeOf(38, 0))
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := range b.N {
@@ -112,7 +112,7 @@ func BenchmarkTruncateTransformDecimal(b *testing.B) {
 			}
 		})
 		b.Run(tt.name+"/Transformer", func(b *testing.B) {
-			transformer, err := transform.Transformer(iceberg.DecimalTypeOf(38, 2))
+			transformer, err := transform.Transformer(iceberg.MustDecimalTypeOf(38, 2))
 			if err != nil {
 				b.Fatal(err)
 			}

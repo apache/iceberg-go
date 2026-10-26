@@ -1016,7 +1016,7 @@ func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	assert.True(dropCalled.Load())
 	assert.Positive(removeCalls.Load())
 	assert.False(removeBeforeDrop.Load(), "PurgeTable should drop the catalog entry before removing files")
-	file, err := failingFS.Open(dataFile)
+	file, err := failingFS.Open(context.Background(), dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)
 	assert.NoError(file.Close())
@@ -1053,7 +1053,7 @@ type failRemoveIO struct {
 	onRemove func()
 }
 
-func (f failRemoveIO) Remove(string) error {
+func (f failRemoveIO) Remove(context.Context, string) error {
 	if f.onRemove != nil {
 		f.onRemove()
 	}
@@ -1780,8 +1780,8 @@ func TestIcebergTypeToHiveType(t *testing.T) {
 		{"string", iceberg.PrimitiveTypes.String, "string"},
 		{"uuid", iceberg.PrimitiveTypes.UUID, "string"},
 		{"binary", iceberg.PrimitiveTypes.Binary, "binary"},
-		{"decimal", iceberg.DecimalTypeOf(10, 2), "decimal(10,2)"},
-		{"fixed", iceberg.FixedTypeOf(16), "binary(16)"},
+		{"decimal", iceberg.MustDecimalTypeOf(10, 2), "decimal(10,2)"},
+		{"fixed", iceberg.MustFixedTypeOf(16), "binary(16)"},
 	}
 
 	for _, tt := range tests {

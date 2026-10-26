@@ -71,13 +71,13 @@ func BenchmarkManifestEvaluatorInPredicate(b *testing.B) {
 			}
 
 			b.Run("pruned-lower", func(b *testing.B) {
-				benchmarkManifestIn(b, values, iceberg.Decimal{Val: decimal128.FromI64(int64(literalCount+1) * 100), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(int64(literalCount+1) * 100), Scale: 2}, iceberg.DecimalTypeOf(12, 2))
+				benchmarkManifestIn(b, values, iceberg.Decimal{Val: decimal128.FromI64(int64(literalCount+1) * 100), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(int64(literalCount+1) * 100), Scale: 2}, iceberg.MustDecimalTypeOf(12, 2))
 			})
 			b.Run("pruned-upper", func(b *testing.B) {
-				benchmarkManifestIn(b, values, iceberg.Decimal{Val: decimal128.FromI64(-100), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(-100), Scale: 2}, iceberg.DecimalTypeOf(12, 2))
+				benchmarkManifestIn(b, values, iceberg.Decimal{Val: decimal128.FromI64(-100), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(-100), Scale: 2}, iceberg.MustDecimalTypeOf(12, 2))
 			})
 			b.Run("no-prune", func(b *testing.B) {
-				benchmarkManifestIn(b, values, iceberg.Decimal{Val: decimal128.FromI64(-100), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(int64(literalCount+1) * 100), Scale: 2}, iceberg.DecimalTypeOf(12, 2))
+				benchmarkManifestIn(b, values, iceberg.Decimal{Val: decimal128.FromI64(-100), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(int64(literalCount+1) * 100), Scale: 2}, iceberg.MustDecimalTypeOf(12, 2))
 			})
 		})
 	}
@@ -102,7 +102,7 @@ func benchmarkManifestIn[T iceberg.LiteralType](b *testing.B, values []T, lower,
 	if err != nil {
 		b.Fatal(err)
 	}
-	manifest := iceberg.NewManifestFile(2, "manifest.avro", 1, 0, 1).Partitions(
+	manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).Partitions(
 		[]iceberg.FieldSummary{{LowerBound: &lowerBytes, UpperBound: &upperBytes}},
 	).Build()
 
@@ -132,7 +132,7 @@ func BenchmarkInclusiveMetricsEvalInPredicate(b *testing.B) {
 				// Keep lexical and numeric order identical, including the below-set bound.
 				return iceberg.NewLiteral(fmt.Sprintf("value-%06d", value+1000))
 			}},
-			{"decimal", iceberg.DecimalTypeOf(12, 2), func(value int) iceberg.Literal {
+			{"decimal", iceberg.MustDecimalTypeOf(12, 2), func(value int) iceberg.Literal {
 				return iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(int64(value)), Scale: 2})
 			}},
 		} {

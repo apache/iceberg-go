@@ -439,7 +439,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			logFatal(err)
 		}
 	case catalog.Hadoop:
-		if cat, err = hadoop.NewCatalog("hadoop", args.Warehouse, iceberg.Properties{
+		if cat, err = hadoop.NewCatalog(ctx, "hadoop", args.Warehouse, iceberg.Properties{
 			"warehouse": args.Warehouse,
 		}); err != nil {
 			logFatal(err)
@@ -868,7 +868,7 @@ func resolveCatalogName(explicitFlags map[string]bool, flagValue string) string 
 }
 
 func applyConfigFile(args *Args, explicitFlags map[string]bool) error {
-	configData, err := config.LoadConfigFile(args.Config)
+	configData, err := config.LoadConfig(args.Config)
 	if err != nil {
 		return err
 	}

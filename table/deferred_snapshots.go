@@ -464,9 +464,9 @@ func parseNormalizedMetadataBytesDeferredSnapshots(normalized []byte, formatVers
 
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
-	if metadata.Version() != formatVersion {
+	if metadata.FormatVersion() != formatVersion {
 		return nil, fmt.Errorf("%w: preflight selected version %d, decoded version %d",
-			ErrInvalidMetadataFormatVersion, formatVersion, metadata.Version())
+			ErrInvalidMetadataFormatVersion, formatVersion, metadata.FormatVersion())
 	}
 
 	common := commonMetadataOf(metadata)
@@ -548,7 +548,7 @@ func finishDeferredMetadataUnmarshal(metadata Metadata) error {
 }
 
 func prepareDeferredSnapshots(rawSnapshots json.RawMessage, common *commonMetadata, metadata Metadata) (*deferredSnapshotState, []Snapshot, error) {
-	if metadata.Version() > 1 {
+	if metadata.FormatVersion() > 1 {
 		if err := requireLastSequenceNumber(metadata); err != nil {
 			return nil, nil, err
 		}
@@ -602,11 +602,11 @@ func prepareDeferredSnapshots(rawSnapshots json.RawMessage, common *commonMetada
 		if err := fields.validateHeavyFields(); err != nil {
 			return nil, nil, fmt.Errorf("%w: snapshot %d: %w", ErrInvalidMetadata, *fields.SnapshotID, err)
 		}
-		if metadata.Version() > 1 && fields.SequenceNumber > metadata.LastSequenceNumber() {
+		if metadata.FormatVersion() > 1 && fields.SequenceNumber > metadata.LastSequenceNumber() {
 			return nil, nil, fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
 				ErrInvalidMetadata, *fields.SnapshotID, fields.SequenceNumber, metadata.LastSequenceNumber())
 		}
-		if metadata.Version() >= 3 && fields.FirstRowID != nil && *fields.FirstRowID < 0 {
+		if metadata.FormatVersion() >= 3 && fields.FirstRowID != nil && *fields.FirstRowID < 0 {
 			return nil, nil, fmt.Errorf("%w: snapshot %d has invalid first-row-id %d",
 				ErrInvalidMetadata, *fields.SnapshotID, *fields.FirstRowID)
 		}

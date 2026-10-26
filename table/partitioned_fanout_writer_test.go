@@ -315,7 +315,7 @@ func (s *FanoutWriterTestSuite) TestBinaryPartitionValuesUseComparableKeys() {
 		icebergType iceberg.Type
 	}{
 		{name: "binary", arrowType: arrow.BinaryTypes.Binary, icebergType: iceberg.PrimitiveTypes.Binary},
-		{name: "fixed", arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 4}, icebergType: iceberg.FixedTypeOf(4)},
+		{name: "fixed", arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 4}, icebergType: iceberg.MustFixedTypeOf(4)},
 	}
 
 	for _, test := range tests {
@@ -2038,13 +2038,13 @@ func (s *FanoutWriterTestSuite) TestBoundPartitionTransformsMatchArrowValues() {
 		},
 		{
 			name:       "bucket decimal",
-			sourceType: iceberg.DecimalTypeOf(10, 2),
+			sourceType: iceberg.MustDecimalTypeOf(10, 2),
 			transform:  iceberg.BucketTransform{NumBuckets: 16},
 			build:      buildDecimal,
 		},
 		{
 			name:       "truncate decimal",
-			sourceType: iceberg.DecimalTypeOf(10, 2),
+			sourceType: iceberg.MustDecimalTypeOf(10, 2),
 			transform:  iceberg.TruncateTransform{Width: 10},
 			build:      buildDecimal,
 		},
@@ -2064,7 +2064,7 @@ func (s *FanoutWriterTestSuite) TestBoundPartitionTransformsMatchArrowValues() {
 		},
 		{
 			name:       "bucket fixed",
-			sourceType: iceberg.FixedTypeOf(4),
+			sourceType: iceberg.MustFixedTypeOf(4),
 			transform:  iceberg.BucketTransform{NumBuckets: 16},
 			build: func() arrow.Array {
 				builder := array.NewFixedSizeBinaryBuilder(s.mem, &arrow.FixedSizeBinaryType{ByteWidth: 4})
@@ -2126,7 +2126,7 @@ func (s *FanoutWriterTestSuite) TestArrowDecimalValuesPreserveSign() {
 	}{
 		{
 			name:       "decimal32",
-			sourceType: iceberg.DecimalTypeOf(8, 2),
+			sourceType: iceberg.MustDecimalTypeOf(8, 2),
 			build: func() arrow.Array {
 				builder := array.NewDecimal32Builder(s.mem, &arrow.Decimal32Type{Precision: 8, Scale: 2})
 				builder.Append(arrowdecimal.Decimal32(-1234))
@@ -2139,7 +2139,7 @@ func (s *FanoutWriterTestSuite) TestArrowDecimalValuesPreserveSign() {
 		},
 		{
 			name:       "decimal64",
-			sourceType: iceberg.DecimalTypeOf(18, 2),
+			sourceType: iceberg.MustDecimalTypeOf(18, 2),
 			build: func() arrow.Array {
 				builder := array.NewDecimal64Builder(s.mem, &arrow.Decimal64Type{Precision: 18, Scale: 2})
 				builder.Append(arrowdecimal.Decimal64(-1234))
@@ -2236,7 +2236,7 @@ func (s *FanoutWriterTestSuite) TestVoidTransform() {
 func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase() {
 	icebergSchema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "decimal_col", Type: iceberg.DecimalTypeOf(10, 6), Required: true},
+		iceberg.NestedField{ID: 2, Name: "decimal_col", Type: iceberg.MustDecimalTypeOf(10, 6), Required: true},
 		iceberg.NestedField{ID: 3, Name: "time_col", Type: iceberg.PrimitiveTypes.Time, Required: true},
 		iceberg.NestedField{ID: 4, Name: "timestamp_col", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 		iceberg.NestedField{ID: 5, Name: "timestamptz_col", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},

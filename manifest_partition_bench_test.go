@@ -40,9 +40,9 @@ func BenchmarkPartitionFieldStatsUpdate(b *testing.B) {
 		{name: "binary_repeated_16", typ: PrimitiveTypes.Binary, pattern: "repeated", width: 16},
 		{name: "binary_cycling_64", typ: PrimitiveTypes.Binary, pattern: "cycling", width: 64},
 		{name: "binary_monotonic_64", typ: PrimitiveTypes.Binary, pattern: "monotonic", width: 64},
-		{name: "fixed_repeated_16", typ: FixedTypeOf(16), pattern: "repeated", width: 16},
-		{name: "fixed_cycling_64", typ: FixedTypeOf(64), pattern: "cycling", width: 64},
-		{name: "fixed_monotonic_64", typ: FixedTypeOf(64), pattern: "monotonic", width: 64},
+		{name: "fixed_repeated_16", typ: MustFixedTypeOf(16), pattern: "repeated", width: 16},
+		{name: "fixed_cycling_64", typ: MustFixedTypeOf(64), pattern: "cycling", width: 64},
+		{name: "fixed_monotonic_64", typ: MustFixedTypeOf(64), pattern: "monotonic", width: 64},
 	} {
 		values := partitionFieldStatsBenchmarkValues(10_000, tc.width, tc.pattern)
 

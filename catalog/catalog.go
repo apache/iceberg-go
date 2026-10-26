@@ -162,11 +162,6 @@ type Catalog interface {
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
 }
 
-// Closer is retained as an alias for io.Closer.
-//
-// Deprecated: Use [io.Closer] instead; Catalog embeds it directly.
-type Closer = io.Closer
-
 // TransactionalCatalog is an optional interface implemented by catalogs
 // that support atomic multi-table commits. Callers should check for this
 // capability via a type assertion:
@@ -181,6 +176,23 @@ type Closer = io.Closer
 // server returns 204 No Content.
 type TransactionalCatalog interface {
 	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
+}
+
+// RegisterableCatalog is an optional interface for catalogs that can register
+// an existing table from its metadata file. Registration adds a catalog entry
+// without creating a new table or rewriting its data.
+//
+// REST, Hive, and Glue catalogs implement this interface. Callers should
+// check for registration support with a type assertion:
+//
+//	if registerable, ok := cat.(catalog.RegisterableCatalog); ok {
+//		tbl, err := registerable.RegisterTable(ctx, ident, metadataLocation)
+//	}
+//
+// Backend support for registration does not guarantee that a given request
+// will succeed (for example, if the table already exists).
+type RegisterableCatalog interface {
+	RegisterTable(ctx context.Context, identifier table.Identifier, metadataLocation string) (*table.Table, error)
 }
 
 // PurgeableCatalog is the small table purge interface embedded by Catalog.
