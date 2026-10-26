@@ -609,6 +609,7 @@ fmt.Printf(&quot;rewrote %d files into %d (%d -&gt; %d bytes)\n&quot;,
     result.RemovedDataFiles, result.AddedDataFiles, result.BytesBefore, result.BytesAfter)
 </code></pre>
 <p>The <code>table/compaction</code> subpackage provides bin-packing planning. The <code>iceberg compact analyze</code> and <code>compact run</code> CLI commands wrap the same machinery - see <a href="./cli.html">CLI</a>.</p>
+<p>Compaction tasks represent complete data files, not independent scan splits. The planner collapses split tasks for the same file into one whole-file task, rejecting inconsistent delete or lineage metadata and dropping residual filters because they select files but do not filter rows during compaction. Direct calls to <code>ExecuteCompactionGroup</code> reject partial ranges and residual row filters. Attached delete files are still applied when rewriting each source file.</p>
 <h3 id="expiring-snapshots"><a class="header" href="#expiring-snapshots">Expiring snapshots</a></h3>
 <pre><code class="language-go">import (
     &quot;time&quot;
