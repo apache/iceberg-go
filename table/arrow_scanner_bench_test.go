@@ -512,8 +512,8 @@ func benchmarkPhysicalSchemaCases() []struct {
 		{ID: 1, Name: "flag", Type: iceberg.PrimitiveTypes.Bool},
 		{ID: 2, Name: "count", Type: iceberg.PrimitiveTypes.Int32},
 		{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64},
-		{ID: 4, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
-		{ID: 5, Name: "price", Type: iceberg.DecimalTypeOf(20, 4)},
+		{ID: 4, Name: "fixed", Type: iceberg.MustFixedTypeOf(16)},
+		{ID: 5, Name: "price", Type: iceberg.MustDecimalTypeOf(20, 4)},
 		{ID: 6, Name: "created", Type: iceberg.PrimitiveTypes.TimestampTzNs},
 		{ID: 7, Name: "payload", Type: iceberg.VariantType{}},
 		{ID: 8, Name: "tags", Type: &iceberg.ListType{
@@ -625,7 +625,7 @@ func BenchmarkArrowScanTaskResidual(b *testing.B) {
 	if err := writer.Close(); err != nil {
 		b.Fatal(err)
 	}
-	file, err := fs.Open(dataPath)
+	file, err := fs.Open(context.Background(), dataPath)
 	if err != nil {
 		b.Fatal(err)
 	}

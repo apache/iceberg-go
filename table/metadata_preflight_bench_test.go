@@ -52,7 +52,7 @@ func BenchmarkParseMetadataBytes(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				metadataParseBenchmarkSink = metadata.Version()
+				metadataParseBenchmarkSink = metadata.FormatVersion()
 			}
 		})
 	}

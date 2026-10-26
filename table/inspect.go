@@ -468,7 +468,7 @@ func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transfo
 		return nil
 	}
 
-	builder.Append(transform.ToHumanStrType(typ, literal.Any()))
+	builder.Append(transform.ToHumanString(typ, literal.Any()))
 
 	return nil
 }
@@ -520,7 +520,7 @@ func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
 		}
 
 		name.Append(row.name)
-		refType.Append(strings.ToUpper(string(row.ref.SnapshotRefType)))
+		refType.Append(strings.ToUpper(string(row.ref.Type)))
 		snapshotID.Append(row.ref.SnapshotID)
 
 		if row.ref.MaxRefAgeMs != nil {

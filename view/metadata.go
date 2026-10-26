@@ -659,10 +659,7 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 		version.VersionID = InitialVersionID
 	}
 
-	builder, err := NewMetadataBuilder()
-	if err != nil {
-		return nil, err
-	}
+	builder := NewMetadataBuilder()
 
 	return builder.
 		SetFormatVersion(formatVersion).

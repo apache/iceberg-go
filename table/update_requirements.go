@@ -141,7 +141,7 @@ func refSnapshotID(meta Metadata, name string) *int64 {
 func nonMainBranches(base Metadata) []string {
 	var names []string
 	for name, ref := range base.Refs() {
-		if ref.SnapshotRefType == BranchRef && name != MainBranch {
+		if ref.Type == BranchRef && name != MainBranch {
 			names = append(names, name)
 		}
 	}

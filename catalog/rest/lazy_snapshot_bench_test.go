@@ -226,7 +226,7 @@ func BenchmarkStageParseBuilderMutation(b *testing.B) {
 							added.SnapshotID = n
 							added.ParentSnapshotID = &current.SnapshotID
 							added.TimestampMs = current.TimestampMs + 1
-							if meta.Version() > 1 {
+							if meta.FormatVersion() > 1 {
 								added.SequenceNumber = meta.LastSequenceNumber() + 1
 							}
 							if err := builder.AddSnapshot(&added); err != nil {

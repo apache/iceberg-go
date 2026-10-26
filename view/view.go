@@ -117,7 +117,7 @@ func NewFromLocation(
 			return nil, err
 		}
 	} else {
-		f, err := fsys.Open(metalocation)
+		f, err := fsys.Open(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}
@@ -181,10 +181,7 @@ func createView(
 ) (*View, error) {
 	versionId := int64(1)
 
-	builder, err := NewMetadataBuilder()
-	if err != nil {
-		return nil, err
-	}
+	builder := NewMetadataBuilder()
 
 	viewVersion, err := NewVersionFromSQL(
 		versionId,

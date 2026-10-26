@@ -33,9 +33,7 @@ import (
 )
 
 func newTestBuilder() *MetadataBuilder {
-	b, _ := NewMetadataBuilder()
-
-	return b
+	return NewMetadataBuilder()
 }
 
 func newTestVersion(versionID int64, schemaID int, opts ...VersionOpt) *Version {
@@ -755,8 +753,7 @@ func TestDroppingDialectFailsByDefault(t *testing.T) {
 		},
 		table.Identifier{"defaultns"},
 	)
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	md, err := builder.SetLoc("location").
 		AddSchema(schema).
 		SetCurrentVersion(version, schema).
@@ -781,8 +778,7 @@ func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
 		},
 		table.Identifier{"defaultns"},
 	)
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	md, err := builder.SetLoc("location").
 		AddSchema(schema).
 		SetCurrentVersion(version, schema).
@@ -838,7 +834,7 @@ func TestCurrentViewVersionIsNeverExpired(t *testing.T) {
 	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
 	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
 	v3 := newTestVersionWithSQL(3, 0, "select count(*) as count from ns.tbl")
-	md, err := stripErr(NewMetadataBuilder()).
+	md, err := NewMetadataBuilder().
 		SetLoc("location").
 		SetProperties(props).
 		AddSchema(schema).
@@ -872,7 +868,7 @@ func TestViewVersionHistoryIsCorrectlyRetained(t *testing.T) {
 	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
 	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
 	v3 := newTestVersionWithSQL(3, 0, "select count(*) as count from ns.tbl")
-	md, err := stripErr(NewMetadataBuilder()).
+	md, err := NewMetadataBuilder().
 		SetLoc("location").
 		SetProperties(props).
 		AddSchema(schema).
