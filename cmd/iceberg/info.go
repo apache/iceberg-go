@@ -99,7 +99,7 @@ func buildTableInfo(tbl *table.Table) TableInfo {
 	return TableInfo{
 		Table:             tableIDString(tbl),
 		UUID:              meta.TableUUID().String(),
-		FormatVersion:     meta.Version(),
+		FormatVersion:     meta.FormatVersion(),
 		Location:          meta.Location(),
 		LastUpdated:       lastUpdated,
 		CurrentSnapshotID: currentSnapshotID,

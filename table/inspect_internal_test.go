@@ -4101,11 +4101,11 @@ func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
 			} else {
 				partitionType, partitionIDs, partitionErr := positionDeletesPartitionType(tbl.metadata)
 				require.NoError(t, partitionErr)
-				schema := PositionDeletesSchema(tbl.metadata.CurrentSchema(), partitionType, tbl.metadata.Version())
+				schema := PositionDeletesSchema(tbl.metadata.CurrentSchema(), partitionType, tbl.metadata.FormatVersion())
 				arrowSchema, schemaErr := SchemaToArrowSchema(schema, nil, true, false)
 				require.NoError(t, schemaErr)
 				rr = inspect.positionDeleteRecordReader(
-					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.metadata.Version())
+					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.metadata.FormatVersion())
 			}
 			require.NoError(t, err)
 			require.True(t, rr.Next())

@@ -2122,7 +2122,7 @@ func TestProjectionV3SelectRowLineageColumns(t *testing.T) {
 		iceberg.Properties{"format-version": "3"},
 	)
 	require.NoError(t, err)
-	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+	assert.Equal(t, 3, metadata.FormatVersion(), "sanity: must be v3")
 
 	scan := &Scan{
 		metadata:       metadata,
@@ -2263,7 +2263,7 @@ func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
 
 	metadata, err := ParseMetadataString(metadataJSON)
 	require.NoError(t, err)
-	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+	assert.Equal(t, 3, metadata.FormatVersion(), "sanity: must be v3")
 
 	scan := &Scan{
 		metadata:          metadata,

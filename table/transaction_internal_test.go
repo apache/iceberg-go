@@ -1268,7 +1268,7 @@ func TestTransactionApplyKeepsMetadataUnchangedOnUpdateFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	updates := []Update{
-		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewUpgradeFormatVersionUpdate(baseMeta.FormatVersion() + 1),
 		NewSetCurrentSchemaUpdate(9999),
 	}
 
@@ -1303,7 +1303,7 @@ func TestTransactionApplyKeepsRequirementsUnchangedOnUpdateFailure(t *testing.T)
 	// the requirement list at their pre-call state — not the one extra req this
 	// call would add, and not an empty list.
 	updates := []Update{
-		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewUpgradeFormatVersionUpdate(baseMeta.FormatVersion() + 1),
 		NewSetCurrentSchemaUpdate(9999),
 	}
 	err = txn.apply(updates, []Requirement{AssertCurrentSchemaID(0)})

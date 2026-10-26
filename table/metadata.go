@@ -312,8 +312,8 @@ func partitionSpecIndexPosition(index *partitionSpecIndexData, specs []iceberg.P
 //
 // https://iceberg.apache.org/spec/#iceberg-table-spec
 type Metadata interface {
-	// Version indicates the version of this metadata, 1 for V1, 2 for V2, etc.
-	Version() int
+	// FormatVersion returns the Iceberg table format version (1, 2, 3, etc.).
+	FormatVersion() int
 	// TableUUID returns a UUID that identifies the table, generated when the
 	// table is created. Implementations must throw an exception if a table's
 	// UUID does not match the expected UUID after refreshing metadata.
@@ -496,7 +496,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b := &MetadataBuilder{}
 	b.base = metadata
 
-	b.formatVersion = metadata.Version()
+	b.formatVersion = metadata.FormatVersion()
 	b.uuid = metadata.TableUUID()
 	b.loc = metadata.Location()
 	b.lastUpdatedMS = 0
@@ -540,11 +540,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 			b.encryptionKeyList = cloneEncryptionKeys(common.EncryptionKeyList)
 		}
 		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
-		if metadata.Version() > 1 {
+		if metadata.FormatVersion() > 1 {
 			seq := metadata.LastSequenceNumber()
 			b.lastSequenceNumber = &seq
 		}
-		if metadata.Version() >= 3 {
+		if metadata.FormatVersion() >= 3 {
 			nextRowID := metadata.NextRowID()
 			b.nextRowID = &nextRowID
 		}
@@ -568,11 +568,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
 		b.sortOrderList = slices.Clone(metadata.SortOrders())
 		b.defaultSortOrderID = metadata.DefaultSortOrder()
-		if metadata.Version() > 1 {
+		if metadata.FormatVersion() > 1 {
 			seq := metadata.LastSequenceNumber()
 			b.lastSequenceNumber = &seq
 		}
-		if metadata.Version() >= 3 {
+		if metadata.FormatVersion() >= 3 {
 			nextRowID := metadata.NextRowID()
 			b.nextRowID = &nextRowID
 		}
@@ -2169,9 +2169,9 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
-	if ret.Version() != formatVersion {
+	if ret.FormatVersion() != formatVersion {
 		return nil, fmt.Errorf("%w: preflight selected version %d, decoded version %d",
-			ErrInvalidMetadataFormatVersion, formatVersion, ret.Version())
+			ErrInvalidMetadataFormatVersion, formatVersion, ret.FormatVersion())
 	}
 
 	return ret, nil
@@ -3124,8 +3124,6 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 	return nil
 }
 
-func (c *commonMetadata) Version() int { return c.FormatVersion }
-
 func (c *commonMetadata) checkMainRefMatchesCurrentSnapshot() error {
 	if c.CurrentSnapshotID != nil {
 		if ref, ok := c.SnapshotRefs[MainBranch]; ok {
@@ -3205,6 +3203,8 @@ func initMetadataV1Deser() *metadataV1 {
 	return &meta
 }
 
+func (m *metadataV1) FormatVersion() int { return m.commonMetadata.FormatVersion }
+
 func (m *metadataV1) LastSequenceNumber() int64 { return 0 }
 func (m *metadataV1) NextRowID() int64          { return 0 } // V1 doesn't support row lineage
 
@@ -3276,7 +3276,7 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 
 func (m *metadataV1) finishUnmarshal() error {
 	if err := rejectFieldsBeyondVersion(
-		m.FormatVersion,
+		m.commonMetadata.FormatVersion,
 		versionScopedField{name: "last-sequence-number", introduced: 2, present: m.commonMetadata.LastSequenceNumber != nil},
 		versionScopedField{name: "next-row-id", introduced: 3, present: m.commonMetadata.NextRowID != nil},
 		versionScopedField{name: "encryption-keys", introduced: 3, present: len(m.EncryptionKeyList) > 0},
@@ -3350,6 +3350,8 @@ func initMetadataV2Deser() *metadataV2 {
 	}
 }
 
+func (m *metadataV2) FormatVersion() int { return m.commonMetadata.FormatVersion }
+
 func (m *metadataV2) LastSequenceNumber() int64 { return m.LastSeqNum }
 func (m *metadataV2) NextRowID() int64          { return 0 } // V2 doesn't support row lineage
 
@@ -3386,7 +3388,7 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 
 func (m *metadataV2) finishUnmarshal() error {
 	if err := rejectFieldsBeyondVersion(
-		m.FormatVersion,
+		m.commonMetadata.FormatVersion,
 		versionScopedField{name: "next-row-id", introduced: 3, present: m.commonMetadata.NextRowID != nil},
 		versionScopedField{name: "encryption-keys", introduced: 3, present: len(m.EncryptionKeyList) > 0},
 	); err != nil {
@@ -3450,6 +3452,8 @@ func initMetadataV3Deser() *metadataV3 {
 	}
 }
 
+func (m *metadataV3) FormatVersion() int { return m.commonMetadata.FormatVersion }
+
 func (m *metadataV3) LastSequenceNumber() int64 { return m.LastSeqNum }
 func (m *metadataV3) NextRowID() int64 {
 	if m.NextRowIDValue == -1 {
@@ -3492,7 +3496,7 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 }
 
 func (m *metadataV3) finishUnmarshal() error {
-	if err := rejectFieldsBeyondVersion(m.FormatVersion); err != nil {
+	if err := rejectFieldsBeyondVersion(m.commonMetadata.FormatVersion); err != nil {
 		return err
 	}
 

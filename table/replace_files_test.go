@@ -1099,7 +1099,7 @@ func newCompactedDataFile(t *testing.T, tbl *table.Table, path string, recordCou
 		path, iceberg.ParquetFile, nil, nil, nil, recordCount, 512,
 	)
 	require.NoError(t, err)
-	if tbl.Metadata().Version() >= 3 {
+	if tbl.Metadata().FormatVersion() >= 3 {
 		builder.FirstRowID(tbl.Metadata().NextRowID())
 	}
 

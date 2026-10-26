@@ -2220,7 +2220,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	// does not expose a property to opt out. The DV path threads each data
 	// file's spec id and partition record through DVWriter so partitioned
 	// outputs carry the correct manifest-entry partition.
-	if latestMetadata.Version() >= 3 {
+	if latestMetadata.FormatVersion() >= 3 {
 		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args, latestMetadata, partitionContextByFilePath)
 	}
 
