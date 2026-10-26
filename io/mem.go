@@ -66,7 +66,7 @@ func NewMemFS() *MemFS {
 	return &MemFS{files: make(map[string][]byte)}
 }
 
-func (m *MemFS) Open(name string) (File, error) {
+func (m *MemFS) Open(_ context.Context, name string) (File, error) {
 	m.mu.RLock()
 	data, ok := m.files[name]
 	m.mu.RUnlock()
@@ -79,7 +79,7 @@ func (m *MemFS) Open(name string) (File, error) {
 	return &memFile{data: cp, name: path.Base(name)}, nil
 }
 
-func (m *MemFS) Remove(name string) error {
+func (m *MemFS) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
