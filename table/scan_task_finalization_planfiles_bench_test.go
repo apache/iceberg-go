@@ -137,7 +137,7 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB, splitOffsets bool) *Ta
 				iceberg.EntryStatusADDED,
 				&snapshotID,
 				fileBuilder.Build(),
-			).SequenceNum(sequenceNum).Build()
+			).DataSequenceNumber(sequenceNum).Build()
 		}
 
 		manifestPath := fmt.Sprintf("%s/metadata/manifest-%d.avro", tableLocation, manifestIndex)
@@ -149,9 +149,9 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB, splitOffsets bool) *Ta
 		if err := fs.WriteFile(manifestPath, manifestBuffer.Bytes()); err != nil {
 			b.Fatal(err)
 		}
-		manifests[manifestIndex] = iceberg.NewManifestFile(
+		manifests[manifestIndex] = iceberg.NewManifestBuilder(
 			2, manifestPath, int64(manifestBuffer.Len()), int32(manifestSpec.ID()), snapshotID,
-		).SequenceNum(sequenceNum, sequenceNum).
+		).SequenceNumber(sequenceNum, sequenceNum).
 			AddedFiles(int32(planFilesFinalizationBenchmarkFilesPerManifest)).
 			AddedRows(int64(planFilesFinalizationBenchmarkFilesPerManifest)).
 			Build()

@@ -152,7 +152,7 @@ func writeEmptyManifestBenchmarkManifest(
 		)
 		require.NoError(b, err)
 		entries[i] = iceberg.NewManifestEntryBuilder(status, &snapshotID, dataFile.Build()).
-			SequenceNum(sequenceNum).
+			DataSequenceNumber(sequenceNum).
 			Build()
 	}
 

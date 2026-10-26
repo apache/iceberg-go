@@ -140,7 +140,7 @@ func TestMergeOnReadDeleteOfDataFileAddedInSameTransaction(t *testing.T) {
 	writeRowDeltaDataFile(t, tbl, path, 11, 12)
 
 	txn := tbl.NewTransaction()
-	require.NoError(t, txn.AddFiles(ctx, []string{path}, nil, false))
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
 	require.NoError(t, txn.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(11)), nil))
 	tbl, err := txn.Commit(ctx)
 	require.NoError(t, err)

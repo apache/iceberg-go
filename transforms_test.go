@@ -143,8 +143,8 @@ func TestParseTransform(t *testing.T) {
 
 			// Human rendering is of the value, never the transform name.
 			u := tr.(iceberg.UnknownTransform)
-			assert.Equal(t, "null", u.ToHumanStrType(iceberg.StringType{}, nil))
-			assert.Equal(t, "abc", u.ToHumanStrType(iceberg.StringType{}, "abc"))
+			assert.Equal(t, "null", u.ToHumanString(iceberg.StringType{}, nil))
+			assert.Equal(t, "abc", u.ToHumanString(iceberg.StringType{}, "abc"))
 		})
 	}
 }
@@ -213,7 +213,7 @@ func TestUnknownTransformRejectsEmptyName(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
 
-func TestToHumanStrTypeValues(t *testing.T) {
+func TestToHumanStringValues(t *testing.T) {
 	decVal, _ := decimal.Decimal128FromString("14.21", 4, 2)
 	negDecVal, _ := decimal.Decimal128FromString("-1.50", 9, 2)
 
@@ -263,12 +263,12 @@ func TestToHumanStrTypeValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.transform.ToHumanStrType(tt.typ, tt.input))
+			assert.Equal(t, tt.expected, tt.transform.ToHumanString(tt.typ, tt.input))
 		})
 	}
 }
 
-func TestToHumanStrType(t *testing.T) {
+func TestToHumanString(t *testing.T) {
 	decVal, _ := decimal.Decimal128FromString("14.21", 4, 2)
 	tsMicros := iceberg.Timestamp(1705314600000000)
 	tsNanos := iceberg.TimestampNano(1705314600000000001)
@@ -305,7 +305,7 @@ func TestToHumanStrType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.transform.ToHumanStrType(tt.typ, tt.input))
+			assert.Equal(t, tt.expected, tt.transform.ToHumanString(tt.typ, tt.input))
 		})
 	}
 }

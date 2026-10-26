@@ -292,12 +292,12 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
 	defer func(fs io.IO, name string) {
-		err = fs.Remove(name)
+		err = fs.Remove(s.ctx, name)
 		s.Require().NoError(err)
 	}(fs, pqfile)
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{pqfile}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 
