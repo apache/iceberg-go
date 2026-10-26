@@ -44,14 +44,14 @@ import (
 )
 
 func newDataManifest(minSeqNum int64) iceberg.ManifestFile {
-	return iceberg.NewManifestFile(2, "/path/to/manifest.avro", 1000, 0, 1).
+	return iceberg.NewManifestBuilder(2, "/path/to/manifest.avro", 1000, 0, 1).
 		Content(iceberg.ManifestContentData).
 		SequenceNum(minSeqNum, minSeqNum).
 		Build()
 }
 
 func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
-	return iceberg.NewManifestFile(2, "/path/to/manifest.avro", 1000, 0, 1).
+	return iceberg.NewManifestBuilder(2, "/path/to/manifest.avro", 1000, 0, 1).
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(minSeqNum, minSeqNum).
 		Build()
@@ -945,7 +945,7 @@ func TestPlanDataManifestTasksPreservesManifestOrder(t *testing.T) {
 	assert.Equal(t, "mem://streamed-planning/data-a.parquet", tasks[0].File.FilePath())
 	assert.Equal(t, "mem://streamed-planning/data-b.parquet", tasks[1].File.FilePath())
 
-	unknownCounts := iceberg.NewManifestFile(
+	unknownCounts := iceberg.NewManifestBuilder(
 		2, manifests[0].FilePath(), manifests[0].Length(), 0, snapshotID,
 	).
 		SequenceNum(1, 1).
@@ -1098,7 +1098,7 @@ func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
 
 	// Invalid int32 bounds trigger a LiteralFromBytes error during manifest eval.
 	badBounds := []byte{0x00, 0x01}
-	mf := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/manifest.avro", 100, int32(spec.ID()), snapshotID).
+	mf := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/manifest.avro", 100, int32(spec.ID()), snapshotID).
 		Partitions([]iceberg.FieldSummary{
 			{LowerBound: &badBounds, UpperBound: &badBounds, ContainsNull: false},
 		}).Build()
@@ -1147,7 +1147,7 @@ func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testin
 		manifestListPath = "mem://default/table-location/metadata/snap-1-manifest-list.avro"
 	)
 
-	mf := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/manifest.avro", 100, 999, snapshotID).Build()
+	mf := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/manifest.avro", 100, 999, snapshotID).Build()
 
 	var listBuf bytes.Buffer
 	seqNum := int64(1)
@@ -1208,17 +1208,17 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	)
 	specID := int32(spec.ID())
 
-	dataScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-scanned.avro", 100, specID, snapshotID).
+	dataScanned := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/data-scanned.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentData).
 		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
 		Build()
-	dataSkipped := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-skipped.avro", 100, specID, snapshotID).
+	dataSkipped := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/data-skipped.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentData).
 		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: noMatch, UpperBound: noMatch}}).
 		Build()
-	deleteScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-scanned.avro", 100, specID, snapshotID).
+	deleteScanned := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/delete-scanned.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(1, 1).
 		AddedFiles(1).
@@ -1289,24 +1289,24 @@ func TestFilterManifestsWithSchemaSkipsKnownEmptyManifests(t *testing.T) {
 		rowFilter:     iceberg.AlwaysTrue{},
 		caseSensitive: true,
 	}
-	knownEmptyData := iceberg.NewManifestFile(2, "data-empty.avro", 100, 0, 1).
+	knownEmptyData := iceberg.NewManifestBuilder(2, "data-empty.avro", 100, 0, 1).
 		Content(iceberg.ManifestContentData).
 		AddedFiles(0).
 		ExistingFiles(0).
 		DeletedFiles(2).
 		Build()
-	knownEmptyDelete := iceberg.NewManifestFile(2, "delete-empty.avro", 100, 0, 1).
+	knownEmptyDelete := iceberg.NewManifestBuilder(2, "delete-empty.avro", 100, 0, 1).
 		Content(iceberg.ManifestContentDeletes).
 		AddedFiles(0).
 		ExistingFiles(0).
 		DeletedFiles(1).
 		Build()
-	unknownCounts := iceberg.NewManifestFile(2, "data-unknown.avro", 100, 0, 1).
+	unknownCounts := iceberg.NewManifestBuilder(2, "data-unknown.avro", 100, 0, 1).
 		Content(iceberg.ManifestContentData).
 		AddedFiles(-1).
 		ExistingFiles(-1).
 		Build()
-	live := iceberg.NewManifestFile(2, "data-live.avro", 100, 0, 1).
+	live := iceberg.NewManifestBuilder(2, "data-live.avro", 100, 0, 1).
 		Content(iceberg.ManifestContentData).
 		AddedFiles(0).
 		ExistingFiles(1).
@@ -1351,14 +1351,14 @@ func TestPlanFilesSkipsKnownEmptyManifestsBeforeOpening(t *testing.T) {
 
 	dataPath := tableLocation + "/metadata/data-empty.avro"
 	deletePath := tableLocation + "/metadata/delete-empty.avro"
-	dataManifest := iceberg.NewManifestFile(2, dataPath, 100, int32(spec.ID()), snapshotID).
+	dataManifest := iceberg.NewManifestBuilder(2, dataPath, 100, int32(spec.ID()), snapshotID).
 		Content(iceberg.ManifestContentData).
 		SequenceNum(1, 1).
 		AddedFiles(0).
 		ExistingFiles(0).
 		DeletedFiles(2).
 		Build()
-	deleteManifest := iceberg.NewManifestFile(2, deletePath, 100, int32(spec.ID()), snapshotID).
+	deleteManifest := iceberg.NewManifestBuilder(2, deletePath, 100, int32(spec.ID()), snapshotID).
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(1, 1).
 		AddedFiles(0).
@@ -1628,7 +1628,7 @@ func TestTimeTravelManifestPruningUsesSnapshotSchema(t *testing.T) {
 
 	lower := int32Bound(10)
 	upper := int32Bound(20)
-	manifest := iceberg.NewManifestFile(2, "mem://default/table/metadata/manifest.avro", 100, int32(spec.ID()), snapshotID).
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table/metadata/manifest.avro", 100, int32(spec.ID()), snapshotID).
 		Partitions([]iceberg.FieldSummary{{
 			ContainsNull: false,
 			LowerBound:   &lower,
@@ -2326,7 +2326,7 @@ func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
 		require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
 
 		// Partition summary excludes the filter value (id == 5).
-		manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBytes.Len()), int32(spec.ID()), snapshotID).
+		manifest := iceberg.NewManifestBuilder(2, manifestPath, int64(manifestBytes.Len()), int32(spec.ID()), snapshotID).
 			Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: &lower, UpperBound: &upper}}).
 			SequenceNum(1, 1).
 			AddedFiles(1).
@@ -2494,7 +2494,7 @@ func TestPlanDataManifestTasksHandlesInaccurateCounts(t *testing.T) {
 	for _, counts := range [][]int32{{5, 5, 5}, {0, 2, 1}, {-1, -1, -1}} {
 		scan, schema, manifests, posIndex, dvIndex, eqIndex := newPlanTasksBenchmarkFixture(t, 3, 3)
 		for i, manifest := range manifests {
-			manifests[i] = iceberg.NewManifestFile(2, manifest.FilePath(), manifest.Length(),
+			manifests[i] = iceberg.NewManifestBuilder(2, manifest.FilePath(), manifest.Length(),
 				manifest.PartitionSpecID(), manifest.SnapshotID()).
 				SequenceNum(manifest.SequenceNum(), manifest.MinSequenceNum()).
 				AddedFiles(counts[i]).
