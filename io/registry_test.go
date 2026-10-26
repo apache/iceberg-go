@@ -115,7 +115,9 @@ func TestRegisterRejectsDuplicate(t *testing.T) {
 	defer io.Unregister("test-duplicate")
 
 	assert.PanicsWithValue(t, "io: Register called twice for scheme test-duplicate", func() {
-		io.Register("test-duplicate", dummyFactory)
+		io.Register("test-duplicate", func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+			return nil, assert.AnError
+		})
 	})
 	fs, err := io.LoadFS(t.Context(), nil, "test-duplicate://bucket/path")
 	require.NoError(t, err)
@@ -125,6 +127,29 @@ func TestRegisterRejectsDuplicate(t *testing.T) {
 func TestMustRegisterPanicsOnInvalidRegistration(t *testing.T) {
 	assert.Panics(t, func() { io.MustRegister("nil-factory-test", nil) })
 	assert.NotContains(t, io.GetRegisteredSchemes(), "nil-factory-test")
+}
+
+func TestScopedRegistryDuplicateDoesNotReplaceFactory(t *testing.T) {
+	t.Parallel()
+
+	reg := io.NewRegistry()
+	const scheme = "scoped-duplicate-regression"
+	require.NoError(t, reg.Register(scheme, func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	}))
+
+	err := reg.Register(scheme, func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return nil, assert.AnError
+	})
+	require.ErrorIs(t, err, io.ErrSchemeAlreadyRegistered)
+
+	err = reg.Register("invalid-nil-regression", nil)
+	require.ErrorIs(t, err, io.ErrInvalidSchemeFactory)
+	assert.NotContains(t, reg.Names(), "invalid-nil-regression")
+
+	fs, err := reg.LoadFS(t.Context(), nil, scheme+"://bucket/key")
+	require.NoError(t, err)
+	assert.IsType(t, io.LocalFS{}, fs)
 }
 
 func TestLoadFS(t *testing.T) {
