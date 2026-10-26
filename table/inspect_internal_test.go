@@ -3326,7 +3326,7 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "values", Type: tableListType, Required: true},
 		iceberg.NestedField{ID: 2, Name: "attributes", Type: tableMapType, Required: true},
-		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.DecimalTypeOf(18, 2), Required: true},
+		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.MustDecimalTypeOf(18, 2), Required: true},
 	)
 
 	sourceListType := arrow.ListOfField(arrow.Field{
@@ -3846,7 +3846,7 @@ func TestPositionDeleteRowProjectionPromotesNestedValues(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "values", Type: tableListType, Required: true},
 		iceberg.NestedField{ID: 2, Name: "attributes", Type: tableMapType, Required: true},
-		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.DecimalTypeOf(18, 2), Required: true},
+		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.MustDecimalTypeOf(18, 2), Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
@@ -4269,7 +4269,7 @@ func testFieldNames(sc *iceberg.Schema) []string {
 }
 
 func TestInspectValueScalarDecimal(t *testing.T) {
-	typ := iceberg.DecimalTypeOf(10, 2)
+	typ := iceberg.MustDecimalTypeOf(10, 2)
 	arrowType := &arrow.Decimal128Type{Precision: 10, Scale: 2}
 	value := iceberg.DecimalLiteral{Val: decimal128.FromI64(123), Scale: 2}
 

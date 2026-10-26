@@ -32,7 +32,7 @@ func (s *FanoutWriterTestSuite) TestBinaryPartitionValuesDoNotAliasArrowStorage(
 		icebergType iceberg.Type
 	}{
 		{name: "binary", arrowType: arrow.BinaryTypes.Binary, icebergType: iceberg.PrimitiveTypes.Binary},
-		{name: "fixed", arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 4}, icebergType: iceberg.FixedTypeOf(4)},
+		{name: "fixed", arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 4}, icebergType: iceberg.MustFixedTypeOf(4)},
 	}
 
 	for _, test := range tests {
@@ -170,7 +170,7 @@ func (s *FanoutWriterTestSuite) TestFixedSizeBinaryPartitionReportsWidthMismatch
 	defer record.Release()
 
 	icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "part", Type: iceberg.FixedTypeOf(3),
+		ID: 1, Name: "part", Type: iceberg.MustFixedTypeOf(3),
 	})
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},

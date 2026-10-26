@@ -467,19 +467,19 @@ func getCollector() map[int]internal.StatisticsCollector {
 			FieldID:    13,
 			Mode:       modeFull,
 			ColName:    "small_dec",
-			IcebergTyp: iceberg.DecimalTypeOf(8, 2),
+			IcebergTyp: iceberg.MustDecimalTypeOf(8, 2),
 		},
 		14: {
 			FieldID:    14,
 			Mode:       modeFull,
 			ColName:    "med_dec",
-			IcebergTyp: iceberg.DecimalTypeOf(16, 2),
+			IcebergTyp: iceberg.MustDecimalTypeOf(16, 2),
 		},
 		15: {
 			FieldID:    15,
 			Mode:       modeFull,
 			ColName:    "large_dec",
-			IcebergTyp: iceberg.DecimalTypeOf(24, 2),
+			IcebergTyp: iceberg.MustDecimalTypeOf(24, 2),
 		},
 	}
 }
@@ -588,16 +588,16 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	assertBounds(t, df.LowerBoundValues()[11], iceberg.PrimitiveTypes.UUID,
 		uuid.NewMD5(uuid.NameSpaceDNS, []byte("foo")))
 	assertBounds(t, df.LowerBoundValues()[12], iceberg.PrimitiveTypes.Binary, []byte("he"))
-	assertBounds(t, df.LowerBoundValues()[13], iceberg.DecimalTypeOf(8, 2), iceberg.Decimal{
+	assertBounds(t, df.LowerBoundValues()[13], iceberg.MustDecimalTypeOf(8, 2), iceberg.Decimal{
 		Val:   decimal128.FromI64(12345678),
 		Scale: 2,
 	})
-	assertBounds(t, df.LowerBoundValues()[14], iceberg.DecimalTypeOf(16, 2), iceberg.Decimal{
+	assertBounds(t, df.LowerBoundValues()[14], iceberg.MustDecimalTypeOf(16, 2), iceberg.Decimal{
 		Val:   decimal128.FromI64(1234567890123456),
 		Scale: 2,
 	})
 	expected, _ := (&big.Int{}).SetString("123456789012345678901234", 10)
-	assertBounds(t, df.LowerBoundValues()[15], iceberg.DecimalTypeOf(24, 2), iceberg.Decimal{
+	assertBounds(t, df.LowerBoundValues()[15], iceberg.MustDecimalTypeOf(24, 2), iceberg.Decimal{
 		Val:   decimal128.FromBigInt(expected),
 		Scale: 2,
 	})
@@ -620,16 +620,16 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	assertBounds(t, df.UpperBoundValues()[11], iceberg.PrimitiveTypes.UUID,
 		uuid.NewMD5(uuid.NameSpaceDNS, []byte("bar")))
 	assertBounds(t, df.UpperBoundValues()[12], iceberg.PrimitiveTypes.Binary, []byte("wp"))
-	assertBounds(t, df.UpperBoundValues()[13], iceberg.DecimalTypeOf(8, 2), iceberg.Decimal{
+	assertBounds(t, df.UpperBoundValues()[13], iceberg.MustDecimalTypeOf(8, 2), iceberg.Decimal{
 		Val:   decimal128.FromI64(87654321),
 		Scale: 2,
 	})
-	assertBounds(t, df.UpperBoundValues()[14], iceberg.DecimalTypeOf(16, 2), iceberg.Decimal{
+	assertBounds(t, df.UpperBoundValues()[14], iceberg.MustDecimalTypeOf(16, 2), iceberg.Decimal{
 		Val:   decimal128.FromI64(6543210987654321),
 		Scale: 2,
 	})
 	expectedUpper, _ := (&big.Int{}).SetString("432109876543210987654321", 10)
-	assertBounds(t, df.UpperBoundValues()[15], iceberg.DecimalTypeOf(24, 2), iceberg.Decimal{
+	assertBounds(t, df.UpperBoundValues()[15], iceberg.MustDecimalTypeOf(24, 2), iceberg.Decimal{
 		Val:   decimal128.FromBigInt(expectedUpper),
 		Scale: 2,
 	})
@@ -1009,7 +1009,7 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 					FieldID:    1,
 					Mode:       internal.MetricsMode{Typ: internal.MetricModeFull},
 					ColName:    "value",
-					IcebergTyp: iceberg.DecimalTypeOf(tt.precision, tt.scale),
+					IcebergTyp: iceberg.MustDecimalTypeOf(tt.precision, tt.scale),
 				},
 			}
 
@@ -1031,13 +1031,13 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			require.Contains(t, df.UpperBoundValues(), 1)
 
 			// Verify the actual values
-			minLit, err := iceberg.LiteralFromBytes(iceberg.DecimalTypeOf(tt.precision, tt.scale), df.LowerBoundValues()[1])
+			minLit, err := iceberg.LiteralFromBytes(iceberg.MustDecimalTypeOf(tt.precision, tt.scale), df.LowerBoundValues()[1])
 			require.NoError(t, err)
 			minDec := minLit.(iceberg.TypedLiteral[iceberg.Decimal]).Value()
 			assert.Equal(t, uint64(tt.expectedMin), minDec.Val.LowBits())
 			assert.Equal(t, tt.scale, minDec.Scale)
 
-			maxLit, err := iceberg.LiteralFromBytes(iceberg.DecimalTypeOf(tt.precision, tt.scale), df.UpperBoundValues()[1])
+			maxLit, err := iceberg.LiteralFromBytes(iceberg.MustDecimalTypeOf(tt.precision, tt.scale), df.UpperBoundValues()[1])
 			require.NoError(t, err)
 			maxDec := maxLit.(iceberg.TypedLiteral[iceberg.Decimal]).Value()
 			assert.Equal(t, uint64(tt.expectedMax), maxDec.Val.LowBits())

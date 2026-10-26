@@ -136,7 +136,12 @@ func arrowLeafToIceberg(dt arrow.DataType) (iceberg.PrimitiveType, bool) {
 			return iceberg.PrimitiveTypes.TimestampTzNs, true
 		}
 	case *arrow.Decimal128Type:
-		return iceberg.DecimalTypeOf(int(t.Precision), int(t.Scale)), true
+		dec, err := iceberg.DecimalTypeOf(int(t.Precision), int(t.Scale))
+		if err != nil {
+			return nil, false
+		}
+
+		return dec, true
 	case arrow.ExtensionType:
 		if t.ExtensionName() == "arrow.uuid" {
 			return iceberg.PrimitiveTypes.UUID, true

@@ -806,7 +806,7 @@ func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 2, Name: "price", Type: iceberg.MustDecimalTypeOf(9, 2)},
 		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
 	)
 	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
@@ -861,7 +861,7 @@ func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	// off and the regular decimal column keeps its default FIXED_LEN_BYTE_ARRAY.
 	assert.Equal(t, parquet.Types.FixedLenByteArray, columnPhysicalType(t, files[0].FilePath(), "price"))
 
-	decTyp := iceberg.DecimalTypeOf(9, 2)
+	decTyp := iceberg.MustDecimalTypeOf(9, 2)
 	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])
 	require.NoError(t, err)
 	ub, err := iceberg.LiteralFromBytes(decTyp, files[0].UpperBoundValues()[2])
@@ -878,7 +878,7 @@ func TestShreddedVariantWriteRegularDecimalWithShreddedDecimal(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 2, Name: "price", Type: iceberg.MustDecimalTypeOf(9, 2)},
 		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
 	)
 	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
@@ -936,7 +936,7 @@ func TestShreddedVariantWriteRegularDecimalWithShreddedDecimal(t *testing.T) {
 
 	// Bounds are derived from the Arrow values, so they must be correct regardless of
 	// the INT physical encoding.
-	decTyp := iceberg.DecimalTypeOf(9, 2)
+	decTyp := iceberg.MustDecimalTypeOf(9, 2)
 	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])
 	require.NoError(t, err)
 	ub, err := iceberg.LiteralFromBytes(decTyp, files[0].UpperBoundValues()[2])

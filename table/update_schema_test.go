@@ -1833,10 +1833,10 @@ func TestUnionByNamePromoteFloatToDouble(t *testing.T) {
 
 func TestUnionByNamePromoteDecimalPrecision(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.DecimalTypeOf(9, 2), Required: true},
+		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(9, 2), Required: true},
 	)
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.DecimalTypeOf(18, 2), Required: true},
+		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(18, 2), Required: true},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -1844,7 +1844,7 @@ func TestUnionByNamePromoteDecimalPrecision(t *testing.T) {
 
 	amount, ok := applied.FindFieldByName("amount")
 	require.True(t, ok)
-	assert.Equal(t, iceberg.DecimalTypeOf(18, 2), amount.Type)
+	assert.Equal(t, iceberg.MustDecimalTypeOf(18, 2), amount.Type)
 }
 
 func TestUnionByNameIgnoreNarrowingType(t *testing.T) {
@@ -2334,11 +2334,11 @@ func TestUnionByNameRejectsMistypedNativeDefault(t *testing.T) {
 
 func TestUnionByNamePromoteDecimalKeepsWiderWriteDefault(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.DecimalTypeOf(9, 2), Required: true},
+		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(9, 2), Required: true},
 	)
 	incoming := iceberg.NewSchema(1,
 		iceberg.NestedField{
-			ID: 1, Name: "amount", Type: iceberg.DecimalTypeOf(18, 2), Required: true,
+			ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(18, 2), Required: true,
 			WriteDefault: "123456789.12",
 		},
 	)
@@ -2348,7 +2348,7 @@ func TestUnionByNamePromoteDecimalKeepsWiderWriteDefault(t *testing.T) {
 
 	amount, ok := applied.FindFieldByName("amount")
 	require.True(t, ok)
-	assert.Equal(t, iceberg.DecimalTypeOf(18, 2), amount.Type)
+	assert.Equal(t, iceberg.MustDecimalTypeOf(18, 2), amount.Type)
 	assert.Equal(t, "123456789.12", amount.WriteDefault)
 }
 
@@ -2553,8 +2553,8 @@ func TestUnionByNameRejectsInvalidPromotions(t *testing.T) {
 	}{
 		{"string -> binary", iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary},
 		{"binary -> string", iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.String},
-		{"fixed[16] -> uuid", iceberg.FixedTypeOf(16), iceberg.PrimitiveTypes.UUID},
-		{"decimal scale widening", iceberg.DecimalTypeOf(10, 1), iceberg.DecimalTypeOf(10, 2)},
+		{"fixed[16] -> uuid", iceberg.MustFixedTypeOf(16), iceberg.PrimitiveTypes.UUID},
+		{"decimal scale widening", iceberg.MustDecimalTypeOf(10, 1), iceberg.MustDecimalTypeOf(10, 2)},
 		{"string -> int", iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Int32},
 	}
 

@@ -42,11 +42,11 @@ func TestPhysicalSchemaKeyDistinctTypeTags(t *testing.T) {
 		iceberg.BinaryType{},
 		iceberg.UnknownType{},
 		iceberg.VariantType{},
-		iceberg.FixedTypeOf(8),
-		iceberg.FixedTypeOf(16),
-		iceberg.DecimalTypeOf(10, 2),
-		iceberg.DecimalTypeOf(11, 2),
-		iceberg.DecimalTypeOf(10, 3),
+		iceberg.MustFixedTypeOf(8),
+		iceberg.MustFixedTypeOf(16),
+		iceberg.MustDecimalTypeOf(10, 2),
+		iceberg.MustDecimalTypeOf(11, 2),
+		iceberg.MustDecimalTypeOf(10, 3),
 	}
 	keys := make(map[string]string, len(types))
 	for _, typ := range types {

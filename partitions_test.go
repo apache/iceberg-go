@@ -529,7 +529,7 @@ func TestPartitionTypePreservesFieldOrderAndResultTypes(t *testing.T) {
 			{ID: 2, Name: "nested", Type: iceberg.Int64Type{}, Required: true},
 		}}},
 		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.TimestampTzNsType{}, Required: true},
-		iceberg.NestedField{ID: 4, Name: "amount", Type: iceberg.DecimalTypeOf(12, 2)},
+		iceberg.NestedField{ID: 4, Name: "amount", Type: iceberg.MustDecimalTypeOf(12, 2)},
 	)
 	unknown, err := iceberg.ParseTransform("custom_transform[42]")
 	require.NoError(t, err)
@@ -549,7 +549,7 @@ func TestPartitionTypePreservesFieldOrderAndResultTypes(t *testing.T) {
 	want := []iceberg.NestedField{
 		{ID: 1007, Name: "nested", Type: iceberg.Int64Type{}},
 		{ID: 1001, Name: "ts", Type: iceberg.TimestampTzNsType{}},
-		{ID: 1006, Name: "amount", Type: iceberg.DecimalTypeOf(12, 2)},
+		{ID: 1006, Name: "amount", Type: iceberg.MustDecimalTypeOf(12, 2)},
 		{ID: 1002, Name: "missing_bucket", Type: iceberg.Int32Type{}},
 		{ID: 1005, Name: "missing_day", Type: iceberg.DateType{}},
 		{ID: 1003, Name: "missing_identity", Type: iceberg.UnknownType{}},

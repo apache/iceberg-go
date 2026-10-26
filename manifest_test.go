@@ -532,7 +532,7 @@ func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
 		{name: "time from duration", typ: PrimitiveTypes.Time, value: time.Duration(11), want: NewLiteral(Time(11))},
 		{name: "timestamp from int64", typ: PrimitiveTypes.Timestamp, value: int64(12), want: NewLiteral(Timestamp(12))},
 		{name: "binary from string", typ: PrimitiveTypes.Binary, value: "shard", want: NewLiteral([]byte("shard"))},
-		{name: "fixed from bytes", typ: FixedTypeOf(5), value: "fixed", want: NewLiteral([]byte("fixed"))},
+		{name: "fixed from bytes", typ: MustFixedTypeOf(5), value: "fixed", want: NewLiteral([]byte("fixed"))},
 		{
 			name:  "uuid from array",
 			typ:   PrimitiveTypes.UUID,
@@ -541,7 +541,7 @@ func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
 		},
 		{
 			name:  "decimal from decimal literal",
-			typ:   DecimalTypeOf(10, 2),
+			typ:   MustDecimalTypeOf(10, 2),
 			value: DecimalLiteral{Val: decimal128.FromI64(130), Scale: 2},
 			want:  NewLiteral(Decimal{Val: decimal128.FromI64(130), Scale: 2}),
 		},
@@ -590,8 +590,8 @@ func TestPartitionFieldStatsRejectsUnsupportedValues(t *testing.T) {
 		{name: "timestamp with timezone", typ: PrimitiveTypes.TimestampTz},
 		{name: "uuid", typ: PrimitiveTypes.UUID},
 		{name: "binary", typ: PrimitiveTypes.Binary},
-		{name: "fixed", typ: FixedTypeOf(5)},
-		{name: "decimal", typ: DecimalTypeOf(10, 2)},
+		{name: "fixed", typ: MustFixedTypeOf(5)},
+		{name: "decimal", typ: MustDecimalTypeOf(10, 2)},
 	}
 
 	for _, tt := range tests {
@@ -3202,7 +3202,7 @@ func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 func TestManifestRoundTripDecimalPartitionUsesSignedFixedSize(t *testing.T) {
 	schema := NewSchema(
 		0,
-		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(10, 2)},
+		NestedField{ID: 1, Name: "price", Type: MustDecimalTypeOf(10, 2)},
 	)
 	partitionSpec := NewPartitionSpecID(
 		1,

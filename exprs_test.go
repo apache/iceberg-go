@@ -251,11 +251,11 @@ func TestRefTypes(t *testing.T) {
 		iceberg.NestedField{ID: 6, Name: "f", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 7, Name: "g", Type: iceberg.PrimitiveTypes.Time},
 		iceberg.NestedField{ID: 8, Name: "h", Type: iceberg.PrimitiveTypes.Timestamp},
-		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.DecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.MustDecimalTypeOf(9, 2)},
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
-		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
+		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.MustFixedTypeOf(5)},
 		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.VariantType{}},
 		iceberg.NestedField{ID: 15, Name: "o", Type: iceberg.PrimitiveTypes.TimestampNs},
 		iceberg.NestedField{ID: 16, Name: "p", Type: iceberg.PrimitiveTypes.TimestampTzNs})
@@ -334,7 +334,7 @@ func TestRefTypes(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, iceberg.OpEQ, fx.Op())
-			assert.True(t, fx.(iceberg.BoundLiteralPredicate).Literal().Type().Equals(iceberg.FixedTypeOf(5)))
+			assert.True(t, fx.(iceberg.BoundLiteralPredicate).Literal().Type().Equals(iceberg.MustFixedTypeOf(5)))
 		})
 
 		t.Run("uuid", func(t *testing.T) {
@@ -412,9 +412,9 @@ func TestRefTypes(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, iceberg.OpIn, fx.Op())
-			assert.True(t, fx.(iceberg.BoundSetPredicate).Ref().Type().Equals(iceberg.FixedTypeOf(5)))
+			assert.True(t, fx.(iceberg.BoundSetPredicate).Ref().Type().Equals(iceberg.MustFixedTypeOf(5)))
 			for _, v := range fx.(iceberg.BoundSetPredicate).Literals().Members() {
-				assert.True(t, v.Type().Equals(iceberg.FixedTypeOf(5)))
+				assert.True(t, v.Type().Equals(iceberg.MustFixedTypeOf(5)))
 			}
 		})
 
@@ -544,7 +544,7 @@ func TestInNotInSimplifications(t *testing.T) {
 			},
 			{
 				name: "fixed",
-				typ:  iceberg.FixedTypeOf(16),
+				typ:  iceberg.MustFixedTypeOf(16),
 				lits: func(first, second []byte) []iceberg.Literal {
 					return []iceberg.Literal{iceberg.NewLiteral(first), iceberg.NewLiteral(second)}
 				},
@@ -848,7 +848,7 @@ func TestToString(t *testing.T) {
 		iceberg.NestedField{ID: 5, Name: "e", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 6, Name: "f", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 7, Name: "g", Type: iceberg.PrimitiveTypes.Float32},
-		iceberg.NestedField{ID: 8, Name: "h", Type: iceberg.DecimalTypeOf(8, 4)},
+		iceberg.NestedField{ID: 8, Name: "h", Type: iceberg.MustDecimalTypeOf(8, 4)},
 		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Bool},

@@ -354,7 +354,7 @@ func newPartitionedEqDeleteTestTable(t *testing.T) *table.Table {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
 		iceberg.NestedField{ID: 3, Name: "score", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-		iceberg.NestedField{ID: 4, Name: "price", Type: iceberg.DecimalTypeOf(10, 2), Required: false},
+		iceberg.NestedField{ID: 4, Name: "price", Type: iceberg.MustDecimalTypeOf(10, 2), Required: false},
 	)
 
 	partSpec := iceberg.NewPartitionSpec(
@@ -447,7 +447,7 @@ func TestWriteEqualityDeleteFilesPartitionedTableAcceptsDecimalFieldID(t *testin
 	tbl := newPartitionedEqDeleteTestTable(t)
 
 	delSchema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 4, Name: "price", Type: iceberg.DecimalTypeOf(10, 2), Required: false},
+		iceberg.NestedField{ID: 4, Name: "price", Type: iceberg.MustDecimalTypeOf(10, 2), Required: false},
 		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
 	)
 	delArrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)

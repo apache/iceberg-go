@@ -59,12 +59,12 @@ func TestArrowToIceberg(t *testing.T) {
 		reciprocal bool
 		err        string
 	}{
-		{&arrow.FixedSizeBinaryType{ByteWidth: 0}, iceberg.FixedTypeOf(0), true, ""},
-		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.FixedTypeOf(23), true, ""},
-		{&arrow.Decimal32Type{Precision: 8, Scale: 2}, iceberg.DecimalTypeOf(8, 2), false, ""},
+		{&arrow.FixedSizeBinaryType{ByteWidth: 0}, iceberg.MustFixedTypeOf(0), true, ""},
+		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.MustFixedTypeOf(23), true, ""},
+		{&arrow.Decimal32Type{Precision: 8, Scale: 2}, iceberg.MustDecimalTypeOf(8, 2), false, ""},
 		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, nil, false, "invalid scale 9: must be less than or equal to precision 8"},
-		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.DecimalTypeOf(15, 14), false, ""},
-		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.DecimalTypeOf(26, 20), true, ""},
+		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.MustDecimalTypeOf(15, 14), false, ""},
+		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.MustDecimalTypeOf(26, 20), true, ""},
 		{&arrow.Decimal256Type{Precision: 8, Scale: 9}, nil, false, "unsupported arrow type for conversion - decimal256(8, 9)"},
 		{arrow.FixedWidthTypes.Boolean, iceberg.PrimitiveTypes.Bool, true, ""},
 		{arrow.Null, iceberg.PrimitiveTypes.Unknown, true, ""},
@@ -1830,7 +1830,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 		{
 			name: "decimal write-default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+				ID: 2, Name: "price", Type: iceberg.MustDecimalTypeOf(10, 2),
 				Required: false, WriteDefault: iceberg.Decimal{Val: decimal128.New(0, 12345), Scale: 2},
 			},
 			check: func(t *testing.T, col arrow.Array) {
@@ -2059,7 +2059,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 		{
 			name: "decimal initial-default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+				ID: 2, Name: "price", Type: iceberg.MustDecimalTypeOf(10, 2),
 				Required: false, InitialDefault: iceberg.Decimal{Val: decimal128.New(0, 12345), Scale: 2},
 			},
 			check: func(t *testing.T, col arrow.Array) {

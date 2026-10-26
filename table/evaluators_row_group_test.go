@@ -209,7 +209,7 @@ func TestInclusiveMetricsEvalIntBackedDecimalRowGroup(t *testing.T) {
 				minUnscaled, maxUnscaled := rng.minUnscaled, rng.maxUnscaled
 				meta := buildDecimalRowGroupMetadata(t, tt.physical, tt.typeLen,
 					int32(tt.precision), scale, tt.encode(minUnscaled), tt.encode(maxUnscaled))
-				field := iceberg.DecimalTypeOf(tt.precision, scale)
+				field := iceberg.MustDecimalTypeOf(tt.precision, scale)
 				ref := iceberg.Reference("decimal")
 
 				keep := func(pred iceberg.BooleanExpression) bool {
@@ -288,7 +288,7 @@ func TestInclusiveMetricsEvalRealParquetDecimalRowGroup(t *testing.T) {
 	require.True(t, intBackedDecimal(stats.Descr()),
 		"writer did not produce an INT32-backed decimal, so this test no longer covers the bug")
 
-	field := iceberg.DecimalTypeOf(precision, scale)
+	field := iceberg.MustDecimalTypeOf(precision, scale)
 	ref := iceberg.Reference("decimal")
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "decimal", Type: field, Required: true,
