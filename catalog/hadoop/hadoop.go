@@ -433,7 +433,8 @@ func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
 
 	if err := c.filesystem.Rename(tempPath, hintPath); err != nil {
 		log.Printf("hadoop catalog: failed to rename version hint: %v", err)
-		_ = c.filesystem.Remove(tempPath)
+		// Best-effort cleanup of the version-hint temp file; no caller context.
+		_ = c.filesystem.Remove(context.Background(), tempPath)
 	}
 }
 

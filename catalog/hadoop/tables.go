@@ -106,12 +106,12 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
 	if err := internal.WriteTableMetadata(metadata, c.filesystem, tempPath, compression); err != nil {
-		_ = c.filesystem.Remove(tempPath)
+		_ = c.filesystem.Remove(context.WithoutCancel(ctx), tempPath)
 
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	if err := c.commitMetadataFile(ident, version, tempPath, metaPath, catalog.ErrTableAlreadyExists); err != nil {
+	if err := c.commitMetadataFile(ctx, ident, version, tempPath, metaPath, catalog.ErrTableAlreadyExists); err != nil {
 		return nil, err
 	}
 
@@ -245,12 +245,12 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
 	if err := internal.WriteTableMetadata(updated, c.filesystem, tempPath, compression); err != nil {
-		_ = c.filesystem.Remove(tempPath)
+		_ = c.filesystem.Remove(context.WithoutCancel(ctx), tempPath)
 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	if err := c.commitMetadataFile(ident, newVersion, tempPath, newMetaPath, table.ErrCommitFailed); err != nil {
+	if err := c.commitMetadataFile(ctx, ident, newVersion, tempPath, newMetaPath, table.ErrCommitFailed); err != nil {
 		return nil, "", err
 	}
 
@@ -260,25 +260,28 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	return updated, newMetaPath, nil
 }
 
-func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPath, metaPath string, conflictErr error) error {
+func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier, version int, tempPath, metaPath string, conflictErr error) error {
+	// Cleanup on a failed commit must not inherit ctx's cancellation, or a
+	// canceled commit would leave the temp file or the version claim behind.
+	cleanupCtx := context.WithoutCancel(ctx)
 	claimPath := c.metadataVersionClaimPath(ident, version)
 	for {
 		if err := c.filesystem.RenameNoReplace(tempPath, claimPath); err != nil {
 			if !errors.Is(err, fs.ErrExist) {
-				_ = c.filesystem.Remove(tempPath)
+				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
 				return fmt.Errorf("hadoop catalog: failed to claim metadata version: %w", err)
 			}
 
 			existingPath, exists, err := c.metadataVersionLocation(ident, version)
 			if err != nil {
-				_ = c.filesystem.Remove(tempPath)
+				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
 				return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
 					version, err)
 			}
 			if exists {
-				_ = c.filesystem.Remove(tempPath)
+				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
 				return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 					conflictErr, strings.Join(ident, "."), existingPath)
@@ -290,19 +293,19 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPa
 					continue
 				}
 
-				_ = c.filesystem.Remove(tempPath)
+				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
 				return fmt.Errorf("hadoop catalog: failed to inspect stale metadata claim %s: %w", claimPath, err)
 			}
 			if time.Since(claimInfo.ModTime()) < metadataClaimStaleAfter {
-				_ = c.filesystem.Remove(tempPath)
+				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
 				return fmt.Errorf("%w: metadata version already claimed for table %s: %s",
 					conflictErr, strings.Join(ident, "."), claimPath)
 			}
 
-			if err := c.filesystem.Remove(claimPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				_ = c.filesystem.Remove(tempPath)
+			if err := c.filesystem.Remove(ctx, claimPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
 				return fmt.Errorf("hadoop catalog: failed to clear stale metadata claim %s: %w", claimPath, err)
 			}
@@ -316,7 +319,7 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPa
 	removeClaim := true
 	defer func() {
 		if removeClaim {
-			_ = c.filesystem.Remove(claimPath)
+			_ = c.filesystem.Remove(cleanupCtx, claimPath)
 		}
 	}()
 

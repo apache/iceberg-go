@@ -58,7 +58,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	return nil
 }
 
-func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
+func (c *Catalog) DropNamespace(ctx context.Context, ns table.Identifier) error {
 	if err := validateIdentifier(ns); err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 		return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, strings.Join(ns, "."))
 	}
 
-	return c.filesystem.Remove(path)
+	return c.filesystem.Remove(ctx, path)
 }
 
 func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (bool, error) {
