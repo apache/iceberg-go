@@ -102,7 +102,7 @@ func benchmarkManifestIn[T iceberg.LiteralType](b *testing.B, values []T, lower,
 	if err != nil {
 		b.Fatal(err)
 	}
-	manifest := iceberg.NewManifestFile(2, "manifest.avro", 1, 0, 1).Partitions(
+	manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).Partitions(
 		[]iceberg.FieldSummary{{LowerBound: &lowerBytes, UpperBound: &upperBytes}},
 	).Build()
 

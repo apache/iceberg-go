@@ -217,8 +217,8 @@ type Transform interface {
 	Apply(Optional[Literal]) Optional[Literal]
 	Project(name string, pred BoundPredicate) (UnboundPredicate, error)
 
-	// ToHumanStrType formats a partition value using its transformed result type.
-	ToHumanStrType(typ Type, val any) string
+	// ToHumanString formats a partition value using its transformed result type.
+	ToHumanString(typ Type, val any) string
 }
 
 // IdentityTransform uses the identity function, performing no transformation
@@ -258,9 +258,9 @@ func (IdentityTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return value
 }
 
-// ToHumanStrType formats identity partition values, including UTC offsets for
+// ToHumanString formats identity partition values, including UTC offsets for
 // timestamp-with-zone source types.
-func (IdentityTransform) ToHumanStrType(typ Type, val any) string {
+func (IdentityTransform) ToHumanString(typ Type, val any) string {
 	if val == nil {
 		return "null"
 	}
@@ -348,7 +348,7 @@ func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
 
-func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
+func (VoidTransform) ToHumanString(Type, any) string { return "null" }
 
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
@@ -401,10 +401,10 @@ func (UnknownTransform) Apply(Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
 
-// ToHumanStrType renders the value, not the unknown transform name. This
+// ToHumanString renders the value, not the unknown transform name. This
 // keeps distinct partition values from collapsing into a single path.
-func (UnknownTransform) ToHumanStrType(typ Type, val any) string {
-	return IdentityTransform{}.ToHumanStrType(typ, val)
+func (UnknownTransform) ToHumanString(typ Type, val any) string {
+	return IdentityTransform{}.ToHumanString(typ, val)
 }
 
 // Project returns nil so scans don't prune on an unknown partition field.
@@ -617,7 +617,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	}
 }
 
-func (BucketTransform) ToHumanStrType(_ Type, val any) string {
+func (BucketTransform) ToHumanString(_ Type, val any) string {
 	if val == nil {
 		return "null"
 	}
@@ -840,7 +840,7 @@ func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]
 	return out
 }
 
-func (TruncateTransform) ToHumanStrType(_ Type, val any) string {
+func (TruncateTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case nil:
 		return "null"
@@ -1091,7 +1091,7 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (YearTransform) ToHumanStrType(_ Type, val any) string {
+func (YearTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		return strconv.Itoa(int(v) + epochTM.Year())
@@ -1192,7 +1192,7 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (MonthTransform) ToHumanStrType(_ Type, val any) string {
+func (MonthTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		tm := epochTM.AddDate(0, int(v), 0)
@@ -1289,7 +1289,7 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (DayTransform) ToHumanStrType(_ Type, val any) string {
+func (DayTransform) ToHumanString(_ Type, val any) string {
 	var days int32
 	switch v := val.(type) {
 	case Date:
@@ -1391,7 +1391,7 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (HourTransform) ToHumanStrType(_ Type, val any) string {
+func (HourTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		seconds := int64(v) * int64(time.Hour/time.Second)

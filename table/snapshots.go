@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -406,7 +407,8 @@ func (s Snapshot) ValidateRowLineage() error {
 
 func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) {
 	if s.ManifestList != "" {
-		f, err := fio.Open(s.ManifestList)
+		// No caller context to thread here.
+		f, err := fio.Open(context.Background(), s.ManifestList)
 		if err != nil {
 			return nil, fmt.Errorf("could not open manifest file: %w", err)
 		}
@@ -422,7 +424,7 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 				return nil, err
 			}
 
-			manifests[i] = iceberg.NewManifestFile(1, path, length, 0, s.SnapshotID).
+			manifests[i] = iceberg.NewManifestBuilder(1, path, length, 0, s.SnapshotID).
 				AddedFiles(-1).
 				ExistingFiles(-1).
 				DeletedFiles(-1).
@@ -452,7 +454,7 @@ func embeddedManifestLength(fio iceio.IO, path string) (_ int64, err error) {
 		return info.Size(), nil
 	}
 
-	f, err := fio.Open(path)
+	f, err := fio.Open(context.Background(), path)
 	if err != nil {
 		return 0, fmt.Errorf("could not open embedded manifest %q: %w", path, err)
 	}

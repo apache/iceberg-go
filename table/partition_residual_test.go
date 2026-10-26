@@ -372,7 +372,7 @@ func TestPlanFilesLocalPopulatesPartitionResidual(t *testing.T) {
 	dataFile := newTestDataFile(t, spec, dataPath, map[int]any{1000: int32(5)})
 	entry := iceberg.NewManifestEntryBuilder(
 		iceberg.EntryStatusADDED, &snapshotID, dataFile,
-	).SequenceNum(1).Build()
+	).DataSequenceNumber(1).Build()
 
 	var manifestBuffer bytes.Buffer
 	manifest, err := iceberg.WriteManifest(

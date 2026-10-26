@@ -171,7 +171,7 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	}
 
 	if cfg.preserveRowLineage {
-		if v := tbl.metadata.Version(); v < 3 {
+		if v := tbl.metadata.FormatVersion(); v < 3 {
 			return internal.SingleErrorIter[iceberg.DataFile](
 				fmt.Errorf("WithPreserveRowLineage requires a v3+ table, got v%d", v))
 		}

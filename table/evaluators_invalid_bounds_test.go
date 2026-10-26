@@ -38,7 +38,7 @@ func TestMalformedFixedBoundsAreConservative(t *testing.T) {
 		eval, err := newManifestEvaluator(spec, schema, expr, true)
 		require.NoError(t, err)
 
-		manifest := iceberg.NewManifestFile(2, "manifest.avro", 1, 0, 1).
+		manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).
 			AddedFiles(1).
 			Partitions([]iceberg.FieldSummary{{LowerBound: &malformed, UpperBound: &malformed}}).
 			Build()

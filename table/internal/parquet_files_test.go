@@ -102,11 +102,11 @@ type trackingFileSystem struct {
 	file *trackingOpenFile
 }
 
-func (f *trackingFileSystem) Open(name string) (iceio.File, error) {
+func (f *trackingFileSystem) Open(_ context.Context, name string) (iceio.File, error) {
 	return f.file, nil
 }
 
-func (f *trackingFileSystem) Remove(name string) error {
+func (f *trackingFileSystem) Remove(_ context.Context, name string) error {
 	return nil
 }
 
@@ -1249,7 +1249,7 @@ func TestWriteDataFileNormalizesEWKBOnDisk(t *testing.T) {
 	}, []arrow.RecordBatch{record})
 	require.NoError(t, err)
 
-	output, err := fs.Open("geo.parquet")
+	output, err := fs.Open(context.Background(), "geo.parquet")
 	require.NoError(t, err)
 	data, err := io.ReadAll(output)
 	closeErr := output.Close()
@@ -1400,7 +1400,7 @@ func TestParquetFileWriterAbortRemovesFile(t *testing.T) {
 
 	require.NoError(t, writer.Abort())
 
-	_, err := memFS.Open(fileName)
+	_, err := memFS.Open(context.Background(), fileName)
 	require.ErrorIs(t, err, iofs.ErrNotExist)
 }
 
@@ -2004,7 +2004,7 @@ func TestParquetRowGroupTargetRotatesBeforeNextBatch(t *testing.T) {
 			}, []arrow.RecordBatch{first, second})
 			require.NoError(t, err)
 
-			input, err := fsys.Open("row-groups.parquet")
+			input, err := fsys.Open(context.Background(), "row-groups.parquet")
 			require.NoError(t, err)
 			defer input.Close()
 
@@ -3301,12 +3301,11 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 	}
 }
 
-// TestWriteDataFileNestedGeoNullCount pins the current metrics for a geo column
-// nested in a struct. The Parquet GEOMETRY logical type drops the leaf's footer
-// statistics, and only top-level geo columns have their null counts tallied
-// from the Arrow data, so the nested leaf records a value count but no null
-// count. A missing null count only costs pruning. Flip this when nested geo
-// metrics land (TODO(#2158)).
+// TestWriteDataFileNestedGeoNullCount checks the metrics for geo columns nested
+// in a struct, a list and a map. The Parquet GEOMETRY logical type drops the
+// leaf's footer statistics, so null counts and bounds are computed from the
+// Arrow data. Null counts follow Parquet's leaf null_count: a null leaf, a null
+// parent, and an empty list or map each count once.
 func TestWriteDataFileNestedGeoNullCount(t *testing.T) {
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
@@ -3315,41 +3314,76 @@ func TestWriteDataFileNestedGeoNullCount(t *testing.T) {
 				{ID: 3, Name: "g", Type: iceberg.GeometryType{}, Required: false},
 			},
 		}},
+		iceberg.NestedField{ID: 4, Name: "l", Required: false, Type: &iceberg.ListType{
+			ElementID: 5, Element: iceberg.GeometryType{}, ElementRequired: false,
+		}},
+		iceberg.NestedField{ID: 6, Name: "m", Required: false, Type: &iceberg.MapType{
+			KeyID: 7, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 8, ValueType: iceberg.GeometryType{}, ValueRequired: false,
+		}},
 	)
 
 	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
 	require.NoError(t, err)
 
-	pt, err := wktToWKB("POINT (1 2)")
-	require.NoError(t, err)
+	wkbHex := func(s string) string {
+		g, err := wktToWKB(s)
+		require.NoError(t, err)
+
+		return g.String()
+	}
 
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
-		{"id": 1, "s": {"g": "`+pt.String()+`"}},
-		{"id": 2, "s": {"g": null}},
-		{"id": 3, "s": {"g": "`+pt.String()+`"}}
+		{"id": 1, "s": {"g": "`+wkbHex("POINT (1 2)")+`"},
+		 "l": ["`+wkbHex("POINT (3 4)")+`", null, "`+wkbHex("POINT (-1 7)")+`"],
+		 "m": [{"key": "a", "value": "`+wkbHex("POINT (5 6)")+`"}, {"key": "b", "value": null}]},
+		{"id": 2, "s": null, "l": null, "m": null},
+		{"id": 3, "s": {"g": null}, "l": [], "m": []}
 	]`))
 	require.NoError(t, err)
 	defer rec.Release()
 
+	full := internal.MetricsMode{Typ: internal.MetricModeFull}
 	fm := internal.GetFileFormat(iceberg.ParquetFile)
 	df, err := fm.WriteDataFile(context.Background(), iceio.NewMemFS(), nil, internal.WriteFileInfo{
 		FileSchema: iceSchema,
 		Spec:       *iceberg.UnpartitionedSpec,
 		FileName:   "nested-geo.parquet",
 		StatsCols: map[int]internal.StatisticsCollector{
-			1: {FieldID: 1, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "id", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
-			3: {FieldID: 3, IcebergTyp: iceberg.GeometryType{}, ColName: "s.g", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+			1: {FieldID: 1, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "id", Mode: full},
+			3: {FieldID: 3, IcebergTyp: iceberg.GeometryType{}, ColName: "s.g", Mode: full},
+			5: {FieldID: 5, IcebergTyp: iceberg.GeometryType{}, ColName: "l.element", Mode: full},
+			7: {FieldID: 7, IcebergTyp: iceberg.PrimitiveTypes.String, ColName: "m.key", Mode: full},
+			8: {FieldID: 8, IcebergTyp: iceberg.GeometryType{}, ColName: "m.value", Mode: full},
 		},
 		WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
 		Content:    iceberg.EntryContentData,
 	}, []arrow.RecordBatch{rec})
 	require.NoError(t, err)
 
-	require.Contains(t, df.ValueCounts(), 3)
-	assert.EqualValues(t, 3, df.ValueCounts()[3])
-	assert.NotContains(t, df.NullValueCounts(), 3, "nested geo null counts are not recovered yet")
-	assert.NotContains(t, df.LowerBoundValues(), 3)
-	assert.NotContains(t, df.UpperBoundValues(), 3)
+	tests := []struct {
+		name         string
+		fieldID      int
+		values       int64
+		nulls        int64
+		lower, upper []byte
+	}{
+		// rows: {g: POINT (1 2)}, null, {g: null}
+		{"struct", 3, 3, 2, geoBoundBytes(1, 2), geoBoundBytes(1, 2)},
+		// rows: [POINT (3 4), null, POINT (-1 7)], null, []
+		{"list", 5, 5, 3, geoBoundBytes(-1, 4), geoBoundBytes(3, 7)},
+		// rows: {a: POINT (5 6), b: null}, null, {}
+		{"map", 8, 4, 3, geoBoundBytes(5, 6), geoBoundBytes(5, 6)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.values, df.ValueCounts()[tt.fieldID])
+			require.Contains(t, df.NullValueCounts(), tt.fieldID)
+			assert.Equal(t, tt.nulls, df.NullValueCounts()[tt.fieldID])
+			assert.Equal(t, tt.lower, df.LowerBoundValues()[tt.fieldID])
+			assert.Equal(t, tt.upper, df.UpperBoundValues()[tt.fieldID])
+		})
+	}
 }
 
 // geoBoundBytes builds the Iceberg geospatial single-value serialization of a

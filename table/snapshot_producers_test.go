@@ -97,7 +97,7 @@ func newMemIO(limit int, err error) *memIO {
 	}
 }
 
-func (m *memIO) Open(name string) (iceio.File, error) {
+func (m *memIO) Open(_ context.Context, name string) (iceio.File, error) {
 	m.mu.Lock()
 	data, ok := m.files[name]
 	m.mu.Unlock()
@@ -120,7 +120,7 @@ func (m *memIO) WriteFile(name string, content []byte) error {
 	return nil
 }
 
-func (m *memIO) Remove(name string) error {
+func (m *memIO) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.files, name)
@@ -452,7 +452,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 func readManifestListFromPath(t *testing.T, fs iceio.IO, path string) []iceberg.ManifestFile {
 	t.Helper()
 
-	f, err := fs.Open(path)
+	f, err := fs.Open(context.Background(), path)
 	require.NoError(t, err, "open manifest list: %s", path)
 	defer f.Close()
 
@@ -567,7 +567,7 @@ func TestManifestMergeManagerClosesWriterOnError(t *testing.T) {
 	require.NoError(t, err, "write manifest")
 	require.NoError(t, mem.WriteFile(manifestPath, manifestBuf.Bytes()))
 
-	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1, int32(spec.ID()), sp.snapshotID).
+	missingManifest := iceberg.NewManifestBuilder(2, "table-location/metadata/missing.avro", 1, int32(spec.ID()), sp.snapshotID).
 		Build()
 
 	mgr := manifestMergeManager{snap: sp}
@@ -590,7 +590,7 @@ func TestManifestMergeManagerClosesWriterBeforeFileOnReadFailure(t *testing.T) {
 		[]iceberg.ManifestEntry{
 			iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df),
 		})
-	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1,
+	missingManifest := iceberg.NewManifestBuilder(2, "table-location/metadata/missing.avro", 1,
 		int32(spec.ID()), sp.snapshotID).Build()
 
 	mgr := manifestMergeManager{snap: sp}
@@ -617,7 +617,7 @@ func TestManifestMergeReturnsReadErrorBeforeCreatingWriter(t *testing.T) {
 		[]iceberg.ManifestEntry{
 			iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &oldSnapshotID, &sequenceNumber, nil, df),
 		})
-	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1,
+	missingManifest := iceberg.NewManifestBuilder(2, "table-location/metadata/missing.avro", 1,
 		int32(spec.ID()), sp.snapshotID).Build()
 
 	mgr := manifestMergeManager{snap: sp}
@@ -908,7 +908,7 @@ func newTrackingIO() *trackingIO {
 	}
 }
 
-func (t *trackingIO) Open(name string) (iceio.File, error) {
+func (t *trackingIO) Open(_ context.Context, name string) (iceio.File, error) {
 	data, ok := t.files[name]
 	if !ok {
 		return nil, fs.ErrNotExist
@@ -933,7 +933,7 @@ func (t *trackingIO) WriteFile(name string, content []byte) error {
 	return nil
 }
 
-func (t *trackingIO) Remove(name string) error {
+func (t *trackingIO) Remove(_ context.Context, name string) error {
 	delete(t.files, name)
 
 	return nil
@@ -992,13 +992,13 @@ func (c *closeErrorIO) Create(name string) (iceio.FileWriter, error) {
 	return writer, err
 }
 
-func (c *closeErrorIO) Remove(name string) error {
+func (c *closeErrorIO) Remove(_ context.Context, name string) error {
 	c.removes = append(c.removes, name)
 	if c.removeErr != nil {
 		return c.removeErr
 	}
 
-	return c.trackingIO.Remove(name)
+	return c.trackingIO.Remove(context.Background(), name)
 }
 
 func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
@@ -1590,7 +1590,7 @@ func TestOverwriteParentDependentManifestsCleansCompletedRewritesOnError(t *test
 	}
 	validPath := "table-location/metadata/source-valid.avro"
 	validManifest := writeTestManifestWithEntries(t, mem, spec, schema, snapshotID, validPath, entries)
-	missingManifest := iceberg.NewManifestFile(2,
+	missingManifest := iceberg.NewManifestBuilder(2,
 		"table-location/metadata/source-missing.avro", 1, int32(spec.ID()), snapshotID).Build()
 	manifests := []iceberg.ManifestFile{validManifest, missingManifest}
 
@@ -1857,9 +1857,9 @@ func TestFastAppendInheritsZeroCountManifests(t *testing.T) {
 	seqNum1 := int64(1)
 
 	// These paths must be under the table location so the mem FS can locate them.
-	athenaManifest1 := iceberg.NewManifestFile(2,
+	athenaManifest1 := iceberg.NewManifestBuilder(2,
 		"mem://default/table-location/metadata/athena-m0.avro", 512, 0, snap1ID).Build()
-	athenaManifest2 := iceberg.NewManifestFile(2,
+	athenaManifest2 := iceberg.NewManifestBuilder(2,
 		"mem://default/table-location/metadata/athena-m1.avro", 256, 0, snap1ID).Build()
 
 	// Sanity check: both manifests have zero counts, so the old filter would drop them.
@@ -2468,14 +2468,14 @@ func TestOverwriteParentDependentManifestsUsesProductionPath(t *testing.T) {
 	require.Len(t, dataTombstone, 1)
 	require.Equal(t, iceberg.EntryStatusDELETED, dataTombstone[0].Status())
 	require.Equal(t, sp.snapshotID, dataTombstone[0].SnapshotID())
-	require.Equal(t, dataSequenceNumber, dataTombstone[0].SequenceNum())
+	require.Equal(t, dataSequenceNumber, dataTombstone[0].DataSequenceNumber())
 	require.Equal(t, deletedData.FilePath(), dataTombstone[0].DataFile().FilePath())
 
 	deleteTombstone := readEntries(got[1])
 	require.Len(t, deleteTombstone, 1)
 	require.Equal(t, iceberg.EntryStatusDELETED, deleteTombstone[0].Status())
 	require.Equal(t, sp.snapshotID, deleteTombstone[0].SnapshotID())
-	require.Equal(t, deleteSequenceNumber, deleteTombstone[0].SequenceNum())
+	require.Equal(t, deleteSequenceNumber, deleteTombstone[0].DataSequenceNumber())
 	require.Equal(t, removedDelete.FilePath(), deleteTombstone[0].DataFile().FilePath())
 
 	keptDataEntries := readEntries(got[2])

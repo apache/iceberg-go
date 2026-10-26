@@ -205,7 +205,7 @@ func TestMetadataV1Parsing(t *testing.T) {
 	require.NotNil(t, meta)
 
 	assert.IsType(t, (*metadataV1)(nil), meta)
-	assert.Equal(t, 1, meta.Version())
+	assert.Equal(t, 1, meta.FormatVersion())
 
 	data := meta.(*metadataV1)
 	assert.Equal(t, uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"), meta.TableUUID())
@@ -253,7 +253,7 @@ func TestMetadataV2Parsing(t *testing.T) {
 	require.NotNil(t, meta)
 
 	assert.IsType(t, (*metadataV2)(nil), meta)
-	assert.Equal(t, 2, meta.Version())
+	assert.Equal(t, 2, meta.FormatVersion())
 
 	data := meta.(*metadataV2)
 	assert.Equal(t, uuid.MustParse("9c12d441-03fe-4693-9a96-a0705ddf69c1"), data.UUID)
@@ -285,7 +285,7 @@ func TestMetadataV3Parsing(t *testing.T) {
 	require.NotNil(t, meta)
 
 	assert.IsType(t, (*metadataV3)(nil), meta)
-	assert.Equal(t, 3, meta.Version())
+	assert.Equal(t, 3, meta.FormatVersion())
 
 	data := meta.(*metadataV3)
 	assert.Equal(t, uuid.MustParse("9c12d441-03fe-4693-9a96-a0705ddf69c1"), data.UUID)
@@ -751,7 +751,7 @@ func TestMetadataV3Builder(t *testing.T) {
 	metadata, err := builder.Build()
 	require.NoError(t, err)
 
-	assert.Equal(t, 3, metadata.Version())
+	assert.Equal(t, 3, metadata.FormatVersion())
 	assert.Equal(t, int64(0), metadata.NextRowID())
 }
 
@@ -1476,13 +1476,13 @@ func TestV2RefCreation(t *testing.T) {
 	maxRefAge := int64(10000000)
 	assert.Equal(t, map[string]SnapshotRef{
 		"main": {
-			SnapshotID:      3055729675574597004,
-			SnapshotRefType: BranchRef,
+			SnapshotID: 3055729675574597004,
+			Type:       BranchRef,
 		},
 		"test": {
-			SnapshotID:      3051729675574597004,
-			SnapshotRefType: TagRef,
-			MaxRefAgeMs:     &maxRefAge,
+			SnapshotID:  3051729675574597004,
+			Type:        TagRef,
+			MaxRefAgeMs: &maxRefAge,
 		},
 	}, meta.SnapshotRefs)
 }
@@ -2094,7 +2094,7 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 	// Deserialize the JSON - this should succeed by inferring default_spec_id as the max spec ID
 	meta, err := getTestTableMetadata("TableMetadataV1PartitionSpecsWithoutDefaultId.json")
 	require.NoError(t, err)
-	require.Equal(t, meta.Version(), 1)
+	require.Equal(t, meta.FormatVersion(), 1)
 	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
 	require.Equal(t, meta.DefaultPartitionSpec(), 2)
 	require.Equal(t, len(meta.PartitionSpecs()), 2)
@@ -2133,7 +2133,7 @@ func TestDefaultPartitionSpec(t *testing.T) {
 func TestTableMetadataV1SchemasWithoutCurrentId(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV1SchemasWithoutCurrentId.json")
 	require.NoError(t, err)
-	require.Equal(t, meta.(*metadataV1).Version(), 1)
+	require.Equal(t, meta.(*metadataV1).FormatVersion(), 1)
 	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
 	schema := meta.CurrentSchema()
 	require.Equal(t, len(schema.Fields()), 3)
@@ -2727,7 +2727,7 @@ func TestV3PartitionStatisticsRoundTrip(t *testing.T) {
 
 	meta, err := ParseMetadataBytes(raw)
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 
 	partStats := slices.Collect(meta.PartitionStatistics())
 	require.Len(t, partStats, 2)

@@ -293,7 +293,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 			statsPlan,
 			pathMapping,
 			tblutils.VariantFieldIDsFromSchema(args.Schema),
-			// Metadata-only path: no file is read here, so no arrow schema; AddFiles recomputes variant bounds in fileToDataFile.
+			// Metadata-only path: no file is read here, so no arrow schema; AddDataFilesByPath recomputes variant bounds in fileToDataFile.
 			nil,
 		)
 		if stats == nil {

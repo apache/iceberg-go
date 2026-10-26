@@ -52,20 +52,20 @@ func newTrackingCallsIO() *trackingCallsIO {
 	}
 }
 
-func (c *trackingCallsIO) Open(name string) (iceio.File, error) {
+func (c *trackingCallsIO) Open(_ context.Context, name string) (iceio.File, error) {
 	c.mu.Lock()
 	c.openCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Open(name)
+	return c.trackingIO.Open(context.Background(), name)
 }
 
-func (c *trackingCallsIO) Remove(name string) error {
+func (c *trackingCallsIO) Remove(_ context.Context, name string) error {
 	c.mu.Lock()
 	c.removeCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Remove(name)
+	return c.trackingIO.Remove(context.Background(), name)
 }
 
 // writeManifest writes a v2 data manifest with a single ADDED
@@ -87,7 +87,7 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	require.NoError(t, err)
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df.Build()).
-		SequenceNum(seqNum).
+		DataSequenceNumber(seqNum).
 		Build()
 
 	var buf bytes.Buffer
@@ -95,8 +95,8 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	require.NoError(t, err)
 	require.NoError(t, tio.WriteFile(manifestPath, buf.Bytes()))
 
-	return iceberg.NewManifestFile(2, manifestPath, int64(buf.Len()), 0, snapshotID).
-		SequenceNum(seqNum, seqNum).
+	return iceberg.NewManifestBuilder(2, manifestPath, int64(buf.Len()), 0, snapshotID).
+		SequenceNumber(seqNum, seqNum).
 		AddedFiles(1).
 		AddedRows(1).
 		Build()

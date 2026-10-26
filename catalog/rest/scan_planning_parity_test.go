@@ -198,7 +198,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		b.SplitOffsets([]int64{4, 40, 70})
 		b.LowerBoundValues(map[int][]byte{2: lo}).UpperBoundValues(map[int][]byte{2: hi})
 		b.ValueCounts(map[int]int64{1: 10, 2: 10}).NullValueCounts(map[int]int64{1: 0, 2: 0})
-		entries = append(entries, iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(10)), b.Build()).SequenceNum(1).Build())
+		entries = append(entries, iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(10)), b.Build()).DataSequenceNumber(1).Build())
 	}
 	var data bytes.Buffer
 	mf, err := iceberg.WriteManifest("mem://parity/data.avro", &data, 2, spec, schema, 10, entries)
@@ -218,7 +218,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 			if content == iceberg.EntryContentEqDeletes {
 				b.EqualityFieldIDs([]int{2})
 			}
-			require.NoError(t, writer.Add(iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(20)), b.Build()).SequenceNum(2).Build()))
+			require.NoError(t, writer.Add(iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(20)), b.Build()).DataSequenceNumber(2).Build()))
 		}
 	}
 	require.NoError(t, writer.Close())
