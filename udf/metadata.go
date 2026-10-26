@@ -91,19 +91,6 @@ type SQLRepresentation struct {
 	SQL     string `json:"sql"`
 }
 
-// NewSQLRepresentation validates a SQL representation.
-// Named fields prevent mixing up the dialect and SQL, which are both strings.
-func NewSQLRepresentation(repr SQLRepresentation) (SQLRepresentation, error) {
-	if repr.Dialect == "" {
-		return SQLRepresentation{}, fmt.Errorf("%w: sql representation requires a dialect", ErrInvalidUDFMetadata)
-	}
-	if repr.SQL == "" {
-		return SQLRepresentation{}, fmt.Errorf("%w: sql representation requires a sql expression", ErrInvalidUDFMetadata)
-	}
-
-	return repr, nil
-}
-
 func (SQLRepresentation) RepresentationType() string { return "sql" }
 func (SQLRepresentation) isRepresentation()          {}
 func (r SQLRepresentation) clone() Representation    { return r }
