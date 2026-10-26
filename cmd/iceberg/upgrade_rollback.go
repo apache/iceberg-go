@@ -34,7 +34,7 @@ import (
 func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *UpgradeCmd) {
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
-	currentVersion := meta.Version()
+	currentVersion := meta.FormatVersion()
 
 	result := UpgradeResult{
 		DryRun:          cmd.DryRun,
@@ -169,7 +169,7 @@ func resolveRollbackSnapshotID(tbl *table.Table, cmd *RollbackCmd) (int64, error
 		return 0, err
 	}
 
-	if snap := tbl.SnapshotAsOf(timestamp.UnixMilli(), true); snap != nil {
+	if snap := tbl.SnapshotAsOf(timestamp.UnixMilli()); snap != nil {
 		return snap.SnapshotID, nil
 	}
 

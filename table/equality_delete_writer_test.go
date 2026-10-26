@@ -99,7 +99,7 @@ func TestWriteEqualityDeleteFiles(t *testing.T) {
 
 	// Verify the file was actually written to disk
 	fs := iceio.LocalFS{}
-	f, err := fs.Open(df.FilePath())
+	f, err := fs.Open(context.Background(), df.FilePath())
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 }
@@ -522,7 +522,7 @@ func TestWriteEqualityDeleteFilesCommitViaRowDelta(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assertRowCount(t, tbl, 3)

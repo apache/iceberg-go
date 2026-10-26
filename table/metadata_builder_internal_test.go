@@ -174,7 +174,7 @@ func TestBuildUnpartitionedUnsorted(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 	require.Equal(t, TestLocation, meta.Location())
 	require.Equal(t, 0, meta.CurrentSchema().ID)
 	require.Equal(t, 0, meta.DefaultPartitionSpec())
@@ -921,7 +921,7 @@ func TestSetSnapshotRefBranchToTagDropsAllRetention(t *testing.T) {
 
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, TagRef))
 	ref := builder.refs[MainBranch]
-	require.Equal(t, TagRef, ref.SnapshotRefType)
+	require.Equal(t, TagRef, ref.Type)
 	require.Nil(t, ref.MinSnapshotsToKeep)
 	require.Nil(t, ref.MaxSnapshotAgeMs)
 	require.Nil(t, ref.MaxRefAgeMs)
@@ -1129,7 +1129,7 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 	}
 	builder.currentSnapshotID = new(snapshot3ID)
 	builder.refs = map[string]SnapshotRef{
-		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: snapshot3ID, Type: BranchRef},
 	}
 
 	meta, err := builder.Build()
@@ -1189,7 +1189,7 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
 	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
 	require.Equal(t, int64(2), ref.SnapshotID)
-	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.Equal(t, BranchRef, ref.Type)
 	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
 	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
 	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
@@ -1227,7 +1227,7 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
 	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
 	require.Equal(t, int64(2), ref.SnapshotID)
-	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.Equal(t, BranchRef, ref.Type)
 	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
 	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
 	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
@@ -1273,7 +1273,7 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 			SnapshotLog:       []SnapshotLogEntry{},
 			SortOrderList:     []SortOrder{UnsortedSortOrder},
 			SnapshotRefs: map[string]SnapshotRef{
-				MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef},
+				MainBranch: {SnapshotID: currentID, Type: BranchRef},
 			},
 		},
 	}
@@ -1331,9 +1331,9 @@ func TestRemoveSnapshotsRemovesMultipleIDs(t *testing.T) {
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
 		SnapshotRefs: map[string]SnapshotRef{
-			MainBranch:       {SnapshotID: currentID, SnapshotRefType: BranchRef},
-			"removed-branch": {SnapshotID: removedID2, SnapshotRefType: BranchRef},
-			"kept-branch":    {SnapshotID: keptID, SnapshotRefType: BranchRef},
+			MainBranch:       {SnapshotID: currentID, Type: BranchRef},
+			"removed-branch": {SnapshotID: removedID2, Type: BranchRef},
+			"kept-branch":    {SnapshotID: keptID, Type: BranchRef},
 		},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: removedID1, StatisticsPath: "s3://stats/removed-1.puffin"},
@@ -1417,7 +1417,7 @@ func TestRemoveSnapshotsPrunesStatistics(t *testing.T) {
 		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: currentID, TimestampMs: 1003}},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, Type: BranchRef}},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: removedID, StatisticsPath: "s3://stats/removed.puffin"},
 			{SnapshotID: keptID, StatisticsPath: "s3://stats/kept.puffin"},
@@ -1480,7 +1480,7 @@ func TestBuildPreservesStatistics(t *testing.T) {
 		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: snapID, TimestampMs: 1001}},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, Type: BranchRef}},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: snapID, StatisticsPath: "s3://stats/snap.puffin"},
 		},
@@ -2215,6 +2215,24 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 		"another-custom-property": "also-allowed",
 	})
 	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
+}
+
+func TestSnapshotTimestampReservedPropertyKey(t *testing.T) {
+	const canonical = "current-snapshot-timestamp-ms"
+	const oldKey = "current-snapshot-timestamp"
+
+	require.Equal(t, canonical, PropertyCurrentSnapshotTimestamp)
+
+	builder := builderWithoutChanges(2)
+	require.ErrorContains(t, builder.SetProperties(iceberg.Properties{canonical: "123"}), "can't set reserved property "+canonical)
+	require.ErrorContains(t, builder.RemoveProperties([]string{canonical}), "can't remove reserved property "+canonical)
+	require.False(t, builder.HasChanges())
+
+	// The old spelling is not reserved by Iceberg.
+	require.NoError(t, builder.SetProperties(iceberg.Properties{oldKey: "custom"}))
+	require.Equal(t, "custom", builder.props[oldKey])
+	require.NoError(t, builder.RemoveProperties([]string{oldKey}))
+	require.NotContains(t, builder.props, oldKey)
 }
 
 func TestSetPropertiesClonesProperties(t *testing.T) {
@@ -3633,7 +3651,7 @@ func TestSetFormatVersionV1ToV2InitializesSequenceNumber(t *testing.T) {
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.LastSequenceNumber())
 }
 
@@ -3643,7 +3661,7 @@ func TestSetFormatVersionV1ToV3InitializesSequenceNumberAndNextRowID(t *testing.
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.LastSequenceNumber())
 	require.Equal(t, int64(0), meta.NextRowID())
 }
@@ -3654,7 +3672,7 @@ func TestSetFormatVersionV2ToV3InitializesNextRowID(t *testing.T) {
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.NextRowID())
 }
 
@@ -3769,7 +3787,7 @@ func TestSetFormatVersionV2ToV3PreservesSequenceNumber(t *testing.T) {
 func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 	meta, err := ParseMetadataString(ExampleTableMetadataV1)
 	require.NoError(t, err)
-	require.Equal(t, 1, meta.Version())
+	require.Equal(t, 1, meta.FormatVersion())
 
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -3777,7 +3795,7 @@ func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 
 	meta3, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, 3, meta3.FormatVersion())
 	require.Equal(t, int64(0), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
 	require.NotEqual(t, uuid.UUID{}, meta3.TableUUID())
@@ -3786,7 +3804,7 @@ func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 	meta, err := ParseMetadataString(ExampleTableMetadataV2)
 	require.NoError(t, err)
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -3794,7 +3812,7 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 
 	meta3, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, 3, meta3.FormatVersion())
 	require.Equal(t, int64(34), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
 }

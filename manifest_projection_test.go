@@ -149,8 +149,8 @@ func TestManifestEntryProjectionDropsTransientStats(t *testing.T) {
 
 	assert.Equal(t, entry.Status(), projected.Status())
 	assert.Equal(t, entry.SnapshotID(), projected.SnapshotID())
-	assert.Equal(t, entry.SequenceNum(), projected.SequenceNum())
-	assert.Equal(t, entry.FileSequenceNum(), projected.FileSequenceNum())
+	assert.Equal(t, entry.DataSequenceNumber(), projected.DataSequenceNumber())
+	assert.Equal(t, entry.FileSequenceNumber(), projected.FileSequenceNumber())
 	assert.Equal(t, "data.parquet", projected.DataFile().FilePath())
 	assert.Equal(t, int64(3), projected.DataFile().Count())
 	assert.Equal(t, int64(128), projected.DataFile().FileSizeBytes())

@@ -49,7 +49,7 @@ func TestCollectDeadPositionDeletes(t *testing.T) {
 		p := tbl.Location() + fmt.Sprintf("/data/d-%d.parquet", i)
 		writeParquet(t, p, arrowSc, fmt.Sprintf(`[{"id": %d, "data": "r%d"}]`, i+1, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(ctx, []string{p}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(ctx, []string{p}, nil, false))
 		tbl, err = tx.Commit(ctx)
 		require.NoError(t, err)
 	}
@@ -160,7 +160,7 @@ func TestDeadPositionDeleteRoundTrip(t *testing.T) {
 		writeParquet(t, dataPaths[i], arrowSc, fmt.Sprintf(`[{"id": %d, "data": "r%d"}]`, i+1, i+1))
 	}
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(ctx, dataPaths, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(ctx, dataPaths, nil, false))
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 

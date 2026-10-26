@@ -18,6 +18,7 @@
 package dv
 
 import (
+	"context"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -70,7 +71,7 @@ func TestCrossClientReadJavaMultiBlobDV(t *testing.T) {
 	require.NoError(t, err)
 
 	fs := iceio.LocalFS{}
-	f, err := fs.Open(abs)
+	f, err := fs.Open(context.Background(), abs)
 	require.NoError(t, err)
 	t.Cleanup(func() { f.Close() })
 
@@ -210,7 +211,7 @@ func loadJavaPuffinBlob(t *testing.T, fixture string, blobIdx int, referencedDat
 	require.NoError(t, err)
 
 	fs := iceio.LocalFS{}
-	f, err := fs.Open(abs)
+	f, err := fs.Open(context.Background(), abs)
 	require.NoError(t, err)
 	defer f.Close()
 

@@ -148,10 +148,10 @@ func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.Mani
 		if _, ok := seen[path]; ok {
 			continue
 		}
-		if e.SequenceNum() < 0 {
+		if e.DataSequenceNumber() < 0 {
 			continue
 		}
-		if minSeq >= e.SequenceNum() {
+		if minSeq >= e.DataSequenceNumber() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
@@ -199,7 +199,7 @@ func DecideDeadEqualityDeletesWithSpecs(
 		if _, ok := seen[path]; ok {
 			continue
 		}
-		if e.SequenceNum() < 0 {
+		if e.DataSequenceNumber() < 0 {
 			continue
 		}
 		isUnpartitioned, ok := unpartitionedBySpecID[df.SpecID()]
@@ -214,7 +214,7 @@ func DecideDeadEqualityDeletesWithSpecs(
 		}
 		if survey.specAwareApplicableMinSeq(
 			df.SpecID(), internal.BorrowedDataFilePartition(df), isUnpartitioned,
-		) >= e.SequenceNum() {
+		) >= e.DataSequenceNumber() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}

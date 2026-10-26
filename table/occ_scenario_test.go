@@ -497,7 +497,7 @@ func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterConflict() {
 		`[{"id":1,"val":"a"},{"id":2,"val":"b"},{"id":3,"val":"c"}]`)
 
 	tx := baseTbl.NewTransaction()
-	s.Require().NoError(tx.AddFiles(s.ctx, []string{file0Path}, nil, false))
+	s.Require().NoError(tx.AddDataFilesByPath(s.ctx, []string{file0Path}, nil, false))
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 	metaBase := cat.current
@@ -511,7 +511,7 @@ func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterConflict() {
 	writeParquetFile(s.T(), peerPath, arrowSc, `[{"id":4,"val":"d"}]`)
 
 	ptx := peerTbl.NewTransaction()
-	s.Require().NoError(ptx.AddFiles(s.ctx, []string{peerPath}, nil, false))
+	s.Require().NoError(ptx.AddDataFilesByPath(s.ctx, []string{peerPath}, nil, false))
 	_, err = ptx.Commit(s.ctx)
 	s.Require().NoError(err)
 	metaPeer := peerCat.current
@@ -589,7 +589,7 @@ func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterTwoConflicts()
 		`[{"id":1,"val":"a"},{"id":2,"val":"b"},{"id":3,"val":"c"}]`)
 
 	tx := baseTbl.NewTransaction()
-	s.Require().NoError(tx.AddFiles(s.ctx, []string{file0Path}, nil, false))
+	s.Require().NoError(tx.AddDataFilesByPath(s.ctx, []string{file0Path}, nil, false))
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 	metaBase := cat.current
@@ -607,7 +607,7 @@ func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterTwoConflicts()
 		peer++
 
 		ptx := peerTbl.NewTransaction()
-		s.Require().NoError(ptx.AddFiles(s.ctx, []string{peerPath}, nil, false))
+		s.Require().NoError(ptx.AddDataFilesByPath(s.ctx, []string{peerPath}, nil, false))
 		_, err := ptx.Commit(s.ctx)
 		s.Require().NoError(err)
 

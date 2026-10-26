@@ -134,8 +134,8 @@ type manifestTrackingIO struct {
 	delay   time.Duration
 }
 
-func (fs *manifestTrackingIO) Open(name string) (iceio.File, error) {
-	f, err := fs.IO.Open(name)
+func (fs *manifestTrackingIO) Open(_ context.Context, name string) (iceio.File, error) {
+	f, err := fs.IO.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}
@@ -198,8 +198,8 @@ func tableWithManifestListsUsingIO(t *testing.T, snapshotCount int, readIOFn fun
 		snapshotID := int64(i + 1)
 		seqNum := snapshotID
 		manifestPath := fmt.Sprintf("%s/metadata/manifest-%02d.avro", tableLocation, snapshotID)
-		manifest := iceberg.NewManifestFile(2, manifestPath, 1, 0, snapshotID).
-			SequenceNum(seqNum, seqNum).
+		manifest := iceberg.NewManifestBuilder(2, manifestPath, 1, 0, snapshotID).
+			SequenceNumber(seqNum, seqNum).
 			AddedFiles(1).
 			AddedRows(1).
 			Build()

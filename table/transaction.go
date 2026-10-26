@@ -94,11 +94,11 @@ type Transaction struct {
 	// removals; see the flag site in commitManifests.
 	noReplay bool
 
-	// pinnedRefs names branches with an explicit AssertRefSnapshotID
-	// requirement. doCommit's refresh-and-replay must not rewrite their
-	// assertions to the fresh branch head between retries: the caller
-	// opted into compare-and-swap semantics, so a branch that has
-	// changed fails the commit.
+	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
+	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot, and
+	// ExpireSnapshots. doCommit's refresh-and-replay must not rewrite
+	// their assertions to the fresh head between retries, so a ref that
+	// has changed fails the commit.
 	pinnedRefs map[string]struct{}
 
 	mx        sync.Mutex
@@ -151,6 +151,11 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
+	return t.applyLocked(updates, reqs)
+}
+
+// The caller must hold t.mx.
+func (t *Transaction) applyLocked(updates []Update, reqs []Requirement) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -449,27 +454,29 @@ func (t *Transaction) AssertRefSnapshotID(branch string) error {
 
 	id := t.baseRefSnapshotID(branch)
 
-	// Record the pin before the requirement can become visible to a
-	// concurrent Commit, which would otherwise rewrite the requirement
-	// to the fresh head on retry and silently void the
-	// compare-and-swap. The transient pin is harmless on its own and
-	// is rolled back if the requirement fails to apply.
-	t.mx.Lock()
-	if t.pinnedRefs == nil {
-		t.pinnedRefs = make(map[string]struct{})
-	}
-	_, alreadyPinned := t.pinnedRefs[branch]
-	t.pinnedRefs[branch] = struct{}{}
-	t.mx.Unlock()
+	return t.applyPinned(nil, []Requirement{AssertRefSnapshotID(branch, id)}, []string{branch})
+}
 
-	if err := t.apply(nil, []Requirement{AssertRefSnapshotID(branch, id)}); err != nil {
-		if !alreadyPinned {
-			t.mx.Lock()
-			delete(t.pinnedRefs, branch)
-			t.mx.Unlock()
-		}
-
+// applyPinned applies updates and reqs and pins refs, so doCommit fails
+// the commit when a pinned ref has moved instead of rewriting its
+// assertion to the fresh head. Updates and pins are published under one
+// hold of t.mx, so a concurrent Commit sees both or neither, and a failed
+// apply publishes no pins.
+func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []string) error {
+	if err := t.checkNotNil(); err != nil {
 		return err
+	}
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	if t.pinnedRefs == nil {
+		t.pinnedRefs = make(map[string]struct{}, len(refs))
+	}
+	for _, ref := range refs {
+		t.pinnedRefs[ref] = struct{}{}
 	}
 
 	return nil
@@ -551,9 +558,9 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 			iceberg.ErrInvalidArgument, branch)
 	}
 
-	if ref.SnapshotRefType != BranchRef {
+	if ref.Type != BranchRef {
 		return fmt.Errorf("%w: cannot rollback: ref %q is a %s, not a branch",
-			iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+			iceberg.ErrInvalidArgument, branch, ref.Type)
 	}
 
 	// Present but invalid is not the same as absent: metadata validation
@@ -581,16 +588,17 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 
 	update := meta.NewRetainingSnapshotRefUpdate(branch, snapshotID, BranchRef)
 
-	// Assert the base branch head so a concurrent head move fails the
-	// commit instead of the rollback clobbering it. When the branch was
-	// staged by this transaction (absent on the base), the update that
-	// created it already carries its own base-state requirement.
+	// Assert and pin the base branch head so a concurrent head move fails
+	// the commit instead of the rollback clobbering it. A branch staged by
+	// this transaction (absent on the base) already carries an absence
+	// assertion, and the pin keeps a retry from rebasing it onto a branch a
+	// peer created.
 	var reqs []Requirement
 	if id := t.baseRefSnapshotID(branch); id != nil {
 		reqs = append(reqs, AssertRefSnapshotID(branch, id))
 	}
 
-	return t.apply([]Update{update}, reqs)
+	return t.applyPinned([]Update{update}, reqs, []string{branch})
 }
 
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
@@ -744,6 +752,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		cfg         = expireSnapshotsCfg{postCommit: true}
 		updates     []Update
 		reqs        []Requirement
+		pinned      []string
 		snapsToKeep = make(map[int64]struct{})
 		nowMs       = time.Now().UnixMilli()
 	)
@@ -792,14 +801,15 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
-		// Assert the ref's base snapshot id so we don't accidentally
-		// expire snapshots that are now referenced by concurrently
-		// updated refs. Refs the transaction itself staged (absent on
-		// the base) get no assertion here: the update that created
-		// them carries its own base-state requirement.
+		// Assert and pin the ref's base snapshot id so we don't expire
+		// snapshots that concurrently updated refs now reference. Refs
+		// the transaction itself staged (absent on the base) already
+		// carry an absence assertion, which the pin keeps from being
+		// rebased.
 		if id := t.baseRefSnapshotID(refName); id != nil {
 			reqs = append(reqs, AssertRefSnapshotID(refName, id))
 		}
+		pinned = append(pinned, refName)
 
 		snap, err := meta.SnapshotByID(ref.SnapshotID)
 		if err != nil {
@@ -820,7 +830,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		// when min-snapshots-to-keep is 0, and tags never run that walk.
 		snapsToKeep[ref.SnapshotID] = struct{}{}
 
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			continue
 		}
 
@@ -843,7 +853,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	referencedSnapshots := make(map[int64]struct{})
 	for _, ref := range retainedRefs {
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			referencedSnapshots[ref.SnapshotID] = struct{}{}
 
 			continue
@@ -878,7 +888,14 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit))
 	}
 
-	return t.apply(updates, reqs)
+	// A no-op expiry must not pin the commit branch, which would stop the
+	// transaction's other updates from rebasing on retry. apply still
+	// rejects a transaction that has already been committed.
+	if len(updates) == 0 {
+		return t.apply(nil, nil)
+	}
+
+	return t.applyPinned(updates, reqs, pinned)
 }
 
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
@@ -947,7 +964,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	}
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
-			return t.AddFiles(ctx, filesToAdd, snapshotProps, false)
+			return t.AddDataFilesByPath(ctx, filesToAdd, snapshotProps, false)
 		}
 	}
 
@@ -1558,7 +1575,7 @@ func (t *Transaction) ensureNameMapping() error {
 // This is useful for clients who have already constructed DataFile objects with metadata,
 // avoiding the need to read files to extract schema and statistics.
 //
-// Unlike AddFiles, this method does not read files from storage. It validates only metadata
+// Unlike AddDataFilesByPath, this method does not read files from storage. It validates only metadata
 // that can be checked without opening files (for example spec-id and partition field IDs).
 //
 // Each DataFile may target any partition spec registered in the table metadata,
@@ -1979,7 +1996,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		// count as found when removing files, but it still blocks re-adding its path.
 		isLive := entry.Status() != iceberg.EntryStatusDELETED
 		if isData && isLive {
-			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.SequenceNum()}
+			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.DataSequenceNumber()}
 			if _, ok := setToDelete[path]; ok {
 				markedDataForDeletion = append(markedDataForDeletion, df)
 			}
@@ -1987,7 +2004,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData && isLive {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-				if seq := entry.SequenceNum(); seq >= 0 {
+				if seq := entry.DataSequenceNumber(); seq >= 0 {
 					removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
 					removedDeleteContents[df.ContentType()] = struct{}{}
 				} else {
@@ -2000,7 +2017,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 				// was already replaced would match the newer DV, which holds more deletes.
 				if want, ok := dvsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
-					if seq := entry.SequenceNum(); seq >= 0 {
+					if seq := entry.DataSequenceNumber(); seq >= 0 {
 						removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
 						removedDeleteContents[df.ContentType()] = struct{}{}
 					} else {
@@ -2061,7 +2078,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if _, removed := setDeleteFilesToRemove[path]; !removed {
 				if _, automaticallyRemoved := autoSetDeleteFilesToRemove[path]; !automaticallyRemoved {
 					survivingPositionDeletes = append(survivingPositionDeletes, rewriteFileState{
-						file: df, dataSequenceNumber: entry.SequenceNum(),
+						file: df, dataSequenceNumber: entry.DataSequenceNumber(),
 					})
 				}
 			}
@@ -2230,15 +2247,15 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	return nil
 }
 
-type AddFilesOption func(addFilesOp *addFilesOperation)
+type AddDataFilesByPathOption func(addFilesOp *addFilesOperation)
 
 type addFilesOperation struct {
 	concurrency int
 }
 
-// WithAddFilesConcurrency overwrites the default concurrency for add files operation.
+// WithAddDataFilesByPathConcurrency overrides the concurrency used by AddDataFilesByPath.
 // Default: runtime.GOMAXPROCS(0)
-func WithAddFilesConcurrency(concurrency int) AddFilesOption {
+func WithAddDataFilesByPathConcurrency(concurrency int) AddDataFilesByPathOption {
 	return func(op *addFilesOperation) {
 		if concurrency > 0 {
 			op.concurrency = concurrency
@@ -2246,7 +2263,9 @@ func WithAddFilesConcurrency(concurrency int) AddFilesOption {
 	}
 }
 
-func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddFilesOption) error {
+// AddDataFilesByPath adds data files at the provided paths to the table.
+// Unlike AddDataFiles, it opens each file to read its schema and statistics.
+func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddDataFilesByPathOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -2261,7 +2280,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	set := make(map[string]struct{}, len(filePaths))
 	for _, filePath := range filePaths {
 		if _, ok := set[filePath]; ok {
-			return errors.New("file paths must be unique for AddFiles")
+			return errors.New("file paths must be unique for AddDataFilesByPath")
 		}
 		set[filePath] = struct{}{}
 	}

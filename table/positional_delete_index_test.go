@@ -257,7 +257,7 @@ func TestPositionalDeleteIndexMatchesReferenceApplicability(t *testing.T) {
 
 	for _, dataEntry := range dataEntries {
 		t.Run(fmt.Sprintf("%s/spec=%d/sequence=%d",
-			dataEntry.DataFile().FilePath(), dataEntry.DataFile().SpecID(), dataEntry.SequenceNum()), func(t *testing.T) {
+			dataEntry.DataFile().FilePath(), dataEntry.DataFile().SpecID(), dataEntry.DataSequenceNumber()), func(t *testing.T) {
 			matched, err := idx.forDataFile(dataEntry)
 			require.NoError(t, err)
 
@@ -280,7 +280,7 @@ func referencePositionalDeleteApplies(
 	deleteEntry iceberg.ManifestEntry,
 	pathFieldID int,
 ) bool {
-	if deleteEntry.SequenceNum() < dataEntry.SequenceNum() {
+	if deleteEntry.DataSequenceNumber() < dataEntry.DataSequenceNumber() {
 		return false
 	}
 

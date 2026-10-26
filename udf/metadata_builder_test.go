@@ -87,10 +87,9 @@ func TestNewDefinitionVersion(t *testing.T) {
 // TestBuildRejectsNilRepresentation ensures a hand-built version carrying a
 // nil representation fails validation at Build instead of marshaling null.
 func TestBuildRejectsNilRepresentation(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
-	_, err = builder.
+	_, err := builder.
 		AddDefinition(newTestDefinition(t)).
 		AddDefinitionVersion("int", &DefinitionVersion{
 			Representations: []Representation{nil},
@@ -102,8 +101,7 @@ func TestBuildRejectsNilRepresentation(t *testing.T) {
 }
 
 func TestBuildNewMetadata(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	meta, err := builder.
 		SetLoc("s3://bucket/functions/add_one").
@@ -145,8 +143,7 @@ func TestBuildNewMetadata(t *testing.T) {
 func TestBuildSetUUID(t *testing.T) {
 	functionID := uuid.New()
 
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	meta, err := builder.
 		SetUUID(functionID).
@@ -158,15 +155,13 @@ func TestBuildSetUUID(t *testing.T) {
 }
 
 func TestBuildRequiresCompleteDefinition(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	// a definition without any version is incomplete
-	_, err = builder.AddDefinition(newTestDefinition(t)).Build()
+	_, err := builder.AddDefinition(newTestDefinition(t)).Build()
 	assert.ErrorIs(t, err, ErrInvalidUDFMetadata)
 
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	_, err = builder.Build()
 	assert.ErrorContains(t, err, "at least one definition is required")
 }
@@ -288,8 +283,7 @@ func TestBuilderRemoveDefinition(t *testing.T) {
 }
 
 func TestBuilderAddDefinitionConflicts(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	builder = builder.
 		AddDefinition(newTestDefinition(t)).
@@ -297,16 +291,14 @@ func TestBuilderAddDefinitionConflicts(t *testing.T) {
 	assert.ErrorContains(t, builder.Err(), "already exists")
 
 	// a mismatched pre-set definition-id is rejected
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	def := newTestDefinition(t)
 	def.DefinitionID = "float"
 	builder = builder.AddDefinition(def)
 	assert.ErrorContains(t, builder.Err(), "does not match canonical form")
 
 	// duplicate specific names are rejected across signatures
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	first, err := NewDefinition(FunctionTypeUDF,
 		[]Parameter{{Name: "x", Type: mustPrimitive(t, "int")}},
 		mustPrimitive(t, "int"), WithSpecificName("add_one"))
@@ -320,13 +312,11 @@ func TestBuilderAddDefinitionConflicts(t *testing.T) {
 }
 
 func TestBuilderVersionErrors(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	builder = builder.AddDefinitionVersion("int", newTestVersion(t, "x + 1", 1000))
 	assert.ErrorContains(t, builder.Err(), `no definition with definition-id "int"`)
 
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	explicit := newTestVersion(t, "x + 1", 1000)
 	explicit.VersionID = 1
 	duplicate := newTestVersion(t, "x + 2", 2000)
@@ -337,23 +327,20 @@ func TestBuilderVersionErrors(t *testing.T) {
 		AddDefinitionVersion("int", duplicate)
 	assert.ErrorContains(t, builder.Err(), `already has version-id 1`)
 
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	builder = builder.
 		AddDefinition(newTestDefinition(t)).
 		AddDefinitionVersion("int", newTestVersion(t, "x + 1", 1000)).
 		SetCurrentVersion("int", 7)
 	assert.ErrorContains(t, builder.Err(), "has no version-id 7")
 
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	builder = builder.RemoveDefinition("int")
 	assert.ErrorContains(t, builder.Err(), `no definition with definition-id "int"`)
 }
 
 func TestBuilderErrorChaining(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	builder = builder.
 		RemoveDefinition("missing").
@@ -364,13 +351,12 @@ func TestBuilderErrorChaining(t *testing.T) {
 	require.Error(t, firstErr)
 
 	// operations after an error are noops and Build reports the first error
-	_, err = builder.Build()
+	_, err := builder.Build()
 	assert.Equal(t, firstErr, err)
 }
 
 func TestBuilderUUIDReassignment(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	builder = builder.SetUUID(uuid.New()).SetUUID(uuid.New())
 	assert.ErrorContains(t, builder.Err(), "cannot reassign uuid")
@@ -387,8 +373,7 @@ func TestBuilderUUIDReassignment(t *testing.T) {
 // TestBuilderNormalizesNilParameters ensures a hand-built zero-parameter
 // definition with nil parameters serializes as the required empty list.
 func TestBuilderNormalizesNilParameters(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	meta, err := builder.
 		AddDefinition(&Definition{
@@ -415,8 +400,7 @@ func TestBuilderZeroParameterDefinition(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", def.DefinitionID, "a zero-parameter definition has an empty definition-id")
 
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	meta, err := builder.
 		AddDefinition(def).
 		AddDefinitionVersion("", newTestVersion(t, "42", 1000)).
@@ -438,8 +422,7 @@ func TestBuilderZeroParameterDefinition(t *testing.T) {
 // TestBuildIsolation ensures further builder operations cannot alter
 // previously built metadata.
 func TestBuildIsolation(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	builder = builder.
 		AddDefinition(newTestDefinition(t)).
@@ -464,8 +447,7 @@ func TestBuildIsolation(t *testing.T) {
 }
 
 func TestBuilderRejectsHandBuiltUnknownRepresentation(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	version, err := NewDefinitionVersion(
 		[]Representation{UnknownRepresentation{TypeName: "python"}},
@@ -486,8 +468,7 @@ func TestBuilderOnNullInput(t *testing.T) {
 		WithTimestampMS(1000), WithOnNullInput(OnNullInputReturnNull))
 	require.NoError(t, err)
 
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	meta, err := builder.
 		AddDefinition(newTestDefinition(t)).
 		AddDefinitionVersion("int", version).
@@ -508,8 +489,7 @@ func TestBuilderOnNullInput(t *testing.T) {
 // TestBuilderLogTimestampZero pins that epoch-0 is a settable log timestamp:
 // the builder's "unset" sentinel is -1, matching DefinitionVersion.TimestampMS.
 func TestBuilderLogTimestampZero(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	meta, err := builder.
 		AddDefinition(newTestDefinition(t)).
@@ -523,8 +503,7 @@ func TestBuilderLogTimestampZero(t *testing.T) {
 	assert.Equal(t, int64(0), log[0].TimestampMS)
 
 	// a negative log timestamp is rejected by validation at Build
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	_, err = builder.
 		AddDefinition(newTestDefinition(t)).
 		AddDefinitionVersion("int", newTestVersion(t, "x + 1", 1000)).
@@ -535,8 +514,7 @@ func TestBuilderLogTimestampZero(t *testing.T) {
 }
 
 func TestBuilderRemoveProperties(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	meta, err := builder.
 		SetProperties(iceberg.Properties{"owner": "iceberg-go", "team": "iceberg"}).
@@ -587,8 +565,7 @@ func TestBuilderNoopsAndErrorGuards(t *testing.T) {
 }
 
 func TestBuilderAddDefinitionWithInvalidTypes(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 
 	builder = builder.AddDefinition(&Definition{
 		Parameters:   []Parameter{{Name: "x", Type: nil}},
@@ -598,23 +575,19 @@ func TestBuilderAddDefinitionWithInvalidTypes(t *testing.T) {
 }
 
 func TestBuilderNilArguments(t *testing.T) {
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	builder = builder.AddDefinition(nil)
 	assert.ErrorContains(t, builder.Err(), "cannot add nil definition")
 
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	builder = builder.AddDefinition(newTestDefinition(t)).AddDefinitionVersion("int", nil)
 	assert.ErrorContains(t, builder.Err(), "cannot add nil definition version")
 
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	builder = builder.SetCurrentVersion("missing", 1)
 	assert.ErrorContains(t, builder.Err(), `no definition with definition-id "missing"`)
 
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	negative := newTestVersion(t, "x + 1", 1000)
 	negative.VersionID = -2
 	builder = builder.AddDefinition(newTestDefinition(t)).AddDefinitionVersion("int", negative)
@@ -626,9 +599,8 @@ func TestBuilderNilArguments(t *testing.T) {
 func TestBuildValidatesReturnType(t *testing.T) {
 	intType := mustPrimitive(t, "int")
 
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
-	_, err = builder.
+	builder := NewMetadataBuilder()
+	_, err := builder.
 		AddDefinition(&Definition{
 			Parameters:   []Parameter{{Name: "x", Type: intType}},
 			FunctionType: FunctionTypeUDF,
@@ -662,8 +634,7 @@ func TestBuilderUDTF(t *testing.T) {
 		[]Parameter{{Name: "c", Type: mustPrimitive(t, "string")}}, returnType)
 	require.NoError(t, err)
 
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	meta, err := builder.
 		AddDefinition(def).
 		AddDefinitionVersion("string", newTestVersion(t, "SELECT name, color FROM fruits WHERE color = c", 1000)).
@@ -678,8 +649,7 @@ func TestBuilderUDTF(t *testing.T) {
 	invalid, err := NewDefinition(FunctionTypeUDTF,
 		[]Parameter{{Name: "c", Type: mustPrimitive(t, "int")}}, mustPrimitive(t, "int"))
 	require.NoError(t, err)
-	builder, err = NewMetadataBuilder()
-	require.NoError(t, err)
+	builder = NewMetadataBuilder()
 	_, err = builder.
 		AddDefinition(invalid).
 		AddDefinitionVersion("int", newTestVersion(t, "SELECT 1", 1000)).
