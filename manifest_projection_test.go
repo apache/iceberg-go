@@ -20,6 +20,7 @@ package iceberg
 import (
 	"bytes"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -36,6 +37,7 @@ func TestManifestEntryProjectionWhitelistCoversDataFileSchema(t *testing.T) {
 	dataFileFields := make(map[string]struct{})
 	for field := range dataFileType.Fields() {
 		if name, ok := field.Tag.Lookup("avro"); ok {
+			name, _, _ = strings.Cut(name, ",")
 			dataFileFields[name] = struct{}{}
 		}
 	}
@@ -213,12 +215,6 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 				128,
 			)
 			require.NoError(t, err)
-			assert.Zero(t, builder.Build().(*dataFile).BlockSizeInBytes)
-			if tt.version == 1 {
-				// Legacy v1 manifests may contain a non-default block size.
-				// Keep verifying that projection preserves it when decoding.
-				builder.d.BlockSizeInBytes = 64 * 1024
-			}
 			builder.
 				ColumnSizes(map[int]int64{1: 64}).
 				ValueCounts(map[int]int64{1: 1}).
@@ -271,7 +267,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			assert.Empty(t, projected.DataFile().ValueCounts())
 			assert.Empty(t, projected.DataFile().LowerBoundValues())
 			if tt.version == 1 {
-				assert.Equal(t, int64(64*1024), projected.DataFile().(*dataFile).BlockSizeInBytes)
+				assert.Equal(t, int64(64*1024*1024), projected.DataFile().(*dataFile).BlockSizeInBytes)
 			}
 			if tt.entryContent == EntryContentPosDeletes && tt.format == PuffinFile {
 				require.NotNil(t, projected.DataFile().ReferencedDataFile())
@@ -300,6 +296,10 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			require.NoError(t, err)
 			require.NoError(t, fullReader.Close())
 			assert.Equal(t, map[int]int64{1: 64}, full.DataFile().ColumnSizes())
+			if tt.version == 1 {
+				// An unset builder field must serialize using the v1 schema default.
+				assert.Equal(t, int64(64*1024*1024), full.DataFile().(*dataFile).BlockSizeInBytes)
+			}
 
 			fs := iceio.NewMemFS()
 			require.NoError(t, fs.WriteFile(manifest.FilePath(), manifestBytes.Bytes()))
