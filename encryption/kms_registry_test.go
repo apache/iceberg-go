@@ -138,6 +138,19 @@ func TestKMSRegistry_PassesContextToFactory(t *testing.T) {
 	assert.True(t, called, "factory must receive the caller context")
 }
 
+func TestKMSRegistry_PropagatesCanceledContext(t *testing.T) {
+	registry := encryption.NewKMSRegistry()
+	require.NoError(t, registry.Register("context-kms", func(ctx context.Context, _ map[string]string) (encryption.KeyManagementClient, error) {
+		return nil, ctx.Err()
+	}))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := registry.Load(ctx, map[string]string{encryption.KMSTypeKey: "context-kms"})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestKMSRegistry_PassesPropertiesToFactory(t *testing.T) {
 	registry := encryption.NewKMSRegistry()
 	wantProps := map[string]string{
