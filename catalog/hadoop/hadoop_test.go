@@ -123,11 +123,11 @@ var _ HadoopCatalogFS = (*stubHadoopCatalogFS)(nil)
 
 type stubIO struct{}
 
-func (stubIO) Open(string) (icebergio.File, error) {
+func (stubIO) Open(context.Context, string) (icebergio.File, error) {
 	return nil, fs.ErrNotExist
 }
 
-func (stubIO) Remove(string) error {
+func (stubIO) Remove(context.Context, string) error {
 	return nil
 }
 
@@ -142,7 +142,7 @@ func (s *HadoopCatalogTestSuite) SetupTest() {
 	s.warehouse, err = os.MkdirTemp("", "test_hadoop_*")
 	s.Require().NoError(err)
 
-	s.cat, err = NewCatalog("test", s.warehouse, nil)
+	s.cat, err = NewCatalog(context.Background(), "test", s.warehouse, nil)
 	s.Require().NoError(err)
 }
 
@@ -377,27 +377,27 @@ func (s *HadoopCatalogTestSuite) TestRegistrationMissingWarehouse() {
 }
 
 func (s *HadoopCatalogTestSuite) TestNewCatalogTrimsTrailingSlash() {
-	cat, err := NewCatalog("test", "/tmp/wh/", nil)
+	cat, err := NewCatalog(context.Background(), "test", "/tmp/wh/", nil)
 	s.Require().NoError(err)
 	s.Equal("/tmp/wh", cat.warehouse)
 }
 
 func (s *HadoopCatalogTestSuite) TestNewCatalogStripsFilePrefix() {
-	cat, err := NewCatalog("test", "file:///tmp/wh", nil)
+	cat, err := NewCatalog(context.Background(), "test", "file:///tmp/wh", nil)
 	s.Require().NoError(err)
 	s.Equal("/tmp/wh", cat.warehouse)
 
-	cat, err = NewCatalog("test", "file:/tmp/wh", nil)
+	cat, err = NewCatalog(context.Background(), "test", "file:/tmp/wh", nil)
 	s.Require().NoError(err)
 	s.Equal("/tmp/wh", cat.warehouse)
 }
 
 func (s *HadoopCatalogTestSuite) TestNewCatalogRequiresOptInForRemoteSchemes() {
-	_, err := NewCatalog("test", "s3://bucket/path", nil)
+	_, err := NewCatalog(context.Background(), "test", "s3://bucket/path", nil)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
 
-	_, err = NewCatalog("test", "hdfs://namenode/warehouse", nil)
+	_, err = NewCatalog(context.Background(), "test", "hdfs://namenode/warehouse", nil)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
 
@@ -408,7 +408,7 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogRequiresOptInForRemoteSchemes() {
 		return &stubHadoopCatalogFS{}, nil
 	})
 
-	_, err = NewCatalog("test", scheme+"://bucket/path", nil)
+	_, err = NewCatalog(context.Background(), "test", scheme+"://bucket/path", nil)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
 	s.False(loadFSCalled)
@@ -423,7 +423,7 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogRemoteHappyPathWithUnsafeCommits(
 		return &stubHadoopCatalogFS{}, nil
 	})
 
-	cat, err := NewCatalog("test", scheme+"://bucket/wh/", iceberg.Properties{
+	cat, err := NewCatalog(context.Background(), "test", scheme+"://bucket/wh/", iceberg.Properties{
 		"allow-unsafe-commits": "true",
 	})
 	s.Require().NoError(err)
@@ -446,7 +446,7 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogRemoteRequiresHadoopCatalogFS() {
 		return stubIO{}, nil
 	})
 
-	_, err := NewCatalog("test", scheme+"://bucket/wh", iceberg.Properties{
+	_, err := NewCatalog(context.Background(), "test", scheme+"://bucket/wh", iceberg.Properties{
 		"allow-unsafe-commits": "true",
 	})
 	s.Require().Error(err)
@@ -1571,7 +1571,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
 func (s *HadoopCatalogTestSuite) TestCreateTableInvalidReporterDoesNotMutate() {
 	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
 
-	_, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+	_, err := NewCatalog(context.Background(), "test", s.warehouse, iceberg.Properties{
 		metrics.ReporterImplKey: "does-not-exist",
 	})
 	s.Require().Error(err)
@@ -1857,7 +1857,7 @@ func (s *HadoopCatalogTestSuite) TestCommitMetadataFileFailsClosedOnMetadataScan
 		s.cat.filesystem = originalFS
 	}()
 
-	err = s.cat.commitMetadataFile(ident, 1, tempPath, metaPath, table.ErrCommitFailed)
+	err = s.cat.commitMetadataFile(context.Background(), ident, 1, tempPath, metaPath, table.ErrCommitFailed)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "failed to inspect metadata directory for version 1")
 	s.ErrorIs(err, fs.ErrPermission)
@@ -2149,7 +2149,7 @@ func (s *HadoopCatalogTestSuite) TestLoadTableNotExists() {
 
 func (s *HadoopCatalogTestSuite) TestLoadTableEnablesCatalogManifestContentCache() {
 	ctx := context.Background()
-	cat, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+	cat, err := NewCatalog(ctx, "test", s.warehouse, iceberg.Properties{
 		table.IOManifestCacheEnabledKey: "true",
 	})
 	s.Require().NoError(err)
@@ -2422,7 +2422,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableMetadataFormatVersion() {
 	s.Require().NoError(err)
 
 	// Default format version should be V2
-	s.Equal(2, tbl.Metadata().Version())
+	s.Equal(2, tbl.Metadata().FormatVersion())
 }
 
 // CommitTable tests

@@ -91,19 +91,6 @@ type SQLRepresentation struct {
 	SQL     string `json:"sql"`
 }
 
-// NewSQLRepresentation creates a SQL representation from a dialect
-// identifier (e.g. "spark", "trino") and a SQL expression.
-func NewSQLRepresentation(dialect, sql string) (SQLRepresentation, error) {
-	if dialect == "" {
-		return SQLRepresentation{}, fmt.Errorf("%w: sql representation requires a dialect", ErrInvalidUDFMetadata)
-	}
-	if sql == "" {
-		return SQLRepresentation{}, fmt.Errorf("%w: sql representation requires a sql expression", ErrInvalidUDFMetadata)
-	}
-
-	return SQLRepresentation{Dialect: dialect, SQL: sql}, nil
-}
-
 func (SQLRepresentation) RepresentationType() string { return "sql" }
 func (SQLRepresentation) isRepresentation()          {}
 func (r SQLRepresentation) clone() Representation    { return r }

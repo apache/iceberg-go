@@ -163,14 +163,14 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "tenant", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int32},
-		iceberg.NestedField{ID: 3, Name: "amount", Type: iceberg.DecimalTypeOf(12, 2)},
+		iceberg.NestedField{ID: 3, Name: "amount", Type: iceberg.MustDecimalTypeOf(12, 2)},
 		iceberg.NestedField{ID: 4, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
 		iceberg.NestedField{ID: 5, Name: "tstz", Type: iceberg.PrimitiveTypes.TimestampTz},
 		iceberg.NestedField{ID: 6, Name: "day", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 7, Name: "clock", Type: iceberg.PrimitiveTypes.Time},
 		iceberg.NestedField{ID: 8, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 9, Name: "blob", Type: iceberg.PrimitiveTypes.Binary},
-		iceberg.NestedField{ID: 10, Name: "fixed", Type: iceberg.FixedTypeOf(3)},
+		iceberg.NestedField{ID: 10, Name: "fixed", Type: iceberg.MustFixedTypeOf(3)},
 		iceberg.NestedField{ID: 11, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
 			{ID: 16, Name: "text", Type: iceberg.PrimitiveTypes.String},
 		}}},
@@ -198,7 +198,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		b.SplitOffsets([]int64{4, 40, 70})
 		b.LowerBoundValues(map[int][]byte{2: lo}).UpperBoundValues(map[int][]byte{2: hi})
 		b.ValueCounts(map[int]int64{1: 10, 2: 10}).NullValueCounts(map[int]int64{1: 0, 2: 0})
-		entries = append(entries, iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(10)), b.Build()).SequenceNum(1).Build())
+		entries = append(entries, iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(10)), b.Build()).DataSequenceNumber(1).Build())
 	}
 	var data bytes.Buffer
 	mf, err := iceberg.WriteManifest("mem://parity/data.avro", &data, 2, spec, schema, 10, entries)
@@ -218,7 +218,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 			if content == iceberg.EntryContentEqDeletes {
 				b.EqualityFieldIDs([]int{2})
 			}
-			require.NoError(t, writer.Add(iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(20)), b.Build()).SequenceNum(2).Build()))
+			require.NoError(t, writer.Add(iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, new(int64(20)), b.Build()).DataSequenceNumber(2).Build()))
 		}
 	}
 	require.NoError(t, writer.Close())

@@ -43,7 +43,10 @@ const (
 	descriptionKey = "description"
 )
 
-var _ catalog.Catalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog             = (*Catalog)(nil)
+	_ catalog.RegisterableCatalog = (*Catalog)(nil)
+)
 
 func init() {
 	catalog.Register("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
@@ -784,7 +787,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}
 
-	if err := fs.Remove(metadataLocation); err != nil {
+	if err := fs.Remove(ctx, metadataLocation); err != nil {
 		return fmt.Errorf("failed to remove view metadata file at %s: %w", metadataLocation, err)
 	}
 

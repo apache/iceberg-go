@@ -17,14 +17,14 @@
 
 package table_test
 
-// Regression test for: AddFiles() ignoring commit.manifest-merge.enabled.
+// Regression test for: AddDataFilesByPath() ignoring commit.manifest-merge.enabled.
 //
-// Root cause: transaction.go hardcoded .fastAppend() in AddFiles(), bypassing
+// Root cause: transaction.go hardcoded .fastAppend() in AddDataFilesByPath(), bypassing
 // appendSnapshotProducer() which reads ManifestMergeEnabledKey.
 //
 // Java reference: BaseTable.newAppend() always uses MergeAppend (merge default=true).
 // AddDataFiles() and Append() in Go both correctly call appendSnapshotProducer().
-// Only AddFiles() was missing the call.
+// Only AddDataFilesByPath() was missing the call.
 //
 // Fix: change line 780 in transaction.go from:
 //
@@ -71,10 +71,10 @@ func (c *mergeCatalog) CommitTable(_ context.Context, _ table.Identifier, _ []ta
 	return meta, "", nil
 }
 
-// TestAddFilesRespectsMergeEnabled verifies that AddFiles() respects the
+// TestAddFilesRespectsMergeEnabled verifies that AddDataFilesByPath() respects the
 // commit.manifest-merge.enabled table property.
 //
-// Before fix: 3 sequential AddFiles() commits produce 3 manifests because
+// Before fix: 3 sequential AddDataFilesByPath() commits produce 3 manifests because
 // fastAppend() is hardcoded and the merge property is ignored.
 //
 // After fix: with minCountToMerge=2, the 3rd commit triggers a merge and
@@ -131,7 +131,7 @@ func TestAddFilesRespectsMergeEnabled(t *testing.T) {
 		cat,
 	)
 
-	// Perform 3 separate AddFiles commits — simulating the committer's 1-per-batch pattern.
+	// Perform 3 separate AddDataFilesByPath commits — simulating the committer's 1-per-batch pattern.
 	// minCountToMerge=2 means the 3rd commit should trigger a merge.
 	const numCommits = 3
 	for i := range numCommits {
@@ -139,8 +139,8 @@ func TestAddFilesRespectsMergeEnabled(t *testing.T) {
 		writeParquet(filePath)
 
 		txn := tbl.NewTransaction()
-		require.NoError(t, txn.AddFiles(ctx, []string{filePath}, nil, false),
-			"AddFiles commit %d failed", i+1)
+		require.NoError(t, txn.AddDataFilesByPath(ctx, []string{filePath}, nil, false),
+			"AddDataFilesByPath commit %d failed", i+1)
 
 		tbl, err = txn.Commit(ctx)
 		require.NoError(t, err, "Commit %d failed", i+1)
@@ -155,8 +155,8 @@ func TestAddFilesRespectsMergeEnabled(t *testing.T) {
 	// After fix: merge fires on commit 3 (accumulated 3 > minCount 2) → 1 merged manifest.
 	// Before fix: 3 manifests (fastAppend carries all forward without merging).
 	assert.Equal(t, 1, len(manifests),
-		"expected 1 merged manifest after %d AddFiles commits with manifest merge enabled "+
+		"expected 1 merged manifest after %d AddDataFilesByPath commits with manifest merge enabled "+
 			"(minCountToMerge=2), got %d manifests — "+
-			"AddFiles() is not respecting commit.manifest-merge.enabled",
+			"AddDataFilesByPath() is not respecting commit.manifest-merge.enabled",
 		numCommits, len(manifests))
 }

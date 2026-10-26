@@ -495,7 +495,7 @@ func buildEqualityDeleteIndex(
 
 	sortBySequence := func(entries []equalityDeleteIndexEntry) {
 		slices.SortStableFunc(entries, func(a, b equalityDeleteIndexEntry) int {
-			return cmp.Compare(a.entry.SequenceNum(), b.entry.SequenceNum())
+			return cmp.Compare(a.entry.DataSequenceNumber(), b.entry.DataSequenceNumber())
 		})
 	}
 	sortBySequence(idx.global)
@@ -536,12 +536,12 @@ func (idx *equalityDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]
 		}
 	}
 
-	dataSeqNum := dataEntry.SequenceNum()
+	dataSeqNum := dataEntry.DataSequenceNumber()
 	// Equality deletes are sorted by sequence within each list. When even
 	// the newest delete is not newer than the data file, no delete applies.
 	// Avoid initializing or copying column statistics in that common case.
-	if (len(idx.global) == 0 || idx.global[len(idx.global)-1].entry.SequenceNum() <= dataSeqNum) &&
-		(len(partitionEntries) == 0 || partitionEntries[len(partitionEntries)-1].entry.SequenceNum() <= dataSeqNum) {
+	if (len(idx.global) == 0 || idx.global[len(idx.global)-1].entry.DataSequenceNumber() <= dataSeqNum) &&
+		(len(partitionEntries) == 0 || partitionEntries[len(partitionEntries)-1].entry.DataSequenceNumber() <= dataSeqNum) {
 		return nil, nil
 	}
 	var dataStats *equalityDeleteDataFileStats
@@ -563,7 +563,7 @@ func firstEqualityDeleteAfter(
 	dataSeqNum int64,
 ) int {
 	return sort.Search(len(entries), func(i int) bool {
-		return entries[i].entry.SequenceNum() > dataSeqNum
+		return entries[i].entry.DataSequenceNumber() > dataSeqNum
 	})
 }
 

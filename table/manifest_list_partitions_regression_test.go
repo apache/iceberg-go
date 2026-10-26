@@ -17,13 +17,13 @@
 
 package table_test
 
-// End-to-end regression test for issue #1309: AddFiles() after a prior Delete()
+// End-to-end regression test for issue #1309: AddDataFilesByPath() after a prior Delete()
 // produces a manifest list whose `partitions` field serializes as Avro null,
 // which Redshift Spectrum rejects ("Wrong type in Avro file. Field: partitions.
 // Expected: 12 (union). Got: 7 (null)").
 //
 // The trigger is the inheritance path: Delete() uses the mergeOverwrite producer
-// and the following AddFiles() uses fastAppend, which inherits the delete
+// and the following AddDataFilesByPath() uses fastAppend, which inherits the delete
 // snapshot's manifests unchanged. When the manifest list is rewritten, an
 // inherited manifest whose `partitions` summaries are present-but-empty (an
 // unpartitioned table has zero field summaries) round-trips as a non-nil pointer
@@ -84,7 +84,7 @@ type manifestListRecordV2 struct {
 func readManifestListPartitionFields(t *testing.T, fs iceio.IO, manifestListPath string) []any {
 	t.Helper()
 
-	f, err := fs.Open(manifestListPath)
+	f, err := fs.Open(context.Background(), manifestListPath)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, f.Close()) }()
 
@@ -149,13 +149,13 @@ func TestManifestListPartitionsPresentAfterDeleteThenAddFiles(t *testing.T) {
 	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
 	require.NoError(t, err)
 
-	// Step 3 — AddFiles (fastAppend) inherits the delete snapshot's manifests.
+	// Step 3 — AddDataFilesByPath (fastAppend) inherits the delete snapshot's manifests.
 	// This is the commit whose manifest list #1309 reports as unreadable.
 	extraPath := location + "/data-extra.parquet"
 	writeInt64Parquet(t, fs, extraPath, arrowSchema, []int64{4, 5})
 
 	txn := tbl.NewTransaction()
-	require.NoError(t, txn.AddFiles(ctx, []string{extraPath}, nil, false))
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{extraPath}, nil, false))
 	tbl, err = txn.Commit(ctx)
 	require.NoError(t, err)
 
@@ -187,7 +187,7 @@ func TestManifestListPartitionsPresentAfterDeleteThenAddFiles(t *testing.T) {
 		"iceberg-go must read the appended rows back with their real values")
 }
 
-// writeInt64Parquet writes a single-column ("id") Parquet file so AddFiles has a
+// writeInt64Parquet writes a single-column ("id") Parquet file so AddDataFilesByPath has a
 // real file to ingest.
 func writeInt64Parquet(t *testing.T, fs iceio.LocalFS, path string, arrowSchema *arrow.Schema, ids []int64) {
 	t.Helper()

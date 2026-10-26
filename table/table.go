@@ -201,9 +201,9 @@ func (t Table) NewTransactionOnBranch(branch string) (*Transaction, error) {
 		if name != branch {
 			continue
 		}
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
-				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+				iceberg.ErrInvalidArgument, branch, ref.Type)
 		}
 
 		break
@@ -564,9 +564,8 @@ type commitOpts struct {
 	// in snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
-	// pinnedRefs names branches with an explicit requirement from
-	// Transaction.AssertRefSnapshotID, whose assertions must not be
-	// rewritten to the fresh branch head between retries (see
+	// pinnedRefs names refs whose assertions guard the commit and must
+	// not be rewritten to the fresh head between retries (see
 	// Transaction.pinnedRefs).
 	pinnedRefs map[string]struct{}
 }
@@ -649,8 +648,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		if !cleanupOrphans || len(orphanedManifests) == 0 {
 			return
 		}
+		// The commit may have failed because ctx was canceled; remove the
+		// orphans without that cancellation so they are not left behind.
+		cleanupCtx := context.WithoutCancel(ctx)
 		for _, path := range orphanedManifests {
-			if removeErr := wfs.Remove(path); removeErr != nil {
+			if removeErr := wfs.Remove(cleanupCtx, path); removeErr != nil {
 				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
 			}
 		}
@@ -709,7 +711,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// never succeed — fail now instead of burning the remaining
 			// retries on it.
 			if err := validatePinnedRefRequirements(reqs, co.pinnedRefs, current); err != nil {
-				return nil, fmt.Errorf("%w: explicit ref requirement failed: %w", ErrCommitFailed, err)
+				return nil, fmt.Errorf("%w: pinned ref requirement failed: %w", ErrCommitFailed, err)
 			}
 			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
 				return nil, err
@@ -875,10 +877,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // deleted underneath us), reqs is returned unchanged — newConflict-
 // Context will surface the divergence on the next pre-flight pass.
 //
-// Assertions on branches in pinned were registered explicitly by the
-// committer (Transaction.AssertRefSnapshotID) for compare-and-swap
-// semantics and are never rewritten: a branch that has changed must
-// fail the commit, not be replayed against the new head.
+// Assertions on refs in pinned guard the commit (an explicit
+// Transaction.AssertRefSnapshotID, a rollback, or snapshot expiry) and
+// are never rewritten: a ref that has changed must fail the commit, not
+// be replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
@@ -971,11 +973,11 @@ func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 		return true
 	}
 
-	if fresh.Version() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
+	if fresh.FormatVersion() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
 		return false
 	}
 
-	if fresh.Version() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
+	if fresh.FormatVersion() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
 		return false
 	}
 
@@ -1176,9 +1178,11 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	return time.Duration(wait) * time.Millisecond
 }
 
-// SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
-func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+// SnapshotAsOf returns the snapshot that was current at or before timestampMs,
+// measured in milliseconds since the Unix epoch. It returns nil when no
+// snapshot was current at or before that time.
+func (t Table) SnapshotAsOf(timestampMs int64) *Snapshot {
+	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, true)
 	if ok {
 		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
@@ -1212,7 +1216,8 @@ func deleteOldMetadata(fs icebergio.IO, baseMeta, newMeta Metadata) {
 		toRemove := internal.Difference(removedPrevious, currentMetadata)
 
 		for _, file := range toRemove {
-			if err := fs.Remove(file); err != nil {
+			// deleteOldMetadata is best-effort cleanup with no caller context.
+			if err := fs.Remove(context.Background(), file); err != nil {
 				// Log the error instead of raising it when deleting old metadata files, as an external entity like a compactor may have already deleted them
 				log.Printf("Warning: Failed to delete old metadata file: %s error: %v", file, err)
 			}
@@ -1541,7 +1546,7 @@ func NewFromLocation(
 			return nil, err
 		}
 	} else {
-		f, err := fsys.Open(metalocation)
+		f, err := fsys.Open(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}

@@ -573,7 +573,7 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	err = tx.AddFiles(t.Context(), []string{dataPath}, nil, false)
+	err = tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false)
 	require.NoError(t, err)
 
 	tbl, err = tx.Commit(t.Context())
@@ -747,7 +747,7 @@ func newTableWithLiveDV(t *testing.T) (*table.Table, string, string, iceberg.Dat
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -780,7 +780,7 @@ func newTableWithSharedPuffinDVs(t *testing.T) (*table.Table, string, string, st
 	writeParquetFile(t, pathB, arrowSc, `[{"id": 3, "data": "gamma"}, {"id": 4, "data": "delta"}]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{pathA, pathB}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{pathA, pathB}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -859,7 +859,7 @@ func TestRowDeltaDVSupersessionSingleSnapshot(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assertRowCount(t, tbl, 5)
@@ -1359,7 +1359,7 @@ func TestRowDeltaRemoveDeletesStaleReference(t *testing.T) {
 		writeParquetFile(t, pathB, arrowSc, `[{"id": 3, "data": "gamma"}, {"id": 4, "data": "delta"}]`)
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{pathA, pathB}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{pathA, pathB}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -1551,7 +1551,7 @@ func TestRowDeltaRemoveDeletesUnknownFile(t *testing.T) {
 		writeParquetFile(t, realDataPath, arrowSc, `[{"id": 1, "data": "alpha"}]`)
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{realDataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{realDataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -1771,7 +1771,7 @@ func TestRowDeltaFastAppendRejectsDuplicateAddedDVs(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -1827,7 +1827,7 @@ func TestRowDeltaRejectsConcurrentFirstDVOnRetry(t *testing.T) {
 	]`)
 
 	tx := baseTbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	_, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	metaBase := baseCat.current
@@ -1903,7 +1903,7 @@ func seedRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...in
 
 	writeRowDeltaDataFile(t, tbl, path, ids...)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{path}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false))
 
 	tbl, err := tx.Commit(t.Context())
 	require.NoError(t, err)

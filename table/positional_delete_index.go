@@ -166,7 +166,7 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 
 	sortBySequence := func(entries []iceberg.ManifestEntry) {
 		slices.SortStableFunc(entries, func(a, b iceberg.ManifestEntry) int {
-			return cmp.Compare(a.SequenceNum(), b.SequenceNum())
+			return cmp.Compare(a.DataSequenceNumber(), b.DataSequenceNumber())
 		})
 	}
 	for _, pathEntries := range idx.byPath {
@@ -174,7 +174,7 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 	}
 	sortPartitionBySequence := func(entries []positionalPartitionDeleteEntry) {
 		slices.SortStableFunc(entries, func(a, b positionalPartitionDeleteEntry) int {
-			return cmp.Compare(a.entry.SequenceNum(), b.entry.SequenceNum())
+			return cmp.Compare(a.entry.DataSequenceNumber(), b.entry.DataSequenceNumber())
 		})
 	}
 	for _, partitionEntries := range idx.byPartition {
@@ -210,7 +210,7 @@ func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) (
 		}
 	}
 
-	dataSeqNum := dataEntry.SequenceNum()
+	dataSeqNum := dataEntry.DataSequenceNumber()
 	out, err := appendPartitionDeletesFromSequence(
 		nil, partitionEntries, dataSeqNum, dataFile.FilePath())
 	if err != nil {
@@ -229,7 +229,7 @@ func appendPartitionDeletesFromSequence(
 	dataFilePath string,
 ) ([]iceberg.DataFile, error) {
 	start := sort.Search(len(entries), func(i int) bool {
-		return entries[i].entry.SequenceNum() >= dataSeqNum
+		return entries[i].entry.DataSequenceNumber() >= dataSeqNum
 	})
 	if start == len(entries) {
 		return out, nil
@@ -258,7 +258,7 @@ func appendPositionalDeletesFromSequence(
 	dataSeqNum int64,
 ) []iceberg.DataFile {
 	start := sort.Search(len(entries), func(i int) bool {
-		return entries[i].SequenceNum() >= dataSeqNum
+		return entries[i].DataSequenceNumber() >= dataSeqNum
 	})
 	for _, entry := range entries[start:] {
 		out = append(out, entry.DataFile())

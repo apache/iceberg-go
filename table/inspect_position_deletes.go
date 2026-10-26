@@ -54,7 +54,7 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: %w", err)
 	}
-	schema := PositionDeletesSchema(i.tbl.Metadata().CurrentSchema(), partitionType, i.tbl.Metadata().Version())
+	schema := PositionDeletesSchema(i.tbl.Metadata().CurrentSchema(), partitionType, i.tbl.Metadata().FormatVersion())
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: build arrow schema: %w", err)
@@ -67,7 +67,7 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 	ctx = compute.WithAllocator(ctx, i.alloc)
 
 	return i.positionDeleteRecordReader(
-		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().Version()), nil
+		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().FormatVersion()), nil
 }
 
 func (i InspectTable) currentPositionDeleteManifests(

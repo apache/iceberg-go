@@ -155,7 +155,7 @@ func TestMarshalExpressionTypedLiterals(t *testing.T) {
 		{"date", mustLit(t, "2022-08-14", iceberg.PrimitiveTypes.Date), `{"type":"eq","term":"d","value":"2022-08-14"}`},
 		{"uuid", iceberg.UUIDLiteral(uuid.MustParse("f79c3e09-677c-4bbd-a479-3f349cb785e7")), `{"type":"eq","term":"d","value":"f79c3e09-677c-4bbd-a479-3f349cb785e7"}`},
 		{"binary", iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03}), `{"type":"eq","term":"d","value":"010203"}`},
-		{"decimal", mustLit(t, "3.14", iceberg.DecimalTypeOf(9, 2)), `{"type":"eq","term":"d","value":"3.14"}`},
+		{"decimal", mustLit(t, "3.14", iceberg.MustDecimalTypeOf(9, 2)), `{"type":"eq","term":"d","value":"3.14"}`},
 	}
 
 	for _, tt := range tests {
@@ -675,7 +675,7 @@ func TestUnmarshalExpressionLiteralWrapperErrors(t *testing.T) {
 // doesn't match the column's declared length.
 func TestUnmarshalExpressionFixedLength(t *testing.T) {
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "f", Type: iceberg.FixedTypeOf(4)},
+		iceberg.NestedField{ID: 1, Name: "f", Type: iceberg.MustFixedTypeOf(4)},
 	)
 	_, err := iceberg.ParseExpr([]byte(`{"type":"eq","term":"f","value":"0102"}`), schema)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
