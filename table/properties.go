@@ -19,6 +19,7 @@ package table
 
 import (
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -233,7 +234,7 @@ const (
 	PropertyDefaultSortOrder         = "default-sort-order"
 )
 
-var ReservedProperties = [9]string{
+var reservedProperties = [...]string{
 	PropertyFormatVersion,
 	PropertyUuid,
 	PropertySnapshotCount,
@@ -243,6 +244,12 @@ var ReservedProperties = [9]string{
 	PropertyCurrentSchema,
 	PropertyDefaultPartitionSpec,
 	PropertyDefaultSortOrder,
+}
+
+// ReservedProperties returns a new slice of reserved table property names.
+// Mutating the returned slice does not change metadata validation.
+func ReservedProperties() []string {
+	return slices.Clone(reservedProperties[:])
 }
 
 // Metadata compression codecs

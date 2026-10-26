@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Reserved table properties now use a read-only API.** Replace references to `table.ReservedProperties` with `table.ReservedProperties()`. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.
 - **Fixed and decimal constructors return errors.** `iceberg.FixedTypeOf` and `iceberg.DecimalTypeOf` now return `(type, error)` instead of panicking for invalid inputs. Use `MustFixedTypeOf` or `MustDecimalTypeOf` only for known-valid values.
 - **SQL UDF representations now use struct literals.** The `udf.NewSQLRepresentation(dialect, sql)` function, available since v0.7.0, is removed. Use `udf.SQLRepresentation{Dialect: "trino", SQL: "x + 1"}` instead. Empty fields and duplicate dialects are checked during metadata validation; serialized JSON is unchanged.
 - **Filesystem adapter construction consolidated.** Replace `io.FSPreProcName(fsys, fn)` with `io.FS(fsys, io.WithNamePreprocessor(fn))`. Plain `io.FS(fsys)` remains supported.
