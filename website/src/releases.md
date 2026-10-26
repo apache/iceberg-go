@@ -43,6 +43,8 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 ### Unreleased compatibility notes
 
 - **Reserved table properties now use a read-only API.** Replace references to `table.ReservedProperties` with `table.ReservedProperties()`. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.
+- **Fixed and decimal constructors return errors.** `iceberg.FixedTypeOf` and `iceberg.DecimalTypeOf` now return `(type, error)` instead of panicking for invalid inputs. Use `MustFixedTypeOf` or `MustDecimalTypeOf` only for known-valid values.
+- **SQL UDF representations now use struct literals.** The `udf.NewSQLRepresentation(dialect, sql)` function, available since v0.7.0, is removed. Use `udf.SQLRepresentation{Dialect: "trino", SQL: "x + 1"}` instead. Empty fields and duplicate dialects are checked during metadata validation; serialized JSON is unchanged.
 - **Filesystem adapter construction consolidated.** Replace `io.FSPreProcName(fsys, fn)` with `io.FS(fsys, io.WithNamePreprocessor(fn))`. Plain `io.FS(fsys)` remains supported.
 - **Table purge is required on catalogs.** The `catalog.Catalog` interface now embeds `catalog.PurgeableCatalog`; every custom catalog implementation must provide `PurgeTable(ctx, identifier) error`. The narrow `catalog.PurgeableTable` interface is renamed to `catalog.PurgeableCatalog`. Built-in purge behavior is unchanged.
 - **Unify statistics blob types with Puffin.** Replace `table.BlobType` with `puffin.BlobType` when constructing `table.BlobMetadata`. Replace `table.BlobTypeApacheDatasketchesThetaV1` with `puffin.BlobTypeDataSketchesTheta` and `table.BlobTypeDeletionVectorV1` with `puffin.BlobTypeDeletionVector`. Use `puffin.BlobType.IsKnown()` to identify the types defined by the Puffin specification; the redundant `table.BlobType.IsValid()` method is removed. Unknown non-empty blob type names still round-trip through table metadata.
@@ -52,7 +54,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 - **Substrait expression conversion no longer takes case sensitivity.** `substrait.ConvertExpr(schema, expression, caseSensitive)` becomes `substrait.ConvertExpr(schema, expression)`. Case sensitivity remains part of expression binding.
 
 - **Transform formatting requires the result type and uses the Java-aligned method name.** `Transform.ToHumanStr(value)` and `Transform.ToHumanStrType(resultType, value)` are removed. Use `Transform.ToHumanString(resultType, value)` to format partition values, including timestamps with time zones.
-- **Catalogs now require cleanup.** The `catalog.Catalog` interface includes `Close() error`. Custom catalog implementations must provide `Close`, and callers should close catalog instances after use. `catalog.Closer` remains available as an alias for `io.Closer`.
+- **Catalogs now require cleanup.** The `catalog.Catalog` interface includes `Close() error`. Custom catalog implementations must provide `Close`, and callers should close catalog instances after use. `catalog.Closer` is removed. Replace `cat.(catalog.Closer)` checks with `defer cat.Close()`; `catalog.Catalog` already implements `io.Closer`, so no type assertion is needed.
 
 - **Puffin writer property setter renamed.** `puffin.Writer.AddProperties` is now `puffin.Writer.SetProperties`. Repeated calls still merge keys; use `ClearProperties` to clear custom properties before finishing.
 

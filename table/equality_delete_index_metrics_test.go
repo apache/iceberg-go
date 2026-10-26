@@ -340,13 +340,13 @@ func TestEqualityDeleteIndexDoesNotUseUncertainFloatBounds(t *testing.T) {
 }
 
 func TestEqualityDeleteMetricValueCompareSupportsRangeTypes(t *testing.T) {
-	decimalLower, err := iceberg.LiteralFromBytes(iceberg.DecimalTypeOf(9, 0), []byte{1})
+	decimalLower, err := iceberg.LiteralFromBytes(iceberg.MustDecimalTypeOf(9, 0), []byte{1})
 	require.NoError(t, err)
-	decimalUpper, err := iceberg.LiteralFromBytes(iceberg.DecimalTypeOf(9, 0), []byte{2})
+	decimalUpper, err := iceberg.LiteralFromBytes(iceberg.MustDecimalTypeOf(9, 0), []byte{2})
 	require.NoError(t, err)
-	fixedLower, err := iceberg.LiteralFromBytes(iceberg.FixedTypeOf(2), []byte{1, 0})
+	fixedLower, err := iceberg.LiteralFromBytes(iceberg.MustFixedTypeOf(2), []byte{1, 0})
 	require.NoError(t, err)
-	fixedUpper, err := iceberg.LiteralFromBytes(iceberg.FixedTypeOf(2), []byte{2, 0})
+	fixedUpper, err := iceberg.LiteralFromBytes(iceberg.MustFixedTypeOf(2), []byte{2, 0})
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -366,13 +366,13 @@ func TestEqualityDeleteMetricValueCompareSupportsRangeTypes(t *testing.T) {
 		{"timestamp-nano", iceberg.PrimitiveTypes.TimestampNs, iceberg.NewLiteral(iceberg.TimestampNano(1)), iceberg.NewLiteral(iceberg.TimestampNano(2))},
 		{"string", iceberg.PrimitiveTypes.String, iceberg.NewLiteral("a"), iceberg.NewLiteral("b")},
 		{"binary", iceberg.PrimitiveTypes.Binary, iceberg.NewLiteral([]byte{1}), iceberg.NewLiteral([]byte{2})},
-		{"fixed", iceberg.FixedTypeOf(2), fixedLower, fixedUpper},
+		{"fixed", iceberg.MustFixedTypeOf(2), fixedLower, fixedUpper},
 		{
 			"uuid", iceberg.PrimitiveTypes.UUID,
 			iceberg.NewLiteral(uuid.MustParse("00000000-0000-0000-0000-000000000001")),
 			iceberg.NewLiteral(uuid.MustParse("00000000-0000-0000-0000-000000000002")),
 		},
-		{"decimal", iceberg.DecimalTypeOf(9, 0), decimalLower, decimalUpper},
+		{"decimal", iceberg.MustDecimalTypeOf(9, 0), decimalLower, decimalUpper},
 	}
 
 	for _, tt := range tests {

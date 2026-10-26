@@ -2250,7 +2250,7 @@ func TestTableDataV2NoSnapshots(t *testing.T) {
             "default-sort-order-id": 0
         }`
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		Type:     iceberg.FixedTypeOf(1),
+		Type:     iceberg.MustFixedTypeOf(1),
 		ID:       1,
 		Name:     "struct_name",
 		Required: true,

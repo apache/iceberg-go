@@ -388,7 +388,7 @@ func TestDataFileStatisticsDecimalPartitionManifestRoundTrip(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:   1,
 		Name: "price",
-		Type: iceberg.DecimalTypeOf(10, 2),
+		Type: iceberg.MustDecimalTypeOf(10, 2),
 	})
 	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
 		SourceIDs: []int{1},

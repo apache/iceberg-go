@@ -2537,10 +2537,10 @@ func tableSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 11, Name: "date", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 12, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 13, Name: "binary", Type: iceberg.PrimitiveTypes.Binary},
-		iceberg.NestedField{ID: 14, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
-		iceberg.NestedField{ID: 15, Name: "small_dec", Type: iceberg.DecimalTypeOf(8, 2)},
-		iceberg.NestedField{ID: 16, Name: "med_dec", Type: iceberg.DecimalTypeOf(16, 2)},
-		iceberg.NestedField{ID: 17, Name: "large_dec", Type: iceberg.DecimalTypeOf(24, 2)},
+		iceberg.NestedField{ID: 14, Name: "fixed", Type: iceberg.MustFixedTypeOf(16)},
+		iceberg.NestedField{ID: 15, Name: "small_dec", Type: iceberg.MustDecimalTypeOf(8, 2)},
+		iceberg.NestedField{ID: 16, Name: "med_dec", Type: iceberg.MustDecimalTypeOf(16, 2)},
+		iceberg.NestedField{ID: 17, Name: "large_dec", Type: iceberg.MustDecimalTypeOf(24, 2)},
 	)
 }
 

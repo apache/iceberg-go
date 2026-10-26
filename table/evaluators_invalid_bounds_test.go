@@ -26,7 +26,7 @@ import (
 
 func TestMalformedFixedBoundsAreConservative(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "value", Type: iceberg.FixedTypeOf(4),
+		ID: 1, Name: "value", Type: iceberg.MustFixedTypeOf(4),
 	})
 	expr := iceberg.EqualTo(iceberg.Reference("value"), []byte{1, 2, 3, 4})
 	malformed := []byte{1, 2, 3, 4, 5}
