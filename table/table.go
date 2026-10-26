@@ -576,7 +576,8 @@ type commitOpts struct {
 	// in snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
-	// Pinned assertions must not be rebased between retries (see
+	// pinnedRefs names refs whose assertions guard the commit and must
+	// not be rewritten to the fresh head between retries (see
 	// Transaction.pinnedRefs).
 	pinnedRefs map[string]struct{}
 
@@ -947,8 +948,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // deleted underneath us), reqs is returned unchanged, and the commit
 // branch check that follows rejects the commit.
 //
-// Pinned assertions protect explicit ref requirements, rollbacks, and snapshot
-// expiry from being replayed against a changed ref.
+// Assertions on refs in pinned guard the commit (an explicit
+// Transaction.AssertRefSnapshotID, a rollback, or snapshot expiry) and
+// are never rewritten: a ref that has changed must fail the commit, not
+// be replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs

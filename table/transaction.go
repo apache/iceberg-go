@@ -94,8 +94,11 @@ type Transaction struct {
 	// removals; see the flag site in commitManifests.
 	noReplay bool
 
-	// Explicit ref requirements, rollbacks, and snapshot expiry must fail
-	// on changed refs rather than rebase their assertions during retries.
+	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
+	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot, and
+	// ExpireSnapshots. doCommit's refresh-and-replay must not rewrite
+	// their assertions to the fresh head between retries, so a ref that
+	// has changed fails the commit.
 	pinnedRefs map[string]struct{}
 
 	mx        sync.Mutex
@@ -473,8 +476,11 @@ func (t *Transaction) AssertRefSnapshotID(branch string) error {
 	return t.applyPinned(nil, []Requirement{AssertRefSnapshotID(branch, id)}, []string{branch})
 }
 
-// Updates and pins must be published together so a concurrent Commit cannot
-// rebase a guarded assertion. A failed apply must not publish pins.
+// applyPinned applies updates and reqs and pins refs, so doCommit fails
+// the commit when a pinned ref has moved instead of rewriting its
+// assertion to the fresh head. Updates and pins are published under one
+// hold of t.mx, so a concurrent Commit sees both or neither, and a failed
+// apply publishes no pins.
 func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []string) error {
 	if err := t.checkNotNil(); err != nil {
 		return err
@@ -601,8 +607,11 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 
 	update := meta.NewRetainingSnapshotRefUpdate(branch, snapshotID, BranchRef)
 
-	// Pin the head or absence assertion to avoid rolling back a peer's commit,
-	// including a peer's creation of a branch staged by this transaction.
+	// Assert and pin the base branch head so a concurrent head move fails
+	// the commit instead of the rollback clobbering it. A branch staged by
+	// this transaction (absent on the base) already carries an absence
+	// assertion, and the pin keeps a retry from rebasing it onto a branch a
+	// peer created.
 	var reqs []Requirement
 	if id := t.baseRefSnapshotID(branch); id != nil {
 		reqs = append(reqs, AssertRefSnapshotID(branch, id))
@@ -816,8 +825,11 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
-		// Pin refs to avoid expiring snapshots retained by a concurrent ref update.
-		// Refs staged by this transaction already have absence assertions.
+		// Assert and pin the ref's base snapshot id so we don't expire
+		// snapshots that concurrently updated refs now reference. Refs
+		// the transaction itself staged (absent on the base) already
+		// carry an absence assertion, which the pin keeps from being
+		// rebased.
 		if id := t.baseRefSnapshotID(refName); id != nil {
 			reqs = append(reqs, AssertRefSnapshotID(refName, id))
 		}
@@ -901,12 +913,10 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 
 	// A no-op expiry must not pin the commit branch, which would stop the
-	// transaction's other updates from rebasing on retry.
+	// transaction's other updates from rebasing on retry. apply still
+	// rejects a committed or unusable transaction.
 	if len(updates) == 0 {
-		t.mx.Lock()
-		defer t.mx.Unlock()
-
-		return t.checkUsable()
+		return t.apply(nil, nil)
 	}
 
 	return t.applyPinned(updates, reqs, pinned)

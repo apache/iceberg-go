@@ -75,7 +75,11 @@ rejects when concurrent deletes touch the same files.
 iceberg-go can refresh the table and replay the operation against the latest
 snapshot between attempts. On each retry the table metadata is reloaded, the
 producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid.
+re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`
+and `AssertRefSnapshotID` pin the refs they guard, so a retry does not rebase
+those assertions. If a guarded ref has moved, the commit fails with
+`ErrCommitFailed` instead of retrying. An `ExpireSnapshots` that removes nothing
+adds no guards.
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
 setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
@@ -90,15 +94,14 @@ _, err := cat.CreateTable(ctx, ident, schema,
 )
 ```
 
-> **Catalog support:** all built-in catalogs report commit conflicts as
-> `ErrCommitFailed`, including requirements that fail because of a concurrent
-> change. The REST catalog maps HTTP 409 Conflict to this error.
+> **Catalog support:** the REST, SQL, Glue, Hive, and Hadoop catalogs report
+> commit conflicts, including requirements that fail because of a concurrent
+> change, as `ErrCommitFailed`, so the retry loop engages on all of them.
 
 Only the implicit assertion on the commit branch's head is rebased after a
-refresh. Other requirements, including schema, spec, sort order, and refs pinned
-by `AssertRefSnapshotID`, `RollbackToSnapshot`, or `ExpireSnapshots`, must still
-hold. Otherwise, the commit fails without another attempt and the transaction
-is unusable.
+refresh. Other requirements, including the schema, spec, sort order, and pinned
+refs, must still hold. Otherwise, the commit fails without another attempt and
+the transaction is unusable.
 
 After a conflict, calling `Commit` again on the same transaction refreshes the
 table and replays the staged changes like the next retry attempt, so it can
@@ -115,6 +118,6 @@ manifests that later attempts merged. `TableCommit` refuses a transaction whose
 commit failed, since the multi-table path does not refresh. Call `Commit` to
 resume it, or build a new transaction.
 
-An `ExpireSnapshots` that removes something deliberately pins the commit
-branch. A transaction that also appends then fails instead of rebasing onto a
-peer's append, since the expiry was computed from the old head.
+Because an `ExpireSnapshots` that removes something pins the commit branch, a
+transaction that also appends fails instead of rebasing onto a peer's append.
+This is deliberate, since the expiry was computed from the old head.

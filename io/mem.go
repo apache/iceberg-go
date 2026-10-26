@@ -58,7 +58,7 @@ func init() {
 // Use the "mem://bucket/path" URI scheme to access files.
 type MemFS struct {
 	mu    sync.RWMutex
-	files map[string][]byte // keyed by full URI
+	files map[string][]byte // immutable snapshots, keyed by full URI
 }
 
 // NewMemFS creates an initialized MemFS ready for use.
@@ -73,10 +73,10 @@ func (m *MemFS) Open(_ context.Context, name string) (File, error) {
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
-	cp := make([]byte, len(data))
-	copy(cp, data)
 
-	return &memFile{data: cp, name: path.Base(name)}, nil
+	// WriteFile stores a copy that is never mutated. Replacing or removing
+	// a path does not change the bytes held by an already-open reader.
+	return &memFile{data: data, name: path.Base(name)}, nil
 }
 
 func (m *MemFS) Remove(_ context.Context, name string) error {
