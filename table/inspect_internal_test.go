@@ -58,7 +58,7 @@ import (
 // list) to exercise the null-parent path.
 func historyTestTable() *Table {
 	return inspectTestTable(Identifier{"history"}, map[string]SnapshotRef{
-		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
 	})
 }
 
@@ -364,14 +364,14 @@ func TestInspectRefs(t *testing.T) {
 	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			SnapshotRefType:    BranchRef,
+			Type:               BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 			MaxSnapshotAgeMs:   &maxSnapshotAge,
 		},
 		"release": {
-			SnapshotID:      102,
-			SnapshotRefType: TagRef,
-			MaxRefAgeMs:     &maxReferenceAge,
+			SnapshotID:  102,
+			Type:        TagRef,
+			MaxRefAgeMs: &maxReferenceAge,
 		},
 	})
 
@@ -426,7 +426,7 @@ func TestInspectRefsAllocator(t *testing.T) {
 	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { checked.AssertSize(t, 0) })
 	tbl := refsTestTable(map[string]SnapshotRef{
-		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
 	})
 
 	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Refs(context.Background())
@@ -449,7 +449,7 @@ func TestInspectRefsRejectsMinSnapshotsToKeepOverflow(t *testing.T) {
 	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			SnapshotRefType:    BranchRef,
+			Type:               BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
 	})
@@ -464,7 +464,7 @@ func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
 	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			SnapshotRefType:    BranchRef,
+			Type:               BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
 	})
@@ -520,7 +520,7 @@ func snapshotsTestTable() *Table {
 		CurrentSnapshotID:  &current,
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, Type: BranchRef}},
 	}}
 
 	return New(Identifier{"snapshots"}, meta, "", nil, nil)
@@ -707,7 +707,7 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 		CurrentSnapshotID:  &current,
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: s2, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: s2, Type: BranchRef}},
 	}}
 	tbl := New(Identifier{"metadata-log-entries"}, meta, "/metadata/v3.json", nil, nil)
 
@@ -1197,8 +1197,8 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
 
-	manifest := iceberg.NewManifestFile(2, tableLocation+"/metadata/shared-manifest.avro", 100, 0, 1).
-		SequenceNum(1, 1).
+	manifest := iceberg.NewManifestBuilder(2, tableLocation+"/metadata/shared-manifest.avro", 100, 0, 1).
+		SequenceNumber(1, 1).
 		AddedFiles(1).
 		KeyMetadata([]byte{1, 2, 3}).
 		Build()
@@ -1248,10 +1248,10 @@ func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
 
 	manifests := make([]iceberg.ManifestFile, manifestCount)
 	for idx := range manifests {
-		manifests[idx] = iceberg.NewManifestFile(2,
+		manifests[idx] = iceberg.NewManifestBuilder(2,
 			fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
 			100, 0, 1).
-			SequenceNum(1, 1).
+			SequenceNumber(1, 1).
 			AddedFiles(1).
 			Build()
 	}
@@ -1284,10 +1284,10 @@ func TestInspectAllManifestsAllocator(t *testing.T) {
 
 			manifests := make([]iceberg.ManifestFile, tt.manifestCount)
 			for idx := range manifests {
-				manifests[idx] = iceberg.NewManifestFile(2,
+				manifests[idx] = iceberg.NewManifestBuilder(2,
 					fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
 					100, 0, 1).
-					SequenceNum(1, 1).
+					SequenceNumber(1, 1).
 					AddedFiles(1).
 					Build()
 			}
@@ -1368,9 +1368,9 @@ func TestInspectManifestsContainsNaN(t *testing.T) {
 	containsNaN := true
 	bound, err := iceberg.Int32Literal(7).MarshalBinary()
 	require.NoError(t, err)
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/contains-nan.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/contains-nan.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{
 			ContainsNaN: &containsNaN,
 			LowerBound:  &bound,
@@ -1427,9 +1427,9 @@ func TestInspectManifestsPromotedPartitionSummaryBounds(t *testing.T) {
 			})
 			bound, err := tt.literal.MarshalBinary()
 			require.NoError(t, err)
-			manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/promoted.avro",
+			manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/promoted.avro",
 				100, int32(spec.ID()), 1).
-				SequenceNum(1, 1).
+				SequenceNumber(1, 1).
 				Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
 				Build()
 			tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
@@ -1457,9 +1457,9 @@ func TestInspectManifestsDroppedPartitionSource(t *testing.T) {
 	currentSchema := iceberg.NewSchema(1)
 	bound, err := iceberg.Int32Literal(7).MarshalBinary()
 	require.NoError(t, err)
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/dropped-source.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/dropped-source.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
 		Build()
 	tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
@@ -1481,10 +1481,10 @@ func TestInspectManifestsDroppedPartitionSource(t *testing.T) {
 
 func TestInspectManifestsDeleteCounts(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-manifest.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/delete-manifest.avro",
 		100, int32(spec.ID()), 1).
 		Content(iceberg.ManifestContentDeletes).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		AddedFiles(2).
 		ExistingFiles(3).
 		DeletedFiles(4).
@@ -1508,7 +1508,7 @@ func TestInspectManifestsDeleteCounts(t *testing.T) {
 
 func TestInspectManifestsV1UnknownCounts(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(1, "mem://default/table-location/metadata/v1-manifest.avro",
+	manifest := iceberg.NewManifestBuilder(1, "mem://default/table-location/metadata/v1-manifest.avro",
 		100, int32(spec.ID()), 1).
 		AddedFiles(-1).
 		ExistingFiles(-1).
@@ -1578,7 +1578,7 @@ func TestAppendManifestCountValidatesNegativeSentinels(t *testing.T) {
 
 func TestInspectManifestsRejectsNegativeAddedSnapshotID(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(1, "mem://default/table-location/metadata/v1-manifest.avro",
+	manifest := iceberg.NewManifestBuilder(1, "mem://default/table-location/metadata/v1-manifest.avro",
 		100, int32(spec.ID()), -1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 1, []iceberg.ManifestFile{manifest})
@@ -1612,10 +1612,10 @@ func TestInspectManifestsRejectsNegativeCountsForV2AndV3(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			spec := partitionedSpec()
-			manifest := iceberg.NewManifestFile(tt.version, "mem://default/table-location/metadata/negative-count.avro",
+			manifest := iceberg.NewManifestBuilder(tt.version, "mem://default/table-location/metadata/negative-count.avro",
 				100, int32(spec.ID()), 1).
 				Content(tt.content).
-				SequenceNum(1, 1).
+				SequenceNumber(1, 1).
 				AddedFiles(tt.added).
 				ExistingFiles(tt.existing).
 				DeletedFiles(tt.deleted).
@@ -1631,9 +1631,9 @@ func TestInspectManifestsRejectsNegativeCountsForV2AndV3(t *testing.T) {
 
 func TestInspectManifestsRejectsMissingPartitionSpec(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/missing-spec.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/missing-spec.avro",
 		100, 999, 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{}}).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
@@ -1645,9 +1645,9 @@ func TestInspectManifestsRejectsMissingPartitionSpec(t *testing.T) {
 
 func TestInspectManifestsAllowsMissingPartitionSpecWithoutSummaries(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/missing-spec.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/missing-spec.avro",
 		100, 999, 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
@@ -1666,9 +1666,9 @@ func TestInspectManifestsAllowsMissingPartitionSpecWithoutSummaries(t *testing.T
 func TestInspectManifestsReportsPartitionFieldNameInBoundErrors(t *testing.T) {
 	spec := partitionedSpec()
 	invalidBound := []byte{0x01}
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/invalid-bound.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/invalid-bound.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{LowerBound: &invalidBound}}).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
@@ -1679,9 +1679,9 @@ func TestInspectManifestsReportsPartitionFieldNameInBoundErrors(t *testing.T) {
 
 func TestInspectManifestsWrapsFileIOFactoryError(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/manifest.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/manifest.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 	factoryErr := errors.New("factory failed")
@@ -1710,9 +1710,9 @@ func TestInspectManifestsNoCurrentSnapshot(t *testing.T) {
 
 func TestInspectManifestsRejectsExtraPartitionSummaries(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/extra-summary.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/extra-summary.avro",
 		100, int32(spec.ID()), 1).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Partitions([]iceberg.FieldSummary{{}, {}}).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
@@ -1724,10 +1724,10 @@ func TestInspectManifestsRejectsExtraPartitionSummaries(t *testing.T) {
 
 func TestInspectManifestsRejectsUnknownContent(t *testing.T) {
 	spec := partitionedSpec()
-	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/unknown-content.avro",
+	manifest := iceberg.NewManifestBuilder(2, "mem://default/table-location/metadata/unknown-content.avro",
 		100, int32(spec.ID()), 1).
 		Content(iceberg.ManifestContent(2)).
-		SequenceNum(1, 1).
+		SequenceNumber(1, 1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
@@ -2866,8 +2866,8 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 			iceberg.EntryStatusADDED, new(expiredSnapshotID), &sequenceNumber, &sequenceNumber, file)})
 	require.NoError(t, err)
 	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
-	manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
-		SequenceNum(sequenceNumber, sequenceNumber).
+	manifest := iceberg.NewManifestBuilder(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
+		SequenceNumber(sequenceNumber, sequenceNumber).
 		AddedFiles(1).
 		AddedRows(1).
 		Build()
@@ -3237,7 +3237,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 			newPosDeleteFile(t, deletePath, inspectRecordBatchSize, 128),
 		)},
 	)
-	missingManifest := iceberg.NewManifestFile(
+	missingManifest := iceberg.NewManifestBuilder(
 		2, "mem://position-deletes/table/metadata/not-opened.avro", 1, 0, snapshotID,
 	).Content(iceberg.ManifestContentDeletes).AddedFiles(1).ExistingFiles(0).DeletedFiles(0).Build()
 	tbl := inspectPositionDeletesTableWithManifests(
@@ -4101,11 +4101,11 @@ func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
 			} else {
 				partitionType, partitionIDs, partitionErr := positionDeletesPartitionType(tbl.metadata)
 				require.NoError(t, partitionErr)
-				schema := PositionDeletesSchema(tbl.metadata.CurrentSchema(), partitionType, tbl.metadata.Version())
+				schema := PositionDeletesSchema(tbl.metadata.CurrentSchema(), partitionType, tbl.metadata.FormatVersion())
 				arrowSchema, schemaErr := SchemaToArrowSchema(schema, nil, true, false)
 				require.NoError(t, schemaErr)
 				rr = inspect.positionDeleteRecordReader(
-					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.metadata.Version())
+					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.metadata.FormatVersion())
 			}
 			require.NoError(t, err)
 			require.True(t, rr.Next())

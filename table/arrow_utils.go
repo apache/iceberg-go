@@ -1881,7 +1881,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}()
 
-			// Pass 0 so AddFiles does not claim sort_order_id on files
+			// Pass 0 so AddDataFilesByPath does not claim sort_order_id on files
 			// it did not write (#1184). Callers that know the file's
 			// sort layout use FileToDataFile with an explicit id.
 			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, 0, meta.props)
@@ -2220,7 +2220,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	// does not expose a property to opt out. The DV path threads each data
 	// file's spec id and partition record through DVWriter so partitioned
 	// outputs carry the correct manifest-entry partition.
-	if latestMetadata.Version() >= 3 {
+	if latestMetadata.FormatVersion() >= 3 {
 		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args, latestMetadata, partitionContextByFilePath)
 	}
 

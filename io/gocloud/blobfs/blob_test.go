@@ -728,7 +728,7 @@ func (b *trackingDeleteBucket) Copy(context.Context, string, string, *driver.Cop
 	return errTrackingDeleteUnsupported
 }
 
-func (b *trackingDeleteBucket) Delete(ctx context.Context, _ string) error {
+func (b *trackingDeleteBucket) Delete(ctx context.Context, _ string, _ *driver.DeleteOptions) error {
 	b.mu.Lock()
 	b.inFlight++
 	if b.inFlight > b.maxInFlight {

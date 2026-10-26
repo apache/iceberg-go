@@ -41,7 +41,7 @@ func BenchmarkManifestEvaluatorBuiltInPartitions(b *testing.B) {
 				summaries := manifestEvaluatorBenchmarkSummaries(fieldCount)
 				manifests := make([]iceberg.ManifestFile, manifestCount)
 				for i := range manifests {
-					manifests[i] = iceberg.NewManifestFile(
+					manifests[i] = iceberg.NewManifestBuilder(
 						2, fmt.Sprintf("manifest-%d.avro", i), 0, int32(spec.ID()), 1,
 					).Partitions(summaries).Build()
 				}

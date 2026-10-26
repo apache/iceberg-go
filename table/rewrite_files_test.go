@@ -275,7 +275,7 @@ func TestRewriteFiles_Commit_SingleShot(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "seed"}]`, i+1))
 		seedTx := tbl.NewTransaction()
-		require.NoError(t, seedTx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, seedTx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = seedTx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -318,7 +318,7 @@ func TestRewriteFiles_PreservesIndependentPositionDeleteSequences(t *testing.T) 
 	writeParquetFile(t, dataPath, arrowSc,
 		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -334,7 +334,7 @@ func TestRewriteFiles_PreservesIndependentPositionDeleteSequences(t *testing.T) 
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 		oldDeletes = append(oldDeletes, builder)
-		oldSequences = append(oldSequences, currentManifestEntry(t, tbl, path).SequenceNum())
+		oldSequences = append(oldSequences, currentManifestEntry(t, tbl, path).DataSequenceNumber())
 	}
 	require.NotEqual(t, oldSequences[0], oldSequences[1])
 
@@ -356,7 +356,7 @@ func TestRewriteFiles_PreservesIndependentPositionDeleteSequences(t *testing.T) 
 	require.NoError(t, err)
 
 	for i, df := range newDeletes {
-		assert.Equal(t, oldSequences[i], currentManifestEntry(t, tbl, df.FilePath()).SequenceNum())
+		assert.Equal(t, oldSequences[i], currentManifestEntry(t, tbl, df.FilePath()).DataSequenceNumber())
 	}
 	assert.Empty(t, scanIDs(t, tbl),
 		"each replacement must retain the applicability of its corresponding old position delete")
@@ -434,7 +434,7 @@ func TestRewriteFiles_DeleteFile_RoutesByContentType(t *testing.T) {
 	dataPath := tbl.Location() + "/data/seed.parquet"
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "seed"}]`)
 	seedTx := tbl.NewTransaction()
-	require.NoError(t, seedTx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, seedTx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = seedTx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -469,7 +469,7 @@ func TestRewriteFiles_DeleteFile_RoutesByContentType(t *testing.T) {
 // tombstone handling: a rewrite that removes a data file leaves a
 // DELETED manifest entry for its path on the branch head. That entry
 // records a removal — the path is no longer referenced by the table —
-// so a subsequent AddFiles for the same path must not report a false
+// so a subsequent AddDataFilesByPath for the same path must not report a false
 // "already referenced" conflict.
 func TestAddFiles_ReAddsPathDeletedByRewrite(t *testing.T) {
 	tbl := newRewriteTestTable(t)
@@ -479,7 +479,7 @@ func TestAddFiles_ReAddsPathDeletedByRewrite(t *testing.T) {
 	dataPath := tbl.Location() + "/data/seed.parquet"
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "seed"}]`)
 	seedTx := tbl.NewTransaction()
-	require.NoError(t, seedTx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, seedTx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = seedTx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -495,7 +495,7 @@ func TestAddFiles_ReAddsPathDeletedByRewrite(t *testing.T) {
 	require.NoError(t, err)
 
 	readdTx := tbl.NewTransaction()
-	require.NoError(t, readdTx.AddFiles(t.Context(), []string{dataPath}, nil, false),
+	require.NoError(t, readdTx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false),
 		"a path whose only head entry is a DELETED tombstone is not referenced by the table")
 	tbl, err = readdTx.Commit(t.Context())
 	require.NoError(t, err)
@@ -564,7 +564,7 @@ func TestRewriteFiles_DistributedEquivalence(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -638,7 +638,7 @@ func TestRewriteFiles_DropsSafePositionDeletes(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc, fmt.Sprintf(
 			`[{"id": %d, "data": "a"}, {"id": %d, "data": "b"}]`, i*2+1, i*2+2))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -742,7 +742,7 @@ func TestRewriteFiles_RejectsConcurrentEqDelete(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -821,7 +821,7 @@ func TestRewriteFiles_RejectsConcurrentDeleteForAddedDVTarget(t *testing.T) {
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	oldDeleteSequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).SequenceNum()
+	oldDeleteSequence := currentManifestEntry(t, tbl, oldDelete.FilePath()).DataSequenceNumber()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -872,7 +872,7 @@ func TestRewriteFiles_RejectsConcurrentPartitionScopedPosDelete(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}

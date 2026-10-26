@@ -159,7 +159,7 @@ func TestReplaceFilesWithRemovalsFailsInsteadOfReplaying(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc,
 		`[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}, {"id": 3, "data": "gamma"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -250,7 +250,7 @@ func TestReplaceFilesWithRemovalsResumesAfterPeerOnAnotherBranch(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc,
 		`[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}, {"id": 3, "data": "gamma"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -281,7 +281,7 @@ func TestReplaceFilesWithRemovalsResumesAfterPeerOnAnotherBranch(t *testing.T) {
 	writeParquetFile(t, peerPath, arrowSc, `[{"id": 9, "data": "peer"}]`)
 	peerTxn, err := tbl.NewTransactionOnBranch("other")
 	require.NoError(t, err)
-	require.NoError(t, peerTxn.AddFiles(t.Context(), []string{peerPath}, nil, false))
+	require.NoError(t, peerTxn.AddDataFilesByPath(t.Context(), []string{peerPath}, nil, false))
 	_, err = peerTxn.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -314,7 +314,7 @@ func TestReplaceFilesResumeAfterPeerRemovedInputIsUnusable(t *testing.T) {
 	dataPath := tbl.Location() + "/data/data-001.parquet"
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	require.NoError(t, tx.SetProperties(iceberg.Properties{table.CommitNumRetriesKey: "0"}))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
@@ -379,7 +379,7 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc,
 		`[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	// Overwrites validate added data files under the default
 	// serializable isolation; relax to snapshot so the peer's append is
 	// not rejected as a semantic conflict and the replay itself is
@@ -414,7 +414,7 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 	peerPath := tbl.Location() + "/data/data-peer.parquet"
 	writeParquetFile(t, peerPath, arrowSc, `[{"id": 100, "data": "peer"}]`)
 	peerTxn := tbl.NewTransaction()
-	require.NoError(t, peerTxn.AddFiles(t.Context(), []string{peerPath}, nil, false))
+	require.NoError(t, peerTxn.AddDataFilesByPath(t.Context(), []string{peerPath}, nil, false))
 	_, err = peerTxn.Commit(t.Context())
 	require.NoError(t, err)
 

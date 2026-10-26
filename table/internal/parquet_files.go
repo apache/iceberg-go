@@ -537,8 +537,8 @@ type geoColumn struct {
 // Parquet drops the Statistics block (min, max, null count) for GEOMETRY and
 // GEOGRAPHY columns because their sort order is undefined, so these metrics are
 // computed from the Arrow data instead. Geo files imported via
-// DataFileStatsFromMeta alone (e.g. AddFiles) get no geo null counts or bounds,
-// which costs pruning but never gives a wrong answer.
+// DataFileStatsFromMeta alone (e.g. AddDataFilesByPath) get no geo null counts
+// or bounds, which costs pruning but never gives a wrong answer.
 func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn {
 	var result []geoColumn
 	for i, f := range sc.Fields() {

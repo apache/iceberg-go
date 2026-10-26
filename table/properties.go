@@ -227,7 +227,7 @@ const (
 	PropertySnapshotCount            = "snapshot-count"
 	PropertyCurrentSnapshotId        = "current-snapshot-id"
 	PropertyCurrentSnapshotSummary   = "current-snapshot-summary"
-	PropertyCurrentSnapshotTimestamp = "current-snapshot-timestamp"
+	PropertyCurrentSnapshotTimestamp = "current-snapshot-timestamp-ms"
 	PropertyCurrentSchema            = "current-schema"
 	PropertyDefaultPartitionSpec     = "default-partition-spec"
 	PropertyDefaultSortOrder         = "default-sort-order"

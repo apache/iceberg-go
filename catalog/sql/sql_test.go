@@ -994,7 +994,7 @@ func (s *SqliteCatalogTestSuite) TestCreateV1Table() {
 
 		s.FileExists(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
 		s.Equal(0, tbl.SortOrder().OrderID())
-		s.Equal(1, tbl.Metadata().Version())
+		s.Equal(1, tbl.Metadata().FormatVersion())
 		s.True(tbl.Spec().Equals(*iceberg.UnpartitionedSpec))
 		s.NoError(tt.cat.DropTable(context.Background(), tt.tblID))
 	}
@@ -2935,7 +2935,7 @@ func (s *SqliteCatalogTestSuite) TestCommitTable() {
 		s.EqualValues(0, tbl.Metadata().CurrentSchema().ID)
 
 		tx := tbl.NewTransaction()
-		s.Require().NoError(tx.AddFiles(ctx, []string{pqfile}, nil, false))
+		s.Require().NoError(tx.AddDataFilesByPath(ctx, []string{pqfile}, nil, false))
 		updated, err := tx.Commit(ctx)
 		s.Require().NoError(err)
 

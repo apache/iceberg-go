@@ -2422,7 +2422,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableMetadataFormatVersion() {
 	s.Require().NoError(err)
 
 	// Default format version should be V2
-	s.Equal(2, tbl.Metadata().Version())
+	s.Equal(2, tbl.Metadata().FormatVersion())
 }
 
 // CommitTable tests

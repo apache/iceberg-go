@@ -577,9 +577,9 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 			iceberg.ErrInvalidArgument, branch)
 	}
 
-	if ref.SnapshotRefType != BranchRef {
+	if ref.Type != BranchRef {
 		return fmt.Errorf("%w: cannot rollback: ref %q is a %s, not a branch",
-			iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+			iceberg.ErrInvalidArgument, branch, ref.Type)
 	}
 
 	// Present but invalid is not the same as absent: metadata validation
@@ -854,7 +854,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		// when min-snapshots-to-keep is 0, and tags never run that walk.
 		snapsToKeep[ref.SnapshotID] = struct{}{}
 
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			continue
 		}
 
@@ -877,7 +877,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	referencedSnapshots := make(map[int64]struct{})
 	for _, ref := range retainedRefs {
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			referencedSnapshots[ref.SnapshotID] = struct{}{}
 
 			continue
@@ -988,7 +988,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	}
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
-			return t.AddFiles(ctx, filesToAdd, snapshotProps, false)
+			return t.AddDataFilesByPath(ctx, filesToAdd, snapshotProps, false)
 		}
 	}
 
@@ -1599,7 +1599,7 @@ func (t *Transaction) ensureNameMapping() error {
 // This is useful for clients who have already constructed DataFile objects with metadata,
 // avoiding the need to read files to extract schema and statistics.
 //
-// Unlike AddFiles, this method does not read files from storage. It validates only metadata
+// Unlike AddDataFilesByPath, this method does not read files from storage. It validates only metadata
 // that can be checked without opening files (for example spec-id and partition field IDs).
 //
 // Each DataFile may target any partition spec registered in the table metadata,
@@ -2020,7 +2020,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		// count as found when removing files, but it still blocks re-adding its path.
 		isLive := entry.Status() != iceberg.EntryStatusDELETED
 		if isData && isLive {
-			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.SequenceNum()}
+			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.DataSequenceNumber()}
 			if _, ok := setToDelete[path]; ok {
 				markedDataForDeletion = append(markedDataForDeletion, df)
 			}
@@ -2028,7 +2028,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData && isLive {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-				if seq := entry.SequenceNum(); seq >= 0 {
+				if seq := entry.DataSequenceNumber(); seq >= 0 {
 					removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
 					removedDeleteContents[df.ContentType()] = struct{}{}
 				} else {
@@ -2041,7 +2041,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 				// was already replaced would match the newer DV, which holds more deletes.
 				if want, ok := dvsToRemoveByRef[*ref]; ok && want.FilePath() == path {
 					markedDVsForRemoval[*ref] = df
-					if seq := entry.SequenceNum(); seq >= 0 {
+					if seq := entry.DataSequenceNumber(); seq >= 0 {
 						removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
 						removedDeleteContents[df.ContentType()] = struct{}{}
 					} else {
@@ -2102,7 +2102,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if _, removed := setDeleteFilesToRemove[path]; !removed {
 				if _, automaticallyRemoved := autoSetDeleteFilesToRemove[path]; !automaticallyRemoved {
 					survivingPositionDeletes = append(survivingPositionDeletes, rewriteFileState{
-						file: df, dataSequenceNumber: entry.SequenceNum(),
+						file: df, dataSequenceNumber: entry.DataSequenceNumber(),
 					})
 				}
 			}
@@ -2271,15 +2271,15 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	return nil
 }
 
-type AddFilesOption func(addFilesOp *addFilesOperation)
+type AddDataFilesByPathOption func(addFilesOp *addFilesOperation)
 
 type addFilesOperation struct {
 	concurrency int
 }
 
-// WithAddFilesConcurrency overwrites the default concurrency for add files operation.
+// WithAddDataFilesByPathConcurrency overrides the concurrency used by AddDataFilesByPath.
 // Default: runtime.GOMAXPROCS(0)
-func WithAddFilesConcurrency(concurrency int) AddFilesOption {
+func WithAddDataFilesByPathConcurrency(concurrency int) AddDataFilesByPathOption {
 	return func(op *addFilesOperation) {
 		if concurrency > 0 {
 			op.concurrency = concurrency
@@ -2287,7 +2287,9 @@ func WithAddFilesConcurrency(concurrency int) AddFilesOption {
 	}
 }
 
-func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddFilesOption) error {
+// AddDataFilesByPath adds data files at the provided paths to the table.
+// Unlike AddDataFiles, it opens each file to read its schema and statistics.
+func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddDataFilesByPathOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -2302,7 +2304,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	set := make(map[string]struct{}, len(filePaths))
 	for _, filePath := range filePaths {
 		if _, ok := set[filePath]; ok {
-			return errors.New("file paths must be unique for AddFiles")
+			return errors.New("file paths must be unique for AddDataFilesByPath")
 		}
 		set[filePath] = struct{}{}
 	}

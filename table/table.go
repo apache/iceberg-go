@@ -213,9 +213,9 @@ func (t Table) NewTransactionOnBranch(branch string) (*Transaction, error) {
 		if name != branch {
 			continue
 		}
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
-				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+				iceberg.ErrInvalidArgument, branch, ref.Type)
 		}
 
 		break
@@ -1079,11 +1079,11 @@ func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 		return true
 	}
 
-	if fresh.Version() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
+	if fresh.FormatVersion() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
 		return false
 	}
 
-	if fresh.Version() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
+	if fresh.FormatVersion() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
 		return false
 	}
 
@@ -1286,9 +1286,11 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	return time.Duration(wait) * time.Millisecond
 }
 
-// SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
-func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+// SnapshotAsOf returns the snapshot that was current at or before timestampMs,
+// measured in milliseconds since the Unix epoch. It returns nil when no
+// snapshot was current at or before that time.
+func (t Table) SnapshotAsOf(timestampMs int64) *Snapshot {
+	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, true)
 	if ok {
 		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}

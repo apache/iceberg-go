@@ -35,7 +35,7 @@ func appendEqualityDeletesAfterLinear(
 	dataStats *equalityDeleteDataFileStats,
 ) []iceberg.DataFile {
 	for _, entry := range entries {
-		if entry.entry.SequenceNum() > dataSeqNum && equalityDeleteCanContainData(dataStats, entry.fields) {
+		if entry.entry.DataSequenceNumber() > dataSeqNum && equalityDeleteCanContainData(dataStats, entry.fields) {
 			out = append(out, entry.entry.DataFile())
 		}
 	}
@@ -119,11 +119,11 @@ func TestEqualityDeleteRangeIndexMatchesLinearReference(t *testing.T) {
 
 			stats := equalityDeleteDataFileStatsFor(dataEntry.DataFile())
 			want := appendEqualityDeletesAfterLinear(
-				nil, entries, dataEntry.SequenceNum(), &stats)
+				nil, entries, dataEntry.DataSequenceNumber(), &stats)
 			assert.Equal(t, equalityDeleteMetricPaths(want), equalityDeleteMetricPaths(got))
-			start := firstEqualityDeleteAfter(entries, dataEntry.SequenceNum())
+			start := firstEqualityDeleteAfter(entries, dataEntry.DataSequenceNumber())
 			if len(entries)-start >= equalityDeleteRangeIndexMinLookupEntries {
-				candidates, ok := idx.rangeIndexesByPartition[key].candidates(start, dataEntry.SequenceNum(), &stats)
+				candidates, ok := idx.rangeIndexesByPartition[key].candidates(start, dataEntry.DataSequenceNumber(), &stats)
 				assert.Equal(t, tt.indexed, ok, "the expected fast path must actually run")
 				if ok {
 					assert.Less(t, len(candidates), len(entries)-start)
@@ -214,10 +214,10 @@ func BenchmarkEqualityDeleteRangeIndexLookup(b *testing.B) {
 				var files []iceberg.DataFile
 				if indexed {
 					files = appendEqualityDeletesAfterIndexed(
-						nil, entries, dataEntry.SequenceNum(), &stats, rangeIndex)
+						nil, entries, dataEntry.DataSequenceNumber(), &stats, rangeIndex)
 				} else {
 					files = appendEqualityDeletesAfterIndexed(
-						nil, entries, dataEntry.SequenceNum(), &stats, nil)
+						nil, entries, dataEntry.DataSequenceNumber(), &stats, nil)
 				}
 				matched += len(files)
 			}

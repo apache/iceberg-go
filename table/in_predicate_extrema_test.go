@@ -170,7 +170,7 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 			require.NoError(t, err)
 			upper, err := tt.upper.MarshalBinary()
 			require.NoError(t, err)
-			manifest := iceberg.NewManifestFile(2, "manifest.avro", 1, 0, 1).Partitions(
+			manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).Partitions(
 				[]iceberg.FieldSummary{{LowerBound: &lower, UpperBound: &upper}},
 			).Build()
 
