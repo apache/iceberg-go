@@ -171,7 +171,7 @@ func parquetRowGroupCount(t *testing.T, tbl *table.Table) int {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 
-	f, err := iceio.LocalFS{}.Open(tasks[0].File.FilePath())
+	f, err := iceio.LocalFS{}.Open(context.Background(), tasks[0].File.FilePath())
 	require.NoError(t, err)
 	rdr, err := file.NewParquetReader(f)
 	require.NoError(t, err)

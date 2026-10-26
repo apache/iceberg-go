@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -83,7 +84,8 @@ func manifestEntries(
 	projection *ManifestEntryProjection,
 ) iter.Seq2[ManifestEntry, error] {
 	return func(yield func(ManifestEntry, error) bool) {
-		f, err := fs.Open(m.FilePath())
+		// No caller context to thread here.
+		f, err := fs.Open(context.Background(), m.FilePath())
 		if err != nil {
 			yield(nil, err)
 

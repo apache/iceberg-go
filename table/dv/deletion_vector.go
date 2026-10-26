@@ -20,6 +20,7 @@ package dv
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -427,7 +428,8 @@ func validateDVFile(dvFile iceberg.DataFile) error {
 // the still-open file, so the caller can read bare blobs without a second
 // Open round-trip; the caller owns closing f whenever err is nil.
 func openDVReader(fs iceio.IO, filePath string) (*puffin.Reader, iceio.File, error) {
-	f, err := fs.Open(filePath)
+	// No caller context to thread here.
+	f, err := fs.Open(context.Background(), filePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open DV file %s: %w", filePath, err)
 	}
