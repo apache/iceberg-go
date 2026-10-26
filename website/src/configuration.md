@@ -327,7 +327,7 @@ if err := registry.Register("myfs", myFactory); err != nil {
 fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 ```
 
-`io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
+`io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
 ### Catalog type registry
 
