@@ -3727,8 +3727,8 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 	for _, f := range partitions.Fields() {
 		var s string
 		var ok bool
-		if s, ok = previousMapFn(f.SourceID()); !ok {
-			return nil, fmt.Errorf("%w: partition source field %d not found in schema", ErrInvalidMetadata, f.SourceID())
+		if s, ok = previousMapFn(f.FirstSourceID()); !ok {
+			return nil, fmt.Errorf("%w: partition source field %d not found in schema", ErrInvalidMetadata, f.FirstSourceID())
 		}
 		opts = append(opts, iceberg.AddPartitionFieldByName(s, f.Name, f.Transform, freshSc, nil))
 	}

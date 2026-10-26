@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/puffin"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
@@ -1168,14 +1169,14 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			gotSpec := meta.PartitionSpec()
 			require.Equal(t, len(tt.wantSourceIDs), gotSpec.NumFields())
 			for i, wantSourceID := range tt.wantSourceIDs {
-				assert.Equal(t, wantSourceID, gotSpec.Field(i).SourceID())
+				assert.Equal(t, wantSourceID, gotSpec.Field(i).FirstSourceID())
 				assert.Equal(t, tt.wantNames[i], gotSpec.Field(i).Name)
 			}
 
 			// The sort order references the first column, so it remaps to 1.
 			require.Equal(t, 1, meta.SortOrder().Len())
 			for _, field := range meta.SortOrder().Fields() {
-				assert.Equal(t, wantSortID, field.SourceID())
+				assert.Equal(t, wantSortID, field.FirstSourceID())
 			}
 
 			// Written metadata carries bound IDs only, so it parses back as
@@ -1186,7 +1187,7 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			require.NoError(t, err)
 			reparsedSpec := reparsed.PartitionSpec()
 			for i, wantSourceID := range tt.wantSourceIDs {
-				assert.Equal(t, wantSourceID, reparsedSpec.Field(i).SourceID())
+				assert.Equal(t, wantSourceID, reparsedSpec.Field(i).FirstSourceID())
 			}
 		})
 	}
@@ -1725,7 +1726,7 @@ func TestMetadataV1Serialize(t *testing.T) {
 					KeyMetadata:           nil,
 					BlobMetadata: []BlobMetadata{
 						{
-							Type:           BlobTypeApacheDatasketchesThetaV1,
+							Type:           puffin.BlobTypeDataSketchesTheta,
 							SnapshotID:     1234567890,
 							SequenceNumber: 1,
 							Fields:         []int32{1, 2},
@@ -1817,7 +1818,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 					FileFooterSizeInBytes: 1024,
 					BlobMetadata: []BlobMetadata{
 						{
-							Type:           BlobTypeDeletionVectorV1,
+							Type:           puffin.BlobTypeDeletionVector,
 							SnapshotID:     9876543210,
 							SequenceNumber: 5,
 							Fields:         []int32{1},
@@ -2102,7 +2103,7 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 	require.Equal(t, spec.NumFields(), 1)
 	require.Equal(t, spec.Field(0).Name, "y")
 	require.Equal(t, spec.Field(0).Transform, iceberg.IdentityTransform{})
-	require.Equal(t, spec.Field(0).SourceID(), 2)
+	require.Equal(t, spec.Field(0).FirstSourceID(), 2)
 }
 
 func TestTableMetadataV2MissingPartitionSpecs(t *testing.T) {

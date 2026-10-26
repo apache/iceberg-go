@@ -2559,7 +2559,7 @@ func TestSigV4WithoutBackendReturnsHelpfulError(t *testing.T) {
 // WithSignerFactory is handed the signing region and service resolved from
 // WithSigV4RegionSvc and any server-provided /v1/config overrides, rather than
 // values frozen when the option was constructed. This is the seam a pre-built
-// WithSigner (which sigv4.WithAwsConfig used before it became a factory) got
+// WithSigner (which sigv4.WithAWSConfig used before it became a factory) got
 // wrong: it ignored both WithSigV4RegionSvc and server overrides.
 func TestSignerFactoryReceivesResolvedRegionService(t *testing.T) {
 	t.Parallel()

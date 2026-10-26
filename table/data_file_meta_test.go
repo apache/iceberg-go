@@ -1171,7 +1171,7 @@ func TestDataFileFromMetadata_V3ReplaceDataFilesRequiresFirstRowID(t *testing.T)
 	require.Nil(t, replacement.FirstRowID())
 
 	tx = tbl.NewTransaction()
-	err = tx.ReplaceDataFilesWithDataFiles(t.Context(),
+	err = tx.ReplaceDataFiles(t.Context(),
 		[]iceberg.DataFile{initial}, []iceberg.DataFile{replacement}, nil)
 	require.ErrorContains(t, err, "first_row_id")
 	require.ErrorContains(t, err, "required for v3")

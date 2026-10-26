@@ -151,14 +151,14 @@ var (
 	)
 )
 
-func TestSchemaFromJson(t *testing.T) {
+func TestSchemaFromJSON(t *testing.T) {
 	testFieldsStr := `[
 		{"id":1,"name":"foo","type":"string","required":false},
 		{"id":2,"name":"bar","type":"int","required":true},
 		{"id":3,"name":"baz","type":"boolean","required":false}
 	]`
 
-	simpleSchema, err := iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
+	simpleSchema, err := iceberg.NewSchemaFromJSONFields(1, testFieldsStr)
 	assert.NoError(t, err)
 	assert.Equal(t, tableSchemaSimple.Fields(), simpleSchema.Fields())
 
@@ -166,7 +166,7 @@ func TestSchemaFromJson(t *testing.T) {
 		{"id":1,"name":"id","type":"int","required":true,"doc":"primary key"},
 		{"id":2,"name":"name","type":"string","required":false,"doc":"user name"}
 	]`
-	commentSchema, err := iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
+	commentSchema, err := iceberg.NewSchemaFromJSONFields(1, testFieldsStr)
 	assert.NoError(t, err)
 	assert.Equal(t, "primary key", commentSchema.Fields()[0].Doc)
 	assert.Equal(t, "user name", commentSchema.Fields()[1].Doc)
@@ -183,7 +183,7 @@ func TestSchemaFromJson(t *testing.T) {
 		},
 		"required": true
 	}]`
-	nestedSchema, err := iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
+	nestedSchema, err := iceberg.NewSchemaFromJSONFields(1, testFieldsStr)
 	assert.NoError(t, err)
 	assert.Len(t, nestedSchema.Fields(), 1)
 

@@ -219,7 +219,7 @@ type Args struct {
 	Warehouse   string `arg:"--warehouse" help:"warehouse to use"`
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
-	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
+	AWSProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
 	SQLDriver   string `arg:"--sql-driver" help:"database/sql driver name (SQL catalog; default binary includes sqliteshim only)"`
 	SQLDialect  string `arg:"--sql-dialect" help:"SQL dialect (SQL catalog; default binary includes sqlite via sqliteshim; other dialects need a custom build with their drivers)"`
 
@@ -242,7 +242,7 @@ func main() {
 
 	if parser.Subcommand() == nil {
 		parser.WriteHelp(os.Stderr)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	// Determine which flags were explicitly supplied on the command line so
@@ -258,29 +258,29 @@ func main() {
 
 	if err := applyConfigFile(&args, explicitFlags); err != nil {
 		log.Printf("configuration error: %v", err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	// Validate nested subcommands before catalog init.
 	switch {
 	case args.Create != nil && args.Create.Namespace == nil && args.Create.Table == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "create")
-		os.Exit(1)
+		osExit(1)
 	case args.Drop != nil && args.Drop.Namespace == nil && args.Drop.Table == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "drop")
-		os.Exit(1)
+		osExit(1)
 	case args.Properties != nil && args.Properties.Get == nil && args.Properties.Set == nil && args.Properties.Remove == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "properties")
-		os.Exit(1)
+		osExit(1)
 	case args.Compact != nil && args.Compact.Analyze == nil && args.Compact.Run == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "compact")
-		os.Exit(1)
+		osExit(1)
 	case args.Branch != nil && args.Branch.Create == nil && args.Branch.Delete == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "branch")
-		os.Exit(1)
+		osExit(1)
 	case args.Tag != nil && args.Tag.Create == nil && args.Tag.Delete == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "tag")
-		os.Exit(1)
+		osExit(1)
 	}
 
 	var output Output
@@ -290,7 +290,7 @@ func main() {
 	case "json":
 		output = jsonOutput{}
 	default:
-		log.Fatal("unimplemented output type")
+		logFatal("unimplemented output type")
 	}
 
 	// Validate the rollback selector before catalog init so invalid flags fail
@@ -298,7 +298,7 @@ func main() {
 	if args.Rollback != nil {
 		if err := validateRollbackSelector(args.Rollback); err != nil {
 			output.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 	}
 
@@ -306,10 +306,14 @@ func main() {
 	// as other user-facing errors (respects --output).
 	if catalog.Type(strings.ToLower(args.Catalog)) == catalog.DynamoDB {
 		output.Error(errors.New("dynamodb catalog is not implemented"))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	cat := initCatalog(ctx, args)
+	// Route command exits through a closer so os.Exit cannot skip cleanup.
+	defer closeCatalogBeforeExit(cat, func(err error) {
+		log.Printf("failed to close catalog: %v", err)
+	})()
 
 	switch {
 	case args.List != nil:
@@ -404,24 +408,24 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}
 
 		if cat, err = rest.NewCatalog(ctx, "rest", args.URI, opts...); err != nil {
-			log.Fatal(err)
+			logFatal(err)
 		}
 	case catalog.Glue:
 		var awsLoadOpts []func(*awsconfig.LoadOptions) error
-		if args.AwsProfile != "" {
-			awsLoadOpts = append(awsLoadOpts, awsconfig.WithSharedConfigProfile(args.AwsProfile))
+		if args.AWSProfile != "" {
+			awsLoadOpts = append(awsLoadOpts, awsconfig.WithSharedConfigProfile(args.AWSProfile))
 		}
 
 		awscfg, err := awsconfig.LoadDefaultConfig(ctx, awsLoadOpts...)
 		if err != nil {
-			log.Fatal(err)
+			logFatal(err)
 		}
 
 		opts := []glue.Option{
-			glue.WithAwsConfig(awscfg),
+			glue.WithAWSConfig(awscfg),
 		}
 		if cat, err = glue.NewCatalog(opts...); err != nil {
-			log.Fatal(err)
+			logFatal(err)
 		}
 	case catalog.Hive:
 		props := iceberg.Properties{
@@ -432,13 +436,13 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}
 
 		if cat, err = hive.NewCatalog(props); err != nil {
-			log.Fatal(err)
+			logFatal(err)
 		}
 	case catalog.Hadoop:
 		if cat, err = hadoop.NewCatalog("hadoop", args.Warehouse, iceberg.Properties{
 			"warehouse": args.Warehouse,
 		}); err != nil {
-			log.Fatal(err)
+			logFatal(err)
 		}
 	case catalog.SQL:
 		// Always set uri/warehouse/credential keys (even when empty) so
@@ -459,10 +463,10 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}
 
 		if cat, err = catalog.Load(ctx, args.CatalogName, props); err != nil {
-			log.Fatal(err)
+			logFatal(err)
 		}
 	default:
-		log.Fatal("unrecognized catalog type")
+		logFatal("unrecognized catalog type")
 	}
 
 	return cat
@@ -481,14 +485,14 @@ func runDescribe(ctx context.Context, output Output, cat catalog.Catalog, cmd *D
 		ident = cmd.Target
 
 		if ident == "" {
-			log.Fatal("missing IDENTIFIER for describe namespace")
+			logFatal("missing IDENTIFIER for describe namespace")
 		}
 	case "table":
 		entityType = "tbl"
 		ident = cmd.Target
 
 		if ident == "" {
-			log.Fatal("missing IDENTIFIER for describe table")
+			logFatal("missing IDENTIFIER for describe table")
 		}
 	}
 
@@ -511,7 +515,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		err := cat.CreateNamespace(ctx, catalog.ToIdentifier(ns.Identifier), props)
 		if err != nil {
 			output.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 
 		output.Text("Namespace " + ns.Identifier + " created successfully")
@@ -519,7 +523,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		tbl := cmd.Table
 		if tbl.Schema != "" && tbl.InferSchema != "" {
 			output.Error(errors.New("--schema and --infer-schema are mutually exclusive"))
-			os.Exit(1)
+			osExit(1)
 		}
 
 		var schema *iceberg.Schema
@@ -528,10 +532,10 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		case tbl.Schema != "":
 			var err error
 
-			schema, err = iceberg.NewSchemaFromJsonFields(0, tbl.Schema)
+			schema, err = iceberg.NewSchemaFromJSONFields(0, tbl.Schema)
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		case tbl.InferSchema != "":
 			var err error
@@ -539,14 +543,14 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 			schema, err = schemaFromFile(tbl.InferSchema)
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 
 			output.Text("Inferred schema from " + tbl.InferSchema + ":")
 			output.Schema(schema)
 		default:
 			output.Error(errors.New("missing --schema or --infer-schema for table creation"))
-			os.Exit(1)
+			osExit(1)
 		}
 
 		var opts []catalog.CreateTableOpt
@@ -558,7 +562,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 			props, err := parseProperties(tbl.Properties)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse properties: %w", err))
-				os.Exit(1)
+				osExit(1)
 			}
 
 			opts = append(opts, catalog.WithProperties(props))
@@ -568,7 +572,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 			spec, err := parsePartitionSpec(tbl.PartitionSpec, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse partition spec: %w", err))
-				os.Exit(1)
+				osExit(1)
 			}
 
 			opts = append(opts, catalog.WithPartitionSpec(spec))
@@ -578,7 +582,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 			sortOrder, err := parseSortOrder(tbl.SortOrder, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse sort order: %w", err))
-				os.Exit(1)
+				osExit(1)
 			}
 
 			opts = append(opts, catalog.WithSortOrder(sortOrder))
@@ -588,7 +592,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		_, err := cat.CreateTable(ctx, ident, schema, opts...)
 		if err != nil {
 			output.Error(fmt.Errorf("failed to create table: %w", err))
-			os.Exit(1)
+			osExit(1)
 		}
 
 		output.Text("Table " + tbl.Identifier + " created successfully")
@@ -611,15 +615,7 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		ident := catalog.ToIdentifier(cmd.Table.Identifier)
 
 		if cmd.Table.Purge {
-			purger, ok := cat.(catalog.PurgeableTable)
-			if !ok {
-				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
-				osExit(1)
-
-				return
-			}
-
-			if err := purger.PurgeTable(ctx, ident); err != nil {
+			if err := cat.PurgeTable(ctx, ident); err != nil {
 				output.Error(err)
 				osExit(1)
 
@@ -647,7 +643,7 @@ func runRename(ctx context.Context, output Output, cat catalog.Catalog, cmd *Ren
 		catalog.ToIdentifier(cmd.From), catalog.ToIdentifier(cmd.To))
 	if err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	output.Text("Renamed table from " + cmd.From + " to " + cmd.To)
@@ -655,7 +651,7 @@ func runRename(ctx context.Context, output Output, cat catalog.Catalog, cmd *Ren
 
 func validateEntityType(t string) {
 	if t != "namespace" && t != "table" {
-		log.Fatalf("expected 'namespace' or 'table', got %q", t)
+		logFatalf("expected 'namespace' or 'table', got %q", t)
 	}
 }
 
@@ -675,7 +671,7 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 			props, err = cat.LoadNamespaceProperties(ctx, ident)
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		} else {
 			tbl := loadTable(ctx, output, cat, get.Identifier)
@@ -707,7 +703,7 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 				nil, iceberg.Properties{set.PropName: set.Value})
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		} else {
 			tbl := loadTable(ctx, output, cat, set.Identifier)
@@ -715,7 +711,7 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 				[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{set.PropName: set.Value})})
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		}
 
@@ -733,7 +729,7 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 				[]string{rm.PropName}, nil)
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		} else {
 			tbl := loadTable(ctx, output, cat, rm.Identifier)
@@ -741,7 +737,7 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 				[]table.Update{table.NewRemovePropertiesUpdate([]string{rm.PropName})})
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		}
 
@@ -772,7 +768,7 @@ func list(ctx context.Context, output Output, cat catalog.Catalog, parent string
 
 	if pageSize < 0 {
 		output.Error(fmt.Errorf("--page-size must be non-negative, got %d", pageSize))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if pageSize > 0 {
@@ -788,7 +784,7 @@ func list(ctx context.Context, output Output, cat catalog.Catalog, parent string
 		for id, err := range iter {
 			if err != nil {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 
 			ids = append(ids, id)
@@ -799,7 +795,7 @@ func list(ctx context.Context, output Output, cat catalog.Catalog, parent string
 		ns, err := cat.ListNamespaces(ctx, prnt)
 		if err != nil {
 			output.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 
 		ids = ns
@@ -818,11 +814,11 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 			if errors.Is(err, catalog.ErrNoSuchNamespace) {
 				if entityType != "any" || len(ident) == 1 {
 					output.Error(err)
-					os.Exit(1)
+					osExit(1)
 				}
 			} else {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		} else {
 			isNS = true
@@ -835,7 +831,7 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 		if err != nil {
 			if !errors.Is(err, catalog.ErrNoSuchTable) || entityType != "any" {
 				output.Error(err)
-				os.Exit(1)
+				osExit(1)
 			}
 		} else {
 			isTbl = true
@@ -846,7 +842,7 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 	if !isNS && !isTbl {
 		output.Error(fmt.Errorf("%w: table or namespace does not exist: %s",
 			catalog.ErrNoSuchNamespace, ident))
-		os.Exit(1)
+		osExit(1)
 	}
 }
 
@@ -854,7 +850,7 @@ func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id strin
 	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier(id))
 	if err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	return tbl
@@ -939,8 +935,8 @@ func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[str
 		args.Warehouse = fileConf.Warehouse
 	}
 
-	if !explicitFlags["aws-profile"] && len(fileConf.AwsProfile) > 0 {
-		args.AwsProfile = fileConf.AwsProfile
+	if !explicitFlags["aws-profile"] && len(fileConf.AWSProfile) > 0 {
+		args.AWSProfile = fileConf.AWSProfile
 	}
 
 	if !explicitFlags["sql-driver"] && len(fileConf.SQLDriver) > 0 {

@@ -118,7 +118,7 @@ func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 	assert.Equal(t, 1000, newSpec.Field(0).FieldID)
 	assert.Equal(t, "id", newSpec.Field(0).Name)
 	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(0).Transform)
-	assert.Equal(t, 2, newSpec.Field(1).SourceID())
+	assert.Equal(t, 2, newSpec.Field(1).FirstSourceID())
 	assert.Equal(t, "name_identity", newSpec.Field(1).Name)
 }
 
@@ -169,7 +169,7 @@ func TestUpdateSpecAllowsReplacingTimeTransformOnSameSource(t *testing.T) {
 		require.Equal(t, 1, newSpec.NumFields())
 		assert.Equal(t, "ts_month", newSpec.Field(0).Name)
 		assert.Equal(t, iceberg.MonthTransform{}, newSpec.Field(0).Transform)
-		assert.Equal(t, 3, newSpec.Field(0).SourceID())
+		assert.Equal(t, 3, newSpec.Field(0).FirstSourceID())
 	}
 
 	t.Run("remove then add", func(t *testing.T) {
@@ -211,10 +211,10 @@ func TestUpdateSpecReplacesTimeTransformOverV1VoidTombstone(t *testing.T) {
 	require.Equal(t, 2, newSpec.NumFields())
 	assert.Equal(t, "ts_year", newSpec.Field(0).Name)
 	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(0).Transform)
-	assert.Equal(t, 3, newSpec.Field(0).SourceID())
+	assert.Equal(t, 3, newSpec.Field(0).FirstSourceID())
 	assert.Equal(t, "ts_month", newSpec.Field(1).Name)
 	assert.Equal(t, iceberg.MonthTransform{}, newSpec.Field(1).Transform)
-	assert.Equal(t, 3, newSpec.Field(1).SourceID())
+	assert.Equal(t, 3, newSpec.Field(1).FirstSourceID())
 }
 
 // Iceberg-Java writes this metadata today, so loading it has to keep working: the
@@ -328,13 +328,13 @@ func TestUpdateSpecAddField(t *testing.T) {
 		assert.Equal(t, "street_void", newSpec.FieldsBySourceID(5)[0].Name)
 
 		addedField := newSpec.FieldsBySourceID(3)[0]
-		assert.Equal(t, 3, addedField.SourceID())
+		assert.Equal(t, 3, addedField.FirstSourceID())
 		assert.Equal(t, 1002, addedField.FieldID)
 		assert.Equal(t, "year_transform", addedField.Name)
 		assert.Equal(t, iceberg.YearTransform{}, addedField.Transform)
 
 		addedField = newSpec.FieldsBySourceID(7)[0]
-		assert.Equal(t, 7, addedField.SourceID())
+		assert.Equal(t, 7, addedField.FirstSourceID())
 		assert.Equal(t, 1003, addedField.FieldID)
 		assert.Equal(t, "zipcode_bucket", addedField.Name)
 		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 5}, addedField.Transform)
@@ -643,13 +643,13 @@ func TestUpdateSpecAddIdentityField(t *testing.T) {
 		assert.Equal(t, "street_void", newSpec.FieldsBySourceID(5)[0].Name)
 
 		addedField := newSpec.FieldsBySourceID(3)[0]
-		assert.Equal(t, 3, addedField.SourceID())
+		assert.Equal(t, 3, addedField.FirstSourceID())
 		assert.Equal(t, 1002, addedField.FieldID)
 		assert.Equal(t, "ts", addedField.Name)
 		assert.Equal(t, iceberg.IdentityTransform{}, addedField.Transform)
 
 		addedField = newSpec.FieldsBySourceID(2)[0]
-		assert.Equal(t, 2, addedField.SourceID())
+		assert.Equal(t, 2, addedField.FirstSourceID())
 		assert.Equal(t, 1003, addedField.FieldID)
 		assert.Equal(t, "name", addedField.Name)
 		assert.Equal(t, iceberg.IdentityTransform{}, addedField.Transform)
@@ -910,13 +910,13 @@ func TestUpdateSpecCommit(t *testing.T) {
 		assert.Equal(t, []iceberg.PartitionField(nil), currSpec.FieldsBySourceID(1))
 
 		addedField := currSpec.FieldsBySourceID(6)[0]
-		assert.Equal(t, 6, addedField.SourceID())
+		assert.Equal(t, 6, addedField.FirstSourceID())
 		assert.Equal(t, 1002, addedField.FieldID)
 		assert.Equal(t, "address.city_trunc_3", addedField.Name)
 		assert.Equal(t, iceberg.TruncateTransform{Width: 3}, addedField.Transform)
 
 		addedIdentity := currSpec.FieldsBySourceID(7)[0]
-		assert.Equal(t, 7, addedIdentity.SourceID())
+		assert.Equal(t, 7, addedIdentity.FirstSourceID())
 		assert.Equal(t, 1003, addedIdentity.FieldID)
 		assert.Equal(t, "address.zip_code", addedIdentity.Name)
 		assert.Equal(t, iceberg.IdentityTransform{}, addedIdentity.Transform)

@@ -116,7 +116,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 			return us
 		}
 		transformToField[transformKey{
-			SourceId:  partitionField.SourceID(),
+			SourceId:  partitionField.FirstSourceID(),
 			Transform: partitionField.Transform.String(),
 		}] = partitionField
 		nameToField[partitionField.Name] = partitionField
@@ -215,9 +215,9 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 		var err error
 		if _, deleted := us.deletes[field.FieldID]; !deleted {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, rename, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.schema, field.FirstSourceID(), field.FieldID, rename, field.Transform, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, field.Name, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.schema, field.FirstSourceID(), field.FieldID, field.Name, field.Transform, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
@@ -225,9 +225,9 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 			partitionFields = append(partitionFields, newField)
 		} else if us.meta.Version() == 1 {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.schema, field.FirstSourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.schema, field.FirstSourceID(), field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
@@ -275,7 +275,7 @@ func validateNoRedundantTimeFields(fields []iceberg.PartitionField) error {
 		if _, isTime := field.Transform.(iceberg.TimeTransform); !isTime {
 			continue
 		}
-		source := field.SourceID()
+		source := field.FirstSourceID()
 		if existing, exists := timeFields[source]; exists {
 			return fmt.Errorf("%w: redundant partition field for source ID %d: %s (%s) conflicts with %s (%s); remove one of them in this update",
 				iceberg.ErrInvalidPartitionSpec, source,
@@ -419,7 +419,7 @@ func (us *UpdateSpec) historicalPartitionFields(key transformKey) []iceberg.Part
 		for _, spec := range us.meta.PartitionSpecs() {
 			for _, field := range spec.Fields() {
 				historicalKey := transformKey{
-					SourceId:  field.SourceID(),
+					SourceId:  field.FirstSourceID(),
 					Transform: field.Transform.String(),
 				}
 				us.historicalFields[historicalKey] = append(us.historicalFields[historicalKey], field)

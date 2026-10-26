@@ -87,7 +87,7 @@ type orphanCleanupConfig struct {
 	location           string
 	olderThan          time.Duration
 	dryRun             bool
-	deleteFunc         func(string) error
+	deleteFunc         func(context.Context, string) error
 	maxConcurrency     int
 	prefixMismatchMode PrefixMismatchMode
 	equalSchemes       map[string]string
@@ -135,7 +135,7 @@ func WithCleanupDryRun(enabled bool) OrphanCleanupOption {
 
 // WithCleanupDeleteFunc sets a custom delete function. If not provided, the table's FileIO
 // delete method will be used.
-func WithCleanupDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
+func WithCleanupDeleteFunc(deleteFunc func(context.Context, string) error) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.deleteFunc = deleteFunc
 	}
@@ -227,11 +227,9 @@ func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 	return flattened
 }
 
+// OrphanCleanupResult reports the files found and deleted by orphan cleanup.
 type OrphanCleanupResult struct {
-	// OrphanFileLocations is retained for backward compatibility with callers
-	// that consume only orphan paths. Prefer OrphanFiles for canonical path+size data.
-	OrphanFileLocations []string
-	// OrphanFiles is the canonical richer orphan result, carrying both path and size.
+	// OrphanFiles includes the path and size of each identified orphan.
 	OrphanFiles  []OrphanFile
 	DeletedFiles []string
 	// TotalSizeBytes is the combined size of orphan files only, not all scanned files.
@@ -276,9 +274,8 @@ func (p OrphanCleanupPlan) Cutoff() time.Time {
 
 func (p OrphanCleanupPlan) result() OrphanCleanupResult {
 	return OrphanCleanupResult{
-		OrphanFileLocations: p.Files(),
-		OrphanFiles:         p.OrphanFiles(),
-		TotalSizeBytes:      p.totalSizeBytes,
+		OrphanFiles:    p.OrphanFiles(),
+		TotalSizeBytes: p.totalSizeBytes,
 	}
 }
 
@@ -422,33 +419,53 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 		return OrphanCleanupPlan{}, err
 	}
 
-	// Identify orphans.
-	referencedIndex := newReferencedFileIndex(referencedFiles, cfg)
+	// Most listed paths already match their metadata references exactly.
+	// Avoid normalizing the entire reference set unless a raw lookup misses.
+	plan, err := findOrphanFiles(scannedFiles, referencedFiles, cfg)
+	if err != nil {
+		return OrphanCleanupPlan{}, err
+	}
+	plan.cutoff = cutoff
 
-	var orphanFiles []string
-	orphanFileEntries := make([]OrphanFile, 0)
-	var totalOrphanSize int64
+	return plan, nil
+}
+
+// findOrphanFiles defers building the URI alias index until it is needed.
+// Exact matches do not need URI parsing or prefix-mismatch handling.
+func findOrphanFiles(
+	scannedFiles []scannedFile, referencedFiles map[string]bool, cfg *orphanCleanupConfig,
+) (OrphanCleanupPlan, error) {
+	plan := OrphanCleanupPlan{orphanFiles: make([]OrphanFile, 0)}
+	var referencedIndex referencedFileIndex
+	indexBuilt := false
+
 	for _, f := range scannedFiles {
+		if _, referenced := referencedFiles[f.path]; referenced {
+			continue
+		}
+
+		if !indexBuilt {
+			referencedIndex = newReferencedFileIndex(referencedFiles, cfg)
+			indexBuilt = true
+		}
+
 		isOrphan, err := isFileOrphan(f.path, referencedFiles, referencedIndex, cfg)
 		if err != nil {
 			return OrphanCleanupPlan{}, fmt.Errorf("failed to identify orphan %s: %w", f.path, err)
 		}
-		if isOrphan {
-			orphanFiles = append(orphanFiles, f.path)
-			orphanFileEntries = append(orphanFileEntries, OrphanFile{
-				Path:      f.path,
-				SizeBytes: f.size,
-			})
-			totalOrphanSize += f.size
+		if !isOrphan {
+			continue
 		}
+
+		plan.orphanFileLocations = append(plan.orphanFileLocations, f.path)
+		plan.orphanFiles = append(plan.orphanFiles, OrphanFile{
+			Path:      f.path,
+			SizeBytes: f.size,
+		})
+		plan.totalSizeBytes += f.size
 	}
 
-	return OrphanCleanupPlan{
-		orphanFileLocations: orphanFiles,
-		orphanFiles:         orphanFileEntries,
-		totalSizeBytes:      totalOrphanSize,
-		cutoff:              cutoff,
-	}, nil
+	return plan, nil
 }
 
 func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
@@ -463,10 +480,9 @@ func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	}
 
 	return OrphanCleanupResult{
-		OrphanFileLocations: orphanFiles,
-		OrphanFiles:         plan.OrphanFiles(),
-		DeletedFiles:        deletedFiles,
-		TotalSizeBytes:      plan.totalSizeBytes,
+		OrphanFiles:    plan.OrphanFiles(),
+		DeletedFiles:   deletedFiles,
+		TotalSizeBytes: plan.totalSizeBytes,
 	}, nil
 }
 
@@ -655,14 +671,14 @@ func isFileOrphan(
 	referencedIndex referencedFileIndex,
 	cfg *orphanCleanupConfig,
 ) (bool, error) {
-	normalizedFiles := normalizedFilePathAliases(file, cfg)
-	normalizedFile := normalizedFiles[0]
-
-	// Any presence in referencedFiles means referenced;
-	// the bool distinguishes data vs metadata for gc.enabled, not membership"
+	// Any presence in referencedFiles means referenced. Its bool value
+	// distinguishes data and metadata, not membership.
 	if _, ok := referencedFiles[file]; ok {
 		return false, nil
 	}
+
+	normalizedFiles := normalizedFilePathAliases(file, cfg)
+	normalizedFile := normalizedFiles[0]
 	if _, ok := referencedFiles[normalizedFile]; ok {
 		return false, nil
 	}
@@ -767,7 +783,7 @@ func deleteFilesSequential(ctx context.Context, fs io.IO, orphanFiles []string, 
 
 			break
 		}
-		if err := deleteFunc(file); err != nil {
+		if err := deleteFunc(ctx, file); err != nil {
 			result = errors.Join(result, fmt.Errorf("failed to delete orphan file %s: %w", file, err))
 
 			continue
@@ -783,7 +799,7 @@ func deleteFilesParallel(
 	ctx context.Context,
 	files []string,
 	maxConcurrency int,
-	deleteFunc func(string) error,
+	deleteFunc func(context.Context, string) error,
 	wrapError func(string, error) error,
 ) ([]string, error) {
 	workers := min(max(maxConcurrency, 1), len(files))
@@ -822,7 +838,7 @@ func deleteFilesParallel(
 						return
 					}
 
-					if err := deleteFunc(files[index]); err != nil {
+					if err := deleteFunc(ctx, files[index]); err != nil {
 						wrappedErr := wrapError(files[index], err)
 						if wrappedErr == nil {
 							// Keep failed deletions observable if the wrapper suppresses the error.
@@ -1416,8 +1432,8 @@ func PurgeFiles(ctx context.Context, tbl *table.Table) error {
 				ctx,
 				files,
 				defaultPurgeMaxConcurrency,
-				func(file string) error {
-					if err := fs.Remove(file); err != nil && !os.IsNotExist(err) {
+				func(ctx context.Context, file string) error {
+					if err := fs.Remove(ctx, file); err != nil && !os.IsNotExist(err) {
 						return err
 					}
 

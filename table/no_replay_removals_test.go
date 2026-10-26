@@ -279,7 +279,8 @@ func TestReplaceFilesWithRemovalsResumesAfterPeerOnAnotherBranch(t *testing.T) {
 
 	peerPath := tbl.Location() + "/data/data-peer.parquet"
 	writeParquetFile(t, peerPath, arrowSc, `[{"id": 9, "data": "peer"}]`)
-	peerTxn := tbl.NewTransactionOnBranch("other")
+	peerTxn, err := tbl.NewTransactionOnBranch("other")
+	require.NoError(t, err)
 	require.NoError(t, peerTxn.AddFiles(t.Context(), []string{peerPath}, nil, false))
 	_, err = peerTxn.Commit(t.Context())
 	require.NoError(t, err)

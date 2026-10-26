@@ -101,7 +101,7 @@ func init() {
 			return nil, err
 		}
 
-		return NewCatalog(WithAwsConfig(awsConfig), WithAwsProperties(AwsProperties(props)))
+		return NewCatalog(WithAWSConfig(awsConfig), WithAWSProperties(AWSProperties(props)))
 	}))
 }
 
@@ -154,7 +154,7 @@ type glueAPI interface {
 	UpdateDatabase(ctx context.Context, params *glue.UpdateDatabaseInput, optFns ...func(*glue.Options)) (*glue.UpdateDatabaseOutput, error)
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	glueSvc   glueAPI
@@ -176,7 +176,7 @@ type Catalog struct {
 //     ...other transport options...
 // })
 // awsCfg.HTTPClient = client
-// catalog, err := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+// catalog, err := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 
 func NewCatalog(opts ...Option) (*Catalog, error) {
 	glueOps := &options{}
@@ -186,7 +186,7 @@ func NewCatalog(opts ...Option) (*Catalog, error) {
 	}
 
 	if glueOps.awsProperties == nil {
-		glueOps.awsProperties = AwsProperties{}
+		glueOps.awsProperties = AWSProperties{}
 	}
 
 	var catalogId *string
@@ -273,11 +273,8 @@ func (c *Catalog) CatalogType() catalog.Type {
 
 // Close releases the catalog's metrics reporter. The Glue catalog does not own
 // the lifetime of the AWS clients it was configured with, so only the reporter
-// is released. Callers holding a [catalog.Catalog] can reach this via a
-// [catalog.Closer] type assertion.
+// is released. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error { return c.reporter.Close() }
-
-var _ catalog.Closer = (*Catalog)(nil)
 
 // CreateTable creates a new Iceberg table in the Glue catalog.
 // This function will create the metadata file in S3 using the catalog and table properties,
@@ -325,7 +322,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	// Use the catalog's AWS config, not the ambient chain, for the metadata write.
-	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
@@ -442,7 +439,7 @@ func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName s
 // the Glue entry; the caller reloads, so a read failure never triggers rollback.
 func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) error {
 	// Use the catalog's AWS config for WriteMetadata and the staged.FS cleanup below.
-	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
 
 	allocated, err := c.glueSvc.GetTable(ctx, &glue.GetTableInput{
 		CatalogId:    c.catalogId,
@@ -490,8 +487,10 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 	if err != nil {
 		// Best-effort: drop the metadata object we just wrote; for S3 Tables the
 		// managed location may be unreachable, so leave any remainder to the service.
-		if fs, fsErr := staged.FS(ctx); fsErr == nil {
-			_ = fs.Remove(staged.MetadataLocation())
+		// The commit may have failed on ctx's cancellation, so do not inherit it.
+		cleanupCtx := context.WithoutCancel(ctx)
+		if fs, fsErr := staged.FS(cleanupCtx); fsErr == nil {
+			_ = fs.Remove(cleanupCtx, staged.MetadataLocation())
 		}
 
 		return fmt.Errorf("failed to commit S3 Tables table %s.%s: %w", database, tableName, err)
@@ -508,7 +507,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 
 	// Load the metadata file to get table properties
-	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
 	// Read the metadata file. The reporter is intentionally not wired here: the
 	// tail c.LoadTable(...) re-resolves it through convertGlueToIceberg, and the
 	// table built below is discarded after constructTableInput.
@@ -518,6 +517,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		metadataLocation,
 		io.LoadFSFunc(c.props, metadataLocation),
 		c,
+		table.WithScanPlanningIOProperties(c.props),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
@@ -568,7 +568,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 	// Use the catalog's AWS config, not the ambient chain, for the metadata write.
-	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
@@ -1114,12 +1114,13 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 	}
 
 	icebergTable, err := table.NewFromLocation(
-		utils.WithAwsConfig(ctx, c.awsCfg),
+		utils.WithAWSConfig(ctx, c.awsCfg),
 		TableIdentifier(database, tableName),
 		metadataLocation,
 		io.LoadFSFunc(c.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.props),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create iceberg table from location %s: %w", metadataLocation, err)

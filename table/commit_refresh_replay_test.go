@@ -371,7 +371,9 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 			tbl, cat := newAssertRefTestTable(t, base, tt.peer(t, base))
 			tx := tbl.NewTransaction()
 			if tt.branch != "" {
-				tx = tbl.NewTransactionOnBranch(tt.branch)
+				branchTx, err := tbl.NewTransactionOnBranch(tt.branch)
+				require.NoError(t, err)
+				tx = branchTx
 			}
 			require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
 			if tt.stage != nil {

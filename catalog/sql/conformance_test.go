@@ -45,7 +45,7 @@ func TestSqlCatalogConformance(t *testing.T) {
 				"warehouse":       "file://" + warehouse,
 			})
 			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, cat.(*sqlcat.Catalog).Close()) })
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
 
 			return cat
 		},

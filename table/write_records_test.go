@@ -517,10 +517,10 @@ func (s *WriteRecordsTestSuite) TestTimestampNanosecondsShouldFloorNegativeValue
 
 type readOnlyFS struct{}
 
-func (readOnlyFS) Open(name string) (iceio.File, error) {
+func (readOnlyFS) Open(_ context.Context, name string) (iceio.File, error) {
 	return nil, errors.New("not supported")
 }
 
-func (readOnlyFS) Remove(name string) error {
+func (readOnlyFS) Remove(_ context.Context, name string) error {
 	return errors.New("not supported")
 }

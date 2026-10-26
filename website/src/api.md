@@ -70,7 +70,7 @@ import (
 
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
 // handle err
-cat := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 ```
 
 #### Hive
@@ -112,7 +112,12 @@ cat, err := catalog.Load(ctx, "default", iceberg.Properties{
     "uri":       "http://localhost:8181",
     "warehouse": "s3://my-bucket/warehouse",
 })
+if err != nil { panic(err) }
+defer cat.Close()
 ```
+
+Every catalog implements `Close() error`. Close it when done to release catalog-owned
+resources. A caller-supplied database connection remains caller-owned.
 
 ### Namespaces
 
@@ -357,7 +362,7 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
-`ReplaceDataFiles(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFilesWithDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
+`ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
 
 ### Transactions
 
@@ -383,7 +388,8 @@ newTbl, err := txn.Commit(ctx)
 To target a specific branch:
 
 ```go
-txn := tbl.NewTransactionOnBranch("staging")
+txn, err := tbl.NewTransactionOnBranch("staging")
+if err != nil { /* ... */ }
 ```
 
 `Commit` can retry on conflict (`ErrCommitFailed`) when `commit.retry.num-retries` is set. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.

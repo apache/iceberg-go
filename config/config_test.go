@@ -139,7 +139,7 @@ catalog:
 `), "default",
 		&CatalogConfig{
 			CatalogType: "glue",
-			AwsProfile:  "my-aws-profile",
+			AWSProfile:  "my-aws-profile",
 		},
 	},
 	// sql catalog with driver/dialect

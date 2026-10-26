@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"iter"
 	"log"
 	"maps"
 	"slices"
@@ -383,7 +382,7 @@ func isRetryableSerializableError(err error) bool {
 		strings.Contains(msg, "ORA-00060")
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	db            *bun.DB
@@ -462,8 +461,7 @@ func (c *Catalog) CatalogType() catalog.Type {
 // Close releases the catalog's metrics reporter. When the catalog opened its own
 // database handle (the registry [catalog.Load] path), Close also closes that
 // handle's connection pool; a handle supplied to [NewCatalog] stays owned by the
-// caller and is left open. Callers holding a [catalog.Catalog] can reach this via
-// a [catalog.Closer] type assertion.
+// caller and is left open. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error {
 	err := c.reporter.Close()
 	if c.ownsDB {
@@ -478,8 +476,6 @@ func (c *Catalog) Close() error {
 
 	return err
 }
-
-var _ catalog.Closer = (*Catalog)(nil)
 
 func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 	_, err := c.db.NewCreateTable().Model((*sqlIcebergTable)(nil)).
@@ -758,12 +754,15 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func removeUncommittedMetadata(ctx context.Context, metadataLocation string, loadFS table.FSysF) error {
-	fs, err := loadFS(context.WithoutCancel(ctx))
+	// This runs after a failed commit, which may have failed because ctx was
+	// canceled, so neither the load nor the removal inherits that cancellation.
+	cleanupCtx := context.WithoutCancel(ctx)
+	fs, err := loadFS(cleanupCtx)
 	if err != nil {
 		return fmt.Errorf("failed to load filesystem while removing uncommitted metadata %s: %w", metadataLocation, err)
 	}
 
-	if err := fs.Remove(metadataLocation); err != nil {
+	if err := fs.Remove(cleanupCtx, metadataLocation); err != nil {
 		return fmt.Errorf("failed to remove uncommitted metadata %s: %w", metadataLocation, err)
 	}
 
@@ -818,7 +817,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(ident)
-	tblIdent := catalog.TableNameFromIdent(ident)
+	tblIdent := catalog.ObjectNameFromIdent(ident)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return nil, err
@@ -890,7 +889,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	ns := catalog.NamespaceFromIdent(ident)
-	tblName := catalog.TableNameFromIdent(ident)
+	tblName := catalog.ObjectNameFromIdent(ident)
 	nsKey, err := c.namespaceKey(ctx, ns)
 	if err != nil {
 		return nil, "", err
@@ -996,7 +995,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 	}
 
 	ns := catalog.NamespaceFromIdent(identifier)
-	tbl := catalog.TableNameFromIdent(identifier)
+	tbl := catalog.ObjectNameFromIdent(identifier)
 	nsKey, err := c.namespaceKey(ctx, ns)
 	if err != nil {
 		return nil, err
@@ -1044,6 +1043,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		io.LoadFSFunc(c.props, result.MetadataLocation.String),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.props),
 	)
 }
 
@@ -1056,7 +1056,7 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 	if err != nil {
 		return err
 	}
-	tbl := catalog.TableNameFromIdent(identifier)
+	tbl := catalog.ObjectNameFromIdent(identifier)
 
 	return withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		del := tx.NewDelete().Model(&sqlIcebergTable{
@@ -1121,13 +1121,13 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	if err != nil {
 		return nil, err
 	}
-	fromTbl := catalog.TableNameFromIdent(from)
+	fromTbl := catalog.ObjectNameFromIdent(from)
 
 	toNs, exists, err := c.resolveNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
 	if err != nil {
 		return nil, err
 	}
-	toTbl := catalog.TableNameFromIdent(to)
+	toTbl := catalog.ObjectNameFromIdent(to)
 
 	if !exists {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, toNs)
@@ -1225,7 +1225,7 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	if err != nil {
 		return false, err
 	}
-	tableName := catalog.TableNameFromIdent(identifier)
+	tableName := catalog.ObjectNameFromIdent(identifier)
 
 	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
 		query := tx.NewSelect().Model(&sqlIcebergTable{
@@ -1420,67 +1420,6 @@ func validateNamespacePropertyUpdates(removals []string, updates iceberg.Propert
 	return nil
 }
 
-func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
-	tables, err := c.listTablesAll(ctx, namespace)
-	if err != nil {
-		return func(yield func(table.Identifier, error) bool) {
-			yield(table.Identifier{}, err)
-		}
-	}
-
-	return func(yield func(table.Identifier, error) bool) {
-		for _, t := range tables {
-			if !yield(t, nil) {
-				return
-			}
-		}
-	}
-}
-
-func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
-	ns := namespaceToString(namespace)
-	if len(namespace) > 0 {
-		var exists bool
-		var err error
-		ns, exists, err = c.resolveNamespaceKey(ctx, namespace)
-		if err != nil {
-			return nil, err
-		}
-		if !exists {
-			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(namespace, "."))
-		}
-	}
-
-	tables, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergTable, error) {
-		var tables []sqlIcebergTable
-		sel := tx.NewSelect().Model(&tables).
-			Where("catalog_name = ?", c.name).
-			Where("table_namespace = ?", ns)
-		if c.isV0() {
-			sel = sel.ExcludeColumn("iceberg_type")
-		} else {
-			sel = sel.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
-		}
-		err := sel.Scan(ctx)
-
-		return tables, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error listing tables for namespace '%s': %w", namespace, err)
-	}
-
-	ret := make([]table.Identifier, len(tables))
-	for i, t := range tables {
-		namespace, err := namespaceFromString(t.TableNamespace)
-		if err != nil {
-			return nil, err
-		}
-		ret[i] = append(namespace, t.TableName)
-	}
-
-	return ret, nil
-}
-
 func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	tableQuery := c.db.NewSelect().Model((*sqlIcebergTable)(nil)).
 		Column("table_namespace").Where("catalog_name = ?", c.name)
@@ -1637,7 +1576,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(identifier)
-	viewIdent := catalog.TableNameFromIdent(identifier)
+	viewIdent := catalog.ObjectNameFromIdent(identifier)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return err
@@ -1700,68 +1639,6 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 	return err
 }
 
-// ListViews returns a list of view identifiers in the catalog.
-func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
-	views, err := c.listViewsAll(ctx, namespace)
-	if err != nil {
-		return func(yield func(table.Identifier, error) bool) {
-			yield(table.Identifier{}, err)
-		}
-	}
-
-	return func(yield func(table.Identifier, error) bool) {
-		for _, v := range views {
-			if !yield(v, nil) {
-				return
-			}
-		}
-	}
-}
-
-func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
-	if c.isV0() {
-		return nil, nil
-	}
-
-	ns := namespaceToString(namespace)
-	if len(namespace) > 0 {
-		var exists bool
-		var err error
-		ns, exists, err = c.resolveNamespaceKey(ctx, namespace)
-		if err != nil {
-			return nil, err
-		}
-		if !exists {
-			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(namespace, "."))
-		}
-	}
-
-	views, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergTable, error) {
-		var views []sqlIcebergTable
-		err := tx.NewSelect().Model(&views).
-			Where("catalog_name = ?", c.name).
-			Where("table_namespace = ?", ns).
-			Where("iceberg_type = ?", ViewType).
-			Scan(ctx)
-
-		return views, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error listing views for namespace '%s': %w", namespace, err)
-	}
-
-	ret := make([]table.Identifier, len(views))
-	for i, v := range views {
-		namespace, err := namespaceFromString(v.TableNamespace)
-		if err != nil {
-			return nil, err
-		}
-		ret[i] = append(namespace, v.TableName)
-	}
-
-	return ret, nil
-}
-
 // DropView deletes a view from the catalog.
 func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
 	if c.isV0() {
@@ -1772,7 +1649,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 	if err != nil {
 		return err
 	}
-	viewName := catalog.TableNameFromIdent(identifier)
+	viewName := catalog.ObjectNameFromIdent(identifier)
 
 	metadataLocation := ""
 	view, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
@@ -1831,7 +1708,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 			return err
 		}
 
-		_ = fs.Remove(metadataLocation)
+		_ = fs.Remove(ctx, metadataLocation)
 	}
 
 	return nil
@@ -1851,7 +1728,7 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 	if err != nil {
 		return false, err
 	}
-	viewName := catalog.TableNameFromIdent(identifier)
+	viewName := catalog.ObjectNameFromIdent(identifier)
 
 	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
 		exists, err := tx.NewSelect().Model(&sqlIcebergTable{
@@ -1881,7 +1758,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (vi
 	if err != nil {
 		return nil, err
 	}
-	viewName := catalog.TableNameFromIdent(identifier)
+	viewName := catalog.ObjectNameFromIdent(identifier)
 
 	v, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
 		v := new(sqlIcebergTable)
