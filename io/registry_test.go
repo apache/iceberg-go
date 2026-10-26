@@ -223,6 +223,25 @@ func TestIndependentRegistryIsolation(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestNewRegistrySnapshotsGlobalRegistrations(t *testing.T) {
+	const scheme = "late-global-registration-test"
+	before := io.NewRegistry()
+
+	io.Register(scheme, func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	})
+	t.Cleanup(func() { io.Unregister(scheme) })
+
+	_, err := before.LoadFS(t.Context(), nil, scheme+"://bucket/key")
+	require.ErrorIs(t, err, io.ErrIOSchemeNotFound)
+
+	after := io.NewRegistry()
+	_, err = after.LoadFS(t.Context(), nil, scheme+"://bucket/key")
+	require.NoError(t, err)
+	assert.Contains(t, after.RegisteredSchemes(), scheme)
+	assert.NotContains(t, before.RegisteredSchemes(), scheme)
+}
+
 func TestRegistryZeroValueIsUsable(t *testing.T) {
 	var reg io.Registry
 	require.Empty(t, reg.RegisteredSchemes())
