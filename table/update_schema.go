@@ -447,7 +447,7 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 			return fmt.Errorf("cannot rename field to the same name: %s", fullName)
 		}
 
-		newFullName := strings.Join(append(path[:len(path)-1], update.Name.Val), ".")
+		newFullName := strings.Join(append(slices.Clone(path[:len(path)-1]), update.Name.Val), ".")
 		if existingField, ok := u.findField(newFullName); ok {
 			if !u.isDeleted(existingField.ID) {
 				return fmt.Errorf("field already exists: %s", newFullName)
