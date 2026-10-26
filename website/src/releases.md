@@ -42,7 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
-- **Table metadata getter renamed.** Replace `table.Metadata.Version()` with `table.Metadata.FormatVersion()`, consistent with Iceberg Java and Go view/UDF metadata. Metadata JSON is unchanged.
+- **Filesystem adapter construction consolidated.** Replace `io.FSPreProcName(fsys, fn)` with `io.FS(fsys, io.WithNamePreprocessor(fn))`. Plain `io.FS(fsys)` remains supported.
 - **Table purge is required on catalogs.** The `catalog.Catalog` interface now embeds `catalog.PurgeableCatalog`; every custom catalog implementation must provide `PurgeTable(ctx, identifier) error`. The narrow `catalog.PurgeableTable` interface is renamed to `catalog.PurgeableCatalog`. Built-in purge behavior is unchanged.
 - **Unify statistics blob types with Puffin.** Replace `table.BlobType` with `puffin.BlobType` when constructing `table.BlobMetadata`. Replace `table.BlobTypeApacheDatasketchesThetaV1` with `puffin.BlobTypeDataSketchesTheta` and `table.BlobTypeDeletionVectorV1` with `puffin.BlobTypeDeletionVector`. Use `puffin.BlobType.IsKnown()` to identify the types defined by the Puffin specification; the redundant `table.BlobType.IsValid()` method is removed. Unknown non-empty blob type names still round-trip through table metadata.
 - **View representation field uses the Go SQL initialism.** Replace `view.Representation.Sql` with `view.Representation.SQL`. Serialized view metadata still uses the `sql` JSON field.
@@ -50,7 +50,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 - **Catalog identifier helper renamed.** `catalog.TableNameFromIdent` is removed. Use `catalog.ObjectNameFromIdent` for tables, views, and functions.
 - **Substrait expression conversion no longer takes case sensitivity.** `substrait.ConvertExpr(schema, expression, caseSensitive)` becomes `substrait.ConvertExpr(schema, expression)`. Case sensitivity remains part of expression binding.
 
-- **Transform formatting requires the result type.** `Transform.ToHumanStr(value)` is removed. Use `Transform.ToHumanStrType(resultType, value)` to format partition values, including timestamps with time zones.
+- **Transform formatting requires the result type and uses the Java-aligned method name.** `Transform.ToHumanStr(value)` and `Transform.ToHumanStrType(resultType, value)` are removed. Use `Transform.ToHumanString(resultType, value)` to format partition values, including timestamps with time zones.
 - **Catalogs now require cleanup.** The `catalog.Catalog` interface includes `Close() error`. Custom catalog implementations must provide `Close`, and callers should close catalog instances after use. `catalog.Closer` remains available as an alias for `io.Closer`.
 
 - **Puffin writer property setter renamed.** `puffin.Writer.AddProperties` is now `puffin.Writer.SetProperties`. Repeated calls still merge keys; use `ClearProperties` to clear custom properties before finishing.

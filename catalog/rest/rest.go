@@ -52,6 +52,7 @@ var (
 	_ catalog.Catalog                      = (*Catalog)(nil)
 	_ catalog.TransactionalCatalog         = (*Catalog)(nil)
 	_ catalog.RefreshableCredentialCatalog = (*Catalog)(nil)
+	_ catalog.RegisterableCatalog          = (*Catalog)(nil)
 )
 
 const (
