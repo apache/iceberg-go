@@ -20,6 +20,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -222,6 +223,80 @@ func TestWriteRejectsMismatchedGeoBatch(t *testing.T) {
 		err := writer.Write(batch)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no bounds accumulator")
+	})
+}
+
+func TestAccumulateGeoValuesNested(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	wkbType := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	hex := func(s string) string { return geoarrow.WKBBytes(wkbOf(t, s)).String() }
+
+	listOfStructs, _, err := array.FromJSON(mem,
+		arrow.ListOf(arrow.StructOf(arrow.Field{Name: "g", Type: wkbType, Nullable: true})),
+		strings.NewReader(`[
+			[{"g": "`+hex("POINT (1 2)")+`"}, null, {"g": null}],
+			[],
+			null,
+			[{"g": "`+hex("POINT (3 -4)")+`"}]
+		]`))
+	require.NoError(t, err)
+	defer listOfStructs.Release()
+
+	t.Run("list of structs", func(t *testing.T) {
+		acc := newGeoBoundsAccumulator(false)
+		require.NoError(t, accumulateGeoValues(acc, listOfStructs, []int{0}, 0, listOfStructs.Len()))
+
+		// null struct, null leaf, empty list, null list
+		assert.EqualValues(t, 4, acc.nulls)
+		lower, upper := acc.Bounds()
+		assert.Equal(t, []float64{1, -4}, decodeBound(t, lower))
+		assert.Equal(t, []float64{3, 2}, decodeBound(t, upper))
+	})
+
+	t.Run("sliced list", func(t *testing.T) {
+		sliced := array.NewSlice(listOfStructs, 1, 4)
+		defer sliced.Release()
+
+		acc := newGeoBoundsAccumulator(false)
+		require.NoError(t, accumulateGeoValues(acc, sliced, []int{0}, 0, sliced.Len()))
+
+		assert.EqualValues(t, 2, acc.nulls)
+		lower, upper := acc.Bounds()
+		assert.Equal(t, []float64{3, -4}, decodeBound(t, lower))
+		assert.Equal(t, []float64{3, -4}, decodeBound(t, upper))
+	})
+
+	t.Run("value under a null parent is not decoded", func(t *testing.T) {
+		storageBuilder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+		storageBuilder.Append(wkbOf(t, "POINT (1 2)"))
+		storageBuilder.Append([]byte{0xff, 0xff})
+		storage := storageBuilder.NewArray()
+		storageBuilder.Release()
+		defer storage.Release()
+
+		geomArr := array.NewExtensionArrayWithStorage(wkbType, storage)
+		defer geomArr.Release()
+
+		structArr, err := array.NewStructArrayWithNulls([]arrow.Array{geomArr}, []string{"g"},
+			memory.NewBufferBytes([]byte{0b01}), 1, 0)
+		require.NoError(t, err)
+		defer structArr.Release()
+
+		acc := newGeoBoundsAccumulator(false)
+		require.NoError(t, accumulateGeoValues(acc, structArr, []int{0}, 0, structArr.Len()))
+
+		assert.EqualValues(t, 1, acc.nulls)
+		lower, _ := acc.Bounds()
+		assert.Equal(t, []float64{1, 2}, decodeBound(t, lower))
+	})
+
+	t.Run("array does not match path", func(t *testing.T) {
+		acc := newGeoBoundsAccumulator(false)
+		err := accumulateGeoValues(acc, listOfStructs, nil, 0, listOfStructs.Len())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not match the geo column path")
 	})
 }
 

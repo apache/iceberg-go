@@ -134,8 +134,8 @@ type manifestTrackingIO struct {
 	delay   time.Duration
 }
 
-func (fs *manifestTrackingIO) Open(name string) (iceio.File, error) {
-	f, err := fs.IO.Open(name)
+func (fs *manifestTrackingIO) Open(_ context.Context, name string) (iceio.File, error) {
+	f, err := fs.IO.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}

@@ -40,8 +40,13 @@ import (
 // Used to verify that doCommit fails early when the FS cannot write.
 type readOnlyIO struct{}
 
-func (readOnlyIO) Open(_ string) (iceio.File, error) { return nil, errors.New("readOnlyIO: no files") }
-func (readOnlyIO) Remove(_ string) error             { return errors.New("readOnlyIO: read-only") }
+func (readOnlyIO) Open(_ context.Context, _ string) (iceio.File, error) {
+	return nil, errors.New("readOnlyIO: no files")
+}
+
+func (readOnlyIO) Remove(_ context.Context, _ string) error {
+	return errors.New("readOnlyIO: read-only")
+}
 
 // sequentialCatalog returns a predetermined error per CommitTable attempt.
 // If attempts exceed the len(errs) slice it returns nil (success).
@@ -723,6 +728,77 @@ func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 	assert.False(t, stillExists,
 		"orphaned manifest list must be removed when retries are exhausted with ErrCommitFailed: "+
 			"none of the retry attempts were accepted, so all orphans are safe to delete")
+}
+
+// cancelAwareRemoveIO wraps memIO and, like blobfs, rejects Remove on a
+// canceled context.
+type cancelAwareRemoveIO struct {
+	*memIO
+}
+
+func (c *cancelAwareRemoveIO) Remove(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return c.memIO.Remove(ctx, name)
+}
+
+// cancelAfterCommitCatalog cancels the commit context once CommitTable has
+// been called cancelAfter times.
+type cancelAfterCommitCatalog struct {
+	*sequentialCatalog
+	cancelAfter int32
+	cancel      context.CancelFunc
+}
+
+func (c *cancelAfterCommitCatalog) CommitTable(ctx context.Context, ident Identifier, reqs []Requirement, updates []Update) (Metadata, string, error) {
+	meta, loc, err := c.sequentialCatalog.CommitTable(ctx, ident, reqs, updates)
+	if c.attempts.Load() == c.cancelAfter {
+		c.cancel()
+	}
+
+	return meta, loc, err
+}
+
+// TestDoCommit_OrphanCleanedOnCancellation verifies that orphan cleanup does
+// not inherit the caller's cancellation: when doCommit exits because ctx was
+// canceled, an IO that honors ctx on Remove must still remove the orphans.
+func TestDoCommit_OrphanCleanedOnCancellation(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	mem, meta := newMemIOWithRetryMeta(t, spec)
+	wfs := &cancelAwareRemoveIO{memIO: mem}
+
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	originalManifestList := updates[0].(*addSnapshotUpdate).Snapshot.ManifestList
+	require.Contains(t, mem.files, originalManifestList)
+
+	// The first failure triggers a rebuild that orphans the original manifest
+	// list; the context is canceled during the second attempt, so doCommit
+	// exits on the cancellation with orphan cleanup still enabled.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cat := &cancelAfterCommitCatalog{
+		sequentialCatalog: &sequentialCatalog{
+			metadata: meta,
+			errs:     []error{ErrCommitFailed, ErrCommitFailed},
+		},
+		cancelAfter: 2,
+		cancel:      cancel,
+	}
+	tbl = newOCCTable(t, meta, wfs, cat)
+
+	_, err = tbl.doCommit(ctx, updates, reqs, withCommitBranch(MainBranch))
+	require.ErrorIs(t, err, context.Canceled)
+
+	assert.NotContains(t, mem.files, originalManifestList,
+		"orphaned manifest list must be removed even when the commit ends on cancellation")
 }
 
 // ---------------------------------------------------------------------------
