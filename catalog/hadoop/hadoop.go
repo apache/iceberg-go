@@ -419,13 +419,13 @@ func (c *Catalog) readVersionHint(ident table.Identifier) int {
 	return ver
 }
 
-func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
+func (c *Catalog) writeVersionHint(ctx context.Context, ident table.Identifier, version int) {
 	dir := c.metadataDir(ident)
 	tempPath := joinPath(c.isLocal, dir, uuid.New().String()+"-version-hint.temp")
 	hintPath := c.versionHintPath(ident)
 
 	content := []byte(strconv.Itoa(version))
-	if err := c.filesystem.WriteFile(tempPath, content); err != nil {
+	if err := c.filesystem.WriteFile(ctx, tempPath, content); err != nil {
 		log.Printf("hadoop catalog: failed to write version hint temp file: %v", err)
 
 		return
@@ -434,7 +434,7 @@ func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
 	if err := c.filesystem.Rename(tempPath, hintPath); err != nil {
 		log.Printf("hadoop catalog: failed to rename version hint: %v", err)
 		// Best-effort cleanup of the version-hint temp file; no caller context.
-		_ = c.filesystem.Remove(context.Background(), tempPath)
+		_ = c.filesystem.Remove(context.WithoutCancel(ctx), tempPath)
 	}
 }
 

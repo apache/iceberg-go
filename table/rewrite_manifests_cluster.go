@@ -81,7 +81,7 @@ func (m *manifestMergeManager) newClusterWriter(specID int) (*manifestClusterWri
 		return nil, err
 	}
 
-	writer, path, counter, fileCloser, err := m.snap.newManifestWriter(spec)
+	writer, path, counter, fileCloser, err := m.snap.newManifestWriter(m.operationContext(), spec)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 			writer.abort()
 		}
 		for _, path := range paths {
-			if removeErr := m.snap.io.Remove(context.Background(), path); removeErr != nil {
+			if removeErr := m.snap.io.Remove(context.WithoutCancel(m.operationContext()), path); removeErr != nil {
 				log.Printf("Warning: failed to delete orphaned clustered manifest %s: %v", path, removeErr)
 			}
 		}

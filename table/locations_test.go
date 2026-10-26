@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,7 @@ func TestLocationProviderLocalPaths(t *testing.T) {
 						} {
 							require.True(t, strings.HasPrefix(file.location, file.dir+"/"), "%q is outside %q", file.location, file.dir)
 							require.NotContains(t, file.location, `\`)
-							writer, err := (io.LocalFS{}).Create(file.location)
+							writer, err := (io.LocalFS{}).Create(context.Background(), file.location)
 							require.NoError(t, err)
 							require.NoError(t, writer.Close())
 							_, err = os.Stat(file.location)

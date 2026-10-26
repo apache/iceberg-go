@@ -41,10 +41,10 @@ func (io *delayedManifestIO) Open(_ context.Context, name string) (iceio.File, e
 	return io.memIO.Open(context.Background(), name)
 }
 
-func (io *delayedManifestIO) Create(name string) (iceio.FileWriter, error) {
+func (io *delayedManifestIO) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
 	time.Sleep(io.delay)
 
-	return io.memIO.Create(name)
+	return io.memIO.Create(ctx, name)
 }
 
 func BenchmarkOverwriteParentDependentManifests(b *testing.B) {
@@ -89,7 +89,7 @@ func BenchmarkOverwriteParentDependentManifests(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			if err := fs.WriteFile(manifestListPath, listBuf.Bytes()); err != nil {
+			if err := fs.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()); err != nil {
 				b.Fatal(err)
 			}
 

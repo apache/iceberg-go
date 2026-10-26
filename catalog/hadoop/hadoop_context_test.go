@@ -77,12 +77,12 @@ func (f *contextBoundHadoopFS) ReadFile(name string) ([]byte, error) {
 	return f.LocalFS.ReadFile(f.localPath(name))
 }
 
-func (f *contextBoundHadoopFS) WriteFile(name string, content []byte) error {
+func (f *contextBoundHadoopFS) WriteFile(ctx context.Context, name string, content []byte) error {
 	if err := f.ctx.Err(); err != nil {
 		return err
 	}
 
-	return f.LocalFS.WriteFile(f.localPath(name), content)
+	return f.LocalFS.WriteFile(ctx, f.localPath(name), content)
 }
 
 func registerHadoopContextFS(t *testing.T, scheme string, factory icebergio.SchemeFactory) {
@@ -141,7 +141,7 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			fs := cat.(*Catalog).filesystem
 			location := warehouse + "/ns/after-cancel.txt"
 			content := []byte("still writable")
-			require.NoError(t, fs.WriteFile(location, content))
+			require.NoError(t, fs.WriteFile(context.Background(), location, content))
 			readBack, err := fs.ReadFile(location)
 			require.NoError(t, err)
 			require.Equal(t, content, readBack)

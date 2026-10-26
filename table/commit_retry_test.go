@@ -906,7 +906,7 @@ func (c *progressingRebuildCatalog) graftPeer() {
 	peerSeq := c.metadata.LastSequenceNumber() + 1
 
 	manifestListPath := fmt.Sprintf("%s/metadata/peer-%d-manifest-list.avro", c.location, peerID)
-	out, err := c.wfs.Create(manifestListPath)
+	out, err := c.wfs.Create(context.Background(), manifestListPath)
 	if err != nil {
 		panic(err)
 	}

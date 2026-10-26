@@ -71,6 +71,8 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - **Partition and sort source accessors renamed.** Replace `PartitionField.SourceID()` and `SortField.SourceID()` with `FirstSourceID()`. Their behavior and serialized fields are unchanged.
 
+- **File writes now take an operation context.** Update `WriteFileIO` implementations and calls to `Create` and `WriteFile` to pass `context.Context`; cloud writes use it for cancellation.
+
 ## Verifying and producing releases
 
 If you are validating an RC or cutting a new release, see:

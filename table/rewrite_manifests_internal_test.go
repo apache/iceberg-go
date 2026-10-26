@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"strconv"
@@ -55,7 +56,7 @@ func writeManifestWithEntries(t *testing.T, fs iceio.WriteFileIO, dir string, n 
 	}
 
 	path := dir + "/metadata/m-v1.avro"
-	out, err := fs.Create(path)
+	out, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	mf, err := iceberg.WriteManifest(path, out, 2, *iceberg.UnpartitionedSpec, sc, snapID, entries)
 	require.NoError(t, err)
@@ -137,7 +138,7 @@ func TestManifestMergeClusterRollsAfterAvroBlockFlush(t *testing.T) {
 	var buf bytes.Buffer
 	input, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+	require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 
 	mgr := manifestMergeManager{
 		targetSizeBytes:  input.Length() / 4,
@@ -189,7 +190,7 @@ func TestRewriteManifestsCleansOrphanOnValidationError(t *testing.T) {
 		var buf bytes.Buffer
 		_, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 
 		// A header count that lies: the merge re-counts the one real entry and
 		// disagrees, tripping the file-count guard after the merged file is
@@ -199,7 +200,7 @@ func TestRewriteManifestsCleansOrphanOnValidationError(t *testing.T) {
 	}
 
 	before := memKeys(mem)
-	_, err := r.processManifests(inputs)
+	_, err := r.processManifests(context.Background(), inputs)
 	require.Error(t, err, "lying header counts must trip the file-count guard")
 
 	for path := range memKeys(mem) {
@@ -255,7 +256,7 @@ func TestRewriteManifestsCleansOrphansOnInvalidClusterKey(t *testing.T) {
 		var buf bytes.Buffer
 		mf, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 		inputs[i] = mf
 	}
 
@@ -304,7 +305,7 @@ func TestManifestMergeClusterSeparatesSpecsWithSameKey(t *testing.T) {
 		var buf bytes.Buffer
 		mf, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, []iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 		inputs = append(inputs, mf)
 	}
 
@@ -328,13 +329,13 @@ type failSecondCreateIO struct {
 	count int
 }
 
-func (f *failSecondCreateIO) Create(name string) (iceio.FileWriter, error) {
+func (f *failSecondCreateIO) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
 	f.mu.Lock()
 	first := f.count == 0
 	f.count++
 	f.mu.Unlock()
 	if first {
-		return f.memIO.Create(name)
+		return f.memIO.Create(ctx, name)
 	}
 
 	return &limitedWriteCloser{limit: 0, err: errLimitedWrite}, nil
@@ -365,7 +366,7 @@ func TestRewriteManifestsCleansOrphansOnMergeFailure(t *testing.T) {
 		var buf bytes.Buffer
 		_, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 
 		inputs[i] = iceberg.NewManifestBuilder(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
 			AddedFiles(1).Content(iceberg.ManifestContentData).Build()
@@ -374,7 +375,7 @@ func TestRewriteManifestsCleansOrphansOnMergeFailure(t *testing.T) {
 	r.cfg.targetSizeBytes = 2 * maxLen
 
 	before := memKeys(mem.memIO)
-	_, err := r.processManifests(inputs)
+	_, err := r.processManifests(context.Background(), inputs)
 	require.ErrorIs(t, err, errLimitedWrite, "a failing bin must surface the write error")
 
 	for path := range memKeys(mem.memIO) {

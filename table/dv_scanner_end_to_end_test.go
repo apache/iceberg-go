@@ -75,7 +75,7 @@ func writeIntParquetWithFieldID(t *testing.T, fs iceio.WriteFileIO, path string,
 	arrTbl := array.NewTableFromRecords(arrSchema, []arrow.RecordBatch{rb})
 	defer arrTbl.Release()
 
-	fo, err := fs.Create(path)
+	fo, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	defer fo.Close()
 	require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(), nil,
@@ -231,7 +231,7 @@ func TestDVScanEndToEnd(t *testing.T) {
 			defer record.Release()
 			deleteTable := array.NewTableFromRecords(deleteSchema, []arrow.RecordBatch{record})
 			defer deleteTable.Release()
-			deleteFile, err := fs.Create(deletePath)
+			deleteFile, err := fs.Create(context.Background(), deletePath)
 			require.NoError(t, err)
 			defer deleteFile.Close()
 			require.NoError(t, pqarrow.WriteTable(deleteTable, deleteFile, 1, nil, pqarrow.DefaultWriterProps()))

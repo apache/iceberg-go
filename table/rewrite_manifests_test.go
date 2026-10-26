@@ -79,7 +79,7 @@ func writeOneRowParquet(t *testing.T, fs iceio.WriteFileIO, path string) {
 	arrTbl := array.NewTableFromRecords(rewriteArrowSchema, []arrow.RecordBatch{rec})
 	defer arrTbl.Release()
 
-	fo, err := fs.Create(path)
+	fo, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
@@ -809,12 +809,12 @@ type trackingFS struct {
 	removed []string
 }
 
-func (f *trackingFS) Create(name string) (iceio.FileWriter, error) {
+func (f *trackingFS) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
 	f.mu.Lock()
 	f.created = append(f.created, name)
 	f.mu.Unlock()
 
-	return f.LocalFS.Create(name)
+	return f.LocalFS.Create(ctx, name)
 }
 
 func (f *trackingFS) Remove(_ context.Context, name string) error {

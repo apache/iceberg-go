@@ -115,7 +115,7 @@ func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoError(t, LocalFS{}.WriteFile(tt.path, content))
+			require.NoError(t, LocalFS{}.WriteFile(context.Background(), tt.path, content))
 
 			got, err := os.ReadFile(tt.readPath)
 			require.NoError(t, err)

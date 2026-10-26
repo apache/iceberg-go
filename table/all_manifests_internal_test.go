@@ -209,7 +209,7 @@ func tableWithManifestListsUsingIO(t *testing.T, snapshotCount int, readIOFn fun
 		var listBuf bytes.Buffer
 		require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, parentID, &seqNum, 0,
 			[]iceberg.ManifestFile{manifest}))
-		require.NoError(t, memFS.WriteFile(manifestListPath, listBuf.Bytes()))
+		require.NoError(t, memFS.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 		snapshot := Snapshot{
 			SnapshotID:       snapshotID,

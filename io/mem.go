@@ -92,11 +92,18 @@ func (m *MemFS) Remove(_ context.Context, name string) error {
 	return nil
 }
 
-func (m *MemFS) Create(name string) (FileWriter, error) {
-	return &memWriter{fs: m, name: name}, nil
+func (m *MemFS) Create(ctx context.Context, name string) (FileWriter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return &memWriter{fs: m, name: name, ctx: ctx}, nil
 }
 
-func (m *MemFS) WriteFile(name string, content []byte) error {
+func (m *MemFS) WriteFile(ctx context.Context, name string, content []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cp := make([]byte, len(content))
 	copy(cp, content)
 	m.mu.Lock()
@@ -314,11 +321,16 @@ func (fi *memFileInfo) Sys() any           { return nil }
 type memWriter struct {
 	fs   *MemFS
 	name string
+	ctx  context.Context
 	buf  bytes.Buffer
 }
 
 func (w *memWriter) Write(p []byte) (int, error)         { return w.buf.Write(p) }
 func (w *memWriter) ReadFrom(r io.Reader) (int64, error) { return w.buf.ReadFrom(r) }
 func (w *memWriter) Close() error {
-	return w.fs.WriteFile(w.name, w.buf.Bytes())
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+
+	return w.fs.WriteFile(w.ctx, w.name, w.buf.Bytes())
 }

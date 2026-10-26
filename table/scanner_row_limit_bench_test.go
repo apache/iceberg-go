@@ -88,7 +88,7 @@ func newRowLimitPlanningBenchmarkTable(b testing.TB, manifestCount int) *Table {
 	var listBuf bytes.Buffer
 	sequenceNumber := int64(1)
 	require.NoError(b, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0, manifests))
-	require.NoError(b, fs.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(b, fs.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	schemaID := meta.CurrentSchema().ID
 	require.NoError(b, builder.AddSnapshot(&Snapshot{
@@ -130,7 +130,7 @@ func writeRowLimitPlanningBenchmarkManifest(
 	_, err = iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
 		[]iceberg.ManifestEntry{entry})
 	require.NoError(b, err)
-	require.NoError(b, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(b, fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	return iceberg.NewManifestBuilder(2, manifestPath, int64(manifestBuf.Len()), 0, snapshotID).
 		SequenceNumber(sequenceNumber, sequenceNumber).

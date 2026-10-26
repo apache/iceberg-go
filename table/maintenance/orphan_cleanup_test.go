@@ -172,11 +172,11 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 
 	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(metadataLocation, nil))
+	require.NoError(t, fs.WriteFile(context.Background(), metadataLocation, nil))
 
 	plannedOrphan := location + "/data/planned.parquet"
 	newOrphan := location + "/data/appeared-after-confirmation.parquet"
-	require.NoError(t, fs.WriteFile(plannedOrphan, []byte("planned")))
+	require.NoError(t, fs.WriteFile(context.Background(), plannedOrphan, []byte("planned")))
 
 	tbl := table.New(
 		[]string{"db", "plan_race"},
@@ -192,7 +192,7 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	assert.Equal(t, []OrphanFile{{Path: plannedOrphan, SizeBytes: int64(len("planned"))}}, plan.OrphanFiles())
 	assert.False(t, plan.Cutoff().IsZero())
 
-	require.NoError(t, fs.WriteFile(newOrphan, []byte("new")))
+	require.NoError(t, fs.WriteFile(context.Background(), newOrphan, []byte("new")))
 	_, err = ExecuteOrphanCleanup(ctx, tbl, plan, WithCleanupFilesOlderThan(time.Hour))
 	require.ErrorContains(t, err, "WithCleanupFilesOlderThan")
 

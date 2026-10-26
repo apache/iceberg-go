@@ -90,7 +90,7 @@ func writeTestParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData 
 	defer rec.Release()
 
 	fs := iceio.LocalFS{}
-	fw, err := fs.Create(path)
+	fw, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 
 	tbl := array.NewTableFromRecords(sc, []arrow.RecordBatch{rec})

@@ -87,7 +87,11 @@ func (LocalFS) ReadFile(name string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func (LocalFS) Create(name string) (FileWriter, error) {
+func (LocalFS) Create(ctx context.Context, name string) (FileWriter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	filename, err := localPath(name)
 	if err != nil {
 		return nil, err
@@ -99,7 +103,11 @@ func (LocalFS) Create(name string) (FileWriter, error) {
 	return os.Create(filename)
 }
 
-func (LocalFS) WriteFile(name string, content []byte) error {
+func (LocalFS) WriteFile(ctx context.Context, name string, content []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	filename, err := localPath(name)
 	if err != nil {
 		return err

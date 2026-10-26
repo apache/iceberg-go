@@ -18,6 +18,7 @@
 package io_test
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"strings"
@@ -49,7 +50,7 @@ func benchmarkMemFSWalkDir(b *testing.B, nameForFile func(int) string) {
 		b.Run(fmt.Sprintf("files=%d", fileCount), func(b *testing.B) {
 			memIO := icebergio.NewMemFS()
 			for i := range fileCount {
-				if err := memIO.WriteFile(nameForFile(i), nil); err != nil {
+				if err := memIO.WriteFile(context.Background(), nameForFile(i), nil); err != nil {
 					b.Fatal(err)
 				}
 			}

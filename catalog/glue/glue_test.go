@@ -892,7 +892,7 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
 	dataFile := tableLocation + "/data/file.parquet"
 	writeGluePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation, nil)
-	assert.NoError(failingFS.WriteFile(dataFile, []byte("data")))
+	assert.NoError(failingFS.WriteFile(context.Background(), dataFile, []byte("data")))
 	glueTable := gluePurgeTable(metadataLocation)
 
 	mockGlueSvc := &mockGlueClient{}
@@ -1004,7 +1004,7 @@ func writeGluePurgeTableMetadata(
 	})
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, props)
 	require.NoError(t, err)
-	require.NoError(t, cataloginternal.WriteTableMetadata(meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
+	require.NoError(t, cataloginternal.WriteTableMetadata(context.Background(), meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
 }
 
 func TestGlueCreateNamespace(t *testing.T) {

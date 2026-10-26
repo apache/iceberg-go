@@ -89,11 +89,12 @@ type WriteFileIO interface {
 	IO
 
 	// Create attempts to create the named file and return a writer
-	// for it.
-	Create(name string) (FileWriter, error)
+	// for it. Implementations may use ctx to bound creation and writes
+	// performed through the returned writer.
+	Create(ctx context.Context, name string) (FileWriter, error)
 
 	// WriteFile writes p to the named file.
-	WriteFile(name string, p []byte) error
+	WriteFile(ctx context.Context, name string, p []byte) error
 }
 
 // ListableIO is the interface implemented by a file system that

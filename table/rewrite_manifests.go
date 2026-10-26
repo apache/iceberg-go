@@ -242,7 +242,7 @@ func (r *rewriteManifests) reuseManifests(parent *Snapshot) ([]iceberg.ManifestF
 	return result, inserted, nil
 }
 
-func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+func (r *rewriteManifests) processManifests(ctx context.Context, manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	var toRewrite, kept []iceberg.ManifestFile
 	for _, m := range manifests {
 		if r.eligible(m) {
@@ -253,6 +253,7 @@ func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([
 	}
 
 	mgr := manifestMergeManager{
+		ctx:             ctx,
 		targetSizeBytes: r.cfg.targetSizeBytes,
 		minCountToMerge: 1,    // force a merge regardless of count
 		mergeEnabled:    true, // explicit op ignores commit.manifest-merge.enabled
@@ -270,7 +271,7 @@ func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([
 	owned := false
 	defer func() {
 		if !owned {
-			r.deleteWritten(toRewrite, merged)
+			r.deleteWritten(context.WithoutCancel(ctx), toRewrite, merged)
 		}
 	}()
 
@@ -305,7 +306,7 @@ func (r *rewriteManifests) eligible(m iceberg.ManifestFile) bool {
 // deleteWritten removes the manifests mergeManifests newly wrote for this pass.
 // Single-manifest bins pass through with their input path and are left alone;
 // only the merged files (in the output but not the input) are deleted.
-func (r *rewriteManifests) deleteWritten(input, merged []iceberg.ManifestFile) {
+func (r *rewriteManifests) deleteWritten(ctx context.Context, input, merged []iceberg.ManifestFile) {
 	inPaths := make(map[string]struct{}, len(input))
 	for _, m := range input {
 		inPaths[m.FilePath()] = struct{}{}
@@ -314,7 +315,7 @@ func (r *rewriteManifests) deleteWritten(input, merged []iceberg.ManifestFile) {
 		if _, ok := inPaths[m.FilePath()]; ok {
 			continue
 		}
-		if err := r.base.io.Remove(context.Background(), m.FilePath()); err != nil {
+		if err := r.base.io.Remove(ctx, m.FilePath()); err != nil {
 			log.Printf("Warning: failed to delete orphaned merged manifest %s: %v", m.FilePath(), err)
 		}
 	}
@@ -497,7 +498,7 @@ func (t *Transaction) RewriteManifests(ctx context.Context, opts ...RewriteManif
 		return impl.result, nil
 	}
 
-	updates, reqs, err := prod.commitManifests(newManifests, addedContent)
+	updates, reqs, err := prod.commitManifests(ctx, newManifests, addedContent)
 	if err != nil {
 		return nil, err
 	}

@@ -187,7 +187,7 @@ func (w *DVWriter) Load(dataFilePath string, bitmap *RoaringPositionBitmap, spec
 // The location parameter is the full path (including filename) for the
 // Puffin file to create. The caller is responsible for generating a unique
 // path within the table's metadata directory.
-func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile, error) {
+func (w *DVWriter) Flush(ctx context.Context, location string) ([]iceberg.DataFile, error) {
 	if len(w.entries) == 0 {
 		return nil, nil
 	}
@@ -276,7 +276,7 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 		dataFiles = append(dataFiles, df)
 	}
 
-	if err := w.fs.WriteFile(location, fileBytes); err != nil {
+	if err := w.fs.WriteFile(ctx, location, fileBytes); err != nil {
 		return nil, fmt.Errorf("write DV puffin file: %w", err)
 	}
 

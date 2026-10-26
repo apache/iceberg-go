@@ -157,7 +157,7 @@ func inspectTableWithManifestListAndSchemas(t *testing.T, initialSchema, current
 	var listBuf bytes.Buffer
 	require.NoError(t, iceberg.WriteManifestList(version, &listBuf, snapshotID, nil,
 		listSequenceNumber, 0, manifests))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -1105,7 +1105,7 @@ func inspectFilesTableWithManifests(t *testing.T, spec iceberg.PartitionSpec, ma
 		manifest, err := writer.ToManifestFile(manifestPath, int64(manifestBuf.Len()),
 			iceberg.WithManifestFileContent(manifestSpec.content))
 		require.NoError(t, err)
-		require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+		require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 		manifestFiles = append(manifestFiles, manifest)
 	}
 
@@ -1113,7 +1113,7 @@ func inspectFilesTableWithManifests(t *testing.T, spec iceberg.PartitionSpec, ma
 	var listBuf bytes.Buffer
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(3, &listBuf, snapshotID, nil, &sequenceNumber, 0, manifestFiles))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapshotIDValue := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -1207,7 +1207,7 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{manifest}))
-	require.NoError(t, memFS.WriteFile(manifestListPath, list.Bytes()))
+	require.NoError(t, memFS.WriteFile(context.Background(), manifestListPath, list.Bytes()))
 
 	schemaID := schema.ID
 	snapshotOne := int64(1)
@@ -1321,12 +1321,12 @@ func TestInspectManifests(t *testing.T) {
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
 		[]iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	var listBuf bytes.Buffer
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{manifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -1764,7 +1764,7 @@ func TestInspectAllEntriesDeduplicatesSharedManifests(t *testing.T) {
 		var buf bytes.Buffer
 		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, memIO.WriteFile(path, buf.Bytes()))
+		require.NoError(t, memIO.WriteFile(context.Background(), path, buf.Bytes()))
 
 		return manifest
 	}
@@ -1779,7 +1779,7 @@ func TestInspectAllEntriesDeduplicatesSharedManifests(t *testing.T) {
 		var buf bytes.Buffer
 		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, parent,
 			&sequenceNumber, 0, manifests))
-		require.NoError(t, memIO.WriteFile(path, buf.Bytes()))
+		require.NoError(t, memIO.WriteFile(context.Background(), path, buf.Bytes()))
 		written, err := iceberg.ReadManifestList(bytes.NewReader(buf.Bytes()))
 		require.NoError(t, err)
 
@@ -1968,13 +1968,13 @@ func inspectDataFilesTable(t *testing.T, spec iceberg.PartitionSpec, entries []i
 	var manifestBuf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	var listBuf bytes.Buffer
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{manifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -2036,7 +2036,7 @@ func writeInspectManifest(
 	manifest, err := writer.ToManifestFile(path, int64(buf.Len()),
 		iceberg.WithManifestFileContent(content))
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
 	return manifest
 }
@@ -2087,7 +2087,7 @@ func inspectAllFilesTable(t *testing.T) *Table {
 		var buf bytes.Buffer
 		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, parent,
 			&sequenceNumber, 0, manifests))
-		require.NoError(t, memIO.WriteFile(path, buf.Bytes()))
+		require.NoError(t, memIO.WriteFile(context.Background(), path, buf.Bytes()))
 		written, err := iceberg.ReadManifestList(bytes.NewReader(buf.Bytes()))
 		require.NoError(t, err)
 
@@ -2354,13 +2354,13 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 	var manifestBuf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	var listBuf bytes.Buffer
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{manifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -2772,7 +2772,7 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	var dataManifestBuf bytes.Buffer
 	dataManifest, err := iceberg.WriteManifest(dataManifestPath, &dataManifestBuf, 2, spec, schema, snapshotID, dataEntries)
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(dataManifestPath, dataManifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), dataManifestPath, dataManifestBuf.Bytes()))
 
 	deleteFile := newTestPosDeleteFileForSpec(t, spec,
 		"mem://default/table-location/delete/positions.parquet", partition,
@@ -2803,14 +2803,14 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	deleteManifest, err := deleteWriter.ToManifestFile(deleteManifestPath, int64(deleteManifestBuf.Len()),
 		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(deleteManifestPath, deleteManifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), deleteManifestPath, deleteManifestBuf.Bytes()))
 
 	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
 	var listBuf bytes.Buffer
 	manifestListSequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil,
 		&manifestListSequenceNumber, 0, []iceberg.ManifestFile{dataManifest, deleteManifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	txn.meta.snapshotList = []Snapshot{{
 		SnapshotID:     snapshotID,
@@ -2865,7 +2865,7 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
 			iceberg.EntryStatusADDED, new(expiredSnapshotID), &sequenceNumber, &sequenceNumber, file)})
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 	manifest := iceberg.NewManifestBuilder(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
 		SequenceNumber(sequenceNumber, sequenceNumber).
 		AddedFiles(1).
@@ -2877,7 +2877,7 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 	currentSequenceNumber := int64(2)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, currentSnapshotID, nil,
 		&currentSequenceNumber, 0, []iceberg.ManifestFile{manifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	txn.meta.snapshotList = []Snapshot{{
 		SnapshotID:     currentSnapshotID,
@@ -2962,12 +2962,12 @@ func TestInspectEntriesIncludesDeletedEntries(t *testing.T) {
 	var manifestBuf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	var listBuf bytes.Buffer
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{manifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	txn.meta.snapshotList = []Snapshot{{
 		SnapshotID:     snapshotID,
@@ -3071,7 +3071,7 @@ func inspectPositionDeletesTableWithSchema(
 		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes),
 	)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(manifestPath, manifestBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuffer.Bytes()))
 
 	return inspectPositionDeletesTableWithManifests(
 		t, formatVersion, mb, tableSchema, fs, []iceberg.ManifestFile{manifest})
@@ -3095,7 +3095,7 @@ func inspectPositionDeletesTableWithManifests(
 		formatVersion, manifestListBuffer, snapshotID, nil, &sequenceNumber, 0,
 		manifests,
 	))
-	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, manifestListBuffer.Bytes()))
 
 	schemaID := tableSchema.ID
 	snapshot := &Snapshot{
@@ -3275,7 +3275,7 @@ func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {
 
 	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{record})
 	defer tbl.Release()
-	file, err := memFS.Create(deletePath)
+	file, err := memFS.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(
 		tbl, file, record.NumRows(),
@@ -3372,7 +3372,7 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 
 	arrowTable := array.NewTableFromRecords(sourceSchema, []arrow.RecordBatch{record})
 	defer arrowTable.Release()
-	file, err := memFS.Create(deletePath)
+	file, err := memFS.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(
 		arrowTable, file, record.NumRows(),
@@ -3456,7 +3456,7 @@ func TestInspectPositionDeletesParquetUsesNameMappingAndInitialDefault(t *testin
 
 	arrowTable := array.NewTableFromRecords(sourceSchema, []arrow.RecordBatch{record})
 	defer arrowTable.Release()
-	file, err := memFS.Create(deletePath)
+	file, err := memFS.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(
 		arrowTable, file, record.NumRows(),
@@ -3538,7 +3538,7 @@ func TestInspectPositionDeletesParquetProjectsDateToTimestampsV3(t *testing.T) {
 
 	arrowTable := array.NewTableFromRecords(sourceSchema, []arrow.RecordBatch{record})
 	defer arrowTable.Release()
-	file, err := memFS.Create(deletePath)
+	file, err := memFS.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(
 		arrowTable, file, record.NumRows(),

@@ -87,7 +87,7 @@ func (g *reorderGateIO) armCreate() {
 	g.createGate = make(chan struct{})
 }
 
-func (g *reorderGateIO) Create(name string) (iceio.FileWriter, error) {
+func (g *reorderGateIO) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
 	g.mu.Lock()
 	gate := g.createGate
 	g.mu.Unlock()
@@ -96,7 +96,7 @@ func (g *reorderGateIO) Create(name string) (iceio.FileWriter, error) {
 		<-gate
 	}
 
-	return g.LocalFS.Create(name)
+	return g.LocalFS.Create(ctx, name)
 }
 
 func (g *reorderGateIO) releaseCreate() {
@@ -202,7 +202,7 @@ func writeReorderDataFile(tb testing.TB, arrowSchema *arrow.Schema, path string,
 	arrowTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 	defer arrowTable.Release()
 
-	fw, err := iceio.LocalFS{}.Create(path)
+	fw, err := iceio.LocalFS{}.Create(context.Background(), path)
 	require.NoError(tb, err)
 	defer fw.Close()
 	require.NoError(tb, pqarrow.WriteTable(arrowTable, fw, int64(rows),

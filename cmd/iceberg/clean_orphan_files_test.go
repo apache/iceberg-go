@@ -66,8 +66,8 @@ func TestRunCleanOrphanFilesPreviewsPlanBeforeDeletion(t *testing.T) {
 
 	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
 	require.NoError(t, err)
-	require.NoError(t, memFS.WriteFile(metadataLocation, nil))
-	require.NoError(t, memFS.WriteFile(orphanPath, []byte("orphan")))
+	require.NoError(t, memFS.WriteFile(context.Background(), metadataLocation, nil))
+	require.NoError(t, memFS.WriteFile(context.Background(), orphanPath, []byte("orphan")))
 
 	tbl := table.New(
 		table.Identifier{"db", "preview"},

@@ -220,7 +220,7 @@ func newConflictValidationBenchmarkContext(b *testing.B, entryCount int) *confli
 	if err != nil {
 		b.Fatal(err)
 	}
-	if err := baseFS.WriteFile(manifestPath, manifest.Bytes()); err != nil {
+	if err := baseFS.WriteFile(context.Background(), manifestPath, manifest.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 
@@ -229,7 +229,7 @@ func newConflictValidationBenchmarkContext(b *testing.B, entryCount int) *confli
 	if err := iceberg.WriteManifestList(2, &manifestList, snapshotID, nil, &sequenceNumber, 0, []iceberg.ManifestFile{mf}); err != nil {
 		b.Fatal(err)
 	}
-	if err := baseFS.WriteFile(manifestListPath, manifestList.Bytes()); err != nil {
+	if err := baseFS.WriteFile(context.Background(), manifestListPath, manifestList.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 

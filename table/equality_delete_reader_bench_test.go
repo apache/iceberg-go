@@ -70,7 +70,7 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 
 			tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 			defer tbl.Release()
-			file, err := (iceio.LocalFS{}).Create(path)
+			file, err := (iceio.LocalFS{}).Create(context.Background(), path)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -312,7 +312,7 @@ func newEqualityDeleteLoadingBenchmarkInput(b *testing.B) equalityDeleteLoadingB
 	for i := range deleteFileCount {
 		path := fmt.Sprintf("mem://benchmark-lazy-equality/delete-%04d.parquet", i)
 		if i > 0 {
-			if err := fs.WriteFile(path, contents); err != nil {
+			if err := fs.WriteFile(context.Background(), path, contents); err != nil {
 				b.Fatal(err)
 			}
 		}

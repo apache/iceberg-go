@@ -468,7 +468,7 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	second.Release()
 	deleteTable := array.NewTableFromRecords(duplicateSchema, []arrow.RecordBatch{batch})
 	batch.Release()
-	file, err := iceio.LocalFS{}.Create(deletePath)
+	file, err := iceio.LocalFS{}.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	defer file.Close()
 	require.NoError(t, pqarrow.WriteTable(deleteTable, file, 1,

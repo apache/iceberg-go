@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -51,7 +52,7 @@ func TestReadDeletesForPathsRejectsNestedBloomFieldIDCollision(t *testing.T) {
 
 	fs := iceio.NewMemFS()
 	const deletePath = "mem://bucket/deletes/nested-bloom.parquet"
-	writer, err := fs.Create(deletePath)
+	writer, err := fs.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, writer, 1,
 		parquet.NewWriterProperties(parquet.WithStats(true), parquet.WithBloomFilterEnabled(true)),

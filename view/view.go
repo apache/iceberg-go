@@ -223,15 +223,15 @@ func createView(
 		return nil, errors.New("filesystem IO does not support writing")
 	}
 
-	if err := writeViewMetadata(wfs, metadataLocation, viewMetadataBytes); err != nil {
+	if err := writeViewMetadata(ctx, wfs, metadataLocation, viewMetadataBytes); err != nil {
 		return nil, err
 	}
 
 	return New(viewIdent, viewMD, metadataLocation), nil
 }
 
-func writeViewMetadata(wfs io.WriteFileIO, metadataLocation string, data []byte) (err error) {
-	out, err := wfs.Create(metadataLocation)
+func writeViewMetadata(ctx context.Context, wfs io.WriteFileIO, metadataLocation string, data []byte) (err error) {
+	out, err := wfs.Create(ctx, metadataLocation)
 	if err != nil {
 		return fmt.Errorf("failed to create view metadata file: %w", err)
 	}

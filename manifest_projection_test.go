@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"context"
 	"reflect"
 	"sync"
 	"testing"
@@ -297,7 +298,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			assert.Equal(t, map[int]int64{1: 64}, full.DataFile().ColumnSizes())
 
 			fs := iceio.NewMemFS()
-			require.NoError(t, fs.WriteFile(manifest.FilePath(), manifestBytes.Bytes()))
+			require.NoError(t, fs.WriteFile(context.Background(), manifest.FilePath(), manifestBytes.Bytes()))
 			projectedEntries := map[string]ManifestEntry{
 				"reader":                    projected,
 				"reader with pruning stats": withStats,

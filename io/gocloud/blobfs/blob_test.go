@@ -202,6 +202,66 @@ func TestBlobFileIOOpenPreprocessErrorRetainsOriginalPath(t *testing.T) {
 	assert.Equal(t, name, pathErr.Path)
 }
 
+func TestBlobFileIOWriteOperationsUseOperationContext(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	fileIO := testBlobFileIO(lifetimeCtx, "my-bucket", bucket)
+	cancelLifetime()
+
+	ctx := context.Background()
+	content := []byte("written with operation context")
+	require.NoError(t, fileIO.WriteFile(ctx, "s3://my-bucket/write-file", content))
+
+	writer, err := fileIO.Create(ctx, "s3://my-bucket/create-file")
+	require.NoError(t, err)
+	_, err = writer.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	for _, key := range []string{"write-file", "create-file"} {
+		got, err := bucket.ReadAll(ctx, key)
+		require.NoError(t, err)
+		assert.Equal(t, content, got)
+	}
+}
+
+func TestBlobFileIOWriteFileHonorsOperationCancellation(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := fileIO.WriteFile(ctx, "s3://my-bucket/canceled", []byte("content"))
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestBlobFileIOCreateHonorsOperationCancellation(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	writer, err := fileIO.Create(ctx, "s3://my-bucket/canceled")
+	if err == nil {
+		_, writeErr := writer.Write([]byte("content"))
+		closeErr := writer.Close()
+		err = errors.Join(writeErr, closeErr)
+	}
+	assert.ErrorIs(t, err, context.Canceled)
+	exists, err := bucket.Exists(context.Background(), "canceled")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
 func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *FileIO {
 	if len(allowedSchemes) == 0 {
 		allowedSchemes = schemes.S3
@@ -268,7 +328,7 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 			bfs := testBlobFileIO(ctx, "test-bucket", bucket, tt.allowedSchemes...)
 			require.NoError(t, bucket.WriteAll(ctx, tt.oldKey, []byte("sentinel"), nil))
 
-			err := bfs.WriteFile(tt.path, []byte("content"))
+			err := bfs.WriteFile(context.Background(), tt.path, []byte("content"))
 			require.ErrorContains(t, err, tt.wantErrText)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -605,7 +665,7 @@ func TestBlobFileIORawQueryFragmentRoundTrip(t *testing.T) {
 	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
 	location := "s3://test-bucket/path/to/file.parquet?param=value#fragment"
 	content := []byte("data")
-	require.NoError(t, bfs.WriteFile(location, content))
+	require.NoError(t, bfs.WriteFile(context.Background(), location, content))
 
 	file, err := bfs.Open(context.Background(), location)
 	require.NoError(t, err)
@@ -1018,7 +1078,7 @@ func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
 		run func() error
 	}{
 		{"remove", func() error { return fileIO.Remove(context.Background(), name) }},
-		{"write file", func() error { return fileIO.WriteFile(name, nil) }},
+		{"write file", func() error { return fileIO.WriteFile(context.Background(), name, nil) }},
 		{"new writer", func() error {
 			_, err := fileIO.NewWriter(context.Background(), name, true, nil)
 

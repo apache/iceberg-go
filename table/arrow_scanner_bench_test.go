@@ -131,7 +131,7 @@ func BenchmarkArrowScanManyFilesAndBatches(b *testing.B) {
 
 			const dataPath = "mem://benchmark/table/data.parquet"
 			fs := iceio.NewMemFS()
-			writer, err := fs.Create(dataPath)
+			writer, err := fs.Create(context.Background(), dataPath)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -244,7 +244,7 @@ func benchmarkSplitParquetScanWithRowGroups(
 	// B/op measures scanner allocations instead of one full-file copy per task.
 	path := filepath.Join(b.TempDir(), "data.parquet")
 	fs := iceio.LocalFS{}
-	if err := fs.WriteFile(path, buf.Bytes()); err != nil {
+	if err := fs.WriteFile(context.Background(), path, buf.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 
@@ -614,7 +614,7 @@ func BenchmarkArrowScanTaskResidual(b *testing.B) {
 
 	dataPath := "mem://benchmark/identity-residual/data.parquet"
 	fs := iceio.NewMemFS()
-	writer, err := fs.Create(dataPath)
+	writer, err := fs.Create(context.Background(), dataPath)
 	if err != nil {
 		b.Fatal(err)
 	}

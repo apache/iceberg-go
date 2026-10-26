@@ -203,7 +203,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 	var data bytes.Buffer
 	mf, err := iceberg.WriteManifest("mem://parity/data.avro", &data, 2, spec, schema, 10, entries)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(mf.FilePath(), data.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), mf.FilePath(), data.Bytes()))
 	var deletes bytes.Buffer
 	writer, err := iceberg.NewManifestWriter(2, &deletes, spec, schema, 20,
 		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
@@ -225,7 +225,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 	dm, err := writer.ToManifestFile("mem://parity/deletes.avro", int64(deletes.Len()),
 		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(dm.FilePath(), deletes.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), dm.FilePath(), deletes.Bytes()))
 	builder, err := table.MetadataBuilderFromBase(meta, "metadata.json")
 	require.NoError(t, err)
 	for i := range 2 {
@@ -241,7 +241,7 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		}
 		var list bytes.Buffer
 		require.NoError(t, iceberg.WriteManifestList(2, &list, snapshotID, parentSnapshotID, &seq, 0, manifests))
-		require.NoError(t, fs.WriteFile(path, list.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, list.Bytes()))
 		if i == 0 {
 			committed, err := iceberg.ReadManifestList(bytes.NewReader(list.Bytes()))
 			require.NoError(t, err)

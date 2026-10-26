@@ -378,7 +378,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	pqfile, err := url.JoinPath(expectedLocation, "data", "test_commit_table_data", "test.parquet")
 	s.Require().NoError(err)
 
-	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(pqfile)
+	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(context.Background(), pqfile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
@@ -425,7 +425,7 @@ func (s *RestIntegrationSuite) writeParquetFile(tbl *table.Table, schema *iceber
 	pqfile, err := url.JoinPath(tbl.Location(), "data", subpath, "test.parquet")
 	s.Require().NoError(err)
 
-	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(pqfile)
+	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(context.Background(), pqfile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(arrowTbl, fw, arrowTbl.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))

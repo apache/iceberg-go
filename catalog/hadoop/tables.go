@@ -105,7 +105,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 
 	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
-	if err := internal.WriteTableMetadata(metadata, c.filesystem, tempPath, compression); err != nil {
+	if err := internal.WriteTableMetadata(ctx, metadata, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(context.WithoutCancel(ctx), tempPath)
 
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
@@ -115,7 +115,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
-	c.writeVersionHint(ident, version)
+	c.writeVersionHint(ctx, ident, version)
 
 	tbl := table.New(
 		ident,
@@ -244,7 +244,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
-	if err := internal.WriteTableMetadata(updated, c.filesystem, tempPath, compression); err != nil {
+	if err := internal.WriteTableMetadata(ctx, updated, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(context.WithoutCancel(ctx), tempPath)
 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
@@ -255,7 +255,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	// Step 8: Best-effort version hint update.
-	c.writeVersionHint(ident, newVersion)
+	c.writeVersionHint(ctx, ident, newVersion)
 
 	return updated, newMetaPath, nil
 }

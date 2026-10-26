@@ -146,7 +146,7 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB, splitOffsets bool) *Ta
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := fs.WriteFile(manifestPath, manifestBuffer.Bytes()); err != nil {
+		if err := fs.WriteFile(context.Background(), manifestPath, manifestBuffer.Bytes()); err != nil {
 			b.Fatal(err)
 		}
 		manifests[manifestIndex] = iceberg.NewManifestBuilder(
@@ -162,7 +162,7 @@ func newPlanFilesFinalizationBenchmarkTable(b testing.TB, splitOffsets bool) *Ta
 	requireNoErrorBenchmark(b, iceberg.WriteManifestList(
 		2, &manifestListBuffer, snapshotID, nil, new(sequenceNum), 0, manifests,
 	))
-	requireNoErrorBenchmark(b, fs.WriteFile(manifestListPath, manifestListBuffer.Bytes()))
+	requireNoErrorBenchmark(b, fs.WriteFile(context.Background(), manifestListPath, manifestListBuffer.Bytes()))
 
 	schemaID := meta.CurrentSchema().ID
 	requireNoErrorBenchmark(b, builder.AddSnapshot(&Snapshot{

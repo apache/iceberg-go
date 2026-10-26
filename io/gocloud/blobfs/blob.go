@@ -334,17 +334,17 @@ func (bfs *FileIO) Remove(ctx context.Context, name string) error {
 	return nil
 }
 
-func (bfs *FileIO) Create(name string) (icebergio.FileWriter, error) {
-	return bfs.NewWriter(bfs.ctx, name, true, nil)
+func (bfs *FileIO) Create(ctx context.Context, name string) (icebergio.FileWriter, error) {
+	return bfs.NewWriter(ctx, name, true, nil)
 }
 
-func (bfs *FileIO) WriteFile(name string, content []byte) error {
+func (bfs *FileIO) WriteFile(ctx context.Context, name string, content []byte) error {
 	key, err := bfs.preprocess(name)
 	if err != nil {
 		return &fs.PathError{Op: "write file", Path: name, Err: err}
 	}
 
-	return bfs.WriteAll(bfs.ctx, key, content, nil)
+	return bfs.WriteAll(ctx, key, content, nil)
 }
 
 // NewWriter returns a Writer that writes to the blob stored at path.

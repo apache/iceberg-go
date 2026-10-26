@@ -38,13 +38,13 @@ func (m *MockFS) Open(_ context.Context, name string) (io.File, error) {
 	return args.Get(0).(io.File), args.Error(1)
 }
 
-func (m *MockFS) Create(name string) (io.FileWriter, error) {
+func (m *MockFS) Create(ctx context.Context, name string) (io.FileWriter, error) {
 	args := m.Called(name)
 
 	return args.Get(0).(io.FileWriter), args.Error(1)
 }
 
-func (m *MockFS) WriteFile(name string, content []byte) error {
+func (m *MockFS) WriteFile(ctx context.Context, name string, content []byte) error {
 	return m.Called(name, content).Error(0)
 }
 

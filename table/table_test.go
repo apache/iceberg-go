@@ -510,7 +510,7 @@ func (t *TableWritingTestSuite) getMetadataLoc() string {
 }
 
 func (t *TableWritingTestSuite) writeParquet(fio iceio.WriteFileIO, filePath string, arrTbl arrow.Table) {
-	fo, err := fio.Create(filePath)
+	fo, err := fio.Create(context.Background(), filePath)
 	t.Require().NoError(err)
 
 	t.Require().NoError(pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(),
@@ -518,7 +518,7 @@ func (t *TableWritingTestSuite) writeParquet(fio iceio.WriteFileIO, filePath str
 }
 
 func (t *TableWritingTestSuite) writeParquetWithStoredSchema(fio iceio.WriteFileIO, filePath string, arrTbl arrow.Table) {
-	fo, err := fio.Create(filePath)
+	fo, err := fio.Create(context.Background(), filePath)
 	t.Require().NoError(err)
 
 	t.Require().NoError(pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(),
@@ -3611,7 +3611,7 @@ func TestWritesToUnknownTransformSpecFail(t *testing.T) {
 				defer arrTable.Release()
 
 				filePath := location + "/data/add-files.parquet"
-				fo, err := mustFS(t, tbl).(iceio.WriteFileIO).Create(filePath)
+				fo, err := mustFS(t, tbl).(iceio.WriteFileIO).Create(context.Background(), filePath)
 				require.NoError(t, err)
 				require.NoError(t, pqarrow.WriteTable(arrTable, fo, arrTable.NumRows(), nil, pqarrow.DefaultWriterProps()))
 

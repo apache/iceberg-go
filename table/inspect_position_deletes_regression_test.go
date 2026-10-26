@@ -47,7 +47,7 @@ func writePositionDeleteManifestList(
 	var buf bytes.Buffer
 	require.NoError(t, iceberg.WriteManifestList(
 		2, &buf, snapshotID, parentSnapshotID, &sequenceNumber, 0, manifests))
-	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 }
 
 func TestInspectPositionDeletesV3MixesParquetAndDeletionVector(t *testing.T) {

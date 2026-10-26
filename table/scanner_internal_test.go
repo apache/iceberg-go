@@ -570,7 +570,7 @@ func scanWithManifestCount(tb testing.TB, manifestCount int) (*Scan, *iceio.MemF
 			[]iceberg.ManifestEntry{entry},
 		)
 		require.NoError(tb, err)
-		require.NoError(tb, fs.WriteFile(manifestPath, manifestData.Bytes()))
+		require.NoError(tb, fs.WriteFile(context.Background(), manifestPath, manifestData.Bytes()))
 	}
 
 	const manifestListPath = "mem://planning/table/metadata/snap-1.avro"
@@ -585,7 +585,7 @@ func scanWithManifestCount(tb testing.TB, manifestCount int) (*Scan, *iceio.MemF
 		0,
 		manifests,
 	))
-	require.NoError(tb, fs.WriteFile(manifestListPath, manifestListData.Bytes()))
+	require.NoError(tb, fs.WriteFile(context.Background(), manifestListPath, manifestListData.Bytes()))
 
 	builder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(tb, err)
@@ -664,7 +664,7 @@ func TestOpenManifestShortCircuitsMetricsEvaluation(t *testing.T) {
 	require.NoError(t, err)
 
 	fs := iceio.NewMemFS()
-	require.NoError(t, fs.WriteFile(manifestPath, manifestBytes.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()))
 
 	tests := []struct {
 		name             string
@@ -1106,7 +1106,7 @@ func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
 	var listBuf bytes.Buffer
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{mf}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -1152,7 +1152,7 @@ func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testin
 	var listBuf bytes.Buffer
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{mf}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -1229,7 +1229,7 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0,
 		[]iceberg.ManifestFile{dataScanned, dataSkipped, deleteScanned}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{
@@ -1370,7 +1370,7 @@ func TestPlanFilesSkipsKnownEmptyManifestsBeforeOpening(t *testing.T) {
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{dataManifest, deleteManifest}))
-	require.NoError(t, fs.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	schemaID := metadata.CurrentSchema().ID
 	require.NoError(t, builder.AddSnapshot(&Snapshot{
@@ -1432,7 +1432,7 @@ func TestScanReusesPartitionFiltersAcrossPlanningPhases(t *testing.T) {
 	require.NoError(t, err)
 
 	memIO := iceio.NewMemFS()
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()))
 
 	scan := &Scan{
 		metadata:      metadata,
@@ -1640,7 +1640,7 @@ func TestTimeTravelManifestPruningUsesSnapshotSchema(t *testing.T) {
 	seqNum := int64(1)
 	err := iceberg.WriteManifestList(2, &listBytes, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{manifest})
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBytes.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBytes.Bytes()))
 
 	tasks, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
@@ -1676,7 +1676,7 @@ func TestTimeTravelMetricsPruningUsesSnapshotSchema(t *testing.T) {
 	var manifestBytes bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBytes, 2, spec, oldSchema, snapshotID, []iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()))
 
 	entries, err := scan.collectManifestEntries(context.Background(), []iceberg.ManifestFile{manifest})
 	require.NoError(t, err)
@@ -2323,7 +2323,7 @@ func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
 		_, err = iceberg.WriteManifest(manifestPath, &manifestBytes, 2, spec, oldSchema, snapshotID,
 			[]iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+		require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()))
 
 		// Partition summary excludes the filter value (id == 5).
 		manifest := iceberg.NewManifestBuilder(2, manifestPath, int64(manifestBytes.Len()), int32(spec.ID()), snapshotID).
@@ -2336,7 +2336,7 @@ func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
 		seqNum := int64(1)
 		require.NoError(t, iceberg.WriteManifestList(2, &listBytes, snapshotID, nil, &seqNum, 0,
 			[]iceberg.ManifestFile{manifest}))
-		require.NoError(t, memIO.WriteFile(manifestListPath, listBytes.Bytes()))
+		require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBytes.Bytes()))
 
 		tasks, err := scan.PlanFiles(context.Background())
 		require.NoError(t, err)
