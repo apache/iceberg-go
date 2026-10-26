@@ -51,7 +51,7 @@ func init() {
 	}))
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient
@@ -784,7 +784,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}
 
-	if err := fs.Remove(metadataLocation); err != nil {
+	if err := fs.Remove(ctx, metadataLocation); err != nil {
 		return fmt.Errorf("failed to remove view metadata file at %s: %w", metadataLocation, err)
 	}
 

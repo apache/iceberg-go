@@ -130,13 +130,13 @@ type failingLazyDeletionVectorIO struct {
 	err   error
 }
 
-func (f *failingLazyDeletionVectorIO) Open(string) (iceio.File, error) {
+func (f *failingLazyDeletionVectorIO) Open(context.Context, string) (iceio.File, error) {
 	f.opens.Add(1)
 
 	return nil, f.err
 }
 
-func (f *failingLazyDeletionVectorIO) Remove(string) error { return nil }
+func (f *failingLazyDeletionVectorIO) Remove(context.Context, string) error { return nil }
 
 func TestLazyDeletionVectorLoaderCachesGroupErrors(t *testing.T) {
 	const dataFilePath = "file:///table/data/missing.parquet"
@@ -173,8 +173,8 @@ type cancelOnOpenIO struct {
 	opens  atomic.Int64
 }
 
-func (f *cancelOnOpenIO) Open(name string) (iceio.File, error) {
-	file, err := f.LocalFS.Open(name)
+func (f *cancelOnOpenIO) Open(_ context.Context, name string) (iceio.File, error) {
+	file, err := f.LocalFS.Open(context.Background(), name)
 	if err == nil {
 		f.opens.Add(1)
 		f.cancel()
@@ -224,8 +224,8 @@ type countingPuffinOpenIO struct {
 	opens atomic.Int64
 }
 
-func (f *countingPuffinOpenIO) Open(name string) (iceio.File, error) {
-	file, err := f.base.Open(name)
+func (f *countingPuffinOpenIO) Open(_ context.Context, name string) (iceio.File, error) {
+	file, err := f.base.Open(context.Background(), name)
 	if err == nil && strings.HasSuffix(name, ".puffin") {
 		f.opens.Add(1)
 	}
@@ -233,7 +233,9 @@ func (f *countingPuffinOpenIO) Open(name string) (iceio.File, error) {
 	return file, err
 }
 
-func (f *countingPuffinOpenIO) Remove(name string) error { return f.base.Remove(name) }
+func (f *countingPuffinOpenIO) Remove(_ context.Context, name string) error {
+	return f.base.Remove(context.Background(), name)
+}
 
 func TestReadTasksDoesNotLoadDeletionVectorsBeforeIteration(t *testing.T) {
 	baseFS := iceio.LocalFS{}

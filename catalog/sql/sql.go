@@ -382,7 +382,7 @@ func isRetryableSerializableError(err error) bool {
 		strings.Contains(msg, "ORA-00060")
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	db            *bun.DB
@@ -754,12 +754,15 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func removeUncommittedMetadata(ctx context.Context, metadataLocation string, loadFS table.FSysF) error {
-	fs, err := loadFS(context.WithoutCancel(ctx))
+	// This runs after a failed commit, which may have failed because ctx was
+	// canceled, so neither the load nor the removal inherits that cancellation.
+	cleanupCtx := context.WithoutCancel(ctx)
+	fs, err := loadFS(cleanupCtx)
 	if err != nil {
 		return fmt.Errorf("failed to load filesystem while removing uncommitted metadata %s: %w", metadataLocation, err)
 	}
 
-	if err := fs.Remove(metadataLocation); err != nil {
+	if err := fs.Remove(cleanupCtx, metadataLocation); err != nil {
 		return fmt.Errorf("failed to remove uncommitted metadata %s: %w", metadataLocation, err)
 	}
 
@@ -1705,7 +1708,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 			return err
 		}
 
-		_ = fs.Remove(metadataLocation)
+		_ = fs.Remove(ctx, metadataLocation)
 	}
 
 	return nil

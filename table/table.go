@@ -174,20 +174,9 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
-	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	txn, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
 		return t.newBrokenTransaction(MainBranch, err)
-	}
-
-	return txn
-}
-
-// NewTransactionOnBranch creates a new transaction that commits to the named
-// branch. Use [NewTransaction] to commit to the default "main" branch.
-func (t Table) NewTransactionOnBranch(branch string) *Transaction {
-	txn, err := t.NewTransactionOnBranchWithError(branch)
-	if err != nil {
-		return t.newBrokenTransaction(branch, err)
 	}
 
 	return txn
@@ -202,13 +191,12 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 	}
 }
 
-// NewTransactionOnBranchWithError creates a new transaction and returns any metadata
-// initialization error that prevents builder construction.
-//
-// This preserves the old non-failing constructor contract while allowing
-// callers to receive the precise initialization error instead of hitting
-// panic/undefined behavior later.
-func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+// NewTransactionOnBranch creates a transaction that commits to the named
+// branch. Initialization failures and attempts to target a tag are returned
+// immediately instead of being stored in a broken transaction.
+// A missing branch is allowed; its absence is checked at commit time.
+// Use [NewTransaction] to target the default "main" branch.
+func (t Table) NewTransactionOnBranch(branch string) (*Transaction, error) {
 	for name, ref := range t.metadata.Refs() {
 		if name != branch {
 			continue
@@ -661,8 +649,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		if !cleanupOrphans || len(orphanedManifests) == 0 {
 			return
 		}
+		// The commit may have failed because ctx was canceled; remove the
+		// orphans without that cancellation so they are not left behind.
+		cleanupCtx := context.WithoutCancel(ctx)
 		for _, path := range orphanedManifests {
-			if removeErr := wfs.Remove(path); removeErr != nil {
+			if removeErr := wfs.Remove(cleanupCtx, path); removeErr != nil {
 				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
 			}
 		}
@@ -1224,7 +1215,8 @@ func deleteOldMetadata(fs icebergio.IO, baseMeta, newMeta Metadata) {
 		toRemove := internal.Difference(removedPrevious, currentMetadata)
 
 		for _, file := range toRemove {
-			if err := fs.Remove(file); err != nil {
+			// deleteOldMetadata is best-effort cleanup with no caller context.
+			if err := fs.Remove(context.Background(), file); err != nil {
 				// Log the error instead of raising it when deleting old metadata files, as an external entity like a compactor may have already deleted them
 				log.Printf("Warning: Failed to delete old metadata file: %s error: %v", file, err)
 			}
@@ -1553,7 +1545,7 @@ func NewFromLocation(
 			return nil, err
 		}
 	} else {
-		f, err := fsys.Open(metalocation)
+		f, err := fsys.Open(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}
