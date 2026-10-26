@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Filesystem adapter construction consolidated.</strong> Replace <code>io.FSPreProcName(fsys, fn)</code> with <code>io.FS(fsys, io.WithNamePreprocessor(fn))</code>. Plain <code>io.FS(fsys)</code> remains supported.</p>
+</li>
+<li>
 <p><strong>Table purge is required on catalogs.</strong> The <code>catalog.Catalog</code> interface now embeds <code>catalog.PurgeableCatalog</code>; every custom catalog implementation must provide <code>PurgeTable(ctx, identifier) error</code>. The narrow <code>catalog.PurgeableTable</code> interface is renamed to <code>catalog.PurgeableCatalog</code>. Built-in purge behavior is unchanged.</p>
 </li>
 <li>

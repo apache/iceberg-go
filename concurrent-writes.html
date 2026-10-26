@@ -278,7 +278,11 @@ rejects when concurrent deletes touch the same files.</p>
 <p>iceberg-go can refresh the table and replay the operation against the latest
 snapshot between attempts. On each retry the table metadata is reloaded, the
 producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid.</p>
+re-submitted only if it is still valid. <code>RollbackToSnapshot</code>, <code>ExpireSnapshots</code>
+and <code>AssertRefSnapshotID</code> pin the refs they guard, so a retry does not rebase
+those assertions. If a guarded ref has moved, the commit fails with
+<code>ErrCommitFailed</code> instead of retrying. An <code>ExpireSnapshots</code> that removes nothing
+adds no guards.</p>
 <p>Retry is <strong>off by default</strong> (<code>commit.retry.num-retries</code> is <code>0</code>). Opt in by
 setting the retry properties — see <a href="./configuration.html#manifest-and-commit">Manifest and commit</a>
 in the configuration reference for the full list:</p>
@@ -290,9 +294,9 @@ _, err := cat.CreateTable(ctx, ident, schema,
 )
 </code></pre>
 <blockquote>
-<p><strong>Catalog support:</strong> retry currently engages on the REST catalog, which wraps
-commit conflicts as <code>ErrCommitFailed</code>. The Glue, SQL, and Hive catalogs do
-not yet wrap their conflict errors, so the retry loop will not fire on them.</p>
+<p><strong>Catalog support:</strong> the REST, SQL, Glue, Hive, and Hadoop catalogs report
+commit conflicts, including requirements that fail because of a concurrent
+change, as <code>ErrCommitFailed</code>, so the retry loop engages on all of them.</p>
 </blockquote>
 
                     </main>
