@@ -36,7 +36,7 @@ func TestMemFSOpenPreservesSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	oldFile, err := memFS.Open(name)
+	oldFile, err := memFS.Open(t.Context(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,16 +47,16 @@ func TestMemFSOpenPreservesSnapshots(t *testing.T) {
 	if err := memFS.WriteFile(name, []byte("replacement")); err != nil {
 		t.Fatal(err)
 	}
-	newFile, err := memFS.Open(name)
+	newFile, err := memFS.Open(t.Context(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer newFile.Close()
 
-	if err := memFS.Remove(name); err != nil {
+	if err := memFS.Remove(t.Context(), name); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := memFS.Open(name); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := memFS.Open(t.Context(), name); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("open after remove: got %v, want fs.ErrNotExist", err)
 	}
 
@@ -106,7 +106,7 @@ func TestMemFSOpenPreservesSnapshotAcrossCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	oldFile, err := memFS.Open(name)
+	oldFile, err := memFS.Open(t.Context(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestMemFSOpenPreservesSnapshotAcrossCreate(t *testing.T) {
 		t.Fatalf("open reader changed after Create replacement: got %q", got)
 	}
 
-	current, err := memFS.Open(name)
+	current, err := memFS.Open(t.Context(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestMemFSOpenConcurrentReplacement(t *testing.T) {
 	})
 
 	for range 300 {
-		file, err := memFS.Open(name)
+		file, err := memFS.Open(t.Context(), name)
 		if err != nil {
 			t.Errorf("open: %v", err)
 

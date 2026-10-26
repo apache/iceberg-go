@@ -38,7 +38,7 @@ func BenchmarkMemFSOpen(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				file, err := memFS.Open(name)
+				file, err := memFS.Open(b.Context(), name)
 				if err != nil {
 					b.Fatal(err)
 				}
