@@ -265,7 +265,11 @@ func TestKMSRegistry_GlobalRegistrationCompatibility(t *testing.T) {
 	encryption.MustRegisterKMS(name, memoryKMSFactory)
 	t.Cleanup(func() { encryption.UnregisterKMS(name) })
 
-	assert.Panics(t, func() { encryption.RegisterKMS(name, memoryKMSFactory) })
+	assert.Panics(t, func() {
+		encryption.RegisterKMS(name, func(_ context.Context, _ map[string]string) (encryption.KeyManagementClient, error) {
+			return nil, assert.AnError
+		})
+	})
 	assert.Panics(t, func() { encryption.RegisterKMS("test-nil-global-kms", nil) })
 
 	kms, err := encryption.LoadKeyManagementClient(t.Context(), map[string]string{encryption.KMSTypeKey: name})
