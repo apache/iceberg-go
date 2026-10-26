@@ -2612,7 +2612,7 @@ make integration-external-rest
 <p><strong>Substrait expression conversion no longer takes case sensitivity.</strong> <code>substrait.ConvertExpr(schema, expression, caseSensitive)</code> becomes <code>substrait.ConvertExpr(schema, expression)</code>. Case sensitivity remains part of expression binding.</p>
 </li>
 <li>
-<p><strong>Transform formatting requires the result type.</strong> <code>Transform.ToHumanStr(value)</code> is removed. Use <code>Transform.ToHumanStrType(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
+<p><strong>Transform formatting requires the result type and uses the Java-aligned method name.</strong> <code>Transform.ToHumanStr(value)</code> and <code>Transform.ToHumanStrType(resultType, value)</code> are removed. Use <code>Transform.ToHumanString(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
 </li>
 <li>
 <p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> remains available as an alias for <code>io.Closer</code>.</p>
