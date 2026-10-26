@@ -419,7 +419,7 @@ func TestBranchCommitRejectsNameThatBecomesATagOnRetry(t *testing.T) {
 			featureRef = ref
 		}
 	}
-	require.Equal(t, TagRef, featureRef.SnapshotRefType, "the tag must not be converted into a branch")
+	require.Equal(t, TagRef, featureRef.Type, "the tag must not be converted into a branch")
 	require.Equal(t, mainHead, featureRef.SnapshotID, "the tag must not advance")
 }
 
@@ -817,7 +817,7 @@ func TestExpireSnapshotsRetainsRefHeads(t *testing.T) {
 			ref, refExists := txn.meta.refs[tt.refName]
 			require.True(t, refExists, "ref %q must survive expiry", tt.refName)
 			require.Equal(t, int64(20), ref.SnapshotID, "ref %q must still point at its head", tt.refName)
-			require.Equal(t, tt.refType, ref.SnapshotRefType, "ref %q must keep its type", tt.refName)
+			require.Equal(t, tt.refType, ref.Type, "ref %q must keep its type", tt.refName)
 
 			_, err := txn.meta.SnapshotByID(20)
 			require.NoError(t, err, "head snapshot of ref %q must not be expired", tt.refName)
@@ -1169,7 +1169,9 @@ func TestTransactionEntryPointsRejectNilAndBrokenTransaction(t *testing.T) {
 		{"AppendTable", func(txn *Transaction) error { return txn.AppendTable(ctx, nil, 0, nil) }},
 		{"Append", func(txn *Transaction) error { return txn.Append(ctx, nil, nil) }},
 		{"AddDataFiles", func(txn *Transaction) error { return txn.AddDataFiles(ctx, []iceberg.DataFile{dataFile}, nil) }},
-		{"AddFiles", func(txn *Transaction) error { return txn.AddFiles(ctx, []string{"file://a.parquet"}, nil, false) }},
+		{"AddDataFilesByPath", func(txn *Transaction) error {
+			return txn.AddDataFilesByPath(ctx, []string{"file://a.parquet"}, nil, false)
+		}},
 		{"ReplaceDataFilesByPath", func(txn *Transaction) error {
 			return txn.ReplaceDataFilesByPath(ctx, []string{"a"}, []string{"b"}, nil)
 		}},
@@ -1266,7 +1268,7 @@ func TestTransactionApplyKeepsMetadataUnchangedOnUpdateFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	updates := []Update{
-		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewUpgradeFormatVersionUpdate(baseMeta.FormatVersion() + 1),
 		NewSetCurrentSchemaUpdate(9999),
 	}
 
@@ -1301,7 +1303,7 @@ func TestTransactionApplyKeepsRequirementsUnchangedOnUpdateFailure(t *testing.T)
 	// the requirement list at their pre-call state — not the one extra req this
 	// call would add, and not an empty list.
 	updates := []Update{
-		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewUpgradeFormatVersionUpdate(baseMeta.FormatVersion() + 1),
 		NewSetCurrentSchemaUpdate(9999),
 	}
 	err = txn.apply(updates, []Requirement{AssertCurrentSchemaID(0)})
@@ -1715,10 +1717,10 @@ func requireUntouchedRollbackRefs(t *testing.T, txn *Transaction, except string)
 	t.Helper()
 
 	want := map[string]SnapshotRef{
-		MainBranch: {SnapshotID: 20, SnapshotRefType: BranchRef},
-		"feature":  {SnapshotID: 30, SnapshotRefType: BranchRef},
-		"diverged": {SnapshotID: 40, SnapshotRefType: BranchRef},
-		"v1":       {SnapshotID: 10, SnapshotRefType: TagRef},
+		MainBranch: {SnapshotID: 20, Type: BranchRef},
+		"feature":  {SnapshotID: 30, Type: BranchRef},
+		"diverged": {SnapshotID: 40, Type: BranchRef},
+		"v1":       {SnapshotID: 10, Type: TagRef},
 	}
 	for name, expected := range want {
 		if name == except {
@@ -1728,7 +1730,7 @@ func requireUntouchedRollbackRefs(t *testing.T, txn *Transaction, except string)
 		require.True(t, ok, "ref %q must still exist after a rollback of %q", name, except)
 		require.Equal(t, expected.SnapshotID, actual.SnapshotID,
 			"rollback of %q must not move ref %q", except, name)
-		require.Equal(t, expected.SnapshotRefType, actual.SnapshotRefType,
+		require.Equal(t, expected.Type, actual.Type,
 			"rollback of %q must not change the type of ref %q", except, name)
 	}
 
@@ -1752,7 +1754,7 @@ func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
 
 	featureRef := branchTxn.meta.refs["feature"]
 	require.Equal(t, int64(10), featureRef.SnapshotID, "rollback must move the targeted branch")
-	require.Equal(t, BranchRef, featureRef.SnapshotRefType, "the rolled-back ref must stay a branch")
+	require.Equal(t, BranchRef, featureRef.Type, "the rolled-back ref must stay a branch")
 	requireUntouchedRollbackRefs(t, branchTxn, "feature")
 
 	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", new(int64(30)))
@@ -1806,7 +1808,7 @@ func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
 
 	branchTxn, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
-	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 9999, SnapshotRefType: BranchRef}
+	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 9999, Type: BranchRef}
 
 	err = branchTxn.RollbackToSnapshot(10)
 	require.Error(t, err)
@@ -1825,14 +1827,14 @@ func TestRollbackToSnapshotRejectsTagRef(t *testing.T) {
 
 	branchTxn, err := tbl.NewTransactionOnBranch("feature")
 	require.NoError(t, err)
-	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 30, SnapshotRefType: TagRef}
+	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 30, Type: TagRef}
 
 	err = branchTxn.RollbackToSnapshot(10)
 	require.Error(t, err, "a ref that is a tag must not be rolled back as a branch")
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, `ref "feature" is a tag, not a branch`)
 
-	require.Equal(t, TagRef, branchTxn.meta.refs["feature"].SnapshotRefType,
+	require.Equal(t, TagRef, branchTxn.meta.refs["feature"].Type,
 		"the rejected ref must keep its tag type")
 	require.Equal(t, int64(30), branchTxn.meta.refs["feature"].SnapshotID)
 	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
@@ -1847,7 +1849,7 @@ func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
 
 		require.NoError(t, txn.RollbackToSnapshot(10))
 		require.Equal(t, int64(10), txn.meta.refs[MainBranch].SnapshotID)
-		require.Equal(t, BranchRef, txn.meta.refs[MainBranch].SnapshotRefType)
+		require.Equal(t, BranchRef, txn.meta.refs[MainBranch].Type)
 		require.NotNil(t, txn.meta.currentSnapshotID)
 		require.Equal(t, int64(10), *txn.meta.currentSnapshotID,
 			"rolling main back must also move the current-snapshot pointer")
@@ -2170,7 +2172,7 @@ func TestTableCommitWithSnapshotProducerPinsBaseHead(t *testing.T) {
 	tbl, _, _ := newProducerAssertRefTable(t)
 
 	seed := tbl.NewTransaction()
-	require.NoError(t, seed.AddFiles(t.Context(), nil, nil, false))
+	require.NoError(t, seed.AddDataFilesByPath(t.Context(), nil, nil, false))
 	tbl, err := seed.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -2178,7 +2180,7 @@ func TestTableCommitWithSnapshotProducerPinsBaseHead(t *testing.T) {
 	require.NotNil(t, baseHead)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), nil, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), nil, nil, false))
 
 	tc, err := tx.TableCommit()
 	require.NoError(t, err)

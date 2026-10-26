@@ -653,7 +653,7 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 		useSnapshotSchema := true
 		for refName, ref := range scan.metadata.Refs() {
 			if refName == name {
-				useSnapshotSchema = ref.SnapshotRefType == TagRef
+				useSnapshotSchema = ref.Type == TagRef
 
 				break
 			}
@@ -718,7 +718,7 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	curVersion := scan.metadata.Version()
+	curVersion := scan.metadata.FormatVersion()
 
 	if scan.includeRowLineage && curVersion < minFormatVersionRowLineage {
 		return nil, fmt.Errorf("%w: row lineage requires format version %d, table is v%d",

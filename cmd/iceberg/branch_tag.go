@@ -284,8 +284,8 @@ func runRefDelete(ctx context.Context, output Output, cat catalog.Catalog, table
 		return
 	}
 
-	if ref.SnapshotRefType != refType {
-		output.Error(fmt.Errorf("ref %q is a %s, not a %s", refName, ref.SnapshotRefType, refType))
+	if ref.Type != refType {
+		output.Error(fmt.Errorf("ref %q is a %s, not a %s", refName, ref.Type, refType))
 		osExit(1)
 
 		return

@@ -155,7 +155,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	}
 
 	tx := tbl.NewTransaction()
-	err = tx.AddFiles(s.ctx, []string{filename}, nil, false)
+	err = tx.AddDataFilesByPath(s.ctx, []string{filename}, nil, false)
 	s.Require().NoError(err)
 
 	tbl, err = tx.Commit(s.ctx)

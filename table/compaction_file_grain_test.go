@@ -56,7 +56,7 @@ func TestCompactionPreservesSplitFileRows(t *testing.T) {
 					}
 					tx := tbl.NewTransaction()
 					require.NoError(t, tx.SetProperties(iceberg.Properties{table.ReadSplitTargetSizeKey: splitSize}))
-					require.NoError(t, tx.AddFiles(t.Context(), []string{path}, nil, false))
+					require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false))
 					tbl, err = tx.Commit(t.Context())
 					require.NoError(t, err)
 					scan := tbl.Scan()

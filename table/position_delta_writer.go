@@ -91,9 +91,9 @@ func NewPositionDeltaWriter(tbl *Table, opts ...WriteRecordOption) (*PositionDel
 		return nil, fmt.Errorf("%w: table is nil", iceberg.ErrInvalidArgument)
 	}
 
-	if tbl.metadata.Version() < 3 {
+	if tbl.metadata.FormatVersion() < 3 {
 		return nil, fmt.Errorf("%w: PositionDeltaWriter requires format version >= 3, got %d",
-			iceberg.ErrInvalidArgument, tbl.metadata.Version())
+			iceberg.ErrInvalidArgument, tbl.metadata.FormatVersion())
 	}
 
 	return &PositionDeltaWriter{

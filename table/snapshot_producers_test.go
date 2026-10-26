@@ -567,7 +567,7 @@ func TestManifestMergeManagerClosesWriterOnError(t *testing.T) {
 	require.NoError(t, err, "write manifest")
 	require.NoError(t, mem.WriteFile(manifestPath, manifestBuf.Bytes()))
 
-	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1, int32(spec.ID()), sp.snapshotID).
+	missingManifest := iceberg.NewManifestBuilder(2, "table-location/metadata/missing.avro", 1, int32(spec.ID()), sp.snapshotID).
 		Build()
 
 	mgr := manifestMergeManager{snap: sp}
@@ -590,7 +590,7 @@ func TestManifestMergeManagerClosesWriterBeforeFileOnReadFailure(t *testing.T) {
 		[]iceberg.ManifestEntry{
 			iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df),
 		})
-	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1,
+	missingManifest := iceberg.NewManifestBuilder(2, "table-location/metadata/missing.avro", 1,
 		int32(spec.ID()), sp.snapshotID).Build()
 
 	mgr := manifestMergeManager{snap: sp}
@@ -617,7 +617,7 @@ func TestManifestMergeReturnsReadErrorBeforeCreatingWriter(t *testing.T) {
 		[]iceberg.ManifestEntry{
 			iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &oldSnapshotID, &sequenceNumber, nil, df),
 		})
-	missingManifest := iceberg.NewManifestFile(2, "table-location/metadata/missing.avro", 1,
+	missingManifest := iceberg.NewManifestBuilder(2, "table-location/metadata/missing.avro", 1,
 		int32(spec.ID()), sp.snapshotID).Build()
 
 	mgr := manifestMergeManager{snap: sp}
@@ -1590,7 +1590,7 @@ func TestOverwriteParentDependentManifestsCleansCompletedRewritesOnError(t *test
 	}
 	validPath := "table-location/metadata/source-valid.avro"
 	validManifest := writeTestManifestWithEntries(t, mem, spec, schema, snapshotID, validPath, entries)
-	missingManifest := iceberg.NewManifestFile(2,
+	missingManifest := iceberg.NewManifestBuilder(2,
 		"table-location/metadata/source-missing.avro", 1, int32(spec.ID()), snapshotID).Build()
 	manifests := []iceberg.ManifestFile{validManifest, missingManifest}
 
@@ -1857,9 +1857,9 @@ func TestFastAppendInheritsZeroCountManifests(t *testing.T) {
 	seqNum1 := int64(1)
 
 	// These paths must be under the table location so the mem FS can locate them.
-	athenaManifest1 := iceberg.NewManifestFile(2,
+	athenaManifest1 := iceberg.NewManifestBuilder(2,
 		"mem://default/table-location/metadata/athena-m0.avro", 512, 0, snap1ID).Build()
-	athenaManifest2 := iceberg.NewManifestFile(2,
+	athenaManifest2 := iceberg.NewManifestBuilder(2,
 		"mem://default/table-location/metadata/athena-m1.avro", 256, 0, snap1ID).Build()
 
 	// Sanity check: both manifests have zero counts, so the old filter would drop them.

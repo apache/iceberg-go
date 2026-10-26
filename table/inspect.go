@@ -520,7 +520,7 @@ func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
 		}
 
 		name.Append(row.name)
-		refType.Append(strings.ToUpper(string(row.ref.SnapshotRefType)))
+		refType.Append(strings.ToUpper(string(row.ref.Type)))
 		snapshotID.Append(row.ref.SnapshotID)
 
 		if row.ref.MaxRefAgeMs != nil {

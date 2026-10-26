@@ -93,7 +93,7 @@ func writeSnapshotTestManifestList(t *testing.T, fs iceio.WriteFileIO, dir strin
 // Why: a manifest entry with status DELETED is a tombstone recording a
 // removal, not a file reachable from the snapshot. Yielding it would make
 // existence and duplicate checks (ReplaceFiles' belong-to-table check,
-// AddFiles' duplicate walk, classifyFilesForDeletions) treat a file
+// AddDataFilesByPath' duplicate walk, classifyFilesForDeletions) treat a file
 // deleted by the snapshot as still live. ADDED and EXISTING entries are
 // both live and must keep flowing through.
 // Condition: a snapshot whose data and delete manifests each carry one
