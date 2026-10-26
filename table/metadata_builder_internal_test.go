@@ -921,7 +921,7 @@ func TestSetSnapshotRefBranchToTagDropsAllRetention(t *testing.T) {
 
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, TagRef))
 	ref := builder.refs[MainBranch]
-	require.Equal(t, TagRef, ref.SnapshotRefType)
+	require.Equal(t, TagRef, ref.Type)
 	require.Nil(t, ref.MinSnapshotsToKeep)
 	require.Nil(t, ref.MaxSnapshotAgeMs)
 	require.Nil(t, ref.MaxRefAgeMs)
@@ -1129,7 +1129,7 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 	}
 	builder.currentSnapshotID = new(snapshot3ID)
 	builder.refs = map[string]SnapshotRef{
-		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: snapshot3ID, Type: BranchRef},
 	}
 
 	meta, err := builder.Build()
@@ -1189,7 +1189,7 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
 	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
 	require.Equal(t, int64(2), ref.SnapshotID)
-	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.Equal(t, BranchRef, ref.Type)
 	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
 	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
 	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
@@ -1227,7 +1227,7 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
 	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
 	require.Equal(t, int64(2), ref.SnapshotID)
-	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.Equal(t, BranchRef, ref.Type)
 	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
 	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
 	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
@@ -1273,7 +1273,7 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 			SnapshotLog:       []SnapshotLogEntry{},
 			SortOrderList:     []SortOrder{UnsortedSortOrder},
 			SnapshotRefs: map[string]SnapshotRef{
-				MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef},
+				MainBranch: {SnapshotID: currentID, Type: BranchRef},
 			},
 		},
 	}
@@ -1331,9 +1331,9 @@ func TestRemoveSnapshotsRemovesMultipleIDs(t *testing.T) {
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
 		SnapshotRefs: map[string]SnapshotRef{
-			MainBranch:       {SnapshotID: currentID, SnapshotRefType: BranchRef},
-			"removed-branch": {SnapshotID: removedID2, SnapshotRefType: BranchRef},
-			"kept-branch":    {SnapshotID: keptID, SnapshotRefType: BranchRef},
+			MainBranch:       {SnapshotID: currentID, Type: BranchRef},
+			"removed-branch": {SnapshotID: removedID2, Type: BranchRef},
+			"kept-branch":    {SnapshotID: keptID, Type: BranchRef},
 		},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: removedID1, StatisticsPath: "s3://stats/removed-1.puffin"},
@@ -1417,7 +1417,7 @@ func TestRemoveSnapshotsPrunesStatistics(t *testing.T) {
 		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: currentID, TimestampMs: 1003}},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, Type: BranchRef}},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: removedID, StatisticsPath: "s3://stats/removed.puffin"},
 			{SnapshotID: keptID, StatisticsPath: "s3://stats/kept.puffin"},
@@ -1480,7 +1480,7 @@ func TestBuildPreservesStatistics(t *testing.T) {
 		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: snapID, TimestampMs: 1001}},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, Type: BranchRef}},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: snapID, StatisticsPath: "s3://stats/snap.puffin"},
 		},

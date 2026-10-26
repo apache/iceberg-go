@@ -653,7 +653,7 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 		useSnapshotSchema := true
 		for refName, ref := range scan.metadata.Refs() {
 			if refName == name {
-				useSnapshotSchema = ref.SnapshotRefType == TagRef
+				useSnapshotSchema = ref.Type == TagRef
 
 				break
 			}

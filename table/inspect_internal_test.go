@@ -58,7 +58,7 @@ import (
 // list) to exercise the null-parent path.
 func historyTestTable() *Table {
 	return inspectTestTable(Identifier{"history"}, map[string]SnapshotRef{
-		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
 	})
 }
 
@@ -364,14 +364,14 @@ func TestInspectRefs(t *testing.T) {
 	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			SnapshotRefType:    BranchRef,
+			Type:               BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 			MaxSnapshotAgeMs:   &maxSnapshotAge,
 		},
 		"release": {
-			SnapshotID:      102,
-			SnapshotRefType: TagRef,
-			MaxRefAgeMs:     &maxReferenceAge,
+			SnapshotID:  102,
+			Type:        TagRef,
+			MaxRefAgeMs: &maxReferenceAge,
 		},
 	})
 
@@ -426,7 +426,7 @@ func TestInspectRefsAllocator(t *testing.T) {
 	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { checked.AssertSize(t, 0) })
 	tbl := refsTestTable(map[string]SnapshotRef{
-		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
 	})
 
 	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Refs(context.Background())
@@ -449,7 +449,7 @@ func TestInspectRefsRejectsMinSnapshotsToKeepOverflow(t *testing.T) {
 	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			SnapshotRefType:    BranchRef,
+			Type:               BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
 	})
@@ -464,7 +464,7 @@ func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
 	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			SnapshotRefType:    BranchRef,
+			Type:               BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
 	})
@@ -520,7 +520,7 @@ func snapshotsTestTable() *Table {
 		CurrentSnapshotID:  &current,
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, Type: BranchRef}},
 	}}
 
 	return New(Identifier{"snapshots"}, meta, "", nil, nil)
@@ -707,7 +707,7 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 		CurrentSnapshotID:  &current,
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: s2, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: s2, Type: BranchRef}},
 	}}
 	tbl := New(Identifier{"metadata-log-entries"}, meta, "/metadata/v3.json", nil, nil)
 

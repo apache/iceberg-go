@@ -201,9 +201,9 @@ func (t Table) NewTransactionOnBranch(branch string) (*Transaction, error) {
 		if name != branch {
 			continue
 		}
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
-				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+				iceberg.ErrInvalidArgument, branch, ref.Type)
 		}
 
 		break
