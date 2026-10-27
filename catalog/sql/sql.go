@@ -1566,7 +1566,7 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 }
 
 // CreateView creates a new view in the catalog.
-func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, viewSQL string, props iceberg.Properties) error {
+func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, representation view.Representation, props iceberg.Properties) error {
 	if c.isV0() {
 		return errViewsUnsupportedOnV0
 	}
@@ -1591,7 +1591,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return err
 	}
 
-	createdView, err := view.CreateView(ctx, c.name, identifier, schema, viewSQL, nsIdent, loc, props)
+	createdView, err := view.CreateView(ctx, c.name, identifier, schema, representation, nsIdent, loc, props)
 	if err != nil {
 		return err
 	}

@@ -69,9 +69,16 @@ func TestVersionEquals(t *testing.T) {
 	assert.True(t, v1.Equals(v2), fmt.Sprintf("Expected the same SchemaID, Summary, Representation for %v, got %v", v1, v2))
 }
 
+func TestNewRepresentationSetsTypeWithoutMutatingInput(t *testing.T) {
+	input := Representation{SQL: "SELECT 1", Dialect: "spark"}
+	repr := NewRepresentation(input)
+	require.Equal(t, Representation{Type: "sql", SQL: "SELECT 1", Dialect: "spark"}, repr)
+	require.Empty(t, input.Type)
+}
+
 // TestRepresentationSQLJSON keeps the on-disk SQL key unchanged after the Go API rename.
 func TestRepresentationSQLJSON(t *testing.T) {
-	repr := NewRepresentation("SELECT 1", "spark")
+	repr := NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "spark"})
 	require.Equal(t, "SELECT 1", repr.SQL)
 
 	data, err := json.Marshal(repr)
@@ -155,7 +162,7 @@ func TestUnmarshalViewMetadata(t *testing.T) {
 	assert.Equal(t, 0, md.CurrentVersion().SchemaID)
 	assert.Equal(t, VersionSummary{"summaryProp": "summaryVal"}, md.CurrentVersion().Summary)
 	assert.Equal(t, []VersionLogEntry{{TimestampMS: 1000, VersionID: 1}}, md.VersionLog())
-	assert.Equal(t, []Representation{NewRepresentation("select * from ns.tbl", "trino")}, md.CurrentVersion().Representations)
+	assert.Equal(t, []Representation{NewRepresentation(Representation{SQL: "select * from ns.tbl", Dialect: "trino"})}, md.CurrentVersion().Representations)
 	assert.Equal(t, iceberg.Properties{"prop": "value"}, md.Properties())
 }
 
