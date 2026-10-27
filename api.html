@@ -638,7 +638,7 @@ v, err := view.CreateView(
     &quot;my-catalog&quot;,
     table.Identifier{&quot;analytics&quot;, &quot;monthly_orders&quot;},
     schema,
-    &quot;SELECT month, sum(amount) FROM orders GROUP BY month&quot;,
+    view.Representation{SQL: &quot;SELECT month, sum(amount) FROM orders GROUP BY month&quot;, Dialect: &quot;spark&quot;},
     table.Identifier{&quot;sales&quot;},                      // default namespace for unqualified names
     &quot;s3://my-bucket/views/monthly_orders&quot;,
     iceberg.Properties{},

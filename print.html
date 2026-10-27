@@ -1592,7 +1592,7 @@ v, err := view.CreateView(
     &quot;my-catalog&quot;,
     table.Identifier{&quot;analytics&quot;, &quot;monthly_orders&quot;},
     schema,
-    &quot;SELECT month, sum(amount) FROM orders GROUP BY month&quot;,
+    view.Representation{SQL: &quot;SELECT month, sum(amount) FROM orders GROUP BY month&quot;, Dialect: &quot;spark&quot;},
     table.Identifier{&quot;sales&quot;},                      // default namespace for unqualified names
     &quot;s3://my-bucket/views/monthly_orders&quot;,
     iceberg.Properties{},
@@ -2598,6 +2598,12 @@ make integration-external-rest
 <p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
+<li>
+<p><strong>View creation APIs take a named SQL representation.</strong> <code>view.NewVersionFromSQL</code>, <code>view.CreateView</code>, <code>view.CreateViewWithIOProperties</code>, and <code>sql.Catalog.CreateView</code> now accept a <code>view.Representation{SQL: sql, Dialect: dialect}</code> instead of positional SQL/dialect strings. The dialect is required; Hive preserves the selected representation's dialect.</p>
+</li>
+<li>
+<p><strong>View SQL representation construction uses named fields.</strong> Replace <code>view.NewRepresentation(sql, dialect)</code> with <code>view.NewRepresentation(view.Representation{SQL: sql, Dialect: dialect})</code>. Serialized JSON is unchanged.</p>
+</li>
 <li>
 <p><strong>Reserved table properties now use a read-only API.</strong> Replace references to <code>table.ReservedProperties</code> with <code>table.ReservedProperties()</code>. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.</p>
 </li>
