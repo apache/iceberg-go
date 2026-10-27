@@ -2676,6 +2676,9 @@ make integration-external-rest
 <li>
 <p><strong>Partition and sort source accessors renamed.</strong> Replace <code>PartitionField.SourceID()</code> and <code>SortField.SourceID()</code> with <code>FirstSourceID()</code>. Their behavior and serialized fields are unchanged.</p>
 </li>
+<li>
+<p><strong>File writes and directory walks now take an operation context.</strong> Update <code>WriteFileIO</code> and <code>ListableIO</code> implementations and calls to <code>Create</code>, <code>WriteFile</code>, and <code>WalkDir</code> to pass <code>context.Context</code>; cloud writes and listings use it for cancellation.</p>
+</li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>
 <p>If you are validating an RC or cutting a new release, see:</p>
