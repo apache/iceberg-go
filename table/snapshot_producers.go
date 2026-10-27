@@ -64,12 +64,64 @@ type producerImpl interface {
 	needsValidation() bool
 }
 
-// supersededAccumulator marks a producer that writes merged manifests OCC
-// retries orphan. Only rewrite implements it.
-type supersededAccumulator interface {
-	// supersededManifests returns paths of merged manifests that earlier
-	// passes wrote and a later pass replaced, to delete once the commit lands.
-	supersededManifests() []string
+// writtenManifests records the manifests a producer wrote for its staged
+// snapshot and each rebuild. Staged manifests are deleted only after a commit
+// lands, and a failed commit deletes only what its rebuilds wrote.
+type writtenManifests struct {
+	stagedList   string
+	staged       map[string]struct{}
+	unreferenced []string
+	rebuilt      map[string]struct{}
+	keepRebuilt  bool
+}
+
+func (w *writtenManifests) stage(list string, referenced, added []string) {
+	w.stagedList = list
+	w.staged = make(map[string]struct{}, len(referenced)+len(added))
+	w.unreferenced = nil
+	for _, path := range referenced {
+		w.staged[path] = struct{}{}
+	}
+	for _, path := range added {
+		if _, ok := w.staged[path]; !ok {
+			w.staged[path] = struct{}{}
+			w.unreferenced = append(w.unreferenced, path)
+		}
+	}
+}
+
+func (w *writtenManifests) rebuild(referenced []string) {
+	for _, path := range referenced {
+		if _, ok := w.staged[path]; ok {
+			continue
+		}
+		if w.rebuilt == nil {
+			w.rebuilt = make(map[string]struct{})
+		}
+		w.rebuilt[path] = struct{}{}
+	}
+}
+
+// uncommitted returns the recorded manifests that the committed snapshot,
+// whose manifest list is committedList, might not reference. The caller must
+// still drop the ones a committed snapshot references.
+func (w *writtenManifests) uncommitted(committedList string) []string {
+	paths := slices.Collect(maps.Keys(w.rebuilt))
+	if committedList == w.stagedList {
+		return append(paths, w.unreferenced...)
+	}
+
+	return append(paths, slices.Collect(maps.Keys(w.staged))...)
+}
+
+func (w *writtenManifests) discardRebuilt() []string {
+	if w.keepRebuilt {
+		return nil
+	}
+	paths := slices.Collect(maps.Keys(w.rebuilt))
+	w.rebuilt = nil
+
+	return paths
 }
 
 // retryManifestRebuilder lets a producer reuse parent-independent manifest
@@ -759,6 +811,7 @@ type snapshotProducer struct {
 	deletedDeleteFiles      map[string]iceberg.DataFile
 	deletedDVsByRef         map[string]iceberg.DataFile
 	snapshotProps           iceberg.Properties
+	written                 writtenManifests
 }
 
 // deleteFileAddition carries the data sequence number of a rewritten delete
@@ -913,6 +966,19 @@ func (sp *snapshotProducer) newManifestOutput(ctx context.Context) (io.WriteClos
 
 func (sp *snapshotProducer) iterManifestEntries(m iceberg.ManifestFile, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
 	return m.Entries(sp.io, discardDeleted)
+}
+
+// writtenPaths returns the manifests this producer wrote, the ones carrying its
+// snapshot ID.
+func (sp *snapshotProducer) writtenPaths(manifests []iceberg.ManifestFile) []string {
+	paths := make([]string, 0, len(manifests))
+	for _, m := range manifests {
+		if m.SnapshotID() == sp.snapshotID {
+			paths = append(paths, m.FilePath())
+		}
+	}
+
+	return paths
 }
 
 // parentSnapshot resolves the snapshot this producer is layered on (the branch
@@ -1614,6 +1680,7 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 	if err != nil {
 		return nil, nil, err
 	}
+	sp.written.stage(manifestListFilePath, sp.writtenPaths(newManifests), sp.writtenPaths(addedContent))
 
 	snapshot := Snapshot{
 		SnapshotID:       sp.snapshotID,
@@ -1699,6 +1766,7 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 		if procErr != nil {
 			return nil, fmt.Errorf("rebuild manifest list: assemble manifests: %w", procErr)
 		}
+		sp.written.rebuild(sp.writtenPaths(combined))
 
 		// Derive the sequence number from the fresh table-wide last-sequence-number.
 		// Using freshParent.SequenceNumber + 1 alone would violate the spec when a
@@ -1794,11 +1862,7 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 	addSnap := NewAddSnapshotUpdate(&snapshot)
 	addSnap.ownManifests = addedContent
 	addSnap.rebuildManifestList = rebuildFn
-	// Hold the producer so doCommit can read the manifests orphaned by OCC
-	// retries and clean them up. Only rewrite producers implement this.
-	if acc, ok := sp.producerImpl.(supersededAccumulator); ok {
-		addSnap.supersededSource = acc
-	}
+	addSnap.written = &sp.written
 
 	// Build the assertion from the base table's branch head, not the
 	// staged metadata's current snapshot: a staged intermediate snapshot
