@@ -258,13 +258,17 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		branch    string
-		stage     func(t *testing.T, tx *Transaction)
-		validator conflictValidatorFunc
-		peer      func(t *testing.T, base Metadata) Metadata
-		want      error
-		message   string
+		name                string
+		branch              string
+		stage               func(t *testing.T, tx *Transaction)
+		validator           conflictValidatorFunc
+		peer                func(t *testing.T, base Metadata) Metadata
+		want                error
+		message             string
+		matchesCommitFailed bool
+		// mentionsRetry marks validator causes, whose text includes
+		// ErrCommitFailed's.
+		mentionsRetry bool
 	}{
 		{
 			name: "diverged base", validator: func(*conflictContext) error { return nil },
@@ -282,21 +286,24 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 		},
 		{
 			name: "conflicting data files", validator: rejectConcurrent(ErrConflictingDataFiles),
-			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
-			want:    ErrConflictingDataFiles,
-			message: "transaction cannot be committed again: validation conflict: concurrent data files added: snapshot 200 added f.parquet",
+			peer:                func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:                ErrConflictingDataFiles,
+			message:             "transaction cannot be committed again: validation conflict: commit failed, refresh and try again: concurrent data files added: snapshot 200 added f.parquet",
+			matchesCommitFailed: true, mentionsRetry: true,
 		},
 		{
 			name: "conflicting delete files", validator: rejectConcurrent(ErrConflictingDeleteFiles),
-			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
-			want:    ErrConflictingDeleteFiles,
-			message: "transaction cannot be committed again: validation conflict: concurrent delete files added: snapshot 200 added f.parquet",
+			peer:                func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:                ErrConflictingDeleteFiles,
+			message:             "transaction cannot be committed again: validation conflict: commit failed, refresh and try again: concurrent delete files added: snapshot 200 added f.parquet",
+			matchesCommitFailed: true, mentionsRetry: true,
 		},
 		{
 			name: "data files missing", validator: rejectConcurrent(ErrDataFilesMissing),
-			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
-			want:    ErrDataFilesMissing,
-			message: "transaction cannot be committed again: validation conflict: referenced data files missing: snapshot 200 added f.parquet",
+			peer:                func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:                ErrDataFilesMissing,
+			message:             "transaction cannot be committed again: validation conflict: commit failed, refresh and try again: referenced data files missing: snapshot 200 added f.parquet",
+			matchesCommitFailed: true, mentionsRetry: true,
 		},
 		{
 			name: "wrapped conflict from any validator",
@@ -307,9 +314,9 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 
 				return nil
 			},
-			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
-			want:    ErrCommitFailed,
-			message: "transaction cannot be committed again: validation conflict: a concurrent commit conflicts with the staged changes",
+			peer:                func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			message:             "transaction cannot be committed again: validation conflict: custom validator: commit failed, refresh and try again",
+			matchesCommitFailed: true, mentionsRetry: true,
 		},
 		{
 			name: "commit branch became a tag", branch: "feature",
@@ -326,8 +333,8 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 			peer: func(t *testing.T, base Metadata) Metadata {
 				return rebuild(t, base, func(b *MetadataBuilder) { require.NoError(t, b.RemoveSnapshotRef("feature")) })
 			},
-			want:    ErrCommitFailed,
-			message: `transaction cannot be committed again: commit branch is no longer a branch: requirement failed: branch or tag "feature" is missing, expected 100`,
+			message:             `transaction cannot be committed again: commit branch is no longer a branch: requirement failed: branch or tag "feature" is missing, expected 100`,
+			matchesCommitFailed: true,
 		},
 		{
 			name: "stale schema",
@@ -344,24 +351,50 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 					require.NoError(t, b.SetCurrentSchemaID(-1))
 				})
 			},
-			want: ErrCommitFailed,
 			message: "transaction cannot be committed again: requirement no longer holds after refresh: " +
 				"Requirement failed: current schema id has changed: expected 0, found 1",
+			matchesCommitFailed: true,
+		},
+		{
+			name:  "stale default sort order",
+			stage: func(t *testing.T, tx *Transaction) { require.NoError(t, tx.AssertDefaultShape()) },
+			peer: func(t *testing.T, base Metadata) Metadata {
+				return rebuild(t, base, func(b *MetadataBuilder) {
+					order, err := NewSortOrder(1, []SortField{{
+						SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsFirst,
+					}})
+					require.NoError(t, err)
+					require.NoError(t, b.AddSortOrder(&order))
+					require.NoError(t, b.SetDefaultSortOrderID(-1))
+				})
+			},
+			message: "transaction cannot be committed again: requirement no longer holds after refresh: " +
+				"requirement failed: default sort order id has changed: expected 0, found 1",
+			matchesCommitFailed: true,
+		},
+		{
+			name:  "pinned ref moved",
+			stage: func(t *testing.T, tx *Transaction) { require.NoError(t, tx.AssertRefSnapshotID(MainBranch)) },
+			peer:  func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			message: "transaction cannot be committed again: requirement no longer holds after refresh: " +
+				`requirement failed: branch "main" has changed: expected id 100, found 200`,
+			matchesCommitFailed: true,
 		},
 		{
 			name:  "non-replayable commit whose branch moved",
 			stage: func(_ *testing.T, tx *Transaction) { tx.noReplay = true },
 			peer:  func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
-			want:  ErrCommitFailed,
 			message: "transaction cannot be committed again: requirement no longer holds after refresh (" + noReplayHint + "): " +
 				`requirement failed: branch "main" has changed: expected id 100, found 200`,
+			matchesCommitFailed: true,
 		},
 		{
 			name: "table was replaced",
 			peer: func(t *testing.T, base Metadata) Metadata {
 				return rebuild(t, base, func(b *MetadataBuilder) { require.NoError(t, b.SetUUID(uuid.New())) })
 			},
-			want: ErrInvalidMetadata,
+			want:    ErrInvalidMetadata,
+			message: "transaction cannot be committed again: table was replaced: ",
 		},
 	}
 
@@ -395,10 +428,15 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 			if tt.want != nil {
 				require.ErrorIs(t, err, tt.want)
 			}
-			if tt.message != "" {
-				assert.True(t, strings.HasPrefix(err.Error(), tt.message), err.Error())
+			if tt.matchesCommitFailed {
+				require.ErrorIs(t, err, ErrCommitFailed)
+			} else {
+				require.NotErrorIs(t, err, ErrCommitFailed, "a caller retrying on ErrCommitFailed must stop")
 			}
-			assert.NotContains(t, err.Error(), "refresh and try again")
+			assert.True(t, strings.HasPrefix(err.Error(), tt.message), err.Error())
+			if !tt.mentionsRetry {
+				assert.NotContains(t, err.Error(), "refresh and try again")
+			}
 			assert.Equal(t, int32(1), cat.attempts.Load(), "the resume must stop before the catalog")
 
 			_, err = tx.Commit(t.Context())

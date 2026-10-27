@@ -350,6 +350,7 @@ func TestReplaceFilesResumeAfterPeerRemovedInputIsUnusable(t *testing.T) {
 	_, err = staleTxn.Commit(t.Context())
 	require.ErrorIs(t, err, table.ErrTransactionUnusable)
 	require.ErrorIs(t, err, table.ErrCommitDiverged)
+	require.NotErrorIs(t, err, table.ErrCommitFailed, "a caller retrying on ErrCommitFailed must stop")
 	assert.EqualError(t, err, fmt.Sprintf("transaction cannot be committed again: files to rewrite were removed: "+
 		"commit diverged: base snapshot is no longer on the branch: 1 data file(s) to rewrite are no longer on the branch head, e.g. [%q]", dataPath))
 	assert.NotContains(t, err.Error(), "refresh and try again")

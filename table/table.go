@@ -842,8 +842,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
+					// Conflicts with a concurrent commit end the transaction.
+					// Other validator errors, such as read failures, stay
+					// resumable.
 					if errors.Is(vErr, ErrCommitFailed) {
-						return nil, &validationConflictError{err: vErr}
+						return nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
 					}
 
 					return nil, vErr
@@ -1009,25 +1012,6 @@ type commitStateUnknownError struct{ err error }
 func (e *commitStateUnknownError) Error() string { return e.err.Error() }
 
 func (e *commitStateUnknownError) Unwrap() error { return e.err }
-
-// validationConflictError ends a commit a validator rejected after a
-// refresh because of what a concurrent commit changed. Validators report
-// such a rejection with an error that matches ErrCommitFailed, and the same
-// concurrent commit rejects every later attempt. It matches
-// ErrTransactionUnusable and the validator's error. Its message keeps the
-// validator's detail without ErrCommitFailed's advice to try again.
-type validationConflictError struct{ err error }
-
-func (e *validationConflictError) Error() string {
-	detail, ok := strings.CutPrefix(e.err.Error(), ErrCommitFailed.Error()+": ")
-	if !ok {
-		detail = "a concurrent commit conflicts with the staged changes"
-	}
-
-	return ErrTransactionUnusable.Error() + ": validation conflict: " + detail
-}
-
-func (e *validationConflictError) Unwrap() []error { return []error{ErrTransactionUnusable, e.err} }
 
 // stagedManifestLists returns the manifest list of every snapshot updates add.
 func stagedManifestLists(updates []Update) map[string]struct{} {
