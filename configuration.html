@@ -467,7 +467,7 @@ selected.</p>
 <h2 id="pluggability"><a class="header" href="#pluggability">Pluggability</a></h2>
 <p>Two registries are user-extensible. The third (LocationProvider) is currently informational.</p>
 <h3 id="io-scheme-registry"><a class="header" href="#io-scheme-registry">IO scheme registry</a></h3>
-<p>Register a custom URL scheme with <a href="https://github.com/apache/iceberg-go/blob/main/io/registry.go"><code>io.Register</code></a>:</p>
+<p>Register a custom URL scheme from an <code>init</code> function with <a href="https://github.com/apache/iceberg-go/blob/main/io/registry.go"><code>io.MustRegister</code></a>:</p>
 <pre><code class="language-go">import (
     &quot;context&quot;
     &quot;net/url&quot;
@@ -476,14 +476,22 @@ selected.</p>
 )
 
 func init() {
-    io.Register(&quot;myfs&quot;, func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
+    io.MustRegister(&quot;myfs&quot;, func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
         return newMyFS(parsed, props)
     })
 }
 </code></pre>
-<p><code>io.Register</code> panics on <code>nil</code> factory or duplicate scheme. Built-in schemes: <code>file</code>, <code>&quot;&quot;</code> (the empty scheme).
+<p><code>io.Register</code> and <code>io.MustRegister</code> both panic for invalid or duplicate global schemes, preserving the existing registration contract. <code>registry.Register</code> on an independent registry returns <code>ErrInvalidSchemeFactory</code> or <code>ErrSchemeAlreadyRegistered</code> instead. Built-in schemes: <code>file</code>, <code>&quot;&quot;</code> (the empty scheme).
 Cloud schemes (<code>s3</code>, <code>gs</code>, <code>abfs</code>, etc.) are registered only when the matching backend package under <code>io/gocloud</code> is blank-imported.</p>
 <p><code>io.GetRegisteredSchemes()</code> returns the current scheme list; <code>io.Unregister(scheme)</code> removes one.</p>
+<p>To register schemes at runtime without changing other users of the same process, create an independent registry (catalogs and <code>view.CreateView</code> still resolve through the default registry):</p>
+<pre><code class="language-go">registry := io.NewRegistry()
+if err := registry.Register(&quot;myfs&quot;, myFactory); err != nil {
+    return err
+}
+fs, err := registry.LoadFS(ctx, props, &quot;myfs://bucket/key&quot;)
+</code></pre>
+<p><code>io.NewRegistry()</code> copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. <code>registry.Clone()</code> makes an isolated copy of another registry. <code>registry.Names()</code> lists the schemes registered in that instance. <code>registry.LoadFSFunc()</code> is the lazy factory equivalent. Global <code>io.LoadFS()</code> and <code>io.LoadFSFunc()</code> continue using the default registry.</p>
 <h3 id="catalog-type-registry"><a class="header" href="#catalog-type-registry">Catalog type registry</a></h3>
 <p>Register a custom catalog type with <a href="https://github.com/apache/iceberg-go/blob/main/catalog/registry.go"><code>catalog.Register</code></a>:</p>
 <pre><code class="language-go">import (
