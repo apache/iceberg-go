@@ -137,33 +137,35 @@ func NewFromLocation(
 //
 // Note: This function only supports creating new views with format version 1.
 // It does not support updating existing view metadata.
+// representation holds both SQL text and its dialect.
 func CreateView(
 	ctx context.Context,
 	catalogName string,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
-	viewSQL string,
+	representation Representation,
 	defaultNS table.Identifier,
 	loc string,
 	props iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, props, props)
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
 }
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
 // filesystem and metadataProps as the properties persisted in view metadata.
+// representation holds both SQL text and its dialect.
 func CreateViewWithIOProperties(
 	ctx context.Context,
 	catalogName string,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
-	viewSQL string,
+	representation Representation,
 	defaultNS table.Identifier,
 	loc string,
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, ioProps, metadataProps)
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps)
 }
 
 func createView(
@@ -171,7 +173,7 @@ func createView(
 	catalogName string,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
-	viewSQL string,
+	representation Representation,
 	defaultNS table.Identifier,
 	loc string,
 	ioProps iceberg.Properties,
@@ -184,7 +186,7 @@ func createView(
 	viewVersion, err := NewVersionFromSQL(
 		versionId,
 		schema.ID,
-		viewSQL,
+		representation,
 		defaultNS,
 		WithDefaultViewCatalog(catalogName),
 	)
