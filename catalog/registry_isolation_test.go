@@ -41,8 +41,10 @@ func TestCatalogRegistryIsolation(t *testing.T) {
 	second := catalog.NewRegistry()
 
 	require.NoError(t, first.Register("MyType", stubRegistrar()))
-	assert.Equal(t, []string{"mytype"}, first.GetRegisteredCatalogs())
-	assert.Empty(t, second.GetRegisteredCatalogs())
+	assert.Contains(t, first.Names(), "mytype")
+	assert.NotContains(t, second.Names(), "mytype")
+	assert.Contains(t, first.Names(), "rest")
+	assert.Contains(t, second.Names(), "rest")
 
 	_, err := first.Load(context.Background(), "test", iceberg.Properties{"type": "MYTYPE"})
 	require.NoError(t, err)
@@ -85,16 +87,16 @@ func TestCatalogRegistriesWithSameTypeAreIsolated(t *testing.T) {
 
 func TestCatalogRegistryZeroValue(t *testing.T) {
 	var reg catalog.Registry
-	assert.Empty(t, reg.GetRegisteredCatalogs())
+	assert.Empty(t, reg.Names())
 
 	require.NoError(t, reg.Register("Mock", stubRegistrar()))
-	assert.Equal(t, []string{"mock"}, reg.GetRegisteredCatalogs())
+	assert.Equal(t, []string{"mock"}, reg.Names())
 
 	_, err := reg.Load(context.Background(), "test", iceberg.Properties{"type": "MOCK"})
 	require.NoError(t, err)
 
 	reg.Unregister("MOCK")
-	assert.Empty(t, reg.GetRegisteredCatalogs())
+	assert.Empty(t, reg.Names())
 }
 
 func TestCatalogRegistryCloneIsIndependent(t *testing.T) {
@@ -103,8 +105,8 @@ func TestCatalogRegistryCloneIsIndependent(t *testing.T) {
 	clone := source.Clone()
 	source.Unregister("mock")
 
-	assert.Empty(t, source.GetRegisteredCatalogs())
-	assert.Equal(t, []string{"mock"}, clone.GetRegisteredCatalogs())
+	assert.NotContains(t, source.Names(), "mock")
+	assert.Contains(t, clone.Names(), "mock")
 
 	_, err := clone.Load(context.Background(), "test", iceberg.Properties{"type": "mock"})
 	require.NoError(t, err)
@@ -112,19 +114,19 @@ func TestCatalogRegistryCloneIsIndependent(t *testing.T) {
 	// Clones of the zero-value registry also support registration.
 	var zero catalog.Registry
 	require.NoError(t, zero.Clone().Register("other", stubRegistrar()))
-	assert.Empty(t, zero.GetRegisteredCatalogs())
+	assert.Empty(t, zero.Names())
 }
 
-func TestCatalogCloneDefaultRegistryDoesNotAffectGlobalRegistrations(t *testing.T) {
+func TestCatalogNewRegistryDoesNotAffectGlobalRegistrations(t *testing.T) {
 	const name = "catalog-clone-test"
-	require.NoError(t, catalog.Register(name, stubRegistrar()))
+	catalog.Register(name, stubRegistrar())
 	t.Cleanup(func() { catalog.Unregister(name) })
 
-	cloned := catalog.CloneDefaultRegistry()
-	assert.Contains(t, cloned.GetRegisteredCatalogs(), name)
+	cloned := catalog.NewRegistry()
+	assert.Contains(t, cloned.Names(), name)
 
 	cloned.Unregister(name)
-	assert.NotContains(t, cloned.GetRegisteredCatalogs(), name)
+	assert.NotContains(t, cloned.Names(), name)
 	assert.Contains(t, catalog.GetRegisteredCatalogs(), name)
 
 	_, err := cloned.Load(context.Background(), "test", iceberg.Properties{"type": name})
@@ -137,13 +139,14 @@ func TestCatalogRegistryRejectsInvalidRegistration(t *testing.T) {
 	reg := catalog.NewRegistry()
 	require.ErrorIs(t, reg.Register("", stubRegistrar()), iceberg.ErrInvalidArgument)
 	require.ErrorIs(t, reg.Register("mock", nil), iceberg.ErrInvalidArgument)
-	assert.Empty(t, reg.GetRegisteredCatalogs())
+	assert.NotContains(t, reg.Names(), "mock")
 	assert.Panics(t, func() { reg.MustRegister("mock", nil) })
 }
 
 func TestCatalogRegistryConcurrentAccess(t *testing.T) {
 	reg := catalog.NewRegistry()
 	const workers = 16
+	baseCount := len(reg.Names())
 	var wg sync.WaitGroup
 	for i := range workers {
 		wg.Add(1)
@@ -158,10 +161,48 @@ func TestCatalogRegistryConcurrentAccess(t *testing.T) {
 			if _, err := reg.Load(context.Background(), "test", iceberg.Properties{"type": name}); err != nil {
 				t.Errorf("load %s: %v", name, err)
 			}
-			_ = reg.GetRegisteredCatalogs()
+			_ = reg.Names()
 			_ = reg.Clone()
 		}(i)
 	}
 	wg.Wait()
-	assert.Len(t, reg.GetRegisteredCatalogs(), workers)
+	assert.Len(t, reg.Names(), baseCount+workers)
+}
+
+func TestCatalogNewRegistrySnapshotsDefaultRegistrations(t *testing.T) {
+	const name = "catalog-snapshot-test"
+	before := catalog.NewRegistry()
+	assert.NotContains(t, before.Names(), name)
+
+	catalog.Register(name, stubRegistrar())
+	t.Cleanup(func() { catalog.Unregister(name) })
+	after := catalog.NewRegistry()
+
+	assert.NotContains(t, before.Names(), name)
+	assert.Contains(t, after.Names(), name)
+	catalog.Unregister(name)
+	assert.Contains(t, after.Names(), name)
+
+	_, err := after.Load(context.Background(), "test", iceberg.Properties{"type": name})
+	require.NoError(t, err)
+}
+
+func TestCatalogRegistryDuplicateRegistrationReplacesFactory(t *testing.T) {
+	reg := catalog.NewRegistry()
+	firstErr := errors.New("first factory")
+	secondErr := errors.New("replacement factory")
+
+	require.NoError(t, reg.Register("replace-test", catalog.RegistrarFunc(
+		func(context.Context, string, iceberg.Properties) (catalog.Catalog, error) {
+			return nil, firstErr
+		},
+	)))
+	require.NoError(t, reg.Register("REPLACE-TEST", catalog.RegistrarFunc(
+		func(context.Context, string, iceberg.Properties) (catalog.Catalog, error) {
+			return nil, secondErr
+		},
+	)))
+
+	_, err := reg.Load(context.Background(), "test", iceberg.Properties{"type": "replace-test"})
+	require.ErrorIs(t, err, secondErr)
 }
