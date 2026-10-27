@@ -55,7 +55,6 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - **Transform formatting requires the result type and uses the Java-aligned method name.** `Transform.ToHumanStr(value)` and `Transform.ToHumanStrType(resultType, value)` are removed. Use `Transform.ToHumanString(resultType, value)` to format partition values, including timestamps with time zones.
 - **Catalogs now require cleanup.** The `catalog.Catalog` interface includes `Close() error`. Custom catalog implementations must provide `Close`, and callers should close catalog instances after use. `catalog.Closer` is removed. Replace `cat.(catalog.Closer)` checks with `defer cat.Close()`; `catalog.Catalog` already implements `io.Closer`, so no type assertion is needed.
-- **Catalog registration returns errors.** `catalog.Register` now returns an error for empty catalog types and nil registrars. Handle the error, or use `catalog.MustRegister` for registrations that must succeed during package initialization.
 
 - **Puffin writer property setter renamed.** `puffin.Writer.AddProperties` is now `puffin.Writer.SetProperties`. Repeated calls still merge keys; use `ClearProperties` to clear custom properties before finishing.
 
