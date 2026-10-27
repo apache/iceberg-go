@@ -46,24 +46,33 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ErrCommitFailed is the sentinel error returned by catalogs when a
-// commit fails due to a concurrent modification (e.g. HTTP 409 Conflict
-// from the REST catalog, or a commit requirement that no longer holds).
-// Catalog implementations should wrap this error so that callers using
-// errors.Is(err, table.ErrCommitFailed) can detect commit conflicts.
-// Calling Transaction.Commit again retries the conflict unless the error
-// also matches ErrTransactionUnusable.
+// ErrCommitFailed means a concurrent change caused the failure. A new
+// transaction built from a reloaded table may succeed. Catalogs return it
+// when a commit loses to a concurrent modification (e.g. HTTP 409 Conflict
+// from the REST catalog, or a commit requirement that no longer holds), and
+// catalog implementations should wrap it so callers can detect conflicts
+// with errors.Is(err, table.ErrCommitFailed). Calling Transaction.Commit
+// again retries the conflict unless the error also matches
+// ErrTransactionUnusable.
+//
+// After a refresh, a stale requirement, a validator conflict and a deleted
+// commit branch match ErrCommitFailed. A commit branch that became a tag, a
+// replaced table, a diverged base snapshot and files to rewrite that a
+// concurrent commit removed do not, so a retry loop keyed on ErrCommitFailed
+// stops.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
-// ErrTransactionUnusable is returned when no later commit of the same
-// transaction can succeed, because after a refresh the commit fails a check
-// that every later attempt would fail too. The checks are a requirement the
-// retry loop does not rebase (a pinned ref, the schema, partition spec or sort
-// order, or a non-replayable commit whose branch has moved), a validator
-// conflict with a concurrent commit, a diverged base snapshot, files to
-// rewrite that a concurrent commit removed, a commit branch that became a tag
-// or was deleted, and a replaced table. Only the commit branch's head
-// assertion is rebased. Build a new transaction to retry.
+// ErrTransactionUnusable means this transaction can't be committed again,
+// because after a refresh the commit fails a check that every later attempt
+// would fail too. An error can match both ErrTransactionUnusable and
+// ErrCommitFailed, in which case a new transaction built from a reloaded
+// table may still succeed. The checks are a requirement the retry loop does
+// not rebase (a pinned ref, the schema, partition spec or sort order, or a
+// non-replayable commit whose branch has moved), a validator conflict with a
+// concurrent commit, a diverged base snapshot, files to rewrite that a
+// concurrent commit removed, a commit branch that became a tag or was
+// deleted, and a replaced table. Only the commit branch's head assertion is
+// rebased.
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
