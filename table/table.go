@@ -1065,8 +1065,8 @@ func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 // stagedSnapshotStillValid reports whether a snapshot built on an earlier
 // attempt would still be accepted by AddSnapshot against fresh. Both values it
 // checks are table-wide, so a peer committing on ANOTHER branch invalidates them
-// without moving this branch's head — the case the caller's parent check misses,
-// and one AddSnapshot rejects terminally rather than retryably.
+// without moving this branch's head, which the caller's parent check misses.
+// Resubmitting such a snapshot unchanged would fail every retry.
 func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 	if snap == nil || fresh == nil {
 		return true

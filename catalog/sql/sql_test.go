@@ -1626,6 +1626,69 @@ func (s *SqliteCatalogTestSuite) TestStaleAppendRetriesRequirementFailure() {
 	}
 }
 
+// A peer append on another branch takes the staged snapshot's sequence number
+// or first-row-id.
+func (s *SqliteCatalogTestSuite) TestStaleAppendRetriesAfterPeerOnAnotherBranch() {
+	ctx := context.Background()
+	tests := []struct {
+		name          string
+		formatVersion int
+		numRetries    string
+		// The v3 cases seed nothing, so the staged snapshot has no parent and
+		// only the first-row-id check rejects it.
+		seed     []string
+		conflict string
+	}{
+		{"sequence number, retries enabled", 2, "2", []string{"seed"}, ""},
+		{"sequence number, retries disabled", 2, "0", []string{"seed"}, "must be > than last sequence number"},
+		{"first-row-id, retries enabled", 3, "2", nil, ""},
+		{"first-row-id, retries disabled", 3, "0", nil, "first-row-id 0 is behind table next-row-id 1"},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			cat := s.getCatalogSqlite()
+			defer cat.Close()
+			tblID := s.createRetryingStringTable(ctx, cat, tt.numRetries)
+			tbl, err := cat.LoadTable(ctx, tblID)
+			s.Require().NoError(err)
+			upgrade := tbl.NewTransaction()
+			s.Require().NoError(upgrade.UpgradeFormatVersion(tt.formatVersion))
+			tbl, err = upgrade.Commit(ctx)
+			s.Require().NoError(err)
+			for _, v := range tt.seed {
+				tbl = s.appendStringRow(ctx, tbl, table.MainBranch, v)
+			}
+			mainHead := tbl.Metadata().CurrentSnapshot()
+
+			peer := s.appendStringRow(ctx, tbl, "other", "peer")
+			peerHead := peer.Metadata().SnapshotByName("other").SnapshotID
+
+			tx := tbl.NewTransaction()
+			s.stageStringRow(ctx, tx, "stale")
+			_, err = tx.Commit(ctx)
+			if tt.numRetries == "0" {
+				s.Require().ErrorIs(err, table.ErrCommitFailed)
+				s.Require().NotErrorIs(err, table.ErrTransactionUnusable)
+				s.Contains(err.Error(), tt.conflict)
+
+				_, err = tx.Commit(ctx)
+			}
+			s.Require().NoError(err)
+
+			current, err := cat.LoadTable(ctx, tblID)
+			s.Require().NoError(err)
+			s.ElementsMatch(append(slices.Clone(tt.seed), "stale"), s.storedStringValues(ctx, current))
+			if mainHead == nil {
+				s.Nil(current.Metadata().CurrentSnapshot().ParentSnapshotID)
+			} else {
+				s.Equal(mainHead.SnapshotID, *current.Metadata().CurrentSnapshot().ParentSnapshotID)
+			}
+			s.Equal(peerHead, current.Metadata().SnapshotByName("other").SnapshotID)
+		})
+	}
+}
+
 func (s *SqliteCatalogTestSuite) addStringColumn(ctx context.Context, tbl *table.Table, name string) *table.Transaction {
 	tx := tbl.NewTransaction()
 	s.Require().NoError(tx.UpdateSchema(true, false).

@@ -98,7 +98,9 @@ _, err := cat.CreateTable(ctx, ident, schema,
 
 > **Catalog support:** the REST, SQL, Glue, Hive, and Hadoop catalogs report
 > commit conflicts, including requirements that fail because of a concurrent
-> change, as `ErrCommitFailed`, so the retry loop engages on all of them.
+> change, as `ErrCommitFailed`, so the retry loop engages on all of them. A
+> commit on another branch that takes the staged snapshot's sequence number or
+> first-row-id is a conflict too, and the retry renumbers the snapshot.
 
 Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including the schema, spec, sort order, and pinned
