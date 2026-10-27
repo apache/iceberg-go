@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Data file block size setter removed.** `iceberg.DataFileBuilder.BlockSizeInBytes` is removed. New v1 manifests use the Avro schema's 64 MiB default when the field is unset. V2/v3 omit this deprecated field, and legacy v1 values remain readable.
 - **View creation APIs take a named SQL representation.** `view.NewVersionFromSQL`, `view.CreateView`, `view.CreateViewWithIOProperties`, and `sql.Catalog.CreateView` now accept a `view.Representation{SQL: sql, Dialect: dialect}` instead of positional SQL/dialect strings. The dialect is required; Hive preserves the selected representation's dialect.
 
 - **View SQL representation construction uses named fields.** Replace `view.NewRepresentation(sql, dialect)` with `view.NewRepresentation(view.Representation{SQL: sql, Dialect: dialect})`. Serialized JSON is unchanged.
