@@ -1468,15 +1468,15 @@ func TestDoCommit_PartialRebuildFailureRemovesWrittenList(t *testing.T) {
 	wfs := newMemIO(1<<20, nil)
 	const loc = "mem://default/table-location/metadata/"
 	for _, name := range []string{"staged-1.avro", "staged-2.avro"} {
-		require.NoError(t, wfs.WriteFile(loc+name, []byte("list")))
+		require.NoError(t, wfs.WriteFile(t.Context(), loc+name, []byte("list")))
 	}
 
 	rebuildErr := errors.New("simulated rebuild failure")
 	first := &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   &Snapshot{SnapshotID: 101, ParentSnapshotID: &head, SequenceNumber: 2, ManifestList: loc + "staged-1.avro"},
-		rebuildManifestList: func(_ context.Context, _ Metadata, parent *Snapshot, fio iceio.WriteFileIO, _ int) (*Snapshot, error) {
-			if err := fio.WriteFile(loc+"rebuilt-1.avro", []byte("list")); err != nil {
+		rebuildManifestList: func(ctx context.Context, _ Metadata, parent *Snapshot, fio iceio.WriteFileIO, _ int) (*Snapshot, error) {
+			if err := fio.WriteFile(ctx, loc+"rebuilt-1.avro", []byte("list")); err != nil {
 				return nil, err
 			}
 			parentID := parent.SnapshotID
