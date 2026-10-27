@@ -37,11 +37,11 @@ type Registry struct {
 	registrars map[string]Registrar
 }
 
-// NewRegistry returns an empty registry. Importing a catalog backend registers
-// it with the package-level default, not with independently created registries.
-// Use CloneDefaultRegistry to start with those registrations.
+// NewRegistry returns an independent snapshot of the default registry,
+// including backends already registered through side-effect imports. Future
+// registration changes to either registry do not affect the other.
 func NewRegistry() *Registry {
-	return &Registry{registrars: make(map[string]Registrar)}
+	return defaultRegistry.Clone()
 }
 
 // Clone returns a snapshot with independent registrations and synchronization.
@@ -54,6 +54,18 @@ func (r *Registry) Clone() *Registry {
 	return &Registry{registrars: maps.Clone(r.registrars)}
 }
 
+// set registers a factory, replacing any existing factory of the same type.
+// Unlike Register, it also allows an empty type for legacy package-level calls.
+func (r *Registry) set(catalogType string, reg Registrar) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.registrars == nil {
+		r.registrars = make(map[string]Registrar)
+	}
+	r.registrars[strings.ToLower(catalogType)] = reg
+}
+
 func (r *Registry) get(catalogType string) (Registrar, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -63,7 +75,7 @@ func (r *Registry) get(catalogType string) (Registrar, bool) {
 	return registrar, ok
 }
 
-var defaultRegistry = NewRegistry()
+var defaultRegistry = &Registry{registrars: make(map[string]Registrar)}
 
 // Registrar is a factory for creating Catalog instances, used for registering to use
 // with LoadCatalog.
@@ -87,13 +99,7 @@ func (r *Registry) Register(catalogType string, reg Registrar) error {
 		return fmt.Errorf("%w: catalog registrar must not be nil", iceberg.ErrInvalidArgument)
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.registrars == nil {
-		r.registrars = make(map[string]Registrar)
-	}
-	r.registrars[strings.ToLower(catalogType)] = reg
+	r.set(catalogType, reg)
 
 	return nil
 }
@@ -113,19 +119,22 @@ func (r *Registry) Unregister(catalogType string) {
 	delete(r.registrars, strings.ToLower(catalogType))
 }
 
-// GetRegisteredCatalogs lists catalog types in sorted order.
-func (r *Registry) GetRegisteredCatalogs() []string {
+// Names lists catalog types in sorted order.
+func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	return slices.Sorted(maps.Keys(r.registrars))
 }
 
-// Register adds a factory to the process-wide default registry. An existing
-// catalog type is replaced. Invalid registrations return an error instead of
-// panicking. Use MustRegister for package initialization.
-func Register(catalogType string, reg Registrar) error {
-	return defaultRegistry.Register(catalogType, reg)
+// Register adds a factory to the process-wide default registry, replacing any
+// existing factory of the same type. For compatibility, it panics on a nil
+// registrar and permits an empty catalog type.
+func Register(catalogType string, reg Registrar) {
+	if reg == nil {
+		panic("catalog: RegisterCatalog catalog factory is nil")
+	}
+	defaultRegistry.set(catalogType, reg)
 }
 
 // MustRegister registers a catalog factory in the default registry or panics.
@@ -140,13 +149,7 @@ func Unregister(catalogType string) {
 
 // GetRegisteredCatalogs returns the registered catalog types in sorted order.
 func GetRegisteredCatalogs() []string {
-	return defaultRegistry.GetRegisteredCatalogs()
-}
-
-// CloneDefaultRegistry returns an independent snapshot of the current default
-// registry, including backends registered by side-effect imports.
-func CloneDefaultRegistry() *Registry {
-	return defaultRegistry.Clone()
+	return defaultRegistry.Names()
 }
 
 // Load returns a catalog that must be closed by the caller to release its
