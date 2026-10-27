@@ -85,6 +85,8 @@ const (
 	totalFileSizeKey          = "total-files-size"
 	changedPartitionCountProp = "changed-partition-count"
 	changedPartitionPrefix    = "partitions."
+	addedDVsKey               = "added-dvs"
+	removedDVsKey             = "removed-dvs"
 )
 
 type updateMetrics struct {
@@ -104,6 +106,8 @@ type updateMetrics struct {
 	removedPosDeletes     int64
 	addedEqDeletes        int64
 	removedEqDeletes      int64
+	addedDVs              int64
+	removedDVs            int64
 }
 
 func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
@@ -114,7 +118,11 @@ func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
 		m.addedRecords += df.Count()
 	case iceberg.EntryContentPosDeletes:
 		m.addedDeleteFiles++
-		m.addedPosDeleteFiles++
+		if IsDeletionVector(df) {
+			m.addedDVs++
+		} else {
+			m.addedPosDeleteFiles++
+		}
 		m.addedPosDeletes += df.Count()
 	case iceberg.EntryContentEqDeletes:
 		m.addedDeleteFiles++
@@ -135,7 +143,11 @@ func (m *updateMetrics) removeFile(df iceberg.DataFile) error {
 		m.deletedRecords += df.Count()
 	case iceberg.EntryContentPosDeletes:
 		m.removedDeleteFiles++
-		m.removedPosDeleteFiles++
+		if IsDeletionVector(df) {
+			m.removedDVs++
+		} else {
+			m.removedPosDeleteFiles++
+		}
 		m.removedPosDeletes += df.Count()
 	case iceberg.EntryContentEqDeletes:
 		m.removedDeleteFiles++
@@ -172,6 +184,8 @@ func (m *updateMetrics) toProps() iceberg.Properties {
 	setWhenPositive(props, removedPosDeletesKey, m.removedPosDeletes)
 	setWhenPositive(props, addedEqDeletesKey, m.addedEqDeletes)
 	setWhenPositive(props, removedEqDeletesKey, m.removedEqDeletes)
+	setWhenPositive(props, addedDVsKey, m.addedDVs)
+	setWhenPositive(props, removedDVsKey, m.removedDVs)
 
 	return props
 }

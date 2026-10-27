@@ -81,9 +81,8 @@ func summaryCounter(props iceberg.Properties, key string, unit metrics.Unit) *me
 // snapshotSummary): attempts and total-duration come from the commit itself,
 // and every other metric is read from the snapshot summary under its spec key
 // and emitted under Java's commit-report field name so dashboards line up
-// across implementations. Metrics whose summary key iceberg-go does not yet
-// populate (DVs) are absent and therefore omitted — exactly as Java's
-// counterFrom omits summary keys it does not find.
+// across implementations. A metric whose summary key is absent is omitted,
+// exactly as Java's counterFrom omits summary keys it does not find.
 func buildCommitReport(tableName string, snap *Snapshot, attempts int64, dur time.Duration) metrics.CommitReport {
 	var (
 		snapshotID int64
@@ -126,6 +125,9 @@ func buildCommitReport(tableName string, snap *Snapshot, attempts int64, dur tim
 
 			AddedPositionalDeleteFiles:   count(addedPosDeleteFilesKey),
 			RemovedPositionalDeleteFiles: count(removedPosDeleteFilesKey),
+
+			AddedDVs:   count(addedDVsKey),
+			RemovedDVs: count(removedDVsKey),
 
 			AddedRecords:   count(addedRecordsKey),
 			RemovedRecords: count(deletedRecordsKey),
