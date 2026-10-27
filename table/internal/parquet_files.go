@@ -2872,7 +2872,7 @@ func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manif
 	results := make([]T, len(manifest.Fields))
 	for i, f := range manifest.Fields {
 		if mapping != nil {
-			fieldMap = mapping.GetField(f.Field.Name)
+			fieldMap, _ = mapping.FindFieldByName(f.Field.Name)
 		}
 		res := visitManifestField(f, visitor, fieldMap)
 		results[i] = visitor.Field(f, res, fieldMap)
@@ -2886,7 +2886,7 @@ func visitParquetManifestStruct[T any](field pqarrow.SchemaField, visitor manife
 	var fieldMap *iceberg.MappedField
 	for i, f := range field.Children {
 		if mapping != nil {
-			fieldMap = mapping.GetField(f.Field.Name)
+			fieldMap, _ = mapping.FindFieldByName(f.Field.Name)
 		}
 		res := visitManifestField(f, visitor, fieldMap)
 		results[i] = visitor.Field(f, res, fieldMap)
@@ -2899,7 +2899,7 @@ func visitManifestList[T any](field pqarrow.SchemaField, visitor manifestVisitor
 	elemField := field.Children[0]
 	var elemMapping *iceberg.MappedField
 	if mapping != nil {
-		elemMapping = mapping.GetField("element")
+		elemMapping, _ = mapping.FindFieldByName("element")
 	}
 	res := visitManifestField(elemField, visitor, elemMapping)
 
@@ -2911,8 +2911,8 @@ func visitManifestMap[T any](field pqarrow.SchemaField, visitor manifestVisitor[
 	keyField, valField := kvfield.Children[0], kvfield.Children[1]
 	var keyMapping, valMapping *iceberg.MappedField
 	if mapping != nil {
-		keyMapping = mapping.GetField("key")
-		valMapping = mapping.GetField("value")
+		keyMapping, _ = mapping.FindFieldByName("key")
+		valMapping, _ = mapping.FindFieldByName("value")
 	}
 
 	return visitor.Map(field, visitManifestField(keyField, visitor, keyMapping), visitManifestField(valField, visitor, valMapping), mapping)
@@ -3077,7 +3077,7 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Field, mapping *iceberg.MappedField) arrow.Field {
 	var elemMapping *iceberg.MappedField
 	if mapping != nil {
-		elemMapping = mapping.GetField("element")
+		elemMapping, _ = mapping.FindFieldByName("element")
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Children[0].Field, elemMapping)]
@@ -3117,7 +3117,7 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult arrow.Field, mapping *iceberg.MappedField) arrow.Field {
 	var valMapping *iceberg.MappedField
 	if mapping != nil {
-		valMapping = mapping.GetField("value")
+		valMapping, _ = mapping.FindFieldByName("value")
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Children[0].Children[1].Field, valMapping)]

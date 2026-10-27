@@ -43,14 +43,21 @@ func (m *MappedField) ID() int {
 	return *m.FieldID
 }
 
-func (m *MappedField) GetField(field string) *MappedField {
-	for _, f := range m.Fields {
-		if slices.Contains(f.Names, field) {
-			return &f
+// FindFieldByName returns the first direct child with a matching name or alias.
+// The pointer refers to the child in m.Fields, not a copy. If there is no
+// matching child, FindFieldByName returns nil, false.
+func (m *MappedField) FindFieldByName(name string) (*MappedField, bool) {
+	if m == nil {
+		return nil, false
+	}
+
+	for i := range m.Fields {
+		if slices.Contains(m.Fields[i].Names, name) {
+			return &m.Fields[i], true
 		}
 	}
 
-	return nil
+	return nil, false
 }
 
 func (m *MappedField) Len() int { return len(m.Fields) }
@@ -286,7 +293,9 @@ func (NameMappingAccessor) FieldPartner(partnerStruct *MappedField, _ int, field
 		return nil
 	}
 
-	return partnerStruct.GetField(fieldName)
+	field, _ := partnerStruct.FindFieldByName(fieldName)
+
+	return field
 }
 
 func (NameMappingAccessor) ListElementPartner(partnerList *MappedField) *MappedField {
@@ -294,7 +303,9 @@ func (NameMappingAccessor) ListElementPartner(partnerList *MappedField) *MappedF
 		return nil
 	}
 
-	return partnerList.GetField("element")
+	field, _ := partnerList.FindFieldByName("element")
+
+	return field
 }
 
 func (NameMappingAccessor) MapKeyPartner(partnerMap *MappedField) *MappedField {
@@ -302,7 +313,9 @@ func (NameMappingAccessor) MapKeyPartner(partnerMap *MappedField) *MappedField {
 		return nil
 	}
 
-	return partnerMap.GetField("key")
+	field, _ := partnerMap.FindFieldByName("key")
+
+	return field
 }
 
 func (NameMappingAccessor) MapValuePartner(partnerMap *MappedField) *MappedField {
@@ -310,7 +323,9 @@ func (NameMappingAccessor) MapValuePartner(partnerMap *MappedField) *MappedField
 		return nil
 	}
 
-	return partnerMap.GetField("value")
+	field, _ := partnerMap.FindFieldByName("value")
+
+	return field
 }
 
 type indexedNameMappingAccessor struct {
@@ -355,7 +370,9 @@ func (n indexedNameMappingAccessor) getField(partnerStruct *MappedField, fieldNa
 		return fieldsByName[fieldName]
 	}
 
-	return partnerStruct.GetField(fieldName)
+	field, _ := partnerStruct.FindFieldByName(fieldName)
+
+	return field
 }
 
 func (n indexedNameMappingAccessor) SchemaPartner(partner *MappedField) *MappedField {
