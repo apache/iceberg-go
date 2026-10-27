@@ -515,7 +515,7 @@ newTbl, err := txn.Commit(ctx)
 <pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;staging&quot;)
 if err != nil { /* ... */ }
 </code></pre>
-<p><code>Commit</code> retries automatically on conflict (<code>ErrCommitFailed</code>) - tune via the <code>commit.retry.*</code> table properties.</p>
+<p><code>Commit</code> can retry on conflict (<code>ErrCommitFailed</code>) when <code>commit.retry.num-retries</code> is set. See <a href="./concurrent-writes.html#automatic-retry">Automatic retry</a> for the <code>commit.retry.*</code> table properties.</p>
 <h2 id="schema-and-partition-evolution"><a class="header" href="#schema-and-partition-evolution">Schema and partition evolution</a></h2>
 <h3 id="schema-evolution"><a class="header" href="#schema-evolution">Schema evolution</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
