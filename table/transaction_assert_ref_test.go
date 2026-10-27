@@ -191,16 +191,19 @@ func TestNoOpExpireSnapshotsDoesNotBlockRebase(t *testing.T) {
 	assert.Equal(t, "42", cat.metadata.Properties()["offsets"])
 }
 
-func TestNoOpExpireSnapshotsRejectsCommittedTransaction(t *testing.T) {
+func TestNoOpExpireSnapshotsRejectsFinishedTransaction(t *testing.T) {
 	head := int64(100)
 	base := newConflictTestMetadataWithProps(t, &head, assertRefRetryProps)
 	tbl, _ := newAssertRefTestTable(t, base, base)
 
-	tx := tbl.NewTransaction()
-	require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
-	_, err := tx.Commit(t.Context())
+	committed := tbl.NewTransaction()
+	_, err := committed.Commit(t.Context())
 	require.NoError(t, err)
-	assert.ErrorContains(t, tx.ExpireSnapshots(), "already been committed")
+	assert.ErrorContains(t, committed.ExpireSnapshots(), "already been committed")
+
+	unusable := tbl.NewTransaction()
+	unusable.unusable = true
+	assert.ErrorIs(t, unusable.ExpireSnapshots(), ErrTransactionUnusable)
 }
 
 // Why: ref assertions are deduplicated by (type, ref), so assertions

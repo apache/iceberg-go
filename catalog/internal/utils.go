@@ -263,10 +263,10 @@ func ParseMetadataVersion(location string) int {
 
 // ValidateRequirements checks commit requirements against the table's current
 // metadata, which is nil when the table does not exist. A failed requirement
-// on a missing table is reported as catalog.ErrNoSuchTable; any other failure
-// means a concurrent writer changed the table, and is reported as
-// table.ErrCommitFailed so the commit retry loop can refresh and replay, as it
-// does for a REST 409.
+// on a missing table is reported as catalog.ErrNoSuchTable. Any other failure
+// is returned as the requirement reported it, which matches
+// table.ErrCommitFailed when a concurrent writer changed the table, so the
+// commit retry loop can refresh and replay, as it does for a REST 409.
 func ValidateRequirements(ident table.Identifier, current table.Metadata, reqs []table.Requirement) error {
 	for _, r := range reqs {
 		if err := r.Validate(current); err != nil {
@@ -274,7 +274,7 @@ func ValidateRequirements(ident table.Identifier, current table.Metadata, reqs [
 				return fmt.Errorf("%w: %s: %w", catalog.ErrNoSuchTable, strings.Join(ident, "."), err)
 			}
 
-			return fmt.Errorf("%w: %w", table.ErrCommitFailed, err)
+			return err
 		}
 	}
 

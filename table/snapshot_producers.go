@@ -67,10 +67,9 @@ type producerImpl interface {
 // supersededAccumulator marks a producer that writes merged manifests OCC
 // retries orphan. Only rewrite implements it.
 type supersededAccumulator interface {
-	// supersededManifests returns paths of merged manifests to delete once the
-	// commit resolves. When committed is false the commit never landed, so the
-	// final attempt's manifests are orphaned too and are included.
-	supersededManifests(committed bool) []string
+	// supersededManifests returns paths of merged manifests that earlier
+	// passes wrote and a later pass replaced, to delete once the commit lands.
+	supersededManifests() []string
 }
 
 // retryManifestRebuilder lets a producer reuse parent-independent manifest

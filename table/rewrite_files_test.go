@@ -53,6 +53,9 @@ type concurrentTestCatalog struct {
 	location string
 	fsF      table.FSysF
 	attempts atomic.Int32
+	// restConflicts reports a metadata builder rejection as a conflict, as
+	// a REST catalog's 409 does.
+	restConflicts bool
 }
 
 func (c *concurrentTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
@@ -68,6 +71,10 @@ func (c *concurrentTestCatalog) CommitTable(_ context.Context, _ table.Identifie
 	}
 	meta, err := table.UpdateTableMetadata(c.metadata, updates, "")
 	if err != nil {
+		if c.restConflicts {
+			return nil, "", fmt.Errorf("%w: %w", table.ErrCommitFailed, err)
+		}
+
 		return nil, "", err
 	}
 	c.metadata = meta
