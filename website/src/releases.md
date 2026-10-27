@@ -43,6 +43,10 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 ### Unreleased compatibility notes
 
 - **Data file block size setter removed.** `iceberg.DataFileBuilder.BlockSizeInBytes` is removed. New v1 manifests use the Avro schema's 64 MiB default when the field is unset. V2/v3 omit this deprecated field, and legacy v1 values remain readable.
+- **View creation APIs take a named SQL representation.** `view.NewVersionFromSQL`, `view.CreateView`, `view.CreateViewWithIOProperties`, and `sql.Catalog.CreateView` now accept a `view.Representation{SQL: sql, Dialect: dialect}` instead of positional SQL/dialect strings. The dialect is required; Hive preserves the selected representation's dialect.
+
+- **View SQL representation construction uses named fields.** Replace `view.NewRepresentation(sql, dialect)` with `view.NewRepresentation(view.Representation{SQL: sql, Dialect: dialect})`. Serialized JSON is unchanged.
+
 - **Reserved table properties now use a read-only API.** Replace references to `table.ReservedProperties` with `table.ReservedProperties()`. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.
 - **Fixed and decimal constructors return errors.** `iceberg.FixedTypeOf` and `iceberg.DecimalTypeOf` now return `(type, error)` instead of panicking for invalid inputs. Use `MustFixedTypeOf` or `MustDecimalTypeOf` only for known-valid values.
 - **SQL UDF representations now use struct literals.** The `udf.NewSQLRepresentation(dialect, sql)` function, available since v0.7.0, is removed. Use `udf.SQLRepresentation{Dialect: "trino", SQL: "x + 1"}` instead. Empty fields and duplicate dialects are checked during metadata validation; serialized JSON is unchanged.

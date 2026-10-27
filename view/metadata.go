@@ -109,12 +109,12 @@ type Representation struct {
 }
 type Representations []Representation
 
-func NewRepresentation(sql string, dialect string) Representation {
-	return Representation{
-		Type:    "sql",
-		SQL:     sql,
-		Dialect: dialect,
-	}
+// NewRepresentation creates a SQL view representation from named fields.
+// The SQL and Dialect fields are validated by NewVersion.
+func NewRepresentation(repr Representation) Representation {
+	repr.Type = "sql"
+
+	return repr
 }
 
 type Version struct {
@@ -222,10 +222,10 @@ func validateRepresentation(repr Representation) (string, error) {
 	return strings.ToLower(dialect), nil
 }
 
-// NewVersionFromSQL creates a new Version with a single representation
-// using the provided SQL and dialect "default".
-func NewVersionFromSQL(id int64, schemaID int, sql string, defaultNS table.Identifier, opts ...VersionOpt) (*Version, error) {
-	return NewVersion(id, schemaID, Representations{NewRepresentation(sql, "default")}, defaultNS, opts...)
+// NewVersionFromSQL creates a new Version with one SQL representation.
+// SQL and dialect are passed as named fields to avoid swapping them.
+func NewVersionFromSQL(id int64, schemaID int, representation Representation, defaultNS table.Identifier, opts ...VersionOpt) (*Version, error) {
+	return NewVersion(id, schemaID, Representations{NewRepresentation(representation)}, defaultNS, opts...)
 }
 
 // Equals checks whether the other Version would behave the same
