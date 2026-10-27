@@ -3036,7 +3036,7 @@ func TestUnknownTypeValidation(t *testing.T) {
 
 // reservedNonLineageFieldID is a spec-reserved metadata column ID (_file) that
 // is not one of the row-lineage columns, exercising the full reserved range
-// rather than just iceberg.IsMetadataColumn.
+// rather than just iceberg.IsRowLineageColumn.
 const reservedNonLineageFieldID = 2147483646
 
 func TestValidateNoReservedFieldIDs(t *testing.T) {

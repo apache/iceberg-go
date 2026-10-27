@@ -82,8 +82,11 @@ func LastUpdatedSequenceNumber() NestedField {
 	}
 }
 
-// IsMetadataColumn returns true if the field ID is a reserved metadata column (e.g. row lineage).
-func IsMetadataColumn(fieldID int) bool {
+// IsRowLineageColumn reports whether fieldID is one of the two row-lineage
+// metadata columns: _row_id or _last_updated_sequence_number.
+// Other reserved metadata field IDs return false. Use [IsReservedFieldID]
+// to check the full range reserved for metadata columns.
+func IsRowLineageColumn(fieldID int) bool {
 	return fieldID == RowIDFieldID || fieldID == LastUpdatedSequenceNumberFieldID
 }
 
