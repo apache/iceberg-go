@@ -106,7 +106,7 @@ func TestManifestContentCacheBoundsPopulationAndPreservesFullReads(t *testing.T)
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			base := iceio.NewMemFS()
-			require.NoError(t, base.WriteFile(location, content))
+			require.NoError(t, base.WriteFile(context.Background(), location, content))
 			fs := &manifestContentCountingIO{IO: base}
 			cache := newManifestContentCache(0, 128, 64)
 			manifest := iceberg.NewManifestBuilder(2, location, tt.expectedLength, 0, 1).Build()
@@ -168,9 +168,9 @@ func TestManifestContentCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	)
 	firstBytes := []byte("aaaa")
 	secondBytes := []byte("bbbb")
-	require.NoError(t, fs.WriteFile(firstPath, firstBytes))
-	require.NoError(t, fs.WriteFile(secondPath, secondBytes))
-	require.NoError(t, fs.WriteFile(thirdPath, []byte("cccc")))
+	require.NoError(t, fs.WriteFile(context.Background(), firstPath, firstBytes))
+	require.NoError(t, fs.WriteFile(context.Background(), secondPath, secondBytes))
+	require.NoError(t, fs.WriteFile(context.Background(), thirdPath, []byte("cccc")))
 
 	first := iceberg.NewManifestBuilder(2, firstPath, int64(len(firstBytes)), 0, 1).Build()
 	second := iceberg.NewManifestBuilder(2, secondPath, int64(len(secondBytes)), 0, 1).Build()
@@ -192,7 +192,7 @@ func TestManifestContentCacheEvictsLeastRecentlyUsed(t *testing.T) {
 func TestManifestContentCacheExpiresIdleEntries(t *testing.T) {
 	const location = "mem://manifest-content-cache/expired.avro"
 	fs := newTrackingCallsIO()
-	require.NoError(t, fs.WriteFile(location, []byte("aaaa")))
+	require.NoError(t, fs.WriteFile(context.Background(), location, []byte("aaaa")))
 	manifest := iceberg.NewManifestBuilder(2, location, 4, 0, 1).Build()
 	cache := newManifestContentCache(60_000, 8, 4)
 
@@ -213,7 +213,7 @@ func TestManifestContentCacheZeroExpirationKeepsWarmEntries(t *testing.T) {
 	const location = "mem://manifest-content-cache/no-expiration.avro"
 	content := []byte("manifest")
 	fs := newTrackingCallsIO()
-	require.NoError(t, fs.WriteFile(location, content))
+	require.NoError(t, fs.WriteFile(context.Background(), location, content))
 	config := iceberg.Properties{
 		IOManifestCacheEnabledKey:              "true",
 		IOManifestCacheExpirationIntervalMsKey: "0",
@@ -244,7 +244,7 @@ func TestManifestContentCacheSharesInFlightRead(t *testing.T) {
 	const manifestPath = "mem://manifest-content-cache/shared.avro"
 	content := []byte("manifest")
 	base := iceio.NewMemFS()
-	require.NoError(t, base.WriteFile(manifestPath, content))
+	require.NoError(t, base.WriteFile(context.Background(), manifestPath, content))
 
 	fs := &blockingSnapshotManifestIO{
 		IO:          base,
@@ -330,7 +330,7 @@ func TestManifestContentCacheInFlightLengthMismatch(t *testing.T) {
 	const location = "mem://manifest-content-cache/inflight-length.avro"
 	content := []byte("manifest")
 	base := iceio.NewMemFS()
-	require.NoError(t, base.WriteFile(location, content))
+	require.NoError(t, base.WriteFile(context.Background(), location, content))
 	fs := &blockingSnapshotManifestIO{
 		IO: base, blockedPath: location, started: make(chan struct{}),
 		release: make(chan struct{}), opens: make(map[string]int),
@@ -521,7 +521,7 @@ func (f *manifestContentCacheFailOnceIO) Open(ctx context.Context, name string) 
 func TestManifestContentCacheFailedPopulationFallsBackWithoutCaching(t *testing.T) {
 	const location = "mem://manifest-content-cache/fallback.avro"
 	base := iceio.NewMemFS()
-	require.NoError(t, base.WriteFile(location, []byte("test")))
+	require.NoError(t, base.WriteFile(context.Background(), location, []byte("test")))
 	fs := &manifestContentCacheFailOnceIO{IO: base}
 	cache := newManifestContentCache(0, 16, 16)
 	manifest := iceberg.NewManifestBuilder(2, location, 4, 0, 1).Build()
@@ -627,7 +627,7 @@ func TestManifestContentCacheReclaimsExpiredEntriesOnInsert(t *testing.T) {
 		thirdPath  = "mem://manifest-content-cache/new.avro"
 	)
 	for _, name := range []string{firstPath, secondPath, thirdPath} {
-		require.NoError(t, fs.WriteFile(name, []byte("test")))
+		require.NoError(t, fs.WriteFile(context.Background(), name, []byte("test")))
 	}
 	cache := newManifestContentCache(1000, 16, 4)
 	now := time.Now()
@@ -693,7 +693,7 @@ func TestManifestContentCacheFailedSharedLoadFallsBackForAllCallers(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			const path = "mem://manifest-content-cache/failed-shared.avro"
 			base := iceio.NewMemFS()
-			require.NoError(t, base.WriteFile(path, []byte("test")))
+			require.NoError(t, base.WriteFile(context.Background(), path, []byte("test")))
 			fs := &manifestContentFailingBlockedIO{
 				IO: base, started: make(chan struct{}), release: make(chan struct{}),
 				firstReadIsShort: tc.firstReadIsShort,
@@ -767,7 +767,7 @@ func TestManifestContentCacheFailedSharedLoadFallsBackForAllCallers(t *testing.T
 func TestManifestContentCachePanickingProducerUnblocksWaiter(t *testing.T) {
 	const location = "mem://manifest-content-cache/panicking-producer.avro"
 	base := iceio.NewMemFS()
-	require.NoError(t, base.WriteFile(location, []byte("test")))
+	require.NoError(t, base.WriteFile(context.Background(), location, []byte("test")))
 	fs := &manifestContentFailingBlockedIO{
 		IO: base, started: make(chan struct{}), release: make(chan struct{}),
 		firstOpenPanics: true,
@@ -897,7 +897,7 @@ func TestManifestContentCacheFailedSharedLoadPreservesBothErrors(t *testing.T) {
 func TestManifestContentCacheRetriesAfterProducerCancellation(t *testing.T) {
 	const path = "mem://manifest-content-cache/canceled-producer.avro"
 	base := iceio.NewMemFS()
-	require.NoError(t, base.WriteFile(path, []byte("test")))
+	require.NoError(t, base.WriteFile(context.Background(), path, []byte("test")))
 	fs := &manifestContentFailingBlockedIO{
 		IO: base, started: make(chan struct{}), release: make(chan struct{}),
 	}

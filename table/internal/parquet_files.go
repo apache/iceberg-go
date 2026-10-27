@@ -621,7 +621,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 			iceberg.ErrInvalidArgument, rowGroupTargetSizeBytes)
 	}
 
-	fw, err := fs.Create(info.FileName)
+	fw, err := fs.Create(ctx, info.FileName)
 	if err != nil {
 		return nil, err
 	}

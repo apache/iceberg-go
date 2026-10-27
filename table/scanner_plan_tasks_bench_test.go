@@ -138,7 +138,7 @@ func newPlanTasksBenchmarkFixture(
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := fs.WriteFile(manifestPath, manifestBuf.Bytes()); err != nil {
+		if err := fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()); err != nil {
 			b.Fatal(err)
 		}
 		manifests[manifestIndex] = iceberg.NewManifestBuilder(

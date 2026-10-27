@@ -319,7 +319,7 @@ func writePosDeleteParquetToMemFSWithSchema(t *testing.T, memFS *iceio.MemFS, pa
 	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
-	fw, err := memFS.Create(path)
+	fw, err := memFS.Create(context.Background(), path)
 	require.NoError(t, err)
 
 	props = append([]parquet.WriterProperty{

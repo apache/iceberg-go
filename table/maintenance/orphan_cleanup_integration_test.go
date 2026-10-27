@@ -150,7 +150,7 @@ func (s *OrphanCleanupIntegrationSuite) createTableWithData() *table.Table {
 	s.Require().NoError(err)
 
 	fs := s.mustFS(tbl)
-	fw, err := fs.(io.WriteFileIO).Create(dataFile)
+	fw, err := fs.(io.WriteFileIO).Create(context.Background(), dataFile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(arrowTable, fw, arrowTable.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
@@ -174,7 +174,7 @@ func (s *OrphanCleanupIntegrationSuite) createOrphanFiles(tbl *table.Table, loca
 		s.Require().NoError(err)
 
 		// Write some fake contents to the orphan file
-		fw, err := fs.(io.WriteFileIO).Create(orphanPath)
+		fw, err := fs.(io.WriteFileIO).Create(context.Background(), orphanPath)
 		s.Require().NoError(err)
 
 		content := []byte("This is an orphan file: " + fileName)

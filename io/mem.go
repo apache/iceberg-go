@@ -92,11 +92,18 @@ func (m *MemFS) Remove(_ context.Context, name string) error {
 	return nil
 }
 
-func (m *MemFS) Create(name string) (FileWriter, error) {
-	return &memWriter{fs: m, name: name}, nil
+func (m *MemFS) Create(ctx context.Context, name string) (FileWriter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return &memWriter{fs: m, name: name, ctx: ctx}, nil
 }
 
-func (m *MemFS) WriteFile(name string, content []byte) error {
+func (m *MemFS) WriteFile(ctx context.Context, name string, content []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cp := make([]byte, len(content))
 	copy(cp, content)
 	m.mu.Lock()
@@ -106,7 +113,11 @@ func (m *MemFS) WriteFile(name string, content []byte) error {
 	return nil
 }
 
-func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
+func (m *MemFS) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	type walkEntry struct {
 		path  string
 		size  int64
@@ -124,6 +135,12 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 		}
 	}
 	for key, data := range m.files {
+		if err := ctx.Err(); err != nil {
+			m.mu.RUnlock()
+
+			return err
+		}
+
 		if !memPathInRoot(key, root) {
 			continue
 		}
@@ -150,6 +167,10 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 		addEntry(walkEntry{path: filePath, size: int64(len(data))})
 	}
 	m.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if len(entriesByPath) == 0 {
 		err := fn(root, nil, &fs.PathError{Op: "lstat", Path: root, Err: fs.ErrNotExist})
 		if err == fs.SkipDir || err == fs.SkipAll {
@@ -164,14 +185,25 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 	paths := make([]string, 0, len(entriesByPath))
 	for entryPath := range entriesByPath {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		paths = append(paths, entryPath)
 	}
 	sort.Slice(paths, func(i, j int) bool {
 		return memWalkPathLess(root, paths[i], paths[j])
 	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	var skipPrefix string
 	for _, entryPath := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if skipPrefix != "" && strings.HasPrefix(entryPath, skipPrefix) {
 			continue
 		}
@@ -314,11 +346,16 @@ func (fi *memFileInfo) Sys() any           { return nil }
 type memWriter struct {
 	fs   *MemFS
 	name string
+	ctx  context.Context
 	buf  bytes.Buffer
 }
 
 func (w *memWriter) Write(p []byte) (int, error)         { return w.buf.Write(p) }
 func (w *memWriter) ReadFrom(r io.Reader) (int64, error) { return w.buf.ReadFrom(r) }
 func (w *memWriter) Close() error {
-	return w.fs.WriteFile(w.name, w.buf.Bytes())
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+
+	return w.fs.WriteFile(w.ctx, w.name, w.buf.Bytes())
 }

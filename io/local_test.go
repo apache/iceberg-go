@@ -43,7 +43,7 @@ func TestLocalFSWalkDir(t *testing.T) {
 	lfs := LocalFS{}
 
 	var files []string
-	err := lfs.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := lfs.WalkDir(context.Background(), dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -74,7 +74,7 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 	lfs := LocalFS{}
 
 	var files []string
-	err := lfs.WalkDir(fileURI(dir), func(path string, d fs.DirEntry, err error) error {
+	err := lfs.WalkDir(context.Background(), fileURI(dir), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -87,6 +87,21 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{filepath.Join(dir, "test.txt")}, files)
+}
+
+func TestLocalFSWalkDirReturnsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var called bool
+	err := (LocalFS{}).WalkDir(ctx, t.TempDir(), func(string, fs.DirEntry, error) error {
+		called = true
+
+		return nil
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called)
 }
 
 func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
@@ -115,7 +130,7 @@ func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoError(t, LocalFS{}.WriteFile(tt.path, content))
+			require.NoError(t, LocalFS{}.WriteFile(context.Background(), tt.path, content))
 
 			got, err := os.ReadFile(tt.readPath)
 			require.NoError(t, err)

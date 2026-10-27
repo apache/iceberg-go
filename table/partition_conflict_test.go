@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -107,7 +108,7 @@ func writeTestManifest(
 	require.NoError(t, err)
 
 	fs := iceio.LocalFS{}
-	f, err := fs.Create(manifestPath)
+	f, err := fs.Create(context.Background(), manifestPath)
 	require.NoError(t, err)
 	_, err = f.Write(buf.Bytes())
 	require.NoError(t, err)
@@ -126,7 +127,7 @@ func writeTestManifestList(
 
 	listPath := filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("snap-%d-manifests.avro", snapshotID)))
 	fs := iceio.LocalFS{}
-	f, err := fs.Create(listPath)
+	f, err := fs.Create(context.Background(), listPath)
 	require.NoError(t, err)
 
 	seqNum := int64(1)

@@ -588,7 +588,7 @@ func writeEqualityDeleteParquetToMemFS(t testing.TB, fs *iceio.MemFS, path, cont
 	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
 	defer tbl.Release()
 
-	file, err := fs.Create(path)
+	file, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, file, record.NumRows(),
 		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
@@ -618,7 +618,7 @@ func TestReadEqualityDeleteFileMatchesMaterializedRead(t *testing.T) {
 	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
-	f, err := (iceio.LocalFS{}).Create(path)
+	f, err := (iceio.LocalFS{}).Create(context.Background(), path)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, f, 2,
 		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
@@ -677,7 +677,7 @@ func TestReadEqualityDeleteFilePreservesEmbeddedFieldIDsWhenNamesAreReused(t *te
 	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
-	f, err := (iceio.LocalFS{}).Create(path)
+	f, err := (iceio.LocalFS{}).Create(context.Background(), path)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, f, 1,
 		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))

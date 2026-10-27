@@ -40,7 +40,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
+func WriteTableMetadata(ctx context.Context, metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
 	switch compression {
 	case table.MetadataCompressionCodecNone, table.MetadataCompressionCodecGzip, table.MetadataCompressionCodecZstd:
 		// supported codecs
@@ -48,7 +48,7 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 		return fmt.Errorf("unsupported write metadata compression codec: %s", compression)
 	}
 
-	out, err := fs.Create(loc)
+	out, err := fs.Create(ctx, loc)
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func WriteMetadata(ctx context.Context, tbl *table.Table) error {
 
 	compression := tbl.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 
-	return WriteTableMetadata(tbl.Metadata(), wfs, tbl.MetadataLocation(), compression)
+	return WriteTableMetadata(ctx, tbl.Metadata(), wfs, tbl.MetadataLocation(), compression)
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {

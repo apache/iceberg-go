@@ -166,7 +166,7 @@ func (f *rowLineageRewriteBenchmarkFixture) reset(b *testing.B) {
 func rowLineageRewriteBenchmarkFiles(b *testing.B, fsys *iceio.MemFS, location string) map[string]struct{} {
 	b.Helper()
 	files := make(map[string]struct{})
-	require.NoError(b, fsys.WalkDir(location, func(path string, entry fs.DirEntry, err error) error {
+	require.NoError(b, fsys.WalkDir(context.Background(), location, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

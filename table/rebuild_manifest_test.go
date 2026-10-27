@@ -510,7 +510,7 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 
 	// Write an empty manifest list for the freshParent so Manifests() can open it.
 	parentManifestListPath := "mem://default/table-location/metadata/fresh-parent-snap.avro"
-	out, createErr := wfs.Create(parentManifestListPath)
+	out, createErr := wfs.Create(context.Background(), parentManifestListPath)
 	require.NoError(t, createErr)
 	writeErr := iceberg.WriteManifestList(2, out, 77, nil, new(int64(0)), 0, nil)
 	require.NoError(t, writeErr)

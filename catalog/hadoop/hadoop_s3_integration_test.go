@@ -193,7 +193,7 @@ func (s *HadoopS3IntegrationSuite) TestPurgeTableRemovesTableRoot() {
 	s.Require().True(ok)
 
 	dataPath := tbl.Location() + "/data/file.parquet"
-	s.Require().NoError(writeFS.WriteFile(dataPath, []byte("data")))
+	s.Require().NoError(writeFS.WriteFile(context.Background(), dataPath, []byte("data")))
 
 	s.Require().NoError(s.cat.PurgeTable(s.ctx, ident))
 

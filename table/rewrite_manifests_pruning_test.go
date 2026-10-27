@@ -78,7 +78,7 @@ func TestRewriteManifestsClusterByPrunesManifests(t *testing.T) {
 		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, inputSnapshotID,
 			[]iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 		manifests = append(manifests, manifest)
 	}
 

@@ -89,11 +89,12 @@ type WriteFileIO interface {
 	IO
 
 	// Create attempts to create the named file and return a writer
-	// for it.
-	Create(name string) (FileWriter, error)
+	// for it. Implementations may use ctx to bound creation and writes
+	// performed through the returned writer.
+	Create(ctx context.Context, name string) (FileWriter, error)
 
 	// WriteFile writes p to the named file.
-	WriteFile(name string, p []byte) error
+	WriteFile(ctx context.Context, name string, p []byte) error
 }
 
 // ListableIO is the interface implemented by a file system that
@@ -110,7 +111,9 @@ type ListableIO interface {
 	// WalkDir walks the file tree rooted at root, calling fn for each
 	// file or directory in the tree, including root. Paths passed to fn
 	// are full URIs consistent with the root's scheme and authority.
-	WalkDir(root string, fn fs.WalkDirFunc) error
+	// Implementations should pass ctx to backend listing operations and stop
+	// traversal when it is canceled.
+	WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error
 }
 
 // BulkRemovableIO is an optional interface for IO implementations that

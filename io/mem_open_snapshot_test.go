@@ -19,6 +19,7 @@ package io_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -32,7 +33,7 @@ func TestMemFSOpenPreservesSnapshots(t *testing.T) {
 	memFS := icebergio.NewMemFS()
 	name := "mem://bucket/data.parquet"
 	input := []byte("original")
-	if err := memFS.WriteFile(name, input); err != nil {
+	if err := memFS.WriteFile(context.Background(), name, input); err != nil {
 		t.Fatal(err)
 	}
 
@@ -44,7 +45,7 @@ func TestMemFSOpenPreservesSnapshots(t *testing.T) {
 
 	// The caller's input must not alias a published file.
 	input[0] = 'X'
-	if err := memFS.WriteFile(name, []byte("replacement")); err != nil {
+	if err := memFS.WriteFile(context.Background(), name, []byte("replacement")); err != nil {
 		t.Fatal(err)
 	}
 	newFile, err := memFS.Open(t.Context(), name)
@@ -95,7 +96,7 @@ func TestMemFSOpenPreservesSnapshotAcrossCreate(t *testing.T) {
 	memFS := icebergio.NewMemFS()
 	name := "mem://bucket/created.parquet"
 
-	firstWriter, err := memFS.Create(name)
+	firstWriter, err := memFS.Create(context.Background(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +113,7 @@ func TestMemFSOpenPreservesSnapshotAcrossCreate(t *testing.T) {
 	}
 	defer oldFile.Close()
 
-	secondWriter, err := memFS.Create(name)
+	secondWriter, err := memFS.Create(context.Background(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func TestMemFSOpenConcurrentReplacement(t *testing.T) {
 	name := "mem://bucket/data.parquet"
 	a := bytes.Repeat([]byte{'a'}, 4096)
 	b := bytes.Repeat([]byte{'b'}, 4096)
-	if err := memFS.WriteFile(name, a); err != nil {
+	if err := memFS.WriteFile(context.Background(), name, a); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +162,7 @@ func TestMemFSOpenConcurrentReplacement(t *testing.T) {
 			if i%2 != 0 {
 				value = b
 			}
-			if err := memFS.WriteFile(name, value); err != nil {
+			if err := memFS.WriteFile(context.Background(), name, value); err != nil {
 				t.Errorf("write: %v", err)
 
 				return

@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"context"
 	"reflect"
 	"strings"
 	"sync"
@@ -302,7 +303,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			}
 
 			fs := iceio.NewMemFS()
-			require.NoError(t, fs.WriteFile(manifest.FilePath(), manifestBytes.Bytes()))
+			require.NoError(t, fs.WriteFile(context.Background(), manifest.FilePath(), manifestBytes.Bytes()))
 			projectedEntries := map[string]ManifestEntry{
 				"reader":                    projected,
 				"reader with pruning stats": withStats,

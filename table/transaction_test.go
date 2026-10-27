@@ -144,7 +144,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
-	fw, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(filename)
+	fw, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(context.Background(), filename)
 	if err != nil {
 		panic(err)
 	}

@@ -80,7 +80,7 @@ func benchmarkInspectPartitionTable(b *testing.B, manifestCount int) *Table {
 			},
 		)
 		require.NoError(b, err)
-		require.NoError(b, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+		require.NoError(b, fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 		manifests = append(manifests, manifest)
 	}
 
@@ -89,7 +89,7 @@ func benchmarkInspectPartitionTable(b *testing.B, manifestCount int) *Table {
 	require.NoError(b, iceberg.WriteManifestList(
 		2, &listBuf, snapshotID, nil, &sequenceNumber, 0, manifests,
 	))
-	require.NoError(b, fs.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(b, fs.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	schemaID := schema.ID
 	require.NoError(b, builder.AddSnapshot(&Snapshot{

@@ -72,7 +72,7 @@ func writeTestDeleteManifest(
 	require.NoError(t, err)
 
 	fs := iceio.LocalFS{}
-	f, err := fs.Create(manifestPath)
+	f, err := fs.Create(context.Background(), manifestPath)
 	require.NoError(t, err)
 	_, err = f.Write(buf.Bytes())
 	require.NoError(t, err)
@@ -846,7 +846,7 @@ func writeTestMetricsManifestWithValues(
 	mf, err := iceberg.WriteManifest(manifestPath, &buf, 2, spec, schema, snapshotID, []iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
 	fs := iceio.LocalFS{}
-	out, err := fs.Create(manifestPath)
+	out, err := fs.Create(context.Background(), manifestPath)
 	require.NoError(t, err)
 	_, err = out.Write(buf.Bytes())
 	require.NoError(t, err)

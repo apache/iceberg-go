@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -100,7 +101,7 @@ func benchmarkWritePosDeleteParquet(b *testing.B, fs *iceio.MemFS, path, content
 	tbl := array.NewTableFromRecords(PositionalDeleteArrowSchema, []arrow.RecordBatch{record})
 	defer tbl.Release()
 
-	file, err := fs.Create(path)
+	file, err := fs.Create(context.Background(), path)
 	if err != nil {
 		b.Fatal(err)
 	}

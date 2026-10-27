@@ -791,7 +791,7 @@ func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, cataloginternal.WriteTableMetadata(
-		current, iceio.LocalFS{}, oldMetadataLocation, table.MetadataCompressionCodecNone,
+		context.Background(), current, iceio.LocalFS{}, oldMetadataLocation, table.MetadataCompressionCodecNone,
 	))
 
 	existing := constructHiveTable(
@@ -998,7 +998,7 @@ func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
 	dataFile := tableLocation + "/data/file.parquet"
 	writeHivePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation, nil)
-	assert.NoError(failingFS.WriteFile(dataFile, []byte("data")))
+	assert.NoError(failingFS.WriteFile(context.Background(), dataFile, []byte("data")))
 	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
 
 	mockClient := &mockHiveClient{}
@@ -1091,7 +1091,7 @@ func writeHivePurgeTableFilesWithProperties(
 	metadataLocation = filepath.Join(tableLocation, "metadata", "v1.metadata.json")
 	dataFile = filepath.Join(tableLocation, "data", "file.parquet")
 	writeHivePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, props)
-	writer, err := iceio.LocalFS{}.Create(dataFile)
+	writer, err := iceio.LocalFS{}.Create(context.Background(), dataFile)
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("data"))
 	require.NoError(t, err)
@@ -1113,7 +1113,7 @@ func writeHivePurgeTableMetadata(
 	})
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, props)
 	require.NoError(t, err)
-	require.NoError(t, cataloginternal.WriteTableMetadata(meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
+	require.NoError(t, cataloginternal.WriteTableMetadata(context.Background(), meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
 }
 
 func TestHiveDropTableNotExists(t *testing.T) {

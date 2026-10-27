@@ -92,7 +92,7 @@ func TestSnapshotManifestCacheSeparatesContentAndProtectsSlices(t *testing.T) {
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{data, deleteManifest}))
 	const listPath = "mem://snapshot-manifest-cache/separate.avro"
-	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), listPath, list.Bytes()))
 
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
 	set, err := cache.get(context.Background(), snapshot, testSnapshotManifestLoader(snapshot, fs))
@@ -118,7 +118,7 @@ func TestSnapshotManifestCacheSharesInFlightRead(t *testing.T) {
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{}))
-	require.NoError(t, base.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, base.WriteFile(context.Background(), listPath, list.Bytes()))
 
 	fs := &blockingSnapshotManifestIO{
 		IO:          base,
@@ -179,7 +179,7 @@ func TestSnapshotManifestCacheRetriesFailedRead(t *testing.T) {
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{}))
-	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), listPath, list.Bytes()))
 	_, err = cache.get(context.Background(), snapshot, testSnapshotManifestLoader(snapshot, fs))
 	require.NoError(t, err)
 }
@@ -193,7 +193,7 @@ func TestSnapshotManifestCacheBoundsCompletedEntries(t *testing.T) {
 		var list bytes.Buffer
 		require.NoError(t, iceberg.WriteManifestList(2, &list, int64(i), nil, &sequenceNumber, 0, nil))
 		path := fmt.Sprintf("mem://snapshot-manifest-cache/bounded-%d.avro", i)
-		require.NoError(t, fs.WriteFile(path, list.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, list.Bytes()))
 		snapshots[i] = Snapshot{SnapshotID: int64(i), ManifestList: path}
 	}
 
@@ -405,7 +405,7 @@ func TestSnapshotManifestCacheKeepsCompletedReadAfterCancellation(t *testing.T) 
 	manifest := iceberg.NewManifestBuilder(2, "data.avro", 10, 0, 1).Build()
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0, []iceberg.ManifestFile{manifest}))
 	const listPath = "mem://snapshot-manifest-cache/late-cancel.avro"
-	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), listPath, list.Bytes()))
 
 	cache := newSnapshotManifestCache()
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
@@ -450,7 +450,7 @@ func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T
 	var list bytes.Buffer
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0, nil))
-	require.NoError(t, base.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, base.WriteFile(context.Background(), listPath, list.Bytes()))
 	fs := &blockingSnapshotManifestIO{
 		IO: base, blockedPath: listPath, started: make(chan struct{}),
 		release: make(chan struct{}), opens: make(map[string]int),
@@ -880,7 +880,7 @@ func TestAllManifestsEarlyStopDoesNotFailConcurrentScan(t *testing.T) {
 	var list bytes.Buffer
 	sequenceNumber := int64(2)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 2, &previous.SnapshotID, &sequenceNumber, 0, manifests))
-	require.NoError(t, fs.WriteFile(currentList, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), currentList, list.Bytes()))
 	builder, err := MetadataBuilderFromBase(scan.metadata, "")
 	require.NoError(t, err)
 	current := *previous

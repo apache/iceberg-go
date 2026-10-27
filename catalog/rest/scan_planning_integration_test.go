@@ -261,7 +261,7 @@ func (s *RestIntegrationSuite) createScanPlanningTable(cat *rest.Catalog, ident 
 	s.Require().NoError(err)
 	writeFS, ok := mustFS(s.T(), tbl).(iceio.WriteFileIO)
 	s.Require().True(ok, "table filesystem must implement WriteFileIO")
-	file, err := writeFS.Create(dataPath)
+	file, err := writeFS.Create(context.Background(), dataPath)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(arrowTable, file, arrowTable.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))

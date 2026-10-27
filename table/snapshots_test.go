@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -145,8 +146,8 @@ func TestDeserializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
 
 	assert.Equal(t, paths, snapshot.ManifestLocations)
 	fs := iceio.NewMemFS()
-	require.NoError(t, fs.WriteFile(paths[0], []byte("manifest-one")))
-	require.NoError(t, fs.WriteFile(paths[1], []byte("manifest-two-longer")))
+	require.NoError(t, fs.WriteFile(context.Background(), paths[0], []byte("manifest-one")))
+	require.NoError(t, fs.WriteFile(context.Background(), paths[1], []byte("manifest-two-longer")))
 
 	manifests, err := snapshot.Manifests(fs)
 	require.NoError(t, err)

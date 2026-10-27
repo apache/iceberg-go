@@ -202,6 +202,66 @@ func TestBlobFileIOOpenPreprocessErrorRetainsOriginalPath(t *testing.T) {
 	assert.Equal(t, name, pathErr.Path)
 }
 
+func TestBlobFileIOWriteOperationsUseOperationContext(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	fileIO := testBlobFileIO(lifetimeCtx, "my-bucket", bucket)
+	cancelLifetime()
+
+	ctx := context.Background()
+	content := []byte("written with operation context")
+	require.NoError(t, fileIO.WriteFile(ctx, "s3://my-bucket/write-file", content))
+
+	writer, err := fileIO.Create(ctx, "s3://my-bucket/create-file")
+	require.NoError(t, err)
+	_, err = writer.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	for _, key := range []string{"write-file", "create-file"} {
+		got, err := bucket.ReadAll(ctx, key)
+		require.NoError(t, err)
+		assert.Equal(t, content, got)
+	}
+}
+
+func TestBlobFileIOWriteFileHonorsOperationCancellation(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := fileIO.WriteFile(ctx, "s3://my-bucket/canceled", []byte("content"))
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestBlobFileIOCreateHonorsOperationCancellation(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	writer, err := fileIO.Create(ctx, "s3://my-bucket/canceled")
+	if err == nil {
+		_, writeErr := writer.Write([]byte("content"))
+		closeErr := writer.Close()
+		err = errors.Join(writeErr, closeErr)
+	}
+	assert.ErrorIs(t, err, context.Canceled)
+	exists, err := bucket.Exists(context.Background(), "canceled")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
 func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *FileIO {
 	if len(allowedSchemes) == 0 {
 		allowedSchemes = schemes.S3
@@ -268,7 +328,7 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 			bfs := testBlobFileIO(ctx, "test-bucket", bucket, tt.allowedSchemes...)
 			require.NoError(t, bucket.WriteAll(ctx, tt.oldKey, []byte("sentinel"), nil))
 
-			err := bfs.WriteFile(tt.path, []byte("content"))
+			err := bfs.WriteFile(context.Background(), tt.path, []byte("content"))
 			require.ErrorContains(t, err, tt.wantErrText)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -411,7 +471,7 @@ func TestBlobFileIOWalkDir(t *testing.T) {
 
 	var walked []string
 	var sawRoot bool
-	err := bfs.WalkDir("s3://test-bucket/", func(path string, d fs.DirEntry, err error) error {
+	err := bfs.WalkDir(context.Background(), "s3://test-bucket/", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -439,6 +499,66 @@ func TestBlobFileIOWalkDir(t *testing.T) {
 	assert.True(t, sawRoot)
 }
 
+type walkContextKey struct{}
+
+type contextAwareListBucket struct {
+	driver.Bucket
+	listCtx chan context.Context
+	release chan struct{}
+}
+
+func (b *contextAwareListBucket) ErrorCode(error) gcerrors.ErrorCode { return gcerrors.Unknown }
+
+func (b *contextAwareListBucket) ListPaged(ctx context.Context, _ *driver.ListOptions) (*driver.ListPage, error) {
+	b.listCtx <- ctx
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-b.release:
+		return nil, context.Canceled
+	}
+}
+
+func (b *contextAwareListBucket) Close() error { return nil }
+
+func TestBlobFileIOWalkDirPassesOperationContextToListing(t *testing.T) {
+	driverBucket := &contextAwareListBucket{
+		listCtx: make(chan context.Context, 1),
+		release: make(chan struct{}),
+	}
+	bucket := blob.NewBucket(driverBucket)
+	defer bucket.Close()
+	defer close(driverBucket.release)
+
+	const contextValue = "walk operation"
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), walkContextKey{}, contextValue))
+	defer cancel()
+	bfs := New(context.Background(), bucket, DefaultObjectLocationExtractor("test-bucket"))
+
+	walkErr := make(chan error, 1)
+	go func() {
+		walkErr <- bfs.WalkDir(ctx, "s3://test-bucket/", func(string, fs.DirEntry, error) error {
+			return nil
+		})
+	}()
+
+	var listCtx context.Context
+	select {
+	case listCtx = <-driverBucket.listCtx:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WalkDir did not start the bucket listing")
+	}
+	assert.Equal(t, contextValue, listCtx.Value(walkContextKey{}))
+
+	cancel()
+	select {
+	case err := <-walkErr:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("WalkDir did not cancel the bucket listing")
+	}
+}
+
 func TestBlobFileIOWalkDirRejectsMalformedAuthorityURI(t *testing.T) {
 	ctx := context.Background()
 
@@ -447,7 +567,7 @@ func TestBlobFileIOWalkDirRejectsMalformedAuthorityURI(t *testing.T) {
 
 	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
 
-	err := bfs.WalkDir("s3://test-bucket?prefix=data", func(string, fs.DirEntry, error) error {
+	err := bfs.WalkDir(context.Background(), "s3://test-bucket?prefix=data", func(string, fs.DirEntry, error) error {
 		t.Fatal("WalkDir callback should not be called")
 
 		return nil
@@ -477,7 +597,7 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bfs := testBlobFileIO(ctx, "test-bucket", bucket, tt.allowedSchemes...)
-			err := bfs.WalkDir(tt.root, func(string, fs.DirEntry, error) error {
+			err := bfs.WalkDir(context.Background(), tt.root, func(string, fs.DirEntry, error) error {
 				t.Fatal("WalkDir callback should not be called")
 
 				return nil
@@ -500,7 +620,7 @@ func TestBlobFileIOWalkDirRelativeRootReturnsBareKeys(t *testing.T) {
 	bfs := testBlobFileIO(ctx, "mybucket", bucket)
 
 	var walked []string
-	err := bfs.WalkDir("data", func(path string, d fs.DirEntry, err error) error {
+	err := bfs.WalkDir(context.Background(), "data", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -531,7 +651,7 @@ func TestBlobFileIOWalkDirSubPath(t *testing.T) {
 	bfs := testBlobFileIO(ctx, "mybucket", bucket)
 
 	var walked []string
-	err := bfs.WalkDir("s3://mybucket/data", func(path string, d fs.DirEntry, err error) error {
+	err := bfs.WalkDir(context.Background(), "s3://mybucket/data", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -569,7 +689,7 @@ func TestBlobFileIOWalkDirHierarchicalNamespace(t *testing.T) {
 	bfs := testBlobFileIO(ctx, "mybucket", bucket)
 
 	var dirs, files []string
-	err := bfs.WalkDir("s3://mybucket/tbl", func(path string, d fs.DirEntry, err error) error {
+	err := bfs.WalkDir(context.Background(), "s3://mybucket/tbl", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -605,7 +725,7 @@ func TestBlobFileIORawQueryFragmentRoundTrip(t *testing.T) {
 	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
 	location := "s3://test-bucket/path/to/file.parquet?param=value#fragment"
 	content := []byte("data")
-	require.NoError(t, bfs.WriteFile(location, content))
+	require.NoError(t, bfs.WriteFile(context.Background(), location, content))
 
 	file, err := bfs.Open(context.Background(), location)
 	require.NoError(t, err)
@@ -883,7 +1003,7 @@ func TestBlobFileIOWalkDirSkipsDirectoryMarker(t *testing.T) {
 	require.NoError(t, bfs.MkdirAll("s3://test-bucket/warehouse/ns"))
 
 	var paths []string
-	require.NoError(t, bfs.WalkDir("s3://test-bucket/warehouse/ns", func(path string, d fs.DirEntry, err error) error {
+	require.NoError(t, bfs.WalkDir(context.Background(), "s3://test-bucket/warehouse/ns", func(path string, d fs.DirEntry, err error) error {
 		require.NoError(t, err)
 		paths = append(paths, path)
 
@@ -909,7 +1029,7 @@ func TestBlobFileIOWalkDirSkipsSubdirectoryMarkers(t *testing.T) {
 	bfs := testBlobFileIO(ctx, "mybucket", bucket)
 
 	var dirs, files []string
-	err := bfs.WalkDir("s3://mybucket/tbl", func(path string, d fs.DirEntry, err error) error {
+	err := bfs.WalkDir(context.Background(), "s3://mybucket/tbl", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -951,7 +1071,7 @@ func TestBlobFileIOWalkDirTrailingSlashRoot(t *testing.T) {
 
 	walk := func(root string) []string {
 		var paths []string
-		require.NoError(t, bfs.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+		require.NoError(t, bfs.WalkDir(context.Background(), root, func(path string, _ fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -1018,7 +1138,7 @@ func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
 		run func() error
 	}{
 		{"remove", func() error { return fileIO.Remove(context.Background(), name) }},
-		{"write file", func() error { return fileIO.WriteFile(name, nil) }},
+		{"write file", func() error { return fileIO.WriteFile(context.Background(), name, nil) }},
 		{"new writer", func() error {
 			_, err := fileIO.NewWriter(context.Background(), name, true, nil)
 

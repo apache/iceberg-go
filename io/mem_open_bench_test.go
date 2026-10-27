@@ -18,6 +18,7 @@
 package io_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -30,7 +31,7 @@ func BenchmarkMemFSOpen(b *testing.B) {
 			memFS := icebergio.NewMemFS()
 			name := "mem://bucket/data.parquet"
 			size := sizeMiB << 20
-			if err := memFS.WriteFile(name, make([]byte, size)); err != nil {
+			if err := memFS.WriteFile(context.Background(), name, make([]byte, size)); err != nil {
 				b.Fatal(err)
 			}
 

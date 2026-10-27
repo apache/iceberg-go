@@ -380,7 +380,7 @@ func TestPlanFilesLocalPopulatesPartitionResidual(t *testing.T) {
 		[]iceberg.ManifestEntry{entry},
 	)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(manifestPath, manifestBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuffer.Bytes()))
 
 	var listBuffer bytes.Buffer
 	sequenceNumber := int64(1)
@@ -388,7 +388,7 @@ func TestPlanFilesLocalPopulatesPartitionResidual(t *testing.T) {
 		2, &listBuffer, snapshotID, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{manifest},
 	))
-	require.NoError(t, fs.WriteFile(manifestListPath, listBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, listBuffer.Bytes()))
 
 	tasks, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)

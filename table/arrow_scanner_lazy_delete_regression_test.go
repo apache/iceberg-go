@@ -94,7 +94,7 @@ func writeLazyDataParquetToMemFS(t *testing.T, fs *iceio.MemFS, path string, sta
 	tbl := array.NewTableFromRecords(dataSchema, []arrow.RecordBatch{record})
 	defer tbl.Release()
 
-	file, err := fs.Create(path)
+	file, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, file, int64(count),
 		parquet.NewWriterProperties(parquet.WithStats(true)),
@@ -576,7 +576,7 @@ func TestLazyPositionDeleteLoaderCachesErrors(t *testing.T) {
 func TestLazyPositionDeleteLoaderWrapsErrorsWithoutFilePath(t *testing.T) {
 	fs := &countingOpenMemFS{MemFS: iceio.NewMemFS()}
 	deletePath := "mem://bucket/deletes/corrupt.parquet"
-	require.NoError(t, fs.WriteFile(deletePath, []byte("not a parquet file")))
+	require.NoError(t, fs.WriteFile(context.Background(), deletePath, []byte("not a parquet file")))
 	task := FileScanTask{
 		File:        newLazyDataFile(t, "mem://bucket/data/a.parquet"),
 		DeleteFiles: []iceberg.DataFile{newPosDeleteFile(t, deletePath, 1, 128)},
@@ -754,7 +754,7 @@ func TestArrowScanRowLimitStopsBeforeLazyPositionDeleteError(t *testing.T) {
 		dataPath := fmt.Sprintf("mem://bucket/data/data-%d.parquet", i)
 		tasks[i].File = writeLazyDataParquetToMemFS(t, memFS.MemFS, dataPath, i, 4)
 	}
-	require.NoError(t, memFS.WriteFile(corruptDeletePath, []byte("not a parquet file")))
+	require.NoError(t, memFS.WriteFile(context.Background(), corruptDeletePath, []byte("not a parquet file")))
 	tasks[taskCount-1].DeleteFiles = []iceberg.DataFile{
 		newPosDeleteFile(t, corruptDeletePath, 1, 128),
 	}

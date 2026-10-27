@@ -64,7 +64,7 @@ func (t *trackingIO) Open(_ context.Context, name string) (iceio.File, error) {
 	return memFile{bytes.NewReader(data)}, nil
 }
 
-func (t *trackingIO) WriteFile(name string, content []byte) error {
+func (t *trackingIO) WriteFile(ctx context.Context, name string, content []byte) error {
 	t.files[name] = append([]byte(nil), content...)
 
 	return nil
@@ -133,7 +133,7 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	var buf bytes.Buffer
 	_, err = iceberg.WriteManifest(manifestPath, &buf, 2, spec, dataSchema, snapshotID, []iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
-	require.NoError(t, tio.WriteFile(manifestPath, buf.Bytes()))
+	require.NoError(t, tio.WriteFile(context.Background(), manifestPath, buf.Bytes()))
 
 	return iceberg.NewManifestBuilder(2, manifestPath, int64(buf.Len()), 0, snapshotID).
 		SequenceNumber(seqNum, seqNum).
@@ -150,7 +150,7 @@ func writeManifestList(t testing.TB, tio *trackingIO, snapshotID int64, listPath
 	var buf bytes.Buffer
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, manifests))
-	require.NoError(t, tio.WriteFile(listPath, buf.Bytes()))
+	require.NoError(t, tio.WriteFile(context.Background(), listPath, buf.Bytes()))
 }
 
 // metaJSONOpts configures the metadata document built by buildMetaJSON.

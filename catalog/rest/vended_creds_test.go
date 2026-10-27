@@ -1301,7 +1301,7 @@ func writeAndRead(t *testing.T, fs iceio.IO, location string) {
 
 	wfs, ok := fs.(iceio.WriteFileIO)
 	require.True(t, ok, "%T is not writable", fs)
-	require.NoError(t, wfs.WriteFile(location, []byte("data")))
+	require.NoError(t, wfs.WriteFile(context.Background(), location, []byte("data")))
 
 	f, err := fs.Open(t.Context(), location)
 	require.NoError(t, err)

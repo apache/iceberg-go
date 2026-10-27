@@ -288,7 +288,7 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 
 	fs, err := tbl.FS(s.ctx)
 	s.Require().NoError(err)
-	fw, err := fs.(io.WriteFileIO).Create(pqfile)
+	fw, err := fs.(io.WriteFileIO).Create(context.Background(), pqfile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))

@@ -172,11 +172,11 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 
 	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(metadataLocation, nil))
+	require.NoError(t, fs.WriteFile(context.Background(), metadataLocation, nil))
 
 	plannedOrphan := location + "/data/planned.parquet"
 	newOrphan := location + "/data/appeared-after-confirmation.parquet"
-	require.NoError(t, fs.WriteFile(plannedOrphan, []byte("planned")))
+	require.NoError(t, fs.WriteFile(context.Background(), plannedOrphan, []byte("planned")))
 
 	tbl := table.New(
 		[]string{"db", "plan_race"},
@@ -192,7 +192,7 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	assert.Equal(t, []OrphanFile{{Path: plannedOrphan, SizeBytes: int64(len("planned"))}}, plan.OrphanFiles())
 	assert.False(t, plan.Cutoff().IsZero())
 
-	require.NoError(t, fs.WriteFile(newOrphan, []byte("new")))
+	require.NoError(t, fs.WriteFile(context.Background(), newOrphan, []byte("new")))
 	_, err = ExecuteOrphanCleanup(ctx, tbl, plan, WithCleanupFilesOlderThan(time.Hour))
 	require.ErrorContains(t, err, "WithCleanupFilesOlderThan")
 
@@ -1603,9 +1603,13 @@ type mockWalkEntry struct {
 	info mockFileInfo
 }
 
-func (m *mockListableIO) WalkDir(root string, fn stdfs.WalkDirFunc) error {
+func (m *mockListableIO) WalkDir(ctx context.Context, root string, fn stdfs.WalkDirFunc) error {
 	m.root = root
 	for _, entry := range m.entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err := fn(entry.path, stdfs.FileInfoToDirEntry(entry.info), nil); err != nil {
 			return err
 		}
@@ -2232,7 +2236,7 @@ func TestWalkDirectoryUsesListableIO(t *testing.T) {
 	var walked []string
 	sizes := make(map[string]int64)
 
-	err := walkDirectory(mock, "s3://bucket/data", func(path string, info stdfs.FileInfo) error {
+	err := walkDirectory(context.Background(), mock, "s3://bucket/data", func(path string, info stdfs.FileInfo) error {
 		walked = append(walked, path)
 		sizes[path] = info.Size()
 
@@ -2314,7 +2318,7 @@ func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
 }
 
 func TestWalkDirectoryRequiresListableIO(t *testing.T) {
-	err := walkDirectory(&mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
+	err := walkDirectory(context.Background(), &mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
 		require.Fail(t, "walk callback should not run for non-listable IO")
 
 		return nil

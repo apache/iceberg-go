@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"iter"
 	"testing"
@@ -122,7 +123,7 @@ func newManifestProjectionBenchmarkFixture(
 	}
 
 	fs := iceio.NewMemFS()
-	if err := fs.WriteFile(manifestPath, manifestBytes.Bytes()); err != nil {
+	if err := fs.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 

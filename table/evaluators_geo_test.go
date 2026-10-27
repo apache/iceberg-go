@@ -221,14 +221,14 @@ func TestScanPrunesDisjointGeometryFile(t *testing.T) {
 	var manifestBuf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 3, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	manifestListPath := "mem://default/table/metadata/snap-1-manifest-list.avro"
 	var listBuf bytes.Buffer
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(3, &listBuf, snapshotID, nil, &seqNum, 0,
 		[]iceberg.ManifestFile{manifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	firstRowID, addedRows := int64(0), int64(4)
 	require.NoError(t, builder.AddSnapshot(&Snapshot{
