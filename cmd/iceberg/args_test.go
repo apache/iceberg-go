@@ -205,23 +205,26 @@ func TestArgsParsing(t *testing.T) {
 		},
 		{
 			name: "compact analyze",
-			args: []string{"compact", "analyze", "prod.db.events", "--target-file-size", "134217728"},
+			args: []string{"compact", "analyze", "prod.db.events", "--target-file-size", "134217728", "--rewrite-all"},
 			check: func(t *testing.T, a Args) {
 				require.NotNil(t, a.Compact)
 				require.NotNil(t, a.Compact.Analyze)
 				assert.Equal(t, "prod.db.events", a.Compact.Analyze.TableID)
 				assert.Equal(t, int64(134217728), a.Compact.Analyze.TargetFileSize)
+				assert.True(t, a.Compact.Analyze.RewriteAll)
 			},
 		},
 		{
 			name: "compact run with all flags",
-			args: []string{"compact", "run", "prod.db.events", "--partial-progress", "--preserve-dead-equality-deletes"},
+			args: []string{"compact", "run", "prod.db.events", "--partial-progress", "--preserve-dead-equality-deletes", "--sort", "--rewrite-all"},
 			check: func(t *testing.T, a Args) {
 				require.NotNil(t, a.Compact)
 				require.NotNil(t, a.Compact.Run)
 				assert.Equal(t, "prod.db.events", a.Compact.Run.TableID)
 				assert.True(t, a.Compact.Run.PartialProgress)
 				assert.True(t, a.Compact.Run.PreserveDeadEqualityDeletes)
+				assert.True(t, a.Compact.Run.Sort)
+				assert.True(t, a.Compact.Run.RewriteAll)
 			},
 		},
 		{

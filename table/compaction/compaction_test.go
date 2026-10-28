@@ -278,6 +278,35 @@ func TestPlanCompaction_AllFilesOptimal(t *testing.T) {
 	assert.Equal(t, 5, plan.TotalInputFiles)
 }
 
+func TestPlanCompaction_RewriteAll(t *testing.T) {
+	cfg := compaction.DefaultConfig()
+	cfg.RewriteAll = true
+
+	// Optimal and oversized files, too few per partition for MinInputFiles:
+	// size-based selection would skip every one of them.
+	tasks := []table.FileScanTask{
+		makeTask(newPartitionedDataFile("a-optimal.parquet", 500, map[int]any{1000: int32(1)}), 0, 0),
+		makeTask(newPartitionedDataFile("a-oversized.parquet", 2000, map[int]any{1000: int32(1)}), 0, 0),
+		makeTask(newPartitionedDataFile("b-optimal.parquet", 500, map[int]any{1000: int32(2)}), 0, 0),
+	}
+
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, plan.SkippedFiles)
+	var grouped int
+	for _, g := range plan.Groups {
+		grouped += len(g.Tasks)
+	}
+	assert.Equal(t, len(tasks), grouped)
+
+	cfg.RewriteAll = false
+	plan, err = cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	assert.Empty(t, plan.Groups)
+	assert.Equal(t, len(tasks), plan.SkippedFiles)
+}
+
 func TestPlanCompaction_SmallFiles(t *testing.T) {
 	cfg := compaction.Config{
 		TargetFileSizeBytes: 100 * 1024 * 1024,

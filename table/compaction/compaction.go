@@ -87,6 +87,13 @@ type Config struct {
 	// into the snapshot walk + RewriteDataFilesOptions.ExtraDeleteFilesToRemove
 	// — see CollectDeadEqualityDeletesWithSpecs.
 	PreserveDeadEqualityDeletes bool
+
+	// RewriteAll selects every file for rewriting regardless of size or
+	// deletes and keeps every packed group regardless of MinInputFiles.
+	// Mirrors Java's rewrite-all option. Use it with
+	// [table.WithCompactionSortOrder] to sort files that the size-based
+	// selection would skip as already optimal.
+	RewriteAll bool
 }
 
 const (
@@ -242,7 +249,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	var partitionBuckets []partitionBucket
 
 	for _, t := range wholeFileTasks {
-		if !cfg.isCandidate(t) {
+		if !cfg.RewriteAll && !cfg.isCandidate(t) {
 			plan.SkippedFiles++
 
 			continue
@@ -266,7 +273,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	}
 
 	for _, bucket := range partitionBuckets {
-		if len(bucket.candidates) < int(cfg.MinInputFiles) {
+		if !cfg.RewriteAll && len(bucket.candidates) < int(cfg.MinInputFiles) {
 			plan.SkippedFiles += len(bucket.candidates)
 
 			continue
@@ -277,7 +284,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		})
 
 		for _, bin := range bins {
-			if len(bin) < int(cfg.MinInputFiles) {
+			if !cfg.RewriteAll && len(bin) < int(cfg.MinInputFiles) {
 				plan.SkippedFiles += len(bin)
 
 				continue
