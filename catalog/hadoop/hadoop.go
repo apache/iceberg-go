@@ -281,6 +281,8 @@ func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Prope
 	return cat, nil
 }
 
+func (c *Catalog) Name() string { return c.name }
+
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hadoop
 }

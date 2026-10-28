@@ -36,6 +36,8 @@ type exampleCatalog struct {
 
 func (c *exampleCatalog) Close() error { return nil }
 
+func (c *exampleCatalog) Name() string { return "example" }
+
 func (c *exampleCatalog) CatalogType() catalog.Type { return catalog.REST }
 
 func (c *exampleCatalog) CommitTransaction(_ context.Context, _ []table.TableCommit) error {

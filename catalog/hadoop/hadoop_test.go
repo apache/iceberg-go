@@ -357,6 +357,7 @@ func (f selectiveFailingWalkFS) WalkDir(ctx context.Context, path string, fn fs.
 
 func (s *HadoopCatalogTestSuite) TestCatalogType() {
 	s.Equal(catalog.Hadoop, s.cat.CatalogType())
+	s.Equal("test", s.cat.Name())
 }
 
 func (s *HadoopCatalogTestSuite) TestRegistration() {
@@ -366,6 +367,7 @@ func (s *HadoopCatalogTestSuite) TestRegistration() {
 	})
 	s.Require().NoError(err)
 	s.Equal(catalog.Hadoop, cat.CatalogType())
+	s.Equal("test", cat.Name())
 }
 
 func (s *HadoopCatalogTestSuite) TestRegistrationMissingWarehouse() {

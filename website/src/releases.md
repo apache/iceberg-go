@@ -42,6 +42,8 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Catalog capabilities split into narrower interfaces.** `catalog.Catalog` now embeds `TableCatalog` and `NamespaceCatalog` (the existing table and namespace method signatures are unchanged). All `Catalog` implementations must add `Name() string` to report their configured name; this is a breaking change for third-party catalogs. `ViewCatalog` is optional and currently implemented by REST and Hive. Future catalog capabilities should use optional interfaces rather than extending `Catalog`.
+
 - **Path-based data-file addition renamed.** Replace `Transaction.AddFiles` with `AddDataFilesByPath`, `AddFilesOption` with `AddDataFilesByPathOption`, and `WithAddFilesConcurrency` with `WithAddDataFilesByPathConcurrency`. Behavior is unchanged.
 - **Manifest builder constructor renamed.** Replace `iceberg.NewManifestFile(...)` with `iceberg.NewManifestBuilder(...)`. It still returns a `ManifestBuilder`.
 - **Manifest sequence APIs use explicit names.** `ManifestBuilder.SequenceNum` and `ManifestFile.SequenceNum` become `SequenceNumber`, and `ManifestFile.MinSequenceNum` becomes `MinSequenceNumber`. `ManifestEntryBuilder.SequenceNum` and `ManifestEntry.SequenceNum` become `DataSequenceNumber`. `FileSequenceNum` becomes `FileSequenceNumber` for entries and their builder. Avro and JSON field names are unchanged.

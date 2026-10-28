@@ -898,7 +898,10 @@ func toProps(o *options) iceberg.Properties {
 	return props
 }
 
-var _ catalog.Catalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog     = (*Catalog)(nil)
+	_ catalog.ViewCatalog = (*Catalog)(nil)
+)
 
 type Catalog struct {
 	baseURI *url.URL
