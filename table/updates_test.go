@@ -228,6 +228,42 @@ func TestRemoveSnapshotsPostCommitDeletesStatisticsFiles(t *testing.T) {
 	assert.NotContains(t, tio.files, "s3://bucket/stats/snap1-part.puffin")
 }
 
+func TestRemoveSnapshotsPostCommitDeletesStatisticsFromPlanningMetadata(t *testing.T) {
+	// The transaction staged statistics for snapshot 1 that the base table
+	// never had, so only the planning metadata lists them.
+	const (
+		statsPath     = "s3://bucket/stats/snap1.puffin"
+		partStatsPath = "s3://bucket/stats/snap1-part.puffin"
+	)
+	planned, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000}`,
+		statistics:          `{"snapshot-id":1,"statistics-path":"` + statsPath + `","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
+		partitionStatistics: `{"snapshot-id":1,"statistics-path":"` + partStatsPath + `","file-size-in-bytes":50}`,
+	}))
+	require.NoError(t, err)
+	pre, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: `{"snapshot-id":1,"timestamp-ms":1000}`,
+	}))
+	require.NoError(t, err)
+	post, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{}))
+	require.NoError(t, err)
+
+	tio := newTrackingIO()
+	tio.files[statsPath] = []byte("puffin")
+	tio.files[partStatsPath] = []byte("puffin")
+
+	fsF := testFSF(tio)
+	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
+	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
+
+	update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+	update.planningMeta = planned
+	require.NoError(t, update.PostCommit(context.Background(), preTable, postTable))
+
+	assert.NotContains(t, tio.files, statsPath)
+	assert.NotContains(t, tio.files, partStatsPath)
+}
+
 func TestRemoveSnapshotsPostCommitPreservesStatisticsOfSurvivingSnapshots(t *testing.T) {
 	// pre:  snapshots 1 and 2, statistics for both.
 	// post: snapshot 1 expired, snapshot 2 kept with its statistics still present.
@@ -322,6 +358,64 @@ func TestRemoveSnapshotsPostCommitSharedManifestRetained(t *testing.T) {
 	assert.Contains(t, tio.files, manifestPath)
 	assert.Contains(t, tio.files, dataPath)
 	assert.Contains(t, tio.files, manifestList2)
+}
+
+func TestRemoveSnapshotsPostCommitKeepsFilesOfSnapshotStillInPostTable(t *testing.T) {
+	const (
+		dataPath     = "s3://bucket/data/file-1.parquet"
+		manifestPath = "s3://bucket/meta/manifest-1.avro"
+		manifestList = "s3://bucket/meta/snap-1.avro"
+	)
+
+	tio := newTrackingIO()
+	mf := writeManifest(t, tio, 1, 1, manifestPath, dataPath)
+	writeManifestList(t, tio, 1, manifestList, []iceberg.ManifestFile{mf})
+	tio.files[dataPath] = []byte("data")
+
+	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: fmt.Sprintf(`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q}`, manifestList),
+	}))
+	require.NoError(t, err)
+	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
+
+	update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+	require.NoError(t, update.PostCommit(context.Background(), tbl, tbl))
+
+	assert.Contains(t, tio.files, manifestList)
+	assert.Contains(t, tio.files, manifestPath)
+	assert.Contains(t, tio.files, dataPath)
+}
+
+func TestRemoveSnapshotsPostCommitKeepsStatisticsOfSnapshotStillInPostTable(t *testing.T) {
+	// Omit statistics from postTable to verify that retaining the snapshot is sufficient.
+	const (
+		statsPath     = "s3://bucket/stats/snap1.puffin"
+		partStatsPath = "s3://bucket/stats/snap1-part.puffin"
+	)
+	pre, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000}`,
+		statistics:          `{"snapshot-id":1,"statistics-path":"` + statsPath + `","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
+		partitionStatistics: `{"snapshot-id":1,"statistics-path":"` + partStatsPath + `","file-size-in-bytes":50}`,
+	}))
+	require.NoError(t, err)
+	post, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: `{"snapshot-id":1,"timestamp-ms":1000}`,
+	}))
+	require.NoError(t, err)
+
+	tio := newTrackingIO()
+	tio.files[statsPath] = []byte("puffin")
+	tio.files[partStatsPath] = []byte("puffin")
+
+	fsF := testFSF(tio)
+	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
+	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
+
+	update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+	require.NoError(t, update.PostCommit(context.Background(), preTable, postTable))
+
+	assert.Contains(t, tio.files, statsPath)
+	assert.Contains(t, tio.files, partStatsPath)
 }
 
 func TestRemoveSnapshotsPostCommitSharedManifestExpiredOnce(t *testing.T) {

@@ -20,6 +20,8 @@ package table
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -612,6 +614,143 @@ func TestExpireSnapshotsMaterializesDeferredHistory(t *testing.T) {
 	}
 	require.NotNil(t, removal)
 	assert.Contains(t, removal.SnapshotIDs, historicalID)
+}
+
+func TestExpireSnapshotsCleansUpSnapshotStagedInSameTransaction(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+	cat := &sequentialCatalog{metadata: meta}
+	txn := newOCCTable(t, meta, wfs, cat).NewTransaction()
+
+	// Snapshots are dated before the table's last update, so WithOlderThan(0)
+	// selects s1 however quickly the test runs.
+	stageAppend := func(path string, timestampMs int64) *Snapshot {
+		sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+		sp.appendDataFile(newTestDataFile(t, spec, path, nil))
+		updates, reqs, err := sp.commit(ctx)
+		require.NoError(t, err)
+		snap := updates[0].(*addSnapshotUpdate).Snapshot
+		snap.TimestampMs = timestampMs
+		require.NoError(t, txn.apply(updates, reqs))
+
+		return snap
+	}
+	s1 := stageAppend("mem://default/table-location/data/s1.parquet", meta.LastUpdatedMillis()-30_000)
+	s2 := stageAppend("mem://default/table-location/data/s2.parquet", meta.LastUpdatedMillis()-20_000)
+
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(1)))
+
+	before := slices.Collect(maps.Keys(wfs.files))
+	committed, err := txn.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Nil(t, committed.Metadata().SnapshotByID(s1.SnapshotID))
+	require.NotNil(t, committed.Metadata().SnapshotByID(s2.SnapshotID))
+
+	var removed []string
+	for _, path := range before {
+		if _, ok := wfs.files[path]; !ok {
+			removed = append(removed, path)
+		}
+	}
+	// s2 still references s1's manifest.
+	assert.Equal(t, []string{s1.ManifestList}, removed)
+}
+
+func TestExpireSnapshotsTwiceInTransactionDeletesSharedFilesOnce(t *testing.T) {
+	const (
+		list1     = "s3://bucket/meta/snap-1.avro"
+		list2     = "s3://bucket/meta/snap-2.avro"
+		list3     = "s3://bucket/meta/snap-3.avro"
+		manifest1 = "s3://bucket/meta/manifest-1.avro"
+		manifest2 = "s3://bucket/meta/manifest-2.avro"
+		manifest3 = "s3://bucket/meta/manifest-3.avro"
+		data1     = "s3://bucket/data/file-1.parquet"
+		data2     = "s3://bucket/data/file-2.parquet"
+		data3     = "s3://bucket/data/file-3.parquet"
+	)
+
+	// Snapshot 3 uses separate manifests to model an overwrite.
+	tio := newTrackingCallsIO()
+	m1 := writeManifest(t, tio.trackingIO, 1, 1, manifest1, data1)
+	m2 := writeManifest(t, tio.trackingIO, 2, 2, manifest2, data2)
+	m3 := writeManifest(t, tio.trackingIO, 3, 3, manifest3, data3)
+	writeManifestList(t, tio.trackingIO, 1, list1, []iceberg.ManifestFile{m1})
+	writeManifestList(t, tio.trackingIO, 2, list2, []iceberg.ManifestFile{m1, m2})
+	writeManifestList(t, tio.trackingIO, 3, list3, []iceberg.ManifestFile{m3})
+	for _, path := range []string{data1, data2, data3} {
+		tio.files[path] = []byte("data")
+	}
+
+	txn := stageTwoExpirations(t, tio, list1, list2, list3)
+	committed, err := txn.Commit(context.Background())
+	require.NoError(t, err)
+	require.Len(t, committed.Metadata().Snapshots(), 1)
+
+	for _, path := range []string{list1, list2, manifest1, manifest2, data1, data2} {
+		assert.NotContains(t, tio.files, path)
+		assert.Equal(t, 1, tio.removeCount[path], "%s must be deleted exactly once", path)
+	}
+	for _, path := range []string{list3, manifest3, data3} {
+		assert.Contains(t, tio.files, path)
+	}
+}
+
+func TestExpireSnapshotsTwiceInTransactionDeletesNothingWhenCleanupFails(t *testing.T) {
+	const (
+		list1     = "s3://bucket/meta/snap-1.avro"
+		list2     = "s3://bucket/meta/snap-2.avro"
+		list3     = "s3://bucket/meta/snap-3.avro"
+		manifest1 = "s3://bucket/meta/manifest-1.avro"
+		manifest3 = "s3://bucket/meta/manifest-3.avro"
+		data1     = "s3://bucket/data/file-1.parquet"
+		data3     = "s3://bucket/data/file-3.parquet"
+	)
+
+	// Snapshot 2's manifest list is never written, so the second removal
+	// cannot read it.
+	tio := newTrackingCallsIO()
+	m1 := writeManifest(t, tio.trackingIO, 1, 1, manifest1, data1)
+	m3 := writeManifest(t, tio.trackingIO, 3, 3, manifest3, data3)
+	writeManifestList(t, tio.trackingIO, 1, list1, []iceberg.ManifestFile{m1})
+	writeManifestList(t, tio.trackingIO, 3, list3, []iceberg.ManifestFile{m3})
+	for _, path := range []string{data1, data3} {
+		tio.files[path] = []byte("data")
+	}
+
+	txn := stageTwoExpirations(t, tio, list1, list2, list3)
+	committed, err := txn.Commit(context.Background())
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	require.NotNil(t, committed, "the catalog commit landed before cleanup failed")
+	require.Len(t, committed.Metadata().Snapshots(), 1)
+
+	assert.Empty(t, tio.removeCount)
+}
+
+func stageTwoExpirations(t *testing.T, fio iceio.IO, list1, list2, list3 string) *Transaction {
+	t.Helper()
+
+	base, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: fmt.Sprintf(
+			`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q},`+
+				`{"snapshot-id":2,"parent-snapshot-id":1,"timestamp-ms":2000,"manifest-list":%q},`+
+				`{"snapshot-id":3,"parent-snapshot-id":2,"timestamp-ms":3000,"manifest-list":%q}`,
+			list1, list2, list3),
+	}))
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 3, BranchRef))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	cat := &sequentialCatalog{metadata: meta}
+	txn := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(fio), cat).NewTransaction()
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(2)))
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(1)))
+
+	return txn
 }
 
 func TestExpireSnapshotsUsesStandardRetentionPropertyNames(t *testing.T) {

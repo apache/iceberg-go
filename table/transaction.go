@@ -909,7 +909,15 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	// Only add the update if there are actually snapshots to delete
 	if len(snapsToDelete) > 0 {
-		updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit))
+		// Build can set the last-updated time, but only apply may change the
+		// transaction's builder.
+		planned, err := meta.clone().Build()
+		if err != nil {
+			return err
+		}
+		removal := NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit)
+		removal.planningMeta = planned
+		updates = append(updates, removal)
 	}
 
 	// A no-op expiry must not pin the commit branch, which would stop the
@@ -2662,10 +2670,19 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		// otherwise a retry would re-run the catalog commit.
 		t.committed = true
 
+		var removals []*removeSnapshotsUpdate
 		for _, u := range meta.updates {
+			if removal, ok := u.(*removeSnapshotsUpdate); ok {
+				removals = append(removals, removal)
+
+				continue
+			}
 			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
 				err = errors.Join(err, perr)
 			}
+		}
+		if perr := deleteExpiredFiles(ctx, t.tbl, tbl, removals...); perr != nil {
+			err = errors.Join(err, perr)
 		}
 
 		return tbl, err

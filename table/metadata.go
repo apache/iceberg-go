@@ -1065,8 +1065,13 @@ func (b *MetadataBuilder) NextRowID() int64 {
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) error {
-	removedIDs := make(map[int64]struct{}, len(snapshotIds))
-	for _, snapshotID := range snapshotIds {
+	return b.removeSnapshotsInternal(NewRemoveSnapshotsUpdate(snapshotIds, postCommit))
+}
+
+// Preserve the update's unexported planning metadata when staging it.
+func (b *MetadataBuilder) removeSnapshotsInternal(u *removeSnapshotsUpdate) error {
+	removedIDs := make(map[int64]struct{}, len(u.SnapshotIDs))
+	for _, snapshotID := range u.SnapshotIDs {
 		removedIDs[snapshotID] = struct{}{}
 	}
 
@@ -1116,7 +1121,7 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 		return ok
 	})
 
-	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds, postCommit))
+	b.updates = append(b.updates, u)
 
 	return nil
 }
