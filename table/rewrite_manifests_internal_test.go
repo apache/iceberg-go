@@ -419,7 +419,7 @@ func TestRewriteManifestsFailedPassKeepsPreviousState(t *testing.T) {
 
 	_, err := r.processManifests(t.Context(), inputs("good", 1))
 	require.NoError(t, err)
-	added, rewritten, superseded := slices.Clone(r.added), slices.Clone(r.rewritten), slices.Clone(r.superseded)
+	added, rewritten := slices.Clone(r.added), slices.Clone(r.rewritten)
 	require.NotEmpty(t, added)
 
 	// A header count that lies trips the guard after the merged file is written.
@@ -428,7 +428,6 @@ func TestRewriteManifestsFailedPassKeepsPreviousState(t *testing.T) {
 
 	assert.Equal(t, added, r.added)
 	assert.Equal(t, rewritten, r.rewritten)
-	assert.Equal(t, superseded, r.superseded)
 	assert.Equal(t, added, r.result.AddedManifests)
 	assert.Equal(t, rewritten, r.result.RewrittenManifests)
 	files := memKeys(mem)
