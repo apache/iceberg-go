@@ -71,8 +71,9 @@ type RewriteResult struct {
 	// partial-progress mode.
 	CompletedGroups []CompactionGroupResult
 
-	// FailedGroups contains groups whose catalog commits failed. A partial
-	// rewrite can return both completed and failed groups.
+	// FailedGroups contains groups whose batch failed to commit, or was
+	// rejected because a delete for one of its files was committed after
+	// planning. A partial rewrite can return both completed and failed groups.
 	FailedGroups []CompactionGroupFailure
 }
 
