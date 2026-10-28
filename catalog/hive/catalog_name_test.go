@@ -15,16 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package catalog provides an interface for Catalog implementations along with
-// a registry for registering catalog implementations.
-//
-// Subpackages of this package provide some default implementations for select
-// catalog types which will register themselves if imported. For instance,
-// adding the following import:
-//
-//	import _ "github.com/apache/iceberg-go/catalog/rest"
-//
-// Will register the REST catalog implementation.
 package hive
 
 import "testing"
