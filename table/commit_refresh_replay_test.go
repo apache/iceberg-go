@@ -167,7 +167,7 @@ func TestDoCommit_RefreshAndReplaySucceedsAfterPeerAdvance(t *testing.T) {
 	reqs := []Requirement{AssertRefSnapshotID(MainBranch, &writerHead)}
 	noOpValidator := func(*conflictContext) error { return nil }
 
-	_, err := tbl.doCommit(context.Background(), nil, reqs,
+	_, _, err := tbl.doCommit(context.Background(), nil, reqs,
 		withCommitBranch(MainBranch),
 		withCommitValidators(noOpValidator))
 
@@ -208,7 +208,7 @@ func TestDoCommit_ValidatorRejectsOnRefresh(t *testing.T) {
 		return nil
 	}
 
-	_, err := tbl.doCommit(context.Background(), nil, reqs,
+	_, _, err := tbl.doCommit(context.Background(), nil, reqs,
 		withCommitBranch(MainBranch),
 		withCommitValidators(rejectOnConcurrent))
 
@@ -532,7 +532,7 @@ func TestDoCommit_NonRebasedRequirementFailsAfterOneRefresh(t *testing.T) {
 			AssertCurrentSchemaID(writerBase.CurrentSchema().ID),
 			AssertTableUUID(writerBase.TableUUID()),
 		}
-		_, err := tbl.doCommit(t.Context(),
+		_, _, err := tbl.doCommit(t.Context(),
 			[]Update{NewSetPropertiesUpdate(iceberg.Properties{"k": "v"})}, reqs,
 			withCommitBranch(MainBranch))
 		require.NoError(t, err)
@@ -594,7 +594,7 @@ func TestDoCommitRetryPassesIdentifierCopy(t *testing.T) {
 	tbl := New(identifier, meta, "file:///tmp/test-do-commit-retry-copy/metadata/v1.metadata.json",
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
 
-	_, err := tbl.doCommit(context.Background(), nil, nil, withCommitBranch(MainBranch))
+	_, _, err := tbl.doCommit(context.Background(), nil, nil, withCommitBranch(MainBranch))
 	require.NoError(t, err)
 	require.NotNil(t, cat.loadIdentifier)
 

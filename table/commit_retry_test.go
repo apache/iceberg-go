@@ -151,7 +151,7 @@ func TestDoCommit_SucceedsFirstTry(t *testing.T) {
 	tbl := newRetryTestTable(t, cat, nil)
 	cat.metadata = tbl.Metadata()
 
-	_, err := tbl.doCommit(t.Context(), nil, nil)
+	_, _, err := tbl.doCommit(t.Context(), nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), cat.attempts.Load())
 }
@@ -168,7 +168,7 @@ func TestDoCommit_RetriesOnCommitFailed(t *testing.T) {
 	})
 	cat.metadata = tbl.Metadata()
 
-	_, err := tbl.doCommit(t.Context(), nil, nil)
+	_, _, err := tbl.doCommit(t.Context(), nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(3), cat.attempts.Load(), "should retry 2x then succeed on 3rd")
 }
@@ -185,7 +185,7 @@ func TestDoCommit_GivesUpAfterMaxRetries(t *testing.T) {
 	})
 	cat.metadata = tbl.Metadata()
 
-	_, err := tbl.doCommit(t.Context(), nil, nil)
+	_, _, err := tbl.doCommit(t.Context(), nil, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommitFailed)
 	// 1 initial + 2 retries = 3 attempts
@@ -205,7 +205,7 @@ func TestDoCommit_DoesNotRetryUnknownStateError(t *testing.T) {
 	})
 	cat.metadata = tbl.Metadata()
 
-	_, err := tbl.doCommit(t.Context(), nil, nil)
+	_, _, err := tbl.doCommit(t.Context(), nil, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, unknownErr)
 	// Must not retry — unknown state could mean the commit actually succeeded.
@@ -225,7 +225,7 @@ func TestDoCommit_DoesNotRetryUnrelatedError(t *testing.T) {
 	})
 	cat.metadata = tbl.Metadata()
 
-	_, err := tbl.doCommit(t.Context(), nil, nil)
+	_, _, err := tbl.doCommit(t.Context(), nil, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, otherErr)
 	assert.Equal(t, int32(1), cat.attempts.Load())
@@ -246,7 +246,7 @@ func TestDoCommit_RespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
 
-	_, err := tbl.doCommit(ctx, nil, nil)
+	_, _, err := tbl.doCommit(ctx, nil, nil)
 	require.Error(t, err)
 	// Either the commit error bubbles up or context cancellation does.
 	// Both are acceptable outcomes — the test just verifies we don't hang.
@@ -266,7 +266,7 @@ func TestDoCommit_ZeroRetriesOnlyOneAttempt(t *testing.T) {
 	})
 	cat.metadata = tbl.Metadata()
 
-	_, err := tbl.doCommit(t.Context(), nil, nil)
+	_, _, err := tbl.doCommit(t.Context(), nil, nil)
 	require.Error(t, err)
 	assert.Equal(t, int32(1), cat.attempts.Load())
 }
@@ -401,7 +401,7 @@ func TestDoCommitRejectsUnsafeRetryProperty(t *testing.T) {
 	})
 	cat.metadata = tbl.Metadata()
 
-	_, err := tbl.doCommit(t.Context(), nil, nil)
+	_, _, err := tbl.doCommit(t.Context(), nil, nil)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, CommitMinRetryWaitMsKey)
 	assert.Zero(t, cat.attempts.Load())
@@ -432,7 +432,7 @@ func TestDoCommit_NonWriteFileIOReturnsError(t *testing.T) {
 		cat,
 	)
 
-	_, doErr := tbl.doCommit(t.Context(), nil, nil)
+	_, _, doErr := tbl.doCommit(t.Context(), nil, nil)
 	require.Error(t, doErr, "doCommit must fail when FS does not implement WriteFileIO")
 	require.ErrorIs(t, doErr, ErrWriteIORequired,
 		"doCommit must wrap ErrWriteIORequired so callers can detect this condition with errors.Is")
@@ -511,7 +511,7 @@ func TestDoCommit_OrphanCleanedOnSuccess(t *testing.T) {
 	}
 	tbl = newOCCTable(t, meta, wfs, cat)
 
-	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	_, _, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
 	require.NoError(t, err, "doCommit must succeed on the second attempt")
 
 	_, stillExists := wfs.files[originalManifestList]
@@ -564,7 +564,7 @@ func TestDoCommit_CommitReportRecordsRetryAttempts(t *testing.T) {
 		WithMetricsReporter(sink),
 	)
 
-	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	_, _, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
 	require.NoError(t, err, "doCommit must succeed on the second attempt")
 
 	var cr *metrics.CommitReport
@@ -610,7 +610,7 @@ func TestDoCommit_OrphanNotCleanedOnUnknownError(t *testing.T) {
 	}
 	tbl = newOCCTable(t, meta, wfs, cat)
 
-	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	_, _, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
 	require.ErrorIs(t, err, unknown5xxErr, "5xx error must propagate")
 
 	_, stillExists := wfs.files[originalManifestList]
@@ -678,7 +678,7 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 
 	divergedValidator := func(*conflictContext) error { return ErrCommitDiverged }
 
-	_, err = tbl.doCommit(t.Context(), updates, reqs,
+	_, _, err = tbl.doCommit(t.Context(), updates, reqs,
 		withCommitBranch(MainBranch),
 		withCommitValidators(divergedValidator),
 	)
@@ -728,7 +728,7 @@ func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 	}
 	tbl = newOCCTable(t, meta, wfs, cat)
 
-	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	_, _, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
 	require.ErrorIs(t, err, ErrCommitFailed,
 		"retries exhausted: terminal error must be ErrCommitFailed")
 
@@ -802,7 +802,7 @@ func TestDoCommit_OrphanCleanedOnCancellation(t *testing.T) {
 	}
 	tbl = newOCCTable(t, meta, wfs, cat)
 
-	_, err = tbl.doCommit(ctx, updates, reqs, withCommitBranch(MainBranch))
+	_, _, err = tbl.doCommit(ctx, updates, reqs, withCommitBranch(MainBranch))
 	require.ErrorIs(t, err, context.Canceled)
 
 	assert.Equal(t, filesBefore, slices.Sorted(maps.Keys(mem.files)),
@@ -1025,7 +1025,7 @@ func TestDoCommit_RetryProgressesFreshMeta(t *testing.T) {
 	}
 	tbl = newOCCTable(t, meta, wfs, cat)
 
-	_, err = tbl.doCommit(context.Background(), updates, reqs, withCommitBranch(MainBranch))
+	_, _, err = tbl.doCommit(context.Background(), updates, reqs, withCommitBranch(MainBranch))
 	require.NoError(t, err, "doCommit must succeed on the third attempt")
 
 	// (a) commitTableCalls: 2 fails + 1 success.
@@ -1495,12 +1495,41 @@ func TestDoCommit_PartialRebuildFailureRemovesWrittenList(t *testing.T) {
 
 	cat := &sequentialCatalog{metadata: base, loadMeta: graftSnapshotOnto(t, base, MainBranch, 200), errs: []error{ErrCommitFailed}}
 	tbl := newOCCTable(t, base, wfs, cat)
-	_, err := tbl.doCommit(t.Context(), []Update{first, second}, nil, withCommitBranch(MainBranch))
+	_, _, err := tbl.doCommit(t.Context(), []Update{first, second}, nil, withCommitBranch(MainBranch))
 	require.ErrorIs(t, err, rebuildErr)
 
 	assert.Contains(t, wfs.files, loc+"staged-1.avro")
 	assert.Contains(t, wfs.files, loc+"staged-2.avro")
 	assert.NotContains(t, wfs.files, loc+"rebuilt-1.avro", "the list the failed rebuild wrote must be removed")
+}
+
+func TestDoCommit_ReturnsLandedAttemptUpdates(t *testing.T) {
+	fs, inner, tbl := newExpireReplayTable(t, nil)
+	tbl, _ = appendOnBranch(t, tbl, MainBranch, "b1")
+	cat := &recordingCatalog{reqValidatingCatalog: inner}
+	tbl = newOCCTable(t, tbl.Metadata(), fs, cat)
+
+	tx := tbl.NewTransaction()
+	stageFiles(t, tx, "a")
+	meta, err := tx.txnMeta()
+	require.NoError(t, err)
+	staged := slices.Clone(meta.updates)
+	p := peerAppend(t, fs, inner, MainBranch, "p")
+
+	reqs := transactionRequirements(tx.reqs, tx.branch, tbl.metadata)
+	_, submitted, err := tbl.doCommit(t.Context(), staged, reqs, withCommitBranch(MainBranch))
+	require.NoError(t, err)
+
+	require.Len(t, cat.updates, 2)
+	require.Len(t, submitted, len(cat.updates[1]))
+	for i := range submitted {
+		assert.Same(t, cat.updates[1][i], submitted[i])
+	}
+	rebuilt, ok := submitted[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	assert.NotSame(t, staged[0], rebuilt)
+	require.NotNil(t, rebuilt.Snapshot.ParentSnapshotID)
+	assert.Equal(t, p, *rebuilt.Snapshot.ParentSnapshotID)
 }
 
 func TestTransactionCommit_TerminalOnUnknownState(t *testing.T) {

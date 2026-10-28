@@ -77,11 +77,11 @@ rejects when concurrent deletes touch the same files.
 iceberg-go can refresh the table and replay the operation against the latest
 snapshot between attempts. On each retry the table metadata is reloaded, the
 producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`
-and `AssertRefSnapshotID` pin the refs they guard, so a retry does not rebase
-those assertions. If a guarded ref has moved, the commit fails with
-`ErrCommitFailed` instead of retrying. An `ExpireSnapshots` that removes nothing
-adds no guards.
+re-submitted only if it is still valid. `RollbackToSnapshot` and
+`AssertRefSnapshotID` pin their refs, so retries do not rebase those assertions.
+If a pinned ref moved, the commit fails with `ErrCommitFailed` instead of
+retrying. `ExpireSnapshots` does not pin refs. Retries replan it as described in
+[Snapshot expiration](#snapshot-expiration).
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
 setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
@@ -122,6 +122,40 @@ manifests that later attempts merged. `TableCommit` refuses a transaction whose
 commit failed, since the multi-table path does not refresh. Call `Commit` to
 resume it, or build a new transaction.
 
-Because an `ExpireSnapshots` that removes something pins the commit branch, a
-transaction that also appends fails instead of rebasing onto a peer's append.
-This is deliberate, since the expiry was computed from the old head.
+### Snapshot expiration
+
+A retry replays staged changes in order against the refreshed table. It replans
+each `ExpireSnapshots` call at its original position, with the original options
+and cutoff time. The plan retains snapshots that a concurrent commit made
+reachable, such as rollback targets and new branch heads. It can expire
+snapshots that a concurrent append moved outside the retention window. A
+transaction that appends and expires snapshots rebases onto a concurrent append
+like any other append.
+
+Each attempt requires the refs that the plans read to be unchanged since
+loading or refreshing the table. If a concurrent commit moves one of those
+refs before the attempt succeeds, it causes another conflict. The next attempt
+replans the expiry. If a concurrent commit creates a ref that the plan did not
+read, that ref does not cause a conflict. Expiring its snapshot also removes
+the ref.
+
+- Retries replan an expiry even if staging or an earlier attempt produced no
+  expiry updates.
+- If no updates remain, for example because a concurrent commit already expired
+  the same snapshots, `Commit` returns the refreshed table without committing.
+- A transaction containing only expiries with no updates makes no commit attempt
+  and never refreshes or replans.
+- Post-commit cleanup deletes files for snapshots expired by the successful
+  attempt, if cleanup is enabled.
+
+A retry fails with `ErrTransactionUnusable` in these cases:
+
+- Replanning changes whether a non-main commit branch is removed. Later staged
+  changes depend on the original outcome. The error also matches
+  `ErrCommitFailed`, because a new transaction from the refreshed table can plan
+  consistently.
+- GC is disabled after refresh. The error does not match `ErrCommitFailed`.
+  A new transaction fails when staging the expiry too.
+- A staged change cannot apply after refresh, such as a ref update to a snapshot
+  that a concurrent commit expired. The error does not match `ErrCommitFailed`.
+  The same operations fail again without new input.
