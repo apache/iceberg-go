@@ -249,6 +249,48 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Path-based data-file addition renamed.</strong> Replace <code>Transaction.AddFiles</code> with <code>AddDataFilesByPath</code>, <code>AddFilesOption</code> with <code>AddDataFilesByPathOption</code>, and <code>WithAddFilesConcurrency</code> with <code>WithAddDataFilesByPathConcurrency</code>. Behavior is unchanged.</p>
+</li>
+<li>
+<p><strong>Manifest builder constructor renamed.</strong> Replace <code>iceberg.NewManifestFile(...)</code> with <code>iceberg.NewManifestBuilder(...)</code>. It still returns a <code>ManifestBuilder</code>.</p>
+</li>
+<li>
+<p><strong>Manifest sequence APIs use explicit names.</strong> <code>ManifestBuilder.SequenceNum</code> and <code>ManifestFile.SequenceNum</code> become <code>SequenceNumber</code>, and <code>ManifestFile.MinSequenceNum</code> becomes <code>MinSequenceNumber</code>. <code>ManifestEntryBuilder.SequenceNum</code> and <code>ManifestEntry.SequenceNum</code> become <code>DataSequenceNumber</code>. <code>FileSequenceNum</code> becomes <code>FileSequenceNumber</code> for entries and their builder. Avro and JSON field names are unchanged.</p>
+</li>
+<li>
+<p><strong>View and UDF metadata builder constructors are infallible.</strong> <code>view.NewMetadataBuilder</code> and <code>udf.NewMetadataBuilder</code> now return only a builder instead of <code>(builder, error)</code>; remove error handling at call sites.</p>
+</li>
+<li>
+<p><strong>Table metadata getter renamed.</strong> Replace <code>table.Metadata.Version()</code> with <code>table.Metadata.FormatVersion()</code>, consistent with Iceberg Java and Go view/UDF metadata. Metadata JSON is unchanged.</p>
+</li>
+<li>
+<p><strong>Snapshot ref type field renamed.</strong> Replace <code>table.SnapshotRef.SnapshotRefType</code> with <code>table.SnapshotRef.Type</code>. The JSON field is still <code>&quot;type&quot;</code>.</p>
+</li>
+<li>
+<p><strong>As-of snapshot lookups now use inclusive timestamps.</strong> Replace <code>tbl.SnapshotAsOf(timestampMs, true)</code> with <code>tbl.SnapshotAsOf(timestampMs)</code>. The method always selects the latest snapshot at or before the timestamp, matching Java Iceberg's <code>SnapshotUtil.nullableSnapshotIdAsOfTime</code>. For strict-before lookup, use <code>SnapshotLogEntryAsOf(tbl.Metadata().SnapshotLogs(), timestampMs, false)</code>.</p>
+</li>
+<li>
+<p><strong>Snapshot timestamp property key corrected.</strong> <code>PropertyCurrentSnapshotTimestamp</code> now uses <code>current-snapshot-timestamp-ms</code>. The old <code>current-snapshot-timestamp</code> spelling is no longer reserved and remains usable as a custom property.</p>
+</li>
+<li>
+<p><strong>FileIO open and remove take a context.</strong> <code>io.IO.Open</code> and <code>io.IO.Remove</code> now take a <code>context.Context</code> first argument, so custom <code>io.IO</code> implementations must add it. <code>maintenance.WithCleanupDeleteFunc</code> now takes <code>func(context.Context, string) error</code>.</p>
+</li>
+<li>
+<p><strong>Hadoop catalog construction takes a context.</strong> <code>hadoop.NewCatalog(name, warehouse, props)</code> becomes <code>hadoop.NewCatalog(ctx, name, warehouse, props)</code>. The context bounds filesystem setup; the catalog's filesystem keeps its values but not its cancellation.</p>
+</li>
+<li>
+<p><strong>Config loading reports errors.</strong> <code>config.LoadConfig</code> now returns <code>([]byte, error)</code>, and <code>config.LoadConfigFile</code> is removed; call <code>LoadConfig</code> instead. A missing default <code>~/.iceberg-go.yaml</code> still returns no data and no error.</p>
+</li>
+<li>
+<p><strong>Branch transactions return initialization errors.</strong> <code>Table.NewTransactionOnBranch(branch)</code> now returns <code>(*Transaction, error)</code>, and <code>Table.NewTransactionOnBranchWithError</code> is removed. Use <code>NewTransactionOnBranch</code> and handle its error.</p>
+</li>
+<li>
+<p><strong>Schema JSON constructor uses the Go initialism.</strong> Replace <code>iceberg.NewSchemaFromJsonFields</code> with <code>iceberg.NewSchemaFromJSONFields</code>.</p>
+</li>
+<li>
+<p><strong>AWS identifiers use the Go initialism.</strong> <code>glue.AwsProperties</code>, <code>glue.WithAwsConfig</code> and <code>glue.WithAwsProperties</code> become <code>glue.AWSProperties</code>, <code>glue.WithAWSConfig</code> and <code>glue.WithAWSProperties</code>; <code>sigv4.WithAwsConfig</code> becomes <code>sigv4.WithAWSConfig</code>; <code>utils.WithAwsConfig</code> and <code>utils.GetAwsConfig</code> become <code>utils.WithAWSConfig</code> and <code>utils.GetAWSConfig</code>; and <code>config.CatalogConfig.AwsProfile</code> becomes <code>AWSProfile</code>. The <code>aws-profile</code> YAML key is unchanged.</p>
+</li>
+<li>
 <p><strong>KMS factory registration now takes a context.</strong> Change <code>encryption.KMSFactory</code> implementations to accept <code>(context.Context, map[string]string)</code> instead of only properties, and call <code>encryption.LoadKeyManagementClient(ctx, props)</code> instead of <code>LoadKeyManagementClient(props)</code>. The existing global <code>RegisterKMS</code>, <code>UnregisterKMS</code>, and <code>GetRegisteredKMSNames</code> functions still use the default registry; <code>RegisterKMS</code> still panics for invalid registrations. Use <code>encryption.MustRegisterKMS</code> for provider initialization. For isolated registrations, create <code>registry := encryption.NewKMSRegistry()</code> after importing any KMS providers and call <code>registry.Register</code>, <code>registry.Load(ctx, props)</code>, <code>registry.Names</code>, or <code>registry.Unregister</code>. New registries snapshot the global registrations; subsequent changes do not propagate.</p>
 </li>
 <li>
