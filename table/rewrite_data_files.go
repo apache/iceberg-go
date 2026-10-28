@@ -352,6 +352,41 @@ func WithCompactionSortOrder(order SortOrder) CompactionGroupOption {
 	}
 }
 
+// rewriteStrategy decides how a compaction group's rows are arranged
+// before they are written: which rows are read in what order, and what
+// the writer may assume about that order.
+type rewriteStrategy interface {
+	// records reads tasks with scan, deletes applied, and returns the
+	// rows in the order they are to be written.
+	records(ctx context.Context, scan *Scan, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error)
+	// writeOptions are added to the options the group is written with.
+	writeOptions() []WriteRecordOption
+}
+
+// rewriteStrategy returns the strategy the options select: sort when a
+// sort order is set, bin-pack otherwise.
+func (c compactionGroupConfig) rewriteStrategy(tbl *Table) (rewriteStrategy, error) {
+	if c.sortOrder == nil {
+		return binPackStrategy{}, nil
+	}
+
+	batchRows := int64(c.arrowBatchSize)
+	if batchRows <= 0 {
+		batchRows = int64(tbl.Properties().GetInt(tblutils.ParquetBatchSizeKey, tblutils.ParquetBatchSizeDefault))
+	}
+
+	return newSortStrategy(tbl, *c.sortOrder, max(batchRows, 1))
+}
+
+// binPackStrategy writes the group's rows in the order they are read.
+type binPackStrategy struct{}
+
+func (binPackStrategy) records(ctx context.Context, scan *Scan, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	return scan.ReadTasks(ctx, tasks)
+}
+
+func (binPackStrategy) writeOptions() []WriteRecordOption { return nil }
+
 // RewriteDataFiles compacts the given groups by reading data with
 // deletes applied, writing new consolidated files, and atomically
 // replacing the old files. Position delete files that are fully
@@ -499,14 +534,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		opt(&cfg)
 	}
 
-	if cfg.sortOrder != nil {
-		if cfg.sortOrder.IsUnsorted() {
-			return CompactionGroupResult{}, fmt.Errorf("%w: sort compaction of group %q requires a sort order with at least one field",
-				ErrInvalidOperation, group.PartitionKey)
-		}
-		if err := cfg.sortOrder.CheckCompatibility(tbl.Schema()); err != nil {
-			return CompactionGroupResult{}, fmt.Errorf("sort compaction of group %q: %w", group.PartitionKey, err)
-		}
+	strategy, err := cfg.rewriteStrategy(tbl)
+	if err != nil {
+		return CompactionGroupResult{}, fmt.Errorf("compaction group %q: %w", group.PartitionKey, err)
 	}
 
 	var scanOpts []ScanOption
@@ -549,31 +579,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		}
 	}
 
-	var (
-		sortBatchRows int64
-		sortParts     [][]FileScanTask
-		mergeSorted   bool
-	)
-	if cfg.sortOrder != nil {
-		sortBatchRows = int64(cfg.arrowBatchSize)
-		if sortBatchRows <= 0 {
-			sortBatchRows = int64(tbl.Properties().GetInt(tblutils.ParquetBatchSizeKey, tblutils.ParquetBatchSizeDefault))
-		}
-		sortBatchRows = max(sortBatchRows, 1)
-		sortParts, mergeSorted = presortedPartitions(tbl.Metadata(), tbl.Spec(), *cfg.sortOrder, group.Tasks)
-	}
-
-	var (
-		arrowSchema *arrow.Schema
-		records     iter.Seq2[arrow.RecordBatch, error]
-		err         error
-	)
-	scan := tbl.Scan(scanOpts...)
-	if mergeSorted {
-		arrowSchema, records, err = mergedCompactionRecords(ctx, scan, tbl.Schema(), *cfg.sortOrder, sortBatchRows, sortParts)
-	} else {
-		arrowSchema, records, err = scan.ReadTasks(ctx, group.Tasks)
-	}
+	arrowSchema, records, err := strategy.records(ctx, tbl.Scan(scanOpts...), group.Tasks)
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 	}
@@ -607,12 +613,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		}
 		writeOpts = append(writeOpts, WithPreserveRowLineage(projectedSchema))
 	}
-	if cfg.sortOrder != nil {
-		if !mergeSorted {
-			records = sortedCompactionRecords(ctx, tbl.Spec(), tbl.Schema(), *cfg.sortOrder, sortBatchRows, records)
-		}
-		writeOpts = append(writeOpts, withPresortedInput(claimableSortOrderID(tbl.Metadata(), *cfg.sortOrder)))
-	}
+	writeOpts = append(writeOpts, strategy.writeOptions()...)
 
 	var (
 		newFiles   []iceberg.DataFile

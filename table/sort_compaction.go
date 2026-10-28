@@ -38,6 +38,51 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
+// sortStrategy writes a compaction group's rows sorted by order. Groups
+// whose files are already sorted by order are merged; others are sorted
+// in memory.
+type sortStrategy struct {
+	order     SortOrder
+	meta      Metadata
+	spec      iceberg.PartitionSpec
+	schema    *iceberg.Schema
+	batchRows int64
+}
+
+func newSortStrategy(tbl *Table, order SortOrder, batchRows int64) (sortStrategy, error) {
+	if order.IsUnsorted() {
+		return sortStrategy{}, fmt.Errorf("%w: sort compaction requires a sort order with at least one field", ErrInvalidOperation)
+	}
+	if err := order.CheckCompatibility(tbl.Schema()); err != nil {
+		return sortStrategy{}, fmt.Errorf("sort compaction: %w", err)
+	}
+
+	return sortStrategy{
+		order:     order,
+		meta:      tbl.Metadata(),
+		spec:      tbl.Spec(),
+		schema:    tbl.Schema(),
+		batchRows: batchRows,
+	}, nil
+}
+
+func (s sortStrategy) records(ctx context.Context, scan *Scan, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	if parts, ok := presortedPartitions(s.meta, s.spec, s.order, tasks); ok {
+		return mergedCompactionRecords(ctx, scan, s.schema, s.order, s.batchRows, parts)
+	}
+
+	sc, records, err := scan.ReadTasks(ctx, tasks)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return sc, sortedCompactionRecords(ctx, s.spec, s.schema, s.order, s.batchRows, records), nil
+}
+
+func (s sortStrategy) writeOptions() []WriteRecordOption {
+	return []WriteRecordOption{withPresortedInput(claimableSortOrderID(s.meta, s.order))}
+}
+
 // sortKeyColumn is one field of a rowComparator.
 type sortKeyColumn struct {
 	col        int

@@ -292,7 +292,9 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		partitionBuckets[index].candidates = append(partitionBuckets[index].candidates, t)
 	}
 
-	// Bin-pack candidates per partition.
+	// Group candidates per partition by size. This only splits the work;
+	// how each group's rows are rewritten (bin-pack or sort) is chosen per
+	// group with [table.CompactionGroupOption]s.
 	packer := internal.SlicePacker[table.FileScanTask]{
 		TargetWeight:    cfg.groupSizeBytes(),
 		Lookback:        int(cfg.PackingLookback),
