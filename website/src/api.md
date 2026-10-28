@@ -536,7 +536,7 @@ result, err := txn.RewriteDataFiles(ctx, groups /* from plan.Groups */, table.Re
 })
 ```
 
-A sort rewrite holds each group decoded in memory, so size groups with `compaction.Config.TargetFileSizeBytes` accordingly. The CLI equivalent is `iceberg compact run --sort [--rewrite-all]`, which uses the table's default sort order.
+When every file of a group already records the order's `sort_order_id` (for example, files written by an earlier sort rewrite), the files are streamed and merged, holding about two batches per file instead of the whole group. Otherwise a sort rewrite holds each group decoded in memory, so size groups with `compaction.Config.TargetFileSizeBytes` accordingly. The CLI equivalent is `iceberg compact run --sort [--rewrite-all]`, which uses the table's default sort order.
 
 ### Expiring snapshots
 

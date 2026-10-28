@@ -22,9 +22,11 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
+	"iter"
 	"log/slog"
 	"maps"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -324,15 +326,21 @@ func WithCompactionParquetRowGroupLimit(n int) CompactionGroupOption {
 // Each field sorts by its first source column, so a field whose
 // transform does not preserve order (bucket, void) or that has several
 // source columns only clusters rows by that column. Output files record
-// order's id as sort_order_id when every field is single-source and
-// order-preserving and order is one of the table's sort orders (for
-// example [Table.SortOrder]); otherwise they record none.
+// order's id as sort_order_id when order is one of the table's sort
+// orders (for example [Table.SortOrder]), every field is single-source,
+// every field but the last is identity and the last preserves order;
+// otherwise they record none.
 //
-// The whole group is held in memory decoded until its files are
-// written, so size groups (see [compaction.Config.TargetFileSizeBytes])
-// to fit. [WithCompactionArrowBatchSize] sets the rows per sorted batch
-// handed to the writer. An unsorted order is rejected by
-// [ExecuteCompactionGroup].
+// When every file of the group records order's id as its sort_order_id
+// and was written under the table's current partition spec, each file is
+// read as its own stream and the streams are merged, so memory holds
+// about the current batch of each file plus one read ahead rather than
+// the whole group. A file whose rows turn out not to be sorted fails the
+// group. Otherwise the whole group is held in memory decoded until its
+// files are written, so size groups (see
+// [compaction.Config.TargetFileSizeBytes]) to fit.
+// [WithCompactionArrowBatchSize] sets the rows per batch read and handed
+// to the writer. An unsorted order is rejected by [ExecuteCompactionGroup].
 func WithCompactionSortOrder(order SortOrder) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.sortOrder = &order
@@ -536,7 +544,31 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		}
 	}
 
-	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
+	var (
+		sortBatchRows int64
+		sortParts     [][]FileScanTask
+		mergeSorted   bool
+	)
+	if cfg.sortOrder != nil {
+		sortBatchRows = int64(cfg.arrowBatchSize)
+		if sortBatchRows <= 0 {
+			sortBatchRows = int64(tbl.Properties().GetInt(tblutils.ParquetBatchSizeKey, tblutils.ParquetBatchSizeDefault))
+		}
+		sortBatchRows = max(sortBatchRows, 1)
+		sortParts, mergeSorted = presortedPartitions(tbl.Metadata(), tbl.Spec(), *cfg.sortOrder, group.Tasks)
+	}
+
+	var (
+		arrowSchema *arrow.Schema
+		records     iter.Seq2[arrow.RecordBatch, error]
+		err         error
+	)
+	scan := tbl.Scan(scanOpts...)
+	if mergeSorted {
+		arrowSchema, records, err = mergedCompactionRecords(ctx, scan, tbl.Schema(), *cfg.sortOrder, sortBatchRows, sortParts)
+	} else {
+		arrowSchema, records, err = scan.ReadTasks(ctx, group.Tasks)
+	}
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 	}
@@ -571,11 +603,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		writeOpts = append(writeOpts, WithPreserveRowLineage(projectedSchema))
 	}
 	if cfg.sortOrder != nil {
-		batchRows := int64(cfg.arrowBatchSize)
-		if batchRows <= 0 {
-			batchRows = int64(tbl.Properties().GetInt(tblutils.ParquetBatchSizeKey, tblutils.ParquetBatchSizeDefault))
+		if !mergeSorted {
+			records = sortedCompactionRecords(ctx, tbl.Spec(), tbl.Schema(), *cfg.sortOrder, sortBatchRows, records)
 		}
-		records = sortedCompactionRecords(ctx, tbl.Spec(), tbl.Schema(), *cfg.sortOrder, max(batchRows, 1), records)
 		writeOpts = append(writeOpts, withPresortedInput(claimableSortOrderID(tbl.Metadata(), *cfg.sortOrder)))
 	}
 

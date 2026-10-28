@@ -18,28 +18,48 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 )
 
-// resolveCompactionSortKeys converts order into Arrow sort keys against
-// the columns of the scan output schema sc. Sort fields are matched by
-// name through schema because the scan emits the table schema's
-// top-level columns by name.
-func resolveCompactionSortKeys(order SortOrder, schema *iceberg.Schema, sc *arrow.Schema) ([]compute.SortKey, error) {
+// sortKeyColumn is one field of a rowComparator.
+type sortKeyColumn struct {
+	col        int
+	desc       bool
+	nullsFirst bool
+	values     valueComparator
+}
+
+// rowComparator orders the rows of record batches that share one schema
+// by the source columns of a sort order, following the Iceberg spec: each
+// field's null order places nulls whatever its direction, floating-point
+// values order as -NaN < -Inf < -x < -0 < 0 < x < Inf < NaN, and strings
+// and binary compare as unsigned bytes. A descending field reverses the
+// order of its non-null values.
+type rowComparator []sortKeyColumn
+
+// newRowComparator resolves order against the scan output schema sc.
+// Sort fields are matched by name through schema because the scan emits
+// the table schema's top-level columns by name.
+func newRowComparator(order SortOrder, schema *iceberg.Schema, sc *arrow.Schema) (rowComparator, error) {
 	fields := schema.Fields()
-	keys := make([]compute.SortKey, 0, order.Len())
+	keys := make(rowComparator, 0, order.Len())
 	for _, field := range order.fields {
 		idx, ok := topLevelFieldIndex(fields, field.FirstSourceID())
 		if !ok {
@@ -51,28 +71,269 @@ func resolveCompactionSortKeys(order SortOrder, schema *iceberg.Schema, sc *arro
 			return nil, fmt.Errorf("sort order %d: column %q not found in scan output",
 				order.OrderID(), fields[idx].Name)
 		}
-
-		key := compute.SortKey{ColumnIndex: colIdx[0], Order: compute.SortOrderAscending, NullPlacement: compute.SortNullsAtEnd}
-		if field.Direction == SortDESC {
-			key.Order = compute.SortOrderDescending
+		values, err := newValueComparator(sc.Field(colIdx[0]).Type)
+		if err != nil {
+			return nil, fmt.Errorf("sort order %d: column %q: %w", order.OrderID(), fields[idx].Name, err)
 		}
-		if field.NullOrder == NullsFirst {
-			key.NullPlacement = compute.SortNullsAtStart
-		}
-		keys = append(keys, key)
+		keys = append(keys, sortKeyColumn{
+			col:        colIdx[0],
+			desc:       field.Direction == SortDESC,
+			nullsFirst: field.NullOrder == NullsFirst,
+			values:     values,
+		})
 	}
 
 	return keys, nil
 }
 
+// compareNulls orders a null against a non-null value. It reports false
+// when neither is null.
+func compareNulls(xNull, yNull, nullsFirst bool) (int, bool) {
+	switch {
+	case !xNull && !yNull:
+		return 0, false
+	case xNull && yNull:
+		return 0, true
+	case xNull == nullsFirst:
+		return -1, true
+	default:
+		return 1, true
+	}
+}
+
+func (c rowComparator) compare(a arrow.RecordBatch, i int, b arrow.RecordBatch, j int) int {
+	for _, k := range c {
+		x, y := a.Column(k.col), b.Column(k.col)
+		r, isNull := compareNulls(x.IsNull(i), y.IsNull(j), k.nullsFirst)
+		if !isNull {
+			r = k.values.compare(x, i, y, j)
+			if k.desc {
+				r = -r
+			}
+		}
+		if r != 0 {
+			return r
+		}
+	}
+
+	return 0
+}
+
+// bind returns compare specialized to rows of batches, which resolves each
+// key column's typed values once instead of on every comparison.
+func (c rowComparator) bind(batches []arrow.RecordBatch) func(x, y rowRef) int {
+	type boundKey struct {
+		cols       []arrow.Array
+		hasNulls   bool
+		desc       bool
+		nullsFirst bool
+		compare    func(xb, xi, yb, yi int) int
+	}
+	keys := make([]boundKey, len(c))
+	for n, k := range c {
+		cols := make([]arrow.Array, len(batches))
+		hasNulls := false
+		for b, rec := range batches {
+			cols[b] = rec.Column(k.col)
+			hasNulls = hasNulls || cols[b].NullN() > 0
+		}
+		keys[n] = boundKey{cols, hasNulls, k.desc, k.nullsFirst, k.values.bind(cols)}
+	}
+
+	return func(x, y rowRef) int {
+		xb, xi, yb, yi := x.batch(), x.row(), y.batch(), y.row()
+		for _, k := range keys {
+			var r int
+			isNull := false
+			if k.hasNulls {
+				r, isNull = compareNulls(k.cols[xb].IsNull(xi), k.cols[yb].IsNull(yi), k.nullsFirst)
+			}
+			if !isNull {
+				r = k.compare(xb, xi, yb, yi)
+				if k.desc {
+					r = -r
+				}
+			}
+			if r != 0 {
+				return r
+			}
+		}
+
+		return 0
+	}
+}
+
+// valueComparator compares the non-null values of one Arrow type, either
+// at any two positions of any two arrays, or bound to a fixed set of
+// arrays and addressed by (array, row).
+type valueComparator struct {
+	compare func(a arrow.Array, i int, b arrow.Array, j int) int
+	bind    func(cols []arrow.Array) func(xb, xi, yb, yi int) int
+}
+
+func orderedValues[T cmp.Ordered, A interface{ Values() []T }]() valueComparator {
+	return fixedWidthValues[T, A](cmp.Compare[T])
+}
+
+func fixedWidthValues[T any, A interface{ Values() []T }](compare func(T, T) int) valueComparator {
+	return valueComparator{
+		compare: func(a arrow.Array, i int, b arrow.Array, j int) int {
+			return compare(a.(A).Values()[i], b.(A).Values()[j])
+		},
+		bind: func(cols []arrow.Array) func(xb, xi, yb, yi int) int {
+			values := make([][]T, len(cols))
+			for n, col := range cols {
+				values[n] = col.(A).Values()
+			}
+
+			return func(xb, xi, yb, yi int) int { return compare(values[xb][xi], values[yb][yi]) }
+		},
+	}
+}
+
+func accessorValues[T any, A interface{ Value(int) T }](compare func(T, T) int) valueComparator {
+	return valueComparator{
+		compare: func(a arrow.Array, i int, b arrow.Array, j int) int {
+			return compare(a.(A).Value(i), b.(A).Value(j))
+		},
+		bind: func(cols []arrow.Array) func(xb, xi, yb, yi int) int {
+			typed := make([]A, len(cols))
+			for n, col := range cols {
+				typed[n] = col.(A)
+			}
+
+			return func(xb, xi, yb, yi int) int { return compare(typed[xb].Value(xi), typed[yb].Value(yi)) }
+		},
+	}
+}
+
+func compareFloat[T float32 | float64](x, y T) int {
+	xNaN, yNaN := x != x, y != y
+	switch {
+	case xNaN || yNaN:
+		rank := func(nan bool, v T) int {
+			switch {
+			case !nan:
+				return 0
+			case math.Signbit(float64(v)):
+				return -1
+			default:
+				return 1
+			}
+		}
+
+		return cmp.Compare(rank(xNaN, x), rank(yNaN, y))
+	case x == y:
+		// Only -0 and 0 compare equal while differing in sign.
+		return cmp.Compare(boolRank(!math.Signbit(float64(x))), boolRank(!math.Signbit(float64(y))))
+	case x < y:
+		return -1
+	default:
+		return 1
+	}
+}
+
+func compareBool(x, y bool) int { return cmp.Compare(boolRank(x), boolRank(y)) }
+
+func boolRank(v bool) int {
+	if v {
+		return 1
+	}
+
+	return 0
+}
+
+func compareDecimal128(x, y decimal128.Num) int { return x.Cmp(y) }
+
+func newValueComparator(dt arrow.DataType) (valueComparator, error) {
+	switch dt.ID() {
+	case arrow.BOOL:
+		return accessorValues[bool, *array.Boolean](compareBool), nil
+	case arrow.INT8:
+		return orderedValues[int8, *array.Int8](), nil
+	case arrow.INT16:
+		return orderedValues[int16, *array.Int16](), nil
+	case arrow.INT32:
+		return orderedValues[int32, *array.Int32](), nil
+	case arrow.INT64:
+		return orderedValues[int64, *array.Int64](), nil
+	case arrow.UINT8:
+		return orderedValues[uint8, *array.Uint8](), nil
+	case arrow.UINT16:
+		return orderedValues[uint16, *array.Uint16](), nil
+	case arrow.UINT32:
+		return orderedValues[uint32, *array.Uint32](), nil
+	case arrow.UINT64:
+		return orderedValues[uint64, *array.Uint64](), nil
+	case arrow.FLOAT32:
+		return fixedWidthValues[float32, *array.Float32](compareFloat[float32]), nil
+	case arrow.FLOAT64:
+		return fixedWidthValues[float64, *array.Float64](compareFloat[float64]), nil
+	case arrow.DATE32:
+		return orderedValues[arrow.Date32, *array.Date32](), nil
+	case arrow.DATE64:
+		return orderedValues[arrow.Date64, *array.Date64](), nil
+	case arrow.TIME32:
+		return orderedValues[arrow.Time32, *array.Time32](), nil
+	case arrow.TIME64:
+		return orderedValues[arrow.Time64, *array.Time64](), nil
+	case arrow.TIMESTAMP:
+		return orderedValues[arrow.Timestamp, *array.Timestamp](), nil
+	case arrow.STRING:
+		return accessorValues[string, *array.String](strings.Compare), nil
+	case arrow.LARGE_STRING:
+		return accessorValues[string, *array.LargeString](strings.Compare), nil
+	case arrow.STRING_VIEW:
+		return accessorValues[string, *array.StringView](strings.Compare), nil
+	case arrow.BINARY:
+		return accessorValues[[]byte, *array.Binary](bytes.Compare), nil
+	case arrow.LARGE_BINARY:
+		return accessorValues[[]byte, *array.LargeBinary](bytes.Compare), nil
+	case arrow.BINARY_VIEW:
+		return accessorValues[[]byte, *array.BinaryView](bytes.Compare), nil
+	case arrow.FIXED_SIZE_BINARY:
+		return accessorValues[[]byte, *array.FixedSizeBinary](bytes.Compare), nil
+	case arrow.DECIMAL128:
+		return fixedWidthValues[decimal128.Num, *array.Decimal128](compareDecimal128), nil
+	case arrow.EXTENSION:
+		storage, err := newValueComparator(dt.(arrow.ExtensionType).StorageType())
+		if err != nil {
+			return valueComparator{}, err
+		}
+		unwrap := func(a arrow.Array) arrow.Array { return a.(array.ExtensionArray).Storage() }
+
+		return valueComparator{
+			compare: func(a arrow.Array, i int, b arrow.Array, j int) int {
+				return storage.compare(unwrap(a), i, unwrap(b), j)
+			},
+			bind: func(cols []arrow.Array) func(xb, xi, yb, yi int) int {
+				stored := make([]arrow.Array, len(cols))
+				for n, col := range cols {
+					stored[n] = unwrap(col)
+				}
+
+				return storage.bind(stored)
+			},
+		}, nil
+	default:
+		return valueComparator{}, fmt.Errorf("%w: cannot sort by values of type %s", iceberg.ErrNotImplemented, dt)
+	}
+}
+
 // claimableSortOrderID returns the id to record as sort_order_id on files
 // written sorted by order, or UnsortedSortOrderID when the claim would not
-// hold. Rows are ordered by each field's first source column, which only
-// matches the spec's ordering for single-source, order-preserving
-// transforms, and the id must name the same order in the table metadata.
+// hold. Rows are ordered by each field's first source column. That matches
+// the spec's ordering only when every field but the last is identity and
+// the last preserves order: ordering by a coarser transform's source
+// column (day(ts)) also orders rows the transform ties on, which breaks
+// the order of the fields after it. The id must also name the same order
+// in the table metadata.
 func claimableSortOrderID(meta Metadata, order SortOrder) int {
-	for _, field := range order.fields {
+	for i, field := range order.fields {
 		if len(field.SourceIDs) > 1 || field.Transform == nil || !field.Transform.PreservesOrder() {
+			return UnsortedSortOrderID
+		}
+		if _, identity := field.Transform.(iceberg.IdentityTransform); !identity && i < len(order.fields)-1 {
 			return UnsortedSortOrderID
 		}
 	}
@@ -115,7 +376,7 @@ func sortedCompactionRecords(
 	records iter.Seq2[arrow.RecordBatch, error],
 ) iter.Seq2[arrow.RecordBatch, error] {
 	return func(yield func(arrow.RecordBatch, error) bool) {
-		parts, keys, err := collectCompactionPartitions(ctx, spec, schema, order, records)
+		parts, rows, err := collectCompactionPartitions(ctx, spec, schema, order, records)
 		defer func() { releaseCompactionPartitions(parts) }()
 		if err != nil {
 			yield(nil, err)
@@ -124,7 +385,7 @@ func sortedCompactionRecords(
 		}
 
 		for i := range parts {
-			if !yieldSortedPartition(ctx, parts[i].batches, keys, batchRows, yield) {
+			if !yieldSortedPartition(ctx, parts[i].batches, rows, batchRows, yield) {
 				return
 			}
 			releaseCompactionPartitions(parts[i : i+1])
@@ -141,10 +402,10 @@ func collectCompactionPartitions(
 	schema *iceberg.Schema,
 	order SortOrder,
 	records iter.Seq2[arrow.RecordBatch, error],
-) ([]compactionPartition, []compute.SortKey, error) {
+) ([]compactionPartition, rowComparator, error) {
 	var (
 		parts  []compactionPartition
-		keys   []compute.SortKey
+		rows   rowComparator
 		plan   *partitionExtractionPlan
 		takeFn = partitionBatchByKey(ctx)
 	)
@@ -158,8 +419,8 @@ func collectCompactionPartitions(
 
 			continue
 		}
-		if keys == nil {
-			if keys, err = resolveCompactionSortKeys(order, schema, rec.Schema()); err != nil {
+		if rows == nil {
+			if rows, err = newRowComparator(order, schema, rec.Schema()); err != nil {
 				rec.Release()
 
 				return parts, nil, err
@@ -211,8 +472,16 @@ func collectCompactionPartitions(
 		rec.Release()
 	}
 
-	return parts, keys, nil
+	return parts, rows, nil
 }
+
+// rowRef addresses one row of a slice of batches: the batch index in the
+// high 32 bits and the row within it in the low 32.
+type rowRef uint64
+
+func newRowRef(batch, row int) rowRef { return rowRef(uint64(batch)<<32 | uint64(row)) }
+func (r rowRef) batch() int           { return int(r >> 32) }
+func (r rowRef) row() int             { return int(r & math.MaxUint32) }
 
 // yieldSortedPartition sorts batches as one table and yields the sorted
 // rows. Ownership of each yielded batch passes to the consumer. It returns
@@ -220,7 +489,7 @@ func collectCompactionPartitions(
 func yieldSortedPartition(
 	ctx context.Context,
 	batches []arrow.RecordBatch,
-	keys []compute.SortKey,
+	rows rowComparator,
 	batchRows int64,
 	yield func(arrow.RecordBatch, error) bool,
 ) bool {
@@ -229,42 +498,35 @@ func yieldSortedPartition(
 	}
 
 	sc := batches[0].Schema()
-	for _, b := range batches[1:] {
+	var total int64
+	for _, b := range batches {
 		if !b.Schema().Equal(sc) {
 			yield(nil, errors.New("sort compaction: scan produced batches with differing schemas"))
 
 			return false
 		}
+		total += b.NumRows()
 	}
 
-	tbl := array.NewTableFromRecords(sc, batches)
-	defer tbl.Release()
-
-	indices, err := compute.SortIndicesTable(ctx, tbl, keys)
-	if err != nil {
-		yield(nil, fmt.Errorf("sort compaction: compute sort indices: %w", err))
-
-		return false
+	refs := make([]rowRef, 0, total)
+	for b, rec := range batches {
+		for r := range int(rec.NumRows()) {
+			refs = append(refs, newRowRef(b, r))
+		}
 	}
-	defer indices.Release()
-
-	perm := indices.(*array.Uint64).Uint64Values()
-	starts := make([]int64, len(batches)+1)
-	for i, b := range batches {
-		starts[i+1] = starts[i] + b.NumRows()
-	}
+	slices.SortStableFunc(refs, rows.bind(batches))
 
 	takeFn := partitionBatchByKey(ctx)
 	mem := compute.GetAllocator(ctx)
-	for off := 0; off < len(perm); off += int(batchRows) {
+	for off := 0; off < len(refs); off += int(batchRows) {
 		if err := ctx.Err(); err != nil {
 			yield(nil, err)
 
 			return false
 		}
 
-		end := min(off+int(batchRows), len(perm))
-		out, err := gatherSortedRows(mem, takeFn, batches, starts, perm[off:end])
+		end := min(off+int(batchRows), len(refs))
+		out, err := gatherSortedRows(mem, takeFn, batches, refs[off:end])
 		if err != nil {
 			yield(nil, fmt.Errorf("sort compaction: gather sorted rows: %w", err))
 
@@ -278,25 +540,21 @@ func yieldSortedPartition(
 	return true
 }
 
-// gatherSortedRows builds one batch holding the rows at the global
-// positions rows (in that order) of the concatenation of batches, whose
-// cumulative row offsets are starts. Each source batch is taken from
-// directly so no column is ever concatenated beyond one output batch.
+// gatherSortedRows builds one batch holding the rows refs of batches, in
+// that order. Each source batch is taken from directly so no column is
+// ever concatenated beyond one output batch.
 func gatherSortedRows(
 	mem memory.Allocator,
 	takeFn partitionBatchFn,
 	batches []arrow.RecordBatch,
-	starts []int64,
-	rows []uint64,
+	refs []rowRef,
 ) (arrow.RecordBatch, error) {
 	local := make([][]int64, len(batches))
-	src := make([]int, len(rows))
-	pos := make([]int64, len(rows))
-	for i, g := range rows {
-		b := sort.Search(len(batches), func(j int) bool { return starts[j+1] > int64(g) })
-		src[i] = b
+	pos := make([]int64, len(refs))
+	for i, ref := range refs {
+		b := ref.batch()
 		pos[i] = int64(len(local[b]))
-		local[b] = append(local[b], int64(g)-starts[b])
+		local[b] = append(local[b], int64(ref.row()))
 	}
 
 	var pieces []arrow.RecordBatch
@@ -333,9 +591,9 @@ func gatherSortedRows(
 	}
 	defer merged.Release()
 
-	order := make([]int64, len(rows))
-	for i := range rows {
-		order[i] = base[src[i]] + pos[i]
+	order := make([]int64, len(refs))
+	for i, ref := range refs {
+		order[i] = base[ref.batch()] + pos[i]
 	}
 
 	return takeFn(merged, order)
@@ -369,4 +627,290 @@ func concatRecordBatches(mem memory.Allocator, batches []arrow.RecordBatch) (arr
 	}
 
 	return array.NewRecordBatch(sc, cols, rows), nil
+}
+
+// presortedPartitions reports whether tasks can be merged instead of
+// sorted: every task's file records order's id as its sort_order_id, the
+// id is one claimableSortOrderID accepts, and every file was written under
+// spec, so each file holds rows of a single partition of spec. The tasks
+// are returned grouped by partition, in order of first appearance.
+func presortedPartitions(meta Metadata, spec iceberg.PartitionSpec, order SortOrder, tasks []FileScanTask) ([][]FileScanTask, bool) {
+	id := claimableSortOrderID(meta, order)
+	if id == UnsortedSortOrderID {
+		return nil, false
+	}
+
+	var (
+		keys  []partitionRecord
+		parts [][]FileScanTask
+	)
+	for _, task := range tasks {
+		sortOrderID := task.File.SortOrderID()
+		if sortOrderID == nil || *sortOrderID != id || int(task.File.SpecID()) != spec.ID() {
+			return nil, false
+		}
+
+		values := task.File.Partition()
+		key := make(partitionRecord, 0, spec.NumFields())
+		for _, field := range spec.Fields() {
+			key = append(key, values[field.FieldID])
+		}
+		idx := slices.IndexFunc(keys, func(k partitionRecord) bool { return partitionRecordsEqual(k, key) })
+		if idx < 0 {
+			keys = append(keys, key)
+			parts = append(parts, nil)
+			idx = len(parts) - 1
+		}
+		parts[idx] = append(parts[idx], task)
+	}
+
+	return parts, true
+}
+
+// mergedCompactionRecords reads each task of parts (see
+// presortedPartitions) as its own stream and merges the streams of one
+// partition after another into batches of at most batchRows rows sorted
+// by order. Only the current batch of each stream of the partition being
+// merged is held, plus what its scan worker decodes ahead, instead of the
+// whole group.
+func mergedCompactionRecords(
+	ctx context.Context,
+	scan *Scan,
+	schema *iceberg.Schema,
+	order SortOrder,
+	batchRows int64,
+	parts [][]FileScanTask,
+) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	tasks := slices.Concat(parts...)
+	sc, streams, release, err := scan.readTasksPerTask(ctx, tasks)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := newRowComparator(order, schema, sc)
+	if err != nil {
+		release()
+
+		return nil, nil, err
+	}
+
+	paths := make([]string, len(tasks))
+	for i, task := range tasks {
+		paths[i] = task.File.FilePath()
+	}
+
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		defer release()
+		start := 0
+		for _, part := range parts {
+			end := start + len(part)
+			if !mergeSortedStreams(ctx, rows, paths[start:end], streams[start:end], batchRows, yield) {
+				return
+			}
+			start = end
+		}
+	}
+
+	return sc, records, nil
+}
+
+// mergeCursor walks one sorted stream of a k-way merge.
+type mergeCursor struct {
+	idx  int
+	path string
+	next func() (arrow.RecordBatch, error, bool)
+	stop func()
+	rec  arrow.RecordBatch
+	row  int
+}
+
+// load moves the cursor to the first row of the stream's next non-empty
+// batch and reports false at the end of the stream. It checks that the
+// stream is sorted, since a merge of unsorted input would silently yield
+// unsorted output.
+func (c *mergeCursor) load(rows rowComparator) (bool, error) {
+	for {
+		rec, err, ok := c.next()
+		switch {
+		case !ok:
+			c.releaseBatch()
+
+			return false, nil
+		case err != nil:
+			return false, err
+		case rec.NumRows() == 0:
+			rec.Release()
+
+			continue
+		}
+
+		sorted := c.rec == nil || rows.compare(c.rec, int(c.rec.NumRows())-1, rec, 0) <= 0
+		for r := 1; sorted && r < int(rec.NumRows()); r++ {
+			sorted = rows.compare(rec, r-1, rec, r) <= 0
+		}
+		c.releaseBatch()
+		c.rec, c.row = rec, 0
+		if !sorted {
+			return false, fmt.Errorf("sort compaction: data file %s records the sort order being merged but is not sorted by it", c.path)
+		}
+
+		return true, nil
+	}
+}
+
+func (c *mergeCursor) releaseBatch() {
+	if c.rec != nil {
+		c.rec.Release()
+		c.rec = nil
+	}
+}
+
+// mergeHeap orders cursors by their current row, ties broken by stream
+// index so the merge is deterministic.
+type mergeHeap struct {
+	cursors []*mergeCursor
+	rows    rowComparator
+}
+
+func (h *mergeHeap) precedes(a *mergeCursor, row int, b *mergeCursor) bool {
+	if c := h.rows.compare(a.rec, row, b.rec, b.row); c != 0 {
+		return c < 0
+	}
+
+	return a.idx < b.idx
+}
+
+func (h *mergeHeap) Len() int { return len(h.cursors) }
+func (h *mergeHeap) Less(i, j int) bool {
+	return h.precedes(h.cursors[i], h.cursors[i].row, h.cursors[j])
+}
+func (h *mergeHeap) Swap(i, j int) { h.cursors[i], h.cursors[j] = h.cursors[j], h.cursors[i] }
+func (h *mergeHeap) Push(x any)    { h.cursors = append(h.cursors, x.(*mergeCursor)) }
+func (h *mergeHeap) Pop() any {
+	last := h.cursors[len(h.cursors)-1]
+	h.cursors = h.cursors[:len(h.cursors)-1]
+
+	return last
+}
+
+// runnerUp returns the cursor that would be the heap's minimum once its
+// root is gone.
+func (h *mergeHeap) runnerUp() *mergeCursor {
+	if len(h.cursors) == 2 || h.Less(1, 2) {
+		return h.cursors[1]
+	}
+
+	return h.cursors[2]
+}
+
+// mergeSortedStreams k-way merges streams, each sorted by rows, and yields
+// the result in batches of at most batchRows rows. Every step takes the
+// longest run of the minimum stream's current batch that precedes the
+// runner-up's head, so streams with disjoint ranges are copied a batch
+// slice at a time. Ownership of each yielded batch passes to the consumer.
+// It returns false when iteration must stop.
+func mergeSortedStreams(
+	ctx context.Context,
+	rows rowComparator,
+	paths []string,
+	streams []iter.Seq2[arrow.RecordBatch, error],
+	batchRows int64,
+	yield func(arrow.RecordBatch, error) bool,
+) bool {
+	h := &mergeHeap{rows: rows}
+	cursors := make([]*mergeCursor, 0, len(streams))
+	var pending []arrow.RecordBatch
+	defer func() {
+		for _, c := range cursors {
+			c.releaseBatch()
+			c.stop()
+		}
+		for _, p := range pending {
+			p.Release()
+		}
+	}()
+
+	for i, stream := range streams {
+		next, stop := iter.Pull2(stream)
+		c := &mergeCursor{idx: i, path: paths[i], next: next, stop: stop}
+		cursors = append(cursors, c)
+		ok, err := c.load(rows)
+		if err != nil {
+			yield(nil, err)
+
+			return false
+		}
+		if ok {
+			h.cursors = append(h.cursors, c)
+		}
+	}
+	heap.Init(h)
+
+	mem := compute.GetAllocator(ctx)
+	var pendingRows int64
+	flush := func() bool {
+		out := pending[0]
+		if len(pending) > 1 {
+			merged, err := concatRecordBatches(mem, pending)
+			if err != nil {
+				yield(nil, fmt.Errorf("sort compaction: merge sorted rows: %w", err))
+
+				return false
+			}
+			for _, p := range pending {
+				p.Release()
+			}
+			out = merged
+		}
+		pending, pendingRows = pending[:0], 0
+
+		return yield(out, nil)
+	}
+
+	for h.Len() > 0 {
+		if err := ctx.Err(); err != nil {
+			yield(nil, err)
+
+			return false
+		}
+
+		c := h.cursors[0]
+		end := int(c.rec.NumRows())
+		if h.Len() > 1 {
+			next := h.runnerUp()
+			end = c.row + sort.Search(end-c.row, func(k int) bool {
+				return !h.precedes(c, c.row+k, next)
+			})
+		}
+		end = min(end, c.row+int(batchRows-pendingRows))
+
+		pending = append(pending, c.rec.NewSlice(int64(c.row), int64(end)))
+		pendingRows += int64(end - c.row)
+		c.row = end
+		if pendingRows == batchRows && !flush() {
+			return false
+		}
+
+		if c.row < int(c.rec.NumRows()) {
+			heap.Fix(h, 0)
+
+			continue
+		}
+		ok, err := c.load(rows)
+		switch {
+		case err != nil:
+			yield(nil, err)
+
+			return false
+		case ok:
+			heap.Fix(h, 0)
+		default:
+			heap.Pop(h)
+		}
+	}
+
+	if pendingRows > 0 {
+		return flush()
+	}
+
+	return true
 }

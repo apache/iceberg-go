@@ -245,3 +245,64 @@ func TestRewriteDataFiles_SortOrder(t *testing.T) {
 	assert.Equal(t, tbl.SortOrder().OrderID(), *tasks[0].File.SortOrderID())
 	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6}, readInt64Column(t, tasks[0].File.FilePath(), "id"))
 }
+
+// TestExecuteCompactionGroup_MergesSortedFiles compacts files that already
+// record the sort order, which takes the streaming merge path, with one
+// position-delete file shared by both inputs.
+func TestExecuteCompactionGroup_MergesSortedFiles(t *testing.T) {
+	tbl := newSortCompactionTestTable(t, iceberg.UnpartitionedSpec)
+	tbl = addSortTestFile(t, tbl, "f0", "x", 7, 3, 11)
+	tbl = addSortTestFile(t, tbl, "f1", "x", 2, 9, 5)
+	tbl = addSortTestFile(t, tbl, "f2", "x", 12, 1, 8)
+	tbl = addSortTestFile(t, tbl, "f3", "x", 4, 10, 6)
+	unsorted := sortTestGroup(t, tbl)
+
+	res, err := tbl.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{
+		{PartitionKey: "a", Tasks: unsorted.Tasks[:2]},
+		{PartitionKey: "b", Tasks: unsorted.Tasks[2:]},
+	}, table.RewriteDataFilesOptions{
+		GroupOptions: []table.CompactionGroupOption{table.WithCompactionSortOrder(tbl.SortOrder())},
+	})
+	require.NoError(t, err)
+	tbl = res.Table
+
+	group := sortTestGroup(t, tbl)
+	require.Len(t, group.Tasks, 2)
+	byFirstID := make(map[int64]table.FileScanTask)
+	for _, task := range group.Tasks {
+		require.NotNil(t, task.File.SortOrderID())
+		require.Equal(t, tbl.SortOrder().OrderID(), *task.File.SortOrderID())
+		byFirstID[readInt64Column(t, task.File.FilePath(), "id")[0]] = task
+	}
+	// Files hold 2,3,5,7,9,11 and 1,4,6,8,10,12. Delete 2 and 11 from the
+	// first and 4 from the second.
+	first, second := byFirstID[2].File.FilePath(), byFirstID[1].File.FilePath()
+	delPath := tbl.Location() + "/data/pos-del.parquet"
+	writeParquetFile(t, delPath, table.PositionalDeleteArrowSchema, fmt.Sprintf(
+		`[{"file_path": %q, "pos": 0}, {"file_path": %q, "pos": 5}, {"file_path": %q, "pos": 1}]`,
+		first, first, second))
+	bldr, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		delPath, iceberg.ParquetFile, nil, nil, nil, 3, 1)
+	require.NoError(t, err)
+	posDel := bldr.Build()
+	for i := range group.Tasks {
+		group.Tasks[i].DeleteFiles = []iceberg.DataFile{posDel}
+	}
+
+	out, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
+		table.WithCompactionSortOrder(tbl.SortOrder()),
+		table.WithCompactionArrowBatchSize(4),
+		table.WithCompactionTargetFileSize(1))
+	require.NoError(t, err)
+	require.Len(t, out.NewDataFiles, 3)
+
+	var all []int64
+	for _, df := range out.NewDataFiles {
+		ids := readInt64Column(t, df.FilePath(), "id")
+		assert.True(t, slices.IsSorted(ids), "file %s is not sorted: %v", df.FilePath(), ids)
+		all = append(all, ids...)
+		require.NotNil(t, df.SortOrderID())
+		assert.Equal(t, tbl.SortOrder().OrderID(), *df.SortOrderID())
+	}
+	assert.Equal(t, []int64{1, 3, 5, 6, 7, 8, 9, 10, 12}, all)
+}
