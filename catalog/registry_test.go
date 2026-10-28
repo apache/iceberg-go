@@ -134,7 +134,15 @@ func TestCatalogRegistryNormalizesType(t *testing.T) {
 }
 
 func TestRegistryPanic(t *testing.T) {
-	assert.PanicsWithValue(t, "catalog: RegisterCatalog catalog factory is nil", func() { catalog.Register("foobar", nil) })
+	assert.PanicsWithValue(t, "catalog: RegisterCatalog catalog factory is nil", func() {
+		catalog.Register("foobar", nil)
+	})
+}
+
+func TestLegacyRegisterAllowsEmptyCatalogType(t *testing.T) {
+	catalog.Register("", stubRegistrar())
+	t.Cleanup(func() { catalog.Unregister("") })
+	assert.Contains(t, catalog.GetRegisteredCatalogs(), "")
 }
 
 func TestCatalogWithEmptyName(t *testing.T) {

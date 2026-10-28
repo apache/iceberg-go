@@ -136,9 +136,9 @@ func init() {
 		return newCatalogFromProps(ctx, name, p.Get("uri", ""), p)
 	})
 
-	catalog.Register(string(catalog.REST), reg)
-	catalog.Register("http", reg)
-	catalog.Register("https", reg)
+	catalog.MustRegister(string(catalog.REST), reg)
+	catalog.MustRegister("http", reg)
+	catalog.MustRegister("https", reg)
 }
 
 type errorResponse struct {

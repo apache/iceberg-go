@@ -46,7 +46,7 @@ import (
 )
 
 func init() {
-	catalog.Register(string(catalog.Hadoop), catalog.RegistrarFunc(
+	catalog.MustRegister(string(catalog.Hadoop), catalog.RegistrarFunc(
 		func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
 			warehouse := props.Get("warehouse", "")
 

@@ -49,7 +49,7 @@ var (
 )
 
 func init() {
-	catalog.Register("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
 		return NewCatalog(props)
 	}))
 }
