@@ -69,6 +69,7 @@ const (
 	addedPosDeleteFilesKey    = "added-position-delete-files"
 	addedRecordsKey           = "added-records"
 	addedEqDeleteFilesKey     = "added-equality-delete-files"
+	addedDVsKey               = "added-dvs"
 	deletedDataFilesKey       = "deleted-data-files"
 	deletedRecordsKey         = "deleted-records"
 	removedDeleteFilesKey     = "removed-delete-files"
@@ -77,6 +78,7 @@ const (
 	removedFileSizeKey        = "removed-files-size"
 	removedPosDeletesKey      = "removed-position-deletes"
 	removedPosDeleteFilesKey  = "removed-position-delete-files"
+	removedDVsKey             = "removed-dvs"
 	totalEqDeletesKey         = "total-equality-deletes"
 	totalPosDeletesKey        = "total-position-deletes"
 	totalDataFilesKey         = "total-data-files"
@@ -85,8 +87,6 @@ const (
 	totalFileSizeKey          = "total-files-size"
 	changedPartitionCountProp = "changed-partition-count"
 	changedPartitionPrefix    = "partitions."
-	addedDVsKey               = "added-dvs"
-	removedDVsKey             = "removed-dvs"
 )
 
 type updateMetrics struct {
@@ -98,6 +98,8 @@ type updateMetrics struct {
 	removedEqDeleteFiles  int64
 	addedPosDeleteFiles   int64
 	removedPosDeleteFiles int64
+	addedDVs              int64
+	removedDVs            int64
 	addedDeleteFiles      int64
 	removedDeleteFiles    int64
 	addedRecords          int64
@@ -106,8 +108,6 @@ type updateMetrics struct {
 	removedPosDeletes     int64
 	addedEqDeletes        int64
 	removedEqDeletes      int64
-	addedDVs              int64
-	removedDVs            int64
 }
 
 func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
@@ -176,6 +176,8 @@ func (m *updateMetrics) toProps() iceberg.Properties {
 	setWhenPositive(props, removedEqDeleteFilesKey, m.removedEqDeleteFiles)
 	setWhenPositive(props, addedPosDeleteFilesKey, m.addedPosDeleteFiles)
 	setWhenPositive(props, removedPosDeleteFilesKey, m.removedPosDeleteFiles)
+	setWhenPositive(props, addedDVsKey, m.addedDVs)
+	setWhenPositive(props, removedDVsKey, m.removedDVs)
 	setWhenPositive(props, addedDeleteFilesKey, m.addedDeleteFiles)
 	setWhenPositive(props, removedDeleteFilesKey, m.removedDeleteFiles)
 	setWhenPositive(props, addedRecordsKey, m.addedRecords)
@@ -184,8 +186,6 @@ func (m *updateMetrics) toProps() iceberg.Properties {
 	setWhenPositive(props, removedPosDeletesKey, m.removedPosDeletes)
 	setWhenPositive(props, addedEqDeletesKey, m.addedEqDeletes)
 	setWhenPositive(props, removedEqDeletesKey, m.removedEqDeletes)
-	setWhenPositive(props, addedDVsKey, m.addedDVs)
-	setWhenPositive(props, removedDVsKey, m.removedDVs)
 
 	return props
 }

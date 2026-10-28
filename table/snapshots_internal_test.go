@@ -299,8 +299,7 @@ func TestSnapshotSummaryCollectorDeletionVectors(t *testing.T) {
 	var ssc SnapshotSummaryCollector
 	spec := *iceberg.UnpartitionedSpec
 
-	// Two DVs written into one Puffin file, the way DVWriter does it:
-	// both carry the whole Puffin size as FileSizeBytes.
+	// Two DVs that share one Puffin file, as DVWriter writes them.
 	newDV := func(ref string, count, offset, size int64) iceberg.DataFile {
 		return must(iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
 			"/path/to/batch.puffin", iceberg.PuffinFile, nil, nil, nil, count, 1000)).

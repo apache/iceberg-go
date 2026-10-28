@@ -59,8 +59,8 @@ func TestBuildCommitReport(t *testing.T) {
 				totalFileSizeKey:       "5000000",
 				addedPosDeletesKey:     "2",
 				addedPosDeleteFilesKey: "1",
-				addedDVsKey:            "2",
-				removedDVsKey:          "1",
+				addedDVsKey:            "7",
+				removedDVsKey:          "8",
 				addedEqDeletesKey:      "3",
 				addedEqDeleteFilesKey:  "1",
 				manifestsCreatedKey:    "6",
@@ -93,6 +93,10 @@ func TestBuildCommitReport(t *testing.T) {
 	assert.Equal(t, int64(12345), m.AddedRecords.Value)
 	require.NotNil(t, m.TotalRecords)
 	assert.Equal(t, int64(20000), m.TotalRecords.Value)
+	require.NotNil(t, m.AddedDVs)
+	assert.Equal(t, int64(7), m.AddedDVs.Value)
+	require.NotNil(t, m.RemovedDVs)
+	assert.Equal(t, int64(8), m.RemovedDVs.Value)
 
 	// Name-translated mappings (iceberg-go summary key -> Java report name).
 	require.NotNil(t, m.RemovedDataFiles, "deleted-data-files -> removed-data-files")
@@ -108,10 +112,6 @@ func TestBuildCommitReport(t *testing.T) {
 	assert.Equal(t, int64(5000000), m.TotalFilesSizeBytes.Value)
 	require.NotNil(t, m.AddedPositionalDeletes, "added-position-deletes -> added-positional-deletes")
 	assert.Equal(t, int64(2), m.AddedPositionalDeletes.Value)
-	require.NotNil(t, m.AddedDVs)
-	assert.Equal(t, int64(2), m.AddedDVs.Value)
-	require.NotNil(t, m.RemovedDVs)
-	assert.Equal(t, int64(1), m.RemovedDVs.Value)
 	require.NotNil(t, m.AddedPositionalDeleteFiles, "added-position-delete-files -> added-positional-delete-files")
 	assert.Equal(t, int64(1), m.AddedPositionalDeleteFiles.Value)
 	require.NotNil(t, m.AddedEqualityDeletes)
