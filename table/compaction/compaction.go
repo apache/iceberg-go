@@ -111,9 +111,6 @@ type Config struct {
 	// example, 10 GB of small files with a 512 MB target is about 20
 	// separately sorted groups whose files all overlap; one 10 GB group is
 	// sorted once and written as about 20 files with disjoint key ranges.
-	// Raise this so a group covers a whole partition, but keep it within
-	// what one rewrite may hold in memory: a group whose files are not
-	// already sorted by the order is held decoded in memory.
 	MaxGroupSizeBytes int64
 }
 
