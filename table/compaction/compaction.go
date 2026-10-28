@@ -95,17 +95,25 @@ type Config struct {
 	// selection would skip as already optimal.
 	RewriteAll bool
 
-	// MaxGroupSizeBytes caps the total input size of one group; candidates
-	// of a partition are bin-packed into groups of up to this size, and
-	// each group is rewritten into files of TargetFileSizeBytes. Zero packs
-	// groups to TargetFileSizeBytes, so each group yields about one file.
-	// Mirrors Java's max-file-group-size-bytes.
+	// MaxGroupSizeBytes caps the total input size of one group. Candidates
+	// of a partition are packed into groups of up to this size, and each
+	// group is rewritten into files of about TargetFileSizeBytes, so group
+	// size and output file size are set independently. When zero, groups
+	// are packed to TargetFileSizeBytes (always positive; see Validate) and
+	// each group yields about one file. Mirrors Java's
+	// max-file-group-size-bytes.
 	//
-	// A sort rewrite ([table.WithCompactionSortOrder]) orders rows only
-	// within a group, so output files of different groups overlap on the
-	// sort key: raise this so a group covers a whole partition, sized to
-	// what one rewrite may hold in memory (a group whose files are not
-	// already sorted is held decoded in memory).
+	// Bin-pack rewrites are unaffected by the group size beyond how work is
+	// split. Sort rewrites ([table.WithCompactionSortOrder]) depend on it:
+	// rows are ordered only within a group, so a partition split across
+	// several groups yields files that each span the partition's whole key
+	// range, and readers cannot skip any of them by min/max statistics. For
+	// example, 10 GB of small files with a 512 MB target is about 20
+	// separately sorted groups whose files all overlap; one 10 GB group is
+	// sorted once and written as about 20 files with disjoint key ranges.
+	// Raise this so a group covers a whole partition, but keep it within
+	// what one rewrite may hold in memory: a group whose files are not
+	// already sorted by the order is held decoded in memory.
 	MaxGroupSizeBytes int64
 }
 
