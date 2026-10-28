@@ -792,16 +792,6 @@ func (h *mergeHeap) Pop() any {
 	return last
 }
 
-// runnerUp returns the cursor that would be the heap's minimum once its
-// root is gone.
-func (h *mergeHeap) runnerUp() *mergeCursor {
-	if len(h.cursors) == 2 || h.Less(1, 2) {
-		return h.cursors[1]
-	}
-
-	return h.cursors[2]
-}
-
 // mergeSortedStreams k-way merges streams, each sorted by rows, and yields
 // the result in batches of at most batchRows rows. Every step takes the
 // longest run of the minimum stream's current batch that precedes the
@@ -873,10 +863,10 @@ func mergeSortedStreams(
 			return false
 		}
 
-		c := h.cursors[0]
+		c := heap.Pop(h).(*mergeCursor)
 		end := int(c.rec.NumRows())
-		if h.Len() > 1 {
-			next := h.runnerUp()
+		if h.Len() > 0 {
+			next := h.cursors[0]
 			end = c.row + sort.Search(end-c.row, func(k int) bool {
 				return !h.precedes(c, c.row+k, next)
 			})
@@ -891,20 +881,18 @@ func mergeSortedStreams(
 		}
 
 		if c.row < int(c.rec.NumRows()) {
-			heap.Fix(h, 0)
+			heap.Push(h, c)
 
 			continue
 		}
 		ok, err := c.load(rows)
-		switch {
-		case err != nil:
+		if err != nil {
 			yield(nil, err)
 
 			return false
-		case ok:
-			heap.Fix(h, 0)
-		default:
-			heap.Pop(h)
+		}
+		if ok {
+			heap.Push(h, c)
 		}
 	}
 
