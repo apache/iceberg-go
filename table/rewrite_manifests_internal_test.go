@@ -409,7 +409,7 @@ func TestRewriteManifestsFailedPassKeepsPreviousState(t *testing.T) {
 			var buf bytes.Buffer
 			_, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
 			require.NoError(t, err)
-			require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+			require.NoError(t, mem.WriteFile(t.Context(), path, buf.Bytes()))
 			out[i] = iceberg.NewManifestBuilder(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
 				AddedFiles(addedFiles).Content(iceberg.ManifestContentData).Build()
 		}
@@ -417,13 +417,13 @@ func TestRewriteManifestsFailedPassKeepsPreviousState(t *testing.T) {
 		return out
 	}
 
-	_, err := r.processManifests(inputs("good", 1))
+	_, err := r.processManifests(t.Context(), inputs("good", 1))
 	require.NoError(t, err)
 	added, rewritten, superseded := slices.Clone(r.added), slices.Clone(r.rewritten), slices.Clone(r.superseded)
 	require.NotEmpty(t, added)
 
 	// A header count that lies trips the guard after the merged file is written.
-	_, err = r.processManifests(inputs("lying", 99))
+	_, err = r.processManifests(t.Context(), inputs("lying", 99))
 	require.Error(t, err)
 
 	assert.Equal(t, added, r.added)
