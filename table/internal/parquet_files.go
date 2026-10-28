@@ -1672,7 +1672,7 @@ func resolveParquetStatsColumns(meta *metadata.FileMetaData, statsCols map[int]S
 			// _last_updated_sequence_number) may legitimately appear in a file
 			// without a metrics-plan entry. Writers materialize them without
 			// adding them to the table schema, so skip them entirely.
-			if iceberg.IsMetadataColumn(fieldID) {
+			if iceberg.IsRowLineageColumn(fieldID) {
 				descriptor.skipStats = true
 			} else {
 				descriptor.resolveErr = fmt.Errorf("field id %d (column %q) not found in the metrics plan", fieldID, descriptor.path)

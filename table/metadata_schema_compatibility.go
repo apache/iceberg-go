@@ -140,7 +140,7 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 		// throwaway metadata from those schemas via AddSchema. User schemas are
 		// validated against the full reserved range separately, before
 		// reassignIDs, in NewMetadataWithUUID.
-		if iceberg.IsMetadataColumn(field.ID) {
+		if iceberg.IsRowLineageColumn(field.ID) {
 			return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
 				iceberg.ErrInvalidSchema, colName, field.ID)
 		}
