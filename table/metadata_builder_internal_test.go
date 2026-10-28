@@ -1928,6 +1928,57 @@ func TestAddSnapshotOnBuilderWithoutBaseV3(t *testing.T) {
 	require.Equal(t, addedRows, meta.NextRowID())
 }
 
+func TestAddSnapshotStaleValuesAreCommitConflicts(t *testing.T) {
+	now := time.Now().UnixMilli()
+	parentID := int64(1)
+
+	t.Run("sequence number taken by a peer", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		peer := freshBuilderSnapshot(1, nil, 1, now)
+		require.NoError(t, builder.AddSnapshot(&peer))
+		stale := freshBuilderSnapshot(2, &parentID, 1, now)
+
+		err := builder.AddSnapshot(&stale)
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.ErrorContains(t, err, "can't add snapshot with sequence number 1, must be > than last sequence number 1")
+	})
+
+	t.Run("first-row-id behind next-row-id", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 3)
+		firstRowID, addedRows := int64(0), int64(10)
+		peer := freshBuilderSnapshot(1, nil, 1, now)
+		peer.FirstRowID, peer.AddedRows = &firstRowID, &addedRows
+		require.NoError(t, builder.AddSnapshot(&peer))
+		stale := freshBuilderSnapshot(2, &parentID, 2, now)
+		stale.FirstRowID, stale.AddedRows = &firstRowID, &addedRows
+
+		err := builder.AddSnapshot(&stale)
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.ErrorIs(t, err, ErrInvalidRowLineage)
+		require.ErrorContains(t, err, "first-row-id 0 is behind table next-row-id 10")
+	})
+
+	t.Run("timestamp before last update", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		first := freshBuilderSnapshot(1, nil, 1, now)
+		require.NoError(t, builder.AddSnapshot(&first))
+		stale := freshBuilderSnapshot(2, &parentID, 2, now-2*oneMinuteInMs)
+
+		err := builder.AddSnapshot(&stale)
+		require.ErrorContains(t, err, "before last updated timestamp")
+		require.NotErrorIs(t, err, ErrCommitFailed)
+	})
+
+	t.Run("missing first-row-id", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 3)
+		snap := freshBuilderSnapshot(1, nil, 1, now)
+
+		err := builder.AddSnapshot(&snap)
+		require.ErrorIs(t, err, ErrInvalidRowLineage)
+		require.NotErrorIs(t, err, ErrCommitFailed)
+	})
+}
+
 func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
 	builder := freshMetadataBuilder(t, 2)
 	parentSnapshotID := int64(1)
