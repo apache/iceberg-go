@@ -2820,12 +2820,25 @@ func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {
 	s.Contains(err.Error(), "UUID")
 }
 
+func (s *HadoopCatalogTestSuite) metadataDirEntries(ident table.Identifier) []string {
+	entries, err := os.ReadDir(s.cat.metadataDir(ident))
+	s.Require().NoError(err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+
+	return names
+}
+
 func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+	before := s.metadataDirEntries(ident)
 
 	_, _, err := s.cat.CommitTable(
-		ctx, []string{"ns", "tbl"},
+		ctx, ident,
 		nil,
 		[]table.Update{
 			table.NewSetLocationUpdate("/some/other/location"),
@@ -2833,14 +2846,18 @@ func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
 	)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "location cannot be changed")
+	s.ErrorIs(err, table.ErrCommitRejected)
+	s.Equal(before, s.metadataDirEntries(ident), "a rejected commit must not write metadata")
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+	before := s.metadataDirEntries(ident)
 
 	_, _, err := s.cat.CommitTable(
-		ctx, []string{"ns", "tbl"},
+		ctx, ident,
 		nil,
 		[]table.Update{
 			table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -2850,6 +2867,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
 	)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "write.metadata.location")
+	s.ErrorIs(err, table.ErrCommitRejected)
+	s.Equal(before, s.metadataDirEntries(ident), "a rejected commit must not write metadata")
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableNoOrphanedTempFiles() {
