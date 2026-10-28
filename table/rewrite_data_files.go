@@ -337,8 +337,13 @@ func WithCompactionParquetRowGroupLimit(n int) CompactionGroupOption {
 // about the current batch of each file plus one read ahead rather than
 // the whole group. A file whose rows turn out not to be sorted fails the
 // group. Otherwise the whole group is held in memory decoded until its
-// files are written, so size groups (see
-// [compaction.Config.TargetFileSizeBytes]) to fit.
+// files are written.
+//
+// Rows are ordered only within a group, so files of different groups
+// overlap on the sort key. Plan groups with
+// [compaction.Config.MaxGroupSizeBytes] large enough to cover a
+// partition, and small enough to fit in memory when its files are not
+// already sorted.
 // [WithCompactionArrowBatchSize] sets the rows per batch read and handed
 // to the writer. An unsorted order is rejected by [ExecuteCompactionGroup].
 func WithCompactionSortOrder(order SortOrder) CompactionGroupOption {

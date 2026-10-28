@@ -164,6 +164,7 @@ type CompactAnalyzeCmd struct {
 	TableID        string `arg:"positional,required" help:"full path to a table"`
 	TargetFileSize int64  `arg:"--target-file-size" default:"0" help:"target output file size in bytes"`
 	RewriteAll     bool   `arg:"--rewrite-all" help:"select every file regardless of size, deletes or minimum group size"`
+	MaxGroupSize   int64  `arg:"--max-group-size" default:"0" help:"maximum input bytes per group (default: the target file size)"`
 }
 
 type CompactRunCmd struct {
@@ -173,6 +174,7 @@ type CompactRunCmd struct {
 	PreserveDeadEqualityDeletes bool   `arg:"--preserve-dead-equality-deletes" help:"keep equality-delete files that are provably dead after the rewrite (default: drop them — recommended for sustained CDC workloads)"`
 	Sort                        bool   `arg:"--sort" help:"sort each group by the table's default sort order instead of bin-packing it"`
 	RewriteAll                  bool   `arg:"--rewrite-all" help:"select every file regardless of size, deletes or minimum group size"`
+	MaxGroupSize                int64  `arg:"--max-group-size" default:"0" help:"maximum input bytes per group (default: the target file size); with --sort, raise it so a group covers a partition, within memory"`
 }
 
 type CompactCmd struct {
@@ -756,6 +758,7 @@ func runCompact(ctx context.Context, output Output, cat catalog.Catalog, cmd *Co
 			targetFileSize: cmd.Analyze.TargetFileSize,
 			analyzeOnly:    true,
 			rewriteAll:     cmd.Analyze.RewriteAll,
+			maxGroupSize:   cmd.Analyze.MaxGroupSize,
 		})
 	case cmd.Run != nil:
 		compact(ctx, output, cat, compactConfig{
@@ -765,6 +768,7 @@ func runCompact(ctx context.Context, output Output, cat catalog.Catalog, cmd *Co
 			preserveDeadEqualityDeletes: cmd.Run.PreserveDeadEqualityDeletes,
 			sort:                        cmd.Run.Sort,
 			rewriteAll:                  cmd.Run.RewriteAll,
+			maxGroupSize:                cmd.Run.MaxGroupSize,
 		})
 	}
 }

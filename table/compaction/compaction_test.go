@@ -307,6 +307,42 @@ func TestPlanCompaction_RewriteAll(t *testing.T) {
 	assert.Equal(t, len(tasks), plan.SkippedFiles)
 }
 
+func TestPlanCompaction_MaxGroupSize(t *testing.T) {
+	cfg := compaction.DefaultConfig()
+	cfg.RewriteAll = true
+
+	// Four right-sized files of one partition and one of another.
+	var tasks []table.FileScanTask
+	for i := range 4 {
+		tasks = append(tasks, makeTask(newPartitionedDataFile(fmt.Sprintf("a-%d.parquet", i), 500, map[int]any{1000: int32(1)}), 0, 0))
+	}
+	tasks = append(tasks, makeTask(newPartitionedDataFile("b-0.parquet", 500, map[int]any{1000: int32(2)}), 0, 0))
+
+	// Packed to one target file, every file lands in a group of its own.
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	assert.Len(t, plan.Groups, 5)
+
+	// A group cap above the partition size keeps each partition whole, and
+	// each group still splits into target-sized output files.
+	cfg.MaxGroupSizeBytes = 10 * 1024 * 1024 * 1024
+	plan, err = cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	require.Len(t, plan.Groups, 2)
+	sizes := []int{len(plan.Groups[0].Tasks), len(plan.Groups[1].Tasks)}
+	assert.ElementsMatch(t, []int{4, 1}, sizes)
+	assert.Equal(t, 5, plan.EstOutputFiles)
+}
+
+func TestValidate_MaxGroupSizeBelowTarget(t *testing.T) {
+	cfg := compaction.DefaultConfig()
+	cfg.MaxGroupSizeBytes = cfg.TargetFileSizeBytes - 1
+	assert.ErrorContains(t, cfg.Validate(), "max group size")
+
+	cfg.MaxGroupSizeBytes = cfg.TargetFileSizeBytes
+	assert.NoError(t, cfg.Validate())
+}
+
 func TestPlanCompaction_SmallFiles(t *testing.T) {
 	cfg := compaction.Config{
 		TargetFileSizeBytes: 100 * 1024 * 1024,

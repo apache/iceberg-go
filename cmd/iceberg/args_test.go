@@ -216,7 +216,7 @@ func TestArgsParsing(t *testing.T) {
 		},
 		{
 			name: "compact run with all flags",
-			args: []string{"compact", "run", "prod.db.events", "--partial-progress", "--preserve-dead-equality-deletes", "--sort", "--rewrite-all"},
+			args: []string{"compact", "run", "prod.db.events", "--partial-progress", "--preserve-dead-equality-deletes", "--sort", "--rewrite-all", "--max-group-size", "10737418240"},
 			check: func(t *testing.T, a Args) {
 				require.NotNil(t, a.Compact)
 				require.NotNil(t, a.Compact.Run)
@@ -225,6 +225,7 @@ func TestArgsParsing(t *testing.T) {
 				assert.True(t, a.Compact.Run.PreserveDeadEqualityDeletes)
 				assert.True(t, a.Compact.Run.Sort)
 				assert.True(t, a.Compact.Run.RewriteAll)
+				assert.Equal(t, int64(10737418240), a.Compact.Run.MaxGroupSize)
 			},
 		},
 		{

@@ -94,6 +94,19 @@ type Config struct {
 	// [table.WithCompactionSortOrder] to sort files that the size-based
 	// selection would skip as already optimal.
 	RewriteAll bool
+
+	// MaxGroupSizeBytes caps the total input size of one group; candidates
+	// of a partition are bin-packed into groups of up to this size, and
+	// each group is rewritten into files of TargetFileSizeBytes. Zero packs
+	// groups to TargetFileSizeBytes, so each group yields about one file.
+	// Mirrors Java's max-file-group-size-bytes.
+	//
+	// A sort rewrite ([table.WithCompactionSortOrder]) orders rows only
+	// within a group, so output files of different groups overlap on the
+	// sort key: raise this so a group covers a whole partition, sized to
+	// what one rewrite may hold in memory (a group whose files are not
+	// already sorted is held decoded in memory).
+	MaxGroupSizeBytes int64
 }
 
 const (
@@ -149,8 +162,21 @@ func (cfg Config) Validate() error {
 	if cfg.DeleteRatioThreshold < 0 || cfg.DeleteRatioThreshold > 1 {
 		return fmt.Errorf("delete ratio threshold must be in [0,1], got %g", cfg.DeleteRatioThreshold)
 	}
+	if cfg.MaxGroupSizeBytes != 0 && cfg.MaxGroupSizeBytes < cfg.TargetFileSizeBytes {
+		return fmt.Errorf("max group size (%d) must be zero or at least the target file size (%d)",
+			cfg.MaxGroupSizeBytes, cfg.TargetFileSizeBytes)
+	}
 
 	return nil
+}
+
+// groupSizeBytes is the weight candidates are bin-packed to.
+func (cfg Config) groupSizeBytes() int64 {
+	if cfg.MaxGroupSizeBytes > 0 {
+		return cfg.MaxGroupSizeBytes
+	}
+
+	return cfg.TargetFileSizeBytes
 }
 
 // Group represents a set of files in the same partition
@@ -196,7 +222,8 @@ type Plan struct {
 
 // PlanCompaction analyzes the given scan tasks and produces a Plan.
 // Tasks are grouped by partition, classified as candidates or skipped,
-// and candidates are bin-packed into groups targeting TargetFileSizeBytes.
+// and candidates are bin-packed into groups of up to MaxGroupSizeBytes
+// (TargetFileSizeBytes when zero).
 // Tasks should come from one coherent scan plan; split tasks for the same file
 // are collapsed, retaining the first task's per-file delete and lineage data.
 // Residual filters select files to rewrite, but are not applied to file contents.
@@ -267,7 +294,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 
 	// Bin-pack candidates per partition.
 	packer := internal.SlicePacker[table.FileScanTask]{
-		TargetWeight:    cfg.TargetFileSizeBytes,
+		TargetWeight:    cfg.groupSizeBytes(),
 		Lookback:        int(cfg.PackingLookback),
 		LargestBinFirst: false,
 	}

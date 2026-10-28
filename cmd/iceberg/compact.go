@@ -36,6 +36,7 @@ type compactConfig struct {
 	preserveDeadEqualityDeletes bool
 	sort                        bool
 	rewriteAll                  bool
+	maxGroupSize                int64
 }
 
 func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg compactConfig) {
@@ -48,6 +49,7 @@ func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg compac
 
 	compCfg := compaction.DefaultConfig()
 	compCfg.RewriteAll = cfg.rewriteAll
+	compCfg.MaxGroupSizeBytes = cfg.maxGroupSize
 	if cfg.targetFileSize > 0 {
 		compCfg.TargetFileSizeBytes = cfg.targetFileSize
 		// Derive min/max using the same ratios as DefaultConfig (75%/180%).
