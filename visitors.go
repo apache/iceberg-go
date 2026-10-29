@@ -685,7 +685,8 @@ func TranslateColumnNamesForScan(expr BooleanExpression, fileSchema *Schema) (Bo
 
 // nullColumn stands for a predicate over a column that is null for every row
 // of a file, which is NULL rather than false. resolveNullColumns replaces it
-// before translation returns.
+// before translation returns, and it must not escape TranslateColumnNamesForScan:
+// Op reports OpFalse, which is only right where no NOT applies.
 type nullColumn struct{}
 
 func (nullColumn) String() string            { return "NullColumn()" }
