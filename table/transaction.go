@@ -909,14 +909,8 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	// Only add the update if there are actually snapshots to delete
 	if len(snapsToDelete) > 0 {
-		// Build can set the last-updated time, but only apply may change the
-		// transaction's builder.
-		planned, err := meta.clone().Build()
-		if err != nil {
-			return err
-		}
 		removal := NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit)
-		removal.planningMeta = planned
+		removal.expired = captureExpired(snapsToDelete, lookup, slices.Values(meta.statisticsList), slices.Values(meta.partitionStatsList))
 		updates = append(updates, removal)
 	}
 

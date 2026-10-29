@@ -1068,7 +1068,7 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	return b.removeSnapshotsInternal(NewRemoveSnapshotsUpdate(snapshotIds, postCommit))
 }
 
-// Preserve the update's unexported planning metadata when staging it.
+// Stage u itself because it carries the expired snapshots that cleanup reads.
 func (b *MetadataBuilder) removeSnapshotsInternal(u *removeSnapshotsUpdate) error {
 	removedIDs := make(map[int64]struct{}, len(u.SnapshotIDs))
 	for _, snapshotID := range u.SnapshotIDs {

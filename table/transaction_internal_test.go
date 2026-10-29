@@ -728,7 +728,84 @@ func TestExpireSnapshotsTwiceInTransactionDeletesNothingWhenCleanupFails(t *test
 	assert.Empty(t, tio.removeCount)
 }
 
+func TestExpireSnapshotsWithAndWithoutCleanupInTransaction(t *testing.T) {
+	const (
+		list1     = "s3://bucket/meta/snap-1.avro"
+		list2     = "s3://bucket/meta/snap-2.avro"
+		list3     = "s3://bucket/meta/snap-3.avro"
+		manifest1 = "s3://bucket/meta/manifest-1.avro"
+		manifest2 = "s3://bucket/meta/manifest-2.avro"
+		manifest3 = "s3://bucket/meta/manifest-3.avro"
+		data1     = "s3://bucket/data/file-1.parquet"
+		data2     = "s3://bucket/data/file-2.parquet"
+		data3     = "s3://bucket/data/file-3.parquet"
+	)
+
+	tio := newTrackingIO()
+	m1 := writeManifest(t, tio, 1, 1, manifest1, data1)
+	m2 := writeManifest(t, tio, 2, 2, manifest2, data2)
+	m3 := writeManifest(t, tio, 3, 3, manifest3, data3)
+	writeManifestList(t, tio, 1, list1, []iceberg.ManifestFile{m1})
+	writeManifestList(t, tio, 2, list2, []iceberg.ManifestFile{m1, m2})
+	writeManifestList(t, tio, 3, list3, []iceberg.ManifestFile{m3})
+	for _, path := range []string{data1, data2, data3} {
+		tio.files[path] = []byte("data")
+	}
+
+	txn := newThreeSnapshotTxn(t, tio, list1, list2, list3)
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(2)))
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(1), WithPostCommit(false)))
+	committed, err := txn.Commit(context.Background())
+	require.NoError(t, err)
+	require.Len(t, committed.Metadata().Snapshots(), 1)
+
+	// Snapshot 2 shares manifest 1 with snapshot 1, whose expiry cleans up.
+	assert.ElementsMatch(t,
+		[]string{list2, manifest2, data2, list3, manifest3, data3},
+		slices.Collect(maps.Keys(tio.files)))
+}
+
+func TestExpireSnapshotsCleansUpStatisticsStagedInSameTransaction(t *testing.T) {
+	const (
+		list1         = "s3://bucket/meta/snap-1.avro"
+		list2         = "s3://bucket/meta/snap-2.avro"
+		list3         = "s3://bucket/meta/snap-3.avro"
+		statsPath     = "s3://bucket/stats/snap1.puffin"
+		partStatsPath = "s3://bucket/stats/snap1-part.puffin"
+	)
+
+	tio := newTrackingIO()
+	for i, list := range []string{list1, list2, list3} {
+		writeManifestList(t, tio, int64(i+1), list, nil)
+	}
+	tio.files[statsPath] = []byte("puffin")
+	tio.files[partStatsPath] = []byte("puffin")
+
+	// The base table has no statistics, so only the transaction lists them.
+	txn := newThreeSnapshotTxn(t, tio, list1, list2, list3)
+	require.NoError(t, txn.apply([]Update{
+		NewSetStatisticsUpdate(StatisticsFile{SnapshotID: 1, StatisticsPath: statsPath}),
+		NewSetPartitionStatisticsUpdate(PartitionStatisticsFile{SnapshotID: 1, StatisticsPath: partStatsPath}),
+	}, nil))
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(2)))
+	committed, err := txn.Commit(context.Background())
+	require.NoError(t, err)
+	require.Nil(t, committed.Metadata().SnapshotByID(1))
+
+	assert.ElementsMatch(t, []string{list2, list3}, slices.Collect(maps.Keys(tio.files)))
+}
+
 func stageTwoExpirations(t *testing.T, fio iceio.IO, list1, list2, list3 string) *Transaction {
+	t.Helper()
+
+	txn := newThreeSnapshotTxn(t, fio, list1, list2, list3)
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(2)))
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(1)))
+
+	return txn
+}
+
+func newThreeSnapshotTxn(t *testing.T, fio iceio.IO, list1, list2, list3 string) *Transaction {
 	t.Helper()
 
 	base, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
@@ -746,11 +823,8 @@ func stageTwoExpirations(t *testing.T, fio iceio.IO, list1, list2, list3 string)
 	require.NoError(t, err)
 
 	cat := &sequentialCatalog{metadata: meta}
-	txn := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(fio), cat).NewTransaction()
-	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(2)))
-	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(0), WithRetainLast(1)))
 
-	return txn
+	return New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(fio), cat).NewTransaction()
 }
 
 func TestExpireSnapshotsUsesStandardRetentionPropertyNames(t *testing.T) {

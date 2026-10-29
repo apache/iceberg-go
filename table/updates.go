@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strings"
@@ -637,10 +638,15 @@ type removeSnapshotsUpdate struct {
 	SnapshotIDs []int64 `json:"snapshot-ids"`
 	postCommit  bool
 
-	// planningMeta is the metadata the removal was planned against. Unlike
-	// the base table, it has snapshots and statistics staged in this
-	// transaction. Nil means preTable.
-	planningMeta Metadata
+	// Includes snapshots and statistics staged before this removal.
+	// Nil falls back to preTable.
+	expired map[int64]*expiredSnapshot
+}
+
+type expiredSnapshot struct {
+	Snapshot
+	// Both statistics and partition-statistics files.
+	statisticsPaths []string
 }
 
 // NewRemoveSnapshotsUpdate creates a new update that removes all snapshots from
@@ -802,39 +808,54 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 // expiredSnapshots also adds the expired snapshots' manifest lists and
 // statistics paths to files.
 func (u *removeSnapshotsUpdate) expiredSnapshots(preTable, postTable *Table, files map[string]struct{}) ([]*Snapshot, error) {
-	planned := u.planningMeta
+	planned := u.expired
 	if planned == nil {
-		planned = preTable.Metadata()
+		pre := preTable.Metadata()
+		planned = captureExpired(u.SnapshotIDs, pre.SnapshotByID, pre.Statistics(), pre.PartitionStatistics())
 	}
 
 	snaps := make([]*Snapshot, 0, len(u.SnapshotIDs))
-	expiredIDs := make(map[int64]struct{}, len(u.SnapshotIDs))
 	for _, id := range u.SnapshotIDs {
 		if postTable.Metadata().SnapshotByID(id) != nil {
 			continue
 		}
-		snap := planned.SnapshotByID(id)
-		if snap == nil {
+		snap, ok := planned[id]
+		if !ok {
 			return nil, fmt.Errorf("missing snapshot %d", id)
 		}
 		files[snap.ManifestList] = struct{}{}
-		snaps = append(snaps, snap)
-		expiredIDs[id] = struct{}{}
-	}
-
-	for sf := range planned.Statistics() {
-		if _, ok := expiredIDs[sf.SnapshotID]; ok && sf.StatisticsPath != "" {
-			files[sf.StatisticsPath] = struct{}{}
+		for _, path := range snap.statisticsPaths {
+			files[path] = struct{}{}
 		}
-	}
-
-	for psf := range planned.PartitionStatistics() {
-		if _, ok := expiredIDs[psf.SnapshotID]; ok && psf.StatisticsPath != "" {
-			files[psf.StatisticsPath] = struct{}{}
-		}
+		snaps = append(snaps, &snap.Snapshot)
 	}
 
 	return snaps, nil
+}
+
+// captureExpired copies values so the result does not keep the source
+// metadata alive. It leaves out IDs that snapshotByID cannot find.
+func captureExpired(ids []int64, snapshotByID func(int64) *Snapshot, stats iter.Seq[StatisticsFile], partitionStats iter.Seq[PartitionStatisticsFile]) map[int64]*expiredSnapshot {
+	expired := make(map[int64]*expiredSnapshot, len(ids))
+	for _, id := range ids {
+		if snap := snapshotByID(id); snap != nil {
+			expired[id] = &expiredSnapshot{Snapshot: cloneSnapshot(*snap)}
+		}
+	}
+
+	addPath := func(id int64, path string) {
+		if snap, ok := expired[id]; ok && path != "" {
+			snap.statisticsPaths = append(snap.statisticsPaths, path)
+		}
+	}
+	for sf := range stats {
+		addPath(sf.SnapshotID, sf.StatisticsPath)
+	}
+	for psf := range partitionStats {
+		addPath(psf.SnapshotID, psf.StatisticsPath)
+	}
+
+	return expired
 }
 
 type removeSnapshotRefUpdate struct {
