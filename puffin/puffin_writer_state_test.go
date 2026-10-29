@@ -40,6 +40,7 @@ func TestWriterStateGuardErrors(t *testing.T) {
 		}},
 		{"AddBlob", "add blob", func(w *Writer) error {
 			_, err := w.AddBlob(BlobMetadataInput{}, nil)
+
 			return err
 		}},
 		{"Finish", "finish", func(w *Writer) error {
