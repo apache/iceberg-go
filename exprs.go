@@ -769,6 +769,30 @@ func (ul *unboundLiteralPredicate) Bind(schema *Schema, caseSensitive bool) (Boo
 		return nil, err
 	}
 
+	// A finite literal beyond the range of a floating-point term lies between
+	// the largest finite value and infinity, so an ordering comparison against
+	// it is the same as one against the largest finite value. Folding it to
+	// AlwaysTrue or AlwaysFalse instead would get NaN, the infinities and NULL
+	// wrong: x < 1e100 on a float32 column is false for NaN and +Inf and NULL
+	// for NULL. Java still folds them, see
+	// https://github.com/apache/iceberg/issues/18700.
+	if isFloatingPoint(bound.Type()) && isOrderingOp(ul.op) {
+		switch lit.(type) {
+		case AboveMaxLiteral:
+			if ul.op == OpLT || ul.op == OpLTEQ {
+				return createBoundLiteralPredicate(OpLTEQ, bound, maxFiniteLiteral(bound.Type()))
+			}
+
+			return createBoundLiteralPredicate(OpGT, bound, maxFiniteLiteral(bound.Type()))
+		case BelowMinLiteral:
+			if ul.op == OpGT || ul.op == OpGTEQ {
+				return createBoundLiteralPredicate(OpGTEQ, bound, minFiniteLiteral(bound.Type()))
+			}
+
+			return createBoundLiteralPredicate(OpLT, bound, minFiniteLiteral(bound.Type()))
+		}
+	}
+
 	switch lit.(type) {
 	case AboveMaxLiteral:
 		switch ul.op {
@@ -1436,4 +1460,20 @@ func (b *boundBBoxPredicate) Equals(other BooleanExpression) bool {
 	}
 
 	return b.op == rhs.op && b.term.Equals(rhs.term) && b.bbox.Equals(rhs.bbox)
+}
+
+func maxFiniteLiteral(typ Type) Literal {
+	if _, ok := typ.(Float32Type); ok {
+		return Float32Literal(math.MaxFloat32)
+	}
+
+	return Float64Literal(math.MaxFloat64)
+}
+
+func minFiniteLiteral(typ Type) Literal {
+	if _, ok := typ.(Float32Type); ok {
+		return Float32Literal(-math.MaxFloat32)
+	}
+
+	return Float64Literal(-math.MaxFloat64)
 }

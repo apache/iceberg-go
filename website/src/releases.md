@@ -93,6 +93,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - **Row-lineage column predicate renamed.** Use `iceberg.IsRowLineageColumn` instead of `iceberg.IsMetadataColumn` to identify `_row_id` and `_last_updated_sequence_number`. Use `iceberg.IsReservedFieldID` to check the full reserved metadata field ID range.
 - **File writes and directory walks now take an operation context.** Update `WriteFileIO` and `ListableIO` implementations and calls to `Create`, `WriteFile`, and `WalkDir` to pass `context.Context`; cloud writes and listings use it for cancellation.
+- **Float comparisons against literals beyond the float32 range follow IEEE 754.** On a float32 column, `x < 1e100` no longer returns NaN, `+Inf` or NULL rows, and `NOT(x > 1e100)` no longer returns NULL rows. An infinite literal now binds to a float32 infinity, so `x = +Inf` matches `+Inf` rows. Java still folds these comparisons to always true or false, see [apache/iceberg#18700](https://github.com/apache/iceberg/issues/18700).
 
 ## Verifying and producing releases
 

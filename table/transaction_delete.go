@@ -628,9 +628,8 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 // enough: under three-valued logic `v = 5` is NULL when v is NULL, and so is
 // NOT(v = 5), so a copy-on-write rewrite would drop rows that never matched.
 //
-// The result contains no NOT. Row-group pruning pushes a NOT down with
-// RewriteNotExpr, which turns NOT(x < 5) into x >= 5, and that is false for
-// NaN. Negating the predicates here keeps NaN rows in both places.
+// The result contains no NOT. A negated ordering comparison gets an is_nan
+// branch, as RewriteNotExpr adds one, since NaN fails both x < 5 and x >= 5.
 func isNotTrueExpr(filter iceberg.BooleanExpression) (iceberg.BooleanExpression, error) {
 	res, err := iceberg.VisitExpr(filter, isNotTrueVisitor{})
 	if err != nil {
