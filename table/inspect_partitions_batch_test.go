@@ -56,8 +56,10 @@ func inspectPartitionBatchFixture(
 }
 
 func TestInspectPartitionAggregateReaderBoundedBatches(t *testing.T) {
-	for _, count := range []int{0, 1, inspectRecordBatchSize - 1, inspectRecordBatchSize,
-		inspectRecordBatchSize + 1, 2*inspectRecordBatchSize + 1} {
+	for _, count := range []int{
+		0, 1, inspectRecordBatchSize - 1, inspectRecordBatchSize,
+		inspectRecordBatchSize + 1, 2*inspectRecordBatchSize + 1,
+	} {
 		t.Run(fmt.Sprintf("partitions=%d", count), func(t *testing.T) {
 			partitionType, arrowSchema, aggregates := inspectPartitionBatchFixture(t, count)
 			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
