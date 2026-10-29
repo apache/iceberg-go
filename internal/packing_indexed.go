@@ -23,13 +23,14 @@ import (
 )
 
 // Large FIFO plans spend most of their time searching the open bins.
-// Index only when there are enough items to amortize the tree and ring buffer.
-// Smaller plans, largest-bin-first packing, and potentially overflowing
-// weights keep the existing linear implementation.
+// For small plans, index only after there are enough items to amortize it.
+// Large plans use the indexed first-fit path even with a very large lookback;
+// otherwise every new bin searches thousands of open bins. Division avoids
+// overflow when callers use a practically unbounded lookback.
 func (s *SlicePacker[T]) shouldUseIndexedFIFO(itemCount int) bool {
 	return !s.LargestBinFirst &&
-		s.Lookback >= 32 && s.Lookback <= 8192 &&
-		itemCount >= 2*s.Lookback &&
+		s.Lookback >= 32 &&
+		(itemCount/s.Lookback >= 2 || itemCount >= 16_384) &&
 		s.TargetWeight >= 0 && s.TargetWeight <= math.MaxInt64/2
 }
 
@@ -96,7 +97,8 @@ func indexedFIFOPackingIterator[T any](
 	input iter.Seq[T], targetWeight int64, lookback int, weightFunc func(T) int64,
 ) iter.Seq[[]T] {
 	capacity := lookback + 1
-	bins := make([]Bin[T], capacity)
+	// Small or easy-to-pack inputs do not need a lookback-sized ring.
+	bins := make([]Bin[T], 0, min(capacity, 32))
 
 	var weights packingWeightIndex
 	head, openBins := 0, 0
@@ -140,7 +142,11 @@ func indexedFIFOPackingIterator[T any](
 			}
 
 			slot := (head + openBins) % capacity
-			bins[slot] = Bin[T]{targetWeight: targetWeight}
+			if slot == len(bins) {
+				bins = append(bins, Bin[T]{targetWeight: targetWeight})
+			} else {
+				bins[slot] = Bin[T]{targetWeight: targetWeight}
+			}
 			bins[slot].Add(item, weight)
 			if indexed {
 				weights.update(slot, weight)
@@ -148,6 +154,12 @@ func indexedFIFOPackingIterator[T any](
 			openBins++
 
 			if safeToIndex && !indexed && openBins == 32 {
+				// Only allocate the full ring once indexing becomes worthwhile.
+				if cap(bins) < capacity {
+					expanded := make([]Bin[T], capacity)
+					copy(expanded, bins)
+					bins = expanded
+				}
 				weights = newPackingWeightIndex(capacity)
 				for i := range openBins {
 					j := (head + i) % capacity
