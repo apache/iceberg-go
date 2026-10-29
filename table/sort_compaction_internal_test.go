@@ -245,16 +245,32 @@ func TestPresortedPartitions(t *testing.T) {
 	id, other := order.OrderID(), order.OrderID()+1
 
 	a1, b1, a2 := task("a1", "a", &id), task("b1", "b", &id), task("a2", "a", &id)
-	parts, ok := presortedPartitions(meta, spec, order, []FileScanTask{a1, b1, a2})
+	parts, ok := presortedPartitions(meta, spec, order, []FileScanTask{a1, b1, a2}, 2)
 	require.True(t, ok)
 	require.Len(t, parts, 2)
 	assert.Equal(t, []string{"a1", "a2"}, []string{parts[0][0].File.FilePath(), parts[0][1].File.FilePath()})
 	assert.Equal(t, "b1", parts[1][0].File.FilePath())
 
-	_, ok = presortedPartitions(meta, spec, order, []FileScanTask{a1, task("a3", "a", nil)})
+	_, ok = presortedPartitions(meta, spec, order, []FileScanTask{a1, b1, a2}, 1)
+	assert.False(t, ok, "a partition with more files than streams may be open must be sorted, not merged")
+	_, ok = presortedPartitions(meta, spec, order, []FileScanTask{a1, task("a3", "a", nil)}, 2)
 	assert.False(t, ok, "a file without sort_order_id must be sorted, not merged")
-	_, ok = presortedPartitions(meta, spec, order, []FileScanTask{a1, task("a3", "a", &other)})
+	_, ok = presortedPartitions(meta, spec, order, []FileScanTask{a1, task("a3", "a", &other)}, 2)
 	assert.False(t, ok, "a file sorted by another order must be sorted, not merged")
+
+	truncated, err := NewSortOrder(1, []SortField{
+		{SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsFirst},
+		{SourceIDs: []int{2}, Transform: iceberg.TruncateTransform{Width: 1}, Direction: SortASC, NullOrder: NullsFirst},
+	})
+	require.NoError(t, err)
+	truncMeta, err := NewMetadata(schema, &spec, truncated, "s3://bucket/t", nil)
+	require.NoError(t, err)
+	truncated = truncMeta.SortOrder()
+	truncID := truncated.OrderID()
+	require.Equal(t, truncID, claimableSortOrderID(truncMeta, truncated))
+	_, ok = presortedPartitions(truncMeta, spec, truncated,
+		[]FileScanTask{task("t1", "a", &truncID), task("t2", "a", &truncID)}, 2)
+	assert.False(t, ok, "files sorted by a transform may be unsorted by its source column, so they must be sorted, not merged")
 }
 
 var mergeTestSchema = arrow.NewSchema([]arrow.Field{

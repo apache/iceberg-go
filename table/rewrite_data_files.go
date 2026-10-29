@@ -331,13 +331,16 @@ func WithCompactionParquetRowGroupLimit(n int) CompactionGroupOption {
 // every field but the last is identity and the last preserves order;
 // otherwise they record none.
 //
-// When every file of the group records order's id as its sort_order_id
-// and was written under the table's current partition spec, each file is
-// read as its own stream and the streams are merged, so memory holds
-// about the current batch of each file plus one read ahead rather than
-// the whole group. A file whose rows turn out not to be sorted fails the
-// group. Otherwise the whole group is held in memory decoded until its
-// files are written.
+// When every file of the group records order's id as its sort_order_id,
+// every field of order is identity, every file was written under the
+// table's current partition spec and no partition has more files than
+// the scan concurrency ([WithCompactionScanConcurrency], GOMAXPROCS by
+// default), the files of each partition are read as concurrent streams
+// and merged. Memory then holds up to about five batches per file being
+// merged rather than the whole group. A file whose rows turn out not to
+// be sorted fails the group. Otherwise the whole group is held in memory
+// decoded until its files are written; with the batches queued for the
+// writer, that can reach about twice the group's decoded size.
 //
 // Rows are ordered only within a group, so files of different groups
 // overlap on the sort key. Plan groups with

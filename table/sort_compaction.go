@@ -67,7 +67,7 @@ func newSortStrategy(tbl *Table, order SortOrder, batchRows int64) (sortStrategy
 }
 
 func (s sortStrategy) records(ctx context.Context, scan *Scan, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
-	if parts, ok := presortedPartitions(s.meta, s.spec, s.order, tasks); ok {
+	if parts, ok := presortedPartitions(s.meta, s.spec, s.order, tasks, scan.concurrency); ok {
 		return mergedCompactionRecords(ctx, scan, s.schema, s.order, s.batchRows, parts)
 	}
 
@@ -676,13 +676,24 @@ func concatRecordBatches(mem memory.Allocator, batches []arrow.RecordBatch) (arr
 
 // presortedPartitions reports whether tasks can be merged instead of
 // sorted: every task's file records order's id as its sort_order_id, the
-// id is one claimableSortOrderID accepts, and every file was written under
-// spec, so each file holds rows of a single partition of spec. The tasks
-// are returned grouped by partition, in order of first appearance.
-func presortedPartitions(meta Metadata, spec iceberg.PartitionSpec, order SortOrder, tasks []FileScanTask) ([][]FileScanTask, bool) {
+// id is one claimableSortOrderID accepts, every field of order is
+// identity, every file was written under spec, so each file holds rows of
+// a single partition of spec, and no partition has more than maxStreams
+// files. The tasks are returned grouped by partition, in order of first
+// appearance.
+//
+// The merge compares source values, so a transformed field rules it out:
+// a file sorted by [day(ts)] is validly unsorted by ts within a day.
+// maxStreams bounds the files the merge reads at once.
+func presortedPartitions(meta Metadata, spec iceberg.PartitionSpec, order SortOrder, tasks []FileScanTask, maxStreams int) ([][]FileScanTask, bool) {
 	id := claimableSortOrderID(meta, order)
 	if id == UnsortedSortOrderID {
 		return nil, false
+	}
+	for _, field := range order.fields {
+		if _, identity := field.Transform.(iceberg.IdentityTransform); !identity {
+			return nil, false
+		}
 	}
 
 	var (
@@ -707,6 +718,9 @@ func presortedPartitions(meta Metadata, spec iceberg.PartitionSpec, order SortOr
 			idx = len(parts) - 1
 		}
 		parts[idx] = append(parts[idx], task)
+		if len(parts[idx]) > maxStreams {
+			return nil, false
+		}
 	}
 
 	return parts, true
@@ -715,9 +729,9 @@ func presortedPartitions(meta Metadata, spec iceberg.PartitionSpec, order SortOr
 // mergedCompactionRecords reads each task of parts (see
 // presortedPartitions) as its own stream and merges the streams of one
 // partition after another into batches of at most batchRows rows sorted
-// by order. Only the current batch of each stream of the partition being
-// merged is held, plus what its scan worker decodes ahead, instead of the
-// whole group.
+// by order. Each stream of the partition being merged holds up to about
+// five batches (its scan worker, the channels behind it and the merge
+// cursor), instead of the whole group being held.
 func mergedCompactionRecords(
 	ctx context.Context,
 	scan *Scan,
@@ -766,6 +780,9 @@ type mergeCursor struct {
 	stop func()
 	rec  arrow.RecordBatch
 	row  int
+	// held is rec's index in the pending output's source batches, or -1
+	// while no pending row comes from rec.
+	held int
 }
 
 // load moves the cursor to the first row of the stream's next non-empty
@@ -793,7 +810,7 @@ func (c *mergeCursor) load(rows rowComparator) (bool, error) {
 			sorted = rows.compare(rec, r-1, rec, r) <= 0
 		}
 		c.releaseBatch()
-		c.rec, c.row = rec, 0
+		c.rec, c.row, c.held = rec, 0, -1
 		if !sorted {
 			return false, fmt.Errorf("sort compaction: data file %s records the sort order being merged but is not sorted by it", c.path)
 		}
@@ -837,12 +854,18 @@ func (h *mergeHeap) Pop() any {
 	return last
 }
 
+// mergeRun is rows [start, end) of the pending output's source batch
+// held[batch].
+type mergeRun struct{ batch, start, end int }
+
 // mergeSortedStreams k-way merges streams, each sorted by rows, and yields
 // the result in batches of at most batchRows rows. Every step takes the
 // longest run of the minimum stream's current batch that precedes the
-// runner-up's head, so streams with disjoint ranges are copied a batch
-// slice at a time. Ownership of each yielded batch passes to the consumer.
-// It returns false when iteration must stop.
+// runner-up's head. An output batch that is one run is a zero-copy slice;
+// otherwise its rows are gathered from their source batches, so
+// interleaved streams cost a gather per output batch rather than a slice
+// per run. Ownership of each yielded batch passes to the consumer. It
+// returns false when iteration must stop.
 func mergeSortedStreams(
 	ctx context.Context,
 	rows rowComparator,
@@ -853,20 +876,31 @@ func mergeSortedStreams(
 ) bool {
 	h := &mergeHeap{rows: rows}
 	cursors := make([]*mergeCursor, 0, len(streams))
-	var pending []arrow.RecordBatch
+	var (
+		held        []arrow.RecordBatch
+		runs        []mergeRun
+		pendingRows int64
+	)
+	releaseHeld := func() {
+		for _, b := range held {
+			b.Release()
+		}
+		held, runs, pendingRows = held[:0], runs[:0], 0
+		for _, c := range cursors {
+			c.held = -1
+		}
+	}
 	defer func() {
 		for _, c := range cursors {
 			c.releaseBatch()
 			c.stop()
 		}
-		for _, p := range pending {
-			p.Release()
-		}
+		releaseHeld()
 	}()
 
 	for i, stream := range streams {
 		next, stop := iter.Pull2(stream)
-		c := &mergeCursor{idx: i, path: paths[i], next: next, stop: stop}
+		c := &mergeCursor{idx: i, path: paths[i], next: next, stop: stop, held: -1}
 		cursors = append(cursors, c)
 		ok, err := c.load(rows)
 		if err != nil {
@@ -881,22 +915,15 @@ func mergeSortedStreams(
 	heap.Init(h)
 
 	mem := compute.GetAllocator(ctx)
-	var pendingRows int64
+	takeFn := partitionBatchByKey(ctx)
 	flush := func() bool {
-		out := pending[0]
-		if len(pending) > 1 {
-			merged, err := concatRecordBatches(mem, pending)
-			if err != nil {
-				yield(nil, fmt.Errorf("sort compaction: merge sorted rows: %w", err))
+		out, err := gatherMergeRuns(mem, takeFn, held, runs, pendingRows)
+		releaseHeld()
+		if err != nil {
+			yield(nil, fmt.Errorf("sort compaction: merge sorted rows: %w", err))
 
-				return false
-			}
-			for _, p := range pending {
-				p.Release()
-			}
-			out = merged
+			return false
 		}
-		pending, pendingRows = pending[:0], 0
 
 		return yield(out, nil)
 	}
@@ -918,7 +945,16 @@ func mergeSortedStreams(
 		}
 		end = min(end, c.row+int(batchRows-pendingRows))
 
-		pending = append(pending, c.rec.NewSlice(int64(c.row), int64(end)))
+		if c.held < 0 {
+			c.rec.Retain()
+			held = append(held, c.rec)
+			c.held = len(held) - 1
+		}
+		if last := len(runs) - 1; last >= 0 && runs[last].batch == c.held && runs[last].end == c.row {
+			runs[last].end = end
+		} else {
+			runs = append(runs, mergeRun{batch: c.held, start: c.row, end: end})
+		}
 		pendingRows += int64(end - c.row)
 		c.row = end
 		if pendingRows == batchRows && !flush() {
@@ -946,4 +982,28 @@ func mergeSortedStreams(
 	}
 
 	return true
+}
+
+// gatherMergeRuns builds one batch of the n rows of runs, in order.
+func gatherMergeRuns(
+	mem memory.Allocator,
+	takeFn partitionBatchFn,
+	held []arrow.RecordBatch,
+	runs []mergeRun,
+	n int64,
+) (arrow.RecordBatch, error) {
+	if len(runs) == 1 {
+		r := runs[0]
+
+		return held[r.batch].NewSlice(int64(r.start), int64(r.end)), nil
+	}
+
+	refs := make([]rowRef, 0, n)
+	for _, r := range runs {
+		for row := r.start; row < r.end; row++ {
+			refs = append(refs, newRowRef(r.batch, row))
+		}
+	}
+
+	return gatherSortedRows(mem, takeFn, held, refs)
 }
