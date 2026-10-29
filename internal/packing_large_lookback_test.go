@@ -168,3 +168,49 @@ func BenchmarkSlicePackerLargeLookback(b *testing.B) {
 		})
 	}
 }
+
+func TestIndexedPackingMatchesLinearAcrossWeightTransitions(t *testing.T) {
+	const count = 512
+	for _, lookback := range []int{32, 33, 64, 128} {
+		for seed := int64(0); seed < 4; seed++ {
+			t.Run(fmt.Sprintf("lookback=%d/seed=%d", lookback, seed), func(t *testing.T) {
+				rng := rand.New(rand.NewSource(seed))
+				items := make([]int, count)
+				weights := make([]int64, count)
+				for i := range items {
+					items[i] = i
+					if i < 160 {
+						weights[i] = int64(65 + rng.Intn(64))
+					} else {
+						weights[i] = int64(rng.Intn(129))
+					}
+				}
+				weights[255] = -1
+				weights[383] = math.MaxInt64
+				weight := func(i int) int64 { return weights[i] }
+				packer := SlicePacker[int]{TargetWeight: 128, Lookback: lookback}
+
+				want := slices.Collect(PackingIterator(slices.Values(items), 128, lookback, weight, false))
+				if got := packer.Pack(items, weight); !reflect.DeepEqual(got, want) {
+					t.Fatal("indexed packing differs from linear first-fit")
+				}
+
+				reversed := func(yield func(int) bool {
+					for _, item := range slices.Backward(items) {
+						if !yield(item) {
+							return
+						}
+					}
+				}
+				wantEnd := slices.Collect(PackingIterator(reversed, 128, lookback, weight, false))
+				slices.Reverse(wantEnd)
+				for _, bin := range wantEnd {
+					slices.Reverse(bin)
+				}
+				if got := packer.PackEnd(items, weight); !reflect.DeepEqual(got, wantEnd) {
+					t.Fatal("indexed reverse packing differs from linear first-fit")
+				}
+			})
+		}
+	}
+}
