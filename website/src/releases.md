@@ -92,6 +92,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - **Row-lineage column predicate renamed.** Use `iceberg.IsRowLineageColumn` instead of `iceberg.IsMetadataColumn` to identify `_row_id` and `_last_updated_sequence_number`. Use `iceberg.IsReservedFieldID` to check the full reserved metadata field ID range.
 - **File writes and directory walks now take an operation context.** Update `WriteFileIO` and `ListableIO` implementations and calls to `Create`, `WriteFile`, and `WalkDir` to pass `context.Context`; cloud writes and listings use it for cancellation.
+- **Commit rejections now match `table.ErrCommitRejected`.** SQL, Glue, Hive and Hadoop failures while preparing metadata, plus REST commit responses 400, 401, 403 and 404, leave transactions committable (after a REST 404, the next `Commit` fails when it reloads the table). Existing `errors.Is` matches keep working, but SQL, Glue, Hive and Hadoop rejection messages now start with `commit rejected: `, so code that matches error text may need updating.
 
 ## Verifying and producing releases
 

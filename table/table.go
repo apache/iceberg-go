@@ -64,6 +64,9 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrCommitRejected means the catalog rejected a commit without writing
 // anything. It is the Go equivalent of Java's CleanableFailure.
+// Unlike Java, the REST catalog treats every 400 commit response as a
+// rejection, including one with error type IllegalArgumentException, since the
+// server rejected the request either way.
 //
 // Transaction.Commit does not retry it, but a later Commit can try again.
 // Staged files are retained. Files created during retries are deleted unless
