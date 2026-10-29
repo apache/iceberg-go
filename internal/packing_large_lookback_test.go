@@ -195,7 +195,7 @@ func TestIndexedPackingMatchesLinearAcrossWeightTransitions(t *testing.T) {
 					t.Fatal("indexed packing differs from linear first-fit")
 				}
 
-				reversed := func(yield func(int) bool {
+				reversed := func(yield func(int) bool) {
 					for _, item := range slices.Backward(items) {
 						if !yield(item) {
 							return
