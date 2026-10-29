@@ -223,7 +223,7 @@ func (i InspectTable) manifestEntryReaderFromManifestSource(
 				continue
 			}
 
-			for entry, err := range manifest.Entries(fs, discardDeleted) {
+			for entry, err := range manifest.Entries(ctx, fs, discardDeleted) {
 				if err != nil {
 					yieldError(fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err))
 

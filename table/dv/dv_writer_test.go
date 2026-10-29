@@ -234,7 +234,7 @@ func TestDVWriterAddRejectsNegativePositions(t *testing.T) {
 	require.Len(t, dataFiles, 1)
 	assert.Equal(t, int64(2), dataFiles[0].Count(), "negative Add should be rejected without mutating prior valid state")
 
-	bm, err := ReadDV(fs, dataFiles[0])
+	bm, err := ReadDV(t.Context(), fs, dataFiles[0])
 	require.NoError(t, err)
 	assert.True(t, bm.Contains(1))
 	assert.True(t, bm.Contains(3))
@@ -271,7 +271,7 @@ func TestDVWriterAddPositionRejectsNegativeAfterValidPosition(t *testing.T) {
 	assert.Equal(t, int64(1), dataFiles[0].Count(),
 		"negative AddPosition should not mutate prior valid state")
 
-	bm, err := ReadDV(fs, dataFiles[0])
+	bm, err := ReadDV(t.Context(), fs, dataFiles[0])
 	require.NoError(t, err)
 	assert.True(t, bm.Contains(1))
 	assert.Equal(t, dataFiles[0].Count(), bm.Cardinality())
@@ -527,7 +527,7 @@ func TestDVWriterFlushUnknownSpecID(t *testing.T) {
 func verifyDVReadBack(t *testing.T, fs iceio.IO, df iceberg.DataFile) {
 	t.Helper()
 
-	bm, err := ReadDV(fs, df)
+	bm, err := ReadDV(t.Context(), fs, df)
 	require.NoError(t, err)
 	assert.Equal(t, df.Count(), bm.Cardinality())
 }

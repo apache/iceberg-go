@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Manifest and deletion-vector reads take a context.** `Snapshot.Manifests`, `ManifestFile.Entries`, `iceberg.EntriesWithProjection`, `dv.ReadDV` and `dv.ReadDVs` now take a `context.Context` first argument and pass it to `IO.Open`. Custom `ManifestFile` implementations must add it to `Entries`.
 - **Path-based data-file addition renamed.** Replace `Transaction.AddFiles` with `AddDataFilesByPath`, `AddFilesOption` with `AddDataFilesByPathOption`, and `WithAddFilesConcurrency` with `WithAddDataFilesByPathConcurrency`. Behavior is unchanged.
 - **Manifest builder constructor renamed.** Replace `iceberg.NewManifestFile(...)` with `iceberg.NewManifestBuilder(...)`. It still returns a `ManifestBuilder`.
 - **Manifest sequence APIs use explicit names.** `ManifestBuilder.SequenceNum` and `ManifestFile.SequenceNum` become `SequenceNumber`, and `ManifestFile.MinSequenceNum` becomes `MinSequenceNumber`. `ManifestEntryBuilder.SequenceNum` and `ManifestEntry.SequenceNum` become `DataSequenceNumber`. `FileSequenceNum` becomes `FileSequenceNumber` for entries and their builder. Avro and JSON field names are unchanged.

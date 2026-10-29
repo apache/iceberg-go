@@ -1246,14 +1246,14 @@ func snapshotContainsDeleteFile(t *testing.T, tbl *table.Table, path string) boo
 	require.NotNil(t, snap)
 
 	fs := iceio.LocalFS{}
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	for _, m := range manifests {
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for e, err := range m.Entries(fs, false) {
+		for e, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if e.Status() == iceberg.EntryStatusDELETED {
 				continue
@@ -1334,12 +1334,12 @@ func readKeySeqNums(t *testing.T, tbl *table.Table) (eqDelete, smallMin, preserv
 	require.NotNil(t, snap)
 
 	fs := iceio.LocalFS{}
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	smallMin = int64(1<<62 - 1)
 	for _, m := range manifests {
-		for e, err := range m.Entries(fs, false) {
+		for e, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if e.Status() == iceberg.EntryStatusDELETED {
 				continue

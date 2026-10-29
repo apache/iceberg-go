@@ -191,13 +191,13 @@ func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.
 
 	var oldEquality iceberg.DataFile
 	var oldEqualitySequence int64
-	manifests, err := tbl.CurrentSnapshot().Manifests(iceio.LocalFS{})
+	manifests, err := tbl.CurrentSnapshot().Manifests(ctx, iceio.LocalFS{})
 	require.NoError(t, err)
 	for _, manifest := range manifests {
 		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for entry, err := range manifest.Entries(iceio.LocalFS{}, false) {
+		for entry, err := range manifest.Entries(ctx, iceio.LocalFS{}, false) {
 			require.NoError(t, err)
 			if entry.Status() == iceberg.EntryStatusDELETED || entry.DataFile().ContentType() != iceberg.EntryContentEqDeletes {
 				continue
@@ -486,7 +486,7 @@ func deleteEntriesReferencing(t *testing.T, tbl *table.Table, refs map[string]st
 	require.NotNil(t, snap)
 
 	fs := iceio.LocalFS{}
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	var found []string
@@ -494,7 +494,7 @@ func deleteEntriesReferencing(t *testing.T, tbl *table.Table, refs map[string]st
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for e, err := range m.Entries(fs, false) {
+		for e, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if e.Status() == iceberg.EntryStatusDELETED {
 				continue

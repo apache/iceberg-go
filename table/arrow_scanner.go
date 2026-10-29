@@ -511,7 +511,7 @@ func (l *lazyDeletionVectorLoader) load(ctx context.Context, dataFilePath string
 	}
 
 	group.once.Do(func() {
-		bitmaps, err := dv.ReadDVs(l.fs, group.files)
+		bitmaps, err := dv.ReadDVs(ctx, l.fs, group.files)
 		if err != nil {
 			group.err = fmt.Errorf("read deletion vectors from %s: %w", group.puffinPath, err)
 

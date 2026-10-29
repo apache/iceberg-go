@@ -134,7 +134,7 @@ func TestRewriteManifests(t *testing.T) {
 	const numCommits = 3
 	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", numCommits)
 
-	before, err := tbl.CurrentSnapshot().Manifests(fs)
+	before, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
 	require.NoError(t, err)
 	require.Len(t, before, numCommits, "each append should leave its own manifest")
 	wantFiles := activeFiles(t, before)
@@ -158,7 +158,7 @@ func TestRewriteManifests(t *testing.T) {
 	assert.Equal(t, "0", snap.Summary.Properties["manifests-kept"])
 	assert.Equal(t, strconv.Itoa(numCommits), snap.Summary.Properties["entries-processed"])
 
-	after, err := snap.Manifests(fs)
+	after, err := snap.Manifests(ctx, fs)
 	require.NoError(t, err)
 	assert.Len(t, after, 1, "manifests should be merged into one")
 	assert.Equal(t, wantFiles, activeFiles(t, after), "rewrite must preserve the data file count")
@@ -201,12 +201,12 @@ func TestRewriteManifestsClusterBy(t *testing.T) {
 	assert.Len(t, res.AddedManifests, 2)
 	assert.Len(t, res.RewrittenManifests, 6)
 
-	manifests, err := tbl.CurrentSnapshot().Manifests(fs)
+	manifests, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
 	require.NoError(t, err)
 	require.Len(t, manifests, 2)
 	for _, manifest := range manifests {
 		entries := make([]iceberg.ManifestEntry, 0)
-		for entry, entryErr := range manifest.Entries(fs, true) {
+		for entry, entryErr := range manifest.Entries(ctx, fs, true) {
 			require.NoError(t, entryErr)
 			entries = append(entries, entry)
 		}
@@ -304,12 +304,12 @@ func TestRewriteManifestsClusterByRollsAtTargetSize(t *testing.T) {
 	assert.Len(t, res.AddedManifests, 3)
 	assert.Len(t, res.RewrittenManifests, 3)
 
-	manifests, err := tbl.CurrentSnapshot().Manifests(fs)
+	manifests, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
 	require.NoError(t, err)
 	require.Len(t, manifests, 3)
 	for _, manifest := range manifests {
 		entryCount := 0
-		for _, entryErr := range manifest.Entries(fs, true) {
+		for _, entryErr := range manifest.Entries(ctx, fs, true) {
 			require.NoError(t, entryErr)
 			entryCount++
 		}
@@ -338,7 +338,7 @@ func TestRewriteManifestsMultipleBins(t *testing.T) {
 	const numData = 4
 	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", numData)
 
-	before, err := tbl.CurrentSnapshot().Manifests(fs)
+	before, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
 	require.NoError(t, err)
 	require.Len(t, before, numData)
 
@@ -364,7 +364,7 @@ func TestRewriteManifestsMultipleBins(t *testing.T) {
 	assert.Equal(t, "2", snap.Summary.Properties["manifests-created"])
 	assert.Equal(t, strconv.Itoa(numData), snap.Summary.Properties["manifests-replaced"])
 
-	after, err := snap.Manifests(fs)
+	after, err := snap.Manifests(ctx, fs)
 	require.NoError(t, err)
 	assert.Len(t, after, 2, "all data merges into two manifests")
 	assert.Equal(t, numData, activeFiles(t, after), "rewrite must preserve the data file count")
@@ -440,7 +440,7 @@ func TestRewriteManifestsOnBranchOnlyTable(t *testing.T) {
 	require.Nil(t, tbl.CurrentSnapshot(), "fixture must leave main without a head")
 	head := tbl.SnapshotByName("feature")
 	require.NotNil(t, head)
-	before, err := head.Manifests(fs)
+	before, err := head.Manifests(ctx, fs)
 	require.NoError(t, err)
 	require.Len(t, before, numData)
 
@@ -457,7 +457,7 @@ func TestRewriteManifestsOnBranchOnlyTable(t *testing.T) {
 
 	rewritten := tbl.SnapshotByName("feature")
 	require.NotNil(t, rewritten)
-	after, err := rewritten.Manifests(fs)
+	after, err := rewritten.Manifests(ctx, fs)
 	require.NoError(t, err)
 	assert.Len(t, after, 1, "the branch's manifests must merge into one")
 	assert.Equal(t, numData, activeFiles(t, after), "rewrite must preserve the data file count")
@@ -484,7 +484,7 @@ func TestRewriteManifestsAlreadyOptimal(t *testing.T) {
 
 	tbl = appendSeparateManifests(t, ctx, tbl, track, dir, "data", 1)
 
-	before, err := tbl.CurrentSnapshot().Manifests(track)
+	before, err := tbl.CurrentSnapshot().Manifests(ctx, track)
 	require.NoError(t, err)
 	require.Len(t, before, 1)
 	beforeSnapshotID := tbl.CurrentSnapshot().SnapshotID
@@ -574,7 +574,7 @@ func TestRewriteManifestsPredicate(t *testing.T) {
 			const numCommits = 3
 			tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", numCommits)
 
-			before, err := tbl.CurrentSnapshot().Manifests(fs)
+			before, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
 			require.NoError(t, err)
 			require.Len(t, before, numCommits)
 
@@ -611,7 +611,7 @@ func TestRewriteManifestsPredicate(t *testing.T) {
 			assert.Equal(t, "2", snap.Summary.Properties["manifests-replaced"])
 			assert.Equal(t, "1", snap.Summary.Properties["manifests-kept"])
 
-			after, err := snap.Manifests(fs)
+			after, err := snap.Manifests(ctx, fs)
 			require.NoError(t, err)
 			assert.Len(t, after, 2, "one merged manifest plus the untouched one")
 			assert.Equal(t, numCommits, activeFiles(t, after), "no data file may be dropped")
@@ -668,7 +668,7 @@ func TestRewriteManifestsSpecIDFilter(t *testing.T) {
 			tbl, err = txn.Commit(ctx)
 			require.NoError(t, err)
 
-			before, err := tbl.CurrentSnapshot().Manifests(fs)
+			before, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
 			require.NoError(t, err)
 			require.Len(t, before, 3, "two spec-0 manifests plus one spec-1 manifest")
 
@@ -709,7 +709,7 @@ func TestRewriteManifestsSpecIDFilter(t *testing.T) {
 			assert.Equal(t, "2", snap.Summary.Properties["manifests-replaced"])
 			assert.Equal(t, "1", snap.Summary.Properties["manifests-kept"], "the spec-1 manifest is kept")
 
-			after, err := snap.Manifests(fs)
+			after, err := snap.Manifests(ctx, fs)
 			require.NoError(t, err)
 			assert.Len(t, after, 2, "one merged spec-0 manifest plus the untouched spec-1 manifest")
 			assert.Equal(t, 3, activeFiles(t, after), "no data file may be dropped")
@@ -771,7 +771,7 @@ func TestRewriteManifestsLeavesDeleteManifests(t *testing.T) {
 	tbl, err = txn.Commit(ctx)
 	require.NoError(t, err)
 
-	before, err := tbl.CurrentSnapshot().Manifests(fs)
+	before, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
 	require.NoError(t, err)
 	dataN, delN, beforeDeletePath := classifyManifests(t, before)
 	require.Equal(t, numData, dataN)
@@ -792,7 +792,7 @@ func TestRewriteManifestsLeavesDeleteManifests(t *testing.T) {
 	assert.Equal(t, strconv.Itoa(numData), snap.Summary.Properties["manifests-replaced"])
 	assert.Equal(t, "1", snap.Summary.Properties["manifests-kept"], "the delete manifest is kept")
 
-	after, err := snap.Manifests(fs)
+	after, err := snap.Manifests(ctx, fs)
 	require.NoError(t, err)
 	afterData, afterDel, afterDeletePath := classifyManifests(t, after)
 	assert.Equal(t, 1, afterData, "data manifests merged into one")
@@ -974,7 +974,7 @@ func TestRewriteManifestsCleansEverySupersededGeneration(t *testing.T) {
 
 	snap := committed.CurrentSnapshot()
 	require.NotNil(t, snap)
-	after, err := snap.Manifests(track)
+	after, err := snap.Manifests(ctx, track)
 	require.NoError(t, err)
 	require.Len(t, after, 1, "all inherited manifests merge into one")
 	assert.Len(t, res.AddedManifests, 1)
@@ -1048,7 +1048,7 @@ func TestRewriteManifestsKeepsMergedManifestsUntilResumeLands(t *testing.T) {
 
 func committedManifestPaths(t *testing.T, committed *table.Table, fs iceio.IO) map[string]struct{} {
 	t.Helper()
-	manifests, err := committed.CurrentSnapshot().Manifests(fs)
+	manifests, err := committed.CurrentSnapshot().Manifests(t.Context(), fs)
 	require.NoError(t, err)
 	paths := make(map[string]struct{}, len(manifests))
 	for _, m := range manifests {
@@ -1227,14 +1227,14 @@ func TestRewriteManifestsClusterByReusesOutputOnOCCRetry(t *testing.T) {
 	require.NotNil(t, snap)
 	assert.Equal(t, "2", snap.Summary.Properties["manifests-kept"],
 		"concurrent manifests inherited by the reused output must be counted as kept")
-	after, err := snap.Manifests(track)
+	after, err := snap.Manifests(ctx, track)
 	require.NoError(t, err)
 	require.Len(t, after, 3,
 		"the reused clustered output plus two concurrent manifests must be retained")
 
 	var clusteredEntries int
 	for _, manifest := range after {
-		for entry, entryErr := range manifest.Entries(track, true) {
+		for entry, entryErr := range manifest.Entries(ctx, track, true) {
 			require.NoError(t, entryErr)
 			if strings.HasPrefix(filepath.Base(entry.DataFile().FilePath()), "stale-") {
 				clusteredEntries++
@@ -1287,7 +1287,7 @@ func TestRewriteManifestsClusterByDoesNotReuseDisplacedOutput(t *testing.T) {
 	peer, err = peerTxn.Commit(ctx)
 	require.NoError(t, err)
 	peerMeta := peer.Metadata()
-	peerManifests, err := peer.CurrentSnapshot().Manifests(track)
+	peerManifests, err := peer.CurrentSnapshot().Manifests(ctx, track)
 	require.NoError(t, err)
 	require.Len(t, peerManifests, 1, "the peer must replace all stale manifests")
 
@@ -1324,13 +1324,13 @@ func TestRewriteManifestsClusterByDoesNotReuseDisplacedOutput(t *testing.T) {
 
 	snap := committed.CurrentSnapshot()
 	require.NotNil(t, snap)
-	after, err := snap.Manifests(track)
+	after, err := snap.Manifests(ctx, track)
 	require.NoError(t, err)
 	require.Len(t, after, 1, "the retry should replace the peer manifest once")
 
 	counts := make(map[string]int)
 	for _, manifest := range after {
-		for entry, entryErr := range manifest.Entries(track, true) {
+		for entry, entryErr := range manifest.Entries(ctx, track, true) {
 			require.NoError(t, entryErr)
 			counts[filepath.Base(entry.DataFile().FilePath())]++
 		}
@@ -1379,7 +1379,7 @@ func TestRewriteManifestsStaleCountsAfterOCCRetry(t *testing.T) {
 	_ = appendSeparateManifests(t, ctx, tbl, track, dir, "fresh", 1)
 	freshSnap := cat.current.CurrentSnapshot()
 	require.NotNil(t, freshSnap)
-	freshManifests, err := freshSnap.Manifests(track)
+	freshManifests, err := freshSnap.Manifests(ctx, track)
 	require.NoError(t, err)
 	require.Len(t, freshManifests, freshCount, "catalog should now hold four manifests")
 
@@ -1411,7 +1411,7 @@ func TestRewriteManifestsStaleCountsAfterOCCRetry(t *testing.T) {
 		"summary must reflect the winning attempt's counts")
 	assert.Equal(t, strconv.Itoa(freshCount), snap.Summary.Properties["entries-processed"])
 
-	after, err := snap.Manifests(track)
+	after, err := snap.Manifests(ctx, track)
 	require.NoError(t, err)
 	assert.Len(t, after, 1, "all four manifests merge into one")
 	assert.Equal(t, freshCount, activeFiles(t, after))

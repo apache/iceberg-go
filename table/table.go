@@ -697,7 +697,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 		}
 		if committed && len(remove) > 0 {
-			referenced, err := committedFiles(wfs, updates)
+			referenced, err := committedFiles(ctx, wfs, updates)
 			if err != nil {
 				log.Printf("Warning: skipping cleanup of uncommitted files: %v", err)
 
@@ -858,7 +858,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// level case-sensitivity is not yet threaded through the
 			// Commit path, and true is the scan default throughout the
 			// codebase.
-			cc, ccErr := newConflictContext(t.metadata, current, co.branch, fs, true)
+			cc, ccErr := newConflictContext(ctx, t.metadata, current, co.branch, fs, true)
 			if ccErr != nil {
 				// ErrCommitDiverged — terminal, do not retry. The
 				// sentinel deliberately does not wrap ErrCommitFailed.
@@ -1055,7 +1055,7 @@ func stagedManifestLists(updates []Update) map[string]struct{} {
 
 // committedFiles returns the manifest lists and manifests of every snapshot
 // updates add.
-func committedFiles(fs icebergio.IO, updates []Update) (map[string]struct{}, error) {
+func committedFiles(ctx context.Context, fs icebergio.IO, updates []Update) (map[string]struct{}, error) {
 	files := make(map[string]struct{})
 	for _, u := range updates {
 		su, ok := u.(*addSnapshotUpdate)
@@ -1063,7 +1063,7 @@ func committedFiles(fs icebergio.IO, updates []Update) (map[string]struct{}, err
 			continue
 		}
 		files[su.Snapshot.ManifestList] = struct{}{}
-		manifests, err := su.Snapshot.Manifests(fs)
+		manifests, err := su.Snapshot.Manifests(ctx, fs)
 		if err != nil {
 			return nil, fmt.Errorf("read manifests of committed snapshot %d: %w", su.Snapshot.SnapshotID, err)
 		}

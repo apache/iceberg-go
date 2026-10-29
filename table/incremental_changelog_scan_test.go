@@ -101,7 +101,7 @@ func TestOpenManifestWithOptionsCanDiscardExistingEntries(t *testing.T) {
 
 	partitionCalls := 0
 	metricsCalls := 0
-	got, err := openManifestWithOptions(
+	got, err := openManifestWithOptions(t.Context(),
 		fs,
 		manifest,
 		func(iceberg.DataFile) (bool, error) {

@@ -113,3 +113,20 @@ func (m *MockFile) Seek(offset int64, whence int) (n int64, err error) {
 
 	return m.Contents.Seek(offset, whence)
 }
+
+// ErrContextProbe is the error ContextProbe returns from Open.
+var ErrContextProbe = errors.New("iomock: context probe refuses opens")
+
+// ContextProbe is an IO that records the context passed to Open and then
+// fails with ErrContextProbe, so tests can check which context reaches it.
+type ContextProbe struct {
+	Ctx context.Context
+}
+
+func (p *ContextProbe) Open(ctx context.Context, _ string) (io.File, error) {
+	p.Ctx = ctx
+
+	return nil, ErrContextProbe
+}
+
+func (p *ContextProbe) Remove(context.Context, string) error { return nil }

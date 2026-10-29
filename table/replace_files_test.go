@@ -760,10 +760,10 @@ func currentManifestEntry(t *testing.T, tbl *table.Table, path string) iceberg.M
 	t.Helper()
 	snap := tbl.CurrentSnapshot()
 	require.NotNil(t, snap)
-	manifests, err := snap.Manifests(iceio.LocalFS{})
+	manifests, err := snap.Manifests(t.Context(), iceio.LocalFS{})
 	require.NoError(t, err)
 	for _, manifest := range manifests {
-		for entry, err := range manifest.Entries(iceio.LocalFS{}, false) {
+		for entry, err := range manifest.Entries(t.Context(), iceio.LocalFS{}, false) {
 			require.NoError(t, err)
 			if entry.DataFile().FilePath() == path {
 				return entry

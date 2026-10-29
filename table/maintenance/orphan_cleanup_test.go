@@ -2442,12 +2442,12 @@ func dataFilePathsFromSnapshot(
 	wantStatus iceberg.ManifestEntryStatus,
 ) []string {
 	t.Helper()
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	var paths []string
 	for _, m := range manifests {
-		for e, err := range m.Entries(fs, false) {
+		for e, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if e.Status() == wantStatus {
 				paths = append(paths, e.DataFile().FilePath())

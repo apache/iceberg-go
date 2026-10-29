@@ -695,7 +695,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 	retainedManifests := make(map[string]struct{})
 	retainedSnapshotManifests := make([]iceberg.ManifestFile, 0, len(retainedSnapshots))
 	for _, snap := range retainedSnapshots {
-		mans, err := snap.Manifests(prefs)
+		mans, err := snap.Manifests(ctx, prefs)
 		if err != nil {
 			return err
 		}
@@ -719,7 +719,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 			return fmt.Errorf("missing snapshot %d", snapId)
 		}
 
-		mans, err := snap.Manifests(prefs)
+		mans, err := snap.Manifests(ctx, prefs)
 		if err != nil {
 			return err
 		}
@@ -737,7 +737,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 
 			filesToDelete[manPath] = struct{}{}
 
-			for entry, err := range man.Entries(prefs, false) {
+			for entry, err := range man.Entries(ctx, prefs, false) {
 				if err != nil {
 					return err
 				}
@@ -750,7 +750,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 	// including data files carried forward as EXISTING by manifest merges.
 	if len(filesToDelete) > 0 {
 		for _, man := range retainedSnapshotManifests {
-			for entry, err := range man.Entries(prefs, false) {
+			for entry, err := range man.Entries(ctx, prefs, false) {
 				if err != nil {
 					return err
 				}

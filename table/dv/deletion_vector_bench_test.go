@@ -82,7 +82,7 @@ func BenchmarkReadDVs(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				fs.reset()
-				bitmaps, err := ReadDVs(fs, files)
+				bitmaps, err := ReadDVs(b.Context(), fs, files)
 				if err != nil {
 					b.Fatal(err)
 				}
