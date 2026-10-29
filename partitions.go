@@ -599,6 +599,10 @@ func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
 // FieldsRef returns the partition fields owned by this spec for trusted
 // internal callers. The returned slice and everything reachable through the
 // fields must be treated as read-only.
+//
+// FieldsRef is for use by iceberg-go's own packages only: its sentinel argument
+// cannot be constructed outside this module. It is not covered by the module's
+// compatibility guarantees. Use [PartitionSpec.Fields] instead.
 func (ps *PartitionSpec) FieldsRef(_ internal.PartitionSpecRef) []PartitionField {
 	return ps.fields
 }

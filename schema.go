@@ -282,6 +282,10 @@ func (s *Schema) Fields() []NestedField   { return cloneFields(s.fields) }
 // FieldsRef returns the schema-owned fields for trusted internal callers.
 // The returned slice and everything reachable through the fields must be
 // treated as read-only.
+//
+// FieldsRef is for use by iceberg-go's own packages only: its sentinel argument
+// cannot be constructed outside this module. It is not covered by the module's
+// compatibility guarantees. Use [Schema.Fields] instead.
 func (s *Schema) FieldsRef(_ internal.SchemaRef) []NestedField { return s.fields }
 
 func (s *Schema) FieldIDs() []int {
@@ -475,6 +479,10 @@ func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
 // field is a value copy, but its Type and everything reachable from that Type
 // are shared with the schema and must be treated as read-only. This method is
 // limited to internal callers that need to avoid clone-on-read overhead.
+//
+// FindFieldByIDRef is for use by iceberg-go's own packages only: its sentinel
+// argument cannot be constructed outside this module. It is not covered by the
+// module's compatibility guarantees. Use [Schema.FindFieldByID] instead.
 func (s *Schema) FindFieldByIDRef(id int, _ internal.SchemaRef) (NestedField, bool) {
 	idx, _ := s.lazyIDToField()
 	f, ok := idx[id]
