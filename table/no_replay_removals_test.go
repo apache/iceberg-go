@@ -241,8 +241,7 @@ func TestReplaceFilesWithRemovalsFailsInsteadOfReplaying(t *testing.T) {
 // unchanged but takes the staged snapshot's sequence number. The resume of a
 // non-replayable compaction rebuilds onto the same pinned parent and lands.
 func TestReplaceFilesWithRemovalsResumesAfterPeerOnAnotherBranch(t *testing.T) {
-	tbl, cat := newConcurrentRewriteTestTable(t)
-	cat.restConflicts = true
+	tbl, _ := newConcurrentRewriteTestTable(t)
 
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
 	require.NoError(t, err)
