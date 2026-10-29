@@ -198,6 +198,7 @@ func As[T any](cat Catalog) (T, bool) {
 	}
 
 	var zero T
+
 	return zero, false
 }
 
