@@ -64,6 +64,9 @@ const (
 
 // Sketch accumulates values into a Theta sketch to estimate the number of
 // distinct values (NDV) of a column. It is not safe for concurrent use.
+//
+// Estimate, NDV and Serialize each build a new union over the retained
+// entries, so call them once after all values are added rather than per value.
 type Sketch struct {
 	us *theta.QuickSelectUpdateSketch
 }
