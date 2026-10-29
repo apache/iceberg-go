@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong><code>ReplaceFilesWithDeleteFiles</code> removed.</strong> For delete-file replacements, use <code>tx.NewRewrite(snapshotProps)</code>, call <code>DeleteFile</code> for each source file and <code>AddDeleteFileWithDataSequenceNumber</code> for each replacement, then commit the builder. Rewrites record a <code>replace</code> snapshot instead of <code>overwrite</code>. The five-argument <code>ReplaceFiles</code> API is unchanged and remains available for compaction and delete-file removals.</p>
+</li>
+<li>
 <p><strong>Path-based data-file addition renamed.</strong> Replace <code>Transaction.AddFiles</code> with <code>AddDataFilesByPath</code>, <code>AddFilesOption</code> with <code>AddDataFilesByPathOption</code>, and <code>WithAddFilesConcurrency</code> with <code>WithAddDataFilesByPathConcurrency</code>. Behavior is unchanged.</p>
 </li>
 <li>
