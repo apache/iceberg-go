@@ -180,22 +180,55 @@ type Catalog interface {
 	NamespaceCatalog
 }
 
+// As finds the first catalog in the wrapping chain that implements T.
+// Catalog decorators can expose a wrapped catalog with Unwrap() Catalog.
+// The outermost catalog is checked first, allowing decorators to intercept
+// optional operations. The Unwrap chain must terminate without cycles.
+func As[T any](cat Catalog) (T, bool) {
+	for cat != nil {
+		if capability, ok := any(cat).(T); ok {
+			return capability, true
+		}
+
+		wrapper, ok := cat.(interface{ Unwrap() Catalog })
+		if !ok {
+			break
+		}
+		cat = wrapper.Unwrap()
+	}
+
+	var zero T
+	return zero, false
+}
+
 // ViewCatalog is an optional capability for standard view operations.
-// Use a type assertion to discover support on a Catalog. RenameView and
-// RegisterView are backend-specific and are not part of this interface.
+// Use As to discover support on a Catalog, including through decorators.
+// RenameView, RegisterView, and UpdateView are not part of this interface.
 type ViewCatalog interface {
+	// ListViews lists view identifiers in a namespace.
 	ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error]
+	// LoadView loads a view by its identifier.
 	LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error)
+	// CreateView creates a view using the given version and schema.
 	CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...CreateViewOpt) (*view.View, error)
+	// DropView removes an existing view.
 	DropView(ctx context.Context, identifier table.Identifier) error
+	// CheckViewExists reports whether the view exists.
 	CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error)
+}
+
+// UpdatableViewCatalog is an optional capability for updating existing views.
+// The REST catalog implements it; discover support with As.
+type UpdatableViewCatalog interface {
+	// UpdateView applies requirements and updates and returns the updated view.
+	UpdateView(ctx context.Context, ident table.Identifier, requirements []view.Requirement, updates []view.Update) (*view.View, error)
 }
 
 // TransactionalCatalog is an optional interface implemented by catalogs
 // that support atomic multi-table commits. Callers should check for this
-// capability via a type assertion:
+// capability via [As]:
 //
-//	if tc, ok := cat.(catalog.TransactionalCatalog); ok {
+//	if tc, ok := catalog.As[catalog.TransactionalCatalog](cat); ok {
 //	    err := tc.CommitTransaction(ctx, commits)
 //	}
 //
@@ -212,9 +245,9 @@ type TransactionalCatalog interface {
 // without creating a new table or rewriting its data.
 //
 // REST, Hive, and Glue catalogs implement this interface. Callers should
-// check for registration support with a type assertion:
+// check for registration support with [As]:
 //
-//	if registerable, ok := cat.(catalog.RegisterableCatalog); ok {
+//	if registerable, ok := catalog.As[catalog.RegisterableCatalog](cat); ok {
 //		tbl, err := registerable.RegisterTable(ctx, ident, metadataLocation)
 //	}
 //
@@ -246,9 +279,9 @@ type PurgeableCatalog interface {
 // RefreshableCredentialCatalog is an optional interface implemented by catalogs that
 // support temporarily-vended credentials. Temporarily-vended credentials scope object
 // storage access to just files allowed by the user making a related request to the
-// catalog. Callers should check for this capability via a type assertion:
+// catalog. Callers should check for this capability via [As]:
 //
-//	if rc, ok := cat.(catalog.RefreshableCredentialCatalog); ok {
+//	if rc, ok := catalog.As[catalog.RefreshableCredentialCatalog](cat); ok {
 //	    refreshed, err := rc.RefreshTableCredentials(ctx, tbl)
 //	    if err == nil {
 //	        tbl = refreshed

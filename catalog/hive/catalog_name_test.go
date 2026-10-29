@@ -25,8 +25,8 @@ func TestHiveCatalogName(t *testing.T) {
 		t.Fatalf("default catalog name = %q, want %q", got, "hive")
 	}
 
-	WithName("analytics")(cat.opts)
-	if got := cat.Name(); got != "analytics" {
+	named := NewCatalogWithClient(nil, nil, WithName("analytics"))
+	if got := named.Name(); got != "analytics" {
 		t.Fatalf("configured catalog name = %q, want %q", got, "analytics")
 	}
 }

@@ -58,9 +58,9 @@ type MultiTableTransaction struct {
 
 // NewMultiTableTransaction creates a new multi-table transaction backed
 // by the given catalog. Returns an error if the catalog does not
-// implement [TransactionalCatalog].
+// expose [TransactionalCatalog], including through an Unwrap chain.
 func NewMultiTableTransaction(cat Catalog) (*MultiTableTransaction, error) {
-	tc, ok := cat.(TransactionalCatalog)
+	tc, ok := As[TransactionalCatalog](cat)
 	if !ok {
 		return nil, errors.New("catalog does not support multi-table transactions")
 	}

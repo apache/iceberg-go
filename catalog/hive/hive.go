@@ -55,8 +55,6 @@ func init() {
 	}))
 }
 
-var _ catalog.Catalog = (*Catalog)(nil)
-
 type Catalog struct {
 	client HiveClient
 	opts   *HiveOptions
@@ -88,9 +86,13 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	}, nil
 }
 
-func NewCatalogWithClient(client HiveClient, props iceberg.Properties) *Catalog {
+func NewCatalogWithClient(client HiveClient, props iceberg.Properties, opts ...Option) *Catalog {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
+
+	for _, opt := range opts {
+		opt(o)
+	}
 
 	return &Catalog{
 		client: client,
