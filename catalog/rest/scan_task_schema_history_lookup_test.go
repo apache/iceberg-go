@@ -196,7 +196,7 @@ func historicalSchemaBenchmarkFixture(schemaCount, fieldCount, sourceCount int) 
 				ID: 900000, Name: "current", Type: iceberg.PrimitiveTypes.String,
 			}),
 		},
-		history:                 history,
+		history: history,
 	}
 
 	return metadata, sources
