@@ -410,7 +410,12 @@ func (t *toSubstraitExpr) VisitIn(term iceberg.BoundTerm, lits iceberg.Set[icebe
 }
 
 func (t *toSubstraitExpr) VisitNotIn(term iceberg.BoundTerm, lits iceberg.Set[iceberg.Literal]) expr.Builder {
-	return t.bldr.ScalarFunc(notID).Args(t.makeSetFunc(isInID, term, lits).(expr.FuncArgBuilder))
+	notIn := t.bldr.ScalarFunc(notID).Args(t.makeSetFunc(isInID, term, lits).(expr.FuncArgBuilder))
+
+	return t.bldr.ScalarFunc(andID).Args(
+		t.makeRefFunc(isNotNullID, term).(expr.FuncArgBuilder),
+		notIn,
+	)
 }
 
 func (t *toSubstraitExpr) makeRefFunc(id extensions.ID, term iceberg.BoundTerm) expr.Builder {
