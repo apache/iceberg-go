@@ -304,6 +304,107 @@ func TestMapTypeUnmarshalRequiresValue(t *testing.T) {
 	assert.ErrorContains(t, err, "missing required 'value' key")
 }
 
+// nestedTypeWireFixture nests every composite type inside the others, with
+// required and optional children, docs and defaults on nested fields.
+func nestedTypeWireFixture() *iceberg.StructType {
+	return &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		{ID: 2, Name: "tags", Doc: "labels", Type: &iceberg.ListType{
+			ElementID: 3, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
+		}},
+		{ID: 4, Name: "attrs", Required: true, Type: &iceberg.MapType{
+			KeyID: 5, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 6, ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 7, Name: "score", Type: iceberg.PrimitiveTypes.Float64, Required: true},
+				{ID: 8, Name: "note", Type: iceberg.PrimitiveTypes.String, InitialDefault: "n/a", WriteDefault: "none"},
+			}},
+			ValueRequired: true,
+		}},
+		{ID: 9, Name: "points", Type: &iceberg.ListType{
+			ElementID: 10, ElementRequired: true, Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 11, Name: "x", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+				{ID: 12, Name: "y", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+			}},
+		}},
+		{ID: 13, Name: "flags", Type: &iceberg.MapType{
+			KeyID: 14, KeyType: iceberg.PrimitiveTypes.Int32,
+			ValueID: 15, ValueType: &iceberg.ListType{
+				ElementID: 16, Element: iceberg.PrimitiveTypes.Bool, ElementRequired: false,
+			},
+			ValueRequired: false,
+		}},
+		{ID: 17, Name: "active", Type: iceberg.PrimitiveTypes.Bool, InitialDefault: true},
+	}}
+}
+
+const nestedTypeWireJSON = `{"type":"struct","fields":[` +
+	`{"type":"long","id":1,"name":"id","required":true},` +
+	`{"type":{"type":"list","element-id":3,"element-required":false,"element":"string"},` +
+	`"id":2,"name":"tags","required":false,"doc":"labels"},` +
+	`{"type":{"type":"map","key-id":5,"value-id":6,"value-required":true,"key":"string",` +
+	`"value":{"type":"struct","fields":[` +
+	`{"type":"double","id":7,"name":"score","required":true},` +
+	`{"type":"string","id":8,"name":"note","required":false,"initial-default":"n/a","write-default":"none"}]}},` +
+	`"id":4,"name":"attrs","required":true},` +
+	`{"type":{"type":"list","element-id":10,"element-required":true,` +
+	`"element":{"type":"struct","fields":[` +
+	`{"type":"float","id":11,"name":"x","required":true},` +
+	`{"type":"float","id":12,"name":"y","required":true}]}},` +
+	`"id":9,"name":"points","required":false},` +
+	`{"type":{"type":"map","key-id":14,"value-id":15,"value-required":false,"key":"int",` +
+	`"value":{"type":"list","element-id":16,"element-required":false,"element":"boolean"}},` +
+	`"id":13,"name":"flags","required":false},` +
+	`{"type":"boolean","id":17,"name":"active","required":false,"initial-default":true}]}`
+
+// TestNestedTypeJSONWireFormat pins the exact bytes, key order included, that
+// nested types encode to, and that decoding them rebuilds an equal type.
+func TestNestedTypeJSONWireFormat(t *testing.T) {
+	typ := nestedTypeWireFixture()
+
+	out, err := json.Marshal(typ)
+	require.NoError(t, err)
+	assert.Equal(t, nestedTypeWireJSON, string(out))
+
+	var decoded iceberg.StructType
+	require.NoError(t, json.Unmarshal([]byte(nestedTypeWireJSON), &decoded))
+	assert.True(t, typ.Equals(&decoded), "decoded: %s", &decoded)
+
+	again, err := json.Marshal(&decoded)
+	require.NoError(t, err)
+	assert.Equal(t, nestedTypeWireJSON, string(again))
+
+	t.Run("in schema", func(t *testing.T) {
+		sc := iceberg.NewSchema(0, typ.FieldList...)
+		out, err := json.Marshal(sc)
+		require.NoError(t, err)
+
+		var decoded iceberg.Schema
+		require.NoError(t, json.Unmarshal(out, &decoded))
+		assert.True(t, sc.Equals(&decoded))
+	})
+}
+
+func TestStructTypeUnmarshalMissingFieldsIsEmpty(t *testing.T) {
+	var typ iceberg.StructType
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"struct"}`), &typ))
+	assert.Empty(t, typ.FieldList)
+}
+
+func TestStructTypeUnmarshalErrorLeavesTypeUnchanged(t *testing.T) {
+	kept := func() iceberg.StructType {
+		return iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 1, Name: "kept", Type: iceberg.PrimitiveTypes.String},
+		}}
+	}
+	typ := kept()
+
+	err := json.Unmarshal([]byte(`{"type":"struct","fields":[`+
+		`{"id":2,"name":"replaced","type":"int","required":true},`+
+		`{"id":3,"name":"bad","required":false}]}`), &typ)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Equal(t, kept(), typ)
+}
+
 var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.Bool,
 	iceberg.PrimitiveTypes.Int32,
