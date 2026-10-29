@@ -645,7 +645,8 @@ func (expressionFieldIDs) VisitBound(pred BoundPredicate) map[int]struct{} {
 
 // TranslateColumnNames converts the names of columns in an expression by looking up
 // the field IDs in the file schema. If columns don't exist they are replaced with
-// AlwaysFalse or AlwaysTrue depending on the operator.
+// AlwaysFalse or AlwaysTrue depending on the operator and, for a predicate that
+// is NULL for a null value, on whether it is under NOT.
 func TranslateColumnNames(expr BooleanExpression, fileSchema *Schema) (BooleanExpression, error) {
 	res, extracts, err := TranslateColumnNamesForScan(expr, fileSchema)
 	if err != nil {
@@ -679,7 +680,45 @@ func TranslateColumnNamesForScan(expr BooleanExpression, fileSchema *Schema) (Bo
 		return nil, nil, err
 	}
 
-	return res, tr.columns, nil
+	return resolveNullColumns(res, false), tr.columns, nil
+}
+
+// nullColumn stands for a predicate over a column that is null for every row
+// of a file, which is NULL rather than false. resolveNullColumns replaces it
+// before translation returns.
+type nullColumn struct{}
+
+func (nullColumn) String() string            { return "NullColumn()" }
+func (nullColumn) Op() Operation             { return OpFalse }
+func (nullColumn) Negate() BooleanExpression { return nullColumn{} }
+func (nullColumn) Equals(other BooleanExpression) bool {
+	_, ok := other.(nullColumn)
+
+	return ok
+}
+
+// resolveNullColumns replaces each nullColumn so that the expression is true
+// for exactly the rows it is true for under three-valued logic, as the row
+// filter evaluates a stored null. AND and OR are monotone, so a NULL can be
+// read as false under an even number of NOTs and as true under an odd number:
+// NOT(x = 5) must stay NULL, not become true.
+func resolveNullColumns(expr BooleanExpression, negated bool) BooleanExpression {
+	switch e := expr.(type) {
+	case nullColumn:
+		if negated {
+			return AlwaysTrue{}
+		}
+
+		return AlwaysFalse{}
+	case NotExpr:
+		return NewNot(resolveNullColumns(e.child, !negated))
+	case AndExpr:
+		return NewAnd(resolveNullColumns(e.left, negated), resolveNullColumns(e.right, negated))
+	case OrExpr:
+		return NewOr(resolveNullColumns(e.left, negated), resolveNullColumns(e.right, negated))
+	}
+
+	return expr
 }
 
 type scanTranslator struct {
@@ -716,13 +755,15 @@ func (*scanTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpression {
 
 // nullColumnResult folds a predicate over a column that is null for every row
 // of a file. IsNull and NotNaN match a null, as they do for a stored null in
-// the row filter; every other predicate does not.
+// the row filter, and NotNull and IsNaN don't. Every other predicate is NULL.
 func nullColumnResult(op Operation) BooleanExpression {
 	switch op {
 	case OpIsNull, OpNotNan:
 		return AlwaysTrue{}
-	default:
+	case OpNotNull, OpIsNan:
 		return AlwaysFalse{}
+	default:
+		return nullColumn{}
 	}
 }
 

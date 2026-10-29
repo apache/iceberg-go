@@ -235,13 +235,13 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 			name:      "timestamp in",
 			fieldType: iceberg.PrimitiveTypes.TimestampNs,
 			predicate: iceberg.IsIn(iceberg.Reference("ts"), iceberg.TimestampNano(1), iceberg.TimestampNano(1001)),
-			wantExpr:  "is_in(.field(0) => precision_timestamp?<9>, list<precision_timestamp<9>>([precision_timestamp<9>(1970-01-01 00:00:00.000000001) precision_timestamp<9>(1970-01-01 00:00:00.000001001)])) => boolean?",
+			wantExpr:  "or(is_in(.field(0) => precision_timestamp?<9>, list<precision_timestamp<9>>([precision_timestamp<9>(1970-01-01 00:00:00.000000001) precision_timestamp<9>(1970-01-01 00:00:00.000001001)])) => boolean?, and(is_null(.field(0) => precision_timestamp?<9>) => boolean, null(boolean?)) => boolean?) => boolean?",
 		},
 		{
 			name:      "timestamp with timezone not in",
 			fieldType: iceberg.PrimitiveTypes.TimestampTzNs,
 			predicate: iceberg.NotIn(iceberg.Reference("ts"), iceberg.TimestampNano(-1), iceberg.TimestampNano(1001)),
-			wantExpr:  "not(is_in(.field(0) => precision_timestamp_tz?<9>, list<precision_timestamp_tz<9>>([precision_timestamp_tz<9>(1969-12-31T23:59:59.999999999Z) precision_timestamp_tz<9>(1970-01-01T00:00:00.000001001Z)])) => boolean?) => boolean?",
+			wantExpr:  "not(or(is_in(.field(0) => precision_timestamp_tz?<9>, list<precision_timestamp_tz<9>>([precision_timestamp_tz<9>(1969-12-31T23:59:59.999999999Z) precision_timestamp_tz<9>(1970-01-01T00:00:00.000001001Z)])) => boolean?, and(is_null(.field(0) => precision_timestamp_tz?<9>) => boolean, null(boolean?)) => boolean?) => boolean?) => boolean?",
 		},
 		{
 			name:      "timestamp greater than",
