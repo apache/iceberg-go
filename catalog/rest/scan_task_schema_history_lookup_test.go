@@ -79,7 +79,7 @@ func TestPartitionDecodePlanReusesHistoricalSchemaCopies(t *testing.T) {
 	)
 	metadata := &cloningSchemaHistoryMetadata{
 		scanTaskDecoderMetadata: &scanTaskDecoderMetadata{schema: current},
-		history: []*iceberg.Schema{nil, firstHistory, secondHistory},
+		history:                 []*iceberg.Schema{nil, firstHistory, secondHistory},
 	}
 	spec := iceberg.NewPartitionSpecID(7,
 		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "active", Transform: iceberg.IdentityTransform{}},
