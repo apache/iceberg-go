@@ -2074,6 +2074,58 @@ func TestCreateViewDoesNotPersistCatalogProperties(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestCreateViewKeepsCallerVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		defaultCatalog string
+	}{
+		{name: "default catalog set", defaultCatalog: "prod"},
+		{name: "default catalog unset"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := require.New(t)
+
+			loc := "file://" + filepath.ToSlash(filepath.Join(t.TempDir(), "view_loc"))
+			mockClient := &mockHiveClient{}
+			mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+			mockClient.On("GetTable", mock.Anything, "test_database", "multi_view").Return(nil, errNoSuchObject).Twice()
+			mockClient.On("CreateTable", mock.Anything, mock.MatchedBy(func(tbl *hive_metastore.Table) bool {
+				return tbl.ViewOriginalText == "SELECT hive_sql" && tbl.ViewExpandedText == "SELECT hive_sql"
+			})).Return(nil).Once()
+
+			opts := []view.VersionOpt{view.WithVersionSummary(view.VersionSummary{"engine-version": "1.0"})}
+			if tt.defaultCatalog != "" {
+				opts = append(opts, view.WithDefaultViewCatalog(tt.defaultCatalog))
+			}
+			ver, err := view.NewVersion(1, 0, []view.Representation{
+				view.NewRepresentation(view.Representation{SQL: "SELECT trino_sql", Dialect: "trino"}),
+				view.NewRepresentation(view.Representation{SQL: "SELECT hive_sql", Dialect: "hive"}),
+			}, table.Identifier{"other_db"}, opts...)
+			assert.NoError(err)
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+			cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+			created, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "multi_view"), ver, schema,
+				catalog.WithViewLocation(loc))
+			assert.NoError(err)
+
+			f, err := os.Open(strings.TrimPrefix(created.MetadataLocation(), "file://"))
+			assert.NoError(err)
+			defer f.Close()
+			md, err := view.ParseMetadata(f)
+			assert.NoError(err)
+
+			got := md.CurrentVersion()
+			assert.Equal(ver.Representations, got.Representations)
+			assert.Equal(table.Identifier{"other_db"}, got.DefaultNamespace)
+			assert.Equal(tt.defaultCatalog, got.DefaultCatalog)
+			assert.Equal("1.0", got.Summary["engine-version"])
+
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
 func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {
 	assert := require.New(t)
 
