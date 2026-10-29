@@ -139,8 +139,8 @@ func TestPartitionDecodePlanSkipsUnneededSchemaCopies(t *testing.T) {
 			for index, id := range tc.sourceIDs {
 				fields[index] = iceberg.PartitionField{
 					SourceIDs: []int{id},
-					FieldID: 1000 + index,
-					Name: fmt.Sprintf("part_%d", index),
+					FieldID:   1000 + index,
+					Name:      fmt.Sprintf("part_%d", index),
 					Transform: iceberg.IdentityTransform{},
 				}
 			}
@@ -178,7 +178,7 @@ func historicalSchemaBenchmarkFixture(schemaCount, fieldCount, sourceCount int) 
 		fields := make([]iceberg.NestedField, fieldCount)
 		for index := range fields {
 			fields[index] = iceberg.NestedField{
-				ID: 1 + version*fieldCount + index,
+				ID:   1 + version*fieldCount + index,
 				Name: fmt.Sprintf("field_%d", index),
 				Type: iceberg.PrimitiveTypes.Int64,
 			}
@@ -196,7 +196,7 @@ func historicalSchemaBenchmarkFixture(schemaCount, fieldCount, sourceCount int) 
 				ID: 900000, Name: "current", Type: iceberg.PrimitiveTypes.String,
 			}),
 		},
-		history: history,
+		history:                 history,
 	}
 
 	return metadata, sources
