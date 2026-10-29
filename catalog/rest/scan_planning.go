@@ -266,7 +266,7 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 
 	result := table.ScanPlanningResult{
 		Tasks: tasks,
-		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req)),
+		IO:    planIOFromCredentialsWithRegistry(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req), r.ioRegistry),
 	}
 	if result.IO == nil {
 		// Without plan-scoped credentials, all task materialization is complete
@@ -472,11 +472,16 @@ func remoteScanTasks(envelopes []ScanTasks, req table.ScanPlanningRequest) ([]ta
 // so vended keys win on collision. With none vended it returns a nil PlanIO,
 // and the scan falls back to the table's own FileIO.
 func planIOFromCredentials(creds []StorageCredential, location string, baseProps iceberg.Properties) table.PlanIO {
+	return planIOFromCredentialsWithRegistry(creds, location, baseProps, nil)
+}
+
+func planIOFromCredentialsWithRegistry(creds []StorageCredential, location string, baseProps iceberg.Properties, registry *iceio.Registry) table.PlanIO {
 	if len(creds) == 0 {
 		return nil
 	}
 
 	return &planScopedIO{refresher: &vendedCredentialRefresher{
+		ioRegistry:  registry,
 		mu:          semaphore.NewWeighted(1),
 		location:    location,
 		props:       maps.Clone(baseProps),
