@@ -151,17 +151,17 @@ func computeHash(dataFileName string) string {
 	return string(hashPath[:])
 }
 
+// NewDataLocation places the entropy hash right under the data path, like the
+// Java implementation. A partitioned dataFileName ("<partition path>/<file>")
+// keeps its partition directories only when partitioned paths are enabled.
 func (p *objectStoreLocationProvider) NewDataLocation(dataFileName string) string {
-	if path.Dir(dataFileName) != "." {
-		return p.simpleLocationProvider.NewDataLocation(dataFileName)
+	if p.includePartitionPaths {
+		return joinLocationPath(p.dataPath, computeHash(dataFileName), dataFileName)
 	}
 
-	hashedPath := computeHash(dataFileName)
-	if p.includePartitionPaths {
-		return joinLocationPath(p.dataPath, hashedPath, dataFileName)
-	} else {
-		return joinLocationPath(p.dataPath, hashedPath+"-"+dataFileName)
-	}
+	dataFileName = path.Base(dataFileName)
+
+	return joinLocationPath(p.dataPath, computeHash(dataFileName)+"-"+dataFileName)
 }
 
 func newObjectStoreLocationProvider(tableLoc string, tableProps iceberg.Properties) *objectStoreLocationProvider {

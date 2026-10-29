@@ -20,8 +20,10 @@ package table
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"sync"
@@ -655,12 +657,11 @@ func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
 	s.Equal(int64(100), df.Count())
 }
 
-// TestPartitionLocProviderPreservesObjectStorageProps reproduces #1155: when
-// write.object-storage.enabled is true on a partitioned table, partition data
-// file paths must include entropy hash dirs from objectStoreLocationProvider.
-// Previously partitionLocProvider rebuilt props with only WriteDataPathKey, so
-// LoadLocationProvider fell back to simpleLocationProvider for partitions.
-func (s *RollingDataWriterTestSuite) TestPartitionLocProviderPreservesObjectStorageProps() {
+// TestPartitionedDataLocations checks partitioned data file paths against the
+// Java layout: with object storage the entropy hash comes right after the
+// data path, and write.object-storage.partitioned-paths=false drops the
+// partition directories (#2367). write.data.path is honored as well.
+func (s *RollingDataWriterTestSuite) TestPartitionedDataLocations() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
@@ -669,42 +670,74 @@ func (s *RollingDataWriterTestSuite) TestPartitionLocProviderPreservesObjectStor
 	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 	s.Require().NoError(err)
 
-	spec := iceberg.NewPartitionSpec()
-	loc := "table_location"
-	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{
-		ObjectStoreEnabledKey: "true",
-	})
-	s.Require().NoError(err)
-	metaBuilder, err := MetadataBuilderFromBase(meta, "")
-	s.Require().NoError(err)
+	const (
+		partition = "dt=2026-06-04"
+		hash      = `[01]{4}/[01]{4}/[01]{4}/[01]{8}`
+		file      = `[^/]+\.parquet`
+	)
 
-	writeUUID := uuid.New()
-	args := recordWritingArgs{
-		sc:        arrSchema,
-		fs:        iceio.LocalFS{},
-		writeUUID: &writeUUID,
-		counter: func(yield func(int) bool) {
-			for i := 0; ; i++ {
-				if !yield(i) {
-					break
-				}
+	for _, tt := range []struct {
+		name  string
+		props iceberg.Properties
+		want  string
+	}{
+		{"simple", iceberg.Properties{}, "data/" + partition + "/" + file},
+		{"simple custom path", iceberg.Properties{WriteDataPathKey: "custom"}, "custom/" + partition + "/" + file},
+		{"object storage", iceberg.Properties{ObjectStoreEnabledKey: "true"}, "data/" + hash + "/" + partition + "/" + file},
+		{"object storage without partition paths", iceberg.Properties{
+			ObjectStoreEnabledKey:               "true",
+			WriteObjectStorePartitionedPathsKey: "false",
+		}, "data/" + hash + "-" + file},
+		{"object storage custom path", iceberg.Properties{
+			ObjectStoreEnabledKey: "true",
+			WriteDataPathKey:      "custom",
+		}, "custom/" + hash + "/" + partition + "/" + file},
+	} {
+		s.Run(tt.name, func() {
+			loc := filepath.ToSlash(s.T().TempDir())
+			props := maps.Clone(tt.props)
+			if dataPath, ok := props[WriteDataPathKey]; ok {
+				props[WriteDataPathKey] = loc + "/" + dataPath
 			}
-		},
+
+			spec := iceberg.NewPartitionSpec()
+			meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, props)
+			s.Require().NoError(err)
+			metaBuilder, err := MetadataBuilderFromBase(meta, "")
+			s.Require().NoError(err)
+
+			writeUUID := uuid.New()
+			args := recordWritingArgs{
+				sc:        arrSchema,
+				fs:        iceio.LocalFS{},
+				writeUUID: &writeUUID,
+				counter: func(yield func(int) bool) {
+					for i := 0; ; i++ {
+						if !yield(i) {
+							break
+						}
+					}
+				},
+			}
+			factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
+			s.Require().NoError(err)
+			defer factory.closeAll()
+
+			outputCh := make(chan iceberg.DataFile, 1)
+			writer := factory.newRollingDataWriter(s.ctx, partition, nil, outputCh)
+
+			record := s.buildRecord(arrSchema, 5)
+			defer record.Release()
+
+			s.Require().NoError(writer.Add(record))
+			s.Require().NoError(writer.closeAndWait())
+			close(outputCh)
+
+			df := <-outputCh
+			s.Require().NotNil(df)
+			s.Regexp("^"+regexp.QuoteMeta(loc)+"/"+tt.want+"$", df.FilePath())
+		})
 	}
-	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
-	s.Require().NoError(err)
-	defer factory.closeAll()
-
-	provider, err := factory.partitionLocProvider("dt=2026-06-04")
-	s.Require().NoError(err)
-	_, ok := provider.(*objectStoreLocationProvider)
-	s.True(ok, "expected objectStoreLocationProvider for partitioned writes when write.object-storage.enabled=true")
-
-	// Hashed prefix should appear before the file name for object storage layout.
-	dataLoc := provider.NewDataLocation("a")
-	s.Contains(dataLoc, "table_location/data/dt=2026-06-04/")
-	s.NotEqual("table_location/data/dt=2026-06-04/a", dataLoc,
-		"object storage layout should inject an entropy hash prefix between partition dir and file")
 }
 
 // TestSortsRowsBeforeWriting exercises the sort-on-write path: the rolling

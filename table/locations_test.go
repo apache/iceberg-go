@@ -110,11 +110,11 @@ func TestLocationProviderLiteralPaths(t *testing.T) {
 }
 
 func TestLocationProviderLiteralCustomPaths(t *testing.T) {
-	for _, tt := range []struct{ objectStore, partitionPaths, data string }{
-		{"false", "false", "s3://bucket/my data%20#?/a"},
-		{"false", "true", "s3://bucket/my data%20#?/a"},
-		{"true", "false", "s3://bucket/my data%20#?/0101/0110/1001/10110010-a"},
-		{"true", "true", "s3://bucket/my data%20#?/0101/0110/1001/10110010/a"},
+	for _, tt := range []struct{ objectStore, partitionPaths, data, partitioned string }{
+		{"false", "false", "s3://bucket/my data%20#?/a", "s3://bucket/my data%20#?/partition=a b%20#?/file.parquet"},
+		{"false", "true", "s3://bucket/my data%20#?/a", "s3://bucket/my data%20#?/partition=a b%20#?/file.parquet"},
+		{"true", "false", "s3://bucket/my data%20#?/0101/0110/1001/10110010-a", "s3://bucket/my data%20#?/0010/1111/0101/11011101-file.parquet"},
+		{"true", "true", "s3://bucket/my data%20#?/0101/0110/1001/10110010/a", "s3://bucket/my data%20#?/1011/0010/0000/11011010/partition=a b%20#?/file.parquet"},
 	} {
 		t.Run(tt.objectStore+"/"+tt.partitionPaths, func(t *testing.T) {
 			provider, err := table.LoadLocationProvider("s3://bucket/my table", iceberg.Properties{
@@ -125,7 +125,7 @@ func TestLocationProviderLiteralCustomPaths(t *testing.T) {
 			})
 			require.NoError(t, err)
 			assert.Equal(t, tt.data, provider.NewDataLocation("a"))
-			assert.Equal(t, "s3://bucket/my data%20#?/partition=a b%20#?/file.parquet",
+			assert.Equal(t, tt.partitioned,
 				provider.NewDataLocation("partition=a b%20#?/file.parquet"))
 			assert.Equal(t, "gs://bucket/100% metadata/./../here/manifest #?%.avro",
 				provider.NewMetadataLocation("manifest #?%.avro"))
