@@ -136,11 +136,6 @@ type rewriteManifests struct {
 	rewritten []iceberg.ManifestFile
 	added     []iceberg.ManifestFile
 
-	// superseded accumulates merged manifest files written by a rebuild on a
-	// prior OCC attempt that a later attempt replaced. doCommit removes them
-	// after a successful commit so retries don't leak orphaned manifests.
-	superseded []string
-
 	// result is the value returned to the caller. record() rewrites its
 	// fields on every pass, including OCC retries, so the pointer the caller
 	// holds reflects the manifests actually committed, not attempt 0's.
@@ -150,15 +145,10 @@ type rewriteManifests struct {
 func newRewriteManifestsProducer(txn *Transaction, fs iceio.WriteFileIO, props iceberg.Properties, cfg rewriteManifestsCfg) *snapshotProducer {
 	prod := createSnapshotProducer(OpReplace, txn, fs, nil, props)
 	prod.producerImpl = &rewriteManifests{base: prod, cfg: cfg, result: &RewriteManifestsResult{}}
+	// A resumed commit can reuse the manifests the last rebuild merged.
+	prod.written.keepRebuilt = true
 
 	return prod
-}
-
-// supersededManifests returns the merged manifests earlier passes wrote and a
-// later pass replaced. The committed snapshot references only the last pass's
-// manifests, so these are safe to delete once the commit lands.
-func (r *rewriteManifests) supersededManifests() []string {
-	return r.superseded
 }
 
 func (r *rewriteManifests) parentDependentManifests(_ context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
@@ -356,12 +346,6 @@ func (r *rewriteManifests) record(toRewrite, merged, kept []iceberg.ManifestFile
 
 	// Publish only after the guard passes. On failure the caller deletes this
 	// pass's merged files, so the producer must keep the previous pass's state.
-	// The previous pass's merged manifests were never committed. Carry them
-	// into the superseded set so a successful commit deletes them, or every
-	// retry leaks a full set of merged files.
-	for _, m := range r.added {
-		r.superseded = append(r.superseded, m.FilePath())
-	}
 	r.added, r.rewritten = added, rewritten
 
 	// Publish into the shared result the caller holds so a retry's counts win.

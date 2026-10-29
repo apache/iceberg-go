@@ -684,18 +684,37 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		remove := slices.Collect(maps.Keys(rebuiltLists))
 		if committed {
 			remove = orphanedManifests
-			for _, u := range updates {
-				if su, ok := u.(*addSnapshotUpdate); ok && su.supersededSource != nil {
-					remove = append(remove, su.supersededSource.supersededManifests()...)
-				}
+		}
+		for _, u := range updates {
+			su, ok := u.(*addSnapshotUpdate)
+			if !ok || su.written == nil {
+				continue
 			}
+			if committed {
+				remove = append(remove, su.written.uncommitted(su.Snapshot.ManifestList)...)
+			} else {
+				remove = append(remove, su.written.discardRebuilt()...)
+			}
+		}
+		if committed && len(remove) > 0 {
+			referenced, err := committedFiles(wfs, updates)
+			if err != nil {
+				log.Printf("Warning: skipping cleanup of uncommitted files: %v", err)
+
+				return
+			}
+			remove = slices.DeleteFunc(remove, func(path string) bool {
+				_, ok := referenced[path]
+
+				return ok
+			})
 		}
 		// The commit may have failed because ctx was canceled; remove the
 		// orphans without that cancellation so they are not left behind.
 		cleanupCtx := context.WithoutCancel(ctx)
 		for _, path := range remove {
 			if removeErr := wfs.Remove(cleanupCtx, path); removeErr != nil {
-				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
+				log.Printf("Warning: failed to delete uncommitted file %s: %v", path, removeErr)
 			}
 		}
 	}()
@@ -1034,6 +1053,28 @@ func stagedManifestLists(updates []Update) map[string]struct{} {
 	return lists
 }
 
+// committedFiles returns the manifest lists and manifests of every snapshot
+// updates add.
+func committedFiles(fs icebergio.IO, updates []Update) (map[string]struct{}, error) {
+	files := make(map[string]struct{})
+	for _, u := range updates {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok || su.Snapshot == nil {
+			continue
+		}
+		files[su.Snapshot.ManifestList] = struct{}{}
+		manifests, err := su.Snapshot.Manifests(fs)
+		if err != nil {
+			return nil, fmt.Errorf("read manifests of committed snapshot %d: %w", su.Snapshot.SnapshotID, err)
+		}
+		for _, m := range manifests {
+			files[m.FilePath()] = struct{}{}
+		}
+	}
+
+	return files, nil
+}
+
 func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
 	for _, req := range reqs {
 		if ref, ok := req.(*assertRefSnapshotID); ok && ref.requireBranch && ref.Ref == branch {
@@ -1065,8 +1106,8 @@ func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 // stagedSnapshotStillValid reports whether a snapshot built on an earlier
 // attempt would still be accepted by AddSnapshot against fresh. Both values it
 // checks are table-wide, so a peer committing on ANOTHER branch invalidates them
-// without moving this branch's head — the case the caller's parent check misses,
-// and one AddSnapshot rejects terminally rather than retryably.
+// without moving this branch's head, which the caller's parent check misses.
+// Resubmitting such a snapshot unchanged would fail every retry.
 func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 	if snap == nil || fresh == nil {
 		return true
@@ -1153,7 +1194,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			Snapshot:            newSnap,
 			ownManifests:        su.ownManifests,
 			rebuildManifestList: su.rebuildManifestList,
-			supersededSource:    su.supersededSource,
+			written:             su.written,
 		}
 
 		// The old manifest list is now an orphaned object in object storage.
