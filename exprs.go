@@ -774,7 +774,8 @@ func (ul *unboundLiteralPredicate) Bind(schema *Schema, caseSensitive bool) (Boo
 	// it is the same as one against the largest finite value. Folding it to
 	// AlwaysTrue or AlwaysFalse instead would get NaN, the infinities and NULL
 	// wrong: x < 1e100 on a float32 column is false for NaN and +Inf and NULL
-	// for NULL.
+	// for NULL. Java still folds them, see
+	// https://github.com/apache/iceberg/issues/18700.
 	if isFloatingPoint(bound.Type()) && isOrderingOp(ul.op) {
 		switch lit.(type) {
 		case AboveMaxLiteral:

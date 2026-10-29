@@ -569,7 +569,8 @@ var _ BoundGeospatialExprVisitor[bool] = (*exprEvaluator)(nil)
 // fails both x < 5 and x >= 5, and the result must hold for the same rows as
 // the NOT it replaces. That follows IEEE 754 comparison, as a scan's row
 // filter does. ExpressionEvaluator orders NaN below every number instead, so on
-// a NaN value it can disagree with the expression it evaluates before rewriting.
+// a NaN value it can disagree with the expression it evaluates before rewriting;
+// see https://github.com/apache/iceberg-go/issues/2359.
 func RewriteNotExpr(expr BooleanExpression) (BooleanExpression, error) {
 	return VisitExpr(expr, rewriteNotVisitor{})
 }
