@@ -339,4 +339,7 @@ func TestSnapshotSummaryCollectorDeletionVectors(t *testing.T) {
 	assert.Equal(t, "1", props["removed-delete-files"])
 	assert.Equal(t, "9", props["added-position-deletes"]) // 2 + 4 + 3
 	assert.Equal(t, "1", props["removed-position-deletes"])
+	// A DV counts only its own blob, not the whole shared Puffin file.
+	assert.Equal(t, "1500", props["added-files-size"]) // 300 + 400 + 800
+	assert.Equal(t, "250", props["removed-files-size"])
 }

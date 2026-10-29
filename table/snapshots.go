@@ -110,8 +110,18 @@ type updateMetrics struct {
 	removedEqDeletes      int64
 }
 
+// contentSizeInBytes returns the bytes a file contributes to the table. A DV
+// shares its Puffin file with other DVs, so it counts only its own blob.
+func contentSizeInBytes(df iceberg.DataFile) int64 {
+	if IsDeletionVector(df) && df.ContentSizeInBytes() != nil {
+		return *df.ContentSizeInBytes()
+	}
+
+	return df.FileSizeBytes()
+}
+
 func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
-	m.addedFileSize += df.FileSizeBytes()
+	m.addedFileSize += contentSizeInBytes(df)
 	switch df.ContentType() {
 	case iceberg.EntryContentData:
 		m.addedDataFiles++
@@ -136,7 +146,7 @@ func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
 }
 
 func (m *updateMetrics) removeFile(df iceberg.DataFile) error {
-	m.removedFileSize += df.FileSizeBytes()
+	m.removedFileSize += contentSizeInBytes(df)
 	switch df.ContentType() {
 	case iceberg.EntryContentData:
 		m.removedDataFiles++
