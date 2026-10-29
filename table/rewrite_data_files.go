@@ -182,6 +182,11 @@ type RewriteDataFilesOptions struct {
 	// PartialProgress, when true, commits non-empty groups in durable catalog
 	// batches. When false (the default), every group is staged in a single
 	// atomic rewrite snapshot.
+	//
+	// Partial progress checks each batch against the delete files committed
+	// since the transaction's starting snapshot, so the groups must be planned
+	// from the transaction's table. Deletes committed between an older
+	// planning snapshot and that starting snapshot are not detected.
 	PartialProgress bool
 
 	// MaxCommits bounds the number of catalog snapshots produced in
@@ -590,7 +595,7 @@ func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 // classic position deletes are rechecked against the union of every old data
 // file in the batch before they are removed. A later batch can fail without
 // rolling back snapshots already committed for earlier batches. Each batch is
-// also checked against every snapshot committed since the groups were planned,
+// also checked against every delete committed since the groups were planned,
 // since an earlier batch's retry can make those snapshots part of its base.
 func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	if err := t.checkNotNil(); err != nil {
@@ -639,7 +644,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	groupsPerCommit := (len(pendingGroups)-1)/maxCommits + 1
 	props := maps.Clone(opts.SnapshotProps)
 	current := t.tbl
-	planned := t.tbl.Metadata()
+	sincePlanning := deletesSincePlanning{checked: t.tbl.Metadata(), branch: t.branch}
 	failedCommits := 0
 
 	for batchStart := 0; batchStart < len(pendingGroups); batchStart += groupsPerCommit {
@@ -664,7 +669,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		// commit-time validator never sees them, while its planned tasks lack
 		// any delete files they added. Rewriting anyway would write the deleted
 		// rows back and then drop those deletes as dead.
-		if err := validateNoNewDeletesSincePlanning(planned, current.Metadata(), t.branch, fs, batchGroups); err != nil {
+		if err := sincePlanning.validate(current.Metadata(), fs, batchGroups); err != nil {
 			if !errors.Is(err, ErrConflictingDeleteFiles) {
 				return result, fmt.Errorf("validate partial rewrite batch %d against its planning snapshot: %w", batchNum, err)
 			}
@@ -677,7 +682,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 				})
 			}
 			if maxFailedCommits > 0 && failedCommits > maxFailedCommits {
-				return result, fmt.Errorf("commit partial rewrite batch %d: %w (maximum failed commits reached)",
+				return result, fmt.Errorf("reject partial rewrite batch %d: %w (maximum failed commits reached)",
 					batchNum, err)
 			}
 
@@ -897,25 +902,63 @@ func rewriteValidatorWithReferencedDataFiles(
 	}
 }
 
-// validateNoNewDeletesSincePlanning applies the rewrite conflict rules to the
-// snapshots committed on branch between planned, the metadata the groups were
-// planned from, and current. It returns ErrConflictingDeleteFiles when one of
-// them added a delete file that could apply to a data file in groups.
-func validateNoNewDeletesSincePlanning(planned, current Metadata, branch string, fs iceio.IO, groups []CompactionTaskGroup) error {
+// deletesSincePlanning collects the delete files committed on a branch since
+// the groups were planned. Each validate call reads only the snapshots
+// committed since the previous call, so a partial rewrite reads every
+// snapshot's manifests once rather than once per batch.
+type deletesSincePlanning struct {
+	// checked is the metadata the collected deletes run up to. It starts as
+	// the metadata the groups were planned from.
+	checked Metadata
+	branch  string
+	deletes []addedDelete
+}
+
+// validate collects the deletes committed between d.checked and current,
+// then returns ErrConflictingDeleteFiles when any delete committed since
+// planning could apply to a data file in groups.
+func (d *deletesSincePlanning) validate(current Metadata, fs iceio.IO, groups []CompactionTaskGroup) error {
+	// The rewrite validator binds no filters, so case sensitivity is moot.
+	cc, err := newConflictContext(d.checked, current, d.branch, fs, true)
+	if err != nil {
+		return err
+	}
+	deletes := d.deletes
+	err = cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
+		added, err := newAddedDelete(snap, e.DataFile())
+		if err != nil {
+			return err
+		}
+		deletes = append(deletes, added)
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	d.checked, d.deletes = current, deletes
+
+	if len(d.deletes) == 0 {
+		return nil
+	}
+
 	var files []iceberg.DataFile
 	for _, group := range groups {
 		for _, task := range group.Tasks {
 			files = append(files, task.File)
 		}
 	}
-
-	// The rewrite validator binds no filters, so case sensitivity is moot.
-	cc, err := newConflictContext(planned, current, branch, fs, true)
+	rewritten, err := newRewrittenFileSet(files)
 	if err != nil {
 		return err
 	}
+	for _, added := range d.deletes {
+		if err := rewritten.conflict(added); err != nil {
+			return err
+		}
+	}
 
-	return validateNoNewDeletesForRewrittenFiles(cc, files)
+	return nil
 }
 
 // CollectSafePositionDeletes returns position delete files from the
