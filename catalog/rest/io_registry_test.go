@@ -108,3 +108,38 @@ func TestIsolatedIORegistryDoesNotUseGlobalFactories(t *testing.T) {
 	require.NoError(t, err)
 	require.IsType(t, iceio.LocalFS{}, fs)
 }
+
+func TestCatalogsCanUseDifferentFactoriesForSameScheme(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", serveEmptyConfig)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name string
+		fs   *iceio.MemFS
+	}{
+		{name: "first", fs: iceio.NewMemFS()},
+		{name: "second", fs: iceio.NewMemFS()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := &iceio.Registry{}
+			require.NoError(t, registry.Register("same-scheme", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+				return tc.fs, nil
+			}))
+
+			cat, err := NewCatalog(t.Context(), tc.name, server.URL, WithIORegistry(registry))
+			require.NoError(t, err)
+			defer cat.Close()
+
+			for _, vended := range []bool{false, true} {
+				tbl, err := cat.tableFromResponse(
+					t.Context(), []string{"ns", "tbl"}, nil, "same-scheme://bucket/metadata", nil, nil, vended, nil, nil)
+				require.NoError(t, err)
+				loaded, err := tbl.FS(t.Context())
+				require.NoError(t, err)
+				require.Same(t, tc.fs, loaded)
+			}
+		})
+	}
+}
