@@ -564,7 +564,12 @@ var _ BoundGeospatialExprVisitor[bool] = (*exprEvaluator)(nil)
 // RewriteNotExpr rewrites a boolean expression to remove "Not" nodes from the expression
 // tree. This is because Projections assume there are no "not" nodes.
 //
-// Not nodes will be replaced with simply calling `Negate` on the child in the tree.
+// Not nodes are replaced by negating the child in the tree. A negated ordering
+// comparison also matches NaN, so NOT(x < 5) becomes x >= 5 OR is_nan(x): NaN
+// fails both x < 5 and x >= 5, and the result must hold for the same rows as
+// the NOT it replaces. That follows IEEE 754 comparison, as a scan's row
+// filter does. ExpressionEvaluator orders NaN below every number instead, so on
+// a NaN value it can disagree with the expression it evaluates before rewriting.
 func RewriteNotExpr(expr BooleanExpression) (BooleanExpression, error) {
 	return VisitExpr(expr, rewriteNotVisitor{})
 }
@@ -574,7 +579,49 @@ type rewriteNotVisitor struct{}
 func (rewriteNotVisitor) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
 func (rewriteNotVisitor) VisitFalse() BooleanExpression { return AlwaysFalse{} }
 func (rewriteNotVisitor) VisitNot(child BooleanExpression) BooleanExpression {
-	return child.Negate()
+	return negateKeepingNaN(child)
+}
+
+// negateKeepingNaN negates expr, which contains no Not nodes, adding an is_nan
+// branch to every negated ordering comparison on a floating-point term. And
+// and Or recurse here rather than through Negate, which would drop the branch
+// for their children.
+func negateKeepingNaN(expr BooleanExpression) BooleanExpression {
+	switch e := expr.(type) {
+	case AndExpr:
+		return NewOr(negateKeepingNaN(e.left), negateKeepingNaN(e.right))
+	case OrExpr:
+		return NewAnd(negateKeepingNaN(e.left), negateKeepingNaN(e.right))
+	case UnboundPredicate:
+		if isOrderingOp(e.Op()) {
+			// IsNaN binds to AlwaysFalse for a term that isn't floating point.
+			return NewOr(e.Negate(), IsNaN(e.Term()))
+		}
+	case BoundPredicate:
+		if isOrderingOp(e.Op()) && isFloatingPoint(e.Term().Type()) {
+			return NewOr(e.Negate(), createBoundUnaryPredicate(OpIsNan, e.Term()))
+		}
+	}
+
+	return expr.Negate()
+}
+
+func isOrderingOp(op Operation) bool {
+	switch op {
+	case OpLT, OpLTEQ, OpGT, OpGTEQ:
+		return true
+	}
+
+	return false
+}
+
+func isFloatingPoint(typ Type) bool {
+	switch typ.(type) {
+	case Float32Type, Float64Type:
+		return true
+	}
+
+	return false
 }
 
 func (rewriteNotVisitor) VisitAnd(left, right BooleanExpression) BooleanExpression {

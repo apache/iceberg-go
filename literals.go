@@ -680,9 +680,14 @@ func (f Float64Literal) String() string                { return strconv.FormatFl
 func (f Float64Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
-		if math.MaxFloat32 < f {
+		switch {
+		case math.IsInf(float64(f), 0):
+			// infinity is a float32 value, unlike a finite value beyond
+			// the float32 range, and x <= +Inf holds for +Inf
+			return Float32Literal(f), nil
+		case math.MaxFloat32 < f:
 			return Float32AboveMaxLiteral(), nil
-		} else if -math.MaxFloat32 > f {
+		case -math.MaxFloat32 > f:
 			return Float32BelowMinLiteral(), nil
 		}
 
