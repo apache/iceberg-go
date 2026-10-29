@@ -115,25 +115,33 @@ func TestCatalogsCanUseDifferentFactoriesForSameScheme(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	for _, tc := range []struct {
+	cases := []struct {
 		name string
 		fs   *iceio.MemFS
 	}{
 		{name: "first", fs: iceio.NewMemFS()},
 		{name: "second", fs: iceio.NewMemFS()},
-	} {
+	}
+	catalogs := make([]*Catalog, len(cases))
+	for i, tc := range cases {
+		registry := &iceio.Registry{}
+		fs := tc.fs
+		require.NoError(t, registry.Register("same-scheme", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+			return fs, nil
+		}))
+
+		cat, err := NewCatalog(t.Context(), tc.name, server.URL, WithIORegistry(registry))
+		require.NoError(t, err)
+		defer cat.Close()
+		catalogs[i] = cat
+	}
+
+	// Both catalogs must remain alive while the same URI scheme resolves to
+	// different factories, including through vended-credential refreshers.
+	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			registry := &iceio.Registry{}
-			require.NoError(t, registry.Register("same-scheme", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
-				return tc.fs, nil
-			}))
-
-			cat, err := NewCatalog(t.Context(), tc.name, server.URL, WithIORegistry(registry))
-			require.NoError(t, err)
-			defer cat.Close()
-
 			for _, vended := range []bool{false, true} {
-				tbl, err := cat.tableFromResponse(
+				tbl, err := catalogs[i].tableFromResponse(
 					t.Context(), []string{"ns", "tbl"}, nil, "same-scheme://bucket/metadata", nil, nil, vended, nil, nil)
 				require.NoError(t, err)
 				loaded, err := tbl.FS(t.Context())
