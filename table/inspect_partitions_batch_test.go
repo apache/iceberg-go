@@ -168,61 +168,39 @@ func TestInspectPartitionAggregateReaderCancellation(t *testing.T) {
 
 var inspectPartitionBatchBenchmarkSink int64
 
-// BenchmarkInspectPartitionBatchEncoding compares the former eager, single
-// batch encoder with the bounded streaming encoder on identical input rows.
+// BenchmarkInspectPartitionBatchEncoding measures the bounded partition
+// metadata encoder at different partition counts.
 func BenchmarkInspectPartitionBatchEncoding(b *testing.B) {
 	for _, count := range []int{4096, 16384, 65536} {
 		partitionType, arrowSchema, aggregates := inspectPartitionBatchFixture(b, count)
-		for _, bounded := range []bool{false, true} {
-			mode := "single_batch"
-			if bounded {
-				mode = "bounded"
-			}
-			b.Run(fmt.Sprintf("partitions=%d/%s", count, mode), func(b *testing.B) {
-				inspector := InspectTable{alloc: memory.DefaultAllocator}
-				b.ReportAllocs()
-				b.ReportMetric(float64(count), "partitions/op")
-				b.ResetTimer()
-				var maxBatchRows int64
-				for b.Loop() {
-					var reader array.RecordReader
-					if bounded {
-						reader = inspector.partitionAggregateReader(
-							context.Background(), arrowSchema, partitionType, aggregates)
-					} else {
-						builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
-						for _, aggregate := range aggregates {
-							if err := appendPartitionAggregate(builder, partitionType, *aggregate); err != nil {
-								b.Fatal(err)
-							}
-						}
-						var err error
-						reader, err = singleBatchReader(arrowSchema, builder)
-						builder.Release()
-						if err != nil {
-							b.Fatal(err)
-						}
+		b.Run(fmt.Sprintf("partitions=%d/bounded", count), func(b *testing.B) {
+			inspector := InspectTable{alloc: memory.DefaultAllocator}
+			b.ReportAllocs()
+			b.ReportMetric(float64(count), "partitions/op")
+			b.ResetTimer()
+			var maxBatchRows int64
+			for b.Loop() {
+				reader := inspector.partitionAggregateReader(
+					context.Background(), arrowSchema, partitionType, aggregates)
+				var seen int64
+				for reader.Next() {
+					rows := reader.RecordBatch().NumRows()
+					seen += rows
+					if rows > maxBatchRows {
+						maxBatchRows = rows
 					}
-					var seen int64
-					for reader.Next() {
-						rows := reader.RecordBatch().NumRows()
-						seen += rows
-						if rows > maxBatchRows {
-							maxBatchRows = rows
-						}
-					}
-					readErr := reader.Err()
-					reader.Release()
-					if readErr != nil {
-						b.Fatal(readErr)
-					}
-					if seen != int64(count) {
-						b.Fatalf("read %d partitions, want %d", seen, count)
-					}
-					inspectPartitionBatchBenchmarkSink = seen
 				}
-				b.ReportMetric(float64(maxBatchRows), "max_batch_rows")
-			})
-		}
+				readErr := reader.Err()
+				reader.Release()
+				if readErr != nil {
+					b.Fatal(readErr)
+				}
+				if seen != int64(count) {
+					b.Fatalf("read %d partitions, want %d", seen, count)
+				}
+				inspectPartitionBatchBenchmarkSink = seen
+			}
+			b.ReportMetric(float64(maxBatchRows), "max_batch_rows")
+		})
 	}
 }
