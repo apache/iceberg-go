@@ -2198,7 +2198,7 @@ func (scan *Scan) readFileTasks(ctx context.Context, tasks []FileScanTask, added
 		return nil, nil, err
 	}
 	if addedDeletes != nil {
-		as.addedDeletes = addedDeletes
+		as.added = &addedDeleteState{deletes: addedDeletes}
 	}
 
 	readRecords := scan.readRecords

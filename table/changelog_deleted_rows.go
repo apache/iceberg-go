@@ -34,6 +34,15 @@ import (
 // later keep step can still see it after existing deletes shorten the batch.
 const changelogFilePosColumn = "_changelog_file_pos"
 
+// addedDeleteState is the delete files added in one changelog snapshot and
+// the loaders that read them. A normal scan leaves arrowScan.added nil.
+type addedDeleteState struct {
+	deletes   *FileScanTask
+	posLoader *lazyPositionDeleteLoader
+	dvLoader  *lazyDeletionVectorLoader
+	eqLoader  *lazyEqualityDeleteLoader
+}
+
 func (scan *Scan) readDeletedRows(ctx context.Context, task DeletedRowsScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	base := task.ScanTask()
 	added := base
@@ -45,12 +54,17 @@ func (scan *Scan) readDeletedRows(ctx context.Context, task DeletedRowsScanTask)
 }
 
 func (as *arrowScan) prepareAddedDeleteLoaders(invariants *arrowScanInvariants) error {
-	tasks := []FileScanTask{*as.addedDeletes}
+	tasks := []FileScanTask{*as.added.deletes}
 	posLoader := newLazyPositionDeleteLoader(as.fs, tasks)
+	releasePos := func() {
+		if posLoader != nil {
+			posLoader.release()
+		}
+	}
 
 	dvLoader, err := newLazyDeletionVectorLoader(as.fs, tasks)
 	if err != nil {
-		posLoader.release()
+		releasePos()
 
 		return err
 	}
@@ -58,7 +72,7 @@ func (as *arrowScan) prepareAddedDeleteLoaders(invariants *arrowScanInvariants) 
 	eqLoader, err := newLazyEqualityDeleteLoader(
 		as.fs, invariants.tableSchema, nil, invariants.nameMapping, tasks)
 	if err != nil {
-		posLoader.release()
+		releasePos()
 
 		return err
 	}
@@ -67,15 +81,15 @@ func (as *arrowScan) prepareAddedDeleteLoaders(invariants *arrowScanInvariants) 
 	}
 	eqLoader.addFieldIDs(invariants.projectedIDs)
 
-	as.addedPosLoader = posLoader
-	as.addedDVLoader = dvLoader
-	as.addedEqLoader = eqLoader
+	as.added.posLoader = posLoader
+	as.added.dvLoader = dvLoader
+	as.added.eqLoader = eqLoader
 
 	return nil
 }
 
 func (as *arrowScan) loadAddedDeletes(ctx context.Context, task FileScanTask) (*dv.RoaringPositionBitmap, *dv.RoaringPositionBitmap, []*equalityDeleteSet, error) {
-	if as.addedDeletes == nil {
+	if as.added == nil {
 		return nil, nil, nil, nil
 	}
 
@@ -83,24 +97,24 @@ func (as *arrowScan) loadAddedDeletes(ctx context.Context, task FileScanTask) (*
 	if task.File != nil {
 		dataPath = task.File.FilePath()
 	}
-	if as.addedDeletes.File == nil || as.addedDeletes.File.FilePath() != dataPath {
+	if as.added.deletes.File == nil || as.added.deletes.File.FilePath() != dataPath {
 		return nil, nil, nil, fmt.Errorf("%w: added delete files do not match data file %s",
-			iceberg.ErrInvalidArgument, dataPath)
+			ErrInvalidOperation, dataPath)
 	}
 
 	var pos *dv.RoaringPositionBitmap
 	var err error
-	if as.addedPosLoader != nil {
-		pos, err = as.addedPosLoader.load(ctx, 0, dataPath)
+	if as.added.posLoader != nil {
+		pos, err = as.added.posLoader.load(ctx, 0, dataPath)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 	}
-	bitmap, err := as.addedDVLoader.load(ctx, dataPath)
+	bitmap, err := as.added.dvLoader.load(ctx, dataPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	eq, err := as.addedEqLoader.load(ctx, *as.addedDeletes)
+	eq, err := as.added.eqLoader.load(ctx, *as.added.deletes)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -159,7 +173,9 @@ func dropChangelogFilePos(in arrow.RecordBatch) (arrow.RecordBatch, error) {
 		cols = append(cols, in.Column(i))
 	}
 
-	return array.NewRecordBatch(arrow.NewSchema(fields, nil), cols, in.NumRows()), nil
+	md := in.Schema().Metadata()
+
+	return array.NewRecordBatch(arrow.NewSchema(fields, &md), cols, in.NumRows()), nil
 }
 
 // keepAddedDeleteRows keeps rows removed by the added deletes. Existing
