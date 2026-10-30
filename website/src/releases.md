@@ -93,6 +93,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - **Row-lineage column predicate renamed.** Use `iceberg.IsRowLineageColumn` instead of `iceberg.IsMetadataColumn` to identify `_row_id` and `_last_updated_sequence_number`. Use `iceberg.IsReservedFieldID` to check the full reserved metadata field ID range.
 - **File writes and directory walks now take an operation context.** Update `WriteFileIO` and `ListableIO` implementations and calls to `Create`, `WriteFile`, and `WalkDir` to pass `context.Context`; cloud writes and listings use it for cancellation.
+- **In and NotIn follow SQL semantics for NULL.** A multi-valued `NotIn`, `NOT(In(...))` and `NOT(NotIn(...))` no longer match rows where the column is NULL, consistent with `NotEqual`. A predicate under NOT on a column missing from an older data file no longer matches every row of that file; those rows match as a stored NULL would. Java's `Evaluator` still matches NULL for `notEq` and `notIn`, see [apache/iceberg#18701](https://github.com/apache/iceberg/issues/18701).
 
 ## Verifying and producing releases
 
