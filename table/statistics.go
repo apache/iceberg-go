@@ -17,7 +17,11 @@
 
 package table
 
-import "github.com/apache/iceberg-go/puffin"
+import (
+	"encoding/json"
+
+	"github.com/apache/iceberg-go/puffin"
+)
 
 // StatisticsFile represents a statistics file in the Puffin format, that can be used to read table data more
 // efficiently.
@@ -40,7 +44,17 @@ type BlobMetadata struct {
 	SnapshotID     int64             `json:"snapshot-id"`
 	SequenceNumber int64             `json:"sequence-number"`
 	Fields         []int32           `json:"fields"`
-	Properties     map[string]string `json:"properties"`
+	Properties     map[string]string `json:"properties,omitempty"`
+}
+
+// MarshalJSON writes nil Fields as [], since the spec requires the field.
+func (b BlobMetadata) MarshalJSON() ([]byte, error) {
+	type blobMetadata BlobMetadata
+	if b.Fields == nil {
+		b.Fields = []int32{}
+	}
+
+	return json.Marshal(blobMetadata(b))
 }
 
 // PartitionStatisticsFile represents a partition statistics file that can be used to read table data more efficiently.

@@ -66,3 +66,23 @@ func TestBlobMetadataRejectsNullAndEmptyType(t *testing.T) {
 		})
 	}
 }
+
+func TestBlobMetadataJSONMatchesJava(t *testing.T) {
+	for _, tt := range []struct {
+		blob BlobMetadata
+		want string
+	}{
+		{
+			blob: BlobMetadata{Type: puffin.BlobTypeDataSketchesTheta, SnapshotID: 1, SequenceNumber: 2, Fields: []int32{1}},
+			want: `{"type":"apache-datasketches-theta-v1","snapshot-id":1,"sequence-number":2,"fields":[1]}`,
+		},
+		{
+			blob: BlobMetadata{Type: "vendor-sketch-v1", SnapshotID: 1, SequenceNumber: 2, Properties: map[string]string{"k": "v"}},
+			want: `{"type":"vendor-sketch-v1","snapshot-id":1,"sequence-number":2,"fields":[],"properties":{"k":"v"}}`,
+		},
+	} {
+		data, err := json.Marshal(tt.blob)
+		require.NoError(t, err)
+		assert.JSONEq(t, tt.want, string(data))
+	}
+}
