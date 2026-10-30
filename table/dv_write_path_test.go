@@ -74,7 +74,7 @@ func TestDVWritePathProducesReadableOutput(t *testing.T) {
 	assert.Equal(t, int64(2), df2.Count())
 	assert.Equal(t, "s3://bucket/data/file-002.parquet", *df2.ReferencedDataFile())
 
-	bm1, err := dv.ReadDV(fs, df1)
+	bm1, err := dv.ReadDV(t.Context(), fs, df1)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), bm1.Cardinality())
 	assert.True(t, bm1.Contains(1))
@@ -82,7 +82,7 @@ func TestDVWritePathProducesReadableOutput(t *testing.T) {
 	assert.True(t, bm1.Contains(5))
 	assert.False(t, bm1.Contains(2))
 
-	bm2, err := dv.ReadDV(fs, df2)
+	bm2, err := dv.ReadDV(t.Context(), fs, df2)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), bm2.Cardinality())
 	assert.True(t, bm2.Contains(0))
@@ -185,13 +185,13 @@ func TestDVWritePathV3PartitionedUsesPuffinDV(t *testing.T) {
 	assert.Equal(t, map[int]any{iceberg.PartitionDataIDStart: int32(1)}, df1.Partition())
 	assert.Equal(t, int64(3), df1.Count())
 
-	bm0, err := dv.ReadDV(fs, df0)
+	bm0, err := dv.ReadDV(t.Context(), fs, df0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), bm0.Cardinality())
 	assert.True(t, bm0.Contains(1))
 	assert.True(t, bm0.Contains(4))
 
-	bm1, err := dv.ReadDV(fs, df1)
+	bm1, err := dv.ReadDV(t.Context(), fs, df1)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), bm1.Cardinality())
 	assert.True(t, bm1.Contains(0))
@@ -372,7 +372,7 @@ func TestDVWritePathMergesMultiBatchSameFile(t *testing.T) {
 	assert.Equal(t, int64(4), df.Count(),
 		"merged DV cardinality should be the union across batches")
 
-	bm, err := dv.ReadDV(fs, df)
+	bm, err := dv.ReadDV(t.Context(), fs, df)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), bm.Cardinality())
 	for _, pos := range []uint64{1, 3, 5, 7} {

@@ -36,7 +36,7 @@ import (
 type Output interface {
 	Identifiers([]table.Identifier)
 	DescribeTable(*table.Table)
-	Files(tbl *table.Table, history bool)
+	Files(ctx context.Context, tbl *table.Table, history bool)
 	PlannedFiles(tbl *table.Table, tasks []table.FileScanTask)
 	DescribeProperties(iceberg.Properties)
 	Info(tbl *table.Table)
@@ -130,7 +130,7 @@ func (t textOutput) DescribeTable(tbl *table.Table) {
 	propTable.Render()
 }
 
-func (t textOutput) Files(tbl *table.Table, history bool) {
+func (t textOutput) Files(ctx context.Context, tbl *table.Table, history bool) {
 	var snapshots []table.Snapshot
 	if history {
 		snapshots = tbl.Metadata().Snapshots()
@@ -159,7 +159,7 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 			t.Error(err)
 			osExit(1)
 		}
-		manifestList, err := snap.Manifests(afs)
+		manifestList, err := snap.Manifests(ctx, afs)
 		if err != nil {
 			t.Error(err)
 			osExit(1)
@@ -170,7 +170,7 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 				Level: 1, Text: "Manifest: " + m.FilePath(),
 			})
 			var iterErr error
-			for e, err := range m.Entries(afs, false) {
+			for e, err := range m.Entries(ctx, afs, false) {
 				if err != nil {
 					iterErr = err
 
@@ -311,7 +311,7 @@ func (j jsonOutput) DescribeTable(tbl *table.Table) {
 	}
 }
 
-func (j jsonOutput) Files(tbl *table.Table, history bool) {
+func (j jsonOutput) Files(ctx context.Context, tbl *table.Table, history bool) {
 	if history {
 		type dataType struct {
 			Snapshots []table.Snapshot `json:"snapshots"`

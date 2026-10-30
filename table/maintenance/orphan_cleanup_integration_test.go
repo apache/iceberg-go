@@ -286,7 +286,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupActualDeletion() {
 
 	for manifest, err := range tbl.AllManifests(s.ctx) {
 		s.Require().NoError(err)
-		for entry, err := range manifest.Entries(fs, false) {
+		for entry, err := range manifest.Entries(s.T().Context(), fs, false) {
 			s.Require().NoError(err)
 			dataFile := entry.DataFile().FilePath()
 			s.True(s.fileExists(fs, dataFile), "Data file should still exist: %s", dataFile)

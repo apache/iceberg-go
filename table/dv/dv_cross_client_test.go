@@ -45,7 +45,7 @@ func TestCrossClientReadJavaSingleBlobDV(t *testing.T) {
 
 	df, fs := loadJavaPuffinBlob(t, fixture, 0, referencedDataFile)
 
-	bm, err := ReadDV(fs, df)
+	bm, err := ReadDV(t.Context(), fs, df)
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(wantPositions)), bm.Cardinality())
 	for _, pos := range wantPositions {
@@ -90,7 +90,7 @@ func TestCrossClientReadJavaMultiBlobDV(t *testing.T) {
 		seen[ref] = struct{}{}
 
 		df, _ := loadJavaPuffinBlob(t, fixture, i, ref)
-		bm, err := ReadDV(fs, df)
+		bm, err := ReadDV(t.Context(), fs, df)
 		require.NoErrorf(t, err, "ReadDV blob %d (ref=%s)", i, ref)
 		assert.Equalf(t, int64(len(want)), bm.Cardinality(), "blob %d cardinality", i)
 		for _, pos := range want {

@@ -799,11 +799,11 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 			},
 		})
 
-	m, err := stagedTbl.CurrentSnapshot().Manifests(mustFS(t.T(), tbl))
+	m, err := stagedTbl.CurrentSnapshot().Manifests(t.T().Context(), mustFS(t.T(), tbl))
 	t.Require().NoError(err)
 
 	for _, manifest := range m {
-		for e, err := range manifest.Entries(mustFS(t.T(), tbl), false) {
+		for e, err := range manifest.Entries(t.T().Context(), mustFS(t.T(), tbl), false) {
 			t.Require().NoError(err)
 			t.Equal(map[int]any{
 				1000: int32(123), 1001: int32(650),
@@ -1144,7 +1144,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesByPath() {
 		t.Require().NoError(err)
 	}
 
-	mflist, err := tbl.CurrentSnapshot().Manifests(mustFS(t.T(), tbl))
+	mflist, err := tbl.CurrentSnapshot().Manifests(ctx, mustFS(t.T(), tbl))
 	t.Require().NoError(err)
 	t.Len(mflist, 5)
 
@@ -1268,14 +1268,14 @@ func (t *TableWritingTestSuite) TestAddDataFilesMultipleSpecs() {
 	// One manifest per spec, each declaring its own spec id and carrying
 	// entries whose spec ids and partition tuples round-trip.
 	snap := tbl.CurrentSnapshot()
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.T().Context(), fs)
 	t.Require().NoError(err)
 	t.Require().Len(manifests, 2)
 
 	filesBySpec := map[int32]iceberg.DataFile{}
 	for _, m := range manifests {
 		numEntries := 0
-		for entry, err := range m.Entries(fs, false) {
+		for entry, err := range m.Entries(t.T().Context(), fs, false) {
 			t.Require().NoError(err)
 			numEntries++
 			df := entry.DataFile()
@@ -1488,14 +1488,14 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesDoesNotCarryEmptyManifests()
 		current = next
 	}
 
-	manifests, err := tbl.CurrentSnapshot().Manifests(mustFS(t.T(), tbl))
+	manifests, err := tbl.CurrentSnapshot().Manifests(t.T().Context(), mustFS(t.T(), tbl))
 	t.Require().NoError(err)
 	t.Len(manifests, 2, "repeated overwrites should keep only the current add manifest and current delete manifest")
 
 	var liveEntries, emptyCurrentManifests int
 	for _, manifest := range manifests {
 		manifestLiveEntries := 0
-		for entry, err := range manifest.Entries(mustFS(t.T(), tbl), true) {
+		for entry, err := range manifest.Entries(t.T().Context(), mustFS(t.T(), tbl), true) {
 			t.Require().NoError(err)
 			t.Equal(current.FilePath(), entry.DataFile().FilePath())
 			manifestLiveEntries++
@@ -2018,7 +2018,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshots() {
 		t.Require().NoError(err)
 	}
 
-	mflist, err := tbl.CurrentSnapshot().Manifests(tblfs)
+	mflist, err := tbl.CurrentSnapshot().Manifests(ctx, tblfs)
 	t.Require().NoError(err)
 	t.Len(mflist, 5)
 	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
@@ -2682,13 +2682,13 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
 	t.Require().NoError(err)
 
-	manifestList, err := tblA.CurrentSnapshot().Manifests(mustFS(t.T(), tblA))
+	manifestList, err := tblA.CurrentSnapshot().Manifests(t.T().Context(), mustFS(t.T(), tblA))
 	t.Require().NoError(err)
 	t.Len(manifestList, 1)
 	t.validateManifestFileLength(mustFS(t.T(), tblA), manifestList[0])
 
 	entries := make([]iceberg.ManifestEntry, 0, 3)
-	for entry, err := range manifestList[0].Entries(mustFS(t.T(), tblA), false) {
+	for entry, err := range manifestList[0].Entries(t.T().Context(), mustFS(t.T(), tblA), false) {
 		t.Require().NoError(err)
 		entries = append(entries, entry)
 	}
@@ -2704,7 +2704,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 		}
 	}
 
-	manifestList, err = tblB.CurrentSnapshot().Manifests(mustFS(t.T(), tblB))
+	manifestList, err = tblB.CurrentSnapshot().Manifests(t.T().Context(), mustFS(t.T(), tblB))
 	t.Require().NoError(err)
 	t.Len(manifestList, 3)
 
@@ -2712,7 +2712,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 		t.validateManifestFileLength(mustFS(t.T(), tblB), m)
 	}
 
-	manifestList, err = tblC.CurrentSnapshot().Manifests(mustFS(t.T(), tblC))
+	manifestList, err = tblC.CurrentSnapshot().Manifests(t.T().Context(), mustFS(t.T(), tblC))
 	t.Require().NoError(err)
 	t.Len(manifestList, 3)
 

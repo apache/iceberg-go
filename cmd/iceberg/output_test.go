@@ -507,7 +507,7 @@ func Test_textOutput_FilesSnapshotWithoutSchemaID(t *testing.T) {
 		return memFS, nil
 	}, nil)
 
-	textOutput{}.Files(tbl, false)
+	textOutput{}.Files(t.Context(), tbl, false)
 
 	assert.True(t, strings.Contains(buf.String(), "Snapshot 100, schema unknown"))
 }

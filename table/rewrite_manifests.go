@@ -151,12 +151,12 @@ func newRewriteManifestsProducer(txn *Transaction, fs iceio.WriteFileIO, props i
 	return prod
 }
 
-func (r *rewriteManifests) parentDependentManifests(_ context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
+func (r *rewriteManifests) parentDependentManifests(ctx context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
 	if parent == nil {
 		return nil, nil
 	}
 
-	return parent.Manifests(r.base.io)
+	return parent.Manifests(ctx, r.base.io)
 }
 
 // rebuildManifests reuses the clustered output when a concurrent commit only
@@ -166,7 +166,7 @@ func (r *rewriteManifests) parentDependentManifests(_ context.Context, parent *S
 // parent's additional manifests need to be inherited.
 func (r *rewriteManifests) rebuildManifests(ctx context.Context, parent *Snapshot, addedContent []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	if r.cfg.clusterBy != nil {
-		if reused, ok, err := r.reuseManifests(parent); err != nil {
+		if reused, ok, err := r.reuseManifests(ctx, parent); err != nil {
 			return nil, err
 		} else if ok {
 			return reused, nil
@@ -176,12 +176,12 @@ func (r *rewriteManifests) rebuildManifests(ctx context.Context, parent *Snapsho
 	return r.base.assembleManifests(ctx, parent, addedContent)
 }
 
-func (r *rewriteManifests) reuseManifests(parent *Snapshot) ([]iceberg.ManifestFile, bool, error) {
+func (r *rewriteManifests) reuseManifests(ctx context.Context, parent *Snapshot) ([]iceberg.ManifestFile, bool, error) {
 	if parent == nil || len(r.rewritten) == 0 || len(r.added) == 0 {
 		return nil, false, nil
 	}
 
-	current, err := parent.Manifests(r.base.io)
+	current, err := parent.Manifests(ctx, r.base.io)
 	if err != nil {
 		return nil, false, err
 	}
@@ -260,7 +260,7 @@ func (r *rewriteManifests) processManifests(ctx context.Context, manifests []ice
 	// pass is the one that commits, so its counts are the ones that must win.
 	// record also runs the file-count guard, so an error here leaves the
 	// merged files to the defer above for cleanup.
-	if err := r.record(toRewrite, merged, kept); err != nil {
+	if err := r.record(ctx, toRewrite, merged, kept); err != nil {
 		return nil, err
 	}
 	owned = true
@@ -301,7 +301,7 @@ func (r *rewriteManifests) deleteWritten(ctx context.Context, input, merged []ic
 	}
 }
 
-func (r *rewriteManifests) record(toRewrite, merged, kept []iceberg.ManifestFile) error {
+func (r *rewriteManifests) record(ctx context.Context, toRewrite, merged, kept []iceberg.ManifestFile) error {
 	inPaths := make(map[string]struct{}, len(toRewrite))
 	for _, m := range toRewrite {
 		inPaths[m.FilePath()] = struct{}{}
@@ -332,11 +332,11 @@ func (r *rewriteManifests) record(toRewrite, merged, kept []iceberg.ManifestFile
 	// rewritten/added diff is equivalent to comparing the full input/output and
 	// avoids re-walking the pass-throughs. The processed count doubles as the
 	// entries-processed summary value.
-	processed, err := manifestActiveFiles(r.base.io, rewritten)
+	processed, err := manifestActiveFiles(ctx, r.base.io, rewritten)
 	if err != nil {
 		return err
 	}
-	written, err := manifestActiveFiles(r.base.io, added)
+	written, err := manifestActiveFiles(ctx, r.base.io, added)
 	if err != nil {
 		return err
 	}
@@ -372,13 +372,13 @@ func (r *rewriteManifests) needsValidation() bool           { return false }
 // reading and counting the live entries when a count is absent — V1 manifests
 // don't populate the count fields, so without the fallback the count guard
 // would silently not run on exactly the tables that most need it.
-func manifestActiveFiles(fs iceio.IO, manifests []iceberg.ManifestFile) (int64, error) {
+func manifestActiveFiles(ctx context.Context, fs iceio.IO, manifests []iceberg.ManifestFile) (int64, error) {
 	var total int64
 	for _, m := range manifests {
 		added, existing := m.AddedDataFiles(), m.ExistingDataFiles()
 		if added < 0 || existing < 0 {
 			// discardDeleted drops DELETED entries, leaving added + existing.
-			for _, err := range m.Entries(fs, true) {
+			for _, err := range m.Entries(ctx, fs, true) {
 				if err != nil {
 					return 0, fmt.Errorf("count active files in manifest %s: %w", m.FilePath(), err)
 				}

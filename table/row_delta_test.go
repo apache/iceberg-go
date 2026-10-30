@@ -439,7 +439,7 @@ func TestRowDeltaManifestContents(t *testing.T) {
 	require.NotNil(t, snap)
 
 	fs := iceio.LocalFS{}
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	// Should have separate data and delete manifests
@@ -458,7 +458,7 @@ func TestRowDeltaManifestContents(t *testing.T) {
 
 	// Verify manifest entries have correct content types
 	for _, m := range manifests {
-		for e, err := range m.Entries(fs, true) {
+		for e, err := range m.Entries(t.Context(), fs, true) {
 			require.NoError(t, err)
 			if m.ManifestContent() == iceberg.ManifestContentData {
 				assert.Equal(t, iceberg.EntryContentData, e.DataFile().ContentType())
@@ -671,14 +671,14 @@ func writeDV(t *testing.T, location, name, dataPath string, positions []int64) i
 func snapshotDeleteEntryFiles(t *testing.T, snap *table.Snapshot, fs iceio.IO) (live, removed []iceberg.DataFile) {
 	t.Helper()
 
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	for _, m := range manifests {
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for e, err := range m.Entries(fs, false) {
+		for e, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if e.Status() == iceberg.EntryStatusDELETED {
 				removed = append(removed, e.DataFile())
@@ -903,7 +903,7 @@ func TestRowDeltaDVSupersessionSingleSnapshot(t *testing.T) {
 	// the three surviving rows — ids 1/3/5.
 	assert.Equal(t, []string{dv2.FilePath()}, scanSingleDVTask(t, tbl))
 
-	bm, err := dv.ReadDV(fs, dv2)
+	bm, err := dv.ReadDV(t.Context(), fs, dv2)
 	require.NoError(t, err)
 	var hidden []uint64
 	for pos := range bm.Positions() {
@@ -1441,7 +1441,7 @@ func TestRowDeltaRemoveDeletesSharedPuffin(t *testing.T) {
 			case pathB:
 				assert.Equal(t, dvB.FilePath(), planned.FilePath())
 				assert.Equal(t, pathB, refOf(planned))
-				bm, err := dv.ReadDV(fs, planned)
+				bm, err := dv.ReadDV(t.Context(), fs, planned)
 				require.NoError(t, err)
 				assert.True(t, bm.Contains(0), "B's deleted row must stay hidden")
 				assert.EqualValues(t, 1, bm.Cardinality())
@@ -1678,7 +1678,7 @@ func TestRowDeltaWritesRegisteredNonDefaultSpec(t *testing.T) {
 	require.NotNil(t, snap)
 
 	fs := iceio.LocalFS{}
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 	require.Len(t, manifests, 2)
 
@@ -1686,7 +1686,7 @@ func TestRowDeltaWritesRegisteredNonDefaultSpec(t *testing.T) {
 		assert.Equal(t, int32(spec.ID()), m.PartitionSpecID(),
 			"manifest must declare the spec its entries were written under")
 		entries := 0
-		for e, err := range m.Entries(fs, true) {
+		for e, err := range m.Entries(t.Context(), fs, true) {
 			require.NoError(t, err)
 			assert.Equal(t, int32(spec.ID()), e.DataFile().SpecID())
 			assert.Equal(t, int64(7), e.DataFile().Partition()[fieldID])

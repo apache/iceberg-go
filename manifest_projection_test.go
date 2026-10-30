@@ -312,7 +312,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 					&sequenceNumber, nil, DataFileWithoutColumnStats(full.DataFile())),
 				"repeated projection": ManifestEntryWithoutColumnStats(projected),
 			}
-			for entry, err := range EntriesWithProjection(fs, manifest, false, ManifestEntryProjection{}) {
+			for entry, err := range EntriesWithProjection(t.Context(), fs, manifest, false, ManifestEntryProjection{}) {
 				require.NoError(t, err)
 				projectedEntries["iterator"] = entry
 			}

@@ -90,7 +90,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to build metadata: %w", err)
 		}
-		deletes, err = t.readPlanningDeletes(fs, builtMeta)
+		deletes, err = t.readPlanningDeletes(ctx, fs, builtMeta)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -167,7 +167,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	// DVs only exist from v3, so v2 skips the read.
 	var dvs liveDeletionVectors
 	if meta.formatVersion >= 3 && (len(filesToDelete) > 0 || len(withPartialDeletions) > 0) {
-		dvs, err = t.readLiveDeletionVectors(fs)
+		dvs, err = t.readLiveDeletionVectors(ctx, fs)
 		if err != nil {
 			return nil, err
 		}
@@ -195,7 +195,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		// RowDelta: collect referenced data-file paths, leave out the ones
 		// staged earlier in the transaction, and run validateDataFilesExist
 		// unconditionally (no isolation gating).
-		referenced, err = t.headDataFiles(fs, referenced, nil)
+		referenced, err = t.headDataFiles(ctx, fs, referenced, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -319,7 +319,7 @@ func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, f
 	}
 
 	if filter == nil || filter.Equals(iceberg.AlwaysTrue{}) {
-		for df, err := range s.dataFiles(fs, nil) {
+		for df, err := range s.dataFiles(ctx, fs, nil) {
 			if err != nil {
 				return nil, nil, err
 			}
@@ -399,7 +399,7 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	s := t.planningSnapshot(meta)
 	var manifests []iceberg.ManifestFile
 	if s != nil {
-		manifests, err = s.Manifests(fs)
+		manifests, err = s.Manifests(ctx, fs)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get manifests: %w", err)
 		}
@@ -427,7 +427,7 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 			localDelete := make([]iceberg.DataFile, 0)
 			localRewrite := make([]iceberg.ManifestEntry, 0)
 
-			for entry, err := range manifest.Entries(fs, false) {
+			for entry, err := range manifest.Entries(ctx, fs, false) {
 				if err != nil {
 					return fmt.Errorf("failed to fetch manifest entries: %w", err)
 				}
@@ -504,7 +504,7 @@ type planningDeletes struct {
 //
 // Known limitation (#2160): every live delete manifest of the snapshot is read on each call,
 // with no partition pruning, so a narrow delete or rewrite on a delete-heavy table pays for all of them.
-func (t *Transaction) classifyLiveDeletes(fs io.IO) (classifiedManifestEntries, error) {
+func (t *Transaction) classifyLiveDeletes(ctx context.Context, fs io.IO) (classifiedManifestEntries, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return classifiedManifestEntries{}, err
@@ -514,7 +514,7 @@ func (t *Transaction) classifyLiveDeletes(fs io.IO) (classifiedManifestEntries, 
 	if s := t.planningSnapshot(meta); s != nil {
 		// Skip DELETED entries: a replaced DV stays behind as one, and merging it
 		// into a new DV would bring back deleted rows. See #1372.
-		for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes, true) {
+		for entry, err := range s.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 			if err != nil {
 				return classifiedManifestEntries{}, fmt.Errorf("failed to read delete manifests: %w", err)
 			}
@@ -530,13 +530,13 @@ func (t *Transaction) classifyLiveDeletes(fs io.IO) (classifiedManifestEntries, 
 //
 // Delete manifests are not pruned by the row filter: with filter id=2 the rewrite keeps id=1,
 // so a delete on id=1 must still be applied.
-func (t *Transaction) readPlanningDeletes(fs io.IO, builtMeta Metadata) (planningDeletes, error) {
+func (t *Transaction) readPlanningDeletes(ctx context.Context, fs io.IO, builtMeta Metadata) (planningDeletes, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return planningDeletes{}, err
 	}
 
-	classified, err := t.classifyLiveDeletes(fs)
+	classified, err := t.classifyLiveDeletes(ctx, fs)
 	if err != nil {
 		return planningDeletes{}, err
 	}
@@ -559,8 +559,8 @@ func (t *Transaction) readPlanningDeletes(fs io.IO, builtMeta Metadata) (plannin
 // readLiveDeletionVectors returns the live deletion vectors of the planning snapshot. Merge-on-read uses it
 // because it only drops or merges deletion vectors, so it skips building the position and equality delete
 // indexes and neither pays for them nor fails on them.
-func (t *Transaction) readLiveDeletionVectors(fs io.IO) (liveDeletionVectors, error) {
-	classified, err := t.classifyLiveDeletes(fs)
+func (t *Transaction) readLiveDeletionVectors(ctx context.Context, fs io.IO) (liveDeletionVectors, error) {
+	classified, err := t.classifyLiveDeletes(ctx, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -908,7 +908,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		if !ok {
 			continue
 		}
-		bitmap, err := dv.ReadDV(fs, entry.DataFile())
+		bitmap, err := dv.ReadDV(ctx, fs, entry.DataFile())
 		if err != nil {
 			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", df.FilePath(), err)
 		}

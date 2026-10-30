@@ -191,7 +191,7 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		manifests, err := snapshot.Manifests(fs)
+		manifests, err := snapshot.Manifests(ctx, fs)
 		if err != nil {
 			return nil, err
 		}

@@ -48,7 +48,7 @@ func CollectDeadPositionDeletes(
 		return nil, nil
 	}
 
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(ctx, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for e, err := range m.Entries(fs, true) {
+		for e, err := range m.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, false, err
 			}
@@ -133,7 +133,7 @@ func minSurvivorSeqByPartition(ctx context.Context, fs iceio.IO, manifests []ice
 		if m.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		for e, err := range m.Entries(fs, true) {
+		for e, err := range m.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, err
 			}

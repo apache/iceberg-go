@@ -307,7 +307,7 @@ func readSnapshotManifestSet(
 	if err != nil {
 		return snapshotManifestSet{}, fmt.Errorf("get file IO: %w", err)
 	}
-	manifests, err := snapshot.Manifests(fio)
+	manifests, err := snapshot.Manifests(ctx, fio)
 	if err != nil {
 		return snapshotManifestSet{}, err
 	}

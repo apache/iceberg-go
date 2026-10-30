@@ -371,31 +371,33 @@ func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.Struct
 	return newPartitionRecord(dataFilePartition(dataFile), partitionType)
 }
 
-func openManifest(io io.IO, manifest iceberg.ManifestFile,
+func openManifest(ctx context.Context, io io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 ) ([]iceberg.ManifestEntry, error) {
-	return openManifestWithProjection(io, manifest, partitionFilter, metricsEval, nil, false)
+	return openManifestWithProjection(ctx, io, manifest, partitionFilter, metricsEval, nil, false)
 }
 
 func openManifestWithProjection(
+	ctx context.Context,
 	io io.IO,
 	manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 	projection *iceberg.ManifestEntryProjection,
 	dropColumnStats bool,
 ) ([]iceberg.ManifestEntry, error) {
-	return openManifestWithReadOptions(
+	return openManifestWithReadOptions(ctx,
 		io, manifest, partitionFilter, metricsEval, projection, dropColumnStats, true, false)
 }
 
-func openManifestWithOptions(io io.IO, manifest iceberg.ManifestFile,
+func openManifestWithOptions(ctx context.Context, io io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error), discardDeleted, discardExisting bool,
 ) ([]iceberg.ManifestEntry, error) {
-	return openManifestWithReadOptions(
+	return openManifestWithReadOptions(ctx,
 		io, manifest, partitionFilter, metricsEval, nil, false, discardDeleted, discardExisting)
 }
 
 func openManifestWithReadOptions(
+	ctx context.Context,
 	io io.IO,
 	manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
@@ -418,7 +420,7 @@ func openManifestWithReadOptions(
 		}
 	}
 	out := make([]iceberg.ManifestEntry, 0, capacity)
-	if err := streamManifestWithReadOptions(
+	if err := streamManifestWithReadOptions(ctx,
 		io, manifest, partitionFilter, metricsEval, projection, dropColumnStats,
 		discardDeleted, discardExisting, func(entry iceberg.ManifestEntry) error {
 			out = append(out, entry)
@@ -435,35 +437,35 @@ func openManifestWithReadOptions(
 // metrics filters before passing each match to visit. It deliberately does not
 // retain the entries, so callers can choose the smallest representation needed
 // for the next planning step.
-func streamManifest(manifestIO io.IO, manifest iceberg.ManifestFile,
+func streamManifest(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 	projection *iceberg.ManifestEntryProjection,
 	dropColumnStats bool,
 	visit func(iceberg.ManifestEntry) error,
 ) error {
-	return streamManifestWithReadOptions(
+	return streamManifestWithReadOptions(ctx,
 		manifestIO, manifest, partitionFilter, metricsEval, projection, dropColumnStats,
 		true, false, visit)
 }
 
-func streamManifestWithOptions(manifestIO io.IO, manifest iceberg.ManifestFile,
+func streamManifestWithOptions(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error), discardDeleted, discardExisting bool,
 	visit func(iceberg.ManifestEntry) error,
 ) error {
-	return streamManifestWithReadOptions(
+	return streamManifestWithReadOptions(ctx,
 		manifestIO, manifest, partitionFilter, metricsEval, nil, false,
 		discardDeleted, discardExisting, visit)
 }
 
-func streamManifestWithReadOptions(manifestIO io.IO, manifest iceberg.ManifestFile,
+func streamManifestWithReadOptions(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 	projection *iceberg.ManifestEntryProjection,
 	dropColumnStats, discardDeleted, discardExisting bool,
 	visit func(iceberg.ManifestEntry) error,
 ) error {
-	entries := manifest.Entries(manifestIO, discardDeleted)
+	entries := manifest.Entries(ctx, manifestIO, discardDeleted)
 	if projection != nil {
-		entries = iceberg.EntriesWithProjection(manifestIO, manifest, discardDeleted, *projection)
+		entries = iceberg.EntriesWithProjection(ctx, manifestIO, manifest, discardDeleted, *projection)
 	}
 	for entry, err := range entries {
 		if err != nil {
@@ -1310,7 +1312,7 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 				// Keep pruning stats until equality and positional deletes are indexed.
 				projection = &iceberg.ManifestEntryProjection{IncludePruningStats: true}
 			}
-			manifestEntries, err := openManifestWithReadOptions(
+			manifestEntries, err := openManifestWithReadOptions(ctx,
 				fs, mf, partEval, metricsEval, projection, false, discardDeleted, discardExisting)
 			if err != nil {
 				return err
@@ -1480,7 +1482,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 				stripTaskColumnStats = p.IncludePruningStats && !dropColumnStats
 				projection = &p
 			}
-			err = streamManifest(fs, manifest, partEval, metricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
+			err = streamManifest(ctx, fs, manifest, partEval, metricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
 				dataFile := entry.DataFile()
 				if dataFile.ContentType() != iceberg.EntryContentData {
 					return fmt.Errorf("%w: data manifest contains %s file %q",

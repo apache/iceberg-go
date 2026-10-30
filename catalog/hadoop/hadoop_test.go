@@ -2186,7 +2186,7 @@ func (s *HadoopCatalogTestSuite) TestLoadTableEnablesCatalogManifestContentCache
 
 	fs, err := loaded.FS(ctx)
 	s.Require().NoError(err)
-	manifests, err := loaded.CurrentSnapshot().Manifests(fs)
+	manifests, err := loaded.CurrentSnapshot().Manifests(ctx, fs)
 	s.Require().NoError(err)
 	s.Require().Len(manifests, 1)
 

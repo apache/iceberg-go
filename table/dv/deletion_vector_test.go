@@ -32,6 +32,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/assert"
@@ -558,7 +559,7 @@ func TestReadDV(t *testing.T) {
 	path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
 
 	offset, size := meta.Offset, meta.Length
-	bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+	bm, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(5), bm.Cardinality())
@@ -595,7 +596,7 @@ func TestReadDVs(t *testing.T) {
 		files[i] = file
 	}
 
-	bitmaps, err := ReadDVs(iceio.LocalFS{}, files)
+	bitmaps, err := ReadDVs(t.Context(), iceio.LocalFS{}, files)
 	require.NoError(t, err)
 	require.Len(t, bitmaps, 2)
 	for _, bitmap := range bitmaps {
@@ -605,7 +606,7 @@ func TestReadDVs(t *testing.T) {
 	}
 
 	t.Run("empty batch", func(t *testing.T) {
-		bitmaps, err := ReadDVs(iceio.LocalFS{}, nil)
+		bitmaps, err := ReadDVs(t.Context(), iceio.LocalFS{}, nil)
 		require.NoError(t, err)
 		assert.Nil(t, bitmaps)
 	})
@@ -615,7 +616,7 @@ func TestReadDVs(t *testing.T) {
 		second := *files[1].(*mockDVFile)
 		second.path = filepath.Join(t.TempDir(), "other.puffin")
 
-		_, err := ReadDVs(iceio.LocalFS{}, []iceberg.DataFile{first, &second})
+		_, err := ReadDVs(t.Context(), iceio.LocalFS{}, []iceberg.DataFile{first, &second})
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		assert.ErrorContains(t, err, "uses Puffin file")
 	})
@@ -625,7 +626,7 @@ func TestReadDVs(t *testing.T) {
 		second := *files[1].(*mockDVFile)
 		second.referencedDataFile = new("s3://bucket/data/wrong.parquet")
 
-		_, err := ReadDVs(iceio.LocalFS{}, []iceberg.DataFile{first, &second})
+		_, err := ReadDVs(t.Context(), iceio.LocalFS{}, []iceberg.DataFile{first, &second})
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
 		assert.ErrorContains(t, err, "manifest referenced_data_file")
 	})
@@ -670,7 +671,7 @@ func TestReadDVsCoalescesAdjacentBlobReads(t *testing.T) {
 	files[1].(*mockDVFile).referencedDataFile = new("data-001.parquet")
 
 	fs := &countingReadIO{base: iceio.LocalFS{}}
-	bitmaps, err := ReadDVs(fs, files)
+	bitmaps, err := ReadDVs(t.Context(), fs, files)
 	require.NoError(t, err)
 	require.Len(t, bitmaps, 2)
 	assert.True(t, bitmaps[0].Contains(2))
@@ -713,7 +714,7 @@ func TestReadDVsDoesNotCoalesceRangesOverSizeLimit(t *testing.T) {
 	}
 
 	fs := &countingReadIO{base: iceio.LocalFS{}}
-	bitmaps, err := ReadDVs(fs, files)
+	bitmaps, err := ReadDVs(t.Context(), fs, files)
 	require.NoError(t, err)
 	require.Len(t, bitmaps, 2)
 	assert.Equal(t, cardinality, bitmaps[0].Cardinality())
@@ -761,7 +762,7 @@ func TestReadDVsDoesNotCoalesceBlobsWithGaps(t *testing.T) {
 	}
 
 	fs := &countingReadIO{base: iceio.LocalFS{}}
-	bitmaps, err := ReadDVs(fs, files)
+	bitmaps, err := ReadDVs(t.Context(), fs, files)
 	require.NoError(t, err)
 	require.Len(t, bitmaps, 2)
 	assert.True(t, bitmaps[0].Contains(1))
@@ -797,7 +798,7 @@ func largeDVData(t *testing.T) ([]byte, int64) {
 // Condition: DataFile reports Parquet format instead of Puffin.
 // Assertion: returns an error containing "expected PUFFIN format".
 func TestReadDVWrongFormat(t *testing.T) {
-	_, err := ReadDV(iceio.LocalFS{}, &mockDVFile{
+	_, err := ReadDV(t.Context(), iceio.LocalFS{}, &mockDVFile{
 		path:   "s3://bucket/data/pos-del.parquet",
 		format: iceberg.ParquetFile,
 	})
@@ -811,14 +812,14 @@ func TestReadDVMissingContentMetadata(t *testing.T) {
 	t.Run("nil offset", func(t *testing.T) {
 		size := int64(50)
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, nil, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, nil, &size))
 		assert.ErrorContains(t, err, "missing ContentOffset/ContentSizeInBytes")
 	})
 
 	t.Run("nil size", func(t *testing.T) {
 		offset := int64(4)
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, &offset, nil))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, &offset, nil))
 		assert.ErrorContains(t, err, "missing ContentOffset/ContentSizeInBytes")
 	})
 }
@@ -839,7 +840,7 @@ func TestReadDVMissingReferencedDataFile(t *testing.T) {
 			dvFile := newDVTestFile("missing.puffin", 5, &offset, &size)
 			dvFile.referencedDataFile = tt.referenced
 
-			_, err := ReadDV(iceio.LocalFS{}, dvFile)
+			_, err := ReadDV(t.Context(), iceio.LocalFS{}, dvFile)
 			assert.ErrorContains(t, err, "missing or empty referenced-data-file property")
 		})
 	}
@@ -852,7 +853,7 @@ func TestReadDVInvalidBlobSize(t *testing.T) {
 	offset := int64(4)
 	negSize := int64(-1)
 
-	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, &offset, &negSize))
+	_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, &offset, &negSize))
 	assert.ErrorContains(t, err, "out of valid range")
 }
 
@@ -862,7 +863,7 @@ func TestReadDVInvalidBlobSize(t *testing.T) {
 func TestReadDVOpenError(t *testing.T) {
 	offset, size := int64(4), int64(16)
 
-	_, err := ReadDV(failingOpenFS{err: errors.New("boom")}, newDVTestFile("missing.puffin", 0, &offset, &size))
+	_, err := ReadDV(t.Context(), failingOpenFS{err: errors.New("boom")}, newDVTestFile("missing.puffin", 0, &offset, &size))
 	assert.ErrorContains(t, err, "open DV file missing.puffin")
 	assert.ErrorContains(t, err, "boom")
 }
@@ -876,7 +877,7 @@ func TestReadDVInvalidPuffin(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("not a puffin file"), 0o644))
 
 	offset, size := int64(4), int64(16)
-	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
+	_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
 	require.ErrorIs(t, err, ErrInvalidDeletionVector)
 	assert.ErrorContains(t, err, "not a Puffin container")
 }
@@ -905,7 +906,7 @@ func TestReadDVTruncatedPuffinDoesNotFallBack(t *testing.T) {
 			path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".puffin")
 			require.NoError(t, os.WriteFile(path, raw, 0o644))
 			offset, size := meta.Offset, meta.Length
-			_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+			_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 			require.Error(t, err)
 			assert.False(t, errors.Is(err, puffin.ErrNotPuffinFile), "damaged Puffin file must not be treated as bare: %v", err)
 			assert.ErrorContains(t, err, "create puffin reader")
@@ -941,7 +942,7 @@ func TestReadDVBareBlobWithoutPuffinContainer(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, raw, 0o644))
 
 	firstOffset, firstSize := int64(1), int64(len(firstData))
-	bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 2, &firstOffset, &firstSize))
+	bm, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 2, &firstOffset, &firstSize))
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), bm.Cardinality())
 	assert.True(t, bm.Contains(1))
@@ -952,21 +953,21 @@ func TestReadDVBareBlobWithoutPuffinContainer(t *testing.T) {
 		newDVTestFile(path, 2, &firstOffset, &firstSize),
 		newDVTestFile(path, 1, &secondOffset, &secondSize),
 	}
-	bitmaps, err := ReadDVs(iceio.LocalFS{}, files)
+	bitmaps, err := ReadDVs(t.Context(), iceio.LocalFS{}, files)
 	require.NoError(t, err)
 	require.Len(t, bitmaps, 2)
 	assert.Equal(t, int64(2), bitmaps[0].Cardinality())
 	assert.True(t, bitmaps[1].Contains(7))
 
 	t.Run("cardinality still validated against record_count", func(t *testing.T) {
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 3, &firstOffset, &firstSize))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 3, &firstOffset, &firstSize))
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
 		assert.ErrorContains(t, err, "cardinality mismatch")
 	})
 
 	t.Run("range beyond file", func(t *testing.T) {
 		badOffset, badSize := int64(1), int64(len(raw)+8)
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 2, &badOffset, &badSize))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 2, &badOffset, &badSize))
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
 		assert.ErrorContains(t, err, "direct read")
 	})
@@ -978,7 +979,7 @@ func TestReadDVBareBlobWithoutPuffinContainer(t *testing.T) {
 		}
 		badPath := filepath.Join(dir, "deletion_vector_crc.bin")
 		require.NoError(t, os.WriteFile(badPath, bad, 0o644))
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(badPath, 2, &firstOffset, &firstSize))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(badPath, 2, &firstOffset, &firstSize))
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
 		assert.ErrorContains(t, err, "blob at offset")
 		assert.ErrorContains(t, err, "CRC mismatch")
@@ -989,7 +990,7 @@ func TestReadDVBareBlobWithoutPuffinContainer(t *testing.T) {
 			newDVTestFile(path, 1, &secondOffset, &secondSize),
 			newDVTestFile(path, 2, &firstOffset, &firstSize),
 		}
-		bitmaps, err := ReadDVs(iceio.LocalFS{}, reversed)
+		bitmaps, err := ReadDVs(t.Context(), iceio.LocalFS{}, reversed)
 		require.NoError(t, err)
 		require.Len(t, bitmaps, 2)
 		assert.True(t, bitmaps[0].Contains(7))
@@ -1012,7 +1013,7 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 		})
 		offset, size := meta.Offset, meta.Length
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "manifest referenced_data_file")
 		assert.ErrorContains(t, err, "data-001.parquet")
@@ -1039,7 +1040,7 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 		)
 		offset, size := metas[1].Offset, metas[1].Length
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "manifest referenced_data_file")
 		assert.ErrorContains(t, err, "data-001.parquet")
@@ -1052,7 +1053,7 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 			puffin.BlobTypeDeletionVector, map[string]string{dvCardinalityProperty: "5"})
 		offset, size := meta.Offset, meta.Length
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		assert.ErrorContains(t, err, "missing or empty referenced-data-file property")
 	})
 
@@ -1065,7 +1066,7 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 			})
 		offset, size := meta.Offset, meta.Length
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		assert.ErrorContains(t, err, "missing or empty referenced-data-file property")
 	})
 
@@ -1078,7 +1079,7 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 			})
 		offset, size := meta.Offset, meta.Length
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		assert.ErrorContains(t, err, `has type "test-blob", expected "deletion-vector-v1"`)
 	})
 
@@ -1090,7 +1091,7 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 		})
 		offset, size := meta.Offset, meta.Length
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
 		assert.ErrorContains(t, err, "manifest referenced_data_file")
 		assert.ErrorContains(t, err, "s3://bucket/data/data-001.parquet")
@@ -1106,7 +1107,7 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 			}, "zstd")
 		offset, size := meta.Offset, meta.Length
 
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
 		assert.ErrorContains(t, err, "unsupported compression codec")
 	})
@@ -1122,7 +1123,7 @@ func TestReadDVInvalidBlobRange(t *testing.T) {
 	path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
 
 	offset, size := int64(0), meta.Length
-	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+	_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 	assert.ErrorContains(t, err, "no blob in puffin footer at offset 0")
 }
 
@@ -1141,7 +1142,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 			dvCardinalityProperty:        "5",
 		})
 		offset, size := meta.Offset, meta.Length
-		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		bm, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.NoError(t, err)
 		assert.Equal(t, int64(5), bm.Cardinality())
 	})
@@ -1157,7 +1158,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 			dvCardinalityProperty:        "0",
 		})
 		offset, size := meta.Offset, meta.Length
-		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
+		bm, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), bm.Cardinality())
 	})
@@ -1170,7 +1171,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 			dvCardinalityProperty: "99",
 		})
 		offset, size := meta.Offset, meta.Length
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.Error(t, err)
 		// Cross-check fires before DeserializeDV: the two metadata sources
 		// disagree, so we never reach the bitmap "cardinality mismatch" path.
@@ -1188,7 +1189,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 			dvCardinalityProperty:        "5",
 		})
 		offset, size := meta.Offset, meta.Length
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "manifest record_count 0 disagrees with puffin cardinality property 5")
 	})
@@ -1203,7 +1204,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 			dvCardinalityProperty:        "99",
 		})
 		offset, size := meta.Offset, meta.Length
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 99, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 99, &offset, &size))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cardinality mismatch")
 	})
@@ -1216,7 +1217,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writeRawPuffinWithDVBlobNoCardinality(t, dir, dvBlobBytes)
 		offset, size := meta.Offset, meta.Length
-		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		bm, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.NoError(t, err)
 		assert.Equal(t, int64(5), bm.Cardinality())
 	})
@@ -1229,7 +1230,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writeRawPuffinWithDVBlobNoCardinality(t, dir, dvBlobBytes)
 		offset, size := meta.Offset, meta.Length
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 3, &offset, &size))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 3, &offset, &size))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cardinality mismatch")
 	})
@@ -1257,7 +1258,7 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		// region (no "extends into footer" error) while guaranteeing no
 		// footer blob starts at that exact offset.
 		wrongOffset, smallSize := meta.Offset+1, int64(8)
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &wrongOffset, &smallSize))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &wrongOffset, &smallSize))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no blob in puffin footer")
 	})
@@ -1271,8 +1272,37 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
 		offset := meta.Offset
 		wrongSize := meta.Length - 1
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &wrongSize))
+		_, err := ReadDV(t.Context(), iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &wrongSize))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "manifest says")
 	})
+}
+
+func TestReadDVPassesContextToOpen(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "caller")
+	files := []iceberg.DataFile{
+		newDVTestFile("s3://bucket/dv.puffin", 1, new(int64(4)), new(int64(16))),
+		newDVTestFile("s3://bucket/dv.puffin", 1, new(int64(20)), new(int64(16))),
+	}
+
+	for name, read := range map[string]func(iceio.IO) error{
+		"ReadDV": func(fs iceio.IO) error {
+			_, err := ReadDV(ctx, fs, files[0])
+
+			return err
+		},
+		"ReadDVs": func(fs iceio.IO) error {
+			_, err := ReadDVs(ctx, fs, files)
+
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := &iomock.ContextProbe{}
+			require.ErrorIs(t, read(probe), iomock.ErrContextProbe)
+			require.NotNil(t, probe.Ctx)
+			require.Equal(t, "caller", probe.Ctx.Value(key{}))
+		})
+	}
 }

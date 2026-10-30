@@ -1030,7 +1030,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	}
 
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(fs, nil) {
+	for df, err := range s.dataFiles(ctx, fs, nil) {
 		if err != nil {
 			return err
 		}
@@ -1052,7 +1052,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	// DVs only exist from v3, so v2 skips the read.
 	var dvs liveDeletionVectors
 	if meta.formatVersion >= 3 && len(markedForDeletion) > 0 {
-		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+		if dvs, err = t.readLiveDeletionVectors(ctx, fs); err != nil {
 			return err
 		}
 	}
@@ -1661,7 +1661,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	if !cfg.skipDuplicateCheck {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
-			for df, err := range s.dataFiles(fs, nil) {
+			for df, err := range s.dataFiles(ctx, fs, nil) {
 				if err != nil {
 					return err
 				}
@@ -1769,7 +1769,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(fs, nil) {
+	for df, err := range s.dataFiles(ctx, fs, nil) {
 		if err != nil {
 			return err
 		}
@@ -1791,7 +1791,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	// DVs only exist from v3, so v2 skips the read.
 	var dvs liveDeletionVectors
 	if meta.formatVersion >= 3 {
-		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+		if dvs, err = t.readLiveDeletionVectors(ctx, fs); err != nil {
 			return err
 		}
 	}
@@ -1981,7 +1981,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
 	liveDataFiles := make(map[string]rewriteFileState)
 	survivingPositionDeletes := make([]rewriteFileState, 0)
-	for entry, err := range s.entries(fs, -1, false) {
+	for entry, err := range s.entries(ctx, fs, -1, false) {
 		if err != nil {
 			return err
 		}
@@ -2177,7 +2177,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			referencedDataFilePaths = append(referencedDataFilePaths, ref)
 		}
 		slices.Sort(referencedDataFilePaths)
-		if referencedDataFilePaths, err = t.headDataFiles(fs, referencedDataFilePaths, nil); err != nil {
+		if referencedDataFilePaths, err = t.headDataFiles(ctx, fs, referencedDataFilePaths, nil); err != nil {
 			return err
 		}
 	}
@@ -2293,7 +2293,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 	if !ignoreDuplicates {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
-			for df, err := range s.dataFiles(fs, nil) {
+			for df, err := range s.dataFiles(ctx, fs, nil) {
 				if err != nil {
 					return err
 				}

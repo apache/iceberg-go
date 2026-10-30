@@ -84,14 +84,14 @@ func TestManifestActiveFilesCountsEntriesWhenHeaderCountsAbsent(t *testing.T) {
 		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).Build()
 	require.EqualValues(t, -1, unknown.AddedDataFiles(), "precondition: counts must read as unknown")
 
-	got, err := manifestActiveFiles(fs, []iceberg.ManifestFile{unknown})
+	got, err := manifestActiveFiles(t.Context(), fs, []iceberg.ManifestFile{unknown})
 	require.NoError(t, err)
 	require.EqualValues(t, n, got, "fallback must count the live entries, not skip the manifest")
 
 	// And the header-count path still wins when the counts are present.
 	known := iceberg.NewManifestBuilder(2, path, length, 0, 1).
 		AddedFiles(n).ExistingFiles(0).DeletedFiles(0).Build()
-	got, err = manifestActiveFiles(fs, []iceberg.ManifestFile{known})
+	got, err = manifestActiveFiles(t.Context(), fs, []iceberg.ManifestFile{known})
 	require.NoError(t, err)
 	require.EqualValues(t, n, got)
 }

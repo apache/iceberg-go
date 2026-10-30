@@ -291,7 +291,7 @@ func (i InspectTable) foldInspectPartitionManifest(
 	}
 
 	entryIndex := 0
-	for entry, err := range manifest.Entries(fs, true) {
+	for entry, err := range manifest.Entries(ctx, fs, true) {
 		if err != nil {
 			return err
 		}

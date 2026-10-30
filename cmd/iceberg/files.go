@@ -52,7 +52,7 @@ func runFiles(ctx context.Context, output Output, cat catalog.Catalog, cmd *File
 	}
 
 	if !planned {
-		output.Files(tbl, cmd.History)
+		output.Files(ctx, tbl, cmd.History)
 
 		return
 	}

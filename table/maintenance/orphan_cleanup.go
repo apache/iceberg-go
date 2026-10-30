@@ -548,7 +548,7 @@ func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConc
 				return err
 			}
 
-			manifestFiles, err := snapshots[i].Manifests(fs)
+			manifestFiles, err := snapshots[i].Manifests(ctx, fs)
 			if err != nil {
 				return fmt.Errorf("failed to read manifests for snapshot %d: %w", snapshots[i].SnapshotID, err)
 			}
@@ -601,7 +601,7 @@ func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConc
 			// against orphan cleanup once the snapshot that
 			// originally held it live has been expired.
 			// This matches iceberg-java and pyiceberg behavior.
-			for entry, err := range m.Entries(fs, discardDeleted) {
+			for entry, err := range m.Entries(ctx, fs, discardDeleted) {
 				if err != nil {
 					return fmt.Errorf("manifest %s: %w", m.FilePath(), err)
 				}

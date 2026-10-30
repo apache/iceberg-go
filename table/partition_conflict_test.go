@@ -169,7 +169,7 @@ func buildPartitionedContext(
 	current, err := builder.Build()
 	require.NoError(t, err)
 
-	ctx, err := newConflictContext(writerBaseMeta, current, MainBranch, iceio.LocalFS{}, true)
+	ctx, err := newConflictContext(t.Context(), writerBaseMeta, current, MainBranch, iceio.LocalFS{}, true)
 	require.NoError(t, err)
 
 	return ctx
@@ -293,7 +293,7 @@ func TestValidateNoConflictingDataFilesInPartitions_SnapshotIsolationIsNoOp(t *t
 	)
 	head := int64(1)
 	meta := partitionedConflictMeta(t, schema, 1, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	spec := meta.PartitionSpec()
@@ -317,7 +317,7 @@ func TestValidateNoConflictingDataFilesInPartitions_EmptyInputsNoOp(t *testing.T
 	)
 	head := int64(1)
 	meta := partitionedConflictMeta(t, schema, 1, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	require.NoError(t, validateNoConflictingDataFilesInPartitions(ctx, nil, IsolationSerializable))

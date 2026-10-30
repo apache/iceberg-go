@@ -82,7 +82,7 @@ func collectDeadEqualityDeletes(
 		return nil, nil
 	}
 
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(ctx, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func collectDeadEqualityDeletes(
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for e, err := range m.Entries(fs, true) {
+		for e, err := range m.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, err
 			}
@@ -119,7 +119,7 @@ func collectDeadEqualityDeletes(
 		if m.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		for e, err := range m.Entries(fs, true) {
+		for e, err := range m.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, err
 			}

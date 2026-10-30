@@ -249,7 +249,7 @@ func (s *OCCScenarioTestSuite) TestManifestListInheritedAfterConflict() {
 	s.Require().NotNil(finalSnap, "committed table must have a current snapshot")
 
 	fio := iceio.LocalFS{}
-	manifests, err := finalSnap.Manifests(fio)
+	manifests, err := finalSnap.Manifests(s.T().Context(), fio)
 	s.Require().NoError(err, "must be able to read manifest list from disk")
 	s.Require().Len(manifests, 2,
 		"expected 2 manifests (Writer A + Writer B); got %d — "+
@@ -350,7 +350,7 @@ func (s *OCCScenarioTestSuite) TestV3RowLineageCorrectAfterOCCRetry() {
 
 	// Step 4: Validate manifest-level first_row_id is persisted correctly.
 	fio := iceio.LocalFS{}
-	manifests, err := finalSnap.Manifests(fio)
+	manifests, err := finalSnap.Manifests(s.T().Context(), fio)
 	s.Require().NoError(err)
 	s.Require().Len(manifests, 2,
 		"expected 2 manifests (Writer A + inherited Writer B)")
@@ -447,7 +447,7 @@ func (s *OCCScenarioTestSuite) TestV3MergeAppendRowLineageAfterOCCRetry() {
 
 	// Step 4: All data manifests in the final snapshot must have first_row_id set.
 	fio := iceio.LocalFS{}
-	manifests, err := finalSnap.Manifests(fio)
+	manifests, err := finalSnap.Manifests(s.T().Context(), fio)
 	s.Require().NoError(err)
 	for i, mf := range manifests {
 		if mf.ManifestContent() == iceberg.ManifestContentData {
@@ -655,7 +655,7 @@ func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterTwoConflicts()
 // referenced by snap's manifest list.
 func (s *OCCScenarioTestSuite) liveDataFilePaths(snap *table.Snapshot) []string {
 	fio := iceio.LocalFS{}
-	manifests, err := snap.Manifests(fio)
+	manifests, err := snap.Manifests(s.T().Context(), fio)
 	s.Require().NoError(err)
 
 	var paths []string
@@ -663,7 +663,7 @@ func (s *OCCScenarioTestSuite) liveDataFilePaths(snap *table.Snapshot) []string 
 		if mf.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		for e, err := range mf.Entries(fio, false) {
+		for e, err := range mf.Entries(s.T().Context(), fio, false) {
 			s.Require().NoError(err)
 			if e.Status() == iceberg.EntryStatusDELETED {
 				continue

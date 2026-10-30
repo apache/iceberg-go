@@ -70,7 +70,7 @@ func TestOpenManifestWithProjectionDropsStatsAfterFiltering(t *testing.T) {
 	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()))
 
 	projection := iceberg.ManifestEntryProjection{IncludePruningStats: true}
-	entries, err := openManifestWithProjection(
+	entries, err := openManifestWithProjection(t.Context(),
 		fs,
 		manifest,
 		func(file iceberg.DataFile) (bool, error) {

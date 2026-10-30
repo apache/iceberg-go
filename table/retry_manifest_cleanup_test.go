@@ -205,11 +205,11 @@ func (f retryCleanupFixture) assertOnlyCommittedFilesAdded(t *testing.T, committ
 		}
 		added++
 		want[s.ManifestList] = struct{}{}
-		manifests, err := s.Manifests(f.wfs)
+		manifests, err := s.Manifests(t.Context(), f.wfs)
 		require.NoError(t, err, "committed manifest list %s must be readable", s.ManifestList)
 		for _, m := range manifests {
 			want[m.FilePath()] = struct{}{}
-			for _, err := range m.Entries(f.wfs, false) {
+			for _, err := range m.Entries(t.Context(), f.wfs, false) {
 				require.NoError(t, err, "committed manifest %s must be readable", m.FilePath())
 			}
 		}
@@ -223,7 +223,7 @@ func headManifests(t *testing.T, tbl *Table, fs *memIO) (*Snapshot, []iceberg.Ma
 	t.Helper()
 	head := tbl.CurrentSnapshot()
 	require.NotNil(t, head)
-	manifests, err := head.Manifests(fs)
+	manifests, err := head.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	return head, manifests
@@ -423,7 +423,7 @@ func TestChainedSnapshotsKeepEveryCommittedManifest(t *testing.T) {
 	require.NotNil(t, head.ParentSnapshotID)
 	first := committed.Metadata().SnapshotByID(*head.ParentSnapshotID)
 	require.NotNil(t, first)
-	firstManifests, err := first.Manifests(f.wfs)
+	firstManifests, err := first.Manifests(t.Context(), f.wfs)
 	require.NoError(t, err)
 	var firstAdded int
 	for _, m := range firstManifests {

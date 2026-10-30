@@ -208,7 +208,7 @@ func BenchmarkOpenManifestPartitionRejectsMostEntries(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		matched, err := openManifest(fs, manifest, partitionFilter, metricsEval)
+		matched, err := openManifest(b.Context(), fs, manifest, partitionFilter, metricsEval)
 		if err != nil {
 			b.Fatal(err)
 		}

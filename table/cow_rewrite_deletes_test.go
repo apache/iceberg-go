@@ -439,7 +439,7 @@ func liveDataRecordCount(t *testing.T, tbl *table.Table) int64 {
 	require.NoError(t, err)
 	snapshot := tbl.CurrentSnapshot()
 	require.NotNil(t, snapshot)
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	var total int64
@@ -447,7 +447,7 @@ func liveDataRecordCount(t *testing.T, tbl *table.Table) int64 {
 		if m.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		for entry, err := range m.Entries(fs, true) {
+		for entry, err := range m.Entries(t.Context(), fs, true) {
 			require.NoError(t, err)
 			total += entry.DataFile().Count()
 		}
