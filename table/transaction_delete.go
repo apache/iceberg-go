@@ -691,11 +691,8 @@ func (isNotTrueVisitor) VisitUnbound(pred iceberg.UnboundPredicate) truthExprs {
 		negated = iceberg.NewOr(negated, iceberg.IsNaN(pred.Term()))
 	}
 
-	// Any other predicate is NULL when its term is NULL. Guard In and NotIn
-	// too: binding turns a set that ends up with one value into Equal or
-	// NotEqual, which are NULL for a NULL term. A scan with a multi-valued
-	// NotIn still matches NULL rows, see
-	// https://github.com/apache/iceberg-go/issues/2132.
+	// Any other predicate is NULL when its term is NULL, In and NotIn
+	// included, as the row filter evaluates them.
 	isNull := iceberg.IsNull(pred.Term())
 
 	return truthExprs{
