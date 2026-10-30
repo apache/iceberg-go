@@ -313,7 +313,7 @@ schema, batches, err := tbl.NewIncrementalChangelogScan(
 ).FromSnapshotExclusive(startSnapshotID).ToArrowRecords(ctx)
 ```
 
-`FromSnapshotInclusive`, `FromSnapshotExclusive`, and `ToSnapshot` bound the snapshot range. Projection, row filters, and limits apply while the rows are read.
+`FromSnapshotInclusive`, `FromSnapshotExclusive`, and `ToSnapshot` bound the snapshot range. Projection, row filters, and limits apply while the rows are read. If the start snapshot has been expired, changes in expired snapshots before the oldest retained one are not reported. Each snapshot that adds deletes is planned against every live data file, narrowed only by the partition filter, so the cost follows the table size rather than the size of the snapshot range.
 
 Each batch is the scan projection followed by three columns:
 

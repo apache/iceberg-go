@@ -170,6 +170,86 @@ func TestIncrementalChangelogReadReleasesCheckedAllocator(t *testing.T) {
 	t.Run("early break", func(t *testing.T) { read(t, true) })
 }
 
+func TestIncrementalChangelogReadReleasesCheckedAllocatorForDeletes(t *testing.T) {
+	ctx := t.Context()
+	for _, tt := range []struct {
+		name    string
+		version int
+	}{
+		{name: "position delete", version: 2},
+		{name: "deletion vector", version: 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := appendChangelogRows(t, ctx, newChangelogMORTable(t, tt.version))
+			tbl = deleteChangelogID(t, ctx, tbl, 2)
+			arrowSchema := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+				{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+			}, nil)
+			extra, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+				`[{"id": 4, "data": "d"}]`,
+			})
+			require.NoError(t, err)
+			t.Cleanup(extra.Release)
+			tbl, err = tbl.Append(ctx, array.NewTableReader(extra, -1), nil)
+			require.NoError(t, err)
+
+			read := func(t *testing.T, stopEarly bool) {
+				t.Helper()
+
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				readCtx := compute.WithAllocator(ctx, mem)
+				defer mem.AssertSize(t, 0)
+
+				_, records, err := tbl.NewIncrementalChangelogScan().ToArrowRecords(readCtx)
+				require.NoError(t, err)
+				var sawDelete bool
+				for rec, err := range records {
+					require.NoError(t, err)
+					ops := rec.Column(rec.Schema().FieldIndices(table.ChangelogChangeTypeColumn)[0]).(*array.String)
+					deleteBatch := rec.NumRows() > 0 && ops.Value(0) == string(table.ChangelogOpDelete)
+					rec.Release()
+					if deleteBatch {
+						sawDelete = true
+						if stopEarly {
+							break
+						}
+					}
+				}
+				require.True(t, sawDelete)
+			}
+
+			t.Run("full drain", func(t *testing.T) { read(t, false) })
+			t.Run("early break", func(t *testing.T) { read(t, true) })
+		})
+	}
+}
+
+func TestIncrementalChangelogReadExpiredParentEmitsOnlyInRangeDelete(t *testing.T) {
+	ctx := t.Context()
+	for _, version := range []int{2, 3} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			tbl := appendChangelogRows(t, ctx, newChangelogMORTable(t, version))
+			tbl = deleteChangelogID(t, ctx, tbl, 1)
+			firstDelete := tbl.CurrentSnapshot().SnapshotID
+			tbl = deleteChangelogID(t, ctx, tbl, 2)
+
+			builder, err := table.MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+			require.NoError(t, err)
+			require.NoError(t, builder.RemoveSnapshots([]int64{firstDelete}, false))
+			meta, err := builder.Build()
+			require.NoError(t, err)
+			tbl = table.New(tbl.Identifier(), meta, tbl.MetadataLocation(), func(context.Context) (iceio.IO, error) {
+				return iceio.LocalFS{}, nil
+			}, nil)
+
+			got := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan().FromSnapshotExclusive(firstDelete))
+			require.Empty(t, changelogIDs(got, table.ChangelogOpInsert))
+			require.Equal(t, []int64{2}, changelogIDs(got, table.ChangelogOpDelete))
+		})
+	}
+}
+
 func TestIncrementalChangelogReadAppliesFileDeletes(t *testing.T) {
 	ctx := t.Context()
 	tbl := newV2RowLineageTestTable(t)
@@ -535,6 +615,29 @@ func TestIncrementalChangelogReadEqualityDeletes(t *testing.T) {
 	got := readChangelog(t, ctx, tbl.NewIncrementalChangelogScan())
 	require.Equal(t, []int64{1, 2, 3}, changelogIDs(got, table.ChangelogOpInsert))
 	require.Equal(t, []int64{2}, changelogIDs(got, table.ChangelogOpDelete))
+
+	// id is not projected. The equality delete still has to match it.
+	schema, records, err := tbl.NewIncrementalChangelogScan(table.WithSelectedFields("data")).ToArrowRecords(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"data",
+		table.ChangelogChangeTypeColumn,
+		table.ChangelogChangeOrdinalColumn,
+		table.ChangelogCommitSnapshotIDColumn,
+	}, schemaFieldNames(schema))
+	var deletedData []string
+	for rec, err := range records {
+		require.NoError(t, err)
+		values := rec.Column(0).(*array.String)
+		ops := rec.Column(1).(*array.String)
+		for i := range int(rec.NumRows()) {
+			if ops.Value(i) == string(table.ChangelogOpDelete) {
+				deletedData = append(deletedData, values.Value(i))
+			}
+		}
+		rec.Release()
+	}
+	require.Equal(t, []string{"b"}, deletedData)
 }
 
 func TestIncrementalChangelogReadSameSnapshotPositionDelete(t *testing.T) {
