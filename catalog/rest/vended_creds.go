@@ -575,3 +575,12 @@ func loadRegistryFS(ctx context.Context, registry *iceio.Registry, props iceberg
 
 	return registry.LoadFS(ctx, props, location)
 }
+
+// loadRegistryFSFunc preserves the global registry for lazy loads when none is configured.
+func loadRegistryFSFunc(registry *iceio.Registry, props iceberg.Properties, location string) func(context.Context) (iceio.IO, error) {
+	if registry == nil {
+		return iceio.LoadFSFunc(props, location)
+	}
+
+	return registry.LoadFSFunc(props, location)
+}

@@ -1346,11 +1346,7 @@ func (r *Catalog) tableFromResponse(
 		}
 		fsF = refresher.loadFS
 	} else {
-		if r.ioRegistry == nil {
-			fsF = iceio.LoadFSFunc(config, loc)
-		} else {
-			fsF = r.ioRegistry.LoadFSFunc(config, loc)
-		}
+		fsF = loadRegistryFSFunc(r.ioRegistry, config, loc)
 	}
 
 	// Resolve the reporter from the client-supplied properties only (see the
