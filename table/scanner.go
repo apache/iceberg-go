@@ -2188,56 +2188,7 @@ func bindReadTasksResiduals(
 // therefore still hold its whole decoded contents while it waits. The bound for
 // a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
-	if atomic.LoadUint32(&scan.closed) != 0 {
-		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
-	}
-
-	if scan.selectorErr != nil {
-		return nil, nil, scan.selectorErr
-	}
-	var (
-		boundFilter iceberg.BooleanExpression
-		err         error
-	)
-
-	effectiveSchema, err := scan.effectiveSchema()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if scan.rowFilter != nil {
-		boundFilter, err = iceberg.BindExpr(effectiveSchema, scan.rowFilter, scan.caseSensitive)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	schema, err := scan.Projection()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Bind task residuals against the schema selected by this scan, which may
-	// be an older snapshot schema rather than the table's current schema.
-	readTasks, err := bindReadTasksResiduals(effectiveSchema, tasks, scan.caseSensitive)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// A plan-scoped FileIO (from remote planning) takes precedence over the
-	// table's default FileIO. The iterator keeps a reader lease so replanning
-	// cannot close the old plan's resources while records are still being read.
-	planIO := scan.planIO
-	var fs io.IO
-	var releasePlanIO func()
-	if planIO != nil {
-		fs, releasePlanIO, err = planIO.acquire(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		fs, err = scan.ioF(ctx)
-	}
+	as, readTasks, releasePlanIO, err := scan.arrowScanForTasks(ctx, tasks)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2246,20 +2197,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	if readRecords == nil {
 		readRecords = (*arrowScan).GetRecords
 	}
-	outSchema, records, err := readRecords(&arrowScan{
-		metadata:           scan.metadata,
-		fs:                 fs,
-		scanSchema:         effectiveSchema,
-		projectedSchema:    schema,
-		boundRowFilter:     boundFilter,
-		filterSchema:       effectiveSchema,
-		caseSensitive:      scan.caseSensitive,
-		taskResidualsBound: true,
-		rowLimit:           scan.limit,
-		options:            scan.options,
-		concurrency:        scan.concurrency,
-		arrowBatchSize:     scan.arrowBatchSize,
-	}, ctx, readTasks)
+	outSchema, records, err := readRecords(as, ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so release here.
 		if releasePlanIO != nil {
@@ -2274,6 +2212,109 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	}
 
 	return outSchema, records, nil
+}
+
+// readTasksPerTask is [Scan.ReadTasks] returning one single-use record
+// stream per task, in task order, instead of one stream for all tasks.
+// The streams share the scan's delete files, so each delete file is read
+// at most once however many streams it applies to, and they may be read
+// concurrently and in any order. Each stream decodes its task on one
+// worker. release must be called exactly once, after the last stream is
+// done being read.
+func (scan *Scan) readTasksPerTask(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, []iter.Seq2[arrow.RecordBatch, error], func(), error) {
+	as, readTasks, releasePlanIO, err := scan.arrowScanForTasks(ctx, tasks)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	outSchema, streams, releaseDeletes, err := as.GetRecordsPerTask(ctx, readTasks)
+	if err != nil {
+		if releasePlanIO != nil {
+			releasePlanIO()
+		}
+
+		return nil, nil, nil, err
+	}
+
+	release := func() {
+		releaseDeletes()
+		if releasePlanIO != nil {
+			releasePlanIO()
+		}
+	}
+
+	return outSchema, streams, release, nil
+}
+
+// arrowScanForTasks builds the arrowScan that reads tasks and returns it
+// with the tasks' residuals bound to the scan's schema. A non-nil
+// releasePlanIO frees the plan-scoped FileIO lease and must be called once
+// reading is done.
+func (scan *Scan) arrowScanForTasks(ctx context.Context, tasks []FileScanTask) (as *arrowScan, readTasks []FileScanTask, releasePlanIO func(), err error) {
+	if atomic.LoadUint32(&scan.closed) != 0 {
+		return nil, nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
+	}
+
+	if scan.selectorErr != nil {
+		return nil, nil, nil, scan.selectorErr
+	}
+	var boundFilter iceberg.BooleanExpression
+
+	effectiveSchema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	if scan.rowFilter != nil {
+		boundFilter, err = iceberg.BindExpr(effectiveSchema, scan.rowFilter, scan.caseSensitive)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
+	schema, err := scan.Projection()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Bind task residuals against the schema selected by this scan, which may
+	// be an older snapshot schema rather than the table's current schema.
+	readTasks, err = bindReadTasksResiduals(effectiveSchema, tasks, scan.caseSensitive)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// A plan-scoped FileIO (from remote planning) takes precedence over the
+	// table's default FileIO. The iterator keeps a reader lease so replanning
+	// cannot close the old plan's resources while records are still being read.
+	planIO := scan.planIO
+	var fs io.IO
+	if planIO != nil {
+		fs, releasePlanIO, err = planIO.acquire(ctx)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	} else {
+		fs, err = scan.ioF(ctx)
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return &arrowScan{
+		metadata:           scan.metadata,
+		fs:                 fs,
+		scanSchema:         effectiveSchema,
+		projectedSchema:    schema,
+		boundRowFilter:     boundFilter,
+		filterSchema:       effectiveSchema,
+		caseSensitive:      scan.caseSensitive,
+		taskResidualsBound: true,
+		rowLimit:           scan.limit,
+		options:            scan.options,
+		concurrency:        scan.concurrency,
+		arrowBatchSize:     scan.arrowBatchSize,
+	}, readTasks, releasePlanIO, nil
 }
 
 // closePlanIO releases the scoped resources associated with the current
