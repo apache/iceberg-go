@@ -553,10 +553,17 @@ func yieldSortedPartition(
 		total += b.NumRows()
 	}
 
-	compare := rows.bind(batches)
-	if partitionRowsAlreadySorted(batches, compare) {
+	refs := make([]rowRef, 0, total)
+	for b, rec := range batches {
+		for r := range int(rec.NumRows()) {
+			refs = append(refs, newRowRef(b, r))
+		}
+	}
+	slices.SortStableFunc(refs, rows.bind(batches))
+
+	if sortedRefsAreIdentity(refs, batches) {
 		// Keep the scan's natural order. Every output owns its reference to
-		// the original batch; no row references or Arrow Take arrays are needed.
+		// the original batch; no Arrow Take arrays are needed.
 		for _, batch := range batches {
 			for off := int64(0); off < batch.NumRows(); off += batchRows {
 				if err := ctx.Err(); err != nil {
@@ -580,14 +587,6 @@ func yieldSortedPartition(
 
 		return true
 	}
-
-	refs := make([]rowRef, 0, total)
-	for b, rec := range batches {
-		for r := range int(rec.NumRows()) {
-			refs = append(refs, newRowRef(b, r))
-		}
-	}
-	slices.SortStableFunc(refs, compare)
 
 	takeFn := partitionBatchByKey(ctx)
 	mem := compute.GetAllocator(ctx)
@@ -613,19 +612,25 @@ func yieldSortedPartition(
 	return true
 }
 
-// partitionRowsAlreadySorted also checks batch boundaries. It uses the same
-// Iceberg comparator as the stable sort, including null order and signed NaNs.
-// Equal keys retain their original input order without a re-sort.
-func partitionRowsAlreadySorted(batches []arrow.RecordBatch, compare func(rowRef, rowRef) int) bool {
-	var previous rowRef
-	hasPrevious := false
+// sortedRefsAreIdentity reports whether the stable sort preserved input order.
+func sortedRefsAreIdentity(refs []rowRef, batches []arrow.RecordBatch) bool {
+	// Check the final row first to reject a common late inversion quickly.
+	if len(refs) > 0 {
+		lastBatch := len(batches) - 1
+		for batches[lastBatch].NumRows() == 0 {
+			lastBatch--
+		}
+		if refs[len(refs)-1] != newRowRef(lastBatch, int(batches[lastBatch].NumRows())-1) {
+			return false
+		}
+	}
+	index := 0
 	for batch, rec := range batches {
 		for row := range int(rec.NumRows()) {
-			current := newRowRef(batch, row)
-			if hasPrevious && compare(previous, current) > 0 {
+			if refs[index] != newRowRef(batch, row) {
 				return false
 			}
-			previous, hasPrevious = current, true
+			index++
 		}
 	}
 

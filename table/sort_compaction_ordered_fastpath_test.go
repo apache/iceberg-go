@@ -261,7 +261,7 @@ func BenchmarkYieldSortedPartitionFastPath(b *testing.B) {
 		columnCount  = 16
 		outputRows   = 8192
 	)
-	for _, mode := range []string{"globally_sorted", "nearly_sorted", "interleaved", "shuffled"} {
+	for _, mode := range []string{"globally_sorted", "nearly_sorted", "near_middle", "near_center", "center_swap", "tail_swap", "interleaved", "shuffled"} {
 		b.Run(mode, func(b *testing.B) {
 			fields := make([]arrow.Field, columnCount)
 			for i := range fields {
@@ -289,9 +289,27 @@ func BenchmarkYieldSortedPartitionFastPath(b *testing.B) {
 				for row := range rowsPerBatch {
 					var key int64
 					switch mode {
-					case "globally_sorted", "nearly_sorted":
+					case "globally_sorted", "nearly_sorted", "near_middle", "near_center", "center_swap", "tail_swap":
 						key = int64(batch*rowsPerBatch + row)
-						if mode == "nearly_sorted" && batch == batchCount-1 && row == rowsPerBatch-1 {
+						if mode == "center_swap" && batch == batchCount/2-1 {
+							switch row {
+							case rowsPerBatch / 2:
+								key++
+							case rowsPerBatch/2 + 1:
+								key--
+							}
+						}
+						if mode == "tail_swap" && batch == batchCount-1 {
+							switch row {
+							case rowsPerBatch - 2:
+								key++
+							case rowsPerBatch - 1:
+								key--
+							}
+						}
+						if (mode == "nearly_sorted" && batch == batchCount-1 && row == rowsPerBatch-1) ||
+							(mode == "near_middle" && batch == batchCount/2 && row == 0) ||
+							(mode == "near_center" && batch == batchCount/2-1 && row == rowsPerBatch/2) {
 							key = 0
 						}
 					case "interleaved":
@@ -340,5 +358,69 @@ func BenchmarkYieldSortedPartitionFastPath(b *testing.B) {
 				})
 			}
 		})
+	}
+}
+
+func TestSortedRefsAreIdentityChecksEveryPair(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+	schema, comparator := orderedPartitionTestSetup(t)
+	for _, inversion := range []int{-1, 1, 2, 3, 4, 5, 6, 7} {
+		t.Run(strconv.Itoa(inversion), func(t *testing.T) {
+			var batches []arrow.RecordBatch
+			for batch := range 4 {
+				var rows []orderedPartitionTestRow
+				for row := range 2 {
+					i := batch*2 + row
+					key := int64(i)
+					if i == inversion {
+						key = -1
+					}
+					rows = append(rows, orderedPartitionTestRow{key: key, valid: true})
+				}
+				batches = append(batches, makeOrderedPartitionTestBatch(mem, schema, rows))
+				if batch == 1 {
+					batches = append(batches, makeOrderedPartitionTestBatch(mem, schema, nil))
+				}
+			}
+			defer func() {
+				for _, batch := range batches {
+					batch.Release()
+				}
+			}()
+			var refs []rowRef
+			for batch, rec := range batches {
+				for row := range int(rec.NumRows()) {
+					refs = append(refs, newRowRef(batch, row))
+				}
+			}
+			slices.SortStableFunc(refs, comparator.bind(batches))
+			got := sortedRefsAreIdentity(refs, batches)
+			if got != (inversion < 0) {
+				t.Fatalf("inversion at %d: got sorted=%t", inversion, got)
+			}
+		})
+	}
+}
+
+func TestSortedRefsAreIdentityEmptyBatches(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+	schema, comparator := orderedPartitionTestSetup(t)
+	empty := makeOrderedPartitionTestBatch(mem, schema, nil)
+	defer empty.Release()
+	batch := makeOrderedPartitionTestBatch(mem, schema, []orderedPartitionTestRow{{key: 1, valid: true}})
+	defer batch.Release()
+	for _, batches := range [][]arrow.RecordBatch{{empty}, {empty, batch, empty}} {
+		var refs []rowRef
+		for batch, rec := range batches {
+			for row := range int(rec.NumRows()) {
+				refs = append(refs, newRowRef(batch, row))
+			}
+		}
+		slices.SortStableFunc(refs, comparator.bind(batches))
+		if !sortedRefsAreIdentity(refs, batches) {
+			t.Fatal("expected unchanged row order")
+		}
 	}
 }
