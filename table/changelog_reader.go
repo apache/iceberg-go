@@ -29,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 )
 
@@ -106,6 +107,7 @@ func (s *IncrementalChangelogScan) Read(ctx context.Context, tasks []ChangelogSc
 				return
 			}
 			if limit > 0 {
+				// Safe because tasks are read sequentially on one clone.
 				readScan.limit = limit - emitted
 			}
 
@@ -284,12 +286,25 @@ func appendChangelogColumns(ctx context.Context, schema *arrow.Schema, useLargeT
 
 	mem := allocatorFrom(ctx)
 	n := int(rec.NumRows())
-	changeType := constantStringArray(mem, useLargeTypes, string(task.Operation()), n)
+	var changeScalar scalar.Scalar = scalar.NewStringScalar(string(task.Operation()))
+	if useLargeTypes {
+		changeScalar = scalar.NewLargeStringScalar(string(task.Operation()))
+	}
+	changeType, err := scalar.MakeArrayFromScalar(changeScalar, n, mem)
+	if err != nil {
+		return nil, err
+	}
 	defer changeType.Release()
 
-	ordinal := constantInt32Array(mem, int32(task.ChangeOrdinal()), n)
+	ordinal, err := scalar.MakeArrayFromScalar(scalar.NewInt32Scalar(int32(task.ChangeOrdinal())), n, mem)
+	if err != nil {
+		return nil, err
+	}
 	defer ordinal.Release()
-	snapshotID := constantInt64Array(mem, task.CommitSnapshotID(), n)
+	snapshotID, err := scalar.MakeArrayFromScalar(scalar.NewInt64Scalar(task.CommitSnapshotID()), n, mem)
+	if err != nil {
+		return nil, err
+	}
 	defer snapshotID.Release()
 
 	cols := make([]arrow.Array, 0, rec.NumCols()+3)
@@ -305,48 +320,4 @@ func allocatorFrom(ctx context.Context) memory.Allocator {
 	}
 
 	return memory.DefaultAllocator
-}
-
-func constantStringArray(mem memory.Allocator, useLargeTypes bool, value string, n int) arrow.Array {
-	if useLargeTypes {
-		bldr := array.NewLargeStringBuilder(mem)
-		defer bldr.Release()
-		bldr.Reserve(n)
-		for range n {
-			bldr.Append(value)
-		}
-
-		return bldr.NewArray()
-	}
-
-	bldr := array.NewStringBuilder(mem)
-	defer bldr.Release()
-	bldr.Reserve(n)
-	for range n {
-		bldr.Append(value)
-	}
-
-	return bldr.NewArray()
-}
-
-func constantInt32Array(mem memory.Allocator, value int32, n int) arrow.Array {
-	bldr := array.NewInt32Builder(mem)
-	defer bldr.Release()
-	bldr.Reserve(n)
-	for range n {
-		bldr.Append(value)
-	}
-
-	return bldr.NewArray()
-}
-
-func constantInt64Array(mem memory.Allocator, value int64, n int) arrow.Array {
-	bldr := array.NewInt64Builder(mem)
-	defer bldr.Release()
-	bldr.Reserve(n)
-	for range n {
-		bldr.Append(value)
-	}
-
-	return bldr.NewArray()
 }
