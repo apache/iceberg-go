@@ -27,6 +27,7 @@ require (
 	github.com/RoaringBitmap/roaring/v2 v2.29.0
 	github.com/alexflint/go-arg v1.6.1
 	github.com/apache/arrow-go/v18 v18.8.0
+	github.com/apache/datasketches-go v0.2.0
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
