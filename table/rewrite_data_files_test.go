@@ -791,6 +791,144 @@ func TestRewriteDataFiles_PartialProgressRetainsSharedPositionDeleteAfterFailure
 		"generated files from tolerated failed batches must be removed")
 }
 
+// TestRewriteDataFiles_PartialProgressRejectsDeleteAbsorbedByEarlierBatch
+// lands a peer position delete for a batch-2 data file just before batch 1
+// commits. Batch 1's retry rebases onto the peer snapshot without conflict,
+// since the delete targets a file batch 1 does not rewrite. Batch 2's tasks
+// were planned before the delete existed and its transaction starts from
+// batch 1's table, so only a check back to the planning snapshot can stop it
+// from rewriting the file without the delete and then dropping the delete as
+// dead, which would bring the deleted row back.
+func TestRewriteDataFiles_PartialProgressRejectsDeleteAbsorbedByEarlierBatch(t *testing.T) {
+	tbl, cat, groups, posDelPaths := newAbsorbedDeleteFixture(t, 2, 1)
+	posDelPath := posDelPaths[0]
+
+	beforeFiles := parquetFiles(t, tbl.Location())
+	tx := tbl.NewTransaction()
+	result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      2,
+	})
+	require.NoError(t, err)
+	require.Nil(t, cat.beforeCommit, "the peer commit must have landed during the rewrite")
+
+	require.Len(t, result.CompletedGroups, 1)
+	assert.Equal(t, "absorbed-group-0", result.CompletedGroups[0].PartitionKey)
+	require.Len(t, result.FailedGroups, 1)
+	assert.Equal(t, "absorbed-group-1", result.FailedGroups[0].PartitionKey)
+	assert.ErrorIs(t, result.FailedGroups[0].Err, table.ErrConflictingDeleteFiles)
+	assert.Zero(t, result.RemovedPositionDeleteFiles)
+
+	final, err := cat.LoadTable(t.Context(), tbl.Identifier())
+	require.NoError(t, err)
+	assertRowCount(t, final, 3)
+	finalTasks, err := final.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	var liveDeletes int
+	for _, task := range finalTasks {
+		liveDeletes += len(task.DeleteFiles)
+	}
+	assert.Equal(t, 1, liveDeletes, "the peer's position delete must stay live")
+
+	// The rejected batch is detected before it writes anything.
+	expectedFiles := append([]string{posDelPath}, beforeFiles...)
+	for _, file := range result.CompletedGroups[0].NewDataFiles {
+		expectedFiles = append(expectedFiles, file.FilePath())
+	}
+	assert.ElementsMatch(t, expectedFiles, parquetFiles(t, tbl.Location()),
+		"the rejected batch must not leave compacted outputs behind")
+}
+
+// TestRewriteDataFiles_PartialProgressRejectedBatchesCountTowardMaxFailedCommits
+// rejects two batches through the planning-snapshot check and asserts that
+// they count toward MaxFailedCommits like catalog commit failures do.
+func TestRewriteDataFiles_PartialProgressRejectedBatchesCountTowardMaxFailedCommits(t *testing.T) {
+	tbl, cat, groups, _ := newAbsorbedDeleteFixture(t, 3, 1, 2)
+
+	tx := tbl.NewTransaction()
+	result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress:  true,
+		MaxCommits:       3,
+		MaxFailedCommits: 1,
+	})
+	require.Nil(t, cat.beforeCommit, "the peer commit must have landed during the rewrite")
+	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	assert.ErrorContains(t, err, "maximum failed commits reached")
+	require.Len(t, result.CompletedGroups, 1)
+	assert.Equal(t, "absorbed-group-0", result.CompletedGroups[0].PartitionKey)
+	require.Len(t, result.FailedGroups, 2)
+}
+
+// newAbsorbedDeleteFixture writes n two-row data files, each committed on its
+// own, and returns one compaction group per file in path order. Before the
+// rewrite's first catalog commit, a peer commits one file-scoped position
+// delete (row 0) for each data file index in deleteTargets. Index 0's batch
+// commits first, so targets must be greater than 0 to be absorbed by an
+// earlier batch.
+func newAbsorbedDeleteFixture(t *testing.T, n int, deleteTargets ...int) (*table.Table, *concurrentTestCatalog, []table.CompactionTaskGroup, []string) {
+	t.Helper()
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	paths := make([]string, n)
+	for i := range paths {
+		paths[i] = tbl.Location() + fmt.Sprintf("/data/absorbed-%d.parquet", i)
+		writeParquetFile(t, paths[i], arrowSc, fmt.Sprintf(
+			`[{"id": %d, "data": "a"}, {"id": %d, "data": "b"}]`, i*2+1, i*2+2))
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{paths[i]}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, n)
+	taskByPath := make(map[string]table.FileScanTask, len(tasks))
+	for _, task := range tasks {
+		taskByPath[task.File.FilePath()] = task
+	}
+	groups := make([]table.CompactionTaskGroup, 0, n)
+	for i, path := range paths {
+		task := taskByPath[path]
+		groups = append(groups, table.CompactionTaskGroup{
+			PartitionKey:   fmt.Sprintf("absorbed-group-%d", i),
+			Tasks:          []table.FileScanTask{task},
+			TotalSizeBytes: task.File.FileSizeBytes(),
+		})
+	}
+
+	// Equal file_path bounds make each delete file-scoped, so the earlier
+	// batch's validator ignores it.
+	posDelPaths := make([]string, len(deleteTargets))
+	for i, target := range deleteTargets {
+		posDelPaths[i] = tbl.Location() + fmt.Sprintf("/data/absorbed-peer-delete-%d.parquet", target)
+	}
+	cat.beforeCommit = func() {
+		peer, err := cat.LoadTable(t.Context(), tbl.Identifier())
+		require.NoError(t, err)
+		peerTx := peer.NewTransaction()
+		delta := peerTx.NewRowDelta(nil)
+		for i, target := range deleteTargets {
+			writeParquetFile(t, posDelPaths[i], table.PositionalDeleteArrowSchema,
+				fmt.Sprintf(`[{"file_path": "%s", "pos": 0}]`, paths[target]))
+			builder, err := iceberg.NewDataFileBuilder(
+				*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+				posDelPaths[i], iceberg.ParquetFile, nil, nil, nil, 1, 128)
+			require.NoError(t, err)
+			bound := map[int][]byte{iceberg.DeleteFilePathFieldID: []byte(paths[target])}
+			delta = delta.AddDeletes(builder.LowerBoundValues(bound).UpperBoundValues(bound).Build())
+		}
+		require.NoError(t, delta.Commit(t.Context()))
+		_, err = peerTx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	return tbl, cat, groups, posDelPaths
+}
+
 func TestRewriteDataFiles_PartialProgressCleansOutputsBeforeCommit(t *testing.T) {
 	tbl, _ := newPartialProgressTestTable(t)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
