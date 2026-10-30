@@ -1892,18 +1892,6 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
-// DeleteFileAddition is a delete file added by a rewrite. The data sequence
-// number must be copied from the delete files being replaced so the new file
-// has the same applicability boundary as the old files. When one rewrite
-// contains multiple replacement groups, callers are responsible for assigning
-// each output the maximum sequence number of the exact source files it replaces;
-// the transaction can validate membership in the overall source sequence set,
-// but the grouping is not represented by this API.
-type DeleteFileAddition struct {
-	File               iceberg.DataFile
-	DataSequenceNumber int64
-}
-
 // ReplaceFiles atomically replaces data files and removes associated delete files
 // in a single snapshot. This is the commit primitive for compaction: old data files
 // are replaced with new (compacted) data files, and delete files that are fully
@@ -1911,24 +1899,6 @@ type DeleteFileAddition struct {
 // removed with it, whether or not it is in deleteFilesToRemove.
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, nil, snapshotProps, opts...)
-}
-
-// ReplaceFilesWithDeleteFiles atomically replaces data files, adds new delete
-// files, and removes superseded delete files in one snapshot. Every added delete
-// file must carry the data sequence number of the delete files it replaces.
-// This is intended for rewrites that change delete-file representation, such as
-// rewriting position deletes into deletion vectors.
-func (t *Transaction) ReplaceFilesWithDeleteFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []DeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
-	additions := make([]rewriteDeleteFileAddition, len(deleteFilesToAdd))
-	for i, addition := range deleteFilesToAdd {
-		seq := addition.DataSequenceNumber
-		additions[i] = rewriteDeleteFileAddition{
-			file:               addition.File,
-			dataSequenceNumber: &seq,
-		}
-	}
-
-	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, additions, snapshotProps, opts...)
 }
 
 func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, autoDeleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []rewriteDeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
