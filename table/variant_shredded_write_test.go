@@ -1487,6 +1487,73 @@ func TestShreddedVariantWriteNullFieldKeepsBound(t *testing.T) {
 	assert.Equal(t, buildObj(1006), files[0].UpperBoundValues()[2])
 }
 
+func TestShreddedVariantWriteSmallSampleKeepsWideBound(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	vals := []int64{1, 2, 3, 4, 40000, 40001, 40002, 40003}
+	idb := array.NewInt64Builder(mem)
+	defer idb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i, fv := range vals {
+		idb.Append(int64(i))
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"f": fv}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	idArr := idb.NewArray()
+	defer idArr.Release()
+	pArr := vb.NewArray()
+	defer pArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, pArr}, int64(len(vals)))
+	defer rec.Release()
+
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:       "3",
+		ParquetShredVariantsKey:     "true",
+		ParquetVariantBufferSizeKey: "4",
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	u := uuid.New()
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range unpartitionedWrite(context.Background(), factory, args.itr) {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.Len(t, files, 1)
+
+	// Inference sees only 1-4 (int8); 40000+ must still land in typed_value, or f loses its bounds.
+	buildObj := func(fv int64) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$['f']")}
+		require.NoError(t, b.AppendInt(fv))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+	assert.Equal(t, buildObj(1), files[0].LowerBoundValues()[2])
+	assert.Equal(t, buildObj(40003), files[0].UpperBoundValues()[2])
+}
+
 func TestShreddedVariantWriteFloatBound(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,

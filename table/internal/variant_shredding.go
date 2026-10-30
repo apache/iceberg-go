@@ -347,11 +347,8 @@ func primitiveArrowType(t variant.Type, info *fieldInfo) arrow.DataType {
 	switch t {
 	case variant.Bool:
 		return arrow.FixedWidthTypes.Boolean
-	case variant.Int8:
-		return arrow.PrimitiveTypes.Int8
-	case variant.Int16:
-		return arrow.PrimitiveTypes.Int16
-	case variant.Int32:
+	case variant.Int8, variant.Int16, variant.Int32:
+		// Never narrower than INT32: same physical type, and later values within int32 range stay typed.
 		return arrow.PrimitiveTypes.Int32
 	case variant.Int64:
 		return arrow.PrimitiveTypes.Int64
