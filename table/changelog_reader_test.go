@@ -21,6 +21,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
@@ -40,6 +43,35 @@ func TestChangelogReadRejectsDeletedRowTasks(t *testing.T) {
 	scan := &IncrementalChangelogScan{scan: &Scan{limit: ScanNoLimit}}
 	_, _, err = scan.Read(context.Background(), []ChangelogScanTask{task})
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+}
+
+func TestStampChangelogBatchCutsToTheRemainingBudget(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.AppendValues([]int64{1, 2, 3}, nil)
+	values := builder.NewArray()
+	defer values.Release()
+	dataSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
+	rec := array.NewRecordBatch(dataSchema, []arrow.Array{values}, int64(values.Len()))
+	defer rec.Release()
+
+	out := dataSchema
+	var err error
+	for _, field := range changelogArrowFields(false) {
+		out, err = out.AddField(out.NumFields(), field)
+		require.NoError(t, err)
+	}
+	file := changelogTestDataFile(t, "data.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
+	task, err := NewAddedRowsScanTask(file, nil, 0, 7)
+	require.NoError(t, err)
+
+	stamped, rows, err := stampChangelogBatch(context.Background(), out, false, rec, task, 2, 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), rows)
+	require.Equal(t, int64(2), stamped.NumRows())
+	t.Cleanup(stamped.Release)
+	require.Equal(t, []int64{1, 2}, stamped.Column(0).(*array.Int64).Int64Values())
 }
 
 func TestChangelogArrowSchemaRejectsReservedName(t *testing.T) {
