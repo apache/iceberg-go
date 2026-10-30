@@ -20,9 +20,19 @@ package table
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
@@ -256,26 +266,66 @@ func TestIncrementalChangelogScanEmitsScanReport(t *testing.T) {
 	require.Equal(t, int64(3), report.Metrics.ScannedDataManifests.Value)
 }
 
-func TestIncrementalChangelogScanRejectsDeleteManifests(t *testing.T) {
+func TestIncrementalChangelogScanPlansPositionDeletes(t *testing.T) {
+	reporter := &metrics.InMemoryReporter{}
 	tbl := incrementalChangelogDeleteManifestTable(t)
 
-	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
-	require.ErrorIs(t, err, ErrInvalidOperation)
-	require.ErrorContains(t, err, "scan range references a delete manifest")
-	require.Nil(t, tasks)
+	tasks, err := tbl.NewIncrementalChangelogScan(WithReporter(reporter)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+
+	require.Equal(t, ChangelogOpInsert, tasks[0].Operation())
+	require.Equal(t, "mem://default/changelog-delete/data-1.parquet", tasks[0].ScanTask().File.FilePath())
+	require.Equal(t, 0, tasks[0].ChangeOrdinal())
+	require.Empty(t, tasks[0].ScanTask().DeleteFiles)
+
+	rows, ok := tasks[1].(DeletedRowsScanTask)
+	require.True(t, ok)
+	require.Equal(t, ChangelogOpDelete, rows.Operation())
+	require.Equal(t, 1, rows.ChangeOrdinal())
+	require.Equal(t, int64(2), rows.CommitSnapshotID())
+	require.Equal(t, "mem://default/changelog-delete/data-1.parquet", rows.ScanTask().File.FilePath())
+	require.Equal(t, []string{"mem://default/changelog-delete/delete.parquet"}, changelogFilePaths(rows.AddedDeletes()))
+	require.Empty(t, rows.ExistingDeletes())
+	require.NotNil(t, rows.ScanTask().DataSequenceNumber)
+	require.Equal(t, int64(1), *rows.ScanTask().DataSequenceNumber)
+
+	require.Equal(t, ChangelogOpInsert, tasks[2].Operation())
+	require.Equal(t, "mem://default/changelog-delete/data-3.parquet", tasks[2].ScanTask().File.FilePath())
+	require.Equal(t, 2, tasks[2].ChangeOrdinal())
+
+	onlyDelete, err := tbl.NewIncrementalChangelogScan().
+		FromSnapshotInclusive(2).
+		ToSnapshot(2).
+		PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, onlyDelete, 1)
+	_, ok = onlyDelete[0].(DeletedRowsScanTask)
+	require.True(t, ok)
+
+	reports := reporter.Reports()
+	require.Len(t, reports, 1)
+	report, ok := reports[0].(metrics.ScanReport)
+	require.True(t, ok)
+	require.Equal(t, int64(3), report.Metrics.ResultDataFiles.Value)
+	require.Equal(t, int64(1), report.Metrics.ResultDeleteFiles.Value)
+	require.Equal(t, int64(1), report.Metrics.PositionalDeleteFiles.Value)
+	require.Equal(t, int64(1), report.Metrics.TotalDeleteManifests.Value)
+	require.Equal(t, int64(1), report.Metrics.ScannedDeleteManifests.Value)
 }
 
-func TestIncrementalChangelogScanRejectsCarriedForwardDeleteManifests(t *testing.T) {
+func TestIncrementalChangelogScanIgnoresCarriedForwardDeleteManifests(t *testing.T) {
 	tbl := incrementalChangelogDeleteManifestTable(t)
 
 	tasks, err := tbl.NewIncrementalChangelogScan().
 		FromSnapshotExclusive(2).
 		ToSnapshot(3).
 		PlanFiles(context.Background())
-	require.ErrorIs(t, err, ErrInvalidOperation)
-	require.ErrorContains(t, err, "scan range references a delete manifest")
-	require.ErrorContains(t, err, "snapshot 2")
-	require.Nil(t, tasks)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, ChangelogOpInsert, tasks[0].Operation())
+	require.Equal(t, "mem://default/changelog-delete/data-3.parquet", tasks[0].ScanTask().File.FilePath())
+	require.Empty(t, tasks[0].ScanTask().DeleteFiles)
 }
 
 func TestIncrementalChangelogScanRejectsMissingSnapshotOperation(t *testing.T) {
@@ -768,6 +818,1124 @@ func incrementalChangelogDeleteManifestTable(t *testing.T) *Table {
 	}, nil)
 }
 
+func TestIncrementalChangelogScanAttachesSameSnapshotDeletes(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-same/data.parquet", map[int]any{1000: int32(1)})
+	posDelete := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-same/pos.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	eqDelete := newChangelogEqDelete(t, spec,
+		"mem://default/changelog-same/eq.parquet", map[int]any{1000: int32(1)})
+	tbl := writeChangelogScanTable(t, "changelog-same", []changelogScanStep{
+		{operation: OpAppend},
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, data)},
+			deletes: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, posDelete),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, eqDelete),
+			},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	added, ok := tasks[0].(AddedRowsScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{posDelete.FilePath()}, changelogFilePaths(added.Deletes()))
+	require.Empty(t, added.ScanTask().EqualityDeleteFiles)
+}
+
+func TestIncrementalChangelogScanSeparatesAddedAndExistingDeletes(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-prior/data.parquet", map[int]any{1000: int32(1)})
+	first := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-prior/first.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	second := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-prior/second.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-prior", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, data)},
+		},
+		{
+			operation: OpDelete,
+			deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, first)},
+		},
+		{
+			operation: OpDelete,
+			deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, second)},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+
+	firstRows, ok := tasks[1].(DeletedRowsScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{first.FilePath()}, changelogFilePaths(firstRows.AddedDeletes()))
+	require.Empty(t, firstRows.ExistingDeletes())
+
+	secondRows, ok := tasks[2].(DeletedRowsScanTask)
+	require.True(t, ok)
+	require.Equal(t, 2, secondRows.ChangeOrdinal())
+	require.Equal(t, []string{second.FilePath()}, changelogFilePaths(secondRows.AddedDeletes()))
+	require.Equal(t, []string{first.FilePath()}, changelogFilePaths(secondRows.ExistingDeletes()))
+}
+
+func TestIncrementalChangelogScanPlansEqualityDeletes(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-eq/data.parquet", map[int]any{1000: int32(1)})
+	eqDelete := newChangelogEqDelete(t, spec,
+		"mem://default/changelog-eq/eq.parquet", map[int]any{1000: int32(1)})
+	tbl := writeChangelogScanTable(t, "changelog-eq", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, data)},
+		},
+		{
+			operation: OpDelete,
+			deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, eqDelete)},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	rows, ok := tasks[1].(DeletedRowsScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{eqDelete.FilePath()}, changelogFilePaths(rows.AddedDeletes()))
+	require.Empty(t, rows.ScanTask().EqualityDeleteFiles)
+	require.Equal(t, iceberg.EntryContentEqDeletes, rows.AddedDeletes()[0].ContentType())
+}
+
+func TestIncrementalChangelogScanPlansDeletionVectors(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-dv/data.parquet", map[int]any{1000: int32(1)})
+	posDelete := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-dv/pos.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	dv := newChangelogDeletionVector(t, spec, "mem://default/changelog-dv/dv.puffin", data.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-dv", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, data)},
+		},
+		{
+			operation: OpDelete,
+			deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, posDelete)},
+		},
+		{
+			operation:       OpDelete,
+			manifestVersion: 3,
+			deletes:         []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, dv)},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	rows, ok := tasks[2].(DeletedRowsScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{dv.FilePath()}, changelogFilePaths(rows.AddedDeletes()))
+	require.Equal(t, []string{posDelete.FilePath()}, changelogFilePaths(rows.ExistingDeletes()))
+	require.Empty(t, rows.ScanTask().DeletionVectorFiles)
+}
+
+func TestIncrementalChangelogScanAppliesExistingDeletesToRemovedFiles(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-removed/data.parquet", map[int]any{1000: int32(1)})
+	posDelete := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-removed/pos.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-removed", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, data)},
+		},
+		{
+			operation: OpDelete,
+			deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, posDelete)},
+		},
+		{
+			operation: OpOverwrite,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, 3, 1, data)},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	removed, ok := tasks[2].(DeletedDataFileScanTask)
+	require.True(t, ok)
+	require.Equal(t, ChangelogOpDelete, removed.Operation())
+	require.Equal(t, 2, removed.ChangeOrdinal())
+	require.Equal(t, []string{posDelete.FilePath()}, changelogFilePaths(removed.ExistingDeletes()))
+
+	bounded, err := tbl.NewIncrementalChangelogScan().
+		FromSnapshotExclusive(2).
+		ToSnapshot(3).
+		PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, bounded, 1)
+	removed, ok = bounded[0].(DeletedDataFileScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{posDelete.FilePath()}, changelogFilePaths(removed.ExistingDeletes()))
+}
+
+func TestIncrementalChangelogScanFiltersDeleteBackedTasks(t *testing.T) {
+	tbl := incrementalChangelogDeleteManifestTable(t)
+	filter := iceberg.EqualTo(iceberg.Reference("id"), int32(3))
+
+	tasks, err := tbl.NewIncrementalChangelogScan(WithRowFilter(filter)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "mem://default/changelog-delete/data-3.parquet", tasks[0].ScanTask().File.FilePath())
+	require.Equal(t, ChangelogOpInsert, tasks[0].Operation())
+}
+
+func TestIncrementalChangelogScanFiltersDeletedRowsByPartition(t *testing.T) {
+	spec := partitionedSpec()
+	partOne := newTestDataFile(t, spec, "mem://default/changelog-part/data-1.parquet", map[int]any{1000: int32(1)})
+	partTwo := newTestDataFile(t, spec, "mem://default/changelog-part/data-2.parquet", map[int]any{1000: int32(2)})
+	deleteOne := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-part/delete-1.parquet", map[int]any{1000: int32(1)}, partOne.FilePath())
+	deleteTwo := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-part/delete-2.parquet", map[int]any{1000: int32(2)}, partTwo.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-part", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, partOne),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, partTwo),
+			},
+		},
+		{
+			operation: OpDelete,
+			deletes: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, deleteOne),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, deleteTwo),
+			},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan(
+		WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(1))),
+	).PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	var deleted []DeletedRowsScanTask
+	for _, task := range tasks {
+		require.NotEqual(t, partTwo.FilePath(), task.ScanTask().File.FilePath())
+		rows, ok := task.(DeletedRowsScanTask)
+		if !ok {
+			continue
+		}
+		deleted = append(deleted, rows)
+	}
+	require.Len(t, deleted, 1)
+	require.Equal(t, partOne.FilePath(), deleted[0].ScanTask().File.FilePath())
+	require.Equal(t, []string{deleteOne.FilePath()}, changelogFilePaths(deleted[0].AddedDeletes()))
+}
+
+func TestIncrementalChangelogScanAppliesDeletesBySequence(t *testing.T) {
+	spec := partitionedSpec()
+
+	// A writer commits the data file in snapshot 2 at sequence 2, then delete
+	// files in snapshots 3 and 4 at those snapshots' sequences. A later
+	// snapshot cannot commit a delete sequence below that data sequence.
+	t.Run("later snapshots", func(t *testing.T) {
+		for _, kind := range []string{"pos", "eq", "dv"} {
+			t.Run(kind, func(t *testing.T) {
+				data := newTestDataFile(t, spec, "mem://default/changelog-seq/data.parquet", map[int]any{1000: int32(1)})
+				first, version := changelogSequenceDelete(t, spec, kind, "mem://default/changelog-seq/first", data)
+				second, _ := changelogSequenceDelete(t, spec, kind, "mem://default/changelog-seq/second", data)
+				tbl := writeChangelogScanTable(t, "changelog-seq-"+kind, []changelogScanStep{
+					{operation: OpAppend},
+					{
+						operation: OpAppend,
+						data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, data)},
+					},
+					{
+						operation:       OpDelete,
+						manifestVersion: version,
+						deletes:         []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, first)},
+					},
+					{
+						operation:       OpDelete,
+						manifestVersion: version,
+						deletes:         []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 4, 4, second)},
+					},
+				})
+
+				tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+				require.NoError(t, err)
+				bySnapshot := changelogTasksBySnapshot(tasks)
+				require.Equal(t, ChangelogOpInsert, bySnapshot[2].Operation())
+
+				firstRows, ok := bySnapshot[3].(DeletedRowsScanTask)
+				require.True(t, ok)
+				require.Equal(t, []string{first.FilePath()}, changelogFilePaths(firstRows.AddedDeletes()))
+				require.Empty(t, firstRows.ExistingDeletes())
+
+				secondRows, ok := bySnapshot[4].(DeletedRowsScanTask)
+				require.True(t, ok)
+				require.Equal(t, []string{second.FilePath()}, changelogFilePaths(secondRows.AddedDeletes()))
+				require.Equal(t, []string{first.FilePath()}, changelogFilePaths(secondRows.ExistingDeletes()))
+			})
+		}
+	})
+
+	// Equality deletes do not apply at the data file's own sequence. Position
+	// deletes and deletion vectors do.
+	t.Run("same snapshot", func(t *testing.T) {
+		for _, tt := range []struct {
+			kind string
+			want bool
+		}{
+			{kind: "pos", want: true},
+			{kind: "eq", want: false},
+			{kind: "dv", want: true},
+		} {
+			t.Run(tt.kind, func(t *testing.T) {
+				data := newTestDataFile(t, spec, "mem://default/changelog-seq-same/data.parquet", map[int]any{1000: int32(1)})
+				deleteFile, version := changelogSequenceDelete(t, spec, tt.kind, "mem://default/changelog-seq-same/delete", data)
+				tbl := writeChangelogScanTable(t, "changelog-seq-same-"+tt.kind, []changelogScanStep{
+					{operation: OpAppend},
+					{
+						operation:       OpAppend,
+						manifestVersion: version,
+						data:            []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, data)},
+						deletes:         []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, deleteFile)},
+					},
+				})
+
+				tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+				require.NoError(t, err)
+				require.Len(t, tasks, 1)
+				added, ok := tasks[0].(AddedRowsScanTask)
+				require.True(t, ok)
+				if !tt.want {
+					require.Empty(t, added.Deletes())
+
+					return
+				}
+				require.Equal(t, []string{deleteFile.FilePath()}, changelogFilePaths(added.Deletes()))
+			})
+		}
+	})
+
+	// A delete committed before the data file keeps its lower sequence and
+	// must not come back as an existing delete when the file is removed.
+	t.Run("older delete", func(t *testing.T) {
+		data := newTestDataFile(t, spec, "mem://default/changelog-seq-old/data.parquet", map[int]any{1000: int32(1)})
+		older := newTestPosDeleteFileForSpec(t, spec,
+			"mem://default/changelog-seq-old/older.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+		newer := newTestPosDeleteFileForSpec(t, spec,
+			"mem://default/changelog-seq-old/newer.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+		tbl := writeChangelogScanTable(t, "changelog-seq-old", []changelogScanStep{
+			{
+				operation: OpDelete,
+				deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, older)},
+			},
+			{
+				operation: OpAppend,
+				data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, data)},
+			},
+			{
+				operation: OpDelete,
+				deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, newer)},
+			},
+			{
+				operation: OpOverwrite,
+				data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, 4, 2, data)},
+			},
+		})
+
+		tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+		require.NoError(t, err)
+		bySnapshot := changelogTasksBySnapshot(tasks)
+		rows, ok := bySnapshot[3].(DeletedRowsScanTask)
+		require.True(t, ok)
+		require.Equal(t, []string{newer.FilePath()}, changelogFilePaths(rows.AddedDeletes()))
+		require.Empty(t, rows.ExistingDeletes())
+
+		removed, ok := bySnapshot[4].(DeletedDataFileScanTask)
+		require.True(t, ok)
+		require.Equal(t, []string{newer.FilePath()}, changelogFilePaths(removed.ExistingDeletes()))
+	})
+}
+
+func TestIncrementalChangelogScanAppliesEveryDeleteInOneSnapshot(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-multi/data.parquet", map[int]any{1000: int32(1)})
+	first := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-multi/first.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	second := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-multi/second.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-multi", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, data)},
+		},
+		{
+			operation: OpDelete,
+			deletes: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, first),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, second),
+			},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	rows, ok := tasks[1].(DeletedRowsScanTask)
+	require.True(t, ok)
+	require.ElementsMatch(t, []string{first.FilePath(), second.FilePath()}, changelogFilePaths(rows.AddedDeletes()))
+}
+
+func TestIncrementalChangelogScanFoldsReplaceDeleteRewrites(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-replace-del/data.parquet", map[int]any{1000: int32(1)})
+	oldDelete := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-replace-del/old.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	newDelete := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-replace-del/new.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-replace-del", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, data)},
+		},
+		{
+			operation: OpDelete,
+			deletes:   []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, oldDelete)},
+		},
+		{
+			operation: OpReplace,
+			deletes: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusDELETED, 3, 2, oldDelete),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, newDelete),
+			},
+		},
+		{
+			operation: OpOverwrite,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, 4, 1, data)},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	for _, task := range tasks {
+		require.NotEqual(t, int64(3), task.CommitSnapshotID())
+	}
+	removed, ok := tasks[2].(DeletedDataFileScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{newDelete.FilePath()}, changelogFilePaths(removed.ExistingDeletes()))
+}
+
+func TestIncrementalChangelogScanKeepsSiblingDeletionVector(t *testing.T) {
+	spec := partitionedSpec()
+	dataA := newTestDataFile(t, spec, "mem://default/changelog-puffin/a.parquet", map[int]any{1000: int32(1)})
+	dataB := newTestDataFile(t, spec, "mem://default/changelog-puffin/b.parquet", map[int]any{1000: int32(2)})
+	puffin := "mem://default/changelog-puffin/both.puffin"
+	dvA := newSharedDeletionVector(t, spec, puffin, dataA.FilePath(), 0)
+	dvB := newSharedDeletionVector(t, spec, puffin, dataB.FilePath(), 64)
+	rewrittenA := newSharedDeletionVector(t, spec, "mem://default/changelog-puffin/a.puffin", dataA.FilePath(), 0)
+	later := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-puffin/later.parquet", map[int]any{1000: int32(2)}, dataB.FilePath())
+	tbl := writeChangelogScanTable(t, "changelog-puffin", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, dataA),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, dataB),
+			},
+		},
+		{
+			operation:       OpDelete,
+			manifestVersion: 3,
+			deletes: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, dvA),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, dvB),
+			},
+		},
+		{
+			operation:       OpDelete,
+			manifestVersion: 3,
+			deletes: []iceberg.ManifestEntry{
+				changelogManifestEntry(iceberg.EntryStatusDELETED, 3, 2, dvA),
+				changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, rewrittenA),
+			},
+		},
+		{
+			operation:       OpDelete,
+			manifestVersion: 3,
+			deletes:         []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 4, 4, later)},
+		},
+	})
+
+	tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	var got DeletedRowsScanTask
+	var found bool
+	for _, task := range tasks {
+		rows, ok := task.(DeletedRowsScanTask)
+		if !ok || rows.ScanTask().File.FilePath() != dataB.FilePath() || rows.CommitSnapshotID() != 4 {
+			continue
+		}
+		got = rows
+		found = true
+	}
+	require.True(t, found)
+	require.Equal(t, []string{later.FilePath()}, changelogFilePaths(got.AddedDeletes()))
+	require.Equal(t, []string{dvB.FilePath()}, changelogFilePaths(got.ExistingDeletes()))
+	require.Equal(t, dataB.FilePath(), referencedDataFilePath(got.ExistingDeletes()[0]))
+}
+
+func TestIncrementalChangelogScanPlansOverwriteWithExpiredParent(t *testing.T) {
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	data := newTestDataFile(t, spec, "mem://default/changelog-expired-overwrite/data.parquet", map[int]any{1000: int32(1)})
+	snapshotID := int64(2)
+	dataManifest := writeChangelogDataManifest(t, fs, spec, schema,
+		"mem://default/changelog-expired-overwrite/metadata/data.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, data)})
+	listPath := "mem://default/changelog-expired-overwrite/metadata/snap-2.avro"
+	writeChangelogManifestList(t, fs, listPath, snapshotID, 2, []iceberg.ManifestFile{dataManifest})
+
+	expiredParent := int64(1)
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &expiredParent,
+		TimestampMs:      2000,
+		ManifestList:     listPath,
+		SequenceNumber:   snapshotID,
+		SchemaID:         &schema.ID,
+		Summary:          &Summary{Operation: OpOverwrite},
+	}}
+	txn.meta.snapshotLog = []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 2000}}
+	txn.meta.currentSnapshotID = &snapshotID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"changelog-expired-overwrite"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+
+	tasks, err := tbl.NewIncrementalChangelogScan().
+		FromSnapshotExclusive(expiredParent).
+		ToSnapshot(snapshotID).
+		PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	_, ok := tasks[0].(DeletedDataFileScanTask)
+	require.True(t, ok)
+}
+
+func TestIncrementalChangelogScanKeepsCarriedDeleteWhenParentExpired(t *testing.T) {
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	data := newTestDataFile(t, spec, "mem://default/changelog-expired-delete/data.parquet", map[int]any{1000: int32(1)})
+	pos := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/changelog-expired-delete/pos.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	snapshotID := int64(2)
+	expiredParent := int64(1)
+	dataManifest := writeChangelogDataManifest(t, fs, spec, schema,
+		"mem://default/changelog-expired-delete/metadata/data.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, data)})
+	deleteManifest := writeChangelogDeleteManifest(t, fs, spec, schema,
+		"mem://default/changelog-expired-delete/metadata/deletes.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusEXISTING, expiredParent, 1, pos)})
+	listPath := "mem://default/changelog-expired-delete/metadata/snap-2.avro"
+	writeChangelogManifestList(t, fs, listPath, snapshotID, 2, []iceberg.ManifestFile{dataManifest, deleteManifest})
+
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &expiredParent,
+		TimestampMs:      2000,
+		ManifestList:     listPath,
+		SequenceNumber:   snapshotID,
+		SchemaID:         &schema.ID,
+		Summary:          &Summary{Operation: OpOverwrite},
+	}}
+	txn.meta.snapshotLog = []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 2000}}
+	txn.meta.currentSnapshotID = &snapshotID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"changelog-expired-delete"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+
+	tasks, err := tbl.NewIncrementalChangelogScan().
+		FromSnapshotExclusive(expiredParent).
+		ToSnapshot(snapshotID).
+		PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	removed, ok := tasks[0].(DeletedDataFileScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{pos.FilePath()}, changelogFilePaths(removed.ExistingDeletes()))
+}
+
+func TestIncrementalChangelogScanKeepsRemovedDeleteWhenParentExpired(t *testing.T) {
+	for _, inclusive := range []bool{false, true} {
+		name := "exclusive"
+		if inclusive {
+			name = "inclusive"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := expiredParentRemovedDeleteTable(t, "changelog-expired-removed-"+name)
+			scan := tbl.NewIncrementalChangelogScan()
+			if inclusive {
+				scan = scan.FromSnapshotInclusive(2)
+			} else {
+				scan = scan.FromSnapshotExclusive(1)
+			}
+			tasks, err := scan.ToSnapshot(2).PlanFiles(context.Background())
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			removed, ok := tasks[0].(DeletedDataFileScanTask)
+			require.True(t, ok)
+			require.Equal(t, []string{"mem://default/changelog-expired-removed-" + name + "/pos.parquet"}, changelogFilePaths(removed.ExistingDeletes()))
+		})
+	}
+}
+
+func TestIncrementalChangelogScanReplaceRewritesDVWhenParentExpired(t *testing.T) {
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	data := newTestDataFile(t, spec, "mem://default/changelog-expired-replace/data.parquet", map[int]any{1000: int32(1)})
+	oldDV := newChangelogDeletionVector(t, spec, "mem://default/changelog-expired-replace/old.puffin", data.FilePath())
+	newDV := newChangelogDeletionVector(t, spec, "mem://default/changelog-expired-replace/new.puffin", data.FilePath())
+	expiredParent := int64(1)
+	replaceID := int64(2)
+	overwriteID := int64(3)
+	deleteManifest := writeChangelogDeleteManifest(t, fs, spec, schema,
+		"mem://default/changelog-expired-replace/metadata/deletes.avro", replaceID, 3,
+		[]iceberg.ManifestEntry{
+			changelogManifestEntry(iceberg.EntryStatusDELETED, replaceID, 2, oldDV),
+			changelogManifestEntry(iceberg.EntryStatusADDED, replaceID, 3, newDV),
+		})
+	dataManifest := writeChangelogDataManifest(t, fs, spec, schema,
+		"mem://default/changelog-expired-replace/metadata/data.avro", overwriteID, 3,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, overwriteID, 2, data)})
+	replaceList := "mem://default/changelog-expired-replace/metadata/snap-2.avro"
+	overwriteList := "mem://default/changelog-expired-replace/metadata/snap-3.avro"
+	replaceManifests := writeChangelogManifestList(t, fs, replaceList, replaceID, 3, []iceberg.ManifestFile{deleteManifest})
+	writeChangelogManifestList(t, fs, overwriteList, overwriteID, 3, append(replaceManifests, dataManifest))
+
+	schemaID := schema.ID
+	txn.meta.snapshotList = []Snapshot{
+		{
+			SnapshotID:       replaceID,
+			ParentSnapshotID: &expiredParent,
+			TimestampMs:      2000,
+			ManifestList:     replaceList,
+			SequenceNumber:   replaceID,
+			SchemaID:         &schemaID,
+			Summary: &Summary{
+				Operation:  OpReplace,
+				Properties: iceberg.Properties{removedDeleteFilesKey: "1"},
+			},
+		},
+		{
+			SnapshotID:       overwriteID,
+			ParentSnapshotID: &replaceID,
+			TimestampMs:      3000,
+			ManifestList:     overwriteList,
+			SequenceNumber:   overwriteID,
+			SchemaID:         &schemaID,
+			Summary:          &Summary{Operation: OpOverwrite},
+		},
+	}
+	txn.meta.snapshotLog = []SnapshotLogEntry{
+		{SnapshotID: replaceID, TimestampMs: 2000},
+		{SnapshotID: overwriteID, TimestampMs: 3000},
+	}
+	txn.meta.currentSnapshotID = &overwriteID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"changelog-expired-replace"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+
+	tasks, err := tbl.NewIncrementalChangelogScan().
+		FromSnapshotExclusive(expiredParent).
+		PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	removed, ok := tasks[0].(DeletedDataFileScanTask)
+	require.True(t, ok)
+	require.Equal(t, overwriteID, removed.CommitSnapshotID())
+	require.Equal(t, []string{newDV.FilePath()}, changelogFilePaths(removed.ExistingDeletes()))
+}
+
+func TestIncrementalChangelogScanRejectsUnrecordedRemovedDeletes(t *testing.T) {
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	data := newTestDataFile(t, spec, "mem://default/changelog-expired-guard/data.parquet", map[int]any{1000: int32(1)})
+	snapshotID := int64(2)
+	dataManifest := writeChangelogDataManifest(t, fs, spec, schema,
+		"mem://default/changelog-expired-guard/metadata/data.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, data)})
+	listPath := "mem://default/changelog-expired-guard/metadata/snap-2.avro"
+	writeChangelogManifestList(t, fs, listPath, snapshotID, 2, []iceberg.ManifestFile{dataManifest})
+
+	expiredParent := int64(1)
+	schemaID := schema.ID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &expiredParent,
+		TimestampMs:      2000,
+		ManifestList:     listPath,
+		SequenceNumber:   snapshotID,
+		SchemaID:         &schemaID,
+		Summary: &Summary{
+			Operation:  OpOverwrite,
+			Properties: iceberg.Properties{removedDeleteFilesKey: "1"},
+		},
+	}}
+	txn.meta.snapshotLog = []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 2000}}
+	txn.meta.currentSnapshotID = &snapshotID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"changelog-expired-guard"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+
+	_, err = tbl.NewIncrementalChangelogScan().
+		FromSnapshotExclusive(expiredParent).
+		PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, removedDeleteFilesKey)
+}
+
+func TestIncrementalChangelogScanCountsRemovedDeletesBeforePartitionPrune(t *testing.T) {
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	location := "mem://default/changelog-expired-prune"
+	data := newTestDataFile(t, spec, location+"/data.parquet", map[int]any{1000: int32(1)})
+	kept := newTestPosDeleteFileForSpec(t, spec, location+"/kept.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	pruned := newTestPosDeleteFileForSpec(t, spec, location+"/pruned.parquet", map[int]any{1000: int32(2)}, data.FilePath())
+	snapshotID := int64(2)
+	expiredParent := int64(1)
+	dataManifest := writeChangelogDataManifest(t, fs, spec, schema, location+"/metadata/data.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, data)})
+	keptManifest := writeChangelogDeleteManifest(t, fs, spec, schema, location+"/metadata/kept.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, kept)})
+	prunedManifest := writeChangelogDeleteManifest(t, fs, spec, schema, location+"/metadata/pruned.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, pruned)})
+	listPath := location + "/metadata/snap-2.avro"
+	writeChangelogManifestList(t, fs, listPath, snapshotID, 2, []iceberg.ManifestFile{dataManifest, keptManifest, prunedManifest})
+
+	schemaID := schema.ID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &expiredParent,
+		TimestampMs:      2000,
+		ManifestList:     listPath,
+		SequenceNumber:   snapshotID,
+		SchemaID:         &schemaID,
+		Summary: &Summary{
+			Operation:  OpOverwrite,
+			Properties: iceberg.Properties{removedDeleteFilesKey: "2"},
+		},
+	}}
+	txn.meta.snapshotLog = []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 2000}}
+	txn.meta.currentSnapshotID = &snapshotID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"changelog-expired-prune"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+
+	tasks, err := tbl.NewIncrementalChangelogScan(
+		WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(1))),
+	).FromSnapshotExclusive(expiredParent).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	removed, ok := tasks[0].(DeletedDataFileScanTask)
+	require.True(t, ok)
+	require.Equal(t, []string{kept.FilePath()}, changelogFilePaths(removed.ExistingDeletes()))
+}
+
+func TestEntriesLiveBefore(t *testing.T) {
+	carried := changelogTestDataFile(t, "carried.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	removed := changelogTestDataFile(t, "removed.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	added := changelogTestDataFile(t, "added.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	dup := changelogTestDataFile(t, "dup.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	snapshotID := int64(5)
+
+	got := entriesLiveBefore([]iceberg.ManifestEntry{
+		changelogManifestEntry(iceberg.EntryStatusEXISTING, 2, 1, carried),
+		changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, removed),
+		changelogManifestEntry(iceberg.EntryStatusADDED, snapshotID, 2, added),
+	}, snapshotID)
+	require.Equal(t, []string{carried.FilePath(), removed.FilePath()}, changelogEntryPaths(got))
+
+	for _, entries := range [][]iceberg.ManifestEntry{
+		{
+			changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, dup),
+			changelogManifestEntry(iceberg.EntryStatusEXISTING, 2, 1, dup),
+		},
+		{
+			changelogManifestEntry(iceberg.EntryStatusEXISTING, 2, 1, dup),
+			changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, dup),
+		},
+	} {
+		got = entriesLiveBefore(entries, snapshotID)
+		require.Equal(t, []string{dup.FilePath()}, changelogEntryPaths(got))
+		require.Equal(t, iceberg.EntryStatusEXISTING, got[0].Status())
+	}
+}
+
+func TestLiveManifestEntriesUsesTheLatestStatus(t *testing.T) {
+	file := changelogTestDataFile(t, "data.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
+	// Snapshot IDs are not chronological. The delete is snapshot 3, whose
+	// sequence number is 2. The add is snapshot 20, whose sequence number is 1.
+	added := changelogManifestEntry(iceberg.EntryStatusADDED, 20, 1, file)
+	deleted := changelogManifestEntry(iceberg.EntryStatusDELETED, 3, 1, file)
+	readded := changelogManifestEntry(iceberg.EntryStatusADDED, 2, 1, file)
+	sameSnapshotDeleted := changelogManifestEntry(iceberg.EntryStatusDELETED, 20, 1, file)
+	sequences := func(snapshotID int64) (int64, bool) {
+		switch snapshotID {
+		case 20:
+			return 1, true
+		case 3:
+			return 2, true
+		case 2:
+			return 3, true
+		default:
+			return 0, false
+		}
+	}
+
+	for _, entries := range [][]iceberg.ManifestEntry{
+		{added, deleted},
+		{deleted, added},
+		{added, sameSnapshotDeleted},
+		{sameSnapshotDeleted, added},
+	} {
+		require.Empty(t, liveManifestEntries(entries, sequences))
+	}
+
+	for _, entries := range [][]iceberg.ManifestEntry{
+		{added, deleted, readded},
+		{readded, deleted, added},
+	} {
+		got := liveManifestEntries(entries, sequences)
+		require.Len(t, got, 1)
+		require.Equal(t, iceberg.EntryStatusADDED, got[0].Status())
+		require.Equal(t, int64(2), got[0].SnapshotID())
+	}
+}
+
+func TestEntriesBeforeDropsRemovedDeleteFiles(t *testing.T) {
+	keep := changelogTestDataFile(t, "keep.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	drop := changelogTestDataFile(t, "drop.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	state := &changelogDeleteState{
+		snapshots: []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}, {SnapshotID: 3}},
+		preRange:  []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, drop)},
+		added: map[int64][]iceberg.ManifestEntry{
+			1: {changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, keep)},
+		},
+		removed: map[int64]map[string]struct{}{
+			2: {drop.FilePath(): {}},
+		},
+	}
+
+	require.Equal(t, []string{keep.FilePath()}, changelogEntryPaths(state.entriesBefore(3)))
+
+	readded := &changelogDeleteState{
+		snapshots: state.snapshots,
+		preRange:  state.preRange,
+		added: map[int64][]iceberg.ManifestEntry{
+			1: {changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, keep)},
+			2: {changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, drop)},
+		},
+		removed: state.removed,
+	}
+	require.Equal(t, []string{keep.FilePath(), drop.FilePath()}, changelogEntryPaths(readded.entriesBefore(3)))
+}
+
+func TestKeepNewestDeletionVector(t *testing.T) {
+	spec := partitionedSpec()
+	older := newChangelogDeletionVector(t, spec, "older.puffin", "data.parquet")
+	newer := newChangelogDeletionVector(t, spec, "newer.puffin", "data.parquet")
+	pos := changelogTestDataFile(t, "pos.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	got := keepNewestDeletionVector([]iceberg.ManifestEntry{
+		changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, older),
+		changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, pos),
+		changelogManifestEntry(iceberg.EntryStatusADDED, 3, 3, newer),
+	})
+	require.Equal(t, []string{pos.FilePath(), newer.FilePath()}, changelogEntryPaths(got))
+}
+
+func changelogFilePaths(files []iceberg.DataFile) []string {
+	out := make([]string, len(files))
+	for i, file := range files {
+		out[i] = file.FilePath()
+	}
+
+	return out
+}
+
+func changelogEntryPaths(entries []iceberg.ManifestEntry) []string {
+	out := make([]string, len(entries))
+	for i, entry := range entries {
+		out[i] = entry.DataFile().FilePath()
+	}
+
+	return out
+}
+
+func changelogManifestEntry(status iceberg.ManifestEntryStatus, snapshotID, sequence int64, file iceberg.DataFile) iceberg.ManifestEntry {
+	return iceberg.NewManifestEntry(status, &snapshotID, &sequence, &sequence, file)
+}
+
+func changelogTasksBySnapshot(tasks []ChangelogScanTask) map[int64]ChangelogScanTask {
+	out := make(map[int64]ChangelogScanTask, len(tasks))
+	for _, task := range tasks {
+		out[task.CommitSnapshotID()] = task
+	}
+
+	return out
+}
+
+func changelogSequenceDelete(t *testing.T, spec iceberg.PartitionSpec, kind, path string, data iceberg.DataFile) (iceberg.DataFile, int) {
+	t.Helper()
+
+	switch kind {
+	case "pos":
+		return newTestPosDeleteFileForSpec(t, spec, path+".parquet", map[int]any{1000: int32(1)}, data.FilePath()), 2
+	case "eq":
+		return newChangelogEqDelete(t, spec, path+".parquet", map[int]any{1000: int32(1)}), 2
+	default:
+		return newChangelogDeletionVector(t, spec, path+".puffin", data.FilePath()), 3
+	}
+}
+
+func expiredParentRemovedDeleteTable(t *testing.T, location string) *Table {
+	t.Helper()
+
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	data := newTestDataFile(t, spec, "mem://default/"+location+"/data.parquet", map[int]any{1000: int32(1)})
+	pos := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/"+location+"/pos.parquet", map[int]any{1000: int32(1)}, data.FilePath())
+	snapshotID := int64(2)
+	expiredParent := int64(1)
+	dataManifest := writeChangelogDataManifest(t, fs, spec, schema,
+		"mem://default/"+location+"/metadata/data.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, data)})
+	deleteManifest := writeChangelogDeleteManifest(t, fs, spec, schema,
+		"mem://default/"+location+"/metadata/deletes.avro", snapshotID, 2,
+		[]iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusDELETED, snapshotID, 1, pos)})
+	listPath := "mem://default/" + location + "/metadata/snap-2.avro"
+	writeChangelogManifestList(t, fs, listPath, snapshotID, 2, []iceberg.ManifestFile{dataManifest, deleteManifest})
+
+	schemaID := schema.ID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &expiredParent,
+		TimestampMs:      2000,
+		ManifestList:     listPath,
+		SequenceNumber:   snapshotID,
+		SchemaID:         &schemaID,
+		Summary: &Summary{
+			Operation:  OpOverwrite,
+			Properties: iceberg.Properties{removedDeleteFilesKey: "1"},
+		},
+	}}
+	txn.meta.snapshotLog = []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 2000}}
+	txn.meta.currentSnapshotID = &snapshotID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{location}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+}
+
+func newChangelogEqDelete(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentEqDeletes, path, iceberg.ParquetFile, partition, nil, nil, 1, 1)
+	require.NoError(t, err)
+
+	return builder.EqualityFieldIDs([]int{1}).Build()
+}
+
+func newChangelogDeletionVector(t *testing.T, spec iceberg.PartitionSpec, path, dataPath string) iceberg.DataFile {
+	t.Helper()
+
+	return newSharedDeletionVector(t, spec, path, dataPath, 0)
+}
+
+func newSharedDeletionVector(t *testing.T, spec iceberg.PartitionSpec, path, dataPath string, offset int64) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentPosDeletes, path, iceberg.PuffinFile, nil, nil, nil, 1, 1)
+	require.NoError(t, err)
+
+	return builder.ReferencedDataFile(dataPath).ContentOffset(offset).ContentSizeInBytes(16).Build()
+}
+
+type changelogScanStep struct {
+	operation       Operation
+	manifestVersion int
+	data            []iceberg.ManifestEntry
+	deletes         []iceberg.ManifestEntry
+}
+
+func writeChangelogScanTable(t *testing.T, location string, steps []changelogScanStep) *Table {
+	t.Helper()
+
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	var manifestList []iceberg.ManifestFile
+	listVersion := 2
+	snapshots := make([]Snapshot, 0, len(steps))
+	log := make([]SnapshotLogEntry, 0, len(steps))
+	var parent *int64
+	for i, step := range steps {
+		snapshotID := int64(i + 1)
+		version := step.manifestVersion
+		if version == 0 {
+			version = 2
+		}
+		if version > listVersion {
+			listVersion = version
+		}
+		var written []iceberg.ManifestFile
+		if len(step.data) > 0 {
+			path := "mem://default/" + location + "/metadata/data-" + fmtSnapshot(snapshotID) + ".avro"
+			written = append(written, writeChangelogDataManifest(t, fs, spec, schema, path, snapshotID, version, step.data))
+		}
+		if len(step.deletes) > 0 {
+			path := "mem://default/" + location + "/metadata/deletes-" + fmtSnapshot(snapshotID) + ".avro"
+			written = append(written, writeChangelogDeleteManifest(t, fs, spec, schema, path, snapshotID, version, step.deletes))
+		}
+		listPath := "mem://default/" + location + "/metadata/snap-" + fmtSnapshot(snapshotID) + ".avro"
+		manifestList = writeChangelogManifestList(t, fs, listPath, snapshotID, listVersion, append(manifestList, written...))
+		snapshots = append(snapshots, Snapshot{
+			SnapshotID:       snapshotID,
+			ParentSnapshotID: parent,
+			TimestampMs:      snapshotID * 1000,
+			ManifestList:     listPath,
+			SequenceNumber:   snapshotID,
+			SchemaID:         &schema.ID,
+			Summary:          &Summary{Operation: step.operation},
+		})
+		log = append(log, SnapshotLogEntry{SnapshotID: snapshotID, TimestampMs: snapshotID * 1000})
+		id := snapshotID
+		parent = &id
+	}
+	txn.meta.snapshotList = snapshots
+	txn.meta.snapshotLog = log
+	if len(snapshots) > 0 {
+		current := snapshots[len(snapshots)-1].SnapshotID
+		txn.meta.currentSnapshotID = &current
+	}
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{location}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+}
+
+func fmtSnapshot(snapshotID int64) string {
+	return strconv.FormatInt(snapshotID, 10)
+}
+
+func writeChangelogDataManifest(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	spec iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+	path string,
+	snapshotID int64,
+	version int,
+	entries []iceberg.ManifestEntry,
+) iceberg.ManifestFile {
+	t.Helper()
+
+	var buf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(path, &buf, version, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
+
+	return manifest
+}
+
+func writeChangelogDeleteManifest(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	spec iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+	path string,
+	snapshotID int64,
+	version int,
+	entries []iceberg.ManifestEntry,
+) iceberg.ManifestFile {
+	t.Helper()
+
+	var buf bytes.Buffer
+	writer, err := iceberg.NewManifestWriter(version, &buf, spec, schema, snapshotID,
+		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+	for _, entry := range entries {
+		switch entry.Status() {
+		case iceberg.EntryStatusDELETED:
+			require.NoError(t, writer.Delete(entry))
+		case iceberg.EntryStatusEXISTING:
+			require.NoError(t, writer.Existing(entry))
+		default:
+			require.NoError(t, writer.Add(entry))
+		}
+	}
+	require.NoError(t, writer.Close())
+	manifest, err := writer.ToManifestFile(path, int64(buf.Len()),
+		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
+
+	return manifest
+}
+
+func writeChangelogManifestList(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	path string,
+	snapshotID int64,
+	version int,
+	manifests []iceberg.ManifestFile,
+) []iceberg.ManifestFile {
+	t.Helper()
+
+	var buf bytes.Buffer
+	sequenceNumber := snapshotID
+	require.NoError(t, iceberg.WriteManifestList(version, &buf, snapshotID, nil, &sequenceNumber, 0, manifests))
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
+	listFile, err := fs.Open(context.Background(), path)
+	require.NoError(t, err)
+	list, err := iceberg.ReadManifestList(listFile)
+	require.NoError(t, err)
+	require.NoError(t, listFile.Close())
+
+	return list
+}
+
 type countingOpenIO struct {
 	iceio.IO
 	opens     *atomic.Int64
@@ -781,4 +1949,146 @@ func (io *countingOpenIO) Open(_ context.Context, name string) (iceio.File, erro
 	}
 
 	return io.IO.Open(context.Background(), name)
+}
+
+// TestIncrementalChangelogScanRebuildsExpiredParentFromRealWriters appends a
+// data file, adds a position delete with RowDelta, then replaces both through
+// the overwrite writer. Expiring the delete snapshot leaves the replace as
+// the first in-range snapshot, and planning rebuilds the position delete from
+// the DELETED entry that writer recorded.
+func TestIncrementalChangelogScanRebuildsExpiredParentFromRealWriters(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir, iceberg.Properties{
+		PropertyFormatVersion: "2",
+	})
+	require.NoError(t, err)
+	cat := &countingCatalog{metadata: meta}
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	tbl := New(Identifier{"db", "changelog-real-writer"}, meta, "", fsF, cat)
+
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, false, false)
+	require.NoError(t, err)
+	tbl, err = appendChangelogRows(ctx, tbl, arrowSchema, `[{"id": 1}]`)
+	require.NoError(t, err)
+	require.NotNil(t, tbl.CurrentSnapshot())
+
+	planned, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	dataFile := planned[0].File
+
+	posPath := filepath.Join(dir, "pos-del.parquet")
+	writeChangelogParquet(t, posPath, PositionalDeleteArrowSchema, fmt.Sprintf(`[{"file_path": %q, "pos": 0}]`, dataFile.FilePath()))
+	posInfo, err := os.Stat(posPath)
+	require.NoError(t, err)
+	posBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes,
+		posPath,
+		iceberg.ParquetFile,
+		nil, nil, nil,
+		1,
+		posInfo.Size(),
+	)
+	require.NoError(t, err)
+	posDelete := posBuilder.ReferencedDataFile(dataFile.FilePath()).Build()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	snapshotB := tbl.CurrentSnapshot().SnapshotID
+
+	planned, err = tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	require.NotEmpty(t, planned[0].DeleteFiles)
+
+	replacementPath := filepath.Join(dir, "replacement.parquet")
+	writeChangelogParquet(t, replacementPath, arrowSchema, `[{"id": 2}]`)
+	replacementInfo, err := os.Stat(replacementPath)
+	require.NoError(t, err)
+	replacementBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		replacementPath,
+		iceberg.ParquetFile,
+		nil, nil, nil,
+		1,
+		replacementInfo.Size(),
+	)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.ReplaceFiles(ctx,
+		[]iceberg.DataFile{planned[0].File},
+		[]iceberg.DataFile{replacementBuilder.Build()},
+		append([]iceberg.DataFile{}, planned[0].DeleteFiles...),
+		nil,
+	))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	snapshotC := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshotC)
+	require.Contains(t, snapshotC.Summary.Properties, removedDeleteFilesKey)
+
+	builder, err := MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshots([]int64{snapshotB}, false))
+	expired, err := builder.Build()
+	require.NoError(t, err)
+	tbl = New(tbl.Identifier(), expired, tbl.MetadataLocation(), fsF, cat)
+
+	tasks, err := tbl.NewIncrementalChangelogScan().FromSnapshotExclusive(snapshotB).PlanFiles(ctx)
+	require.NoError(t, err)
+
+	var deleted DeletedDataFileScanTask
+	found := false
+	for _, task := range tasks {
+		got, ok := task.(DeletedDataFileScanTask)
+		if !ok {
+			continue
+		}
+		found = true
+		deleted = got
+	}
+	require.True(t, found)
+	require.Equal(t, snapshotC.SnapshotID, deleted.CommitSnapshotID())
+	paths := make([]string, 0, len(deleted.ExistingDeletes()))
+	for _, file := range deleted.ExistingDeletes() {
+		paths = append(paths, file.FilePath())
+	}
+	require.Contains(t, paths, posPath)
+}
+
+func appendChangelogRows(ctx context.Context, tbl *Table, schema *arrow.Schema, jsonRows string) (*Table, error) {
+	batch, _, err := array.RecordFromJSON(memory.DefaultAllocator, schema, strings.NewReader(jsonRows))
+	if err != nil {
+		return nil, err
+	}
+	defer batch.Release()
+	rows := array.NewTableFromRecords(schema, []arrow.RecordBatch{batch})
+	defer rows.Release()
+	reader := array.NewTableReader(rows, rows.NumRows())
+	defer reader.Release()
+
+	return tbl.Append(ctx, reader, nil)
+}
+
+func writeChangelogParquet(t *testing.T, path string, schema *arrow.Schema, jsonData string) {
+	t.Helper()
+
+	batch, _, err := array.RecordFromJSON(memory.DefaultAllocator, schema, strings.NewReader(jsonData))
+	require.NoError(t, err)
+	defer batch.Release()
+
+	out, err := iceio.LocalFS{}.Create(context.Background(), path)
+	require.NoError(t, err)
+	defer out.Close()
+
+	rows := array.NewTableFromRecords(schema, []arrow.RecordBatch{batch})
+	defer rows.Release()
+	require.NoError(t, pqarrow.WriteTable(rows, out, batch.NumRows(), parquet.NewWriterProperties(), pqarrow.DefaultWriterProps()))
 }
