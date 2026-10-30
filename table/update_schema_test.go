@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -2219,6 +2220,49 @@ func TestUnionByNameAddedColumnPreservesInitialDefault(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, int32(42), count.InitialDefault)
 	assert.Equal(t, int32(42), count.WriteDefault)
+}
+
+func TestAddColumnStoresBinaryDefaultAsHex(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).
+		AddColumn([]string{"payload"}, iceberg.PrimitiveTypes.Binary, "", false, iceberg.NewLiteral([]byte{0x0a, 0xff})).
+		Apply()
+	require.NoError(t, err)
+
+	payload, ok := applied.FindFieldByName("payload")
+	require.True(t, ok)
+	assert.Equal(t, "0aff", payload.InitialDefault)
+	assert.Equal(t, "0aff", payload.WriteDefault)
+
+	data, err := json.Marshal(applied)
+	require.NoError(t, err)
+	var decoded iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.True(t, applied.Equals(&decoded))
+}
+
+// A binary write default read from metadata and the same default built in
+// process must compare equal, so union-by-name does not rewrite it.
+func TestUnionByNameKeepsUnchangedBinaryWriteDefault(t *testing.T) {
+	var current iceberg.Schema
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"struct","schema-id":1,"fields":[`+
+		`{"id":1,"name":"payload","type":"binary","required":false,"initial-default":"0aff","write-default":"0aff"}]}`), &current))
+	incoming := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Binary,
+		InitialDefault: []byte{0x0a, 0xff}, WriteDefault: []byte{0x0a, 0xff},
+	})
+
+	meta, err := NewMetadata(&current, iceberg.UnpartitionedSpec, UnsortedSortOrder, "",
+		iceberg.Properties{PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	txn := New([]string{"tbl"}, meta, "", nil, nil).NewTransaction()
+
+	applied, err := NewUpdateSchema(txn, true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+	assert.Equal(t, current.AsStruct(), applied.AsStruct())
 }
 
 func TestUnionByNameRejectsInvalidAddedColumnDefault(t *testing.T) {
