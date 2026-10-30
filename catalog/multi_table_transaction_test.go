@@ -81,6 +81,8 @@ func (s *fullStubCatalog) CommitTable(context.Context, table.Identifier, []table
 
 func (s *fullStubCatalog) DropTable(context.Context, table.Identifier) error { return nil }
 
+func (s *fullStubCatalog) PurgeTable(context.Context, table.Identifier) error { return nil }
+
 func (s *fullStubCatalog) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
@@ -110,6 +112,8 @@ func (s *fullStubCatalog) LoadNamespaceProperties(context.Context, table.Identif
 func (s *fullStubCatalog) UpdateNamespaceProperties(context.Context, table.Identifier, []string, iceberg.Properties) (PropertiesUpdateSummary, error) {
 	return PropertiesUpdateSummary{}, nil
 }
+
+func (s *fullStubCatalog) Close() error { return nil }
 
 func (s *fullStubCatalog) CatalogType() Type { return REST }
 

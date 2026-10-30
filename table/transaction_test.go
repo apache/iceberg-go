@@ -45,7 +45,6 @@ import (
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
 
 type SparkIntegrationTestSuite struct {
@@ -54,13 +53,10 @@ type SparkIntegrationTestSuite struct {
 	ctx   context.Context
 	cat   catalog.Catalog
 	props iceberg.Properties
-	stack *compose.DockerCompose
 }
 
 func (s *SparkIntegrationTestSuite) SetupSuite() {
-	var err error
-	s.stack, err = recipe.Start(s.T())
-	s.Require().NoError(err)
+	s.Require().NoError(recipe.Start(s.T()))
 }
 
 func (s *SparkIntegrationTestSuite) SetupTest() {
@@ -148,7 +144,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
-	fw, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(filename)
+	fw, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(context.Background(), filename)
 	if err != nil {
 		panic(err)
 	}
@@ -159,7 +155,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	}
 
 	tx := tbl.NewTransaction()
-	err = tx.AddFiles(s.ctx, []string{filename}, nil, false)
+	err = tx.AddDataFilesByPath(s.ctx, []string{filename}, nil, false)
 	s.Require().NoError(err)
 
 	tbl, err = tx.Commit(s.ctx)
@@ -195,10 +191,10 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 		iceberg.NestedField{ID: 10, Name: "date", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 11, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 12, Name: "binary", Type: iceberg.PrimitiveTypes.Binary},
-		iceberg.NestedField{ID: 13, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
-		iceberg.NestedField{ID: 14, Name: "small_dec", Type: iceberg.DecimalTypeOf(8, 2)},
-		iceberg.NestedField{ID: 15, Name: "med_dec", Type: iceberg.DecimalTypeOf(16, 2)},
-		iceberg.NestedField{ID: 16, Name: "large_dec", Type: iceberg.DecimalTypeOf(24, 2)},
+		iceberg.NestedField{ID: 13, Name: "fixed", Type: iceberg.MustFixedTypeOf(16)},
+		iceberg.NestedField{ID: 14, Name: "small_dec", Type: iceberg.MustDecimalTypeOf(8, 2)},
+		iceberg.NestedField{ID: 15, Name: "med_dec", Type: iceberg.MustDecimalTypeOf(16, 2)},
+		iceberg.NestedField{ID: 16, Name: "large_dec", Type: iceberg.MustDecimalTypeOf(24, 2)},
 		iceberg.NestedField{
 			ID: 17, Name: "list", Type: &iceberg.ListType{
 				ElementID: 18,
@@ -657,7 +653,7 @@ func (s *SparkIntegrationTestSuite) variantField(obj variant.ObjectValue, key st
 func (s *SparkIntegrationTestSuite) assertVariantFileShredded(tbl *table.Table, path string) {
 	fs, err := tbl.FS(s.ctx)
 	s.Require().NoError(err)
-	f, err := fs.Open(path)
+	f, err := fs.Open(s.ctx, path)
 	s.Require().NoError(err)
 	defer f.Close()
 

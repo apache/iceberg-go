@@ -22,12 +22,15 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
+	"iter"
 	"log/slog"
 	"maps"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // RewriteResult summarizes a completed compaction.
@@ -93,7 +96,7 @@ type CompactionGroupFailure struct {
 // normally be invoked through this action so callers do not accidentally try
 // to commit the parent transaction again.
 func (t Table) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
-	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	txn, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +232,7 @@ type compactionGroupConfig struct {
 	arrowBatchSize        int
 	recordBatchBufferSize int
 	parquetRowGroupLimit  int
+	sortOrder             *SortOrder
 }
 
 // WithCompactionTargetFileSize sets the size target for output files
@@ -311,6 +315,80 @@ func WithCompactionParquetRowGroupLimit(n int) CompactionGroupOption {
 		}
 	}
 }
+
+// WithCompactionSortOrder switches the group rewrite from bin-pack to
+// sort: every row of the group is sorted by order before being written,
+// so each output file holds a sorted, non-overlapping range of the group
+// instead of one sorted run per record batch. Rows are split by the
+// table's current partition spec first and each partition is sorted on
+// its own.
+//
+// Each field sorts by its first source column, so a field whose
+// transform does not preserve order (bucket, void) or that has several
+// source columns only clusters rows by that column. Output files record
+// order's id as sort_order_id when order is one of the table's sort
+// orders (for example [Table.SortOrder]), every field is single-source,
+// every field but the last is identity and the last preserves order;
+// otherwise they record none.
+//
+// When every file of the group records order's id as its sort_order_id,
+// every field of order is identity, every file was written under the
+// table's current partition spec and no partition has more files than
+// the scan concurrency ([WithCompactionScanConcurrency], GOMAXPROCS by
+// default), the files of each partition are read as concurrent streams
+// and merged. Memory then holds up to about five batches per file being
+// merged rather than the whole group. A file whose rows turn out not to
+// be sorted fails the group. Otherwise the whole group is held in memory
+// decoded until its files are written; with the batches queued for the
+// writer, that can reach about twice the group's decoded size.
+//
+// Rows are ordered only within a group, so files of different groups
+// overlap on the sort key. Plan groups with
+// [compaction.Config.MaxGroupSizeBytes] large enough to cover a
+// partition, and small enough to fit in memory when its files are not
+// already sorted.
+// [WithCompactionArrowBatchSize] sets the rows per batch read and handed
+// to the writer. An unsorted order is rejected by [ExecuteCompactionGroup].
+func WithCompactionSortOrder(order SortOrder) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		c.sortOrder = &order
+	}
+}
+
+// rewriteStrategy decides how a compaction group's rows are arranged
+// before they are written: which rows are read in what order, and what
+// the writer may assume about that order.
+type rewriteStrategy interface {
+	// records reads tasks with scan, deletes applied, and returns the
+	// rows in the order they are to be written.
+	records(ctx context.Context, scan *Scan, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error)
+	// writeOptions are added to the options the group is written with.
+	writeOptions() []WriteRecordOption
+}
+
+// rewriteStrategy returns the strategy the options select: sort when a
+// sort order is set, bin-pack otherwise.
+func (c compactionGroupConfig) rewriteStrategy(tbl *Table) (rewriteStrategy, error) {
+	if c.sortOrder == nil {
+		return binPackStrategy{}, nil
+	}
+
+	batchRows := int64(c.arrowBatchSize)
+	if batchRows <= 0 {
+		batchRows = int64(tbl.Properties().GetInt(tblutils.ParquetBatchSizeKey, tblutils.ParquetBatchSizeDefault))
+	}
+
+	return newSortStrategy(tbl, *c.sortOrder, max(batchRows, 1))
+}
+
+// binPackStrategy writes the group's rows in the order they are read.
+type binPackStrategy struct{}
+
+func (binPackStrategy) records(ctx context.Context, scan *Scan, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	return scan.ReadTasks(ctx, tasks)
+}
+
+func (binPackStrategy) writeOptions() []WriteRecordOption { return nil }
 
 // RewriteDataFiles compacts the given groups by reading data with
 // deletes applied, writing new consolidated files, and atomically
@@ -418,6 +496,11 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // Empty groups return a zero [CompactionGroupResult] without doing
 // any I/O.
 //
+// Every task must represent one complete physical data file with no residual
+// row filter. Compaction applies the attached deletes, then replaces each
+// source file in full; partial ranges or residual filters would otherwise
+// silently discard rows when the original task is replaced.
+//
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
 //
@@ -429,9 +512,34 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		return CompactionGroupResult{PartitionKey: group.PartitionKey}, nil
 	}
 
+	seenFiles := make(map[string]struct{}, len(group.Tasks))
+	for _, task := range group.Tasks {
+		if task.File == nil {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
+		}
+		path := task.File.FilePath()
+		if _, ok := seenFiles[path]; ok {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction group contains duplicate data file %q", ErrInvalidOperation, path)
+		}
+		seenFiles[path] = struct{}{}
+
+		fileSize := task.File.FileSizeBytes()
+		if task.Start != 0 || task.Length < 0 || (task.Length > 0 && task.Length != fileSize) {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task for %q must cover the whole data file", ErrInvalidOperation, path)
+		}
+		if task.Residual != nil && !task.Residual.Equals(iceberg.AlwaysTrue{}) {
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task for %q has a residual row filter", ErrInvalidOperation, path)
+		}
+	}
+
 	cfg := compactionGroupConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+
+	strategy, err := cfg.rewriteStrategy(tbl)
+	if err != nil {
+		return CompactionGroupResult{}, fmt.Errorf("compaction group %q: %w", group.PartitionKey, err)
 	}
 
 	var scanOpts []ScanOption
@@ -451,10 +559,10 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	// the first v3 manifest-list write after a v1/v2->v3 upgrade, so mixed
 	// groups are expected during migration; for now we degrade gracefully
 	// and do not preserve lineage for the surviving rows.
-	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
+	preserveLineage := tbl.metadata.FormatVersion() >= 3 && allTasksHaveRowLineage(group.Tasks)
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
-	} else if tbl.metadata.Version() >= 3 {
+	} else if tbl.metadata.FormatVersion() >= 3 {
 		// Drop lineage for the whole mixed group. Warn only when at least one
 		// source file already carried lineage; all-legacy groups fall through
 		// silently because there is no lineage to lose.
@@ -474,7 +582,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		}
 	}
 
-	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
+	arrowSchema, records, err := strategy.records(ctx, tbl.Scan(scanOpts...), group.Tasks)
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 	}
@@ -508,6 +616,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		}
 		writeOpts = append(writeOpts, WithPreserveRowLineage(projectedSchema))
 	}
+	writeOpts = append(writeOpts, strategy.writeOptions()...)
 
 	var (
 		newFiles   []iceberg.DataFile
@@ -573,8 +682,8 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	if err != nil {
 		return nil, err
 	}
-	if t.committed {
-		return nil, errors.New("transaction has already been committed")
+	if err := t.checkUsable(); err != nil {
+		return nil, err
 	}
 	result := &RewriteResult{Table: t.tbl}
 	if len(meta.updates) > 0 || len(t.reqs) > 0 || len(t.validators) > 0 {
@@ -692,7 +801,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		}
 		deletesToRemove := append(deadPositionDeletes, safeDVs...)
 
-		groupTxn, err := current.NewTransactionOnBranchWithError(t.branch)
+		groupTxn, err := current.NewTransactionOnBranch(t.branch)
 		if err != nil {
 			return result, cleanupBatch(fmt.Errorf("create transaction for partial rewrite batch: %w", err))
 		}
@@ -719,9 +828,10 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 				return result, err
 			}
 
-			// ErrCommitFailed is the only error that proves the catalog did not
-			// commit. Every other error leaves commit state unknown, so continuing
-			// with the old table could apply later batches on stale state.
+			// Only a conflict lets the loop move on to the next batch, since each
+			// batch commits through its own transaction built on the current
+			// table. Any other failure stops the rewrite. It may be of unknown
+			// commit state, so continuing could apply later batches on stale state.
 			if !errors.Is(err, ErrCommitFailed) {
 				t.committed = true
 
@@ -783,7 +893,7 @@ func cleanupCompactionOutputs(fs iceio.IO, batchResults []CompactionGroupResult)
 
 	var cleanupErr error
 	for path := range paths {
-		if err := fs.Remove(path); err != nil && !errors.Is(err, iofs.ErrNotExist) {
+		if err := fs.Remove(context.Background(), path); err != nil && !errors.Is(err, iofs.ErrNotExist) {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove %s: %w", path, err))
 		}
 	}

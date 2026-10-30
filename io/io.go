@@ -47,6 +47,10 @@ import (
 type IO interface {
 	// Open opens the named file.
 	//
+	// Implementations may use ctx to bound the open; those backed by a
+	// plain io/fs.FS ignore it since fs.FS.Open takes no context. Reads on
+	// the returned File are not bound by ctx.
+	//
 	// When Open returns an error, it should be of type *PathError
 	// with the Op field set to "open", the Path field set to name,
 	// and the Err field describing the problem.
@@ -54,13 +58,14 @@ type IO interface {
 	// Open should reject attempts to open names that do not satisfy
 	// fs.ValidPath(name), returning a *PathError with Err set to
 	// ErrInvalid or ErrNotExist.
-	Open(name string) (File, error)
+	Open(ctx context.Context, name string) (File, error)
 
-	// Remove removes the named file or (empty) directory.
+	// Remove removes the named file or (empty) directory. The context bounds
+	// the delete; local filesystem implementations ignore it.
 	//
 	// If there is an error, it will be of type *PathError.
 	// Implementations must be safe for concurrent use by multiple goroutines.
-	Remove(name string) error
+	Remove(ctx context.Context, name string) error
 }
 
 // ReadFileIO is the interface implemented by a file system that
@@ -84,11 +89,12 @@ type WriteFileIO interface {
 	IO
 
 	// Create attempts to create the named file and return a writer
-	// for it.
-	Create(name string) (FileWriter, error)
+	// for it. Implementations may use ctx to bound creation and writes
+	// performed through the returned writer.
+	Create(ctx context.Context, name string) (FileWriter, error)
 
 	// WriteFile writes p to the named file.
-	WriteFile(name string, p []byte) error
+	WriteFile(ctx context.Context, name string, p []byte) error
 }
 
 // ListableIO is the interface implemented by a file system that
@@ -105,7 +111,9 @@ type ListableIO interface {
 	// WalkDir walks the file tree rooted at root, calling fn for each
 	// file or directory in the tree, including root. Paths passed to fn
 	// are full URIs consistent with the root's scheme and authority.
-	WalkDir(root string, fn fs.WalkDirFunc) error
+	// Implementations should pass ctx to backend listing operations and stop
+	// traversal when it is canceled.
+	WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error
 }
 
 // BulkRemovableIO is an optional interface for IO implementations that
@@ -217,24 +225,35 @@ type MkdirAllIO interface {
 	MkdirAll(path string) error
 }
 
-// FS wraps an io/fs.FS as an IO interface.
-func FS(fsys fs.FS) IO {
-	if _, ok := fsys.(fs.ReadFileFS); ok {
-		return readFileFS{ioFS{fsys, nil}}
+// FS wraps an io/fs.FS as an IO interface. It implements ReadFileIO only
+// if the underlying fsys supports fs.ReadFileFS. Options can configure name
+// processing; see WithNamePreprocessor.
+func FS(fsys fs.FS, opts ...FSOption) IO {
+	adapter := ioFS{fsys: fsys}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&adapter)
+		}
 	}
 
-	return ioFS{fsys, nil}
+	if _, ok := fsys.(fs.ReadFileFS); ok {
+		return readFileFS{adapter}
+	}
+
+	return adapter
 }
 
-// FSPreProcName wraps an io/fs.FS like FS, only if fn is non-nil then
-// it is called to preprocess any filenames before they are passed to
-// the underlying fsys.
-func FSPreProcName(fsys fs.FS, fn func(string) string) IO {
-	if _, ok := fsys.(fs.ReadFileFS); ok {
-		return readFileFS{ioFS{fsys, fn}}
-	}
+// FSOption configures an IO adapter created by FS.
+type FSOption func(*ioFS)
 
-	return ioFS{fsys, fn}
+// WithNamePreprocessor transforms filenames before FS normalizes leading
+// slashes and passes them to the underlying fs.FS. It applies to Open, Remove,
+// and ReadFile when available. A nil preprocessor leaves names unchanged.
+// fn must be safe for concurrent use by multiple goroutines.
+func WithNamePreprocessor(fn func(string) string) FSOption {
+	return func(adapter *ioFS) {
+		adapter.preProcessName = fn
+	}
 }
 
 type readFileFS struct {
@@ -256,7 +275,9 @@ type ioFS struct {
 	preProcessName func(string) string
 }
 
-func (f ioFS) Open(name string) (File, error) {
+func (f ioFS) Open(_ context.Context, name string) (File, error) {
+	// The wrapped io/fs.FS has no context-aware Open, so ctx cannot be
+	// forwarded; it only bounds context-aware implementations.
 	name = f.processName(name)
 	file, err := f.fsys.Open(name)
 	if err != nil {
@@ -280,7 +301,15 @@ func (f ioFS) processName(name string) string {
 	return name
 }
 
-func (f ioFS) Remove(name string) error {
+func (f ioFS) Remove(ctx context.Context, name string) error {
+	// Prefer a context-aware Remove when the wrapped fsys offers one, and fall
+	// back to the plain io/fs-style Remove otherwise.
+	if r, ok := f.fsys.(interface {
+		Remove(context.Context, string) error
+	}); ok {
+		return r.Remove(ctx, f.processName(name))
+	}
+
 	r, ok := f.fsys.(interface{ Remove(name string) error })
 	if !ok {
 		return errMissingRemove
@@ -333,24 +362,21 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 	return d.ReadDir(count)
 }
 
-// LoadFS takes a map of properties and an optional URI location
-// and attempts to infer an IO object from it using the registered
-// scheme factories.
-//
-// The scheme is extracted from the location URI and used to look up
-// the appropriate factory from the registry. The local filesystem
-// (file:// or empty scheme) is registered by default.
-//
-// Additional schemes can be registered by importing subpackages.
-// Import the backend for each cloud in use, or io/gocloud for all of them:
-//
-//	import _ "github.com/apache/iceberg-go/io/gocloud/s3"
+// LoadFS takes properties and a URI location and resolves a FileIO using
+// the global scheme registry. When location is empty, the warehouse property
+// is used. Import the desired io/gocloud backends for their scheme factories.
 func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
+	return defaultRegistry.LoadFS(ctx, props, location)
+}
+
+// LoadFS loads a FileIO using only this registry's scheme factories.
+// If location is empty, the warehouse property is used instead.
+func (r *Registry) LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]
 	}
 
-	iofs, err := inferFileIOFromScheme(ctx, location, props)
+	iofs, err := r.inferFileIOFromScheme(ctx, location, props)
 	if err != nil {
 		return nil, err
 	}
@@ -362,10 +388,16 @@ func LoadFS(ctx context.Context, props map[string]string, location string) (IO, 
 	return iofs, nil
 }
 
-// LoadFSFunc is a helper function to create IO Func factory for later usage
+// LoadFSFunc constructs a lazy factory backed by the global scheme registry.
 func LoadFSFunc(props map[string]string, location string) func(ctx context.Context) (IO, error) {
+	return defaultRegistry.LoadFSFunc(props, location)
+}
+
+// LoadFSFunc constructs a lazy factory backed by this registry. It keeps the
+// registry selection even when other schemes are registered globally later.
+func (r *Registry) LoadFSFunc(props map[string]string, location string) func(ctx context.Context) (IO, error) {
 	return func(ctx context.Context) (IO, error) {
-		iofs, err := LoadFS(ctx, props, location)
+		iofs, err := r.LoadFS(ctx, props, location)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load metadata file at %s: %w", location, err)
 		}

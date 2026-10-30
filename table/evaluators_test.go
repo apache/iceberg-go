@@ -137,8 +137,8 @@ func TestManifestEvaluator(t *testing.T) {
 	}
 
 	spec := iceberg.NewPartitionSpec(partFields...)
-	manifestNoStats := iceberg.NewManifestFile(1, "", 0, 0, 0).Build()
-	manifest := iceberg.NewManifestFile(1, "", 0, 0, 0).Partitions(
+	manifestNoStats := iceberg.NewManifestBuilder(1, "", 0, 0, 0).Build()
+	manifest := iceberg.NewManifestBuilder(1, "", 0, 0, 0).Partitions(
 		[]iceberg.FieldSummary{
 			{ // id
 				ContainsNull: false,
@@ -759,7 +759,7 @@ func TestManifestEvaluatorWithDroppedPartitionSource(t *testing.T) {
 		return iceberg.FieldSummary{ContainsNull: false, LowerBound: &lower, UpperBound: &upper}
 	}
 	manifestWith := func(summaries ...iceberg.FieldSummary) iceberg.ManifestFile {
-		return iceberg.NewManifestFile(1, "", 0, 0, 0).Partitions(summaries).Build()
+		return iceberg.NewManifestBuilder(1, "", 0, 0, 0).Partitions(summaries).Build()
 	}
 	// evalForCol projects (col == 2) onto the spec and returns the manifest
 	// evaluator. In every case below the dropped field's slot contains 2
@@ -1308,7 +1308,6 @@ func (m *mockDataFile) ColumnSizes() map[int]int64                { return m.col
 func (m *mockDataFile) ValueCounts() map[int]int64                { return m.valueCounts }
 func (m *mockDataFile) NullValueCounts() map[int]int64            { return m.nullCounts }
 func (m *mockDataFile) NaNValueCounts() map[int]int64             { return m.nanCounts }
-func (*mockDataFile) DistinctValueCounts() map[int]int64          { return nil }
 func (m *mockDataFile) LowerBoundValues() map[int][]byte          { return m.lowerBounds }
 func (m *mockDataFile) UpperBoundValues() map[int][]byte          { return m.upperBounds }
 func (*mockDataFile) KeyMetadata() []byte                         { return nil }

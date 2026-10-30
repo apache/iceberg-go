@@ -18,6 +18,7 @@
 package encryption
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -26,86 +27,179 @@ import (
 )
 
 // KMSTypeKey is the catalog property that selects a [KeyManagementClient]
-// implementation registered via [RegisterKMS] (e.g. "memory"). It is a
-// registered short name, not a fully-qualified class name.
-//
-// KMSTypeKey ("kms-type") is an iceberg-go-specific mechanism for wiring up
-// a KMS client at runtime. It is not a standardized Iceberg spec property
-// and has no cross-implementation meaning. It will not be recognized by,
-// or portable to, other Iceberg implementations.
+// implementation registered with a [KMSRegistry] (e.g. "memory").
+// It is an iceberg-go-specific property and is not portable to other Iceberg
+// implementations.
 const KMSTypeKey = "kms-type"
 
-// ErrKMSTypeNotFound is returned by [LoadKeyManagementClient] when the
-// requested kmsType has not been registered via [RegisterKMS].
-var ErrKMSTypeNotFound = errors.New("encryption: kms type not found")
-
-// KMSFactory creates a [KeyManagementClient] from catalog/table properties.
-// props is the full property map (typically catalog properties); factories
-// should read whichever keys they need (e.g. key material, endpoints,
-// credentials) directly from it.
-type KMSFactory func(props map[string]string) (KeyManagementClient, error)
-
 var (
-	kmsRegMutex sync.RWMutex
-	kmsRegistry = map[string]KMSFactory{}
+	// ErrKMSTypeNotFound is returned by [KMSRegistry.Load] when the
+	// requested KMS has not been registered.
+	ErrKMSTypeNotFound = errors.New("encryption: kms type not found")
+
+	// ErrKMSAlreadyRegistered is returned when a factory name is already in use.
+	ErrKMSAlreadyRegistered = errors.New("encryption: kms factory already registered")
+
+	// ErrInvalidKMSRegistration is returned for an empty name or nil factory.
+	ErrInvalidKMSRegistration = errors.New("encryption: invalid kms registration")
 )
 
-// RegisterKMS adds a new named [KMSFactory] to the registry so it can later
-// be selected via the [KMSTypeKey] catalog property. It panics if factory is
-// nil or if name is already registered.
-func RegisterKMS(name string, factory KMSFactory) {
+// KMSFactory creates a [KeyManagementClient] from catalog/table properties.
+// Factories receive the caller's context and full property map.
+type KMSFactory func(ctx context.Context, props map[string]string) (KeyManagementClient, error)
+
+// KMSRegistry owns the named factories used to construct KMS clients.
+// A registry is safe for concurrent use and must not be copied after first use.
+// Its zero value is an empty, usable registry. Use [NewKMSRegistry] to clone
+// the global default, which includes the built-in "memory" factory (for testing).
+//
+// Separate registries let tests and catalog clients register the same name
+// without modifying each other's factories.
+type KMSRegistry struct {
+	mu        sync.RWMutex
+	factories map[string]KMSFactory
+}
+
+func builtInKMSRegistry() *KMSRegistry {
+	return &KMSRegistry{
+		factories: map[string]KMSFactory{
+			"memory": func(_ context.Context, _ map[string]string) (KeyManagementClient, error) {
+				return NewInMemoryKeyManagementClient(), nil
+			},
+		},
+	}
+}
+
+// defaultKMSRegistry receives package-level registrations, including those
+// made by cloud KMS providers through side-effect imports.
+var defaultKMSRegistry = builtInKMSRegistry()
+
+// NewKMSRegistry returns an independent snapshot of the default registry.
+// Providers should be imported before calling it. Initializing a package-level
+// variable with NewKMSRegistry can miss registrations made by other packages.
+func NewKMSRegistry() *KMSRegistry {
+	return defaultKMSRegistry.Clone()
+}
+
+// Clone copies the registered factories into a separate registry. Factories
+// themselves are shared, but future registrations and removals are isolated.
+func (r *KMSRegistry) Clone() *KMSRegistry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return &KMSRegistry{factories: maps.Clone(r.factories)}
+}
+
+// Register adds a named KMS factory. It returns an error for an empty name,
+// nil factory, or duplicate name. The registry is unchanged on error.
+func (r *KMSRegistry) Register(name string, factory KMSFactory) error {
+	if name == "" {
+		return fmt.Errorf("%w: name must not be empty", ErrInvalidKMSRegistration)
+	}
 	if factory == nil {
-		panic("encryption: RegisterKMS factory is nil")
+		return fmt.Errorf("%w: factory for %q is nil", ErrInvalidKMSRegistration, name)
 	}
 
-	kmsRegMutex.Lock()
-	defer kmsRegMutex.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	if _, dup := kmsRegistry[name]; dup {
-		panic("encryption: RegisterKMS called twice for name " + name)
+	if _, exists := r.factories[name]; exists {
+		return fmt.Errorf("%w: %q", ErrKMSAlreadyRegistered, name)
 	}
-	kmsRegistry[name] = factory
+	if r.factories == nil {
+		r.factories = make(map[string]KMSFactory)
+	}
+	r.factories[name] = factory
+
+	return nil
 }
 
-// UnregisterKMS removes the requested named factory from the registry.
-func UnregisterKMS(name string) {
-	kmsRegMutex.Lock()
-	defer kmsRegMutex.Unlock()
-	delete(kmsRegistry, name)
+// MustRegister registers a factory or panics. It is intended for init functions
+// in KMS provider packages where registration failure is unrecoverable.
+func (r *KMSRegistry) MustRegister(name string, factory KMSFactory) {
+	if err := r.Register(name, factory); err != nil {
+		panic(err)
+	}
 }
 
-// GetRegisteredKMSNames returns the names of all currently registered KMS
-// factories.
-func GetRegisteredKMSNames() []string {
-	kmsRegMutex.RLock()
-	defer kmsRegMutex.RUnlock()
+// Unregister removes a named factory. Removing an unknown name is a no-op.
+func (r *KMSRegistry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	return slices.Collect(maps.Keys(kmsRegistry))
+	delete(r.factories, name)
 }
 
-// LoadKeyManagementClient resolves and constructs a [KeyManagementClient]
-// from props. It looks up the KMS name under [KMSTypeKey]; it returns an
-// error wrapping [ErrKMSTypeNotFound] if the property is unset or the named
-// KMS has not been registered via [RegisterKMS].
-func LoadKeyManagementClient(props map[string]string) (KeyManagementClient, error) {
+// Names returns the currently registered factory names in sorted order.
+// The returned slice is independent of the registry.
+func (r *KMSRegistry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := make([]string, 0, len(r.factories))
+	for name := range r.factories {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	return names
+}
+
+// Load resolves and constructs a [KeyManagementClient] from props. It looks
+// up the name under [KMSTypeKey] and returns an error wrapping
+// [ErrKMSTypeNotFound] when the property is empty or not registered.
+// The factory is invoked outside the lock, so it may update this registry.
+func (r *KMSRegistry) Load(ctx context.Context, props map[string]string) (KeyManagementClient, error) {
 	name := props[KMSTypeKey]
 	if name == "" {
 		return nil, fmt.Errorf("%w: %q is not set", ErrKMSTypeNotFound, KMSTypeKey)
 	}
 
-	kmsRegMutex.RLock()
-	factory, ok := kmsRegistry[name]
-	kmsRegMutex.RUnlock()
+	r.mu.RLock()
+	factory, ok := r.factories[name]
+	r.mu.RUnlock()
 
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrKMSTypeNotFound, name)
 	}
 
-	return factory(props)
+	return factory(ctx, props)
 }
 
-func init() {
-	RegisterKMS("memory", func(_ map[string]string) (KeyManagementClient, error) {
-		return NewInMemoryKeyManagementClient(), nil
-	})
+// RegisterKMS adds a factory to the process-wide default registry. As in
+// previous releases, invalid or duplicate registrations panic. Use a separate
+// KMSRegistry and its Register method to handle registration errors.
+func RegisterKMS(name string, factory KMSFactory) {
+	if factory == nil {
+		panic("encryption: RegisterKMS factory is nil")
+	}
+	if err := defaultKMSRegistry.Register(name, factory); err != nil {
+		if errors.Is(err, ErrKMSAlreadyRegistered) {
+			panic("encryption: RegisterKMS called twice for name " + name)
+		}
+		panic(err)
+	}
+}
+
+// MustRegisterKMS registers a global KMS factory or panics. It is intended
+// for use by KMS providers during package initialization.
+func MustRegisterKMS(name string, factory KMSFactory) {
+	RegisterKMS(name, factory)
+}
+
+// UnregisterKMS removes a factory from the default registry. Existing
+// independent registry snapshots are unaffected.
+func UnregisterKMS(name string) {
+	defaultKMSRegistry.Unregister(name)
+}
+
+// GetRegisteredKMSNames returns globally registered factory names, sorted.
+func GetRegisteredKMSNames() []string {
+	return defaultKMSRegistry.Names()
+}
+
+// LoadKeyManagementClient constructs a KMS client using the default registry.
+// Its context is forwarded to the selected factory.
+func LoadKeyManagementClient(ctx context.Context, props map[string]string) (KeyManagementClient, error) {
+	return defaultKMSRegistry.Load(ctx, props)
 }

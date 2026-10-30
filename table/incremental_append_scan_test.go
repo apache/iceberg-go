@@ -301,7 +301,7 @@ func TestIncrementalAppendScanPrunesManifestSummariesBeforeOpening(t *testing.T)
 		manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
 			[]iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 		return manifest
 	}
@@ -312,7 +312,7 @@ func TestIncrementalAppendScanPrunesManifestSummariesBeforeOpening(t *testing.T)
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &manifestListBuf, 1, nil, &seqNum, 0,
 		[]iceberg.ManifestFile{matchingManifest, irrelevantManifest}))
-	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, manifestListBuf.Bytes()))
 
 	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://default/incremental", nil)
 	require.NoError(t, err)
@@ -355,7 +355,7 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 		var manifestBuf bytes.Buffer
 		manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, []iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 		return manifest
 	}
@@ -371,11 +371,11 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 		var listBuf bytes.Buffer
 		seqNum := snapshotID
 		require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, manifests))
-		require.NoError(t, fs.WriteFile(path, listBuf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, listBuf.Bytes()))
 	}
 	manifestList1Path := "mem://default/table-location/metadata/snap-1.avro"
 	writeManifestList(1, manifestList1Path, []iceberg.ManifestFile{manifest1})
-	listFile, err := fs.Open(manifestList1Path)
+	listFile, err := fs.Open(context.Background(), manifestList1Path)
 	require.NoError(t, err)
 	manifestList1, err := iceberg.ReadManifestList(listFile)
 	require.NoError(t, err)
@@ -431,7 +431,7 @@ func incrementalAppendMixedOperationTable(t *testing.T) *Table {
 		manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema,
 			snapshotID, []iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 		return manifest
 	}
@@ -442,8 +442,8 @@ func incrementalAppendMixedOperationTable(t *testing.T) *Table {
 		sequenceNumber := snapshotID
 		require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil,
 			&sequenceNumber, 0, manifests))
-		require.NoError(t, fs.WriteFile(path, listBuf.Bytes()))
-		listFile, err := fs.Open(path)
+		require.NoError(t, fs.WriteFile(context.Background(), path, listBuf.Bytes()))
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		manifestList, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -558,7 +558,7 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 		manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
 			[]iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 		return manifest
 	}
@@ -577,11 +577,11 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 		var listBuf bytes.Buffer
 		sequenceNumber := snapshotID
 		require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0, manifests))
-		require.NoError(t, fs.WriteFile(path, listBuf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, listBuf.Bytes()))
 	}
 	manifestListBPath := "mem://default/table-location/metadata/snap-b.avro"
 	writeManifestList(2, manifestListBPath, []iceberg.ManifestFile{manifestB})
-	listFile, err := fs.Open(manifestListBPath)
+	listFile, err := fs.Open(context.Background(), manifestListBPath)
 	require.NoError(t, err)
 	manifestListB, err := iceberg.ReadManifestList(listFile)
 	require.NoError(t, err)

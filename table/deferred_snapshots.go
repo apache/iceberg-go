@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 )
@@ -39,6 +40,56 @@ type deferredSnapshotState struct {
 	snapshots []Snapshot
 	index     *snapshotIndexData
 	err       error
+}
+
+// deferredSnapshotOverlay records mutations over an immutable deferred
+// snapshot state. It belongs to immutable built metadata, so the fully applied
+// collection can be cached after the first collection access or marshal.
+type deferredSnapshotOverlay struct {
+	additions []Snapshot
+	removed   map[int64]struct{}
+
+	applyOnce sync.Once
+	applied   []Snapshot
+}
+
+func (o *deferredSnapshotOverlay) clone() *deferredSnapshotOverlay {
+	if o == nil {
+		return nil
+	}
+
+	return &deferredSnapshotOverlay{
+		additions: cloneSnapshots(o.additions),
+		removed:   maps.Clone(o.removed),
+	}
+}
+
+func (o *deferredSnapshotOverlay) isRemoved(id int64) bool {
+	if o == nil {
+		return false
+	}
+
+	_, ok := o.removed[id]
+
+	return ok
+}
+
+func (o *deferredSnapshotOverlay) apply(base []Snapshot) []Snapshot {
+	if o == nil || (len(o.additions) == 0 && len(o.removed) == 0) {
+		return base
+	}
+
+	o.applyOnce.Do(func() {
+		o.applied = make([]Snapshot, 0, len(base)+len(o.additions))
+		for _, snapshot := range base {
+			if !o.isRemoved(snapshot.SnapshotID) {
+				o.applied = append(o.applied, snapshot)
+			}
+		}
+		o.applied = append(o.applied, o.additions...)
+	})
+
+	return o.applied
 }
 
 type deferredSnapshotEntry struct {
@@ -132,6 +183,27 @@ func (s *deferredSnapshotState) snapshotByID(id int64) (*Snapshot, error) {
 	}
 
 	return cloneSnapshotPtr(&entry.snapshot), nil
+}
+
+func (s *deferredSnapshotState) containsID(id int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.snapshots != nil {
+		_, ok := snapshotIndexPosition(s.index, s.snapshots, id)
+
+		return ok
+	}
+	_, ok := s.byID[id]
+
+	return ok
+}
+
+func (s *deferredSnapshotState) isMaterialized() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.raw == nil
 }
 
 type deferredSnapshotFields struct {
@@ -291,12 +363,38 @@ func skipJSONSpace(raw []byte, i int) int {
 }
 
 func scanJSONString(raw []byte, i int) int {
-	for i++; i < len(raw); i++ {
-		switch raw[i] {
+	// Find the first quote with the optimized byte scanner.
+	start := i + 1
+	if start >= len(raw) {
+		return len(raw)
+	}
+	offset := bytes.IndexByte(raw[start:], '"')
+	if offset < 0 {
+		return len(raw)
+	}
+	end := start + offset
+	if end == start || raw[end-1] != '\\' {
+		return end + 1
+	}
+
+	// A quote after backslashes closes the string only when the run
+	// contains an even number of backslashes.
+	backslashes := 0
+	for j := end - 1; j > i && raw[j] == '\\'; j-- {
+		backslashes++
+	}
+	if backslashes%2 == 0 {
+		return end + 1
+	}
+
+	// This quote was escaped. Resume after it rather than scanning the
+	// already-checked prefix again.
+	for j := end + 1; j < len(raw); j++ {
+		switch raw[j] {
 		case '\\':
-			i++
+			j++
 		case '"':
-			return i + 1
+			return j + 1
 		}
 	}
 
@@ -366,9 +464,9 @@ func parseNormalizedMetadataBytesDeferredSnapshots(normalized []byte, formatVers
 
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
-	if metadata.Version() != formatVersion {
+	if metadata.FormatVersion() != formatVersion {
 		return nil, fmt.Errorf("%w: preflight selected version %d, decoded version %d",
-			ErrInvalidMetadataFormatVersion, formatVersion, metadata.Version())
+			ErrInvalidMetadataFormatVersion, formatVersion, metadata.FormatVersion())
 	}
 
 	common := commonMetadataOf(metadata)
@@ -450,7 +548,7 @@ func finishDeferredMetadataUnmarshal(metadata Metadata) error {
 }
 
 func prepareDeferredSnapshots(rawSnapshots json.RawMessage, common *commonMetadata, metadata Metadata) (*deferredSnapshotState, []Snapshot, error) {
-	if metadata.Version() > 1 {
+	if metadata.FormatVersion() > 1 {
 		if err := requireLastSequenceNumber(metadata); err != nil {
 			return nil, nil, err
 		}
@@ -504,11 +602,11 @@ func prepareDeferredSnapshots(rawSnapshots json.RawMessage, common *commonMetada
 		if err := fields.validateHeavyFields(); err != nil {
 			return nil, nil, fmt.Errorf("%w: snapshot %d: %w", ErrInvalidMetadata, *fields.SnapshotID, err)
 		}
-		if metadata.Version() > 1 && fields.SequenceNumber > metadata.LastSequenceNumber() {
+		if metadata.FormatVersion() > 1 && fields.SequenceNumber > metadata.LastSequenceNumber() {
 			return nil, nil, fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
 				ErrInvalidMetadata, *fields.SnapshotID, fields.SequenceNumber, metadata.LastSequenceNumber())
 		}
-		if metadata.Version() >= 3 && fields.FirstRowID != nil && *fields.FirstRowID < 0 {
+		if metadata.FormatVersion() >= 3 && fields.FirstRowID != nil && *fields.FirstRowID < 0 {
 			return nil, nil, fmt.Errorf("%w: snapshot %d has invalid first-row-id %d",
 				ErrInvalidMetadata, *fields.SnapshotID, *fields.FirstRowID)
 		}

@@ -81,7 +81,7 @@ func benchmarkManifestMergeMode(b *testing.B, cluster bool) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := mem.WriteFile(manifestPath, buf.Bytes()); err != nil {
+		if err := mem.WriteFile(context.Background(), manifestPath, buf.Bytes()); err != nil {
 			b.Fatal(err)
 		}
 		manifests = append(manifests, manifest)
@@ -107,7 +107,7 @@ func benchmarkManifestMergeMode(b *testing.B, cluster bool) {
 		}
 		b.StopTimer()
 		for _, manifest := range output {
-			if err := mem.Remove(manifest.FilePath()); err != nil {
+			if err := mem.Remove(context.Background(), manifest.FilePath()); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -191,7 +191,7 @@ func benchmarkManifestPruningMode(b *testing.B, cluster bool) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := mem.WriteFile(manifestPath, buf.Bytes()); err != nil {
+		if err := mem.WriteFile(context.Background(), manifestPath, buf.Bytes()); err != nil {
 			b.Fatal(err)
 		}
 		manifests = append(manifests, manifest)

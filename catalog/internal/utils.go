@@ -40,7 +40,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
+func WriteTableMetadata(ctx context.Context, metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
 	switch compression {
 	case table.MetadataCompressionCodecNone, table.MetadataCompressionCodecGzip, table.MetadataCompressionCodecZstd:
 		// supported codecs
@@ -48,7 +48,7 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 		return fmt.Errorf("unsupported write metadata compression codec: %s", compression)
 	}
 
-	out, err := fs.Create(loc)
+	out, err := fs.Create(ctx, loc)
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func WriteMetadata(ctx context.Context, tbl *table.Table) error {
 
 	compression := tbl.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 
-	return WriteTableMetadata(tbl.Metadata(), wfs, tbl.MetadataLocation(), compression)
+	return WriteTableMetadata(ctx, tbl.Metadata(), wfs, tbl.MetadataLocation(), compression)
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {
@@ -135,7 +135,7 @@ func createStagedTable(
 	}
 
 	dbIdent := catalog.NamespaceFromIdent(ident)
-	tblname := catalog.TableNameFromIdent(ident)
+	tblname := catalog.ObjectNameFromIdent(ident)
 	if namespaceKey == "" {
 		namespaceKey = strings.Join(dbIdent, ".")
 	}
@@ -261,6 +261,26 @@ func ParseMetadataVersion(location string) int {
 	return v
 }
 
+// ValidateRequirements checks commit requirements against the table's current
+// metadata, which is nil when the table does not exist. A failed requirement
+// on a missing table is reported as catalog.ErrNoSuchTable. Any other failure
+// is returned as the requirement reported it, which matches
+// table.ErrCommitFailed when a concurrent writer changed the table, so the
+// commit retry loop can refresh and replay, as it does for a REST 409.
+func ValidateRequirements(ident table.Identifier, current table.Metadata, reqs []table.Requirement) error {
+	for _, r := range reqs {
+		if err := r.Validate(current); err != nil {
+			if current == nil {
+				return fmt.Errorf("%w: %s: %w", catalog.ErrNoSuchTable, strings.Join(ident, "."), err)
+			}
+
+			return err
+		}
+	}
+
+	return nil
+}
+
 func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
 	var (
 		baseMeta        table.Metadata
@@ -287,10 +307,8 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 		}
 		newVersion = metadataVersion + 1
 	}
-	for _, r := range reqs {
-		if err := r.Validate(currentMetadata); err != nil {
-			return nil, err
-		}
+	if err := ValidateRequirements(ident, currentMetadata, reqs); err != nil {
+		return nil, err
 	}
 
 	updated, err := UpdateTableMetadata(baseMeta, updates, metadataLoc)

@@ -195,7 +195,7 @@ func TestRewriteDataFiles_SmallFiles(t *testing.T) {
 			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -241,7 +241,7 @@ func TestRewriteDataFiles_WithPositionDeletes(t *testing.T) {
 			`[{"id": %d, "data": "a"}, {"id": %d, "data": "b"}]`, i*2+1, i*2+2))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -327,7 +327,7 @@ func TestExecuteCompactionGroup_TargetFileSizeForwarded(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -388,7 +388,7 @@ func TestExecuteCompactionGroup_ParquetRowGroupLimitForwarded(t *testing.T) {
 	dataPath := tbl.Location() + "/data/rg-limit.parquet"
 	writeParquetFile(t, dataPath, arrowSc, rows.String())
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -443,7 +443,7 @@ func TestExecuteCompactionGroup_ScanConcurrencyForwarded(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -484,7 +484,7 @@ func TestRewriteDataFiles_GroupOptionsForwarded(t *testing.T) {
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -549,7 +549,7 @@ func TestRewriteDataFiles_PartialProgress(t *testing.T) {
 			fmt.Sprintf(`[{"id": %d, "data": "row"}]`, i+1))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -594,7 +594,7 @@ func TestRewriteDataFiles_PartialProgressMaxCommitsProcessesAllGroups(t *testing
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row"}]`, i+1))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -634,7 +634,7 @@ func TestRewriteDataFiles_PartialProgressRejectsCommittedParentReuse(t *testing.
 	dataPath := tbl.Location() + "/data/reuse.parquet"
 	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "row"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -679,7 +679,7 @@ func TestRewriteDataFiles_PartialProgressStopsOnUnknownCommitState(t *testing.T)
 		writeParquetFile(t, dataPath, arrowSc,
 			fmt.Sprintf(`[{"id": %d, "data": "row"}, {"id": %d, "data": "row"}]`, i*2+1, i*2+2))
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -718,7 +718,7 @@ func TestRewriteDataFiles_PartialProgressRetainsSharedPositionDeleteAfterFailure
 			`[{"id": %d, "data": "a"}, {"id": %d, "data": "b"}]`, i*2+1, i*2+2))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -802,7 +802,7 @@ func TestRewriteDataFiles_PartialProgressCleansOutputsBeforeCommit(t *testing.T)
 			`[{"id": %d, "data": "row"}]`, i+1))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -882,7 +882,7 @@ func addPartitionedRowsOnRef(t *testing.T, tbl *table.Table, ref, name, partitio
 	info, err := os.Stat(dataPath)
 	require.NoError(t, err)
 
-	txn, err := tbl.NewTransactionOnBranchWithError(ref)
+	txn, err := tbl.NewTransactionOnBranch(ref)
 	require.NoError(t, err)
 	builder, err := iceberg.NewDataFileBuilder(
 		tbl.Spec(), iceberg.EntryContentData, dataPath, iceberg.ParquetFile,
@@ -927,7 +927,7 @@ func TestRewriteDataFiles_PartialProgressUsesTargetBranchSnapshot(t *testing.T) 
 		tbl.Spec(), iceberg.EntryContentPosDeletes, posDelPath, iceberg.ParquetFile,
 		map[int]any{1000: "branch"}, nil, nil, 2, info.Size())
 	require.NoError(t, err)
-	txn, err := tbl.NewTransactionOnBranchWithError(branch)
+	txn, err := tbl.NewTransactionOnBranch(branch)
 	require.NoError(t, err)
 	require.NoError(t, txn.NewRowDelta(nil).AddDeletes(delBuilder.Build()).Commit(t.Context()))
 	tbl, err = txn.Commit(t.Context())
@@ -948,7 +948,7 @@ func TestRewriteDataFiles_PartialProgressUsesTargetBranchSnapshot(t *testing.T) 
 	}
 	require.NotNil(t, rewriteTask.File)
 
-	txn, err = tbl.NewTransactionOnBranchWithError(branch)
+	txn, err = tbl.NewTransactionOnBranch(branch)
 	require.NoError(t, err)
 	result, err := txn.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{
 		PartitionKey:   "branch",
@@ -985,7 +985,7 @@ func TestRewriteDataFiles_ContextCancellation(t *testing.T) {
 			fmt.Sprintf(`[{"id": %d, "data": "row"}]`, i+1))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -1023,7 +1023,7 @@ func TestRewriteDataFiles_DeadEqualityDeletesDropped(t *testing.T) {
 			`[{"id": %d, "data": "a"}, {"id": %d, "data": "b"}]`, i*2+1, i*2+2))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -1108,7 +1108,7 @@ func TestRewriteDataFiles_PartialRewritePreservesEqDelete(t *testing.T) {
 			`[{"id": %d, "data": "a"}]`, i+1))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -1120,7 +1120,7 @@ func TestRewriteDataFiles_PartialRewritePreservesEqDelete(t *testing.T) {
 	preserveDataPath := tbl.Location() + "/data/preserve.parquet"
 	writeParquetFile(t, preserveDataPath, arrowSc, `[{"id": 50, "data": "preserved"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{preserveDataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{preserveDataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -1193,7 +1193,7 @@ func TestRewriteDataFiles_PreserveDeadEqualityDeletesOptOut(t *testing.T) {
 			`[{"id": %d, "data": "a"}]`, i+1))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -1299,7 +1299,7 @@ func TestRewriteDataFiles_PartialProgressPreservesEqDeletes(t *testing.T) {
 			`[{"id": %d, "data": "a"}]`, i+1))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 	}
@@ -1345,7 +1345,7 @@ func readKeySeqNums(t *testing.T, tbl *table.Table) (eqDelete, smallMin, preserv
 				continue
 			}
 			path := e.DataFile().FilePath()
-			seq := e.SequenceNum()
+			seq := e.DataSequenceNumber()
 			switch {
 			case e.DataFile().ContentType() == iceberg.EntryContentEqDeletes:
 				eqDelete = seq

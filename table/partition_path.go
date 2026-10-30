@@ -18,10 +18,10 @@
 package table
 
 import (
-	"net/url"
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 )
 
 type partitionPathField struct {
@@ -52,8 +52,8 @@ func (p partitionPathPlan) format(data iceberg.StructLike) string {
 
 		sb.WriteString(field.escapedName)
 		sb.WriteByte('=')
-		value := field.transform.ToHumanStrType(field.resultType, data.Get(i))
-		sb.WriteString(url.QueryEscape(value))
+		value := field.transform.ToHumanString(field.resultType, data.Get(i))
+		internal.AppendQueryEscaped(&sb, value)
 	}
 
 	return sb.String()

@@ -174,7 +174,7 @@ func TestBuildUnpartitionedUnsorted(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 	require.Equal(t, TestLocation, meta.Location())
 	require.Equal(t, 0, meta.CurrentSchema().ID)
 	require.Equal(t, 0, meta.DefaultPartitionSpec())
@@ -921,7 +921,7 @@ func TestSetSnapshotRefBranchToTagDropsAllRetention(t *testing.T) {
 
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, TagRef))
 	ref := builder.refs[MainBranch]
-	require.Equal(t, TagRef, ref.SnapshotRefType)
+	require.Equal(t, TagRef, ref.Type)
 	require.Nil(t, ref.MinSnapshotsToKeep)
 	require.Nil(t, ref.MaxSnapshotAgeMs)
 	require.Nil(t, ref.MaxRefAgeMs)
@@ -1060,6 +1060,52 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 		TimestampMs: snapshot2.TimestampMs,
 	}, "expected snapshot to match added snapshot")
 	require.True(t, res.CurrentSnapshot().Equals(snapshot2))
+
+	require.Len(t, builder.snapshotLog, 2, "Build must not prune the builder's own log")
+	again, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, res.(*metadataV2).SnapshotLog, again.(*metadataV2).SnapshotLog)
+}
+
+func TestSnapshotLogAfterMovingMainBackAfterBuild(t *testing.T) {
+	// add A, set main to A, add B, set main to B, build, set main back to A, build.
+	// In the first build main moved from A to B, so A is the intermediate snapshot and
+	// that build logs [B]. Moving main back to A makes B the intermediate one, while
+	// both of A's entries stay, so the second build logs [A, A]. Before the fix, the
+	// first build wrote its pruned [B] back to the builder and the second returned [A].
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	newSnapshot := func(id int64) *Snapshot {
+		return &Snapshot{
+			SnapshotID:   id,
+			TimestampMs:  builder.base.LastUpdatedMillis() + id,
+			ManifestList: fmt.Sprintf("/snap-%d.avro", id),
+			Summary:      &Summary{Operation: OpAppend},
+			SchemaID:     &schemaID,
+		}
+	}
+
+	require.NoError(t, builder.AddSnapshot(newSnapshot(1)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	require.NoError(t, builder.AddSnapshot(newSnapshot(2)))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
+	_, err := builder.Build()
+	require.NoError(t, err)
+
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	res, err := builder.Build()
+	require.NoError(t, err)
+
+	ids := make([]int64, 0, 2)
+	for entry := range res.SnapshotLogs() {
+		ids = append(ids, entry.SnapshotID)
+	}
+	require.Equal(t, []int64{1, 1}, ids)
+
+	// Committing the same updates gives the same log.
+	committed, err := UpdateTableMetadata(builder.base, builder.updates, "")
+	require.NoError(t, err)
+	require.Equal(t, slices.Collect(committed.SnapshotLogs()), slices.Collect(res.SnapshotLogs()))
 }
 
 func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
@@ -1083,7 +1129,7 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 	}
 	builder.currentSnapshotID = new(snapshot3ID)
 	builder.refs = map[string]SnapshotRef{
-		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: snapshot3ID, Type: BranchRef},
 	}
 
 	meta, err := builder.Build()
@@ -1104,6 +1150,12 @@ func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
 		SnapshotID:  snapshot3ID,
 		TimestampMs: baseTimestamp + 3,
 	}}, slices.Collect(rebuilt.SnapshotLogs()))
+
+	// Building again prunes the same entries from the builder's log, which keeps them.
+	again, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.Equal(t, slices.Collect(rebuilt.SnapshotLogs()), slices.Collect(again.SnapshotLogs()))
+	require.Len(t, newBuilder.snapshotLog, 3, "Build must not prune the builder's own log")
 }
 
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
@@ -1137,7 +1189,7 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
 	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
 	require.Equal(t, int64(2), ref.SnapshotID)
-	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.Equal(t, BranchRef, ref.Type)
 	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
 	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
 	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
@@ -1175,7 +1227,7 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
 	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
 	require.Equal(t, int64(2), ref.SnapshotID)
-	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.Equal(t, BranchRef, ref.Type)
 	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
 	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
 	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
@@ -1221,7 +1273,7 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 			SnapshotLog:       []SnapshotLogEntry{},
 			SortOrderList:     []SortOrder{UnsortedSortOrder},
 			SnapshotRefs: map[string]SnapshotRef{
-				MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef},
+				MainBranch: {SnapshotID: currentID, Type: BranchRef},
 			},
 		},
 	}
@@ -1279,9 +1331,9 @@ func TestRemoveSnapshotsRemovesMultipleIDs(t *testing.T) {
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
 		SnapshotRefs: map[string]SnapshotRef{
-			MainBranch:       {SnapshotID: currentID, SnapshotRefType: BranchRef},
-			"removed-branch": {SnapshotID: removedID2, SnapshotRefType: BranchRef},
-			"kept-branch":    {SnapshotID: keptID, SnapshotRefType: BranchRef},
+			MainBranch:       {SnapshotID: currentID, Type: BranchRef},
+			"removed-branch": {SnapshotID: removedID2, Type: BranchRef},
+			"kept-branch":    {SnapshotID: keptID, Type: BranchRef},
 		},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: removedID1, StatisticsPath: "s3://stats/removed-1.puffin"},
@@ -1365,7 +1417,7 @@ func TestRemoveSnapshotsPrunesStatistics(t *testing.T) {
 		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: currentID, TimestampMs: 1003}},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, Type: BranchRef}},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: removedID, StatisticsPath: "s3://stats/removed.puffin"},
 			{SnapshotID: keptID, StatisticsPath: "s3://stats/kept.puffin"},
@@ -1428,7 +1480,7 @@ func TestBuildPreservesStatistics(t *testing.T) {
 		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: snapID, TimestampMs: 1001}},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, Type: BranchRef}},
 		StatisticsList: []StatisticsFile{
 			{SnapshotID: snapID, StatisticsPath: "s3://stats/snap.puffin"},
 		},
@@ -1876,6 +1928,57 @@ func TestAddSnapshotOnBuilderWithoutBaseV3(t *testing.T) {
 	require.Equal(t, addedRows, meta.NextRowID())
 }
 
+func TestAddSnapshotStaleValuesAreCommitConflicts(t *testing.T) {
+	now := time.Now().UnixMilli()
+	parentID := int64(1)
+
+	t.Run("sequence number taken by a peer", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		peer := freshBuilderSnapshot(1, nil, 1, now)
+		require.NoError(t, builder.AddSnapshot(&peer))
+		stale := freshBuilderSnapshot(2, &parentID, 1, now)
+
+		err := builder.AddSnapshot(&stale)
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.ErrorContains(t, err, "can't add snapshot with sequence number 1, must be > than last sequence number 1")
+	})
+
+	t.Run("first-row-id behind next-row-id", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 3)
+		firstRowID, addedRows := int64(0), int64(10)
+		peer := freshBuilderSnapshot(1, nil, 1, now)
+		peer.FirstRowID, peer.AddedRows = &firstRowID, &addedRows
+		require.NoError(t, builder.AddSnapshot(&peer))
+		stale := freshBuilderSnapshot(2, &parentID, 2, now)
+		stale.FirstRowID, stale.AddedRows = &firstRowID, &addedRows
+
+		err := builder.AddSnapshot(&stale)
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.ErrorIs(t, err, ErrInvalidRowLineage)
+		require.ErrorContains(t, err, "first-row-id 0 is behind table next-row-id 10")
+	})
+
+	t.Run("timestamp before last update", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		first := freshBuilderSnapshot(1, nil, 1, now)
+		require.NoError(t, builder.AddSnapshot(&first))
+		stale := freshBuilderSnapshot(2, &parentID, 2, now-2*oneMinuteInMs)
+
+		err := builder.AddSnapshot(&stale)
+		require.ErrorContains(t, err, "before last updated timestamp")
+		require.NotErrorIs(t, err, ErrCommitFailed)
+	})
+
+	t.Run("missing first-row-id", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 3)
+		snap := freshBuilderSnapshot(1, nil, 1, now)
+
+		err := builder.AddSnapshot(&snap)
+		require.ErrorIs(t, err, ErrInvalidRowLineage)
+		require.NotErrorIs(t, err, ErrCommitFailed)
+	})
+}
+
 func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
 	builder := freshMetadataBuilder(t, 2)
 	parentSnapshotID := int64(1)
@@ -2120,6 +2223,25 @@ func TestDefaultSpecCannotBeRemoved(t *testing.T) {
 	require.ErrorContains(t, builder.RemovePartitionSpecs([]int{0}), "can't remove default partition spec with id 0")
 }
 
+func TestReservedPropertiesCannotBeMutated(t *testing.T) {
+	properties := ReservedProperties()
+	index := slices.Index(properties, PropertyFormatVersion)
+	require.NotEqual(t, -1, index)
+
+	properties[index] = "not-reserved"
+	require.Contains(t, ReservedProperties(), PropertyFormatVersion)
+	require.NotContains(t, ReservedProperties(), "not-reserved")
+
+	builder := builderWithoutChanges(2)
+	require.ErrorContains(t,
+		builder.SetProperties(iceberg.Properties{PropertyFormatVersion: "2"}),
+		"can't set reserved property "+PropertyFormatVersion)
+	require.ErrorContains(t,
+		builder.RemoveProperties([]string{PropertyFormatVersion}),
+		"can't remove reserved property "+PropertyFormatVersion)
+	require.NoError(t, builder.SetProperties(iceberg.Properties{"not-reserved": "allowed"}))
+}
+
 func TestSetReservedPropertiesFails(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
@@ -2132,7 +2254,7 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 	require.True(t, builder.HasChanges())
 
 	// Test setting each reserved property individually
-	for _, reserved := range ReservedProperties {
+	for _, reserved := range ReservedProperties() {
 		err := builder.SetProperties(iceberg.Properties{reserved: "some-value"})
 		require.ErrorContains(t, err, "can't set reserved property "+reserved)
 	}
@@ -2144,6 +2266,24 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 		"another-custom-property": "also-allowed",
 	})
 	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
+}
+
+func TestSnapshotTimestampReservedPropertyKey(t *testing.T) {
+	const canonical = "current-snapshot-timestamp-ms"
+	const oldKey = "current-snapshot-timestamp"
+
+	require.Equal(t, canonical, PropertyCurrentSnapshotTimestamp)
+
+	builder := builderWithoutChanges(2)
+	require.ErrorContains(t, builder.SetProperties(iceberg.Properties{canonical: "123"}), "can't set reserved property "+canonical)
+	require.ErrorContains(t, builder.RemoveProperties([]string{canonical}), "can't remove reserved property "+canonical)
+	require.False(t, builder.HasChanges())
+
+	// The old spelling is not reserved by Iceberg.
+	require.NoError(t, builder.SetProperties(iceberg.Properties{oldKey: "custom"}))
+	require.Equal(t, "custom", builder.props[oldKey])
+	require.NoError(t, builder.RemoveProperties([]string{oldKey}))
+	require.NotContains(t, builder.props, oldKey)
 }
 
 func TestSetPropertiesClonesProperties(t *testing.T) {
@@ -2175,7 +2315,7 @@ func TestRemoveReservedPropertiesFails(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
 	// Test removing each reserved property individually
-	for _, reserved := range ReservedProperties {
+	for _, reserved := range ReservedProperties() {
 		err := builder.RemoveProperties([]string{reserved})
 		require.ErrorContains(t, err, "can't remove reserved property "+reserved)
 	}
@@ -2947,7 +3087,7 @@ func TestUnknownTypeValidation(t *testing.T) {
 
 // reservedNonLineageFieldID is a spec-reserved metadata column ID (_file) that
 // is not one of the row-lineage columns, exercising the full reserved range
-// rather than just iceberg.IsMetadataColumn.
+// rather than just iceberg.IsRowLineageColumn.
 const reservedNonLineageFieldID = 2147483646
 
 func TestValidateNoReservedFieldIDs(t *testing.T) {
@@ -3562,7 +3702,7 @@ func TestSetFormatVersionV1ToV2InitializesSequenceNumber(t *testing.T) {
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.LastSequenceNumber())
 }
 
@@ -3572,7 +3712,7 @@ func TestSetFormatVersionV1ToV3InitializesSequenceNumberAndNextRowID(t *testing.
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.LastSequenceNumber())
 	require.Equal(t, int64(0), meta.NextRowID())
 }
@@ -3583,7 +3723,7 @@ func TestSetFormatVersionV2ToV3InitializesNextRowID(t *testing.T) {
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 	require.Equal(t, int64(0), meta.NextRowID())
 }
 
@@ -3698,7 +3838,7 @@ func TestSetFormatVersionV2ToV3PreservesSequenceNumber(t *testing.T) {
 func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 	meta, err := ParseMetadataString(ExampleTableMetadataV1)
 	require.NoError(t, err)
-	require.Equal(t, 1, meta.Version())
+	require.Equal(t, 1, meta.FormatVersion())
 
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -3706,7 +3846,7 @@ func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 
 	meta3, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, 3, meta3.FormatVersion())
 	require.Equal(t, int64(0), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
 	require.NotEqual(t, uuid.UUID{}, meta3.TableUUID())
@@ -3715,7 +3855,7 @@ func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
 func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 	meta, err := ParseMetadataString(ExampleTableMetadataV2)
 	require.NoError(t, err)
-	require.Equal(t, 2, meta.Version())
+	require.Equal(t, 2, meta.FormatVersion())
 
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -3723,7 +3863,7 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 
 	meta3, err := builder.Build()
 	require.NoError(t, err)
-	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, 3, meta3.FormatVersion())
 	require.Equal(t, int64(34), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
 }
@@ -3733,6 +3873,7 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 // both the drift guard and its filler consult it.
 var sharedCloneFields = map[string]struct{}{
 	"base":               {}, // immutable snapshot, shared by design.
+	"deferredSnapshots":  {}, // immutable snapshot source with concurrency-safe caches.
 	"schemaIndex":        {}, // immutable schema references, copied on schema mutation.
 	"partitionSpecIndex": {}, // immutable index positions, copied on spec mutation.
 	"snapshotIndex":      {}, // immutable index positions, copied on snapshot mutation.

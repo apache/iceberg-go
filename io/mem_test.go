@@ -40,10 +40,10 @@ func TestMemIO_BasicOperations(t *testing.T) {
 	require.True(t, ok, "mem IO should implement WriteFileIO")
 
 	testData := []byte("Hello, Iceberg!")
-	err = writeIO.WriteFile("test-file.txt", testData)
+	err = writeIO.WriteFile(context.Background(), "test-file.txt", testData)
 	require.NoError(t, err)
 
-	file, err := memIO.Open("test-file.txt")
+	file, err := memIO.Open(context.Background(), "test-file.txt")
 	require.NoError(t, err)
 	defer file.Close()
 
@@ -51,10 +51,10 @@ func TestMemIO_BasicOperations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testData, content)
 
-	err = memIO.Remove("test-file.txt")
+	err = memIO.Remove(context.Background(), "test-file.txt")
 	require.NoError(t, err)
 
-	_, err = memIO.Open("test-file.txt")
+	_, err = memIO.Open(context.Background(), "test-file.txt")
 	assert.Error(t, err)
 }
 
@@ -66,7 +66,7 @@ func TestMemIO_Create(t *testing.T) {
 
 	writeIO := memIO.(icebergio.WriteFileIO)
 
-	writer, err := writeIO.Create("created-file.txt")
+	writer, err := writeIO.Create(context.Background(), "created-file.txt")
 	require.NoError(t, err)
 	require.NotNil(t, writer)
 
@@ -78,7 +78,7 @@ func TestMemIO_Create(t *testing.T) {
 	err = writer.Close()
 	require.NoError(t, err)
 
-	file, err := memIO.Open("created-file.txt")
+	file, err := memIO.Open(context.Background(), "created-file.txt")
 	require.NoError(t, err)
 	defer file.Close()
 
@@ -102,12 +102,12 @@ func TestMemIO_MultipleFiles(t *testing.T) {
 	}
 
 	for name, content := range files {
-		err := writeIO.WriteFile(name, content)
+		err := writeIO.WriteFile(context.Background(), name, content)
 		require.NoError(t, err)
 	}
 
 	for name, expectedContent := range files {
-		file, err := memIO.Open(name)
+		file, err := memIO.Open(context.Background(), name)
 		require.NoError(t, err)
 
 		content, err := io.ReadAll(file)
@@ -118,17 +118,17 @@ func TestMemIO_MultipleFiles(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	err = memIO.Remove("file2.txt")
+	err = memIO.Remove(context.Background(), "file2.txt")
 	require.NoError(t, err)
 
-	_, err = memIO.Open("file2.txt")
+	_, err = memIO.Open(context.Background(), "file2.txt")
 	assert.Error(t, err)
 
-	file1, err := memIO.Open("file1.txt")
+	file1, err := memIO.Open(context.Background(), "file1.txt")
 	require.NoError(t, err)
 	file1.Close()
 
-	file3, err := memIO.Open("file3.txt")
+	file3, err := memIO.Open(context.Background(), "file3.txt")
 	require.NoError(t, err)
 	file3.Close()
 }
@@ -138,14 +138,14 @@ func TestMemIO_RemoveMissingReturnsNotExist(t *testing.T) {
 
 	memIO, err := icebergio.LoadFS(ctx, map[string]string{}, "mem://bucket/")
 	require.NoError(t, err)
-	require.ErrorIs(t, memIO.Remove("does-not-exist.txt"), fs.ErrNotExist)
+	require.ErrorIs(t, memIO.Remove(context.Background(), "does-not-exist.txt"), fs.ErrNotExist)
 }
 
 func TestMemIO_FileRejectsInvalidOffsets(t *testing.T) {
 	memIO := icebergio.NewMemFS()
-	require.NoError(t, memIO.WriteFile("file.txt", []byte("abc")))
+	require.NoError(t, memIO.WriteFile(context.Background(), "file.txt", []byte("abc")))
 
-	file, err := memIO.Open("file.txt")
+	file, err := memIO.Open(context.Background(), "file.txt")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, file.Close()) })
 
@@ -174,12 +174,12 @@ func TestMemIO_WalkDir(t *testing.T) {
 	require.True(t, ok, "mem IO should implement ListableIO")
 
 	writeIO := memIO.(icebergio.WriteFileIO)
-	require.NoError(t, writeIO.WriteFile("mem://walkdir-bucket/a/1.txt", []byte("1")))
-	require.NoError(t, writeIO.WriteFile("mem://walkdir-bucket/a/2.txt", []byte("2")))
-	require.NoError(t, writeIO.WriteFile("mem://walkdir-bucket/b/3.txt", []byte("3")))
+	require.NoError(t, writeIO.WriteFile(context.Background(), "mem://walkdir-bucket/a/1.txt", []byte("1")))
+	require.NoError(t, writeIO.WriteFile(context.Background(), "mem://walkdir-bucket/a/2.txt", []byte("2")))
+	require.NoError(t, writeIO.WriteFile(context.Background(), "mem://walkdir-bucket/b/3.txt", []byte("3")))
 
 	var walked []string
-	err = listable.WalkDir("mem://walkdir-bucket/a", func(path string, _ fs.DirEntry, err error) error {
+	err = listable.WalkDir(context.Background(), "mem://walkdir-bucket/a", func(path string, _ fs.DirEntry, err error) error {
 		require.NoError(t, err)
 		walked = append(walked, path)
 
@@ -202,9 +202,9 @@ func TestMemIO_WalkDirDoesNotIncludeSiblingPrefixes(t *testing.T) {
 	listable := memIO.(icebergio.ListableIO)
 	writeIO := memIO.(icebergio.WriteFileIO)
 
-	require.NoError(t, writeIO.WriteFile("mem://walkdir-boundary-bucket/table/data.parquet", []byte("table")))
-	require.NoError(t, writeIO.WriteFile("mem://walkdir-boundary-bucket/table2/data.parquet", []byte("table2")))
-	require.NoError(t, writeIO.WriteFile("mem://walkdir-boundary-bucket/table_backup/data.parquet", []byte("backup")))
+	require.NoError(t, writeIO.WriteFile(context.Background(), "mem://walkdir-boundary-bucket/table/data.parquet", []byte("table")))
+	require.NoError(t, writeIO.WriteFile(context.Background(), "mem://walkdir-boundary-bucket/table2/data.parquet", []byte("table2")))
+	require.NoError(t, writeIO.WriteFile(context.Background(), "mem://walkdir-boundary-bucket/table_backup/data.parquet", []byte("backup")))
 
 	for _, root := range []string{
 		"mem://walkdir-boundary-bucket/table",
@@ -212,7 +212,7 @@ func TestMemIO_WalkDirDoesNotIncludeSiblingPrefixes(t *testing.T) {
 	} {
 		t.Run(root, func(t *testing.T) {
 			var walked []string
-			err := listable.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+			err := listable.WalkDir(context.Background(), root, func(path string, _ fs.DirEntry, err error) error {
 				require.NoError(t, err)
 				walked = append(walked, path)
 
@@ -229,12 +229,12 @@ func TestMemIO_WalkDirDoesNotIncludeSiblingPrefixes(t *testing.T) {
 
 func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
 	memIO := icebergio.NewMemFS()
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/1.txt", []byte("1")))
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/2.txt", []byte("22")))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/1.txt", []byte("1")))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/2.txt", []byte("22")))
 
 	done := make(chan error, 1)
 	go func() {
-		done <- memIO.WalkDir("mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
+		done <- memIO.WalkDir(context.Background(), "mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -242,7 +242,7 @@ func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
 				return nil
 			}
 
-			return memIO.Remove(path)
+			return memIO.Remove(context.Background(), path)
 		})
 	}()
 
@@ -253,19 +253,38 @@ func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
 		t.Fatal("WalkDir deadlocked when its callback removed a file")
 	}
 
-	_, err := memIO.Open("mem://bucket/root/1.txt")
+	_, err := memIO.Open(context.Background(), "mem://bucket/root/1.txt")
 	require.ErrorIs(t, err, fs.ErrNotExist)
-	_, err = memIO.Open("mem://bucket/root/2.txt")
+	_, err = memIO.Open(context.Background(), "mem://bucket/root/2.txt")
 	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+func TestMemIO_WalkDirStopsWhenContextIsCanceled(t *testing.T) {
+	memIO := icebergio.NewMemFS()
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/a.txt", nil))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/b.txt", nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var walked []string
+	err := memIO.WalkDir(ctx, "mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		walked = append(walked, path)
+		cancel()
+
+		return nil
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, []string{"mem://bucket/root"}, walked)
 }
 
 func TestMemIO_WalkDirEmitsDirectoriesLexicallyAndHonorsSkipDir(t *testing.T) {
 	memIO := icebergio.NewMemFS()
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/b/file.txt", []byte("b")))
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/a/nested/file.txt", []byte("a")))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/b/file.txt", []byte("b")))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/a/nested/file.txt", []byte("a")))
 
 	var walked []string
-	err := memIO.WalkDir("mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
+	err := memIO.WalkDir(context.Background(), "mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
 		require.NoError(t, err)
 		walked = append(walked, path)
 		if path == "mem://bucket/root/a" {
@@ -288,11 +307,11 @@ func TestMemIO_WalkDirEmitsDirectoriesLexicallyAndHonorsSkipDir(t *testing.T) {
 
 func TestMemIO_WalkDirUsesPreorderTraversal(t *testing.T) {
 	memIO := icebergio.NewMemFS()
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/a/child.txt", nil))
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/a.txt", nil))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/a/child.txt", nil))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/a.txt", nil))
 
 	var walked []string
-	require.NoError(t, memIO.WalkDir("mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
+	require.NoError(t, memIO.WalkDir(context.Background(), "mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
 		require.NoError(t, err)
 		walked = append(walked, path)
 
@@ -308,11 +327,11 @@ func TestMemIO_WalkDirUsesPreorderTraversal(t *testing.T) {
 
 func TestMemIO_WalkDirTreatsFileRootAsFile(t *testing.T) {
 	memIO := icebergio.NewMemFS()
-	require.NoError(t, memIO.WriteFile("mem://bucket/root", []byte("root")))
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/child.txt", nil))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root", []byte("root")))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/child.txt", nil))
 
 	var walked []string
-	require.NoError(t, memIO.WalkDir("mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
+	require.NoError(t, memIO.WalkDir(context.Background(), "mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
 		require.NoError(t, err)
 		assert.False(t, d.IsDir())
 		walked = append(walked, path)
@@ -326,7 +345,7 @@ func TestMemIO_WalkDirReportsMissingRoot(t *testing.T) {
 	memIO := icebergio.NewMemFS()
 	var callbackErr error
 
-	err := memIO.WalkDir("mem://bucket/missing", func(_ string, d fs.DirEntry, err error) error {
+	err := memIO.WalkDir(context.Background(), "mem://bucket/missing", func(_ string, d fs.DirEntry, err error) error {
 		assert.Nil(t, d)
 		callbackErr = err
 
@@ -339,11 +358,11 @@ func TestMemIO_WalkDirReportsMissingRoot(t *testing.T) {
 
 func TestMemIO_WalkDirHonorsSkipAtRootAndSkipAll(t *testing.T) {
 	memIO := icebergio.NewMemFS()
-	require.NoError(t, memIO.WriteFile("mem://bucket/root/a.txt", nil))
+	require.NoError(t, memIO.WriteFile(context.Background(), "mem://bucket/root/a.txt", nil))
 
 	for _, skipErr := range []error{fs.SkipDir, fs.SkipAll} {
 		var walked []string
-		err := memIO.WalkDir("mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
+		err := memIO.WalkDir(context.Background(), "mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
 			require.NoError(t, err)
 			walked = append(walked, path)
 
@@ -352,4 +371,45 @@ func TestMemIO_WalkDirHonorsSkipAtRootAndSkipAll(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"mem://bucket/root"}, walked)
 	}
+}
+
+func TestMemIO_WalkDirNestedPrefixes(t *testing.T) {
+	memIO := icebergio.NewMemFS()
+	for name, data := range map[string][]byte{
+		"mem://bucket/root/a/b/c/deep.parquet": []byte("deep"),
+		"mem://bucket/root/a/first.parquet":    []byte("first!"),
+		"mem://bucket/root/ab/second.parquet":  []byte("second file"),
+	} {
+		require.NoError(t, memIO.WriteFile(context.Background(), name, data))
+	}
+
+	type visitedEntry struct {
+		path  string
+		isDir bool
+		size  int64
+	}
+	var got []visitedEntry
+	err := memIO.WalkDir(context.Background(), "mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		got = append(got, visitedEntry{path: path, isDir: d.IsDir(), size: info.Size()})
+
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []visitedEntry{
+		{path: "mem://bucket/root", isDir: true},
+		{path: "mem://bucket/root/a", isDir: true},
+		{path: "mem://bucket/root/a/b", isDir: true},
+		{path: "mem://bucket/root/a/b/c", isDir: true},
+		{path: "mem://bucket/root/a/b/c/deep.parquet", size: 4},
+		{path: "mem://bucket/root/a/first.parquet", size: 6},
+		{path: "mem://bucket/root/ab", isDir: true},
+		{path: "mem://bucket/root/ab/second.parquet", size: 11},
+	}, got)
 }

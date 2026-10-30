@@ -103,18 +103,18 @@ type Representation struct {
 	// Must be sql
 	Type string `json:"type"`
 	// A SQL SELECT statement
-	Sql string `json:"sql"`
+	SQL string `json:"sql"`
 	// The dialect of the sql SELECT statement (e.g., "trino" or "spark")
 	Dialect string `json:"dialect"`
 }
 type Representations []Representation
 
-func NewRepresentation(sql string, dialect string) Representation {
-	return Representation{
-		Type:    "sql",
-		Sql:     sql,
-		Dialect: dialect,
-	}
+// NewRepresentation creates a SQL view representation from named fields.
+// The SQL and Dialect fields are validated by NewVersion.
+func NewRepresentation(repr Representation) Representation {
+	repr.Type = "sql"
+
+	return repr
 }
 
 type Version struct {
@@ -159,6 +159,8 @@ func WithTimestampMS(timestampMS int64) VersionOpt {
 }
 
 // NewVersion creates a Version instance from the provided parameters.
+// It copies the representations and namespace so later changes to the inputs
+// cannot modify the returned version.
 // If building updates using the MetadataBuilder, and one desires to use the last
 // added schema ID, one should use the LastAddedID constant as the provided schemaID
 //
@@ -188,10 +190,10 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 	version := &Version{
 		VersionID:        id,
 		SchemaID:         schemaID,
-		Representations:  representations,
+		Representations:  slices.Clone(representations),
 		Summary:          VersionSummary{viewEngineProperty: defaultViewEngine},
 		TimestampMS:      time.Now().UnixMilli(),
-		DefaultNamespace: defaultNS,
+		DefaultNamespace: slices.Clone(defaultNS),
 	}
 
 	for _, opt := range opts {
@@ -208,7 +210,7 @@ func validateRepresentation(repr Representation) (string, error) {
 		return "", errors.New("invalid view representation: type should be \"sql\"")
 	}
 
-	if strings.TrimSpace(repr.Sql) == "" {
+	if strings.TrimSpace(repr.SQL) == "" {
 		return "", errors.New("invalid view representation: sql is required")
 	}
 
@@ -220,10 +222,10 @@ func validateRepresentation(repr Representation) (string, error) {
 	return strings.ToLower(dialect), nil
 }
 
-// NewVersionFromSQL creates a new Version with a single representation
-// using the provided SQL and dialect "default".
-func NewVersionFromSQL(id int64, schemaID int, sql string, defaultNS table.Identifier, opts ...VersionOpt) (*Version, error) {
-	return NewVersion(id, schemaID, Representations{NewRepresentation(sql, "default")}, defaultNS, opts...)
+// NewVersionFromSQL creates a new Version with one SQL representation.
+// SQL and dialect are passed as named fields to avoid swapping them.
+func NewVersionFromSQL(id int64, schemaID int, representation Representation, defaultNS table.Identifier, opts ...VersionOpt) (*Version, error) {
+	return NewVersion(id, schemaID, Representations{NewRepresentation(representation)}, defaultNS, opts...)
 }
 
 // Equals checks whether the other Version would behave the same
@@ -657,10 +659,7 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 		version.VersionID = InitialVersionID
 	}
 
-	builder, err := NewMetadataBuilder()
-	if err != nil {
-		return nil, err
-	}
+	builder := NewMetadataBuilder()
 
 	return builder.
 		SetFormatVersion(formatVersion).

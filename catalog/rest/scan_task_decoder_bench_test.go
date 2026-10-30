@@ -178,3 +178,27 @@ func BenchmarkDecodeJSONNumberForms(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkDecodeScanTasksSharedDeletionVector(b *testing.B) {
+	metadata := newScanTaskDecoderMetadata()
+	for _, taskCount := range []int{100, 1000, 10000} {
+		wire := deletionVectorScanTasksWire(1, false)
+		task := wire.FileScanTasks[0]
+		wire.FileScanTasks = make([]RESTFileScanTask, taskCount)
+		for i := range wire.FileScanTasks {
+			wire.FileScanTasks[i] = task
+		}
+
+		b.Run(fmt.Sprintf("derived-owner/tasks=%d", taskCount), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				decodeScanTasksBenchmarkSink = len(tasks)
+			}
+		})
+	}
+}

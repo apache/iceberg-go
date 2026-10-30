@@ -52,8 +52,7 @@ type ScannerSuite struct {
 }
 
 func (s *ScannerSuite) SetupSuite() {
-	_, err := recipe.Start(s.T())
-	require.NoError(s.T(), err)
+	require.NoError(s.T(), recipe.Start(s.T()))
 }
 
 func (s *ScannerSuite) SetupTest() {

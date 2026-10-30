@@ -50,9 +50,9 @@ type failAfterGoodCloseFS struct {
 	goodClosedOnce sync.Once
 }
 
-func (f *failAfterGoodCloseFS) Open(name string) (iceio.File, error) {
+func (f *failAfterGoodCloseFS) Open(_ context.Context, name string) (iceio.File, error) {
 	if name == f.goodPath {
-		file, err := f.MemFS.Open(name)
+		file, err := f.MemFS.Open(context.Background(), name)
 		if err != nil {
 			return nil, err
 		}
@@ -79,7 +79,7 @@ func (f *failAfterGoodCloseFS) Open(name string) (iceio.File, error) {
 		return nil, &iofs.PathError{Op: "open", Path: name, Err: iofs.ErrNotExist}
 	}
 
-	return f.MemFS.Open(name)
+	return f.MemFS.Open(context.Background(), name)
 }
 
 type closeSignalFile struct {
@@ -319,7 +319,7 @@ func writePosDeleteParquetToMemFSWithSchema(t *testing.T, memFS *iceio.MemFS, pa
 	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
-	fw, err := memFS.Create(path)
+	fw, err := memFS.Create(context.Background(), path)
 	require.NoError(t, err)
 
 	props = append([]parquet.WriterProperty{

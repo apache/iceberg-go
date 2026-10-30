@@ -35,6 +35,9 @@ state. A failed validation surfaces as one of:
   retried after refreshing (see below).
 - `table.ErrCommitDiverged` — terminal. The base snapshot is no longer on the
   branch at all, so a retry cannot reconcile the change.
+- `table.ErrTransactionUnusable` — this transaction can't be committed again.
+  If the error also matches `ErrCommitFailed`, retry in a new transaction from a
+  reloaded table.
 
 ```go
 import (
@@ -46,7 +49,9 @@ import (
 
 _, err := txn.Commit(context.Background())
 switch {
-case errors.Is(err, table.ErrCommitDiverged):
+case errors.Is(err, table.ErrTransactionUnusable) && errors.Is(err, table.ErrCommitFailed):
+    // a concurrent change: retry in a new transaction from a reloaded table
+case errors.Is(err, table.ErrCommitDiverged), errors.Is(err, table.ErrTransactionUnusable):
     // unrecoverable: rebuild the operation from the latest table
 case errors.Is(err, table.ErrCommitFailed):
     // retriable: refresh and try again (the retry loop does this for you)
@@ -72,7 +77,11 @@ rejects when concurrent deletes touch the same files.
 iceberg-go can refresh the table and replay the operation against the latest
 snapshot between attempts. On each retry the table metadata is reloaded, the
 producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid.
+re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`
+and `AssertRefSnapshotID` pin the refs they guard, so a retry does not rebase
+those assertions. If a guarded ref has moved, the commit fails with
+`ErrCommitFailed` instead of retrying. An `ExpireSnapshots` that removes nothing
+adds no guards.
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
 setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
@@ -87,6 +96,32 @@ _, err := cat.CreateTable(ctx, ident, schema,
 )
 ```
 
-> **Catalog support:** retry currently engages on the REST catalog, which wraps
-> commit conflicts as `ErrCommitFailed`. The Glue, SQL, and Hive catalogs do
-> not yet wrap their conflict errors, so the retry loop will not fire on them.
+> **Catalog support:** the REST, SQL, Glue, Hive, and Hadoop catalogs report
+> commit conflicts, including requirements that fail because of a concurrent
+> change, as `ErrCommitFailed`, so the retry loop engages on all of them. A
+> commit on another branch that takes the staged snapshot's sequence number or
+> first-row-id is a conflict too, and the retry renumbers the snapshot.
+
+Only the implicit assertion on the commit branch's head is rebased after a
+refresh. Other requirements, including the schema, spec, sort order, and pinned
+refs, must still hold. Otherwise, the commit fails without another attempt and
+the transaction is unusable.
+
+After a conflict, calling `Commit` again on the same transaction refreshes the
+table and replays the staged changes like the next retry attempt, so it can
+rebase onto a peer's commit even with retries disabled. Each call gets the
+configured retry budget. A commit carrying delete-file removals that cannot be
+replayed resubmits only if its branch has not moved. The rejections after a
+refresh that make the transaction unusable are listed on
+`ErrTransactionUnusable`.
+
+A failed commit keeps the files it staged until a later commit lands. A
+transaction you abandon leaves them for orphan file removal, as one with
+retries disabled always has. An abandoned manifest rewrite also leaves the
+manifests that later attempts merged. `TableCommit` refuses a transaction whose
+commit failed, since the multi-table path does not refresh. Call `Commit` to
+resume it, or build a new transaction.
+
+Because an `ExpireSnapshots` that removes something pins the commit branch, a
+transaction that also appends fails instead of rebasing onto a peer's append.
+This is deliberate, since the expiry was computed from the old head.

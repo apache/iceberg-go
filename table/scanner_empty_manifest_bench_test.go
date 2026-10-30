@@ -106,7 +106,7 @@ func newEmptyManifestBenchmarkTable(
 	manifestListPath := tableLocation + "/metadata/snap-1.avro"
 	var listBuf bytes.Buffer
 	require.NoError(b, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, new(sequenceNum), 0, manifests))
-	require.NoError(b, fs.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(b, fs.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation, nil)
 	require.NoError(b, err)
@@ -152,14 +152,14 @@ func writeEmptyManifestBenchmarkManifest(
 		)
 		require.NoError(b, err)
 		entries[i] = iceberg.NewManifestEntryBuilder(status, &snapshotID, dataFile.Build()).
-			SequenceNum(sequenceNum).
+			DataSequenceNumber(sequenceNum).
 			Build()
 	}
 
 	var manifestBuf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
 	require.NoError(b, err)
-	require.NoError(b, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(b, fs.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	return manifest
 }

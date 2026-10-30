@@ -26,17 +26,69 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadConfigFile(t *testing.T) {
+func TestLoadConfig(t *testing.T) {
+	t.Run("explicit file contents", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		contents := []byte("default-catalog: test\n")
+		require.NoError(t, os.WriteFile(path, contents, 0o600))
+
+		data, err := LoadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, contents, data)
+	})
+
+	t.Run("explicit relative config path", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		contents := []byte("max-workers: 7\n")
+		require.NoError(t, os.WriteFile("relative.yaml", contents, 0o600))
+
+		data, err := LoadConfig("relative.yaml")
+		require.NoError(t, err)
+		assert.Equal(t, contents, data)
+	})
+
+	t.Run("implicit home directory config", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		contents := []byte("max-workers: 3\n")
+		require.NoError(t, os.WriteFile(filepath.Join(home, cfgFile), contents, 0o600))
+
+		data, err := LoadConfig("")
+		require.NoError(t, err)
+		assert.Equal(t, contents, data)
+	})
+
 	t.Run("implicit missing config", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
-		data, err := LoadConfigFile("")
+		data, err := LoadConfig("")
 		require.NoError(t, err)
 		assert.Nil(t, data)
 	})
 
+	t.Run("implicit config ignores GOICEBERG_HOME", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		alternateHome := t.TempDir()
+		t.Setenv("GOICEBERG_HOME", alternateHome)
+		require.NoError(t, os.WriteFile(filepath.Join(alternateHome, cfgFile), []byte("max-workers: 7\n"), 0o600))
+
+		data, err := LoadConfig("")
+		require.NoError(t, err)
+		assert.Nil(t, data)
+	})
+
+	t.Run("implicit config with unavailable home", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		if _, err := os.UserHomeDir(); err == nil {
+			t.Skip("this platform still resolves a home directory without HOME")
+		}
+		_, err := LoadConfig("")
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "resolve home directory")
+	})
+
 	t.Run("explicit missing config", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing.yaml")
-		_, err := LoadConfigFile(path)
+		_, err := LoadConfig(path)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, os.ErrNotExist)
 		assert.ErrorContains(t, err, path)
@@ -44,10 +96,21 @@ func TestLoadConfigFile(t *testing.T) {
 
 	t.Run("explicit path is directory", func(t *testing.T) {
 		path := t.TempDir()
-		_, err := LoadConfigFile(path)
+		_, err := LoadConfig(path)
 		require.Error(t, err)
 		assert.ErrorContains(t, err, path)
 	})
+}
+
+// An unreadable explicit file remains best-effort for the EnvConfig helper.
+func TestFromConfigFilesIgnoresReadErrors(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("GOICEBERG_HOME", configHome)
+	require.NoError(t, os.Mkdir(filepath.Join(configHome, cfgFile), 0o700))
+
+	cfg := fromConfigFiles()
+	assert.Equal(t, "default", cfg.DefaultCatalog)
+	assert.Equal(t, defaultMaxWorkers, cfg.MaxWorkers)
 }
 
 var testArgs = []struct {
@@ -139,7 +202,7 @@ catalog:
 `), "default",
 		&CatalogConfig{
 			CatalogType: "glue",
-			AwsProfile:  "my-aws-profile",
+			AWSProfile:  "my-aws-profile",
 		},
 	},
 	// sql catalog with driver/dialect

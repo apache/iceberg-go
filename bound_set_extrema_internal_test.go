@@ -88,3 +88,22 @@ func TestVisitBoundPredicateRefPassesInExtrema(t *testing.T) {
 	assert.Nil(t, visitor.minLit)
 	assert.Nil(t, visitor.maxLit)
 }
+
+func TestVisitBoundPredicateRefGeoSkipsExtrema(t *testing.T) {
+	geometry := GeometryType{}
+	first, err := LiteralFromBytes(geometry, []byte("1234567890abcdef"))
+	require.NoError(t, err)
+	second, err := LiteralFromBytes(geometry, []byte("fedcba9876543210"))
+	require.NoError(t, err)
+
+	schema := NewSchema(1, NestedField{ID: 1, Name: "value", Type: geometry})
+	bound, err := BindExpr(schema, SetPredicate(OpIn, Reference("value"), []Literal{first, second}), true)
+	require.NoError(t, err)
+	pred, ok := bound.(BoundPredicate)
+	require.True(t, ok)
+
+	visitor := &boundSetExtremaVisitVisitor{boundSetVisitVisitor: boundSetVisitVisitor{needle: first}}
+	assert.True(t, VisitBoundPredicateRef(pred, visitor, internal.BoundPredicateRef{}))
+	assert.Nil(t, visitor.minLit)
+	assert.Nil(t, visitor.maxLit)
+}

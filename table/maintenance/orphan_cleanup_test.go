@@ -73,7 +73,7 @@ func TestOrphanCleanupOptions(t *testing.T) {
 	WithCleanupDryRun(true)(cfg)
 	assert.True(t, cfg.dryRun)
 
-	deleteFunc := func(string) error { return nil }
+	deleteFunc := func(context.Context, string) error { return nil }
 	WithCleanupDeleteFunc(deleteFunc)(cfg)
 	assert.NotNil(t, cfg.deleteFunc)
 
@@ -172,11 +172,11 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 
 	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(metadataLocation, nil))
+	require.NoError(t, fs.WriteFile(context.Background(), metadataLocation, nil))
 
 	plannedOrphan := location + "/data/planned.parquet"
 	newOrphan := location + "/data/appeared-after-confirmation.parquet"
-	require.NoError(t, fs.WriteFile(plannedOrphan, []byte("planned")))
+	require.NoError(t, fs.WriteFile(context.Background(), plannedOrphan, []byte("planned")))
 
 	tbl := table.New(
 		[]string{"db", "plan_race"},
@@ -192,7 +192,7 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	assert.Equal(t, []OrphanFile{{Path: plannedOrphan, SizeBytes: int64(len("planned"))}}, plan.OrphanFiles())
 	assert.False(t, plan.Cutoff().IsZero())
 
-	require.NoError(t, fs.WriteFile(newOrphan, []byte("new")))
+	require.NoError(t, fs.WriteFile(context.Background(), newOrphan, []byte("new")))
 	_, err = ExecuteOrphanCleanup(ctx, tbl, plan, WithCleanupFilesOlderThan(time.Hour))
 	require.ErrorContains(t, err, "WithCleanupFilesOlderThan")
 
@@ -200,9 +200,9 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{plannedOrphan}, result.DeletedFiles)
 
-	_, err = fs.Open(plannedOrphan)
+	_, err = fs.Open(context.Background(), plannedOrphan)
 	assert.ErrorIs(t, err, stdfs.ErrNotExist)
-	file, err := fs.Open(newOrphan)
+	file, err := fs.Open(context.Background(), newOrphan)
 	require.NoError(t, err)
 	assert.NoError(t, file.Close())
 }
@@ -1519,11 +1519,11 @@ type mockBulkRemovableIO struct {
 	bulkPaths  []string
 }
 
-func (m *mockBulkRemovableIO) Open(string) (iceio.File, error) {
+func (m *mockBulkRemovableIO) Open(context.Context, string) (iceio.File, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockBulkRemovableIO) Remove(string) error {
+func (m *mockBulkRemovableIO) Remove(context.Context, string) error {
 	return errors.New("Remove should not be called when BulkRemovableIO is available")
 }
 
@@ -1551,7 +1551,7 @@ func TestDeleteFilesWithCustomDeleteFunc(t *testing.T) {
 
 	var customDeleted []string
 	cfg := &orphanCleanupConfig{
-		deleteFunc: func(path string) error {
+		deleteFunc: func(_ context.Context, path string) error {
 			customDeleted = append(customDeleted, path)
 
 			return nil
@@ -1579,11 +1579,11 @@ type mockPlainIO struct {
 	removed []string
 }
 
-func (m *mockPlainIO) Open(string) (iceio.File, error) {
+func (m *mockPlainIO) Open(context.Context, string) (iceio.File, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockPlainIO) Remove(name string) error {
+func (m *mockPlainIO) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1603,9 +1603,13 @@ type mockWalkEntry struct {
 	info mockFileInfo
 }
 
-func (m *mockListableIO) WalkDir(root string, fn stdfs.WalkDirFunc) error {
+func (m *mockListableIO) WalkDir(ctx context.Context, root string, fn stdfs.WalkDirFunc) error {
 	m.root = root
 	for _, entry := range m.entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err := fn(entry.path, stdfs.FileInfoToDirEntry(entry.info), nil); err != nil {
 			return err
 		}
@@ -1639,7 +1643,7 @@ type purgeDeleteTrackingIO struct {
 	removed   []string
 }
 
-func (m *purgeDeleteTrackingIO) Remove(name string) error {
+func (m *purgeDeleteTrackingIO) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	m.active++
 	m.maxActive = max(m.maxActive, m.active)
@@ -1680,7 +1684,7 @@ func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
 		context.Background(),
 		files,
 		4,
-		func(path string) error {
+		func(_ context.Context, path string) error {
 			mu.Lock()
 			calls[path]++
 			mu.Unlock()
@@ -1734,7 +1738,7 @@ func TestDeleteFilesParallelPreservesErrorWithNilWrapper(t *testing.T) {
 		context.Background(),
 		files,
 		2,
-		func(path string) error {
+		func(_ context.Context, path string) error {
 			if path == files[1] {
 				return deleteErr
 			}
@@ -1757,7 +1761,7 @@ func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 		ctx,
 		[]string{"s3://bucket/table/file.parquet"},
 		4,
-		func(string) error {
+		func(context.Context, string) error {
 			called = true
 
 			return nil
@@ -1817,7 +1821,7 @@ func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T)
 				gatedErrContext{Context: ctx, checks: checks, errCalls: errCalls},
 				files,
 				maxConcurrency,
-				func(string) error {
+				func(context.Context, string) error {
 					if calls.Add(1) > maxConcurrency {
 						extraCalls <- struct{}{}
 					}
@@ -2015,7 +2019,7 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 						WithCleanupLocation("s3://bucket/path"),
 						WithCleanupFilesOlderThan(0),
 						WithPrefixMismatchMode(mode),
-						WithCleanupDeleteFunc(func(path string) error {
+						WithCleanupDeleteFunc(func(_ context.Context, path string) error {
 							deleted = append(deleted, path)
 
 							return nil
@@ -2028,11 +2032,12 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 						assert.Empty(t, deleted)
 					case PrefixMismatchIgnore:
 						require.NoError(t, err)
-						assert.Empty(t, result.OrphanFileLocations)
+						assert.Empty(t, result.OrphanFiles)
 						assert.Empty(t, deleted)
 					case PrefixMismatchDelete:
 						require.NoError(t, err)
-						assert.Equal(t, []string{tt.listedPath}, result.OrphanFileLocations)
+						require.Len(t, result.OrphanFiles, 1)
+						assert.Equal(t, tt.listedPath, result.OrphanFiles[0].Path)
 						assert.Equal(t, []string{tt.listedPath}, deleted)
 					}
 				})
@@ -2086,7 +2091,7 @@ func TestDeleteOrphanFilesDryRunKeepsMixedCaseWindowsReference(t *testing.T) {
 		WithCleanupDryRun(true),
 	)
 	require.NoError(t, err)
-	assert.Empty(t, result.OrphanFileLocations)
+	assert.Empty(t, result.OrphanFiles)
 	assert.Empty(t, result.DeletedFiles)
 }
 
@@ -2161,7 +2166,7 @@ func TestDeleteOrphanFilesDryRunKeepsPortableWindowsReferences(t *testing.T) {
 				WithCleanupDryRun(true),
 			)
 			require.NoError(t, err)
-			assert.Empty(t, result.OrphanFileLocations)
+			assert.Empty(t, result.OrphanFiles)
 			assert.Empty(t, result.DeletedFiles)
 		})
 	}
@@ -2204,7 +2209,7 @@ func TestDeleteOrphanFilesDryRunKeepsOpaqueVersionHint(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, tableLocation, fsys.root)
-	assert.Empty(t, result.OrphanFileLocations)
+	assert.Empty(t, result.OrphanFiles)
 	assert.Empty(t, result.DeletedFiles)
 }
 
@@ -2231,7 +2236,7 @@ func TestWalkDirectoryUsesListableIO(t *testing.T) {
 	var walked []string
 	sizes := make(map[string]int64)
 
-	err := walkDirectory(mock, "s3://bucket/data", func(path string, info stdfs.FileInfo) error {
+	err := walkDirectory(context.Background(), mock, "s3://bucket/data", func(path string, info stdfs.FileInfo) error {
 		walked = append(walked, path)
 		sizes[path] = info.Size()
 
@@ -2313,7 +2318,7 @@ func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
 }
 
 func TestWalkDirectoryRequiresListableIO(t *testing.T) {
-	err := walkDirectory(&mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
+	err := walkDirectory(context.Background(), &mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
 		require.Fail(t, "walk callback should not run for non-listable IO")
 
 		return nil

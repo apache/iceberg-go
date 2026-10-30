@@ -38,10 +38,28 @@ func TestNormalizeVariantPathEscaping(t *testing.T) {
 		{"backslash escaped", []string{`a\b`}, `$['a\\b']`},
 		{"newline escaped", []string{"a\nb"}, `$['a\nb']`},
 		{"other control char hex-escaped", []string{"a\x01b"}, "$['a\\u0001b']"},
+		{"common control escapes", []string{"\b\t\f\n\r"}, "$['\\b\\t\\f\\n\\r']"},
+		{"nested escaped members", []string{"o'brien", "a\x00\x1fb", "a\\b"}, "$['o\\'brien']['a\\u0000\\u001fb']['a\\\\b']"},
+		{"unicode members", []string{"naïve", "東京"}, "$['naïve']['東京']"},
+		{"unescaped invalid UTF8", []string{"bad\xff"}, "$['bad\xff']"},
+		{"escaped invalid UTF8", []string{"bad\xff'\x80"}, "$['bad\uFFFD\\'\uFFFD']"},
+		{"unicode with control", []string{"東京\n🦊"}, "$['東京\\n🦊']"},
+		{"empty member", []string{""}, "$['']"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, NormalizeVariantPath(tt.fields))
 		})
+	}
+}
+
+// Check every ASCII control byte, including the less common \\u00xx escapes.
+func TestNormalizeVariantPathAllControlBytes(t *testing.T) {
+	for c := range byte(0x20) {
+		fields := []string{"pre" + string(c) + "post"}
+		path := NormalizeVariantPath(fields)
+		got, err := parseVariantPath(path)
+		require.NoError(t, err, "control byte %#x", c)
+		assert.Equal(t, fields, got, "control byte %#x", c)
 	}
 }
 
@@ -57,6 +75,11 @@ func TestParseVariantPath(t *testing.T) {
 		{"underscore and digits", "$._a1.b2", []string{"_a1", "b2"}},
 		{"non-ascii first char", "$.naïve", []string{"naïve"}},
 		{"bracket notation", "$['event_id']", []string{"event_id"}},
+		{"bracket empty quoted member", "$['']", []string{""}},
+		{"bracket plain unicode", "$['naïve_東京']", []string{"naïve_東京"}},
+		{"bracket literal delimiters", "$['a.b[0]']", []string{"a.b[0]"}},
+		{"bracket two different escapes", "$['a\\nb\\tc']", []string{"a\nb\tc"}},
+		{"bracket mixed escaped and plain runs", "$['pre\\'mid\\\\end']", []string{"pre'mid\\end"}},
 		{"bracket nested", "$['location']['latitude']", []string{"location", "latitude"}},
 		{"bracket dotted name", "$['user.name']", []string{"user.name"}},
 		{"bracket leading digit", "$['1abc']", []string{"1abc"}},

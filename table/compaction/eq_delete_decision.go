@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -147,10 +148,10 @@ func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.Mani
 		if _, ok := seen[path]; ok {
 			continue
 		}
-		if e.SequenceNum() < 0 {
+		if e.DataSequenceNumber() < 0 {
 			continue
 		}
-		if minSeq >= e.SequenceNum() {
+		if minSeq >= e.DataSequenceNumber() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
@@ -198,7 +199,7 @@ func DecideDeadEqualityDeletesWithSpecs(
 		if _, ok := seen[path]; ok {
 			continue
 		}
-		if e.SequenceNum() < 0 {
+		if e.DataSequenceNumber() < 0 {
 			continue
 		}
 		isUnpartitioned, ok := unpartitionedBySpecID[df.SpecID()]
@@ -213,7 +214,7 @@ func DecideDeadEqualityDeletesWithSpecs(
 		}
 		if survey.specAwareApplicableMinSeq(
 			df.SpecID(), internal.BorrowedDataFilePartition(df), isUnpartitioned,
-		) >= e.SequenceNum() {
+		) >= e.DataSequenceNumber() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
@@ -246,7 +247,8 @@ func partitionBucketKey(specID int32, part map[int]any) string {
 
 func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
 	key := make([]byte, 0, len(tuple)+12)
-	key = fmt.Appendf(key, "%d:", specID)
+	key = strconv.AppendInt(key, int64(specID), 10)
+	key = append(key, ':')
 
 	return string(append(key, tuple...))
 }
@@ -254,13 +256,40 @@ func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
 // appendPartitionTuple emits the sorted "id=value;" tuple into dst.
 // Caller is responsible for any leading prefix (e.g. specID).
 func appendPartitionTuple(dst []byte, part map[int]any) []byte {
-	ids := make([]int, 0, len(part))
+	var inlineIDs [8]int
+	ids := inlineIDs[:0]
+	if len(part) > len(inlineIDs) {
+		ids = make([]int, 0, len(part))
+	}
 	for id := range part {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
+
+	if cap(dst) == 0 && len(part) != 0 {
+		dst = make([]byte, 0, len(part)*16)
+	}
 	for _, id := range ids {
-		dst = fmt.Appendf(dst, "%d=%v;", id, part[id])
+		dst = strconv.AppendInt(dst, int64(id), 10)
+		dst = append(dst, '=')
+		// Match fmt's %v output exactly; these partition keys are externally visible.
+		switch value := part[id].(type) {
+		case nil:
+			dst = append(dst, "<nil>"...)
+		case string:
+			dst = append(dst, value...)
+		case int32:
+			dst = strconv.AppendInt(dst, int64(value), 10)
+		case iceberg.Date:
+			dst = strconv.AppendInt(dst, int64(value), 10)
+		case int64:
+			dst = strconv.AppendInt(dst, value, 10)
+		case bool:
+			dst = strconv.AppendBool(dst, value)
+		default:
+			dst = fmt.Append(dst, value)
+		}
+		dst = append(dst, ';')
 	}
 
 	return dst

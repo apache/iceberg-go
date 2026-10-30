@@ -28,8 +28,6 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
-const referencedDataFilePathFieldID = 2147483546
-
 // DataFileArgs collects everything needed to compute a fully populated
 // [iceberg.DataFile] (data, equality-delete, or positional-delete) from
 // a file's in-memory, format-specific metadata object without performing
@@ -121,7 +119,7 @@ type DataFileArgs struct {
 	//   - [Transaction.AddDataFiles]: REQUIRED. These are externally-written
 	//     files, so the library cannot fabricate row IDs for them; a nil
 	//     first_row_id is rejected at commit time.
-	//   - [Transaction.ReplaceDataFilesWithDataFiles]: REQUIRED for the added
+	//   - [Transaction.ReplaceDataFiles]: REQUIRED for the added
 	//     files, except when the caller opts into rewrite/compaction semantics
 	//     (WithRewriteSemantics), where the manifest-list writer assigns it by
 	//     inheritance and it may be left nil.
@@ -255,7 +253,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		if statsProps == nil {
 			statsProps = iceberg.Properties{}
 		}
-		if colName, ok := args.Schema.FindColumnName(referencedDataFilePathFieldID); ok {
+		if colName, ok := args.Schema.FindColumnName(iceberg.DeleteFilePathFieldID); ok {
 			statsProps[MetricsModeColumnConfPrefix+"."+colName] = string(tblutils.MetricModeFull)
 		}
 	}
@@ -295,7 +293,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 			statsPlan,
 			pathMapping,
 			tblutils.VariantFieldIDsFromSchema(args.Schema),
-			// Metadata-only path: no file is read here, so no arrow schema; AddFiles recomputes variant bounds in fileToDataFile.
+			// Metadata-only path: no file is read here, so no arrow schema; AddDataFilesByPath recomputes variant bounds in fileToDataFile.
 			nil,
 		)
 		if stats == nil {
@@ -335,7 +333,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 
 func verifyReferencedDataFile(df iceberg.DataFile, ref string) error {
 	decode := func(bounds map[int][]byte, which string) (string, error) {
-		raw, ok := bounds[referencedDataFilePathFieldID]
+		raw, ok := bounds[iceberg.DeleteFilePathFieldID]
 		if !ok {
 			return "", fmt.Errorf(
 				"referenced_data_file %q is set but the position-delete file_path column has no %s bound",

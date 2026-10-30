@@ -478,7 +478,7 @@ func TestExecuteCompactionGroupPreservesRowIDAcrossV2Upgrade(t *testing.T) {
 	require.NoError(t, tx.UpgradeFormatVersion(3))
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 3, tbl.Metadata().Version())
+	require.Equal(t, 3, tbl.Metadata().FormatVersion())
 
 	v3Data, err := array.TableFromJSON(mem, arrowSchema, []string{
 		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,

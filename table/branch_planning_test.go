@@ -99,7 +99,7 @@ func idRecordReader(t *testing.T, tbl *table.Table, ids ...int64) array.RecordRe
 func appendRowsOnRef(t *testing.T, tbl *table.Table, ref string, ids ...int64) *table.Table {
 	t.Helper()
 
-	txn, err := tbl.NewTransactionOnBranchWithError(ref)
+	txn, err := tbl.NewTransactionOnBranch(ref)
 	require.NoError(t, err)
 
 	rdr := idRecordReader(t, tbl, ids...)
@@ -253,7 +253,7 @@ func mainOnlyDataPath(t *testing.T, tbl *table.Table) string {
 func TestBranchDeleteClassifiesBranchFiles(t *testing.T) {
 	tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 
-	txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.Delete(t.Context(), iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(3)), nil))
 	tbl, err = txn.Commit(t.Context())
@@ -270,7 +270,7 @@ func TestBranchDeleteClassifiesBranchFiles(t *testing.T) {
 func TestBranchDeleteRewritesPartiallyMatchedBranchFile(t *testing.T) {
 	tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 
-	txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil))
 	tbl, err = txn.Commit(t.Context())
@@ -286,7 +286,7 @@ func TestBranchDeleteRewritesPartiallyMatchedBranchFile(t *testing.T) {
 func TestBranchOverwriteReplacesBranchOnlyFiles(t *testing.T) {
 	tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 
-	txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 
 	rdr := idRecordReader(t, tbl, 9)
@@ -307,7 +307,7 @@ func TestOverwriteCreatingBranchPlansAgainstMainHead(t *testing.T) {
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2)
 	require.Nil(t, tbl.SnapshotByName(branchPlanningRef), "the branch must not exist yet")
 
-	txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 
 	rdr := idRecordReader(t, tbl, 9)
@@ -359,7 +359,7 @@ func TestBranchOverwriteReplaysOnBranchHeadAfterConflict(t *testing.T) {
 	}
 	writer := table.New(branchPlanningIdent, seedCat.current, metaLoc, branchPlanningFS, cat)
 
-	txn, err := writer.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := writer.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	rdr := idRecordReader(t, writer, 9)
 	defer rdr.Release()
@@ -384,7 +384,7 @@ func TestBranchOverwriteReplaysOnBranchHeadAfterConflict(t *testing.T) {
 func TestBranchFilteredOverwriteClassifiesBranchFiles(t *testing.T) {
 	tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 
-	txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 
 	rdr := idRecordReader(t, tbl, 7)
@@ -406,7 +406,7 @@ func TestBranchAddDataFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 		tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 		branchOnly := branchOnlyDataPath(t, tbl)
 
-		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
 
 		err = txn.AddDataFiles(t.Context(), []iceberg.DataFile{buildDataFile(t, branchOnly)}, nil)
@@ -418,7 +418,7 @@ func TestBranchAddDataFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 		tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 		mainOnly := mainOnlyDataPath(t, tbl)
 
-		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
 
 		require.NoError(t, txn.AddDataFiles(t.Context(), []iceberg.DataFile{buildDataFile(t, mainOnly)}, nil))
@@ -430,16 +430,16 @@ func TestBranchAddDataFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 	})
 }
 
-// AddFiles runs the same check from paths, through its own snapshot lookup.
+// AddDataFilesByPath runs the same check from paths, through its own snapshot lookup.
 func TestBranchAddFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 	t.Run("rejects a file the branch already references", func(t *testing.T) {
 		tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 		branchOnly := branchOnlyDataPath(t, tbl)
 
-		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
 
-		err = txn.AddFiles(t.Context(), []string{branchOnly}, nil, false)
+		err = txn.AddDataFilesByPath(t.Context(), []string{branchOnly}, nil, false)
 		require.ErrorContains(t, err, "cannot add files that are already referenced by table")
 		assert.Contains(t, err.Error(), branchOnly)
 	})
@@ -448,10 +448,10 @@ func TestBranchAddFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 		tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
 		mainOnly := mainOnlyDataPath(t, tbl)
 
-		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
 
-		require.NoError(t, txn.AddFiles(t.Context(), []string{mainOnly}, nil, false))
+		require.NoError(t, txn.AddDataFilesByPath(t.Context(), []string{mainOnly}, nil, false))
 		tbl, err = txn.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -463,7 +463,7 @@ func TestBranchAddFilesDuplicateCheckUsesBranchHead(t *testing.T) {
 // A table written only through a branch has no main head, so a main-based plan
 // rejects the replace outright instead of performing it.
 func TestReplaceOnBranchOnlyTable(t *testing.T) {
-	t.Run("ReplaceDataFiles", func(t *testing.T) {
+	t.Run("ReplaceDataFilesByPath", func(t *testing.T) {
 		tbl := newBranchPlanningTable(t, nil)
 		tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 1, 2)
 		require.Nil(t, tbl.CurrentSnapshot(), "fixture must leave main without a head")
@@ -476,9 +476,9 @@ func TestReplaceOnBranchOnlyTable(t *testing.T) {
 		require.NoError(t, err)
 		writeParquetFile(t, replacement, arrowSchema, `[{"id":8}]`)
 
-		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
-		require.NoError(t, txn.ReplaceDataFiles(t.Context(), original, []string{replacement}, nil))
+		require.NoError(t, txn.ReplaceDataFilesByPath(t.Context(), original, []string{replacement}, nil))
 		tbl, err = txn.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -486,11 +486,11 @@ func TestReplaceOnBranchOnlyTable(t *testing.T) {
 		assert.Nil(t, tbl.CurrentSnapshot(), "replacing on the branch must not create a main head")
 	})
 
-	t.Run("ReplaceDataFilesWithDataFiles", func(t *testing.T) {
+	t.Run("ReplaceDataFiles", func(t *testing.T) {
 		tbl := newBranchPlanningTable(t, nil)
 		staged := buildDataFile(t, tbl.Location()+"/data/branch-1.parquet")
 
-		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
 		require.NoError(t, txn.AddDataFiles(t.Context(), []iceberg.DataFile{staged}, nil))
 		tbl, err = txn.Commit(t.Context())
@@ -498,9 +498,9 @@ func TestReplaceOnBranchOnlyTable(t *testing.T) {
 		require.Nil(t, tbl.CurrentSnapshot(), "fixture must leave main without a head")
 
 		replacement := buildDataFile(t, tbl.Location()+"/data/branch-2.parquet")
-		txn, err = tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err = tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
-		require.NoError(t, txn.ReplaceDataFilesWithDataFiles(t.Context(),
+		require.NoError(t, txn.ReplaceDataFiles(t.Context(),
 			[]iceberg.DataFile{staged}, []iceberg.DataFile{replacement}, nil))
 		tbl, err = txn.Commit(t.Context())
 		require.NoError(t, err)
@@ -519,14 +519,14 @@ func TestBranchReplaceFilesResolvesBranchDeleteFiles(t *testing.T) {
 	staged := buildDataFile(t, tbl.Location()+"/data/branch-staged.parquet")
 	posDelete := buildPosDeleteFile(t, tbl.Location()+"/data/branch-pos-delete.parquet")
 
-	txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.NewRowDelta(nil).AddRows(staged).AddDeletes(posDelete).Commit(t.Context()))
 	tbl, err = txn.Commit(t.Context())
 	require.NoError(t, err)
 
 	replacement := buildDataFile(t, tbl.Location()+"/data/branch-compacted.parquet")
-	txn, err = tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err = tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.ReplaceFiles(t.Context(),
 		[]iceberg.DataFile{staged}, []iceberg.DataFile{replacement}, []iceberg.DataFile{posDelete}, nil))
@@ -553,7 +553,7 @@ func TestBranchMergeOnReadDeleteMergesBranchDeletionVector(t *testing.T) {
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2, 3, 4, 5)
 
 	for _, id := range []int64{2, 3} {
-		txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+		txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 		require.NoError(t, err)
 		require.NoError(t, txn.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference("id"), id), nil))
 		tbl, err = txn.Commit(t.Context())
@@ -578,7 +578,7 @@ func TestBranchMergeOnReadDeleteTargetsBranchOnlyFile(t *testing.T) {
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2)
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 3, 4)
 
-	txn, err := tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil))
 	tbl, err = txn.Commit(t.Context())
@@ -602,13 +602,13 @@ func TestBranchRowDeltaResolvesRemovedDeletesOnBranchHead(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSchema, `[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5}]`)
 
 	txn := tbl.NewTransaction()
-	require.NoError(t, txn.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, txn.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = txn.Commit(t.Context())
 	require.NoError(t, err)
 
 	// The first vector (hiding position 1, id 2) exists only on the branch.
 	dv1 := writeDV(t, location, "dv-001.puffin", dataPath, []int64{1})
-	txn, err = tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err = tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.NewRowDelta(nil).AddDeletes(dv1).Commit(t.Context()))
 	tbl, err = txn.Commit(t.Context())
@@ -616,7 +616,7 @@ func TestBranchRowDeltaResolvesRemovedDeletesOnBranchHead(t *testing.T) {
 	require.Equal(t, []int64{1, 3, 4, 5}, idsOnRef(t, tbl, branchPlanningRef))
 
 	dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{1, 3})
-	txn, err = tbl.NewTransactionOnBranchWithError(branchPlanningRef)
+	txn, err = tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, txn.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1).Commit(t.Context()))
 	tbl, err = txn.Commit(t.Context())

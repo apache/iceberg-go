@@ -1450,7 +1450,7 @@ func (r *RestCatalogSuite) TestCreateTable200() {
 
 	r.Equal(catalog.ToIdentifier("fokko", "fokko2"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata.json", tbl.MetadataLocation())
-	r.EqualValues(1, tbl.Metadata().Version())
+	r.EqualValues(1, tbl.Metadata().FormatVersion())
 	r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", tbl.Metadata().TableUUID().String())
 	r.EqualValues(1657810967051, tbl.Metadata().LastUpdatedMillis())
 	r.Equal(3, tbl.Metadata().LastColumnID())
@@ -1687,7 +1687,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 
 	r.Equal(catalog.ToIdentifier("fokko", "table"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", tbl.MetadataLocation())
-	r.EqualValues(1, tbl.Metadata().Version())
+	r.EqualValues(1, tbl.Metadata().FormatVersion())
 	r.Equal("b55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
 	r.EqualValues(1646787054459, tbl.Metadata().LastUpdatedMillis())
 	r.Equal(2, tbl.Metadata().LastColumnID())
@@ -1771,6 +1771,184 @@ func (r *RestCatalogSuite) TestLoadTableLabels() {
 	r.Equal(iceberg.Properties{"classification": "pii"}, labels.Field(2))
 	r.Equal(iceberg.Properties{"classification": "dropped"}, labels.Field(99)) // dropped column still resolvable
 	r.Nil(labels.Field(1))                                                     // field present in schema but unlabeled
+}
+
+func (r *RestCatalogSuite) TestLoadTableScanPlanningDirective() {
+	for _, tc := range []struct {
+		name       string
+		config     string
+		properties string
+		catOpts    []rest.Option
+		want       table.ScanPlanningDirective
+		wantErr    bool
+	}{
+		{name: "absent", config: `{}`, want: table.ScanPlanningDirectiveNone},
+		{name: "client", config: `{"scan-planning-mode": "client"}`, want: table.ScanPlanningDirectiveClient},
+		{name: "server", config: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveServer},
+		{name: "unrecognized", config: `{"scan-planning-mode": "bogus"}`, want: table.ScanPlanningDirectiveNone, wantErr: true},
+		// Table metadata properties never carry the directive.
+		{name: "metadata_property_only", config: `{}`, properties: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveNone},
+		// As in Java, the catalog's own property applies when the server sends
+		// none, and the server's value wins when both are present.
+		{
+			name:    "catalog_property_only",
+			config:  `{}`,
+			catOpts: []rest.Option{rest.WithAdditionalProps(iceberg.Properties{"scan-planning-mode": "client"})},
+			want:    table.ScanPlanningDirectiveClient,
+		},
+		{
+			name:    "config_wins_over_catalog_property",
+			config:  `{"scan-planning-mode": "server"}`,
+			catOpts: []rest.Option{rest.WithAdditionalProps(iceberg.Properties{"scan-planning-mode": "client"})},
+			want:    table.ScanPlanningDirectiveServer,
+		},
+		{
+			name:       "config_wins_over_metadata_property",
+			config:     `{"scan-planning-mode": "client"}`,
+			properties: `{"scan-planning-mode": "server"}`,
+			want:       table.ScanPlanningDirectiveClient,
+		},
+	} {
+		r.Run(tc.name, func() {
+			tableName := "table_" + tc.name
+			properties := tc.properties
+			if properties == "" {
+				properties = `{}`
+			}
+			r.mux.HandleFunc("/v1/namespaces/fokko/tables/"+tableName, func(w http.ResponseWriter, req *http.Request) {
+				r.Require().Equal(http.MethodGet, req.Method)
+				w.Write([]byte(`{
+					"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
+					"metadata": {
+						"format-version": 1,
+						"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+						"location": "s3://warehouse/database/table",
+						"last-updated-ms": 1646787054459,
+						"last-column-id": 2,
+						"schema": {"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]},
+						"current-schema-id": 0,
+						"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]}],
+						"partition-spec": [],
+						"default-spec-id": 0,
+						"partition-specs": [{"spec-id":0,"fields":[]}],
+						"last-partition-id": 999,
+						"default-sort-order-id": 0,
+						"sort-orders": [{"order-id":0,"fields":[]}],
+						"properties": ` + properties + `
+					},
+					"config": ` + tc.config + `
+				}`))
+			})
+
+			cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+				append([]rest.Option{rest.WithOAuthToken(TestToken)}, tc.catOpts...)...)
+			r.Require().NoError(err)
+
+			tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", tableName))
+			r.Require().NoError(err)
+			got, err := tbl.ScanPlanningDirective()
+			if tc.wantErr {
+				r.ErrorIs(err, iceberg.ErrInvalidArgument)
+				r.Equal(tc.want, got)
+
+				return
+			}
+			r.Require().NoError(err)
+			r.Equal(tc.want, got)
+		})
+	}
+}
+
+// TestCreateAndRegisterTableScanPlanningDirective pins that the other load
+// response paths read the directive from the config block too.
+func (r *RestCatalogSuite) TestCreateAndRegisterTableScanPlanningDirective() {
+	const metadataLoc = "s3://warehouse/database/table/metadata/00001.metadata.json"
+
+	for _, op := range []struct {
+		name string
+		path string
+		call func(cat *rest.Catalog, ident table.Identifier) (*table.Table, error)
+	}{
+		{
+			name: "create",
+			path: "/v1/namespaces/fokko/tables",
+			call: func(cat *rest.Catalog, ident table.Identifier) (*table.Table, error) {
+				return cat.CreateTable(context.Background(), ident, tableSchemaSimple)
+			},
+		},
+		{
+			name: "register",
+			path: "/v1/namespaces/fokko/register",
+			call: func(cat *rest.Catalog, ident table.Identifier) (*table.Table, error) {
+				return cat.RegisterTable(context.Background(), ident, metadataLoc)
+			},
+		},
+	} {
+		for _, tc := range []struct {
+			name       string
+			config     string
+			properties string
+			want       table.ScanPlanningDirective
+			wantErr    bool
+		}{
+			{name: "absent", config: `{}`, properties: `{}`, want: table.ScanPlanningDirectiveNone},
+			{name: "server", config: `{"scan-planning-mode": "server"}`, properties: `{}`, want: table.ScanPlanningDirectiveServer},
+			{name: "unrecognized", config: `{"scan-planning-mode": "bogus"}`, properties: `{}`, wantErr: true},
+			{name: "metadata_property_only", config: `{}`, properties: `{"scan-planning-mode": "server"}`, want: table.ScanPlanningDirectiveNone},
+		} {
+			r.Run(op.name+"_"+tc.name, func() {
+				mux := http.NewServeMux()
+				srv := httptest.NewServer(mux)
+				defer srv.Close()
+
+				mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+					json.NewEncoder(w).Encode(map[string]any{
+						"defaults":  map[string]any{},
+						"overrides": map[string]any{},
+						"endpoints": rest.AllEndpointStrings,
+					})
+				})
+				mux.HandleFunc(op.path, func(w http.ResponseWriter, req *http.Request) {
+					r.Require().Equal(http.MethodPost, req.Method)
+					w.Write([]byte(`{
+						"metadata-location": "` + metadataLoc + `",
+						"metadata": {
+							"format-version": 1,
+							"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+							"location": "s3://warehouse/database/table",
+							"last-updated-ms": 1646787054459,
+							"last-column-id": 2,
+							"schema": {"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]},
+							"current-schema-id": 0,
+							"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]}],
+							"partition-spec": [],
+							"default-spec-id": 0,
+							"partition-specs": [{"spec-id":0,"fields":[]}],
+							"last-partition-id": 999,
+							"default-sort-order-id": 0,
+							"sort-orders": [{"order-id":0,"fields":[]}],
+							"properties": ` + tc.properties + `
+						},
+						"config": ` + tc.config + `
+					}`))
+				})
+
+				cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+				r.Require().NoError(err)
+
+				tbl, err := op.call(cat, catalog.ToIdentifier("fokko", "fokko2"))
+				r.Require().NoError(err)
+				got, err := tbl.ScanPlanningDirective()
+				if tc.wantErr {
+					r.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+					return
+				}
+				r.Require().NoError(err)
+				r.Equal(tc.want, got)
+			})
+		}
+	}
 }
 
 func (r *RestCatalogSuite) TestCreateTableLabels() {
@@ -1944,6 +2122,122 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
 	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
 }
 
+func (r *RestCatalogSuite) TestRenameTable409() {
+	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table already exists: fokko.destination",
+				"type":    "AlreadyExistsException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("fokko", "destination"))
+	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+// renameTableErrors registers a rename endpoint that fails and returns a
+// function that sets the failure's status and error.type, renames a table, and
+// returns the error RenameTable reports. The handler is registered once, so the
+// returned function can be called repeatedly within one test.
+func (r *RestCatalogSuite) renameTableErrors() func(status int, errType string) error {
+	var status int
+	var errType string
+	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+		if !r.Equal(http.MethodPost, req.Method) {
+			return
+		}
+
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "rename failed",
+				"type":    errType,
+				"code":    status,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	return func(s int, t string) error {
+		status, errType = s, t
+		_, err := cat.RenameTable(context.Background(), catalog.ToIdentifier("fokko", "source"), catalog.ToIdentifier("missing", "destination"))
+
+		return err
+	}
+}
+
+func (r *RestCatalogSuite) TestRenameTable404MissingTable() {
+	err := r.renameTableErrors()(http.StatusNotFound, "NoSuchTableException")
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (r *RestCatalogSuite) TestRenameTable404MissingNamespace() {
+	err := r.renameTableErrors()(http.StatusNotFound, "NoSuchNamespaceException")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+// TestRenameTable404UntypedFallsBackToNoSuchTable pins the fallback for servers
+// that omit or send an unrecognized error.type on a rename 404.
+func (r *RestCatalogSuite) TestRenameTable404UntypedFallsBackToNoSuchTable() {
+	rename := r.renameTableErrors()
+	for _, errType := range []string{"", "SomeUnknownException"} {
+		r.Run("type="+errType, func() {
+			err := rename(http.StatusNotFound, errType)
+			r.ErrorIs(err, catalog.ErrNoSuchTable)
+			r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+		})
+	}
+}
+
+// TestRenameTableNoSuchNamespaceTypeIsStatusGated asserts that the error.type
+// refinement only applies to statuses in the rename status map (404 and 409).
+// An unmapped status carrying NoSuchNamespaceException must not read as a
+// missing namespace.
+func (r *RestCatalogSuite) TestRenameTableNoSuchNamespaceTypeIsStatusGated() {
+	rename := r.renameTableErrors()
+	tests := []struct {
+		status int
+		want   error
+	}{
+		{http.StatusServiceUnavailable, rest.ErrServiceUnavailable},
+		{http.StatusInternalServerError, rest.ErrServerError},
+		{http.StatusUnauthorized, rest.ErrUnauthorized},
+		{http.StatusForbidden, rest.ErrForbidden},
+	}
+	for _, tt := range tests {
+		r.Run(http.StatusText(tt.status), func() {
+			err := rename(tt.status, "NoSuchNamespaceException")
+			r.ErrorIs(err, tt.want)
+			r.NotErrorIs(err, catalog.ErrNoSuchNamespace)
+		})
+	}
+}
+
+// TestRenameTable409WithNamespaceTypeResolvesToNamespace pins the edge where a
+// 409 carries NoSuchNamespaceException. No real server sends this combo, but
+// 409 is in the rename status map, so the type override refines it. The test
+// documents that behavior: if status-aware overrides are added later, this
+// catches the change.
+func (r *RestCatalogSuite) TestRenameTable409WithNamespaceTypeResolvesToNamespace() {
+	err := r.renameTableErrors()(http.StatusConflict, "NoSuchNamespaceException")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
 func (r *RestCatalogSuite) TestRenameTable204() {
 	// Mock the rename table endpoint
 	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
@@ -1998,7 +2292,7 @@ func (r *RestCatalogSuite) TestRenameTable204() {
 
 	r.Equal(catalog.ToIdentifier("fokko", "destination"), renamedTable.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata.json", renamedTable.MetadataLocation())
-	r.EqualValues(1, renamedTable.Metadata().Version())
+	r.EqualValues(1, renamedTable.Metadata().FormatVersion())
 	r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", renamedTable.Metadata().TableUUID().String())
 	r.EqualValues(1657810967051, renamedTable.Metadata().LastUpdatedMillis())
 	r.Equal(3, renamedTable.Metadata().LastColumnID())
@@ -2234,7 +2528,7 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 
 	r.Equal(catalog.ToIdentifier("fokko", "fokko2"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", tbl.MetadataLocation())
-	r.EqualValues(1, tbl.Metadata().Version())
+	r.EqualValues(1, tbl.Metadata().FormatVersion())
 	r.Equal("d55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
 	r.Equal("bryan", tbl.Metadata().Properties()["owner"])
 }
@@ -3115,6 +3409,8 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	}
 
 	r.mux.HandleFunc("/v1/namespaces/create-ns/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/create-ns/tables", req.URL.EscapedPath())
+
 		var payload namedPayload
 		if !decodePayload(req, &payload) {
 			return
@@ -3124,6 +3420,8 @@ func (r *RestCatalogSuite) TestRequestPathsEncodeNamesAndBodiesRemainRaw() {
 	})
 
 	r.mux.HandleFunc("/v1/namespaces/register-ns/register", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal("/v1/namespaces/register-ns/register", req.URL.EscapedPath())
+
 		var payload namedPayload
 		if !decodePayload(req, &payload) {
 			return
@@ -3193,7 +3491,7 @@ func (r *RestCatalogSuite) TestCreateView200() {
 		"owner":       "admin",
 		"view-format": "iceberg",
 	}
-	reprs := []view.Representation{view.NewRepresentation(exampleViewSQL, "default")}
+	reprs := []view.Representation{view.NewRepresentation(view.Representation{SQL: exampleViewSQL, Dialect: "default"})}
 	version, err := view.NewVersion(1, 0, reprs, table.Identifier{ns},
 		view.WithDefaultViewCatalog("default-catalog"),
 		view.WithTimestampMS(0))
@@ -3257,7 +3555,7 @@ func (r *RestCatalogSuite) TestCreateView409() {
 		Required: true,
 	})
 	sql := "SELECT * FROM table"
-	reprs := []view.Representation{view.NewRepresentation(sql, "default")}
+	reprs := []view.Representation{view.NewRepresentation(view.Representation{SQL: sql, Dialect: "default"})}
 	version, err := view.NewVersion(1, 1, reprs, table.Identifier{ns})
 	r.Require().NoError(err)
 
@@ -3292,7 +3590,7 @@ func (r *RestCatalogSuite) TestCreateView404() {
 	})
 	sql := "SELECT * FROM table"
 	reprs := []view.Representation{
-		view.NewRepresentation(sql, "spark"),
+		view.NewRepresentation(view.Representation{SQL: sql, Dialect: "spark"}),
 	}
 	version, err := view.NewVersion(1, 1, reprs, table.Identifier{ns})
 	r.Require().NoError(err)
@@ -3357,7 +3655,7 @@ func (r *RestCatalogSuite) TestRegisterView200() {
 	r.Equal(metadataLoc, v.MetadataLocation())
 	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), v.Metadata().ViewUUID())
 	r.EqualValues(1, v.Metadata().CurrentVersionID())
-	r.Equal(exampleViewSQL, v.Metadata().CurrentVersion().Representations[0].Sql)
+	r.Equal(exampleViewSQL, v.Metadata().CurrentVersion().Representations[0].SQL)
 }
 
 func (r *RestCatalogSuite) TestRegisterViewLabels() {
@@ -3395,7 +3693,7 @@ func (r *RestCatalogSuite) TestCreateViewLabels() {
 	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1}, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	reprs := []view.Representation{view.NewRepresentation(exampleViewSQL, "default")}
+	reprs := []view.Representation{view.NewRepresentation(view.Representation{SQL: exampleViewSQL, Dialect: "default"})}
 	version, err := view.NewVersion(1, 0, reprs, table.Identifier{ns},
 		view.WithDefaultViewCatalog("default-catalog"), view.WithTimestampMS(0))
 	r.Require().NoError(err)
@@ -3567,7 +3865,7 @@ func (r *RestCatalogSuite) TestRenameView204() {
 	r.Equal(toIdent, renamed.Identifier())
 	r.Equal(metadataLoc, renamed.MetadataLocation())
 	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), renamed.Metadata().ViewUUID())
-	r.Equal(exampleViewSQL, renamed.Metadata().CurrentVersion().Representations[0].Sql)
+	r.Equal(exampleViewSQL, renamed.Metadata().CurrentVersion().Representations[0].SQL)
 }
 
 func (r *RestCatalogSuite) TestRenameView404() {
@@ -4368,4 +4666,196 @@ func TestEndpointNegotiation(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.False(t, tablesHit)
+}
+
+// directiveTestMetadata is minimal table metadata for the scan-planning
+// directive tests.
+const directiveTestMetadata = `{
+	"format-version": 1,
+	"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+	"location": "s3://warehouse/database/table",
+	"last-updated-ms": 1646787054459,
+	"last-column-id": 2,
+	"schema": {"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]},
+	"current-schema-id": 0,
+	"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"int"},{"id":2,"name":"data","required":false,"type":"string"}]}],
+	"partition-spec": [],
+	"default-spec-id": 0,
+	"partition-specs": [{"spec-id":0,"fields":[]}],
+	"last-partition-id": 999,
+	"default-sort-order-id": 0,
+	"sort-orders": [{"order-id":0,"fields":[]}],
+	"properties": {}
+}`
+
+// A server directive without the plan endpoint must not block loading or
+// metadata-only use of the table; only planning a scan fails (#2102).
+func TestLoadTableServerDirectiveWithoutPlanEndpoint(t *testing.T) {
+	planning := map[string]bool{
+		"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan":             true,
+		"GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}":    true,
+		"DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}": true,
+		"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks":            true,
+	}
+	var endpoints []string
+	for _, e := range rest.AllEndpointStrings {
+		if !planning[e] {
+			endpoints = append(endpoints, e)
+		}
+	}
+	require.Len(t, endpoints, len(rest.AllEndpointStrings)-len(planning), "planning endpoint strings changed")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{}, "endpoints": endpoints,
+		}))
+	})
+	mux.HandleFunc("/v1/namespaces/fokko/tables/tbl", func(w http.ResponseWriter, _ *http.Request) {
+		_, err := w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00001.metadata.json",
+			"metadata": ` + directiveTestMetadata + `,
+			"config": {"scan-planning-mode": "server"}
+		}`))
+		require.NoError(t, err)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+	require.False(t, cat.SupportsPlanTableScan())
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "tbl"))
+	require.NoError(t, err)
+	assert.Len(t, tbl.Schema().Fields(), 2)
+	directive, err := tbl.ScanPlanningDirective()
+	require.NoError(t, err)
+	assert.Equal(t, table.ScanPlanningDirectiveServer, directive)
+
+	_, err = tbl.Scan().PlanFiles(context.Background())
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	assert.ErrorContains(t, err, "requires server-side scan planning")
+}
+
+// A catalog commonly advertises scan-planning-mode through the /v1/config
+// defaults block rather than client options. Tables from both LoadTable and
+// UpdateTable, whose commit response carries no table config, must enforce it.
+func TestCatalogConfigScanPlanningDirective(t *testing.T) {
+	const metadataLoc = "s3://warehouse/database/table/metadata/00001.metadata.json"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{"scan-planning-mode": "server"},
+			"overrides": map[string]any{},
+		}))
+	})
+	mux.HandleFunc("/v1/namespaces/fokko/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+		body := `{"metadata-location": "` + metadataLoc + `", "metadata": ` + directiveTestMetadata
+		if req.Method == http.MethodGet {
+			body += `, "config": {}`
+		}
+		_, err := w.Write([]byte(body + `}`))
+		require.NoError(t, err)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+	ident := catalog.ToIdentifier("fokko", "tbl")
+
+	loaded, err := cat.LoadTable(context.Background(), ident)
+	require.NoError(t, err)
+	updated, err := cat.UpdateTable(context.Background(), ident, nil, nil)
+	require.NoError(t, err)
+
+	for name, tbl := range map[string]*table.Table{"load": loaded, "update": updated} {
+		t.Run(name, func(t *testing.T) {
+			directive, err := tbl.ScanPlanningDirective()
+			require.NoError(t, err)
+			assert.Equal(t, table.ScanPlanningDirectiveServer, directive)
+
+			_, err = tbl.Scan().PlanFiles(context.Background())
+			require.ErrorIs(t, err, table.ErrInvalidOperation)
+			assert.ErrorContains(t, err, "requires server-side scan planning")
+		})
+	}
+}
+
+// A commit response carries no table config, so UpdateTable keeps only the
+// catalog's own scan-planning-mode property and drops the per-table directive
+// from the load config. This pins both directions: a per-table server directive
+// is dropped, and a per-table client directive under a catalog-wide server
+// directive comes back as server.
+func TestUpdateTableKeepsOnlyCatalogScanPlanningDirective(t *testing.T) {
+	const metadataLoc = "s3://warehouse/database/table/metadata/00001.metadata.json"
+
+	for _, tc := range []struct {
+		name        string
+		catalogMode string
+		tableConfig string
+		wantLoaded  table.ScanPlanningDirective
+		wantUpdated table.ScanPlanningDirective
+	}{
+		{
+			name:        "per-table server is dropped",
+			tableConfig: `{"scan-planning-mode": "server"}`,
+			wantLoaded:  table.ScanPlanningDirectiveServer,
+			wantUpdated: table.ScanPlanningDirectiveNone,
+		},
+		{
+			name:        "per-table client under catalog server becomes server",
+			catalogMode: "server",
+			tableConfig: `{"scan-planning-mode": "client"}`,
+			wantLoaded:  table.ScanPlanningDirectiveClient,
+			wantUpdated: table.ScanPlanningDirectiveServer,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"defaults": map[string]any{}, "overrides": map[string]any{},
+				}))
+			})
+			mux.HandleFunc("/v1/namespaces/fokko/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+				body := `{"metadata-location": "` + metadataLoc + `", "metadata": ` + directiveTestMetadata
+				if req.Method == http.MethodGet {
+					body += `, "config": ` + tc.tableConfig
+				}
+				_, err := w.Write([]byte(body + `}`))
+				require.NoError(t, err)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			opts := []rest.Option{rest.WithOAuthToken(TestToken)}
+			if tc.catalogMode != "" {
+				opts = append(opts, rest.WithAdditionalProps(iceberg.Properties{"scan-planning-mode": tc.catalogMode}))
+			}
+			cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, opts...)
+			require.NoError(t, err)
+			ident := catalog.ToIdentifier("fokko", "tbl")
+
+			loaded, err := cat.LoadTable(context.Background(), ident)
+			require.NoError(t, err)
+			got, err := loaded.ScanPlanningDirective()
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantLoaded, got)
+
+			updated, err := cat.UpdateTable(context.Background(), ident, nil, nil)
+			require.NoError(t, err)
+			got, err = updated.ScanPlanningDirective()
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantUpdated, got)
+
+			if tc.wantUpdated == table.ScanPlanningDirectiveServer {
+				_, err = updated.Scan(table.WithScanPlanningMode(table.ScanPlanningLocal)).PlanFiles(context.Background())
+				require.ErrorIs(t, err, table.ErrInvalidOperation)
+				assert.ErrorContains(t, err, "requires server-side scan planning")
+			}
+		})
+	}
 }

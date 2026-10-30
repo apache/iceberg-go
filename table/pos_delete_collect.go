@@ -106,7 +106,7 @@ func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests
 			}
 
 			// An unset delete sequence cannot be compared safely. Retain it.
-			if seq := e.SequenceNum(); seq >= 0 {
+			if seq := e.DataSequenceNumber(); seq >= 0 {
 				partitionKey, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 				if err != nil {
 					return nil, false, fmt.Errorf("building partition key for position delete %s (spec %d): %w", df.FilePath(), df.SpecID(), err)
@@ -147,7 +147,7 @@ func minSurvivorSeqByPartition(ctx context.Context, fs iceio.IO, manifests []ice
 
 			// Unknown survivor sequence numbers are treated as old as possible,
 			// retaining every delete whose applicability is uncertain.
-			seq := max(e.SequenceNum(), 0)
+			seq := max(e.DataSequenceNumber(), 0)
 			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
 				return nil, fmt.Errorf("building partition key for surviving data file %s (spec %d): %w", df.FilePath(), df.SpecID(), err)

@@ -105,7 +105,7 @@ const (
 type parquetFormat struct{}
 
 func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ FileReader, err error) {
-	inputfile, err := fs.Open(path)
+	inputfile, err := fs.Open(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -521,28 +521,52 @@ type ParquetFileWriter struct {
 	rowGroupBytes    int64
 }
 
-// geoColumn locates a top-level geometry/geography column: its position in the
-// Arrow record batch and the Iceberg field ID its bounds are recorded under.
+// geoColumn locates a geometry/geography leaf: the position of its top-level
+// column in the Arrow record batch, the struct child index taken at each
+// struct (including a map's key/value entries) on the way down to the leaf,
+// and the Iceberg field ID its bounds are recorded under.
 type geoColumn struct {
 	colIdx  int
+	path    []int
 	fieldID int
 }
 
-// collectGeoColumns finds top-level WKB-encoded geo columns in the Arrow schema
-// and pairs each with its Iceberg field ID. Geo bounds for columns nested inside
-// structs/lists/maps are not yet computed, which diverges from Java/PyIceberg.
-// TODO(#992): compute geo bounds for geo columns nested in structs/lists/maps.
+// collectGeoColumns finds WKB-encoded geo leaves in the Arrow schema, including
+// those nested in structs/lists/maps, and pairs each with its Iceberg field ID.
+//
+// Parquet drops the Statistics block (min, max, null count) for GEOMETRY and
+// GEOGRAPHY columns because their sort order is undefined, so these metrics are
+// computed from the Arrow data instead. Geo files imported via
+// DataFileStatsFromMeta alone (e.g. AddDataFilesByPath) get no geo null counts
+// or bounds, which costs pruning but never gives a wrong answer.
 func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn {
 	var result []geoColumn
 	for i, f := range sc.Fields() {
-		if _, ok := f.Type.(*geoarrow.WKBType); !ok {
-			continue
+		result = appendGeoColumns(result, f.Type, f.Name, i, nil, colMapping)
+	}
+
+	return result
+}
+
+// appendGeoColumns walks dt and appends a geoColumn for each WKB leaf. name is
+// the Parquet column path used as the colMapping key.
+func appendGeoColumns(result []geoColumn, dt arrow.DataType, name string, colIdx int, path []int, colMapping map[string]int) []geoColumn {
+	switch t := dt.(type) {
+	case *geoarrow.WKBType:
+		if fieldID, ok := colMapping[name]; ok {
+			result = append(result, geoColumn{colIdx: colIdx, path: slices.Clone(path), fieldID: fieldID})
 		}
-		fieldID, ok := colMapping[f.Name]
-		if !ok {
-			continue
+	case *arrow.StructType:
+		for i, f := range t.Fields() {
+			result = appendGeoColumns(result, f.Type, name+"."+f.Name, colIdx, append(path, i), colMapping)
 		}
-		result = append(result, geoColumn{colIdx: i, fieldID: fieldID})
+	case *arrow.MapType:
+		kv := name + ".key_value."
+		result = appendGeoColumns(result, t.KeyType(), kv+t.KeyField().Name, colIdx, append(path, 0), colMapping)
+		result = appendGeoColumns(result, t.ItemType(), kv+t.ItemField().Name, colIdx, append(path, 1), colMapping)
+	case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType:
+		elem := dt.(arrow.ListLikeType).ElemField()
+		result = appendGeoColumns(result, elem.Type, name+".list."+elem.Name, colIdx, path, colMapping)
 	}
 
 	return result
@@ -597,7 +621,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 			iceberg.ErrInvalidArgument, rowGroupTargetSizeBytes)
 	}
 
-	fw, err := fs.Create(info.FileName)
+	fw, err := fs.Create(ctx, info.FileName)
 	if err != nil {
 		return nil, err
 	}
@@ -1188,32 +1212,94 @@ func normalizeWKBArrayReachable(ext array.ExtensionArray, active []bool, mem mem
 }
 
 // accumulateGeoBounds extends the per-field bounding boxes with the WKB values
-// in this batch. Null rows are skipped; a malformed WKB value fails the write.
+// in this batch and tallies their null counts. Null rows are skipped; a
+// malformed WKB value fails the write.
+//
+// Every geoCols entry comes from a *geoarrow.WKBType leaf of the writer's
+// schema, so a batch whose column does not match is an error rather than a
+// skip: skipping would leave a partial null count that under-reports nulls.
 func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
 	for _, gc := range w.geoCols {
 		if gc.colIdx >= int(batch.NumCols()) {
-			continue
-		}
-		ext, ok := batch.Column(gc.colIdx).(array.ExtensionArray)
-		if !ok {
-			continue
-		}
-		storage, ok := ext.Storage().(wkbStorage)
-		if !ok {
-			continue
+			return fmt.Errorf("geo field %d: column %d missing from batch with %d columns",
+				gc.fieldID, gc.colIdx, batch.NumCols())
 		}
 
 		acc, ok := w.geoAccs[gc.fieldID]
 		if !ok {
-			continue
+			return fmt.Errorf("geo field %d: no bounds accumulator", gc.fieldID)
 		}
-		for i := range storage.Len() {
-			if storage.IsNull(i) {
+		col := batch.Column(gc.colIdx)
+		if err := accumulateGeoValues(acc, col, gc.path, 0, col.Len()); err != nil {
+			return fmt.Errorf("geo field %d: %w", gc.fieldID, err)
+		}
+	}
+
+	return nil
+}
+
+// accumulateGeoValues feeds the WKB values in arr[lo:hi] to acc, following path
+// down to the geo leaf. Nulls are counted the way Parquet's leaf null_count
+// does: a null leaf, a null parent, and an empty list or map each count once.
+// Values under a null parent are never decoded.
+func accumulateGeoValues(acc *geoBoundsAccumulator, arr arrow.Array, path []int, lo, hi int) error {
+	switch arr := arr.(type) {
+	case *array.Struct:
+		if len(path) == 0 || path[0] >= arr.NumField() {
+			return fmt.Errorf("struct array %s does not match the geo column path", arr.DataType())
+		}
+		child := arr.Field(path[0])
+		for i := lo; i < hi; i++ {
+			if arr.IsNull(i) {
+				acc.nulls++
+
 				continue
 			}
-			if err := acc.AddWKB(storage.Value(i)); err != nil {
-				return fmt.Errorf("computing geo bounds for field %d: %w", gc.fieldID, err)
+			if err := accumulateGeoValues(acc, child, path[1:], i, i+1); err != nil {
+				return err
 			}
+		}
+	case array.ListLike:
+		for i := lo; i < hi; i++ {
+			start, end := arr.ValueOffsets(i)
+			if arr.IsNull(i) || start == end {
+				acc.nulls++
+
+				continue
+			}
+			if err := accumulateGeoValues(acc, arr.ListValues(), path, int(start), int(end)); err != nil {
+				return err
+			}
+		}
+	default:
+		if len(path) != 0 {
+			return fmt.Errorf("%s array does not match the geo column path", arr.DataType())
+		}
+
+		return accumulateWKBValues(acc, arr, lo, hi)
+	}
+
+	return nil
+}
+
+func accumulateWKBValues(acc *geoBoundsAccumulator, arr arrow.Array, lo, hi int) error {
+	ext, ok := arr.(array.ExtensionArray)
+	if !ok {
+		return fmt.Errorf("expected a WKB extension array, got %s", arr.DataType())
+	}
+	storage, ok := ext.Storage().(wkbStorage)
+	if !ok {
+		return fmt.Errorf("unsupported WKB storage type %s", ext.Storage().DataType())
+	}
+
+	for i := lo; i < hi; i++ {
+		if storage.IsNull(i) {
+			acc.nulls++
+
+			continue
+		}
+		if err := acc.AddWKB(storage.Value(i)); err != nil {
+			return fmt.Errorf("computing geo bounds: %w", err)
 		}
 	}
 
@@ -1246,7 +1332,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	return stats.ToDataFile(DataFileOpts{
+	opts := DataFileOpts{
 		Schema:          w.info.FileSchema,
 		Spec:            w.info.Spec,
 		Path:            w.info.FileName,
@@ -1255,12 +1341,44 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		FileSize:        w.counter.Count,
 		PartitionValues: w.partition,
 		SortOrderID:     w.info.SortOrderID,
-	}), nil
+	}
+	if w.info.Content == iceberg.EntryContentPosDeletes {
+		opts.ReferencedDataFile = singleReferencedDataFile(stats)
+	}
+
+	return stats.ToDataFile(opts), nil
+}
+
+// singleReferencedDataFile returns the data file path when every delete in a
+// position delete file targets that one file, or nil otherwise. It compares
+// the untruncated file_path min and max, which position delete writers always
+// collect (see table.positionDeleteMetricsProps). Java's v2
+// PositionDeleteWriter leaves the field unset; the spec allows it on position
+// delete files with a single target.
+func singleReferencedDataFile(stats *DataFileStatistics) *string {
+	agg, ok := stats.ColAggs[iceberg.DeleteFilePathFieldID]
+	if !ok {
+		return nil
+	}
+
+	lower, ok := agg.Min().(iceberg.StringLiteral)
+	if !ok || lower == "" {
+		return nil
+	}
+	upper, ok := agg.Max().(iceberg.StringLiteral)
+	if !ok || lower != upper {
+		return nil
+	}
+
+	path := string(lower)
+
+	return &path
 }
 
 func (w *ParquetFileWriter) Abort() error {
 	closeErr := w.fileCloser.Close()
-	removeErr := w.fs.Remove(w.info.FileName)
+	// Abort is a best-effort cleanup with no caller context to thread.
+	removeErr := w.fs.Remove(context.Background(), w.info.FileName)
 	if errors.Is(removeErr, fs.ErrNotExist) || os.IsNotExist(removeErr) {
 		removeErr = nil
 	}
@@ -1268,17 +1386,30 @@ func (w *ParquetFileWriter) Abort() error {
 	return errors.Join(closeErr, removeErr)
 }
 
-// applyGeoBounds injects the WKB single-point bounds accumulated during the
-// write into the file statistics, so they flow through ToDataFile into the
-// manifest entry like any other typed bound.
+// applyGeoBounds injects the WKB single-point bounds and null counts
+// accumulated during the write into the file statistics, so they flow through
+// ToDataFile into the manifest entry like any other typed bound.
+//
+// Parquet GEOMETRY/GEOGRAPHY columns have an undefined sort order, so the
+// Parquet writer omits the standard Statistics block (min, max, null count)
+// from their column chunks and DataFileStatsFromMeta cannot recover null
+// counts for them.
 func (w *ParquetFileWriter) applyGeoBounds(stats *DataFileStatistics) error {
 	for fieldID, acc := range w.geoAccs {
 		// Honor the column's metrics mode: a column the caller never registered
-		// (missing key) or one set to counts/none does not record bounds. Check
-		// presence first — a missing key yields a zero-value mode of "" that would
-		// otherwise fall through and write bounds the caller asked to skip.
+		// (missing key) or one set to none records nothing, and counts records
+		// no bounds. Check presence first — a missing key yields a zero-value
+		// mode of "" that would otherwise fall through and write bounds the
+		// caller asked to skip.
 		sc, ok := w.info.StatsCols[fieldID]
-		if !ok || sc.Mode.Typ == MetricModeNone || sc.Mode.Typ == MetricModeCounts {
+		if !ok || sc.Mode.Typ == MetricModeNone {
+			continue
+		}
+		if stats.NullValueCounts == nil {
+			stats.NullValueCounts = make(map[int]int64)
+		}
+		stats.NullValueCounts[fieldID] = acc.nulls
+		if sc.Mode.Typ == MetricModeCounts {
 			continue
 		}
 
@@ -1541,7 +1672,7 @@ func resolveParquetStatsColumns(meta *metadata.FileMetaData, statsCols map[int]S
 			// _last_updated_sequence_number) may legitimately appear in a file
 			// without a metrics-plan entry. Writers materialize them without
 			// adding them to the table schema, so skip them entirely.
-			if iceberg.IsMetadataColumn(fieldID) {
+			if iceberg.IsRowLineageColumn(fieldID) {
 				descriptor.skipStats = true
 			} else {
 				descriptor.resolveErr = fmt.Errorf("field id %d (column %q) not found in the metrics plan", fieldID, descriptor.path)
@@ -1929,9 +2060,11 @@ type ParquetRowGroupTester struct {
 	// Parquet row-group offset falls in [Start, Start+Length).
 	Start, Length int64
 	// PlanningSplitOffsets contains the split offsets used when the scan task
-	// was planned. When it contains one valid offset per row group, range
-	// selection uses these offsets instead of re-deriving them from the opened
-	// Parquet footer. Sparse split-offset lists fall back to the footer offsets.
+	// was planned. It may be a borrowed view of DataFile state and must be
+	// treated as read-only for the lifetime of this tester. When it contains one
+	// valid offset per row group, range selection uses these offsets instead of
+	// re-deriving them from the opened Parquet footer. Sparse split-offset lists
+	// fall back to the footer offsets.
 	PlanningSplitOffsets []int64
 	// Survivors, if non-nil, is reset and then filled with one span per row group
 	// that survives pruning, in file order, with positions relative to the full
@@ -2635,7 +2768,7 @@ func checkRowGroupBloomFilters(
 }
 
 func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader, err error) {
-	pf, err := pfs.fs.Open(pfs.file.FilePath())
+	pf, err := pfs.fs.Open(ctx, pfs.file.FilePath())
 	if err != nil {
 		return nil, err
 	}
@@ -2739,7 +2872,7 @@ func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manif
 	results := make([]T, len(manifest.Fields))
 	for i, f := range manifest.Fields {
 		if mapping != nil {
-			fieldMap = mapping.GetField(f.Field.Name)
+			fieldMap, _ = mapping.FindFieldByName(f.Field.Name)
 		}
 		res := visitManifestField(f, visitor, fieldMap)
 		results[i] = visitor.Field(f, res, fieldMap)
@@ -2753,7 +2886,7 @@ func visitParquetManifestStruct[T any](field pqarrow.SchemaField, visitor manife
 	var fieldMap *iceberg.MappedField
 	for i, f := range field.Children {
 		if mapping != nil {
-			fieldMap = mapping.GetField(f.Field.Name)
+			fieldMap, _ = mapping.FindFieldByName(f.Field.Name)
 		}
 		res := visitManifestField(f, visitor, fieldMap)
 		results[i] = visitor.Field(f, res, fieldMap)
@@ -2766,7 +2899,7 @@ func visitManifestList[T any](field pqarrow.SchemaField, visitor manifestVisitor
 	elemField := field.Children[0]
 	var elemMapping *iceberg.MappedField
 	if mapping != nil {
-		elemMapping = mapping.GetField("element")
+		elemMapping, _ = mapping.FindFieldByName("element")
 	}
 	res := visitManifestField(elemField, visitor, elemMapping)
 
@@ -2778,8 +2911,8 @@ func visitManifestMap[T any](field pqarrow.SchemaField, visitor manifestVisitor[
 	keyField, valField := kvfield.Children[0], kvfield.Children[1]
 	var keyMapping, valMapping *iceberg.MappedField
 	if mapping != nil {
-		keyMapping = mapping.GetField("key")
-		valMapping = mapping.GetField("value")
+		keyMapping, _ = mapping.FindFieldByName("key")
+		valMapping, _ = mapping.FindFieldByName("value")
 	}
 
 	return visitor.Map(field, visitManifestField(keyField, visitor, keyMapping), visitManifestField(valField, visitor, valMapping), mapping)
@@ -2944,7 +3077,7 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Field, mapping *iceberg.MappedField) arrow.Field {
 	var elemMapping *iceberg.MappedField
 	if mapping != nil {
-		elemMapping = mapping.GetField("element")
+		elemMapping, _ = mapping.FindFieldByName("element")
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Children[0].Field, elemMapping)]
@@ -2984,7 +3117,7 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult arrow.Field, mapping *iceberg.MappedField) arrow.Field {
 	var valMapping *iceberg.MappedField
 	if mapping != nil {
-		valMapping = mapping.GetField("value")
+		valMapping, _ = mapping.FindFieldByName("value")
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Children[0].Children[1].Field, valMapping)]

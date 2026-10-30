@@ -195,10 +195,13 @@ func (s *RestIntegrationSuite) requireScanPlanningIntegration() {
 	}
 }
 
+// requireJavaScanPlanningCapabilities fails rather than skips: callers have
+// already opted in through requireScanPlanningIntegration, so a fixture that
+// stops advertising the endpoints is a regression that must not pass as a skip.
 func (s *RestIntegrationSuite) requireJavaScanPlanningCapabilities(cat *rest.Catalog) {
 	s.T().Helper()
 	if !cat.SupportsPlanTableScan() || !cat.SupportsFullRemoteScanPlanning() {
-		s.T().Skip("Java fixture does not advertise planTableScan/poll/cancel/task-fetch endpoints; " +
+		s.T().Fatal("Java fixture does not advertise planTableScan/poll/cancel/task-fetch endpoints; " +
 			"is the scan-planning-capable image running?")
 	}
 }
@@ -258,14 +261,14 @@ func (s *RestIntegrationSuite) createScanPlanningTable(cat *rest.Catalog, ident 
 	s.Require().NoError(err)
 	writeFS, ok := mustFS(s.T(), tbl).(iceio.WriteFileIO)
 	s.Require().True(ok, "table filesystem must implement WriteFileIO")
-	file, err := writeFS.Create(dataPath)
+	file, err := writeFS.Create(context.Background(), dataPath)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(arrowTable, file, arrowTable.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
-	s.T().Cleanup(func() { s.Require().NoError(mustFS(s.T(), tbl).Remove(dataPath)) })
+	s.T().Cleanup(func() { s.Require().NoError(mustFS(s.T(), tbl).Remove(s.ctx, dataPath)) })
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{dataPath}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{dataPath}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 	s.Require().NotNil(updated.CurrentSnapshot())

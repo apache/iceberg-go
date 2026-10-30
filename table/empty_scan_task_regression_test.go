@@ -91,12 +91,12 @@ func TestScanSurvivesFullyPrunedTask(t *testing.T) {
 		arrTbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 		defer arrTbl.Release()
 
-		fo, err := fs.Create(path)
+		fo, err := fs.Create(context.Background(), path)
 		require.NoError(t, err)
 		require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(),
 			nil, pqarrow.DefaultWriterProps()))
 
-		st, err := fs.Open(path)
+		st, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		defer st.Close()
 		info, err := st.Stat()

@@ -408,6 +408,8 @@ type panicCatalog struct {
 	tbl *table.Table
 }
 
+func (p *panicCatalog) Close() error { return nil }
+
 func (p *panicCatalog) CatalogType() catalog.Type { return "panic" }
 func (p *panicCatalog) CreateTable(context.Context, table.Identifier, *iceberg.Schema, ...catalog.CreateTableOpt) (*table.Table, error) {
 	panic("CreateTable must not be called")
@@ -427,6 +429,10 @@ func (p *panicCatalog) LoadTable(_ context.Context, _ table.Identifier) (*table.
 
 func (p *panicCatalog) DropTable(context.Context, table.Identifier) error {
 	panic("DropTable must not be called")
+}
+
+func (p *panicCatalog) PurgeTable(context.Context, table.Identifier) error {
+	panic("PurgeTable must not be called")
 }
 
 func (p *panicCatalog) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {

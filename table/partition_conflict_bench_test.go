@@ -201,9 +201,9 @@ func eqDeletePartitionsToFilterBeforeDedup(
 				return nil, fmt.Errorf("partition field ID %d not found in spec %d", partFieldID, f.SpecID())
 			}
 
-			sourceField, ok := meta.CurrentSchema().FindFieldByID(pf.SourceID())
+			sourceField, ok := meta.CurrentSchema().FindFieldByID(pf.FirstSourceID())
 			if !ok {
-				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.SourceID(), pf.Name)
+				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.FirstSourceID(), pf.Name)
 			}
 
 			value := p[partFieldID]

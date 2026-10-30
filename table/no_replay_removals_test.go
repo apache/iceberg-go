@@ -26,6 +26,7 @@ package table_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -76,7 +77,8 @@ func newNoReplayV3Table(t *testing.T) (*table.Table, *concurrentTestCatalog) {
 // own merged DV; a stale writer (still seeing DV1 live) then commits
 // its own supersession with retries enabled.
 // Assertion: the stale commit fails wrapping ErrCommitFailed after
-// exactly one CommitTable attempt (no replay), and the table carries
+// exactly one CommitTable attempt (no replay), the re-commit finds the
+// branch moved and is refused before the catalog, and the table carries
 // exactly one live DV — the peer's — so only the peer's deletes apply.
 func TestMoRDeleteSupersedingDVFailsInsteadOfReplaying(t *testing.T) {
 	ctx := context.Background()
@@ -101,7 +103,8 @@ func TestMoRDeleteSupersedingDVFailsInsteadOfReplaying(t *testing.T) {
 	require.NoError(t, staleTxn.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil))
 
 	// Peer supersedes DV1 from the same view and wins the race.
-	_, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	staleHead := tbl.CurrentSnapshot().SnapshotID
+	peer, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
 	require.NoError(t, err)
 
 	attemptsBefore := cat.attempts.Load()
@@ -111,13 +114,16 @@ func TestMoRDeleteSupersedingDVFailsInsteadOfReplaying(t *testing.T) {
 	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(),
 		"a commit carrying DV removals must fail on the first CAS conflict, not refresh-and-replay")
 
-	// The clean conflict leaves the transaction retriable, not latched
-	// as committed: a naive same-transaction retry surfaces a fresh
-	// conflict (its requirement still targets the stale base) rather
-	// than "transaction has already been committed".
+	assert.NotErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Contains(t, err.Error(), "reload the table and rebuild the removals")
+
+	attemptsBefore = cat.attempts.Load()
 	_, err = staleTxn.Commit(ctx)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.EqualError(t, err, fmt.Sprintf("transaction cannot be committed again: requirement no longer holds after refresh "+
+		"(commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals): "+
+		"requirement failed: branch \"main\" has changed: expected id %d, found %d", staleHead, peer.CurrentSnapshot().SnapshotID))
+	assert.Equal(t, attemptsBefore, cat.attempts.Load(), "the re-commit must stop before the catalog")
 
 	// The table is uncorrupted: exactly one live DV (the peer's merged
 	// one) references the data file, and only the peer's deletes apply.
@@ -153,7 +159,7 @@ func TestReplaceFilesWithRemovalsFailsInsteadOfReplaying(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc,
 		`[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}, {"id": 3, "data": "gamma"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -231,6 +237,129 @@ func TestReplaceFilesWithRemovalsFailsInsteadOfReplaying(t *testing.T) {
 		"the stale compaction must not have landed; ids 1 and 2 stay deleted by the live position deletes")
 }
 
+// A peer snapshot on another branch leaves main and every requirement
+// unchanged but takes the staged snapshot's sequence number. The resume of a
+// non-replayable compaction rebuilds onto the same pinned parent and lands.
+func TestReplaceFilesWithRemovalsResumesAfterPeerOnAnotherBranch(t *testing.T) {
+	tbl, _ := newConcurrentRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/data-001.parquet"
+	writeParquetFile(t, dataPath, arrowSc,
+		`[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}, {"id": 3, "data": "gamma"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	posDelPath := tbl.Location() + "/data/pos-del-001.parquet"
+	writeParquetFile(t, posDelPath, table.PositionalDeleteArrowSchema,
+		`[{"file_path": "`+dataPath+`", "pos": 1}]`)
+	tx2 := tbl.NewTransaction()
+	rd := tx2.NewRowDelta(nil)
+	rd.AddDeletes(newPosDeleteFile(t, posDelPath))
+	require.NoError(t, rd.Commit(t.Context()))
+	tbl, err = tx2.Commit(t.Context())
+	require.NoError(t, err)
+	mainHead := tbl.CurrentSnapshot().SnapshotID
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	compactedPath := tbl.Location() + "/data/data-compacted.parquet"
+	writeParquetFile(t, compactedPath, arrowSc, `[{"id": 1, "data": "alpha"}, {"id": 3, "data": "gamma"}]`)
+	compacted, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		compactedPath, iceberg.ParquetFile, nil, nil, nil, 2, 512)
+	require.NoError(t, err)
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.ReplaceFiles(t.Context(),
+		[]iceberg.DataFile{tasks[0].File}, []iceberg.DataFile{compacted.Build()}, tasks[0].DeleteFiles, nil))
+
+	peerPath := tbl.Location() + "/data/data-peer.parquet"
+	writeParquetFile(t, peerPath, arrowSc, `[{"id": 9, "data": "peer"}]`)
+	peerTxn, err := tbl.NewTransactionOnBranch("other")
+	require.NoError(t, err)
+	require.NoError(t, peerTxn.AddDataFilesByPath(t.Context(), []string{peerPath}, nil, false))
+	_, err = peerTxn.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, err = staleTxn.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.NotErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Contains(t, err.Error(), "reload the table and rebuild the removals")
+
+	committed, err := staleTxn.Commit(t.Context())
+	require.NoError(t, err)
+	head := committed.CurrentSnapshot()
+	require.NotNil(t, head.ParentSnapshotID)
+	assert.Equal(t, mainHead, *head.ParentSnapshotID, "the resume must keep the pinned parent")
+	assert.Equal(t, []int64{1, 3}, idsInTable(t, committed))
+	assert.Empty(t, deleteEntriesReferencing(t, committed, map[string]struct{}{dataPath: {}, compactedPath: {}}),
+		"the compaction removed the only live delete")
+	other := committed.Metadata().SnapshotByName("other")
+	require.NotNil(t, other.ParentSnapshotID)
+	assert.Equal(t, mainHead, *other.ParentSnapshotID, "the peer branch is untouched")
+}
+
+// A peer that removed a file this compaction replaces makes the resume's
+// rebuild fail the same way on every later attempt, so the transaction
+// must become unusable.
+func TestReplaceFilesResumeAfterPeerRemovedInputIsUnusable(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/data-001.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.SetProperties(iceberg.Properties{table.CommitNumRetriesKey: "0"}))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	replacement := func(name string) iceberg.DataFile {
+		path := tbl.Location() + "/data/" + name + ".parquet"
+		writeParquetFile(t, path, arrowSc, `[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}]`)
+		b, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+			path, iceberg.ParquetFile, nil, nil, nil, 2, 512)
+		require.NoError(t, err)
+
+		return b.Build()
+	}
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.ReplaceFiles(t.Context(),
+		[]iceberg.DataFile{tasks[0].File}, []iceberg.DataFile{replacement("stale")}, nil, nil))
+
+	peerTxn := tbl.NewTransaction()
+	require.NoError(t, peerTxn.ReplaceFiles(t.Context(),
+		[]iceberg.DataFile{tasks[0].File}, []iceberg.DataFile{replacement("peer")}, nil, nil))
+	_, err = peerTxn.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, err = staleTxn.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.NotErrorIs(t, err, table.ErrTransactionUnusable)
+
+	attempts := cat.attempts.Load()
+	_, err = staleTxn.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	require.ErrorIs(t, err, table.ErrCommitDiverged)
+	require.NotErrorIs(t, err, table.ErrCommitFailed, "a caller retrying on ErrCommitFailed must stop")
+	assert.EqualError(t, err, fmt.Sprintf("transaction cannot be committed again: files to rewrite were removed: "+
+		"commit diverged: base snapshot is no longer on the branch: 1 data file(s) to rewrite are no longer on the branch head, e.g. [%q]", dataPath))
+	assert.NotContains(t, err.Error(), "refresh and try again")
+	assert.Equal(t, attempts, cat.attempts.Load(), "the resume must stop before the catalog")
+
+	_, err = staleTxn.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Equal(t, attempts, cat.attempts.Load())
+}
+
 // Regression guard: the noReplay flag must not leak to commits that
 // remove only data files. Those removals are path-keyed and the retry
 // rebuild fails terminally when the path is gone from the fresh base,
@@ -250,7 +379,7 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc,
 		`[{"id": 1, "data": "alpha"}, {"id": 2, "data": "beta"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	// Overwrites validate added data files under the default
 	// serializable isolation; relax to snapshot so the peer's append is
 	// not rejected as a semantic conflict and the replay itself is
@@ -285,7 +414,7 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 	peerPath := tbl.Location() + "/data/data-peer.parquet"
 	writeParquetFile(t, peerPath, arrowSc, `[{"id": 100, "data": "peer"}]`)
 	peerTxn := tbl.NewTransaction()
-	require.NoError(t, peerTxn.AddFiles(t.Context(), []string{peerPath}, nil, false))
+	require.NoError(t, peerTxn.AddDataFilesByPath(t.Context(), []string{peerPath}, nil, false))
 	_, err = peerTxn.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -296,4 +425,56 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 		"expected exactly one conflict followed by one successful replay")
 	assert.Equal(t, []int64{1, 2, 100}, idsInTable(t, committed),
 		"the replay must inherit the peer's append alongside the compacted file")
+}
+
+// A copy-on-write delete that removes a deletion vector must fail on a concurrent append instead of retrying.
+// Without a deletion vector, the same delete still retries and both writes land.
+func TestCoWDeleteRemovingDVFailsInsteadOfReplaying(t *testing.T) {
+	cases := []struct {
+		name         string
+		seededDVs    int
+		wantAttempts int32
+	}{
+		{name: "file with a deletion vector fails on the first conflict", seededDVs: 1, wantAttempts: 1},
+		{name: "file without a deletion vector still retries", seededDVs: 0, wantAttempts: 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, cat := newNoReplayV3Table(t)
+			tbl = appendTenRows(t, tbl)
+			if tc.seededDVs > 0 {
+				tbl = mergeOnReadDelete(t, tbl, 7)
+			}
+			require.Equal(t, tc.seededDVs, liveDVCount(t, tbl))
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.SetProperties(iceberg.Properties{table.WriteDeleteModeKey: table.WriteModeCopyOnWrite}))
+			tbl, err := tx.Commit(ctx)
+			require.NoError(t, err)
+
+			staleTxn := tbl.NewTransaction()
+			require.NoError(t, staleTxn.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil))
+
+			appendRowsOnRef(t, tbl, table.MainBranch, 100)
+
+			attemptsBefore := cat.attempts.Load()
+			_, err = staleTxn.Commit(ctx)
+			assert.Equal(t, attemptsBefore+tc.wantAttempts, cat.attempts.Load())
+
+			committed, loadErr := cat.LoadTable(ctx, table.Identifier{"db", "no_replay_removals"})
+			require.NoError(t, loadErr)
+			if tc.seededDVs > 0 {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, table.ErrCommitFailed)
+				assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 8, 9, 10, 100}, idsInTable(t, committed),
+					"only the peer's append landed; the stale delete of id 2 must not have")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 100}, idsInTable(t, committed),
+					"the delete replays over the peer's append, so both writers land")
+			}
+		})
+	}
 }

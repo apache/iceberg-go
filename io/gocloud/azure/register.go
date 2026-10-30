@@ -42,6 +42,6 @@ func init() {
 	}
 
 	for _, scheme := range schemes.Azure {
-		io.Register(scheme, factory)
+		io.MustRegister(scheme, factory)
 	}
 }

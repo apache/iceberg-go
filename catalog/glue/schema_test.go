@@ -96,19 +96,19 @@ func TestIcebergTypeToGlueType(t *testing.T) {
 		},
 		{
 			name:     "decimal type",
-			input:    iceberg.DecimalTypeOf(10, 2),
+			input:    iceberg.MustDecimalTypeOf(10, 2),
 			expected: "decimal(10,2)",
 		},
 		{
 			name:     "fixed type",
-			input:    iceberg.FixedTypeOf(16),
+			input:    iceberg.MustFixedTypeOf(16),
 			expected: "binary",
 		},
 		{
 			name: "nested fixed type",
 			input: &iceberg.ListType{
 				ElementID:       1,
-				Element:         iceberg.FixedTypeOf(16),
+				Element:         iceberg.MustFixedTypeOf(16),
 				ElementRequired: true,
 			},
 			expected: "array<binary>",
@@ -153,7 +153,7 @@ func TestFieldToGlueColumn(t *testing.T) {
 			field: iceberg.NestedField{
 				ID:       2,
 				Name:     "price",
-				Type:     iceberg.DecimalTypeOf(10, 2),
+				Type:     iceberg.MustDecimalTypeOf(10, 2),
 				Required: false,
 				Doc:      "Price with 2 decimal places",
 			},

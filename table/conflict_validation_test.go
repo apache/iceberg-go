@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -54,7 +55,7 @@ func writeTestDeleteManifest(
 	t.Helper()
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, delFile).
-		SequenceNum(1).
+		DataSequenceNumber(1).
 		Build()
 
 	manifestPath := filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("delete-manifest-%d.avro", snapshotID)))
@@ -71,7 +72,7 @@ func writeTestDeleteManifest(
 	require.NoError(t, err)
 
 	fs := iceio.LocalFS{}
-	f, err := fs.Create(manifestPath)
+	f, err := fs.Create(context.Background(), manifestPath)
 	require.NoError(t, err)
 	_, err = f.Write(buf.Bytes())
 	require.NoError(t, err)
@@ -837,7 +838,7 @@ func writeTestMetricsManifestWithValues(
 	}
 	df := builder.Build()
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df).
-		SequenceNum(1).
+		DataSequenceNumber(1).
 		Build()
 
 	manifestPath := filepath.Join(dir, "metrics-manifest.avro")
@@ -845,7 +846,7 @@ func writeTestMetricsManifestWithValues(
 	mf, err := iceberg.WriteManifest(manifestPath, &buf, 2, spec, schema, snapshotID, []iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
 	fs := iceio.LocalFS{}
-	out, err := fs.Create(manifestPath)
+	out, err := fs.Create(context.Background(), manifestPath)
 	require.NoError(t, err)
 	_, err = out.Write(buf.Bytes())
 	require.NoError(t, err)
@@ -992,7 +993,7 @@ func TestConflictManifestIODoesNotCachePartialRead(t *testing.T) {
 	tio.files[manifestPath] = []byte("abc")
 	cache := newConflictManifestIO(&conflictValidationStatIO{trackingCallsIO: tio})
 
-	f, err := cache.Open(manifestPath)
+	f, err := cache.Open(context.Background(), manifestPath)
 	require.NoError(t, err)
 	buf := make([]byte, 1)
 	_, err = f.Read(buf)
@@ -1006,7 +1007,7 @@ func TestConflictManifestIOIsReadOnly(t *testing.T) {
 	tio := newTrackingCallsIO()
 	cache := newConflictManifestIO(tio)
 
-	err := cache.Remove("manifest.avro")
+	err := cache.Remove(context.Background(), "manifest.avro")
 	require.Error(t, err)
 	assert.Zero(t, tio.removeCount["manifest.avro"])
 }
@@ -1021,7 +1022,7 @@ func TestConflictManifestIOStopsCachingAtByteLimit(t *testing.T) {
 		cachedBytes: maxConflictManifestCacheBytes - 1,
 	}
 
-	f, err := cache.Open(manifestPath)
+	f, err := cache.Open(context.Background(), manifestPath)
 	require.NoError(t, err)
 	buf := make([]byte, 2)
 	_, err = f.Read(buf)

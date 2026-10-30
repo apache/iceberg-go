@@ -38,6 +38,7 @@ If two PRs land for the same issue, we will generally keep the one from the cont
 - Keep PRs focused — one issue per PR.
 - Run `make test` and `make lint` before pushing. CI runs all of these too, but catching issues locally saves a round-trip. `make lint-install` will install the linter if you don't have it yet.
 - All commits must have a `Signed-off-by` line ([DCO](https://developercertificate.org/)).
+- CI checks the exported API against the base branch with `apidiff`. If your PR changes it incompatibly on purpose, mark the PR title as breaking with a `!`, for example `refactor(io)!: add context to IO.Open`. You can run the same check locally with `dev/check-api-compat.sh` after installing the `apidiff` version it names.
 
 ## Code Review
 
@@ -62,4 +63,20 @@ Integration tests require Docker and are gated behind a build tag:
 ```bash
 docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
 go test -tags integration ./...
+```
+
+#### External REST Catalog Conformance
+
+`TestExternalRestCatalogConformance` runs the catalog conformance suite against any REST catalog server. It is skipped unless `REST_CATALOG_URI` is set. CI runs it against [Apache Polaris](https://polaris.apache.org/); to do the same locally (requires `jq`):
+
+```bash
+make integration-setup-polaris
+make integration-external-rest
+```
+
+To test another catalog, override the Polaris defaults with `REST_CATALOG_URI`, `REST_CATALOG_CREDENTIAL` (`client_id:client_secret`), `REST_CATALOG_SCOPE` and `REST_CATALOG_WAREHOUSE`. Set any of them to an empty value to leave it unset, for example:
+
+```bash
+REST_CATALOG_URI=http://localhost:8181 REST_CATALOG_CREDENTIAL= REST_CATALOG_SCOPE= REST_CATALOG_WAREHOUSE= \
+  make integration-external-rest
 ```

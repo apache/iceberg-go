@@ -19,6 +19,7 @@ package maintenance
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	stdfs "io/fs"
 	"sync"
@@ -54,7 +55,7 @@ func newTrackingIO() *trackingIO {
 	return &trackingIO{files: make(map[string][]byte)}
 }
 
-func (t *trackingIO) Open(name string) (iceio.File, error) {
+func (t *trackingIO) Open(_ context.Context, name string) (iceio.File, error) {
 	data, ok := t.files[name]
 	if !ok {
 		return nil, stdfs.ErrNotExist
@@ -63,13 +64,13 @@ func (t *trackingIO) Open(name string) (iceio.File, error) {
 	return memFile{bytes.NewReader(data)}, nil
 }
 
-func (t *trackingIO) WriteFile(name string, content []byte) error {
+func (t *trackingIO) WriteFile(ctx context.Context, name string, content []byte) error {
 	t.files[name] = append([]byte(nil), content...)
 
 	return nil
 }
 
-func (t *trackingIO) Remove(name string) error {
+func (t *trackingIO) Remove(_ context.Context, name string) error {
 	delete(t.files, name)
 
 	return nil
@@ -91,20 +92,20 @@ func newTrackingCallsIO() *trackingCallsIO {
 	}
 }
 
-func (c *trackingCallsIO) Open(name string) (iceio.File, error) {
+func (c *trackingCallsIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	c.mu.Lock()
 	c.openCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Open(name)
+	return c.trackingIO.Open(ctx, name)
 }
 
-func (c *trackingCallsIO) Remove(name string) error {
+func (c *trackingCallsIO) Remove(ctx context.Context, name string) error {
 	c.mu.Lock()
 	c.removeCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Remove(name)
+	return c.trackingIO.Remove(ctx, name)
 }
 
 // writeManifest writes a v2 data manifest with a single ADDED
@@ -126,16 +127,16 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	require.NoError(t, err)
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df.Build()).
-		SequenceNum(seqNum).
+		DataSequenceNumber(seqNum).
 		Build()
 
 	var buf bytes.Buffer
 	_, err = iceberg.WriteManifest(manifestPath, &buf, 2, spec, dataSchema, snapshotID, []iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
-	require.NoError(t, tio.WriteFile(manifestPath, buf.Bytes()))
+	require.NoError(t, tio.WriteFile(context.Background(), manifestPath, buf.Bytes()))
 
-	return iceberg.NewManifestFile(2, manifestPath, int64(buf.Len()), 0, snapshotID).
-		SequenceNum(seqNum, seqNum).
+	return iceberg.NewManifestBuilder(2, manifestPath, int64(buf.Len()), 0, snapshotID).
+		SequenceNumber(seqNum, seqNum).
 		AddedFiles(1).
 		AddedRows(1).
 		Build()
@@ -149,7 +150,7 @@ func writeManifestList(t testing.TB, tio *trackingIO, snapshotID int64, listPath
 	var buf bytes.Buffer
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, manifests))
-	require.NoError(t, tio.WriteFile(listPath, buf.Bytes()))
+	require.NoError(t, tio.WriteFile(context.Background(), listPath, buf.Bytes()))
 }
 
 // metaJSONOpts configures the metadata document built by buildMetaJSON.
@@ -192,8 +193,8 @@ type manifestTrackingIO struct {
 	delay   time.Duration
 }
 
-func (fs *manifestTrackingIO) Open(name string) (iceio.File, error) {
-	f, err := fs.IO.Open(name)
+func (fs *manifestTrackingIO) Open(ctx context.Context, name string) (iceio.File, error) {
+	f, err := fs.IO.Open(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -232,8 +233,8 @@ type benchmarkDelayIO struct {
 	delay time.Duration
 }
 
-func (fs *benchmarkDelayIO) Open(name string) (iceio.File, error) {
-	f, err := fs.IO.Open(name)
+func (fs *benchmarkDelayIO) Open(ctx context.Context, name string) (iceio.File, error) {
+	f, err := fs.IO.Open(ctx, name)
 	if err != nil {
 		return nil, err
 	}

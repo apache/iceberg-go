@@ -29,7 +29,7 @@ import (
 )
 
 func rowCountManifest(path string, addedRows, existingRows int64) iceberg.ManifestFile {
-	return iceberg.NewManifestFile(3, path, 1, 0, 1).
+	return iceberg.NewManifestBuilder(3, path, 1, 0, 1).
 		AddedRows(addedRows).
 		ExistingRows(existingRows).
 		Build()

@@ -49,7 +49,7 @@ func TestFileToDataFile(t *testing.T) {
 	arrTbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 	defer arrTbl.Release()
 
-	fo, err := fs.Create(path)
+	fo, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
 

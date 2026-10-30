@@ -22,6 +22,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,6 +40,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
@@ -56,12 +59,12 @@ func TestArrowToIceberg(t *testing.T) {
 		reciprocal bool
 		err        string
 	}{
-		{&arrow.FixedSizeBinaryType{ByteWidth: 0}, iceberg.FixedTypeOf(0), true, ""},
-		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.FixedTypeOf(23), true, ""},
-		{&arrow.Decimal32Type{Precision: 8, Scale: 2}, iceberg.DecimalTypeOf(8, 2), false, ""},
+		{&arrow.FixedSizeBinaryType{ByteWidth: 0}, iceberg.MustFixedTypeOf(0), true, ""},
+		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.MustFixedTypeOf(23), true, ""},
+		{&arrow.Decimal32Type{Precision: 8, Scale: 2}, iceberg.MustDecimalTypeOf(8, 2), false, ""},
 		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, nil, false, "invalid scale 9: must be less than or equal to precision 8"},
-		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.DecimalTypeOf(15, 14), false, ""},
-		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.DecimalTypeOf(26, 20), true, ""},
+		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.MustDecimalTypeOf(15, 14), false, ""},
+		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.MustDecimalTypeOf(26, 20), true, ""},
 		{&arrow.Decimal256Type{Precision: 8, Scale: 9}, nil, false, "unsupported arrow type for conversion - decimal256(8, 9)"},
 		{arrow.FixedWidthTypes.Boolean, iceberg.PrimitiveTypes.Bool, true, ""},
 		{arrow.Null, iceberg.PrimitiveTypes.Unknown, true, ""},
@@ -1827,7 +1830,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 		{
 			name: "decimal write-default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+				ID: 2, Name: "price", Type: iceberg.MustDecimalTypeOf(10, 2),
 				Required: false, WriteDefault: iceberg.Decimal{Val: decimal128.New(0, 12345), Scale: 2},
 			},
 			check: func(t *testing.T, col arrow.Array) {
@@ -2056,7 +2059,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 		{
 			name: "decimal initial-default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+				ID: 2, Name: "price", Type: iceberg.MustDecimalTypeOf(10, 2),
 				Required: false, InitialDefault: iceberg.Decimal{Val: decimal128.New(0, 12345), Scale: 2},
 			},
 			check: func(t *testing.T, col arrow.Array) {
@@ -3339,8 +3342,17 @@ func TestToRequestedSchemaGeoAbsentCRSAgainstSRID0SchemaFails(t *testing.T) {
 }
 
 // TestGeoTypeParquetRoundTrip pins the CRS a geo column carries on the Parquet
-// wire. arrow-go writes no GEOMETRY or GEOGRAPHY logical type, so the CRS
-// travels in the GeoArrow metadata of the stored Arrow schema.
+// wire. geoarrow-go's WKB type maps to the Parquet GEOMETRY or GEOGRAPHY logical
+// type, and the CRS also travels in the GeoArrow metadata of the stored Arrow
+// schema.
+// Per the Parquet spec, SRIDs are written as "srid:<id>" and the default
+// OGC:CRS84 is omitted.
+//
+// Two cases differ from what Java writes and are pinned so a geoarrow-go bump
+// can't change them silently: EPSG:4326 collapses to OGC:CRS84 (so no Parquet
+// crs, and it reads back as the default CRS) where Java writes "EPSG:4326"
+// verbatim, and a projjson:<property> reference is written as the inline
+// PROJJSON document where Java writes the reference itself.
 func TestGeoTypeParquetRoundTrip(t *testing.T) {
 	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
 	require.NoError(t, err)
@@ -3350,36 +3362,71 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
 	require.NoError(t, err)
+	geomEPSG4326, err := iceberg.GeometryTypeOf("EPSG:4326")
+	require.NoError(t, err)
+	geomPROJJSON, err := iceberg.GeometryTypeOf("projjson:geo.crs")
+	require.NoError(t, err)
+
+	const projjson = `{"type":"GeographicCRS","name":"Custom WGS 84"}`
 
 	tests := []struct {
 		name             string
 		icebergType      iceberg.Type
+		tableProps       iceberg.Properties
 		geoarrowMetaJSON string
+		parquetLogical   schema.LogicalType
+		// readType is the type read back from the file; nil means icebergType.
+		readType iceberg.Type
 	}{
 		{
 			name:             "geometry_default_crs",
 			icebergType:      iceberg.GeometryType{},
 			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code"}`,
+			parquetLogical:   schema.GeometryLogicalType{},
 		},
 		{
 			name:             "geometry_srid_0",
 			icebergType:      geomSRID0,
 			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: "srid:0"},
+		},
+		{
+			name:             "geography_default",
+			icebergType:      iceberg.GeographyType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code","edges":"spherical"}`,
+			parquetLogical:   schema.GeographyLogicalType{Algorithm: schema.GeographyEdgeSpherical},
 		},
 		{
 			name:             "geography_srid_0",
 			icebergType:      geogSRID0,
 			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid","edges":"spherical"}`,
+			parquetLogical:   schema.GeographyLogicalType{Crs: "srid:0", Algorithm: schema.GeographyEdgeSpherical},
 		},
 		{
 			name:             "geometry_srid_4326",
 			icebergType:      geomSRID,
 			geoarrowMetaJSON: `{"crs":"4326","crs_type":"srid"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: "srid:4326"},
 		},
 		{
 			name:             "geometry_authority_code",
 			icebergType:      geomEPSG3857,
 			geoarrowMetaJSON: `{"crs":"EPSG:3857","crs_type":"authority_code"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: "EPSG:3857"},
+		},
+		{
+			name:             "geometry_epsg_4326",
+			icebergType:      geomEPSG4326,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code"}`,
+			parquetLogical:   schema.GeometryLogicalType{},
+			readType:         iceberg.GeometryType{},
+		},
+		{
+			name:             "geometry_projjson",
+			icebergType:      geomPROJJSON,
+			tableProps:       iceberg.Properties{"geo.crs": projjson},
+			geoarrowMetaJSON: `{"crs":` + projjson + `,"crs_type":"projjson"}`,
+			parquetLogical:   schema.GeometryLogicalType{Crs: projjson},
 		},
 	}
 
@@ -3387,7 +3434,10 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mem := memory.NewGoAllocator()
 
-			dt, err := table.TypeToArrowType(tt.icebergType, true, false)
+			dt, err := table.TypeToArrowTypeWithOptions(tt.icebergType, table.ArrowSchemaOptions{
+				IncludeFieldIDs: true,
+				TableProperties: tt.tableProps,
+			})
 			require.NoError(t, err)
 
 			wkb, ok := dt.(*geoarrow.WKBType)
@@ -3414,10 +3464,8 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 			require.NoError(t, err)
 			defer rdr.Close()
 
-			// Revisit the CRS spelling once arrow-go emits the geo logical types:
-			// the Parquet CRS field takes the prefixed srid:<id> form.
 			logical := rdr.MetaData().Schema.Column(0).LogicalType()
-			assert.True(t, logical.Equals(schema.NoLogicalType{}), "unexpected logical type %s", logical)
+			assert.True(t, logical.Equals(tt.parquetLogical), "expected logical type %s, got %s", tt.parquetLogical, logical)
 
 			arrRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, mem)
 			require.NoError(t, err)
@@ -3425,13 +3473,145 @@ func TestGeoTypeParquetRoundTrip(t *testing.T) {
 			readSchema, err := arrRdr.Schema()
 			require.NoError(t, err)
 
-			readIceberg, err := table.ArrowSchemaToIceberg(readSchema, false, nil)
+			readIceberg, err := table.ArrowSchemaToIcebergWithOptions(readSchema, table.ArrowToIcebergOptions{
+				TableSchema: iceberg.NewSchema(0, iceberg.NestedField{
+					ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+				}),
+				TableProperties: tt.tableProps,
+			})
 			require.NoError(t, err)
 
+			wantType := tt.readType
+			if wantType == nil {
+				wantType = tt.icebergType
+			}
 			field, ok := readIceberg.FindFieldByID(1)
 			require.True(t, ok)
-			assert.Equal(t, tt.icebergType.String(), field.Type.String())
-			assert.True(t, tt.icebergType.Equals(field.Type), "expected %s, got %s", tt.icebergType, field.Type)
+			assert.Equal(t, wantType.String(), field.Type.String())
+			assert.True(t, wantType.Equals(field.Type), "expected %s, got %s", wantType, field.Type)
 		})
 	}
+}
+
+// TestGeoParquetReadWithoutStoredSchema reads a GEOMETRY file that has no
+// stored ARROW:schema, as Java/Spark writers produce. geoarrow-go maps the
+// Parquet GEOMETRY logical type to geoarrow.wkb on read, so the file projects
+// onto a matching geometry column. A binary table column rejects it, both on
+// read and in the FileToDataFile (AddDataFilesByPath) schema check: geo types are
+// deliberately not promotable to or from binary (see iceberg.PromoteType and
+// https://github.com/apache/iceberg-go/issues/2193), and the binary subtests
+// assert that rejection.
+func TestGeoParquetReadWithoutStoredSchema(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	geomType, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	dt, err := table.TypeToArrowType(geomType, true, false)
+	require.NoError(t, err)
+	wkb, ok := dt.(*geoarrow.WKBType)
+	require.True(t, ok, "expected geoarrow.wkb, got %T", dt)
+
+	source := newExtensionArrayOverBinary(t, mem, wkb, wkbPointRows())
+	defer source.Release()
+	rec := singleColumnRecord(arrow.Field{
+		Name: "geom", Type: wkb, Nullable: true, Metadata: fieldIDMeta("1"),
+	}, source)
+	defer rec.Release()
+
+	// No pqarrow.WithStoreSchema: the reader must derive types from the
+	// Parquet schema alone.
+	path := filepath.Join(t.TempDir(), "geo-no-arrow-schema.parquet")
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	writer, err := pqarrow.NewFileWriter(rec.Schema(), f,
+		parquet.NewWriterProperties(parquet.WithAllocator(mem)),
+		pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem)))
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(rec))
+	require.NoError(t, writer.Close())
+
+	readFile := func(t *testing.T) arrow.RecordBatch {
+		t.Helper()
+
+		rdr, err := file.OpenParquetFile(path, false, file.WithReadProps(parquet.NewReaderProperties(mem)))
+		require.NoError(t, err)
+		defer rdr.Close()
+		require.Nil(t, rdr.MetaData().KeyValueMetadata().FindValue("ARROW:schema"), "file must not carry a stored Arrow schema")
+
+		arrRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, mem)
+		require.NoError(t, err)
+		tbl, err := arrRdr.ReadTable(context.Background())
+		require.NoError(t, err)
+		defer tbl.Release()
+
+		trdr := array.NewTableReader(tbl, -1)
+		defer trdr.Release()
+		require.True(t, trdr.Next())
+		out := trdr.RecordBatch()
+		out.Retain()
+
+		return out
+	}
+
+	t.Run("reads as geoarrow.wkb", func(t *testing.T) {
+		got := readFile(t)
+		defer got.Release()
+
+		readType, ok := got.Schema().Field(0).Type.(*geoarrow.WKBType)
+		require.True(t, ok, "expected geoarrow.wkb, got %s", got.Schema().Field(0).Type)
+
+		fileSchema, err := table.ArrowSchemaToIceberg(got.Schema(), false, nil)
+		require.NoError(t, err)
+		field, ok := fileSchema.FindFieldByID(1)
+		require.True(t, ok)
+		assert.True(t, geomType.Equals(field.Type), "expected %s, got %s (%s)", geomType, field.Type, readType.Serialize())
+	})
+
+	t.Run("projects onto geometry column", func(t *testing.T) {
+		got := readFile(t)
+		defer got.Release()
+
+		fileSchema, err := table.ArrowSchemaToIceberg(got.Schema(), false, nil)
+		require.NoError(t, err)
+		requested := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "geom", Type: geomType, Required: false})
+
+		ctx := compute.WithAllocator(context.Background(), mem)
+		projected, err := table.ToRequestedSchema(ctx, requested, fileSchema, got, table.SchemaOptions{IncludeFieldIDs: true})
+		require.NoError(t, err)
+		defer projected.Release()
+
+		require.EqualValues(t, 3, projected.NumRows())
+		storage := projected.Column(0).(array.ExtensionArray).Storage()
+		assert.Equal(t, wkbPointRows()[0], binaryValueAt(t, storage, 0))
+		assert.True(t, storage.IsNull(1))
+		assert.Equal(t, wkbPointRows()[2], binaryValueAt(t, storage, 2))
+	})
+
+	t.Run("binary column rejects it", func(t *testing.T) {
+		got := readFile(t)
+		defer got.Release()
+
+		fileSchema, err := table.ArrowSchemaToIceberg(got.Schema(), false, nil)
+		require.NoError(t, err)
+		requested := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.PrimitiveTypes.Binary, Required: false})
+
+		ctx := compute.WithAllocator(context.Background(), mem)
+		_, err = table.ToRequestedSchema(ctx, requested, fileSchema, got, table.SchemaOptions{IncludeFieldIDs: true})
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "cannot promote geometry(srid:4326) to binary")
+	})
+
+	t.Run("AddDataFilesByPath schema check rejects binary column", func(t *testing.T) {
+		binarySchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.PrimitiveTypes.Binary, Required: false})
+		_, err := table.FileToDataFile(context.Background(), iceio.LocalFS{}, path, binarySchema, *iceberg.UnpartitionedSpec, 0, nil)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "mismatch in fields")
+		assert.ErrorContains(t, err, "geometry(srid:4326)")
+
+		geomSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "geom", Type: geomType, Required: false})
+		_, err = table.FileToDataFile(context.Background(), iceio.LocalFS{}, path, geomSchema, *iceberg.UnpartitionedSpec, 0, nil)
+		require.NoError(t, err)
+	})
 }

@@ -19,6 +19,7 @@ package dv
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -62,7 +63,6 @@ func (*mockDVFile) ColumnSizes() map[int]int64                { return nil }
 func (*mockDVFile) ValueCounts() map[int]int64                { return nil }
 func (*mockDVFile) NullValueCounts() map[int]int64            { return nil }
 func (*mockDVFile) NaNValueCounts() map[int]int64             { return nil }
-func (*mockDVFile) DistinctValueCounts() map[int]int64        { return nil }
 func (*mockDVFile) LowerBoundValues() map[int][]byte          { return nil }
 func (*mockDVFile) UpperBoundValues() map[int][]byte          { return nil }
 func (*mockDVFile) KeyMetadata() []byte                       { return nil }
@@ -261,8 +261,8 @@ type failingOpenFS struct {
 	err error
 }
 
-func (f failingOpenFS) Open(string) (iceio.File, error) { return nil, f.err }
-func (f failingOpenFS) Remove(string) error             { return nil }
+func (f failingOpenFS) Open(context.Context, string) (iceio.File, error) { return nil, f.err }
+func (f failingOpenFS) Remove(context.Context, string) error             { return nil }
 
 type countingReadIO struct {
 	base      iceio.IO
@@ -270,8 +270,8 @@ type countingReadIO struct {
 	readCalls []readAtCall
 }
 
-func (f *countingReadIO) Open(name string) (iceio.File, error) {
-	file, err := f.base.Open(name)
+func (f *countingReadIO) Open(_ context.Context, name string) (iceio.File, error) {
+	file, err := f.base.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}
@@ -279,8 +279,8 @@ func (f *countingReadIO) Open(name string) (iceio.File, error) {
 	return &countingReadFile{File: file, reads: &f.reads, readCalls: &f.readCalls}, nil
 }
 
-func (f *countingReadIO) Remove(name string) error {
-	return f.base.Remove(name)
+func (f *countingReadIO) Remove(_ context.Context, name string) error {
+	return f.base.Remove(context.Background(), name)
 }
 
 func (f *countingReadIO) reset() {

@@ -32,52 +32,72 @@ func NormalizeVariantPath(fields []string) string {
 		return "$"
 	}
 
+	// Reserve space for the unescaped path and its bracket separators.
+	// Escapes may grow beyond this size, but normal member names fit at once.
+	size := 1
+	for _, field := range fields {
+		size += len(field) + 4
+	}
+
 	var b strings.Builder
+	b.Grow(size)
 	b.WriteByte('$')
 	for _, f := range fields {
 		b.WriteString("['")
-		b.WriteString(rfc9535Escape(f))
+		writeRFC9535Escaped(&b, f)
 		b.WriteString("']")
 	}
 
 	return b.String()
 }
 
-func rfc9535Escape(name string) string {
-	if strings.IndexFunc(name, func(r rune) bool {
-		return r < 0x20 || r == '\'' || r == '\\'
-	}) < 0 {
-		return name
+// writeRFC9535Escaped writes directly to the path builder, avoiding a temporary
+// string for each escaped member. Preserve the rune-based escaping semantics.
+func writeRFC9535Escaped(b *strings.Builder, name string) {
+	// Only ASCII controls, quotes and backslashes require escaping.
+	// Scan bytes before decoding runes for the uncommon escaped case.
+	needsEscape := false
+	for i := range len(name) {
+		c := name[i]
+		if c < 0x20 || c == '\'' || c == '\\' {
+			needsEscape = true
+
+			break
+		}
+	}
+	if !needsEscape {
+		b.WriteString(name)
+
+		return
 	}
 
-	var b strings.Builder
-	b.Grow(len(name) + 4)
+	const hex = "0123456789abcdef"
 	for _, r := range name {
 		switch r {
 		case '\b':
-			b.WriteString(`\b`)
+			b.WriteString("\\b")
 		case '\t':
-			b.WriteString(`\t`)
+			b.WriteString("\\t")
 		case '\f':
-			b.WriteString(`\f`)
+			b.WriteString("\\f")
 		case '\n':
-			b.WriteString(`\n`)
+			b.WriteString("\\n")
 		case '\r':
-			b.WriteString(`\r`)
+			b.WriteString("\\r")
 		case '\'':
-			b.WriteString(`\'`)
+			b.WriteString("\\'")
 		case '\\':
-			b.WriteString(`\\`)
+			b.WriteString("\\\\")
 		default:
 			if r < 0x20 {
-				fmt.Fprintf(&b, `\u%04x`, r)
+				b.WriteString("\\u00")
+				b.WriteByte(hex[byte(r)>>4])
+				b.WriteByte(hex[byte(r)&0xf])
 			} else {
 				b.WriteRune(r)
 			}
 		}
 	}
-
-	return b.String()
 }
 
 // parseVariantPath parses a variant path into member names, accepting dot ($.a.b) and bracket ($['a']) notation.
@@ -127,20 +147,33 @@ func parseBracketSelector(s, path string) (string, int, error) {
 		return "", 0, fmt.Errorf("%w: unsupported variant path %q (only quoted member selectors like ['name'] are supported)", ErrInvalidArgument, path)
 	}
 
+	// Delay copying until an escape is found. Plain quoted members can
+	// reference the original path without allocating a new string.
 	var b strings.Builder
+	start := 2
 	for i := 2; i < len(s); {
-		c := s[i]
-		switch c {
+		switch s[i] {
 		case '\'':
 			if i+1 >= len(s) || s[i+1] != ']' {
 				return "", 0, fmt.Errorf("%w: invalid variant path %q (expected ']' after quoted member)", ErrInvalidArgument, path)
 			}
+
+			if start == 2 {
+				if i == 2 {
+					// Avoid retaining the input path for an empty member.
+					return "", i + 2, nil
+				}
+
+				return s[2:i], i + 2, nil
+			}
+			b.WriteString(s[start:i])
 
 			return b.String(), i + 2, nil
 		case '\\':
 			if i+1 >= len(s) {
 				return "", 0, fmt.Errorf("%w: invalid variant path %q (dangling escape)", ErrInvalidArgument, path)
 			}
+			b.WriteString(s[start:i])
 			switch e := s[i+1]; e {
 			case 'b':
 				b.WriteByte('\b')
@@ -161,14 +194,15 @@ func parseBracketSelector(s, path string) (string, int, error) {
 				}
 				b.WriteRune(r)
 				i += consumed
+				start = i
 
 				continue
 			default:
 				return "", 0, fmt.Errorf("%w: invalid variant path %q (unknown escape \\%c)", ErrInvalidArgument, path, e)
 			}
 			i += 2
+			start = i
 		default:
-			b.WriteByte(c)
 			i++
 		}
 	}

@@ -791,7 +791,7 @@ func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, cataloginternal.WriteTableMetadata(
-		current, iceio.LocalFS{}, oldMetadataLocation, table.MetadataCompressionCodecNone,
+		context.Background(), current, iceio.LocalFS{}, oldMetadataLocation, table.MetadataCompressionCodecNone,
 	))
 
 	existing := constructHiveTable(
@@ -891,6 +891,62 @@ func TestHiveRenameTableRejectsChangedMetadataAfterLock(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHiveRenameTableToExistingTable(t *testing.T) {
+	mockClient := &mockHiveClient{}
+	destination := *testIcebergHiveTable1
+	destination.TableName = "renamed"
+	destination.DbName = "target_database"
+
+	mockClient.On("GetDatabase", mock.Anything, "target_database").
+		Return(&hive_metastore.Database{Name: "target_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(testIcebergHiveTable1, nil).Twice()
+	mockClient.On("Lock", mock.Anything, mock.Anything).
+		Return(&hive_metastore.LockResponse{Lockid: 2, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "target_database", "renamed").
+		Return(&destination, nil).Once()
+	mockClient.On("Unlock", mock.Anything, int64(2)).Return(nil).Once()
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RenameTable(
+		context.Background(),
+		TableIdentifier("test_database", "test_table"),
+		TableIdentifier("target_database", "renamed"),
+	)
+	require.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+	mockClient.AssertNotCalled(t, "AlterTable", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	mockClient.AssertExpectations(t)
+}
+
+// TestHiveRenameTableDestinationCreatedConcurrently covers a destination that
+// appears after the pre-check, e.g. from Hive DDL that skips the HMS locks: the
+// metastore rejects AlterTable, and that must surface as ErrTableAlreadyExists.
+func TestHiveRenameTableDestinationCreatedConcurrently(t *testing.T) {
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "target_database").
+		Return(&hive_metastore.Database{Name: "target_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(testIcebergHiveTable1, nil).Twice()
+	mockClient.On("Lock", mock.Anything, mock.Anything).
+		Return(&hive_metastore.LockResponse{Lockid: 2, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "target_database", "renamed").
+		Return(nil, errNoSuchObject).Once()
+	mockClient.On("AlterTable", mock.Anything, "test_database", "test_table", mock.Anything).
+		// Verbatim HMS InvalidOperationException text; isAlreadyExistsError matches
+		// on the "already exists" substring, which is what the metastore emits.
+		Return(errors.New("InvalidOperationException: new table target_database.renamed already exists")).Once()
+	mockClient.On("Unlock", mock.Anything, int64(2)).Return(nil).Once()
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RenameTable(
+		context.Background(),
+		TableIdentifier("test_database", "test_table"),
+		TableIdentifier("target_database", "renamed"),
+	)
+	require.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+	mockClient.AssertExpectations(t)
+}
+
 func TestHivePurgeTable(t *testing.T) {
 	assert := require.New(t)
 	ctx := context.Background()
@@ -942,7 +998,7 @@ func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
 	dataFile := tableLocation + "/data/file.parquet"
 	writeHivePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation, nil)
-	assert.NoError(failingFS.WriteFile(dataFile, []byte("data")))
+	assert.NoError(failingFS.WriteFile(context.Background(), dataFile, []byte("data")))
 	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
 
 	mockClient := &mockHiveClient{}
@@ -960,7 +1016,7 @@ func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	assert.True(dropCalled.Load())
 	assert.Positive(removeCalls.Load())
 	assert.False(removeBeforeDrop.Load(), "PurgeTable should drop the catalog entry before removing files")
-	file, err := failingFS.Open(dataFile)
+	file, err := failingFS.Open(context.Background(), dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)
 	assert.NoError(file.Close())
@@ -997,7 +1053,7 @@ type failRemoveIO struct {
 	onRemove func()
 }
 
-func (f failRemoveIO) Remove(string) error {
+func (f failRemoveIO) Remove(context.Context, string) error {
 	if f.onRemove != nil {
 		f.onRemove()
 	}
@@ -1035,7 +1091,7 @@ func writeHivePurgeTableFilesWithProperties(
 	metadataLocation = filepath.Join(tableLocation, "metadata", "v1.metadata.json")
 	dataFile = filepath.Join(tableLocation, "data", "file.parquet")
 	writeHivePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, props)
-	writer, err := iceio.LocalFS{}.Create(dataFile)
+	writer, err := iceio.LocalFS{}.Create(context.Background(), dataFile)
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("data"))
 	require.NoError(t, err)
@@ -1057,7 +1113,7 @@ func writeHivePurgeTableMetadata(
 	})
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, props)
 	require.NoError(t, err)
-	require.NoError(t, cataloginternal.WriteTableMetadata(meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
+	require.NoError(t, cataloginternal.WriteTableMetadata(context.Background(), meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
 }
 
 func TestHiveDropTableNotExists(t *testing.T) {
@@ -1724,8 +1780,8 @@ func TestIcebergTypeToHiveType(t *testing.T) {
 		{"string", iceberg.PrimitiveTypes.String, "string"},
 		{"uuid", iceberg.PrimitiveTypes.UUID, "string"},
 		{"binary", iceberg.PrimitiveTypes.Binary, "binary"},
-		{"decimal", iceberg.DecimalTypeOf(10, 2), "decimal(10,2)"},
-		{"fixed", iceberg.FixedTypeOf(16), "binary(16)"},
+		{"decimal", iceberg.MustDecimalTypeOf(10, 2), "decimal(10,2)"},
+		{"fixed", iceberg.MustFixedTypeOf(16), "binary(16)"},
 	}
 
 	for _, tt := range tests {
@@ -1872,7 +1928,7 @@ func TestCreateView_NamespaceNotFound(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"missing_db"})
+	ver, _ := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1", Dialect: "hive"}, table.Identifier{"missing_db"})
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	_, err := cat.CreateView(context.Background(), TableIdentifier("missing_db", "v1"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
@@ -1891,7 +1947,7 @@ func TestCreateView_ViewAlreadyExists(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	ver, _ := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1", Dialect: "hive"}, table.Identifier{"test_database"})
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	_, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "test_view"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
@@ -1911,7 +1967,7 @@ func TestCreateView_TableAlreadyExists(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	ver, _ := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1", Dialect: "hive"}, table.Identifier{"test_database"})
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	_, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "test_table"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
@@ -1926,7 +1982,7 @@ func TestCreateView_InvalidIdentifier(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	for _, ident := range []table.Identifier{nil, {}, {"only_db"}} {
-		ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"db"})
+		ver, err := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1", Dialect: "hive"}, table.Identifier{"db"})
 		require.NoError(t, err)
 		_, err = cat.CreateView(context.Background(), ident, ver, schema)
 		require.ErrorIs(t, err, catalog.ErrNoSuchView)
@@ -1959,7 +2015,7 @@ func TestCreateView_Success(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{"test_database"})
+	ver, err := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1 AS col", Dialect: "hive"}, table.Identifier{"test_database"})
 	assert.NoError(err)
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
@@ -1990,7 +2046,7 @@ func TestCreateViewDoesNotPersistCatalogProperties(t *testing.T) {
 	mockClient.On("CreateTable", mock.Anything, mock.Anything).Return(nil).Once()
 
 	cat := NewCatalogWithClient(mockClient, catalogProps)
-	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{"test_database"})
+	ver, err := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1 AS col", Dialect: "hive"}, table.Identifier{"test_database"})
 	assert.NoError(err)
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
@@ -2027,7 +2083,7 @@ func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	ver, err := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1", Dialect: "hive"}, table.Identifier{"test_database"})
 	assert.NoError(err)
 	ver.Representations = nil // no SQL representation
 

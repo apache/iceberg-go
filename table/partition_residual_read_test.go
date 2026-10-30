@@ -72,7 +72,7 @@ func TestReadTasksUsesIdentityPartitionResidual(t *testing.T) {
 		iceberg.EntryStatusADDED,
 		&snapshotID,
 		dataFileBuilder.Build(),
-	).SequenceNum(1).Build()
+	).DataSequenceNumber(1).Build()
 	manifestPath := tableLocation + "/metadata/manifest.avro"
 	var manifestBuffer bytes.Buffer
 	manifest, err := iceberg.WriteManifest(
@@ -88,8 +88,8 @@ func TestReadTasksUsesIdentityPartitionResidual(t *testing.T) {
 		[]iceberg.ManifestFile{manifest},
 	))
 
-	require.NoError(t, fs.WriteFile(manifestPath, manifestBuffer.Bytes()))
-	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, manifestListBuffer.Bytes()))
 
 	metadataBuilder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
@@ -182,13 +182,13 @@ func writePartitionResidualParquet(
 	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
 	defer tbl.Release()
 
-	writer, err := fs.Create(path)
+	writer, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, writer, record.NumRows(),
 		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
 	require.NoError(t, writer.Close())
 
-	file, err := fs.Open(path)
+	file, err := fs.Open(context.Background(), path)
 	require.NoError(t, err)
 	defer file.Close()
 	info, err := file.Stat()

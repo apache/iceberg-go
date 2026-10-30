@@ -33,6 +33,7 @@ import (
 func TestRestCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		SupportsNamespaceProperties: true,
+		SupportsRenameTable:         true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := catalog.Load(context.Background(), "local", iceberg.Properties{
 				"type":               "rest",
@@ -42,11 +43,7 @@ func TestRestCatalogConformance(t *testing.T) {
 				io.S3SecretAccessKey: "password",
 			})
 			require.NoError(t, err)
-			t.Cleanup(func() {
-				if closer, ok := cat.(catalog.Closer); ok {
-					require.NoError(t, closer.Close())
-				}
-			})
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
 
 			return cat
 		},
