@@ -553,13 +553,41 @@ func yieldSortedPartition(
 		total += b.NumRows()
 	}
 
+	compare := rows.bind(batches)
+	if partitionRowsAlreadySorted(batches, compare) {
+		// Keep the scan's natural order. Every output owns its reference to
+		// the original batch; no row references or Arrow Take arrays are needed.
+		for _, batch := range batches {
+			for off := int64(0); off < batch.NumRows(); off += batchRows {
+				if err := ctx.Err(); err != nil {
+					yield(nil, err)
+
+					return false
+				}
+				end := min(off+batchRows, batch.NumRows())
+				var out arrow.RecordBatch
+				if off == 0 && end == batch.NumRows() {
+					batch.Retain()
+					out = batch
+				} else {
+					out = batch.NewSlice(off, end)
+				}
+				if !yield(out, nil) {
+					return false
+				}
+			}
+		}
+
+		return true
+	}
+
 	refs := make([]rowRef, 0, total)
 	for b, rec := range batches {
 		for r := range int(rec.NumRows()) {
 			refs = append(refs, newRowRef(b, r))
 		}
 	}
-	slices.SortStableFunc(refs, rows.bind(batches))
+	slices.SortStableFunc(refs, compare)
 
 	takeFn := partitionBatchByKey(ctx)
 	mem := compute.GetAllocator(ctx)
@@ -579,6 +607,25 @@ func yieldSortedPartition(
 		}
 		if !yield(out, nil) {
 			return false
+		}
+	}
+
+	return true
+}
+
+// partitionRowsAlreadySorted also checks batch boundaries. It uses the same
+// Iceberg comparator as the stable sort, including null order and signed NaNs.
+// Equal keys retain their original input order without a re-sort.
+func partitionRowsAlreadySorted(batches []arrow.RecordBatch, compare func(rowRef, rowRef) int) bool {
+	var previous rowRef
+	hasPrevious := false
+	for batch, rec := range batches {
+		for row := range int(rec.NumRows()) {
+			current := newRowRef(batch, row)
+			if hasPrevious && compare(previous, current) > 0 {
+				return false
+			}
+			previous, hasPrevious = current, true
 		}
 	}
 
