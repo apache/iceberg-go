@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Schemas store binary and fixed defaults as hex strings.** `NewSchema`, `NewSchemaWithIdentifiers` and `NewSchemaFromJSONFields` convert `[]byte`, `BinaryLiteral` and `FixedLiteral` defaults on binary and fixed fields, at any depth, to the hex string used in metadata JSON, so a field read back from a schema holds a `string` such as `"0aff"`. Code that type-asserts these defaults to `[]byte` must decode the string instead, for example with `hex.DecodeString`. A schema built in process now equals the same schema read from metadata. The fields and types passed in are not modified.
 - **`ReplaceFilesWithDeleteFiles` removed.** For delete-file replacements, use `tx.NewRewrite(snapshotProps)`, call `DeleteFile` for each source file and `AddDeleteFileWithDataSequenceNumber` for each replacement, then commit the builder. Rewrites record a `replace` snapshot instead of `overwrite`. The five-argument `ReplaceFiles` API is unchanged and remains available for compaction and delete-file removals.
 - **Path-based data-file addition renamed.** Replace `Transaction.AddFiles` with `AddDataFilesByPath`, `AddFilesOption` with `AddDataFilesByPathOption`, and `WithAddFilesConcurrency` with `WithAddDataFilesByPathConcurrency`. Behavior is unchanged.
 - **Manifest builder constructor renamed.** Replace `iceberg.NewManifestFile(...)` with `iceberg.NewManifestBuilder(...)`. It still returns a `ManifestBuilder`.

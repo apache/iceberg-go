@@ -358,16 +358,8 @@ func (n NestedField) MarshalJSON() ([]byte, error) {
 }
 
 func defaultValueToJSON(typ Type, value any) any {
-	switch typ.(type) {
-	case BinaryType, FixedType:
-		switch value := value.(type) {
-		case []byte:
-			return internal.EncodeDefaultBytes(value)
-		case BinaryLiteral:
-			return internal.EncodeDefaultBytes(value)
-		case FixedLiteral:
-			return internal.EncodeDefaultBytes(value)
-		}
+	if encoded, ok := hexDefault(typ, value); ok {
+		return encoded
 	}
 
 	return value
