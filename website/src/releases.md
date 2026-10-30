@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **`ReplaceFilesWithDeleteFiles` removed.** For delete-file replacements, use `tx.NewRewrite(snapshotProps)`, call `DeleteFile` for each source file and `AddDeleteFileWithDataSequenceNumber` for each replacement, then commit the builder. Rewrites record a `replace` snapshot instead of `overwrite`. The five-argument `ReplaceFiles` API is unchanged and remains available for compaction and delete-file removals.
 - **Path-based data-file addition renamed.** Replace `Transaction.AddFiles` with `AddDataFilesByPath`, `AddFilesOption` with `AddDataFilesByPathOption`, and `WithAddFilesConcurrency` with `WithAddDataFilesByPathConcurrency`. Behavior is unchanged.
 - **Manifest builder constructor renamed.** Replace `iceberg.NewManifestFile(...)` with `iceberg.NewManifestBuilder(...)`. It still returns a `ManifestBuilder`.
 - **Manifest sequence APIs use explicit names.** `ManifestBuilder.SequenceNum` and `ManifestFile.SequenceNum` become `SequenceNumber`, and `ManifestFile.MinSequenceNum` becomes `MinSequenceNumber`. `ManifestEntryBuilder.SequenceNum` and `ManifestEntry.SequenceNum` become `DataSequenceNumber`. `FileSequenceNum` becomes `FileSequenceNumber` for entries and their builder. Avro and JSON field names are unchanged.

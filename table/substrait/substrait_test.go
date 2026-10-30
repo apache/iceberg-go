@@ -166,6 +166,10 @@ func TestExprs(t *testing.T) {
 		{iceberg.StartsWith(ref, "he"), tableSchemaSimple, "starts_with(.field(0) => string?, string(he)) => boolean?"},
 		{iceberg.NotStartsWith(ref, "he"), tableSchemaSimple, "not(starts_with(.field(0) => string?, string(he)) => boolean?) => boolean?"},
 		{
+			iceberg.NotIn(ref, "hello", "world"), tableSchemaSimple,
+			"not(or(is_in(.field(0) => string?, list<string>([string(hello) string(world)])) => boolean?, and(is_null(.field(0) => string?) => boolean, null(boolean?)) => boolean?) => boolean?) => boolean?",
+		},
+		{
 			iceberg.NewAnd(iceberg.EqualTo(ref, "hello"), iceberg.IsNull(ref)), tableSchemaSimple,
 			"and(equal(.field(0) => string?, string(hello)) => boolean?, is_null(.field(0) => string?) => boolean) => boolean?",
 		},

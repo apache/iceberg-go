@@ -90,15 +90,25 @@ func NewWriter(w io.Writer) (*Writer, error) {
 	}, nil
 }
 
+// checkState keeps the writer's finalized and failed-state checks consistent
+// across operations. State checks must run before validating any input.
+func (w *Writer) checkState(action string) error {
+	if w.done {
+		return fmt.Errorf("puffin: cannot %s: writer already finalized", action)
+	}
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot %s: writer previously failed: %w", action, w.failed)
+	}
+
+	return nil
+}
+
 // SetProperties merges the provided properties into the file-level properties
 // written to the footer. Repeated calls overwrite matching keys; use
 // ClearProperties to remove previously set custom properties.
 func (w *Writer) SetProperties(props map[string]string) error {
-	if w.done {
-		return errors.New("puffin: cannot set properties: writer already finalized")
-	}
-	if w.failed != nil {
-		return fmt.Errorf("puffin: cannot set properties: writer previously failed: %w", w.failed)
+	if err := w.checkState("set properties"); err != nil {
+		return err
 	}
 	maps.Copy(w.props, props)
 
@@ -107,11 +117,8 @@ func (w *Writer) SetProperties(props map[string]string) error {
 
 // ClearProperties removes all file-level properties.
 func (w *Writer) ClearProperties() error {
-	if w.done {
-		return errors.New("puffin: cannot clear properties: writer already finalized")
-	}
-	if w.failed != nil {
-		return fmt.Errorf("puffin: cannot clear properties: writer previously failed: %w", w.failed)
+	if err := w.checkState("clear properties"); err != nil {
+		return err
 	}
 	w.props = make(map[string]string)
 
@@ -121,11 +128,8 @@ func (w *Writer) ClearProperties() error {
 // SetCreatedBy overrides the default "created-by" property written to the footer.
 // The default value is "iceberg-go". Example: "MyApp version 1.2.3".
 func (w *Writer) SetCreatedBy(createdBy string) error {
-	if w.done {
-		return errors.New("puffin: cannot set created-by: writer already finalized")
-	}
-	if w.failed != nil {
-		return fmt.Errorf("puffin: cannot set created-by: writer previously failed: %w", w.failed)
+	if err := w.checkState("set created-by"); err != nil {
+		return err
 	}
 	if createdBy == "" {
 		return errors.New("puffin: cannot set created-by: value cannot be empty")
@@ -139,11 +143,8 @@ func (w *Writer) SetCreatedBy(createdBy string) error {
 // Returns the complete BlobMetadata including the computed Offset and Length.
 // The input.Type is required; use constants like ApacheDataSketchesThetaV1.
 func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, error) {
-	if w.done {
-		return BlobMetadata{}, errors.New("puffin: cannot add blob: writer already finalized")
-	}
-	if w.failed != nil {
-		return BlobMetadata{}, fmt.Errorf("puffin: cannot add blob: writer previously failed: %w", w.failed)
+	if err := w.checkState("add blob"); err != nil {
+		return BlobMetadata{}, err
 	}
 	if input.Type == "" {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: type is required")
@@ -216,11 +217,8 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 // Must be called exactly once after all blobs are written.
 // After Finish returns, no further operations are allowed on the writer.
 func (w *Writer) Finish() error {
-	if w.done {
-		return errors.New("puffin: cannot finish: writer already finalized")
-	}
-	if w.failed != nil {
-		return fmt.Errorf("puffin: cannot finish: writer previously failed: %w", w.failed)
+	if err := w.checkState("finish"); err != nil {
+		return err
 	}
 
 	// Build footer
