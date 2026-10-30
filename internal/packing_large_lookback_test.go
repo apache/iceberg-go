@@ -172,7 +172,7 @@ func BenchmarkSlicePackerLargeLookback(b *testing.B) {
 func TestIndexedPackingMatchesLinearAcrossWeightTransitions(t *testing.T) {
 	const count = 512
 	for _, lookback := range []int{32, 33, 64, 128} {
-		for seed := int64(0); seed < 4; seed++ {
+		for seed := range int64(4) {
 			t.Run(fmt.Sprintf("lookback=%d/seed=%d", lookback, seed), func(t *testing.T) {
 				rng := rand.New(rand.NewSource(seed))
 				items := make([]int, count)
