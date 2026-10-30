@@ -148,7 +148,24 @@ func CreateView(
 	loc string,
 	props iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, nil)
+}
+
+// CreateViewWithIORegistry writes view metadata using the selected FileIO registry.
+// A nil registry preserves the global default. The registry only controls
+// FileIO resolution; it is not stored in the view metadata.
+func CreateViewWithIORegistry(
+	ctx context.Context,
+	catalogName string,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	representation Representation,
+	defaultNS table.Identifier,
+	loc string,
+	props iceberg.Properties,
+	registry *io.Registry,
+) (*View, error) {
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, registry)
 }
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
@@ -165,7 +182,24 @@ func CreateViewWithIOProperties(
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps)
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps, nil)
+}
+
+// CreateViewWithIOPropertiesAndRegistry separates FileIO and persisted view
+// properties while allowing a caller-scoped registry for the metadata write.
+func CreateViewWithIOPropertiesAndRegistry(
+	ctx context.Context,
+	catalogName string,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	representation Representation,
+	defaultNS table.Identifier,
+	loc string,
+	ioProps iceberg.Properties,
+	metadataProps iceberg.Properties,
+	registry *io.Registry,
+) (*View, error) {
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps, registry)
 }
 
 func createView(
@@ -178,6 +212,7 @@ func createView(
 	loc string,
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
+	registry *io.Registry,
 ) (*View, error) {
 	versionId := int64(1)
 
@@ -215,7 +250,11 @@ func createView(
 		return nil, fmt.Errorf("failed to marshal view metadata: %w", err)
 	}
 
-	fs, err := io.LoadFS(ctx, ioProps, metadataLocation)
+	loadFS := io.LoadFS
+	if registry != nil {
+		loadFS = registry.LoadFS
+	}
+	fs, err := loadFS(ctx, ioProps, metadataLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}

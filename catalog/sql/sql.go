@@ -396,6 +396,8 @@ type Catalog struct {
 	// path) and must therefore close it in Close. It stays false for handles
 	// supplied to NewCatalog, which remain owned by the caller.
 	ownsDB bool
+
+	ioRegistry *io.Registry
 }
 
 // isV0 reports whether the catalog is operating against a legacy V0 schema that
@@ -424,12 +426,21 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 // SQLite callers that allow concurrent writers should configure WAL and a busy timeout in the driver DSN so the
 // settings apply to every pooled connection. NewCatalog does not mutate connection settings on the caller-owned db.
 func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
+	return NewCatalogWithOptions(name, db, dialect, props)
+}
+
+// NewCatalogWithOptions builds a SQL catalog with optional isolated FileIO wiring.
+func NewCatalogWithOptions(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
 		return nil, err
 	}
 
-	cat := &Catalog{db: bun.NewDB(db, d), name: name, props: props}
+	var config catalogOptions
+	for _, opt := range opts {
+		opt(&config)
+	}
+	cat := &Catalog{db: bun.NewDB(db, d), name: name, props: props, ioRegistry: config.ioRegistry}
 
 	cat.db = cat.db.WithQueryHook(bundebug.NewQueryHook(
 		bundebug.WithEnabled(false),
@@ -827,8 +838,8 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
-	staged, err := internal.CreateStagedTableWithNamespaceKey(
-		ctx, c.props, c.LoadNamespaceProperties, ident, ns, sc, opts...)
+	staged, err := internal.CreateStagedTableWithNamespaceKeyAndRegistry(
+		ctx, c.props, c.LoadNamespaceProperties, ident, ns, sc, c.ioRegistry, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -900,7 +911,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", err
 	}
 
-	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, ident, reqs, updates, c)
+	staged, err := internal.UpdateAndStageTableWithRegistry(ctx, c.props, current, ident, reqs, updates, c, c.ioRegistry)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1040,7 +1051,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		ctx,
 		identifier,
 		result.MetadataLocation.String,
-		io.LoadFSFunc(c.props, result.MetadataLocation.String),
+		internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, result.MetadataLocation.String),
 		c,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(c.props),
@@ -1591,7 +1602,16 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return err
 	}
 
-	createdView, err := view.CreateView(ctx, c.name, identifier, schema, representation, nsIdent, loc, props)
+	// Catalog credentials configure FileIO, but only view properties belong in metadata.
+	ioProps := maps.Clone(c.props)
+	if ioProps == nil {
+		ioProps = make(iceberg.Properties)
+	}
+	maps.Copy(ioProps, props)
+
+	createdView, err := view.CreateViewWithIOPropertiesAndRegistry(
+		ctx, c.name, identifier, schema, representation, nsIdent, loc, ioProps, props, c.ioRegistry,
+	)
 	if err != nil {
 		return err
 	}
@@ -1630,7 +1650,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 				err = collisionErr
 			}
 		}
-		loadFS := io.LoadFSFunc(c.props, metadataLocation)
+		loadFS := internal.LoadFSFuncWithRegistry(c.ioRegistry, ioProps, metadataLocation)
 		if cleanupErr := removeUncommittedMetadata(ctx, metadataLocation, loadFS); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
@@ -1703,7 +1723,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 	}
 
 	if metadataLocation != "" {
-		fs, err := io.LoadFS(ctx, c.props, metadataLocation)
+		fs, err := internal.LoadFSWithRegistry(ctx, c.ioRegistry, c.props, metadataLocation)
 		if err != nil {
 			return err
 		}
@@ -1785,7 +1805,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (vi
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchView, identifier)
 	}
 
-	loadedView, err := view.NewFromLocation(ctx, identifier, v.MetadataLocation.String, io.LoadFSFunc(c.props, v.MetadataLocation.String))
+	loadedView, err := view.NewFromLocation(ctx, identifier, v.MetadataLocation.String, internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, v.MetadataLocation.String))
 	if err != nil {
 		return nil, err
 	}

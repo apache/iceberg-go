@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/io"
 )
 
 const (
@@ -76,6 +77,8 @@ type HiveOptions struct {
 	URI       string
 	Warehouse string
 	props     iceberg.Properties
+
+	ioRegistry *io.Registry
 
 	// Lock configuration for atomic commits
 	LockMinWaitTime time.Duration
@@ -146,6 +149,12 @@ func durationFromProps(props iceberg.Properties, javaMsKey, legacyDurationKey st
 }
 
 type Option func(*HiveOptions)
+
+// WithIORegistry selects the FileIO factories used by this Hive catalog.
+// A nil registry keeps the process-wide default.
+func WithIORegistry(registry *io.Registry) Option {
+	return func(o *HiveOptions) { o.ioRegistry = registry }
+}
 
 // WithURI sets the Thrift URI for the Hive Metastore.
 func WithURI(uri string) Option {

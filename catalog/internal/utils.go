@@ -95,7 +95,20 @@ func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLo
 }
 
 func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nspropsFn GetNamespacePropsFn, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (table.StagedTable, error) {
-	return createStagedTable(ctx, catprops, nspropsFn, ident, "", sc, opts...)
+	return createStagedTable(ctx, catprops, nspropsFn, ident, "", sc, nil, opts...)
+}
+
+// CreateStagedTableWithRegistry creates a staged table with a catalog-scoped FileIO registry.
+func CreateStagedTableWithRegistry(
+	ctx context.Context,
+	catprops iceberg.Properties,
+	nspropsFn GetNamespacePropsFn,
+	ident table.Identifier,
+	sc *iceberg.Schema,
+	registry *icebergio.Registry,
+	opts ...catalog.CreateTableOpt,
+) (table.StagedTable, error) {
+	return createStagedTable(ctx, catprops, nspropsFn, ident, "", sc, registry, opts...)
 }
 
 // CreateStagedTableWithNamespaceKey creates a staged table using namespaceKey
@@ -110,7 +123,22 @@ func CreateStagedTableWithNamespaceKey(
 	sc *iceberg.Schema,
 	opts ...catalog.CreateTableOpt,
 ) (table.StagedTable, error) {
-	return createStagedTable(ctx, catprops, nspropsFn, ident, namespaceKey, sc, opts...)
+	return createStagedTable(ctx, catprops, nspropsFn, ident, namespaceKey, sc, nil, opts...)
+}
+
+// CreateStagedTableWithNamespaceKeyAndRegistry combines an explicit namespace
+// storage key with a catalog-scoped FileIO registry.
+func CreateStagedTableWithNamespaceKeyAndRegistry(
+	ctx context.Context,
+	catprops iceberg.Properties,
+	nspropsFn GetNamespacePropsFn,
+	ident table.Identifier,
+	namespaceKey string,
+	sc *iceberg.Schema,
+	registry *icebergio.Registry,
+	opts ...catalog.CreateTableOpt,
+) (table.StagedTable, error) {
+	return createStagedTable(ctx, catprops, nspropsFn, ident, namespaceKey, sc, registry, opts...)
 }
 
 func createStagedTable(
@@ -120,6 +148,7 @@ func createStagedTable(
 	ident table.Identifier,
 	namespaceKey string,
 	sc *iceberg.Schema,
+	registry *icebergio.Registry,
 	opts ...catalog.CreateTableOpt,
 ) (table.StagedTable, error) {
 	if len(ident) < 2 {
@@ -172,7 +201,7 @@ func createStagedTable(
 			ident,
 			metadata,
 			metadataLoc,
-			icebergio.LoadFSFunc(ioProps, metadataLoc),
+			LoadFSFuncWithRegistry(registry, ioProps, metadataLoc),
 			nil,
 		),
 	}, nil
@@ -282,6 +311,15 @@ func ValidateRequirements(ident table.Identifier, current table.Metadata, reqs [
 }
 
 func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
+	return updateAndStageTable(ctx, catprops, current, ident, reqs, updates, cat, nil)
+}
+
+// UpdateAndStageTableWithRegistry stages a commit using a catalog-scoped FileIO registry.
+func UpdateAndStageTableWithRegistry(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO, registry *icebergio.Registry) (*table.StagedTable, error) {
+	return updateAndStageTable(ctx, catprops, current, ident, reqs, updates, cat, registry)
+}
+
+func updateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO, registry *icebergio.Registry) (*table.StagedTable, error) {
 	var (
 		baseMeta        table.Metadata
 		currentMetadata table.Metadata
@@ -337,7 +375,7 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 			ident,
 			updated,
 			newLocation,
-			icebergio.LoadFSFunc(ioProps, newLocation),
+			LoadFSFuncWithRegistry(registry, ioProps, newLocation),
 			cat,
 		),
 	}, nil
