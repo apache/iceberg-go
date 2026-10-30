@@ -66,6 +66,10 @@ type changelogDeleteState struct {
 
 	addedCache  map[int64]*changelogDeleteIndex
 	beforeCache map[int64]*changelogDeleteIndex
+	// beforeEntries is each snapshot's delete set strictly before that
+	// snapshot. afterEntries is the set after the last timeline snapshot.
+	beforeEntries map[int64][]iceberg.ManifestEntry
+	afterEntries  []iceberg.ManifestEntry
 }
 
 func (s *IncrementalChangelogScan) planChangelogTasks(ctx context.Context, plan changelogTaskPlan) ([]plannedChangelogTask, error) {
@@ -258,7 +262,10 @@ func deleteContentManifests(manifests []iceberg.ManifestFile) []iceberg.Manifest
 
 // checkRemovedDeleteFiles reports an error when the snapshot summary claims
 // more removed delete files than the DELETED delete entries recorded under
-// that snapshot id. Entries must be the unfiltered delete-manifest contents.
+// that snapshot id. A snapshot summary without removed-delete-files passes
+// the guard; the guard only fires when the summary claims more removals than
+// the DELETED entries recorded. Entries must be the unfiltered
+// delete-manifest contents.
 func checkRemovedDeleteFiles(snapshot Snapshot, entries []iceberg.ManifestEntry) error {
 	if snapshot.Summary == nil || len(snapshot.Summary.Properties) == 0 {
 		return nil
@@ -340,14 +347,14 @@ func (s *IncrementalChangelogScan) planDeletedRowTasks(
 	if state == nil || !state.active {
 		return nil, nil
 	}
-	matcher, err := plan.scan.dataFileMatcher(plan.schema, plan.partitionFilters)
+	// Partition and metrics evaluators are constant for the scan, so a manifest
+	// pruned while it is opened can be reused for every later snapshot.
+	partitionFilter, metricsEval, err := plan.scan.changelogDataFilters(plan.schema, plan.partitionFilters)
 	if err != nil {
 		return nil, err
 	}
 
 	var tasks []plannedChangelogTask
-	// Manifest files are immutable, so entries decoded for one snapshot can be
-	// reused when a later snapshot carries the same manifest forward.
 	decodedManifests := make(map[string][]iceberg.ManifestEntry)
 	sequences := snapshotSequences(plan.scan.metadata)
 	for _, snapshot := range plan.snapshots {
@@ -380,9 +387,10 @@ func (s *IncrementalChangelogScan) planDeletedRowTasks(
 		// Each snapshot that adds deletes reads that snapshot's live data
 		// manifests. Equality deletes and position deletes without a referenced
 		// data file cannot be narrowed to one path, so those snapshots scan the
-		// manifests the partition filter keeps. Decoded entries are cached by
-		// manifest path across snapshots.
-		live, err := liveDataEntries(ctx, plan.fs, dataManifests, decodedManifests, sequences)
+		// manifests the partition filter keeps. Entries that fail the scan's
+		// partition or metrics evaluators are dropped while the manifest is
+		// opened, then cached by path.
+		live, err := liveDataEntries(ctx, plan.fs, dataManifests, decodedManifests, sequences, partitionFilter, metricsEval)
 		if err != nil {
 			return nil, err
 		}
@@ -398,13 +406,6 @@ func (s *IncrementalChangelogScan) planDeletedRowTasks(
 			}
 			seen[path] = struct{}{}
 
-			keep, err := matcher(entry.DataFile())
-			if err != nil {
-				return nil, err
-			}
-			if !keep {
-				continue
-			}
 			added, err := addedIndex.forDataFile(entry)
 			if err != nil {
 				return nil, fmt.Errorf("incremental changelog scan snapshot %d: %w", snapshot.SnapshotID, err)
@@ -493,33 +494,38 @@ func (st *changelogDeleteState) beforeIndex(snapshotID int64) (*changelogDeleteI
 }
 
 // entriesBefore returns delete-file entries that applied strictly before
-// snapshotID. Removals drop that delete identity from the running set. A
-// delete removed and added again in one snapshot stays live as the added entry.
+// snapshotID. Each snapshot's set is cached from the previous snapshot's
+// result: drop the deletes that snapshot removed, then append the deletes it
+// added. A delete removed and added again in one snapshot stays live as the
+// added entry. keepNewestDeletionVector runs on each result.
 func (st *changelogDeleteState) entriesBefore(snapshotID int64) []iceberg.ManifestEntry {
-	removed := make(map[string]struct{})
-	var accumulated []iceberg.ManifestEntry
-	for _, snapshot := range st.snapshots {
-		if snapshot.SnapshotID == snapshotID {
-			break
+	if st.beforeEntries == nil {
+		st.beforeEntries = make(map[int64][]iceberg.ManifestEntry, len(st.snapshots))
+		running := keepNewestDeletionVector(slices.Clone(st.preRange))
+		for _, snapshot := range st.snapshots {
+			st.beforeEntries[snapshot.SnapshotID] = running
+			running = nextDeleteEntries(running, st.added[snapshot.SnapshotID], st.removed[snapshot.SnapshotID])
 		}
-		currentRemoved := st.removed[snapshot.SnapshotID]
-		if len(currentRemoved) > 0 {
-			for key := range currentRemoved {
-				removed[key] = struct{}{}
-			}
-			accumulated = dropManifestEntries(accumulated, currentRemoved)
-		}
-		accumulated = append(accumulated, st.added[snapshot.SnapshotID]...)
+		st.afterEntries = running
+	}
+	if entries, ok := st.beforeEntries[snapshotID]; ok {
+		return entries
 	}
 
-	out := make([]iceberg.ManifestEntry, 0, len(st.preRange)+len(accumulated))
-	for _, entry := range st.preRange {
-		if _, gone := removed[deleteEntryKey(entry.DataFile())]; gone {
-			continue
-		}
-		out = append(out, entry)
+	return st.afterEntries
+}
+
+// nextDeleteEntries returns before with removed identities dropped and added
+// entries appended. The result does not alias before, so a cached set stays
+// intact when a later snapshot adds deletes.
+func nextDeleteEntries(before, added []iceberg.ManifestEntry, removed map[string]struct{}) []iceberg.ManifestEntry {
+	next := dropManifestEntries(before, removed)
+	if len(added) == 0 {
+		return keepNewestDeletionVector(next)
 	}
-	out = append(out, accumulated...)
+	out := make([]iceberg.ManifestEntry, len(next), len(next)+len(added))
+	copy(out, next)
+	out = append(out, added...)
 
 	return keepNewestDeletionVector(out)
 }
@@ -574,10 +580,12 @@ func buildChangelogDeleteIndex(entries []iceberg.ManifestEntry, specs partitionS
 	return &changelogDeleteIndex{pos: pos, dv: dv, eq: eq}, nil
 }
 
-func (scan *Scan) dataFileMatcher(
+// changelogDataFilters returns the partition and metrics evaluators applied
+// while a data manifest is opened. Both are constant for one scan.
+func (scan *Scan) changelogDataFilters(
 	schema *iceberg.Schema,
 	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
-) (func(iceberg.DataFile) (bool, error), error) {
+) (func(iceberg.DataFile) (bool, error), func(iceberg.DataFile) (bool, error), error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
 		schema,
 		scan.rowFilter,
@@ -585,24 +593,21 @@ func (scan *Scan) dataFileMatcher(
 		scan.options["include_empty_files"] == "true",
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
-
-	return func(file iceberg.DataFile) (bool, error) {
+	partitionFilter := func(file iceberg.DataFile) (bool, error) {
 		partEval, err := partitionEvaluators.Get(int(file.SpecID()))
 		if err != nil {
 			return false, fmt.Errorf("failed to build partition evaluator for spec %d: %w", file.SpecID(), err)
 		}
-		use, err := partEval(file)
-		if err != nil || !use {
-			return use, err
-		}
 
-		return metricsEval(file)
-	}, nil
+		return partEval(file)
+	}
+
+	return partitionFilter, metricsEval, nil
 }
 
 func liveDataEntries(
@@ -611,6 +616,7 @@ func liveDataEntries(
 	manifests []iceberg.ManifestFile,
 	decoded map[string][]iceberg.ManifestEntry,
 	sequences snapshotSequenceLookup,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 ) ([]iceberg.ManifestEntry, error) {
 	dataManifests := make([]iceberg.ManifestFile, 0, len(manifests))
 	for _, manifest := range manifests {
@@ -618,7 +624,7 @@ func liveDataEntries(
 			dataManifests = append(dataManifests, manifest)
 		}
 	}
-	entries, err := readCachedManifestEntries(ctx, fs, dataManifests, decoded)
+	entries, err := readCachedManifestEntries(ctx, fs, dataManifests, decoded, partitionFilter, metricsEval)
 	if err != nil {
 		return nil, err
 	}
@@ -765,12 +771,15 @@ func deleteEntryKey(file iceberg.DataFile) string {
 }
 
 // readCachedManifestEntries returns manifest entries, reusing entries already
-// decoded for the same manifest path. Manifest files are immutable.
+// decoded for the same manifest path. Manifest files are immutable, and the
+// partition and metrics evaluators do not change during the scan, so the
+// pruned entries stay valid for every snapshot that carries the manifest.
 func readCachedManifestEntries(
 	ctx context.Context,
 	fs io.IO,
 	manifests []iceberg.ManifestFile,
 	decoded map[string][]iceberg.ManifestEntry,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 ) ([]iceberg.ManifestEntry, error) {
 	if len(manifests) == 0 {
 		return nil, nil
@@ -784,7 +793,7 @@ func readCachedManifestEntries(
 		entries, ok := decoded[path]
 		if !ok {
 			var err error
-			entries, err = readManifestEntries(ctx, fs, []iceberg.ManifestFile{manifest}, false, false)
+			entries, err = openManifestWithOptions(fs, manifest, partitionFilter, metricsEval, false, false)
 			if err != nil {
 				return nil, err
 			}

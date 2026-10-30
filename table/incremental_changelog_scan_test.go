@@ -20,10 +20,19 @@ package table
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
@@ -1940,4 +1949,146 @@ func (io *countingOpenIO) Open(_ context.Context, name string) (iceio.File, erro
 	}
 
 	return io.IO.Open(context.Background(), name)
+}
+
+// TestIncrementalChangelogScanRebuildsExpiredParentFromRealWriters appends a
+// data file, adds a position delete with RowDelta, then replaces both through
+// the overwrite writer. Expiring the delete snapshot leaves the replace as
+// the first in-range snapshot, and planning rebuilds the position delete from
+// the DELETED entry that writer recorded.
+func TestIncrementalChangelogScanRebuildsExpiredParentFromRealWriters(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir, iceberg.Properties{
+		PropertyFormatVersion: "2",
+	})
+	require.NoError(t, err)
+	cat := &countingCatalog{metadata: meta}
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	tbl := New(Identifier{"db", "changelog-real-writer"}, meta, "", fsF, cat)
+
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, false, false)
+	require.NoError(t, err)
+	tbl, err = appendChangelogRows(ctx, tbl, arrowSchema, `[{"id": 1}]`)
+	require.NoError(t, err)
+	require.NotNil(t, tbl.CurrentSnapshot())
+
+	planned, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	dataFile := planned[0].File
+
+	posPath := filepath.Join(dir, "pos-del.parquet")
+	writeChangelogParquet(t, posPath, PositionalDeleteArrowSchema, fmt.Sprintf(`[{"file_path": %q, "pos": 0}]`, dataFile.FilePath()))
+	posInfo, err := os.Stat(posPath)
+	require.NoError(t, err)
+	posBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes,
+		posPath,
+		iceberg.ParquetFile,
+		nil, nil, nil,
+		1,
+		posInfo.Size(),
+	)
+	require.NoError(t, err)
+	posDelete := posBuilder.ReferencedDataFile(dataFile.FilePath()).Build()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	snapshotB := tbl.CurrentSnapshot().SnapshotID
+
+	planned, err = tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	require.NotEmpty(t, planned[0].DeleteFiles)
+
+	replacementPath := filepath.Join(dir, "replacement.parquet")
+	writeChangelogParquet(t, replacementPath, arrowSchema, `[{"id": 2}]`)
+	replacementInfo, err := os.Stat(replacementPath)
+	require.NoError(t, err)
+	replacementBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		replacementPath,
+		iceberg.ParquetFile,
+		nil, nil, nil,
+		1,
+		replacementInfo.Size(),
+	)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.ReplaceFiles(ctx,
+		[]iceberg.DataFile{planned[0].File},
+		[]iceberg.DataFile{replacementBuilder.Build()},
+		append([]iceberg.DataFile{}, planned[0].DeleteFiles...),
+		nil,
+	))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	snapshotC := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshotC)
+	require.Contains(t, snapshotC.Summary.Properties, removedDeleteFilesKey)
+
+	builder, err := MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshots([]int64{snapshotB}, false))
+	expired, err := builder.Build()
+	require.NoError(t, err)
+	tbl = New(tbl.Identifier(), expired, tbl.MetadataLocation(), fsF, cat)
+
+	tasks, err := tbl.NewIncrementalChangelogScan().FromSnapshotExclusive(snapshotB).PlanFiles(ctx)
+	require.NoError(t, err)
+
+	var deleted DeletedDataFileScanTask
+	found := false
+	for _, task := range tasks {
+		got, ok := task.(DeletedDataFileScanTask)
+		if !ok {
+			continue
+		}
+		found = true
+		deleted = got
+	}
+	require.True(t, found)
+	require.Equal(t, snapshotC.SnapshotID, deleted.CommitSnapshotID())
+	paths := make([]string, 0, len(deleted.ExistingDeletes()))
+	for _, file := range deleted.ExistingDeletes() {
+		paths = append(paths, file.FilePath())
+	}
+	require.Contains(t, paths, posPath)
+}
+
+func appendChangelogRows(ctx context.Context, tbl *Table, schema *arrow.Schema, jsonRows string) (*Table, error) {
+	batch, _, err := array.RecordFromJSON(memory.DefaultAllocator, schema, strings.NewReader(jsonRows))
+	if err != nil {
+		return nil, err
+	}
+	defer batch.Release()
+	rows := array.NewTableFromRecords(schema, []arrow.RecordBatch{batch})
+	defer rows.Release()
+	reader := array.NewTableReader(rows, rows.NumRows())
+	defer reader.Release()
+
+	return tbl.Append(ctx, reader, nil)
+}
+
+func writeChangelogParquet(t *testing.T, path string, schema *arrow.Schema, jsonData string) {
+	t.Helper()
+
+	batch, _, err := array.RecordFromJSON(memory.DefaultAllocator, schema, strings.NewReader(jsonData))
+	require.NoError(t, err)
+	defer batch.Release()
+
+	out, err := iceio.LocalFS{}.Create(context.Background(), path)
+	require.NoError(t, err)
+	defer out.Close()
+
+	rows := array.NewTableFromRecords(schema, []arrow.RecordBatch{batch})
+	defer rows.Release()
+	require.NoError(t, pqarrow.WriteTable(rows, out, batch.NumRows(), parquet.NewWriterProperties(), pqarrow.DefaultWriterProps()))
 }
