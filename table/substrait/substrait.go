@@ -53,9 +53,9 @@ func NewExtensionSet() exprs.ExtensionIDSet {
 }
 
 // ConvertExpr converts a bound expression to a Substrait expression so that it can
-// be utilized for computation. Case sensitivity is applied when binding; the third
-// argument is retained for API compatibility.
-func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, _ bool) (*expr.ExtensionRegistry, expr.Expression, error) {
+// be utilized for computation. Case sensitivity is applied when binding
+// the expression, before it is passed to ConvertExpr.
+func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression) (*expr.ExtensionRegistry, expr.Expression, error) {
 	base, err := ConvertSchema(schema)
 	if err != nil {
 		return nil, nil, err

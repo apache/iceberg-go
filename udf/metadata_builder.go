@@ -169,14 +169,14 @@ type MetadataBuilder struct {
 }
 
 // NewMetadataBuilder creates a builder for a new UDF's metadata.
-func NewMetadataBuilder() (*MetadataBuilder, error) {
+func NewMetadataBuilder() *MetadataBuilder {
 	return &MetadataBuilder{
 		props:           iceberg.Properties{},
 		definitions:     make([]*Definition, 0),
 		definitionLog:   make([]DefinitionLogEntry, 0),
 		definitionsByID: make(map[string]*Definition),
 		logTimestampMS:  -1,
-	}, nil
+	}
 }
 
 // MetadataBuilderFromBase creates a builder seeded with the state of an

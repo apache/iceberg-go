@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"testing"
@@ -185,7 +186,7 @@ func BenchmarkOpenManifestPartitionRejectsMostEntries(b *testing.B) {
 	}
 
 	fs := iceio.NewMemFS()
-	if err := fs.WriteFile(manifestPath, manifestBytes.Bytes()); err != nil {
+	if err := fs.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 

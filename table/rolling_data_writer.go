@@ -77,6 +77,11 @@ type writerFactory struct {
 	equalityFieldIDs []int
 	sortKeys         []compute.SortKey
 
+	// presorted marks the input as already globally sorted, so batches are
+	// not re-sorted and every file records sortOrderID.
+	presorted   bool
+	sortOrderID int
+
 	// Variant shredding: per-file inference over the first shredBufferRows rows.
 	shredEnabled    bool
 	shredBufferRows int
@@ -107,6 +112,18 @@ func withContentType(content iceberg.ManifestEntryContent) writerFactoryOption {
 func withFactoryEqualityFieldIDs(ids []int) writerFactoryOption {
 	return func(w *writerFactory) error {
 		w.equalityFieldIDs = ids
+
+		return nil
+	}
+}
+
+// withFactoryPresorted declares the input records globally sorted by the
+// sort order with id sortOrderID (UnsortedSortOrderID to make no claim).
+// Each rolled file holds a contiguous run of the input, so it is sorted too.
+func withFactoryPresorted(sortOrderID int) writerFactoryOption {
+	return func(w *writerFactory) error {
+		w.presorted = true
+		w.sortOrderID = sortOrderID
 
 		return nil
 	}
@@ -240,14 +257,14 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		f.variantFieldIDs = tblutils.VariantFieldIDsFromSchema(f.fileSchema)
 	}
 
-	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
+	f.statsCols, err = computeStatsPlan(f.fileSchema, metricsPropsFor(f.content, meta.props))
 	if err != nil {
 		stopCount()
 
 		return nil, err
 	}
 
-	if f.content == iceberg.EntryContentData && meta.defaultSortOrderID != UnsortedSortOrderID {
+	if f.content == iceberg.EntryContentData && !f.presorted && meta.defaultSortOrderID != UnsortedSortOrderID {
 		sortOrder, err := meta.GetSortOrderByID(meta.defaultSortOrderID)
 		if err != nil {
 			stopCount()
@@ -303,7 +320,8 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		filePath = w.locProvider.NewDataLocation(fileName)
 	}
 
-	// No SortOrderID: batches are sorted only individually (see resolveSortKeys).
+	// SortOrderID is set only for presorted input: otherwise batches are sorted
+	// individually (see resolveSortKeys), which does not sort the whole file.
 	// FileSchema stays logical; only arrowSchema carries the shredded layout.
 	return w.format.NewFileWriter(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
@@ -316,6 +334,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		Spec:             w.currentSpec,
 		Content:          w.content,
 		EqualityFieldIDs: w.equalityFieldIDs,
+		SortOrderID:      w.sortOrderID,
 	}, arrowSchema)
 }
 

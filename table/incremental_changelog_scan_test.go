@@ -98,7 +98,7 @@ func TestOpenManifestWithOptionsCanDiscardExistingEntries(t *testing.T) {
 	var buf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &buf, 2, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(manifestPath, buf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, buf.Bytes()))
 
 	partitionCalls := 0
 	metricsCalls := 0
@@ -541,7 +541,7 @@ func incrementalChangelogTestTable(t *testing.T) *Table {
 		var buf bytes.Buffer
 		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
 		return manifest
 	}
@@ -550,9 +550,9 @@ func incrementalChangelogTestTable(t *testing.T) *Table {
 		sequenceNumber := snapshotID
 		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil,
 			&sequenceNumber, 0, manifests))
-		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
-		listFile, err := fs.Open(path)
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		list, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -641,7 +641,7 @@ func incrementalChangelogManifestRewriteTable(t *testing.T) *Table {
 		var buf bytes.Buffer
 		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
 		return manifest
 	}
@@ -650,9 +650,9 @@ func incrementalChangelogManifestRewriteTable(t *testing.T) *Table {
 		sequenceNumber := snapshotID
 		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil,
 			&sequenceNumber, 0, manifests))
-		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
-		listFile, err := fs.Open(path)
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		list, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -741,7 +741,7 @@ func incrementalChangelogDeleteManifestTable(t *testing.T) *Table {
 		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID,
 			[]iceberg.ManifestEntry{entry(iceberg.EntryStatusADDED, snapshotID, snapshotID, file)})
 		require.NoError(t, err)
-		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
 		return manifest
 	}
@@ -750,9 +750,9 @@ func incrementalChangelogDeleteManifestTable(t *testing.T) *Table {
 		sequenceNumber := snapshotID
 		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil,
 			&sequenceNumber, 0, manifests))
-		require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
-		listFile, err := fs.Open(path)
+		listFile, err := fs.Open(context.Background(), path)
 		require.NoError(t, err)
 		list, err := iceberg.ReadManifestList(listFile)
 		require.NoError(t, err)
@@ -779,7 +779,7 @@ func incrementalChangelogDeleteManifestTable(t *testing.T) *Table {
 	deleteManifest, err := writer.ToManifestFile(deleteManifestPath, int64(deleteManifestBuf.Len()),
 		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(deleteManifestPath, deleteManifestBuf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), deleteManifestPath, deleteManifestBuf.Bytes()))
 
 	listTwoPath := "mem://default/changelog-delete/metadata/snap-2.avro"
 	listTwo := writeManifestList(listTwoPath, 2, append(listOne, deleteManifest))
@@ -1516,7 +1516,7 @@ func writeChangelogDataManifest(
 	var buf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(path, &buf, version, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
 	return manifest
 }
@@ -1551,7 +1551,7 @@ func writeChangelogDeleteManifest(
 	manifest, err := writer.ToManifestFile(path, int64(buf.Len()),
 		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
 	return manifest
 }
@@ -1569,8 +1569,8 @@ func writeChangelogManifestList(
 	var buf bytes.Buffer
 	sequenceNumber := snapshotID
 	require.NoError(t, iceberg.WriteManifestList(version, &buf, snapshotID, nil, &sequenceNumber, 0, manifests))
-	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
-	listFile, err := fs.Open(path)
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
+	listFile, err := fs.Open(context.Background(), path)
 	require.NoError(t, err)
 	list, err := iceberg.ReadManifestList(listFile)
 	require.NoError(t, err)
@@ -1585,11 +1585,11 @@ type countingOpenIO struct {
 	afterOpen func()
 }
 
-func (io *countingOpenIO) Open(name string) (iceio.File, error) {
+func (io *countingOpenIO) Open(_ context.Context, name string) (iceio.File, error) {
 	io.opens.Add(1)
 	if io.afterOpen != nil {
 		io.afterOpen()
 	}
 
-	return io.IO.Open(name)
+	return io.IO.Open(context.Background(), name)
 }

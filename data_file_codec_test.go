@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"fmt"
 	"reflect"
 	"strconv"
 	"sync"
@@ -95,6 +96,90 @@ func TestDataFileCodecWithDroppedPartitionSource(t *testing.T) {
 	require.Equal(t, map[int]any{1000: nil, 1001: int32(3)}, decoded.Partition())
 }
 
+// TestMarshalAvroEntryOmitsDistinctCounts checks that the data_file schema the
+// entry codec encodes with has no distinct_counts (field 111), which the spec
+// deprecates in every version (apache/iceberg#12182). The encoder and decoder
+// share this schema, so a round trip alone could not show the field leaking;
+// strict readers such as PyIceberg reject manifests that emit it.
+func TestMarshalAvroEntryOmitsDistinctCounts(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			spec, schema, _ := fullyPopulatedDataFileForCodec(t, version)
+			s, _, err := manifestEntrySchemaFor(spec, schema, version)
+			require.NoError(t, err)
+
+			root := s.Root()
+			found := false
+			for _, field := range root.Fields {
+				if field.Name != "data_file" {
+					continue
+				}
+				found = true
+				for _, dfField := range field.Type.Fields {
+					require.NotEqual(t, "distinct_counts", dfField.Name)
+					require.NotEqual(t, 111, dfField.Props["field-id"])
+				}
+			}
+			require.True(t, found, "data_file field not found on manifest_entry v%d schema", version)
+		})
+	}
+}
+
+func TestUnmarshalAvroDataFileEntryNormalizesFileFormat(t *testing.T) {
+	spec := NewPartitionSpec()
+	schema := NewSchema(0)
+
+	const path = "s3://bucket/table/data.parquet"
+
+	tests := []struct {
+		name      string
+		content   ManifestEntryContent
+		written   FileFormat
+		expected  FileFormat
+		expectErr bool
+	}{
+		{name: "spec lowercase", written: "parquet", expected: ParquetFile},
+		{name: "mixed case", written: "Parquet", expected: ParquetFile},
+		{name: "uppercase", written: ParquetFile, expected: ParquetFile},
+		{name: "lowercase avro", written: "avro", expected: AvroFile},
+		{name: "lowercase orc", written: "orc", expected: OrcFile},
+		{
+			name: "lowercase puffin in delete entry", content: EntryContentPosDeletes,
+			written: "puffin", expected: PuffinFile,
+		},
+		{name: "unknown format", written: "csv", expectErr: true},
+		{name: "empty format", written: "", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := tt.content
+			if content == 0 {
+				content = EntryContentData
+			}
+			builder, err := NewDataFileBuilder(spec, content,
+				path, ParquetFile, nil, nil, nil, 1, 1024)
+			require.NoError(t, err)
+			source := builder.Build().(*dataFile)
+			source.Format = tt.written
+
+			encoded, err := source.MarshalAvroEntry(spec, schema, 2)
+			require.NoError(t, err)
+
+			decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, 2)
+			if tt.expectErr {
+				require.EqualError(t, err, fmt.Sprintf(
+					"iceberg: unmarshalAvroDataFileEntry: data file %q: unknown file format: %s",
+					path, tt.written))
+
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, decoded.FileFormat())
+		})
+	}
+}
+
 // TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes
 // guards against the cache-key collision that would occur if the cache
 // were keyed only by spec.ID(). Two tables can both use
@@ -132,35 +217,89 @@ func TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes(t 
 }
 
 func TestMarshalAvroEntryDoesNotMutateAnyAvroField(t *testing.T) {
-	spec, schema, df := fullyPopulatedDataFileForCodec(t, 2)
-	impl := df.(*dataFile)
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			spec, schema, df := fullyPopulatedDataFileForCodec(t, version)
+			impl := df.(*dataFile)
 
-	before := snapshotAvroFields(impl)
-	_, err := impl.MarshalAvroEntry(spec, schema, 2)
-	require.NoError(t, err)
-	after := snapshotAvroFields(impl)
+			before := snapshotAvroFields(impl)
+			_, err := impl.MarshalAvroEntry(spec, schema, version)
+			require.NoError(t, err)
+			after := snapshotAvroFields(impl)
 
-	require.Equal(t, before, after,
-		"MarshalAvroEntry must not mutate any avro-tagged field of the source DataFile, "+
-			"including pointer-typed fields whose backing storage is shared with the clone")
+			require.Equal(t, before, after,
+				"MarshalAvroEntry must not mutate any avro-tagged field of the source DataFile, "+
+					"including pointer-typed fields whose backing storage is shared with the clone")
+		})
+	}
 }
 
-func TestDataFileAvroFieldIndexesCoverEveryAvroField(t *testing.T) {
+func TestCloneDataFileAvroFieldsCopiesOnlyAvroFields(t *testing.T) {
+	src := &dataFile{}
 	typ := reflect.TypeFor[dataFile]()
-	want := make([]int, 0, typ.NumField())
+	srcVal := reflect.ValueOf(src).Elem()
+
+	// Give every tagged field a nonzero value, including fields added later.
 	for i := range typ.NumField() {
-		if _, ok := typ.Field(i).Tag.Lookup("avro"); ok {
-			want = append(want, i)
+		field := typ.Field(i)
+		if _, tagged := field.Tag.Lookup("avro"); !tagged {
+			continue
+		}
+
+		value := srcVal.Field(i)
+		switch value.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			value.SetInt(17)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			value.SetUint(17)
+		case reflect.String:
+			value.SetString("sentinel")
+		case reflect.Map:
+			value.Set(reflect.MakeMap(value.Type()))
+		case reflect.Pointer:
+			value.Set(reflect.New(value.Type().Elem()))
+		default:
+			t.Fatalf("unhandled Avro field %s of kind %s", field.Name, value.Kind())
 		}
 	}
 
-	require.Equal(t, want, dataFileAvroFieldIndexes,
-		"the precomputed clone indexes must track every avro-tagged dataFile field")
+	// The clone must not carry state from lazily initialized source data.
+	src.projected = true
+	src.specID = 42
+	src.fieldNameToID = map[string]int{"field": 1}
+	src.initPartition.Do(func() {})
+	src.initColumnStats.Do(func() {})
+
+	cloneVal := reflect.ValueOf(cloneDataFileAvroFields(src)).Elem()
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if _, tagged := field.Tag.Lookup("avro"); tagged {
+			source := srcVal.Field(i)
+			cloned := cloneVal.Field(i)
+			require.Equal(t, source.Interface(), cloned.Interface(),
+				"Avro field %s must be copied", field.Name)
+			switch source.Kind() {
+			case reflect.Pointer:
+				require.Same(t, source.Interface(), cloned.Interface(),
+					"pointer-typed Avro field %s must be shallow-copied", field.Name)
+			case reflect.Map:
+				// Mutating the source map must be visible through the clone.
+				// This detects accidental deep copies in this hot path.
+				key := reflect.Zero(source.Type().Key())
+				source.SetMapIndex(key, reflect.Zero(source.Type().Elem()))
+				require.True(t, cloned.MapIndex(key).IsValid(),
+					"map-typed Avro field %s must be shallow-copied", field.Name)
+			}
+		} else {
+			require.True(t, cloneVal.Field(i).IsZero(),
+				"internal field %s must be reset", field.Name)
+		}
+	}
 }
 
 func TestMarshalAvroEntryDecimalPartitionRoundTrip(t *testing.T) {
 	schema := NewSchema(0,
-		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(10, 2)},
+		NestedField{ID: 1, Name: "price", Type: MustDecimalTypeOf(10, 2)},
 	)
 	spec := NewPartitionSpecID(1,
 		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "price", Transform: IdentityTransform{}},
@@ -292,13 +431,6 @@ func fullyPopulatedDataFileForCodec(t testing.TB, version int) (PartitionSpec, *
 		SplitOffsets([]int64{0, 4096}).
 		SortOrderID(0).
 		KeyMetadata([]byte("kms-key-1"))
-	if version < 3 {
-		// distinct_counts is deprecated in the spec for all versions
-		// (apache/iceberg#12182); the fixture sets it to cover the
-		// read-compatibility round-trip path for legacy manifests, not
-		// to model what a new DataFile should carry.
-		builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128})
-	}
 	if version >= 2 {
 		builder.EqualityFieldIDs([]int{1})
 	}
@@ -309,7 +441,16 @@ func fullyPopulatedDataFileForCodec(t testing.TB, version int) (PartitionSpec, *
 			ContentSizeInBytes(2048)
 	}
 
-	return spec, schema, builder.Build()
+	df := builder.Build()
+	if version < 3 {
+		// distinct_counts is deprecated in the spec for all versions
+		// (apache/iceberg#12182) and has no public setter. The fixture sets
+		// the Avro field directly to cover the read-compatibility path for
+		// legacy manifests, not to model what a new DataFile should carry.
+		df.(*dataFile).DistinctCounts = mapToAvroColMap(map[int]int64{1: 64, 2: 128})
+	}
+
+	return spec, schema, df
 }
 
 var (
@@ -360,8 +501,8 @@ func TestManifestEntrySchemaForMatchesPartitionAvroShape(t *testing.T) {
 		UUIDType{},
 		BooleanType{},
 		BinaryType{},
-		FixedTypeOf(8), FixedTypeOf(16),
-		DecimalTypeOf(10, 2), DecimalTypeOf(11, 2), DecimalTypeOf(10, 3),
+		MustFixedTypeOf(8), MustFixedTypeOf(16),
+		MustDecimalTypeOf(10, 2), MustDecimalTypeOf(11, 2), MustDecimalTypeOf(10, 3),
 		UnknownType{},
 	}
 	for _, version := range []int{1, 2, 3} {

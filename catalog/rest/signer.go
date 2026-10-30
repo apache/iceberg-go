@@ -102,7 +102,7 @@ func lookupSigner(name string) (SignerFactory, bool) {
 //     bypasses the sigv4-enabled / signing-region / signing-name settings and any
 //     server-provided overrides.
 //   - Otherwise, when SigV4 is enabled (WithSigV4 / WithSigV4RegionSvc or the
-//     rest.sigv4-enabled property), a WithSignerFactory (e.g. sigv4.WithAwsConfig)
+//     rest.sigv4-enabled property), a WithSignerFactory (e.g. sigv4.WithAWSConfig)
 //     builds the signer if one was supplied, else the registered "sigv4" backend
 //     does. Both receive the resolved region/service, which by this point already
 //     include any /v1/config overrides fetchConfig folded into opts.

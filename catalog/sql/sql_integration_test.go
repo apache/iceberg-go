@@ -36,6 +36,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -237,7 +238,7 @@ func (s *SQLIntegrationSuite) TestCreateView() {
 	// Create a view
 	viewSQL := fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table")
 
-	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, viewSQL, iceberg.Properties{"foobar": "baz"})
+	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, view.Representation{SQL: viewSQL, Dialect: "spark"}, iceberg.Properties{"foobar": "baz"})
 	s.Require().NoError(err)
 
 	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
@@ -287,17 +288,17 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 
 	fs, err := tbl.FS(s.ctx)
 	s.Require().NoError(err)
-	fw, err := fs.(io.WriteFileIO).Create(pqfile)
+	fw, err := fs.(io.WriteFileIO).Create(context.Background(), pqfile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
 	defer func(fs io.IO, name string) {
-		err = fs.Remove(name)
+		err = fs.Remove(s.ctx, name)
 		s.Require().NoError(err)
 	}(fs, pqfile)
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
+	s.Require().NoError(txn.AddDataFilesByPath(s.ctx, []string{pqfile}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 

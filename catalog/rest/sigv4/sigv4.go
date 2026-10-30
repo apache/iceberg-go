@@ -28,7 +28,7 @@
 //
 //	cat, err := rest.NewCatalog(ctx, "c", uri, rest.WithSigV4RegionSvc("us-east-1", "s3tables"))
 //
-// To sign with an explicit aws.Config, pass sigv4.WithAwsConfig alongside
+// To sign with an explicit aws.Config, pass sigv4.WithAWSConfig alongside
 // WithSigV4 / WithSigV4RegionSvc (no blank import needed); the option supplies
 // the config while those options still drive the signing region and service.
 package sigv4
@@ -101,7 +101,7 @@ func init() {
 // credential chain, and an ErrIncompleteStaticCredentials error when the chosen
 // namespace is incomplete.
 //
-// An explicit aws.Config supplied via WithAwsConfig bypasses this: that path
+// An explicit aws.Config supplied via WithAWSConfig bypasses this: that path
 // already fully specifies the credentials, so it never consults the properties.
 func staticCredsFromProps(props iceberg.Properties) (aws.CredentialsProvider, error) {
 	namespaces := [][3]string{
@@ -205,7 +205,7 @@ func (s *signer) SignRequest(r *http.Request) error {
 	return s.httpSigner.SignHTTP(r.Context(), creds, r, payloadHash, s.service, s.cfg.Region, time.Now())
 }
 
-// WithAwsConfig returns a rest.Option that signs catalog requests with AWS
+// WithAWSConfig returns a rest.Option that signs catalog requests with AWS
 // SigV4 using the supplied aws.Config, without consulting the AWS default
 // credential chain. It replaces the former rest.WithAwsConfig, whose AWS SDK
 // dependency now lives only in this optional sub-package.
@@ -216,7 +216,7 @@ func (s *signer) SignRequest(r *http.Request) error {
 // values, plus any server-provided /v1/config overrides, are applied on top of
 // cfg when the signer is built (a non-empty region overrides cfg.Region; an
 // empty service defaults to "execute-api").
-func WithAwsConfig(cfg aws.Config) rest.Option {
+func WithAWSConfig(cfg aws.Config) rest.Option {
 	return rest.WithSignerFactory(func(_ context.Context, sc rest.SignerConfig) (rest.RequestSigner, error) {
 		return buildSigner(cfg, sc), nil
 	})

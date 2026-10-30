@@ -47,7 +47,7 @@ func writePositionDeleteManifestList(
 	var buf bytes.Buffer
 	require.NoError(t, iceberg.WriteManifestList(
 		2, &buf, snapshotID, parentSnapshotID, &sequenceNumber, 0, manifests))
-	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 }
 
 func TestInspectPositionDeletesV3MixesParquetAndDeletionVector(t *testing.T) {
@@ -249,7 +249,7 @@ func TestPositionDeletesPartitionTypeAvoidsCurrentSchemaFieldIDs(t *testing.T) {
 	require.Equal(t, map[int]int{1000: 3}, partitionIDs)
 	require.Equal(t, 3, partitionType.FieldList[0].ID)
 	require.NotPanics(t, func() {
-		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.Version())
+		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.FormatVersion())
 	})
 }
 
@@ -321,6 +321,6 @@ func TestPositionDeletesPartitionTypeFallsBackWhenFieldIDsReachLimit(t *testing.
 		require.LessOrEqual(t, field.ID, math.MaxInt32)
 	}
 	require.NotPanics(t, func() {
-		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.Version())
+		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.FormatVersion())
 	})
 }

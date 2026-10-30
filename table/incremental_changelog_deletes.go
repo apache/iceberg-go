@@ -650,8 +650,8 @@ func liveEntriesByKey(entries []iceberg.ManifestEntry, key func(iceberg.Manifest
 // When the snapshot sequence numbers are equal, or either snapshot is unknown,
 // a deletion wins.
 func changelogEntrySupersedes(next, current iceberg.ManifestEntry, sequences snapshotSequenceLookup) bool {
-	if next.SequenceNum() != current.SequenceNum() {
-		return next.SequenceNum() > current.SequenceNum()
+	if next.DataSequenceNumber() != current.DataSequenceNumber() {
+		return next.DataSequenceNumber() > current.DataSequenceNumber()
 	}
 	if sequences != nil {
 		nextSequence, nextOK := sequences(next.SnapshotID())

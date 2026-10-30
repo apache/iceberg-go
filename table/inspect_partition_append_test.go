@@ -126,7 +126,7 @@ func TestInspectPartitionBuilderAppendsTypedAndFallbackValues(t *testing.T) {
 		},
 		{
 			name:  "decimal scalar fallback",
-			typ:   iceberg.DecimalTypeOf(10, 2),
+			typ:   iceberg.MustDecimalTypeOf(10, 2),
 			value: iceberg.DecimalLiteral{Val: decimal128.FromI64(123), Scale: 2},
 			check: func(t *testing.T, value arrow.Array) {
 				require.Equal(t, decimal128.FromI64(123), value.(*array.Decimal128).Value(0))
@@ -134,7 +134,7 @@ func TestInspectPartitionBuilderAppendsTypedAndFallbackValues(t *testing.T) {
 		},
 		{
 			name:  "fixed scalar fallback",
-			typ:   iceberg.FixedTypeOf(3),
+			typ:   iceberg.MustFixedTypeOf(3),
 			value: []byte("abc"),
 			check: func(t *testing.T, value arrow.Array) {
 				require.Equal(t, []byte("abc"), value.(*array.FixedSizeBinary).Value(0))
@@ -181,7 +181,7 @@ func TestInspectPartitionBuilderScalarFallbackPreservesValidation(t *testing.T) 
 		{name: "compatible integer string", typ: iceberg.PrimitiveTypes.Int32, value: "42"},
 		{name: "invalid integer string", typ: iceberg.PrimitiveTypes.Int32, value: "not-an-int", wantErr: "partition field \"value\": strconv.ParseInt"},
 		{name: "wrong date value", typ: iceberg.PrimitiveTypes.Date, value: int64(1), wantErr: "partition field \"value\": unsupported date"},
-		{name: "wrong fixed width", typ: iceberg.FixedTypeOf(2), value: []byte("x"), wantErr: "invalid scalar value of len"},
+		{name: "wrong fixed width", typ: iceberg.MustFixedTypeOf(2), value: []byte("x"), wantErr: "invalid scalar value of len"},
 	}
 
 	for _, tt := range tests {

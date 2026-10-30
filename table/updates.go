@@ -505,12 +505,8 @@ type addSnapshotUpdate struct {
 	// concurrent writers since the original build.
 	rebuildManifestList func(ctx context.Context, freshMeta Metadata, freshParent *Snapshot, fio io.WriteFileIO, attempt int) (*Snapshot, error)
 
-	// supersededSource, when non-nil, is the producer whose merged manifests a
-	// rebuild on a prior attempt wrote and a later attempt replaced. doCommit
-	// reads its accumulated paths and removes them once the commit resolves.
-	// Distinct from the manifest-LIST orphans rebuildSnapshotUpdates returns:
-	// these are the inner data manifests a rewrite re-merges on every retry.
-	supersededSource supersededAccumulator
+	// written records the manifests the producer wrote for this snapshot.
+	written *writtenManifests
 }
 
 // NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.
@@ -803,7 +799,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 	var res error
 
 	for _, f := range paths {
-		if err := prefs.Remove(f); err != nil {
+		if err := prefs.Remove(ctx, f); err != nil {
 			res = errors.Join(res, err)
 		}
 	}

@@ -231,7 +231,7 @@ func TestUnboundSortOrderUnmarshalAcceptsZeroSourceID(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder))
 	require.Equal(t, 1, sortOrder.Len())
 	for _, field := range sortOrder.Fields() {
-		assert.Equal(t, 0, field.SourceID())
+		assert.Equal(t, 0, field.FirstSourceID())
 	}
 
 	roundTripped, err := json.Marshal(sortOrder)
@@ -631,7 +631,7 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		var field table.SortField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Equal(t, 2, field.SourceID())
+		assert.Equal(t, 2, field.FirstSourceID())
 		assert.Equal(t, []int{2, 3}, field.SourceIDs)
 	})
 
@@ -700,7 +700,7 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		var decoded table.SortField
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		assert.Equal(t, 2, decoded.SourceID())
+		assert.Equal(t, 2, decoded.FirstSourceID())
 		assert.Equal(t, []int{2, 3}, decoded.SourceIDs)
 	})
 
@@ -746,4 +746,21 @@ func TestSortFieldMarshalAppliesDefaultsWithoutMutatingReceiver(t *testing.T) {
 
 	assert.Empty(t, field.Direction)
 	assert.Empty(t, field.NullOrder)
+}
+
+func TestSortFieldFirstSourceID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sourceIDs []int
+		want      int
+	}{
+		{name: "empty", sourceIDs: nil, want: 0},
+		{name: "single", sourceIDs: []int{7}, want: 7},
+		{name: "multiple", sourceIDs: []int{7, 9}, want: 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			field := table.SortField{SourceIDs: tc.sourceIDs}
+			assert.Equal(t, tc.want, field.FirstSourceID())
+		})
+	}
 }

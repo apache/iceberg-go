@@ -177,7 +177,7 @@ func PartitionRecordValue(field iceberg.PartitionField, val iceberg.Literal, sch
 		return ret, nil
 	}
 
-	f, ok := schema.FindFieldByIDRef(field.SourceID(), iceberginternal.SchemaRef{})
+	f, ok := schema.FindFieldByIDRef(field.FirstSourceID(), iceberginternal.SchemaRef{})
 	if !ok {
 		return ret, fmt.Errorf("%w: could not find source field in schema for %s",
 			iceberg.ErrInvalidSchema, field.String())
@@ -239,7 +239,7 @@ type DataFileStatistics struct {
 }
 
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
-	agg, ok := d.ColAggs[field.SourceID()]
+	agg, ok := d.ColAggs[field.FirstSourceID()]
 	if !ok {
 		return nil
 	}
@@ -248,7 +248,7 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 		return nil
 	}
 
-	sourceField, ok := sc.FindFieldByIDRef(field.SourceID(), iceberginternal.SchemaRef{})
+	sourceField, ok := sc.FindFieldByIDRef(field.FirstSourceID(), iceberginternal.SchemaRef{})
 	if !ok {
 		panic(fmt.Errorf("%w: could not find source field in schema for %s",
 			iceberg.ErrInvalidSchema, field.String()))
@@ -312,7 +312,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		fieldIDToPartitionData = make(map[int]any, opts.Spec.NumFields())
 		for _, field := range opts.Spec.Fields() {
 			sourceField, sourceFieldFound := opts.Schema.FindFieldByIDRef(
-				field.SourceID(), iceberginternal.SchemaRef{})
+				field.FirstSourceID(), iceberginternal.SchemaRef{})
 			partitionVal := opts.PartitionValues[field.FieldID]
 			switch {
 			case partitionVal != nil:
@@ -320,7 +320,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 				fieldIDToPartitionData[field.FieldID] = partitionVal
 			case field.Transform.PreservesOrder() && sourceFieldFound:
 				fieldIDToPartitionData[field.FieldID] = d.partitionValueWithSourceType(
-					field, d.ColAggs[field.SourceID()], sourceField.Type)
+					field, d.ColAggs[field.FirstSourceID()], sourceField.Type)
 			case field.Transform.PreservesOrder():
 				// Preserve the existing error path for an invalid schema. This branch
 				// is not part of the valid hot path because sourceFieldFound is false.

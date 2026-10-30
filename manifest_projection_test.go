@@ -19,7 +19,9 @@ package iceberg
 
 import (
 	"bytes"
+	"context"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -33,10 +35,12 @@ func TestManifestEntryProjectionWhitelistCoversDataFileSchema(t *testing.T) {
 		ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true,
 	})
 	dataFileType := reflect.TypeFor[dataFile]()
-	dataFileFields := make(map[string]struct{}, len(dataFileAvroFieldIndexes))
-	for _, index := range dataFileAvroFieldIndexes {
-		name := dataFileType.Field(index).Tag.Get("avro")
-		dataFileFields[name] = struct{}{}
+	dataFileFields := make(map[string]struct{})
+	for field := range dataFileType.Fields() {
+		if name, ok := field.Tag.Lookup("avro"); ok {
+			name, _, _ = strings.Cut(name, ",")
+			dataFileFields[name] = struct{}{}
+		}
 	}
 	optionalFields := map[string]struct{}{
 		"column_sizes":      {},
@@ -148,8 +152,8 @@ func TestManifestEntryProjectionDropsTransientStats(t *testing.T) {
 
 	assert.Equal(t, entry.Status(), projected.Status())
 	assert.Equal(t, entry.SnapshotID(), projected.SnapshotID())
-	assert.Equal(t, entry.SequenceNum(), projected.SequenceNum())
-	assert.Equal(t, entry.FileSequenceNum(), projected.FileSequenceNum())
+	assert.Equal(t, entry.DataSequenceNumber(), projected.DataSequenceNumber())
+	assert.Equal(t, entry.FileSequenceNumber(), projected.FileSequenceNumber())
 	assert.Equal(t, "data.parquet", projected.DataFile().FilePath())
 	assert.Equal(t, int64(3), projected.DataFile().Count())
 	assert.Equal(t, int64(128), projected.DataFile().FileSizeBytes())
@@ -213,7 +217,6 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			)
 			require.NoError(t, err)
 			builder.
-				BlockSizeInBytes(64 * 1024).
 				ColumnSizes(map[int]int64{1: 64}).
 				ValueCounts(map[int]int64{1: 1}).
 				NullValueCounts(map[int]int64{1: 0}).
@@ -265,7 +268,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			assert.Empty(t, projected.DataFile().ValueCounts())
 			assert.Empty(t, projected.DataFile().LowerBoundValues())
 			if tt.version == 1 {
-				assert.Equal(t, int64(64*1024), projected.DataFile().(*dataFile).BlockSizeInBytes)
+				assert.Equal(t, int64(64*1024*1024), projected.DataFile().(*dataFile).BlockSizeInBytes)
 			}
 			if tt.entryContent == EntryContentPosDeletes && tt.format == PuffinFile {
 				require.NotNil(t, projected.DataFile().ReferencedDataFile())
@@ -294,9 +297,13 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			require.NoError(t, err)
 			require.NoError(t, fullReader.Close())
 			assert.Equal(t, map[int]int64{1: 64}, full.DataFile().ColumnSizes())
+			if tt.version == 1 {
+				// An unset builder field must serialize using the v1 schema default.
+				assert.Equal(t, int64(64*1024*1024), full.DataFile().(*dataFile).BlockSizeInBytes)
+			}
 
 			fs := iceio.NewMemFS()
-			require.NoError(t, fs.WriteFile(manifest.FilePath(), manifestBytes.Bytes()))
+			require.NoError(t, fs.WriteFile(context.Background(), manifest.FilePath(), manifestBytes.Bytes()))
 			projectedEntries := map[string]ManifestEntry{
 				"reader":                    projected,
 				"reader with pruning stats": withStats,

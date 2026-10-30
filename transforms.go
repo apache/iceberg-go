@@ -217,9 +217,8 @@ type Transform interface {
 	Apply(Optional[Literal]) Optional[Literal]
 	Project(name string, pred BoundPredicate) (UnboundPredicate, error)
 
-	ToHumanStrType(typ Type, val any) string
-	// Deprecated: ToHumanStr cannot recover source-type information; use ToHumanStrType instead.
-	ToHumanStr(any) string
+	// ToHumanString formats a partition value using its transformed result type.
+	ToHumanString(typ Type, val any) string
 }
 
 // IdentityTransform uses the identity function, performing no transformation
@@ -259,32 +258,9 @@ func (IdentityTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return value
 }
 
-func (IdentityTransform) ToHumanStr(val any) string {
-	switch v := val.(type) {
-	case nil:
-		return "null"
-	case string:
-		return v
-	case []byte:
-		return base64.StdEncoding.EncodeToString(v)
-	case bool:
-		return strconv.FormatBool(v)
-	case Date:
-		return v.ToTime().Format("2006-01-02")
-	case Time:
-		return v.ToTime().Format("15:04:05.999999")
-	case Timestamp:
-		return v.ToTime().Format("2006-01-02T15:04:05.999999")
-	case TimestampNano:
-		return v.ToTime().Format("2006-01-02T15:04:05.999999999")
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-// ToHumanStrType is the type-aware form invoked by PartitionToPath.
-// It appends "+00:00" for TimestampTz/TimestampTzNs — information the value-only ToHumanStr(any) cannot recover by design
-func (t IdentityTransform) ToHumanStrType(typ Type, val any) string {
+// ToHumanString formats identity partition values, including UTC offsets for
+// timestamp-with-zone source types.
+func (IdentityTransform) ToHumanString(typ Type, val any) string {
 	if val == nil {
 		return "null"
 	}
@@ -307,7 +283,24 @@ func (t IdentityTransform) ToHumanStrType(typ Type, val any) string {
 		}
 	}
 
-	return t.ToHumanStr(val)
+	switch v := val.(type) {
+	case string:
+		return v
+	case []byte:
+		return base64.StdEncoding.EncodeToString(v)
+	case bool:
+		return strconv.FormatBool(v)
+	case Date:
+		return v.ToTime().Format("2006-01-02")
+	case Time:
+		return v.ToTime().Format("15:04:05.999999")
+	case Timestamp:
+		return v.ToTime().Format("2006-01-02T15:04:05.999999")
+	case TimestampNano:
+		return v.ToTime().Format("2006-01-02T15:04:05.999999999")
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func (t IdentityTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -355,9 +348,7 @@ func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
 
-func (VoidTransform) ToHumanStr(any) string { return "null" }
-
-func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
+func (VoidTransform) ToHumanString(Type, any) string { return "null" }
 
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
@@ -410,16 +401,10 @@ func (UnknownTransform) Apply(Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
 
-// ToHumanStr renders the value, not the transform name. Java's
-// Transform#toHumanString default does the same and UnknownTransform doesn't
-// override it. Returning the name would be constant for a spec field, which
-// collapses distinct partitions into one PartitionToPath key.
-func (UnknownTransform) ToHumanStr(val any) string {
-	return IdentityTransform{}.ToHumanStr(val)
-}
-
-func (UnknownTransform) ToHumanStrType(typ Type, val any) string {
-	return IdentityTransform{}.ToHumanStrType(typ, val)
+// ToHumanString renders the value, not the unknown transform name. This
+// keeps distinct partition values from collapsing into a single path.
+func (UnknownTransform) ToHumanString(typ Type, val any) string {
+	return IdentityTransform{}.ToHumanString(typ, val)
 }
 
 // Project returns nil so scans don't prune on an unknown partition field.
@@ -632,16 +617,12 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	}
 }
 
-func (BucketTransform) ToHumanStr(val any) string {
+func (BucketTransform) ToHumanString(_ Type, val any) string {
 	if val == nil {
 		return "null"
 	}
 
 	return fmt.Sprintf("%v", val)
-}
-
-func (t BucketTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -804,12 +785,26 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 		ErrInvalidArgument, src)
 }
 
-// Range yields byte indexes at UTF-8 code point boundaries, so slicing on idx
-// truncates by Unicode characters without copying the whole string to []rune.
+// truncateString truncates by UTF-8 code points without allocating.
+// Strings shorter than the width in bytes need no scan. ASCII prefixes
+// can be sliced directly, while other prefixes still use rune boundaries.
 func truncateString(s string, width int) string {
-	for idx := range s {
+	if width >= len(s) {
+		return s
+	}
+
+	idx := 0
+	for idx < width && s[idx] < utf8.RuneSelf {
+		idx++
+	}
+	if idx == width {
+		return s[:idx]
+	}
+
+	width -= idx
+	for offset := range s[idx:] {
 		if width == 0 {
-			return s[:idx]
+			return s[:idx+offset]
 		}
 
 		width--
@@ -845,7 +840,7 @@ func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]
 	return out
 }
 
-func (TruncateTransform) ToHumanStr(val any) string {
+func (TruncateTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case nil:
 		return "null"
@@ -854,10 +849,6 @@ func (TruncateTransform) ToHumanStr(val any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
-}
-
-func (t TruncateTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -974,6 +965,44 @@ func projectTimeTransform(t TimeTransform, name string, pred BoundPredicate) (Un
 	return nil, nil
 }
 
+// yearMonthFromUnixDays converts days since 1970-01-01 to a Gregorian year
+// and month without constructing a time.Time. The 400-year era calculation
+// handles dates before the Unix epoch and all representable Iceberg dates.
+func yearMonthFromUnixDays(days int64) (year, month int) {
+	z := days + 719468
+	era := z / 146097
+	if z < 0 {
+		era = (z - 146096) / 146097
+	}
+
+	dayOfEra := z - era*146097
+	yearOfEra := (dayOfEra - dayOfEra/1460 + dayOfEra/36524 - dayOfEra/146096) / 365
+	y := yearOfEra + era*400
+	dayOfYear := dayOfEra - (365*yearOfEra + yearOfEra/4 - yearOfEra/100)
+	monthIndex := (5*dayOfYear + 2) / 153
+	m := monthIndex + 3
+	if monthIndex >= 10 {
+		m = monthIndex - 9
+	}
+	if m <= 2 {
+		y++
+	}
+
+	return int(y), int(m)
+}
+
+func yearPartitionFromDays(days int64) int32 {
+	year, _ := yearMonthFromUnixDays(days)
+
+	return int32(year - 1970)
+}
+
+func monthPartitionFromDays(days int64) int32 {
+	year, month := yearMonthFromUnixDays(days)
+
+	return int32((year-1970)*12 + month - 1)
+}
+
 // YearTransform transforms a datetime value into a year value.
 type YearTransform struct{}
 
@@ -1008,7 +1037,7 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(v.(Date).ToTime().Year() - epochTM.Year()),
+				Val:   yearPartitionFromDays(int64(v.(Date))),
 			}
 		}, nil
 	case TimestampType, TimestampTzType:
@@ -1019,7 +1048,7 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(v.(Timestamp).ToTime().Year() - epochTM.Year()),
+				Val:   yearPartitionFromDays(int64(v.(Timestamp).ToDate())),
 			}
 		}, nil
 	case TimestampNsType, TimestampTzNsType:
@@ -1030,7 +1059,7 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(v.(TimestampNano).ToTime().Year() - epochTM.Year()),
+				Val:   yearPartitionFromDays(int64(v.(TimestampNano).ToDate())),
 			}
 		}, nil
 	}
@@ -1044,32 +1073,31 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		return out
 	}
 
+	var days int64
 	switch v := value.Val.(type) {
 	case DateLiteral:
-		out.Valid = true
-		out.Val = Int32Literal(Date(v).ToTime().Year() - epochTM.Year())
+		days = int64(v)
 	case TimestampLiteral:
-		out.Valid = true
-		out.Val = Int32Literal(Timestamp(v).ToTime().Year() - epochTM.Year())
+		days = int64(Timestamp(v).ToDate())
 	case TimestampNsLiteral:
-		out.Valid = true
-		out.Val = Int32Literal(TimestampNano(v).ToTime().Year() - epochTM.Year())
+		days = int64(TimestampNano(v).ToDate())
+	default:
+		return out
 	}
+
+	out.Valid = true
+	out.Val = Int32Literal(yearPartitionFromDays(days))
 
 	return out
 }
 
-func (YearTransform) ToHumanStr(val any) string {
+func (YearTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		return strconv.Itoa(int(v) + epochTM.Year())
 	default:
 		return "null"
 	}
-}
-
-func (t YearTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t YearTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1108,11 +1136,9 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				return Optional[int32]{}
 			}
 
-			d := v.(Date).ToTime()
-
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+				Val:   monthPartitionFromDays(int64(v.(Date))),
 			}
 		}, nil
 	case TimestampType, TimestampTzType:
@@ -1121,11 +1147,9 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				return Optional[int32]{}
 			}
 
-			d := v.(Timestamp).ToTime()
-
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+				Val:   monthPartitionFromDays(int64(v.(Timestamp).ToDate())),
 			}
 		}, nil
 	case TimestampNsType, TimestampTzNsType:
@@ -1134,14 +1158,11 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				return Optional[int32]{}
 			}
 
-			d := v.(TimestampNano).ToTime()
-
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+				Val:   monthPartitionFromDays(int64(v.(TimestampNano).ToDate())),
 			}
 		}, nil
-
 	}
 
 	return nil, fmt.Errorf("%w: cannot apply month transform for type %s",
@@ -1153,25 +1174,25 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		return out
 	}
 
-	var tm time.Time
+	var days int64
 	switch v := value.Val.(type) {
 	case DateLiteral:
-		tm = Date(v).ToTime()
+		days = int64(v)
 	case TimestampLiteral:
-		tm = Timestamp(v).ToTime()
+		days = int64(Timestamp(v).ToDate())
 	case TimestampNsLiteral:
-		tm = TimestampNano(v).ToTime()
+		days = int64(TimestampNano(v).ToDate())
 	default:
 		return out
 	}
 
 	out.Valid = true
-	out.Val = Int32Literal(int32((tm.Year()-epochTM.Year())*12 + (int(tm.Month()) - int(epochTM.Month()))))
+	out.Val = Int32Literal(monthPartitionFromDays(days))
 
 	return out
 }
 
-func (t MonthTransform) ToHumanStr(val any) string {
+func (MonthTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		tm := epochTM.AddDate(0, int(v), 0)
@@ -1180,10 +1201,6 @@ func (t MonthTransform) ToHumanStr(val any) string {
 	default:
 		return "null"
 	}
-}
-
-func (t MonthTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t MonthTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1272,7 +1289,7 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (DayTransform) ToHumanStr(val any) string {
+func (DayTransform) ToHumanString(_ Type, val any) string {
 	var days int32
 	switch v := val.(type) {
 	case Date:
@@ -1286,10 +1303,6 @@ func (DayTransform) ToHumanStr(val any) string {
 	tm := epochTM.AddDate(0, 0, int(days))
 
 	return tm.Format("2006-01-02")
-}
-
-func (t DayTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t DayTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1378,7 +1391,7 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return out
 }
 
-func (HourTransform) ToHumanStr(val any) string {
+func (HourTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
 		seconds := int64(v) * int64(time.Hour/time.Second)
@@ -1388,10 +1401,6 @@ func (HourTransform) ToHumanStr(val any) string {
 	default:
 		return "null"
 	}
-}
-
-func (t HourTransform) ToHumanStrType(_ Type, val any) string {
-	return t.ToHumanStr(val)
 }
 
 func (t HourTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {

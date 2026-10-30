@@ -112,7 +112,7 @@ func benchmarkPositionDeleteFileWithPaths(b *testing.B, numPaths, rowsPerPath in
 
 	deletePath := "mem://bucket/deletes/file-path-filter-benchmark.parquet"
 	memFS := iceio.NewMemFS()
-	fw, err := memFS.Create(deletePath)
+	fw, err := memFS.Create(context.Background(), deletePath)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func benchmarkPositionDeleteFile(b *testing.B, numRows int) (*iceio.MemFS, icebe
 
 	deletePath := "mem://bucket/deletes/benchmark.parquet"
 	memFS := iceio.NewMemFS()
-	fw, err := memFS.Create(deletePath)
+	fw, err := memFS.Create(context.Background(), deletePath)
 	if err != nil {
 		b.Fatal(err)
 	}

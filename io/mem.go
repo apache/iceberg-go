@@ -48,7 +48,7 @@ func openOrCreateMemBucket(bucket string) *MemFS {
 }
 
 func init() {
-	Register("mem", func(_ context.Context, parsed *url.URL, _ map[string]string) (IO, error) {
+	MustRegister("mem", func(_ context.Context, parsed *url.URL, _ map[string]string) (IO, error) {
 		return openOrCreateMemBucket(parsed.Host), nil
 	})
 }
@@ -58,7 +58,7 @@ func init() {
 // Use the "mem://bucket/path" URI scheme to access files.
 type MemFS struct {
 	mu    sync.RWMutex
-	files map[string][]byte // keyed by full URI
+	files map[string][]byte // immutable snapshots, keyed by full URI
 }
 
 // NewMemFS creates an initialized MemFS ready for use.
@@ -66,20 +66,20 @@ func NewMemFS() *MemFS {
 	return &MemFS{files: make(map[string][]byte)}
 }
 
-func (m *MemFS) Open(name string) (File, error) {
+func (m *MemFS) Open(_ context.Context, name string) (File, error) {
 	m.mu.RLock()
 	data, ok := m.files[name]
 	m.mu.RUnlock()
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
-	cp := make([]byte, len(data))
-	copy(cp, data)
 
-	return &memFile{data: cp, name: path.Base(name)}, nil
+	// WriteFile stores a copy that is never mutated. Replacing or removing
+	// a path does not change the bytes held by an already-open reader.
+	return &memFile{data: data, name: path.Base(name)}, nil
 }
 
-func (m *MemFS) Remove(name string) error {
+func (m *MemFS) Remove(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -92,11 +92,18 @@ func (m *MemFS) Remove(name string) error {
 	return nil
 }
 
-func (m *MemFS) Create(name string) (FileWriter, error) {
-	return &memWriter{fs: m, name: name}, nil
+func (m *MemFS) Create(ctx context.Context, name string) (FileWriter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return &memWriter{fs: m, name: name, ctx: ctx}, nil
 }
 
-func (m *MemFS) WriteFile(name string, content []byte) error {
+func (m *MemFS) WriteFile(ctx context.Context, name string, content []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cp := make([]byte, len(content))
 	copy(cp, content)
 	m.mu.Lock()
@@ -106,7 +113,11 @@ func (m *MemFS) WriteFile(name string, content []byte) error {
 	return nil
 }
 
-func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
+func (m *MemFS) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	type walkEntry struct {
 		path  string
 		size  int64
@@ -124,6 +135,12 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 		}
 	}
 	for key, data := range m.files {
+		if err := ctx.Err(); err != nil {
+			m.mu.RUnlock()
+
+			return err
+		}
+
 		if !memPathInRoot(key, root) {
 			continue
 		}
@@ -136,20 +153,24 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 		addEntry(walkEntry{path: root, isDir: true})
 		relative := strings.TrimPrefix(key, root+"/")
-		parts := strings.Split(relative, "/")
-		for i := range parts {
-			entryPath := strings.Join(parts[:i+1], "/")
-			if root != "" {
-				entryPath = root + "/" + entryPath
-			}
-			entry := walkEntry{path: entryPath, isDir: i < len(parts)-1}
-			if !entry.isDir {
-				entry.size = int64(len(data))
-			}
-			addEntry(entry)
+		// Keep empty-root paths relative (e.g. "/a/b" is walked as "a/b").
+		filePath, start := relative, 0
+		if root != "" {
+			filePath = key
+			start = len(key) - len(relative)
 		}
+		for i := range len(relative) {
+			if relative[i] == '/' {
+				addEntry(walkEntry{path: filePath[:start+i], isDir: true})
+			}
+		}
+		addEntry(walkEntry{path: filePath, size: int64(len(data))})
 	}
 	m.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if len(entriesByPath) == 0 {
 		err := fn(root, nil, &fs.PathError{Op: "lstat", Path: root, Err: fs.ErrNotExist})
 		if err == fs.SkipDir || err == fs.SkipAll {
@@ -164,14 +185,25 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 	paths := make([]string, 0, len(entriesByPath))
 	for entryPath := range entriesByPath {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		paths = append(paths, entryPath)
 	}
 	sort.Slice(paths, func(i, j int) bool {
 		return memWalkPathLess(root, paths[i], paths[j])
 	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	var skipPrefix string
 	for _, entryPath := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if skipPrefix != "" && strings.HasPrefix(entryPath, skipPrefix) {
 			continue
 		}
@@ -314,11 +346,16 @@ func (fi *memFileInfo) Sys() any           { return nil }
 type memWriter struct {
 	fs   *MemFS
 	name string
+	ctx  context.Context
 	buf  bytes.Buffer
 }
 
 func (w *memWriter) Write(p []byte) (int, error)         { return w.buf.Write(p) }
 func (w *memWriter) ReadFrom(r io.Reader) (int64, error) { return w.buf.ReadFrom(r) }
 func (w *memWriter) Close() error {
-	return w.fs.WriteFile(w.name, w.buf.Bytes())
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+
+	return w.fs.WriteFile(w.ctx, w.name, w.buf.Bytes())
 }

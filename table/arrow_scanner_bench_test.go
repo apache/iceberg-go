@@ -131,7 +131,7 @@ func BenchmarkArrowScanManyFilesAndBatches(b *testing.B) {
 
 			const dataPath = "mem://benchmark/table/data.parquet"
 			fs := iceio.NewMemFS()
-			writer, err := fs.Create(dataPath)
+			writer, err := fs.Create(context.Background(), dataPath)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -197,12 +197,13 @@ func BenchmarkArrowScanManyFilesAndBatches(b *testing.B) {
 }
 
 func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
-	b.Helper()
+	return benchmarkSplitParquetScanWithRowGroups(b, 8, 32768)
+}
 
-	const (
-		rowGroups    = 8
-		rowsPerGroup = 32768
-	)
+func benchmarkSplitParquetScanWithRowGroups(
+	b *testing.B, rowGroups, rowsPerGroup int,
+) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
+	b.Helper()
 	rowCount := int64(rowGroups * rowsPerGroup)
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -233,9 +234,9 @@ func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask
 	var buf bytes.Buffer
 	writerProps := parquet.NewWriterProperties(
 		parquet.WithStats(true),
-		parquet.WithMaxRowGroupLength(rowsPerGroup),
+		parquet.WithMaxRowGroupLength(int64(rowsPerGroup)),
 	)
-	if err := pqarrow.WriteTable(table, &buf, rowsPerGroup, writerProps, pqarrow.DefaultWriterProps()); err != nil {
+	if err := pqarrow.WriteTable(table, &buf, int64(rowsPerGroup), writerProps, pqarrow.DefaultWriterProps()); err != nil {
 		b.Fatal(err)
 	}
 
@@ -243,7 +244,7 @@ func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask
 	// B/op measures scanner allocations instead of one full-file copy per task.
 	path := filepath.Join(b.TempDir(), "data.parquet")
 	fs := iceio.LocalFS{}
-	if err := fs.WriteFile(path, buf.Bytes()); err != nil {
+	if err := fs.WriteFile(context.Background(), path, buf.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 
@@ -276,8 +277,15 @@ func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask
 	dataFile := dataFileBuilder.SplitOffsets(offsets).Build()
 	fullTask := FileScanTask{File: dataFile, Start: 0, Length: int64(buf.Len())}
 	splitTasks, split := splitParquetScanTask(fullTask, 1)
+	if rowGroups == 1 && !split {
+		// A one-row-group file has fewer than two split offsets and cannot be split.
+		// Make the task partial so the benchmark still exercises range planning.
+		partialTask := fullTask
+		partialTask.Length--
+		splitTasks, split = []FileScanTask{partialTask}, true
+	}
 	if !split || len(splitTasks) != rowGroups {
-		b.Fatalf("expected one split task per row group, got %d", len(splitTasks))
+		b.Fatalf("expected %d benchmark range tasks, got %d", rowGroups, len(splitTasks))
 	}
 
 	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
@@ -330,6 +338,47 @@ func BenchmarkArrowScanLargeParquetFileSplitTasks(b *testing.B) {
 					b.Fatalf("unexpected row count: got %d, want %d", rows, wantRows)
 				}
 			}
+		})
+	}
+}
+
+func BenchmarkArrowScanPlanningSplitOffsets(b *testing.B) {
+	for _, rowGroups := range []int{1, 32, 128, 512} {
+		b.Run(fmt.Sprintf("offsets=%d", rowGroups), func(b *testing.B) {
+			metadata, fs, _, tasks, wantRows := benchmarkSplitParquetScanWithRowGroups(
+				b, rowGroups, 512/rowGroups)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				scan := &arrowScan{
+					fs:              fs,
+					metadata:        metadata,
+					scanSchema:      metadata.CurrentSchema(),
+					projectedSchema: metadata.CurrentSchema(),
+					boundRowFilter:  iceberg.AlwaysTrue{},
+					rowLimit:        -1,
+					concurrency:     8,
+				}
+				_, records, err := scan.GetRecords(b.Context(), tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				var rows int64
+				for record, err := range records {
+					if err != nil {
+						b.Fatal(err)
+					}
+					rows += record.NumRows()
+					record.Release()
+				}
+				if rows != wantRows {
+					b.Fatalf("unexpected row count: got %d, want %d", rows, wantRows)
+				}
+			}
+			b.ReportMetric(float64(len(tasks)), "tasks/op")
+			b.ReportMetric(float64(rowGroups), "split_offsets/task")
 		})
 	}
 }
@@ -463,8 +512,8 @@ func benchmarkPhysicalSchemaCases() []struct {
 		{ID: 1, Name: "flag", Type: iceberg.PrimitiveTypes.Bool},
 		{ID: 2, Name: "count", Type: iceberg.PrimitiveTypes.Int32},
 		{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64},
-		{ID: 4, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
-		{ID: 5, Name: "price", Type: iceberg.DecimalTypeOf(20, 4)},
+		{ID: 4, Name: "fixed", Type: iceberg.MustFixedTypeOf(16)},
+		{ID: 5, Name: "price", Type: iceberg.MustDecimalTypeOf(20, 4)},
 		{ID: 6, Name: "created", Type: iceberg.PrimitiveTypes.TimestampTzNs},
 		{ID: 7, Name: "payload", Type: iceberg.VariantType{}},
 		{ID: 8, Name: "tags", Type: &iceberg.ListType{
@@ -565,7 +614,7 @@ func BenchmarkArrowScanTaskResidual(b *testing.B) {
 
 	dataPath := "mem://benchmark/identity-residual/data.parquet"
 	fs := iceio.NewMemFS()
-	writer, err := fs.Create(dataPath)
+	writer, err := fs.Create(context.Background(), dataPath)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -576,7 +625,7 @@ func BenchmarkArrowScanTaskResidual(b *testing.B) {
 	if err := writer.Close(); err != nil {
 		b.Fatal(err)
 	}
-	file, err := fs.Open(dataPath)
+	file, err := fs.Open(context.Background(), dataPath)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -686,4 +735,62 @@ func benchmarkTaskResidualJSON(rowCount int) string {
 	result.WriteByte(']')
 
 	return result.String()
+}
+
+func BenchmarkArrowScanReadTasksResidualBinding(b *testing.B) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	metadata, err := NewMetadata(
+		schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://benchmark/read-tasks", nil,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	fs := iceio.NewMemFS()
+	scan := New(Identifier{"benchmark", "read_tasks"}, metadata, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil).Scan()
+	boundResidual, err := iceberg.BindExpr(schema,
+		iceberg.GreaterThan(iceberg.Reference("id"), int64(1)), true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	unboundResidual := iceberg.GreaterThan(iceberg.Reference("id"), int64(1))
+
+	for _, workload := range []struct {
+		taskCount int
+		name      string
+		residual  iceberg.BooleanExpression
+	}{
+		{taskCount: 1_000, name: "bound", residual: boundResidual},
+		{taskCount: 10_000, name: "bound", residual: boundResidual},
+		{taskCount: 100_000, name: "bound", residual: boundResidual},
+		{taskCount: 100_000, name: "nil"},
+		{taskCount: 100_000, name: "unbound", residual: unboundResidual},
+		{taskCount: 100_000, name: "late_unbound", residual: boundResidual},
+	} {
+		b.Run(fmt.Sprintf("tasks=%d/residual=%s", workload.taskCount, workload.name), func(b *testing.B) {
+			tasks := make([]FileScanTask, workload.taskCount)
+			for i := range tasks {
+				tasks[i].Residual = workload.residual
+			}
+			if workload.name == "late_unbound" {
+				tasks[len(tasks)-1].Residual = unboundResidual
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, records, err := scan.ReadTasks(b.Context(), tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if records == nil {
+					b.Fatal("ReadTasks returned a nil iterator")
+				}
+				// Do not drain the iterator: this benchmark isolates setup and residual binding.
+			}
+			b.ReportMetric(float64(len(tasks)), "tasks/op")
+		})
+	}
 }

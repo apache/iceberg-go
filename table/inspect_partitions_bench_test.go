@@ -151,3 +151,45 @@ func benchmarkInspectPartitionFiles(
 
 	return partitionType, files
 }
+
+func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
+	const (
+		partitionCount = 1024
+		fieldCount     = 8
+	)
+
+	fields := make([]iceberg.NestedField, fieldCount)
+	for i := range fields {
+		fields[i] = iceberg.NestedField{
+			ID: 1000 + i, Name: fmt.Sprintf("part_%d", i), Type: iceberg.PrimitiveTypes.Binary,
+		}
+	}
+	partitionType := &iceberg.StructType{FieldList: fields}
+
+	tree := newInspectPartitionAggregateTree()
+	partitions := make([]map[int]any, partitionCount)
+	for i := range partitions {
+		record := make(partitionRecord, fieldCount)
+		partition := make(map[int]any, fieldCount)
+		for j, field := range fields {
+			value := []byte(fmt.Sprintf("partition-%d-field-%d", i, j))
+			record[j] = value
+			partition[field.ID] = value
+		}
+		tree.insert(record, &inspectPartitionAggregate{})
+		partitions[i] = partition
+	}
+
+	index := 0
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if tree.lookupPartition(partitions[index], partitionType) == nil {
+			b.Fatal("partition not found")
+		}
+		index++
+		if index == len(partitions) {
+			index = 0
+		}
+	}
+}

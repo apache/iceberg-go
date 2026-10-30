@@ -19,6 +19,7 @@ package table
 
 import (
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -45,6 +46,33 @@ const (
 	// retaining manifest descriptors between operations.
 	ReadManifestListCacheEnabledKey     = "read.manifest-list-cache.enabled"
 	ReadManifestListCacheEnabledDefault = true
+
+	// IOManifestCacheEnabledKey controls Java-compatible raw manifest-file
+	// content caching. These settings come from catalog/FileIO properties;
+	// saved per-table configuration overrides matching catalog keys.
+	IOManifestCacheEnabledKey     = "io.manifest.cache-enabled"
+	IOManifestCacheEnabledDefault = false
+
+	// IOManifestCacheExpirationIntervalMsKey controls how long an unused cached
+	// manifest remains eligible for reuse. Expired bytes are removed lazily on
+	// cache access or insertion. Zero disables time-based expiration, matching
+	// Java Iceberg's ContentCache. Invalid negative values warn and disable
+	// the Go cache rather than throwing a Java ValidationException.
+	IOManifestCacheExpirationIntervalMsKey     = "io.manifest.cache.expiration-interval-ms"
+	IOManifestCacheExpirationIntervalMsDefault = 60 * 1000
+
+	// IOManifestCacheMaxTotalBytesKey bounds total retained manifest content per
+	// independently loaded table. Commit-derived handles share the same budget.
+	// Non-positive or unparsable values warn and disable the Go cache, whereas
+	// Java Iceberg rejects them.
+	IOManifestCacheMaxTotalBytesKey     = "io.manifest.cache.max-total-bytes"
+	IOManifestCacheMaxTotalBytesDefault = 100 * 1024 * 1024
+
+	// IOManifestCacheMaxContentLengthKey skips caching individual manifests
+	// larger than this size. Non-positive or unparsable values warn and disable
+	// the Go cache, whereas Java Iceberg rejects them.
+	IOManifestCacheMaxContentLengthKey     = "io.manifest.cache.max-content-length"
+	IOManifestCacheMaxContentLengthDefault = 8 * 1024 * 1024
 
 	// These Java-compatible properties are reserved for future task-group
 	// planning. They are exported so applications can share configuration
@@ -200,13 +228,13 @@ const (
 	PropertySnapshotCount            = "snapshot-count"
 	PropertyCurrentSnapshotId        = "current-snapshot-id"
 	PropertyCurrentSnapshotSummary   = "current-snapshot-summary"
-	PropertyCurrentSnapshotTimestamp = "current-snapshot-timestamp"
+	PropertyCurrentSnapshotTimestamp = "current-snapshot-timestamp-ms"
 	PropertyCurrentSchema            = "current-schema"
 	PropertyDefaultPartitionSpec     = "default-partition-spec"
 	PropertyDefaultSortOrder         = "default-sort-order"
 )
 
-var ReservedProperties = [9]string{
+var reservedProperties = [...]string{
 	PropertyFormatVersion,
 	PropertyUuid,
 	PropertySnapshotCount,
@@ -216,6 +244,12 @@ var ReservedProperties = [9]string{
 	PropertyCurrentSchema,
 	PropertyDefaultPartitionSpec,
 	PropertyDefaultSortOrder,
+}
+
+// ReservedProperties returns a new slice of reserved table property names.
+// Mutating the returned slice does not change metadata validation.
+func ReservedProperties() []string {
+	return slices.Clone(reservedProperties[:])
 }
 
 // Metadata compression codecs

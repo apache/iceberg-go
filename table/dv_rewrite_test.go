@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -202,7 +203,7 @@ func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.
 				continue
 			}
 			oldEquality = entry.DataFile()
-			oldEqualitySequence = entry.SequenceNum()
+			oldEqualitySequence = entry.DataSequenceNumber()
 		}
 	}
 	require.NotNil(t, oldEquality)
@@ -225,7 +226,7 @@ func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 
-	assert.Equal(t, oldEqualitySequence, currentManifestEntry(t, tbl, newEqualityPath).SequenceNum())
+	assert.Equal(t, oldEqualitySequence, currentManifestEntry(t, tbl, newEqualityPath).DataSequenceNumber())
 	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten))
 	assertRowCount(t, tbl, 3)
 }
@@ -238,7 +239,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	oldDataPath := tbl.Location() + "/data/old-data.parquet"
 	writeParquetFile(t, oldDataPath, arrowSc, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{oldDataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{oldDataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -246,7 +247,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	oldData := tasks[0].File
-	oldDataSequence := currentManifestEntry(t, tbl, oldDataPath).SequenceNum()
+	oldDataSequence := currentManifestEntry(t, tbl, oldDataPath).DataSequenceNumber()
 
 	oldDeletePath := tbl.Location() + "/data/old-pos-delete.parquet"
 	writeParquetFile(t, oldDeletePath, table.PositionalDeleteArrowSchema,
@@ -260,7 +261,7 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
-	oldDeleteSequence := currentManifestEntry(t, tbl, oldDeletePath).SequenceNum()
+	oldDeleteSequence := currentManifestEntry(t, tbl, oldDeletePath).DataSequenceNumber()
 
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
@@ -302,8 +303,8 @@ func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testin
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	assert.Equal(t, oldDataSequence, currentManifestEntry(t, tbl, newDataPath).SequenceNum())
-	assert.Equal(t, oldDeleteSequence, currentManifestEntry(t, tbl, newDVs[0].FilePath()).SequenceNum())
+	assert.Equal(t, oldDataSequence, currentManifestEntry(t, tbl, newDataPath).DataSequenceNumber())
+	assert.Equal(t, oldDeleteSequence, currentManifestEntry(t, tbl, newDVs[0].FilePath()).DataSequenceNumber())
 	assert.Equal(t, []int64{2}, scanIDs(t, tbl),
 		"the deletion vector must remain applicable to the replacement data file")
 }
@@ -509,4 +510,113 @@ func deleteEntriesReferencing(t *testing.T, tbl *table.Table, refs map[string]st
 	}
 
 	return found
+}
+
+// TestRemovingDataFileRemovesItsUnnamedDV covers #2238: the v3 spec requires a
+// removed data file to take its deletion vector with it, so every replace entry
+// point must expunge the DV even when the caller does not name it. Each case runs
+// with the files committed in earlier transactions and with everything staged in
+// one transaction. ReplaceFiles also removes an unrelated equality delete, which
+// takes the path that resolves delete files instead of the data-only one.
+//
+// Scan planning drops a DV whose data file is gone, so the assertions walk the
+// raw delete manifests.
+func TestRemovingDataFileRemovesItsUnnamedDV(t *testing.T) {
+	removers := []struct {
+		name   string
+		remove func(ctx context.Context, tx *table.Transaction, dataB, dataC, eqDelete iceberg.DataFile) error
+	}{
+		{"RewriteFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, _ iceberg.DataFile) error {
+			return tx.NewRewrite(nil).DeleteFile(dataB).AddDataFile(dataC).Commit(ctx)
+		}},
+		{"ReplaceDataFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, _ iceberg.DataFile) error {
+			return tx.ReplaceDataFiles(ctx, []iceberg.DataFile{dataB}, []iceberg.DataFile{dataC}, nil)
+		}},
+		{"ReplaceDataFilesByPath", func(ctx context.Context, tx *table.Transaction, dataB, _, _ iceberg.DataFile) error {
+			return tx.ReplaceDataFilesByPath(ctx, []string{dataB.FilePath()}, nil, nil)
+		}},
+		{"ReplaceFiles", func(ctx context.Context, tx *table.Transaction, dataB, dataC, eqDelete iceberg.DataFile) error {
+			return tx.ReplaceFiles(ctx, []iceberg.DataFile{dataB}, []iceberg.DataFile{dataC}, []iceberg.DataFile{eqDelete}, nil)
+		}},
+	}
+
+	for _, rm := range removers {
+		for _, oneTxn := range []bool{false, true} {
+			name := rm.name + "/separate-transactions"
+			if oneTxn {
+				name = rm.name + "/one-transaction"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				tbl := newRowDeltaCommitTestTableVersion(t, 3)
+				location := tbl.Location()
+				dataA := buildDataFile(t, location+"/data/a.parquet")
+				dataB := buildDataFile(t, location+"/data/b.parquet")
+				cBuilder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+					location+"/data/c.parquet", iceberg.ParquetFile, nil, nil, nil, 10, 1024)
+				require.NoError(t, err)
+				// The non-rewrite replace APIs require v3 data files to carry a first_row_id.
+				dataC := cBuilder.FirstRowID(100).Build()
+				dvB := buildDVFile(t, location+"/data/dv-b.puffin", dataB.FilePath())
+				eqDelete := buildEqDeleteFile(t, location+"/data/eq-delete.parquet", []int{1})
+
+				tx := tbl.NewTransaction()
+				step := func(fn func(tx *table.Transaction) error) {
+					t.Helper()
+					require.NoError(t, fn(tx))
+					if oneTxn {
+						return
+					}
+					tbl, err = tx.Commit(ctx)
+					require.NoError(t, err)
+					tx = tbl.NewTransaction()
+				}
+				step(func(tx *table.Transaction) error {
+					return tx.NewRowDelta(nil).AddRows(dataA, dataB).Commit(ctx)
+				})
+				step(func(tx *table.Transaction) error {
+					return tx.NewRowDelta(nil).AddDeletes(dvB, eqDelete).Commit(ctx)
+				})
+				require.NoError(t, rm.remove(ctx, tx, dataB, dataC, eqDelete))
+				tbl, err = tx.Commit(ctx)
+				require.NoError(t, err)
+
+				assert.Empty(t, deleteEntriesReferencing(t, tbl, map[string]struct{}{dataB.FilePath(): {}}),
+					"a DV must not outlive the data file it references")
+				snap := tbl.CurrentSnapshot()
+				live, removed := snapshotDeleteEntryFiles(t, snap, iceio.LocalFS{})
+				assert.Contains(t, pathRefPairs(removed), [2]string{dvB.FilePath(), dataB.FilePath()})
+				assert.Equal(t, "1", snap.Summary.Properties["removed-position-delete-files"])
+				assert.Equal(t, strconv.Itoa(len(live)), snap.Summary.Properties["total-delete-files"])
+			})
+		}
+	}
+}
+
+// TestRewriteFiles_UnnamedDVRemovalKeepsSharedPuffinSibling guards the removal key:
+// two DVs share one Puffin file, so removing data file A must expunge only A's DV
+// entry. B's DV stays live and still hides its row.
+func TestRewriteFiles_UnnamedDVRemovalKeepsSharedPuffinSibling(t *testing.T) {
+	ctx := context.Background()
+	tbl, _, pathA, pathB, dvA, dvB := newTableWithSharedPuffinDVs(t)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	var dataA iceberg.DataFile
+	for _, task := range tasks {
+		if task.File.FilePath() == pathA {
+			dataA = task.File
+		}
+	}
+	require.NotNil(t, dataA)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRewrite(nil).DeleteFile(dataA).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	live, removed := snapshotDeleteEntryFiles(t, tbl.CurrentSnapshot(), iceio.LocalFS{})
+	assert.Equal(t, [][2]string{{dvB.FilePath(), pathB}}, pathRefPairs(live))
+	assert.Equal(t, [][2]string{{dvA.FilePath(), pathA}}, pathRefPairs(removed))
+	assertRowCount(t, tbl, 1)
 }

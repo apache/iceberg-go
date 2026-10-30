@@ -86,7 +86,7 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 >   `WithSigV4` / `WithSigV4RegionSvc` or the `rest.sigv4-enabled` property. The
 >   backend signs with the `s3.*` credential properties when set (falling back to
 >   the `rest.*` aliases), otherwise with the AWS default credential chain.
-> - Explicit config: pass `sigv4.WithAwsConfig(cfg)` to `NewCatalog` alongside
+> - Explicit config: pass `sigv4.WithAWSConfig(cfg)` to `NewCatalog` alongside
 >   `WithSigV4` / `WithSigV4RegionSvc` (no blank import needed). It supplies the
 >   `aws.Config`; the signing service comes from those options (or a server
 >   `/v1/config` override), and so does the region when one is set. Otherwise
@@ -146,8 +146,8 @@ Invalid values (non-positive waits/retries, or min ≥ max) are ignored and the 
 
 Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/glue/options.go).
 
-- `WithAwsConfig(cfg aws.Config)` - AWS SDK v2 config; respects the AWS default credential chain.
-- `WithAwsProperties(props AwsProperties)` - explicit overrides for region/endpoint/access keys.
+- `WithAWSConfig(cfg aws.Config)` - AWS SDK v2 config; respects the AWS default credential chain.
+- `WithAWSProperties(props AWSProperties)` - catalog properties, such as `glue.id` and the `s3.*` FileIO keys. `NewCatalog` ignores the `glue.region`, endpoint, credential, and retry keys; only `catalog.Load` reads them.
 
 ### SQL (`catalog/sql`)
 
@@ -227,15 +227,22 @@ Tuning properties:
 
 ### Azure Data Lake Storage / Blob
 
-Authentication is selected in the following order (`io/gocloud/azure/azure.go`); the first applicable option wins, and if none of 1-4 apply the default credential chain (5) is used:
+Authentication is selected in the following order (`io/gocloud/azure/azure.go`); the first applicable option wins, and if none of 1-5 apply the default credential chain (6) is used:
 
 1. Shared key: a nonempty `adls.auth.shared-key.account.name` selects this path and requires a nonempty `adls.auth.shared-key.account.key`.
 2. Per-host SAS token: `adls.sas-token.<hostname>`, where `<hostname>` exactly matches the storage account hostname (for example, `myaccount.dfs.core.windows.net`).
 3. Per-account connection string: `adls.connection-string.<account-name>` (for example, `adls.connection-string.myaccount`).
-4. Managed identity: `adls.auth.managed-identity.enabled` set to exactly `"true"` selects this path and uses `ManagedIdentityCredential` directly. Set `adls.client-id` to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.
-5. Default credential chain: `DefaultAzureCredential`, which includes managed identity among its credential sources.
+4. Static access token: a nonempty `adls.token`, supplied without the `Bearer ` prefix.
+5. Managed identity: `adls.auth.managed-identity.enabled` set to exactly `"true"` selects this path and uses `ManagedIdentityCredential` directly. Set `adls.client-id` to select a user-assigned managed identity; otherwise, the system-assigned managed identity is used.
+6. Default credential chain: `DefaultAzureCredential`, which includes managed identity among its credential sources.
 
-> **Note on cross-client parity.** The two properties in step 4 diverge from the
+`adls.token` accepts an OAuth2 access token for Azure Storage, including a token supplied by a catalog. An empty value is ignored. A rejected or expired token does not fall back to managed identity or the default credential chain.
+
+The token is static and is not refreshed. As in [Java](https://github.com/apache/iceberg/blob/main/azure/src/main/java/org/apache/iceberg/azure/AzureProperties.java) and [PyIceberg](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/fsspec.py), the credential reports a one-hour cache window to the Azure SDK each time the SDK requests the token. This does not extend the token's actual validity: Azure enforces its expiration. Callers must obtain a new token and recreate the FileIO when it expires; changing the original properties map does not update an existing FileIO.
+
+A REST catalog can also vend `adls.token` as a storage credential. The token carries no expiry of its own, so a vended token's expiry comes from `expiration-time` in the same credential when the catalog supplies one. Without it, a table FileIO that can fetch new credentials assumes a 60-minute lifetime and renews them shortly before it ends, and one that cannot, such as a FileIO for a scan plan's credentials, treats them as never expiring. A token whose actual lifetime is shorter than that fails with authorization errors until it is renewed, so catalogs that vend `adls.token` should send `expiration-time` with it. For the storage account it is vended for, a vended token replaces the SAS token and connection string configured for that account and any shared key, which would otherwise take precedence over it; a shared key is not scoped to an account, so one configured for another account would be used for this account too. The SAS tokens and connection strings of other accounts are kept. Expiries configured for other credentials, such as a SAS expiry or an `expiration-time` in the catalog or table configuration, do not affect when the token is renewed.
+
+> **Note on cross-client parity.** The two properties in step 5 diverge from the
 > other clients. `adls.auth.managed-identity.enabled` is Go-specific: neither
 > Iceberg Java nor PyIceberg defines a property that forces
 > `ManagedIdentityCredential`, so catalog properties that set it do not carry
@@ -244,7 +251,7 @@ Authentication is selected in the following order (`io/gocloud/azure/azure.go`);
 > `adls.tenant-id`, neither of which iceberg-go defines (see the
 > [PyIceberg ADLS configuration](https://py.iceberg.apache.org/configuration/#azure-data-lake)),
 > while Java's `AzureProperties` defines no `adls.client-id` at all. Here it is
-> only ever read as a user-assigned managed identity ID, and only when step 4 is
+> only ever read as a user-assigned managed identity ID, and only when step 5 is
 > selected.
 
 Tuning properties:
@@ -255,6 +262,7 @@ Tuning properties:
 | `adls.auth.shared-key.account.key` (`io.ADLSSharedKeyAccountKey`) | Account key. |
 | `adls.sas-token.<host>` (prefix `io.ADLSSasTokenPrefix`) | Per-host SAS token. |
 | `adls.connection-string.<account-name>` (prefix `io.ADLSConnectionStringPrefix`) | Per-account connection string. |
+| `adls.token` (`io.ADLSToken`) | Static Azure Storage access token, without the `Bearer ` prefix. Subject to the precedence above; not refreshed. |
 | `adls.client-id` (`io.ADLSClientID`) | Client ID of a user-assigned managed identity. Used only when the explicit managed-identity authentication path is selected. |
 | `adls.endpoint` (`io.ADLSEndpoint`) | Storage domain (e.g. `blob.core.windows.net`). |
 | `adls.protocol` (`io.ADLSProtocol`) | `http` or `https`. |
@@ -277,7 +285,7 @@ There is no `PYICEBERG_*`-style env var convention. Use the YAML config file or 
 | Setting | Source | Effect |
 |---|---|---|
 | `max-workers` in `~/.iceberg-go.yaml` (`config.EnvConfig.MaxWorkers`) | YAML config | Worker pool size used by parallel column writes, snapshot producers, scan plan, equality-delete writers. Default `5`. |
-| `WithMaxConcurrency(n int) ScanOption` | Code (`table.WithMaxConcurrency`) | Per-scan override. `WitMaxConcurrency` (missing `h`) remains as a deprecated alias. |
+| `WithMaxConcurrency(n int) ScanOption` | Code (`table.WithMaxConcurrency`) | Per-scan override. |
 | `WithMaxWriteWorkers(n int)` | Code (per-write API on `WriteRecords`) | Per-write override of the worker count. |
 | `WithClusteredWrite()` | Code (per-write API on `WriteRecords`) | Forces single-threaded writes. Mutually exclusive with `WithMaxWriteWorkers`. |
 
@@ -287,7 +295,7 @@ Two registries are user-extensible. The third (LocationProvider) is currently in
 
 ### IO scheme registry
 
-Register a custom URL scheme with [`io.Register`](https://github.com/apache/iceberg-go/blob/main/io/registry.go):
+Register a custom URL scheme from an `init` function with [`io.MustRegister`](https://github.com/apache/iceberg-go/blob/main/io/registry.go):
 
 ```go
 import (
@@ -298,16 +306,28 @@ import (
 )
 
 func init() {
-    io.Register("myfs", func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
+    io.MustRegister("myfs", func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
         return newMyFS(parsed, props)
     })
 }
 ```
 
-`io.Register` panics on `nil` factory or duplicate scheme. Built-in schemes: `file`, `""` (the empty scheme).
+`io.Register` and `io.MustRegister` both panic for invalid or duplicate global schemes, preserving the existing registration contract. `registry.Register` on an independent registry returns `ErrInvalidSchemeFactory` or `ErrSchemeAlreadyRegistered` instead. Built-in schemes: `file`, `""` (the empty scheme).
 Cloud schemes (`s3`, `gs`, `abfs`, etc.) are registered only when the matching backend package under `io/gocloud` is blank-imported.
 
 `io.GetRegisteredSchemes()` returns the current scheme list; `io.Unregister(scheme)` removes one.
+
+To register schemes at runtime without changing other users of the same process, create an independent registry (catalogs and `view.CreateView` still resolve through the default registry):
+
+```go
+registry := io.NewRegistry()
+if err := registry.Register("myfs", myFactory); err != nil {
+    return err
+}
+fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
+```
+
+`io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
 ### Catalog type registry
 
@@ -330,7 +350,7 @@ func init() {
 }
 ```
 
-After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Built-in types: `rest`, `hive`, `glue`, `sql`, `hadoop`.
+After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Custom catalogs must implement `Close() error` to satisfy `catalog.Catalog`, and callers must close them when finished. Built-in types: `rest`, `hive`, `glue`, `sql`, `hadoop`.
 
 `catalog.GetRegisteredCatalogs()` returns the current list; `catalog.Unregister(catalogType)` removes one.
 
@@ -355,12 +375,36 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 |---|---|---|
 | `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
 | `read.manifest-list-cache.enabled` | `true` | Reuse decoded snapshot manifest lists across scans of a table handle. Set to `false` to disable retention and shared in-flight reads. Applied when loading or refreshing a table, and when creating a transaction scan. |
+| `io.manifest.cache-enabled` | `false` | Reuse raw manifest file content across local scans. Read from catalog FileIO properties in REST, Glue, SQL, Hive and Hadoop; REST table metadata and load-response config may override the catalog value. |
+| `io.manifest.cache.expiration-interval-ms` | `60000` | Idle expiration in milliseconds. Zero disables time-based expiration; negative or unparsable values warn and disable the cache. Expired entries are reclaimed on cache access/insertion, without a background cleanup task. |
+| `io.manifest.cache.max-total-bytes` | `104857600` | Retained raw bytes per independently loaded table. Handles returned by commit share their source table's cache and budget. Concurrent population buffers and bytes held by active readers are not counted. Non-positive or unparsable values warn and disable caching. |
+| `io.manifest.cache.max-content-length` | `8388608` | Maximum size of one manifest eligible for content caching. Non-positive or unparsable values warn and disable caching. |
+
+The catalog's FileIO properties configure manifest caching for all built-in
+catalogs. With direct `table.New` calls, use `WithScanPlanningIOProperties`
+or `WithSavedConfig`; saved config wins when the same key is present in both.
+Matching expiration interval, total byte limit and per-manifest byte limit
+preserve warm cache entries across refresh and commit. Changing a limit replaces
+the cache.
+
+Unlike Java, which rejects invalid manifest-cache limits, Go warns and disables
+the content cache for negative or unparsable expiration or
+non-positive/unparsable size limits.
 
 The manifest-list cache retains at most 64 snapshots and 32,768 manifest
 descriptors in total per table handle. These are count limits, not byte limits:
 memory use also depends on manifest paths, partition summaries, and key metadata.
-Refreshing the table replaces its cache. This caches decoded manifest lists;
-it does not implement Java's `io.manifest.cache.*` file-content cache settings.
+Refreshing the table replaces its manifest-list cache.
+
+The optional manifest-content cache is separate. It stores immutable raw manifest
+bytes and still decodes, projects, and filters entries independently for each
+scan. Cache misses for the same manifest share one in-flight read. If population
+fails, its producer and each existing waiter independently fall back to one
+ordinary FileIO open; if the producer was canceled, live waiters can start
+another shared load. Failed content is not
+retained, so a later scan can retry. Manifests larger than the configured
+per-file limit bypass the cache. The current integration covers local scan
+planning; manifest lists continue to use the decoded manifest-list cache.
 
 The Java-compatible `read.split.planning-lookback` and `read.split.open-file-cost`
 names and defaults are also exported by the Go API for shared configuration,

@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
@@ -234,7 +235,7 @@ func TestDropNamespaceDoesNotRaceWithObjectCreation(t *testing.T) {
 		{
 			name: "create view",
 			create: func(_ *testing.T, ctx context.Context, cat *Catalog, ident table.Identifier) error {
-				return cat.CreateView(ctx, ident, schema, "SELECT 1", nil)
+				return cat.CreateView(ctx, ident, schema, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
 			},
 			exists: func(ctx context.Context, cat *Catalog, ident table.Identifier) (bool, error) {
 				return cat.CheckViewExists(ctx, ident)
@@ -269,7 +270,7 @@ func TestDropNamespaceDoesNotRaceWithObjectCreation(t *testing.T) {
 				releaseDrop:    make(chan struct{}),
 				dropDone:       make(chan struct{}),
 			}
-			cat.db.AddQueryHook(hook)
+			cat.db = cat.db.WithQueryHook(hook)
 
 			released := false
 			defer func() {
@@ -337,7 +338,7 @@ func TestDropNamespaceDoesNotRaceWithUpdateNamespaceProperties(t *testing.T) {
 		updateAtInsert: make(chan struct{}),
 		releaseUpdate:  make(chan struct{}),
 	}
-	cat.db.AddQueryHook(hook)
+	cat.db = cat.db.WithQueryHook(hook)
 
 	released := false
 	defer func() {

@@ -63,7 +63,7 @@ func (g *reorderGateIO) arm(headPath string, closes chan<- struct{}) {
 	g.closed = 0
 }
 
-func (g *reorderGateIO) Open(name string) (iceio.File, error) {
+func (g *reorderGateIO) Open(_ context.Context, name string) (iceio.File, error) {
 	g.mu.Lock()
 	headPath, gate := g.headPath, g.gate
 	g.mu.Unlock()
@@ -72,7 +72,7 @@ func (g *reorderGateIO) Open(name string) (iceio.File, error) {
 		<-gate
 	}
 
-	f, err := g.LocalFS.Open(name)
+	f, err := g.LocalFS.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func (g *reorderGateIO) armCreate() {
 	g.createGate = make(chan struct{})
 }
 
-func (g *reorderGateIO) Create(name string) (iceio.FileWriter, error) {
+func (g *reorderGateIO) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
 	g.mu.Lock()
 	gate := g.createGate
 	g.mu.Unlock()
@@ -96,7 +96,7 @@ func (g *reorderGateIO) Create(name string) (iceio.FileWriter, error) {
 		<-gate
 	}
 
-	return g.LocalFS.Create(name)
+	return g.LocalFS.Create(ctx, name)
 }
 
 func (g *reorderGateIO) releaseCreate() {
@@ -202,7 +202,7 @@ func writeReorderDataFile(tb testing.TB, arrowSchema *arrow.Schema, path string,
 	arrowTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 	defer arrowTable.Release()
 
-	fw, err := iceio.LocalFS{}.Create(path)
+	fw, err := iceio.LocalFS{}.Create(context.Background(), path)
 	require.NoError(tb, err)
 	defer fw.Close()
 	require.NoError(tb, pqarrow.WriteTable(arrowTable, fw, int64(rows),
@@ -216,6 +216,26 @@ func writeReorderDataFile(tb testing.TB, arrowSchema *arrow.Schema, path string,
 	require.NoError(tb, err)
 
 	return bldr.Build()
+}
+
+func TestScanTaskChannelCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		taskCount    int
+		numWorkers   int
+		wantCapacity int
+	}{
+		{name: "empty", taskCount: 0, numWorkers: 0, wantCapacity: 0},
+		{name: "single task", taskCount: 1, numWorkers: 1, wantCapacity: 1},
+		{name: "fewer tasks than capacity", taskCount: 3, numWorkers: 3, wantCapacity: 3},
+		{name: "many tasks", taskCount: 100_000, numWorkers: 4, wantCapacity: 8},
+		{name: "single worker", taskCount: 100_000, numWorkers: 1, wantCapacity: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queue := newScanTaskChannel(tc.taskCount, tc.numWorkers)
+			require.Equal(t, tc.wantCapacity, cap(queue))
+		})
+	}
 }
 
 func TestArrowScanReorderHeapBoundedWhileHeadTaskLags(t *testing.T) {
@@ -280,6 +300,9 @@ func TestArrowScanReorderCancelWhileWorkersWaitForTaskCredits(t *testing.T) {
 	)
 
 	synctest.Test(t, func(t *testing.T) {
+		// With the first task gated, these tasks also fill and block the producer.
+		require.Greater(t, files, numWorkers+cap(newScanTaskChannel(files, numWorkers)))
+
 		dir := filepath.ToSlash(t.TempDir())
 		gateIO := &reorderGateIO{}
 		tbl, tasks := newReorderScanFixture(t, dir, files, rowsPerFile, gateIO)

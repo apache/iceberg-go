@@ -375,10 +375,10 @@ func TestFastPathDecimalScaleNearMissFallsBack(t *testing.T) {
 	defer rec.Release()
 
 	iceSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}})
-	term, err := iceberg.Extract("payload", "$.a", iceberg.DecimalTypeOf(10, 4)).Bind(iceSchema, true)
+	term, err := iceberg.Extract("payload", "$.a", iceberg.MustDecimalTypeOf(10, 4)).Bind(iceSchema, true)
 	require.NoError(t, err)
 	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: []string{"payload"}}
-	dt, err := TypeToArrowType(iceberg.DecimalTypeOf(10, 4), false, false)
+	dt, err := TypeToArrowType(iceberg.MustDecimalTypeOf(10, 4), false, false)
 	require.NoError(t, err)
 
 	require.Nil(t, tryShreddedTypedColumn(varr, vpath(t, col.Term), dt, mem), "scale near-miss must not fast-path")

@@ -128,3 +128,22 @@ func TestMergeOnReadDeleteConflict_NoConflictCommits(t *testing.T) {
 
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 8, 9, 10}, idsInTable(t, tbl))
 }
+
+// TestMergeOnReadDeleteOfDataFileAddedInSameTransaction proves a merge-on-read
+// DELETE may target a data file added earlier in the same transaction:
+// the file is not on the branch head yet, but it lands atomically with the deletion vector.
+func TestMergeOnReadDeleteOfDataFileAddedInSameTransaction(t *testing.T) {
+	ctx := context.Background()
+	tbl := appendTenRows(t, newV3MoRConflictTestTable(t))
+
+	path := tbl.Location() + "/data/added-in-txn.parquet"
+	writeRowDeltaDataFile(t, tbl, path, 11, 12)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
+	require.NoError(t, txn.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(11)), nil))
+	tbl, err := txn.Commit(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12}, idsInTable(t, tbl))
+}

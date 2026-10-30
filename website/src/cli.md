@@ -116,30 +116,30 @@ Table default.table-1 created successfully
 
 # Describe the newly created table
 ./iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
-Table format version | 2
-Metadata location    | s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
-Table UUID           | 33fa3fac-e638-4335-a085-343c6d9e7de5
-Last updated         | 1753133512562
-Sort Order           | 1: [
-                     | 1 desc nulls-last
-                     | ]
-Partition Spec       | [
-                     |  1000: foo: identity(1)
-                     | ]
+Table format version │ 2
+Metadata location    │ s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
+Table UUID           │ 33fa3fac-e638-4335-a085-343c6d9e7de5
+Last updated         │ 1753133512562
+Sort Order           │ 1: [
+                     │ 1 desc nulls-last
+                     │ ]
+Partition Spec       │ [
+                     │  1000: foo: identity(1)
+                     │ ]
 
 Current Schema, id=0
-├──1: foo: optional string
-└──2: bar: required int
+├── 1: foo: optional string
+└── 2: bar: required int
 
-Current Snapshot |
+Current Snapshot │
 
 Snapshots
 
 Properties
-key                             | value
+key                             │ value
 -----------------------------------------
-write.format.default            | parquet
-write.parquet.compression-codec | zstd
+write.format.default            │ parquet
+write.parquet.compression-codec │ zstd
 ```
 
 ## Inspecting tables
@@ -174,6 +174,19 @@ iceberg partition-stats my_db.events                          # current snapshot
 iceberg partition-stats --snapshot-id 7234981023498 my_db.events
 iceberg partition-stats --all my_db.events                    # all snapshots
 ```
+
+### `files` — data files
+
+```shell
+iceberg files my_db.events                              # current snapshot
+iceberg files --history my_db.events                    # all snapshots
+iceberg files --scan-planning-mode remote my_db.events  # from a server-side scan plan
+```
+By default `files` reads the manifest list and manifests itself and prints them as a tree: snapshot, manifest, then each manifest entry.
+
+With `--scan-planning-mode remote` or `auto`, or when a REST catalog sets `scan-planning-mode=server` for the table, `files` plans a scan of the current snapshot instead and lists the data files it returns, each with its delete files. A scan plan carries no manifests, so the tree has no manifest level, and it only shows live files. `--history` needs every snapshot's manifests and fails in this mode, as does `--scan-planning-mode local` on a `server` table.
+
+`compact` plans its input with a table scan, so it follows the catalog's `scan-planning-mode` as well. Every other command reads table metadata directly.
 
 ### `schema --show-defaults`
 

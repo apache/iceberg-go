@@ -90,21 +90,20 @@ services:
       # static S3 credentials used by the fixture's backing FileIO.
       - CATALOG_GCS_OAUTH2_TOKEN=scan-planning-integration-token
   object-store:
-    image: rustfs/rustfs:1.0.0
+    image: rustfs/rustfs:1.0.3
     container_name: object-store
     environment:
       - RUSTFS_ACCESS_KEY=admin
       - RUSTFS_SECRET_KEY=password
       - RUSTFS_SERVER_DOMAINS=object-store
       - RUSTFS_OBS_LOG_STDOUT_ENABLED=true
+      - RUSTFS_CONSOLE_ENABLE=false
     networks:
       iceberg_net:
         aliases:
           - warehouse.object-store
     ports:
-      - 9001:9001
       - 9000:9000
-    command: ["/data"]
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:9000/health/ready"]
       interval: 5s

@@ -48,6 +48,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -154,9 +155,11 @@ var (
 	// writing or replacing.
 	ErrConflictingDeleteFiles = fmt.Errorf("%w: concurrent delete files added", ErrCommitFailed)
 
-	// ErrDataFilesMissing is returned when a concurrent commit deleted
-	// data files the committer explicitly references (e.g. a position
-	// delete pointing at a file that is no longer reachable).
+	// ErrDataFilesMissing is returned when data files the committer
+	// explicitly references (e.g. the target of a position delete) are
+	// not live: a concurrent commit removed them, or, when RowDelta.Commit
+	// stages the delete, an operation staged earlier in the same
+	// transaction did. A refresh does not help in the second case.
 	ErrDataFilesMissing = fmt.Errorf("%w: referenced data files missing", ErrCommitFailed)
 )
 
@@ -228,12 +231,12 @@ func newConflictManifestIO(base iceio.IO) *conflictManifestIO {
 	}
 }
 
-func (c *conflictManifestIO) Open(name string) (iceio.File, error) {
+func (c *conflictManifestIO) Open(ctx context.Context, name string) (iceio.File, error) {
 	if data, ok := c.files[name]; ok {
 		return newConflictManifestFile(name, data), nil
 	}
 
-	f, err := c.base.Open(name)
+	f, err := c.base.Open(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +265,7 @@ func (c *conflictManifestIO) Open(name string) (iceio.File, error) {
 	}, nil
 }
 
-func (c *conflictManifestIO) Remove(string) error {
+func (c *conflictManifestIO) Remove(context.Context, string) error {
 	return errConflictManifestIOReadOnly
 }
 
@@ -275,7 +278,7 @@ func (c *conflictManifestIO) Stat(name string) (fs.FileInfo, error) {
 		return statIO.Stat(name)
 	}
 
-	f, err := c.Open(name)
+	f, err := c.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}
@@ -411,8 +414,9 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // partition-spec projection resolves the same column identifiers.
 //
 // When base and current point at the same snapshot on the branch, the
-// returned context has no concurrent snapshots and validators
-// short-circuit to nil. When the base snapshot is no longer on the
+// returned context has no concurrent snapshots and validators that
+// inspect them short-circuit to nil; validateDataFilesExist still reads
+// the branch head. When the base snapshot is no longer on the
 // branch (divergent commit, expired base), newConflictContext returns
 // ErrCommitDiverged; the commit cannot be safely revalidated without
 // a refresh-and-rebuild.
@@ -511,6 +515,8 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 
 // validateDataFilesExist verifies that every file path in
 // referencedPaths is still a live data file on the current branch head.
+// Files the transaction stages are not on the head yet, so callers pass
+// only the paths Transaction.headDataFiles returns when the delete is staged.
 // This is the check a position-delete commit performs to prove the
 // files it references have not been removed by a concurrent commit
 // (at which point the pos-delete would apply to rewritten data and
@@ -580,13 +586,127 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 	for p := range needed {
 		missing = append(missing, p)
 	}
+
+	return dataFilesMissingError(missing, "missing")
+}
+
+// headDataFiles returns the paths in referenced that a delete staged next must still
+// find live on the branch head when the transaction commits (validateDataFilesExist).
+// It replays, oldest first, the data files added and removed by the staged snapshots
+// the delete is layered on (its parent and the parent's staged ancestors, a chain a
+// rollback can shorten), then sorts each referenced file into one case:
+//   - added by those snapshots or in added (the delete's own data files), and not
+//     removed since: left out, as no concurrent commit can remove an uncommitted file;
+//   - removed by those snapshots: rejected with ErrDataFilesMissing, as it would be
+//     across separate commits;
+//   - anything else: returned for the head check, which also rejects a file that only
+//     a later snapshot adds, since the delete would carry the lower sequence number.
+//
+// A retry sees the same changes: it reuses the staged snapshots' added manifests and
+// fails if a file one of them removes is gone from the fresh parent (checkRemovedFiles).
+func (t *Transaction) headDataFiles(fs iceio.IO, referenced []string, added []iceberg.DataFile) ([]string, error) {
+	if len(referenced) == 0 {
+		return nil, nil
+	}
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
+	staged := make(map[int64]*addSnapshotUpdate)
+	for _, u := range meta.updates {
+		if su, ok := u.(*addSnapshotUpdate); ok {
+			staged[su.Snapshot.SnapshotID] = su
+		}
+	}
+	// A parent is always added before its child, so the walk ends at the first
+	// snapshot this transaction did not stage.
+	var chain []*addSnapshotUpdate
+	if parent := t.planningSnapshot(meta); parent != nil {
+		for su, ok := staged[parent.SnapshotID]; ok; {
+			chain = append(chain, su)
+			if su.Snapshot.ParentSnapshotID == nil {
+				break
+			}
+			su, ok = staged[*su.Snapshot.ParentSnapshotID]
+		}
+	}
+	slices.Reverse(chain)
+
+	live := make(map[string]struct{}, len(added))
+	removed := make(map[string]struct{})
+	for _, su := range chain {
+		id := su.Snapshot.SnapshotID
+		manifests, err := su.Snapshot.Manifests(fs)
+		if err != nil {
+			return nil, fmt.Errorf("iterating data files removed by staged snapshot %d: %w", id, err)
+		}
+		for _, mf := range manifests {
+			// Only data manifests this snapshot wrote can hold its tombstones; inherited
+			// ones restate the head (re-read at commit) and the snapshots replayed before it.
+			if mf.ManifestContent() != iceberg.ManifestContentData || mf.SnapshotID() != id || mf.DeletedDataFiles() == 0 {
+				continue
+			}
+			for entry, err := range mf.Entries(fs, false) {
+				if err != nil {
+					return nil, fmt.Errorf("iterating data files removed by staged snapshot %d: %w", id, err)
+				}
+				if entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == id {
+					path := entry.DataFile().FilePath()
+					delete(live, path)
+					removed[path] = struct{}{}
+				}
+			}
+		}
+
+		for _, mf := range su.ownManifests {
+			if mf.ManifestContent() != iceberg.ManifestContentData {
+				continue
+			}
+			for entry, err := range mf.Entries(fs, true) {
+				if err != nil {
+					return nil, fmt.Errorf("iterating data files added by staged snapshot %d: %w", id, err)
+				}
+				path := entry.DataFile().FilePath()
+				live[path] = struct{}{}
+			}
+		}
+	}
+	for _, df := range added {
+		live[df.FilePath()] = struct{}{}
+	}
+
+	head := make([]string, 0, len(referenced))
+	var missing []string
+	for _, path := range referenced {
+		// Not committed yet, so no concurrent commit can remove it.
+		if _, ok := live[path]; ok {
+			continue
+		}
+		if _, ok := removed[path]; ok {
+			missing = append(missing, path)
+
+			continue
+		}
+		head = append(head, path)
+	}
+	if len(missing) > 0 {
+		return nil, dataFilesMissingError(missing, "removed earlier in this transaction")
+	}
+
+	return head, nil
+}
+
+// dataFilesMissingError reports the referenced data files a delete cannot apply to,
+// naming the first few in path order; state says what became of them.
+func dataFilesMissingError(missing []string, state string) error {
 	sort.Strings(missing)
 	sample := missing
 	if len(sample) > 5 {
 		sample = sample[:5]
 	}
 
-	return fmt.Errorf("%w: %d files missing, e.g. %v", ErrDataFilesMissing, len(missing), sample)
+	return fmt.Errorf("%w: %d files %s, e.g. %v", ErrDataFilesMissing, len(missing), state, sample)
 }
 
 // validateAddedDataFilesMatchingFilter returns an error if any
@@ -855,12 +975,12 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				if currentSchema == nil {
 					currentSchema = meta.CurrentSchema()
 				}
-				field, found := currentSchema.FindFieldByID(pf.SourceID())
+				field, found := currentSchema.FindFieldByID(pf.FirstSourceID())
 				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, found: found}
 				specInfo.sourceFields[partFieldID] = sourceField
 			}
 			if !sourceField.found {
-				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.SourceID(), pf.Name)
+				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.FirstSourceID(), pf.Name)
 			}
 
 			value := p[partFieldID]

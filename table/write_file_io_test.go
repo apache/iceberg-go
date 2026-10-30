@@ -150,7 +150,7 @@ func TestWritePathsReturnErrorForReadOnlyIO(t *testing.T) {
 		{
 			name: "replace data files with data files add-only path",
 			run: func(ctx context.Context, tbl *Table) error {
-				return tbl.NewTransaction().ReplaceDataFilesWithDataFiles(ctx, nil, []iceberg.DataFile{
+				return tbl.NewTransaction().ReplaceDataFiles(ctx, nil, []iceberg.DataFile{
 					newWriteIORequiredDataFileWithPath(t, "file:///tmp/read-only-write/replace-data-files-add.parquet"),
 				}, nil)
 			},
@@ -158,7 +158,7 @@ func TestWritePathsReturnErrorForReadOnlyIO(t *testing.T) {
 		{
 			name: "add files",
 			run: func(ctx context.Context, tbl *Table) error {
-				return tbl.NewTransaction().AddFiles(ctx, []string{
+				return tbl.NewTransaction().AddDataFilesByPath(ctx, []string{
 					"file:///tmp/read-only-write/add-files.parquet",
 				}, nil, false)
 			},

@@ -20,6 +20,7 @@ package table_test
 import (
 	"context"
 	"iter"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -517,7 +518,7 @@ func writeParquetFileWithProperties(
 	defer rec.Release()
 
 	fs := iceio.LocalFS{}
-	fw, err := fs.Create(path)
+	fw, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	defer fw.Close()
 
@@ -572,7 +573,7 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	err = tx.AddFiles(t.Context(), []string{dataPath}, nil, false)
+	err = tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false)
 	require.NoError(t, err)
 
 	tbl, err = tx.Commit(t.Context())
@@ -746,7 +747,7 @@ func newTableWithLiveDV(t *testing.T) (*table.Table, string, string, iceberg.Dat
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -779,7 +780,7 @@ func newTableWithSharedPuffinDVs(t *testing.T) (*table.Table, string, string, st
 	writeParquetFile(t, pathB, arrowSc, `[{"id": 3, "data": "gamma"}, {"id": 4, "data": "delta"}]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{pathA, pathB}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{pathA, pathB}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -858,7 +859,7 @@ func TestRowDeltaDVSupersessionSingleSnapshot(t *testing.T) {
 	]`)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assertRowCount(t, tbl, 5)
@@ -963,7 +964,7 @@ func TestRowDeltaRemoveDeletesRequiresReplacement(t *testing.T) {
 // Assertion: Commit fails identifying the surviving live DV (a) or the
 // duplicated reference (b).
 func TestRowDeltaRemoveDeletesRejectsSurvivingLiveDV(t *testing.T) {
-	t.Run("replacement added while live DV not removed", func(t *testing.T) {
+	t.Run("replacement added while live DV not removed (with RemoveDeletes)", func(t *testing.T) {
 		tbl, location, pathA, pathB, dvA, _ := newTableWithSharedPuffinDVs(t)
 
 		// Supersede A's DV, but also add a replacement for B without
@@ -978,6 +979,20 @@ func TestRowDeltaRemoveDeletesRejectsSurvivingLiveDV(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not removed by this row delta")
 		assert.Contains(t, err.Error(), pathB)
+	})
+
+	t.Run("replacement added while live DV not removed (without RemoveDeletes)", func(t *testing.T) {
+		tbl, location, pathA, _, _, _ := newTableWithSharedPuffinDVs(t)
+
+		// Add a replacement DV for A's live DV without removing the live one.
+		// This should fail in the fast-append path (no RemoveDeletes called).
+		dvA2 := writeDV(t, location, "dv-a2.puffin", pathA, []int64{0, 1})
+		rd := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dvA2)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is not removed by this row delta")
+		assert.Contains(t, err.Error(), pathA)
 	})
 
 	t.Run("two replacements for one data file", func(t *testing.T) {
@@ -995,60 +1010,83 @@ func TestRowDeltaRemoveDeletesRejectsSurvivingLiveDV(t *testing.T) {
 	})
 }
 
-// Why: a table that already violates the one-live-DV-per-data-file
-// invariant must fail a supersession commit loudly — the producer keys
-// DV removals by referenced data file, so proceeding would either
-// tombstone several entries while counting one removal (same path) or
-// leave the sibling duplicate live next to the replacement (different
-// paths).
-// Condition: v3 tables corrupted through the unvalidated plain
-// AddDeletes path so one data file carries two live DV entries, first
-// as duplicate entries at one Puffin path, then at two distinct paths;
-// a RowDelta then supersedes one of them.
-// Assertion: Commit fails naming the duplicate entries rather than
-// committing.
+// Why: supersession in the fast-append path (no RemoveDeletes called)
+// must still enforce the one-live-DV-per-data-file invariant and require
+// explicit removal of the live DV.
+// Condition: a RowDelta adds a replacement DV for a data file with a live
+// DV, without calling RemoveDeletes.
+// Assertion: Commit fails with the same error as the RemoveDeletes case,
+// directing the caller to remove the superseded DV. With RemoveDeletes,
+// the same operation succeeds.
+func TestRowDeltaFastAppendRejectsDVSupersessionWithoutRemoval(t *testing.T) {
+	tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+
+	// Add a replacement DV without removing the live one.
+	rep := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil).AddDeletes(rep)
+
+	err := rd.Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not removed by this row delta")
+	assert.Contains(t, err.Error(), "superseded entry must be removed in the same snapshot")
+
+	// With RemoveDeletes, the same operation succeeds.
+	rep2 := writeDV(t, location, "dv-003.puffin", dataPath, []int64{0, 1})
+	tx2 := tbl.NewTransaction()
+	rd2 := tx2.NewRowDelta(nil).AddDeletes(rep2).RemoveDeletes(dv1)
+	require.NoError(t, rd2.Commit(t.Context()))
+
+	result, err := tx2.Commit(t.Context())
+	require.NoError(t, err)
+	snap := result.CurrentSnapshot()
+	require.NotNil(t, snap)
+
+	fs := iceio.LocalFS{}
+	live, removed := snapshotDVEntries(t, snap, fs)
+	assert.Equal(t, []string{rep2.FilePath()}, live)
+	assert.Equal(t, []string{dv1.FilePath()}, removed)
+}
+
+// Why: the fast-append path now prevents tables from being corrupted with
+// duplicate DVs for the same data file. Previously, duplicate entries could
+// be added through the unvalidated plain AddDeletes path, violating the
+// one-live-DV-per-data-file invariant. Now this is detected immediately.
+// Condition: a RowDelta attempts to add a replacement DV for a data file
+// that already has a live DV without removing the live one.
+// Assertion: Commit fails in the fast-append path itself, before any
+// corruption can occur.
 func TestRowDeltaRemoveDeletesCorruptDuplicateLiveDVs(t *testing.T) {
-	t.Run("duplicate entries at one path", func(t *testing.T) {
-		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+	t.Run("duplicate entries at one path prevented", func(t *testing.T) {
+		tbl, _, dataPath, dv1 := newTableWithLiveDV(t)
 
-		// Corrupt the table: a second snapshot re-adds the same DV
-		// entry (same path, same referenced data file).
+		// Attempt to re-add the same DV without removing the live one.
+		// This now fails in the fast-append validation, preventing corruption.
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1).Commit(t.Context()))
-		tbl, err := tx.Commit(t.Context())
-		require.NoError(t, err)
+		rd := tx.NewRowDelta(nil).AddDeletes(dv1)
 
-		replacement := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
-		rd := tbl.NewTransaction().NewRowDelta(nil).
-			AddDeletes(replacement).
-			RemoveDeletes(dv1)
-
-		err = rd.Commit(t.Context())
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate live deletion vectors")
-	})
-
-	t.Run("duplicate entries at two paths", func(t *testing.T) {
-		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
-
-		// Corrupt the table: a second live DV for the same data file
-		// at a different Puffin path.
-		dv1b := writeDV(t, location, "dv-001b.puffin", dataPath, []int64{0})
-		tx := tbl.NewTransaction()
-		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1b).Commit(t.Context()))
-		tbl, err := tx.Commit(t.Context())
-		require.NoError(t, err)
-
-		replacement := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
-		rd := tbl.NewTransaction().NewRowDelta(nil).
-			AddDeletes(replacement).
-			RemoveDeletes(dv1)
-
-		err = rd.Commit(t.Context())
+		err := rd.Commit(t.Context())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not removed by this row delta",
-			"the sibling duplicate at the other path must be flagged as surviving")
-		assert.Contains(t, err.Error(), dv1b.FilePath())
+			"adding a duplicate DV for the same data file must fail in the fast-append path")
+		assert.Contains(t, err.Error(), dataPath)
+	})
+
+	t.Run("duplicate entries at two paths prevented", func(t *testing.T) {
+		tbl, location, dataPath, _ := newTableWithLiveDV(t)
+
+		// Attempt to add a second live DV for the same data file
+		// at a different Puffin path, without removing the first.
+		// This now fails in the fast-append validation, preventing corruption.
+		dv1b := writeDV(t, location, "dv-001b.puffin", dataPath, []int64{0})
+		tx := tbl.NewTransaction()
+		rd := tx.NewRowDelta(nil).AddDeletes(dv1b)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is not removed by this row delta",
+			"adding a second DV for the same data file must fail in the fast-append path")
+		assert.Contains(t, err.Error(), dataPath)
 	})
 }
 
@@ -1321,7 +1359,7 @@ func TestRowDeltaRemoveDeletesStaleReference(t *testing.T) {
 		writeParquetFile(t, pathB, arrowSc, `[{"id": 3, "data": "gamma"}, {"id": 4, "data": "delta"}]`)
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{pathA, pathB}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{pathA, pathB}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -1513,7 +1551,7 @@ func TestRowDeltaRemoveDeletesUnknownFile(t *testing.T) {
 		writeParquetFile(t, realDataPath, arrowSc, `[{"id": 1, "data": "alpha"}]`)
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{realDataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{realDataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -1710,4 +1748,525 @@ func writtenManifests(t *testing.T, location string) []string {
 	require.NoError(t, err)
 
 	return paths
+}
+
+// Why: two DVs added in one row delta that reference the same data file would
+// commit two live DVs even when that data file has no live DV yet, so the
+// removal path's duplicate check never runs (no RemoveDeletes → fast-append).
+// The fast-append path must reject the duplicate directly.
+// Condition: AddDeletes(dvA, dvB) where both reference the same data file that
+// currently has no live DV, and no RemoveDeletes is called.
+// Assertion: Commit fails with the duplicate-added-DV error before committing.
+func TestRowDeltaFastAppendRejectsDuplicateAddedDVs(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	location := tbl.Location()
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := location + "/data/data-100.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[
+		{"id": 1, "data": "alpha"},
+		{"id": 2, "data": "beta"}
+	]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	// The data file has no live DV yet, and no RemoveDeletes is called, so
+	// only the fast-append path can catch the duplicate.
+	dvA := writeDV(t, location, "dv-a.puffin", dataPath, []int64{0})
+	dvB := writeDV(t, location, "dv-b.puffin", dataPath, []int64{1})
+
+	err = tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dvA, dvB).Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple added deletion vectors reference data file "+dataPath)
+}
+
+// Why: two writers that each add the FIRST deletion vector for the same data
+// file both pass the pre-commit scan against their shared base (no live DV
+// yet). After one commits, the other's add-only row delta is replayable, so
+// the retry must re-check against the refreshed head, or the table ends up
+// with two live DVs for one data file.
+// Condition: Writer A adds a DV for data file D; a concurrent writer commits
+// the first DV for D before A's commit lands, forcing A to retry.
+// Assertion: A's commit fails on the retry (after one refresh, before a second
+// commit attempt) with the concurrent-DV conflict error.
+func TestRowDeltaRejectsConcurrentFirstDVOnRetry(t *testing.T) {
+	localFS := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+	)
+	props := iceberg.Properties{
+		table.PropertyFormatVersion:        "3",
+		table.CommitMinRetryWaitMsKey:      "0",
+		table.CommitMaxRetryWaitMsKey:      "0",
+		table.CommitTotalRetryTimeoutMsKey: "60000",
+		table.CommitNumRetriesKey:          "2",
+	}
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location, props)
+	require.NoError(t, err)
+
+	ident := table.Identifier{"db", "row_delta_concurrent_dv"}
+
+	// Base: one data file D with two rows and no deletion vector.
+	baseCat := &occScenarioCatalog{current: meta, location: location}
+	baseTbl := table.New(ident, meta, location+"/metadata/v1.metadata.json", localFS, baseCat)
+
+	arrowSc, err := table.SchemaToArrowSchema(baseTbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := location + "/data/data-001.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[
+		{"id": 1, "data": "alpha"},
+		{"id": 2, "data": "beta"}
+	]`)
+
+	tx := baseTbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
+	_, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	metaBase := baseCat.current
+
+	// A concurrent writer commits the first DV for D just before A's commit,
+	// advancing the head A will refresh onto.
+	addConcurrentDV := func(current table.Metadata) table.Metadata {
+		peerCat := &occScenarioCatalog{current: current, location: location}
+		peerTbl := table.New(ident, current, location+"/metadata/peer.metadata.json", localFS, peerCat)
+
+		dvC := writeDV(t, location, "dv-concurrent.puffin", dataPath, []int64{0})
+		ptx := peerTbl.NewTransaction()
+		require.NoError(t, ptx.NewRowDelta(nil).AddDeletes(dvC).Commit(t.Context()))
+		_, perr := ptx.Commit(t.Context())
+		require.NoError(t, perr)
+
+		return peerCat.current
+	}
+
+	// Writer A starts from the DV-free base and adds its own first DV for D.
+	// Its catalog conflicts once (landing the concurrent DV), then would accept
+	// the retry — which the validator must reject before it commits.
+	catA := &occScenarioCatalog{
+		current:       metaBase,
+		conflictsLeft: 1,
+		location:      location,
+		onConflict:    addConcurrentDV,
+	}
+	writerA := table.New(ident, metaBase, location+"/metadata/base.metadata.json", localFS, catA)
+
+	dvA := writeDV(t, location, "dv-writer-a.puffin", dataPath, []int64{1})
+	txA := writerA.NewTransaction()
+	require.NoError(t, txA.NewRowDelta(nil).AddDeletes(dvA).Commit(t.Context()))
+
+	_, err = txA.Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "concurrent snapshot")
+	assert.Contains(t, err.Error(), dataPath)
+	assert.Equal(t, int32(1), catA.loadTableCalls.Load(),
+		"the commit must refresh once for the retry before rejecting")
+	assert.Equal(t, int32(1), catA.commitTableCalls.Load(),
+		"the validator must reject on the refreshed retry, before a second commit attempt")
+}
+
+func writeRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...int64) iceberg.DataFile {
+	t.Helper()
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	rows := make([]string, 0, len(ids))
+	for _, id := range ids {
+		row := `{"id": ` + strconv.FormatInt(id, 10) + `}`
+		rows = append(rows, row)
+	}
+
+	jsonData := "[" + strings.Join(rows, ",") + "]"
+	writeParquetFile(t, path, arrowSc, jsonData)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	b, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData, path, iceberg.ParquetFile,
+		nil, nil, nil, int64(len(ids)), info.Size())
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func seedRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...int64) *table.Table {
+	t.Helper()
+
+	writeRowDeltaDataFile(t, tbl, path, ids...)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false))
+
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, tbl.CurrentSnapshot())
+
+	return tbl
+}
+
+func writeRowDeltaPositionDelete(t *testing.T, location, name, dataPath string, positions []int64) iceberg.DataFile {
+	t.Helper()
+
+	rows := make([]string, 0, len(positions))
+	for _, pos := range positions {
+		row := `{"file_path": "` + dataPath + `", "pos": ` + strconv.FormatInt(pos, 10) + `}`
+		rows = append(rows, row)
+	}
+	path := location + "/data/" + name
+	jsonData := "[" + strings.Join(rows, ",") + "]"
+	writeParquetFile(t, path, table.PositionalDeleteArrowSchema, jsonData)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	b, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes, path, iceberg.ParquetFile,
+		nil, nil, nil, int64(len(positions)), info.Size())
+	require.NoError(t, err)
+
+	return b.ReferencedDataFile(dataPath).Build()
+}
+
+// addedDataFileStages stage a RowDelta that adds dataB with deletes,
+// either in the same RowDelta or in a later one of the same transaction.
+var addedDataFileStages = []struct {
+	name  string
+	stage func(t *testing.T, tx *table.Transaction, dataB iceberg.DataFile, deletes ...iceberg.DataFile)
+}{
+	{
+		name: "same row delta",
+		stage: func(t *testing.T, tx *table.Transaction, dataB iceberg.DataFile, deletes ...iceberg.DataFile) {
+			require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(deletes...).Commit(t.Context()))
+		},
+	},
+	{
+		name: "earlier row delta in the transaction",
+		stage: func(t *testing.T, tx *table.Transaction, dataB iceberg.DataFile, deletes ...iceberg.DataFile) {
+			require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).Commit(t.Context()))
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(deletes...).Commit(t.Context()))
+		},
+	},
+}
+
+// A data file added by the commit is not on the branch head yet.
+//
+// Condition: one commit adds file B and deletes for head file A and for B,
+// via one RowDelta or two in one transaction, as v2 position deletes or DVs.
+// Assertion: the commit succeeds and each delete hides only its own row.
+func TestRowDeltaDeletesDataFileAddedInSameCommit(t *testing.T) {
+	formats := []struct {
+		name          string
+		formatVersion int
+		ext           string
+		writeDelete   func(t *testing.T, location, name, dataPath string, positions []int64) iceberg.DataFile
+	}{
+		{name: "v2 position delete", formatVersion: 2, ext: ".parquet", writeDelete: writeRowDeltaPositionDelete},
+		{name: "v3 deletion vector", formatVersion: 3, ext: ".puffin", writeDelete: writeDV},
+	}
+	for _, format := range formats {
+		for _, tt := range addedDataFileStages {
+			t.Run(format.name+"/"+tt.name, func(t *testing.T) {
+				tbl := newRowDeltaCommitTestTableVersion(t, format.formatVersion)
+				location := tbl.Location()
+				pathA := location + "/data/data-a.parquet"
+				pathB := location + "/data/data-b.parquet"
+				tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+
+				dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
+				deleteA := format.writeDelete(t, location, "delete-a"+format.ext, pathA, []int64{0})
+				deleteB := format.writeDelete(t, location, "delete-b"+format.ext, pathB, []int64{2})
+
+				tx := tbl.NewTransaction()
+				tt.stage(t, tx, dataB, deleteA, deleteB)
+				tbl, err := tx.Commit(t.Context())
+				require.NoError(t, err)
+
+				assert.Equal(t, []int64{2, 3, 4, 5}, idsInTable(t, tbl))
+			})
+		}
+	}
+}
+
+// A delete-file rewrite may target a data file added earlier in the same transaction.
+//
+// Condition: a RowDelta adds B with a DV for it, then a rewrite replaces that DV.
+// Assertion: the commit succeeds and only the replacement DV hides B's rows.
+func TestRewriteFilesReplacesDVOfDataFileAddedInSameTransaction(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	location := tbl.Location()
+	pathB := location + "/data/data-b.parquet"
+	tbl = seedRowDeltaDataFile(t, tbl, location+"/data/data-a.parquet", 1, 2, 3)
+
+	dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
+	dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{0})
+	replacement := writeDV(t, location, "dv-b-replacement.puffin", pathB, []int64{0, 2})
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvB).Commit(t.Context()))
+	require.NoError(t, tx.NewRewrite(nil).DeleteFile(dvB).AddDeleteFile(replacement).Commit(t.Context()))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, []int64{1, 2, 3, 5}, idsInTable(t, tbl))
+	assert.Equal(t, 1, liveDVCount(t, tbl))
+}
+
+// Exempting files the transaction adds must not waive the check for others.
+//
+// Condition: a DV targets a file that is neither on the head nor added when the DV is staged:
+// an unknown file beside a DV for B, B added only by a later RowDelta, which would leave
+// the DV with the lower data sequence number, or B added by a RowDelta rolled back before it.
+// Assertion: ErrDataFilesMissing names only that file
+// and the catalog never receives a commit.
+func TestRowDeltaRejectsDeleteForDataFileNotLiveWhenStaged(t *testing.T) {
+	tests := []struct {
+		name        string
+		stage       func(t *testing.T, tx *table.Transaction, headID int64, dataB, dvB, dvUnknown iceberg.DataFile)
+		wantMissing string
+	}{
+		{
+			name: "unknown file beside a file the row delta adds",
+			stage: func(t *testing.T, tx *table.Transaction, _ int64, dataB, dvB, dvUnknown iceberg.DataFile) {
+				require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvB, dvUnknown).Commit(t.Context()))
+			},
+			wantMissing: "unknown.parquet",
+		},
+		{
+			name: "file a later row delta adds",
+			stage: func(t *testing.T, tx *table.Transaction, _ int64, dataB, dvB, _ iceberg.DataFile) {
+				require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvB).Commit(t.Context()))
+				require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).Commit(t.Context()))
+			},
+			wantMissing: "data-b.parquet",
+		},
+		{
+			name: "file a rolled back row delta adds",
+			stage: func(t *testing.T, tx *table.Transaction, headID int64, dataB, dvB, _ iceberg.DataFile) {
+				require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).Commit(t.Context()))
+				require.NoError(t, tx.RollbackToSnapshot(headID))
+				require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvB).Commit(t.Context()))
+			},
+			wantMissing: "data-b.parquet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
+			location := tbl.Location()
+			pathB := location + "/data/data-b.parquet"
+			unknownPath := location + "/data/unknown.parquet"
+
+			tbl = seedRowDeltaDataFile(t, tbl, location+"/data/data-a.parquet", 1, 2)
+			headBefore := tbl.CurrentSnapshot().SnapshotID
+			attemptsBefore := cat.attempts.Load()
+
+			dataB := writeRowDeltaDataFile(t, tbl, pathB, 3, 4)
+			dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{0})
+			dvUnknown := writeDV(t, location, "dv-unknown.puffin", unknownPath, []int64{0})
+
+			tx := tbl.NewTransaction()
+			tt.stage(t, tx, headBefore, dataB, dvB, dvUnknown)
+			_, err := tx.Commit(t.Context())
+			require.ErrorIs(t, err, table.ErrDataFilesMissing)
+			assert.ErrorContains(t, err, "1 files missing")
+			assert.ErrorContains(t, err, location+"/data/"+tt.wantMissing)
+			assert.Equal(t, attemptsBefore, cat.attempts.Load())
+			require.NotNil(t, cat.metadata.CurrentSnapshot())
+			assert.Equal(t, headBefore, cat.metadata.CurrentSnapshot().SnapshotID)
+		})
+	}
+}
+
+// Rolling back a staged removal makes the file live again for later deletes.
+//
+// Condition: a rewrite removes head file A, the transaction rolls back to the head,
+// then a RowDelta adds a DV for A.
+// Assertion: the commit succeeds, the DV applies to A, and A carries the only live DV.
+func TestRowDeltaDeletesDataFileAfterRollingBackItsRemoval(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	location := tbl.Location()
+	pathA := location + "/data/data-a.parquet"
+	tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+	headID := tbl.CurrentSnapshot().SnapshotID
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRewrite(nil).DeleteFile(tasks[0].File).Commit(t.Context()))
+	require.NoError(t, tx.RollbackToSnapshot(headID))
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvA).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+	assert.Equal(t, 1, liveDVCount(t, tbl))
+}
+
+// A retry re-checks the refreshed head, which still lacks the added B.
+//
+// Condition: a transaction adds B with DVs for head file A and for B, in one RowDelta
+// or two, and a concurrent append or removal of A commits first.
+// Assertion: the append retries with both DVs; the removal fails naming A.
+func TestRowDeltaDeletesDataFileAddedInSameCommitOnRetry(t *testing.T) {
+	tests := []struct {
+		name       string
+		concurrent func(t *testing.T, tbl *table.Table, dataA iceberg.DataFile)
+		wantIDs    []int64
+		wantErr    bool
+	}{
+		{
+			name: "concurrent append",
+			concurrent: func(t *testing.T, tbl *table.Table, _ iceberg.DataFile) {
+				seedRowDeltaDataFile(t, tbl, tbl.Location()+"/data/data-c.parquet", 7)
+			},
+			wantIDs: []int64{2, 3, 4, 5, 7},
+		},
+		{
+			name: "concurrent removal of a head file",
+			concurrent: func(t *testing.T, tbl *table.Table, dataA iceberg.DataFile) {
+				tx := tbl.NewTransaction()
+				require.NoError(t, tx.NewRewrite(nil).DeleteFile(dataA).Commit(t.Context()))
+				_, err := tx.Commit(t.Context())
+				require.NoError(t, err)
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, stage := range addedDataFileStages {
+		for _, tt := range tests {
+			t.Run(stage.name+"/"+tt.name, func(t *testing.T) {
+				tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
+				location := tbl.Location()
+				pathA := location + "/data/data-a.parquet"
+				pathB := location + "/data/data-b.parquet"
+				tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+
+				tasks, err := tbl.Scan().PlanFiles(t.Context())
+				require.NoError(t, err)
+				require.Len(t, tasks, 1)
+
+				dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
+				dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
+				dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{2})
+				tx := tbl.NewTransaction()
+				stage.stage(t, tx, dataB, dvA, dvB)
+
+				tt.concurrent(t, tbl, tasks[0].File)
+				require.NotNil(t, cat.metadata.CurrentSnapshot())
+				headBefore := cat.metadata.CurrentSnapshot().SnapshotID
+				attemptsBefore := cat.attempts.Load()
+
+				committed, err := tx.Commit(t.Context())
+				if tt.wantErr {
+					require.ErrorIs(t, err, table.ErrDataFilesMissing)
+					assert.ErrorContains(t, err, "1 files missing")
+					assert.ErrorContains(t, err, pathA)
+					assert.Equal(t, int32(1), cat.attempts.Load()-attemptsBefore,
+						"the retry must be rejected before reaching the catalog")
+					assert.Equal(t, headBefore, cat.metadata.CurrentSnapshot().SnapshotID)
+
+					return
+				}
+
+				require.NoError(t, err)
+				assert.Equal(t, int32(2), cat.attempts.Load()-attemptsBefore, "the commit must conflict once and retry")
+				assert.Equal(t, tt.wantIDs, idsInTable(t, committed))
+			})
+		}
+	}
+}
+
+// A rewrite in the same transaction removes the data file a DV targets.
+//
+// Condition: the rewrite removes head file A, or B added earlier in the transaction,
+// before the RowDelta that adds the DV beside a DV for the other, still live file,
+// or after the DV together with it.
+// Assertion: only the DV staged after the removal fails, naming that file alone and writing
+// nothing, as across separate commits; either way the table ends without the file and
+// without a live DV.
+func TestRowDeltaDeleteForDataFileRemovedInSameTransaction(t *testing.T) {
+	files := []struct {
+		name    string
+		pick    func(dataA, dataB iceberg.DataFile) (target, other iceberg.DataFile)
+		wantIDs []int64
+	}{
+		{
+			name:    "head file",
+			pick:    func(dataA, dataB iceberg.DataFile) (iceberg.DataFile, iceberg.DataFile) { return dataA, dataB },
+			wantIDs: []int64{4, 5, 6},
+		},
+		{
+			name:    "file added earlier in the transaction",
+			pick:    func(dataA, dataB iceberg.DataFile) (iceberg.DataFile, iceberg.DataFile) { return dataB, dataA },
+			wantIDs: []int64{1, 2, 3},
+		},
+	}
+	orders := []struct {
+		name  string
+		stage func(t *testing.T, tbl *table.Table, tx *table.Transaction, target, dv, otherDV iceberg.DataFile)
+	}{
+		{
+			name: "removed before the delete",
+			stage: func(t *testing.T, tbl *table.Table, tx *table.Transaction, target, dv, otherDV iceberg.DataFile) {
+				before := metadataFileCount(t, tbl)
+				require.NoError(t, tx.NewRewrite(nil).DeleteFile(target).Commit(t.Context()))
+				staged := metadataFileCount(t, tbl)
+				require.Greater(t, staged, before, "the probe must see the files a staged operation writes")
+
+				err := tx.NewRowDelta(nil).AddDeletes(otherDV, dv).Commit(t.Context())
+				require.ErrorIs(t, err, table.ErrDataFilesMissing)
+				assert.ErrorContains(t, err, "1 files removed earlier in this transaction")
+				assert.ErrorContains(t, err, target.FilePath())
+				assert.Equal(t, staged, metadataFileCount(t, tbl), "the rejected row delta must write nothing")
+			},
+		},
+		{
+			name: "removed after the delete",
+			stage: func(t *testing.T, _ *table.Table, tx *table.Transaction, target, dv, _ iceberg.DataFile) {
+				require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv).Commit(t.Context()))
+				require.NoError(t, tx.NewRewrite(nil).DeleteFile(target).DeleteFile(dv).Commit(t.Context()))
+			},
+		},
+	}
+
+	for _, file := range files {
+		for _, order := range orders {
+			t.Run(file.name+"/"+order.name, func(t *testing.T) {
+				tbl := newRowDeltaCommitTestTableVersion(t, 3)
+				location := tbl.Location()
+				tbl = seedRowDeltaDataFile(t, tbl, location+"/data/data-a.parquet", 1, 2, 3)
+
+				tasks, err := tbl.Scan().PlanFiles(t.Context())
+				require.NoError(t, err)
+				require.Len(t, tasks, 1)
+
+				dataB := writeRowDeltaDataFile(t, tbl, location+"/data/data-b.parquet", 4, 5, 6)
+				target, other := file.pick(tasks[0].File, dataB)
+				dv := writeDV(t, location, "dv-target.puffin", target.FilePath(), []int64{0})
+				otherDV := writeDV(t, location, "dv-other.puffin", other.FilePath(), []int64{0})
+
+				tx := tbl.NewTransaction()
+				require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).Commit(t.Context()))
+				order.stage(t, tbl, tx, target, dv, otherDV)
+				tbl, err = tx.Commit(t.Context())
+				require.NoError(t, err)
+
+				assert.Equal(t, file.wantIDs, idsInTable(t, tbl))
+				assert.Zero(t, liveDVCount(t, tbl))
+			})
+		}
+	}
 }

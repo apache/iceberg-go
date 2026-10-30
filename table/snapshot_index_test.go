@@ -171,7 +171,7 @@ func TestCommonMetadataSnapshotLookupsConcurrent(t *testing.T) {
 		SnapshotList:      []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}},
 		CurrentSnapshotID: &currentSnapshotID,
 		SnapshotRefs: map[string]SnapshotRef{
-			MainBranch: {SnapshotID: currentSnapshotID, SnapshotRefType: BranchRef},
+			MainBranch: {SnapshotID: currentSnapshotID, Type: BranchRef},
 		},
 	}
 	metadata.snapshotIndex = buildSnapshotIndex(metadata.SnapshotList)

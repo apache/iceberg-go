@@ -58,7 +58,7 @@ func TestToDecimalLiteralUsesBoundFieldPrecision(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fieldType := iceberg.DecimalTypeOf(tc.precision, tc.scale)
+			fieldType := iceberg.MustDecimalTypeOf(tc.precision, tc.scale)
 			lit := decimalLiteral16Bytes(tc.scale)
 
 			got := toDecimalLiteral(fieldType, lit)
@@ -118,7 +118,7 @@ func TestToDecimalLiteralRealisticValues(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fieldType := iceberg.DecimalTypeOf(18, tc.scale)
+			fieldType := iceberg.MustDecimalTypeOf(18, tc.scale)
 			lit := iceberg.DecimalLiteral{Val: tc.val, Scale: tc.scale}
 
 			got := toDecimalLiteral(fieldType, lit)

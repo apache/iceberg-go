@@ -70,7 +70,7 @@ import (
 
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
 // handle err
-cat := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 ```
 
 #### Hive
@@ -92,9 +92,10 @@ cat, err := hive.NewCatalog(iceberg.Properties{},
 import (
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog/hadoop"
+    "context"
 )
 
-cat, err := hadoop.NewCatalog("default", "file:///tmp/warehouse", iceberg.Properties{})
+cat, err := hadoop.NewCatalog(context.Background(), "default", "file:///tmp/warehouse", iceberg.Properties{})
 ```
 
 #### Via the registry
@@ -112,7 +113,12 @@ cat, err := catalog.Load(ctx, "default", iceberg.Properties{
     "uri":       "http://localhost:8181",
     "warehouse": "s3://my-bucket/warehouse",
 })
+if err != nil { panic(err) }
+defer cat.Close()
 ```
+
+Every catalog implements `Close() error`. Close it when done to release catalog-owned
+resources. A caller-supplied database connection remains caller-owned.
 
 ### Namespaces
 
@@ -348,7 +354,7 @@ When you already have data files (e.g. produced by another writer), register the
 
 ```go
 txn := tbl.NewTransaction()
-err := txn.AddFiles(ctx, []string{
+err := txn.AddDataFilesByPath(ctx, []string{
     "s3://my-bucket/sales/orders/data/file-1.parquet",
     "s3://my-bucket/sales/orders/data/file-2.parquet",
 }, nil /* snapshot props */, false /* ignoreDuplicates */)
@@ -357,7 +363,7 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
-`ReplaceDataFiles(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFilesWithDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
+`ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
 
 ### Transactions
 
@@ -383,10 +389,11 @@ newTbl, err := txn.Commit(ctx)
 To target a specific branch:
 
 ```go
-txn := tbl.NewTransactionOnBranch("staging")
+txn, err := tbl.NewTransactionOnBranch("staging")
+if err != nil { /* ... */ }
 ```
 
-`Commit` retries automatically on conflict (`ErrCommitFailed`) - tune via the `commit.retry.*` table properties.
+`Commit` can retry on conflict (`ErrCommitFailed`) when `commit.retry.num-retries` is set. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 
 ## Schema and partition evolution
 
@@ -514,6 +521,24 @@ fmt.Printf("rewrote %d files into %d (%d -> %d bytes)\n",
 
 The `table/compaction` subpackage provides bin-packing planning. The `iceberg compact analyze` and `compact run` CLI commands wrap the same machinery - see [CLI](./cli.md).
 
+Compaction tasks represent complete data files, not independent scan splits. The planner collapses split tasks for the same file into one whole-file task, rejecting inconsistent delete or lineage metadata and dropping residual filters because they select files but do not filter rows during compaction. Direct calls to `ExecuteCompactionGroup` reject partial ranges and residual row filters. Attached delete files are still applied when rewriting each source file.
+
+To sort instead of bin-pack, pass `table.WithCompactionSortOrder` as a group option. Each group is sorted as a whole, so every output file holds a sorted, non-overlapping range of it. Output files record the order's `sort_order_id` when the order is one of the table's sort orders, every field has one source column, every field but the last is identity and the last preserves order (see `table.WithCompactionSortOrder`). Files of different groups still overlap, and by default a group is packed to one target file, so raise `compaction.Config.MaxGroupSizeBytes` until a group covers a partition. Set `compaction.Config.RewriteAll` to also rewrite files that are already well-sized:
+
+```go
+cfg := compaction.DefaultConfig()
+cfg.RewriteAll = true
+cfg.MaxGroupSizeBytes = 8 << 30 // 8 GiB per group
+plan, err := compaction.Analyze(ctx, tbl, cfg)
+if err != nil { /* ... */ }
+
+result, err := txn.RewriteDataFiles(ctx, groups /* from plan.Groups */, table.RewriteDataFilesOptions{
+    GroupOptions: []table.CompactionGroupOption{table.WithCompactionSortOrder(tbl.SortOrder())},
+})
+```
+
+When every file of a group already records the order's `sort_order_id` (for example, files written by an earlier sort rewrite), every sort field is identity, and no partition of the group has more files than the scan concurrency (`table.WithCompactionScanConcurrency`, `GOMAXPROCS` by default), the files are streamed and merged, holding up to about five batches per file instead of the whole group. Otherwise a sort rewrite holds each group decoded in memory, and with the batches queued for the writer that can reach about twice the group's decoded size, so keep `compaction.Config.MaxGroupSizeBytes` within what one rewrite can hold. The first sort rewrite of a table always takes this in-memory path, since its files do not record the order yet. The CLI equivalent is `iceberg compact run --sort [--rewrite-all] [--max-group-size BYTES]`, which uses the table's default sort order.
+
 ### Expiring snapshots
 
 ```go
@@ -548,7 +573,7 @@ v, err := view.CreateView(
     "my-catalog",
     table.Identifier{"analytics", "monthly_orders"},
     schema,
-    "SELECT month, sum(amount) FROM orders GROUP BY month",
+    view.Representation{SQL: "SELECT month, sum(amount) FROM orders GROUP BY month", Dialect: "spark"},
     table.Identifier{"sales"},                      // default namespace for unqualified names
     "s3://my-bucket/views/monthly_orders",
     iceberg.Properties{},

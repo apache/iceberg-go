@@ -19,6 +19,7 @@ package io
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -28,53 +29,132 @@ import (
 	"github.com/apache/iceberg-go/internal/schemes"
 )
 
-type registry map[string]SchemeFactory
-
-var (
-	regMutex        sync.RWMutex
-	defaultRegistry = registry{}
-)
-
-// SchemeFactory is a function that creates an IO implementation for a given URI and properties.
+// SchemeFactory creates an IO implementation for a URI and its properties.
 type SchemeFactory func(ctx context.Context, parsed *url.URL, props map[string]string) (IO, error)
 
-// Register adds a new scheme factory to the registry. If the scheme is already registered, it will panic.
+var (
+	// ErrSchemeAlreadyRegistered indicates that a registry already has a factory for a scheme.
+	ErrSchemeAlreadyRegistered = errors.New("io scheme already registered")
+	// ErrInvalidSchemeFactory indicates that an attempt was made to register a nil factory.
+	ErrInvalidSchemeFactory = errors.New("io scheme factory is nil")
+)
+
+// Registry manages FileIO factories for URI schemes. A registry may be used by
+// multiple goroutines. Factories run without the registry lock held, so they
+// may register other schemes or load additional FileIO instances.
+type Registry struct {
+	mu        sync.RWMutex
+	factories map[string]SchemeFactory
+}
+
+func builtInRegistry() *Registry {
+	localFSFactory := func(context.Context, *url.URL, map[string]string) (IO, error) {
+		return LocalFS{}, nil
+	}
+
+	return &Registry{factories: map[string]SchemeFactory{
+		"":     localFSFactory,
+		"file": localFSFactory,
+	}}
+}
+
+// defaultRegistry is populated by side-effect imports of the cloud providers.
+// Independent registries clone these registrations rather than sharing the map.
+var defaultRegistry = builtInRegistry()
+
+// NewRegistry creates an independent snapshot of the globally registered
+// schemes, including cloud providers already registered through side-effect
+// imports. Future registrations in either registry do not affect the other.
+// Called from a package-level var initializer, it can miss backends that the
+// calling package does not import.
+func NewRegistry() *Registry {
+	return defaultRegistry.Clone()
+}
+
+// Clone returns an independent copy of a registry's factory registrations.
+// Factories themselves are shared, but the registration maps and locks are not.
+func (r *Registry) Clone() *Registry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return &Registry{factories: maps.Clone(r.factories)}
+}
+
+// Register adds a scheme factory. Unlike MustRegister, it returns errors for
+// invalid or duplicate registrations rather than panicking.
+func (r *Registry) Register(scheme string, factory SchemeFactory) error {
+	if factory == nil {
+		return ErrInvalidSchemeFactory
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.factories[scheme]; exists {
+		return fmt.Errorf("%w: %q", ErrSchemeAlreadyRegistered, scheme)
+	}
+
+	if r.factories == nil {
+		r.factories = make(map[string]SchemeFactory)
+	}
+	r.factories[scheme] = factory
+
+	return nil
+}
+
+// MustRegister registers a scheme or panics. It is intended for provider init
+// functions where failing to register a required backend is unrecoverable.
+func (r *Registry) MustRegister(scheme string, factory SchemeFactory) {
+	if err := r.Register(scheme, factory); err != nil {
+		panic(err)
+	}
+}
+
+// Unregister removes a scheme from this registry only.
+func (r *Registry) Unregister(scheme string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.factories, scheme)
+}
+
+// Names returns the registered scheme names in sorted order.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return slices.Sorted(maps.Keys(r.factories))
+}
+
+// Register adds a scheme factory to the global registry. As in earlier versions,
+// a nil factory or duplicate scheme causes a panic.
 func Register(scheme string, factory SchemeFactory) {
 	if factory == nil {
 		panic("io: Register factory is nil")
 	}
-
-	regMutex.Lock()
-	defer regMutex.Unlock()
-
-	if _, dup := defaultRegistry[scheme]; dup {
-		panic("io: Register called twice for scheme " + scheme)
+	if err := defaultRegistry.Register(scheme, factory); err != nil {
+		if errors.Is(err, ErrSchemeAlreadyRegistered) {
+			panic("io: Register called twice for scheme " + scheme)
+		}
+		panic(err)
 	}
-	defaultRegistry[scheme] = factory
 }
 
-// Unregister removes the requested scheme factory from the registry.
+// MustRegister registers a global scheme or panics. Use this from backend init
+// functions. For registration errors instead of panics, create an independent
+// registry and call [Registry.Register].
+func MustRegister(scheme string, factory SchemeFactory) {
+	defaultRegistry.MustRegister(scheme, factory)
+}
+
+// Unregister removes a scheme from the global registry.
 func Unregister(scheme string) {
-	regMutex.Lock()
-	defer regMutex.Unlock()
-	delete(defaultRegistry, scheme)
+	defaultRegistry.Unregister(scheme)
 }
 
-// GetRegisteredSchemes returns the list of registered scheme names.
+// GetRegisteredSchemes returns the names registered globally in sorted order.
 func GetRegisteredSchemes() []string {
-	regMutex.RLock()
-	defer regMutex.RUnlock()
-
-	return slices.Collect(maps.Keys(defaultRegistry))
-}
-
-func init() {
-	// Register local filesystem schemes
-	localFSFactory := func(ctx context.Context, parsed *url.URL, props map[string]string) (IO, error) {
-		return LocalFS{}, nil
-	}
-	Register("file", localFSFactory)
-	Register("", localFSFactory)
+	return defaultRegistry.Names()
 }
 
 func schemeImportHint(backend string) string {
@@ -91,15 +171,15 @@ func schemeRegistrationHint(scheme string) string {
 	return schemeImportHint(backend)
 }
 
-func inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {
+func (r *Registry) inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {
 	parsed, err := url.Parse(path)
 	if err != nil {
 		return nil, err
 	}
 
-	regMutex.RLock()
-	factory, ok := defaultRegistry[parsed.Scheme]
-	regMutex.RUnlock()
+	r.mu.RLock()
+	factory, ok := r.factories[parsed.Scheme]
+	r.mu.RUnlock()
 
 	if !ok {
 		hint := schemeRegistrationHint(parsed.Scheme)

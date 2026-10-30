@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -66,7 +67,7 @@ func TestOpenManifestWithProjectionDropsStatsAfterFiltering(t *testing.T) {
 	require.NoError(t, err)
 
 	fs := iceio.NewMemFS()
-	require.NoError(t, fs.WriteFile(manifestPath, manifestBytes.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()))
 
 	projection := iceberg.ManifestEntryProjection{IncludePruningStats: true}
 	entries, err := openManifestWithProjection(
@@ -199,7 +200,7 @@ func TestPlanDataManifestTasksWithProjectionRetainsEqualityDeletePruning(t *test
 		dataEntries,
 	)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(manifestPath, manifestBytes.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBytes.Bytes()))
 
 	deleteEntry := func(path string, value int64) iceberg.ManifestEntry {
 		builder, err := iceberg.NewDataFileBuilder(
@@ -246,9 +247,9 @@ func TestPlanDataManifestTasksWithProjectionRetainsEqualityDeletePruning(t *test
 	}
 	deleteManifest, err := deleteWriter.ToManifestFile("mem://projection-planning/deletes.avro", int64(deleteBytes.Len()))
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(deleteManifest.FilePath(), deleteBytes.Bytes()))
-	deleteManifest = iceberg.NewManifestFile(2, deleteManifest.FilePath(), int64(deleteBytes.Len()), 0, 2).
-		Content(iceberg.ManifestContentDeletes).SequenceNum(2, 2).AddedFiles(2).AddedRows(2).Build()
+	require.NoError(t, fs.WriteFile(context.Background(), deleteManifest.FilePath(), deleteBytes.Bytes()))
+	deleteManifest = iceberg.NewManifestBuilder(2, deleteManifest.FilePath(), int64(deleteBytes.Len()), 0, 2).
+		Content(iceberg.ManifestContentDeletes).SequenceNumber(2, 2).AddedFiles(2).AddedRows(2).Build()
 	classified, err := scan.collectManifestEntriesWithSchemaMinSequenceNum(t.Context(),
 		[]iceberg.ManifestFile{deleteManifest}, schema, scan.partitionFiltersForSchema(schema), 0, true)
 	require.NoError(t, err)

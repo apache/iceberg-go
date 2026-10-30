@@ -57,8 +57,8 @@ type Schema struct {
 	lazyNameMapping func() NameMapping
 }
 
-// NewSchemaFromJsonFields constructs a new schema with the provided ID and fields in json form
-func NewSchemaFromJsonFields(id int, jsonFieldsStr string) (*Schema, error) {
+// NewSchemaFromJSONFields constructs a new schema with the provided ID and fields in JSON form.
+func NewSchemaFromJSONFields(id int, jsonFieldsStr string) (*Schema, error) {
 	var fields []NestedField
 	err := json.Unmarshal([]byte(jsonFieldsStr), &fields)
 	if err != nil {
@@ -282,6 +282,10 @@ func (s *Schema) Fields() []NestedField   { return cloneFields(s.fields) }
 // FieldsRef returns the schema-owned fields for trusted internal callers.
 // The returned slice and everything reachable through the fields must be
 // treated as read-only.
+//
+// FieldsRef is for use by iceberg-go's own packages only: its sentinel argument
+// cannot be constructed outside this module. It is not covered by the module's
+// compatibility guarantees. Use [Schema.Fields] instead.
 func (s *Schema) FieldsRef(_ internal.SchemaRef) []NestedField { return s.fields }
 
 func (s *Schema) FieldIDs() []int {
@@ -475,6 +479,10 @@ func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
 // field is a value copy, but its Type and everything reachable from that Type
 // are shared with the schema and must be treated as read-only. This method is
 // limited to internal callers that need to avoid clone-on-read overhead.
+//
+// FindFieldByIDRef is for use by iceberg-go's own packages only: its sentinel
+// argument cannot be constructed outside this module. It is not covered by the
+// module's compatibility guarantees. Use [Schema.FindFieldByID] instead.
 func (s *Schema) FindFieldByIDRef(id int, _ internal.SchemaRef) (NestedField, bool) {
 	idx, _ := s.lazyIDToField()
 	f, ok := idx[id]
@@ -582,9 +590,40 @@ func (s *Schema) Equals(other *Schema) bool {
 // HighestFieldID returns the value of the numerically highest field ID
 // in this schema.
 func (s *Schema) HighestFieldID() int {
-	id, _ := Visit(s, findLastFieldID{})
+	if s == nil {
+		return 0
+	}
 
-	return id
+	return highestFieldIDFields(s.fields)
+}
+
+func highestFieldIDFields(fields []NestedField) int {
+	highest := 0
+	for i := range fields {
+		highest = max(highest, fields[i].ID, highestFieldIDType(fields[i].Type))
+	}
+
+	return highest
+}
+
+func highestFieldIDType(typ Type) int {
+	switch typ := typ.(type) {
+	case *StructType:
+		if typ != nil {
+			return highestFieldIDFields(typ.FieldList)
+		}
+	case *ListType:
+		if typ != nil {
+			return max(typ.ElementID, highestFieldIDType(typ.Element))
+		}
+	case *MapType:
+		if typ != nil {
+			return max(typ.KeyID, typ.ValueID, highestFieldIDType(typ.KeyType), highestFieldIDType(typ.ValueType))
+		}
+	}
+
+	// New types with nested field IDs must be included in the traversal above.
+	return 0
 }
 
 type Void = struct{}
@@ -1015,10 +1054,8 @@ func IndexByName(schema *Schema) (map[string]int, error) {
 
 	if len(schema.fields) > 0 {
 		indexer := &indexByName{
-			index:           make(map[string]int),
-			shortNameId:     make(map[string]int),
-			fieldNames:      make([]string, 0),
-			shortFieldNames: make([]string, 0),
+			index:       make(map[string]int),
+			shortNameId: make(map[string]int),
 		}
 		if _, err := Visit(schema, indexer); err != nil {
 			return nil, err
@@ -1034,10 +1071,7 @@ func IndexByName(schema *Schema) (map[string]int, error) {
 // a mapping from field ID to field name.
 func IndexNameByID(schema *Schema) (map[int]string, error) {
 	indexer := &indexByName{
-		index:           make(map[string]int),
-		shortNameId:     make(map[string]int),
-		fieldNames:      make([]string, 0),
-		shortFieldNames: make([]string, 0),
+		index: make(map[string]int),
 	}
 	if _, err := Visit(schema, indexer); err != nil {
 		return nil, err
@@ -1047,11 +1081,49 @@ func IndexNameByID(schema *Schema) (map[int]string, error) {
 }
 
 type indexByName struct {
-	index           map[string]int
-	shortNameId     map[string]int
-	combinedIndex   map[string]int
-	fieldNames      []string
-	shortFieldNames []string
+	index         map[string]int
+	shortNameId   map[string]int
+	combinedIndex map[string]int
+
+	fullPath  nameIndexPath
+	shortPath nameIndexPath
+}
+
+// nameIndexPath retains a mutable prefix across the schema traversal. Fields
+// at the same level share the prefix instead of repeatedly joining ancestors.
+// Checkpoints also preserve empty path segments, including their separators.
+type nameIndexPath struct {
+	buf         []byte
+	checkpoints []int
+}
+
+func (p *nameIndexPath) push(name string) {
+	depth := len(p.checkpoints)
+	p.checkpoints = append(p.checkpoints, len(p.buf))
+	if depth > 0 {
+		p.buf = append(p.buf, '.')
+	}
+	p.buf = append(p.buf, name...)
+}
+
+func (p *nameIndexPath) pop() {
+	last := len(p.checkpoints) - 1
+	p.buf = p.buf[:p.checkpoints[last]]
+	p.checkpoints = p.checkpoints[:last]
+}
+
+func (p *nameIndexPath) prefixedName(name string) string {
+	if len(p.checkpoints) == 0 {
+		return name
+	}
+
+	var b strings.Builder
+	b.Grow(len(p.buf) + 1 + len(name))
+	b.Write(p.buf)
+	b.WriteByte('.')
+	b.WriteString(name)
+
+	return b.String()
 }
 
 func (i *indexByName) ByID() map[int]string {
@@ -1073,19 +1145,20 @@ func (i *indexByName) ByName() map[string]int {
 func (i *indexByName) Primitive(PrimitiveType) map[string]int { return i.index }
 func (i *indexByName) Variant(VariantType) map[string]int     { return i.index }
 func (i *indexByName) addField(name string, fieldID int) {
-	fullName := name
-	if len(i.fieldNames) > 0 {
-		fullName = strings.Join(i.fieldNames, ".") + "." + name
-	}
-
+	fullName := i.fullPath.prefixedName(name)
 	if _, ok := i.index[fullName]; ok {
 		panic(fmt.Errorf("%w: multiple fields for name %s: %d and %d",
 			ErrInvalidSchema, fullName, i.index[fullName], fieldID))
 	}
 
 	i.index[fullName] = fieldID
-	if len(i.shortFieldNames) > 0 {
-		shortName := strings.Join(i.shortFieldNames, ".") + "." + name
+	if len(i.shortPath.checkpoints) > 0 {
+		// A regular struct path is the same in both indexes. Reuse the
+		// immutable full-name string rather than formatting it twice.
+		shortName := fullName
+		if len(i.fullPath.checkpoints) == 0 || !bytes.Equal(i.fullPath.buf, i.shortPath.buf) {
+			shortName = i.shortPath.prefixedName(name)
+		}
 		i.shortNameId[shortName] = fieldID
 	}
 }
@@ -1118,27 +1191,31 @@ func (i *indexByName) Map(mapType MapType, _, _ map[string]int) map[string]int {
 }
 
 func (i *indexByName) BeforeListElement(elem NestedField) {
-	if _, ok := elem.Type.(*StructType); !ok {
-		i.shortFieldNames = append(i.shortFieldNames, elem.Name)
+	if _, ok := elem.Type.(*StructType); !ok && i.shortNameId != nil {
+		i.shortPath.push(elem.Name)
 	}
-	i.fieldNames = append(i.fieldNames, elem.Name)
+	i.fullPath.push(elem.Name)
 }
 
 func (i *indexByName) AfterListElement(elem NestedField) {
-	if _, ok := elem.Type.(*StructType); !ok {
-		i.shortFieldNames = i.shortFieldNames[:len(i.shortFieldNames)-1]
+	if _, ok := elem.Type.(*StructType); !ok && i.shortNameId != nil {
+		i.shortPath.pop()
 	}
-	i.fieldNames = i.fieldNames[:len(i.fieldNames)-1]
+	i.fullPath.pop()
 }
 
 func (i *indexByName) BeforeField(field NestedField) {
-	i.fieldNames = append(i.fieldNames, field.Name)
-	i.shortFieldNames = append(i.shortFieldNames, field.Name)
+	i.fullPath.push(field.Name)
+	if i.shortNameId != nil {
+		i.shortPath.push(field.Name)
+	}
 }
 
-func (i *indexByName) AfterField(field NestedField) {
-	i.fieldNames = i.fieldNames[:len(i.fieldNames)-1]
-	i.shortFieldNames = i.shortFieldNames[:len(i.shortFieldNames)-1]
+func (i *indexByName) AfterField(NestedField) {
+	i.fullPath.pop()
+	if i.shortNameId != nil {
+		i.shortPath.pop()
+	}
 }
 
 // PruneColumns visits a schema pruning any columns which do not exist in the
@@ -1347,31 +1424,6 @@ func (*pruneColVisitor) projectMap(mapType *MapType, valueResult Type) *MapType 
 		ValueRequired: mapType.ValueRequired,
 	}
 }
-
-type findLastFieldID struct{}
-
-func (findLastFieldID) Schema(_ *Schema, result int) int {
-	return result
-}
-
-func (findLastFieldID) Struct(_ StructType, fieldResults []int) int {
-	return slices.Max(fieldResults)
-}
-
-func (findLastFieldID) Field(field NestedField, fieldResult int) int {
-	return max(field.ID, fieldResult)
-}
-
-func (findLastFieldID) List(field ListType, elemResult int) int {
-	return max(field.ElementID, elemResult)
-}
-
-func (findLastFieldID) Map(field MapType, keyResult, valueResult int) int {
-	return max(field.KeyID, field.ValueID, keyResult, valueResult)
-}
-
-func (findLastFieldID) Primitive(PrimitiveType) int { return 0 }
-func (findLastFieldID) Variant(VariantType) int     { return 0 }
 
 // IndexParents generates an index of field IDs to their parent field
 // IDs. Root fields are not indexed

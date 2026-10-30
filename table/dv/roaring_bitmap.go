@@ -348,3 +348,57 @@ func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
 
 	return out
 }
+
+// KeepMaskForRange returns a bit-packed Arrow Boolean keep-mask for [start, end).
+// A nil result means the range contains no deletes. Only an affected range
+// allocates a mask, so a scan does not need one bit for every row in the file.
+// The mask is indexed relative to start, including across 32-bit buckets.
+func (b *RoaringPositionBitmap) KeepMaskForRange(start, end uint64) []byte {
+	if start >= end {
+		return nil
+	}
+
+	var out []byte
+	for key, bm := range b.bitmaps {
+		base := uint64(key) << 32
+		if end <= base {
+			continue
+		}
+
+		lo := uint64(0)
+		if start > base {
+			lo = start - base
+			if lo >= 1<<32 {
+				continue
+			}
+		}
+		hi := min(end-base, uint64(1)<<32)
+		if lo >= hi || bm.CardinalityInRange(lo, hi) == 0 {
+			continue
+		}
+
+		if out == nil {
+			out = make([]byte, bitutil.BytesForBits(int64(end-start)))
+			memory.Set(out, 0xFF)
+		}
+
+		it := bm.Iterator()
+		it.AdvanceIfNeeded(uint32(lo))
+		for it.HasNext() {
+			pos := uint64(it.Next())
+			if pos >= hi {
+				break
+			}
+			offset := base + pos - start
+			out[offset>>3] &^= byte(1 << (offset & 7))
+		}
+	}
+
+	if out != nil {
+		if pad := int64(len(out))*8 - int64(end-start); pad > 0 {
+			bitutil.SetBitsTo(out, int64(end-start), pad, false)
+		}
+	}
+
+	return out
+}

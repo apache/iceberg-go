@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/puffin"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
@@ -204,7 +205,7 @@ func TestMetadataV1Parsing(t *testing.T) {
 	require.NotNil(t, meta)
 
 	assert.IsType(t, (*metadataV1)(nil), meta)
-	assert.Equal(t, 1, meta.Version())
+	assert.Equal(t, 1, meta.FormatVersion())
 
 	data := meta.(*metadataV1)
 	assert.Equal(t, uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"), meta.TableUUID())
@@ -252,7 +253,7 @@ func TestMetadataV2Parsing(t *testing.T) {
 	require.NotNil(t, meta)
 
 	assert.IsType(t, (*metadataV2)(nil), meta)
-	assert.Equal(t, 2, meta.Version())
+	assert.Equal(t, 2, meta.FormatVersion())
 
 	data := meta.(*metadataV2)
 	assert.Equal(t, uuid.MustParse("9c12d441-03fe-4693-9a96-a0705ddf69c1"), data.UUID)
@@ -284,7 +285,7 @@ func TestMetadataV3Parsing(t *testing.T) {
 	require.NotNil(t, meta)
 
 	assert.IsType(t, (*metadataV3)(nil), meta)
-	assert.Equal(t, 3, meta.Version())
+	assert.Equal(t, 3, meta.FormatVersion())
 
 	data := meta.(*metadataV3)
 	assert.Equal(t, uuid.MustParse("9c12d441-03fe-4693-9a96-a0705ddf69c1"), data.UUID)
@@ -750,7 +751,7 @@ func TestMetadataV3Builder(t *testing.T) {
 	metadata, err := builder.Build()
 	require.NoError(t, err)
 
-	assert.Equal(t, 3, metadata.Version())
+	assert.Equal(t, 3, metadata.FormatVersion())
 	assert.Equal(t, int64(0), metadata.NextRowID())
 }
 
@@ -1168,14 +1169,14 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			gotSpec := meta.PartitionSpec()
 			require.Equal(t, len(tt.wantSourceIDs), gotSpec.NumFields())
 			for i, wantSourceID := range tt.wantSourceIDs {
-				assert.Equal(t, wantSourceID, gotSpec.Field(i).SourceID())
+				assert.Equal(t, wantSourceID, gotSpec.Field(i).FirstSourceID())
 				assert.Equal(t, tt.wantNames[i], gotSpec.Field(i).Name)
 			}
 
 			// The sort order references the first column, so it remaps to 1.
 			require.Equal(t, 1, meta.SortOrder().Len())
 			for _, field := range meta.SortOrder().Fields() {
-				assert.Equal(t, wantSortID, field.SourceID())
+				assert.Equal(t, wantSortID, field.FirstSourceID())
 			}
 
 			// Written metadata carries bound IDs only, so it parses back as
@@ -1186,7 +1187,7 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			require.NoError(t, err)
 			reparsedSpec := reparsed.PartitionSpec()
 			for i, wantSourceID := range tt.wantSourceIDs {
-				assert.Equal(t, wantSourceID, reparsedSpec.Field(i).SourceID())
+				assert.Equal(t, wantSourceID, reparsedSpec.Field(i).FirstSourceID())
 			}
 		})
 	}
@@ -1475,13 +1476,13 @@ func TestV2RefCreation(t *testing.T) {
 	maxRefAge := int64(10000000)
 	assert.Equal(t, map[string]SnapshotRef{
 		"main": {
-			SnapshotID:      3055729675574597004,
-			SnapshotRefType: BranchRef,
+			SnapshotID: 3055729675574597004,
+			Type:       BranchRef,
 		},
 		"test": {
-			SnapshotID:      3051729675574597004,
-			SnapshotRefType: TagRef,
-			MaxRefAgeMs:     &maxRefAge,
+			SnapshotID:  3051729675574597004,
+			Type:        TagRef,
+			MaxRefAgeMs: &maxRefAge,
 		},
 	}, meta.SnapshotRefs)
 }
@@ -1725,7 +1726,7 @@ func TestMetadataV1Serialize(t *testing.T) {
 					KeyMetadata:           nil,
 					BlobMetadata: []BlobMetadata{
 						{
-							Type:           BlobTypeApacheDatasketchesThetaV1,
+							Type:           puffin.BlobTypeDataSketchesTheta,
 							SnapshotID:     1234567890,
 							SequenceNumber: 1,
 							Fields:         []int32{1, 2},
@@ -1817,7 +1818,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 					FileFooterSizeInBytes: 1024,
 					BlobMetadata: []BlobMetadata{
 						{
-							Type:           BlobTypeDeletionVectorV1,
+							Type:           puffin.BlobTypeDeletionVector,
 							SnapshotID:     9876543210,
 							SequenceNumber: 5,
 							Fields:         []int32{1},
@@ -2093,7 +2094,7 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 	// Deserialize the JSON - this should succeed by inferring default_spec_id as the max spec ID
 	meta, err := getTestTableMetadata("TableMetadataV1PartitionSpecsWithoutDefaultId.json")
 	require.NoError(t, err)
-	require.Equal(t, meta.Version(), 1)
+	require.Equal(t, meta.FormatVersion(), 1)
 	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
 	require.Equal(t, meta.DefaultPartitionSpec(), 2)
 	require.Equal(t, len(meta.PartitionSpecs()), 2)
@@ -2102,7 +2103,7 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 	require.Equal(t, spec.NumFields(), 1)
 	require.Equal(t, spec.Field(0).Name, "y")
 	require.Equal(t, spec.Field(0).Transform, iceberg.IdentityTransform{})
-	require.Equal(t, spec.Field(0).SourceID(), 2)
+	require.Equal(t, spec.Field(0).FirstSourceID(), 2)
 }
 
 func TestTableMetadataV2MissingPartitionSpecs(t *testing.T) {
@@ -2132,7 +2133,7 @@ func TestDefaultPartitionSpec(t *testing.T) {
 func TestTableMetadataV1SchemasWithoutCurrentId(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV1SchemasWithoutCurrentId.json")
 	require.NoError(t, err)
-	require.Equal(t, meta.(*metadataV1).Version(), 1)
+	require.Equal(t, meta.(*metadataV1).FormatVersion(), 1)
 	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
 	schema := meta.CurrentSchema()
 	require.Equal(t, len(schema.Fields()), 3)
@@ -2249,7 +2250,7 @@ func TestTableDataV2NoSnapshots(t *testing.T) {
             "default-sort-order-id": 0
         }`
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		Type:     iceberg.FixedTypeOf(1),
+		Type:     iceberg.MustFixedTypeOf(1),
 		ID:       1,
 		Name:     "struct_name",
 		Required: true,
@@ -2726,7 +2727,7 @@ func TestV3PartitionStatisticsRoundTrip(t *testing.T) {
 
 	meta, err := ParseMetadataBytes(raw)
 	require.NoError(t, err)
-	require.Equal(t, 3, meta.Version())
+	require.Equal(t, 3, meta.FormatVersion())
 
 	partStats := slices.Collect(meta.PartitionStatistics())
 	require.Len(t, partStats, 2)

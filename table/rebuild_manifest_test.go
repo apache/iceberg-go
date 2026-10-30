@@ -137,6 +137,7 @@ func TestRebuildSnapshotUpdates_CallsClosureWithFreshParent(t *testing.T) {
 		MainBranch,
 		iceio.LocalFS{},
 		1,
+		false,
 	)
 	require.NoError(t, err)
 	require.Len(t, rebuilt, 1)
@@ -225,6 +226,7 @@ func TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged(t *testing.T) {
 		MainBranch,
 		iceio.LocalFS{},
 		1,
+		false,
 	)
 	require.NoError(t, err)
 	assert.False(t, called, "rebuild closure must not be called when parent is already up-to-date")
@@ -259,6 +261,7 @@ func TestRebuildSnapshotUpdates_RebuildsWhenTableStateMoved(t *testing.T) {
 		MainBranch,
 		iceio.LocalFS{},
 		1,
+		false,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, receivedParent, "the rebuild must run even though the parent is unchanged")
@@ -287,6 +290,7 @@ func TestRebuildSnapshotUpdates_PassesThroughNonRebuildUpdates(t *testing.T) {
 		MainBranch,
 		iceio.LocalFS{},
 		0,
+		false,
 	)
 	require.NoError(t, err)
 	assert.Empty(t, orphaned)
@@ -315,7 +319,7 @@ func TestRebuildSnapshotUpdates_PropagatesClosureError(t *testing.T) {
 		},
 	}
 
-	_, _, err := rebuildSnapshotUpdates(t.Context(), []Update{upd}, freshMeta, MainBranch, iceio.LocalFS{}, 1)
+	_, _, err := rebuildSnapshotUpdates(t.Context(), []Update{upd}, freshMeta, MainBranch, iceio.LocalFS{}, 1, false)
 	assert.ErrorIs(t, err, wantErr)
 }
 
@@ -510,7 +514,7 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 
 	// Write an empty manifest list for the freshParent so Manifests() can open it.
 	parentManifestListPath := "mem://default/table-location/metadata/fresh-parent-snap.avro"
-	out, createErr := wfs.Create(parentManifestListPath)
+	out, createErr := wfs.Create(context.Background(), parentManifestListPath)
 	require.NoError(t, createErr)
 	writeErr := iceberg.WriteManifestList(2, out, 77, nil, new(int64(0)), 0, nil)
 	require.NoError(t, writeErr)

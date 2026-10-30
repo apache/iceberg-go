@@ -94,7 +94,7 @@ func (t *ViewTestSuite) TestCreateViewJoinsTrailingSlashMetadataLocation() {
 		"test-catalog",
 		[]string{"ns", "test_view"},
 		newTestSchema(0),
-		"select 1",
+		Representation{SQL: "select 1", Dialect: "spark"},
 		[]string{"ns"},
 		"mem://view-create-location/test-view/",
 		nil,
@@ -110,7 +110,7 @@ func (t *ViewTestSuite) TestCreateViewJoinsTrailingSlashMetadataLocation() {
 
 	fs, err := iceio.LoadFS(t.T().Context(), nil, metadataLocation)
 	t.Require().NoError(err)
-	metadataFile, err := fs.Open(metadataLocation)
+	metadataFile, err := fs.Open(context.Background(), metadataLocation)
 	t.Require().NoError(err)
 	t.Require().NoError(metadataFile.Close())
 }
@@ -137,7 +137,7 @@ func TestCreateViewReturnsMetadataCloseError(t *testing.T) {
 		"test-catalog",
 		[]string{"ns", "test_view"},
 		newTestSchema(0),
-		"select 1",
+		Representation{SQL: "select 1", Dialect: "spark"},
 		[]string{"ns"},
 		scheme+"://bucket/test-view",
 		nil,

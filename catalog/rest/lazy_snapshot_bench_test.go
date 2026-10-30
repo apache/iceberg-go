@@ -141,9 +141,8 @@ func BenchmarkStageDeferredAllSnapshots(b *testing.B) {
 }
 
 // BenchmarkStageParseThenMetadataBuilder measures the path taken when a caller
-// starts another transaction from the Table returned by Commit. Builder
-// creation requires complete snapshot history, so this exposes the cost of
-// indexing deferred snapshots and then fully materializing them.
+// starts another transaction from the Table returned by Commit. Deferred
+// builder creation should retain the indexed raw history without decoding it.
 func BenchmarkStageParseThenMetadataBuilder(b *testing.B) {
 	for _, n := range benchSnapshotCounts {
 		body := makeTableResponseWithSnapshots(n)
@@ -174,6 +173,82 @@ func BenchmarkStageParseThenMetadataBuilder(b *testing.B) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// BenchmarkStageParseBuilderMutation measures representative transaction work
+// after parsing a commit response. Add/ref and remove/build should preserve the
+// deferred history, while serialization intentionally materializes it.
+func BenchmarkStageParseBuilderMutation(b *testing.B) {
+	for _, n := range benchSnapshotCounts {
+		body := makeTableResponseWithSnapshots(n)
+		rawMeta := extractMetadata(b, body)
+		for _, mode := range []struct {
+			name  string
+			parse func([]byte) (table.Metadata, error)
+		}{
+			{name: "eager", parse: table.ParseMetadataBytes},
+			{name: "deferred", parse: table.ParseMetadataBytesDeferredSnapshots},
+		} {
+			for _, operation := range []struct {
+				name      string
+				remove    bool
+				serialize bool
+			}{
+				{name: "add-ref-build"},
+				{name: "remove-build", remove: true},
+				{name: "add-ref-build-serialize", serialize: true},
+			} {
+				b.Run(metadataBenchmarkName(rawMeta)+"/"+mode.name+"/"+operation.name, func(b *testing.B) {
+					b.ReportAllocs()
+					b.ReportMetric(float64(len(rawMeta)), "metadata-bytes")
+					b.ReportMetric(float64(n), "snapshots")
+					for range b.N {
+						meta, err := mode.parse(rawMeta)
+						if err != nil {
+							b.Fatal(err)
+						}
+						builder, err := table.MetadataBuilderFromBase(meta, "")
+						if err != nil {
+							b.Fatal(err)
+						}
+						if operation.remove {
+							if err := builder.RemoveSnapshots([]int64{0}, false); err != nil {
+								b.Fatal(err)
+							}
+						} else {
+							current := meta.CurrentSnapshot()
+							if current == nil {
+								b.Fatal("missing current snapshot")
+							}
+							added := *current
+							added.SnapshotID = n
+							added.ParentSnapshotID = &current.SnapshotID
+							added.TimestampMs = current.TimestampMs + 1
+							if meta.FormatVersion() > 1 {
+								added.SequenceNumber = meta.LastSequenceNumber() + 1
+							}
+							if err := builder.AddSnapshot(&added); err != nil {
+								b.Fatal(err)
+							}
+							if err := builder.SetSnapshotRef(table.MainBranch, added.SnapshotID, table.BranchRef); err != nil {
+								b.Fatal(err)
+							}
+						}
+
+						built, err := builder.Build()
+						if err != nil {
+							b.Fatal(err)
+						}
+						if operation.serialize {
+							if _, err := json.Marshal(built); err != nil {
+								b.Fatal(err)
+							}
+						}
+					}
+				})
+			}
 		}
 	}
 }

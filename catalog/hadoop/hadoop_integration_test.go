@@ -23,7 +23,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -32,7 +31,6 @@ import (
 	"github.com/apache/iceberg-go/internal/recipe"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
 
 type HadoopIntegrationSuite struct {
@@ -41,7 +39,6 @@ type HadoopIntegrationSuite struct {
 	ctx       context.Context
 	cat       *hadoop.Catalog
 	warehouse string
-	stack     *compose.DockerCompose
 }
 
 func (s *HadoopIntegrationSuite) SetupSuite() {
@@ -53,15 +50,13 @@ func (s *HadoopIntegrationSuite) SetupSuite() {
 	s.warehouse = "/tmp/iceberg-hadoop-warehouse"
 	s.Require().NoError(os.MkdirAll(s.warehouse, 0o755))
 
-	var err error
-	s.stack, err = recipe.Start(s.T())
-	s.Require().NoError(err)
+	s.Require().NoError(recipe.Start(s.T()))
 }
 
 func (s *HadoopIntegrationSuite) SetupTest() {
 	s.ctx = context.Background()
 
-	cat, err := hadoop.NewCatalog("hadoop_test", s.warehouse, nil)
+	cat, err := hadoop.NewCatalog(s.ctx, "hadoop_test", s.warehouse, nil)
 	s.Require().NoError(err)
 	s.cat = cat
 }
@@ -184,11 +179,10 @@ func (s *HadoopIntegrationSuite) TestDropTableNamespacePreserved() {
 	s.True(info.IsDir(), "namespace directory should still exist")
 }
 
-// TestRenameTableUnsupported verifies that RenameTable returns an error.
+// TestRenameTableUnsupported verifies that RenameTable reports ErrNotImplemented.
 func (s *HadoopIntegrationSuite) TestRenameTableUnsupported() {
 	_, err := s.cat.RenameTable(s.ctx, []string{"ns", "old"}, []string{"ns", "new"})
-	s.Require().Error(err)
-	s.True(strings.Contains(err.Error(), "not supported"))
+	s.ErrorIs(err, iceberg.ErrNotImplemented)
 }
 
 // TestNamespaceRoundTrip creates a namespace in Go, creates a table in

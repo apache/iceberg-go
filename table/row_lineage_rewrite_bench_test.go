@@ -158,7 +158,7 @@ func (f *rowLineageRewriteBenchmarkFixture) reset(b *testing.B) {
 		if _, ok := f.initialFiles[path]; ok {
 			continue
 		}
-		require.NoError(b, f.fs.Remove(path))
+		require.NoError(b, f.fs.Remove(context.Background(), path))
 	}
 	f.catalog.metadata = f.baseMetadata
 }
@@ -166,7 +166,7 @@ func (f *rowLineageRewriteBenchmarkFixture) reset(b *testing.B) {
 func rowLineageRewriteBenchmarkFiles(b *testing.B, fsys *iceio.MemFS, location string) map[string]struct{} {
 	b.Helper()
 	files := make(map[string]struct{})
-	require.NoError(b, fsys.WalkDir(location, func(path string, entry fs.DirEntry, err error) error {
+	require.NoError(b, fsys.WalkDir(context.Background(), location, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

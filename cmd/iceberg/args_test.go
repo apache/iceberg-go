@@ -205,23 +205,27 @@ func TestArgsParsing(t *testing.T) {
 		},
 		{
 			name: "compact analyze",
-			args: []string{"compact", "analyze", "prod.db.events", "--target-file-size", "134217728"},
+			args: []string{"compact", "analyze", "prod.db.events", "--target-file-size", "134217728", "--rewrite-all"},
 			check: func(t *testing.T, a Args) {
 				require.NotNil(t, a.Compact)
 				require.NotNil(t, a.Compact.Analyze)
 				assert.Equal(t, "prod.db.events", a.Compact.Analyze.TableID)
 				assert.Equal(t, int64(134217728), a.Compact.Analyze.TargetFileSize)
+				assert.True(t, a.Compact.Analyze.RewriteAll)
 			},
 		},
 		{
 			name: "compact run with all flags",
-			args: []string{"compact", "run", "prod.db.events", "--partial-progress", "--preserve-dead-equality-deletes"},
+			args: []string{"compact", "run", "prod.db.events", "--partial-progress", "--preserve-dead-equality-deletes", "--sort", "--rewrite-all", "--max-group-size", "10737418240"},
 			check: func(t *testing.T, a Args) {
 				require.NotNil(t, a.Compact)
 				require.NotNil(t, a.Compact.Run)
 				assert.Equal(t, "prod.db.events", a.Compact.Run.TableID)
 				assert.True(t, a.Compact.Run.PartialProgress)
 				assert.True(t, a.Compact.Run.PreserveDeadEqualityDeletes)
+				assert.True(t, a.Compact.Run.Sort)
+				assert.True(t, a.Compact.Run.RewriteAll)
+				assert.Equal(t, int64(10737418240), a.Compact.Run.MaxGroupSize)
 			},
 		},
 		{
@@ -257,7 +261,7 @@ func TestArgsParsing(t *testing.T) {
 			name: "aws-profile flag",
 			args: []string{"--catalog", "glue", "--aws-profile", "my-profile", "list"},
 			check: func(t *testing.T, a Args) {
-				assert.Equal(t, "my-profile", a.AwsProfile)
+				assert.Equal(t, "my-profile", a.AWSProfile)
 			},
 		},
 		{
@@ -637,18 +641,18 @@ func TestMergeConfSQLOptions(t *testing.T) {
 	})
 }
 
-func TestMergeConfAwsProfile(t *testing.T) {
-	fileCfg := &config.CatalogConfig{AwsProfile: "file-profile"}
+func TestMergeConfAWSProfile(t *testing.T) {
+	fileCfg := &config.CatalogConfig{AWSProfile: "file-profile"}
 
 	t.Run("file value applied when flag absent", func(t *testing.T) {
 		var a Args
 		mergeConf(fileCfg, &a, map[string]bool{})
-		assert.Equal(t, "file-profile", a.AwsProfile)
+		assert.Equal(t, "file-profile", a.AWSProfile)
 	})
 
 	t.Run("cli value preserved when flag explicit", func(t *testing.T) {
-		a := Args{AwsProfile: "cli-profile"}
+		a := Args{AWSProfile: "cli-profile"}
 		mergeConf(fileCfg, &a, map[string]bool{"aws-profile": true})
-		assert.Equal(t, "cli-profile", a.AwsProfile)
+		assert.Equal(t, "cli-profile", a.AWSProfile)
 	})
 }

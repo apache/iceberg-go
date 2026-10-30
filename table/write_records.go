@@ -42,6 +42,17 @@ type writeRecordConfig struct {
 	preserveRowLineage    bool
 	recordBatchBufferSize int
 	parquetRowGroupLimit  int
+	presorted             bool
+	sortOrderID           int
+}
+
+// withPresortedInput declares the input records globally sorted by the
+// sort order with id sortOrderID; see withFactoryPresorted.
+func withPresortedInput(sortOrderID int) WriteRecordOption {
+	return func(c *writeRecordConfig) {
+		c.presorted = true
+		c.sortOrderID = sortOrderID
+	}
 }
 
 // WithTargetFileSize overrides the table's default target file size.
@@ -170,8 +181,13 @@ func WriteRecords(ctx context.Context, tbl *Table,
 			errors.New("WithClusteredWrite and WithMaxWriteWorkers are incompatible: the clustered write path is single-threaded"))
 	}
 
+	if cfg.presorted && !cfg.clustered {
+		return internal.SingleErrorIter[iceberg.DataFile](
+			errors.New("presorted input requires the clustered write path to keep its order"))
+	}
+
 	if cfg.preserveRowLineage {
-		if v := tbl.metadata.Version(); v < 3 {
+		if v := tbl.metadata.FormatVersion(); v < 3 {
 			return internal.SingleErrorIter[iceberg.DataFile](
 				fmt.Errorf("WithPreserveRowLineage requires a v3+ table, got v%d", v))
 		}
@@ -257,6 +273,9 @@ func WriteRecords(ctx context.Context, tbl *Table,
 
 	if cfg.fileSchema != nil {
 		args.factoryOpts = append(args.factoryOpts, withFactoryFileSchema(cfg.fileSchema))
+	}
+	if cfg.presorted {
+		args.factoryOpts = append(args.factoryOpts, withFactoryPresorted(cfg.sortOrderID))
 	}
 
 	return recordsToDataFiles(ctx, tbl.Location(), meta, args)
