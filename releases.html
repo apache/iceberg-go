@@ -372,6 +372,9 @@
 <li>
 <p><strong>File writes and directory walks now take an operation context.</strong> Update <code>WriteFileIO</code> and <code>ListableIO</code> implementations and calls to <code>Create</code>, <code>WriteFile</code>, and <code>WalkDir</code> to pass <code>context.Context</code>; cloud writes and listings use it for cancellation.</p>
 </li>
+<li>
+<p><strong>In and NotIn follow SQL semantics for NULL.</strong> A multi-valued <code>NotIn</code>, <code>NOT(In(...))</code> and <code>NOT(NotIn(...))</code> no longer match rows where the column is NULL, consistent with <code>NotEqual</code>. A predicate under NOT on a column missing from an older data file no longer matches every row of that file; those rows match as a stored NULL would. Java's <code>Evaluator</code> still matches NULL for <code>notEq</code> and <code>notIn</code>, see <a href="https://github.com/apache/iceberg/issues/18701">apache/iceberg#18701</a>.</p>
+</li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>
 <p>If you are validating an RC or cutting a new release, see:</p>
