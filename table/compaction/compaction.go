@@ -21,6 +21,8 @@ package compaction
 import (
 	"bytes"
 	"fmt"
+	"reflect"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -85,6 +87,31 @@ type Config struct {
 	// into the snapshot walk + RewriteDataFilesOptions.ExtraDeleteFilesToRemove
 	// — see CollectDeadEqualityDeletesWithSpecs.
 	PreserveDeadEqualityDeletes bool
+
+	// RewriteAll selects every file for rewriting regardless of size or
+	// deletes and keeps every packed group regardless of MinInputFiles.
+	// Mirrors Java's rewrite-all option. Use it with
+	// [table.WithCompactionSortOrder] to sort files that the size-based
+	// selection would skip as already optimal.
+	RewriteAll bool
+
+	// MaxGroupSizeBytes caps the total input size of one group. Candidates
+	// of a partition are packed into groups of up to this size, and each
+	// group is rewritten into files of about TargetFileSizeBytes, so group
+	// size and output file size are set independently. When zero, groups
+	// are packed to TargetFileSizeBytes (always positive; see Validate) and
+	// each group yields about one file. Mirrors Java's
+	// max-file-group-size-bytes.
+	//
+	// Bin-pack rewrites are unaffected by the group size beyond how work is
+	// split. Sort rewrites ([table.WithCompactionSortOrder]) depend on it:
+	// rows are ordered only within a group, so a partition split across
+	// several groups yields files that each span the partition's whole key
+	// range, and readers cannot skip any of them by min/max statistics. For
+	// example, 10 GB of small files with a 512 MB target is about 20
+	// separately sorted groups whose files all overlap; one 10 GB group is
+	// sorted once and written as about 20 files with disjoint key ranges.
+	MaxGroupSizeBytes int64
 }
 
 const (
@@ -140,8 +167,21 @@ func (cfg Config) Validate() error {
 	if cfg.DeleteRatioThreshold < 0 || cfg.DeleteRatioThreshold > 1 {
 		return fmt.Errorf("delete ratio threshold must be in [0,1], got %g", cfg.DeleteRatioThreshold)
 	}
+	if cfg.MaxGroupSizeBytes != 0 && cfg.MaxGroupSizeBytes < cfg.TargetFileSizeBytes {
+		return fmt.Errorf("max group size (%d) must be zero or at least the target file size (%d)",
+			cfg.MaxGroupSizeBytes, cfg.TargetFileSizeBytes)
+	}
 
 	return nil
+}
+
+// groupSizeBytes is the weight candidates are bin-packed to.
+func (cfg Config) groupSizeBytes() int64 {
+	if cfg.MaxGroupSizeBytes > 0 {
+		return cfg.MaxGroupSizeBytes
+	}
+
+	return cfg.TargetFileSizeBytes
 }
 
 // Group represents a set of files in the same partition
@@ -187,56 +227,87 @@ type Plan struct {
 
 // PlanCompaction analyzes the given scan tasks and produces a Plan.
 // Tasks are grouped by partition, classified as candidates or skipped,
-// and candidates are bin-packed into groups targeting TargetFileSizeBytes.
+// and candidates are bin-packed into groups of up to MaxGroupSizeBytes
+// (TargetFileSizeBytes when zero).
+// Tasks should come from one coherent scan plan; split tasks for the same file
+// are collapsed, retaining the first task's per-file delete and lineage data.
+// Residual filters select files to rewrite, but are not applied to file contents.
 func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	if err := cfg.Validate(); err != nil {
 		return Plan{}, fmt.Errorf("invalid compaction config: %w", err)
 	}
 
-	plan := Plan{
-		TotalInputFiles: len(tasks),
+	// Compaction operates on whole physical files. A scan planner may split a
+	// file into multiple tasks, so collapse tasks by path before counting,
+	// selecting, or packing them. Keep the first task's delete and lineage
+	// metadata while replacing its range with the complete file range.
+	wholeFileTasks := make([]table.FileScanTask, 0, len(tasks))
+	seenFiles := make(map[string]table.FileScanTask, len(tasks))
+	for _, task := range tasks {
+		if task.File == nil {
+			return Plan{}, fmt.Errorf("%w: compaction task has no data file", table.ErrInvalidOperation)
+		}
+		path := task.File.FilePath()
+		if first, ok := seenFiles[path]; ok {
+			if !sameCompactionMetadata(first, task) {
+				return Plan{}, fmt.Errorf("%w: split tasks for %q have different delete or lineage metadata", table.ErrInvalidOperation, path)
+			}
+
+			continue
+		}
+		seenFiles[path] = task
+		task.Start = 0
+		task.Length = task.File.FileSizeBytes()
+		task.Residual = nil
+		wholeFileTasks = append(wholeFileTasks, task)
 	}
 
-	for _, t := range tasks {
+	plan := Plan{
+		TotalInputFiles: len(wholeFileTasks),
+	}
+
+	for _, t := range wholeFileTasks {
 		plan.TotalInputBytes += t.File.FileSizeBytes()
 	}
 
-	// Group tasks by partition key.
+	// Only candidate files need partition keys. Most tables have many
+	// right-sized files, so avoid encoding their partitions and retaining
+	// empty buckets for files the planner will not rewrite.
 	type partitionBucket struct {
 		key        string
 		candidates []table.FileScanTask
 	}
-	partitions := make(map[string]partitionBucket)
-	var partitionOrder []string
+	partitionIndices := make(map[string]int)
+	var partitionBuckets []partitionBucket
 
-	for _, t := range tasks {
-		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
-		bucket, ok := partitions[key]
-		if !ok {
-			bucket = partitionBucket{key: key}
-			partitionOrder = append(partitionOrder, key)
-		}
-
-		if !cfg.isCandidate(t) {
+	for _, t := range wholeFileTasks {
+		if !cfg.RewriteAll && !cfg.isCandidate(t) {
 			plan.SkippedFiles++
-			partitions[key] = bucket
 
 			continue
 		}
-		bucket.candidates = append(bucket.candidates, t)
-		partitions[key] = bucket
+
+		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
+		index, ok := partitionIndices[key]
+		if !ok {
+			index = len(partitionBuckets)
+			partitionIndices[key] = index
+			partitionBuckets = append(partitionBuckets, partitionBucket{key: key})
+		}
+		partitionBuckets[index].candidates = append(partitionBuckets[index].candidates, t)
 	}
 
-	// Bin-pack candidates per partition.
+	// Group candidates per partition by size. This only splits the work;
+	// how each group's rows are rewritten (bin-pack or sort) is chosen per
+	// group with [table.CompactionGroupOption]s.
 	packer := internal.SlicePacker[table.FileScanTask]{
-		TargetWeight:    cfg.TargetFileSizeBytes,
+		TargetWeight:    cfg.groupSizeBytes(),
 		Lookback:        int(cfg.PackingLookback),
 		LargestBinFirst: false,
 	}
 
-	for _, key := range partitionOrder {
-		bucket := partitions[key]
-		if len(bucket.candidates) < int(cfg.MinInputFiles) {
+	for _, bucket := range partitionBuckets {
+		if !cfg.RewriteAll && len(bucket.candidates) < int(cfg.MinInputFiles) {
 			plan.SkippedFiles += len(bucket.candidates)
 
 			continue
@@ -247,14 +318,14 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		})
 
 		for _, bin := range bins {
-			if len(bin) < int(cfg.MinInputFiles) {
+			if !cfg.RewriteAll && len(bin) < int(cfg.MinInputFiles) {
 				plan.SkippedFiles += len(bin)
 
 				continue
 			}
 
 			group := Group{
-				PartitionKey: key,
+				PartitionKey: bucket.key,
 				Tasks:        bin,
 			}
 			for _, t := range bin {
@@ -271,6 +342,20 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	}
 
 	return plan, nil
+}
+
+func sameCompactionMetadata(a, b table.FileScanTask) bool {
+	equalDataFiles := func(a, b []iceberg.DataFile) bool {
+		return slices.EqualFunc(a, b, func(a, b iceberg.DataFile) bool {
+			return reflect.DeepEqual(a, b)
+		})
+	}
+
+	return reflect.DeepEqual(a.FirstRowID, b.FirstRowID) &&
+		reflect.DeepEqual(a.DataSequenceNumber, b.DataSequenceNumber) &&
+		equalDataFiles(a.DeleteFiles, b.DeleteFiles) &&
+		equalDataFiles(a.EqualityDeleteFiles, b.EqualityDeleteFiles) &&
+		equalDataFiles(a.DeletionVectorFiles, b.DeletionVectorFiles)
 }
 
 // isCandidate returns true if a file should be considered for compaction.

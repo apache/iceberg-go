@@ -33,16 +33,14 @@ import (
 )
 
 func newTestBuilder() *MetadataBuilder {
-	b, _ := NewMetadataBuilder()
-
-	return b
+	return NewMetadataBuilder()
 }
 
 func newTestVersion(versionID int64, schemaID int, opts ...VersionOpt) *Version {
 	version, _ := NewVersion(
 		versionID,
 		schemaID,
-		Representations{NewRepresentation("select * from table", "sql")},
+		Representations{NewRepresentation(Representation{SQL: "select * from table", Dialect: "sql"})},
 		table.Identifier{"defaultns"},
 		opts...)
 
@@ -53,7 +51,7 @@ func newTestVersionWithSQL(versionID int64, schemaID int, sql string, opts ...Ve
 	version, _ := NewVersion(
 		versionID,
 		schemaID,
-		Representations{NewRepresentation(sql, "spark")},
+		Representations{NewRepresentation(Representation{SQL: sql, Dialect: "spark"})},
 		table.Identifier{"defaultns"},
 		opts...)
 
@@ -188,43 +186,43 @@ func TestNewVersion_RepresentationValidation(t *testing.T) {
 		{
 			name: "valid",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+				{Type: "sql", SQL: "SELECT 1", Dialect: "spark"},
 			},
 		},
 		{
 			name: "invalid type",
 			representations: Representations{
-				{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+				{Type: "hive", SQL: "SELECT 1", Dialect: "spark"},
 			},
 			wantErr: "type should be \"sql\"",
 		},
 		{
 			name: "missing sql",
 			representations: Representations{
-				{Type: "sql", Sql: "", Dialect: "spark"},
+				{Type: "sql", SQL: "", Dialect: "spark"},
 			},
 			wantErr: "sql is required",
 		},
 		{
 			name: "missing dialect",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: ""},
+				{Type: "sql", SQL: "SELECT 1", Dialect: ""},
 			},
 			wantErr: "dialect is required",
 		},
 		{
 			name: "duplicate dialect",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: "SpArK"},
-				{Type: "sql", Sql: "SELECT 2", Dialect: " spark "},
+				{Type: "sql", SQL: "SELECT 1", Dialect: "SpArK"},
+				{Type: "sql", SQL: "SELECT 2", Dialect: " spark "},
 			},
 			wantErr: "Cannot add multiple queries for dialect  spark ",
 		},
 		{
 			name: "valid then invalid type",
 			representations: Representations{
-				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
-				{Type: "hive", Sql: "SELECT 2", Dialect: "hive"},
+				{Type: "sql", SQL: "SELECT 1", Dialect: "spark"},
+				{Type: "hive", SQL: "SELECT 2", Dialect: "hive"},
 			},
 			wantErr: "type should be \"sql\"",
 		},
@@ -246,12 +244,58 @@ func TestNewVersion_RepresentationValidation(t *testing.T) {
 	}
 }
 
+func TestNewVersionCopiesInputSlices(t *testing.T) {
+	representations := Representations{
+		NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "spark"}),
+		NewRepresentation(Representation{SQL: "SELECT 2", Dialect: "trino"}),
+	}
+	defaultNS := table.Identifier{"analytics", "reporting"}
+
+	version, err := NewVersion(1, 0, representations, defaultNS)
+	require.NoError(t, err)
+
+	// These mutations would otherwise change an already validated version,
+	// including making the representation dialects duplicate.
+	representations[0].SQL = "SELECT changed"
+	representations[1].Dialect = "spark"
+	defaultNS[0] = "other"
+	defaultNS[1] = "schema"
+
+	assert.Equal(t, []Representation{
+		NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "spark"}),
+		NewRepresentation(Representation{SQL: "SELECT 2", Dialect: "trino"}),
+	}, version.Representations)
+	assert.Equal(t, table.Identifier{"analytics", "reporting"}, version.DefaultNamespace)
+
+	// Neither side should share the backing storage with the other.
+	version.Representations[0].SQL = "SELECT from version"
+	version.DefaultNamespace[0] = "version"
+	assert.Equal(t, "SELECT changed", representations[0].SQL)
+	assert.Equal(t, "other", defaultNS[0])
+}
+
+func TestNewVersionFromSQLCopiesNamespace(t *testing.T) {
+	defaultNS := table.Identifier{"analytics"}
+	version, err := NewVersionFromSQL(1, 0, Representation{SQL: "SELECT 1", Dialect: "spark"}, defaultNS)
+	require.NoError(t, err)
+
+	defaultNS[0] = "other"
+	assert.Equal(t, table.Identifier{"analytics"}, version.DefaultNamespace)
+	assert.Equal(t, "spark", version.Representations[0].Dialect)
+}
+
+func TestNewVersionFromSQLRequiresDialect(t *testing.T) {
+	_, err := NewVersionFromSQL(1, 0, Representation{SQL: "SELECT 1", Dialect: "  "}, table.Identifier{"analytics"})
+	require.ErrorIs(t, err, ErrInvalidViewMetadata)
+	require.ErrorContains(t, err, "dialect is required")
+}
+
 func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
 	invalidVersion := &Version{
 		VersionID: 1,
 		SchemaID:  0,
 		Representations: []Representation{
-			{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+			{Type: "hive", SQL: "SELECT 1", Dialect: "spark"},
 		},
 	}
 
@@ -269,8 +313,8 @@ func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
 		VersionID: 2,
 		SchemaID:  0,
 		Representations: []Representation{
-			{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
-			{Type: "sql", Sql: "SELECT 2", Dialect: "spark "},
+			{Type: "sql", SQL: "SELECT 1", Dialect: "spark"},
+			{Type: "sql", SQL: "SELECT 2", Dialect: "spark "},
 		},
 	}
 
@@ -654,8 +698,8 @@ func TestAddVersion_MultipleSQLForSameDialect(t *testing.T) {
 		VersionID: 1,
 		SchemaID:  0,
 		Representations: []Representation{
-			{Type: "sql", Sql: "select * from ns.tbl", Dialect: "spark"},
-			{Type: "sql", Sql: "select * from ns.tbl3", Dialect: "SpArK"},
+			{Type: "sql", SQL: "select * from ns.tbl", Dialect: "spark"},
+			{Type: "sql", SQL: "select * from ns.tbl3", Dialect: "SpArK"},
 		},
 	}
 	_, err := newTestBuilder().
@@ -704,13 +748,12 @@ func TestDroppingDialectFailsByDefault(t *testing.T) {
 	schema := newTestSchema(0, "x")
 	version, _ := NewVersion(1, 0,
 		Representations{
-			NewRepresentation("select \"nested\".\"field\" from tbl", "trino"),
-			NewRepresentation("select `nested`.`field` from tbl", "spark"),
+			NewRepresentation(Representation{SQL: "select \"nested\".\"field\" from tbl", Dialect: "trino"}),
+			NewRepresentation(Representation{SQL: "select `nested`.`field` from tbl", Dialect: "spark"}),
 		},
 		table.Identifier{"defaultns"},
 	)
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	md, err := builder.SetLoc("location").
 		AddSchema(schema).
 		SetCurrentVersion(version, schema).
@@ -730,13 +773,12 @@ func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
 	schema := newTestSchema(0, "x")
 	version, _ := NewVersion(1, 0,
 		Representations{
-			NewRepresentation("select \"nested\".\"field\" from tbl", "trino"),
-			NewRepresentation("select `nested`.`field` from tbl", "spark"),
+			NewRepresentation(Representation{SQL: "select \"nested\".\"field\" from tbl", Dialect: "trino"}),
+			NewRepresentation(Representation{SQL: "select `nested`.`field` from tbl", Dialect: "spark"}),
 		},
 		table.Identifier{"defaultns"},
 	)
-	builder, err := NewMetadataBuilder()
-	require.NoError(t, err)
+	builder := NewMetadataBuilder()
 	md, err := builder.SetLoc("location").
 		AddSchema(schema).
 		SetCurrentVersion(version, schema).
@@ -774,7 +816,7 @@ func TestUnknownRepresentationSurvivesBuilderRoundTrip(t *testing.T) {
 	nextVersion, err := NewVersion(
 		2,
 		metadata.CurrentSchemaID(),
-		Representations{NewRepresentation("SELECT 2", "spark")},
+		Representations{NewRepresentation(Representation{SQL: "SELECT 2", Dialect: "spark"})},
 		metadata.CurrentVersion().DefaultNamespace,
 	)
 	require.NoError(t, err)
@@ -792,7 +834,7 @@ func TestCurrentViewVersionIsNeverExpired(t *testing.T) {
 	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
 	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
 	v3 := newTestVersionWithSQL(3, 0, "select count(*) as count from ns.tbl")
-	md, err := stripErr(NewMetadataBuilder()).
+	md, err := NewMetadataBuilder().
 		SetLoc("location").
 		SetProperties(props).
 		AddSchema(schema).
@@ -826,7 +868,7 @@ func TestViewVersionHistoryIsCorrectlyRetained(t *testing.T) {
 	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
 	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
 	v3 := newTestVersionWithSQL(3, 0, "select count(*) as count from ns.tbl")
-	md, err := stripErr(NewMetadataBuilder()).
+	md, err := NewMetadataBuilder().
 		SetLoc("location").
 		SetProperties(props).
 		AddSchema(schema).

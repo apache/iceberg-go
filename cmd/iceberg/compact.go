@@ -20,7 +20,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 
 	"github.com/apache/iceberg-go/catalog"
@@ -35,12 +34,22 @@ type compactConfig struct {
 	analyzeOnly                 bool
 	partialProgress             bool
 	preserveDeadEqualityDeletes bool
+	sort                        bool
+	rewriteAll                  bool
+	maxGroupSize                int64
 }
 
 func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg compactConfig) {
 	tbl := loadTable(ctx, output, cat, cfg.tableID)
 
+	if cfg.sort && tbl.SortOrder().IsUnsorted() {
+		output.Error(fmt.Errorf("--sort requires a default sort order on table %s", cfg.tableID))
+		osExit(1)
+	}
+
 	compCfg := compaction.DefaultConfig()
+	compCfg.RewriteAll = cfg.rewriteAll
+	compCfg.MaxGroupSizeBytes = cfg.maxGroupSize
 	if cfg.targetFileSize > 0 {
 		compCfg.TargetFileSizeBytes = cfg.targetFileSize
 		// Derive min/max using the same ratios as DefaultConfig (75%/180%).
@@ -51,7 +60,7 @@ func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg compac
 	plan, err := compaction.Analyze(ctx, tbl, compCfg)
 	if err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if len(plan.Groups) == 0 {
@@ -127,6 +136,9 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 	rewriteOpts := table.RewriteDataFilesOptions{
 		PartialProgress: cfg.partialProgress,
 	}
+	if cfg.sort {
+		rewriteOpts.GroupOptions = append(rewriteOpts.GroupOptions, table.WithCompactionSortOrder(tbl.SortOrder()))
+	}
 
 	// Cleanup of dead equality-delete files. The executor only
 	// orchestrates the commit; the policy + walk live in
@@ -138,7 +150,7 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 			fs, err := tbl.FS(ctx)
 			if err != nil {
 				output.Error(fmt.Errorf("open fs for eq-delete cleanup: %w", err))
-				os.Exit(1)
+				osExit(1)
 			}
 			rewrittenSet := make(map[string]struct{})
 			for _, g := range plan.Groups {
@@ -150,7 +162,7 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 				ctx, fs, tbl.Metadata(), snap, rewrittenSet)
 			if err != nil {
 				output.Error(fmt.Errorf("collect dead equality deletes: %w", err))
-				os.Exit(1)
+				osExit(1)
 			}
 			rewriteOpts.ExtraDeleteFilesToRemove = deadEqDeletes
 		}
@@ -162,20 +174,20 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 			output.Text(fmt.Sprintf("  (partial: %d groups committed before failure)", result.RewrittenGroups))
 		}
 		output.Error(fmt.Errorf("compaction failed: %w", err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if !cfg.partialProgress {
 		if _, err := tx.Commit(ctx); err != nil {
 			output.Error(fmt.Errorf("commit failed: %w", err))
-			os.Exit(1)
+			osExit(1)
 		}
 	}
 	if len(result.FailedGroups) > 0 {
 		failure := result.FailedGroups[0]
 		output.Error(fmt.Errorf("compaction failed for %d group(s); first group %q: %w",
 			len(result.FailedGroups), failure.PartitionKey, failure.Err))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	totalRemovedDeletes := result.RemovedPositionDeleteFiles + result.RemovedEqualityDeleteFiles

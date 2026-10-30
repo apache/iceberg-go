@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -38,6 +37,7 @@ type Output interface {
 	Identifiers([]table.Identifier)
 	DescribeTable(*table.Table)
 	Files(tbl *table.Table, history bool)
+	PlannedFiles(tbl *table.Table, tasks []table.FileScanTask)
 	DescribeProperties(iceberg.Properties)
 	Info(tbl *table.Table)
 	Snapshots(tbl *table.Table)
@@ -108,7 +108,7 @@ func (t textOutput) DescribeTable(tbl *table.Table) {
 
 	pterm.DefaultTable.
 		WithData(pterm.TableData{
-			{"Table format version", strconv.Itoa(tbl.Metadata().Version())},
+			{"Table format version", strconv.Itoa(tbl.Metadata().FormatVersion())},
 			{"Metadata location", tbl.MetadataLocation()},
 			{"Table UUID", tbl.Metadata().TableUUID().String()},
 			{"Last updated", strconv.Itoa(int(tbl.Metadata().LastUpdatedMillis()))},
@@ -157,12 +157,12 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 		afs, err := tbl.FS(context.TODO())
 		if err != nil {
 			t.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 		manifestList, err := snap.Manifests(afs)
 		if err != nil {
 			t.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 
 		for _, m := range manifestList {
@@ -182,13 +182,38 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 			}
 			if iterErr != nil {
 				t.Error(iterErr)
-				os.Exit(1)
+				osExit(1)
 			}
 		}
 	}
 
 	node := putils.TreeFromLeveledList(snapshotTree)
 	node.Text = "Snapshots: " + strings.Join(tbl.Identifier(), ".")
+	pterm.DefaultTree.WithRoot(node).Render()
+}
+
+func (t textOutput) PlannedFiles(tbl *table.Table, tasks []table.FileScanTask) {
+	fileTree := pterm.LeveledList{}
+	if snap := tbl.CurrentSnapshot(); snap != nil {
+		fileTree = append(fileTree, pterm.LeveledListItem{
+			Level: 0,
+			Text:  fmt.Sprintf("Snapshot %d, schema %s", snap.SnapshotID, snapshotSchemaText(snap.SchemaID)),
+		})
+
+		for _, file := range plannedDataFiles(tasks) {
+			fileTree = append(fileTree, pterm.LeveledListItem{
+				Level: 1, Text: "Datafile: " + file.Path,
+			})
+			for _, del := range file.DeleteFiles {
+				fileTree = append(fileTree, pterm.LeveledListItem{
+					Level: 2, Text: "Deletefile: " + del,
+				})
+			}
+		}
+	}
+
+	node := putils.TreeFromLeveledList(fileTree)
+	node.Text = "Planned files: " + strings.Join(tbl.Identifier(), ".")
 	pterm.DefaultTree.WithRoot(node).Render()
 }
 
@@ -247,7 +272,7 @@ func (textOutput) Uuid(u uuid.UUID) {
 }
 
 func (textOutput) Error(err error) {
-	log.Fatal(err)
+	logFatal(err)
 }
 
 type jsonOutput struct{}
@@ -312,6 +337,21 @@ func (j jsonOutput) Files(tbl *table.Table, history bool) {
 	}
 }
 
+func (j jsonOutput) PlannedFiles(tbl *table.Table, tasks []table.FileScanTask) {
+	type dataType struct {
+		Snapshot *table.Snapshot `json:"snapshot"`
+		Files    []plannedFile   `json:"files"`
+	}
+
+	data := dataType{
+		Snapshot: tbl.CurrentSnapshot(),
+		Files:    plannedDataFiles(tasks),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+		j.Error(err)
+	}
+}
+
 func (j jsonOutput) DescribeProperties(props iceberg.Properties) {
 	if err := json.NewEncoder(os.Stdout).Encode(props); err != nil {
 		j.Error(err)
@@ -357,5 +397,5 @@ func (j jsonOutput) Uuid(u uuid.UUID) {
 }
 
 func (j jsonOutput) Error(err error) {
-	log.Fatal(err)
+	logFatal(err)
 }

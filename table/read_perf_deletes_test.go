@@ -61,7 +61,7 @@ func TestReadPerfUnderDeletePressure(t *testing.T) {
 	writeParquetFile(t, dataPath, arrowSc, generateRowsJSON(numRows))
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -210,7 +210,7 @@ func setupTableWithDeletes(tb testing.TB, numRows, numDeletes int) *table.Table 
 
 	ctx := context.Background()
 	tx := tbl.NewTransaction()
-	require.NoError(tb, tx.AddFiles(ctx, []string{dataPath}, nil, false))
+	require.NoError(tb, tx.AddDataFilesByPath(ctx, []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(ctx)
 	require.NoError(tb, err)
 

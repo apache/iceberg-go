@@ -41,6 +41,8 @@ type mockCatalogForDrop struct {
 	checkExistsErr      error
 }
 
+func (m *mockCatalogForDrop) Close() error { return nil }
+
 func (m *mockCatalogForDrop) CatalogType() catalog.Type {
 	return m.catalogType
 }
@@ -66,6 +68,10 @@ func (m *mockCatalogForDrop) DropTable(ctx context.Context, identifier table.Ide
 	m.dropIdent = identifier
 
 	return m.dropErr
+}
+
+func (m *mockCatalogForDrop) PurgeTable(context.Context, table.Identifier) error {
+	return errors.New("catalog does not support purge")
 }
 
 func (m *mockCatalogForDrop) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {

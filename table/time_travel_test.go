@@ -19,6 +19,8 @@ package table
 
 import (
 	"context"
+	"iter"
+	"slices"
 	"testing"
 	"time"
 
@@ -73,25 +75,18 @@ func TestSnapshotAsOf(t *testing.T) {
 		metadata:   meta,
 	}
 
-	t.Run("SnapshotAsOf finds exact timestamp match (inclusive)", func(t *testing.T) {
+	t.Run("SnapshotAsOf includes an exact timestamp match", func(t *testing.T) {
 		timestamp := baseTime.Add(2 * time.Hour).UnixMilli()
-		snapshot := table.SnapshotAsOf(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID)
 		assert.Equal(t, timestamp, snapshot.TimestampMs)
 	})
 
-	t.Run("SnapshotAsOf finds exact timestamp match (exclusive)", func(t *testing.T) {
-		timestamp := baseTime.Add(2 * time.Hour).UnixMilli()
-		snapshot := table.SnapshotAsOf(timestamp, false)
-		require.NotNil(t, snapshot)
-		assert.Equal(t, int64(1000), snapshot.SnapshotID) // Should get previous snapshot
-	})
-
 	t.Run("SnapshotAsOf finds snapshot before timestamp", func(t *testing.T) {
 		// Query 90 minutes ago (between snapshots 2 and 3)
 		timestamp := baseTime.Add(150 * time.Minute).UnixMilli()
-		snapshot := table.SnapshotAsOf(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID) // Should get snapshot 2
 	})
@@ -99,7 +94,7 @@ func TestSnapshotAsOf(t *testing.T) {
 	t.Run("SnapshotAsOf finds most recent snapshot for future timestamp", func(t *testing.T) {
 		// Query future timestamp
 		timestamp := baseTime.Add(4 * time.Hour).UnixMilli()
-		snapshot := table.SnapshotAsOf(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(3000), snapshot.SnapshotID) // Should get most recent
 	})
@@ -107,21 +102,8 @@ func TestSnapshotAsOf(t *testing.T) {
 	t.Run("SnapshotAsOf returns nil for timestamp before first snapshot", func(t *testing.T) {
 		// Query before first snapshot
 		timestamp := baseTime.Add(-1 * time.Hour).UnixMilli()
-		snapshot := table.SnapshotAsOf(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp)
 		assert.Nil(t, snapshot)
-	})
-
-	t.Run("SnapshotAsOf returns nil for timestamp equal to first snapshot (exclusive)", func(t *testing.T) {
-		timestamp := baseTime.UnixMilli()
-		snapshot := table.SnapshotAsOf(timestamp, false)
-		assert.Nil(t, snapshot)
-	})
-
-	t.Run("SnapshotAsOf with inclusive=true (default behavior)", func(t *testing.T) {
-		timestamp := baseTime.Add(2 * time.Hour).UnixMilli()
-		snapshot := table.SnapshotAsOf(timestamp, true)
-		require.NotNil(t, snapshot)
-		assert.Equal(t, int64(2000), snapshot.SnapshotID)
 	})
 }
 
@@ -147,7 +129,7 @@ func TestSnapshotAsOfWithOutOfOrderSnapshotLog(t *testing.T) {
 	}
 
 	queryTime := baseTime + 2500
-	snapshot := tbl.SnapshotAsOf(queryTime, true)
+	snapshot := tbl.SnapshotAsOf(queryTime)
 	require.NotNil(t, snapshot)
 	assert.Equal(t, int64(1000), snapshot.SnapshotID)
 
@@ -156,10 +138,6 @@ func TestSnapshotAsOfWithOutOfOrderSnapshotLog(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 	assert.Equal(t, int64(1000), snapshot.SnapshotID)
-
-	snapshot = tbl.SnapshotAsOf(baseTime+2000, false)
-	require.NotNil(t, snapshot)
-	assert.Equal(t, int64(2000), snapshot.SnapshotID)
 }
 
 func TestSnapshotAsOfWithEqualTimestampsUsesFirstLogEntry(t *testing.T) {
@@ -177,7 +155,7 @@ func TestSnapshotAsOfWithEqualTimestampsUsesFirstLogEntry(t *testing.T) {
 	require.NoError(t, err)
 
 	tbl := Table{metadata: meta}
-	snapshot := tbl.SnapshotAsOf(baseTime+1000, true)
+	snapshot := tbl.SnapshotAsOf(baseTime + 1000)
 	require.NotNil(t, snapshot)
 	assert.Equal(t, int64(1000), snapshot.SnapshotID)
 
@@ -186,6 +164,94 @@ func TestSnapshotAsOfWithEqualTimestampsUsesFirstLogEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 	assert.Equal(t, int64(1000), snapshot.SnapshotID)
+}
+
+func TestSnapshotLogEntryAsOf(t *testing.T) {
+	entries := func(log ...SnapshotLogEntry) iter.Seq[SnapshotLogEntry] {
+		return slices.Values(log)
+	}
+
+	tests := []struct {
+		name        string
+		log         []SnapshotLogEntry
+		timestampMs int64
+		inclusive   bool
+		wantID      int64
+		wantFound   bool
+	}{
+		{
+			name:        "empty log",
+			timestampMs: 1000,
+			inclusive:   true,
+		},
+		{
+			name:        "all entries after the timestamp",
+			log:         []SnapshotLogEntry{{SnapshotID: 1, TimestampMs: 2000}},
+			timestampMs: 1000,
+			inclusive:   true,
+		},
+		{
+			name: "greatest eligible timestamp in an out-of-order log",
+			log: []SnapshotLogEntry{
+				{SnapshotID: 2, TimestampMs: 2000},
+				{SnapshotID: 1, TimestampMs: 1000},
+				{SnapshotID: 3, TimestampMs: 3000},
+			},
+			timestampMs: 2500,
+			inclusive:   true,
+			wantID:      2,
+			wantFound:   true,
+		},
+		{
+			name:        "inclusive matches an equal timestamp",
+			log:         []SnapshotLogEntry{{SnapshotID: 1, TimestampMs: 1000}, {SnapshotID: 2, TimestampMs: 2000}},
+			timestampMs: 2000,
+			inclusive:   true,
+			wantID:      2,
+			wantFound:   true,
+		},
+		{
+			name:        "exclusive skips an equal timestamp",
+			log:         []SnapshotLogEntry{{SnapshotID: 1, TimestampMs: 1000}, {SnapshotID: 2, TimestampMs: 2000}},
+			timestampMs: 2000,
+			wantID:      1,
+			wantFound:   true,
+		},
+		{
+			name: "equal timestamps take the first entry in log order",
+			log: []SnapshotLogEntry{
+				{SnapshotID: 1, TimestampMs: 1000},
+				{SnapshotID: 2, TimestampMs: 1000},
+				{SnapshotID: 3, TimestampMs: 1000},
+			},
+			timestampMs: 1000,
+			inclusive:   true,
+			wantID:      1,
+			wantFound:   true,
+		},
+		{
+			name: "equal timestamps after a later out-of-order entry",
+			log: []SnapshotLogEntry{
+				{SnapshotID: 1, TimestampMs: 2000},
+				{SnapshotID: 2, TimestampMs: 1000},
+				{SnapshotID: 3, TimestampMs: 2000},
+			},
+			timestampMs: 2500,
+			inclusive:   true,
+			wantID:      1,
+			wantFound:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, found := SnapshotLogEntryAsOf(entries(tt.log...), tt.timestampMs, tt.inclusive)
+			require.Equal(t, tt.wantFound, found)
+			if tt.wantFound {
+				assert.Equal(t, tt.wantID, got.SnapshotID)
+			}
+		})
+	}
 }
 
 func TestResolveSnapshotRejectsUnknownSnapshotLogEntry(t *testing.T) {
@@ -388,7 +454,7 @@ func TestSnapshotAsOfEdgeCases(t *testing.T) {
 			metadata:   meta,
 		}
 
-		snapshot := table.SnapshotAsOf(time.Now().UnixMilli(), true)
+		snapshot := table.SnapshotAsOf(time.Now().UnixMilli())
 		assert.Nil(t, snapshot)
 
 		scan := table.Scan(WithSnapshotAsOf(time.Now().UnixMilli()))
@@ -423,16 +489,16 @@ func TestSnapshotAsOfEdgeCases(t *testing.T) {
 		}
 
 		// Before snapshot
-		snapshot := table.SnapshotAsOf(now.Add(-1*time.Hour).UnixMilli(), true)
+		snapshot := table.SnapshotAsOf(now.Add(-1 * time.Hour).UnixMilli())
 		assert.Nil(t, snapshot)
 
 		// At snapshot timestamp
-		snapshot = table.SnapshotAsOf(now.UnixMilli(), true)
+		snapshot = table.SnapshotAsOf(now.UnixMilli())
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(1000), snapshot.SnapshotID)
 
 		// After snapshot
-		snapshot = table.SnapshotAsOf(now.Add(1*time.Hour).UnixMilli(), true)
+		snapshot = table.SnapshotAsOf(now.Add(1 * time.Hour).UnixMilli())
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(1000), snapshot.SnapshotID)
 	})

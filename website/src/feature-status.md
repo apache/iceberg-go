@@ -39,7 +39,7 @@ All V1 features are supported. V1 is the format-version baseline.
 | Equality deletes | Supported (read + write). Write via `Transaction.WriteEqualityDeletes`; row-level commits via `Transaction.NewRowDelta`; delete-only CDC via `Transaction.CommitEqualityDeletes` |
 | Partition spec evolution | Supported |
 | Sort order enforcement on write | Supported (PR [#1157](https://github.com/apache/iceberg-go/pull/1157), closes [#833](https://github.com/apache/iceberg-go/issues/833)) |
-| `ReplaceDataFiles` using `OpReplace` | Pending ([#841](https://github.com/apache/iceberg-go/issues/841)) |
+| `ReplaceDataFilesByPath` using `OpReplace` | Pending ([#841](https://github.com/apache/iceberg-go/issues/841)) |
 
 ### V3
 
@@ -58,7 +58,7 @@ All V1 features are supported. V1 is the format-version baseline.
 | Geometry / Geography types (schema) | Supported |
 | Geometry: statistics and pruning | Supported |
 | Geography: read, write, and schema | Supported (bounds/pruning intentionally omitted for geodesic safety) |
-| Geometry / Geography: nested-geo bounds | Deferred |
+| Geometry / Geography: nested-geo null counts | Supported (like other nested fields, no bounds are written) |
 | Multi-argument transforms | Infrastructure present; no concrete implementations exercised yet |
 | Statistics files (read / round-trip) | Supported |
 | NDV (Theta-sketch) statistics computation | Roadmap ([#1929](https://github.com/apache/iceberg-go/issues/1929)) |

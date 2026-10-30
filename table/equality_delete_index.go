@@ -34,9 +34,11 @@ import (
 // Unpartitioned equality deletes are global and apply across partition specs;
 // partitioned deletes only apply to data files in the same spec and partition.
 type equalityDeleteIndex struct {
-	global      []equalityDeleteIndexEntry
-	byPartition map[equalityDeletePartitionKey][]equalityDeleteIndexEntry
-	schema      *iceberg.Schema
+	global                  []equalityDeleteIndexEntry
+	byPartition             map[equalityDeletePartitionKey][]equalityDeleteIndexEntry
+	globalRangeIndex        *equalityDeleteRangeIndex
+	rangeIndexesByPartition map[equalityDeletePartitionKey]*equalityDeleteRangeIndex
+	schema                  *iceberg.Schema
 }
 
 type equalityDeleteIndexEntry struct {
@@ -493,12 +495,19 @@ func buildEqualityDeleteIndex(
 
 	sortBySequence := func(entries []equalityDeleteIndexEntry) {
 		slices.SortStableFunc(entries, func(a, b equalityDeleteIndexEntry) int {
-			return cmp.Compare(a.entry.SequenceNum(), b.entry.SequenceNum())
+			return cmp.Compare(a.entry.DataSequenceNumber(), b.entry.DataSequenceNumber())
 		})
 	}
 	sortBySequence(idx.global)
-	for _, partitionEntries := range idx.byPartition {
+	idx.globalRangeIndex = newEqualityDeleteRangeIndex(idx.global)
+	for key, partitionEntries := range idx.byPartition {
 		sortBySequence(partitionEntries)
+		if rangeIndex := newEqualityDeleteRangeIndex(partitionEntries); rangeIndex != nil {
+			if idx.rangeIndexesByPartition == nil {
+				idx.rangeIndexesByPartition = make(map[equalityDeletePartitionKey]*equalityDeleteRangeIndex)
+			}
+			idx.rangeIndexesByPartition[key] = rangeIndex
+		}
 	}
 
 	return idx, nil
@@ -513,6 +522,7 @@ func (idx *equalityDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]
 	}
 
 	partitionEntries := []equalityDeleteIndexEntry(nil)
+	var partitionRangeIndex *equalityDeleteRangeIndex
 	if len(idx.byPartition) > 0 {
 		dataFile := dataEntry.DataFile()
 		partition := dataFilePartition(dataFile)
@@ -522,31 +532,78 @@ func (idx *equalityDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]
 				return nil, fmt.Errorf("matching equality deletes to data file %s: %w", dataFile.FilePath(), err)
 			}
 			partitionEntries = idx.byPartition[key]
+			partitionRangeIndex = idx.rangeIndexesByPartition[key]
 		}
 	}
 
-	dataSeqNum := dataEntry.SequenceNum()
+	dataSeqNum := dataEntry.DataSequenceNumber()
+	// Equality deletes are sorted by sequence within each list. When even
+	// the newest delete is not newer than the data file, no delete applies.
+	// Avoid initializing or copying column statistics in that common case.
+	if (len(idx.global) == 0 || idx.global[len(idx.global)-1].entry.DataSequenceNumber() <= dataSeqNum) &&
+		(len(partitionEntries) == 0 || partitionEntries[len(partitionEntries)-1].entry.DataSequenceNumber() <= dataSeqNum) {
+		return nil, nil
+	}
 	var dataStats *equalityDeleteDataFileStats
 	if idx.schema != nil {
 		stats := equalityDeleteDataFileStatsFor(dataEntry.DataFile())
 		dataStats = &stats
 	}
 
-	out := appendEqualityDeletesAfter(nil, idx.global, dataSeqNum, dataStats)
-	out = appendEqualityDeletesAfter(out, partitionEntries, dataSeqNum, dataStats)
+	out := appendEqualityDeletesAfterIndexed(
+		nil, idx.global, dataSeqNum, dataStats, idx.globalRangeIndex)
+	out = appendEqualityDeletesAfterIndexed(
+		out, partitionEntries, dataSeqNum, dataStats, partitionRangeIndex)
 
 	return out, nil
 }
 
-func appendEqualityDeletesAfter(
+func firstEqualityDeleteAfter(
+	entries []equalityDeleteIndexEntry,
+	dataSeqNum int64,
+) int {
+	return sort.Search(len(entries), func(i int) bool {
+		return entries[i].entry.DataSequenceNumber() > dataSeqNum
+	})
+}
+
+func appendEqualityDeletesAfterIndexed(
 	out []iceberg.DataFile,
 	entries []equalityDeleteIndexEntry,
 	dataSeqNum int64,
 	dataStats *equalityDeleteDataFileStats,
+	rangeIndex *equalityDeleteRangeIndex,
 ) []iceberg.DataFile {
-	start := sort.Search(len(entries), func(i int) bool {
-		return entries[i].entry.SequenceNum() > dataSeqNum
-	})
+	start := firstEqualityDeleteAfter(entries, dataSeqNum)
+	if rangeIndex == nil || dataStats == nil ||
+		len(dataStats.lowerBounds) == 0 || len(dataStats.upperBounds) == 0 ||
+		len(entries)-start < equalityDeleteRangeIndexMinLookupEntries {
+		return appendEqualityDeletesFrom(out, entries, start, dataStats)
+	}
+
+	candidates, ok := rangeIndex.candidates(start, dataSeqNum, dataStats)
+	if !ok {
+		return appendEqualityDeletesFrom(out, entries, start, dataStats)
+	}
+
+	out = slices.Grow(out, len(candidates))
+	for _, entryIndex := range candidates {
+		entry := entries[entryIndex]
+		if !equalityDeleteCanContainData(dataStats, entry.fields) {
+			continue
+		}
+		out = append(out, entry.entry.DataFile())
+	}
+
+	return out
+}
+
+func appendEqualityDeletesFrom(
+	out []iceberg.DataFile,
+	entries []equalityDeleteIndexEntry,
+	start int,
+	dataStats *equalityDeleteDataFileStats,
+) []iceberg.DataFile {
 	for _, entry := range entries[start:] {
 		if !equalityDeleteCanContainData(dataStats, entry.fields) {
 			continue

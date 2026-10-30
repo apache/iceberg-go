@@ -59,7 +59,7 @@ func TestSnapshotBranchRef(t *testing.T) {
 	err := json.Unmarshal([]byte(ref), &snapRef)
 	assert.NoError(t, err)
 
-	assert.Equal(t, table.BranchRef, snapRef.SnapshotRefType)
+	assert.Equal(t, table.BranchRef, snapRef.Type)
 	assert.Equal(t, int64(3051729675574597004), snapRef.SnapshotID)
 	assert.Nil(t, snapRef.MinSnapshotsToKeep)
 	assert.Nil(t, snapRef.MaxRefAgeMs)
@@ -77,11 +77,23 @@ func TestSnapshotTagRef(t *testing.T) {
 	err := json.Unmarshal([]byte(ref), &snapRef)
 	assert.NoError(t, err)
 
-	assert.Equal(t, table.TagRef, snapRef.SnapshotRefType)
+	assert.Equal(t, table.TagRef, snapRef.Type)
 	assert.Equal(t, int64(3051729675574597004), snapRef.SnapshotID)
 	assert.Nil(t, snapRef.MinSnapshotsToKeep)
 	assert.Equal(t, int64(10), *snapRef.MaxRefAgeMs)
 	assert.Nil(t, snapRef.MaxSnapshotAgeMs)
+}
+
+func TestSnapshotRefTypeJSONFieldNameUnchanged(t *testing.T) {
+	original := table.SnapshotRef{SnapshotID: 42, Type: table.BranchRef}
+
+	encoded, err := json.Marshal(original)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"snapshot-id":42,"type":"branch"}`, string(encoded))
+
+	var decoded table.SnapshotRef
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.Equal(t, original, decoded)
 }
 
 func TestSnapshotRefRequiresFields(t *testing.T) {

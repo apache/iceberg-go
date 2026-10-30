@@ -147,7 +147,7 @@ func TestV3MergeOnReadDoubleDeleteMergesDeletionVector(t *testing.T) {
 // TestV3MergeOnReadTripleDeleteMergesDeletionVector extends the double-delete
 // guard to a third delete. The second delete supersedes DV #1, leaving it as a
 // DELETED-status entry in the deleted-files manifest against the same data file.
-// The third delete's collectExistingDVs must skip that ghost entry; otherwise it
+// The third delete's readPlanningDeletes must skip that ghost entry; otherwise it
 // seeds the merged DV from the stale first bitmap (resurrecting id=4, removed by
 // the second delete) and tries to remove a DV that no longer exists. See #1372.
 func TestV3MergeOnReadTripleDeleteMergesDeletionVector(t *testing.T) {
@@ -175,7 +175,7 @@ func TestV3MergeOnReadTripleDeleteMergesDeletionVector(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, liveDVCount(t, tbl), "second delete must merge into the single DV")
 
-	// Third delete: DV #1 is now a superseded DELETED entry. collectExistingDVs
+	// Third delete: DV #1 is now a superseded DELETED entry. readPlanningDeletes
 	// must ignore it and seed only from the live merged DV.
 	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
 	require.NoError(t, err)

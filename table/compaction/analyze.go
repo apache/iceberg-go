@@ -26,8 +26,15 @@ import (
 
 // Analyze scans the table and produces a compaction Plan without
 // modifying anything. This is the dry-run / planning entry point.
+//
+// Analyze closes its scan before returning, which releases a remote plan's
+// resources. Callers read the returned tasks through a scan of their own, as
+// table.ExecuteCompactionGroup does.
 func Analyze(ctx context.Context, tbl *table.Table, cfg Config) (Plan, error) {
-	tasks, err := tbl.Scan().PlanFiles(ctx)
+	scan := tbl.Scan()
+	defer scan.Close()
+
+	tasks, err := scan.PlanFiles(ctx)
 	if err != nil {
 		return Plan{}, fmt.Errorf("plan files for compaction analysis: %w", err)
 	}

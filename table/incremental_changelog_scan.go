@@ -51,13 +51,15 @@ type plannedChangelogTask struct {
 
 // NewIncrementalChangelogScan creates an incremental changelog planner.
 // Projection and row limits are not applied to returned tasks. Auto planning
-// falls back to local planning. Remote planning is not supported.
+// falls back to local planning, while remote planning, including a catalog
+// `server` scan-planning-mode directive, is not supported.
 //
 // ScanTask carries the data file and the deletes applied before the change is
 // interpreted: deletes committed with an added data file, or deletes that
 // already applied to a removed data file or a row-level delete. AddedDeletes
 // on a row-level delete are the deletes that produce the change and are not
-// part of ScanTask. Row filters are attached to each task as residuals without
+// part of ScanTask. Use ScanTask with Scan.ReadTasks to read the returned
+// files. Row filters are attached to each task as residuals without
 // partition-specific simplification, matching incremental append scans.
 func (t Table) NewIncrementalChangelogScan(opts ...ScanOption) *IncrementalChangelogScan {
 	return &IncrementalChangelogScan{scan: t.Scan(opts...)}
@@ -111,12 +113,8 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		return nil, err
 	}
 
-	switch s.scan.planningMode {
-	case ScanPlanningLocal, ScanPlanningAuto:
-	case ScanPlanningRemote:
-		return nil, fmt.Errorf("%w: incremental changelog scans do not support remote planning", ErrInvalidOperation)
-	default:
-		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, s.scan.planningMode)
+	if err := s.scan.checkLocalOnlyPlanning("incremental changelog"); err != nil {
+		return nil, err
 	}
 	start := time.Now()
 
@@ -364,7 +362,7 @@ func configureChangelogFileTask(task *FileScanTask, entry iceberg.ManifestEntry,
 	task.Length = file.FileSizeBytes()
 	task.Residual = residual
 	task.FirstRowID = file.FirstRowID()
-	if sequenceNumber := entry.SequenceNum(); sequenceNumber >= 0 {
+	if sequenceNumber := entry.DataSequenceNumber(); sequenceNumber >= 0 {
 		task.DataSequenceNumber = &sequenceNumber
 	}
 }

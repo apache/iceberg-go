@@ -21,8 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -40,8 +42,13 @@ import (
 // Used to verify that doCommit fails early when the FS cannot write.
 type readOnlyIO struct{}
 
-func (readOnlyIO) Open(_ string) (iceio.File, error) { return nil, errors.New("readOnlyIO: no files") }
-func (readOnlyIO) Remove(_ string) error             { return errors.New("readOnlyIO: read-only") }
+func (readOnlyIO) Open(_ context.Context, _ string) (iceio.File, error) {
+	return nil, errors.New("readOnlyIO: no files")
+}
+
+func (readOnlyIO) Remove(_ context.Context, _ string) error {
+	return errors.New("readOnlyIO: read-only")
+}
 
 // sequentialCatalog returns a predetermined error per CommitTable attempt.
 // If attempts exceed the len(errs) slice it returns nil (success).
@@ -625,11 +632,9 @@ func TestDoCommit_OrphanNotCleanedOnUnknownError(t *testing.T) {
 		"on unknown 5xx every rebuild's manifest list must be preserved (one may be the live commit)")
 }
 
-// TestDoCommit_OrphanCleanedOnCommitDiverged verifies that manifest-list files
-// orphaned by rebuild attempts are removed when ErrCommitDiverged is returned
-// by a conflict validator. Diverged commits are terminal (no retry), and since
-// neither of the orphaned files was ever accepted by the catalog, they are safe
-// to delete. The defer cleanup runs with cleanupOrphans=true on this path.
+// TestDoCommit_OrphanCleanedOnCommitDiverged verifies that when a conflict
+// validator returns ErrCommitDiverged after a rebuild, the manifest list the
+// rebuild wrote is removed while the staged list the caller owns is kept.
 func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	wfs, meta := newMemIOWithRetryMeta(t, spec)
@@ -679,18 +684,26 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrCommitDiverged)
 
-	// The defer must have fired with cleanupOrphans=true and removed the orphan.
-	_, stillExists := wfs.files[originalManifestList]
-	assert.False(t, stillExists,
-		"orphaned manifest list must be removed even on ErrCommitDiverged: "+
-			"the file was never accepted by the catalog so it is safe to delete")
+	assertOnlyManifestList(t, wfs, originalManifestList)
+}
+
+// assertOnlyManifestList checks that want is the only manifest list left in
+// wfs: a failed commit keeps the staged list and removes every rebuilt one.
+func assertOnlyManifestList(t *testing.T, wfs *memIO, want string) {
+	t.Helper()
+	var lists []string
+	for path := range wfs.files {
+		if strings.HasPrefix(filepath.Base(path), "snap-") {
+			lists = append(lists, path)
+		}
+	}
+	assert.Equal(t, []string{want}, lists)
 }
 
 // TestDoCommit_OrphanCleanedOnRetriesExhausted verifies that when every retry
-// attempt fails with ErrCommitFailed and the loop exits with the budget
-// exhausted, the defer still fires with cleanupOrphans=true. None of the
-// orphaned manifest-list files were ever accepted by the catalog, so they are
-// safe to delete on this terminal exit.
+// attempt fails with ErrCommitFailed, the manifest lists the rebuilds wrote,
+// including the final attempt's, are removed while the staged list the caller
+// owns is kept for a later Commit.
 func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	wfs, meta := newMemIOWithRetryMeta(t, spec)
@@ -719,10 +732,81 @@ func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 	require.ErrorIs(t, err, ErrCommitFailed,
 		"retries exhausted: terminal error must be ErrCommitFailed")
 
-	_, stillExists := wfs.files[originalManifestList]
-	assert.False(t, stillExists,
-		"orphaned manifest list must be removed when retries are exhausted with ErrCommitFailed: "+
-			"none of the retry attempts were accepted, so all orphans are safe to delete")
+	assertOnlyManifestList(t, wfs, originalManifestList)
+}
+
+// cancelAwareRemoveIO wraps memIO and, like blobfs, rejects Remove on a
+// canceled context.
+type cancelAwareRemoveIO struct {
+	*memIO
+}
+
+func (c *cancelAwareRemoveIO) Remove(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return c.memIO.Remove(ctx, name)
+}
+
+// cancelAfterCommitCatalog cancels the commit context once CommitTable has
+// been called cancelAfter times.
+type cancelAfterCommitCatalog struct {
+	*sequentialCatalog
+	cancelAfter int32
+	cancel      context.CancelFunc
+}
+
+func (c *cancelAfterCommitCatalog) CommitTable(ctx context.Context, ident Identifier, reqs []Requirement, updates []Update) (Metadata, string, error) {
+	meta, loc, err := c.sequentialCatalog.CommitTable(ctx, ident, reqs, updates)
+	if c.attempts.Load() == c.cancelAfter {
+		c.cancel()
+	}
+
+	return meta, loc, err
+}
+
+// TestDoCommit_OrphanCleanedOnCancellation verifies that orphan cleanup does
+// not inherit the caller's cancellation: when doCommit exits because ctx was
+// canceled, an IO that honors ctx on Remove must still remove the manifest
+// lists its rebuilds wrote, while the caller's staged list is kept for a
+// re-commit.
+func TestDoCommit_OrphanCleanedOnCancellation(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	mem, meta := newMemIOWithRetryMeta(t, spec)
+	wfs := &cancelAwareRemoveIO{memIO: mem}
+
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	originalManifestList := updates[0].(*addSnapshotUpdate).Snapshot.ManifestList
+	require.Contains(t, mem.files, originalManifestList)
+	filesBefore := slices.Sorted(maps.Keys(mem.files))
+
+	// The first failure triggers a rebuild that writes a new manifest list;
+	// the context is canceled during the second attempt, so doCommit exits
+	// on the cancellation with orphan cleanup still enabled.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cat := &cancelAfterCommitCatalog{
+		sequentialCatalog: &sequentialCatalog{
+			metadata: meta,
+			errs:     []error{ErrCommitFailed, ErrCommitFailed},
+		},
+		cancelAfter: 2,
+		cancel:      cancel,
+	}
+	tbl = newOCCTable(t, meta, wfs, cat)
+
+	_, err = tbl.doCommit(ctx, updates, reqs, withCommitBranch(MainBranch))
+	require.ErrorIs(t, err, context.Canceled)
+
+	assert.Equal(t, filesBefore, slices.Sorted(maps.Keys(mem.files)),
+		"rebuilt manifest lists must be removed even when the commit ends on cancellation, and the staged list kept")
 }
 
 // ---------------------------------------------------------------------------
@@ -760,9 +844,20 @@ type progressingRebuildCatalog struct {
 
 	committedSnapshot *Snapshot // populated when CommitTable accepts
 	peerCount         int       // running peer-commit counter (= total-data-files contributed by peers)
+
+	// failLoad makes that LoadTable call (1-based) fail. cancel runs once
+	// CommitTable has been called cancelAt times.
+	loads    int
+	failLoad int
+	cancelAt int32
+	cancel   context.CancelFunc
 }
 
 func (c *progressingRebuildCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	c.loads++
+	if c.loads == c.failLoad {
+		return nil, errors.New("simulated refresh failure")
+	}
 	c.loadedLastSeqNums = append(c.loadedLastSeqNums, c.metadata.LastSequenceNumber())
 
 	return New(ident, c.metadata, "",
@@ -771,6 +866,9 @@ func (c *progressingRebuildCatalog) LoadTable(_ context.Context, ident Identifie
 
 func (c *progressingRebuildCatalog) CommitTable(_ context.Context, _ Identifier, _ []Requirement, updates []Update) (Metadata, string, error) {
 	n := c.commitTableCalls.Add(1)
+	if c.cancel != nil && n == c.cancelAt {
+		defer c.cancel()
+	}
 
 	// Capture the manifest-list path and sequence number being submitted
 	// this attempt — the test asserts each retry produces a unique path
@@ -830,7 +928,7 @@ func (c *progressingRebuildCatalog) graftPeer() {
 	peerSeq := c.metadata.LastSequenceNumber() + 1
 
 	manifestListPath := fmt.Sprintf("%s/metadata/peer-%d-manifest-list.avro", c.location, peerID)
-	out, err := c.wfs.Create(manifestListPath)
+	out, err := c.wfs.Create(context.Background(), manifestListPath)
 	if err != nil {
 		panic(err)
 	}
@@ -1025,17 +1123,19 @@ func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
 
 	_, err := tx.Commit(t.Context())
 	require.ErrorIs(t, err, ErrCommitFailed, "first commit must surface the clean conflict")
+	assert.NotErrorIs(t, err, ErrTransactionUnusable)
 	assert.False(t, tx.committed, "clean-conflict failure must leave committed == false")
 	assert.Equal(t, int32(1), cat.attempts.Load(), "first commit must reach the catalog once")
 
-	// The transaction stays usable: applying further changes and retrying the
-	// commit must both be allowed.
+	// Changes staged after the conflict are part of the re-commit.
 	require.NoError(t, tx.SetProperties(map[string]string{"key2": "value2"}),
 		"apply must be allowed after a failed commit")
 
 	committed, err := tx.Commit(t.Context())
 	require.NoError(t, err, "commit retry must be allowed after a clean conflict")
 	require.NotNil(t, committed)
+	assert.Equal(t, "value", committed.Properties()["key"])
+	assert.Equal(t, "value2", committed.Properties()["key2"])
 	assert.True(t, tx.committed, "committed must be set only after a successful commit")
 	assert.Equal(t, int32(2), cat.attempts.Load(), "the retry must reach the catalog")
 
@@ -1044,6 +1144,130 @@ func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
 
 	_, err = tx.Commit(t.Context())
 	assert.ErrorContains(t, err, "already been committed")
+}
+
+func TestTransactionCommit_ResumedConflictStaysResumable(t *testing.T) {
+	cat := &sequentialCatalog{errs: []error{ErrCommitFailed, ErrCommitFailed}}
+	tbl := newRetryTestTable(t, cat, nil)
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+
+	for range 2 {
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.NotErrorIs(t, err, ErrTransactionUnusable)
+	}
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "value", committed.Properties()["key"])
+	assert.Equal(t, int32(3), cat.attempts.Load(), "each Commit submits once with retries disabled")
+}
+
+func TestTransactionCommit_ResumeRebuildsAfterPeerSnapshotOnAnotherBranch(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs := newMemIO(1<<20, nil)
+	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location",
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	cat := &sequentialCatalog{metadata: meta}
+	tbl := newOCCTable(t, meta, wfs, cat)
+
+	seed := tbl.NewTransaction()
+	require.NoError(t, seed.AddDataFiles(t.Context(), []iceberg.DataFile{
+		newTestDataFile(t, spec, "mem://default/table-location/data/f1.parquet", nil),
+	}, nil))
+	tbl, err = seed.Commit(t.Context())
+	require.NoError(t, err)
+	mainHead := tbl.CurrentSnapshot().SnapshotID
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{
+		newTestDataFile(t, spec, "mem://default/table-location/data/f2.parquet", nil),
+	}, nil))
+
+	// A peer adds a snapshot on another branch. main is unchanged, but the
+	// staged snapshot's sequence number is now taken, so the catalog
+	// rejects the commit as a conflict.
+	builder, err := MetadataBuilderFromBase(cat.metadata, "")
+	require.NoError(t, err)
+	peerSeq := cat.metadata.LastSequenceNumber() + 1
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID:       mainHead + 1,
+		ParentSnapshotID: &mainHead,
+		SequenceNumber:   peerSeq,
+		TimestampMs:      cat.metadata.LastUpdatedMillis() + 1,
+		Summary:          &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, builder.SetSnapshotRef("other", mainHead+1, BranchRef))
+	cat.metadata, err = builder.Build()
+	require.NoError(t, err)
+	cat.errs = []error{nil, ErrCommitFailed}
+	var stagedList string
+	for _, u := range tx.meta.updates {
+		if su, ok := u.(*addSnapshotUpdate); ok {
+			stagedList = su.Snapshot.ManifestList
+		}
+	}
+
+	_, err = tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitFailed)
+	require.NotErrorIs(t, err, ErrTransactionUnusable)
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	head := committed.CurrentSnapshot()
+	require.NotNil(t, head.ParentSnapshotID)
+	assert.Equal(t, mainHead, *head.ParentSnapshotID)
+	assert.Equal(t, peerSeq+1, head.SequenceNumber, "the resume must renumber the staged snapshot")
+	assert.NotEqual(t, stagedList, head.ManifestList, "the rebuilt manifest list must not reuse the first call's name")
+}
+
+func TestTransactionCommit_ResumeOfNonReplayableCommit(t *testing.T) {
+	const hint = "commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals"
+	head := int64(100)
+
+	t.Run("branch unchanged resubmits", func(t *testing.T) {
+		base := newConflictTestMetadataWithProps(t, &head, nil)
+		cat := &sequentialCatalog{metadata: base, errs: []error{ErrCommitFailed}}
+		tbl := New(Identifier{"db", "no-replay"}, base, "metadata.json",
+			func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
+		tx.noReplay = true
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.NotErrorIs(t, err, ErrTransactionUnusable)
+		assert.EqualError(t, err, "commit failed, refresh and try again ("+hint+")")
+
+		_, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), cat.attempts.Load())
+	})
+
+	t.Run("branch moved is unusable", func(t *testing.T) {
+		base := newConflictTestMetadataWithProps(t, &head, nil)
+		cat := &sequentialCatalog{metadata: base, loadMeta: graftSnapshotOnto(t, base, MainBranch, 200), errs: []error{ErrCommitFailed}}
+		tbl := New(Identifier{"db", "no-replay"}, base, "metadata.json",
+			func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
+		tx.noReplay = true
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.NotErrorIs(t, err, ErrTransactionUnusable)
+
+		_, err = tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		require.ErrorIs(t, err, ErrCommitFailed)
+		assert.EqualError(t, err, "transaction cannot be committed again: requirement no longer holds after refresh ("+hint+"): "+
+			`requirement failed: branch "main" has changed: expected id 100, found 200`)
+		assert.Equal(t, int32(1), cat.attempts.Load(), "the resume must stop before the catalog")
+	})
 }
 
 // doCommit exhausts its own retry loop on ErrCommitFailed, the transaction must still be left retriable.
@@ -1065,8 +1289,218 @@ func TestTransactionCommit_RetriableAfterExhaustedInternalRetries(t *testing.T) 
 
 	_, err := tx.Commit(t.Context())
 	require.ErrorIs(t, err, ErrCommitFailed)
+	assert.NotErrorIs(t, err, ErrTransactionUnusable)
 	assert.Equal(t, int32(3), cat.attempts.Load(), "doCommit must exhaust all internal attempts")
 	assert.False(t, tx.committed, "exhausted clean-conflict retries must leave committed == false")
+
+	_, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(4), cat.attempts.Load())
+	assert.Equal(t, 1, countAssertTableUUID(cat.lastReqs),
+		"retry must not append a duplicate AssertTableUUID")
+}
+
+func TestTransactionCommit_CommittableAfterTransientFailureFollowingRebuild(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(*progressingRebuildCatalog, context.CancelFunc)
+		wantErr error
+		message string
+	}{
+		{
+			name:    "refresh error",
+			setup:   func(c *progressingRebuildCatalog, _ context.CancelFunc) { c.failLoad = 2 },
+			message: "refresh table for retry: simulated refresh failure",
+		},
+		{
+			name:    "context cancelled during retry wait",
+			setup:   func(c *progressingRebuildCatalog, cancel context.CancelFunc) { c.cancelAt, c.cancel = 2, cancel },
+			wantErr: context.Canceled,
+			message: "context canceled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := iceberg.NewPartitionSpec()
+			wfs, meta := newMemIOWithRetryMeta(t, spec)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			// The first two submissions conflict and the third lands.
+			cat := &progressingRebuildCatalog{
+				metadata: meta, wfs: wfs, location: "mem://default/table-location", branch: MainBranch, failTimes: 2,
+			}
+			tt.setup(cat, cancel)
+			tbl := newOCCTable(t, meta, wfs, cat)
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{
+				newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil),
+			}, nil))
+			var staged string
+			for _, u := range tx.meta.updates {
+				if su, ok := u.(*addSnapshotUpdate); ok {
+					staged = su.Snapshot.ManifestList
+				}
+			}
+			require.NotEmpty(t, staged)
+
+			_, err := tx.Commit(ctx)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			}
+			require.EqualError(t, err, tt.message)
+			require.NotErrorIs(t, err, ErrTransactionUnusable)
+			require.Equal(t, int32(2), cat.commitTableCalls.Load(), "the failure must follow a rebuilt attempt")
+			assertOnlyManifestList(t, wfs, staged)
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, int32(3), cat.commitTableCalls.Load())
+			require.NotNil(t, committed.CurrentSnapshot().ParentSnapshotID)
+			assert.Equal(t, int64(9_002), *committed.CurrentSnapshot().ParentSnapshotID, "the resume must rebase onto the peers")
+			_, stillExists := wfs.files[staged]
+			assert.False(t, stillExists, "the staged list is deleted once the commit lands")
+			_, live := wfs.files[committed.CurrentSnapshot().ManifestList]
+			assert.True(t, live)
+		})
+	}
+}
+
+func TestTransactionCommit_BusyTableWithRetriesDisabledResumesUntilItLands(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs := newMemIO(1<<20, nil)
+	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	require.NoError(t, err)
+	// Each failed submission grafts a peer commit, so every resume must
+	// rebuild onto a head that moves again before the next submission.
+	cat := &progressingRebuildCatalog{
+		metadata: meta, wfs: wfs, location: "mem://default/table-location", branch: MainBranch, failTimes: 2,
+	}
+	tbl := newOCCTable(t, meta, wfs, cat)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{
+		newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil),
+	}, nil))
+	var staged string
+	for _, u := range tx.meta.updates {
+		if su, ok := u.(*addSnapshotUpdate); ok {
+			staged = su.Snapshot.ManifestList
+		}
+	}
+
+	for range 2 {
+		_, err = tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.NotErrorIs(t, err, ErrTransactionUnusable)
+		assertOnlyManifestList(t, wfs, staged)
+	}
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), cat.commitTableCalls.Load(), "each Commit submits once with retries disabled")
+	head := committed.CurrentSnapshot()
+	require.NotNil(t, head.ParentSnapshotID)
+	assert.Equal(t, int64(9_002), *head.ParentSnapshotID, "the last resume must rebase onto both peers")
+	assert.Equal(t, "3", head.Summary.Properties["total-data-files"], "both peers' files and ours")
+	assertOnlyManifestList(t, wfs, head.ManifestList)
+}
+
+func TestTransactionCommit_AbandonedAfterFailureLeavesOnlyStagedFiles(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+	cat := &progressingRebuildCatalog{
+		metadata: meta, wfs: wfs, location: "mem://default/table-location", branch: MainBranch, failTimes: 99,
+	}
+	tbl := newOCCTable(t, meta, wfs, cat)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{
+		newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil),
+	}, nil))
+	before := slices.Sorted(maps.Keys(wfs.files))
+
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitFailed)
+	require.Equal(t, int32(4), cat.commitTableCalls.Load())
+
+	var after []string
+	for path := range wfs.files {
+		if !strings.HasPrefix(filepath.Base(path), "peer-") {
+			after = append(after, path)
+		}
+	}
+	slices.Sort(after)
+	assert.Equal(t, before, after, "only the staged files may remain, and all of them")
+}
+
+func TestTransactionTableCommitRefusedAfterFailedCommit(t *testing.T) {
+	cat := &sequentialCatalog{errs: []error{ErrCommitFailed}}
+	tbl := newRetryTestTable(t, cat, nil)
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+	_, err := tx.TableCommit()
+	require.NoError(t, err)
+
+	_, err = tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitFailed)
+
+	_, err = tx.TableCommit()
+	require.EqualError(t, err, "a previous commit of this transaction failed, call Commit to resume it")
+	assert.NotErrorIs(t, err, ErrTransactionUnusable)
+
+	_, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+}
+
+// A rebuild that writes the first staged snapshot's list and then fails on
+// the second still owns the list it wrote. The staged lists stay.
+func TestDoCommit_PartialRebuildFailureRemovesWrittenList(t *testing.T) {
+	head := int64(100)
+	base := newConflictTestMetadataWithProps(t, &head, iceberg.Properties{
+		CommitNumRetriesKey:     "1",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	})
+	wfs := newMemIO(1<<20, nil)
+	const loc = "mem://default/table-location/metadata/"
+	for _, name := range []string{"staged-1.avro", "staged-2.avro"} {
+		require.NoError(t, wfs.WriteFile(t.Context(), loc+name, []byte("list")))
+	}
+
+	rebuildErr := errors.New("simulated rebuild failure")
+	first := &addSnapshotUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
+		Snapshot:   &Snapshot{SnapshotID: 101, ParentSnapshotID: &head, SequenceNumber: 2, ManifestList: loc + "staged-1.avro"},
+		rebuildManifestList: func(ctx context.Context, _ Metadata, parent *Snapshot, fio iceio.WriteFileIO, _ int) (*Snapshot, error) {
+			if err := fio.WriteFile(ctx, loc+"rebuilt-1.avro", []byte("list")); err != nil {
+				return nil, err
+			}
+			parentID := parent.SnapshotID
+
+			return &Snapshot{SnapshotID: 101, ParentSnapshotID: &parentID, SequenceNumber: 3, ManifestList: loc + "rebuilt-1.avro"}, nil
+		},
+	}
+	firstID := int64(101)
+	second := &addSnapshotUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
+		Snapshot:   &Snapshot{SnapshotID: 102, ParentSnapshotID: &firstID, SequenceNumber: 3, ManifestList: loc + "staged-2.avro"},
+		rebuildManifestList: func(context.Context, Metadata, *Snapshot, iceio.WriteFileIO, int) (*Snapshot, error) {
+			return nil, rebuildErr
+		},
+	}
+
+	cat := &sequentialCatalog{metadata: base, loadMeta: graftSnapshotOnto(t, base, MainBranch, 200), errs: []error{ErrCommitFailed}}
+	tbl := newOCCTable(t, base, wfs, cat)
+	_, err := tbl.doCommit(t.Context(), []Update{first, second}, nil, withCommitBranch(MainBranch))
+	require.ErrorIs(t, err, rebuildErr)
+
+	assert.Contains(t, wfs.files, loc+"staged-1.avro")
+	assert.Contains(t, wfs.files, loc+"staged-2.avro")
+	assert.NotContains(t, wfs.files, loc+"rebuilt-1.avro", "the list the failed rebuild wrote must be removed")
 }
 
 func TestTransactionCommit_TerminalOnUnknownState(t *testing.T) {

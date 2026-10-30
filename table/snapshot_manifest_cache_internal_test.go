@@ -22,7 +22,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,8 +80,8 @@ func TestTableScansReuseSnapshotManifestList(t *testing.T) {
 }
 
 func TestSnapshotManifestCacheSeparatesContentAndProtectsSlices(t *testing.T) {
-	data := iceberg.NewManifestFile(2, "data.avro", 10, 0, 1).Build()
-	deleteManifest := iceberg.NewManifestFile(2, "delete.avro", 20, 0, 1).
+	data := iceberg.NewManifestBuilder(2, "data.avro", 10, 0, 1).Build()
+	deleteManifest := iceberg.NewManifestBuilder(2, "delete.avro", 20, 0, 1).
 		Content(iceberg.ManifestContentDeletes).
 		Build()
 	cache := newSnapshotManifestCache()
@@ -90,7 +92,7 @@ func TestSnapshotManifestCacheSeparatesContentAndProtectsSlices(t *testing.T) {
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{data, deleteManifest}))
 	const listPath = "mem://snapshot-manifest-cache/separate.avro"
-	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), listPath, list.Bytes()))
 
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
 	set, err := cache.get(context.Background(), snapshot, testSnapshotManifestLoader(snapshot, fs))
@@ -116,7 +118,7 @@ func TestSnapshotManifestCacheSharesInFlightRead(t *testing.T) {
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{}))
-	require.NoError(t, base.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, base.WriteFile(context.Background(), listPath, list.Bytes()))
 
 	fs := &blockingSnapshotManifestIO{
 		IO:          base,
@@ -177,7 +179,7 @@ func TestSnapshotManifestCacheRetriesFailedRead(t *testing.T) {
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{}))
-	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), listPath, list.Bytes()))
 	_, err = cache.get(context.Background(), snapshot, testSnapshotManifestLoader(snapshot, fs))
 	require.NoError(t, err)
 }
@@ -191,7 +193,7 @@ func TestSnapshotManifestCacheBoundsCompletedEntries(t *testing.T) {
 		var list bytes.Buffer
 		require.NoError(t, iceberg.WriteManifestList(2, &list, int64(i), nil, &sequenceNumber, 0, nil))
 		path := fmt.Sprintf("mem://snapshot-manifest-cache/bounded-%d.avro", i)
-		require.NoError(t, fs.WriteFile(path, list.Bytes()))
+		require.NoError(t, fs.WriteFile(context.Background(), path, list.Bytes()))
 		snapshots[i] = Snapshot{SnapshotID: int64(i), ManifestList: path}
 	}
 
@@ -268,7 +270,7 @@ type blockingSnapshotManifestIO struct {
 	opens map[string]int
 }
 
-func (fs *blockingSnapshotManifestIO) Open(name string) (iceio.File, error) {
+func (fs *blockingSnapshotManifestIO) Open(_ context.Context, name string) (iceio.File, error) {
 	if name == fs.blockedPath {
 		fs.once.Do(func() { close(fs.started) })
 		<-fs.release
@@ -278,7 +280,7 @@ func (fs *blockingSnapshotManifestIO) Open(name string) (iceio.File, error) {
 	fs.opens[name]++
 	fs.mu.Unlock()
 
-	return fs.IO.Open(name)
+	return fs.IO.Open(context.Background(), name)
 }
 
 type notifyingContext struct {
@@ -400,10 +402,10 @@ func TestSnapshotManifestCacheKeepsCompletedReadAfterCancellation(t *testing.T) 
 	fs := iceio.NewMemFS()
 	var list bytes.Buffer
 	sequenceNumber := int64(1)
-	manifest := iceberg.NewManifestFile(2, "data.avro", 10, 0, 1).Build()
+	manifest := iceberg.NewManifestBuilder(2, "data.avro", 10, 0, 1).Build()
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0, []iceberg.ManifestFile{manifest}))
 	const listPath = "mem://snapshot-manifest-cache/late-cancel.avro"
-	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), listPath, list.Bytes()))
 
 	cache := newSnapshotManifestCache()
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
@@ -448,7 +450,7 @@ func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T
 	var list bytes.Buffer
 	sequenceNumber := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0, nil))
-	require.NoError(t, base.WriteFile(listPath, list.Bytes()))
+	require.NoError(t, base.WriteFile(context.Background(), listPath, list.Bytes()))
 	fs := &blockingSnapshotManifestIO{
 		IO: base, blockedPath: listPath, started: make(chan struct{}),
 		release: make(chan struct{}), opens: make(map[string]int),
@@ -577,12 +579,12 @@ func TestSnapshotManifestCacheUsesCallerContext(t *testing.T) {
 }
 
 func TestSnapshotManifestCacheDoesNotClassifyUnknownContentAsData(t *testing.T) {
-	unknown := iceberg.NewManifestFile(2, "unknown.avro", 1, 0, 1).
+	unknown := iceberg.NewManifestBuilder(2, "unknown.avro", 1, 0, 1).
 		Content(iceberg.ManifestContent(2)).
 		Build()
 	set := newSnapshotManifestSet([]iceberg.ManifestFile{
-		iceberg.NewManifestFile(2, "data.avro", 1, 0, 1).Build(),
-		iceberg.NewManifestFile(2, "delete.avro", 1, 0, 1).
+		iceberg.NewManifestBuilder(2, "data.avro", 1, 0, 1).Build(),
+		iceberg.NewManifestBuilder(2, "delete.avro", 1, 0, 1).
 			Content(iceberg.ManifestContentDeletes).
 			Build(),
 		unknown,
@@ -609,7 +611,7 @@ func TestSnapshotManifestCacheCountsDataDescriptorsOnce(t *testing.T) {
 	cache := newSnapshotManifestCache()
 	manifests := make([]iceberg.ManifestFile, snapshotManifestCacheManifestLimit)
 	for i := range manifests {
-		manifests[i] = iceberg.NewManifestFile(2, fmt.Sprintf("data-%d.avro", i), 10, 0, 1).Build()
+		manifests[i] = iceberg.NewManifestBuilder(2, fmt.Sprintf("data-%d.avro", i), 10, 0, 1).Build()
 	}
 	set := newSnapshotManifestSet(manifests)
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: "full.avro"}
@@ -728,9 +730,9 @@ type contextBoundSnapshotManifestIO struct {
 	blockedPath string
 }
 
-func (fs *contextBoundSnapshotManifestIO) Open(name string) (iceio.File, error) {
+func (fs *contextBoundSnapshotManifestIO) Open(_ context.Context, name string) (iceio.File, error) {
 	if fs.blockedPath != "" && name != fs.blockedPath {
-		return fs.IO.Open(name)
+		return fs.IO.Open(context.Background(), name)
 	}
 	fs.startedOnce.Do(func() { close(fs.started) })
 	select {
@@ -878,7 +880,7 @@ func TestAllManifestsEarlyStopDoesNotFailConcurrentScan(t *testing.T) {
 	var list bytes.Buffer
 	sequenceNumber := int64(2)
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 2, &previous.SnapshotID, &sequenceNumber, 0, manifests))
-	require.NoError(t, fs.WriteFile(currentList, list.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), currentList, list.Bytes()))
 	builder, err := MetadataBuilderFromBase(scan.metadata, "")
 	require.NoError(t, err)
 	current := *previous
@@ -942,4 +944,25 @@ func TestAllManifestsEarlyStopDoesNotFailConcurrentScan(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("scan did not recover from early iterator stop")
 	}
+}
+
+func TestManifestProviderSharesTableManifestListCache(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	baseFS, err := tbl.fsF(t.Context())
+	require.NoError(t, err)
+	var opens atomic.Int64
+	tbl.fsF = func(context.Context) (iceio.IO, error) {
+		return &countingOpenIO{IO: baseFS, opens: &opens}, nil
+	}
+	snapshot := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+
+	// Each iteration gets a new provider, so only the table's shared cache can
+	// serve the second read without reopening the manifest list.
+	for range 2 {
+		manifests, err := tbl.ManifestProvider().Manifests(t.Context(), *snapshot)
+		require.NoError(t, err)
+		require.Len(t, slices.Collect(manifests), 3)
+	}
+	require.Equal(t, int64(1), opens.Load(), "providers from one table should share its manifest-list cache")
 }

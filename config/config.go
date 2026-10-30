@@ -49,24 +49,18 @@ type CatalogConfig struct {
 	Output      string       `yaml:"output"`
 	Credential  string       `yaml:"credential"`
 	Warehouse   string       `yaml:"warehouse"`
-	AwsProfile  string       `yaml:"aws-profile"`
+	AWSProfile  string       `yaml:"aws-profile"`
 	SQLDriver   string       `yaml:"sql-driver"`
 	SQLDialect  string       `yaml:"sql-dialect"`
 	RestOptions *RestOptions `yaml:"rest,omitempty"`
 }
 
-// LoadConfig returns configuration data when it can be read. It retains the
-// historical best-effort behavior; callers that must distinguish a missing
-// default from a broken explicit file should use LoadConfigFile.
-func LoadConfig(configPath string) []byte {
-	data, _ := LoadConfigFile(configPath)
-
-	return data
-}
-
-// LoadConfigFile loads configuration data and reports path and read failures.
-// A missing implicit home-directory configuration is not an error.
-func LoadConfigFile(configPath string) ([]byte, error) {
+// LoadConfig reads configuration data and reports path and read failures.
+// An empty configPath selects ~/.iceberg-go.yaml. A missing implicit
+// home-directory configuration is not an error; LoadConfig returns nil data.
+// Unlike [EnvConfig], it ignores GOICEBERG_HOME. Use [ParseConfig] to decode
+// the YAML and select a catalog.
+func LoadConfig(configPath string) ([]byte, error) {
 	implicit := configPath == ""
 	var path string
 	if !implicit {
@@ -132,7 +126,10 @@ func fromConfigFiles() Config {
 	}
 
 	var cfg Config
-	if err := yaml.Unmarshal(LoadConfig(dir), &cfg); err != nil {
+	// EnvConfig keeps its historical best-effort initialization behavior.
+	// Callers reading an explicit file should handle errors from LoadConfig.
+	data, _ := LoadConfig(dir)
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg
 	}
 

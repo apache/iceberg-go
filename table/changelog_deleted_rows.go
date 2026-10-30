@@ -74,7 +74,7 @@ func (as *arrowScan) prepareAddedDeleteLoaders(invariants *arrowScanInvariants) 
 	return nil
 }
 
-func (as *arrowScan) loadAddedDeletes(ctx context.Context, task FileScanTask) (positionDeletes, *dv.RoaringPositionBitmap, []*equalityDeleteSet, error) {
+func (as *arrowScan) loadAddedDeletes(ctx context.Context, task FileScanTask) (*dv.RoaringPositionBitmap, *dv.RoaringPositionBitmap, []*equalityDeleteSet, error) {
 	if as.addedDeletes == nil {
 		return nil, nil, nil, nil
 	}
@@ -88,9 +88,13 @@ func (as *arrowScan) loadAddedDeletes(ctx context.Context, task FileScanTask) (p
 			iceberg.ErrInvalidArgument, dataPath)
 	}
 
-	pos, err := as.addedPosLoader.load(ctx, *as.addedDeletes)
-	if err != nil {
-		return nil, nil, nil, err
+	var pos *dv.RoaringPositionBitmap
+	var err error
+	if as.addedPosLoader != nil {
+		pos, err = as.addedPosLoader.load(ctx, 0, dataPath)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	bitmap, err := as.addedDVLoader.load(ctx, dataPath)
 	if err != nil {
@@ -164,7 +168,7 @@ func dropChangelogFilePos(in arrow.RecordBatch) (arrow.RecordBatch, error) {
 // with that position check: a row is kept when either kind matches.
 func keepAddedDeleteRows(
 	ctx context.Context,
-	positions set[int64],
+	positions *dv.RoaringPositionBitmap,
 	hasPos bool,
 	bitmap *dv.RoaringPositionBitmap,
 	rowCount int64,
@@ -173,9 +177,9 @@ func keepAddedDeleteRows(
 	dataFilePath string,
 	stampPos bool,
 ) recProcessFn {
-	var keepBits []byte
+	var deletedByVector *dv.RoaringPositionBitmap
 	if bitmap != nil && !bitmap.IsEmpty() {
-		keepBits = bitmap.KeepMaskBytes(rowCount)
+		deletedByVector = bitmap
 		hasPos = false
 	}
 
@@ -206,14 +210,15 @@ func keepAddedDeleteRows(
 
 		keep := make([]bool, n)
 		switch {
-		case keepBits != nil:
+		case deletedByVector != nil:
 			for i := range n {
 				pos := posCol.Value(i)
-				keep[i] = pos >= 0 && pos < rowCount && !deletionVectorKeepsRow(keepBits, rowCount, pos)
+				keep[i] = !deletionVectorKeepsRow(deletedByVector, rowCount, pos)
 			}
 		case hasPos:
 			for i := range n {
-				_, keep[i] = positions[posCol.Value(i)]
+				pos := posCol.Value(i)
+				keep[i] = pos >= 0 && positions.Contains(uint64(pos))
 			}
 		}
 

@@ -24,10 +24,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -271,6 +273,117 @@ func TestRefreshTableCredentialsPreservesMetricsReporter(t *testing.T) {
 	require.NoError(t, err)
 	require.NotSame(t, tbl, refreshed)
 	assert.Same(t, reporter, refreshed.MetricsReporter())
+}
+
+// TestRefreshTableCredentialsPreservesScanPlanningDirective checks that the
+// load-time scan-planning directive survives a credential refresh, whose
+// response carries no table config to re-derive it from. The directive is
+// copied from the table, never reconstructed from its saved config.
+func TestRefreshTableCredentialsPreservesScanPlanningDirective(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    []table.Option
+		want    table.ScanPlanningDirective
+		wantErr string
+	}{
+		{name: "absent", want: table.ScanPlanningDirectiveNone},
+		{
+			name: "server",
+			opts: []table.Option{table.WithScanPlanningDirective("server", true)},
+			want: table.ScanPlanningDirectiveServer,
+		},
+		{
+			name:    "unrecognized",
+			opts:    []table.Option{table.WithScanPlanningDirective("hybrid", true)},
+			wantErr: `"hybrid"`,
+		},
+		{
+			// A saved config built from metadata properties, as the method's doc
+			// tells external callers to pass, must not leak into the directive.
+			name: "unrecognized_with_saved_metadata_property",
+			opts: []table.Option{
+				table.WithScanPlanningDirective("hybrid", true),
+				table.WithSavedConfig(iceberg.Properties{table.ScanPlanningModeKey: "server"}),
+			},
+			wantErr: `"hybrid"`,
+		},
+		{
+			name: "absent_with_saved_metadata_property",
+			opts: []table.Option{
+				table.WithSavedConfig(iceberg.Properties{table.ScanPlanningModeKey: "server"}),
+			},
+			want: table.ScanPlanningDirectiveNone,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := "restcreds-directive-" + strings.ReplaceAll(tc.name, "_", "-")
+
+			cat := newCredsTestCatalog(t, credsCatalogOpts{
+				creds: func(w http.ResponseWriter, _ *http.Request) {
+					assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+						scheme+"://warehouse/database/table",
+						map[string]string{"s3.access-key-id": "vended-key"},
+					)))
+				},
+			})
+
+			tbl, _ := newExternalTable(t, cat, scheme, tc.opts...)
+
+			refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
+			require.NoError(t, err)
+			require.NotSame(t, tbl, refreshed)
+
+			got, err := refreshed.ScanPlanningDirective()
+			if tc.wantErr != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+				assert.Contains(t, err.Error(), tc.wantErr)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestRefreshTableCredentialsAfterLoadTableKeepsScanPlanningDirective covers
+// the directive end to end: an unrecognized value from the load response's
+// config block must still be reported verbatim after a credential refresh.
+func TestRefreshTableCredentialsAfterLoadTableKeepsScanPlanningDirective(t *testing.T) {
+	const scheme = "restcreds-loaded-directive"
+
+	metadataLoc := scheme + "://warehouse/database/table/metadata/00000-a.metadata.json"
+	cat := newCredsTestCatalog(t, credsCatalogOpts{
+		loadTable: func(w http.ResponseWriter, req *http.Request) {
+			assert.Equal(t, http.MethodGet, req.Method)
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"metadata-location": metadataLoc,
+				"metadata": json.RawMessage(strings.ReplaceAll(
+					exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://")),
+				"config": map[string]string{table.ScanPlanningModeKey: "Hybrid"},
+			}))
+		},
+		creds: func(w http.ResponseWriter, _ *http.Request) {
+			assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+				scheme+"://warehouse/database/table",
+				map[string]string{iceio.S3AccessKeyID: "vended-key"},
+			)))
+		},
+	})
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("db", "tbl"))
+	require.NoError(t, err)
+	_, err = tbl.ScanPlanningDirective()
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.Contains(t, err.Error(), `"Hybrid"`)
+
+	refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
+	require.NoError(t, err)
+	require.NotSame(t, tbl, refreshed)
+
+	_, err = refreshed.ScanPlanningDirective()
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), `"Hybrid"`)
 }
 
 // TestRefreshTableCredentialsAfterLoadTable covers a table loaded through
@@ -580,9 +693,9 @@ func tableResponseFSProps(t *testing.T, scheme, metadataLoc string, tableConfig,
 // table-wide merge sites, where config is the whole table config rather than a
 // per-location copy. The table's FileIO serves only the metadata location's
 // account, so a vended adls.token drops what would apply to that account ahead
-// of it or set its lifetime: that account's SAS token and connection string,
-// any shared key, and every inherited credential expiry. Another account's SAS token and
-// connection string never apply to it and are kept.
+// of it: that account's SAS token and connection string, and any shared key.
+// Another account's SAS token and connection string never apply to it and are
+// kept.
 func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 	const (
 		scheme    = "restcreds-table-adls"
@@ -595,15 +708,12 @@ func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 		map[string]string{
 			// The factory would sign this account's requests with another
 			// account's shared key.
-			iceio.ADLSSharedKeyAccountName:              "other",
-			iceio.ADLSSharedKeyAccountKey:               "other-key",
-			iceio.ADLSSasTokenPrefix + host:             "stale-sas",
-			"adls.sas-token-expires-at-ms." + host:      "1000",
-			iceio.ADLSConnectionStringPrefix + "acct":   "stale-conn",
-			iceio.ADLSSasTokenPrefix + otherHost:        "other-sas",
-			"adls.sas-token-expires-at-ms." + otherHost: "1000",
-			iceio.ADLSConnectionStringPrefix + "other":  "other-conn",
-			"expiration-time":                           "1000",
+			iceio.ADLSSharedKeyAccountName:             "other",
+			iceio.ADLSSharedKeyAccountKey:              "other-key",
+			iceio.ADLSSasTokenPrefix + host:            "stale-sas",
+			iceio.ADLSConnectionStringPrefix + "acct":  "stale-conn",
+			iceio.ADLSSasTokenPrefix + otherHost:       "other-sas",
+			iceio.ADLSConnectionStringPrefix + "other": "other-conn",
 		},
 		map[string]string{iceio.ADLSToken: "vended-token"})
 
@@ -617,15 +727,86 @@ func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 		} {
 			assert.NotContains(t, props, k, "%s: credential %q would be selected ahead of the token", name, k)
 		}
-		for _, k := range []string{
-			"adls.sas-token-expires-at-ms." + host,
-			"adls.sas-token-expires-at-ms." + otherHost,
-			"expiration-time",
-		} {
-			assert.NotContains(t, props, k, "%s: inherited expiry %q would set the token's lifetime", name, k)
-		}
 		assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost], name)
 		assert.Equal(t, "other-conn", props[iceio.ADLSConnectionStringPrefix+"other"], name)
+	}
+}
+
+// TestTableResponseExpiryComesFromVendedCredential checks that a table's FileIO
+// renews on the expiry of the credential vended with it, not on an expiry
+// inherited from the table config or on the default TTL. The inherited one has
+// already passed, so taking it would refetch credentials on every load; the
+// default TTL would keep an expired vended credential until the TTL elapses.
+func TestTableResponseExpiryComesFromVendedCredential(t *testing.T) {
+	const scheme = "restcreds-table-expiry"
+
+	rec := &ioPropsRecorder{}
+	rec.register(t, scheme)
+
+	metadataLoc := scheme + "://warehouse/database/table/metadata/00000-a.metadata.json"
+
+	for _, ec := range []struct {
+		name         string
+		vendedExpiry string
+		wantKey      string
+		wantFetches  int32
+	}{
+		{
+			name:         "valid vend ignores stale config expiries",
+			vendedExpiry: strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10),
+			wantKey:      "vended-key",
+		},
+		{
+			// Already past, so the next FileIO use must go back to the catalog.
+			name:         "expired vend renews",
+			vendedExpiry: "1",
+			wantKey:      "renewed-key",
+			wantFetches:  1,
+		},
+	} {
+		t.Run(ec.name, func(t *testing.T) {
+			respond := func(w http.ResponseWriter, _ *http.Request) {
+				body := storageCredentialsBody(scheme+"://warehouse/database/table", map[string]string{
+					iceio.S3AccessKeyID:              "vended-key",
+					"s3.session-token-expires-at-ms": ec.vendedExpiry,
+				})
+				body["metadata-location"] = metadataLoc
+				body["metadata"] = json.RawMessage(strings.ReplaceAll(
+					exampleTableMetadataNoSnapshotV1, "s3://", scheme+"://"))
+				body["config"] = map[string]string{
+					"gcs.oauth2.token-expires-at": "1000",
+					"expiration-time":             "1000",
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(body))
+			}
+
+			var credsCalls atomic.Int32
+			cat := newCredsTestCatalog(t, credsCatalogOpts{
+				creds: func(w http.ResponseWriter, _ *http.Request) {
+					credsCalls.Add(1)
+					assert.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
+						scheme+"://warehouse/database/table",
+						map[string]string{iceio.S3AccessKeyID: "renewed-key"})))
+				},
+				loadTable: respond,
+				routes: map[string]http.HandlerFunc{
+					"/v1/namespaces/db/tables":   respond,
+					"/v1/namespaces/db/register": respond,
+				},
+			})
+
+			for _, tc := range tableResponseCalls {
+				before := credsCalls.Load()
+				tbl, err := tc.call(context.Background(), cat)
+				require.NoError(t, err, tc.name)
+				for range 2 {
+					_, err = tbl.FS(context.Background())
+					require.NoError(t, err, tc.name)
+				}
+				assert.Equal(t, ec.wantFetches, credsCalls.Load()-before, tc.name)
+				assert.Equal(t, ec.wantKey, rec.lastLoad(t)[iceio.S3AccessKeyID], tc.name)
+			}
+		})
 	}
 }
 

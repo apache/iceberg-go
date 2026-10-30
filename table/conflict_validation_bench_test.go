@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -151,10 +152,10 @@ type conflictValidationBenchmarkIO struct {
 	bytes int64
 }
 
-func (f *conflictValidationBenchmarkIO) Open(name string) (iceio.File, error) {
+func (f *conflictValidationBenchmarkIO) Open(_ context.Context, name string) (iceio.File, error) {
 	f.opens++
 
-	file, err := f.IO.Open(name)
+	file, err := f.IO.Open(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +207,7 @@ func newConflictValidationBenchmarkContext(b *testing.B, entryCount int) *confli
 			b.Fatal(err)
 		}
 		entries[i] = iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, dataFile.Build()).
-			SequenceNum(1).
+			DataSequenceNumber(1).
 			Build()
 	}
 
@@ -219,7 +220,7 @@ func newConflictValidationBenchmarkContext(b *testing.B, entryCount int) *confli
 	if err != nil {
 		b.Fatal(err)
 	}
-	if err := baseFS.WriteFile(manifestPath, manifest.Bytes()); err != nil {
+	if err := baseFS.WriteFile(context.Background(), manifestPath, manifest.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 
@@ -228,7 +229,7 @@ func newConflictValidationBenchmarkContext(b *testing.B, entryCount int) *confli
 	if err := iceberg.WriteManifestList(2, &manifestList, snapshotID, nil, &sequenceNumber, 0, []iceberg.ManifestFile{mf}); err != nil {
 		b.Fatal(err)
 	}
-	if err := baseFS.WriteFile(manifestListPath, manifestList.Bytes()); err != nil {
+	if err := baseFS.WriteFile(context.Background(), manifestListPath, manifestList.Bytes()); err != nil {
 		b.Fatal(err)
 	}
 

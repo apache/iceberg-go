@@ -65,7 +65,7 @@ func writeResidualBindingParquetFile(t testing.TB, path string, schema *iceberg.
 	require.NoError(t, err)
 	defer record.Release()
 
-	writer, err := (iceio.LocalFS{}).Create(path)
+	writer, err := (iceio.LocalFS{}).Create(context.Background(), path)
 	require.NoError(t, err)
 	defer writer.Close()
 

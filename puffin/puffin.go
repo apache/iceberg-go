@@ -28,6 +28,11 @@
 // See the specification at https://iceberg.apache.org/puffin-spec/
 package puffin
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 var magic = [4]byte{'P', 'F', 'A', '1'}
 
 const (
@@ -74,6 +79,8 @@ type Footer struct {
 	Properties map[string]string `json:"properties,omitempty"`
 }
 
+// BlobType identifies the format of a Puffin blob. Unknown non-empty names
+// are preserved so that callers can round-trip vendor-defined blob types.
 type BlobType string
 
 const (
@@ -85,3 +92,30 @@ const (
 	// Iceberg spec. Requires snapshot-id and sequence-number to be -1.
 	BlobTypeDeletionVector BlobType = "deletion-vector-v1"
 )
+
+// IsKnown reports whether the type is one of the standard blob types
+// defined by the Puffin spec. Unknown non-empty types are still valid metadata.
+func (bt BlobType) IsKnown() bool {
+	switch bt {
+	case BlobTypeDataSketchesTheta, BlobTypeDeletionVector:
+		return true
+	default:
+		return false
+	}
+}
+
+// UnmarshalJSON rejects empty and null blob types while preserving unknown
+// non-empty type names for forward compatibility.
+func (bt *BlobType) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err != nil {
+		return err
+	}
+	if name == "" {
+		return fmt.Errorf("invalid blob type: %s", name)
+	}
+
+	*bt = BlobType(name)
+
+	return nil
+}

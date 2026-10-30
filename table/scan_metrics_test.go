@@ -308,13 +308,13 @@ func TestPlanFilesEmitsReportForRealSnapshot(t *testing.T) {
 	var manifestBuf bytes.Buffer
 	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestPath, manifestBuf.Bytes()))
 
 	var listBuf bytes.Buffer
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0,
 		[]iceberg.ManifestFile{manifest}))
-	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
 	txn.meta.snapshotList = []Snapshot{{

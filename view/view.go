@@ -117,7 +117,7 @@ func NewFromLocation(
 			return nil, err
 		}
 	} else {
-		f, err := fsys.Open(metalocation)
+		f, err := fsys.Open(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}
@@ -137,33 +137,35 @@ func NewFromLocation(
 //
 // Note: This function only supports creating new views with format version 1.
 // It does not support updating existing view metadata.
+// representation holds both SQL text and its dialect.
 func CreateView(
 	ctx context.Context,
 	catalogName string,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
-	viewSQL string,
+	representation Representation,
 	defaultNS table.Identifier,
 	loc string,
 	props iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, props, props)
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
 }
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
 // filesystem and metadataProps as the properties persisted in view metadata.
+// representation holds both SQL text and its dialect.
 func CreateViewWithIOProperties(
 	ctx context.Context,
 	catalogName string,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
-	viewSQL string,
+	representation Representation,
 	defaultNS table.Identifier,
 	loc string,
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, ioProps, metadataProps)
+	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps)
 }
 
 func createView(
@@ -171,7 +173,7 @@ func createView(
 	catalogName string,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
-	viewSQL string,
+	representation Representation,
 	defaultNS table.Identifier,
 	loc string,
 	ioProps iceberg.Properties,
@@ -179,15 +181,12 @@ func createView(
 ) (*View, error) {
 	versionId := int64(1)
 
-	builder, err := NewMetadataBuilder()
-	if err != nil {
-		return nil, err
-	}
+	builder := NewMetadataBuilder()
 
 	viewVersion, err := NewVersionFromSQL(
 		versionId,
 		schema.ID,
-		viewSQL,
+		representation,
 		defaultNS,
 		WithDefaultViewCatalog(catalogName),
 	)
@@ -226,15 +225,15 @@ func createView(
 		return nil, errors.New("filesystem IO does not support writing")
 	}
 
-	if err := writeViewMetadata(wfs, metadataLocation, viewMetadataBytes); err != nil {
+	if err := writeViewMetadata(ctx, wfs, metadataLocation, viewMetadataBytes); err != nil {
 		return nil, err
 	}
 
 	return New(viewIdent, viewMD, metadataLocation), nil
 }
 
-func writeViewMetadata(wfs io.WriteFileIO, metadataLocation string, data []byte) (err error) {
-	out, err := wfs.Create(metadataLocation)
+func writeViewMetadata(ctx context.Context, wfs io.WriteFileIO, metadataLocation string, data []byte) (err error) {
+	out, err := wfs.Create(ctx, metadataLocation)
 	if err != nil {
 		return fmt.Errorf("failed to create view metadata file: %w", err)
 	}

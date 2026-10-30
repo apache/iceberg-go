@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,7 +68,7 @@ func writeSnapshotTestManifest(t *testing.T, fs iceio.WriteFileIO, path string, 
 			iceberg.EntryStatusDELETED, &snapshotID, &seq, &seq, df)))
 	}
 	require.NoError(t, wr.Close())
-	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
 
 	mf, err := wr.ToManifestFile(path, int64(buf.Len()), iceberg.WithManifestFileContent(content))
 	require.NoError(t, err)
@@ -81,7 +82,7 @@ func writeSnapshotTestManifestList(t *testing.T, fs iceio.WriteFileIO, dir strin
 	t.Helper()
 
 	listPath := dir + "/metadata/manifest-list.avro"
-	out, err := fs.Create(listPath)
+	out, err := fs.Create(context.Background(), listPath)
 	require.NoError(t, err)
 	seq := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, out, 1, nil, &seq, 0, manifests))
@@ -93,7 +94,7 @@ func writeSnapshotTestManifestList(t *testing.T, fs iceio.WriteFileIO, dir strin
 // Why: a manifest entry with status DELETED is a tombstone recording a
 // removal, not a file reachable from the snapshot. Yielding it would make
 // existence and duplicate checks (ReplaceFiles' belong-to-table check,
-// AddFiles' duplicate walk, classifyFilesForDeletions) treat a file
+// AddDataFilesByPath' duplicate walk, classifyFilesForDeletions) treat a file
 // deleted by the snapshot as still live. ADDED and EXISTING entries are
 // both live and must keep flowing through.
 // Condition: a snapshot whose data and delete manifests each carry one

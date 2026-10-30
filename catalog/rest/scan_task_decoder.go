@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -123,6 +124,52 @@ func DecodeScanTasks(
 	return decodeScanTasks(wire, metadata, schema, fallbackResidual, newPartitionDecodePlanCache())
 }
 
+// deriveDeletionVectorOwners identifies a unique data-file path for unowned
+// Puffin deletion vectors. A conflicting owner stays unresolved so the normal
+// task validation can report the conflict in its original order.
+func deriveDeletionVectorOwners(wire ScanTasks) []string {
+	hasDerivedDV := false
+	for _, del := range wire.DeleteFiles {
+		if del.ReferencedDataFile == nil &&
+			strings.EqualFold(del.FileFormat, string(iceberg.PuffinFile)) {
+			hasDerivedDV = true
+
+			break
+		}
+	}
+	if !hasDerivedDV {
+		return nil
+	}
+
+	owners := make([]string, len(wire.DeleteFiles))
+	conflicts := make([]bool, len(wire.DeleteFiles))
+	for _, task := range wire.FileScanTasks {
+		if task.DataFile == nil || task.DataFile.FilePath == "" {
+			continue
+		}
+		path := task.DataFile.FilePath
+		for _, ref := range task.DeleteFileReferences {
+			// Leave malformed references for the regular validation pass.
+			if ref < 0 || ref >= len(wire.DeleteFiles) || conflicts[ref] {
+				continue
+			}
+			del := &wire.DeleteFiles[ref]
+			if del.ReferencedDataFile != nil ||
+				!strings.EqualFold(del.FileFormat, string(iceberg.PuffinFile)) {
+				continue
+			}
+			if owners[ref] == "" {
+				owners[ref] = path
+			} else if owners[ref] != path {
+				owners[ref] = ""
+				conflicts[ref] = true
+			}
+		}
+	}
+
+	return owners
+}
+
 func decodeScanTasks(
 	wire ScanTasks,
 	metadata table.ScanPlanningMetadata,
@@ -147,11 +194,19 @@ func decodeScanTasks(
 		return nil, nil
 	}
 
+	// Resolve unique owners first so unowned deletion vectors are built once,
+	// even when multiple scan tasks reference the same vector.
+	derivedDVOwners := deriveDeletionVectorOwners(wire)
+
 	// Decode every delete before resolving references. This validates all wire
 	// entries, including an unreferenced entry that will be rejected below.
 	deletes := make([]iceberg.DataFile, len(wire.DeleteFiles))
 	for i := range wire.DeleteFiles {
-		decoded, err := decodeRESTDeleteFile(wire.DeleteFiles[i], metadata, "", plans)
+		owner := ""
+		if derivedDVOwners != nil {
+			owner = derivedDVOwners[i]
+		}
+		decoded, err := decodeRESTDeleteFile(wire.DeleteFiles[i], metadata, owner, plans)
 		if err != nil {
 			return nil, fmt.Errorf("%w: decoding scan tasks: delete-files[%d]: %w", ErrRESTError, i, err)
 		}
@@ -161,6 +216,7 @@ func decodeScanTasks(
 	out := make([]table.FileScanTask, 0, len(wire.FileScanTasks))
 	dvOwners := make(map[int]string)
 	deleteRefTaskIDs := make([]int, len(deletes))
+	var residuals taskResidualDecoder
 	for i := range wire.FileScanTasks {
 		wireTask := wire.FileScanTasks[i]
 		if wireTask.DataFile == nil {
@@ -172,7 +228,7 @@ func decodeScanTasks(
 			return nil, fmt.Errorf("%w: decoding scan tasks: file-scan-tasks[%d].data-file: %w", ErrRESTError, i, err)
 		}
 
-		residual, err := decodeTaskResidual(wireTask.ResidualFilter, schema, fallbackResidual)
+		residual, err := residuals.decode(wireTask.ResidualFilter, schema, fallbackResidual)
 		if err != nil {
 			return nil, fmt.Errorf("%w: decoding scan tasks: file-scan-tasks[%d].residual-filter: %w", ErrRESTError, i, err)
 		}
@@ -219,7 +275,10 @@ func decodeScanTasks(
 				dvOwners[ref] = dataFile.FilePath()
 				// Derive referenced-data-file from the FileScanTask association
 				// when the server omits Java's optional extension field.
-				if wireDelete.ReferencedDataFile == nil {
+				if wireDelete.ReferencedDataFile == nil &&
+					(derivedDVOwners == nil || derivedDVOwners[ref] != dataFile.FilePath()) {
+					// Conflicting or missing owners fall back to the original
+					// per-reference decoder, preserving the validation path.
 					deleteFile, err = decodeRESTDeleteFile(wireDelete, metadata, dataFile.FilePath(), plans)
 					if err != nil {
 						return nil, fmt.Errorf("%w: decoding scan tasks: delete-files[%d]: %w", ErrRESTError, ref, err)
@@ -549,7 +608,7 @@ func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlan
 		fieldPlan := partitionDecodeField{
 			fieldID:   field.FieldID,
 			fieldName: field.Name,
-			sourceID:  field.SourceID(),
+			sourceID:  field.FirstSourceID(),
 		}
 		sourceType, ok := findFieldType(fieldPlan.sourceID, metadata)
 		fieldPlan.sourceTypeFound = ok
@@ -807,6 +866,38 @@ func decodeJSONFloat(raw json.RawMessage, bitSize int) (float64, error) {
 	}
 
 	return parsed, nil
+}
+
+// taskResidualDecoder avoids reparsing an identical residual for adjacent scan
+// tasks. It is local to one envelope: no global cache or retained task JSON.
+type taskResidualDecoder struct {
+	lastRaw   json.RawMessage
+	lastValue iceberg.BooleanExpression
+}
+
+func (d *taskResidualDecoder) decode(
+	raw json.RawMessage,
+	schema *iceberg.Schema,
+	fallback iceberg.BooleanExpression,
+) (iceberg.BooleanExpression, error) {
+	// Most scans omit per-task residuals. Preserve that zero-allocation
+	// fallback and do not retain a cached expression across missing filters.
+	if len(raw) == 0 {
+		d.lastRaw, d.lastValue = nil, nil
+
+		return fallback, nil
+	}
+	if len(d.lastRaw) > 0 && bytes.Equal(raw, d.lastRaw) {
+		return d.lastValue, nil
+	}
+
+	value, err := decodeTaskResidual(raw, schema, fallback)
+	if err != nil {
+		return nil, err
+	}
+	d.lastRaw, d.lastValue = raw, value
+
+	return value, nil
 }
 
 func decodeTaskResidual(

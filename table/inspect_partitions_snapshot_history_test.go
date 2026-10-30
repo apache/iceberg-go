@@ -118,7 +118,7 @@ func inspectPartitionHistoricalSnapshotTable(
 		)},
 	)
 	require.NoError(t, err)
-	require.NoError(t, fs.WriteFile(manifestPath, manifestBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, manifestBuffer.Bytes()))
 
 	manifestListPath := "mem://snapshot-history/table/metadata/snap-2.avro"
 	var listBuffer bytes.Buffer
@@ -131,7 +131,7 @@ func inspectPartitionHistoricalSnapshotTable(
 		0,
 		[]iceberg.ManifestFile{manifest},
 	))
-	require.NoError(t, fs.WriteFile(manifestListPath, listBuffer.Bytes()))
+	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, listBuffer.Bytes()))
 
 	schemaID := schema.ID
 	require.NoError(t, builder.AddSnapshot(&Snapshot{

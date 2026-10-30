@@ -52,7 +52,6 @@ func (f *testDataFile) ColumnSizes() map[int]int64                { return nil }
 func (f *testDataFile) ValueCounts() map[int]int64                { return nil }
 func (f *testDataFile) NullValueCounts() map[int]int64            { return nil }
 func (f *testDataFile) NaNValueCounts() map[int]int64             { return nil }
-func (f *testDataFile) DistinctValueCounts() map[int]int64        { return nil }
 func (f *testDataFile) LowerBoundValues() map[int][]byte          { return f.lowerBounds }
 func (f *testDataFile) UpperBoundValues() map[int][]byte          { return f.upperBounds }
 func (f *testDataFile) KeyMetadata() []byte                       { return nil }
@@ -277,6 +276,71 @@ func TestPlanCompaction_AllFilesOptimal(t *testing.T) {
 	assert.Empty(t, plan.Groups)
 	assert.Equal(t, 5, plan.SkippedFiles)
 	assert.Equal(t, 5, plan.TotalInputFiles)
+}
+
+func TestPlanCompaction_RewriteAll(t *testing.T) {
+	cfg := compaction.DefaultConfig()
+	cfg.RewriteAll = true
+
+	// Optimal and oversized files, too few per partition for MinInputFiles:
+	// size-based selection would skip every one of them.
+	tasks := []table.FileScanTask{
+		makeTask(newPartitionedDataFile("a-optimal.parquet", 500, map[int]any{1000: int32(1)}), 0, 0),
+		makeTask(newPartitionedDataFile("a-oversized.parquet", 2000, map[int]any{1000: int32(1)}), 0, 0),
+		makeTask(newPartitionedDataFile("b-optimal.parquet", 500, map[int]any{1000: int32(2)}), 0, 0),
+	}
+
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, plan.SkippedFiles)
+	var grouped int
+	for _, g := range plan.Groups {
+		grouped += len(g.Tasks)
+	}
+	assert.Equal(t, len(tasks), grouped)
+
+	cfg.RewriteAll = false
+	plan, err = cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	assert.Empty(t, plan.Groups)
+	assert.Equal(t, len(tasks), plan.SkippedFiles)
+}
+
+func TestPlanCompaction_MaxGroupSize(t *testing.T) {
+	cfg := compaction.DefaultConfig()
+	cfg.RewriteAll = true
+
+	// Four right-sized files of one partition and one of another.
+	var tasks []table.FileScanTask
+	for i := range 4 {
+		tasks = append(tasks, makeTask(newPartitionedDataFile(fmt.Sprintf("a-%d.parquet", i), 500, map[int]any{1000: int32(1)}), 0, 0))
+	}
+	tasks = append(tasks, makeTask(newPartitionedDataFile("b-0.parquet", 500, map[int]any{1000: int32(2)}), 0, 0))
+
+	// Packed to one target file, every file lands in a group of its own.
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	assert.Len(t, plan.Groups, 5)
+
+	// A group cap above the partition size keeps each partition whole, and
+	// each group still splits into target-sized output files.
+	cfg.MaxGroupSizeBytes = 10 * 1024 * 1024 * 1024
+	plan, err = cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	require.Len(t, plan.Groups, 2)
+	sizes := []int{len(plan.Groups[0].Tasks), len(plan.Groups[1].Tasks)}
+	assert.ElementsMatch(t, []int{4, 1}, sizes)
+	assert.Equal(t, 5, plan.EstOutputFiles)
+}
+
+func TestValidate_MaxGroupSizeBelowTarget(t *testing.T) {
+	cfg := compaction.DefaultConfig()
+	cfg.MaxGroupSizeBytes = cfg.TargetFileSizeBytes - 1
+	assert.ErrorContains(t, cfg.Validate(), "max group size")
+
+	cfg.MaxGroupSizeBytes = cfg.TargetFileSizeBytes
+	assert.NoError(t, cfg.Validate())
 }
 
 func TestPlanCompaction_SmallFiles(t *testing.T) {

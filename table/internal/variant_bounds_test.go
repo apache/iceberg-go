@@ -532,3 +532,29 @@ func TestVariantBoundLiteralMalformed(t *testing.T) {
 		assert.False(t, ok, "malformed bytes yield no usable bound")
 	}
 }
+
+func TestArrowLeafToIcebergRejectsInvalidDecimal(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		precision int32
+		scale     int32
+		valid     bool
+	}{
+		{"valid", 10, 2, true},
+		{"zero precision", 0, 0, false},
+		{"too large precision", 39, 0, false},
+		{"negative scale", 10, -1, false},
+		{"scale above precision", 5, 6, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			typ, ok := arrowLeafToIceberg(&arrow.Decimal128Type{
+				Precision: tc.precision,
+				Scale:     tc.scale,
+			})
+			assert.Equal(t, tc.valid, ok)
+			if !tc.valid {
+				assert.Nil(t, typ)
+			}
+		})
+	}
+}

@@ -46,17 +46,34 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ErrCommitFailed is the sentinel error returned by catalogs when a
-// commit fails due to a concurrent modification (e.g. HTTP 409 Conflict
-// from the REST catalog). Catalog implementations should wrap this
-// error so that callers using errors.Is(err, table.ErrCommitFailed)
-// can detect retryable commit conflicts.
+// ErrCommitFailed means a concurrent change caused the failure. A new
+// transaction built from a reloaded table may succeed. Catalogs return it
+// when a commit loses to a concurrent modification (e.g. HTTP 409 Conflict
+// from the REST catalog, or a commit requirement that no longer holds), and
+// catalog implementations should wrap it so callers can detect conflicts
+// with errors.Is(err, table.ErrCommitFailed). Calling Transaction.Commit
+// again retries the conflict unless the error also matches
+// ErrTransactionUnusable.
 //
-// Currently only catalog/rest wraps this sentinel; Glue, SQL, and Hive
-// catalogs return their conflict errors raw and will not trigger
-// retries until follow-up work wires them through (tracked under
-// issue #830).
+// After a refresh, a stale requirement, a validator conflict and a deleted
+// commit branch match ErrCommitFailed. A commit branch that became a tag, a
+// replaced table, a diverged base snapshot and files to rewrite that a
+// concurrent commit removed do not, so a retry loop keyed on ErrCommitFailed
+// stops.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
+
+// ErrTransactionUnusable means this transaction can't be committed again,
+// because after a refresh the commit fails a check that every later attempt
+// would fail too. An error can match both ErrTransactionUnusable and
+// ErrCommitFailed, in which case a new transaction built from a reloaded
+// table may still succeed. The checks are a requirement the retry loop does
+// not rebase (a pinned ref, the schema, partition spec or sort order, or a
+// non-replayable commit whose branch has moved), a validator conflict with a
+// concurrent commit, a diverged base snapshot, files to rewrite that a
+// concurrent commit removed, a commit branch that became a tag or was
+// deleted, and a replaced table. Only the commit branch's head assertion is
+// rebased.
+var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
 // does not implement io.WriteFileIO. Commit retries also fail fast on this
@@ -99,20 +116,26 @@ type CatalogIO interface {
 }
 
 type Table struct {
-	identifier       Identifier
-	metadata         Metadata
-	metadataLocation string
-	cat              CatalogIO
-	fsF              FSysF
-	manifestCache    *snapshotManifestCache
-	planner          ScanPlanner
+	identifier           Identifier
+	metadata             Metadata
+	metadataLocation     string
+	cat                  CatalogIO
+	fsF                  FSysF
+	manifestCache        *snapshotManifestCache
+	manifestContentCache *manifestContentCache
+	planner              ScanPlanner
 	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
 	// catalog load response. They are separate from metadata properties because
 	// REST catalogs can return FileIO configuration in the response's config
 	// block.
 	scanPlanningIOProps iceberg.Properties
-	savedConfig         iceberg.Properties
-	reporter            metrics.Reporter
+	// scanPlanningDirective is the raw `scan-planning-mode` value from the
+	// catalog load response's config block; hasScanPlanningDirective records
+	// whether the key was present.
+	scanPlanningDirective    string
+	hasScanPlanningDirective bool
+	savedConfig              iceberg.Properties
+	reporter                 metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
 	// explicit NopReporter opt-out) from the construction-time default, so
@@ -172,20 +195,9 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
-	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	txn, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
 		return t.newBrokenTransaction(MainBranch, err)
-	}
-
-	return txn
-}
-
-// NewTransactionOnBranch creates a new transaction that commits to the named
-// branch. Use [NewTransaction] to commit to the default "main" branch.
-func (t Table) NewTransactionOnBranch(branch string) *Transaction {
-	txn, err := t.NewTransactionOnBranchWithError(branch)
-	if err != nil {
-		return t.newBrokenTransaction(branch, err)
 	}
 
 	return txn
@@ -200,20 +212,19 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 	}
 }
 
-// NewTransactionOnBranchWithError creates a new transaction and returns any metadata
-// initialization error that prevents builder construction.
-//
-// This preserves the old non-failing constructor contract while allowing
-// callers to receive the precise initialization error instead of hitting
-// panic/undefined behavior later.
-func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+// NewTransactionOnBranch creates a transaction that commits to the named
+// branch. Initialization failures and attempts to target a tag are returned
+// immediately instead of being stored in a broken transaction.
+// A missing branch is allowed; its absence is checked at commit time.
+// Use [NewTransaction] to target the default "main" branch.
+func (t Table) NewTransactionOnBranch(branch string) (*Transaction, error) {
 	for name, ref := range t.metadata.Refs() {
 		if name != branch {
 			continue
 		}
-		if ref.SnapshotRefType != BranchRef {
+		if ref.Type != BranchRef {
 			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
-				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+				iceberg.ErrInvalidArgument, branch, ref.Type)
 		}
 
 		break
@@ -248,8 +259,11 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.manifestCache = newSnapshotManifestCacheForMetadata(fresh.metadata)
+	t.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, fresh.manifestContentCache)
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
+	t.scanPlanningDirective = fresh.scanPlanningDirective
+	t.hasScanPlanningDirective = fresh.hasScanPlanningDirective
 	t.labels = fresh.labels
 	t.savedConfig = maps.Clone(fresh.savedConfig)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
@@ -310,6 +324,11 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 //
 // New data from the provided table is written to the table regardless of the filter.
 //
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
+//
 // The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -338,6 +357,11 @@ func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize in
 //
 // New data from the provided RecordReader is written to the table regardless of the filter.
 //
+// On a v3 table, every data file the overwrite removes or rewrites takes its deletion vector with it.
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying.
+// Reload the table and run the overwrite again.
+//
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
 func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) (*Table, error) {
@@ -356,10 +380,19 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 //   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
 //   - Files where no rows match the filter are kept unchanged
 //
+// A row matches only if the filter is true for it. Rows where the filter evaluates to NULL, for example
+// `age = 30` on a NULL age, do not match and are kept.
+//
 // The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
 //   - Inclusive evaluator identifies candidate files that may contain matching rows
 //   - Strict evaluator determines if all rows in a file must match the filter
 //   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
+// A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
+//
+// A commit that removes a deletion vector is not replayed: if another writer commits first,
+// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -552,11 +585,15 @@ type commitOpts struct {
 	// in snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
-	// pinnedRefs names branches with an explicit requirement from
-	// Transaction.AssertRefSnapshotID, whose assertions must not be
-	// rewritten to the fresh branch head between retries (see
+	// pinnedRefs names refs whose assertions guard the commit and must
+	// not be rewritten to the fresh head between retries (see
 	// Transaction.pinnedRefs).
 	pinnedRefs map[string]struct{}
+
+	// resumes counts earlier Commit calls of the same transaction that
+	// failed without committing. A resumed commit refreshes and replays
+	// before its first submission, as the next retry attempt would.
+	resumes int
 }
 
 type commitOption func(*commitOpts)
@@ -583,6 +620,10 @@ func withCommitNoReplay(noReplay bool) commitOption {
 
 func withCommitPinnedRefs(refs map[string]struct{}) commitOption {
 	return func(o *commitOpts) { o.pinnedRefs = refs }
+}
+
+func withCommitResume(resumes int) commitOption {
+	return func(o *commitOpts) { o.resumes = resumes }
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
@@ -627,19 +668,53 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// 0-based counter risks emitting 0 if a second success exit is ever added.
 	var attemptsUsed int64 = 1
 
-	// cleanupOrphans controls whether the defer below removes orphaned manifest-list
-	// files on exit. It defaults to true (clean on all safe exits) and is set to
-	// false only for the one unsafe case: a non-ErrCommitFailed error from
-	// CommitTable, where the catalog may have silently accepted the commit and one
-	// of the "orphaned" files may actually be the live snapshot.
+	// doCommit deletes only files it wrote that were not committed. The
+	// staged updates' own files belong to the caller, which can commit them
+	// again after a failure, so they are deleted only once the commit lands.
+	// cleanupOrphans is false when CommitTable fails in an unknown state,
+	// since the catalog may have accepted a snapshot that references them.
 	cleanupOrphans := true
+	committed := false
+	staged := stagedManifestLists(updates)
+	rebuiltLists := make(map[string]struct{}) // manifest lists this call's rebuilds wrote
 	defer func() {
-		if !cleanupOrphans || len(orphanedManifests) == 0 {
+		if !cleanupOrphans {
 			return
 		}
-		for _, path := range orphanedManifests {
-			if removeErr := wfs.Remove(path); removeErr != nil {
-				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
+		remove := slices.Collect(maps.Keys(rebuiltLists))
+		if committed {
+			remove = orphanedManifests
+		}
+		for _, u := range updates {
+			su, ok := u.(*addSnapshotUpdate)
+			if !ok || su.written == nil {
+				continue
+			}
+			if committed {
+				remove = append(remove, su.written.uncommitted(su.Snapshot.ManifestList)...)
+			} else {
+				remove = append(remove, su.written.discardRebuilt()...)
+			}
+		}
+		if committed && len(remove) > 0 {
+			referenced, err := committedFiles(wfs, updates)
+			if err != nil {
+				log.Printf("Warning: skipping cleanup of uncommitted files: %v", err)
+
+				return
+			}
+			remove = slices.DeleteFunc(remove, func(path string) bool {
+				_, ok := referenced[path]
+
+				return ok
+			})
+		}
+		// The commit may have failed because ctx was canceled; remove the
+		// orphans without that cancellation so they are not left behind.
+		cleanupCtx := context.WithoutCancel(ctx)
+		for _, path := range remove {
+			if removeErr := wfs.Remove(cleanupCtx, path); removeErr != nil {
+				log.Printf("Warning: failed to delete uncommitted file %s: %v", path, removeErr)
 			}
 		}
 	}()
@@ -653,12 +728,32 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// numRetries counts retries; total attempts = 1 initial + numRetries.
 	totalAttempts := cfg.numRetries + 1
 
+	// A rebuilt manifest list is named after its attempt, so number this
+	// call's attempts after every earlier call's. Every call reads the retry
+	// config from the same base metadata, so totalAttempts is the same for
+	// each of them.
+	attemptBase := co.resumes * int(totalAttempts)
+
+	// A non-replayable commit never rebases its branch, so a resume
+	// fails unless the branch head is still the one it was built on.
+	pinned := co.pinnedRefs
+	if co.noReplay && co.resumes > 0 {
+		pinned = maps.Clone(pinned)
+		if pinned == nil {
+			pinned = make(map[string]struct{}, 1)
+		}
+		pinned[co.branch] = struct{}{}
+	}
+
 	// commitStart brackets the commit loop itself (not FS resolution above or
 	// metadata cleanup below) so TotalDuration times only the CommitTable
 	// submission loop, matching Java's CommitReport.
 	commitStart := time.Now()
 
 	for attempt := range totalAttempts {
+		// After a refresh, a rejection that does not depend on timing fails
+		// the same way on every later attempt and every re-commit.
+		refreshed := attempt != 0 || co.resumes > 0
 		if attempt != 0 {
 			wait := backoffDuration(attempt-1, cfg.minWaitMs, cfg.maxWaitMs)
 			if timer == nil {
@@ -673,7 +768,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 				return nil, context.Cause(retryCtx)
 			case <-timer.C:
 			}
-
+		}
+		if refreshed {
 			// Refresh-and-replay: reload the catalog's current state,
 			// run the producers' validators against the fresh
 			// (base=t.metadata, current=fresh) conflict context, and
@@ -687,37 +783,60 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			if t.metadata != nil && fresh.metadata != nil {
 				if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("%w: table was replaced: %w", ErrTransactionUnusable, err)
 				}
 			}
 			current = fresh.metadata
-			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
+			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, pinned)
 
-			// A pinned assertion the fresh catalog state violates can
-			// never succeed — fail now instead of burning the remaining
-			// retries on it.
-			if err := validatePinnedRefRequirements(reqs, co.pinnedRefs, current); err != nil {
-				return nil, fmt.Errorf("%w: explicit ref requirement failed: %w", ErrCommitFailed, err)
+			if err := validateNonRebasedRequirements(reqs, co.branch, pinned, current); err != nil {
+				if co.noReplay {
+					return nil, fmt.Errorf("%w: requirement no longer holds after refresh (%s): %w",
+						ErrTransactionUnusable, noReplayHint, err)
+				}
+
+				return nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w", ErrTransactionUnusable, err)
 			}
-			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
-				return nil, err
+		}
+
+		if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+			if refreshed {
+				return nil, fmt.Errorf("%w: commit branch is no longer a branch: %w", ErrTransactionUnusable, err)
 			}
 
+			return nil, err
+		}
+
+		if refreshed {
 			// Rebuild snapshot manifest lists to inherit all files committed
 			// by concurrent writers since the snapshot was originally built.
 			// Without this, the new snapshot's manifest list would only
 			// contain its own files and callers scanning the current snapshot
 			// would miss every concurrent writer's data.
-			rebuiltUpdates, orphaned, rebuildErr := rebuildSnapshotUpdates(retryCtx, updates, current, co.branch, wfs, int(attempt))
+			// A resume always rebuilds on its first attempt, so the submitted
+			// snapshot and the producers' state come from the same pass. A
+			// producer that kept state from an earlier call could otherwise
+			// submit an older snapshot whose manifests it now counts as
+			// superseded and deletes on success.
+			forceRebuild := co.resumes > 0 && attempt == 0 && !co.noReplay
+			rebuiltUpdates, orphaned, rebuildErr := rebuildSnapshotUpdates(retryCtx, updates, current, co.branch, wfs, attemptBase+int(attempt), forceRebuild)
+			// A failed rebuild still owns the lists it wrote before failing.
+			for list := range stagedManifestLists(rebuiltUpdates) {
+				if _, ok := staged[list]; !ok {
+					rebuiltLists[list] = struct{}{}
+				}
+			}
 			if rebuildErr != nil {
+				// Replaced files missing from the branch head stay missing, so
+				// every later attempt fails the same way.
+				if errors.Is(rebuildErr, ErrCommitDiverged) {
+					return nil, fmt.Errorf("%w: files to rewrite were removed: %w", ErrTransactionUnusable, rebuildErr)
+				}
+
 				return nil, fmt.Errorf("rebuild manifest list for retry attempt %d: %w", attempt, rebuildErr)
 			}
 			orphanedManifests = append(orphanedManifests, orphaned...)
 			updates = rebuiltUpdates
-		}
-
-		if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
-			return nil, err
 		}
 
 		// Pre-flight client-side conflict validation. Producers can
@@ -725,9 +844,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// peers (partition-filter overlap, referenced-file removal)
 		// even when the catalog-side AssertRefSnapshotID would accept
 		// them. On attempt 0 base == current → no concurrent
-		// snapshots → validators short-circuit. Real divergence
-		// detection fires on attempts > 0 once `current` is the
-		// post-conflict state.
+		// snapshots → validators that inspect them short-circuit, but
+		// validateDataFilesExist still reads the branch head. Real
+		// divergence detection fires on attempts > 0 once `current` is the post-conflict state.
 		//
 		// Skipped when the branch does not exist on `current` — that
 		// always means "the committer is creating this branch" (e.g.
@@ -743,10 +862,21 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			if ccErr != nil {
 				// ErrCommitDiverged — terminal, do not retry. The
 				// sentinel deliberately does not wrap ErrCommitFailed.
+				if errors.Is(ccErr, ErrCommitDiverged) {
+					return nil, fmt.Errorf("%w: base diverged: %w", ErrTransactionUnusable, ccErr)
+				}
+
 				return nil, ccErr
 			}
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
+					// Conflicts with a concurrent commit end the transaction.
+					// Other validator errors, such as read failures, stay
+					// resumable.
+					if errors.Is(vErr, ErrCommitFailed) {
+						return nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
+					}
+
 					return nil, vErr
 				}
 			}
@@ -758,6 +888,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
+			committed = true
 			attemptsUsed = int64(attempt) + 1
 			// Capture elapsed time at the commit boundary, before orphan
 			// cleanup and deleteOldMetadata below (both can do I/O).
@@ -774,7 +905,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		if !errors.Is(err, ErrCommitFailed) {
 			cleanupOrphans = false
 
-			return nil, err
+			return nil, &commitStateUnknownError{err: err}
 		}
 
 		// Non-replayable commits fail on the first CAS conflict instead
@@ -782,23 +913,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// distinguishes this abort from an exhausted retry budget while
 		// preserving errors.Is(err, ErrCommitFailed).
 		if co.noReplay {
-			return nil, fmt.Errorf("%w (commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals)", err)
+			return nil, fmt.Errorf("%w (%s)", err, noReplayHint)
 		}
-	}
-
-	// Inner data manifests written by superseded retry attempts (a rewrite
-	// re-merges everything on each retry) are orphaned objects. On a safe
-	// exhausted-ErrCommitFailed failure (err != nil here) nothing committed, so
-	// the accumulator also folds in the final attempt's manifests. On success
-	// the committed snapshot references those, so they are excluded. The defer
-	// skips cleanup only on the unsafe non-ErrCommitFailed path, which returned
-	// above with cleanupOrphans = false.
-	for _, u := range updates {
-		su, ok := u.(*addSnapshotUpdate)
-		if !ok || su.supersededSource == nil {
-			continue
-		}
-		orphanedManifests = append(orphanedManifests, su.supersededSource.supersededManifests(err == nil)...)
 	}
 
 	if err != nil {
@@ -830,7 +946,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
-	return New(
+	next := New(
 		t.identifier,
 		newMeta,
 		newLoc,
@@ -838,9 +954,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		t.cat,
 		withReporterState(t.reporter, t.reporterSet),
 		WithScanPlanningIOProperties(t.scanPlanningIOProps),
+		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
-	), nil
+	)
+	next.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, next.manifestContentCache)
+
+	return next, nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -856,13 +976,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 //
 // Java's SnapshotProducer rewrites the same way between retries. If
 // the branch is empty or the new head cannot be resolved (branch
-// deleted underneath us), reqs is returned unchanged — newConflict-
-// Context will surface the divergence on the next pre-flight pass.
+// deleted underneath us), reqs is returned unchanged, and the commit
+// branch check that follows rejects the commit.
 //
-// Assertions on branches in pinned were registered explicitly by the
-// committer (Transaction.AssertRefSnapshotID) for compare-and-swap
-// semantics and are never rewritten: a branch that has changed must
-// fail the commit, not be replayed against the new head.
+// Assertions on refs in pinned guard the commit (an explicit
+// Transaction.AssertRefSnapshotID, a rollback, or snapshot expiry) and
+// are never rewritten: a ref that has changed must fail the commit, not
+// be replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
@@ -892,29 +1012,67 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	return out
 }
 
-// validatePinnedRefRequirements validates every assert-ref-snapshot-id
-// requirement on a pinned branch against the freshly refreshed catalog
-// metadata. A failure means the branch has changed from the required
-// snapshot: the assertion is never rewritten, so it can never hold and
-// the commit must fail instead of retrying.
-func validatePinnedRefRequirements(reqs []Requirement, pinned map[string]struct{}, fresh Metadata) error {
-	if len(pinned) == 0 {
-		return nil
-	}
+// validateNonRebasedRequirements checks the requirements a retry does not
+// rebase. Only unpinned commit-branch assertions are rebased, so any other
+// requirement that fails against refreshed metadata cannot succeed on retry.
+func validateNonRebasedRequirements(reqs []Requirement, branch string, pinned map[string]struct{}, fresh Metadata) error {
 	for _, r := range reqs {
-		a, ok := r.(*assertRefSnapshotID)
-		if !ok {
-			continue
+		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
+			if _, isPinned := pinned[a.Ref]; !isPinned {
+				continue
+			}
 		}
-		if _, isPinned := pinned[a.Ref]; !isPinned {
-			continue
-		}
-		if err := a.Validate(fresh); err != nil {
+		if err := r.Validate(fresh); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+const noReplayHint = "commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals"
+
+// commitStateUnknownError marks a CommitTable failure after which the catalog
+// may have accepted the commit. Every other doCommit failure committed
+// nothing.
+type commitStateUnknownError struct{ err error }
+
+func (e *commitStateUnknownError) Error() string { return e.err.Error() }
+
+func (e *commitStateUnknownError) Unwrap() error { return e.err }
+
+// stagedManifestLists returns the manifest list of every snapshot updates add.
+func stagedManifestLists(updates []Update) map[string]struct{} {
+	lists := make(map[string]struct{})
+	for _, u := range updates {
+		if su, ok := u.(*addSnapshotUpdate); ok && su.Snapshot != nil {
+			lists[su.Snapshot.ManifestList] = struct{}{}
+		}
+	}
+
+	return lists
+}
+
+// committedFiles returns the manifest lists and manifests of every snapshot
+// updates add.
+func committedFiles(fs icebergio.IO, updates []Update) (map[string]struct{}, error) {
+	files := make(map[string]struct{})
+	for _, u := range updates {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok || su.Snapshot == nil {
+			continue
+		}
+		files[su.Snapshot.ManifestList] = struct{}{}
+		manifests, err := su.Snapshot.Manifests(fs)
+		if err != nil {
+			return nil, fmt.Errorf("read manifests of committed snapshot %d: %w", su.Snapshot.SnapshotID, err)
+		}
+		for _, m := range manifests {
+			files[m.FilePath()] = struct{}{}
+		}
+	}
+
+	return files, nil
 }
 
 func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
@@ -948,18 +1106,18 @@ func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 // stagedSnapshotStillValid reports whether a snapshot built on an earlier
 // attempt would still be accepted by AddSnapshot against fresh. Both values it
 // checks are table-wide, so a peer committing on ANOTHER branch invalidates them
-// without moving this branch's head — the case the caller's parent check misses,
-// and one AddSnapshot rejects terminally rather than retryably.
+// without moving this branch's head, which the caller's parent check misses.
+// Resubmitting such a snapshot unchanged would fail every retry.
 func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 	if snap == nil || fresh == nil {
 		return true
 	}
 
-	if fresh.Version() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
+	if fresh.FormatVersion() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
 		return false
 	}
 
-	if fresh.Version() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
+	if fresh.FormatVersion() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
 		return false
 	}
 
@@ -975,13 +1133,14 @@ func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 // It also returns the manifest-list file paths that were superseded by
 // the rebuild (i.e., the paths from the input updates that were replaced).
 // These become orphaned objects in object storage and should be removed
-// by the caller after a successful commit.
+// by the caller after a successful commit. On error the updates rebuilt so
+// far are still returned, so the caller can delete the lists they wrote.
 //
 // This is the manifest-layer "refresh-and-replay" step: the data files
 // (already written to object storage) are reused as-is; only the manifest
 // list is rewritten to include the fresh parent's manifests so that the
 // rebuilt snapshot contains every committed file.
-func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int) (rebuilt []Update, orphanedPaths []string, err error) {
+func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int, force bool) (rebuilt []Update, orphanedPaths []string, err error) {
 	// Must mirror createSnapshotProducer's attempt-0 fallback, or a retried new
 	// branch rebuilds with a nil parent and silently drops main's data.
 	var freshHead *Snapshot
@@ -1001,7 +1160,8 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 	// dropping the earlier snapshots' data. chainRebuilt forces every snapshot
 	// after the first rebuild to rebuild too: its recorded parent is an earlier
 	// staged snapshot that has itself just been reparented onto the fresh head.
-	chainRebuilt := false
+	// force rebuilds every snapshot from the start.
+	chainRebuilt := force
 	for i, u := range result {
 		su, ok := u.(*addSnapshotUpdate)
 		if !ok || su.rebuildManifestList == nil {
@@ -1026,7 +1186,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 
 		newSnap, rebuildErr := su.rebuildManifestList(ctx, freshMeta, freshHead, fs, attempt)
 		if rebuildErr != nil {
-			return nil, nil, rebuildErr
+			return result, orphanedPaths, rebuildErr
 		}
 
 		result[i] = &addSnapshotUpdate{
@@ -1034,7 +1194,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			Snapshot:            newSnap,
 			ownManifests:        su.ownManifests,
 			rebuildManifestList: su.rebuildManifestList,
-			supersededSource:    su.supersededSource,
+			written:             su.written,
 		}
 
 		// The old manifest list is now an orphaned object in object storage.
@@ -1160,9 +1320,11 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	return time.Duration(wait) * time.Millisecond
 }
 
-// SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
-func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entry, ok := snapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+// SnapshotAsOf returns the snapshot that was current at or before timestampMs,
+// measured in milliseconds since the Unix epoch. It returns nil when no
+// snapshot was current at or before that time.
+func (t Table) SnapshotAsOf(timestampMs int64) *Snapshot {
+	entry, ok := SnapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, true)
 	if ok {
 		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
@@ -1196,7 +1358,8 @@ func deleteOldMetadata(fs icebergio.IO, baseMeta, newMeta Metadata) {
 		toRemove := internal.Difference(removedPrevious, currentMetadata)
 
 		for _, file := range toRemove {
-			if err := fs.Remove(file); err != nil {
+			// deleteOldMetadata is best-effort cleanup with no caller context.
+			if err := fs.Remove(context.Background(), file); err != nil {
 				// Log the error instead of raising it when deleting old metadata files, as an external entity like a compactor may have already deleted them
 				log.Printf("Warning: Failed to delete old metadata file: %s error: %v", file, err)
 			}
@@ -1292,14 +1455,6 @@ func WithMaxConcurrency(n int) ScanOption {
 	}
 }
 
-// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
-// backward compatibility with the pre-existing typo'd name.
-//
-// Deprecated: use [WithMaxConcurrency].
-func WitMaxConcurrency(n int) ScanOption {
-	return WithMaxConcurrency(n)
-}
-
 func WithOptions(opts iceberg.Properties) ScanOption {
 	if opts == nil {
 		return noopOption
@@ -1353,22 +1508,25 @@ func WithArrowBatchSize(n int) ScanOption {
 }
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
+	directive, directiveErr := t.ScanPlanningDirective()
 	s := &Scan{
-		identifier:          slices.Clone(t.identifier),
-		metadata:            t.metadata,
-		metadataLocation:    t.metadataLocation,
-		ioF:                 t.fsF,
-		manifestCache:       t.manifestCache,
-		planner:             t.planner,
-		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
-		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
-		planningMode:   ScanPlanningLocal,
-		rowFilter:      iceberg.AlwaysTrue{},
-		selectedFields: []string{"*"},
-		caseSensitive:  true,
-		limit:          ScanNoLimit,
-		concurrency:    runtime.GOMAXPROCS(0),
-		reporter:       t.MetricsReporter(),
+		identifier:           slices.Clone(t.identifier),
+		metadata:             t.metadata,
+		metadataLocation:     t.metadataLocation,
+		ioF:                  t.fsF,
+		manifestCache:        t.manifestCache,
+		manifestContentCache: t.manifestContentCache,
+		planner:              t.planner,
+		scanPlanningIOProps:  maps.Clone(t.scanPlanningIOProps),
+		directive:            directive,
+		directiveErr:         directiveErr,
+		planningMode:         ScanPlanningLocal,
+		rowFilter:            iceberg.AlwaysTrue{},
+		selectedFields:       []string{"*"},
+		caseSensitive:        true,
+		limit:                ScanNoLimit,
+		concurrency:          runtime.GOMAXPROCS(0),
+		reporter:             t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
@@ -1401,10 +1559,9 @@ func WithMetricsReporter(r metrics.Reporter) Option {
 	}
 }
 
-// WithScanPlanningIOProperties supplies the table-scoped FileIO properties
-// that a remote scan planner needs when it builds a plan-scoped FileIO. This
-// is intended for catalog implementations whose table-load response carries
-// FileIO configuration separately from table metadata properties.
+// WithScanPlanningIOProperties supplies FileIO/catalog properties for
+// manifest content caching and remote scan planning. These can include
+// settings returned separately from table metadata by a REST catalog.
 func WithScanPlanningIOProperties(props iceberg.Properties) Option {
 	if props == nil {
 		return noopTableOption
@@ -1482,6 +1639,14 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 	for _, opt := range opts {
 		opt(t)
 	}
+	// FileIO/catalog settings are the default. Per-table saved settings
+	// (including REST LoadTable overrides) take precedence when supplied.
+	cacheConfig := t.savedConfig
+	if len(t.scanPlanningIOProps) > 0 {
+		cacheConfig = maps.Clone(t.scanPlanningIOProps)
+		maps.Copy(cacheConfig, t.savedConfig)
+	}
+	t.manifestContentCache = newManifestContentCacheForConfig(cacheConfig)
 
 	return t
 }
@@ -1523,7 +1688,7 @@ func NewFromLocation(
 			return nil, err
 		}
 	} else {
-		f, err := fsys.Open(metalocation)
+		f, err := fsys.Open(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}

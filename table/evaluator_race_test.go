@@ -59,7 +59,7 @@ func TestManifestEvalVisitorEvalRace(t *testing.T) {
 
 	manifests := make([]iceberg.ManifestFile, goroutines)
 	for i := range manifests {
-		manifests[i] = iceberg.NewManifestFile(1, "", 0, 0, int64(i)).Partitions(
+		manifests[i] = iceberg.NewManifestBuilder(1, "", 0, 0, int64(i)).Partitions(
 			[]iceberg.FieldSummary{
 				{
 					ContainsNull: false,

@@ -169,10 +169,41 @@ func TestTransactionAssertRefSnapshotID(t *testing.T) {
 		changed := graftSnapshotOnto(t, withFeature, "feature", 200)
 		tbl, cat := newAssertRefTestTable(t, withFeature, changed)
 
-		err = commitPropsWithAssertedRef(t, tbl.NewTransactionOnBranch("feature"), "")
+		branchTxn, err := tbl.NewTransactionOnBranch("feature")
+		require.NoError(t, err)
+		err = commitPropsWithAssertedRef(t, branchTxn, "")
 		assert.ErrorIs(t, err, ErrCommitFailed)
 		assert.NotContains(t, cat.metadata.Properties(), "offsets")
 	})
+}
+
+func TestNoOpExpireSnapshotsDoesNotBlockRebase(t *testing.T) {
+	head := int64(100)
+	base := newConflictTestMetadataWithProps(t, &head, assertRefRetryProps)
+	tbl, cat := newAssertRefTestTable(t, base, graftSnapshotOnto(t, base, MainBranch, 200))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
+	require.NoError(t, tx.ExpireSnapshots())
+	_, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), cat.attempts.Load())
+	assert.Equal(t, "42", cat.metadata.Properties()["offsets"])
+}
+
+func TestNoOpExpireSnapshotsRejectsFinishedTransaction(t *testing.T) {
+	head := int64(100)
+	base := newConflictTestMetadataWithProps(t, &head, assertRefRetryProps)
+	tbl, _ := newAssertRefTestTable(t, base, base)
+
+	committed := tbl.NewTransaction()
+	_, err := committed.Commit(t.Context())
+	require.NoError(t, err)
+	assert.ErrorContains(t, committed.ExpireSnapshots(), "already been committed")
+
+	unusable := tbl.NewTransaction()
+	unusable.unusable = true
+	assert.ErrorIs(t, unusable.ExpireSnapshots(), ErrTransactionUnusable)
 }
 
 // Why: ref assertions are deduplicated by (type, ref), so assertions

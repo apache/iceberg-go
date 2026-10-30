@@ -136,11 +136,6 @@ type rewriteManifests struct {
 	rewritten []iceberg.ManifestFile
 	added     []iceberg.ManifestFile
 
-	// superseded accumulates merged manifest files written by a rebuild on a
-	// prior OCC attempt that a later attempt replaced. doCommit removes them
-	// after a successful commit so retries don't leak orphaned manifests.
-	superseded []string
-
 	// result is the value returned to the caller. record() rewrites its
 	// fields on every pass, including OCC retries, so the pointer the caller
 	// holds reflects the manifests actually committed, not attempt 0's.
@@ -150,25 +145,10 @@ type rewriteManifests struct {
 func newRewriteManifestsProducer(txn *Transaction, fs iceio.WriteFileIO, props iceberg.Properties, cfg rewriteManifestsCfg) *snapshotProducer {
 	prod := createSnapshotProducer(OpReplace, txn, fs, nil, props)
 	prod.producerImpl = &rewriteManifests{base: prod, cfg: cfg, result: &RewriteManifestsResult{}}
+	// A resumed commit can reuse the manifests the last rebuild merged.
+	prod.written.keepRebuilt = true
 
 	return prod
-}
-
-// supersededManifests returns the merged manifests orphaned across OCC retries,
-// safe to delete once the commit resolves. When the commit never landed
-// (committed is false) the final attempt's manifests are orphaned too — a
-// snapshot that never committed references nothing — so they are appended.
-func (r *rewriteManifests) supersededManifests(committed bool) []string {
-	if committed {
-		return r.superseded
-	}
-
-	paths := slices.Clone(r.superseded)
-	for _, m := range r.added {
-		paths = append(paths, m.FilePath())
-	}
-
-	return paths
 }
 
 func (r *rewriteManifests) parentDependentManifests(_ context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
@@ -242,7 +222,7 @@ func (r *rewriteManifests) reuseManifests(parent *Snapshot) ([]iceberg.ManifestF
 	return result, inserted, nil
 }
 
-func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+func (r *rewriteManifests) processManifests(ctx context.Context, manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	var toRewrite, kept []iceberg.ManifestFile
 	for _, m := range manifests {
 		if r.eligible(m) {
@@ -253,6 +233,7 @@ func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([
 	}
 
 	mgr := manifestMergeManager{
+		ctx:             ctx,
 		targetSizeBytes: r.cfg.targetSizeBytes,
 		minCountToMerge: 1,    // force a merge regardless of count
 		mergeEnabled:    true, // explicit op ignores commit.manifest-merge.enabled
@@ -270,7 +251,7 @@ func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([
 	owned := false
 	defer func() {
 		if !owned {
-			r.deleteWritten(toRewrite, merged)
+			r.deleteWritten(context.WithoutCancel(ctx), toRewrite, merged)
 		}
 	}()
 
@@ -305,7 +286,7 @@ func (r *rewriteManifests) eligible(m iceberg.ManifestFile) bool {
 // deleteWritten removes the manifests mergeManifests newly wrote for this pass.
 // Single-manifest bins pass through with their input path and are left alone;
 // only the merged files (in the output but not the input) are deleted.
-func (r *rewriteManifests) deleteWritten(input, merged []iceberg.ManifestFile) {
+func (r *rewriteManifests) deleteWritten(ctx context.Context, input, merged []iceberg.ManifestFile) {
 	inPaths := make(map[string]struct{}, len(input))
 	for _, m := range input {
 		inPaths[m.FilePath()] = struct{}{}
@@ -314,22 +295,13 @@ func (r *rewriteManifests) deleteWritten(input, merged []iceberg.ManifestFile) {
 		if _, ok := inPaths[m.FilePath()]; ok {
 			continue
 		}
-		if err := r.base.io.Remove(m.FilePath()); err != nil {
+		if err := r.base.io.Remove(ctx, m.FilePath()); err != nil {
 			log.Printf("Warning: failed to delete orphaned merged manifest %s: %v", m.FilePath(), err)
 		}
 	}
 }
 
 func (r *rewriteManifests) record(toRewrite, merged, kept []iceberg.ManifestFile) error {
-	// A prior pass (a superseded OCC attempt) wrote its own merged manifests
-	// that the catalog never referenced. Carry their paths into the
-	// producer's superseded set so commit() can delete them on success;
-	// otherwise every retry leaks a full set of merged .avro files.
-	for _, m := range r.added {
-		r.superseded = append(r.superseded, m.FilePath())
-	}
-	r.added, r.rewritten = nil, nil
-
 	inPaths := make(map[string]struct{}, len(toRewrite))
 	for _, m := range toRewrite {
 		inPaths[m.FilePath()] = struct{}{}
@@ -342,14 +314,15 @@ func (r *rewriteManifests) record(toRewrite, merged, kept []iceberg.ManifestFile
 	// Bins of a single manifest pass through unchanged; only the manifests
 	// that actually appear on one side and not the other are added/replaced.
 	// This drives the returned RewriteManifestsResult.
+	var added, rewritten []iceberg.ManifestFile
 	for _, m := range merged {
 		if _, ok := inPaths[m.FilePath()]; !ok {
-			r.added = append(r.added, m)
+			added = append(added, m)
 		}
 	}
 	for _, m := range toRewrite {
 		if _, ok := outPaths[m.FilePath()]; !ok {
-			r.rewritten = append(r.rewritten, m)
+			rewritten = append(rewritten, m)
 		}
 	}
 
@@ -359,17 +332,21 @@ func (r *rewriteManifests) record(toRewrite, merged, kept []iceberg.ManifestFile
 	// rewritten/added diff is equivalent to comparing the full input/output and
 	// avoids re-walking the pass-throughs. The processed count doubles as the
 	// entries-processed summary value.
-	processed, err := manifestActiveFiles(r.base.io, r.rewritten)
+	processed, err := manifestActiveFiles(r.base.io, rewritten)
 	if err != nil {
 		return err
 	}
-	written, err := manifestActiveFiles(r.base.io, r.added)
+	written, err := manifestActiveFiles(r.base.io, added)
 	if err != nil {
 		return err
 	}
 	if processed != written {
 		return fmt.Errorf("rewrite manifests changed active file count: %d before, %d after", processed, written)
 	}
+
+	// Publish only after the guard passes. On failure the caller deletes this
+	// pass's merged files, so the producer must keep the previous pass's state.
+	r.added, r.rewritten = added, rewritten
 
 	// Publish into the shared result the caller holds so a retry's counts win.
 	r.result.RewrittenManifests = r.rewritten
@@ -497,7 +474,7 @@ func (t *Transaction) RewriteManifests(ctx context.Context, opts ...RewriteManif
 		return impl.result, nil
 	}
 
-	updates, reqs, err := prod.commitManifests(newManifests, addedContent)
+	updates, reqs, err := prod.commitManifests(ctx, newManifests, addedContent)
 	if err != nil {
 		return nil, err
 	}

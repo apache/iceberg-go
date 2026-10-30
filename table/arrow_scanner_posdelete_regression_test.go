@@ -88,7 +88,7 @@ func TestReadDeletesRejectsMissingFilePath(t *testing.T) {
 	defer tbl.Release()
 
 	memFS := iceio.NewMemFS()
-	fw, err := memFS.Create(deletePath)
+	fw, err := memFS.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
 		parquet.NewWriterProperties(parquet.WithStats(true)),
@@ -493,7 +493,7 @@ func TestReadDeletesProjectsColumnsAndAccumulatesBatches(t *testing.T) {
 	defer tbl.Release()
 
 	memFS := iceio.NewMemFS()
-	fw, err := memFS.Create(deletePath)
+	fw, err := memFS.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
 		parquet.NewWriterProperties(parquet.WithStats(true)),
@@ -1472,7 +1472,7 @@ func TestReadDeletesRejectsNullPos(t *testing.T) {
 	defer tbl.Release()
 
 	memFS := iceio.NewMemFS()
-	fw, err := memFS.Create(deletePath)
+	fw, err := memFS.Create(context.Background(), deletePath)
 	require.NoError(t, err)
 	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
 		parquet.NewWriterProperties(parquet.WithStats(true)),

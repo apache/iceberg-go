@@ -28,7 +28,7 @@ import "github.com/apache/iceberg-go/internal"
 // not introduce mutable values through this borrowed view.
 //
 // This view intentionally contains only the maps consumed by metric
-// evaluators. ColumnSizes and DistinctValueCounts are excluded because the
+// evaluators. ColumnSizes and distinct_counts are excluded because the
 // evaluator does not read them, and cloning those maps would add work to the
 // hot path without changing its result. Partition has a separate borrowed
 // accessor because partition data is read during scan planning.
@@ -42,6 +42,17 @@ func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	d.initColumnStatsData()
 
 	return d.valCntMap, d.nullCntMap, d.nanCntMap, d.lowerBoundMap, d.upperBoundMap
+}
+
+// DataFileSplitOffsetsRef returns the data file's split offsets without
+// initializing unrelated column-statistics maps. The returned slice aliases
+// immutable DataFile state and must be treated as read-only.
+func (d *dataFile) DataFileSplitOffsetsRef(_ internal.DataFileRef) []int64 {
+	if d.Splits == nil {
+		return nil
+	}
+
+	return *d.Splits
 }
 
 func (d *dataFile) DataFileCollectionsRef(_ internal.DataFileRef) (

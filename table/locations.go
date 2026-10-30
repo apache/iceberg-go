@@ -19,8 +19,8 @@ package table
 
 import (
 	"fmt"
-	"net/url"
 	"path"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -44,14 +44,43 @@ type LocationProvider interface {
 }
 
 type simpleLocationProvider struct {
-	tableLoc     *url.URL
 	tableProps   iceberg.Properties
-	dataPath     *url.URL
-	metadataPath *url.URL
+	dataPath     string
+	metadataPath string
+}
+
+// joinLocationPath appends components using forward slashes.
+// It trims trailing slashes from the base but does not otherwise clean,
+// encode, or decode the local path or URI.
+func joinLocationPath(location string, elem ...string) string {
+	base := strings.TrimRight(location, "/")
+	// The common zero- and one-component cases already need just one
+	// allocation. Keep their direct concatenation path.
+	if len(elem) < 2 {
+		return base + "/" + strings.Join(elem, "/")
+	}
+
+	size := len(base) + len(elem)
+	for _, component := range elem {
+		size += len(component)
+	}
+
+	var b strings.Builder
+	b.Grow(size)
+	b.WriteString(base)
+	b.WriteByte('/')
+	for i, component := range elem {
+		if i > 0 {
+			b.WriteByte('/')
+		}
+		b.WriteString(component)
+	}
+
+	return b.String()
 }
 
 func (slp *simpleLocationProvider) NewDataLocation(dataFileName string) string {
-	return slp.dataPath.JoinPath(dataFileName).String()
+	return joinLocationPath(slp.dataPath, dataFileName)
 }
 
 func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) (string, error) {
@@ -84,35 +113,15 @@ func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) 
 }
 
 func (slp *simpleLocationProvider) NewMetadataLocation(metadataFileName string) string {
-	return slp.metadataPath.JoinPath(metadataFileName).String()
+	return joinLocationPath(slp.metadataPath, metadataFileName)
 }
 
-func newSimpleLocationProvider(tableLoc *url.URL, tableProps iceberg.Properties) (*simpleLocationProvider, error) {
-	out := &simpleLocationProvider{
-		tableLoc:   tableLoc,
-		tableProps: tableProps,
+func newSimpleLocationProvider(tableLoc string, tableProps iceberg.Properties) *simpleLocationProvider {
+	return &simpleLocationProvider{
+		tableProps:   tableProps,
+		dataPath:     tableProps.Get(WriteDataPathKey, joinLocationPath(tableLoc, "data")),
+		metadataPath: tableProps.Get(WriteMetadataPathKey, joinLocationPath(tableLoc, "metadata")),
 	}
-
-	var err error
-	if propPath, ok := tableProps[WriteDataPathKey]; ok {
-		out.dataPath, err = url.Parse(propPath)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		out.dataPath = out.tableLoc.JoinPath("data")
-	}
-
-	if propPath, ok := tableProps[WriteMetadataPathKey]; ok {
-		out.metadataPath, err = url.Parse(propPath)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		out.metadataPath = out.tableLoc.JoinPath("metadata")
-	}
-
-	return out, nil
 }
 
 type objectStoreLocationProvider struct {
@@ -149,34 +158,24 @@ func (p *objectStoreLocationProvider) NewDataLocation(dataFileName string) strin
 
 	hashedPath := computeHash(dataFileName)
 	if p.includePartitionPaths {
-		return p.simpleLocationProvider.dataPath.JoinPath(hashedPath, dataFileName).String()
+		return joinLocationPath(p.dataPath, hashedPath, dataFileName)
 	} else {
-		return p.simpleLocationProvider.dataPath.JoinPath(hashedPath + "-" + dataFileName).String()
+		return joinLocationPath(p.dataPath, hashedPath+"-"+dataFileName)
 	}
 }
 
-func newObjectStoreLocationProvider(tableLoc *url.URL, tableProps iceberg.Properties) (*objectStoreLocationProvider, error) {
-	slp, err := newSimpleLocationProvider(tableLoc, tableProps)
-	if err != nil {
-		return nil, err
-	}
-
+func newObjectStoreLocationProvider(tableLoc string, tableProps iceberg.Properties) *objectStoreLocationProvider {
 	return &objectStoreLocationProvider{
-		simpleLocationProvider: slp,
+		simpleLocationProvider: newSimpleLocationProvider(tableLoc, tableProps),
 		includePartitionPaths: tableProps.GetBool(WriteObjectStorePartitionedPathsKey,
 			WriteObjectStorePartitionedPathsDefault),
-	}, nil
+	}
 }
 
 func LoadLocationProvider(tableLocation string, tableProps iceberg.Properties) (LocationProvider, error) {
-	u, err := url.Parse(tableLocation)
-	if err != nil {
-		return nil, err
-	}
-
 	if tableProps.GetBool(ObjectStoreEnabledKey, ObjectStoreEnabledDefault) {
-		return newObjectStoreLocationProvider(u, tableProps)
+		return newObjectStoreLocationProvider(tableLocation, tableProps), nil
 	}
 
-	return newSimpleLocationProvider(u, tableProps)
+	return newSimpleLocationProvider(tableLocation, tableProps), nil
 }

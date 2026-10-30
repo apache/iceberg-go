@@ -398,7 +398,7 @@ func matchPositionalDeletesByMetrics(
 	deleteEntries []iceberg.ManifestEntry,
 ) ([]iceberg.DataFile, error) {
 	start := sort.Search(len(deleteEntries), func(i int) bool {
-		return deleteEntries[i].SequenceNum() >= dataEntry.SequenceNum()
+		return deleteEntries[i].DataSequenceNumber() >= dataEntry.DataSequenceNumber()
 	})
 	evaluator, err := newInclusiveMetricsEvaluator(iceberg.PositionalDeleteSchema,
 		iceberg.EqualTo(iceberg.Reference("file_path"), dataEntry.DataFile().FilePath()),
@@ -432,7 +432,7 @@ func matchPositionalDeletesByPartition(
 	}
 
 	start := sort.Search(len(deleteEntries), func(i int) bool {
-		return deleteEntries[i].SequenceNum() >= dataEntry.SequenceNum()
+		return deleteEntries[i].DataSequenceNumber() >= dataEntry.DataSequenceNumber()
 	})
 	evaluator, err := newInclusiveMetricsEvaluator(iceberg.PositionalDeleteSchema,
 		iceberg.EqualTo(iceberg.Reference("file_path"), dataFile.FilePath()),

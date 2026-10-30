@@ -29,7 +29,7 @@ import (
 )
 
 func TestBuildSchemaFieldsWithDefaults(t *testing.T) {
-	schema, err := iceberg.NewSchemaFromJsonFields(1, `[
+	schema, err := iceberg.NewSchemaFromJSONFields(1, `[
 		{"id": 1, "name": "id", "required": true, "type": "long"},
 		{"id": 2, "name": "name", "required": false, "type": "string", "initial-default": "unknown", "write-default": "N/A"},
 		{"id": 3, "name": "count", "required": false, "type": "int", "initial-default": 0, "write-default": 42}
@@ -69,7 +69,7 @@ func TestTextOutputSchemaWithDefaults(t *testing.T) {
 	pterm.SetDefaultOutput(&buf)
 	pterm.DisableColor()
 
-	schema, err := iceberg.NewSchemaFromJsonFields(1, `[
+	schema, err := iceberg.NewSchemaFromJSONFields(1, `[
 		{"id": 1, "name": "id", "required": true, "type": "long"},
 		{"id": 2, "name": "name", "required": false, "type": "string", "initial-default": "unknown", "write-default": "N/A"}
 	]`)
@@ -97,7 +97,7 @@ func TestJSONOutputSchemaWithDefaults(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	schema, err := iceberg.NewSchemaFromJsonFields(5, `[
+	schema, err := iceberg.NewSchemaFromJSONFields(5, `[
 		{"id": 1, "name": "x", "required": true, "type": "long"}
 	]`)
 	require.NoError(t, err)

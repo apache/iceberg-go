@@ -214,14 +214,27 @@ func (s *IncrementalChangelogScan) liveDeletesBeforeRange(ctx context.Context, p
 }
 
 // deletesLiveBeforeExpiredParent rebuilds deletes that applied before the
-// range from the first timeline snapshot. A non-deleted entry written by an
-// earlier snapshot was still live. A deleted entry written by this snapshot
-// was live until this snapshot removed it.
+// range from the first timeline snapshot. This is exact when that snapshot
+// records a DELETED entry, under its own snapshot id, for every delete file
+// it removed, and carried entries keep the snapshot id that added them. A
+// writer that drops a fully removed delete manifest, instead of recording a
+// DELETED entry, cannot be reconstructed. When the snapshot summary reports
+// more removed-delete-files than the DELETED delete entries in its manifests,
+// planning returns an error instead of dropping those deletes. That count is
+// taken before partition pruning, so a filtered scan does not look like a
+// missing delete file.
 func (s *IncrementalChangelogScan) deletesLiveBeforeExpiredParent(
 	ctx context.Context, plan changelogTaskPlan, snapshot Snapshot,
 ) ([]iceberg.ManifestEntry, error) {
 	manifests, err := snapshot.Manifests(plan.fs)
 	if err != nil {
+		return nil, err
+	}
+	raw, err := readManifestEntries(ctx, plan.fs, deleteContentManifests(manifests), false, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkRemovedDeleteFiles(snapshot, raw); err != nil {
 		return nil, err
 	}
 	entries, err := s.readDeleteManifestEntries(ctx, plan, manifests)
@@ -232,15 +245,54 @@ func (s *IncrementalChangelogScan) deletesLiveBeforeExpiredParent(
 	return entriesLiveBefore(entries, snapshot.SnapshotID), nil
 }
 
+func deleteContentManifests(manifests []iceberg.ManifestFile) []iceberg.ManifestFile {
+	out := make([]iceberg.ManifestFile, 0)
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
+			out = append(out, manifest)
+		}
+	}
+
+	return out
+}
+
+// checkRemovedDeleteFiles reports an error when the snapshot summary claims
+// more removed delete files than the DELETED delete entries recorded under
+// that snapshot id. Entries must be the unfiltered delete-manifest contents.
+func checkRemovedDeleteFiles(snapshot Snapshot, entries []iceberg.ManifestEntry) error {
+	if snapshot.Summary == nil || len(snapshot.Summary.Properties) == 0 {
+		return nil
+	}
+	raw, ok := snapshot.Summary.Properties[removedDeleteFilesKey]
+	if !ok {
+		return nil
+	}
+	reported, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("%w: snapshot %d removed-delete-files %q", iceberg.ErrInvalidArgument, snapshot.SnapshotID, raw)
+	}
+	recorded := 0
+	for _, entry := range entries {
+		if entry.Status() != iceberg.EntryStatusDELETED || entry.SnapshotID() != snapshot.SnapshotID {
+			continue
+		}
+		if entry.DataFile().ContentType() == iceberg.EntryContentData {
+			continue
+		}
+		recorded++
+	}
+	if reported > recorded {
+		return fmt.Errorf("%w: snapshot %d %s is %d but recorded %d deleted delete entries",
+			iceberg.ErrInvalidArgument, snapshot.SnapshotID, removedDeleteFilesKey, reported, recorded)
+	}
+
+	return nil
+}
+
 func (s *IncrementalChangelogScan) readDeleteManifestEntries(
 	ctx context.Context, plan changelogTaskPlan, manifests []iceberg.ManifestFile,
 ) ([]iceberg.ManifestEntry, error) {
-	deleteManifests := make([]iceberg.ManifestFile, 0)
-	for _, manifest := range manifests {
-		if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
-			deleteManifests = append(deleteManifests, manifest)
-		}
-	}
+	deleteManifests := deleteContentManifests(manifests)
 	// Prune with the scan partition filters. A local accumulator keeps this
 	// pass from counting the same delete manifests in the changelog report.
 	var pruned scanMetricsAccumulator
@@ -650,8 +702,8 @@ func liveEntriesByKey(entries []iceberg.ManifestEntry, key func(iceberg.Manifest
 // When the snapshot sequence numbers are equal, or either snapshot is unknown,
 // a deletion wins.
 func changelogEntrySupersedes(next, current iceberg.ManifestEntry, sequences snapshotSequenceLookup) bool {
-	if next.SequenceNum() != current.SequenceNum() {
-		return next.SequenceNum() > current.SequenceNum()
+	if next.DataSequenceNumber() != current.DataSequenceNumber() {
+		return next.DataSequenceNumber() > current.DataSequenceNumber()
 	}
 	if sequences != nil {
 		nextSequence, nextOK := sequences(next.SnapshotID())

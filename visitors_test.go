@@ -410,7 +410,7 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 		{
 			name: "matching fixed metadata default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				ID: 2, Name: "missing_col", Type: iceberg.MustFixedTypeOf(3),
 				InitialDefault: "010203",
 			},
 			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
@@ -428,7 +428,7 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 		{
 			name: "matching native byte default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				ID: 2, Name: "missing_col", Type: iceberg.MustFixedTypeOf(3),
 				InitialDefault: []byte{1, 2, 3},
 			},
 			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
@@ -482,7 +482,7 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 		{
 			name: "matching decimal metadata default",
 			field: iceberg.NestedField{
-				ID: 2, Name: "missing_col", Type: iceberg.DecimalTypeOf(9, 2),
+				ID: 2, Name: "missing_col", Type: iceberg.MustDecimalTypeOf(9, 2),
 				InitialDefault: "12.34",
 			},
 			expr:     iceberg.EqualTo(ref, "12.34"),
@@ -556,6 +556,26 @@ func TestTranslateColumnNamesInitialDefaultErrorContext(t *testing.T) {
 	require.ErrorContains(t, err, "invalid hex")
 }
 
+// The {"type":"literal","value":...} wrapper belongs to the expression grammar
+// only. A field default uses the spec's single-value JSON, which has no wrapper,
+// so a wrapped default is malformed and must not be read as its inner value.
+func TestTranslateColumnNamesRejectsWrappedInitialDefault(t *testing.T) {
+	field := iceberg.NestedField{
+		ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+		InitialDefault: map[string]any{"type": "literal", "value": float64(42)},
+	}
+	bound, err := iceberg.BindExpr(
+		iceberg.NewSchema(1, field),
+		iceberg.EqualTo(iceberg.Reference("missing_col"), int32(42)),
+		true,
+	)
+	require.NoError(t, err)
+
+	_, err = iceberg.TranslateColumnNames(bound, iceberg.NewSchema(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, `initial-default for column "missing_col" (id 2)`)
+}
+
 func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *testing.T) {
 	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "location", Type: &iceberg.StructType{
@@ -600,6 +620,46 @@ func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *t
 			require.NoError(t, err)
 			require.False(t, translated.Equals(expr.invalidFold),
 				"a nested default is not constant when its parent can be null")
+		})
+	}
+}
+
+// TestTranslateColumnNamesMissingColumnIsNull checks that a predicate over a
+// column absent from the file, with no initial default, folds as it would for
+// a stored null: IsNull and NotNaN match, every other predicate does not.
+func TestTranslateColumnNamesMissingColumnIsNull(t *testing.T) {
+	currentSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	x := iceberg.Reference("x")
+	extracted := iceberg.Extract("payload", "$.v", iceberg.PrimitiveTypes.Float64)
+
+	for _, tt := range []struct {
+		name     string
+		expr     iceberg.BooleanExpression
+		expected iceberg.BooleanExpression
+	}{
+		{"is null", iceberg.IsNull(x), iceberg.AlwaysTrue{}},
+		{"not null", iceberg.NotNull(x), iceberg.AlwaysFalse{}},
+		{"is nan", iceberg.IsNaN(x), iceberg.AlwaysFalse{}},
+		{"not nan", iceberg.NotNaN(x), iceberg.AlwaysTrue{}},
+		{"equal", iceberg.EqualTo(x, 1.0), iceberg.AlwaysFalse{}},
+		{"variant is null", iceberg.IsNull(extracted), iceberg.AlwaysTrue{}},
+		{"variant is nan", iceberg.IsNaN(extracted), iceberg.AlwaysFalse{}},
+		{"variant not nan", iceberg.NotNaN(extracted), iceberg.AlwaysTrue{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(currentSchema, tt.expr, true)
+			require.NoError(t, err)
+
+			translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, translated)
 		})
 	}
 }
@@ -1033,11 +1093,11 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 		iceberg.NestedField{ID: 6, Name: "f", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 7, Name: "g", Type: iceberg.PrimitiveTypes.Time},
 		iceberg.NestedField{ID: 8, Name: "h", Type: iceberg.PrimitiveTypes.Timestamp},
-		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.DecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.MustDecimalTypeOf(9, 2)},
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
-		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
+		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.MustFixedTypeOf(5)},
 		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.PrimitiveTypes.TimestampNs},
 		iceberg.NestedField{ID: 15, Name: "o", Type: iceberg.PrimitiveTypes.TimestampTzNs})
 

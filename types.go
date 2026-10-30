@@ -644,12 +644,24 @@ func validateFixedLength(length int) error {
 	return nil
 }
 
-func FixedTypeOf(n int) FixedType {
+// FixedTypeOf returns the fixed type with the specified length.
+// It returns ErrInvalidArgument if the length is negative.
+func FixedTypeOf(n int) (FixedType, error) {
 	if err := validateFixedLength(n); err != nil {
-		panic(fmt.Errorf("%w: %s", ErrInvalidArgument, err))
+		return FixedType{}, fmt.Errorf("%w: %w", ErrInvalidArgument, err)
 	}
 
-	return FixedType{len: n}
+	return FixedType{len: n}, nil
+}
+
+// MustFixedTypeOf is like FixedTypeOf but panics if the length is negative.
+func MustFixedTypeOf(n int) FixedType {
+	typ, err := FixedTypeOf(n)
+	if err != nil {
+		panic(err)
+	}
+
+	return typ
 }
 
 type FixedType struct {
@@ -669,12 +681,24 @@ func (f FixedType) Type() string   { return fmt.Sprintf("fixed[%d]", f.len) }
 func (f FixedType) String() string { return fmt.Sprintf("fixed[%d]", f.len) }
 func (f FixedType) primitive()     {}
 
-func DecimalTypeOf(prec, scale int) DecimalType {
+// DecimalTypeOf returns the decimal type with the specified precision and scale.
+// It returns ErrInvalidArgument if either value is outside the valid range.
+func DecimalTypeOf(prec, scale int) (DecimalType, error) {
 	if err := validateDecimalPrecisionScale(prec, scale); err != nil {
-		panic(fmt.Errorf("%w: %w", ErrInvalidArgument, err))
+		return DecimalType{}, fmt.Errorf("%w: %w", ErrInvalidArgument, err)
 	}
 
-	return DecimalType{precision: prec, scale: scale}
+	return DecimalType{precision: prec, scale: scale}, nil
+}
+
+// MustDecimalTypeOf is like DecimalTypeOf but panics for an invalid precision or scale.
+func MustDecimalTypeOf(prec, scale int) DecimalType {
+	typ, err := DecimalTypeOf(prec, scale)
+	if err != nil {
+		panic(err)
+	}
+
+	return typ
 }
 
 func validateDecimalPrecisionScale(precision, scale int) error {
@@ -1173,6 +1197,10 @@ func PromoteType(fileType, readType Type) (Type, error) {
 		if _, ok := readType.(BinaryType); ok {
 			return readType, nil
 		}
+	// BinaryType never promotes to or from GeometryType/GeographyType: the spec
+	// lists no promotions for geo types, and plain binary isn't guaranteed to
+	// hold valid WKB. Geo types reach the Equals check in default, so a CRS or
+	// edge-algorithm change errors as well.
 	case BinaryType:
 		if _, ok := readType.(StringType); ok {
 			return readType, nil

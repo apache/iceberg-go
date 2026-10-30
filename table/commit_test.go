@@ -154,7 +154,7 @@ func newV1CommitTestTable(t *testing.T) *table.Table {
 
 func TestUpgradeFormatVersionV1ToV2(t *testing.T) {
 	tbl := newV1CommitTestTable(t)
-	assert.Equal(t, 1, tbl.Metadata().Version())
+	assert.Equal(t, 1, tbl.Metadata().FormatVersion())
 
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(2))

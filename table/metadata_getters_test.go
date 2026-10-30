@@ -24,6 +24,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,7 +58,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 		SnapshotRefs: map[string]SnapshotRef{
 			MainBranch: {
 				SnapshotID:         2,
-				SnapshotRefType:    BranchRef,
+				Type:               BranchRef,
 				MinSnapshotsToKeep: &refMinSnapshots,
 				MaxSnapshotAgeMs:   &refMaxSnapshotAge,
 				MaxRefAgeMs:        &refMaxAge,
@@ -69,7 +70,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 			StatisticsPath: "stats.puffin",
 			KeyMetadata:    &keyMetadata,
 			BlobMetadata: []BlobMetadata{{
-				Type:       BlobTypeApacheDatasketchesThetaV1,
+				Type:       puffin.BlobTypeDataSketchesTheta,
 				Fields:     []int32{1},
 				Properties: map[string]string{"source": "test"},
 			}},

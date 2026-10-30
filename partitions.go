@@ -69,10 +69,10 @@ type PartitionField struct {
 	escapedName string
 }
 
-// SourceID returns the first source column id. For single-argument transforms
-// this is the only source column. For multi-argument transforms this is the
-// first source column.
-func (p PartitionField) SourceID() int {
+// FirstSourceID returns the first source column id, or 0 when SourceIDs is
+// empty. For single-argument transforms this is the only source column; for
+// multi-argument transforms the other ids are only in SourceIDs.
+func (p PartitionField) FirstSourceID() int {
 	if len(p.SourceIDs) == 0 {
 		return 0
 	}
@@ -114,7 +114,7 @@ func (p PartitionField) MarshalJSON() ([]byte, error) {
 		FieldID   int       `json:"field-id"`
 		Name      string    `json:"name"`
 		Transform Transform `json:"transform"`
-	}{p.SourceID(), p.FieldID, p.Name, p.Transform})
+	}{p.FirstSourceID(), p.FieldID, p.Name, p.Transform})
 }
 
 func (p PartitionField) Equals(other PartitionField) bool {
@@ -129,7 +129,7 @@ func (p *PartitionField) String() string {
 		return fmt.Sprintf("%d: %s: %s(%v)", p.FieldID, p.Name, p.Transform, p.SourceIDs)
 	}
 
-	return fmt.Sprintf("%d: %s: %s(%d)", p.FieldID, p.Name, p.Transform, p.SourceID())
+	return fmt.Sprintf("%d: %s: %s(%d)", p.FieldID, p.Name, p.Transform, p.FirstSourceID())
 }
 
 func (p *PartitionField) UnmarshalJSON(b []byte) error {
@@ -313,7 +313,7 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 				continue
 			}
 		}
-		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, schema, &field.FieldID))
+		opts = append(opts, AddPartitionFieldBySourceID(field.FirstSourceID(), field.Name, field.Transform, schema, &field.FieldID))
 	}
 
 	// Replay, not authoring: the spec may come from another client, so it only
@@ -599,6 +599,10 @@ func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
 // FieldsRef returns the partition fields owned by this spec for trusted
 // internal callers. The returned slice and everything reachable through the
 // fields must be treated as read-only.
+//
+// FieldsRef is for use by iceberg-go's own packages only: its sentinel argument
+// cannot be constructed outside this module. It is not covered by the module's
+// compatibility guarantees. Use [PartitionSpec.Fields] instead.
 func (ps *PartitionSpec) FieldsRef(_ internal.PartitionSpecRef) []PartitionField {
 	return ps.fields
 }
@@ -760,7 +764,7 @@ func (ps *PartitionSpec) initialize() {
 
 	for i := range ps.fields {
 		ps.fields[i].escapedName = url.QueryEscape(ps.fields[i].Name)
-		ps.sourceIdToFields[ps.fields[i].SourceID()] = append(ps.sourceIdToFields[ps.fields[i].SourceID()], ps.fields[i])
+		ps.sourceIdToFields[ps.fields[i].FirstSourceID()] = append(ps.sourceIdToFields[ps.fields[i].FirstSourceID()], ps.fields[i])
 	}
 }
 
@@ -867,7 +871,7 @@ func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedParti
 	fields := make([]resolvedPartitionField, 0, len(ps.fields))
 	for _, field := range ps.fields {
 		sourceType := Type(UnknownType{})
-		if sourceField, ok := schema.FindFieldByIDRef(field.SourceID(), internal.SchemaRef{}); ok {
+		if sourceField, ok := schema.FindFieldByIDRef(field.FirstSourceID(), internal.SchemaRef{}); ok {
 			sourceType = sourceField.Type
 		}
 
@@ -899,7 +903,7 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 	nestedFields := make([]NestedField, len(ps.fields))
 	for i, field := range ps.fields {
 		sourceType := Type(UnknownType{})
-		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+		if typ, ok := schema.FindTypeByID(field.FirstSourceID()); ok {
 			sourceType = typ
 		}
 
@@ -947,8 +951,8 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		valueStr := resolvedFields[i].field.Transform.ToHumanStrType(resolvedFields[i].resultType, data.Get(i))
-		sb.WriteString(url.QueryEscape(valueStr))
+		valueStr := resolvedFields[i].field.Transform.ToHumanString(resolvedFields[i].resultType, data.Get(i))
+		internal.AppendQueryEscaped(&sb, valueStr)
 	}
 
 	return sb.String()
@@ -963,9 +967,9 @@ func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, e
 		return field.Name, nil
 	}
 
-	sourceName, exists := schema.FindColumnName(field.SourceID())
+	sourceName, exists := schema.FindColumnName(field.FirstSourceID())
 	if !exists {
-		return "", fmt.Errorf("could not find field with id %d", field.SourceID())
+		return "", fmt.Errorf("could not find field with id %d", field.FirstSourceID())
 	}
 
 	transform := field.Transform

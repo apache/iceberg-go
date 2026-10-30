@@ -412,7 +412,7 @@ func makeEqDeleteEntry(
 	df := builder.Build()
 
 	entryBuilder := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, nil, df)
-	entryBuilder.SequenceNum(seq)
+	entryBuilder.DataSequenceNumber(seq)
 
 	return entryBuilder.Build()
 }

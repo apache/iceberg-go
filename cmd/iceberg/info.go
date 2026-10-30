@@ -88,7 +88,7 @@ func buildTableInfo(tbl *table.Table) TableInfo {
 
 	var refs RefSummary
 	for _, ref := range meta.Refs() {
-		switch ref.SnapshotRefType {
+		switch ref.Type {
 		case table.BranchRef:
 			refs.Branches++
 		case table.TagRef:
@@ -99,7 +99,7 @@ func buildTableInfo(tbl *table.Table) TableInfo {
 	return TableInfo{
 		Table:             tableIDString(tbl),
 		UUID:              meta.TableUUID().String(),
-		FormatVersion:     meta.Version(),
+		FormatVersion:     meta.FormatVersion(),
 		Location:          meta.Location(),
 		LastUpdated:       lastUpdated,
 		CurrentSnapshotID: currentSnapshotID,

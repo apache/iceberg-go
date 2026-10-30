@@ -17,9 +17,97 @@
 
 package table
 
+import "slices"
+
 // SnapshotLookup returns the snapshot for the given id, or nil if not found.
 // It matches the signature of Metadata.SnapshotByID.
 type SnapshotLookup func(id int64) *Snapshot
+
+// Most ancestry queries traverse only a few snapshots. Keep those IDs inline
+// instead of hashing every hop. Longer or malformed chains still use a map
+// so cycle detection stays linear and cannot loop forever.
+const inlineSnapshotVisitLimit = 16
+
+type snapshotVisitSet struct {
+	inline   [inlineSnapshotVisitLimit]int64
+	count    int
+	overflow map[int64]struct{}
+}
+
+// seenOrAdd reports whether id was already visited.
+func (s *snapshotVisitSet) seenOrAdd(id int64) bool {
+	if s.overflow != nil {
+		if _, seen := s.overflow[id]; seen {
+			return true
+		}
+		s.overflow[id] = struct{}{}
+
+		return false
+	}
+
+	if slices.Contains(s.inline[:s.count], id) {
+		return true
+	}
+	if s.count < len(s.inline) {
+		s.inline[s.count] = id
+		s.count++
+
+		return false
+	}
+
+	s.overflow = make(map[int64]struct{}, 2*len(s.inline))
+	for _, previous := range s.inline {
+		s.overflow[previous] = struct{}{}
+	}
+	s.overflow[id] = struct{}{}
+
+	return false
+}
+
+// ancestryWalkMode selects how a snapshot ancestry walk ends.
+// An expired base ID can end a conflict-detection walk, but checking whether
+// an ID is an ancestor requires resolving that snapshot.
+type ancestryWalkMode uint8
+
+const (
+	ancestryToRoot ancestryWalkMode = iota
+	ancestryBeforeBase
+	ancestryToResolvedAncestor
+)
+
+// walkSnapshotAncestry shares parent traversal, missing-snapshot handling and
+// cycle detection. Only the first two modes accumulate snapshot values.
+func walkSnapshotAncestry(startID, boundaryID int64, lookup SnapshotLookup, mode ancestryWalkMode) ([]Snapshot, bool) {
+	var history []Snapshot
+	var visited snapshotVisitSet
+
+	id := startID
+	for {
+		// A base may have expired, so stop before resolving it.
+		if mode == ancestryBeforeBase && id == boundaryID {
+			return history, true
+		}
+		if visited.seenOrAdd(id) {
+			return history, false
+		}
+		snap := lookup(id)
+		if snap == nil {
+			return history, false
+		}
+
+		// Membership requires the candidate ancestor to resolve.
+		if mode == ancestryToResolvedAncestor && id == boundaryID {
+			return nil, true
+		}
+		if mode != ancestryToResolvedAncestor {
+			history = append(history, *snap)
+		}
+		if snap.ParentSnapshotID == nil {
+			return history, mode == ancestryToRoot
+		}
+		id = *snap.ParentSnapshotID
+	}
+}
 
 // AncestorsOf walks the parent chain starting from snapshotID and yields
 // every snapshot reachable via ParentSnapshotID, including the starting
@@ -56,28 +144,7 @@ func AncestorsOf(snapshotID int64, lookup SnapshotLookup) []Snapshot {
 // Snapshots are returned by value in reverse-chronological order.
 // Returns an empty slice and false when snapshotID cannot be resolved.
 func AncestorsOfChecked(snapshotID int64, lookup SnapshotLookup) ([]Snapshot, bool) {
-	var ancestors []Snapshot
-	visited := make(map[int64]struct{})
-
-	id := snapshotID
-	for {
-		if _, seen := visited[id]; seen {
-			return ancestors, false
-		}
-		visited[id] = struct{}{}
-
-		snap := lookup(id)
-		if snap == nil {
-			return ancestors, false
-		}
-
-		ancestors = append(ancestors, *snap)
-
-		if snap.ParentSnapshotID == nil {
-			return ancestors, true
-		}
-		id = *snap.ParentSnapshotID
-	}
+	return walkSnapshotAncestry(snapshotID, 0, lookup, ancestryToRoot)
 }
 
 // AncestorsBetween returns the snapshots from latestID (inclusive) down
@@ -105,34 +172,7 @@ func AncestorsBetween(latestID, baseID int64, lookup SnapshotLookup) ([]Snapshot
 		return nil, true
 	}
 
-	var between []Snapshot
-	visited := make(map[int64]struct{})
-
-	id := latestID
-	for {
-		if id == baseID {
-			return between, true
-		}
-		if _, seen := visited[id]; seen {
-			// Cycle detected before reaching baseID.
-			break
-		}
-		visited[id] = struct{}{}
-
-		snap := lookup(id)
-		if snap == nil {
-			break
-		}
-
-		between = append(between, *snap)
-
-		if snap.ParentSnapshotID == nil {
-			break
-		}
-		id = *snap.ParentSnapshotID
-	}
-
-	return between, false
+	return walkSnapshotAncestry(latestID, baseID, lookup, ancestryBeforeBase)
 }
 
 // IsAncestorOf returns true if ancestorID is in the parent chain of
@@ -148,32 +188,7 @@ func AncestorsBetween(latestID, baseID int64, lookup SnapshotLookup) ([]Snapshot
 // semantics are stricter (conservative) — broken chains return false
 // rather than matching an unreachable ancestor id.
 func IsAncestorOf(snapshotID, ancestorID int64, lookup SnapshotLookup) bool {
-	visited := make(map[int64]struct{})
+	_, found := walkSnapshotAncestry(snapshotID, ancestorID, lookup, ancestryToResolvedAncestor)
 
-	id := snapshotID
-	for {
-		if _, seen := visited[id]; seen {
-			return false
-		}
-
-		snap := lookup(id)
-		if snap == nil {
-			return false
-		}
-
-		// Equality check must come BEFORE the visited write so that an
-		// ancestor reached in the second hop of a cycle (e.g. 1 ↔ 2,
-		// IsAncestorOf(1, 2)) is correctly returned as true before
-		// cycle detection fires on the next iteration.
-		if id == ancestorID {
-			return true
-		}
-
-		visited[id] = struct{}{}
-
-		if snap.ParentSnapshotID == nil {
-			return false
-		}
-		id = *snap.ParentSnapshotID
-	}
+	return found
 }

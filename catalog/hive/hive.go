@@ -43,15 +43,18 @@ const (
 	descriptionKey = "description"
 )
 
-var _ catalog.Catalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog             = (*Catalog)(nil)
+	_ catalog.RegisterableCatalog = (*Catalog)(nil)
+)
 
 func init() {
-	catalog.Register("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
 		return NewCatalog(props)
 	}))
 }
 
-var _ catalog.PurgeableTable = (*Catalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient
@@ -103,8 +106,7 @@ func (c *Catalog) CatalogType() catalog.Type {
 // resource — not just when a close returns an error (errors.Join already keeps
 // both), but when it panics: a bare errors.Join(c.client.Close(), c.reporter.Close())
 // would let a panic in the first close abort the second. Recovered panics are
-// converted to errors and joined with any close errors. Callers holding a
-// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+// converted to errors and joined with any close errors. Close is required by [catalog.Catalog].
 func (c *Catalog) Close() error {
 	return errors.Join(
 		closeIsolated(c.client.Close),
@@ -123,8 +125,6 @@ func closeIsolated(closeFn func() error) (err error) {
 
 	return closeFn()
 }
-
-var _ catalog.Closer = (*Catalog)(nil)
 
 // ListTables returns a list of table identifiers in the given namespace.
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -195,6 +195,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.opts.props),
 	)
 }
 
@@ -287,6 +288,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(c.opts.props),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
@@ -357,7 +359,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	viewSQL, err := sqlFromVersion(version)
+	representation, err := sqlFromVersion(version)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +376,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	createdView, err := view.CreateViewWithIOProperties(
-		ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, ioProps, cfg.Properties,
+		ctx, catalogName, identifier, freshSchema, representation, defaultNS, loc, ioProps, cfg.Properties,
 	)
 	if err != nil {
 		return nil, err
@@ -385,7 +387,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		maps.Copy(viewProps, cfg.Properties)
 	}
 
-	hiveTbl := constructHiveViewTable(database, viewName, loc, createdView.MetadataLocation(), freshSchema, viewSQL, viewProps)
+	hiveTbl := constructHiveViewTable(database, viewName, loc, createdView.MetadataLocation(), freshSchema, representation.SQL, viewProps)
 	if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
 		if isAlreadyExistsError(err) {
 			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, viewName)
@@ -397,28 +399,30 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	return createdView, nil
 }
 
-// sqlFromVersion returns the SQL from the first SQL representation in version, preferring dialect "hive".
-func sqlFromVersion(v *view.Version) (string, error) {
+// sqlFromVersion selects a SQL representation, preferring the Hive dialect.
+// Preserve its dialect so creating the view does not rewrite it to "default".
+func sqlFromVersion(v *view.Version) (view.Representation, error) {
 	if v == nil || len(v.Representations) == 0 {
-		return "", errors.New("view version has no representations")
+		return view.Representation{}, errors.New("view version has no representations")
 	}
-	var fallback string
-	for _, r := range v.Representations {
+	var fallback *view.Representation
+	for i := range v.Representations {
+		r := &v.Representations[i]
 		if r.Type != "sql" {
 			continue
 		}
 		if strings.EqualFold(r.Dialect, "hive") {
-			return r.Sql, nil
+			return *r, nil
 		}
-		if fallback == "" {
-			fallback = r.Sql
+		if fallback == nil {
+			fallback = r
 		}
 	}
-	if fallback != "" {
-		return fallback, nil
+	if fallback != nil {
+		return *fallback, nil
 	}
 
-	return "", errors.New("view version has no SQL representation")
+	return view.Representation{}, errors.New("view version has no SQL representation")
 }
 
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) (err error) {
@@ -552,7 +556,15 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (_
 	hiveTbl.TableName = toTable
 	hiveTbl.DbName = toDB
 
+	// The pre-check above is best-effort: a writer that does not take these HMS
+	// locks (Hive DDL, say) can create the destination before AlterTable runs.
+	// The metastore then rejects the rename, which is mapped to the same
+	// sentinel so callers can match it either way.
 	if err := c.client.AlterTable(ctx, fromDB, fromTable, hiveTbl); err != nil {
+		if isAlreadyExistsError(err) {
+			return nil, fmt.Errorf("%w: %s.%s: %w", catalog.ErrTableAlreadyExists, toDB, toTable, err)
+		}
+
 		return nil, fmt.Errorf("failed to rename table %s.%s to %s.%s: %w", fromDB, fromTable, toDB, toTable, err)
 	}
 
@@ -594,7 +606,10 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		if err != nil {
 			return nil, "", err
 		}
-		current, err = table.NewFromLocation(ctx, identifier, metadataLoc, io.LoadFSFunc(c.opts.props, metadataLoc), c)
+		current, err = table.NewFromLocation(
+			ctx, identifier, metadataLoc, io.LoadFSFunc(c.opts.props, metadataLoc), c,
+			table.WithScanPlanningIOProperties(c.opts.props),
+		)
 		if err != nil {
 			return nil, "", err
 		}
@@ -774,7 +789,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}
 
-	if err := fs.Remove(metadataLocation); err != nil {
+	if err := fs.Remove(ctx, metadataLocation); err != nil {
 		return fmt.Errorf("failed to remove view metadata file at %s: %w", metadataLocation, err)
 	}
 

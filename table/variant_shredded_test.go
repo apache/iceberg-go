@@ -72,7 +72,7 @@ func TestShreddedVariantTableScan(t *testing.T) {
 	)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -185,7 +185,7 @@ func TestShreddedVariantScanNulls(t *testing.T) {
 		&rowDeltaCatalog{metadata: meta})
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -427,7 +427,7 @@ func scanShreddedFixture(t *testing.T, fixture string) arrow.Table {
 	return scanned
 }
 
-// scanShreddedFixtureErr returns the error from AddFiles or the scan instead of
+// scanShreddedFixtureErr returns the error from AddDataFilesByPath or the scan instead of
 // failing, for the rejection cases.
 func scanShreddedFixtureErr(t *testing.T, fixture string) error {
 	t.Helper()
@@ -467,7 +467,7 @@ func scanShreddedFixtureRaw(t *testing.T, fixture string) (arrow.Table, error) {
 		&rowDeltaCatalog{metadata: meta})
 
 	tx := tbl.NewTransaction()
-	if err := tx.AddFiles(t.Context(), []string{dataPath}, nil, false); err != nil {
+	if err := tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false); err != nil {
 		return nil, err
 	}
 	tbl, err = tx.Commit(t.Context())
@@ -573,7 +573,7 @@ func writeFullyShreddedVariantFile(t *testing.T, path string, fieldID, nRows int
 	writeVariantColumnParquet(t, path, fieldID, shreddedType, bldr)
 }
 
-// TestShreddedVariantAddFilesBounds pins that AddFiles (which opens the file and
+// TestShreddedVariantAddFilesBounds pins that AddDataFilesByPath (which opens the file and
 // recomputes) emits correct shredded variant child bounds under the parent field id.
 func TestShreddedVariantAddFilesBounds(t *testing.T) {
 	location := filepath.ToSlash(t.TempDir())
@@ -591,7 +591,7 @@ func TestShreddedVariantAddFilesBounds(t *testing.T) {
 		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, &rowDeltaCatalog{metadata: meta})
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -614,8 +614,8 @@ func TestShreddedVariantAddFilesBounds(t *testing.T) {
 		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
 	}
 
-	assert.Equal(t, buildObj(0, "row-A"), tasks[0].File.LowerBoundValues()[1], "AddFiles lower bound")
-	assert.Equal(t, buildObj(nData-1, "row-E"), tasks[0].File.UpperBoundValues()[1], "AddFiles upper bound")
+	assert.Equal(t, buildObj(0, "row-A"), tasks[0].File.LowerBoundValues()[1], "AddDataFilesByPath lower bound")
+	assert.Equal(t, buildObj(nData-1, "row-E"), tasks[0].File.UpperBoundValues()[1], "AddDataFilesByPath upper bound")
 }
 
 // setupVariantScanTable writes a shredded variant table from rows and returns a closure reading the "id" column of a filtered scan.

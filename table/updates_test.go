@@ -52,20 +52,20 @@ func newTrackingCallsIO() *trackingCallsIO {
 	}
 }
 
-func (c *trackingCallsIO) Open(name string) (iceio.File, error) {
+func (c *trackingCallsIO) Open(_ context.Context, name string) (iceio.File, error) {
 	c.mu.Lock()
 	c.openCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Open(name)
+	return c.trackingIO.Open(context.Background(), name)
 }
 
-func (c *trackingCallsIO) Remove(name string) error {
+func (c *trackingCallsIO) Remove(_ context.Context, name string) error {
 	c.mu.Lock()
 	c.removeCount[name]++
 	c.mu.Unlock()
 
-	return c.trackingIO.Remove(name)
+	return c.trackingIO.Remove(context.Background(), name)
 }
 
 // writeManifest writes a v2 data manifest with a single ADDED
@@ -87,16 +87,16 @@ func writeManifest(t testing.TB, tio *trackingIO, snapshotID, seqNum int64, mani
 	require.NoError(t, err)
 
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df.Build()).
-		SequenceNum(seqNum).
+		DataSequenceNumber(seqNum).
 		Build()
 
 	var buf bytes.Buffer
 	_, err = iceberg.WriteManifest(manifestPath, &buf, 2, spec, dataSchema, snapshotID, []iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
-	require.NoError(t, tio.WriteFile(manifestPath, buf.Bytes()))
+	require.NoError(t, tio.WriteFile(context.Background(), manifestPath, buf.Bytes()))
 
-	return iceberg.NewManifestFile(2, manifestPath, int64(buf.Len()), 0, snapshotID).
-		SequenceNum(seqNum, seqNum).
+	return iceberg.NewManifestBuilder(2, manifestPath, int64(buf.Len()), 0, snapshotID).
+		SequenceNumber(seqNum, seqNum).
 		AddedFiles(1).
 		AddedRows(1).
 		Build()
@@ -110,7 +110,7 @@ func writeManifestList(t testing.TB, tio *trackingIO, snapshotID int64, listPath
 	var buf bytes.Buffer
 	seqNum := int64(1)
 	require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, manifests))
-	require.NoError(t, tio.WriteFile(listPath, buf.Bytes()))
+	require.NoError(t, tio.WriteFile(context.Background(), listPath, buf.Bytes()))
 }
 
 // metaJSONOpts configures the metadata document built by buildMetaJSON.

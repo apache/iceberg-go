@@ -34,6 +34,7 @@ func TestAssertLastAssignedPartitionIDValidate(t *testing.T) {
 		err := req.Validate(meta)
 		require.Error(t, err)
 		assert.EqualError(t, err, "requirement failed: last assigned partition id is missing")
+		assert.NotErrorIs(t, err, ErrCommitFailed, "malformed metadata is not a commit conflict")
 	})
 
 	t.Run("matches metadata last partition id", func(t *testing.T) {
@@ -51,4 +52,15 @@ func TestAssertLastAssignedPartitionIDValidate(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "last assigned partition id has changed")
 	})
+}
+
+func TestAssertBranchRefSnapshotIDRejectsTagWithoutRetry(t *testing.T) {
+	meta, err := ParseMetadataBytes([]byte(ExampleTableMetadataV2))
+	require.NoError(t, err)
+
+	// "test" is a tag. Refresh cannot make it a valid transaction target.
+	err = assertBranchRefSnapshotID("test", new(int64(3051729675574597004))).Validate(meta)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tags cannot be transaction targets")
+	assert.NotErrorIs(t, err, ErrCommitFailed)
 }

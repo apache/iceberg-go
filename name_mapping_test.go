@@ -117,6 +117,42 @@ func TestApplyNameMappingUsesAlias(t *testing.T) {
 	assert.Equal(t, 1, result.Field(0).ID)
 }
 
+func TestMappedFieldFindFieldByName(t *testing.T) {
+	root := iceberg.MappedField{Fields: []iceberg.MappedField{
+		{
+			FieldID: new(7), Names: []string{"old", "current"},
+			Fields: []iceberg.MappedField{
+				{FieldID: new(8), Names: []string{"nested"}},
+			},
+		},
+		{FieldID: new(9), Names: []string{"other", "current"}},
+	}}
+
+	field, ok := root.FindFieldByName("current")
+	require.True(t, ok)
+	require.Same(t, &root.Fields[0], field)
+
+	field.Names[0] = "legacy"
+	assert.Equal(t, "legacy", root.Fields[0].Names[0])
+
+	alias, ok := root.FindFieldByName("legacy")
+	require.True(t, ok)
+	require.Same(t, field, alias)
+
+	nested, ok := field.FindFieldByName("nested")
+	require.True(t, ok)
+	require.Same(t, &root.Fields[0].Fields[0], nested)
+
+	missing, ok := root.FindFieldByName("absent")
+	assert.False(t, ok)
+	assert.Nil(t, missing)
+
+	var nilField *iceberg.MappedField
+	missing, ok = nilField.FindFieldByName("absent")
+	assert.False(t, ok)
+	assert.Nil(t, missing)
+}
+
 func TestNameMappingAccessorRemainsComparable(t *testing.T) {
 	first := iceberg.NameMappingAccessor{}
 	second := iceberg.NameMappingAccessor{}

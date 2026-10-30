@@ -69,7 +69,9 @@ func (s *IncrementalChangelogScan) ToArrowRecords(ctx context.Context) (*arrow.S
 // are read with Scan.ReadTasks, so same-snapshot deletes and deletes that
 // already applied to a removed file are applied before the changelog columns
 // are added. DeletedRowsScanTask emits rows matched by AddedDeletes and skips
-// rows matched by ExistingDeletes. The returned iterator is single-use. The
+// rows matched by ExistingDeletes. Files are read one at a time, in task
+// order, so the rows stay in that order. WithMaxConcurrency does not read
+// changelog files in parallel. The returned iterator is single-use. The
 // caller releases every batch.
 func (s *IncrementalChangelogScan) Read(ctx context.Context, tasks []ChangelogScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if s == nil || s.scan == nil {

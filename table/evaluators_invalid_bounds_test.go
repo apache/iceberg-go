@@ -26,7 +26,7 @@ import (
 
 func TestMalformedFixedBoundsAreConservative(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "value", Type: iceberg.FixedTypeOf(4),
+		ID: 1, Name: "value", Type: iceberg.MustFixedTypeOf(4),
 	})
 	expr := iceberg.EqualTo(iceberg.Reference("value"), []byte{1, 2, 3, 4})
 	malformed := []byte{1, 2, 3, 4, 5}
@@ -38,7 +38,7 @@ func TestMalformedFixedBoundsAreConservative(t *testing.T) {
 		eval, err := newManifestEvaluator(spec, schema, expr, true)
 		require.NoError(t, err)
 
-		manifest := iceberg.NewManifestFile(2, "manifest.avro", 1, 0, 1).
+		manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).
 			AddedFiles(1).
 			Partitions([]iceberg.FieldSummary{{LowerBound: &malformed, UpperBound: &malformed}}).
 			Build()

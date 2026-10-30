@@ -396,7 +396,7 @@ func benchmarkMetadataBuilderBase(schemaCount, specCount, snapshotCount, sortOrd
 			SortOrderList:      sortOrders,
 			DefaultSortOrderID: 0,
 			SnapshotRefs: map[string]SnapshotRef{
-				MainBranch: {SnapshotID: currentSnapshotID, SnapshotRefType: BranchRef},
+				MainBranch: {SnapshotID: currentSnapshotID, Type: BranchRef},
 			},
 		},
 	}
@@ -427,7 +427,7 @@ func benchmarkSnapshotBuilder(snapshotCount int) *MetadataBuilder {
 	currentID := int64(snapshotCount - 1)
 	builder.currentSnapshotID = &currentID
 	builder.refs = map[string]SnapshotRef{
-		MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef},
+		MainBranch: {SnapshotID: currentID, Type: BranchRef},
 	}
 
 	return &builder

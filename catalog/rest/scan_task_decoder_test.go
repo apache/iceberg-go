@@ -310,6 +310,29 @@ func TestDecodeScanTasksDerivesDeletionVectorTargetWhenOmitted(t *testing.T) {
 	assert.Equal(t, new("s3://bucket/table/data.parquet"), tasks[0].DeletionVectorFiles[0].ReferencedDataFile())
 }
 
+func TestDecodeScanTasksSharesDerivedDeletionVector(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	wire := validScanTasksWire()
+	wire.DeleteFiles[0].FileFormat = "PUFFIN"
+	wire.DeleteFiles[0].ContentOffset = new(int64(10))
+	wire.DeleteFiles[0].ContentSizeInBytes = new(int64(20))
+	wire.FileScanTasks[0].DeleteFileReferences = []int{0}
+	// Two file-scan tasks for the same data file share a DV without an
+	// explicit referenced-data-file on the REST wire.
+	wire.FileScanTasks = append(wire.FileScanTasks, wire.FileScanTasks[0])
+
+	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	require.Len(t, tasks[1].DeletionVectorFiles, 1)
+	assert.Equal(t, new("s3://bucket/table/data.parquet"),
+		tasks[0].DeletionVectorFiles[0].ReferencedDataFile())
+	assert.Same(t, tasks[0].DeletionVectorFiles[0], tasks[1].DeletionVectorFiles[0])
+}
+
 func TestRESTValueMapMatchesJavaContentFileParser(t *testing.T) {
 	t.Parallel()
 
@@ -343,7 +366,7 @@ func TestRESTValueMapUsesIcebergBinaryEncoding(t *testing.T) {
 	decoded, err := decodeValueMap("lower-bounds", &bounds)
 	require.NoError(t, err)
 
-	decimalType := iceberg.DecimalTypeOf(9, 2)
+	decimalType := iceberg.MustDecimalTypeOf(9, 2)
 	tests := []struct {
 		name    string
 		fieldID int
@@ -582,8 +605,8 @@ func TestDecodeScanTasksRejectsDeleteFilesWithoutTasks(t *testing.T) {
 func TestDecodePartitionLiteralCoversPrimitiveWireTypes(t *testing.T) {
 	t.Parallel()
 
-	decimalType := iceberg.DecimalTypeOf(9, 2)
-	fixedType := iceberg.FixedTypeOf(4)
+	decimalType := iceberg.MustDecimalTypeOf(9, 2)
+	fixedType := iceberg.MustFixedTypeOf(4)
 	tests := []struct {
 		name        string
 		raw         string
@@ -639,7 +662,7 @@ func TestDecodePartitionLiteralRejectsInvalidValues(t *testing.T) {
 		{"null", `null`, iceberg.PrimitiveTypes.Int64, "null is not valid"},
 		{"int32 overflow", `2147483648`, iceberg.PrimitiveTypes.Int32, "outside int32 range"},
 		{"long fraction", `1.5`, iceberg.PrimitiveTypes.Int64, "invalid integer value"},
-		{"wrong fixed width", `"00FF"`, iceberg.FixedTypeOf(4), "different length"},
+		{"wrong fixed width", `"00FF"`, iceberg.MustFixedTypeOf(4), "different length"},
 		{"invalid binary hex", `"XYZ"`, iceberg.PrimitiveTypes.Binary, "hexadecimal"},
 		{"nested value", `{"x":1}`, iceberg.PrimitiveTypes.String, "invalid string value"},
 	} {
@@ -783,8 +806,8 @@ func newScanTaskDecoderMetadata() *scanTaskDecoderMetadata {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "event_date", Type: iceberg.PrimitiveTypes.Date},
-		iceberg.NestedField{ID: 4, Name: "amount", Type: iceberg.DecimalTypeOf(9, 2)},
-		iceberg.NestedField{ID: 5, Name: "code", Type: iceberg.FixedTypeOf(4)},
+		iceberg.NestedField{ID: 4, Name: "amount", Type: iceberg.MustDecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 5, Name: "code", Type: iceberg.MustFixedTypeOf(4)},
 		iceberg.NestedField{ID: 6, Name: "event_time", Type: iceberg.PrimitiveTypes.TimestampTzNs},
 		iceberg.NestedField{ID: 7, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 8, Name: "lower_int", Type: iceberg.PrimitiveTypes.Int32},
@@ -928,7 +951,7 @@ func TestDecodeScanTasksAcceptsPointerAndUnknownPartitionTransforms(t *testing.T
 
 func TestDecodePartitionLogicalMetadata(t *testing.T) {
 	t.Parallel()
-	decimalType := iceberg.DecimalTypeOf(9, 2)
+	decimalType := iceberg.MustDecimalTypeOf(9, 2)
 	for _, tt := range []struct {
 		name        string
 		typ         iceberg.Type
@@ -938,7 +961,7 @@ func TestDecodePartitionLogicalMetadata(t *testing.T) {
 	}{
 		{name: "unpartitioned"},
 		{name: "integer", typ: iceberg.PrimitiveTypes.Int64, raw: `34`, want: int64(34)},
-		{name: "fixed", typ: iceberg.FixedTypeOf(4), raw: `"78797A21"`, want: []byte("xyz!")},
+		{name: "fixed", typ: iceberg.MustFixedTypeOf(4), raw: `"78797A21"`, want: []byte("xyz!")},
 		{name: "null date", typ: iceberg.PrimitiveTypes.Date, raw: `null`},
 		{name: "null decimal", typ: decimalType, raw: `null`},
 		{name: "date", typ: iceberg.PrimitiveTypes.Date, raw: `"2026-07-17"`, want: mustLiteral(t, "2026-07-17", iceberg.PrimitiveTypes.Date).Any(), logicalType: atype.Date},

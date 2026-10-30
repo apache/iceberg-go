@@ -19,8 +19,10 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,7 +57,7 @@ func writeManifestWithEntries(t *testing.T, fs iceio.WriteFileIO, dir string, n 
 	}
 
 	path := dir + "/metadata/m-v1.avro"
-	out, err := fs.Create(path)
+	out, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 	mf, err := iceberg.WriteManifest(path, out, 2, *iceberg.UnpartitionedSpec, sc, snapID, entries)
 	require.NoError(t, err)
@@ -78,7 +80,7 @@ func TestManifestActiveFilesCountsEntriesWhenHeaderCountsAbsent(t *testing.T) {
 	// A manifest reporting unknown (-1) added/existing counts, as a manifest
 	// written without the count fields would (V1's toFile maps absent counts to
 	// -1), but pointing at the real file so the fallback has entries to read.
-	unknown := iceberg.NewManifestFile(2, path, length, 0, 1).
+	unknown := iceberg.NewManifestBuilder(2, path, length, 0, 1).
 		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).Build()
 	require.EqualValues(t, -1, unknown.AddedDataFiles(), "precondition: counts must read as unknown")
 
@@ -87,7 +89,7 @@ func TestManifestActiveFilesCountsEntriesWhenHeaderCountsAbsent(t *testing.T) {
 	require.EqualValues(t, n, got, "fallback must count the live entries, not skip the manifest")
 
 	// And the header-count path still wins when the counts are present.
-	known := iceberg.NewManifestFile(2, path, length, 0, 1).
+	known := iceberg.NewManifestBuilder(2, path, length, 0, 1).
 		AddedFiles(n).ExistingFiles(0).DeletedFiles(0).Build()
 	got, err = manifestActiveFiles(fs, []iceberg.ManifestFile{known})
 	require.NoError(t, err)
@@ -137,7 +139,7 @@ func TestManifestMergeClusterRollsAfterAvroBlockFlush(t *testing.T) {
 	var buf bytes.Buffer
 	input, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
 	require.NoError(t, err)
-	require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+	require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 
 	mgr := manifestMergeManager{
 		targetSizeBytes:  input.Length() / 4,
@@ -189,17 +191,17 @@ func TestRewriteManifestsCleansOrphanOnValidationError(t *testing.T) {
 		var buf bytes.Buffer
 		_, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 
 		// A header count that lies: the merge re-counts the one real entry and
 		// disagrees, tripping the file-count guard after the merged file is
 		// already on disk.
-		inputs[i] = iceberg.NewManifestFile(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
+		inputs[i] = iceberg.NewManifestBuilder(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
 			AddedFiles(99).Content(iceberg.ManifestContentData).Build()
 	}
 
 	before := memKeys(mem)
-	_, err := r.processManifests(inputs)
+	_, err := r.processManifests(context.Background(), inputs)
 	require.Error(t, err, "lying header counts must trip the file-count guard")
 
 	for path := range memKeys(mem) {
@@ -255,7 +257,7 @@ func TestRewriteManifestsCleansOrphansOnInvalidClusterKey(t *testing.T) {
 		var buf bytes.Buffer
 		mf, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 		inputs[i] = mf
 	}
 
@@ -304,7 +306,7 @@ func TestManifestMergeClusterSeparatesSpecsWithSameKey(t *testing.T) {
 		var buf bytes.Buffer
 		mf, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, []iceberg.ManifestEntry{entry})
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 		inputs = append(inputs, mf)
 	}
 
@@ -328,13 +330,13 @@ type failSecondCreateIO struct {
 	count int
 }
 
-func (f *failSecondCreateIO) Create(name string) (iceio.FileWriter, error) {
+func (f *failSecondCreateIO) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
 	f.mu.Lock()
 	first := f.count == 0
 	f.count++
 	f.mu.Unlock()
 	if first {
-		return f.memIO.Create(name)
+		return f.memIO.Create(ctx, name)
 	}
 
 	return &limitedWriteCloser{limit: 0, err: errLimitedWrite}, nil
@@ -365,20 +367,71 @@ func TestRewriteManifestsCleansOrphansOnMergeFailure(t *testing.T) {
 		var buf bytes.Buffer
 		_, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
 		require.NoError(t, err)
-		require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+		require.NoError(t, mem.WriteFile(context.Background(), path, buf.Bytes()))
 
-		inputs[i] = iceberg.NewManifestFile(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
+		inputs[i] = iceberg.NewManifestBuilder(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
 			AddedFiles(1).Content(iceberg.ManifestContentData).Build()
 		maxLen = max(maxLen, int64(buf.Len()))
 	}
 	r.cfg.targetSizeBytes = 2 * maxLen
 
 	before := memKeys(mem.memIO)
-	_, err := r.processManifests(inputs)
+	_, err := r.processManifests(context.Background(), inputs)
 	require.ErrorIs(t, err, errLimitedWrite, "a failing bin must surface the write error")
 
 	for path := range memKeys(mem.memIO) {
 		_, preexisting := before[path]
 		require.Truef(t, preexisting, "merged manifest %s from the bin that succeeded must be cleaned up", path)
+	}
+}
+
+// A pass that fails the file-count guard deletes the files it merged. The
+// producer must keep the previous pass's state, which a resumed commit can
+// reuse, rather than point at the deleted files.
+func TestRewriteManifestsFailedPassKeepsPreviousState(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{targetSizeBytes: 8 << 20})
+	r := prod.producerImpl.(*rewriteManifests)
+
+	inputs := func(name string, addedFiles int32) []iceberg.ManifestFile {
+		out := make([]iceberg.ManifestFile, 2)
+		sequenceNumber := int64(1)
+		for i := range out {
+			df := newTestDataFile(t, spec, "file://"+name+"-"+string(rune('a'+i))+".parquet", nil)
+			entries := []iceberg.ManifestEntry{
+				iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &prod.snapshotID, &sequenceNumber, nil, df),
+			}
+			path := "table-location/metadata/" + name + "-" + string(rune('a'+i)) + ".avro"
+			var buf bytes.Buffer
+			_, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, prod.snapshotID, entries)
+			require.NoError(t, err)
+			require.NoError(t, mem.WriteFile(t.Context(), path, buf.Bytes()))
+			out[i] = iceberg.NewManifestBuilder(2, path, int64(buf.Len()), int32(spec.ID()), prod.snapshotID).
+				AddedFiles(addedFiles).Content(iceberg.ManifestContentData).Build()
+		}
+
+		return out
+	}
+
+	_, err := r.processManifests(t.Context(), inputs("good", 1))
+	require.NoError(t, err)
+	added, rewritten := slices.Clone(r.added), slices.Clone(r.rewritten)
+	require.NotEmpty(t, added)
+
+	// A header count that lies trips the guard after the merged file is written.
+	_, err = r.processManifests(t.Context(), inputs("lying", 99))
+	require.Error(t, err)
+
+	assert.Equal(t, added, r.added)
+	assert.Equal(t, rewritten, r.rewritten)
+	assert.Equal(t, added, r.result.AddedManifests)
+	assert.Equal(t, rewritten, r.result.RewrittenManifests)
+	files := memKeys(mem)
+	for _, m := range r.added {
+		assert.Containsf(t, files, m.FilePath(), "manifest %s the producer would commit must exist", m.FilePath())
 	}
 }

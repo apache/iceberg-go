@@ -83,7 +83,7 @@ func TestCDCStress(t *testing.T) {
 	seedPath := tbl.Location() + "/data/seed.parquet"
 	writeParquet(t, seedPath, arrowSc, generateRowsJSON(baselineRows))
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{seedPath}, nil, false))
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{seedPath}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -99,7 +99,7 @@ func TestCDCStress(t *testing.T) {
 			fmt.Sprintf(`[{"id": %d, "data": "cdc-%d"}]`, extraID, cycle))
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 
@@ -290,7 +290,7 @@ func writeParquet(t testing.TB, path string, sc *arrow.Schema, jsonData string) 
 	defer rec.Release()
 
 	fs := iceio.LocalFS{}
-	fw, err := fs.Create(path)
+	fw, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
 
 	tbl := array.NewTableFromRecords(sc, []arrow.RecordBatch{rec})
