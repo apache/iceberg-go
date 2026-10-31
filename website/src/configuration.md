@@ -123,6 +123,32 @@ client-supplied catalog properties.
 > Go-specific extension with no Java, PyIceberg, or Rust equivalent; do not
 > assume parity on it in multi-client deployments.
 
+#### Testing against an in-process REST catalog
+
+`catalog/rest/resttest` is an in-memory REST catalog server for tests. It
+implements the config, namespace, table, rename, register and commit
+endpoints, validates commit requirements, and writes metadata files under a
+warehouse directory, so code that uses the REST client can be tested without
+a container:
+
+```go
+import (
+    "github.com/apache/iceberg-go/catalog/rest"
+    "github.com/apache/iceberg-go/catalog/rest/resttest"
+)
+
+func TestWithRESTCatalog(t *testing.T) {
+    srv := resttest.NewServer(t) // warehouse defaults to t.TempDir()
+    cat, err := rest.NewCatalog(t.Context(), "test", srv.URL)
+    // ...
+}
+```
+
+`resttest.NewHandler` returns the bare `http.Handler`. `WithWarehouse`,
+`WithPrefix` and `WithProperties` configure it. Views, multi-table
+transactions, scan planning, credential vending and metrics are not
+implemented and return 501.
+
 ### Hive (`catalog/hive`)
 
 Source: [`catalog/hive/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/hive/options.go).
