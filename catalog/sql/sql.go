@@ -838,7 +838,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
-	staged, err := internal.CreateStagedTableWithNamespaceKeyAndRegistry(
+	staged, err := internal.CreateStagedTableWithNamespaceKey(
 		ctx, c.props, c.LoadNamespaceProperties, ident, ns, sc, c.ioRegistry, opts...)
 	if err != nil {
 		return nil, err
@@ -911,7 +911,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", err
 	}
 
-	staged, err := internal.UpdateAndStageTableWithRegistry(ctx, c.props, current, ident, reqs, updates, c, c.ioRegistry)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, ident, reqs, updates, c, c.ioRegistry)
 	if err != nil {
 		return nil, "", err
 	}

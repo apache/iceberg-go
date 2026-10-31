@@ -26,6 +26,13 @@ type AWSProperties map[string]string
 
 type Option func(*options)
 
+// WithName sets the logical name of this Glue catalog.
+func WithName(name string) Option {
+	return func(o *options) {
+		o.name = name
+	}
+}
+
 // WithAWSConfig sets the AWS configuration for the catalog.
 func WithAWSConfig(cfg aws.Config) Option {
 	return func(o *options) {
@@ -40,12 +47,14 @@ func WithAWSProperties(props AWSProperties) Option {
 }
 
 // WithIORegistry selects the FileIO factories used by this Glue catalog.
-// A nil registry keeps the process-wide default.
+// A nil registry uses the global default. The registry is shared, not copied,
+// so subsequent Register and Unregister calls affect this catalog.
 func WithIORegistry(registry *io.Registry) Option {
 	return func(o *options) { o.ioRegistry = registry }
 }
 
 type options struct {
+	name          string
 	awsConfig     aws.Config
 	awsProperties AWSProperties
 

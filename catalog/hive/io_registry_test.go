@@ -44,7 +44,7 @@ func TestHiveIsolatedIORegistry(t *testing.T) {
 	require.NoError(t, fs.WriteFile(t.Context(), metadataLocation, contents))
 	client := &mockHiveClient{}
 	client.On("GetTable", mock.Anything, "db", "tbl").Return(&hive_metastore.Table{DbName: "db", TableName: "tbl", TableType: TableTypeExternalTable, Parameters: map[string]string{TableTypeKey: TableTypeIceberg, MetadataLocationKey: metadataLocation}}, nil).Once()
-	cat := NewCatalogWithClientAndOptions(client, iceberg.Properties{"storage-key": "secret"}, WithIORegistry(registry))
+	cat := NewCatalogWithClient(client, iceberg.Properties{"storage-key": "secret"}, WithIORegistry(registry))
 	tbl, err := cat.LoadTable(t.Context(), TableIdentifier("db", "tbl"))
 	require.NoError(t, err)
 	loaded, err := tbl.FS(t.Context())

@@ -44,16 +44,15 @@ const (
 
 var (
 	_ catalog.Catalog             = (*Catalog)(nil)
+	_ catalog.ViewCatalog         = (*Catalog)(nil)
 	_ catalog.RegisterableCatalog = (*Catalog)(nil)
 )
 
 func init() {
-	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
-		return NewCatalog(props)
+	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+		return NewCatalog(props, WithName(name))
 	}))
 }
-
-var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient
@@ -86,13 +85,7 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	}, nil
 }
 
-func NewCatalogWithClient(client HiveClient, props iceberg.Properties) *Catalog {
-	return NewCatalogWithClientAndOptions(client, props)
-}
-
-// NewCatalogWithClientAndOptions configures a caller-supplied Hive client
-// without requiring a running Hive server during catalog construction.
-func NewCatalogWithClientAndOptions(client HiveClient, props iceberg.Properties, opts ...Option) *Catalog {
+func NewCatalogWithClient(client HiveClient, props iceberg.Properties, opts ...Option) *Catalog {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
 	for _, opt := range opts {
@@ -104,6 +97,8 @@ func NewCatalogWithClientAndOptions(client HiveClient, props iceberg.Properties,
 		opts:   o,
 	}
 }
+
+func (c *Catalog) Name() string { return c.opts.Name }
 
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hive
@@ -231,7 +226,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, tableName)
 	}
 
-	staged, err := internal.CreateStagedTableWithRegistry(ctx, c.opts.props, c.LoadNamespaceProperties, identifier, schema, c.opts.ioRegistry, opts...)
+	staged, err := internal.CreateStagedTable(ctx, c.opts.props, c.LoadNamespaceProperties, identifier, schema, c.opts.ioRegistry, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -317,6 +312,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 
 // CreateView creates a new view in the catalog. It uses the same signature as the REST catalog:
 // identifier, version (with SQL representations), schema, and optional CreateViewOpt for location and properties.
+// The metastore's view text uses the Hive-dialect SQL, or the first SQL representation.
 // Returns the created *view.View, or an error if the namespace is missing, a view/table already exists, or creation fails.
 func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
 	database, viewName, err := identifierToViewName(identifier)
@@ -372,9 +368,6 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	defaultNS := catalog.NamespaceFromIdent(identifier)
-	catalogName := "hive"
-
 	ioProps := make(iceberg.Properties)
 	if c.opts.props != nil {
 		maps.Copy(ioProps, c.opts.props)
@@ -383,9 +376,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		maps.Copy(ioProps, cfg.Properties)
 	}
 
-	createdView, err := view.CreateViewWithIOPropertiesAndRegistry(
-		ctx, catalogName, identifier, freshSchema, representation, defaultNS, loc, ioProps, cfg.Properties, c.opts.ioRegistry,
-	)
+	createdView, err := view.CreateViewFromVersionWithRegistry(ctx, identifier, freshSchema, version, loc, ioProps, cfg.Properties, c.opts.ioRegistry)
 	if err != nil {
 		return nil, err
 	}
@@ -407,8 +398,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	return createdView, nil
 }
 
-// sqlFromVersion selects a SQL representation, preferring the Hive dialect.
-// Preserve its dialect so creating the view does not rewrite it to "default".
+// sqlFromVersion picks the SQL for the metastore's view text, preferring the Hive dialect.
 func sqlFromVersion(v *view.Version) (view.Representation, error) {
 	if v == nil || len(v.Representations) == 0 {
 		return view.Representation{}, errors.New("view version has no representations")
@@ -623,7 +613,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		}
 	}
 
-	staged, err := internal.UpdateAndStageTableWithRegistry(ctx, c.opts.props, current, identifier, requirements, updates, c, c.opts.ioRegistry)
+	staged, err := internal.UpdateAndStageTable(ctx, c.opts.props, current, identifier, requirements, updates, c, c.opts.ioRegistry)
 	if err != nil {
 		return nil, "", err
 	}

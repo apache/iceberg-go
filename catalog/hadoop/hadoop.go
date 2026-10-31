@@ -296,6 +296,8 @@ func NewCatalogWithOptions(ctx context.Context, name, warehouse string, props ic
 	return cat, nil
 }
 
+func (c *Catalog) Name() string { return c.name }
+
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hadoop
 }

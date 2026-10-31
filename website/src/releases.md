@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Catalog capabilities split into narrower interfaces.** `catalog.Catalog` now embeds `TableCatalog` and `NamespaceCatalog` with unchanged table and namespace methods. `Name() string` is now required, breaking third-party catalogs and test fakes. `ViewCatalog` is optional (REST and Hive), while REST also implements `UpdatableViewCatalog` for `UpdateView`. Use `catalog.As[T](cat)` and the `Unwrap() Catalog` convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending `Catalog`.
 - **`ReplaceFilesWithDeleteFiles` removed.** For delete-file replacements, use `tx.NewRewrite(snapshotProps)`, call `DeleteFile` for each source file and `AddDeleteFileWithDataSequenceNumber` for each replacement, then commit the builder. Rewrites record a `replace` snapshot instead of `overwrite`. The five-argument `ReplaceFiles` API is unchanged and remains available for compaction and delete-file removals.
 - **Path-based data-file addition renamed.** Replace `Transaction.AddFiles` with `AddDataFilesByPath`, `AddFilesOption` with `AddDataFilesByPathOption`, and `WithAddFilesConcurrency` with `WithAddDataFilesByPathConcurrency`. Behavior is unchanged.
 - **Manifest builder constructor renamed.** Replace `iceberg.NewManifestFile(...)` with `iceberg.NewManifestBuilder(...)`. It still returns a `ManifestBuilder`.
@@ -62,6 +63,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 - **Data file block size setter removed.** `iceberg.DataFileBuilder.BlockSizeInBytes` is removed. New v1 manifests use the Avro schema's 64 MiB default when the field is unset. V2/v3 omit this deprecated field, and legacy v1 values remain readable.
 - **View creation APIs take a named SQL representation.** `view.NewVersionFromSQL`, `view.CreateView`, `view.CreateViewWithIOProperties`, and `sql.Catalog.CreateView` now accept a `view.Representation{SQL: sql, Dialect: dialect}` instead of positional SQL/dialect strings. The dialect is required; Hive preserves the selected representation's dialect.
 - **View SQL representation construction uses named fields.** Replace `view.NewRepresentation(sql, dialect)` with `view.NewRepresentation(view.Representation{SQL: sql, Dialect: dialect})`. Serialized JSON is unchanged.
+- **Hive views keep the caller's view version.** `hive.Catalog.CreateView` now stores every representation, the summary, the default namespace and `default-catalog` as passed, instead of one representation with `default-catalog` set to `"hive"`.
 - **Reserved table properties now use a read-only API.** Replace references to `table.ReservedProperties` with `table.ReservedProperties()`. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.
 - **Fixed and decimal constructors return errors.** `iceberg.FixedTypeOf` and `iceberg.DecimalTypeOf` now return `(type, error)` instead of panicking for invalid inputs. Use `MustFixedTypeOf` or `MustDecimalTypeOf` only for known-valid values.
 - **SQL UDF representations now use struct literals.** The `udf.NewSQLRepresentation(dialect, sql)` function, available since v0.7.0, is removed. Use `udf.SQLRepresentation{Dialect: "trino", SQL: "x + 1"}` instead. Empty fields and duplicate dialects are checked during metadata validation; serialized JSON is unchanged.
@@ -93,6 +95,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - **Row-lineage column predicate renamed.** Use `iceberg.IsRowLineageColumn` instead of `iceberg.IsMetadataColumn` to identify `_row_id` and `_last_updated_sequence_number`. Use `iceberg.IsReservedFieldID` to check the full reserved metadata field ID range.
 - **File writes and directory walks now take an operation context.** Update `WriteFileIO` and `ListableIO` implementations and calls to `Create`, `WriteFile`, and `WalkDir` to pass `context.Context`; cloud writes and listings use it for cancellation.
+- **In and NotIn follow SQL semantics for NULL.** A multi-valued `NotIn`, `NOT(In(...))` and `NOT(NotIn(...))` no longer match rows where the column is NULL, consistent with `NotEqual`. A predicate under NOT on a column missing from an older data file no longer matches every row of that file; those rows match as a stored NULL would. Java's `Evaluator` still matches NULL for `notEq` and `notIn`, see [apache/iceberg#18701](https://github.com/apache/iceberg/issues/18701).
 
 ## Verifying and producing releases
 

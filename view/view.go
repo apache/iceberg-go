@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -148,87 +149,85 @@ func CreateView(
 	loc string,
 	props iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, nil)
+	return CreateViewWithIOProperties(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
 }
 
-// CreateViewWithIORegistry writes view metadata using the selected FileIO registry.
-// A nil registry preserves the global default. The registry only controls
-// FileIO resolution; it is not stored in the view metadata.
+// CreateViewWithIORegistry writes view metadata through the supplied
+// registry. A nil registry keeps the global FileIO behavior.
 func CreateViewWithIORegistry(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	props iceberg.Properties,
-	registry *io.Registry,
+	ctx context.Context, catalogName string, viewIdent table.Identifier,
+	schema *iceberg.Schema, representation Representation, defaultNS table.Identifier,
+	loc string, props iceberg.Properties, registry *io.Registry,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, registry)
+	return CreateViewWithIOPropertiesAndRegistry(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, registry)
 }
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
 // filesystem and metadataProps as the properties persisted in view metadata.
 // representation holds both SQL text and its dialect.
 func CreateViewWithIOProperties(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	ioProps iceberg.Properties,
-	metadataProps iceberg.Properties,
+	ctx context.Context, catalogName string, viewIdent table.Identifier,
+	schema *iceberg.Schema, representation Representation, defaultNS table.Identifier,
+	loc string, ioProps iceberg.Properties, metadataProps iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps, nil)
+	return CreateViewWithIOPropertiesAndRegistry(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps, nil)
 }
 
-// CreateViewWithIOPropertiesAndRegistry separates FileIO and persisted view
-// properties while allowing a caller-scoped registry for the metadata write.
+// CreateViewWithIOPropertiesAndRegistry resolves FileIO through an optional
+// registry while keeping storage credentials out of persisted view properties.
 func CreateViewWithIOPropertiesAndRegistry(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	ioProps iceberg.Properties,
-	metadataProps iceberg.Properties,
+	ctx context.Context, catalogName string, viewIdent table.Identifier,
+	schema *iceberg.Schema, representation Representation, defaultNS table.Identifier,
+	loc string, ioProps iceberg.Properties, metadataProps iceberg.Properties,
 	registry *io.Registry,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps, registry)
-}
-
-func createView(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	ioProps iceberg.Properties,
-	metadataProps iceberg.Properties,
-	registry *io.Registry,
-) (*View, error) {
-	versionId := int64(1)
-
-	builder := NewMetadataBuilder()
-
-	viewVersion, err := NewVersionFromSQL(
-		versionId,
-		schema.ID,
-		representation,
-		defaultNS,
-		WithDefaultViewCatalog(catalogName),
-	)
+	version, err := NewVersionFromSQL(InitialVersionID, schema.ID, representation, defaultNS, WithDefaultViewCatalog(catalogName))
 	if err != nil {
 		return nil, err
 	}
-	viewMD, err := builder.
+	return CreateViewFromVersionWithRegistry(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, registry)
+}
+
+// CreateViewFromVersion creates a view whose first version is version, kept as
+// given apart from its IDs. A nil default namespace defaults to the view's
+// namespace, a nil summary to the engine name, and a zero timestamp to now.
+func CreateViewFromVersion(
+	ctx context.Context, viewIdent table.Identifier, schema *iceberg.Schema,
+	version *Version, loc string, ioProps iceberg.Properties, metadataProps iceberg.Properties,
+) (*View, error) {
+	return CreateViewFromVersionWithRegistry(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, nil)
+}
+
+// CreateViewFromVersionWithRegistry preserves the caller's complete first
+// version, including all SQL representations, summary and default catalog.
+// Only FileIO resolution differs from CreateViewFromVersion.
+func CreateViewFromVersionWithRegistry(
+	ctx context.Context,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	version *Version,
+	loc string,
+	ioProps iceberg.Properties,
+	metadataProps iceberg.Properties,
+	registry *io.Registry,
+) (*View, error) {
+	if version == nil {
+		return nil, fmt.Errorf("%w: view version is required", ErrInvalidViewMetadata)
+	}
+
+	viewVersion := version.Clone()
+	viewVersion.VersionID = InitialVersionID
+	if viewVersion.DefaultNamespace == nil && len(viewIdent) > 0 {
+		viewVersion.DefaultNamespace = slices.Clone(viewIdent[:len(viewIdent)-1])
+	}
+	if viewVersion.Summary == nil {
+		viewVersion.Summary = VersionSummary{viewEngineProperty: defaultViewEngine}
+	}
+	if viewVersion.TimestampMS == 0 {
+		viewVersion.TimestampMS = time.Now().UnixMilli()
+	}
+
+	viewMD, err := NewMetadataBuilder().
 		SetLoc(loc).
 		SetCurrentVersion(
 			viewVersion,

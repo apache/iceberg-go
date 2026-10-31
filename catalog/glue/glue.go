@@ -98,13 +98,13 @@ var (
 )
 
 func init() {
-	catalog.MustRegister("glue", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.MustRegister("glue", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
 		awsConfig, err := toAwsConfig(ctx, props)
 		if err != nil {
 			return nil, err
 		}
 
-		return NewCatalog(WithAWSConfig(awsConfig), WithAWSProperties(AWSProperties(props)))
+		return NewCatalog(WithName(name), WithAWSConfig(awsConfig), WithAWSProperties(AWSProperties(props)))
 	}))
 }
 
@@ -160,6 +160,7 @@ type glueAPI interface {
 var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
+	name      string
 	glueSvc   glueAPI
 	catalogId *string
 	awsCfg    *aws.Config
@@ -184,7 +185,7 @@ type Catalog struct {
 // catalog, err := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 
 func NewCatalog(opts ...Option) (*Catalog, error) {
-	glueOps := &options{}
+	glueOps := &options{name: string(catalog.Glue)}
 
 	for _, o := range opts {
 		o(glueOps)
@@ -207,6 +208,7 @@ func NewCatalog(opts ...Option) (*Catalog, error) {
 		awsCfg:     &glueOps.awsConfig,
 		props:      iceberg.Properties(glueOps.awsProperties),
 		ioRegistry: glueOps.ioRegistry,
+		name:       glueOps.name,
 	}
 
 	// Resolve the metrics reporter once, up front. CachedReporter caches the
@@ -273,6 +275,8 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 	return c.convertGlueToIceberg(ctx, glueTable)
 }
 
+func (c *Catalog) Name() string { return c.name }
+
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Glue
 }
@@ -322,7 +326,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	// metrics-reporter-impl already failed there — no per-op guard is needed
 	// before mutating the catalog, and the trailing LoadTable reuses the cached
 	// reporter.
-	staged, err := internal.CreateStagedTableWithRegistry(ctx, c.props, c.namespacePropsFn(db), identifier, schema, c.ioRegistry, opts...)
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.namespacePropsFn(db), identifier, schema, c.ioRegistry, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -472,7 +476,7 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 	copy(stagedOpts, opts)
 	stagedOpts = append(stagedOpts, catalog.WithLocation(managedLocation))
 
-	staged, err := internal.CreateStagedTableWithRegistry(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, c.ioRegistry, stagedOpts...)
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, c.ioRegistry, stagedOpts...)
 	if err != nil {
 		return err
 	}
@@ -566,7 +570,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	// Create a staging table with the updates applied
-	staged, err := internal.UpdateAndStageTableWithRegistry(ctx, c.props, current, identifier, requirements, updates, c, c.ioRegistry)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, identifier, requirements, updates, c, c.ioRegistry)
 	if err != nil {
 		return nil, "", err
 	}

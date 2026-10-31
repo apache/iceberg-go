@@ -410,6 +410,8 @@ type panicCatalog struct {
 
 func (p *panicCatalog) Close() error { return nil }
 
+func (p *panicCatalog) Name() string { return "panic" }
+
 func (p *panicCatalog) CatalogType() catalog.Type { return "panic" }
 func (p *panicCatalog) CreateTable(context.Context, table.Identifier, *iceberg.Schema, ...catalog.CreateTableOpt) (*table.Table, error) {
 	panic("CreateTable must not be called")

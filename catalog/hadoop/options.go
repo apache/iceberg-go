@@ -26,7 +26,8 @@ type catalogOptions struct {
 }
 
 // WithIORegistry selects the FileIO factories used by this Hadoop catalog.
-// A nil registry preserves the package-level default.
+// A nil registry uses the global default. The registry is shared, not copied,
+// so subsequent Register and Unregister calls affect this catalog.
 func WithIORegistry(registry *io.Registry) Option {
 	return func(o *catalogOptions) { o.ioRegistry = registry }
 }

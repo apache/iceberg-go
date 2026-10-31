@@ -561,6 +561,33 @@ func yieldSortedPartition(
 	}
 	slices.SortStableFunc(refs, rows.bind(batches))
 
+	if sortedRefsAreIdentity(refs, batches) {
+		// Keep the scan's natural order. Every output owns its reference to
+		// the original batch; no Arrow Take arrays are needed.
+		for _, batch := range batches {
+			for off := int64(0); off < batch.NumRows(); off += batchRows {
+				if err := ctx.Err(); err != nil {
+					yield(nil, err)
+
+					return false
+				}
+				end := min(off+batchRows, batch.NumRows())
+				var out arrow.RecordBatch
+				if off == 0 && end == batch.NumRows() {
+					batch.Retain()
+					out = batch
+				} else {
+					out = batch.NewSlice(off, end)
+				}
+				if !yield(out, nil) {
+					return false
+				}
+			}
+		}
+
+		return true
+	}
+
 	takeFn := partitionBatchByKey(ctx)
 	mem := compute.GetAllocator(ctx)
 	for off := 0; off < len(refs); off += int(batchRows) {
@@ -579,6 +606,31 @@ func yieldSortedPartition(
 		}
 		if !yield(out, nil) {
 			return false
+		}
+	}
+
+	return true
+}
+
+// sortedRefsAreIdentity reports whether the stable sort preserved input order.
+func sortedRefsAreIdentity(refs []rowRef, batches []arrow.RecordBatch) bool {
+	// Check the final row first to reject a common late inversion quickly.
+	if len(refs) > 0 {
+		lastBatch := len(batches) - 1
+		for batches[lastBatch].NumRows() == 0 {
+			lastBatch--
+		}
+		if refs[len(refs)-1] != newRowRef(lastBatch, int(batches[lastBatch].NumRows())-1) {
+			return false
+		}
+	}
+	index := 0
+	for batch, rec := range batches {
+		for row := range int(rec.NumRows()) {
+			if refs[index] != newRowRef(batch, row) {
+				return false
+			}
+			index++
 		}
 	}
 

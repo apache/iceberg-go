@@ -42,7 +42,7 @@ func TestRegistryIsUsedForStagedAndUpdatedMetadata(t *testing.T) {
 	})
 	nsprops := func(context.Context, table.Identifier) (iceberg.Properties, error) { return nil, nil }
 
-	staged, err := CreateStagedTableWithRegistry(t.Context(), props, nsprops, ident, schema, registry)
+	staged, err := CreateStagedTable(t.Context(), props, nsprops, ident, schema, registry)
 	require.NoError(t, err)
 	loaded, err := staged.FS(t.Context())
 	require.NoError(t, err)
@@ -53,7 +53,7 @@ func TestRegistryIsUsedForStagedAndUpdatedMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	updated, err := UpdateAndStageTableWithRegistry(
+	updated, err := UpdateAndStageTable(
 		t.Context(), props, staged.Table, ident, nil, nil, nil, registry,
 	)
 	require.NoError(t, err)
@@ -75,5 +75,24 @@ func TestLoadFSWithRegistryDistinguishesNilFromEmpty(t *testing.T) {
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 
 	_, err = LoadFSFuncWithRegistry(&iceio.Registry{}, nil, "file:///metadata.json")(t.Context())
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+}
+
+func TestConfiguredRegistryRemainsLive(t *testing.T) {
+	registry := &iceio.Registry{}
+	const location = "registry-live://bucket/metadata.json"
+	_, err := LoadFSWithRegistry(t.Context(), registry, nil, location)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register("registry-live", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+	loaded, err := LoadFSWithRegistry(t.Context(), registry, nil, location)
+	require.NoError(t, err)
+	require.Same(t, fs, loaded)
+
+	registry.Unregister("registry-live")
+	_, err = LoadFSWithRegistry(t.Context(), registry, nil, location)
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 }

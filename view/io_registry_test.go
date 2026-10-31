@@ -91,3 +91,41 @@ func TestCreateViewWithEmptyRegistryDoesNotFallBackToGlobal(t *testing.T) {
 	)
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 }
+
+func TestCreateViewFromVersionPreservesMetadataWithIsolatedRegistry(t *testing.T) {
+	const scheme = "isolated-view-version"
+	registry := &iceio.Registry{}
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+	version, err := NewVersion(7, 3, []Representation{
+		NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "trino"}),
+		NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "spark"}),
+	}, []string{"original_ns"},
+		WithDefaultViewCatalog("prod"),
+		WithVersionSummary(VersionSummary{"engine-version": "467"}),
+		WithTimestampMS(1234),
+	)
+	require.NoError(t, err)
+	created, err := CreateViewFromVersionWithRegistry(
+		t.Context(), []string{"db", "v"}, newTestSchema(0), version,
+		scheme+"://bucket/view", iceberg.Properties{"storage-only": "secret"},
+		iceberg.Properties{"view-property": "stored"}, registry,
+	)
+	require.NoError(t, err)
+	got := created.CurrentVersion()
+	require.Equal(t, version.Representations, got.Representations)
+	require.Equal(t, "prod", got.DefaultCatalog)
+	require.Equal(t, version.DefaultNamespace, got.DefaultNamespace)
+	require.Equal(t, int64(1234), got.TimestampMS)
+	require.Equal(t, "467", got.Summary["engine-version"])
+	require.Equal(t, "stored", created.Properties()["view-property"])
+	require.NotContains(t, created.Properties(), "storage-only")
+	require.Equal(t, int64(7), version.VersionID)
+	f, err := fs.Open(t.Context(), created.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	_, err = iceio.LoadFS(t.Context(), nil, created.MetadataLocation())
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+}

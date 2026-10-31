@@ -74,6 +74,7 @@ const (
 )
 
 type HiveOptions struct {
+	Name      string
 	URI       string
 	Warehouse string
 	props     iceberg.Properties
@@ -88,6 +89,7 @@ type HiveOptions struct {
 
 func NewHiveOptions() *HiveOptions {
 	return &HiveOptions{
+		Name:            "hive",
 		props:           iceberg.Properties{},
 		LockMinWaitTime: DefaultLockCheckMinWaitTime,
 		LockMaxWaitTime: DefaultLockCheckMaxWaitTime,
@@ -150,8 +152,16 @@ func durationFromProps(props iceberg.Properties, javaMsKey, legacyDurationKey st
 
 type Option func(*HiveOptions)
 
+// WithName sets the logical name of this Hive catalog.
+func WithName(name string) Option {
+	return func(o *HiveOptions) {
+		o.Name = name
+	}
+}
+
 // WithIORegistry selects the FileIO factories used by this Hive catalog.
-// A nil registry keeps the process-wide default.
+// A nil registry uses the global default. The registry is shared, not copied,
+// so subsequent Register and Unregister calls affect this catalog.
 func WithIORegistry(registry *io.Registry) Option {
 	return func(o *HiveOptions) { o.ioRegistry = registry }
 }
