@@ -847,6 +847,47 @@ func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHiveCommitTableRejectsOnlyFailuresBeforeMetadataWrite(t *testing.T) {
+	ctx := context.Background()
+	ident := TableIdentifier("test_database", "test_table")
+	newCatalog := func(t *testing.T) (*Catalog, *mockHiveClient) {
+		tableLocation := filepath.Join(t.TempDir(), "test_table")
+		metadataLocation := filepath.Join(tableLocation, "metadata", "v1.metadata.json")
+		writeHivePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, nil)
+
+		mockClient := &mockHiveClient{}
+		expectImmediateTableLock(mockClient, 1)
+		mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+			Return(hivePurgeTable(metadataLocation, tableLocation), nil).Once()
+
+		return NewCatalogWithClient(mockClient, iceberg.Properties{}), mockClient
+	}
+
+	t.Run("staging failure", func(t *testing.T) {
+		cat, mockClient := newCatalog(t)
+
+		_, _, err := cat.CommitTable(ctx, ident, nil, []table.Update{table.NewSetCurrentSchemaUpdate(99)})
+		require.ErrorIs(t, err, table.ErrCommitRejected)
+		require.NotErrorIs(t, err, table.ErrCommitFailed)
+		mockClient.AssertNotCalled(t, "AlterTable", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		mockClient.AssertExpectations(t)
+	})
+
+	t.Run("hms alter failure after metadata write", func(t *testing.T) {
+		cat, mockClient := newCatalog(t)
+		mockClient.On("AlterTable", mock.Anything, "test_database", "test_table", mock.AnythingOfType("*hive_metastore.Table")).
+			Return(errors.New("metastore unavailable")).Once()
+
+		_, _, err := cat.CommitTable(ctx, ident, nil, []table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"key": "value"}),
+		})
+		require.ErrorContains(t, err, "metastore unavailable")
+		require.NotErrorIs(t, err, table.ErrCommitRejected)
+		require.NotErrorIs(t, err, table.ErrCommitFailed)
+		mockClient.AssertExpectations(t)
+	})
+}
+
 func TestHiveDropTableLockFailureIsRetryable(t *testing.T) {
 	mockClient := &mockHiveClient{}
 	mockClient.On("Lock", mock.Anything, mock.AnythingOfType("*hive_metastore.LockRequest")).

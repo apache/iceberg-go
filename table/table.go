@@ -62,6 +62,18 @@ import (
 // stops.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
+// ErrCommitRejected means the catalog rejected a commit without writing
+// anything. It is the Go equivalent of Java's CleanableFailure.
+// Unlike Java, the REST catalog treats every 400 commit response as a
+// rejection, including one with error type IllegalArgumentException, since the
+// server rejected the request either way.
+//
+// Transaction.Commit does not retry it, but a later Commit can try again.
+// Staged files are retained. Files created during retries are deleted unless
+// the transaction can reuse them. Errors that also match ErrCommitFailed
+// are treated as conflicts.
+var ErrCommitRejected = errors.New("commit rejected")
+
 // ErrTransactionUnusable means this transaction can't be committed again,
 // because after a refresh the commit fails a check that every later attempt
 // would fail too. An error can match both ErrTransactionUnusable and
@@ -902,7 +914,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// may have actually succeeded — retrying could duplicate work.
 		// Suppress orphan cleanup for the same reason: one of the orphaned
 		// manifest-list files may actually be the snapshot the catalog accepted.
+		// Rejected commits cannot reference these files, so cleanup is safe.
 		if !errors.Is(err, ErrCommitFailed) {
+			if errors.Is(err, ErrCommitRejected) {
+				return nil, err
+			}
 			cleanupOrphans = false
 
 			return nil, &commitStateUnknownError{err: err}

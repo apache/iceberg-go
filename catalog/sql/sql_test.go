@@ -1732,6 +1732,74 @@ func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateIsRefusedOnRecommit() {
 	s.Equal(peerMeta.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
 }
 
+func (s *SqliteCatalogTestSuite) TestRejectedUpdateLeavesTransactionResumable() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.randomTableIdentifier()
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+	})
+	stale, err := cat.CreateTable(ctx, tblID, schema, catalog.WithProperties(iceberg.Properties{
+		table.PropertyFormatVersion: "1",
+	}))
+	s.Require().NoError(err)
+
+	tx := stale.NewTransaction()
+	s.Require().NoError(tx.UpgradeFormatVersion(2))
+
+	peer := stale.NewTransaction()
+	s.Require().NoError(peer.UpgradeFormatVersion(3))
+	peerTbl, err := peer.Commit(ctx)
+	s.Require().NoError(err)
+
+	// The catalog's metadata builder refuses to downgrade the peer's table.
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrCommitRejected)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidArgument)
+	s.Require().NotErrorIs(err, table.ErrTransactionUnusable)
+
+	current, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Equal(peerTbl.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
+
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrCommitRejected)
+	s.Require().NotErrorIs(err, table.ErrTransactionUnusable)
+}
+
+func (s *SqliteCatalogTestSuite) TestCatalogUpdateFailureAfterMetadataWriteEndsTransaction() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.randomTableIdentifier()
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+	tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+	s.Require().NoError(err)
+
+	sqlDB := s.getDB()
+	defer sqlDB.Close()
+	_, err = sqlDB.Exec(`
+		CREATE TRIGGER fail_catalog_update
+		BEFORE UPDATE ON iceberg_tables
+		BEGIN
+			SELECT RAISE(FAIL, 'forced update failure');
+		END
+	`)
+	s.Require().NoError(err)
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.SetProperties(iceberg.Properties{"key": "value"}))
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorContains(err, "forced update failure")
+	s.Require().NotErrorIs(err, table.ErrCommitRejected)
+	s.Require().NotErrorIs(err, table.ErrCommitFailed)
+
+	_, err = tx.Commit(ctx)
+	s.Require().EqualError(err, "transaction has already been committed")
+}
+
 func (s *SqliteCatalogTestSuite) TestConflictClearedBeforeRecommitLands() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()

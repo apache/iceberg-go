@@ -55,8 +55,15 @@ case errors.Is(err, table.ErrCommitDiverged), errors.Is(err, table.ErrTransactio
     // unrecoverable: rebuild the operation from the latest table
 case errors.Is(err, table.ErrCommitFailed):
     // retriable: refresh and try again (the retry loop does this for you)
+case errors.Is(err, table.ErrCommitRejected):
+    // the catalog wrote nothing: fix the cause, then call Commit again
 }
 ```
+
+A commit can also fail with `table.ErrCommitRejected`, which means the catalog
+rejected it before writing anything, for example an update the catalog can't
+apply or a REST 400, 401, 403 or 404. The commit is not retried, and the
+transaction can still be committed.
 
 ## Isolation levels
 
