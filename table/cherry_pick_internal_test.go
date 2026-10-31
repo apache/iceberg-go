@@ -34,7 +34,20 @@ func TestCherryPickSnapshotRejectsNonAppendOperation(t *testing.T) {
 	for _, op := range []Operation{OpDelete, OpOverwrite, OpReplace} {
 		t.Run(string(op), func(t *testing.T) {
 			txn := newTransactionWithSnapshotRefs(t)
-			txn.meta.snapshotList[1].Summary.Operation = op
+			// The source is a direct child of main in the shared fixture,
+			// which Java allows to fast-forward for any operation. Move main
+			// onto a divergent lineage to exercise unsupported replay.
+			source := txn.meta.snapshotList[1]
+			require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+				SnapshotID:       30,
+				ParentSnapshotID: new(int64(10)),
+				SequenceNumber:   3,
+				ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+				Summary:          &Summary{Operation: OpAppend},
+				TimestampMs:      source.TimestampMs + 1,
+			}))
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
+			source.Summary.Operation = op
 			err := txn.CherryPickSnapshot(t.Context(), 20, nil)
 			require.ErrorIs(t, err, ErrInvalidOperation)
 		})
