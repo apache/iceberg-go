@@ -2668,7 +2668,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		if len(t.expirations) > 0 {
 			replay = newStagedReplay(cmp.Or(t.branch, MainBranch), meta.updates, t.expirations)
 		}
-		tbl, submitted, err := t.tbl.doCommit(ctx, meta.updates, reqs,
+		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 			withCommitNoReplay(t.noReplay),
@@ -2699,8 +2699,12 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		// otherwise a retry would re-run the catalog commit.
 		t.committed = true
 
+		landed := meta.updates
+		if replay != nil && replay.ran {
+			landed = replay.landed
+		}
 		var removals []*removeSnapshotsUpdate
-		for _, u := range submitted {
+		for _, u := range landed {
 			if removal, ok := u.(*removeSnapshotsUpdate); ok {
 				removals = append(removals, removal)
 

@@ -639,10 +639,9 @@ func withCommitReplay(replay *stagedReplay) commitOption {
 	return func(o *commitOpts) { o.replay = replay }
 }
 
-// Returned updates are from the successful attempt, not the staged plan.
 // If replay leaves no updates, return the refreshed table without a catalog
 // commit.
-func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, []Update, error) {
+func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
 	var co commitOpts
 	for _, apply := range opts {
 		apply(&co)
@@ -650,7 +649,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	cfg, err := readRetryConfig(t.metadata.Properties())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Bound total retry time with a derived context so both the wait loop
@@ -660,7 +659,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	fs, err := t.fsF(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Every real commit-path FS implements WriteFileIO. Failing here is
@@ -668,7 +667,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// retry loop — a skip reintroduces the original stale-parent data loss.
 	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: manifest list rebuild requires write access", err)
+		return nil, fmt.Errorf("%w: manifest list rebuild requires write access", err)
 	}
 
 	var (
@@ -781,7 +780,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			case <-retryCtx.Done():
 				timer.Stop()
 
-				return nil, nil, context.Cause(retryCtx)
+				return nil, context.Cause(retryCtx)
 			case <-timer.C:
 			}
 		}
@@ -795,11 +794,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// non-conflicting commit.
 			fresh, refreshErr := t.cat.LoadTable(retryCtx, slices.Clone(t.identifier))
 			if refreshErr != nil {
-				return nil, nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
+				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}
 			if t.metadata != nil && fresh.metadata != nil {
 				if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
-					return nil, nil, fmt.Errorf("%w: table was replaced: %w", ErrTransactionUnusable, err)
+					return nil, fmt.Errorf("%w: table was replaced: %w", ErrTransactionUnusable, err)
 				}
 			}
 			current, currentLoc = fresh.metadata, fresh.metadataLocation
@@ -807,20 +806,20 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 			if err := validateNonRebasedRequirements(reqs, co.branch, pinned, current); err != nil {
 				if co.noReplay {
-					return nil, nil, fmt.Errorf("%w: requirement no longer holds after refresh (%s): %w",
+					return nil, fmt.Errorf("%w: requirement no longer holds after refresh (%s): %w",
 						ErrTransactionUnusable, noReplayHint, err)
 				}
 
-				return nil, nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w", ErrTransactionUnusable, err)
+				return nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w", ErrTransactionUnusable, err)
 			}
 		}
 
 		if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
 			if refreshed {
-				return nil, nil, fmt.Errorf("%w: commit branch is no longer a branch: %w", ErrTransactionUnusable, err)
+				return nil, fmt.Errorf("%w: commit branch is no longer a branch: %w", ErrTransactionUnusable, err)
 			}
 
-			return nil, nil, err
+			return nil, err
 		}
 
 		if refreshed {
@@ -855,15 +854,15 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			if rebuildErr != nil {
 				if errors.Is(rebuildErr, ErrTransactionUnusable) {
-					return nil, nil, rebuildErr
+					return nil, rebuildErr
 				}
 				// Replaced files missing from the branch head stay missing, so
 				// every later attempt fails the same way.
 				if errors.Is(rebuildErr, ErrCommitDiverged) {
-					return nil, nil, fmt.Errorf("%w: files to rewrite were removed: %w", ErrTransactionUnusable, rebuildErr)
+					return nil, fmt.Errorf("%w: files to rewrite were removed: %w", ErrTransactionUnusable, rebuildErr)
 				}
 
-				return nil, nil, fmt.Errorf("%s for retry attempt %d: %w", step, attempt, rebuildErr)
+				return nil, fmt.Errorf("%s for retry attempt %d: %w", step, attempt, rebuildErr)
 			}
 			orphanedManifests = append(orphanedManifests, orphaned...)
 			updates = rebuiltUpdates
@@ -872,7 +871,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			if co.replay != nil && len(updates) == 0 {
 				committed = true
 
-				return t.withMetadata(current, currentLoc), nil, nil
+				return t.withMetadata(current, currentLoc), nil
 			}
 		}
 
@@ -900,10 +899,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 				// ErrCommitDiverged — terminal, do not retry. The
 				// sentinel deliberately does not wrap ErrCommitFailed.
 				if errors.Is(ccErr, ErrCommitDiverged) {
-					return nil, nil, fmt.Errorf("%w: base diverged: %w", ErrTransactionUnusable, ccErr)
+					return nil, fmt.Errorf("%w: base diverged: %w", ErrTransactionUnusable, ccErr)
 				}
 
-				return nil, nil, ccErr
+				return nil, ccErr
 			}
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
@@ -911,16 +910,16 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 					// Other validator errors, such as read failures, stay
 					// resumable.
 					if errors.Is(vErr, ErrCommitFailed) {
-						return nil, nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
+						return nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
 					}
 
-					return nil, nil, vErr
+					return nil, vErr
 				}
 			}
 		}
 
 		if retryCtx.Err() != nil {
-			return nil, nil, context.Cause(retryCtx)
+			return nil, context.Cause(retryCtx)
 		}
 
 		// Keep per-attempt expiry assertions out of reqs so refresh does not
@@ -949,7 +948,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		if !errors.Is(err, ErrCommitFailed) {
 			cleanupOrphans = false
 
-			return nil, nil, &commitStateUnknownError{err: err}
+			return nil, &commitStateUnknownError{err: err}
 		}
 
 		// Non-replayable commits fail on the first CAS conflict instead
@@ -957,12 +956,12 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// distinguishes this abort from an exhausted retry budget while
 		// preserving errors.Is(err, ErrCommitFailed).
 		if co.noReplay {
-			return nil, nil, fmt.Errorf("%w (%s)", err, noReplayHint)
+			return nil, fmt.Errorf("%w (%s)", err, noReplayHint)
 		}
 	}
 
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
@@ -990,7 +989,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
-	return t.withMetadata(newMeta, newLoc), updates, nil
+	return t.withMetadata(newMeta, newLoc), nil
 }
 
 func (t Table) withMetadata(meta Metadata, loc string) *Table {

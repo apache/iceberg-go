@@ -34,6 +34,11 @@ type stagedReplay struct {
 	updates []Update
 
 	plans [][]string
+
+	// Updates from the last successful replay.
+	// ran distinguishes an empty replay from no replay.
+	landed []Update
+	ran    bool
 }
 
 func newStagedReplay(branch string, updates []Update, records []expirationRecord) *stagedReplay {
@@ -115,6 +120,7 @@ func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFi
 		i++
 	}
 	r.plans = plans
+	r.landed, r.ran = out, true
 
 	return out, orphaned, nil
 }

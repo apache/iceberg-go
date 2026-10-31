@@ -616,6 +616,33 @@ func TestExpireReplayAssertsWalkedRefFromAttemptBase(t *testing.T) {
 	})
 }
 
+func TestExpireReplayKeepsAgedRefAfterPeerAdvancesIt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, cat, tbl := newExpireReplayTable(t, iceberg.Properties{MaxRefAgeMsKey: "3600000"})
+		tbl, b1 := appendOnBranch(t, tbl, MainBranch, "b1")
+		tbl, d1 := appendOnBranch(t, tbl, "dev", "d1")
+		time.Sleep(2 * time.Hour)
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.ExpireSnapshots())
+		staged, err := tx.StagedTable()
+		require.NoError(t, err)
+		require.Nil(t, staged.Metadata().SnapshotByName("dev"), "the staged plan removes the aged ref")
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
+
+		p := peerAppend(t, fs, cat, "dev", "p")
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		meta := committed.Metadata()
+		assert.Equal(t, p, refHead(t, meta, "dev"))
+		assert.Equal(t, d1, parentOf(t, meta, p))
+		assert.Equal(t, b1, refHead(t, meta, MainBranch))
+		assert.Equal(t, "v", committed.Properties()["k"])
+	})
+}
+
 func TestExpireReplayFailsWhenPeerDisablesGC(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		_, cat, tbl := newExpireReplayTable(t, nil)

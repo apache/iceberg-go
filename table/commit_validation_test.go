@@ -101,7 +101,7 @@ func TestDoCommit_ValidatorRejectsTerminatesPreFlight(t *testing.T) {
 
 	reject := func(cc *conflictContext) error { return ErrConflictingDataFiles }
 
-	_, _, err := tbl.doCommit(context.Background(), nil, nil,
+	_, err := tbl.doCommit(context.Background(), nil, nil,
 		withCommitBranch(MainBranch),
 		withCommitValidators(reject))
 	require.Error(t, err)
@@ -123,7 +123,7 @@ func TestDoCommit_DivergedSentinelIsTerminal(t *testing.T) {
 
 	diverge := func(cc *conflictContext) error { return ErrCommitDiverged }
 
-	_, _, err := tbl.doCommit(context.Background(), nil, nil,
+	_, err := tbl.doCommit(context.Background(), nil, nil,
 		withCommitBranch(MainBranch),
 		withCommitValidators(diverge))
 	require.Error(t, err)

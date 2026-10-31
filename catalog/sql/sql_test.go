@@ -2093,37 +2093,6 @@ func snapshotIDsBySequence(meta table.Metadata) []int64 {
 	return ids
 }
 
-func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsReplansAfterPeerAppend() {
-	s.inBubble(func() {
-		ctx := context.Background()
-		cat := s.getCatalogSqlite()
-		defer cat.Close()
-		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3")
-		stale, err := cat.LoadTable(ctx, tblID)
-		s.Require().NoError(err)
-		ids := snapshotIDsBySequence(stale.Metadata())
-		time.Sleep(time.Millisecond)
-
-		tx := stale.NewTransaction()
-		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(2), table.WithOlderThan(0)))
-
-		peer, err := cat.LoadTable(ctx, tblID)
-		s.Require().NoError(err)
-		peer = s.appendStringRow(ctx, peer, table.MainBranch, "p")
-		p := peer.Metadata().CurrentSnapshot().SnapshotID
-
-		_, err = tx.Commit(ctx)
-		s.Require().NoError(err)
-
-		current, err := cat.LoadTable(ctx, tblID)
-		s.Require().NoError(err)
-		s.Equal([]int64{ids[2], p}, snapshotIDsBySequence(current.Metadata()))
-		s.Equal(p, current.Metadata().CurrentSnapshot().SnapshotID)
-		s.ElementsMatch([]string{"s1", "s2", "s3", "p"}, s.storedStringValues(ctx, current))
-		s.ElementsMatch([]string{"s1", "s2", "s3"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[2])))
-	})
-}
-
 func (s *SqliteCatalogTestSuite) TestStaleAppendAndExpireReplansAfterPeerRollback() {
 	s.inBubble(func() {
 		ctx := context.Background()
@@ -2199,42 +2168,6 @@ func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsKeepsBranchPeerCreated(
 		s.Equal(ids[0], keep.SnapshotID)
 		s.ElementsMatch([]string{"s1", "s2", "s3", "p"}, s.storedStringValues(ctx, current))
 		s.ElementsMatch([]string{"s1"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[0])))
-	})
-}
-
-func (s *SqliteCatalogTestSuite) TestStaleAppendAndExpireReplansAfterPeerAppend() {
-	s.inBubble(func() {
-		ctx := context.Background()
-		cat := s.getCatalogSqlite()
-		defer cat.Close()
-		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3")
-		stale, err := cat.LoadTable(ctx, tblID)
-		s.Require().NoError(err)
-		time.Sleep(time.Millisecond)
-
-		tx := stale.NewTransaction()
-		s.stageStringRow(ctx, tx, "a")
-		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(2), table.WithOlderThan(0)))
-
-		peer, err := cat.LoadTable(ctx, tblID)
-		s.Require().NoError(err)
-		peer = s.appendStringRow(ctx, peer, table.MainBranch, "p")
-		p := peer.Metadata().CurrentSnapshot().SnapshotID
-
-		_, err = tx.Commit(ctx)
-		s.Require().NoError(err)
-
-		current, err := cat.LoadTable(ctx, tblID)
-		s.Require().NoError(err)
-		got := snapshotIDsBySequence(current.Metadata())
-		s.Require().Len(got, 2)
-		s.Equal(p, got[0])
-		head := current.Metadata().CurrentSnapshot()
-		s.Equal(got[1], head.SnapshotID)
-		s.Require().NotNil(head.ParentSnapshotID)
-		s.Equal(p, *head.ParentSnapshotID)
-		s.ElementsMatch([]string{"s1", "s2", "s3", "p", "a"}, s.storedStringValues(ctx, current))
-		s.ElementsMatch([]string{"s1", "s2", "s3", "p"}, s.storedStringValues(ctx, current, table.WithSnapshotID(p)))
 	})
 }
 

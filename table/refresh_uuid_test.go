@@ -210,7 +210,7 @@ func TestCommitRetryRejectsChangedTableUUIDBeforeRetryCommit(t *testing.T) {
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat,
 	)
 
-	_, _, err := tbl.doCommit(context.Background(), nil, nil, withCommitBranch(MainBranch))
+	_, err := tbl.doCommit(context.Background(), nil, nil, withCommitBranch(MainBranch))
 	require.ErrorIs(t, err, ErrInvalidMetadata)
 	require.ErrorContains(t, err, "load a new table handle")
 	require.Equal(t, int32(1), cat.attempts.Load(), "changed UUID must stop the retry before a second catalog commit")
