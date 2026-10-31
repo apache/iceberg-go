@@ -151,7 +151,7 @@ Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/ma
 
 ### SQL (`catalog/sql`)
 
-The SQL catalog has no functional-option surface. Construct it with `NewCatalog`:
+Construct a SQL catalog with `NewCatalog` or use `NewCatalogWithOptions` to select an isolated FileIO registry:
 
 ```go
 db, _ := sql.Open(sqliteshim.ShimName, "file:catalog.db")
@@ -317,7 +317,7 @@ Cloud schemes (`s3`, `gs`, `abfs`, etc.) are registered only when the matching b
 
 `io.GetRegisteredSchemes()` returns the current scheme list; `io.Unregister(scheme)` removes one.
 
-To register schemes at runtime without changing other users of the same process, create an independent registry (catalogs and `view.CreateView` still resolve through the default registry):
+To register schemes at runtime without changing other users of the same process, create an independent registry:
 
 ```go
 registry := io.NewRegistry()
@@ -328,6 +328,10 @@ fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 ```
 
 `io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
+
+To use the registry with a catalog, pass `WithIORegistry(registry)` to `glue.NewCatalog` or `hive.NewCatalog`; call `hadoop.NewCatalogWithOptions(..., hadoop.WithIORegistry(registry))` or `sql.NewCatalogWithOptions(..., sql.WithIORegistry(registry))` for Hadoop and SQL. Direct view metadata writes can use `view.CreateViewWithIORegistry` or `view.CreateViewWithIOPropertiesAndRegistry`. The default remains global when no registry is specified. An empty non-nil registry does **not** fall back to global schemes. REST catalog support is tracked in [#2366](https://github.com/apache/iceberg-go/pull/2366).
+
+These FileIO options do not select a KMS implementation. `encryption.KMSRegistry` is separate; no catalog encryption path currently loads a KMS client.
 
 ### Catalog type registry
 

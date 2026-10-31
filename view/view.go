@@ -152,38 +152,56 @@ func CreateView(
 	return CreateViewWithIOProperties(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
 }
 
+// CreateViewWithIORegistry writes view metadata through the supplied
+// registry. A nil registry keeps the global FileIO behavior.
+func CreateViewWithIORegistry(
+	ctx context.Context, catalogName string, viewIdent table.Identifier,
+	schema *iceberg.Schema, representation Representation, defaultNS table.Identifier,
+	loc string, props iceberg.Properties, registry *io.Registry,
+) (*View, error) {
+	return CreateViewWithIOPropertiesAndRegistry(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, registry)
+}
+
 // CreateViewWithIOProperties creates a view using ioProps to configure the
 // filesystem and metadataProps as the properties persisted in view metadata.
 // representation holds both SQL text and its dialect.
 func CreateViewWithIOProperties(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	ioProps iceberg.Properties,
-	metadataProps iceberg.Properties,
+	ctx context.Context, catalogName string, viewIdent table.Identifier,
+	schema *iceberg.Schema, representation Representation, defaultNS table.Identifier,
+	loc string, ioProps iceberg.Properties, metadataProps iceberg.Properties,
 ) (*View, error) {
-	viewVersion, err := NewVersionFromSQL(
-		InitialVersionID,
-		schema.ID,
-		representation,
-		defaultNS,
-		WithDefaultViewCatalog(catalogName),
-	)
+	return CreateViewWithIOPropertiesAndRegistry(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps, nil)
+}
+
+// CreateViewWithIOPropertiesAndRegistry resolves FileIO through an optional
+// registry while keeping storage credentials out of persisted view properties.
+func CreateViewWithIOPropertiesAndRegistry(
+	ctx context.Context, catalogName string, viewIdent table.Identifier,
+	schema *iceberg.Schema, representation Representation, defaultNS table.Identifier,
+	loc string, ioProps iceberg.Properties, metadataProps iceberg.Properties,
+	registry *io.Registry,
+) (*View, error) {
+	version, err := NewVersionFromSQL(InitialVersionID, schema.ID, representation, defaultNS, WithDefaultViewCatalog(catalogName))
 	if err != nil {
 		return nil, err
 	}
-
-	return CreateViewFromVersion(ctx, viewIdent, schema, viewVersion, loc, ioProps, metadataProps)
+	return CreateViewFromVersionWithRegistry(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, registry)
 }
 
 // CreateViewFromVersion creates a view whose first version is version, kept as
 // given apart from its IDs. A nil default namespace defaults to the view's
 // namespace, a nil summary to the engine name, and a zero timestamp to now.
 func CreateViewFromVersion(
+	ctx context.Context, viewIdent table.Identifier, schema *iceberg.Schema,
+	version *Version, loc string, ioProps iceberg.Properties, metadataProps iceberg.Properties,
+) (*View, error) {
+	return CreateViewFromVersionWithRegistry(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, nil)
+}
+
+// CreateViewFromVersionWithRegistry preserves the caller's complete first
+// version, including all SQL representations, summary and default catalog.
+// Only FileIO resolution differs from CreateViewFromVersion.
+func CreateViewFromVersionWithRegistry(
 	ctx context.Context,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
@@ -191,6 +209,7 @@ func CreateViewFromVersion(
 	loc string,
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
+	registry *io.Registry,
 ) (*View, error) {
 	if version == nil {
 		return nil, fmt.Errorf("%w: view version is required", ErrInvalidViewMetadata)
@@ -230,7 +249,11 @@ func CreateViewFromVersion(
 		return nil, fmt.Errorf("failed to marshal view metadata: %w", err)
 	}
 
-	fs, err := io.LoadFS(ctx, ioProps, metadataLocation)
+	loadFS := io.LoadFS
+	if registry != nil {
+		loadFS = registry.LoadFS
+	}
+	fs, err := loadFS(ctx, ioProps, metadataLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}

@@ -39,6 +39,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
@@ -191,6 +192,8 @@ type Catalog struct {
 	// reporter builds and caches the catalog's metrics reporter once, so it is
 	// constructed per-catalog rather than per table load. Released by Close.
 	reporter metrics.CachedReporter
+
+	ioRegistry *io.Registry
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
@@ -201,6 +204,17 @@ type Catalog struct {
 // call. When using other schemes, the property `allow-unsafe-commits` must be set to
 // true since custom schemes and blob filesystems do not have the same atomicity guarantees.
 func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Properties) (*Catalog, error) {
+	return NewCatalogWithOptions(ctx, name, warehouse, props)
+}
+
+// NewCatalogWithOptions allows a Hadoop catalog to use an isolated FileIO registry
+// without changing the existing NewCatalog API.
+func NewCatalogWithOptions(ctx context.Context, name, warehouse string, props iceberg.Properties, opts ...Option) (*Catalog, error) {
+	var config catalogOptions
+	for _, opt := range opts {
+		opt(&config)
+	}
+
 	if warehouse == "" {
 		return nil, errors.New("hadoop catalog requires a warehouse path")
 	}
@@ -247,7 +261,7 @@ func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Prope
 	// every later operation. Keep the caller's values, but not its cancellation
 	// or deadline, for the lifetime of the catalog. The original context is
 	// checked before and after initialization so canceled setup still fails.
-	filesystem, err := io.LoadFS(context.WithoutCancel(ctx), props, warehouse)
+	filesystem, err := internal.LoadFSWithRegistry(context.WithoutCancel(ctx), config.ioRegistry, props, warehouse)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to load filesystem: %w", ctxErr)
 	}
@@ -267,6 +281,7 @@ func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Prope
 		// filesystem is resolved dynamically from the IO registry based on the warehouse scheme
 		filesystem: hadoopFs,
 		props:      props,
+		ioRegistry: config.ioRegistry,
 	}
 
 	// Resolve the metrics reporter once, up front. CachedReporter caches the

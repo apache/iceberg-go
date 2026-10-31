@@ -30,7 +30,6 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
-	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/google/uuid"
@@ -121,7 +120,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		ident,
 		metadata,
 		metaPath,
-		io.LoadFSFunc(c.props, metaPath),
+		internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, metaPath),
 		c,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(c.props),
@@ -146,7 +145,7 @@ func (c *Catalog) loadTable(ctx context.Context, ident table.Identifier) (*table
 	}
 
 	tbl, err := table.NewFromLocation(
-		ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c,
+		ctx, ident, metaPath, internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, metaPath), c,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(c.props),
 	)
