@@ -431,13 +431,28 @@ func (s *StructType) Equals(other Type) bool {
 
 func (s *StructType) Fields() []NestedField { return s.FieldList }
 
-func (s *StructType) MarshalJSON() ([]byte, error) {
-	type Alias StructType
+// The JSON methods of the nested types name every serialized field instead of
+// encoding through an alias of the type, so the wire format does not depend on
+// which Go fields are exported.
 
+func (s *StructType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-	}{Type: s.Type(), Alias: (*Alias)(s)})
+		Type   string        `json:"type"`
+		Fields []NestedField `json:"fields"`
+	}{Type: s.Type(), Fields: s.FieldList})
+}
+
+func (s *StructType) UnmarshalJSON(b []byte) error {
+	aux := struct {
+		Fields []NestedField `json:"fields"`
+	}{}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+
+	s.FieldList = aux.Fields
+
+	return nil
 }
 
 func (*StructType) Type() string { return "struct" }
@@ -474,13 +489,15 @@ type ListType struct {
 }
 
 func (l *ListType) MarshalJSON() ([]byte, error) {
-	type Alias ListType
-
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-		Element *typeIFace `json:"element"`
-	}{Type: l.Type(), Alias: (*Alias)(l), Element: &typeIFace{l.Element}})
+		Type            string     `json:"type"`
+		ElementID       int        `json:"element-id"`
+		ElementRequired bool       `json:"element-required"`
+		Element         *typeIFace `json:"element"`
+	}{
+		Type: l.Type(), ElementID: l.ElementID, ElementRequired: l.ElementRequired,
+		Element: &typeIFace{l.Element},
+	})
 }
 
 func (l *ListType) Equals(other Type) bool {
@@ -546,15 +563,15 @@ type MapType struct {
 }
 
 func (m *MapType) MarshalJSON() ([]byte, error) {
-	type Alias MapType
-
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-		KeyType   *typeIFace `json:"key"`
-		ValueType *typeIFace `json:"value"`
+		Type          string     `json:"type"`
+		KeyID         int        `json:"key-id"`
+		ValueID       int        `json:"value-id"`
+		ValueRequired bool       `json:"value-required"`
+		KeyType       *typeIFace `json:"key"`
+		ValueType     *typeIFace `json:"value"`
 	}{
-		Type: m.Type(), Alias: (*Alias)(m),
+		Type: m.Type(), KeyID: m.KeyID, ValueID: m.ValueID, ValueRequired: m.ValueRequired,
 		KeyType:   &typeIFace{m.KeyType},
 		ValueType: &typeIFace{m.ValueType},
 	})
