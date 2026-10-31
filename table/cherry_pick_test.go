@@ -72,6 +72,25 @@ func TestCherryPickSnapshotFromDivergentBranch(t *testing.T) {
 	require.ErrorContains(t, err, "already been applied")
 }
 
+func TestCherryPickSnapshotFastForwardsDirectChild(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	require.Equal(t, tbl.CurrentSnapshot().SnapshotID, *source.ParentSnapshotID)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID,
+		iceberg.Properties{"ignored-on-fast-forward": "true"}))
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, source.SnapshotID, result.CurrentSnapshot().SnapshotID,
+		"fast-forward reuses the source snapshot ID")
+	assert.NotContains(t, result.CurrentSnapshot().Summary.Properties, "ignored-on-fast-forward")
+	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
+}
+
 func TestCherryPickSnapshotRejectsAncestor(t *testing.T) {
 	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
 	id := tbl.CurrentSnapshot().SnapshotID
@@ -138,11 +157,28 @@ func TestCherryPickSnapshotRejectsV3RowLineageReuse(t *testing.T) {
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
 	source := tbl.SnapshotByName(branchPlanningRef)
 	require.NotNil(t, source)
+	// Diverge the target: a direct-child source is safely fast-forwardable.
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
 
 	tx := tbl.NewTransaction()
 	err := tx.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 	assert.Contains(t, err.Error(), "row ID")
+}
+
+func TestCherryPickSnapshotV3FastForwardPreservesLineage(t *testing.T) {
+	tbl := newBranchPlanningTable(t, iceberg.Properties{table.PropertyFormatVersion: "3"})
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, source.SnapshotID, result.CurrentSnapshot().SnapshotID)
+	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, table.MainBranch))
 }
 
 func TestCherryPickSnapshotTracksWAPPublication(t *testing.T) {
