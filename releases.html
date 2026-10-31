@@ -309,6 +309,9 @@
 <p><strong>View SQL representation construction uses named fields.</strong> Replace <code>view.NewRepresentation(sql, dialect)</code> with <code>view.NewRepresentation(view.Representation{SQL: sql, Dialect: dialect})</code>. Serialized JSON is unchanged.</p>
 </li>
 <li>
+<p><strong>Hive views keep the caller's view version.</strong> <code>hive.Catalog.CreateView</code> now stores every representation, the summary, the default namespace and <code>default-catalog</code> as passed, instead of one representation with <code>default-catalog</code> set to <code>&quot;hive&quot;</code>.</p>
+</li>
+<li>
 <p><strong>Reserved table properties now use a read-only API.</strong> Replace references to <code>table.ReservedProperties</code> with <code>table.ReservedProperties()</code>. The function returns a fresh slice, so callers cannot change metadata validation by modifying it.</p>
 </li>
 <li>
