@@ -27,18 +27,20 @@ import (
 
 // CherryPickSnapshot applies the additions from an existing append snapshot to
 // the transaction's target branch. The original snapshot and its branch are
-// not modified. The new commit gets its own snapshot ID and sequence number,
-// while reusing the source data files without copying their contents.
+// not modified. If the source directly follows the target head, the target
+// fast-forwards to the existing source snapshot (including for non-append
+// operations and v3). Otherwise, a supported append is replayed into a new
+// snapshot and sequence number without copying the underlying data files.
 //
 // Source snapshots may come from a different branch or an unreferenced
 // snapshot still present in table metadata. A source that is already an
 // ancestor of the target branch is rejected to avoid replaying old changes.
-// Only append snapshots are supported; overwrite, delete, and replace
-// snapshots require different conflict and rewrite semantics.
+// Only append snapshots can be replayed onto a divergent target. Other
+// operations require the direct-parent fast-forward described above.
 //
-// This operation currently supports format v1 and v2 tables only. In v3,
-// copying a data file into another snapshot without remapping row lineage
-// may reuse row IDs, so the operation fails instead of producing invalid data.
+// Replaying file additions is currently limited to v1 and v2. In v3,
+// copying files into another snapshot may reuse row IDs; fast-forwarding an
+// existing snapshot is safe because the lineage is not duplicated.
 //
 // The target branch is pinned to its base head to prevent a concurrent append
 // from introducing duplicate file references between validation and commit.
@@ -56,17 +58,14 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	if err != nil {
 		return err
 	}
-	if source.Summary == nil || source.Summary.Operation != OpAppend {
-		return fmt.Errorf("%w: snapshot %d is not an append snapshot", ErrInvalidOperation, snapshotID)
-	}
-	if meta.formatVersion >= 3 {
-		return fmt.Errorf("%w: cherry-picking v3 snapshots requires row ID reassignment", iceberg.ErrNotImplemented)
-	}
-
 	// Check both direct ancestry and earlier cherry-picks. A later snapshot
 	// may have removed the source files, so checking live paths is not enough.
-	wapID := source.Summary.Properties["wap.id"]
-	if head := t.planningSnapshot(meta); head != nil {
+	wapID := ""
+	if source.Summary != nil {
+		wapID = source.Summary.Properties["wap.id"]
+	}
+	head := t.planningSnapshot(meta)
+	if head != nil {
 		lookup := func(id int64) *Snapshot {
 			snapshot, _ := meta.SnapshotByID(id)
 
@@ -83,6 +82,39 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 			}
 		}
 	}
+
+	// Java's CherryPickOperation returns the source snapshot itself when its
+	// parent matches the target head. This is valid for all operations and
+	// all table versions: no file is copied, so row lineage stays intact.
+	// A fast-forward intentionally has no new snapshot summary properties.
+	fastForward := head == nil && source.ParentSnapshotID == nil
+	if head != nil && source.ParentSnapshotID != nil {
+		fastForward = *source.ParentSnapshotID == head.SnapshotID
+	}
+	if fastForward {
+		target := t.branch
+		if target == "" {
+			target = MainBranch
+		}
+		if ref, ok := meta.refs[target]; ok && ref.Type != BranchRef {
+			return fmt.Errorf("%w: target ref %q is not a branch", ErrInvalidOperation, target)
+		}
+		update := meta.NewRetainingSnapshotRefUpdate(target, source.SnapshotID, BranchRef)
+
+		return t.applyPinned([]Update{update},
+			[]Requirement{assertBranchRefSnapshotID(target, t.baseRefSnapshotID(target))},
+			[]string{target})
+	}
+
+	if source.Summary == nil || source.Summary.Operation != OpAppend {
+		return fmt.Errorf("%w: snapshot %d is not append, dynamic overwrite, or a fast-forward",
+			ErrInvalidOperation, snapshotID)
+	}
+	if meta.formatVersion >= 3 {
+		return fmt.Errorf("%w: replaying v3 append snapshots requires row ID reassignment",
+			iceberg.ErrNotImplemented)
+	}
+
 	props := make(iceberg.Properties, len(snapshotProps)+2)
 	maps.Copy(props, snapshotProps)
 	props["source-snapshot-id"] = strconv.FormatInt(snapshotID, 10)
