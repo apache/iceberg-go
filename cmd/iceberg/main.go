@@ -280,7 +280,7 @@ func main() {
 	case args.Compact != nil && args.Compact.Analyze == nil && args.Compact.Run == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "compact")
 		osExit(1)
-	case args.Branch != nil && args.Branch.Create == nil && args.Branch.Delete == nil:
+	case args.Branch != nil && args.Branch.Create == nil && args.Branch.Delete == nil && args.Branch.FastForward == nil && args.Branch.Replace == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "branch")
 		osExit(1)
 	case args.Tag != nil && args.Tag.Create == nil && args.Tag.Delete == nil:

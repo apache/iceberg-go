@@ -97,9 +97,27 @@ type BranchDeleteCmd struct {
 	Yes        bool   `arg:"--yes" help:"skip confirmation prompt"`
 }
 
+// BranchFastForwardCmd advances a target branch to an ancestor-safe source ref.
+type BranchFastForwardCmd struct {
+	TableID    string `arg:"positional,required" help:"full path to a table"`
+	BranchName string `arg:"positional,required" help:"target branch name"`
+	SourceRef  string `arg:"positional,required" help:"source branch or tag"`
+	Yes        bool   `arg:"--yes" help:"skip confirmation prompt"`
+}
+
+// BranchReplaceCmd explicitly moves a branch to a selected snapshot.
+type BranchReplaceCmd struct {
+	TableID    string `arg:"positional,required" help:"full path to a table"`
+	BranchName string `arg:"positional,required" help:"target branch name"`
+	SnapshotID int64  `arg:"positional,required" help:"snapshot ID (does not require ancestry)"`
+	Yes        bool   `arg:"--yes" help:"skip confirmation prompt"`
+}
+
 type BranchCmd struct {
-	Create *BranchCreateCmd `arg:"subcommand:create" help:"create a branch"`
-	Delete *BranchDeleteCmd `arg:"subcommand:delete" help:"delete a branch"`
+	Create      *BranchCreateCmd      `arg:"subcommand:create" help:"create a branch"`
+	Delete      *BranchDeleteCmd      `arg:"subcommand:delete" help:"delete a branch"`
+	FastForward *BranchFastForwardCmd `arg:"subcommand:fast-forward" help:"advance a branch to an ancestor-safe source ref"`
+	Replace     *BranchReplaceCmd     `arg:"subcommand:replace" help:"replace a branch head with a snapshot"`
 }
 
 type TagCreateCmd struct {
