@@ -131,6 +131,90 @@ func TestYieldSortedPartitionFastPathPreservesTiesAndNulls(t *testing.T) {
 	}
 }
 
+func TestYieldSortedPartitionFastPathMatchesLegacyAcrossBatchBoundaries(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+	sc, cmp := orderedPartitionTestSetup(t)
+
+	// Source batches intentionally do not align with the four-row output
+	// limit. Ties cross the batch boundary, and the first key is null.
+	input := [][]orderedPartitionTestRow{
+		{
+			{label: "null"},
+			{key: 1, valid: true, label: "a"},
+			{key: 1, valid: true, label: "b"},
+		},
+		{
+			{key: 1, valid: true, label: "c"},
+			{key: 2, valid: true, label: "d"},
+			{key: 2, valid: true, label: "e"},
+			{key: 3, valid: true, label: "f"},
+			{key: 4, valid: true, label: "g"},
+		},
+	}
+	batches := make([]arrow.RecordBatch, len(input))
+	var want []orderedPartitionTestRow
+	for i, rows := range input {
+		batches[i] = makeOrderedPartitionTestBatch(mem, sc, rows)
+		want = append(want, rows...)
+	}
+	defer func() {
+		for _, batch := range batches {
+			batch.Release()
+		}
+	}()
+
+	var legacyRows []orderedPartitionTestRow
+	for _, method := range []struct {
+		name      string
+		fn        func(context.Context, []arrow.RecordBatch, rowComparator, int64, func(arrow.RecordBatch, error) bool) bool
+		wantSizes []int64
+	}{
+		{"legacy", legacyYieldSortedPartition, []int64{4, 4}},
+		{"fastpath", yieldSortedPartition, []int64{3, 4, 1}},
+	} {
+		t.Run(method.name, func(t *testing.T) {
+			var got []orderedPartitionTestRow
+			var sizes []int64
+			ok := method.fn(t.Context(), batches, cmp, 4, func(rec arrow.RecordBatch, err error) bool {
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer rec.Release()
+				sizes = append(sizes, rec.NumRows())
+				keys := rec.Column(0).(*array.Int64)
+				labels := rec.Column(1).(*array.String)
+				for i := range int(rec.NumRows()) {
+					row := orderedPartitionTestRow{
+						valid: !keys.IsNull(i),
+						label: labels.Value(i),
+					}
+					if row.valid {
+						row.key = keys.Value(i)
+					}
+					got = append(got, row)
+				}
+
+				return true
+			})
+			if !ok {
+				t.Fatal("iteration stopped early")
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("rows = %v, want %v", got, want)
+			}
+			if !slices.Equal(sizes, method.wantSizes) {
+				t.Fatalf("batch sizes = %v, want %v", sizes, method.wantSizes)
+			}
+			if method.name == "legacy" {
+				legacyRows = slices.Clone(got)
+			} else if !slices.Equal(got, legacyRows) {
+				t.Fatalf("fast-path rows = %v, legacy rows = %v", got, legacyRows)
+			}
+		})
+	}
+}
+
 func TestYieldSortedPartitionFastPathFallsBack(t *testing.T) {
 	tests := []struct {
 		name  string
