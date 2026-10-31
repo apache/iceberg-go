@@ -110,6 +110,7 @@ func parseCredentialExpiry(config iceberg.Properties) (time.Time, bool) {
 }
 
 type vendedCredentialRefresher struct {
+	ioRegistry *iceio.Registry
 	// Use a weighted semaphore with a single unit to use as an exclusive lock
 	// but cancellation (via context) is supported. This is important as we do IO
 	// while holding this lock and we want to allow others to cancel during acquisition.
@@ -211,11 +212,12 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	if len(v.credentials) > 0 {
 		prefixIO := newPrefixScopedIO(ioCtx, v.props, v.credentials)
 		prefixIO.nowFunc = v.now
+		prefixIO.ioRegistry = v.ioRegistry
 		newIO = prefixIO
 		// Expiry is enforced by prefixScopedIO against only the credential
 		// selected for each object location.
 	} else {
-		loaded, err := iceio.LoadFS(ioCtx, config, v.location)
+		loaded, err := loadRegistryFS(ioCtx, v.ioRegistry, config, v.location)
 		if err != nil {
 			ioCancel()
 
@@ -340,6 +342,7 @@ func (v *vendedCredentialRefresher) close() error {
 // files in different storage prefixes, so resolving credentials once at plan
 // creation would be incorrect.
 type prefixScopedIO struct {
+	ioRegistry  *iceio.Registry
 	ctx         context.Context
 	baseProps   iceberg.Properties
 	credentials []StorageCredential
@@ -408,7 +411,7 @@ func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
 
 	props := p.propertiesForLocation(name)
 
-	fs, err := iceio.LoadFS(p.ctx, props, name)
+	fs, err := loadRegistryFS(p.ctx, p.ioRegistry, props, name)
 	if err != nil {
 		return nil, err
 	}
@@ -562,4 +565,22 @@ func (p *prefixScopedIO) Close() error {
 	}
 
 	return closeErr
+}
+
+// loadRegistryFS preserves the global registry when none is configured.
+func loadRegistryFS(ctx context.Context, registry *iceio.Registry, props iceberg.Properties, location string) (iceio.IO, error) {
+	if registry == nil {
+		return iceio.LoadFS(ctx, props, location)
+	}
+
+	return registry.LoadFS(ctx, props, location)
+}
+
+// loadRegistryFSFunc preserves the global registry for lazy loads when none is configured.
+func loadRegistryFSFunc(registry *iceio.Registry, props iceberg.Properties, location string) func(context.Context) (iceio.IO, error) {
+	if registry == nil {
+		return iceio.LoadFSFunc(props, location)
+	}
+
+	return registry.LoadFSFunc(props, location)
 }

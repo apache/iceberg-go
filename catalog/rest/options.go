@@ -23,9 +23,16 @@ import (
 	"net/url"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 )
 
 type Option func(*options)
+
+// WithIORegistry selects the registry used to load table and scan FileIOs.
+// A nil registry uses the package-level default.
+func WithIORegistry(registry *iceio.Registry) Option {
+	return func(o *options) { o.ioRegistry = registry }
+}
 
 // TransportFactory creates a transport owned by the REST catalog and returns
 // the cleanup function to run when the catalog is closed. The TLS config is
@@ -213,6 +220,7 @@ func WithTransportFactory(factory TransportFactory) Option {
 }
 
 type options struct {
+	ioRegistry        *iceio.Registry
 	signer            RequestSigner
 	signerFactory     SignerFactory
 	tlsConfig         *tls.Config
