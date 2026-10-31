@@ -164,6 +164,60 @@ func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 	}
 }
 
+func TestReplaceBranchFromRef(t *testing.T) {
+	t.Run("moves divergent branch to source tag preserving retention", func(t *testing.T) {
+		base := manageSnapshotRefsFixture(t)
+		tbl, cat := newAssertRefTestTable(t, base, base)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.ReplaceBranchFromRef("qa", "release"))
+		_, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, int64(300), cat.metadata.SnapshotByName("qa").SnapshotID)
+		assert.Equal(t, int64(300), cat.metadata.SnapshotByName("release").SnapshotID)
+		for name, ref := range cat.metadata.Refs() {
+			if name == "qa" {
+				require.NotNil(t, ref.MaxRefAgeMs)
+				require.NotNil(t, ref.MaxSnapshotAgeMs)
+				require.NotNil(t, ref.MinSnapshotsToKeep)
+				assert.Equal(t, int64(1000), *ref.MaxRefAgeMs)
+				assert.Equal(t, int64(2000), *ref.MaxSnapshotAgeMs)
+				assert.Equal(t, 3, *ref.MinSnapshotsToKeep)
+			}
+		}
+	})
+
+	t.Run("creates absent target", func(t *testing.T) {
+		base := manageSnapshotRefsFixture(t)
+		tbl, cat := newAssertRefTestTable(t, base, base)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.ReplaceBranchFromRef("published", "release"))
+		_, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, int64(300), cat.metadata.SnapshotByName("published").SnapshotID)
+		for name, ref := range cat.metadata.Refs() {
+			if name == "published" {
+				assert.Equal(t, BranchRef, ref.Type)
+				assert.Nil(t, ref.MaxRefAgeMs)
+			}
+		}
+	})
+
+	t.Run("rejects source absent or tag target", func(t *testing.T) {
+		base := manageSnapshotRefsFixture(t)
+		tbl, _ := newAssertRefTestTable(t, base, base)
+		for _, tc := range []struct{ target, source string }{
+			{"qa", "missing"},
+			{"release", "qa"},
+			{"qa", ""},
+			{"", "release"},
+		} {
+			tx := tbl.NewTransaction()
+			require.ErrorIs(t, tx.ReplaceBranchFromRef(tc.target, tc.source), iceberg.ErrInvalidArgument)
+			assert.Empty(t, tx.meta.updates)
+		}
+	})
+}
+
 func TestReplaceBranch(t *testing.T) {
 	t.Run("divergent snapshot and retention", func(t *testing.T) {
 		base := manageSnapshotRefsFixture(t)
