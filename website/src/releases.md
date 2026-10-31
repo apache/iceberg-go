@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Catalog capabilities split into narrower interfaces.** `catalog.Catalog` now embeds `TableCatalog` and `NamespaceCatalog` with unchanged table and namespace methods. `Name() string` is now required, breaking third-party catalogs and test fakes. `ViewCatalog` is optional (REST and Hive), while REST also implements `UpdatableViewCatalog` for `UpdateView`. Use `catalog.As[T](cat)` and the `Unwrap() Catalog` convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending `Catalog`.
 - **`ReplaceFilesWithDeleteFiles` removed.** For delete-file replacements, use `tx.NewRewrite(snapshotProps)`, call `DeleteFile` for each source file and `AddDeleteFileWithDataSequenceNumber` for each replacement, then commit the builder. Rewrites record a `replace` snapshot instead of `overwrite`. The five-argument `ReplaceFiles` API is unchanged and remains available for compaction and delete-file removals.
 - **Path-based data-file addition renamed.** Replace `Transaction.AddFiles` with `AddDataFilesByPath`, `AddFilesOption` with `AddDataFilesByPathOption`, and `WithAddFilesConcurrency` with `WithAddDataFilesByPathConcurrency`. Behavior is unchanged.
 - **Manifest builder constructor renamed.** Replace `iceberg.NewManifestFile(...)` with `iceberg.NewManifestBuilder(...)`. It still returns a `ManifestBuilder`.

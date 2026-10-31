@@ -45,16 +45,15 @@ const (
 
 var (
 	_ catalog.Catalog             = (*Catalog)(nil)
+	_ catalog.ViewCatalog         = (*Catalog)(nil)
 	_ catalog.RegisterableCatalog = (*Catalog)(nil)
 )
 
 func init() {
-	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
-		return NewCatalog(props)
+	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+		return NewCatalog(props, WithName(name))
 	}))
 }
-
-var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient
@@ -87,15 +86,21 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	}, nil
 }
 
-func NewCatalogWithClient(client HiveClient, props iceberg.Properties) *Catalog {
+func NewCatalogWithClient(client HiveClient, props iceberg.Properties, opts ...Option) *Catalog {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
+
+	for _, opt := range opts {
+		opt(o)
+	}
 
 	return &Catalog{
 		client: client,
 		opts:   o,
 	}
 }
+
+func (c *Catalog) Name() string { return c.opts.Name }
 
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hive

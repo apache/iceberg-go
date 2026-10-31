@@ -73,6 +73,7 @@ const (
 )
 
 type HiveOptions struct {
+	Name      string
 	URI       string
 	Warehouse string
 	props     iceberg.Properties
@@ -85,6 +86,7 @@ type HiveOptions struct {
 
 func NewHiveOptions() *HiveOptions {
 	return &HiveOptions{
+		Name:            "hive",
 		props:           iceberg.Properties{},
 		LockMinWaitTime: DefaultLockCheckMinWaitTime,
 		LockMaxWaitTime: DefaultLockCheckMaxWaitTime,
@@ -146,6 +148,13 @@ func durationFromProps(props iceberg.Properties, javaMsKey, legacyDurationKey st
 }
 
 type Option func(*HiveOptions)
+
+// WithName sets the logical name of this Hive catalog.
+func WithName(name string) Option {
+	return func(o *HiveOptions) {
+		o.Name = name
+	}
+}
 
 // WithURI sets the Thrift URI for the Hive Metastore.
 func WithURI(uri string) Option {

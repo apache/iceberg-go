@@ -36,6 +36,8 @@ type mockCatalogForCreate struct {
 	createNamespaceErr    error
 }
 
+func (m *mockCatalogForCreate) Name() string { return "mock" }
+
 func (m *mockCatalogForCreate) CatalogType() catalog.Type {
 	return catalog.REST
 }

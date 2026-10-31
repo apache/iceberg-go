@@ -115,6 +115,8 @@ func (s *fullStubCatalog) UpdateNamespaceProperties(context.Context, table.Ident
 
 func (s *fullStubCatalog) Close() error { return nil }
 
+func (s *fullStubCatalog) Name() string { return "test" }
+
 func (s *fullStubCatalog) CatalogType() Type { return REST }
 
 func mtxTestTable(t *testing.T, ns, name string) *table.Table {
