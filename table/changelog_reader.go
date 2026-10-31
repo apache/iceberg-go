@@ -51,8 +51,8 @@ const (
 // INSERT for every row in the rewritten files, including rows that did not
 // change, and UPDATE_BEFORE and UPDATE_AFTER are not produced. Added and
 // removed data files are read with the deletes already stored on their scan
-// task. A plan that includes a row-level delete returns an error instead of
-// dropping those rows.
+// task. Row-level deletes emit the rows removed by delete files added in the
+// range, after deletes that already applied have been excluded.
 func (s *IncrementalChangelogScan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	tasks, err := s.PlanFiles(ctx)
 	if err != nil {
@@ -69,11 +69,11 @@ func (s *IncrementalChangelogScan) ToArrowRecords(ctx context.Context) (*arrow.S
 // UPDATE_AFTER are not produced. AddedRowsScanTask and DeletedDataFileScanTask
 // are read with Scan.ReadTasks, so same-snapshot deletes and deletes that
 // already applied to a removed file are applied before the changelog columns
-// are added. DeletedRowsScanTask returns an error; those rows are produced by
-// a later reader. Files are read one at a time, in task order, so the rows
-// stay in that order. WithMaxConcurrency does not read changelog files in
-// parallel. The returned iterator is single-use. The caller releases every
-// batch.
+// are added. DeletedRowsScanTask emits rows matched by AddedDeletes and skips
+// rows matched by ExistingDeletes. Files are read one at a time, in task
+// order, so the rows stay in that order. WithMaxConcurrency does not read
+// changelog files in parallel. The returned iterator is single-use. The
+// caller releases every batch.
 func (s *IncrementalChangelogScan) Read(ctx context.Context, tasks []ChangelogScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if s == nil || s.scan == nil {
 		return nil, nil, fmt.Errorf("%w: incremental changelog scan is not initialized", ErrInvalidOperation)
@@ -111,7 +111,13 @@ func (s *IncrementalChangelogScan) Read(ctx context.Context, tasks []ChangelogSc
 				readScan.limit = limit - emitted
 			}
 
-			_, records, err := readScan.ReadTasks(ctx, []FileScanTask{task.ScanTask()})
+			var records iter.Seq2[arrow.RecordBatch, error]
+			var err error
+			if deleted, ok := task.(DeletedRowsScanTask); ok {
+				_, records, err = readScan.readDeletedRows(ctx, deleted)
+			} else {
+				_, records, err = readScan.ReadTasks(ctx, []FileScanTask{task.ScanTask()})
+			}
 			if err != nil {
 				yield(nil, err)
 
@@ -149,10 +155,8 @@ func (s *IncrementalChangelogScan) Read(ctx context.Context, tasks []ChangelogSc
 
 func readableChangelogTask(task ChangelogScanTask) error {
 	switch task.(type) {
-	case AddedRowsScanTask, DeletedDataFileScanTask:
+	case AddedRowsScanTask, DeletedDataFileScanTask, DeletedRowsScanTask:
 		return nil
-	case DeletedRowsScanTask:
-		return fmt.Errorf("%w: reading deleted rows from added delete files is not supported", iceberg.ErrNotImplemented)
 	default:
 		return fmt.Errorf("%w: unsupported changelog scan task %T", iceberg.ErrInvalidArgument, task)
 	}
