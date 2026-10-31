@@ -165,7 +165,7 @@ func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 }
 
 func TestReplaceBranchFromRef(t *testing.T) {
-	t.Run("moves divergent branch to source tag preserving retention", func(t *testing.T) {
+	t.Run("moves branch to source tag preserving retention", func(t *testing.T) {
 		base := manageSnapshotRefsFixture(t)
 		tbl, cat := newAssertRefTestTable(t, base, base)
 		tx := tbl.NewTransaction()
@@ -184,6 +184,17 @@ func TestReplaceBranchFromRef(t *testing.T) {
 				assert.Equal(t, 3, *ref.MinSnapshotsToKeep)
 			}
 		}
+	})
+
+	t.Run("moves a divergent branch", func(t *testing.T) {
+		base := manageSnapshotRefsFixture(t)
+		tbl, cat := newAssertRefTestTable(t, base, base)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.ReplaceBranchFromRef("diverged", "release"))
+		_, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, int64(300), cat.metadata.SnapshotByName("diverged").SnapshotID)
+		assert.Equal(t, int64(300), cat.metadata.SnapshotByName("release").SnapshotID)
 	})
 
 	t.Run("creates absent target", func(t *testing.T) {
