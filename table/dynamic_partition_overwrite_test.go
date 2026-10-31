@@ -160,6 +160,19 @@ func TestDynamicPartitionOverwriteEmptyInputIsNoOp(t *testing.T) {
 	require.Empty(t, txn.pinnedRefs)
 }
 
+func TestDynamicPartitionOverwriteRespectsCanceledContext(t *testing.T) {
+	spec := partitionedSpec()
+	txn, _ := createTestTransactionWithMemIO(t, spec)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	file := newTestDataFile(t, spec, "file://canceled.parquet", map[int]any{1000: int32(5)})
+	err := txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{file}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, txn.meta.updates)
+	require.Empty(t, txn.pinnedRefs)
+}
+
 func TestDynamicPartitionOverwriteRejectsUnsupportedLayouts(t *testing.T) {
 	ctx := context.Background()
 	t.Run("unpartitioned", func(t *testing.T) {

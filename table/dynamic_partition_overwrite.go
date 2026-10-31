@@ -99,6 +99,9 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	if len(filesToAdd) == 0 {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if _, err := t.validateDataFilesToAdd(filesToAdd, "DynamicPartitionOverwriteDataFiles", true); err != nil {
 		return err
@@ -151,7 +154,11 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 		}
 	}
 
-	// A ref fence is important even if no files matched: an append to a
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// A ref fence is important even if no files matched: an append to
 	// touched partition between planning and commit must not survive.
 	if err := t.AssertDefaultShape(); err != nil {
 		return err
@@ -177,6 +184,9 @@ func (t *Transaction) DynamicPartitionOverwrite(
 		return fmt.Errorf("%w: nil record reader for dynamic partition overwrite", ErrInvalidOperation)
 	}
 	if _, err := t.dynamicOverwriteSpec(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
