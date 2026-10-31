@@ -586,7 +586,8 @@ func TestRemovingDataFileRemovesItsUnnamedDV(t *testing.T) {
 				snap := tbl.CurrentSnapshot()
 				live, removed := snapshotDeleteEntryFiles(t, snap, iceio.LocalFS{})
 				assert.Contains(t, pathRefPairs(removed), [2]string{dvB.FilePath(), dataB.FilePath()})
-				assert.Equal(t, "1", snap.Summary.Properties["removed-position-delete-files"])
+				assert.Equal(t, "1", snap.Summary.Properties["removed-dvs"])
+				assert.NotContains(t, snap.Summary.Properties, "removed-position-delete-files")
 				assert.Equal(t, strconv.Itoa(len(live)), snap.Summary.Properties["total-delete-files"])
 			})
 		}
