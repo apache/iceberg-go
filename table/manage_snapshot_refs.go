@@ -36,6 +36,23 @@ import (
 // Calls after other ref changes in this transaction use the staged ref heads.
 // A transaction without updates does not contact the catalog.
 func (t *Transaction) FastForwardBranch(target, source string) error {
+	return t.moveBranchToRef(target, source, true)
+}
+
+// ReplaceBranchFromRef moves target to the snapshot named by source without
+// checking ancestry, matching Java's ManageSnapshots.replaceBranch(from, to).
+// Source may be a branch or tag and is left unchanged. If target is absent,
+// it is created as a branch with default retention; otherwise the target
+// branch retains its existing retention settings.
+//
+// Both ref heads are pinned to their base snapshot IDs, so concurrent head
+// moves fail the commit. As with FastForwardBranch, REST requirements cannot
+// detect changes to ref type or retention when its snapshot ID is unchanged.
+func (t *Transaction) ReplaceBranchFromRef(target, source string) error {
+	return t.moveBranchToRef(target, source, false)
+}
+
+func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -74,7 +91,7 @@ func (t *Transaction) FastForwardBranch(target, source string) error {
 
 			return snap
 		}
-		if !IsAncestorOf(sourceRef.SnapshotID, targetRef.SnapshotID, lookup) {
+		if fastForward && !IsAncestorOf(sourceRef.SnapshotID, targetRef.SnapshotID, lookup) {
 			return fmt.Errorf("%w: branch %q snapshot %d is not an ancestor of %q snapshot %d",
 				iceberg.ErrInvalidArgument, target, targetRef.SnapshotID, source, sourceRef.SnapshotID)
 		}
