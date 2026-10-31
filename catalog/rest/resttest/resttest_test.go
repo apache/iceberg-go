@@ -241,6 +241,102 @@ func TestUnsupportedRoutesReturnNotImplemented(t *testing.T) {
 	}
 }
 
+// rawCall sends a request straight to the server and returns the status and
+// the error type from the body, if any.
+func rawCall(t *testing.T, srv *httptest.Server, method, path, body string) (int, string) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(context.Background(), method, srv.URL+path, strings.NewReader(body))
+	require.NoError(t, err)
+	rsp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer rsp.Body.Close()
+
+	var envelope struct {
+		Error struct {
+			Type string `json:"type"`
+			Code int    `json:"code"`
+		} `json:"error"`
+	}
+	if rsp.StatusCode >= http.StatusBadRequest {
+		require.NoError(t, json.NewDecoder(rsp.Body).Decode(&envelope))
+		assert.Equal(t, rsp.StatusCode, envelope.Error.Code, "error code must match the status")
+	}
+
+	return rsp.StatusCode, envelope.Error.Type
+}
+
+// The client maps several error types to the same Go error, so these cases
+// check the status and error type the server sends, without the client.
+func TestSpecErrorResponses(t *testing.T) {
+	srv := resttest.NewServer(t)
+
+	schema, err := json.Marshal(catalogtest.Schema)
+	require.NoError(t, err)
+
+	// Seed namespace "db" with table "t".
+	status, _ := rawCall(t, srv, http.MethodPost, "/v1/namespaces", `{"namespace":["db"]}`)
+	require.Equal(t, http.StatusOK, status)
+	status, _ = rawCall(t, srv, http.MethodPost, "/v1/namespaces/db/tables",
+		`{"name":"t","schema":`+string(schema)+`}`)
+	require.Equal(t, http.StatusOK, status)
+
+	for _, tc := range []struct {
+		name, method, path, body string
+		status                   int
+		errType                  string
+	}{
+		{
+			name: "load missing table", method: http.MethodGet, path: "/v1/namespaces/db/tables/missing",
+			status: http.StatusNotFound, errType: "NoSuchTableException",
+		},
+		{
+			name: "load missing namespace", method: http.MethodGet, path: "/v1/namespaces/missing",
+			status: http.StatusNotFound, errType: "NoSuchNamespaceException",
+		},
+		{
+			name: "create existing namespace", method: http.MethodPost, path: "/v1/namespaces",
+			body:   `{"namespace":["db"]}`,
+			status: http.StatusConflict, errType: "AlreadyExistsException",
+		},
+		{
+			name: "create existing table", method: http.MethodPost, path: "/v1/namespaces/db/tables",
+			body:   `{"name":"t","schema":` + string(schema) + `}`,
+			status: http.StatusConflict, errType: "AlreadyExistsException",
+		},
+		{
+			name: "drop non-empty namespace", method: http.MethodDelete, path: "/v1/namespaces/db",
+			status: http.StatusConflict, errType: "NamespaceNotEmptyException",
+		},
+		{
+			name: "rename to missing namespace", method: http.MethodPost, path: "/v1/tables/rename",
+			body:   `{"source":{"namespace":["db"],"name":"t"},"destination":{"namespace":["missing"],"name":"t"}}`,
+			status: http.StatusNotFound, errType: "NoSuchNamespaceException",
+		},
+		{
+			name: "stale commit", method: http.MethodPost, path: "/v1/namespaces/db/tables/t",
+			body:   `{"requirements":[{"type":"assert-current-schema-id","current-schema-id":99}],"updates":[]}`,
+			status: http.StatusConflict, errType: "CommitFailedException",
+		},
+		{
+			name: "commit to missing table", method: http.MethodPost, path: "/v1/namespaces/db/tables/missing",
+			body:   `{"requirements":[],"updates":[]}`,
+			status: http.StatusNotFound, errType: "NoSuchTableException",
+		},
+		{
+			name: "malformed body", method: http.MethodPost, path: "/v1/namespaces",
+			body:   `{`,
+			status: http.StatusBadRequest, errType: "BadRequestException",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, errType := rawCall(t, srv, tc.method, tc.path, tc.body)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, tc.errType, errType)
+		})
+	}
+}
+
 func TestCreateTableWithoutWarehouseFails(t *testing.T) {
 	srv := httptest.NewServer(resttest.NewHandler())
 	t.Cleanup(srv.Close)

@@ -24,6 +24,9 @@ import (
 
 // Wire types for the REST catalog spec. The catalog/rest client keeps its own
 // copies unexported, so the server defines the shapes it decodes and encodes.
+// The two sets are independent on purpose (the client encodes bound partition
+// specs and sort orders, the server decodes them unbound), and the conformance
+// suite is what keeps their field names in sync.
 
 type errorEnvelope struct {
 	Error errorModel `json:"error"`
