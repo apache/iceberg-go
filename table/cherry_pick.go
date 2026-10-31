@@ -100,29 +100,44 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	// A valid append snapshot never adds delete files or removes files.
 	added := make([]iceberg.DataFile, 0)
 	seen := make(map[string]struct{})
-	for entry, err := range source.entries(fs, -1, false) {
-		if err != nil {
-			return fmt.Errorf("read cherry-pick source snapshot %d: %w", snapshotID, err)
-		}
+	// Manifests are immutable. An entry added by the source snapshot can
+	// only appear in a manifest created by that snapshot. Skip inherited
+	// manifests rather than scanning the entire table history.
+	manifests, err := source.Manifests(fs)
+	if err != nil {
+		return fmt.Errorf("read cherry-pick source snapshot %d: %w", snapshotID, err)
+	}
+	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.SnapshotID() != snapshotID {
+		if manifest.SnapshotID() != snapshotID {
 			continue
 		}
-		switch entry.Status() {
-		case iceberg.EntryStatusDELETED:
-			return fmt.Errorf("%w: append snapshot %d contains a removed file %q", ErrInvalidOperation, snapshotID, entry.DataFile().FilePath())
-		case iceberg.EntryStatusADDED:
-			file := entry.DataFile()
-			if file.ContentType() != iceberg.EntryContentData {
-				return fmt.Errorf("%w: append snapshot %d contains an added delete file %q", ErrInvalidOperation, snapshotID, file.FilePath())
+		for entry, err := range manifest.Entries(fs, false) {
+			if err != nil {
+				return fmt.Errorf("read cherry-pick source snapshot %d: %w", snapshotID, err)
 			}
-			if _, exists := seen[file.FilePath()]; exists {
-				return fmt.Errorf("%w: source snapshot %d adds file %q more than once", iceberg.ErrInvalidArgument, snapshotID, file.FilePath())
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			seen[file.FilePath()] = struct{}{}
-			added = append(added, file)
+			if entry.SnapshotID() != snapshotID {
+				continue
+			}
+			switch entry.Status() {
+			case iceberg.EntryStatusDELETED:
+				return fmt.Errorf("%w: append snapshot %d contains a removed file %q", ErrInvalidOperation, snapshotID, entry.DataFile().FilePath())
+			case iceberg.EntryStatusADDED:
+				file := entry.DataFile()
+				if file.ContentType() != iceberg.EntryContentData {
+					return fmt.Errorf("%w: append snapshot %d contains an added delete file %q", ErrInvalidOperation, snapshotID, file.FilePath())
+				}
+				if _, exists := seen[file.FilePath()]; exists {
+					return fmt.Errorf("%w: source snapshot %d adds file %q more than once", iceberg.ErrInvalidArgument, snapshotID, file.FilePath())
+				}
+				seen[file.FilePath()] = struct{}{}
+				added = append(added, file)
+			}
 		}
 	}
 
