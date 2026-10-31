@@ -91,6 +91,30 @@ func TestCherryPickSnapshotFastForwardsDirectChild(t *testing.T) {
 	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
 }
 
+func TestCherryPickSnapshotFastForwardsNonAppendSnapshot(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
+	branchTxn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	reader := idRecordReader(t, tbl, 2)
+	require.NoError(t, branchTxn.Overwrite(t.Context(), reader, nil))
+	reader.Release()
+	tbl, err = branchTxn.Commit(t.Context())
+	require.NoError(t, err)
+
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	require.Equal(t, table.OpOverwrite, source.Summary.Operation)
+	require.NotNil(t, source.ParentSnapshotID)
+	require.Equal(t, tbl.CurrentSnapshot().SnapshotID, *source.ParentSnapshotID)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, source.SnapshotID, result.CurrentSnapshot().SnapshotID)
+	assert.ElementsMatch(t, []int64{2}, idsOnRef(t, result, table.MainBranch))
+}
+
 func TestCherryPickSnapshotRejectsAncestor(t *testing.T) {
 	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
 	id := tbl.CurrentSnapshot().SnapshotID
