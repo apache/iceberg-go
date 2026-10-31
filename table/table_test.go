@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -2241,7 +2242,8 @@ type validatingCatalog struct {
 }
 
 func (m *validatingCatalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
-	return nil, nil
+	return table.New(ident, m.metadata, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, m), nil
 }
 
 func (m *validatingCatalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
@@ -2262,166 +2264,127 @@ func (m *validatingCatalog) CommitTable(ctx context.Context, ident table.Identif
 	return meta, "", nil
 }
 
-// TestExpireSnapshotsRejectsOnRefRollback verifies that ExpireSnapshots fails
-// when a ref is rolled back to an ancestor snapshot concurrently.
-//
-// Scenario:
-//   - main -> snapshot 5 (newest), chain: 5 <- 4 <- 3 <- 2 <- 1
-//   - ExpireSnapshots calculates: keep {5, 4, 3}, delete {2, 1}
-//   - Concurrently, client rolls main -> snapshot 2
-//   - Without assertion: would delete snapshots 1, leaving main with only 1 accessible snapshot
-//   - With assertion: commit fails because main's snapshot ID changed
-func (t *TableWritingTestSuite) TestExpireSnapshotsRejectsOnRefRollback() {
-	fs := iceio.LocalFS{}
-
-	files := make([]string, 0)
-	for i := range 5 {
-		filePath := fmt.Sprintf("%s/expire_reject_rollback_v%d/data-%d.parquet", t.location, t.formatVersion, i)
-		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
-		files = append(files, filePath)
-	}
-
-	ident := table.Identifier{"default", "expire_reject_rollback_v" + strconv.Itoa(t.formatVersion)}
-	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
-	t.Require().NoError(err)
-
-	ctx := context.Background()
-	cat := &validatingCatalog{meta}
-
-	tbl := table.New(
-		ident,
-		meta,
-		t.getMetadataLoc(),
-		func(ctx context.Context) (iceio.IO, error) {
-			return fs, nil
-		},
-		cat,
-	)
-
-	// Create 5 snapshots
-	for i := range 5 {
-		tx := tbl.NewTransaction()
-		t.Require().NoError(tx.AddDataFilesByPath(ctx, files[i:i+1], nil, false))
-		tbl, err = tx.Commit(ctx)
-		t.Require().NoError(err)
-	}
-
-	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
-
-	// Get snapshot IDs for later use
-	snapshots := tbl.Metadata().Snapshots()
-	snapshot2 := snapshots[1] // Second snapshot (index 1)
-
-	// Start ExpireSnapshots transaction (will calculate based on current main -> snapshot 5)
-	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(3)))
-
-	// Simulate concurrent rollback: update catalog's metadata to point main -> snapshot 2
-	// This simulates another client rolling back main before ExpireSnapshots commits
-	rollbackUpdates := []table.Update{
-		table.NewSetSnapshotRefUpdate("main", snapshot2.SnapshotID, table.BranchRef, -1, -1, -1),
-	}
-	cat.metadata, _, err = cat.CommitTable(ctx, ident, nil, rollbackUpdates)
-	t.Require().NoError(err)
-
-	// Attempt to commit ExpireSnapshots - should fail due to AssertRefSnapshotID
-	_, err = tx.Commit(ctx)
-	t.Require().Error(err)
-	t.Require().Contains(err.Error(), "requirement failed")
-	t.Require().Contains(err.Error(), "main")
+// A millisecond sleep makes earlier snapshots older than the expiry cutoff.
+func (t *TableWritingTestSuite) inBubble(f func()) {
+	outer := t.T()
+	synctest.Test(outer, func(st *testing.T) {
+		t.SetT(st)
+		defer t.SetT(outer)
+		f()
+	})
 }
 
-// TestExpireSnapshotsRejectsOnRefUpdate verifies that ExpireSnapshots fails
-// when a ref eligible for deletion is concurrently updated to a newer snapshot.
-//
-// Scenario:
-//   - tag1 -> old snapshot, eligible for deletion (maxRefAgeMs exceeded)
-//   - ExpireSnapshots decides to remove tag1
-//   - Concurrently, client updates tag1 -> newer snapshot (no longer eligible)
-//   - Without assertion: tag1 would be deleted despite being updated
-//   - With assertion: commit fails because tag1's snapshot ID changed
-func (t *TableWritingTestSuite) TestExpireSnapshotsRejectsOnRefUpdate() {
+func (t *TableWritingTestSuite) newExpireRetryTable(name string, files []string, sleepAfterFirst time.Duration) (*table.Table, *validatingCatalog) {
 	fs := iceio.LocalFS{}
-
-	files := make([]string, 0)
-	for i := range 3 {
-		filePath := fmt.Sprintf("%s/expire_reject_update_v%d/data-%d.parquet", t.location, t.formatVersion, i)
-		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
-		files = append(files, filePath)
-	}
-
-	ident := table.Identifier{"default", "expire_reject_update_v" + strconv.Itoa(t.formatVersion)}
+	ident := table.Identifier{"default", name + "_v" + strconv.Itoa(t.formatVersion)}
 	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
+		table.UnsortedSortOrder, t.location, iceberg.Properties{
+			table.PropertyFormatVersion:   strconv.Itoa(t.formatVersion),
+			table.CommitNumRetriesKey:     "1",
+			table.CommitMinRetryWaitMsKey: "1",
+			table.CommitMaxRetryWaitMsKey: "2",
+		})
 	t.Require().NoError(err)
 
 	ctx := context.Background()
 	cat := &validatingCatalog{meta}
-
-	tbl := table.New(
-		ident,
-		meta,
-		t.getMetadataLoc(),
-		func(ctx context.Context) (iceio.IO, error) {
-			return fs, nil
-		},
-		cat,
-	)
-
-	// Create 3 snapshots
-	for i := range 3 {
+	tbl := table.New(ident, meta, t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) { return fs, nil }, cat)
+	for i, file := range files {
+		t.writeParquet(fs, file, t.arrTablePromotedTypes)
 		tx := tbl.NewTransaction()
-		t.Require().NoError(tx.AddDataFilesByPath(ctx, files[i:i+1], nil, false))
+		t.Require().NoError(tx.AddDataFilesByPath(ctx, []string{file}, nil, false))
 		tbl, err = tx.Commit(ctx)
 		t.Require().NoError(err)
+		if i == 0 {
+			time.Sleep(sleepAfterFirst)
+		}
 	}
-	t.Require().Equal(3, len(tbl.Metadata().Snapshots()))
+	t.Require().Len(tbl.Metadata().Snapshots(), len(files))
 
-	snapshots := tbl.Metadata().Snapshots()
-	oldSnapshot := snapshots[0]   // Oldest snapshot
-	newerSnapshot := snapshots[2] // Newest snapshot
+	return tbl, cat
+}
 
-	// Create a tag pointing to the old snapshot with a short maxRefAgeMs
-	// This tag will be eligible for deletion
-	maxRefAgeMs := int64(1) // 1ms - will definitely be exceeded
-	tagUpdates := []table.Update{
-		table.NewSetSnapshotRefUpdate("expiring-tag", oldSnapshot.SnapshotID, table.TagRef, maxRefAgeMs, -1, -1),
+func snapshotIDsOf(meta table.Metadata) []int64 {
+	var ids []int64
+	for _, snap := range meta.Snapshots() {
+		ids = append(ids, snap.SnapshotID)
 	}
-	cat.metadata, _, err = cat.CommitTable(ctx, ident, nil, tagUpdates)
-	t.Require().NoError(err)
 
-	// Reload table with updated metadata
-	tbl = table.New(
-		ident,
-		cat.metadata,
-		t.getMetadataLoc(),
-		func(ctx context.Context) (iceio.IO, error) {
-			return fs, nil
-		},
-		cat,
-	)
+	return ids
+}
 
-	// Wait a bit to ensure the tag's ref age exceeds maxRefAgeMs
-	time.Sleep(10 * time.Millisecond)
+// Scenario:
+//   - main -> snapshot 5 (newest), chain: 5 <- 4 <- 3 <- 2 <- 1
+//   - Concurrently, client rolls main -> snapshot 2
+func (t *TableWritingTestSuite) TestExpireSnapshotsReplansAfterRefRollback() {
+	t.inBubble(func() {
+		files := make([]string, 0, 5)
+		for i := range 5 {
+			files = append(files, fmt.Sprintf("%s/expire_replan_rollback_v%d/data-%d.parquet", t.location, t.formatVersion, i))
+		}
+		tbl, cat := t.newExpireRetryTable("expire_replan_rollback", files, 0)
+		snapshots := tbl.Metadata().Snapshots()
+		time.Sleep(time.Millisecond)
 
-	// Start ExpireSnapshots transaction (will identify expiring-tag as eligible for deletion)
-	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(time.Hour), table.WithRetainLast(1)))
+		ctx := context.Background()
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(3)))
 
-	// Simulate concurrent update: another client updates the tag to point to a newer snapshot
-	// This makes the tag no longer eligible for deletion
-	updateTagUpdates := []table.Update{
-		table.NewSetSnapshotRefUpdate("expiring-tag", newerSnapshot.SnapshotID, table.TagRef, maxRefAgeMs, -1, -1),
-	}
-	cat.metadata, _, err = cat.CommitTable(ctx, ident, nil, updateTagUpdates)
-	t.Require().NoError(err)
+		var err error
+		cat.metadata, _, err = cat.CommitTable(ctx, tbl.Identifier(), nil, []table.Update{
+			table.NewSetSnapshotRefUpdate("main", snapshots[1].SnapshotID, table.BranchRef, -1, -1, -1),
+		})
+		t.Require().NoError(err)
 
-	// Attempt to commit ExpireSnapshots - should fail due to AssertRefSnapshotID
-	_, err = tx.Commit(ctx)
-	t.Require().Error(err)
-	t.Require().Contains(err.Error(), "requirement failed")
-	t.Require().Contains(err.Error(), "expiring-tag")
+		committed, err := tx.Commit(ctx)
+		t.Require().NoError(err)
+		t.Equal([]int64{snapshots[0].SnapshotID, snapshots[1].SnapshotID}, snapshotIDsOf(committed.Metadata()))
+		t.Equal(snapshots[1].SnapshotID, committed.Metadata().CurrentSnapshot().SnapshotID)
+		t.Equal(snapshotIDsOf(committed.Metadata()), snapshotIDsOf(cat.metadata))
+	})
+}
+
+// Scenario:
+//   - snapshot 1 is two hours older than snapshots 2 and 3
+//   - expiring-tag -> snapshot 1, with a max ref age of one hour
+func (t *TableWritingTestSuite) TestExpireSnapshotsReplansAfterRefUpdate() {
+	t.inBubble(func() {
+		files := make([]string, 0, 3)
+		for i := range 3 {
+			files = append(files, fmt.Sprintf("%s/expire_replan_update_v%d/data-%d.parquet", t.location, t.formatVersion, i))
+		}
+		tbl, cat := t.newExpireRetryTable("expire_replan_update", files, 2*time.Hour)
+		snapshots := tbl.Metadata().Snapshots()
+
+		ctx := context.Background()
+		maxRefAgeMs := time.Hour.Milliseconds()
+		var err error
+		cat.metadata, _, err = cat.CommitTable(ctx, tbl.Identifier(), nil, []table.Update{
+			table.NewSetSnapshotRefUpdate("expiring-tag", snapshots[0].SnapshotID, table.TagRef, maxRefAgeMs, -1, -1),
+		})
+		t.Require().NoError(err)
+		tbl = table.New(tbl.Identifier(), cat.metadata, t.getMetadataLoc(),
+			func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(time.Hour), table.WithRetainLast(1)))
+		staged, err := tx.StagedTable()
+		t.Require().NoError(err)
+		t.Require().Nil(staged.Metadata().SnapshotByName("expiring-tag"), "the staged plan removes the tag")
+
+		cat.metadata, _, err = cat.CommitTable(ctx, tbl.Identifier(), nil, []table.Update{
+			table.NewSetSnapshotRefUpdate("expiring-tag", snapshots[2].SnapshotID, table.TagRef, maxRefAgeMs, -1, -1),
+		})
+		t.Require().NoError(err)
+
+		committed, err := tx.Commit(ctx)
+		t.Require().NoError(err)
+		t.Equal([]int64{snapshots[1].SnapshotID, snapshots[2].SnapshotID}, snapshotIDsOf(committed.Metadata()))
+		tag := committed.Metadata().SnapshotByName("expiring-tag")
+		t.Require().NotNil(tag)
+		t.Equal(snapshots[2].SnapshotID, tag.SnapshotID)
+	})
 }
 
 func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {

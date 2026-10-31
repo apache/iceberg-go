@@ -36,6 +36,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -1526,33 +1527,26 @@ func (s *SqliteCatalogTestSuite) appendStringRow(ctx context.Context, tbl *table
 	return out
 }
 
-// waitPastSnapshots blocks until the wall clock in milliseconds is past
-// every snapshot timestamp of meta, so an expiry with WithOlderThan(0)
-// treats them all as old enough.
-func (s *SqliteCatalogTestSuite) waitPastSnapshots(meta table.Metadata) {
-	var newest int64
-	for _, snap := range meta.Snapshots() {
-		newest = max(newest, snap.TimestampMs)
-	}
-	s.Require().Eventually(func() bool { return time.Now().UnixMilli() > newest },
-		time.Second, time.Millisecond)
-}
-
 // createRetryingStringTable creates a single-column string table that
 // retries conflicting commits numRetries times with millisecond waits,
 // then appends one row per value.
 func (s *SqliteCatalogTestSuite) createRetryingStringTable(ctx context.Context, cat *sqlcat.Catalog, numRetries string, values ...string) table.Identifier {
+	return s.createStringTable(ctx, cat, iceberg.Properties{table.CommitNumRetriesKey: numRetries}, values...)
+}
+
+func (s *SqliteCatalogTestSuite) createStringTable(ctx context.Context, cat *sqlcat.Catalog, props iceberg.Properties, values ...string) table.Identifier {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
 	})
 	tblID := s.randomTableIdentifier()
 	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
 
-	tbl, err := cat.CreateTable(ctx, tblID, schema, catalog.WithProperties(iceberg.Properties{
-		table.CommitNumRetriesKey:     numRetries,
+	all := iceberg.Properties{
 		table.CommitMinRetryWaitMsKey: "1",
 		table.CommitMaxRetryWaitMsKey: "2",
-	}))
+	}
+	maps.Copy(all, props)
+	tbl, err := cat.CreateTable(ctx, tblID, schema, catalog.WithProperties(all))
 	s.Require().NoError(err)
 	for _, v := range values {
 		tbl = s.appendStringRow(ctx, tbl, table.MainBranch, v)
@@ -1965,49 +1959,37 @@ func (s *SqliteCatalogTestSuite) TestStaleRollbackFailsAfterPeerAppend() {
 	s.Len(current.Metadata().Snapshots(), 3)
 }
 
-// Snapshot expiry staged before a peer rolled the branch back must not
-// be replayed against the new head: its retention window was computed
-// from the old head, so it would expire snapshots the rolled-back
-// branch still retains.
-func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsFailsAfterPeerRollback() {
-	ctx := context.Background()
-	cat := s.getCatalogSqlite()
-	defer cat.Close()
-	tblID := s.createRetryingStringTable(ctx, cat, "2", "s1", "s2", "s3", "s4")
+func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsReplansAfterPeerRollback() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3", "s4")
 
-	stale, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	snaps := slices.Clone(stale.Metadata().Snapshots())
-	s.Require().Len(snaps, 4)
-	slices.SortFunc(snaps, func(a, b table.Snapshot) int { return cmp.Compare(a.SequenceNumber, b.SequenceNumber) })
-	ids := make([]int64, len(snaps))
-	for i, snap := range snaps {
-		ids[i] = snap.SnapshotID
-	}
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		ids := snapshotIDsBySequence(stale.Metadata())
+		s.Require().Len(ids, 4)
 
-	peer, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	peerTx := peer.NewTransaction()
-	s.Require().NoError(peerTx.RollbackToSnapshot(ids[1]))
-	_, err = peerTx.Commit(ctx)
-	s.Require().NoError(err)
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peerTx := peer.NewTransaction()
+		s.Require().NoError(peerTx.RollbackToSnapshot(ids[1]))
+		_, err = peerTx.Commit(ctx)
+		s.Require().NoError(err)
+		time.Sleep(time.Millisecond)
 
-	s.waitPastSnapshots(stale.Metadata())
+		tx := stale.NewTransaction()
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(3), table.WithOlderThan(0), table.WithPostCommit(false)))
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
 
-	tx := stale.NewTransaction()
-	s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(3), table.WithOlderThan(0), table.WithPostCommit(false)))
-	_, err = tx.Commit(ctx)
-	s.Require().Error(err)
-	s.ErrorIs(err, table.ErrCommitFailed)
-
-	current, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	s.Equal(ids[1], current.Metadata().CurrentSnapshot().SnapshotID)
-	var remaining []int64
-	for _, snap := range current.Metadata().Snapshots() {
-		remaining = append(remaining, snap.SnapshotID)
-	}
-	s.ElementsMatch(ids, remaining)
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		s.Equal(ids[1], current.Metadata().CurrentSnapshot().SnapshotID)
+		s.Equal(ids[:2], snapshotIDsBySequence(current.Metadata()))
+		s.ElementsMatch([]string{"s1", "s2"}, s.storedStringValues(ctx, current))
+	})
 }
 
 // A rollback of a branch the transaction staged must not be replayed
@@ -2044,44 +2026,149 @@ func (s *SqliteCatalogTestSuite) TestStaleRollbackOfStagedBranchFailsAfterPeerCr
 	s.Len(current.Metadata().Snapshots(), 3)
 }
 
-// Snapshot expiry in a transaction that staged a new branch must not be
-// replayed against a branch a peer created meanwhile: its retention was
-// computed without the peer's branch.
-func (s *SqliteCatalogTestSuite) TestStaleExpireWithStagedBranchFailsAfterPeerCreatesIt() {
-	ctx := context.Background()
-	cat := s.getCatalogSqlite()
-	defer cat.Close()
-	tblID := s.createRetryingStringTable(ctx, cat, "2", "seed", "second")
+func (s *SqliteCatalogTestSuite) TestStaleExpireWithStagedBranchReplansAfterPeerCreatesIt() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "seed", "second")
 
-	stale, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		mainHead := stale.Metadata().CurrentSnapshot().SnapshotID
 
-	peer, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	peer = s.appendStringRow(ctx, peer, "feature", "peer")
-	peerHead := peer.Metadata().SnapshotByName("feature").SnapshotID
-	s.waitPastSnapshots(peer.Metadata())
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peer = s.appendStringRow(ctx, peer, "feature", "peer")
+		peerHead := peer.Metadata().SnapshotByName("feature").SnapshotID
+		time.Sleep(time.Millisecond)
 
-	tx, err := stale.NewTransactionOnBranch("feature")
-	s.Require().NoError(err)
-	s.stageStringRow(ctx, tx, "stale")
-	s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(1), table.WithOlderThan(0), table.WithPostCommit(false)))
-	_, err = tx.Commit(ctx)
-	s.Require().Error(err)
-	s.ErrorIs(err, table.ErrCommitFailed)
+		tx, err := stale.NewTransactionOnBranch("feature")
+		s.Require().NoError(err)
+		s.stageStringRow(ctx, tx, "stale")
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(1), table.WithOlderThan(0), table.WithPostCommit(false)))
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
 
-	current, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	s.Equal(peerHead, current.Metadata().SnapshotByName("feature").SnapshotID)
-	var remaining []int64
-	for _, snap := range current.Metadata().Snapshots() {
-		remaining = append(remaining, snap.SnapshotID)
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		feature := current.Metadata().SnapshotByName("feature")
+		s.Require().NotNil(feature)
+		s.Require().NotNil(feature.ParentSnapshotID)
+		s.Equal(peerHead, *feature.ParentSnapshotID)
+		s.Equal([]int64{mainHead, feature.SnapshotID}, snapshotIDsBySequence(current.Metadata()))
+		s.ElementsMatch([]string{"seed", "second", "peer", "stale"},
+			s.storedStringValues(ctx, current, table.WithSnapshotID(feature.SnapshotID)))
+		s.ElementsMatch([]string{"seed", "second"}, s.storedStringValues(ctx, current))
+	})
+}
+
+// A millisecond sleep makes earlier snapshots older than the expiry cutoff.
+// Use bubbleTableProps for tables created inside the bubble.
+func (s *SqliteCatalogTestSuite) inBubble(f func()) {
+	outer := s.T()
+	synctest.Test(outer, func(t *testing.T) {
+		s.SetT(t)
+		defer s.SetT(outer)
+		f()
+	})
+}
+
+// bubbleTableProps avoid zstd, whose shared decoder in arrow-go belongs to
+// the first bubble that uses it.
+var bubbleTableProps = iceberg.Properties{
+	table.CommitNumRetriesKey:   "2",
+	table.ParquetCompressionKey: "snappy",
+}
+
+func snapshotIDsBySequence(meta table.Metadata) []int64 {
+	snaps := slices.SortedFunc(slices.Values(meta.Snapshots()), func(a, b table.Snapshot) int {
+		return cmp.Compare(a.SequenceNumber, b.SequenceNumber)
+	})
+	ids := make([]int64, len(snaps))
+	for i, snap := range snaps {
+		ids[i] = snap.SnapshotID
 	}
-	var expected []int64
-	for _, snap := range peer.Metadata().Snapshots() {
-		expected = append(expected, snap.SnapshotID)
-	}
-	s.ElementsMatch(expected, remaining)
+
+	return ids
+}
+
+func (s *SqliteCatalogTestSuite) TestStaleAppendAndExpireReplansAfterPeerRollback() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3", "s4")
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		ids := snapshotIDsBySequence(stale.Metadata())
+		time.Sleep(time.Millisecond)
+
+		tx := stale.NewTransaction()
+		s.stageStringRow(ctx, tx, "a")
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(3), table.WithOlderThan(0)))
+
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peerTx := peer.NewTransaction()
+		s.Require().NoError(peerTx.RollbackToSnapshot(ids[1]))
+		_, err = peerTx.Commit(ctx)
+		s.Require().NoError(err)
+
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
+
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		got := snapshotIDsBySequence(current.Metadata())
+		s.Require().Len(got, 3)
+		s.Equal(ids[:2], got[:2])
+		head := current.Metadata().CurrentSnapshot()
+		s.Equal(got[2], head.SnapshotID)
+		s.Require().NotNil(head.ParentSnapshotID)
+		s.Equal(ids[1], *head.ParentSnapshotID)
+		s.ElementsMatch([]string{"s1", "s2", "a"}, s.storedStringValues(ctx, current))
+		s.ElementsMatch([]string{"s1", "s2"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[1])))
+		s.ElementsMatch([]string{"s1"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[0])))
+	})
+}
+
+func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsKeepsBranchPeerCreated() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3")
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		ids := snapshotIDsBySequence(stale.Metadata())
+		time.Sleep(time.Millisecond)
+
+		tx := stale.NewTransaction()
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(1), table.WithOlderThan(0)))
+
+		// Creating an unread ref causes no conflict, so append to force a retry.
+		_, _, err = cat.CommitTable(ctx, tblID, nil, []table.Update{
+			table.NewSetSnapshotRefUpdate("keep", ids[0], table.BranchRef, 0, 0, 0),
+		})
+		s.Require().NoError(err)
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peer = s.appendStringRow(ctx, peer, table.MainBranch, "p")
+		p := peer.Metadata().CurrentSnapshot().SnapshotID
+
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
+
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		s.Equal([]int64{ids[0], p}, snapshotIDsBySequence(current.Metadata()))
+		keep := current.Metadata().SnapshotByName("keep")
+		s.Require().NotNil(keep)
+		s.Equal(ids[0], keep.SnapshotID)
+		s.ElementsMatch([]string{"s1", "s2", "s3", "p"}, s.storedStringValues(ctx, current))
+		s.ElementsMatch([]string{"s1"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[0])))
+	})
 }
 
 func (s *SqliteCatalogTestSuite) TestPurgeTable() {

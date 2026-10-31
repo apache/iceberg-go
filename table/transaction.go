@@ -95,11 +95,13 @@ type Transaction struct {
 	noReplay bool
 
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
-	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot, and
-	// ExpireSnapshots. doCommit's refresh-and-replay must not rewrite
-	// their assertions to the fresh head between retries, so a ref that
-	// has changed fails the commit.
+	// the commit: those from AssertRefSnapshotID and RollbackToSnapshot.
+	// doCommit's refresh-and-replay must not rewrite their assertions to
+	// the fresh head between retries, so a ref that has changed fails the
+	// commit.
 	pinnedRefs map[string]struct{}
+
+	expirations []expirationRecord
 
 	mx        sync.Mutex
 	committed bool
@@ -683,6 +685,19 @@ type expireSnapshotsCfg struct {
 	validationErr      error
 }
 
+// Keep calls that staged no updates so retries can replan them.
+type expirationRecord struct {
+	cfg   expireSnapshotsCfg
+	nowMs int64
+
+	// pos and count refer to the original staged updates, not a retry's plan.
+	pos, count int
+
+	walked []string
+
+	removedBranch bool
+}
+
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
 
 // WithRetainLast sets the minimum number of snapshots to keep per branch,
@@ -765,20 +780,30 @@ func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, 
 //	}
 //	newTbl, err := txn.Commit(ctx)
 //
-// An expiry that removes something pins every ref it read, including the
-// commit branch. A transaction that also appends then fails rather than
-// rebasing onto a peer's append, since the expiry was computed from the old
-// head.
+// After refresh, a retry or resumed commit replans the expiry at its original
+// position, with this call's options and cutoff time. Replanning retains
+// snapshots made reachable by concurrent commits, including rollback targets
+// and new branch heads. It can expire snapshots that a concurrent append moved
+// outside retention. Each attempt requires the refs that the plan read to be
+// unchanged since loading or refreshing the table.
+//
+// Retries replan even if staging or an earlier attempt produced no expiry
+// updates. If no updates remain, Commit returns the refreshed table without
+// committing. A transaction containing only expiries with no updates makes no
+// commit attempt and never refreshes or replans.
+//
+// A retry fails with ErrTransactionUnusable if GC is disabled after refresh,
+// a staged update cannot apply, or replanning changes whether a non-main
+// commit branch is removed. Only the last case also matches ErrCommitFailed.
+// Later staged changes depend on the original branch removal outcome, but a
+// new transaction from the refreshed table can plan consistently. An update
+// that cannot apply includes a ref update to a snapshot that a peer expired.
 //
 // The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
-		cfg         = expireSnapshotsCfg{postCommit: true}
-		updates     []Update
-		reqs        []Requirement
-		pinned      []string
-		snapsToKeep = make(map[int64]struct{})
-		nowMs       = time.Now().UnixMilli()
+		cfg   = expireSnapshotsCfg{postCommit: true}
+		nowMs = time.Now().UnixMilli()
 	)
 
 	for _, opt := range opts {
@@ -794,6 +819,56 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	if err := validateGCEnabledForSnapshotExpiration(meta.props); err != nil {
 		return err
 	}
+
+	updates, walked, err := planExpiration(meta, cfg, nowMs)
+	if err != nil {
+		return err
+	}
+
+	return t.stageExpiration(expirationRecord{
+		cfg:           cfg,
+		nowMs:         nowMs,
+		walked:        walked,
+		removedBranch: removesRef(updates, cmp.Or(t.branch, MainBranch)),
+	}, updates)
+}
+
+// Record positions under the same lock as the updates they locate.
+func (t *Transaction) stageExpiration(rec expirationRecord, updates []Update) error {
+	if err := t.checkNotNil(); err != nil {
+		return err
+	}
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+	rec.pos = len(meta.updates)
+	if err := t.applyLocked(updates, nil); err != nil {
+		return err
+	}
+	rec.count = len(t.meta.updates) - rec.pos
+	t.expirations = append(t.expirations, rec)
+
+	return nil
+}
+
+func removesRef(updates []Update, name string) bool {
+	return slices.ContainsFunc(updates, func(u Update) bool {
+		r, ok := u.(*removeSnapshotRefUpdate)
+
+		return ok && r.RefName == name
+	})
+}
+
+func planExpiration(meta *MetadataBuilder, cfg expireSnapshotsCfg, nowMs int64) ([]Update, []string, error) {
+	var (
+		updates     []Update
+		walked      = make([]string, 0, len(meta.refs))
+		snapsToKeep = make(map[int64]struct{})
+	)
 
 	// Read table-level retention properties as the last-resort defaults,
 	// mirroring the Java implementation. The unprefixed property names are
@@ -814,7 +889,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 	snapshots, err := meta.snapshotsForFullScan()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	lookup := func(id int64) *Snapshot {
@@ -825,19 +900,11 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
-		// Assert and pin the ref's base snapshot id so we don't expire
-		// snapshots that concurrently updated refs now reference. Refs
-		// the transaction itself staged (absent on the base) already
-		// carry an absence assertion, which the pin keeps from being
-		// rebased.
-		if id := t.baseRefSnapshotID(refName); id != nil {
-			reqs = append(reqs, AssertRefSnapshotID(refName, id))
-		}
-		pinned = append(pinned, refName)
+		walked = append(walked, refName)
 
 		snap, err := meta.SnapshotByID(ref.SnapshotID)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 
 		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, &propMaxRefAgeMs)
@@ -914,14 +981,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		updates = append(updates, removal)
 	}
 
-	// A no-op expiry must not pin the commit branch, which would stop the
-	// transaction's other updates from rebasing on retry. apply still
-	// rejects a committed or unusable transaction.
-	if len(updates) == 0 {
-		return t.apply(nil, nil)
-	}
-
-	return t.applyPinned(updates, reqs, pinned)
+	return updates, walked, nil
 }
 
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
@@ -2604,12 +2664,17 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(meta.updates) > 0 {
 		reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
+		var replay *stagedReplay
+		if len(t.expirations) > 0 {
+			replay = newStagedReplay(cmp.Or(t.branch, MainBranch), meta.updates, t.expirations)
+		}
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 			withCommitNoReplay(t.noReplay),
 			withCommitPinnedRefs(t.pinnedRefs),
 			withCommitResume(t.failedCommits),
+			withCommitReplay(replay),
 		)
 		if err != nil {
 			// A failure that committed nothing stays committable, and the next
@@ -2634,8 +2699,12 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		// otherwise a retry would re-run the catalog commit.
 		t.committed = true
 
+		landed := meta.updates
+		if replay != nil && replay.ran {
+			landed = replay.landed
+		}
 		var removals []*removeSnapshotsUpdate
-		for _, u := range meta.updates {
+		for _, u := range landed {
 			if removal, ok := u.(*removeSnapshotsUpdate); ok {
 				removals = append(removals, removal)
 
