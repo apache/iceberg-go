@@ -150,7 +150,41 @@ func TestDynamicPartitionOverwriteAppendsNewPartition(t *testing.T) {
 		files = append(files, df.FilePath())
 	}
 	require.Equal(t, []string{"file://first.parquet"}, files)
+	require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
+	require.Equal(t, "true", snapshot.Summary.Properties["replace-partitions"])
 	require.Contains(t, txn.pinnedRefs, MainBranch)
+}
+
+func TestDynamicPartitionOverwriteUnpartitionedReplacesAllFiles(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	seed, fs := createTestTransactionWithMemIO(t, spec)
+	original := []iceberg.DataFile{
+		newTestDataFile(t, spec, "file://old-1.parquet", nil),
+		newTestDataFile(t, spec, "file://old-2.parquet", nil),
+	}
+	require.NoError(t, seed.AddDataFiles(ctx, original, nil))
+	seedMeta, err := seed.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "tbl"}, seedMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+
+	txn := tbl.NewTransaction()
+	replacement := newTestDataFile(t, spec, "file://replacement.parquet", nil)
+	require.NoError(t, txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil))
+	updated, err := txn.meta.Build()
+	require.NoError(t, err)
+	snapshot := updated.CurrentSnapshot()
+	require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
+	require.Equal(t, "true", snapshot.Summary.Properties["replace-partitions"])
+	var paths []string
+	for df, err := range snapshot.dataFiles(fs, nil) {
+		require.NoError(t, err)
+		if df.ContentType() == iceberg.EntryContentData {
+			paths = append(paths, df.FilePath())
+		}
+	}
+	require.Equal(t, []string{"file://replacement.parquet"}, paths)
 }
 
 func TestDynamicPartitionOverwriteEmptyInputIsNoOp(t *testing.T) {
@@ -175,14 +209,6 @@ func TestDynamicPartitionOverwriteRespectsCanceledContext(t *testing.T) {
 
 func TestDynamicPartitionOverwriteRejectsUnsupportedLayouts(t *testing.T) {
 	ctx := context.Background()
-	t.Run("unpartitioned", func(t *testing.T) {
-		spec := iceberg.NewPartitionSpec()
-		txn, _ := createTestTransactionWithMemIO(t, spec)
-		err := txn.DynamicPartitionOverwriteDataFiles(ctx, nil, nil)
-		require.ErrorIs(t, err, ErrInvalidOperation)
-		require.ErrorContains(t, err, "partitioned table")
-	})
-
 	t.Run("format v3", func(t *testing.T) {
 		spec := partitionedSpec()
 		txn, _ := createTestTransactionWithMemIO(t, spec)
