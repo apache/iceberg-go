@@ -1769,6 +1769,37 @@ func (s *SqliteCatalogTestSuite) TestRejectedUpdateLeavesTransactionResumable() 
 	s.Require().NotErrorIs(err, table.ErrTransactionUnusable)
 }
 
+func (s *SqliteCatalogTestSuite) TestCatalogUpdateFailureAfterMetadataWriteEndsTransaction() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.randomTableIdentifier()
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+	tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+	s.Require().NoError(err)
+
+	sqlDB := s.getDB()
+	defer sqlDB.Close()
+	_, err = sqlDB.Exec(`
+		CREATE TRIGGER fail_catalog_update
+		BEFORE UPDATE ON iceberg_tables
+		BEGIN
+			SELECT RAISE(FAIL, 'forced update failure');
+		END
+	`)
+	s.Require().NoError(err)
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.SetProperties(iceberg.Properties{"key": "value"}))
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorContains(err, "forced update failure")
+	s.Require().NotErrorIs(err, table.ErrCommitRejected)
+	s.Require().NotErrorIs(err, table.ErrCommitFailed)
+
+	_, err = tx.Commit(ctx)
+	s.Require().EqualError(err, "transaction has already been committed")
+}
+
 func (s *SqliteCatalogTestSuite) TestConflictClearedBeforeRecommitLands() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()

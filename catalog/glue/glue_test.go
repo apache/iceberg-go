@@ -2442,6 +2442,50 @@ func TestGlueCommitTableValidatesRequirementsForMissingTable(t *testing.T) {
 	mockGlueSvc.AssertExpectations(t)
 }
 
+func TestGlueCommitTableRejectsOnlyFailuresBeforeMetadataWrite(t *testing.T) {
+	ctx := context.Background()
+	ident := TableIdentifier("test_database", "test_table")
+	newCatalog := func(t *testing.T) (*Catalog, *mockGlueClient) {
+		tableLocation := filepath.Join(t.TempDir(), "test_table")
+		metadataLocation := filepath.Join(tableLocation, "metadata", "v1.metadata.json")
+		writeGluePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, nil)
+		glueTable := gluePurgeTable(metadataLocation)
+		glueTable.VersionId = aws.String("v1")
+
+		mockGlueSvc := &mockGlueClient{}
+		mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+			DatabaseName: aws.String("test_database"),
+			Name:         aws.String("test_table"),
+		}, mock.Anything).Return(&glue.GetTableOutput{Table: &glueTable}, nil).Once()
+
+		return &Catalog{glueSvc: mockGlueSvc}, mockGlueSvc
+	}
+
+	t.Run("staging failure", func(t *testing.T) {
+		glueCatalog, mockGlueSvc := newCatalog(t)
+
+		_, _, err := glueCatalog.CommitTable(ctx, ident, nil, []table.Update{table.NewSetCurrentSchemaUpdate(99)})
+		require.ErrorIs(t, err, table.ErrCommitRejected)
+		require.NotErrorIs(t, err, table.ErrCommitFailed)
+		mockGlueSvc.AssertNotCalled(t, "UpdateTable", mock.Anything, mock.Anything, mock.Anything)
+		mockGlueSvc.AssertExpectations(t)
+	})
+
+	t.Run("glue update failure after metadata write", func(t *testing.T) {
+		glueCatalog, mockGlueSvc := newCatalog(t)
+		mockGlueSvc.On("UpdateTable", mock.Anything, mock.Anything, mock.Anything).
+			Return(&glue.UpdateTableOutput{}, errors.New("glue unavailable")).Once()
+
+		_, _, err := glueCatalog.CommitTable(ctx, ident, nil, []table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"key": "value"}),
+		})
+		require.ErrorContains(t, err, "glue unavailable")
+		require.NotErrorIs(t, err, table.ErrCommitRejected)
+		require.NotErrorIs(t, err, table.ErrCommitFailed)
+		mockGlueSvc.AssertExpectations(t)
+	})
+}
+
 func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, awsCfg aws.Config) {
 	t.Helper()
 

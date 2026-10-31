@@ -195,7 +195,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		currentMetadata = current.Metadata()
 	}
 	if err := internal.ValidateRequirements(ident, currentMetadata, reqs); err != nil {
-		return nil, "", internal.RejectUnlessConflict(err)
+		return nil, "", internal.RejectUnlessConflict(fmt.Errorf("hadoop catalog: %w", err))
 	}
 
 	// Step 3: Apply updates to produce new metadata.
@@ -208,7 +208,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	} else {
 		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: hadoop catalog: failed to create base metadata: %w", table.ErrCommitRejected, err)
+			return nil, "", internal.RejectUnlessConflict(fmt.Errorf("hadoop catalog: failed to create base metadata: %w", err))
 		}
 	}
 
@@ -219,12 +219,12 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	// Step 4: Validate table location has not changed.
 	if current != nil && updated.Location() != current.Location() {
-		return nil, "", fmt.Errorf("%w: hadoop catalog: table location cannot be changed", table.ErrCommitRejected)
+		return nil, "", internal.RejectUnlessConflict(errors.New("hadoop catalog: table location cannot be changed"))
 	}
 
 	// Step 5: Reject write.metadata.location property.
 	if v := updated.Properties().Get(table.WriteMetadataLocationKey, ""); v != "" {
-		return nil, "", fmt.Errorf("%w: hadoop catalog: %s property is not supported", table.ErrCommitRejected, table.WriteMetadataLocationKey)
+		return nil, "", internal.RejectUnlessConflict(fmt.Errorf("hadoop catalog: %s property is not supported", table.WriteMetadataLocationKey))
 	}
 
 	// Step 6: Determine next version number.
