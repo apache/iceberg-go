@@ -170,7 +170,8 @@ type NamespaceCatalog interface {
 type Catalog interface {
 	io.Closer
 
-	// Name returns the catalog's configured logical name.
+	// Name returns the catalog's configured logical name. Glue and Hive
+	// catalogs built without WithName return "glue" and "hive".
 	Name() string
 
 	// CatalogType returns the type of the catalog.
@@ -183,7 +184,8 @@ type Catalog interface {
 // As finds the first catalog in the wrapping chain that implements T.
 // Catalog decorators can expose a wrapped catalog with Unwrap() Catalog.
 // The outermost catalog is checked first, allowing decorators to intercept
-// optional operations. The Unwrap chain must terminate without cycles.
+// optional operations. Unwrap may return nil to end the chain, and the
+// chain must terminate without cycles.
 func As[T any](cat Catalog) (T, bool) {
 	for cat != nil {
 		if capability, ok := any(cat).(T); ok {
