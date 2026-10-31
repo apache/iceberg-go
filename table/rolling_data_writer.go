@@ -23,8 +23,6 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
-	"maps"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,8 +52,6 @@ const rollingDataWriterQueueCapacity = 64
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
 type writerFactory struct {
-	rootLocation   string
-	rootURL        *url.URL
 	fs             iceio.WriteFileIO
 	writeUUID      *uuid.UUID
 	taskSchema     *iceberg.Schema
@@ -90,13 +86,12 @@ type writerFactory struct {
 	// capacity; non-positive uses rollingDataWriterQueueCapacity.
 	recordBufferSize int
 
-	writers               sync.Map
-	partitionLocProviders sync.Map
-	nextCount             func() (int, bool)
-	stopCount             func()
-	countMu               sync.Mutex
-	partitionIDCounter    atomic.Int64
-	mu                    sync.Mutex
+	writers            sync.Map
+	nextCount          func() (int, bool)
+	stopCount          func()
+	countMu            sync.Mutex
+	partitionIDCounter atomic.Int64
+	mu                 sync.Mutex
 }
 
 type writerFactoryOption func(*writerFactory) error
@@ -149,13 +144,6 @@ func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
 // configuration derived from the table metadata.
 func newWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64, opts ...writerFactoryOption) (*writerFactory, error) {
 	nextCount, stopCount := iter.Pull(args.counter)
-
-	rootURL, err := url.Parse(rootLocation)
-	if err != nil {
-		stopCount()
-
-		return nil, err
-	}
 
 	locProvider, err := LoadLocationProvider(rootLocation, meta.props)
 	if err != nil {
@@ -220,8 +208,6 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 
 	f := &writerFactory{
-		rootLocation:     rootLocation,
-		rootURL:          rootURL,
 		fs:               args.fs,
 		writeUUID:        args.writeUUID,
 		taskSchema:       taskSchema,
@@ -309,16 +295,10 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 	fileName := dataFileName(*w.writeUUID, cnt, partitionID, fileCount,
 		strings.ToLower(string(w.fileFormat)))
 
-	var filePath string
 	if partitionPath != "" {
-		partitionLoc, err := w.partitionLocProvider(partitionPath)
-		if err != nil {
-			return nil, err
-		}
-		filePath = partitionLoc.NewDataLocation(fileName)
-	} else {
-		filePath = w.locProvider.NewDataLocation(fileName)
+		fileName = partitionPath + "/" + fileName
 	}
+	filePath := w.locProvider.NewDataLocation(fileName)
 
 	// SortOrderID is set only for presorted input: otherwise batches are sorted
 	// individually (see resolveSortKeys), which does not sort the whole file.
@@ -336,25 +316,6 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		EqualityFieldIDs: w.equalityFieldIDs,
 		SortOrderID:      w.sortOrderID,
 	}, arrowSchema)
-}
-
-func (w *writerFactory) partitionLocProvider(partitionPath string) (LocationProvider, error) {
-	if cached, ok := w.partitionLocProviders.Load(partitionPath); ok {
-		return cached.(LocationProvider), nil
-	}
-
-	partitionDataPath := w.rootURL.JoinPath("data", partitionPath).String()
-	partitionProps := make(iceberg.Properties, len(w.tableProps)+1)
-	maps.Copy(partitionProps, w.tableProps)
-	partitionProps[WriteDataPathKey] = partitionDataPath
-	loc, err := LoadLocationProvider(w.rootLocation, partitionProps)
-	if err != nil {
-		return nil, err
-	}
-
-	w.partitionLocProviders.Store(partitionPath, loc)
-
-	return loc, nil
 }
 
 // RollingDataWriter writes Arrow records for a specific partition, rolling to
