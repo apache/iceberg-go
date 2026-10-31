@@ -17,7 +17,12 @@
 
 package glue
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+)
 
 func TestGlueCatalogName(t *testing.T) {
 	for _, tc := range []struct {
@@ -36,5 +41,29 @@ func TestGlueCatalogName(t *testing.T) {
 				t.Fatalf("catalog name = %q, want %q", got, tc.name)
 			}
 		})
+	}
+}
+
+func TestGlueCatalogRegistrationForwardsName(t *testing.T) {
+	const name = "analytics"
+	cat, err := catalog.Load(t.Context(), name, iceberg.Properties{
+		"type":          "glue",
+		Region:          "us-east-1",
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Errorf("close Glue catalog: %v", err)
+		}
+	})
+	if got := cat.Name(); got != name {
+		t.Fatalf("registered catalog name = %q, want %q", got, name)
+	}
+	if got := cat.CatalogType(); got != catalog.Glue {
+		t.Fatalf("registered catalog type = %q, want %q", got, catalog.Glue)
 	}
 }
