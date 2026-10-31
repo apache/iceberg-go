@@ -60,8 +60,8 @@ func (t *Transaction) dynamicOverwriteSpec() (*iceberg.PartitionSpec, error) {
 	if err != nil {
 		return nil, err
 	}
-	if spec == nil || spec.NumFields() == 0 {
-		return nil, fmt.Errorf("%w: dynamic partition overwrite requires a partitioned table; use Overwrite for unpartitioned tables", ErrInvalidOperation)
+	if spec == nil {
+		return nil, fmt.Errorf("%w: dynamic partition overwrite requires a current partition spec", ErrInvalidOperation)
 	}
 	if err := checkNoUnknownTransform(spec); err != nil {
 		return nil, err
@@ -72,6 +72,8 @@ func (t *Transaction) dynamicOverwriteSpec() (*iceberg.PartitionSpec, error) {
 
 // DynamicPartitionOverwriteDataFiles atomically replaces all live data files
 // in the partitions represented by filesToAdd. Other partitions are unchanged.
+// An unpartitioned table has one logical partition, so a non-empty input
+// replaces all of its data, matching Java's ReplacePartitions operation.
 //
 // The added files must use the table's current partition spec. Existing live
 // data files must use that spec as well: overlapping partitions from an older
@@ -85,8 +87,7 @@ func (t *Transaction) dynamicOverwriteSpec() (*iceberg.PartitionSpec, error) {
 // method should run on a fresh transaction, before other staged snapshot or
 // schema/spec changes.
 //
-// An empty input is a no-op. Unpartitioned tables and format-v3 tables are
-// rejected. All files must be pre-written and have valid DataFile metadata,
+// An empty input is a no-op. Format-v3 tables are rejected. All files must be pre-written and have valid DataFile metadata,
 // just as with AddDataFiles. Uncommitted files remain the caller's responsibility
 // if staging or the eventual transaction commit fails.
 func (t *Transaction) DynamicPartitionOverwriteDataFiles(
@@ -122,6 +123,10 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	if err != nil {
 		return err
 	}
+	addedPaths := make(map[string]struct{}, len(filesToAdd))
+	for _, file := range filesToAdd {
+		addedPaths[file.FilePath()] = struct{}{}
+	}
 
 	var toDelete []iceberg.DataFile
 	validationPlan := newPartitionValidationPlan(spec)
@@ -132,6 +137,9 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 			}
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if _, exists := addedPaths[df.FilePath()]; exists {
+				return fmt.Errorf("%w: added file %q already exists in the target snapshot", ErrInvalidOperation, df.FilePath())
 			}
 			if df.ContentType() != iceberg.EntryContentData {
 				continue
@@ -170,6 +178,31 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	props := make(iceberg.Properties, len(snapshotProps)+1)
 	maps.Copy(props, snapshotProps)
 	props["replace-partitions"] = "true"
+
+	if len(toDelete) == 0 {
+		// ReplaceDataFiles delegates additions without removals to AddDataFiles,
+		// recording an append snapshot. ReplacePartitions must produce an
+		// overwrite snapshot even when it creates a previously empty partition:
+		// the operation type is part of Iceberg's cherry-pick semantics.
+		if err := t.ensureNameMapping(); err != nil {
+			return err
+		}
+		wfs, err := requireWriteFileIO(fs)
+		if err != nil {
+			return err
+		}
+		commitUUID := uuid.New()
+		producer := newOverwriteFilesProducer(OpOverwrite, t, wfs, &commitUUID, props)
+		for _, file := range filesToAdd {
+			producer.appendDataFile(file)
+		}
+		updates, reqs, err := producer.commit(ctx)
+		if err != nil {
+			return err
+		}
+
+		return t.apply(updates, reqs)
+	}
 
 	return t.ReplaceDataFiles(ctx, toDelete, filesToAdd, props)
 }
