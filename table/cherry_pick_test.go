@@ -223,10 +223,12 @@ func TestCherryPickSnapshotTracksWAPPublication(t *testing.T) {
 	source := tbl.SnapshotByName(branchPlanningRef)
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID,
+		iceberg.Properties{"wap.id": "forged", "published-wap-id": "forged"}))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "batch-1", tbl.CurrentSnapshot().Summary.Properties["published-wap-id"])
+	assert.NotContains(t, tbl.CurrentSnapshot().Summary.Properties, "wap.id")
 
 	branch, err = tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
