@@ -18,9 +18,8 @@
 package catalogtest
 
 // This file covers namespaces: the structural lifecycle (create, exists, list,
-// drop) and properties (create with properties, load, set, update, remove).
-// Nested namespaces are deferred to a later slice of #1691, together with the
-// Config.SupportsNestedNamespaces flag that would gate them.
+// drop), nested namespaces when Config.SupportsNestedNamespaces is set, and
+// properties (create with properties, load, set, update, remove).
 //
 // Java splits property writes across SupportsNamespaces.setProperties and
 // removeProperties; the Go catalog has a single UpdateNamespaceProperties
@@ -29,10 +28,12 @@ package catalogtest
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -166,6 +167,94 @@ func testListNamespaces(t *testing.T, cfg Config) {
 	require.NoError(t, err)
 	assert.NotContains(t, namespaces, first, "dropped namespace should no longer be listed")
 	assert.Contains(t, namespaces, second, "remaining namespace should still be listed")
+}
+
+// testListNestedNamespaces asserts that listing a namespace returns its direct
+// children as full identifiers, that the children stay out of the top-level
+// listing, and that a dropped child disappears from its parent's listing.
+func testListNestedNamespaces(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	parent, _ := newIdentifiers()
+	child1 := append(slices.Clone(parent), "child1")
+	child2 := append(slices.Clone(parent), "child2")
+
+	require.NoError(t, cat.CreateNamespace(ctx, parent, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, parent) })
+
+	children, err := cat.ListNamespaces(ctx, parent)
+	require.NoError(t, err)
+	assert.Empty(t, children, "a new namespace should have no children")
+
+	require.NoError(t, cat.CreateNamespace(ctx, child1, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, child1) })
+
+	children, err = cat.ListNamespaces(ctx, parent)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []table.Identifier{child1}, children, "listing the parent should return child1")
+
+	require.NoError(t, cat.CreateNamespace(ctx, child2, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, child2) })
+
+	children, err = cat.ListNamespaces(ctx, parent)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []table.Identifier{child1, child2}, children, "listing the parent should return both children")
+
+	top, err := cat.ListNamespaces(ctx, nil)
+	require.NoError(t, err)
+	assert.Contains(t, top, parent, "the parent should be listed at the top level")
+	assert.NotContains(t, top, child1, "a child should not be listed at the top level")
+	assert.NotContains(t, top, child2, "a child should not be listed at the top level")
+
+	require.NoError(t, cat.DropNamespace(ctx, child1))
+
+	children, err = cat.ListNamespaces(ctx, parent)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []table.Identifier{child2}, children, "a dropped child should no longer be listed")
+
+	require.NoError(t, cat.DropNamespace(ctx, child2))
+
+	children, err = cat.ListNamespaces(ctx, parent)
+	require.NoError(t, err)
+	assert.Empty(t, children, "the parent should have no children left")
+}
+
+// testDropNamespaceWithNestedNamespace asserts that a namespace with a child
+// namespace cannot be dropped, that the rejected drop leaves both in place,
+// and that the two can be dropped child first.
+func testDropNamespaceWithNestedNamespace(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	parent, _ := newIdentifiers()
+	child := append(slices.Clone(parent), "child")
+
+	require.NoError(t, cat.CreateNamespace(ctx, parent, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, parent) })
+	require.NoError(t, cat.CreateNamespace(ctx, child, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, child) })
+
+	err := cat.DropNamespace(ctx, parent)
+	assert.ErrorIs(t, err, catalog.ErrNamespaceNotEmpty)
+
+	exists, err := cat.CheckNamespaceExists(ctx, parent)
+	require.NoError(t, err)
+	assert.True(t, exists, "the parent should still exist after a rejected drop")
+
+	exists, err = cat.CheckNamespaceExists(ctx, child)
+	require.NoError(t, err)
+	assert.True(t, exists, "the child should still exist after a rejected drop of its parent")
+
+	require.NoError(t, cat.DropNamespace(ctx, child))
+
+	exists, err = cat.CheckNamespaceExists(ctx, child)
+	require.NoError(t, err)
+	assert.False(t, exists, "the child should not exist after drop")
+
+	require.NoError(t, cat.DropNamespace(ctx, parent))
+
+	exists, err = cat.CheckNamespaceExists(ctx, parent)
+	require.NoError(t, err)
+	assert.False(t, exists, "the parent should not exist after drop")
 }
 
 // testNamespacePropertiesNotSupported asserts that a catalog which cannot store

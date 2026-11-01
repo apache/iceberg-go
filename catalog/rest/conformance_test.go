@@ -34,6 +34,9 @@ func TestRestCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		SupportsNamespaceProperties: true,
 		SupportsRenameTable:         true,
+		// SupportsNestedNamespaces stays off: the published fixture (1.10.1)
+		// drops a namespace that still has children, which apache/iceberg#16061
+		// fixed in 1.11.0, and no newer fixture image is published yet.
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := catalog.Load(context.Background(), "local", iceberg.Properties{
 				"type":               "rest",
