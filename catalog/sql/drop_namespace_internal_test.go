@@ -387,5 +387,6 @@ func TestDropNamespaceDoesNotRaceWithUpdateNamespaceProperties(t *testing.T) {
 func createTestView(cat *Catalog, ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, representation view.Representation, props iceberg.Properties) error {
 	version := &view.Version{Representations: []view.Representation{view.NewRepresentation(representation)}}
 	_, err := cat.CreateView(ctx, identifier, version, schema, catalog.WithViewProperties(props))
+
 	return err
 }
