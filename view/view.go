@@ -185,6 +185,7 @@ func CreateViewWithIOPropertiesAndRegistry(
 	if err != nil {
 		return nil, err
 	}
+
 	return CreateViewFromVersionWithRegistry(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, registry)
 }
 
