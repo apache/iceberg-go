@@ -107,7 +107,7 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	}
 
 	if source.Summary == nil || source.Summary.Operation != OpAppend {
-		return fmt.Errorf("%w: snapshot %d is not append, dynamic overwrite, or a fast-forward",
+		return fmt.Errorf("%w: snapshot %d is not an append and cannot be replayed onto a divergent branch",
 			ErrInvalidOperation, snapshotID)
 	}
 	if meta.formatVersion >= 3 {
