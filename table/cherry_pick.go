@@ -118,6 +118,9 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	props := make(iceberg.Properties, len(snapshotProps)+2)
 	maps.Copy(props, snapshotProps)
 	props["source-snapshot-id"] = strconv.FormatInt(snapshotID, 10)
+	// Publication provenance must describe the source snapshot, not a
+	// caller-supplied marker that could falsely block a future WAP publish.
+	delete(props, "published-wap-id")
 	if wapID != "" {
 		props["published-wap-id"] = wapID
 	}

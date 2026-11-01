@@ -40,7 +40,9 @@ func TestCherryPickSnapshotFromDivergentBranch(t *testing.T) {
 	require.NotEqual(t, base, targetBefore)
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, iceberg.Properties{"cherry-picked": "yes"}))
+	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, iceberg.Properties{
+		"cherry-picked": "yes", "published-wap-id": "forged", "source-snapshot-id": "forged",
+	}))
 	result, err := tx.Commit(t.Context())
 	require.NoError(t, err)
 
@@ -49,6 +51,8 @@ func TestCherryPickSnapshotFromDivergentBranch(t *testing.T) {
 	require.Equal(t, table.OpAppend, result.CurrentSnapshot().Summary.Operation)
 	assert.Equal(t, "yes", result.CurrentSnapshot().Summary.Properties["cherry-picked"])
 	assert.Equal(t, strconv.FormatInt(source.SnapshotID, 10), result.CurrentSnapshot().Summary.Properties["source-snapshot-id"])
+	assert.NotContains(t, result.CurrentSnapshot().Summary.Properties, "published-wap-id",
+		"a snapshot without WAP must not acquire a caller-supplied publication marker")
 	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, table.MainBranch))
 	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
 
