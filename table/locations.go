@@ -19,7 +19,6 @@ package table
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -38,7 +37,9 @@ const (
 )
 
 type LocationProvider interface {
-	NewDataLocation(dataFileName string) string
+	// NewDataLocation returns the location for a data file. partitionPath is the
+	// file's partition path, such as "a=1/b=2", or empty for an unpartitioned file.
+	NewDataLocation(dataFileName, partitionPath string) string
 	NewTableMetadataFileLocation(newVersion int) (string, error)
 	NewMetadataLocation(metadataFileName string) string
 }
@@ -79,8 +80,12 @@ func joinLocationPath(location string, elem ...string) string {
 	return b.String()
 }
 
-func (slp *simpleLocationProvider) NewDataLocation(dataFileName string) string {
-	return joinLocationPath(slp.dataPath, dataFileName)
+func (slp *simpleLocationProvider) NewDataLocation(dataFileName, partitionPath string) string {
+	if partitionPath == "" {
+		return joinLocationPath(slp.dataPath, dataFileName)
+	}
+
+	return joinLocationPath(slp.dataPath, partitionPath, dataFileName)
 }
 
 func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) (string, error) {
@@ -152,16 +157,18 @@ func computeHash(dataFileName string) string {
 }
 
 // NewDataLocation places the entropy hash right under the data path, like the
-// Java implementation. A partitioned dataFileName ("<partition path>/<file>")
-// keeps its partition directories only when partitioned paths are enabled.
-func (p *objectStoreLocationProvider) NewDataLocation(dataFileName string) string {
-	if p.includePartitionPaths {
-		return joinLocationPath(p.dataPath, computeHash(dataFileName), dataFileName)
+// Java implementation. The partition directories are kept, and hashed with the
+// file name, only when partitioned paths are enabled.
+func (p *objectStoreLocationProvider) NewDataLocation(dataFileName, partitionPath string) string {
+	if !p.includePartitionPaths {
+		return joinLocationPath(p.dataPath, computeHash(dataFileName)+"-"+dataFileName)
 	}
 
-	dataFileName = path.Base(dataFileName)
+	if partitionPath != "" {
+		dataFileName = partitionPath + "/" + dataFileName
+	}
 
-	return joinLocationPath(p.dataPath, computeHash(dataFileName)+"-"+dataFileName)
+	return joinLocationPath(p.dataPath, computeHash(dataFileName), dataFileName)
 }
 
 func newObjectStoreLocationProvider(tableLoc string, tableProps iceberg.Properties) *objectStoreLocationProvider {

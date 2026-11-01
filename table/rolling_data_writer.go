@@ -295,10 +295,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 	fileName := dataFileName(*w.writeUUID, cnt, partitionID, fileCount,
 		strings.ToLower(string(w.fileFormat)))
 
-	if partitionPath != "" {
-		fileName = partitionPath + "/" + fileName
-	}
-	filePath := w.locProvider.NewDataLocation(fileName)
+	filePath := w.locProvider.NewDataLocation(fileName, partitionPath)
 
 	// SortOrderID is set only for presorted input: otherwise batches are sorted
 	// individually (see resolveSortKeys), which does not sort the whole file.
