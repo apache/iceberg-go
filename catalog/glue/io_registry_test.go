@@ -57,3 +57,44 @@ func TestGlueLoadTableWithIsolatedIORegistry(t *testing.T) {
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 	client.AssertExpectations(t)
 }
+
+func TestGlueCatalogsWithSameSchemeStayIsolated(t *testing.T) {
+	const scheme = "glue-shared-scheme"
+	const metadataLocation = scheme + "://bucket/table/metadata.json"
+	contents, err := os.ReadFile("../../table/testdata/TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	filesystems := []*iceio.MemFS{iceio.NewMemFS(), iceio.NewMemFS()}
+	catalogs := make([]*Catalog, len(filesystems))
+	clients := make([]*mockGlueClient, len(filesystems))
+	for i, fs := range filesystems {
+		registry := &iceio.Registry{}
+		require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+			return fs, nil
+		}))
+		require.NoError(t, fs.WriteFile(t.Context(), metadataLocation, contents))
+
+		client := &mockGlueClient{}
+		client.On("GetTable", mock.Anything, mock.Anything, mock.Anything).Return(&awsglue.GetTableOutput{Table: &types.Table{
+			Name: aws.String("tbl"), DatabaseName: aws.String("db"), TableType: aws.String(glueTableType),
+			Parameters: map[string]string{tableParamTableType: glueTypeIceberg, tableParamMetadataLocation: metadataLocation},
+		}}, nil).Once()
+		cat, err := NewCatalog(WithAWSConfig(aws.Config{Region: "us-east-1"}), WithIORegistry(registry))
+		require.NoError(t, err)
+		cat.glueSvc = client
+		catalogs[i] = cat
+		clients[i] = client
+	}
+
+	// Load after both catalogs exist. A shared/global factory would route
+	// both loads to one filesystem even though the URI scheme is identical.
+	for i, cat := range catalogs {
+		tbl, err := cat.LoadTable(t.Context(), TableIdentifier("db", "tbl"))
+		require.NoError(t, err)
+		loaded, err := tbl.FS(t.Context())
+		require.NoError(t, err)
+		require.Same(t, filesystems[i], loaded)
+		require.NotSame(t, filesystems[1-i], loaded)
+		clients[i].AssertExpectations(t)
+	}
+}
