@@ -104,7 +104,8 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 		return err
 	}
 
-	if _, err := t.validateDataFilesToAdd(filesToAdd, "DynamicPartitionOverwriteDataFiles", true); err != nil {
+	addedPaths, err := t.validateDataFilesToAdd(filesToAdd, "DynamicPartitionOverwriteDataFiles", true)
+	if err != nil {
 		return err
 	}
 	for _, df := range filesToAdd {
@@ -123,11 +124,6 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	if err != nil {
 		return err
 	}
-	addedPaths := make(map[string]struct{}, len(filesToAdd))
-	for _, file := range filesToAdd {
-		addedPaths[file.FilePath()] = struct{}{}
-	}
-
 	var toDelete []iceberg.DataFile
 	validationPlan := newPartitionValidationPlan(spec)
 	if snapshot := t.planningSnapshot(t.meta); snapshot != nil {

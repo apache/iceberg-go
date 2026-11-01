@@ -133,6 +133,24 @@ func TestDynamicPartitionOverwriteDataFiles(t *testing.T) {
 	require.Contains(t, txn.pinnedRefs, MainBranch, "concurrent appends must not bypass the overwrite")
 }
 
+func TestDynamicPartitionOverwriteRejectsAlreadyLivePath(t *testing.T) {
+	spec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, spec)
+	existing := newTestDataFile(t, spec, "file://existing.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, seed.AddDataFiles(t.Context(), []iceberg.DataFile{existing}, nil))
+	seedMeta, err := seed.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "tbl"}, seedMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+
+	txn := tbl.NewTransaction()
+	err = txn.DynamicPartitionOverwriteDataFiles(t.Context(), []iceberg.DataFile{existing}, nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorContains(t, err, "already exists")
+	require.Empty(t, txn.meta.updates)
+	require.Empty(t, txn.pinnedRefs)
+}
+
 func TestDynamicPartitionOverwriteAppendsNewPartition(t *testing.T) {
 	ctx := context.Background()
 	spec := partitionedSpec()
