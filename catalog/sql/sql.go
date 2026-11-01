@@ -222,8 +222,10 @@ func init() {
 	}))
 }
 
-var _ catalog.Catalog = (*Catalog)(nil)
-var _ catalog.ViewCatalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog     = (*Catalog)(nil)
+	_ catalog.ViewCatalog = (*Catalog)(nil)
+)
 
 const namespaceExistsProperty = "exists"
 
@@ -1650,6 +1652,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	if err != nil {
 		return nil, err
 	}
+
 	return createdView, nil
 }
 
