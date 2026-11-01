@@ -118,6 +118,10 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	props := make(iceberg.Properties, len(snapshotProps)+2)
 	maps.Copy(props, snapshotProps)
 	props["source-snapshot-id"] = strconv.FormatInt(snapshotID, 10)
+	// The cherry-picked snapshot is published, not staged. Never carry a
+	// caller-supplied WAP ID into its summary: a later publish could
+	// mistake it for an unpublished staged snapshot.
+	delete(props, "wap.id")
 	// Publication provenance must describe the source snapshot, not a
 	// caller-supplied marker that could falsely block a future WAP publish.
 	delete(props, "published-wap-id")
