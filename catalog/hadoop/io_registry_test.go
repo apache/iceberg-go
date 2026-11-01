@@ -77,9 +77,19 @@ func TestHadoopRegistryUsedForTableCreateAndLoad(t *testing.T) {
 	require.Equal(t, created.MetadataLocation(), loaded.MetadataLocation())
 }
 
+// identifiedHadoopCatalogFS has a non-zero-sized value: distinct zero-sized
+// structs may legally have identical pointer addresses in Go.
+type identifiedHadoopCatalogFS struct {
+	*stubHadoopCatalogFS
+	id int
+}
+
 func TestHadoopCatalogsWithSameSchemeStayIsolated(t *testing.T) {
 	const warehouse = "hadoop-shared-scheme://bucket/warehouse"
-	filesystems := []*stubHadoopCatalogFS{{}, {}}
+	filesystems := []*identifiedHadoopCatalogFS{
+		{stubHadoopCatalogFS: &stubHadoopCatalogFS{}, id: 1},
+		{stubHadoopCatalogFS: &stubHadoopCatalogFS{}, id: 2},
+	}
 	catalogs := make([]*Catalog, len(filesystems))
 
 	for i, fs := range filesystems {
