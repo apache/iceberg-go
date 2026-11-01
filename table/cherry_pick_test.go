@@ -164,6 +164,40 @@ func TestCherryPickSnapshotAllowsEmptyAppend(t *testing.T) {
 	require.ErrorContains(t, err, "already been applied")
 }
 
+// A file already live on the target must not be added again even when the
+// source snapshot itself has not been cherry-picked before.
+func TestCherryPickSnapshotRejectsSourceFileAlreadyOnTarget(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
+	mainPaths, _ := liveFilesOnRef(t, tbl, table.MainBranch)
+	require.Len(t, mainPaths, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+
+	branchPaths, _ := liveFilesOnRef(t, tbl, branchPlanningRef)
+	require.Len(t, branchPaths, 2)
+	var sourcePath string
+	for _, path := range branchPaths {
+		if path != mainPaths[0] {
+			sourcePath = path
+			break
+		}
+	}
+	require.NotEmpty(t, sourcePath)
+
+	// Import the same physical file directly, but not the source snapshot.
+	duplicate := tbl.NewTransaction()
+	require.NoError(t, duplicate.AddDataFilesByPath(t.Context(), []string{sourcePath}, nil, false))
+	var err error
+	tbl, err = duplicate.Commit(t.Context())
+	require.NoError(t, err)
+
+	replay := tbl.NewTransaction()
+	err = replay.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
+	require.ErrorContains(t, err, "already referenced")
+	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, tbl, table.MainBranch))
+}
+
 func TestCherryPickSnapshotRejectsConcurrentTargetMove(t *testing.T) {
 	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
