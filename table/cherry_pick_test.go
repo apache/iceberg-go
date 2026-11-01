@@ -180,6 +180,7 @@ func TestCherryPickSnapshotRejectsSourceFileAlreadyOnTarget(t *testing.T) {
 	for _, path := range branchPaths {
 		if path != mainPaths[0] {
 			sourcePath = path
+
 			break
 		}
 	}
