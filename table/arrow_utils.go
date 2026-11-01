@@ -1508,18 +1508,26 @@ func arrowSchemaEqual(left, right *arrow.Schema) bool {
 type schemaCompatVisitor struct {
 	provided *iceberg.Schema
 
+	// errorData holds a row per visited field for the mismatch report. It
+	// is nil while only checking compatibility, so that a compatible
+	// schema, the common case, formats no fields.
 	errorData [][]string
 }
 
 func checkSchemaCompat(requested, provided *iceberg.Schema) error {
+	compat, err := iceberg.PreOrderVisit(requested, &schemaCompatVisitor{provided: provided})
+	if err != nil || compat {
+		return err
+	}
+
+	// Visit again to build the report of every field for the error.
 	sc := &schemaCompatVisitor{
 		provided:  provided,
 		errorData: [][]string{{"", "Table Field", "Requested Field"}},
 	}
+	_, err = iceberg.PreOrderVisit(requested, sc)
 
-	_, compat := iceberg.PreOrderVisit(requested, sc)
-
-	return compat
+	return err
 }
 
 func checkArrowSchemaCompat(requested *iceberg.Schema, provided *arrow.Schema, downcastNanoToMicro bool) error {
@@ -1547,75 +1555,67 @@ func checkArrowSchemaCompatWithProperties(requested *iceberg.Schema, provided *a
 }
 
 func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
-	rhs, ok := sc.provided.FindFieldByID(lhs.ID)
+	rhs, ok := sc.provided.FindFieldByIDRef(lhs.ID, internal.SchemaRef{})
 	if !ok {
-		if lhs.Required && lhs.WriteDefault == nil && lhs.InitialDefault == nil {
-			sc.errorData = append(sc.errorData,
-				[]string{"❌", lhs.String(), "missing"})
-
-			return false
-		}
-		sc.errorData = append(sc.errorData,
-			[]string{"✅", lhs.String(), "missing"})
-
-		return true
+		return sc.report(!lhs.Required || lhs.WriteDefault != nil || lhs.InitialDefault != nil, lhs, nil)
 	}
 
 	if lhs.Required && !rhs.Required {
-		sc.errorData = append(sc.errorData,
-			[]string{"❌", lhs.String(), rhs.String()})
-
-		return false
+		return sc.report(false, lhs, &rhs)
 	}
 
 	if lhs.Type.Equals(rhs.Type) {
-		sc.errorData = append(sc.errorData,
-			[]string{"✅", lhs.String(), rhs.String()})
-
-		return true
+		return sc.report(true, lhs, &rhs)
 	}
 
 	// we only check that parent node is also of the same type
 	// we check the type of the child nodes as we traverse them later
 	switch lhs.Type.(type) {
 	case *iceberg.StructType:
-		if rhs, ok := rhs.Type.(*iceberg.StructType); ok {
-			sc.errorData = append(sc.errorData,
-				[]string{"✅", lhs.String(), rhs.String()})
-
-			return true
+		if _, ok := rhs.Type.(*iceberg.StructType); ok {
+			return sc.report(true, lhs, &rhs)
 		}
 	case *iceberg.ListType:
-		if rhs, ok := rhs.Type.(*iceberg.ListType); ok {
-			sc.errorData = append(sc.errorData,
-				[]string{"✅", lhs.String(), rhs.String()})
-
-			return true
+		if _, ok := rhs.Type.(*iceberg.ListType); ok {
+			return sc.report(true, lhs, &rhs)
 		}
 	case *iceberg.MapType:
-		if rhs, ok := rhs.Type.(*iceberg.MapType); ok {
-			sc.errorData = append(sc.errorData,
-				[]string{"✅", lhs.String(), rhs.String()})
-
-			return true
+		if _, ok := rhs.Type.(*iceberg.MapType); ok {
+			return sc.report(true, lhs, &rhs)
 		}
 	}
 
-	if _, err := iceberg.PromoteType(rhs.Type, lhs.Type); err != nil {
-		sc.errorData = append(sc.errorData,
-			[]string{"❌", lhs.String(), rhs.String()})
+	_, err := iceberg.PromoteType(rhs.Type, lhs.Type)
 
-		return false
+	return sc.report(err == nil, lhs, &rhs)
+}
+
+// report adds the row of lhs, compared with rhs (nil when the provided
+// schema lacks it), to the mismatch report if one is being built. It
+// returns compat.
+func (sc *schemaCompatVisitor) report(compat bool, lhs iceberg.NestedField, rhs *iceberg.NestedField) bool {
+	if sc.errorData == nil {
+		return compat
 	}
 
-	sc.errorData = append(sc.errorData,
-		[]string{"✅", lhs.String(), rhs.String()})
+	status, provided := "✅", "missing"
+	if !compat {
+		status = "❌"
+	}
+	if rhs != nil {
+		provided = rhs.String()
+	}
+	sc.errorData = append(sc.errorData, []string{status, lhs.String(), provided})
 
-	return true
+	return compat
 }
 
 func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
 	if !v() {
+		if sc.errorData == nil {
+			return false
+		}
+
 		// Render the collected mismatch rows into the error message with the
 		// stdlib tabwriter. Unlike the former pterm renderer this writes only to
 		// the returned error and has no stdout side effect. tabwriter measures
@@ -1926,16 +1926,20 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	defer rdr.Close()
 
 	arrSchema := must(rdr.Schema())
-	if err := checkArrowSchemaCompatWithProperties(currentSchema, arrSchema, false, props); err != nil {
+	fileSchema := must(ArrowSchemaToIcebergWithOptions(arrSchema, ArrowToIcebergOptions{
+		NameMapping:     currentSchema.NameMapping(),
+		TableSchema:     currentSchema,
+		TableProperties: props,
+	}))
+	if err := checkSchemaCompat(currentSchema, fileSchema); err != nil {
 		panic(err)
 	}
 
+	// Converting a schema with field IDs ignores the name mapping, so for a
+	// file with IDs fileSchema maps its column paths to those IDs.
 	pathToIDSchema := currentSchema
 	if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
-		pathToIDSchema = must(ArrowSchemaToIcebergWithOptions(arrSchema, ArrowToIcebergOptions{
-			TableSchema:     currentSchema,
-			TableProperties: props,
-		}))
+		pathToIDSchema = fileSchema
 	}
 	statistics := format.DataFileStatsFromMeta(
 		rdr.Metadata(),
