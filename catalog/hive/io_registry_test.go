@@ -66,3 +66,41 @@ func TestHiveIsolatedIORegistry(t *testing.T) {
 	require.NotContains(t, created.Properties(), "storage-key")
 	client.AssertExpectations(t)
 }
+
+func TestHiveCatalogsWithSameSchemeStayIsolated(t *testing.T) {
+	const scheme = "hive-shared-scheme"
+	const metadataLocation = scheme + "://bucket/table/metadata.json"
+	contents, err := os.ReadFile("../../table/testdata/TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	filesystems := []*iceio.MemFS{iceio.NewMemFS(), iceio.NewMemFS()}
+	catalogs := make([]*Catalog, len(filesystems))
+	clients := make([]*mockHiveClient, len(filesystems))
+	for i, fs := range filesystems {
+		registry := &iceio.Registry{}
+		require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+			return fs, nil
+		}))
+		require.NoError(t, fs.WriteFile(t.Context(), metadataLocation, contents))
+
+		client := &mockHiveClient{}
+		client.On("GetTable", mock.Anything, "db", "tbl").Return(&hive_metastore.Table{
+			DbName: "db", TableName: "tbl", TableType: TableTypeExternalTable,
+			Parameters: map[string]string{TableTypeKey: TableTypeIceberg, MetadataLocationKey: metadataLocation},
+		}, nil).Once()
+		catalogs[i] = NewCatalogWithClient(client, nil, WithIORegistry(registry))
+		clients[i] = client
+	}
+
+	// Both catalogs have the same URI scheme and live at the same time.
+	// Each must resolve its own factory, even after the other is created.
+	for i, cat := range catalogs {
+		tbl, err := cat.LoadTable(t.Context(), TableIdentifier("db", "tbl"))
+		require.NoError(t, err)
+		loaded, err := tbl.FS(t.Context())
+		require.NoError(t, err)
+		require.Same(t, filesystems[i], loaded)
+		require.NotSame(t, filesystems[1-i], loaded)
+		clients[i].AssertExpectations(t)
+	}
+}
