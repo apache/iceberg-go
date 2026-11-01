@@ -144,6 +144,16 @@ func whereNamespaceParent(query *bun.SelectQuery, column string, parent table.Id
 	})
 }
 
+func whereNamespaceDescendant(query *bun.SelectQuery, column string, namespace table.Identifier) *bun.SelectQuery {
+	return query.WhereGroup(" AND ", func(query *bun.SelectQuery) *bun.SelectQuery {
+		for _, prefix := range namespaceDescendantPrefixes(namespace) {
+			query = query.WhereOr("? LIKE ? ESCAPE '!'", bun.Ident(column), namespaceLikePrefix(prefix))
+		}
+
+		return query
+	})
+}
+
 const (
 	DialectKey           = "sql.dialect"
 	DriverKey            = "sql.driver"
@@ -1349,6 +1359,24 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, nsToDelete)
 		}
 
+		// A child namespace exists if it has properties of its own or holds a table.
+		childExists, err := whereNamespaceDescendant(tx.NewSelect().Model((*sqlIcebergNamespaceProps)(nil)).
+			ColumnExpr("1").
+			Where("catalog_name = ?", c.name), "namespace", namespace).
+			Limit(1).Exists(ctx)
+		if err == nil && !childExists {
+			childExists, err = whereNamespaceDescendant(tx.NewSelect().Model((*sqlIcebergTable)(nil)).
+				ColumnExpr("1").
+				Where("catalog_name = ?", c.name), "table_namespace", namespace).
+				Limit(1).Exists(ctx)
+		}
+		if err != nil {
+			return fmt.Errorf("error checking namespace '%s' for child namespaces: %w", nsToDelete, err)
+		}
+		if childExists {
+			return fmt.Errorf("%w: child namespaces exist in namespace %s", catalog.ErrNamespaceNotEmpty, nsToDelete)
+		}
+
 		objectsExist, err := tx.NewSelect().Model((*sqlIcebergTable)(nil)).
 			ColumnExpr("1").
 			Where("catalog_name = ?", c.name).
@@ -1459,15 +1487,25 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		return nil, err
 	}
 
+	// Like Java's JdbcCatalog, return only the level below parent: the
+	// distinct first levels at the root, and direct children otherwise.
 	ret := make([]table.Identifier, 0, len(namespaces))
+	seen := make(map[string]struct{}, len(namespaces))
 	for _, n := range namespaces {
 		ident, err := namespaceFromString(n)
 		if err != nil {
 			return nil, err
 		}
-		if len(parent) == 0 || (len(ident) >= len(parent) && slices.Equal(ident[:len(parent)], parent)) {
-			ret = append(ret, ident)
+		if len(ident) <= len(parent) || !slices.Equal(ident[:len(parent)], parent) {
+			continue
 		}
+		ident = ident[:len(parent)+1]
+		key := namespaceToString(ident)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, ident)
 	}
 
 	return ret, nil

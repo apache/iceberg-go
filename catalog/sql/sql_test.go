@@ -1182,30 +1182,51 @@ func (s *SqliteCatalogTestSuite) TestListNamespaces() {
 		s.Require().NoError(cat.CreateNamespace(ctx, ns1, nil))
 		s.Require().NoError(cat.CreateNamespace(ctx, ns2, nil))
 
+		// The root lists first levels only, so ns2 appears as its first level.
 		nslist, err := cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(nslist, 2)
-		s.Contains(nslist, ns1)
-		s.Contains(nslist, ns2)
+		s.ElementsMatch([]table.Identifier{ns1, ns2[:1]}, nslist)
 
 		ns, err := cat.ListNamespaces(ctx, ns1)
 		s.Require().NoError(err)
-		s.Len(ns, 1)
-		s.Equal(ns1, ns[0])
+		s.Empty(ns)
 
 		ns, err = cat.ListNamespaces(ctx, ns2)
 		s.Require().NoError(err)
-		s.Len(ns, 1)
-		s.Equal(ns2, ns[0])
+		s.Empty(ns)
 
 		_, err = cat.ListNamespaces(ctx, table.Identifier{"does_not_exist"})
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	}
+}
 
-		ns, err = cat.ListNamespaces(ctx, nil)
+func (s *SqliteCatalogTestSuite) TestNestedNamespaces() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+
+	for _, cat := range catalogs {
+		ctx := context.Background()
+		parent := table.Identifier{databaseName()}
+		child := append(slices.Clone(parent), "child")
+		grandchild := append(slices.Clone(child), "grandchild")
+		for _, ns := range []table.Identifier{parent, child, grandchild} {
+			s.Require().NoError(cat.CreateNamespace(ctx, ns, nil))
+		}
+
+		root, err := cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(ns, 2)
-		s.Equal(ns1, ns[0])
-		s.Equal(ns2, ns[1])
+		s.Equal([]table.Identifier{parent}, root)
+		children, err := cat.ListNamespaces(ctx, parent)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{child}, children)
+		children, err = cat.ListNamespaces(ctx, child)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{grandchild}, children)
+
+		s.ErrorIs(cat.DropNamespace(ctx, parent), catalog.ErrNamespaceNotEmpty)
+		s.ErrorIs(cat.DropNamespace(ctx, child), catalog.ErrNamespaceNotEmpty)
+		for _, ns := range []table.Identifier{grandchild, child, parent} {
+			s.Require().NoError(cat.DropNamespace(ctx, ns))
+		}
 	}
 }
 
@@ -1224,19 +1245,21 @@ func (s *SqliteCatalogTestSuite) TestDottedNamespaceComponentsRemainDistinct() {
 		s.Require().NoError(cat.CreateNamespace(ctx, dottedChild, nil))
 		s.Require().NoError(cat.CreateNamespace(ctx, hierarchicalChild, nil))
 
+		// "company_.<tag>" is one level of dotted, but only a prefix of
+		// hierarchical's first two levels, so the root lists both separately.
 		namespaces, err := cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Contains(namespaces, dotted)
-		s.Contains(namespaces, hierarchical)
-		s.Contains(namespaces, dottedChild)
-		s.Contains(namespaces, hierarchicalChild)
+		s.Contains(namespaces, dotted[:1])
+		s.Contains(namespaces, hierarchical[:1])
+		s.NotContains(namespaces, dotted)
+		s.NotContains(namespaces, hierarchical)
 
 		dottedNamespaces, err := cat.ListNamespaces(ctx, dotted)
 		s.Require().NoError(err)
-		s.ElementsMatch([]table.Identifier{dotted, dottedChild}, dottedNamespaces)
+		s.ElementsMatch([]table.Identifier{dottedChild}, dottedNamespaces)
 		hierarchicalNamespaces, err := cat.ListNamespaces(ctx, hierarchical)
 		s.Require().NoError(err)
-		s.ElementsMatch([]table.Identifier{hierarchical, hierarchicalChild}, hierarchicalNamespaces)
+		s.ElementsMatch([]table.Identifier{hierarchicalChild}, hierarchicalNamespaces)
 
 		dottedProps, err := cat.LoadNamespaceProperties(ctx, dotted)
 		s.Require().NoError(err)
@@ -1334,7 +1357,7 @@ func (s *SqliteCatalogTestSuite) TestLegacyNamespaceEncodingPrefixRemainsReadabl
 	s.True(exists)
 	children, err := cat.ListNamespaces(ctx, legacyIdent)
 	s.Require().NoError(err)
-	s.Contains(children, legacyIdent)
+	s.Empty(children)
 	props, err := cat.LoadNamespaceProperties(ctx, legacyIdent)
 	s.Require().NoError(err)
 	s.Equal("legacy", props["owner"])
@@ -1372,7 +1395,7 @@ func (s *SqliteCatalogTestSuite) TestListNamespacesEscapesLikeWildcards() {
 
 		namespaces, err := cat.ListNamespaces(ctx, parent)
 		s.Require().NoError(err)
-		s.ElementsMatch([]table.Identifier{parent, child}, namespaces)
+		s.ElementsMatch([]table.Identifier{child}, namespaces)
 
 		s.Require().NoError(cat.DropNamespace(ctx, child))
 		s.Require().NoError(cat.DropNamespace(ctx, parent))
@@ -2550,8 +2573,7 @@ func (s *SqliteCatalogTestSuite) TestCreateaNamespaceWithCommentAndLocation() {
 		s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, testProps))
 		loadedList, err := tt.cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(loadedList, 1)
-		s.Equal(tt.namespace, loadedList[0])
+		s.Equal([]table.Identifier{tt.namespace[:1]}, loadedList)
 
 		props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
 		s.Require().NoError(err)
@@ -2577,8 +2599,7 @@ func (s *SqliteCatalogTestSuite) TestDropNamespace() {
 
 		nslist, err := tt.cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(nslist, 1)
-		s.Equal(ns, nslist[0])
+		s.Equal([]table.Identifier{ns[:1]}, nslist)
 
 		_, err = tt.cat.CreateTable(ctx, tt.tblID, tableSchemaNested)
 		s.Require().NoError(err)
