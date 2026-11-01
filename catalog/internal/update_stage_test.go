@@ -54,6 +54,7 @@ func TestUpdateAndStageTableRejectsInvalidMetadataLocation(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	require.Error(t, err)
 	require.Nil(t, staged)
@@ -86,6 +87,7 @@ func TestUpdateAndStageTableRejectsEmptyMetadataLocationForExistingTable(t *test
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	require.Error(t, err)
 	require.Nil(t, staged)
@@ -105,6 +107,7 @@ func TestUpdateAndStageTableUsesVersionZeroForCreate(t *testing.T) {
 		[]string{"db", "tbl"},
 		nil,
 		[]table.Update{table.NewSetLocationUpdate("file:///tmp/table")},
+		nil,
 		nil,
 	)
 	require.NoError(t, err)
