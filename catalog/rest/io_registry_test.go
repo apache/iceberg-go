@@ -111,6 +111,31 @@ func TestCatalogPlanFilesUsesIsolatedIORegistry(t *testing.T) {
 	require.Equal(t, "vended", gotProps["token"])
 }
 
+// A catalog with an explicit empty registry must not silently use the global
+// file backend when a remote plan supplies credentials for that scheme.
+func TestCatalogPlanFilesDoesNotFallBackToGlobalIO(t *testing.T) {
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"status":"completed","plan-id":"plan-1","storage-credentials":[{"prefix":"file:///warehouse/","config":{"token":"vended"}}]}`))
+		})
+	}, WithIORegistry(&iceio.Registry{}))
+
+	req := planFilesReq()
+	req.MetadataLocation = "file:///warehouse/metadata.json"
+	result, err := cat.PlanFiles(t.Context(), req)
+	require.NoError(t, err)
+	require.NotNil(t, result.IO)
+	t.Cleanup(func() { require.NoError(t, result.IO.Close()) })
+
+	loaded, err := result.IO.Load(t.Context())
+	require.NoError(t, err)
+	resolver, ok := loaded.(*prefixScopedIO)
+	require.True(t, ok)
+
+	_, err = resolver.filesystemFor("file:///warehouse/data.parquet")
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+}
+
 func TestCatalogUsesIsolatedIORegistry(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/config", serveEmptyConfig)
