@@ -73,11 +73,10 @@ func TestCatalogFileIOUsesScopedRegistry(t *testing.T) {
 			return nil
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
+			// Inspect selectors rather than only calls. Assigning io.LoadFS
+			// to a variable or passing it as a callback also bypasses the
+			// catalog-scoped registry, even without a direct call here.
+			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
 				return true
 			}
@@ -85,7 +84,7 @@ func TestCatalogFileIOUsesScopedRegistry(t *testing.T) {
 			if ok && aliases[pkg.Name] &&
 				(sel.Sel.Name == "LoadFS" || sel.Sel.Name == "LoadFSFunc") {
 				t.Errorf("%s: use catalog/internal scoped registry helper instead of io.%s",
-					fset.Position(call.Pos()), sel.Sel.Name)
+					fset.Position(sel.Pos()), sel.Sel.Name)
 			}
 
 			return true
