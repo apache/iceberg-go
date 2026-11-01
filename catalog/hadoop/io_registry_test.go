@@ -76,3 +76,25 @@ func TestHadoopRegistryUsedForTableCreateAndLoad(t *testing.T) {
 	require.Greater(t, calls.Load(), initial)
 	require.Equal(t, created.MetadataLocation(), loaded.MetadataLocation())
 }
+
+func TestHadoopCatalogsWithSameSchemeStayIsolated(t *testing.T) {
+	const warehouse = "hadoop-shared-scheme://bucket/warehouse"
+	filesystems := []*stubHadoopCatalogFS{{}, {}}
+	catalogs := make([]*Catalog, len(filesystems))
+
+	for i, fs := range filesystems {
+		registry := &iceio.Registry{}
+		require.NoError(t, registry.Register("hadoop-shared-scheme", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+			return fs, nil
+		}))
+		cat, err := NewCatalogWithOptions(t.Context(), "test", warehouse,
+			iceberg.Properties{"allow-unsafe-commits": "true"}, WithIORegistry(registry))
+		require.NoError(t, err)
+		catalogs[i] = cat
+	}
+
+	for i, cat := range catalogs {
+		require.Same(t, filesystems[i], cat.filesystem)
+		require.NotSame(t, filesystems[1-i], cat.filesystem)
+	}
+}
