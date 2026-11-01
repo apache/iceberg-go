@@ -164,6 +164,24 @@ func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 	}
 }
 
+func TestFastForwardBranchRejectsConcurrentTargetCreation(t *testing.T) {
+	base := manageSnapshotRefsFixture(t)
+	builder, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	// Another writer creates the target after our transaction loaded metadata.
+	require.NoError(t, builder.SetSnapshotRef("fresh", 200, BranchRef))
+	current, err := builder.Build()
+	require.NoError(t, err)
+
+	tbl, cat := newAssertRefTestTable(t, base, current)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.FastForwardBranch("fresh", "audit"))
+	_, err = tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitFailed)
+	assert.Equal(t, int64(200), cat.metadata.SnapshotByName("fresh").SnapshotID,
+		"promotion must not overwrite a concurrently created branch")
+}
+
 func TestReplaceBranchFromRef(t *testing.T) {
 	t.Run("moves branch to source tag preserving retention", func(t *testing.T) {
 		base := manageSnapshotRefsFixture(t)
