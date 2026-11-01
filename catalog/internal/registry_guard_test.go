@@ -40,6 +40,7 @@ func TestCatalogFileIOUsesScopedRegistry(t *testing.T) {
 			if d.Name() == "rest" {
 				return filepath.SkipDir
 			}
+
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
@@ -86,8 +87,10 @@ func TestCatalogFileIOUsesScopedRegistry(t *testing.T) {
 				t.Errorf("%s: use catalog/internal scoped registry helper instead of io.%s",
 					fset.Position(call.Pos()), sel.Sel.Name)
 			}
+
 			return true
 		})
+
 		return nil
 	})
 	if err != nil {
