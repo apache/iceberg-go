@@ -513,9 +513,8 @@ func (r *Reader) validateBlobs(blobs []BlobMetadata, footerStart int64) error {
 		// "<type> requires X to be -1, got N" so both sides share a
 		// grep-able canonical message.
 		if blob.Type == BlobTypeDeletionVector {
-			if blob.CompressionCodec != nil {
-				return fmt.Errorf("puffin: blob %d: deletion-vector-v1 must not be compressed", i)
-			}
+			// Leave compression validation to ReadBlob and the deletion-vector
+			// reader, which reports ErrInvalidDeletionVector to its callers.
 			if blob.SnapshotID != -1 {
 				return fmt.Errorf("puffin: blob %d: %s requires snapshot-id to be -1, got %d",
 					i, BlobTypeDeletionVector, blob.SnapshotID)
