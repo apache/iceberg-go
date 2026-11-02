@@ -43,15 +43,16 @@ func TestPartitionStatisticsSchemaV1(t *testing.T) {
 		"partition", "spec_id", "data_record_count", "data_file_count",
 		"total_data_file_size_in_bytes", "total_record_count",
 	}, testFieldNames(sc))
+	fields := sc.Fields()
 	require.Equal(t, []int{1, 2, 3, 4, 5, 10}, []int{
-		sc.Field(0).ID, sc.Field(1).ID, sc.Field(2).ID,
-		sc.Field(3).ID, sc.Field(4).ID, sc.Field(5).ID,
+		fields[0].ID, fields[1].ID, fields[2].ID,
+		fields[3].ID, fields[4].ID, fields[5].ID,
 	})
 	for index := 0; index < 5; index++ {
-		require.True(t, sc.Field(index).Required)
+		require.True(t, fields[index].Required)
 	}
-	require.False(t, sc.Field(5).Required)
-	require.Equal(t, 1000, sc.Field(0).Type.(*iceberg.StructType).FieldList[0].ID)
+	require.False(t, fields[5].Required)
+	require.Equal(t, 1000, fields[0].Type.(*iceberg.StructType).FieldList[0].ID)
 }
 
 func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
