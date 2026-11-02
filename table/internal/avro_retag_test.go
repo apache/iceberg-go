@@ -18,6 +18,7 @@
 package internal
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -129,4 +130,12 @@ func TestAvroRetagPreservesValidPrimitiveData(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, converted)
 	converted.Release()
+}
+
+func TestAvroSourceRejectsCanceledContextBeforeIO(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := (&AvroFileSource{}).GetReader(ctx)
+	require.ErrorIs(t, err, context.Canceled)
 }
