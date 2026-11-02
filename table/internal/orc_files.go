@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/bits"
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -80,11 +81,23 @@ type orcColumn struct {
 	field    iceberg.NestedField
 	kind     uint64
 	present  []bool
-	integers []uint64
-	bits     []bool
-	data     bytes.Buffer
-	lengths  []uint64
-	nulls    int64
+	integers     []uint64
+	integerBytes int64
+	bits         []bool
+	data         bytes.Buffer
+	lengths      []uint64
+	lengthBytes  int64
+	nulls        int64
+}
+
+func (c *orcColumn) addInteger(value uint64) {
+	c.integers = append(c.integers, value)
+	c.integerBytes += int64((bits.Len64(value|1) + 6) / 7)
+}
+
+func (c *orcColumn) addLength(length uint64) {
+	c.lengths = append(c.lengths, length)
+	c.lengthBytes += int64((bits.Len64(length|1) + 6) / 7)
 }
 
 func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn, error) {
@@ -146,6 +159,7 @@ func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn,
 }
 
 type orcFileWriter struct {
+	ctx             context.Context
 	fs              iceio.WriteFileIO
 	info            WriteFileInfo
 	partitionValues map[int]any
@@ -156,7 +170,7 @@ type orcFileWriter struct {
 	closed          bool
 }
 
-func (orcFormat) NewFileWriter(_ context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, schema *arrow.Schema) (FileWriter, error) {
+func (orcFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, schema *arrow.Schema) (FileWriter, error) {
 	if info.Content != iceberg.EntryContentData {
 		return nil, fmt.Errorf("%w: ORC delete file writing is not supported", iceberg.ErrNotImplemented)
 	}
@@ -179,7 +193,7 @@ func (orcFormat) NewFileWriter(_ context.Context, fs iceio.WriteFileIO, partitio
 		return nil, fmt.Errorf("%w: missing ORC file IO", iceberg.ErrInvalidArgument)
 	}
 
-	return &orcFileWriter{fs: fs, info: info, columns: columns, schema: schema, partitionValues: partitionValues}, nil
+	return &orcFileWriter{ctx: ctx, fs: fs, info: info, columns: columns, schema: schema, partitionValues: partitionValues}, nil
 }
 
 func (w *orcFileWriter) BytesWritten() int64 {
@@ -189,10 +203,23 @@ func (w *orcFileWriter) BytesWritten() int64 {
 	var size int64
 	for i := range w.columns {
 		c := &w.columns[i]
-		size += int64(c.data.Len() + len(c.integers)*10 + len(c.lengths)*10 + len(c.present)/8 + len(c.bits)/8)
+		// Count the actual varint widths rather than assuming ten bytes for
+		// every integer, which caused rolling writers to close small files early.
+		size += int64(c.data.Len()) + c.integerBytes + c.lengthBytes
+		size += int64((len(c.integers)+127)/128 + (len(c.lengths)+127)/128)
+		if c.nulls > 0 {
+			size += orcByteRLESize((len(c.present) + 7) / 8)
+		}
+		if c.kind == 0 {
+			size += orcByteRLESize((len(c.bits) + 7) / 8)
+		}
 	}
 
 	return size
+}
+
+func orcByteRLESize(n int) int64 {
+	return int64(n + (n+127)/128)
 }
 
 func (w *orcFileWriter) Write(batch arrow.RecordBatch) error {
@@ -229,17 +256,17 @@ func (w *orcFileWriter) Write(batch arrow.RecordBatch) error {
 			case *array.Boolean:
 				c.bits = append(c.bits, a.Value(row))
 			case *array.Int32:
-				c.integers = append(c.integers, orcZigZag(int64(a.Value(row))))
+				c.addInteger(orcZigZag(int64(a.Value(row))))
 			case *array.Int64:
-				c.integers = append(c.integers, orcZigZag(a.Value(row)))
+				c.addInteger(orcZigZag(a.Value(row)))
 			case *array.Date32:
-				c.integers = append(c.integers, orcZigZag(int64(a.Value(row))))
+				c.addInteger(orcZigZag(int64(a.Value(row))))
 			case *array.Time64:
 				v := int64(a.Value(row))
 				if v < 0 || v >= 86400000000 {
 					return fmt.Errorf("%w: ORC time is outside a day", iceberg.ErrInvalidArgument)
 				}
-				c.integers = append(c.integers, orcZigZag(v))
+				c.addInteger(orcZigZag(v))
 			case *array.Float32:
 				var b [4]byte
 				binary.LittleEndian.PutUint32(b[:], math.Float32bits(a.Value(row)))
@@ -251,19 +278,19 @@ func (w *orcFileWriter) Write(batch arrow.RecordBatch) error {
 			case *array.String:
 				v := a.Value(row)
 				c.data.WriteString(v)
-				c.lengths = append(c.lengths, uint64(len(v)))
+				c.addLength(uint64(len(v)))
 			case *array.LargeString:
 				v := a.Value(row)
 				c.data.WriteString(v)
-				c.lengths = append(c.lengths, uint64(len(v)))
+				c.addLength(uint64(len(v)))
 			case *array.Binary:
 				v := a.Value(row)
 				c.data.Write(v)
-				c.lengths = append(c.lengths, uint64(len(v)))
+				c.addLength(uint64(len(v)))
 			case *array.LargeBinary:
 				v := a.Value(row)
 				c.data.Write(v)
-				c.lengths = append(c.lengths, uint64(len(v)))
+				c.addLength(uint64(len(v)))
 			default:
 				return fmt.Errorf("%w: unsupported Arrow ORC input %T", iceberg.ErrNotImplemented, a)
 			}
@@ -287,15 +314,17 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 		return nil, errors.New("ORC writer already closed")
 	}
 	w.closed = true
-	file, err := w.fs.Create(context.Background(), w.info.FileName)
+	// Serialize before creating the destination so failures cannot leave an
+	// empty or incomplete object behind.
+	data, err := w.encode()
 	if err != nil {
 		return nil, err
 	}
-	data, err := w.encode()
+	if err := w.ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := w.fs.Create(w.ctx, w.info.FileName)
 	if err != nil {
-		_ = file.Close()
-		_ = w.fs.Remove(context.Background(), w.info.FileName)
-
 		return nil, err
 	}
 	n, writeErr := file.Write(data)

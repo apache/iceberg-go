@@ -214,3 +214,69 @@ func TestORCWriterRejectsTimeOutsideDay(t *testing.T) {
 		require.NoError(t, writer.Abort())
 	}
 }
+
+// Capture the write context while retaining real filesystem behavior.
+type orcContextIO struct {
+	iceio.LocalFS
+	createContext context.Context
+}
+
+func (f *orcContextIO) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
+	f.createContext = ctx
+
+	return f.LocalFS.Create(ctx, name)
+}
+
+func TestORCWriterHonorsCanceledContextOnClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &orcContextIO{}
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int32Type{}})
+	as := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	fileName := filepath.Join(t.TempDir(), "data.orc")
+	w, err := (orcFormat{}).NewFileWriter(ctx, fs, nil, WriteFileInfo{
+		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec, FileName: fileName,
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	cancel()
+	_, err = w.Close()
+	require.ErrorIs(t, err, context.Canceled)
+	// No destination file is created after the context is canceled.
+	require.Nil(t, fs.createContext)
+	_, err = os.Stat(fileName)
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestORCWriterForwardsContextToCreate(t *testing.T) {
+	ctx := context.WithValue(context.Background(), struct{}{}, "trace")
+	fs := &orcContextIO{}
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int32Type{}})
+	as := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	w, err := (orcFormat{}).NewFileWriter(ctx, fs, nil, WriteFileInfo{
+		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec, FileName: filepath.Join(t.TempDir(), "data.orc"),
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	_, err = w.Close()
+	require.NoError(t, err)
+	require.Same(t, ctx, fs.createContext)
+}
+
+func TestORCBytesWrittenDoesNotAssumeTenBytesPerInteger(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int32Type{}, Required: true})
+	as := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer builder.Release()
+	builder.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3, 4}, nil)
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+	w, err := (orcFormat{}).NewFileWriter(context.Background(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec, FileName: filepath.Join(t.TempDir(), "short.orc"),
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	defer w.Abort()
+	require.NoError(t, w.Write(batch))
+	require.Equal(t, int64(5), w.BytesWritten()) // Four one-byte zigzags and the RLE literal header.
+}
