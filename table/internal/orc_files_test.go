@@ -437,7 +437,7 @@ func TestORCTimestampUnitAndTimezone(t *testing.T) {
 	stripe := stripes[0]
 	offset := int(orcTestVarint(t, stripe, 1) + orcTestVarint(t, stripe, 3))
 	size := int(orcTestVarint(t, stripe, 4))
-	sf := raw[offset:offset+size]
+	sf := raw[offset : offset+size]
 	require.Equal(t, [][]byte{[]byte("UTC")}, orcTestFieldBytes(t, sf, 3))
 	streams := orcTestFieldBytes(t, sf, 1)
 	require.Len(t, streams, 8)
