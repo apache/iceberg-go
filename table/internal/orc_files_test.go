@@ -148,7 +148,7 @@ func TestORCWriterRejectsUnsupportedWithoutCreatingFile(t *testing.T) {
 		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec,
 		FileName: name, Content: iceberg.EntryContentData,
 	}, arrowSchema)
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	_, err = os.Stat(name)
 	require.True(t, os.IsNotExist(err))
 }
@@ -402,7 +402,7 @@ func TestORCTimestampUnitAndTimezone(t *testing.T) {
 	}, nil)
 	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
 	defer b.Release()
-	for i, timestamp := range []arrow.Timestamp{-1, 1_420_070_400_000_000, -1, 1_420_070_400_123_456_789} {
+	for i, timestamp := range []arrow.Timestamp{-1_000_000, 1_420_070_400_000_000, -1_000_000_000, 1_420_070_400_123_456_789} {
 		b.Field(i).(*array.TimestampBuilder).Append(timestamp)
 	}
 	rec := b.NewRecordBatch()
@@ -500,7 +500,7 @@ func TestORCPositionAndEqualityDeletes(t *testing.T) {
 		w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
 			FileSchema: schema, Spec: *iceberg.UnpartitionedSpec,
 			FileName: filepath.Join(t.TempDir(), "equal.orc"),
-			Content: iceberg.EntryContentEqDeletes, EqualityFieldIDs: []int{5},
+			Content:  iceberg.EntryContentEqDeletes, EqualityFieldIDs: []int{5},
 		}, as)
 		require.NoError(t, err)
 		require.NoError(t, w.Write(rec))
@@ -555,7 +555,7 @@ func TestORCEqualityDeletesRejectInvalidKeyTypes(t *testing.T) {
 			_, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
 				FileSchema: tc.schema, Spec: *iceberg.UnpartitionedSpec,
 				FileName: filepath.Join(t.TempDir(), "invalid-key.orc"),
-				Content: iceberg.EntryContentEqDeletes, EqualityFieldIDs: []int{tc.keyID},
+				Content:  iceberg.EntryContentEqDeletes, EqualityFieldIDs: []int{tc.keyID},
 			}, tc.arrow)
 			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		})
@@ -599,7 +599,6 @@ func TestORCStructNullsPropagateIntoChildMetrics(t *testing.T) {
 	defer b.Release()
 	st := b.Field(0).(*array.StructBuilder)
 	st.Append(false)
-	st.FieldBuilder(0).(*array.Int32Builder).AppendNull()
 	st.Append(true)
 	st.FieldBuilder(0).(*array.Int32Builder).Append(7)
 	rec := b.NewRecordBatch()
@@ -608,7 +607,7 @@ func TestORCStructNullsPropagateIntoChildMetrics(t *testing.T) {
 	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
 		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec,
 		FileName: filepath.Join(t.TempDir(), "nullable-struct.orc"),
-		Content: iceberg.EntryContentData,
+		Content:  iceberg.EntryContentData,
 	}, as)
 	require.NoError(t, err)
 	require.NoError(t, w.Write(rec))

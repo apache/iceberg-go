@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"math/bits"
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 )
@@ -121,7 +123,7 @@ func (c *orcColumn) addSecondary(value uint64) {
 
 func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn, error) {
 	c := orcColumn{field: field}
-	switch field.Type.(type) {
+	switch typ := field.Type.(type) {
 	case *iceberg.StructType:
 		c.kind = 12
 		if _, ok := arrowField.Type.(*arrow.StructType); !ok {
@@ -203,6 +205,23 @@ func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn,
 		c.kind = 8
 		if arrowField.Type.ID() != arrow.BINARY && arrowField.Type.ID() != arrow.LARGE_BINARY {
 			return c, fmt.Errorf("ORC %s: expected Arrow binary", field.Name)
+		}
+	case iceberg.UUIDType:
+		c.kind = 8
+		if _, ok := arrowField.Type.(*extensions.UUIDType); !ok {
+			return c, fmt.Errorf("%w: ORC %s expects an Arrow UUID", iceberg.ErrInvalidArgument, field.Name)
+		}
+	case iceberg.FixedType:
+		c.kind = 8
+		fixed, ok := arrowField.Type.(*arrow.FixedSizeBinaryType)
+		if !ok || fixed.ByteWidth != typ.Len() {
+			return c, fmt.Errorf("%w: ORC %s expects fixed binary width %d", iceberg.ErrInvalidArgument, field.Name, typ.Len())
+		}
+	case iceberg.DecimalType:
+		c.kind = 14
+		decimal, ok := arrowField.Type.(*arrow.Decimal128Type)
+		if !ok || decimal.Precision != int32(typ.Precision()) || decimal.Scale != int32(typ.Scale()) {
+			return c, fmt.Errorf("%w: ORC %s expects decimal(%d,%d)", iceberg.ErrInvalidArgument, field.Name, typ.Precision(), typ.Scale())
 		}
 	case iceberg.DateType:
 		c.kind = 15
@@ -551,6 +570,22 @@ func (w *orcFileWriter) appendValue(id int, values arrow.Array, row int) error {
 	case *array.Int64:
 		v := a.Value(row)
 		c.addInteger(orcZigZag(v))
+	case *extensions.UUIDArray:
+		value := a.Value(row)
+		c.data.Write(value[:])
+		c.addLength(uint64(len(value)))
+	case *array.FixedSizeBinary:
+		value := a.Value(row)
+		c.data.Write(value)
+		c.addLength(uint64(len(value)))
+	case *array.Decimal128:
+		value := a.Value(row)
+		decimal := c.field.Type.(iceberg.DecimalType)
+		if !value.FitsInPrecision(int32(decimal.Precision())) {
+			return fmt.Errorf("%w: ORC decimal value exceeds precision %d", iceberg.ErrInvalidArgument, decimal.Precision())
+		}
+		orcWriteDecimal(&c.data, value.BigInt())
+		c.addSecondary(orcZigZag(int64(decimal.Scale())))
 	case *array.Date32:
 		c.addInteger(orcZigZag(int64(a.Value(row))))
 	case *array.Time64:
@@ -568,7 +603,12 @@ func (w *orcFileWriter) appendValue(id int, values arrow.Array, row int) error {
 		}
 		seconds, fraction := v/unit, v%unit
 		if fraction < 0 {
-			seconds--
+			// ORC readers apply a negative-time correction to the fraction.
+			// Truncation preserves negative values outside the first second
+			// before the epoch; that first second cannot be represented safely.
+			if seconds == 0 {
+				return fmt.Errorf("%w: ORC timestamps in the second before the Unix epoch", iceberg.ErrNotImplemented)
+			}
 			fraction += unit
 		}
 		c.addInteger(orcZigZag(seconds - 1_420_070_400))
@@ -739,7 +779,7 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 				out = append(out, lengths...)
 				stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(2, columnID, len(lengths)))
 			}
-			if c.kind == 9 || c.kind == 18 {
+			if c.kind == 9 || c.kind == 18 || c.kind == 14 {
 				secondary := orcEncodeIntegers(c.secondary)
 				out = append(out, secondary...)
 				stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(5, columnID, len(secondary)))
@@ -784,6 +824,16 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 		}
 		for _, name := range c.childNames {
 			t = orcPBBytes(t, 3, []byte(name))
+		}
+		switch typ := c.field.Type.(type) {
+		case iceberg.DecimalType:
+			t = orcPBVarint(t, 5, uint64(typ.Precision()))
+			t = orcPBVarint(t, 6, uint64(typ.Scale()))
+		case iceberg.UUIDType:
+			t = orcPBBytes(t, 7, orcPair("iceberg.binary-type", "UUID"))
+		case iceberg.FixedType:
+			t = orcPBBytes(t, 7, orcPair("iceberg.binary-type", "FIXED"))
+			t = orcPBBytes(t, 7, orcPair("iceberg.length", strconv.Itoa(typ.Len())))
 		}
 		t = orcPBBytes(t, 7, orcPair("iceberg.id", strconv.Itoa(c.field.ID)))
 		t = orcPBBytes(t, 7, orcPair("iceberg.required", strconv.FormatBool(c.field.Required)))
@@ -872,6 +922,21 @@ func orcStream(kind, column uint64, length int) []byte {
 	b = orcPBVarint(b, 2, column)
 
 	return orcPBVarint(b, 3, uint64(length))
+}
+
+// ORC decimal DATA uses arbitrary-width zigzag varints, not integer RLE.
+func orcWriteDecimal(out *bytes.Buffer, value *big.Int) {
+	encoded := new(big.Int).Lsh(value, 1)
+	if value.Sign() < 0 {
+		encoded.Neg(encoded)
+		encoded.Sub(encoded, big.NewInt(1))
+	}
+	mask := big.NewInt(0x7f)
+	for encoded.BitLen() > 7 {
+		out.WriteByte(byte(new(big.Int).And(encoded, mask).Uint64()) | 0x80)
+		encoded.Rsh(encoded, 7)
+	}
+	out.WriteByte(byte(encoded.Uint64()))
 }
 
 func orcZigZag(value int64) uint64 {
