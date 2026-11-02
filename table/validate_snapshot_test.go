@@ -424,15 +424,15 @@ func TestValidateSnapshotEmbeddedUsesHeaderSpecID(t *testing.T) {
 	require.Equal(t, int32(42), report.Issues[0].PartitionSpecID)
 }
 
-func TestValidateSnapshotChecksDeletedEntryContent(t *testing.T) {
+func TestValidateSnapshotChecksDeletedEntries(t *testing.T) {
 	fs := iceio.NewMemFS()
 	const prefix = "mem://audit/deleted-content/"
-	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
-		iceberg.EntryContentPosDeletes, prefix+"pos-deletes.parquet",
+	dataFile, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData, prefix+"old.parquet",
 		iceberg.ParquetFile, nil, nil, nil, 1, 1024)
 	require.NoError(t, err)
 	manifest := writeValidationManifest(t, fs, 3, prefix+"data-manifest.avro",
-		iceberg.ManifestContentData, 1, nil, nil, []iceberg.DataFile{builder.Build()})
+		iceberg.ManifestContentData, 1, nil, nil, []iceberg.DataFile{dataFile.Build()})
 	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1,
 		[]iceberg.ManifestFile{manifest})
 	zero := int64(0)
@@ -443,9 +443,21 @@ func TestValidateSnapshotChecksDeletedEntryContent(t *testing.T) {
 
 	report, err := tbl.ValidateSnapshot(t.Context(), 1)
 	require.NoError(t, err)
-	require.False(t, report.Valid())
-	require.True(t, report.Complete)
+	require.True(t, report.Valid(), "%+v", report.Issues)
 	require.Zero(t, report.LiveFilesChecked)
+}
+
+func TestValidateSnapshotFileRejectsMixedContent(t *testing.T) {
+	// ManifestWriter rejects mixed-content entries before encoding them.
+	// Exercise the audit's content rule directly for malformed metadata.
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, "mem://audit/deleted-content/pos-deletes.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+	require.NoError(t, err)
+	manifest := iceberg.NewManifestBuilder(3,
+		"mem://audit/deleted-content/data-manifest.avro", 100, 0, 1).Build()
+	report := &SnapshotValidationReport{}
+	validateSnapshotFile(report, 3, manifest, builder.Build())
 	require.Len(t, report.Issues, 1)
 	require.Equal(t, SnapshotIssueInvalidFileContent, report.Issues[0].Code)
 }
