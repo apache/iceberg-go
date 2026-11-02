@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -228,8 +230,56 @@ func TestAvroWriterUUIDAndDecimal(t *testing.T) {
 	require.Contains(t, schema, `"logicalType":"decimal"`)
 	var row map[string]any
 	require.NoError(t, r.Decode(&row))
-	require.NotNil(t, row["id"])
-	require.NotNil(t, row["amount"])
+	require.Equal(t, [16]byte(id), row["id"])
+	require.Equal(t, big.NewRat(-617, 50), row["amount"])
+}
+
+func TestAvroWriterDecimal38RoundTrip(t *testing.T) {
+	decimalType := iceberg.MustDecimalTypeOf(38, 0)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "amount", Type: decimalType, Required: true},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "amount", Type: &arrow.Decimal128Type{Precision: 38, Scale: 0}},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer builder.Release()
+	max := strings.Repeat("9", 38)
+	values := []string{max, "-" + max, "0"}
+	for _, value := range values {
+		number, err := decimal128.FromString(value, 38, 0)
+		require.NoError(t, err)
+		builder.Field(0).(*array.Decimal128Builder).Append(number)
+	}
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+
+	path := filepath.Join(t.TempDir(), "decimal38.avro")
+	w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: path,
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(batch))
+	dataFile, err := w.Close()
+	require.NoError(t, err)
+	require.EqualValues(t, len(values), dataFile.Count())
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	r, err := ocf.NewReader(f)
+	require.NoError(t, err)
+	defer r.Close()
+	for _, value := range values {
+		var row map[string]any
+		require.NoError(t, r.Decode(&row))
+		unscaled, ok := new(big.Int).SetString(value, 10)
+		require.True(t, ok)
+		require.Equal(t, new(big.Rat).SetInt(unscaled), row["amount"])
+	}
+	var row map[string]any
+	require.ErrorIs(t, r.Decode(&row), io.EOF)
 }
 
 func TestAvroWriteTimestampValues(t *testing.T) {
