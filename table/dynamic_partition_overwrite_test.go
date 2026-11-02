@@ -253,3 +253,35 @@ func TestDynamicPartitionOverwriteRejectsUnsupportedLayouts(t *testing.T) {
 		require.Error(t, txn.DynamicPartitionOverwriteDataFiles(ctx, nil, nil))
 	})
 }
+
+func TestDynamicPartitionOverwriteV1(t *testing.T) {
+	ctx := t.Context()
+	spec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, spec)
+	seed.meta.formatVersion = 1
+	old := []iceberg.DataFile{
+		newTestDataFile(t, spec, "file://v1-old-a.parquet", map[int]any{1000: int32(1)}),
+		newTestDataFile(t, spec, "file://v1-old-b.parquet", map[int]any{1000: int32(2)}),
+	}
+	require.NoError(t, seed.AddDataFiles(ctx, old, nil))
+	base, err := seed.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, 1, base.FormatVersion())
+	tbl := New(Identifier{"db", "tbl"}, base, "metadata.json", func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+	tx := tbl.NewTransaction()
+	replacement := newTestDataFile(t, spec, "file://v1-new-a.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, tx.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil))
+	updated, err := tx.meta.Build()
+	require.NoError(t, err)
+	snapshot := updated.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
+	var paths []string
+	for file, err := range snapshot.dataFiles(fs, nil) {
+		require.NoError(t, err)
+		if file.ContentType() == iceberg.EntryContentData {
+			paths = append(paths, file.FilePath())
+		}
+	}
+	require.ElementsMatch(t, []string{"file://v1-new-a.parquet", "file://v1-old-b.parquet"}, paths)
+}
