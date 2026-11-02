@@ -99,7 +99,13 @@ func readORCFileSchema(file iceio.File) (*arrow.Schema, int64, error) {
 		return nil, 0, fmt.Errorf("parse ORC footer: %w", err)
 	}
 	types := footer.GetTypes()
-	if len(types) == 0 || types[0].GetKind() != orcpb.Type_STRUCT {
+	if len(types) == 0 {
+		return nil, 0, fmt.Errorf("%w: ORC footer contains no types", iceberg.ErrInvalidSchema)
+	}
+	if err := validateORCTypeTree(types); err != nil {
+		return nil, 0, err
+	}
+	if types[0].GetKind() != orcpb.Type_STRUCT {
 		return nil, 0, fmt.Errorf("%w: ORC root must be a struct", iceberg.ErrInvalidSchema)
 	}
 
@@ -111,13 +117,41 @@ func readORCFileSchema(file iceio.File) (*arrow.Schema, int64, error) {
 	return arrow.NewSchema(fields, nil), size, nil
 }
 
+// ORC subtype indexes form a tree, not a graph. Reused or cyclic indexes
+// would otherwise recurse indefinitely or interpret one column twice.
+func validateORCTypeTree(types []*orcpb.Type) error {
+	pending := []uint32{0}
+	seen := make(map[uint32]struct{}, len(types))
+	for len(pending) != 0 {
+		index := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if uint64(index) >= uint64(len(types)) || types[index] == nil {
+			return fmt.Errorf("%w: invalid ORC type index %d", iceberg.ErrInvalidSchema, index)
+		}
+		if _, exists := seen[index]; exists {
+			return fmt.Errorf("%w: repeated ORC type index %d", iceberg.ErrInvalidSchema, index)
+		}
+		seen[index] = struct{}{}
+		pending = append(pending, types[index].GetSubtypes()...)
+	}
+	return nil
+}
+
 func orcStructFields(types []*orcpb.Type, root *orcpb.Type, seen map[int]struct{}) ([]arrow.Field, error) {
 	names, ids := root.GetFieldNames(), root.GetSubtypes()
 	if root.GetKind() != orcpb.Type_STRUCT || len(names) != len(ids) {
 		return nil, fmt.Errorf("%w: invalid ORC struct fields", iceberg.ErrInvalidSchema)
 	}
 	fields := make([]arrow.Field, len(names))
+	usedNames := make(map[string]struct{}, len(names))
 	for i, name := range names {
+		if name == "" {
+			return nil, fmt.Errorf("%w: ORC struct has an empty field name", iceberg.ErrInvalidSchema)
+		}
+		if _, exists := usedNames[name]; exists {
+			return nil, fmt.Errorf("%w: duplicate ORC struct field %q", iceberg.ErrInvalidSchema, name)
+		}
+		usedNames[name] = struct{}{}
 		f, err := orcSchemaField(types, ids[i], name, seen)
 		if err != nil {
 			return nil, fmt.Errorf("ORC field %q: %w", name, err)

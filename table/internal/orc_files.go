@@ -131,7 +131,7 @@ func (r *orcFileReader) GetRecords(ctx context.Context, _ []int, tester any) (ar
 					return
 				}
 				for i, value := range values {
-					if err := appendORCValue(builder.Field(i), r.schema.Field(i).Type, value); err != nil {
+					if err := appendORCField(builder.Field(i), r.schema.Field(i), value); err != nil {
 						yield(nil, fmt.Errorf("ORC column %q: %w", names[i], err))
 						return
 					}
@@ -188,6 +188,13 @@ func (r *orcFileReader) Close() error {
 	r.closed = true
 
 	return errors.Join(r.decoder.Close(), r.file.Close())
+}
+
+func appendORCField(builder array.Builder, field arrow.Field, value any) error {
+	if value == nil && !field.Nullable {
+		return fmt.Errorf("%w: required ORC field %q is null", iceberg.ErrInvalidSchema, field.Name)
+	}
+	return appendORCValue(builder, field.Type, value)
 }
 
 func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) error {
@@ -333,7 +340,7 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 		b.Append(true)
 		for i := range st.NumFields() {
 			field := st.Field(i)
-			if err := appendORCValue(b.FieldBuilder(i), field.Type, data[field.Name]); err != nil {
+			if err := appendORCField(b.FieldBuilder(i), field, data[field.Name]); err != nil {
 				return fmt.Errorf("struct member %q: %w", field.Name, err)
 			}
 		}
@@ -348,7 +355,7 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 		}
 		b.Append(true)
 		for _, item := range items {
-			if err := appendORCValue(b.ValueBuilder(), lt.ElemField().Type, item); err != nil {
+			if err := appendORCField(b.ValueBuilder(), lt.ElemField(), item); err != nil {
 				return err
 			}
 		}
@@ -366,10 +373,10 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 			if entry.Key == nil {
 				return fmt.Errorf("%w: ORC map contains a null key", iceberg.ErrInvalidSchema)
 			}
-			if err := appendORCValue(b.KeyBuilder(), mt.KeyField().Type, entry.Key); err != nil {
+			if err := appendORCField(b.KeyBuilder(), mt.KeyField(), entry.Key); err != nil {
 				return err
 			}
-			if err := appendORCValue(b.ItemBuilder(), mt.ItemField().Type, entry.Value); err != nil {
+			if err := appendORCField(b.ItemBuilder(), mt.ItemField(), entry.Value); err != nil {
 				return err
 			}
 		}

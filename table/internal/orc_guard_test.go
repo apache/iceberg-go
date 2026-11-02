@@ -95,3 +95,69 @@ func TestORCRejectsUnsupportedMapAndWideDecimal(t *testing.T) {
 		require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 	}
 }
+
+func TestORCRejectsMalformedTypeReferences(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		types []*orcpb.Type
+	}{
+		{
+			name: "cycle",
+			types: []*orcpb.Type{
+				{Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"self"}, Subtypes: []uint32{0}},
+			},
+		},
+		{
+			name: "shared-child",
+			types: []*orcpb.Type{
+				{Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"a", "b"}, Subtypes: []uint32{1, 1}},
+				{Kind: orcpb.Type_LONG.Enum()},
+			},
+		},
+		{
+			name: "out-of-range",
+			types: []*orcpb.Type{
+				{Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"missing"}, Subtypes: []uint32{4}},
+			},
+		},
+		{
+			name: "nil-child",
+			types: []*orcpb.Type{
+				{Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"nil"}, Subtypes: []uint32{1}},
+				nil,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.ErrorIs(t, validateORCTypeTree(tc.types), iceberg.ErrInvalidSchema)
+		})
+	}
+	require.NoError(t, validateORCTypeTree([]*orcpb.Type{
+		{Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"a", "b"}, Subtypes: []uint32{1, 2}},
+		{Kind: orcpb.Type_LONG.Enum()},
+		{Kind: orcpb.Type_STRING.Enum()},
+	}))
+}
+
+func TestORCRejectsDuplicateNestedFieldNames(t *testing.T) {
+	types := []*orcpb.Type{
+		{Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"same", "same"}, Subtypes: []uint32{1, 2}},
+		{Kind: orcpb.Type_LONG.Enum()},
+		{Kind: orcpb.Type_LONG.Enum()},
+	}
+	_, err := orcStructFields(types, types[0], make(map[int]struct{}))
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
+
+func TestORCRejectsNullRequiredField(t *testing.T) {
+	path := writeORCFixture(t, "struct<id:bigint>",
+		map[int]map[string]string{1: {"iceberg.id": "1", "iceberg.required": "true"}},
+		[]any{nil},
+	)
+	reader := openORCFixture(t, path, 1)
+	records, err := reader.GetRecords(t.Context(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.False(t, records.Next())
+	require.ErrorIs(t, records.Err(), iceberg.ErrInvalidSchema)
+}
