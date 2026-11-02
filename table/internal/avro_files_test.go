@@ -26,9 +26,12 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/avro/ocf"
 )
@@ -141,22 +144,92 @@ func TestAvroTimestampSchema(t *testing.T) {
 	}
 }
 
-func TestAvroUnsupportedLogicalTypesBeforeCreate(t *testing.T) {
-	decimal, err := iceberg.DecimalTypeOf(10, 2)
+func TestAvroUUIDAndDecimalSchemas(t *testing.T) {
+	uuidSchema, err := icebergAvroType(iceberg.UUIDType{}, 1)
 	require.NoError(t, err)
-	for _, typ := range []iceberg.Type{iceberg.UUIDType{}, decimal} {
-		t.Run(typ.String(), func(t *testing.T) {
-			sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: typ})
-			arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.BinaryTypes.Binary, Nullable: true}}, nil)
-			name := filepath.Join(t.TempDir(), "invalid.avro")
-			_, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
-				FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: name, Content: iceberg.EntryContentData,
-			}, arrowSchema)
-			require.ErrorIs(t, err, iceberg.ErrNotImplemented)
-			_, err = os.Stat(name)
-			require.True(t, os.IsNotExist(err))
+	uuidFixed := uuidSchema.(map[string]any)
+	require.Equal(t, "fixed", uuidFixed["type"])
+	require.Equal(t, "uuid", uuidFixed["logicalType"])
+	require.Equal(t, 16, uuidFixed["size"])
+
+	decimalType := iceberg.MustDecimalTypeOf(9, 2)
+	decimalSchema, err := icebergAvroType(decimalType, 2)
+	require.NoError(t, err)
+	fixed := decimalSchema.(map[string]any)
+	require.Equal(t, "fixed", fixed["type"])
+	require.Equal(t, "decimal", fixed["logicalType"])
+	require.Equal(t, 4, fixed["size"])
+	require.Equal(t, 9, fixed["precision"])
+	require.Equal(t, 2, fixed["scale"])
+}
+
+func TestAvroSignedDecimalFixedBytes(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  []byte
+	}{
+		{"12.34", []byte{0, 0, 4, 210}},
+		{"-12.34", []byte{255, 255, 251, 46}},
+		{"0.00", []byte{0, 0, 0, 0}},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			number, err := decimal128.FromString(tc.value, 9, 2)
+			require.NoError(t, err)
+			got, err := avroSignedFixed(number.BigInt(), 4)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
+	_, err := avroSignedFixed(nil, 4)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = avroSignedFixed(decimal128.FromI64(200).BigInt(), 1)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}
+
+func TestAvroWriterUUIDAndDecimal(t *testing.T) {
+	id := uuid.MustParse("f79c3e09-677c-4bbd-a479-3f349cb785e7")
+	decimalType := iceberg.MustDecimalTypeOf(9, 2)
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.UUIDType{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "amount", Type: decimalType, Required: true},
+	)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: extensions.NewUUIDType()},
+		{Name: "amount", Type: &arrow.Decimal128Type{Precision: 9, Scale: 2}},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Field(0).(*extensions.UUIDBuilder).Append(id)
+	number, err := decimal128.FromString("-12.34", 9, 2)
+	require.NoError(t, err)
+	builder.Field(1).(*array.Decimal128Builder).Append(number)
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+
+	path := filepath.Join(t.TempDir(), "data.avro")
+	w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: icebergSchema, Spec: *iceberg.UnpartitionedSpec, FileName: path,
+		Content: iceberg.EntryContentData,
+	}, arrowSchema)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(batch))
+	file, err := w.Close()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, file.Count())
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	r, err := ocf.NewReader(f)
+	require.NoError(t, err)
+	defer r.Close()
+	schema := string(r.Metadata()["avro.schema"])
+	require.Contains(t, schema, `"logicalType":"uuid"`)
+	require.Contains(t, schema, `"logicalType":"decimal"`)
+	var row map[string]any
+	require.NoError(t, r.Decode(&row))
+	require.NotNil(t, row["id"])
+	require.NotNil(t, row["amount"])
 }
 
 func TestAvroWriteTimestampValues(t *testing.T) {

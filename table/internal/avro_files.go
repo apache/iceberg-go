@@ -23,12 +23,15 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"os"
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
@@ -178,6 +181,11 @@ func validateAvroArrowType(t iceberg.Type, dt arrow.DataType) error {
 	case iceberg.FixedType:
 		fixed, ok := dt.(*arrow.FixedSizeBinaryType)
 		valid = ok && fixed.ByteWidth == typ.Len()
+	case iceberg.UUIDType:
+		valid = arrow.TypeEqual(dt, extensions.NewUUIDType())
+	case iceberg.DecimalType:
+		decimal, ok := dt.(*arrow.Decimal128Type)
+		valid = ok && int(decimal.Precision) == typ.Precision() && int(decimal.Scale) == typ.Scale()
 	case iceberg.DateType:
 		valid = dt.ID() == arrow.DATE32
 	case iceberg.TimeType:
@@ -390,9 +398,13 @@ func icebergAvroType(t iceberg.Type, id int) (any, error) {
 	case iceberg.FixedType:
 		return map[string]any{"type": "fixed", "name": "fixed_" + strconv.Itoa(id), "size": typ.Len()}, nil
 	case iceberg.UUIDType:
-		return nil, fmt.Errorf("%w: Avro UUID writing", iceberg.ErrNotImplemented)
+		return map[string]any{"type": "fixed", "name": "uuid_" + strconv.Itoa(id), "size": 16, "logicalType": "uuid"}, nil
 	case iceberg.DecimalType:
-		return nil, fmt.Errorf("%w: Avro decimal writing", iceberg.ErrNotImplemented)
+		return map[string]any{
+			"type": "fixed", "name": "decimal_" + strconv.Itoa(id),
+			"size": iceberginternal.DecimalRequiredBytes(typ.Precision()),
+			"logicalType": "decimal", "precision": typ.Precision(), "scale": typ.Scale(),
+		}, nil
 	case *iceberg.StructType:
 		return avroRecordSchema(typ.Fields(), "r_"+strconv.Itoa(id))
 	case *iceberg.ListType:
@@ -440,6 +452,26 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 		return nil, nil
 	}
 	switch t := typ.(type) {
+	case iceberg.UUIDType:
+		ext, ok := col.(array.ExtensionArray)
+		if !ok {
+			return nil, fmt.Errorf("%w: Avro UUID requires an Arrow extension array, got %T", iceberg.ErrInvalidArgument, col)
+		}
+		storage, ok := ext.Storage().(*array.FixedSizeBinary)
+		if !ok || len(storage.Value(row)) != 16 {
+			return nil, fmt.Errorf("%w: Avro UUID requires 16-byte storage", iceberg.ErrInvalidArgument)
+		}
+		return append([]byte(nil), storage.Value(row)...), nil
+	case iceberg.DecimalType:
+		dec, ok := col.(*array.Decimal128)
+		if !ok {
+			return nil, fmt.Errorf("%w: Avro decimal requires Arrow decimal128, got %T", iceberg.ErrInvalidArgument, col)
+		}
+		value := dec.Value(row)
+		if !value.FitsInPrecision(int32(t.Precision())) {
+			return nil, fmt.Errorf("%w: Avro decimal exceeds precision %d", iceberg.ErrInvalidArgument, t.Precision())
+		}
+		return avroSignedFixed(value.BigInt(), iceberginternal.DecimalRequiredBytes(t.Precision()))
 	case *iceberg.StructType:
 		a, ok := col.(*array.Struct)
 		if !ok {
@@ -567,4 +599,22 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 	default:
 		return nil, fmt.Errorf("%w: Avro Arrow array %T", iceberg.ErrNotImplemented, col)
 	}
+}
+
+// avroSignedFixed encodes the unscaled decimal as a fixed-width, big-endian
+// two's-complement integer. Iceberg requires the minimum width for precision.
+func avroSignedFixed(value *big.Int, size int) ([]byte, error) {
+	if value == nil || size <= 0 {
+		return nil, fmt.Errorf("%w: invalid Avro decimal value or width", iceberg.ErrInvalidArgument)
+	}
+	limit := new(big.Int).Lsh(big.NewInt(1), uint(size*8-1))
+	minValue := new(big.Int).Neg(new(big.Int).Set(limit))
+	if value.Cmp(minValue) < 0 || value.Cmp(limit) >= 0 {
+		return nil, fmt.Errorf("%w: Avro decimal value does not fit %d bytes", iceberg.ErrInvalidArgument, size)
+	}
+	unscaled := new(big.Int).Set(value)
+	if unscaled.Sign() < 0 {
+		unscaled.Add(unscaled, new(big.Int).Lsh(big.NewInt(1), uint(size*8)))
+	}
+	return unscaled.FillBytes(make([]byte, size)), nil
 }
