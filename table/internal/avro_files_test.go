@@ -363,3 +363,31 @@ func TestAvroWriterRejectsMissingFileIO(t *testing.T) {
 	}, as)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
+
+func TestAvroWriterAbortsAfterPartialBatchFailure(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	b.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 0}, []bool{true, false})
+	batch := b.NewRecordBatch()
+	defer batch.Release()
+
+	path := filepath.Join(t.TempDir(), "partial.avro")
+	w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: path,
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	// Row one is encoded before row two violates the required field.
+	require.ErrorIs(t, w.Write(batch), iceberg.ErrInvalidArgument)
+	require.ErrorIs(t, w.Write(batch), iceberg.ErrInvalidArgument)
+	_, err = w.Close()
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+}

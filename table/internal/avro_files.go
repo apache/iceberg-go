@@ -269,14 +269,25 @@ type avroFileWriter struct {
 	nulls      map[int]int64
 	values     map[int]int64
 	rows       int64
+	failed     error
 	closed     bool
 }
 
 func (w *avroFileWriter) BytesWritten() int64 { return w.counter.count }
-func (w *avroFileWriter) Write(batch arrow.RecordBatch) error {
+func (w *avroFileWriter) Write(batch arrow.RecordBatch) (err error) {
 	if w.closed {
 		return errors.New("avro writer is closed")
 	}
+	if w.failed != nil {
+		return w.failed
+	}
+	// An OCF stream cannot roll back records written before a batch error.
+	// Prevent Close from publishing mismatched record-count metadata.
+	defer func() {
+		if err != nil {
+			w.failed = err
+		}
+	}()
 	if int(batch.NumCols()) != len(w.fields) {
 		return fmt.Errorf("%w: Avro batch has wrong number of columns", iceberg.ErrInvalidArgument)
 	}
@@ -316,6 +327,9 @@ func (w *avroFileWriter) Write(batch arrow.RecordBatch) error {
 func (w *avroFileWriter) Close() (_ iceberg.DataFile, err error) {
 	if w.closed {
 		return nil, errors.New("avro writer already closed")
+	}
+	if w.failed != nil {
+		return nil, errors.Join(w.failed, w.Abort())
 	}
 	w.closed = true
 	if err = w.writer.Close(); err != nil {
