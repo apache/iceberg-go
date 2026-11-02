@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -114,6 +115,7 @@ func readORCFileSchema(file iceio.File) (*arrow.Schema, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+
 	return arrow.NewSchema(fields, nil), size, nil
 }
 
@@ -139,6 +141,7 @@ func validateORCTypeTree(types []*orcpb.Type) error {
 	if len(seen) != len(types) {
 		return fmt.Errorf("%w: ORC type tree contains %d unreferenced types", iceberg.ErrInvalidSchema, len(types)-len(seen))
 	}
+
 	return nil
 }
 
@@ -179,7 +182,7 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 	field.Name = name
 	if idText, ok := attrs["iceberg.id"]; ok {
 		id, err := strconv.Atoi(idText)
-		if err != nil || id <= 0 || int64(id) > int64(^uint32(0)>>1) {
+		if err != nil || id <= 0 || int64(id) > math.MaxInt32-200 {
 			return field, fmt.Errorf("%w: invalid iceberg.id %q", iceberg.ErrInvalidSchema, idText)
 		}
 		if _, exists := seen[id]; exists {
