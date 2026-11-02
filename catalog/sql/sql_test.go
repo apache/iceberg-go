@@ -1197,6 +1197,114 @@ func (s *SqliteCatalogTestSuite) TestListNamespaces() {
 
 		_, err = cat.ListNamespaces(ctx, table.Identifier{"does_not_exist"})
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		// A parent created only through its child is listed, and exists for
+		// every read, so the hierarchy can be walked from the root.
+		implied := table.Identifier{databaseName()}
+		impliedChild := append(slices.Clone(implied), "child")
+		s.Require().NoError(cat.CreateNamespace(ctx, impliedChild, nil))
+
+		nslist, err = cat.ListNamespaces(ctx, nil)
+		s.Require().NoError(err)
+		s.Contains(nslist, implied)
+		ns, err = cat.ListNamespaces(ctx, implied)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{impliedChild}, ns)
+		ns, err = cat.ListNamespaces(ctx, impliedChild)
+		s.Require().NoError(err)
+		s.Empty(ns)
+
+		exists, err := cat.CheckNamespaceExists(ctx, implied)
+		s.Require().NoError(err)
+		s.True(exists)
+		exists, err = cat.CheckNamespaceExists(ctx, nil)
+		s.Require().NoError(err)
+		s.False(exists)
+		props, err := cat.LoadNamespaceProperties(ctx, implied)
+		s.Require().NoError(err)
+		s.Empty(props)
+		for _, err := range cat.ListTables(ctx, implied) {
+			s.Require().NoError(err)
+		}
+		for _, err := range cat.ListViews(ctx, implied) {
+			s.Require().NoError(err)
+		}
+		s.ErrorIs(cat.DropNamespace(ctx, implied), catalog.ErrNamespaceNotEmpty)
+
+		// Creating the parent itself still succeeds.
+		s.Require().NoError(cat.CreateNamespace(ctx, implied, nil))
+		s.ErrorIs(cat.CreateNamespace(ctx, implied, nil), catalog.ErrNamespaceAlreadyExists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestDropNamespaceWithChildOnlyInTableRow() {
+	cat := s.getCatalogSqlite()
+	ctx := context.Background()
+	parent := table.Identifier{databaseName()}
+	child := append(slices.Clone(parent), "child")
+	s.Require().NoError(cat.CreateNamespace(ctx, parent, nil))
+	s.Require().NoError(cat.CreateNamespace(ctx, child, nil))
+	_, err := cat.CreateTable(ctx, append(slices.Clone(child), tableName()), tableSchemaNested)
+	s.Require().NoError(err)
+
+	// Leave the child only in iceberg_tables, as catalogs without
+	// namespace property rows do.
+	sqldb := s.getDB()
+	defer sqldb.Close()
+	_, err = sqldb.Exec(`DELETE FROM iceberg_namespace_properties WHERE catalog_name = ? AND namespace = ?`,
+		cat.Name(), strings.Join(child, "."))
+	s.Require().NoError(err)
+
+	children, err := cat.ListNamespaces(ctx, parent)
+	s.Require().NoError(err)
+	s.Equal([]table.Identifier{child}, children)
+	s.ErrorIs(cat.DropNamespace(ctx, parent), catalog.ErrNamespaceNotEmpty)
+}
+
+func (s *SqliteCatalogTestSuite) TestDropNamespaceWithDottedChild() {
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		ctx := context.Background()
+		parent := table.Identifier{databaseName()}
+		// The dotted level forces the JSON-encoded storage key.
+		child := append(slices.Clone(parent), "x.y")
+		s.Require().NoError(cat.CreateNamespace(ctx, parent, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, child, nil))
+
+		children, err := cat.ListNamespaces(ctx, parent)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{child}, children)
+		s.ErrorIs(cat.DropNamespace(ctx, parent), catalog.ErrNamespaceNotEmpty)
+
+		s.Require().NoError(cat.DropNamespace(ctx, child))
+		s.Require().NoError(cat.DropNamespace(ctx, parent))
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestNamespaceLevelsCompareCase() {
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		ctx := context.Background()
+		lower := table.Identifier{databaseName()}
+		// SQLite's LIKE ignores ASCII case, so the query alone would treat
+		// this as a child of lower.
+		upperChild := table.Identifier{strings.ToUpper(lower[0]), "eu"}
+		s.Require().NoError(cat.CreateNamespace(ctx, lower, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, upperChild, nil))
+
+		root, err := cat.ListNamespaces(ctx, nil)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{lower, upperChild[:1]}, root)
+		children, err := cat.ListNamespaces(ctx, lower)
+		s.Require().NoError(err)
+		s.Empty(children)
+		s.ErrorIs(cat.DropNamespace(ctx, upperChild[:1]), catalog.ErrNamespaceNotEmpty)
+		s.Require().NoError(cat.DropNamespace(ctx, lower))
+
+		exists, err := cat.CheckNamespaceExists(ctx, lower)
+		s.Require().NoError(err)
+		s.False(exists)
+		exists, err = cat.CheckNamespaceExists(ctx, upperChild[:1])
+		s.Require().NoError(err)
+		s.True(exists)
 	}
 }
 
