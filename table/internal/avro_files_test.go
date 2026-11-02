@@ -391,3 +391,20 @@ func TestAvroWriterAbortsAfterPartialBatchFailure(t *testing.T) {
 	_, err = os.Stat(path)
 	require.True(t, os.IsNotExist(err))
 }
+
+func TestAvroWriterRejectsDuplicateStringMapKeys(t *testing.T) {
+	builder := array.NewMapBuilder(memory.DefaultAllocator, arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int32, false)
+	defer builder.Release()
+	builder.Append(true)
+	builder.KeyBuilder().(*array.StringBuilder).AppendValues([]string{"same", "same"}, nil)
+	builder.ItemBuilder().(*array.Int32Builder).AppendValues([]int32{1, 2}, nil)
+	values := builder.NewMapArray()
+	defer values.Release()
+
+	_, err := avroValue(values, 0, &iceberg.MapType{
+		KeyID: 2, KeyType: iceberg.StringType{},
+		ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: true,
+	})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "duplicate Avro map key")
+}
