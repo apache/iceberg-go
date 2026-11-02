@@ -293,6 +293,40 @@ the table, the following tracks the current write support:
 | Row Delta            |     X     |
 
 
+### Importing bucket-partitioned Parquet files (v1 and newer)
+
+Iceberg v1 stores each data file's partition tuple in its manifest. Partition
+values must match all rows in the file, and the tuple is keyed by partition
+**field ID**, not the source column ID. Parquet min/max statistics cannot
+recover a bucket hash. When importing externally produced Parquet, provide
+the complete partition tuple explicitly:
+
+```go
+// filePath points to a Parquet file already written to the table's storage.
+// 1000 is the partition field ID; bucketID is an int32 in [0, N).
+tx := tbl.NewTransaction()
+err := tx.AddDataFilesByPath(ctx, []string{filePath}, nil, false,
+    table.WithAddDataFilesByPathPartitionValues(map[string]map[int]any{
+        filePath: {1000: bucketID},
+    }),
+)
+if err != nil {
+    return err
+}
+_, err = tx.Commit(ctx)
+```
+
+For one file, pass `table.WithFilePartitionValues(map[int]any{1000: bucketID})`
+to `table.FileToDataFile` and append the resulting DataFile with `AddDataFiles`.
+Unknown field IDs, out-of-range bucket values and incorrect Go bucket types
+are rejected. For specs without a bucket transform, the importer infers values
+for order-preserving transforms when not supplied. It uses null for void fields. Callers remain responsible
+for ensuring all file rows agree with the supplied partition tuple.
+
+Spec: [Partitioning](https://iceberg.apache.org/spec/#partitioning),
+[Bucket transform](https://iceberg.apache.org/spec/#bucket-transform-details),
+[Partition evolution](https://iceberg.apache.org/spec/#partition-evolution).
+
 ### CLI Usage
 Run `go build ./cmd/iceberg` from the root of this repository to build the CLI executable, alternately you can run `go install github.com/apache/iceberg-go/cmd/iceberg@latest` to install it to the `bin` directory of your `GOPATH`.
 
