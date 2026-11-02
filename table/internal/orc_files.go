@@ -616,11 +616,30 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 		return nil, errors.Join(writeErr, closeErr)
 	}
 	w.size = int64(len(data))
+	// ORC does not expose Iceberg-compatible value/null counts for repeated
+	// children. Like Iceberg Java, omit fields beneath LIST or MAP. For
+	// ordinary STRUCT children, a missing parent also represents a null
+	// child, so account for the ancestor's nulls.
+	include := make([]bool, len(w.columns))
+	var visit func(int, bool)
+	visit = func(id int, repeated bool) {
+		c := &w.columns[id]
+		include[id] = !repeated
+		for _, childID := range c.children {
+			visit(childID, repeated || c.kind == 10 || c.kind == 11)
+		}
+	}
+	for _, id := range w.rootIDs {
+		visit(id, false)
+	}
 	nulls := make(map[int]int64, len(w.columns))
 	values := make(map[int]int64, len(w.columns))
-	for _, c := range w.columns {
-		nulls[c.field.ID] = c.nulls
-		values[c.field.ID] = int64(len(c.present))
+	for i, c := range w.columns {
+		if !include[i] {
+			continue
+		}
+		values[c.field.ID] = w.rows
+		nulls[c.field.ID] = w.rows - int64(len(c.present)) + c.nulls
 	}
 	stats := &DataFileStatistics{
 		RecordCount: w.rows, NullValueCounts: nulls, ValueCounts: values,
