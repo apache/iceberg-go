@@ -59,9 +59,9 @@ func TestAvroRetagRejectsIncompatiblePhysicalTypes(t *testing.T) {
 
 func TestAvroRejectsIncorrectTimestampPhysicalType(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		field   arrow.Field
-		node    avro.SchemaNode
+		name  string
+		field arrow.Field
+		node  avro.SchemaNode
 	}{
 		{
 			name: "string timestamp",
