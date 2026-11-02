@@ -42,8 +42,10 @@ func GetFile(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile, isPosD
 			fs:   fs,
 			file: dataFile,
 		}, nil
+	case iceberg.OrcFile:
+		return &ORCFileSource{fs: fs, file: dataFile}, nil
 	default:
-		return nil, fmt.Errorf("%w: only parquet format is implemented, got %s",
+		return nil, fmt.Errorf("%w: unsupported data file format %s",
 			iceberg.ErrNotImplemented, dataFile.FileFormat())
 	}
 }

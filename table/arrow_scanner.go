@@ -2472,6 +2472,14 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
+	// The ORC reader currently scans whole files. Remote partial-file tasks
+	// must fail instead of reading the complete file more than once.
+	if task.Value.File.FileFormat() == iceberg.OrcFile &&
+		(task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes())) {
+		return fmt.Errorf("%w: partial ORC scan task ranges are not supported", iceberg.ErrNotImplemented)
+	}
+
 	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position
