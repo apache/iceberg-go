@@ -404,3 +404,17 @@ func TestDiffSnapshotFilesErrorsAndNoop(t *testing.T) {
 	require.False(t, errors.Is(err, ErrSnapshotNotFound))
 	require.Contains(t, fmt.Sprint(err), "missing.avro")
 }
+
+func TestSnapshotDiffRejectsDuplicateLiveFiles(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://diff/duplicate/"
+	file := diffTestFile(t, prefix+"same.parquet", iceberg.EntryContentData)
+	first := writeDiffTestManifest(t, fs, 1, prefix+"first.avro",
+		iceberg.ManifestContentData, 1, []iceberg.DataFile{file}, nil, nil)
+	second := writeDiffTestManifest(t, fs, 1, prefix+"second.avro",
+		iceberg.ManifestContentData, 1, []iceberg.DataFile{file}, nil, nil)
+
+	_, err := snapshotDiffLiveFiles(t.Context(), fs, []iceberg.ManifestFile{first, second})
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "duplicate live content file")
+}

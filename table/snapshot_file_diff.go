@@ -233,6 +233,10 @@ func snapshotDiffLiveFiles(ctx context.Context, fs iceio.IO, manifests []iceberg
 				if err != nil {
 					return nil, fmt.Errorf("manifest %q: %w", manifest.FilePath(), err)
 				}
+				if _, duplicate := files[key]; duplicate {
+					return nil, fmt.Errorf("%w: duplicate live content file %q in manifest %q",
+						ErrInvalidMetadata, file.FilePath(), manifest.FilePath())
+				}
 				files[key] = file
 			default:
 
