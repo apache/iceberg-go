@@ -25,6 +25,7 @@ import (
 	"math"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -34,6 +35,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro/ocf"
 )
 
 func statsTestPartitionType() *iceberg.StructType {
@@ -197,7 +199,7 @@ func TestCollectPartitionStatisticsFromLiveManifests(t *testing.T) {
 	pt, err := inspectPartitionType(tbl.Metadata())
 	require.NoError(t, err)
 
-	rows, err := collectPartitionStatistics(ctx, fs, *tbl.CurrentSnapshot(), pt)
+	rows, err := collectPartitionStatistics(ctx, fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs())
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 	require.NoError(t, sortPartitionStatistics(rows, pt))
@@ -292,13 +294,6 @@ func TestPartitionStatisticsRejectsDroppedAndPromotedSources(t *testing.T) {
 	require.ErrorIs(t, validatePartitionStatisticsSourceTypes(meta), iceberg.ErrNotImplemented)
 }
 
-func TestPartitionStatisticsRejectsEmbeddedManifestPaths(t *testing.T) {
-	_, err := collectPartitionStatistics(t.Context(), iceio.NewMemFS(), Snapshot{
-		ManifestLocations: []string{"mem://bucket/manifest.avro"},
-	}, statsTestPartitionType())
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
-}
-
 func TestUpdatePartitionStatisticsWritesAndStages(t *testing.T) {
 	spec := partitionedSpec()
 	const snapshotID = int64(1)
@@ -341,7 +336,125 @@ func TestCollectPartitionStatisticsRejectsDuplicateLiveFiles(t *testing.T) {
 	pt, err := inspectPartitionType(tbl.Metadata())
 	require.NoError(t, err)
 
-	_, err = collectPartitionStatistics(t.Context(), fs, *tbl.CurrentSnapshot(), pt)
+	_, err = collectPartitionStatistics(t.Context(), fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs())
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "duplicate live data file")
+}
+
+func TestPartitionStatisticsEmbeddedManifests(t *testing.T) {
+	fs := iceio.NewMemFS()
+	spec0 := partitionedSpec()
+	spec7 := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}})
+	write := func(path string, spec iceberg.PartitionSpec, name string, value any, count int64) {
+		file := newTestDataFileWithCount(t, spec, "mem://stats/"+name+".parquet", map[int]any{1000: value}, count)
+		entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(int64(1)), nil, nil, file)
+		var out bytes.Buffer
+		_, err := iceberg.WriteManifest(path, &out, 1, spec, simpleSchema(), 1, []iceberg.ManifestEntry{entry})
+		require.NoError(t, err)
+		require.NoError(t, fs.WriteFile(t.Context(), path, out.Bytes()))
+	}
+	write("mem://stats/spec0.avro", spec0, "a", int32(3), 10)
+	write("mem://stats/spec7.avro", spec7, "b", int32(3), 20)
+	write("mem://stats/null.avro", spec7, "null", nil, 1)
+	snapshot := Snapshot{SnapshotID: 1, ManifestLocations: []string{"mem://stats/spec0.avro", "mem://stats/spec7.avro", "mem://stats/null.avro"}}
+	pt := &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1000, Name: "id", Type: iceberg.Int32Type{}}}}
+	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0, spec7})
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	require.NoError(t, sortPartitionStatistics(rows, pt))
+	require.Nil(t, rows[0].partition[1000])
+	require.Equal(t, int32(7), rows[0].specID)
+	require.Equal(t, int32(0), rows[1].specID)
+	require.Equal(t, int64(10), rows[1].dataRecordCount)
+	require.Equal(t, int32(7), rows[2].specID)
+	require.Equal(t, int64(20), rows[2].dataRecordCount)
+	statsPath := "mem://stats/partition-stats.parquet"
+	_, err = writePartitionStatisticsParquet(t.Context(), fs, statsPath, pt, rows)
+	require.NoError(t, err)
+	statsFile, err := fs.Open(t.Context(), statsPath)
+	require.NoError(t, err)
+	encoded, err := io.ReadAll(statsFile)
+	require.NoError(t, err)
+	require.NoError(t, statsFile.Close())
+	parquetReader, err := file.NewParquetReader(bytes.NewReader(encoded))
+	require.NoError(t, err)
+	defer parquetReader.Close()
+	arrowReader, err := pqarrow.NewFileReader(parquetReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	result, err := arrowReader.ReadTable(t.Context())
+	require.NoError(t, err)
+	defer result.Release()
+	require.EqualValues(t, 3, result.NumRows())
+	require.Equal(t, []int32{7, 0, 7}, result.Column(1).Data().Chunk(0).(*array.Int32).Int32Values())
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	wrong := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.BucketTransform{NumBuckets: 4}})
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0, wrong})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}
+
+func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
+	fs := iceio.NewMemFS()
+	spec := partitionedSpec()
+	file := newTestDataFileWithCount(t, spec, "mem://stats/a.parquet", map[int]any{1000: int32(3)}, 10)
+	entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(int64(1)), nil, nil, file)
+	var original bytes.Buffer
+	_, err := iceberg.WriteManifest("mem://stats/a.avro", &original, 1, spec, simpleSchema(), 1, []iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	reader, err := ocf.NewReader(bytes.NewReader(original.Bytes()))
+	require.NoError(t, err)
+	metadata := make(map[string][]byte)
+	for k, v := range reader.Metadata() {
+		if k != "partition-spec-id" && k != "avro.schema" && k != "avro.codec" {
+			metadata[k] = v
+		}
+	}
+	var rewritten bytes.Buffer
+	writer, err := ocf.NewWriter(&rewritten, reader.Schema(), ocf.WithMetadata(metadata))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, reader.Close())
+	require.NoError(t, fs.WriteFile(t.Context(), "mem://stats/missing.avro", rewritten.Bytes()))
+	pt := &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1000, Name: "id", Type: iceberg.Int32Type{}}}}
+	_, err = collectPartitionStatistics(t.Context(), fs, Snapshot{SnapshotID: 1, ManifestLocations: []string{"mem://stats/missing.avro"}}, pt, []iceberg.PartitionSpec{spec})
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+}
+
+func TestPartitionStatisticsRequiresPartitionFieldIDs(t *testing.T) {
+	spec := partitionedSpec()
+	require.NoError(t, validatePartitionStatisticsTuple(spec, "file", map[int]any{1000: nil}))
+	require.NoError(t, validatePartitionStatisticsTuple(spec, "file", map[int]any{1000: int32(3)}))
+	require.ErrorIs(t, validatePartitionStatisticsTuple(spec, "file", nil), iceberg.ErrInvalidArgument)
+	require.ErrorIs(t, validatePartitionStatisticsTuple(spec, "file", map[int]any{1001: int32(3)}), iceberg.ErrInvalidArgument)
+}
+
+func TestUpdatePartitionStatisticsEmbeddedManifest(t *testing.T) {
+	fs := iceio.NewMemFS()
+	spec := partitionedSpec()
+	f := newTestDataFileWithCount(t, spec, "mem://table/data/a.parquet", map[int]any{1000: int32(7)}, 12)
+	entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(int64(1)), nil, nil, f)
+	var out bytes.Buffer
+	const path = "mem://table/metadata/manifest.avro"
+	_, err := iceberg.WriteManifest(path, &out, 1, spec, simpleSchema(), 1, []iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(t.Context(), path, out.Bytes()))
+	metadata, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://table", iceberg.Properties{PropertyFormatVersion: "1"})
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSnapshot(&Snapshot{SnapshotID: 1, TimestampMs: time.Now().UnixMilli() + 1000, ManifestLocations: []string{path}}))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	metadata, err = builder.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, metadata, "mem://table/metadata.json", func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+	tx := tbl.NewTransaction()
+	stats, err := tx.UpdatePartitionStatistics(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stats.SnapshotID)
+	result, err := tx.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, []PartitionStatisticsFile{*stats}, slices.Collect(result.PartitionStatistics()))
+	stored, err := fs.Open(t.Context(), stats.StatisticsPath)
+	require.NoError(t, err)
+	require.NoError(t, stored.Close())
 }

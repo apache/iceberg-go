@@ -24,6 +24,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -32,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
+	"github.com/twmb/avro/ocf"
 )
 
 // PartitionStatisticsSchemaV1 is the v1 partition statistics file schema.
@@ -91,8 +93,8 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // deterministic ties. Only tables with at least one partition field are
 // currently supported.
 // Partition fields whose source was dropped or whose result type changed are
-// not yet supported. Legacy snapshots with embedded manifest paths are also
-// unsupported because their partition spec IDs are unavailable.
+// not yet supported. Embedded manifests require a matching spec ID in their
+// headers and a partition tuple with all expected field IDs.
 //
 // Use a fresh transaction: a staged schema, spec, or snapshot change would
 // make the original head's partition type ambiguous. The branch head is pinned
@@ -154,7 +156,7 @@ func (t *Transaction) UpdatePartitionStatistics(ctx context.Context) (*Partition
 	if err != nil {
 		return nil, err
 	}
-	rows, err := collectPartitionStatistics(ctx, fs, *snapshot, partitionType)
+	rows, err := collectPartitionStatistics(ctx, fs, *snapshot, partitionType, t.tbl.Metadata().PartitionSpecs())
 	if err != nil {
 		return nil, fmt.Errorf("partition statistics: %w", err)
 	}
@@ -211,6 +213,54 @@ func validatePartitionStatisticsSourceTypes(meta Metadata) error {
 	return nil
 }
 
+// Embedded v1 paths lack manifest-list descriptors. Read and validate the
+// header spec before constructing a descriptor with the real spec ID.
+func partitionStatisticsEmbeddedManifest(ctx context.Context, fs iceio.IO, manifest iceberg.ManifestFile, specs map[int32]iceberg.PartitionSpec) (iceberg.ManifestFile, error) {
+	f, err := fs.Open(ctx, manifest.FilePath())
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	header, err := ocf.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("read embedded manifest %q: %w", manifest.FilePath(), err)
+	}
+	raw := header.Metadata()["partition-spec-id"]
+	if err := header.Close(); err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("%w: embedded manifest %q has no partition spec ID", iceberg.ErrNotImplemented, manifest.FilePath())
+	}
+	id, err := strconv.ParseInt(string(raw), 10, 32)
+	if err != nil || id < 0 {
+		return nil, fmt.Errorf("%w: embedded manifest %q has invalid partition spec ID", iceberg.ErrInvalidArgument, manifest.FilePath())
+	}
+	expected, ok := specs[int32(id)]
+	if !ok {
+		return nil, fmt.Errorf("%w: embedded manifest %q references unknown partition spec %d", iceberg.ErrInvalidArgument, manifest.FilePath(), id)
+	}
+	descriptor := iceberg.NewManifestBuilder(1, manifest.FilePath(), manifest.Length(), int32(id), manifest.SnapshotID()).
+		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).AddedRows(-1).ExistingRows(-1).DeletedRows(-1).Build()
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil, err
+	}
+	reader, err := iceberg.NewManifestReader(descriptor, f)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	actual, err := reader.PartitionSpec()
+	if err != nil {
+		return nil, err
+	}
+	if !actual.Equals(expected) {
+		return nil, fmt.Errorf("%w: embedded manifest %q partition spec differs from table metadata", iceberg.ErrInvalidArgument, manifest.FilePath())
+	}
+
+	return descriptor, nil
+}
+
 // collectPartitionStatistics reads only manifest metadata, not Parquet data.
 // Each partition spec gets a separate lookup tree: partitions that have the
 // same tuple under two spec IDs are distinct statistics rows.
@@ -219,9 +269,11 @@ func collectPartitionStatistics(
 	fs iceio.IO,
 	snapshot Snapshot,
 	partitionType *iceberg.StructType,
+	specs []iceberg.PartitionSpec,
 ) ([]*inspectPartitionAggregate, error) {
-	if snapshot.ManifestList == "" && snapshot.ManifestLocations != nil {
-		return nil, fmt.Errorf("%w: partition statistics for embedded manifest paths", iceberg.ErrNotImplemented)
+	specByID := make(map[int32]iceberg.PartitionSpec, len(specs))
+	for _, spec := range specs {
+		specByID[int32(spec.ID())] = spec
 	}
 	manifests, err := snapshot.Manifests(fs)
 	if err != nil {
@@ -235,7 +287,17 @@ func collectPartitionStatistics(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if snapshot.ManifestList == "" && snapshot.ManifestLocations != nil {
+			manifest, err = partitionStatisticsEmbeddedManifest(ctx, fs, manifest, specByID)
+			if err != nil {
+				return nil, err
+			}
+		}
 		specID := manifest.PartitionSpecID()
+		spec, ok := specByID[specID]
+		if !ok {
+			return nil, fmt.Errorf("%w: manifest %q references unknown partition spec %d", iceberg.ErrInvalidArgument, manifest.FilePath(), specID)
+		}
 		tree := trees[specID]
 		if tree == nil {
 			tree = newInspectPartitionAggregateTree()
@@ -273,7 +335,11 @@ func collectPartitionStatistics(
 				return nil, fmt.Errorf("%w: file %s has a negative count or size",
 					iceberg.ErrInvalidArgument, file.FilePath())
 			}
-			partition := inspectCoercePartition(dataFilePartition(file), partitionType)
+			values := dataFilePartition(file)
+			if err := validatePartitionStatisticsTuple(spec, file.FilePath(), values); err != nil {
+				return nil, err
+			}
+			partition := inspectCoercePartition(values, partitionType)
 			for _, field := range partitionType.FieldList {
 				value := partition[field.ID]
 				if _, err := comparePartitionStatisticValues(value, value); err != nil {
@@ -302,6 +368,16 @@ func collectPartitionStatistics(
 	}
 
 	return rows, nil
+}
+
+func validatePartitionStatisticsTuple(spec iceberg.PartitionSpec, path string, values map[int]any) error {
+	for _, field := range spec.Fields() {
+		if _, exists := values[field.FieldID]; !exists {
+			return fmt.Errorf("%w: file %q is missing partition field %d", iceberg.ErrInvalidArgument, path, field.FieldID)
+		}
+	}
+
+	return nil
 }
 
 // sortPartitionStatistics obeys the spec's NULL FIRST tuple ordering, not
