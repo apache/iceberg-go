@@ -182,6 +182,34 @@ func TestORCRejectsDuplicateFieldID(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 }
 
+func TestORCRejectsOversizedFixedBinaryLength(t *testing.T) {
+	for _, tc := range []struct {
+		length string
+		valid  bool
+	}{
+		{length: "0"},
+		{length: "-1"},
+		{length: "2147483648"},
+		{length: "9223372036854775807"},
+		{length: "8", valid: true},
+	} {
+		t.Run(tc.length, func(t *testing.T) {
+			attrs := append(encodeORCAttribute("iceberg.binary-type", "FIXED"),
+				encodeORCAttribute("iceberg.length", tc.length)...)
+			typ := &orcpb.Type{Kind: orcpb.Type_BINARY.Enum(), XXX_unrecognized: attrs}
+			field, err := orcSchemaField([]*orcpb.Type{typ}, 0, "value", make(map[int]struct{}))
+			if tc.valid {
+				require.NoError(t, err)
+				binaryType, ok := field.Type.(*arrow.FixedSizeBinaryType)
+				require.True(t, ok)
+				require.Equal(t, 8, binaryType.ByteWidth)
+			} else {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			}
+		})
+	}
+}
+
 func TestORCRejectsReservedFieldIDs(t *testing.T) {
 	for _, tc := range []struct {
 		fieldID string

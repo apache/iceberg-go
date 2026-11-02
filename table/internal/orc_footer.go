@@ -241,7 +241,7 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 			field.Type = arrow.BinaryTypes.Binary
 		case "FIXED":
 			n, err := strconv.Atoi(attrs["iceberg.length"])
-			if err != nil || n < 1 {
+			if err != nil || n < 1 || n > math.MaxInt32 {
 				return field, fmt.Errorf("%w: invalid ORC fixed length", iceberg.ErrInvalidSchema)
 			}
 			field.Type = &arrow.FixedSizeBinaryType{ByteWidth: n}
