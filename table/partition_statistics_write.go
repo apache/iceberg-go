@@ -358,6 +358,17 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 
 		return 1, nil
 	}
+	// Decimal partitions sort by their numeric value, not by the underlying
+	// Decimal struct or the lexicographic encoding of the unscaled integer.
+	if left, ok := a.(iceberg.Decimal); ok {
+		right, valid := b.(iceberg.Decimal)
+		if !valid || left.Scale != right.Scale {
+			return 0, fmt.Errorf("%w: incompatible decimal partition values %v and %v",
+				iceberg.ErrInvalidArgument, a, b)
+		}
+
+		return left.Val.Cmp(right.Val), nil
+	}
 	left, right := reflect.ValueOf(a), reflect.ValueOf(b)
 	if left.Kind() != right.Kind() {
 		return 0, fmt.Errorf("%w: incompatible partition values %T and %T",
