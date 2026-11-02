@@ -262,6 +262,24 @@ func TestORCAttributePairsRejectAmbiguousAndIncompleteFields(t *testing.T) {
 	require.Equal(t, "7", attrs["iceberg.id"])
 }
 
+// Protobuf field numbers must be in the range 1 through 2^29-1.
+// An oversized tag must not be accepted as an unknown ORC footer field.
+func TestORCProtoFieldNumberBounds(t *testing.T) {
+	const maxFieldNumber uint64 = (1 << 29) - 1
+	valid := binary.AppendUvarint(nil, maxFieldNumber<<3)
+	valid = append(valid, 0)
+	field, wire, _, rest, err := consumeORCProtoField(valid)
+	require.NoError(t, err)
+	require.Equal(t, int(maxFieldNumber), field)
+	require.Equal(t, 0, wire)
+	require.Empty(t, rest)
+
+	invalid := binary.AppendUvarint(nil, (maxFieldNumber+1)<<3)
+	invalid = append(invalid, 0)
+	_, _, _, _, err = consumeORCProtoField(invalid)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
+
 func TestORCCompressedAndInvalidFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.orc")
 	require.NoError(t, os.WriteFile(path, []byte("not-orc"), 0o644))
