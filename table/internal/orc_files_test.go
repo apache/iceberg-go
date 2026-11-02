@@ -486,6 +486,8 @@ func TestORCPositionAndEqualityDeletes(t *testing.T) {
 		require.Equal(t, int64(2), df.Count())
 		require.NotNil(t, df.ReferencedDataFile())
 		require.Equal(t, "file.parquet", *df.ReferencedDataFile())
+		require.Equal(t, []byte("file.parquet"), df.LowerBoundValues()[iceberg.DeleteFilePathFieldID])
+		require.Equal(t, []byte("file.parquet"), df.UpperBoundValues()[iceberg.DeleteFilePathFieldID])
 	})
 	t.Run("equality", func(t *testing.T) {
 		schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 5, Name: "id", Type: iceberg.Int32Type{}, Required: true})
@@ -507,6 +509,57 @@ func TestORCPositionAndEqualityDeletes(t *testing.T) {
 		require.Equal(t, iceberg.EntryContentEqDeletes, df.ContentType())
 		require.Equal(t, []int{5}, df.EqualityFieldIDs())
 	})
+}
+
+func TestORCEqualityDeletesRejectInvalidKeyTypes(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema *iceberg.Schema
+		arrow  *arrow.Schema
+		keyID  int
+	}{
+		{
+			name: "float",
+			schema: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "score", Type: iceberg.Float32Type{}}),
+			arrow: arrow.NewSchema([]arrow.Field{
+				{Name: "score", Type: arrow.PrimitiveTypes.Float32},
+			}, nil),
+			keyID: 1,
+		},
+		{
+			name: "list element",
+			schema: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "numbers", Type: &iceberg.ListType{
+					ElementID: 2, Element: iceberg.Int32Type{},
+				}}),
+			arrow: arrow.NewSchema([]arrow.Field{
+				{Name: "numbers", Type: arrow.ListOf(arrow.PrimitiveTypes.Int32)},
+			}, nil),
+			keyID: 2,
+		},
+		{
+			name: "map value",
+			schema: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "lookup", Type: &iceberg.MapType{
+					KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{},
+				}}),
+			arrow: arrow.NewSchema([]arrow.Field{
+				{Name: "lookup", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int32)},
+			}, nil),
+			keyID: 3,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+				FileSchema: tc.schema, Spec: *iceberg.UnpartitionedSpec,
+				FileName: filepath.Join(t.TempDir(), "invalid-key.orc"),
+				Content: iceberg.EntryContentEqDeletes, EqualityFieldIDs: []int{tc.keyID},
+			}, tc.arrow)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
 }
 
 func TestORCPositionDeletesRejectOutOfOrder(t *testing.T) {
