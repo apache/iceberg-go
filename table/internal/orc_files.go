@@ -88,20 +88,20 @@ func (f orcFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, part
 }
 
 type orcColumn struct {
-	field        iceberg.NestedField
-	kind         uint64
-	children     []int
-	childNames   []string
-	present      []bool
-	integers     []uint64
-	integerBytes int64
-	bits         []bool
-	data         bytes.Buffer
-	lengths      []uint64
-	lengthBytes  int64
-	secondary    []uint64
+	field          iceberg.NestedField
+	kind           uint64
+	children       []int
+	childNames     []string
+	present        []bool
+	integers       []uint64
+	integerBytes   int64
+	bits           []bool
+	data           bytes.Buffer
+	lengths        []uint64
+	lengthBytes    int64
+	secondary      []uint64
 	secondaryBytes int64
-	nulls        int64
+	nulls          int64
 }
 
 func (c *orcColumn) addInteger(value uint64) {
@@ -113,7 +113,6 @@ func (c *orcColumn) addLength(length uint64) {
 	c.lengths = append(c.lengths, length)
 	c.lengthBytes += int64((bits.Len64(length|1) + 6) / 7)
 }
-
 
 func (c *orcColumn) addSecondary(value uint64) {
 	c.secondary = append(c.secondary, value)
@@ -400,7 +399,7 @@ func (w *orcFileWriter) validatePositionBatch(batch arrow.RecordBatch) error {
 	if !ok {
 		return fmt.Errorf("%w: ORC position deletes require int64 pos", iceberg.ErrInvalidArgument)
 	}
-	for row := 0; row < int(batch.NumRows()); row++ {
+	for row := range int(batch.NumRows()) {
 		if batch.Column(0).IsNull(row) || positionCol.IsNull(row) {
 			return fmt.Errorf("%w: ORC position deletes cannot contain null paths or offsets", iceberg.ErrInvalidArgument)
 		}
@@ -445,7 +444,7 @@ func (w *orcFileWriter) Write(batch arrow.RecordBatch) (err error) {
 		}
 	}
 	for col, id := range w.rootIDs {
-		for row := 0; row < int(batch.NumRows()); row++ {
+		for row := range int(batch.NumRows()) {
 			if err := w.appendValue(id, batch.Column(col), row); err != nil {
 				return err
 			}
