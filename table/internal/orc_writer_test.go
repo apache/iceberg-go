@@ -619,3 +619,13 @@ func TestORCStructNullsPropagateIntoChildMetrics(t *testing.T) {
 	require.Equal(t, int64(2), df.ValueCounts()[1])
 	require.Equal(t, int64(2), df.ValueCounts()[2])
 }
+
+func TestORCWriterRejectsNilBatches(t *testing.T) {
+	_, err := (orcFormat{}).WriteDataFile(context.Background(), nil, nil, WriteFileInfo{}, []arrow.RecordBatch{nil})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	writer := &orcFileWriter{}
+	err = writer.Write(nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorIs(t, writer.failed, iceberg.ErrInvalidArgument)
+}
