@@ -148,7 +148,7 @@ func TestORCNestedStructAndListIDs(t *testing.T) {
 			3: {"iceberg.id": "3"},
 			4: {"iceberg.id": "4"},
 		},
-		[]any{[]interface{}{int64(7)}, []int64{1, 2}},
+		[]any{[]any{int64(7)}, []int64{1, 2}},
 	)
 	rd := openORCFixture(t, path, 1)
 	schema, err := rd.Schema()

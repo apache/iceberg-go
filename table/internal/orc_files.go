@@ -122,21 +122,25 @@ func (r *orcFileReader) GetRecords(ctx context.Context, _ []int, tester any) (ar
 		for cursor.Stripes() {
 			if err := ctx.Err(); err != nil {
 				yield(nil, err)
+
 				return
 			}
 			for cursor.Next() {
 				if err := ctx.Err(); err != nil {
 					yield(nil, err)
+
 					return
 				}
 				values := cursor.Row()
 				if len(values) != len(names) {
 					yield(nil, fmt.Errorf("%w: ORC row contains %d columns, expected %d", iceberg.ErrInvalidSchema, len(values), len(names)))
+
 					return
 				}
 				for i, value := range values {
 					if err := appendORCField(builder.Field(i), r.schema.Field(i), value); err != nil {
 						yield(nil, fmt.Errorf("ORC column %q: %w", names[i], err))
+
 						return
 					}
 				}
@@ -150,6 +154,7 @@ func (r *orcFileReader) GetRecords(ctx context.Context, _ []int, tester any) (ar
 			}
 			if err := cursor.Err(); err != nil {
 				yield(nil, err)
+
 				return
 			}
 		}
@@ -353,7 +358,7 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 			}
 		}
 	case *array.ListBuilder:
-		items, ok := value.([]interface{})
+		items, ok := value.([]any)
 		if !ok {
 			return badType()
 		}

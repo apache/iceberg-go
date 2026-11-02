@@ -31,7 +31,7 @@ import (
 	"google.golang.org/protobuf/protoadapt"
 )
 
-func assertORCReaderRejected(t *testing.T, path string) {
+func assertORCReaderRejected(t *testing.T, path string, want error) {
 	t.Helper()
 	stat, err := os.Stat(path)
 	require.NoError(t, err)
@@ -40,7 +40,7 @@ func assertORCReaderRejected(t *testing.T, path string) {
 	source, err := GetFile(context.Background(), iceio.LocalFS{}, file.Build(), false)
 	require.NoError(t, err)
 	_, err = source.GetReader(context.Background())
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	require.ErrorIs(t, err, want)
 }
 
 func TestORCRejectsTimestampData(t *testing.T) {
@@ -51,7 +51,7 @@ func TestORCRejectsTimestampData(t *testing.T) {
 				attrs["iceberg.timestamp-unit"] = unit
 			}
 			path := writeORCFixture(t, "struct<ts:timestamp>", map[int]map[string]string{1: attrs}, []any{time.Unix(12345, 0).UTC()})
-			assertORCReaderRejected(t, path)
+			assertORCReaderRejected(t, path, iceberg.ErrNotImplemented)
 		})
 	}
 }
@@ -80,7 +80,11 @@ func TestORCRejectsAmbiguousRootNames(t *testing.T) {
 			updated = append(updated, postscript...)
 			updated = append(updated, byte(len(postscript)))
 			require.NoError(t, os.WriteFile(path, updated, 0o644))
-			assertORCReaderRejected(t, path)
+			want := iceberg.ErrNotImplemented
+			if name == "" {
+				want = iceberg.ErrInvalidSchema
+			}
+			assertORCReaderRejected(t, path, want)
 		})
 	}
 }
