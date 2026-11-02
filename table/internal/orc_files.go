@@ -203,6 +203,7 @@ func appendORCField(builder array.Builder, field arrow.Field, value any) error {
 	if value == nil && !field.Nullable {
 		return fmt.Errorf("%w: required ORC field %q is null", iceberg.ErrInvalidSchema, field.Name)
 	}
+
 	return appendORCValue(builder, field.Type, value)
 }
 
