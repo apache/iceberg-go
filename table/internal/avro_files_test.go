@@ -197,7 +197,7 @@ func TestAvroReadTablePreservesFieldIDs(t *testing.T) {
 	require.NoError(t, err)
 	defer tbl.Release()
 	require.Equal(t, int64(2), tbl.NumRows())
-	require.Equal(t, 1, tbl.NumCols())
+	require.Equal(t, int64(1), tbl.NumCols())
 	fieldID, ok := tbl.Schema().Field(0).Metadata.GetValue("PARQUET:field_id")
 	require.True(t, ok)
 	require.Equal(t, "1", fieldID)
