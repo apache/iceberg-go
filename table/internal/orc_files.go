@@ -31,8 +31,8 @@ import (
 )
 
 // orcFormat implements an initial, uncompressed single-stripe ORC writer.
-// Only supported primitive columns are accepted. Nested types, timestamps,
-// and delete files fail before any output is created.
+// Primitive columns and timestamp types are supported. Nested types are
+// currently rejected before any output is created.
 type orcFormat struct{}
 
 type orcWriteSummary struct {
@@ -87,6 +87,8 @@ type orcColumn struct {
 	data         bytes.Buffer
 	lengths      []uint64
 	lengthBytes  int64
+	secondary    []uint64
+	secondaryBytes int64
 	nulls        int64
 }
 
@@ -98,6 +100,12 @@ func (c *orcColumn) addInteger(value uint64) {
 func (c *orcColumn) addLength(length uint64) {
 	c.lengths = append(c.lengths, length)
 	c.lengthBytes += int64((bits.Len64(length|1) + 6) / 7)
+}
+
+
+func (c *orcColumn) addSecondary(value uint64) {
+	c.secondary = append(c.secondary, value)
+	c.secondaryBytes += int64((bits.Len64(value|1) + 6) / 7)
 }
 
 func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn, error) {
@@ -122,6 +130,31 @@ func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn,
 		c.kind = 4
 		if !arrow.TypeEqual(arrowField.Type, arrow.FixedWidthTypes.Time64us) {
 			return c, fmt.Errorf("ORC %s: expected Arrow time64 in microseconds", field.Name)
+		}
+	case iceberg.TimestampType, iceberg.TimestampTzType, iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		ts, ok := arrowField.Type.(*arrow.TimestampType)
+		if !ok {
+			return c, fmt.Errorf("%w: ORC %s expects an Arrow timestamp", iceberg.ErrInvalidArgument, field.Name)
+		}
+		expectedUnit := arrow.Microsecond
+		switch field.Type.(type) {
+		case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+			expectedUnit = arrow.Nanosecond
+		}
+		if ts.Unit != expectedUnit {
+			return c, fmt.Errorf("%w: ORC %s timestamp precision differs from Iceberg schema", iceberg.ErrInvalidArgument, field.Name)
+		}
+		switch field.Type.(type) {
+		case iceberg.TimestampTzType, iceberg.TimestampTzNsType:
+			if ts.TimeZone != "UTC" {
+				return c, fmt.Errorf("%w: ORC %s requires UTC timezone", iceberg.ErrInvalidArgument, field.Name)
+			}
+			c.kind = 18 // TIMESTAMP_INSTANT
+		default:
+			if ts.TimeZone != "" {
+				return c, fmt.Errorf("%w: ORC %s timestamp must not have a timezone", iceberg.ErrInvalidArgument, field.Name)
+			}
+			c.kind = 9 // TIMESTAMP
 		}
 	case iceberg.Float32Type:
 		c.kind = 5
@@ -172,11 +205,48 @@ type orcFileWriter struct {
 }
 
 func (orcFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, schema *arrow.Schema) (FileWriter, error) {
-	if info.Content != iceberg.EntryContentData {
-		return nil, fmt.Errorf("%w: ORC delete file writing is not supported", iceberg.ErrNotImplemented)
-	}
 	if info.FileSchema == nil || schema == nil {
 		return nil, fmt.Errorf("%w: missing ORC schema", iceberg.ErrInvalidArgument)
+	}
+	switch info.Content {
+	case iceberg.EntryContentData:
+		if len(info.EqualityFieldIDs) != 0 {
+			return nil, fmt.Errorf("%w: data files cannot have equality field IDs", iceberg.ErrInvalidArgument)
+		}
+	case iceberg.EntryContentEqDeletes:
+		if len(info.EqualityFieldIDs) == 0 {
+			return nil, fmt.Errorf("%w: ORC equality deletes require equality field IDs", iceberg.ErrInvalidArgument)
+		}
+		seen := make(map[int]struct{}, len(info.EqualityFieldIDs))
+		for _, id := range info.EqualityFieldIDs {
+			field, ok := info.FileSchema.FindFieldByID(id)
+			if !ok {
+				return nil, fmt.Errorf("%w: ORC equality field %d missing from schema", iceberg.ErrInvalidArgument, id)
+			}
+			if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
+				return nil, fmt.Errorf("%w: ORC equality field %d must be primitive", iceberg.ErrInvalidArgument, id)
+			}
+			if _, ok := seen[id]; ok {
+				return nil, fmt.Errorf("%w: duplicate ORC equality field %d", iceberg.ErrInvalidArgument, id)
+			}
+			seen[id] = struct{}{}
+		}
+	case iceberg.EntryContentPosDeletes:
+		if len(info.EqualityFieldIDs) != 0 || info.SortOrderID != 0 {
+			return nil, fmt.Errorf("%w: ORC position deletes cannot set equality IDs or sort order", iceberg.ErrInvalidArgument)
+		}
+		want := iceberg.PositionalDeleteSchema.Fields()
+		got := info.FileSchema.Fields()
+		if len(got) != len(want) {
+			return nil, fmt.Errorf("%w: ORC position delete schema is invalid", iceberg.ErrInvalidArgument)
+		}
+		for i := range want {
+			if got[i].ID != want[i].ID || got[i].Name != want[i].Name || got[i].Required != want[i].Required || !got[i].Type.Equals(want[i].Type) {
+				return nil, fmt.Errorf("%w: ORC position delete field %d differs from schema", iceberg.ErrInvalidArgument, i)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("%w: unsupported ORC file content %d", iceberg.ErrInvalidArgument, info.Content)
 	}
 	fields := info.FileSchema.Fields()
 	if len(fields) != len(schema.Fields()) {
@@ -204,10 +274,9 @@ func (w *orcFileWriter) BytesWritten() int64 {
 	var size int64
 	for i := range w.columns {
 		c := &w.columns[i]
-		// Count the actual varint widths rather than assuming ten bytes for
-		// every integer, which caused rolling writers to close small files early.
-		size += int64(c.data.Len()) + c.integerBytes + c.lengthBytes
-		size += int64((len(c.integers)+127)/128 + (len(c.lengths)+127)/128)
+		// Use actual varint widths for accurate rolling-file estimates.
+		size += int64(c.data.Len()) + c.integerBytes + c.lengthBytes + c.secondaryBytes
+		size += int64((len(c.integers)+127)/128 + (len(c.lengths)+127)/128 + (len(c.secondary)+127)/128)
 		if c.nulls > 0 {
 			size += orcByteRLESize((len(c.present) + 7) / 8)
 		}
@@ -269,9 +338,33 @@ func (w *orcFileWriter) Write(batch arrow.RecordBatch) (err error) {
 			case *array.Int32:
 				c.addInteger(orcZigZag(int64(a.Value(row))))
 			case *array.Int64:
-				c.addInteger(orcZigZag(a.Value(row)))
+				v := a.Value(row)
+				if c.field.ID == iceberg.DeleteFilePosFieldID && v < 0 {
+					return fmt.Errorf("%w: ORC position delete offset cannot be negative", iceberg.ErrInvalidArgument)
+				}
+				c.addInteger(orcZigZag(v))
 			case *array.Date32:
 				c.addInteger(orcZigZag(int64(a.Value(row))))
+			case *array.Timestamp:
+				v := int64(a.Value(row))
+				unit := int64(1_000_000)
+				if _, ok := c.field.Type.(iceberg.TimestampNsType); ok {
+					unit = 1_000_000_000
+				}
+				if _, ok := c.field.Type.(iceberg.TimestampTzNsType); ok {
+					unit = 1_000_000_000
+				}
+				seconds, fraction := v/unit, v%unit
+				if fraction < 0 {
+					seconds--
+					fraction += unit
+				}
+				// ORC timestamps use a 2015-01-01 base epoch and nanos in a SECONDARY stream.
+				c.addInteger(orcZigZag(seconds - 1_420_070_400))
+				if unit == 1_000_000 {
+					fraction *= 1_000
+				}
+				c.addSecondary(orcTimestampNanos(uint64(fraction)))
 			case *array.Time64:
 				v := int64(a.Value(row))
 				if v < 0 || v >= 86400000000 {
@@ -361,7 +454,10 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 		nulls[c.field.ID] = c.nulls
 		values[c.field.ID] = w.rows
 	}
-	stats := &DataFileStatistics{RecordCount: w.rows, NullValueCounts: nulls, ValueCounts: values}
+	stats := &DataFileStatistics{
+		RecordCount: w.rows, NullValueCounts: nulls, ValueCounts: values,
+		EqualityFieldIDs: append([]int(nil), w.info.EqualityFieldIDs...),
+	}
 
 	return stats.ToDataFile(DataFileOpts{
 		Schema: w.info.FileSchema, Spec: w.info.Spec, Path: w.info.FileName,
@@ -387,7 +483,7 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 		switch c.kind {
 		case 0:
 			data = orcEncodeByteRLE(orcPackBits(c.bits))
-		case 3, 4, 15:
+		case 3, 4, 9, 15, 18:
 			data = orcEncodeIntegers(c.integers)
 		default:
 			data = c.data.Bytes()
@@ -399,6 +495,15 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 			out = append(out, lengthData...)
 			stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(2, columnID, len(lengthData)))
 		}
+		if c.kind == 9 || c.kind == 18 {
+			secondary := orcEncodeIntegers(c.secondary)
+			out = append(out, secondary...)
+			stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(5, columnID, len(secondary)))
+		}
+	}
+	if orcHasTimestamps(w.columns) {
+		// Declare the writer timezone to preserve wall-clock semantics.
+		stripeFooter = orcPBBytes(stripeFooter, 3, []byte("UTC"))
 	}
 	dataLength := len(out) - 3
 	// One encoding entry for the root and one for each leaf.
@@ -431,6 +536,14 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 		if _, ok := c.field.Type.(iceberg.TimeType); ok {
 			t = orcPBBytes(t, 7, orcPair("iceberg.long-type", "TIME"))
 		}
+		if c.kind == 9 || c.kind == 18 {
+			unit := "MICROS"
+			switch c.field.Type.(type) {
+			case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+				unit = "NANOS"
+			}
+			t = orcPBBytes(t, 7, orcPair("iceberg.timestamp-unit", unit))
+		}
 		footer = orcPBBytes(footer, 4, t)
 	}
 	footer = orcPBVarint(footer, 6, uint64(w.rows))
@@ -451,6 +564,32 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 	out = append(out, byte(len(ps)))
 
 	return out, nil
+}
+
+// orcTimestampNanos encodes the nanosecond fraction in ORC's compact format.
+func orcTimestampNanos(nanos uint64) uint64 {
+	if nanos == 0 {
+		return 0
+	}
+	if nanos%100 != 0 {
+		return nanos << 3
+	}
+	zeros := uint64(1)
+	nanos /= 100
+	for nanos%10 == 0 && zeros < 7 {
+		nanos /= 10
+		zeros++
+	}
+	return nanos<<3 | zeros
+}
+
+func orcHasTimestamps(columns []orcColumn) bool {
+	for _, c := range columns {
+		if c.kind == 9 || c.kind == 18 {
+			return true
+		}
+	}
+	return false
 }
 
 func orcPBVarint(out []byte, field int, n uint64) []byte {
