@@ -53,3 +53,14 @@ func TestAvroReadSchemaUnionAlternatives(t *testing.T) {
 		})
 	}
 }
+
+func TestAvroRejectsExcessiveRecordNesting(t *testing.T) {
+	node := avro.SchemaNode{Type: "long"}
+	for range maxAvroReadSchemaDepth {
+		node = avro.SchemaNode{
+			Type: "record",
+			Fields: []avro.SchemaField{{Name: "value", Type: node}},
+		}
+	}
+	require.ErrorIs(t, validateAvroReadNode(node, false, false), iceberg.ErrInvalidSchema)
+}
