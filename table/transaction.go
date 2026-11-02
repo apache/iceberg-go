@@ -2247,7 +2247,7 @@ type AddDataFilesByPathOption func(addFilesOp *addFilesOperation)
 
 type addFilesOperation struct {
 	concurrency     int
-	partitionValues map[string]map[int]any
+	partitionValues *map[string]map[int]any
 }
 
 // WithAddDataFilesByPathConcurrency overrides the concurrency used by AddDataFilesByPath.
@@ -2269,7 +2269,7 @@ func WithAddDataFilesByPathConcurrency(concurrency int) AddDataFilesByPathOption
 // All supplied values must be correct for every row of their file.
 func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDataFilesByPathOption {
 	return func(op *addFilesOperation) {
-		op.partitionValues = values
+		op.partitionValues = &values
 	}
 }
 
@@ -2296,7 +2296,11 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		}
 		set[filePath] = struct{}{}
 	}
-	for filePath := range addFilesOp.partitionValues {
+	var partitionValues map[string]map[int]any
+	if addFilesOp.partitionValues != nil {
+		partitionValues = *addFilesOp.partitionValues
+	}
+	for filePath := range partitionValues {
 		if _, ok := set[filePath]; !ok {
 			return fmt.Errorf("%w: partition values supplied for path %q not present in AddDataFilesByPath", iceberg.ErrInvalidArgument, filePath)
 		}
@@ -2350,7 +2354,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 
-	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, addFilesOp.partitionValues)
+	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)
 	if err != nil {
 		return err
 	}

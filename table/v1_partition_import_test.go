@@ -73,10 +73,10 @@ func TestV1FileToDataFileExplicitBucketPartition(t *testing.T) {
 	tbl, fs, path, fieldID, bucketID := makeV1BucketImportFixture(t)
 	spec := tbl.Metadata().PartitionSpec()
 
-	_, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil)
+	_, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil)
 	require.ErrorContains(t, err, "cannot infer partition field")
 
-	file, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+	file, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 		table.WithFilePartitionValues(map[int]any{fieldID: bucketID}))
 	require.NoError(t, err)
 	require.Equal(t, bucketID, file.Partition()[fieldID])
@@ -84,31 +84,31 @@ func TestV1FileToDataFileExplicitBucketPartition(t *testing.T) {
 	require.Positive(t, file.FileSizeBytes())
 
 	t.Run("invalid bucket type", func(t *testing.T) {
-		_, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+		_, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 			table.WithFilePartitionValues(map[int]any{fieldID: int(1)}))
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 
 	t.Run("out of range bucket", func(t *testing.T) {
-		_, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+		_, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 			table.WithFilePartitionValues(map[int]any{fieldID: int32(8)}))
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 
 	t.Run("negative bucket", func(t *testing.T) {
-		_, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+		_, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 			table.WithFilePartitionValues(map[int]any{fieldID: int32(-1)}))
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 
 	t.Run("unknown partition field", func(t *testing.T) {
-		_, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+		_, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 			table.WithFilePartitionValues(map[int]any{fieldID + 1000: bucketID}))
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 
 	t.Run("null bucket", func(t *testing.T) {
-		file, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+		file, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 			table.WithFilePartitionValues(map[int]any{fieldID: nil}))
 		require.NoError(t, err)
 		value, exists := file.Partition()[fieldID]
@@ -123,13 +123,13 @@ func TestV1ImportVoidPartitionWithoutExplicitValue(t *testing.T) {
 		SourceIDs: []int{1}, FieldID: 1000, Name: "old_id_bucket", Transform: iceberg.VoidTransform{},
 	})
 
-	file, err := table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil)
+	file, err := table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil)
 	require.NoError(t, err)
 	value, ok := file.Partition()[1000]
 	require.True(t, ok)
 	require.Nil(t, value)
 
-	_, err = table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+	_, err = table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 		table.WithFilePartitionValues(map[int]any{1000: int32(0)}))
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
@@ -191,7 +191,7 @@ func TestV1FileToDataFileExplicitPartitionValues(t *testing.T) {
 		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1002, Name: "old", Transform: iceberg.VoidTransform{}},
 	)
 	convert := func(values map[int]any) (iceberg.DataFile, error) {
-		return table.FileToDataFile(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+		return table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
 			table.WithFilePartitionValues(values))
 	}
 

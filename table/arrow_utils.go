@@ -2049,10 +2049,14 @@ func validateFilePartitionValues(schema *iceberg.Schema, spec iceberg.PartitionS
 // stamped onto the DataFile so callers converting foreign parquet
 // footers can convey the file's sort layout (spec data-file field
 // sort_order_id); pass 0 to make no claim. Panics from the unexported
-// conversion are recovered into an error. The optional WithFilePartitionValues
-// allows importing bucket-partitioned and evolved v1 files whose partition
-// tuple cannot be reconstructed from column statistics.
-func FileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties, opts ...FileToDataFileOption) (df iceberg.DataFile, err error) {
+// conversion are recovered into an error.
+func FileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) (iceberg.DataFile, error) {
+	return FileToDataFileWithOptions(ctx, fileIO, filePath, currentSchema, currentSpec, sortOrderID, props)
+}
+
+// FileToDataFileWithOptions builds a DataFile like FileToDataFile, with options
+// to supply partition values that cannot be inferred from Parquet statistics.
+func FileToDataFileWithOptions(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties, opts ...FileToDataFileOption) (df iceberg.DataFile, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			switch e := r.(type) {

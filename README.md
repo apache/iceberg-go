@@ -317,7 +317,7 @@ _, err = tx.Commit(ctx)
 ```
 
 For one file, pass `table.WithFilePartitionValues(map[int]any{1000: bucketID})`
-to `table.FileToDataFile` and append the resulting DataFile with `AddDataFiles`.
+to `table.FileToDataFileWithOptions` and append the resulting DataFile with `AddDataFiles`.
 Unknown field IDs, out-of-range bucket values and incorrect Go bucket types
 are rejected. For specs without a bucket transform, the importer infers values
 for order-preserving transforms when not supplied. It uses null for void fields. Callers remain responsible
