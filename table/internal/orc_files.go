@@ -327,6 +327,7 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 	if w.failed != nil {
 		w.closed = true
 		w.columns = nil
+
 		return nil, fmt.Errorf("ORC writer cannot close after a failed write: %w", w.failed)
 	}
 	w.closed = true
