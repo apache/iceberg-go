@@ -168,3 +168,57 @@ func TestReadCompressedPuffinBlobRejectsInvalidFrames(t *testing.T) {
 		require.ErrorContains(t, err, "missing content size")
 	})
 }
+
+func TestReadCompressedPuffinBlobRejectsZstdTrailingFrames(t *testing.T) {
+	data := bytes.Repeat([]byte("single frame"), 256)
+	frame := compressedBlobTestPayload(t, "zstd", data)
+	for _, tc := range []struct {
+		name     string
+		trailing []byte
+	}{
+		{"empty frame", []byte{0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x01, 0x00, 0x00}},
+		{"skippable frame", []byte{0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0}},
+		{"nonempty frame", compressedBlobTestPayload(t, "zstd", []byte("other"))},
+		{"trailing byte", []byte{0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := append(bytes.Clone(frame), tc.trailing...)
+			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", payload)))
+			require.NoError(t, err)
+			_, err = r.ReadBlob(0)
+			require.ErrorContains(t, err, "trailing data")
+		})
+	}
+}
+
+func TestReadCompressedPuffinBlobRejectsTruncatedZstd(t *testing.T) {
+	frame := compressedBlobTestPayload(t, "zstd", bytes.Repeat([]byte("hello"), 100))
+	for n := 1; n < len(frame); n++ {
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", frame[:n])))
+		require.NoError(t, err)
+		_, err = r.ReadBlob(0)
+		require.Error(t, err, "truncated at %d of %d", n, len(frame))
+	}
+}
+
+func TestReadCompressedPuffinBlobZstdMultipleBlocksAndEmpty(t *testing.T) {
+	large := make([]byte, 300000)
+	for i := range large {
+		large[i] = byte((i * 31) ^ (i >> 7))
+	}
+	for _, tc := range []struct {
+		name        string
+		frame, want []byte
+	}{
+		{"multiple blocks", compressedBlobTestPayload(t, "zstd", large), large},
+		{"empty", []byte{0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x01, 0x00, 0x00}, []byte{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", tc.frame)))
+			require.NoError(t, err)
+			blob, err := r.ReadBlob(0)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, blob.Data)
+		})
+	}
+}

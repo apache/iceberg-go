@@ -75,6 +75,9 @@ func readCompressedBlob(data []byte, codec string, maxBlobSize int64) ([]byte, e
 		if expectedSize > uint64(maxBlobSize) {
 			return nil, fmt.Errorf("puffin: decompressed blob exceeds maximum size %d", maxBlobSize)
 		}
+		if err := validateZstdFrameEnvelope(data, header); err != nil {
+			return nil, fmt.Errorf("puffin: invalid zstd blob frame: %w", err)
+		}
 		// The decoder may need a window larger than a tiny caller-set blob
 		// limit, but its output is still strictly bounded below.
 		decoder, err := zstd.NewReader(
@@ -113,4 +116,45 @@ func readCompressedBlob(data []byte, codec string, maxBlobSize int64) ([]byte, e
 	}
 
 	return output, nil
+}
+
+// validateZstdFrameEnvelope ensures the blob contains exactly one frame.
+// The decoder accepts concatenated or skippable frames, which Puffin does not.
+func validateZstdFrameEnvelope(data []byte, header zstd.Header) error {
+	offset := header.HeaderSize
+	for {
+		if len(data)-offset < 3 {
+			return errors.New("truncated zstd block header")
+		}
+		block := uint32(data[offset]) | uint32(data[offset+1])<<8 | uint32(data[offset+2])<<16
+		offset += 3
+		last := block&1 != 0
+		kind := (block >> 1) & 3
+		blockSize := int(block >> 3)
+		switch kind {
+		case 0, 2:
+		case 1:
+			blockSize = 1
+		default:
+			return errors.New("reserved zstd block type")
+		}
+		if blockSize > len(data)-offset {
+			return errors.New("truncated zstd block")
+		}
+		offset += blockSize
+		if last {
+			break
+		}
+	}
+	if header.HasCheckSum {
+		if len(data)-offset < 4 {
+			return errors.New("truncated zstd content checksum")
+		}
+		offset += 4
+	}
+	if offset != len(data) {
+		return errors.New("zstd frame has trailing data")
+	}
+
+	return nil
 }
