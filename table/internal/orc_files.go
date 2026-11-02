@@ -46,6 +46,9 @@ type ORCFileSource struct {
 }
 
 func (s *ORCFileSource) GetReader(ctx context.Context) (_ FileReader, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := s.fs.Open(ctx, s.file.FilePath())
 	if err != nil {
 		return nil, err
