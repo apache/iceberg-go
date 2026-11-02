@@ -121,20 +121,33 @@ func readORCFileSchema(file iceio.File) (*arrow.Schema, int64, error) {
 
 // ORC subtype indexes form a tree, not a graph. Reused or cyclic indexes
 // would otherwise recurse indefinitely or interpret one column twice.
+// Limit the depth of untrusted footer types before recursively converting
+// them to Arrow schemas or handing them to the ORC decoder.
+const maxORCTypeNesting = 256
+
 func validateORCTypeTree(types []*orcpb.Type) error {
-	pending := []uint32{0}
+	type pendingType struct {
+		index uint32
+		depth int
+	}
+	pending := []pendingType{{index: 0, depth: 1}}
 	seen := make(map[uint32]struct{}, len(types))
 	for len(pending) != 0 {
-		index := pending[len(pending)-1]
+		item := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		if uint64(index) >= uint64(len(types)) || types[index] == nil {
-			return fmt.Errorf("%w: invalid ORC type index %d", iceberg.ErrInvalidSchema, index)
+		if item.depth > maxORCTypeNesting {
+			return fmt.Errorf("%w: ORC type tree exceeds maximum nesting depth %d", iceberg.ErrInvalidSchema, maxORCTypeNesting)
 		}
-		if _, exists := seen[index]; exists {
-			return fmt.Errorf("%w: repeated ORC type index %d", iceberg.ErrInvalidSchema, index)
+		if uint64(item.index) >= uint64(len(types)) || types[item.index] == nil {
+			return fmt.Errorf("%w: invalid ORC type index %d", iceberg.ErrInvalidSchema, item.index)
 		}
-		seen[index] = struct{}{}
-		pending = append(pending, types[index].GetSubtypes()...)
+		if _, exists := seen[item.index]; exists {
+			return fmt.Errorf("%w: repeated ORC type index %d", iceberg.ErrInvalidSchema, item.index)
+		}
+		seen[item.index] = struct{}{}
+		for _, child := range types[item.index].GetSubtypes() {
+			pending = append(pending, pendingType{index: child, depth: item.depth + 1})
+		}
 	}
 	// Every footer type must be reachable from the root. Otherwise a
 	// malformed footer could contain columns that the reader silently drops.
