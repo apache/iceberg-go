@@ -35,7 +35,18 @@ func validateAvroReadSchema(schemaJSON string) error {
 	return validateAvroReadNode(*schema.Root().ExpandReferences(), false, false)
 }
 
+// Prevent untrusted Avro schemas from exhausting the call stack during
+// validation, Arrow schema decoration, or record batch retagging.
+const maxAvroReadSchemaDepth = 256
+
 func validateAvroReadNode(node avro.SchemaNode, nullable, inMap bool) error {
+	return validateAvroReadNodeDepth(node, nullable, inMap, 1)
+}
+
+func validateAvroReadNodeDepth(node avro.SchemaNode, nullable, inMap bool, depth int) error {
+	if depth > maxAvroReadSchemaDepth {
+		return fmt.Errorf("%w: Avro schema exceeds maximum nesting depth %d", iceberg.ErrInvalidSchema, maxAvroReadSchemaDepth)
+	}
 	if node.Type == "union" {
 		if len(node.Branches) != 2 {
 			return fmt.Errorf("%w: Avro unions must contain null and one value type", iceberg.ErrNotImplemented)
@@ -56,7 +67,7 @@ func validateAvroReadNode(node avro.SchemaNode, nullable, inMap bool) error {
 			return fmt.Errorf("%w: Avro unions must contain null and one value type", iceberg.ErrNotImplemented)
 		}
 
-		return validateAvroReadNode(*nonNull, true, inMap)
+		return validateAvroReadNodeDepth(*nonNull, true, inMap, depth+1)
 	}
 	if nullable && node.Type == "record" {
 		return fmt.Errorf("%w: Avro nullable records are not supported", iceberg.ErrNotImplemented)
@@ -70,17 +81,17 @@ func validateAvroReadNode(node avro.SchemaNode, nullable, inMap bool) error {
 	switch node.Type {
 	case "record":
 		for _, field := range node.Fields {
-			if err := validateAvroReadNode(field.Type, false, inMap); err != nil {
+			if err := validateAvroReadNodeDepth(field.Type, false, inMap, depth+1); err != nil {
 				return err
 			}
 		}
 	case "array":
 		if node.Items != nil {
-			return validateAvroReadNode(*node.Items, false, inMap)
+			return validateAvroReadNodeDepth(*node.Items, false, inMap, depth+1)
 		}
 	case "map":
 		if node.Values != nil {
-			return validateAvroReadNode(*node.Values, false, true)
+			return validateAvroReadNodeDepth(*node.Values, false, true, depth+1)
 		}
 	}
 
