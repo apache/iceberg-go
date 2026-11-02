@@ -98,9 +98,12 @@ func (r *orcFileReader) PrunedSchema(_ map[int]struct{}, _ iceberg.NameMapping) 
 	return r.schema, nil, nil
 }
 
-func (r *orcFileReader) GetRecords(ctx context.Context, _ []int, tester any) (array.RecordReader, error) {
+func (r *orcFileReader) GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error) {
 	if r.closed || r.used {
 		return nil, fmt.Errorf("%w: ORC file streams are single-use", iceberg.ErrInvalidArgument)
+	}
+	if cols != nil {
+		return nil, fmt.Errorf("%w: ORC column selection is not supported", iceberg.ErrNotImplemented)
 	}
 	if tester != nil {
 		return nil, fmt.Errorf("%w: ORC does not support Parquet row-group testers", iceberg.ErrInvalidArgument)
