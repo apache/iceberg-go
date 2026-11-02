@@ -458,3 +458,69 @@ func TestAvroWriterRejectsDuplicateStringMapKeys(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "duplicate Avro map key")
 }
+
+func TestAvroWriteNanosecondTimestamps(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "local", Type: iceberg.TimestampNsType{}},
+		iceberg.NestedField{ID: 2, Name: "utc", Type: iceberg.TimestampTzNsType{}},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "local", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}, Nullable: true},
+		{Name: "utc", Type: &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"}, Nullable: true},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	vals := []arrow.Timestamp{-9223372036854775808, -1, 0, 1, 9223372036854775807}
+	for _, v := range vals {
+		b.Field(0).(*array.TimestampBuilder).Append(v)
+		b.Field(1).(*array.TimestampBuilder).Append(v)
+	}
+	b.Field(0).AppendNull()
+	b.Field(1).AppendNull()
+	batch := b.NewRecordBatch()
+	defer batch.Release()
+	name := filepath.Join(t.TempDir(), "nanos.avro")
+	w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{FileSchema: schema, Spec: *iceberg.UnpartitionedSpec, FileName: name, Content: iceberg.EntryContentData}, as)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(batch))
+	_, err = w.Close()
+	require.NoError(t, err)
+	f, err := os.Open(name)
+	require.NoError(t, err)
+	defer f.Close()
+	r, err := ocf.NewReader(f)
+	require.NoError(t, err)
+	defer r.Close()
+	text := string(r.Metadata()["avro.schema"])
+	require.Contains(t, text, `"logicalType":"timestamp-nanos"`)
+	require.Contains(t, text, `"adjust-to-utc":false`)
+	require.Contains(t, text, `"adjust-to-utc":true`)
+	for _, want := range vals {
+		var row struct {
+			Local int64 `avro:"local"`
+			UTC   int64 `avro:"utc"`
+		}
+		require.NoError(t, r.Decode(&row))
+		require.Equal(t, int64(want), row.Local)
+		require.Equal(t, int64(want), row.UTC)
+	}
+	var row map[string]any
+	require.NoError(t, r.Decode(&row))
+	require.Nil(t, row["local"])
+	require.Nil(t, row["utc"])
+	require.ErrorIs(t, r.Decode(&row), io.EOF)
+}
+
+func TestAvroNanosecondTimestampRejectsIncompatibleTypes(t *testing.T) {
+	for _, tc := range []struct {
+		ice iceberg.Type
+		arr arrow.DataType
+	}{
+		{iceberg.TimestampNsType{}, &arrow.TimestampType{Unit: arrow.Microsecond}},
+		{iceberg.TimestampNsType{}, &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"}},
+		{iceberg.TimestampTzNsType{}, &arrow.TimestampType{Unit: arrow.Nanosecond}},
+		{iceberg.TimestampTzNsType{}, &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "Europe/Paris"}},
+	} {
+		require.ErrorIs(t, validateAvroArrowType(tc.ice, tc.arr), iceberg.ErrInvalidArgument)
+	}
+}

@@ -193,6 +193,17 @@ func validateAvroArrowType(t iceberg.Type, dt arrow.DataType) error {
 	case iceberg.TimestampType:
 		ts, ok := dt.(*arrow.TimestampType)
 		valid = ok && ts.Unit == arrow.Microsecond && ts.TimeZone == ""
+	case iceberg.TimestampNsType:
+		ts, ok := dt.(*arrow.TimestampType)
+		valid = ok && ts.Unit == arrow.Nanosecond && ts.TimeZone == ""
+	case iceberg.TimestampTzNsType:
+		ts, ok := dt.(*arrow.TimestampType)
+		if ok && ts.Unit == arrow.Nanosecond {
+			switch ts.TimeZone {
+			case "UTC", "Etc/UTC", "+00:00", "Z":
+				valid = true
+			}
+		}
 	case iceberg.TimestampTzType:
 		ts, ok := dt.(*arrow.TimestampType)
 		if ok && ts.Unit == arrow.Microsecond {
@@ -409,6 +420,10 @@ func icebergAvroType(t iceberg.Type, id int) (any, error) {
 		return map[string]any{"type": "long", "logicalType": "timestamp-micros", "adjust-to-utc": false}, nil
 	case iceberg.TimestampTzType:
 		return map[string]any{"type": "long", "logicalType": "timestamp-micros", "adjust-to-utc": true}, nil
+	case iceberg.TimestampNsType:
+		return map[string]any{"type": "long", "logicalType": "timestamp-nanos", "adjust-to-utc": false}, nil
+	case iceberg.TimestampTzNsType:
+		return map[string]any{"type": "long", "logicalType": "timestamp-nanos", "adjust-to-utc": true}, nil
 	case iceberg.FixedType:
 		return map[string]any{"type": "fixed", "name": "fixed_" + strconv.Itoa(id), "size": typ.Len()}, nil
 	case iceberg.UUIDType:
