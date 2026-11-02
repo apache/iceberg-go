@@ -2100,6 +2100,11 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	if len(suppliedPartitionValues) > 0 {
 		supplied = suppliedPartitionValues[0]
 	}
+	// Explicit partition tuples must not bypass the Iceberg requirement that
+	// writers reject unknown partition transforms.
+	if err := checkNoUnknownTransform(&currentSpec); err != nil {
+		panic(err)
+	}
 	if err := validateFilePartitionValues(currentSchema, currentSpec, supplied); err != nil {
 		panic(err)
 	}
