@@ -64,14 +64,14 @@ func TestAvroRejectsIncorrectTimestampPhysicalType(t *testing.T) {
 		node  avro.SchemaNode
 	}{
 		{
-			name: "string timestamp",
+			name:  "string timestamp",
 			field: arrow.Field{Name: "ts", Type: arrow.BinaryTypes.String},
-			node: avro.SchemaNode{Type: "string", LogicalType: "timestamp-micros"},
+			node:  avro.SchemaNode{Type: "string", LogicalType: "timestamp-micros"},
 		},
 		{
-			name: "mismatched timestamp units",
+			name:  "mismatched timestamp units",
 			field: arrow.Field{Name: "ts", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}},
-			node: avro.SchemaNode{Type: "long", LogicalType: "timestamp-micros"},
+			node:  avro.SchemaNode{Type: "long", LogicalType: "timestamp-micros"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
