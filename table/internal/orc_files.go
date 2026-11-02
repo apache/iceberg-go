@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -59,9 +60,6 @@ func (s *ORCFileSource) GetReader(ctx context.Context) (_ FileReader, err error)
 	}
 	schema, size, err := readORCFileSchema(f)
 	if err != nil {
-		return nil, err
-	}
-	if err := validateORCDates(schema); err != nil {
 		return nil, err
 	}
 	for _, field := range schema.Fields() {
@@ -276,6 +274,14 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 			return badType()
 		}
 		b.Append(v)
+	case *extensions.UUIDBuilder:
+		v, ok := value.([]byte)
+		if !ok || len(v) != 16 {
+			return badType()
+		}
+		var id [16]byte
+		copy(id[:], v)
+		b.AppendBytes(id)
 	case *array.FixedSizeBinaryBuilder:
 		v, ok := value.([]byte)
 		if !ok || len(v) != dataType.(*arrow.FixedSizeBinaryType).ByteWidth {
@@ -300,6 +306,11 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 		}
 		if days < math.MinInt32 || days > math.MaxInt32 {
 			return badType()
+		}
+		// Older ORC writers may use a hybrid Julian/Gregorian calendar.
+		// The decoder does not expose that calendar or convert its dates.
+		if days < -141427 { // 1582-10-15, the Gregorian cutover.
+			return fmt.Errorf("%w: historical ORC dates before 1582-10-15", iceberg.ErrNotImplemented)
 		}
 		b.Append(arrow.Date32(days))
 	case *array.TimestampBuilder:

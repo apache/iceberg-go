@@ -33,7 +33,8 @@ Data-file reads support Parquet and a subset of ORC files. The ORC reader
 preserves Iceberg field IDs from ORC type attributes and streams Arrow batches
 for supported primitive types, nested structs, and lists. It currently supports ORC
 NONE, ZLIB, and SNAPPY compression. Unsupported encodings (including ZSTD),
-variant, UUID, geometry/geography, dates, timestamps, maps, decimals above 18 digits,
+variant, geometry/geography, timestamps, maps, decimals above 18 digits,
+dates with presence streams or before 1582-10-15,
 dotted top-level field names, and partial ORC scan task
 ranges return errors. ORC data-file writing is not implemented.
 

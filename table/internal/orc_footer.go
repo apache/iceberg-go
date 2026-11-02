@@ -26,6 +26,7 @@ import (
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/scritchley/orc"
@@ -98,6 +99,9 @@ func readORCFileSchema(file iceio.File) (*arrow.Schema, int64, error) {
 	var footer orcpb.Footer
 	if err = proto.Unmarshal(payload, protoadapt.MessageV2Of(&footer)); err != nil {
 		return nil, 0, fmt.Errorf("parse ORC footer: %w", err)
+	}
+	if err := validateORCDateStreams(file, size, ps.GetCompression(), &footer); err != nil {
+		return nil, 0, err
 	}
 	types := footer.GetTypes()
 	if len(types) == 0 {
@@ -237,8 +241,10 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 		field.Type = arrow.BinaryTypes.String
 	case orcpb.Type_BINARY:
 		switch attrs["iceberg.binary-type"] {
-		case "":
+		case "", "BINARY":
 			field.Type = arrow.BinaryTypes.Binary
+		case "UUID":
+			field.Type = extensions.NewUUIDType()
 		case "FIXED":
 			n, err := strconv.Atoi(attrs["iceberg.length"])
 			if err != nil || n < 1 || n > math.MaxInt32 {
@@ -246,7 +252,7 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 			}
 			field.Type = &arrow.FixedSizeBinaryType{ByteWidth: n}
 		default:
-			// UUID/geometry/geography require a separate value adapter.
+			// Geometry and geography require a separate value adapter.
 			return field, fmt.Errorf("%w: ORC iceberg.binary-type %q", iceberg.ErrNotImplemented, attrs["iceberg.binary-type"])
 		}
 	case orcpb.Type_DATE:

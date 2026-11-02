@@ -46,3 +46,12 @@ orc.write_table(
     pa.Table.from_pylist(rows, schema=schema), out / "pyarrow_multibatch.orc",
     compression="zlib", stripe_size=4096, batch_size=256,
 )
+
+uuids = pa.array([bytes.fromhex("00112233445566778899aabbccddeeff"), None, bytes.fromhex("ff" * 16)], type=pa.binary())
+orc.write_table(pa.table({"id": uuids}), out / "uuid.orc", compression="uncompressed")
+
+import datetime
+
+dates = pa.table({"d": pa.array([datetime.date(1969, 12, 31), datetime.date(2024, 1, 1)], type=pa.date32())})
+for codec in ("zlib", "snappy"):
+    orc.write_table(dates, out / f"date_{codec}.orc", compression=codec)

@@ -28,6 +28,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -50,9 +51,12 @@ func writeORCFixture(t *testing.T, schemaText string, attributes map[int]map[str
 	}
 	require.NoError(t, writer.Close())
 
-	// Re-encode an uncompressed footer with iceberg.id attributes. The
-	// scritchley writer predates ORC's type attribute support.
-	raw := out.Bytes()
+	return writeORCRawFixture(t, out.Bytes(), attributes)
+}
+
+func writeORCRawFixture(t *testing.T, raw []byte, attributes map[int]map[string]string) string {
+	t.Helper()
+	// The fixture writers do not attach Iceberg type attributes.
 	require.GreaterOrEqual(t, len(raw), 4)
 	psLen := int(raw[len(raw)-1])
 	psStart := len(raw) - 1 - psLen
@@ -480,4 +484,59 @@ func TestORCRecordReaderStopsOnContextCancellation(t *testing.T) {
 	cancel()
 	require.False(t, records.Next())
 	require.ErrorIs(t, records.Err(), context.Canceled)
+}
+
+func TestORCReadUUID(t *testing.T) {
+	first := []byte{0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255}
+	last := bytes.Repeat([]byte{255}, 16)
+	raw, err := os.ReadFile("testdata/orc/uuid.orc")
+	require.NoError(t, err)
+	path := writeORCRawFixture(t, raw, map[int]map[string]string{1: {"iceberg.id": "7", "iceberg.binary-type": "UUID"}})
+	reader := openORCFixture(t, path, 3)
+	schema, err := reader.Schema()
+	require.NoError(t, err)
+	require.IsType(t, &extensions.UUIDType{}, schema.Field(0).Type)
+	id, found := schema.Field(0).Metadata.GetValue("PARQUET:field_id")
+	require.True(t, found)
+	require.Equal(t, "7", id)
+	records, err := reader.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next())
+	values := records.RecordBatch().Column(0).(*extensions.UUIDArray)
+	require.Equal(t, first, values.Storage().(*array.FixedSizeBinary).Value(0))
+	require.True(t, values.IsNull(1))
+	require.Equal(t, last, values.Storage().(*array.FixedSizeBinary).Value(2))
+	require.False(t, records.Next())
+	require.NoError(t, records.Err())
+}
+
+func TestORCReadUUIDRejectsInvalidSize(t *testing.T) {
+	for _, size := range []int{0, 15, 17} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			builder := extensions.NewUUIDBuilder(memory.DefaultAllocator)
+			defer builder.Release()
+			err := appendORCValue(builder, extensions.NewUUIDType(), make([]byte, size))
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+	}
+}
+
+func TestORCReadExplicitBinaryType(t *testing.T) {
+	raw, err := os.ReadFile("testdata/orc/uuid.orc")
+	require.NoError(t, err)
+	path := writeORCRawFixture(t, raw, map[int]map[string]string{1: {"iceberg.id": "7", "iceberg.binary-type": "BINARY"}})
+	reader := openORCFixture(t, path, 3)
+	schema, err := reader.Schema()
+	require.NoError(t, err)
+	require.Equal(t, arrow.BINARY, schema.Field(0).Type.ID())
+	records, err := reader.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next())
+	values := records.RecordBatch().Column(0).(*array.Binary)
+	require.Equal(t, []byte{0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255}, values.Value(0))
+	require.True(t, values.IsNull(1))
+	require.False(t, records.Next())
+	require.NoError(t, records.Err())
 }

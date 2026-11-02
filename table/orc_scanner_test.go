@@ -20,11 +20,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"os"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/scritchley/orc"
@@ -128,7 +130,7 @@ func TestORCScannerMultipleStripesFiltersAndDeletes(t *testing.T) {
 
 func TestORCScannerRejectsNullableDates(t *testing.T) {
 	fs := iceio.NewMemFS()
-	file := orcScanFixture(t, fs, "struct<d:date>", [][]any{{time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}, {nil}})
+	file := orcScanFixture(t, fs, "struct<d:date>", [][]any{{time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}, {time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)}, {nil}})
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "d", Type: iceberg.PrimitiveTypes.Date})
 	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://orc/table", nil)
 	require.NoError(t, err)
@@ -145,4 +147,50 @@ func TestORCScannerRejectsNullableDates(t *testing.T) {
 		}
 	}
 	require.ErrorIs(t, scanErr, iceberg.ErrNotImplemented)
+}
+
+func TestORCScannerUUIDProjectionAndFilter(t *testing.T) {
+	raw, err := os.ReadFile("internal/testdata/orc/uuid.orc")
+	require.NoError(t, err)
+	psLen := int(raw[len(raw)-1])
+	psStart := len(raw) - 1 - psLen
+	var ps orcpb.PostScript
+	require.NoError(t, proto.Unmarshal(raw[psStart:len(raw)-1], protoadapt.MessageV2Of(&ps)))
+	footerStart := psStart - int(ps.GetFooterLength())
+	var footer orcpb.Footer
+	require.NoError(t, proto.Unmarshal(raw[footerStart:psStart], protoadapt.MessageV2Of(&footer)))
+	footer.Types[1].XXX_unrecognized = append(footer.Types[1].XXX_unrecognized, orcTestAttr("iceberg.id", "7")...)
+	footer.Types[1].XXX_unrecognized = append(footer.Types[1].XXX_unrecognized, orcTestAttr("iceberg.binary-type", "UUID")...)
+	encoded, err := proto.Marshal(protoadapt.MessageV2Of(&footer))
+	require.NoError(t, err)
+	ps.FooterLength = new(uint64(len(encoded)))
+	encodedPS, err := proto.Marshal(protoadapt.MessageV2Of(&ps))
+	require.NoError(t, err)
+	output := append([]byte{}, raw[:footerStart]...)
+	output = append(output, encoded...)
+	output = append(output, encodedPS...)
+	output = append(output, byte(len(encodedPS)))
+	fs := iceio.NewMemFS()
+	const path = "mem://orc/uuid.orc"
+	require.NoError(t, fs.WriteFile(t.Context(), path, output))
+	file, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData, path, iceberg.OrcFile, nil, nil, nil, 3, int64(len(output)))
+	require.NoError(t, err)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 7, Name: "renamed", Type: iceberg.UUIDType{}})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://orc/table", nil)
+	require.NoError(t, err)
+	filter, err := iceberg.BindExpr(schema, iceberg.NotNull(iceberg.Reference("renamed")), true)
+	require.NoError(t, err)
+	scan := &arrowScan{fs: fs, metadata: meta, scanSchema: schema, projectedSchema: schema, filterSchema: schema, boundRowFilter: filter, caseSensitive: true, rowLimit: ScanNoLimit, concurrency: 1}
+	_, records, err := scan.GetRecords(t.Context(), []FileScanTask{{File: file.Build(), Residual: iceberg.NotNull(iceberg.Reference("renamed"))}})
+	require.NoError(t, err)
+	var values [][]byte
+	for batch, err := range records {
+		require.NoError(t, err)
+		col := batch.Column(0).(*extensions.UUIDArray)
+		for i := range col.Len() {
+			values = append(values, append([]byte(nil), col.Storage().(*array.FixedSizeBinary).Value(i)...))
+		}
+		batch.Release()
+	}
+	require.Equal(t, [][]byte{{0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255}, bytes.Repeat([]byte{255}, 16)}, values)
 }
