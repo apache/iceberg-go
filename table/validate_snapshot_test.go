@@ -275,14 +275,33 @@ func TestValidateSnapshotV1RejectsIncompatibleManifestDescriptor(t *testing.T) {
 
 func TestValidateManifestEntryCountOptionalV1(t *testing.T) {
 	report := &SnapshotValidationReport{}
-	validateManifestEntryCount(report, "manifest", "added", -1, 2)
-	validateManifestEntryCount(report, "manifest", "added", 2, 2)
+	validateManifestEntryCount(report, "manifest", "added", -1, 2, 1)
+	validateManifestEntryCount(report, "manifest", "added", 2, 2, 1)
 	assert.Empty(t, report.Issues)
 
-	validateManifestEntryCount(report, "manifest", "added", 3, 2)
+	validateManifestEntryCount(report, "manifest", "added", 3, 2, 1)
 	require.Len(t, report.Issues, 1)
 	assert.Equal(t, SnapshotIssueManifestCountMismatch, report.Issues[0].Code)
 	assert.Contains(t, report.Issues[0].Detail, "reports 3, found 2")
+}
+
+func TestValidateManifestEntryCountRequiredInV2AndV3(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		report := &SnapshotValidationReport{}
+		validateManifestEntryCount(report, "manifest", "added", -1, 2, version)
+		require.Len(t, report.Issues, 1)
+		assert.Equal(t, SnapshotIssueManifestCountMismatch, report.Issues[0].Code)
+		assert.Contains(t, report.Issues[0].Detail, "invalid count -1")
+
+		report = &SnapshotValidationReport{}
+		validateManifestEntryCount(report, "manifest", "deleted", 0, 0, version)
+		assert.Empty(t, report.Issues)
+	}
+
+	report := &SnapshotValidationReport{}
+	validateManifestEntryCount(report, "manifest", "existing", -2, 0, 1)
+	require.Len(t, report.Issues, 1)
+	assert.Equal(t, SnapshotIssueManifestCountMismatch, report.Issues[0].Code)
 }
 
 func writeValidationManifest(
