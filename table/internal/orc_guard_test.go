@@ -127,6 +127,14 @@ func TestORCRejectsMalformedTypeReferences(t *testing.T) {
 				nil,
 			},
 		},
+		{
+			name: "orphan",
+			types: []*orcpb.Type{
+				{Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"a"}, Subtypes: []uint32{1}},
+				{Kind: orcpb.Type_LONG.Enum()},
+				{Kind: orcpb.Type_LONG.Enum()},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.ErrorIs(t, validateORCTypeTree(tc.types), iceberg.ErrInvalidSchema)
