@@ -46,6 +46,9 @@ type AvroFileSource struct {
 }
 
 func (s *AvroFileSource) GetReader(ctx context.Context) (FileReader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := s.fs.Open(ctx, s.file.FilePath())
 	if err != nil {
 		return nil, err
