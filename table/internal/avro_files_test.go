@@ -169,3 +169,21 @@ func TestAvroRecordReaderSingleUse(t *testing.T) {
 	require.False(t, records.Next())
 	require.NoError(t, records.Err())
 }
+
+func TestAvroRejectsExplicitColumnSelectionWithoutConsumingStream(t *testing.T) {
+	const schema = `{"type":"record","name":"row","fields":[{"name":"id","type":"long","field-id":1}]}`
+	path := writeAvroOCF(t, schema, map[string]any{"id": int64(42)})
+	reader := openAvroFile(t, path, 1)
+
+	for _, cols := range [][]int{{0}, {}} {
+		_, err := reader.GetRecords(context.Background(), cols, nil)
+		require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	}
+	records, err := reader.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next())
+	require.Equal(t, int64(42), records.RecordBatch().Column(0).(*array.Int64).Value(0))
+	require.False(t, records.Next())
+	require.NoError(t, records.Err())
+}
