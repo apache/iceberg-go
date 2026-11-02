@@ -61,7 +61,8 @@ type Writer struct {
 }
 
 // BlobMetadataInput contains fields the caller provides when adding a blob.
-// Offset, Length, and CompressionCodec are set by the writer.
+// Offset and Length are computed by the writer. CompressionCodec selects the
+// blob's compression and is omitted from footer metadata when empty.
 type BlobMetadataInput struct {
 	Type BlobType
 	// CompressionCodec is "", "lz4", or "zstd". An empty value writes raw bytes.
