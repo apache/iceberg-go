@@ -216,6 +216,8 @@ func TestORCWriterRejectsTimeOutsideDay(t *testing.T) {
 }
 
 // Capture the write context while retaining real filesystem behavior.
+type orcTraceKey struct{}
+
 type orcContextIO struct {
 	iceio.LocalFS
 	createContext context.Context
@@ -249,7 +251,7 @@ func TestORCWriterHonorsCanceledContextOnClose(t *testing.T) {
 }
 
 func TestORCWriterForwardsContextToCreate(t *testing.T) {
-	ctx := context.WithValue(context.Background(), struct{}{}, "trace")
+	ctx := context.WithValue(context.Background(), orcTraceKey{}, "trace")
 	fs := &orcContextIO{}
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int32Type{}})
 	as := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)

@@ -78,9 +78,9 @@ func (f orcFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, part
 }
 
 type orcColumn struct {
-	field    iceberg.NestedField
-	kind     uint64
-	present  []bool
+	field        iceberg.NestedField
+	kind         uint64
+	present      []bool
 	integers     []uint64
 	integerBytes int64
 	bits         []bool
