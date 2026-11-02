@@ -90,6 +90,9 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // the unified partition tuple (ascending, null first), then by spec ID for
 // deterministic ties. Only tables with at least one partition field are
 // currently supported.
+// Partition fields whose source was dropped or whose result type changed are
+// not yet supported. Legacy snapshots with embedded manifest paths are also
+// unsupported because their partition spec IDs are unavailable.
 //
 // Use a fresh transaction: a staged schema, spec, or snapshot change would
 // make the original head's partition type ambiguous. The branch head is pinned
@@ -118,6 +121,9 @@ func (t *Transaction) UpdatePartitionStatistics(ctx context.Context) (*Partition
 		return nil, fmt.Errorf("%w: cannot compute partition statistics without a snapshot",
 			iceberg.ErrInvalidArgument)
 	}
+	if err := validatePartitionStatisticsSourceTypes(t.tbl.Metadata()); err != nil {
+		return nil, err
+	}
 	partitionType, err := inspectPartitionType(t.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("partition statistics: %w", err)
@@ -130,6 +136,13 @@ func (t *Transaction) UpdatePartitionStatistics(ctx context.Context) (*Partition
 	// concurrent append/overwrite on this branch must not silently rebase the
 	// stats registration to that newer head.
 	if err := t.AssertRefSnapshotID(""); err != nil {
+		return nil, err
+	}
+	if err := t.apply(nil, []Requirement{
+		AssertCurrentSchemaID(t.tbl.Metadata().CurrentSchema().ID),
+		AssertDefaultSpecID(t.tbl.Metadata().DefaultPartitionSpec()),
+		AssertLastAssignedPartitionID(lastAssignedPartitionID(t.tbl.Metadata())),
+	}); err != nil {
 		return nil, err
 	}
 
@@ -173,6 +186,31 @@ func (t *Transaction) UpdatePartitionStatistics(ctx context.Context) (*Partition
 	return &stats, nil
 }
 
+// inspectPartitionType omits fields whose source is no longer in the current
+// schema. Statistics must instead include every historical partition field.
+// Reject those tables until historical projection is supported.
+func validatePartitionStatisticsSourceTypes(meta Metadata) error {
+	current := meta.CurrentSchema()
+	for _, spec := range meta.PartitionSpecs() {
+		for _, field := range spec.Fields() {
+			for _, id := range field.SourceIDs {
+				typ, ok := current.FindTypeByID(id)
+				if !ok {
+					return fmt.Errorf("%w: partition source field %d was dropped", iceberg.ErrNotImplemented, id)
+				}
+				for _, schema := range meta.Schemas() {
+					if old, exists := schema.FindTypeByID(id); exists &&
+						!field.Transform.ResultType(typ).Equals(field.Transform.ResultType(old)) {
+						return fmt.Errorf("%w: partition source field %d changed result type", iceberg.ErrNotImplemented, id)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // collectPartitionStatistics reads only manifest metadata, not Parquet data.
 // Each partition spec gets a separate lookup tree: partitions that have the
 // same tuple under two spec IDs are distinct statistics rows.
@@ -182,6 +220,9 @@ func collectPartitionStatistics(
 	snapshot Snapshot,
 	partitionType *iceberg.StructType,
 ) ([]*inspectPartitionAggregate, error) {
+	if snapshot.ManifestList == "" && snapshot.ManifestLocations != nil {
+		return nil, fmt.Errorf("%w: partition statistics for embedded manifest paths", iceberg.ErrNotImplemented)
+	}
 	manifests, err := snapshot.Manifests(fs)
 	if err != nil {
 		return nil, err
@@ -218,6 +259,12 @@ func collectPartitionStatistics(
 					iceberg.ErrInvalidArgument, file.FilePath())
 			}
 			partition := inspectCoercePartition(dataFilePartition(file), partitionType)
+			for _, field := range partitionType.FieldList {
+				value := partition[field.ID]
+				if _, err := comparePartitionStatisticValues(value, value); err != nil {
+					return nil, fmt.Errorf("partition field %q: %w", field.Name, err)
+				}
+			}
 			row := tree.lookupPartition(partition, partitionType)
 			if row == nil {
 				row = &inspectPartitionAggregate{
@@ -321,6 +368,9 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 			return 0, fmt.Errorf("%w: NaN partition ordering is unsupported",
 				iceberg.ErrNotImplemented)
 		}
+		if (left.Float() == 0 && math.Signbit(left.Float())) || (right.Float() == 0 && math.Signbit(right.Float())) {
+			return 0, fmt.Errorf("%w: negative zero partition ordering is unsupported", iceberg.ErrNotImplemented)
+		}
 
 		return compareOrderedStats(left.Float(), right.Float()), nil
 	case reflect.String:
@@ -330,7 +380,7 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 			break
 		}
 		limit := min(left.Len(), right.Len())
-		for index := 0; index < limit; index++ {
+		for index := range limit {
 			aByte, bByte := left.Index(index).Uint(), right.Index(index).Uint()
 			if aByte != bByte {
 				return compareOrderedStats(aByte, bByte), nil
