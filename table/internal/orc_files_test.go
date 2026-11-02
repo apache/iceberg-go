@@ -358,9 +358,11 @@ func TestORCNestedStructListAndMap(t *testing.T) {
 	file, err := w.Close()
 	require.NoError(t, err)
 	require.Equal(t, int64(1), file.Count())
-	require.Equal(t, int64(2), file.ValueCounts()[4])
-	require.Equal(t, int64(1), file.NullValueCounts()[4])
-	require.Equal(t, int64(1), file.ValueCounts()[6])
+	require.Equal(t, int64(1), file.ValueCounts()[1])
+	require.Equal(t, int64(1), file.ValueCounts()[2])
+	require.Equal(t, int64(1), file.ValueCounts()[3])
+	require.NotContains(t, file.ValueCounts(), 4) // Repeated list element.
+	require.NotContains(t, file.ValueCounts(), 6) // Repeated map key.
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -529,4 +531,39 @@ func TestORCPositionDeletesRejectOutOfOrder(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	_, err = os.Stat(path)
 	require.True(t, os.IsNotExist(err))
+}
+
+func TestORCStructNullsPropagateIntoChildMetrics(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "inner", Type: iceberg.Int32Type{}},
+		}},
+	})
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "record", Type: arrow.StructOf(arrow.Field{Name: "inner", Type: arrow.PrimitiveTypes.Int32, Nullable: true}), Nullable: true},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	st := b.Field(0).(*array.StructBuilder)
+	st.Append(false)
+	st.FieldBuilder(0).(*array.Int32Builder).AppendNull()
+	st.Append(true)
+	st.FieldBuilder(0).(*array.Int32Builder).Append(7)
+	rec := b.NewRecordBatch()
+	defer rec.Release()
+
+	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec,
+		FileName: filepath.Join(t.TempDir(), "nullable-struct.orc"),
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(rec))
+	df, err := w.Close()
+	require.NoError(t, err)
+	require.Equal(t, int64(2), df.Count())
+	require.Equal(t, int64(1), df.NullValueCounts()[1])
+	require.Equal(t, int64(1), df.NullValueCounts()[2])
+	require.Equal(t, int64(2), df.ValueCounts()[1])
+	require.Equal(t, int64(2), df.ValueCounts()[2])
 }
