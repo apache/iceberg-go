@@ -153,3 +153,19 @@ func TestAvroRecordReaderStopsOnContextCancellation(t *testing.T) {
 	require.False(t, records.Next())
 	require.ErrorIs(t, records.Err(), context.Canceled)
 }
+
+func TestAvroRecordReaderSingleUse(t *testing.T) {
+	const schema = `{"type":"record","name":"row","fields":[{"name":"id","type":"long","field-id":1}]}`
+	path := writeAvroOCF(t, schema, map[string]any{"id": int64(42)})
+	reader := openAvroFile(t, path, 1)
+	records, err := reader.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+
+	_, err = reader.GetRecords(context.Background(), nil, nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.True(t, records.Next())
+	require.Equal(t, int64(42), records.RecordBatch().Column(0).(*array.Int64).Value(0))
+	require.False(t, records.Next())
+	require.NoError(t, records.Err())
+}

@@ -37,15 +37,26 @@ func validateAvroReadSchema(schemaJSON string) error {
 
 func validateAvroReadNode(node avro.SchemaNode, nullable, inMap bool) error {
 	if node.Type == "union" {
-		for _, branch := range node.Branches {
-			if branch.Type != "null" {
-				if err := validateAvroReadNode(branch, true, inMap); err != nil {
-					return err
-				}
+		if len(node.Branches) != 2 {
+			return fmt.Errorf("%w: Avro unions must contain null and one value type", iceberg.ErrNotImplemented)
+		}
+		var nonNull *avro.SchemaNode
+		hasNull := false
+		for i := range node.Branches {
+			branch := &node.Branches[i]
+			if branch.Type == "null" {
+				hasNull = true
+			} else if nonNull == nil {
+				nonNull = branch
+			} else {
+				return fmt.Errorf("%w: Avro unions must contain null and one value type", iceberg.ErrNotImplemented)
 			}
 		}
+		if !hasNull || nonNull == nil {
+			return fmt.Errorf("%w: Avro unions must contain null and one value type", iceberg.ErrNotImplemented)
+		}
 
-		return nil
+		return validateAvroReadNode(*nonNull, true, inMap)
 	}
 	if nullable && node.Type == "record" {
 		return fmt.Errorf("%w: Avro nullable records are not supported", iceberg.ErrNotImplemented)

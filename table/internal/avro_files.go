@@ -63,6 +63,7 @@ type avroFileReader struct {
 	records  *arrowavro.OCFReader
 	schema   *arrow.Schema
 	fileSize int64
+	used     bool
 	closed   bool
 }
 
@@ -123,9 +124,13 @@ func (r *avroFileReader) GetRecords(ctx context.Context, _ []int, tester any) (a
 	if r.closed {
 		return nil, fmt.Errorf("%w: Avro file reader is closed", iceberg.ErrInvalidArgument)
 	}
+	if r.used {
+		return nil, fmt.Errorf("%w: Avro file streams are single-use", iceberg.ErrInvalidArgument)
+	}
 	if tester != nil {
 		return nil, fmt.Errorf("%w: Avro files do not support Parquet row-group filters", iceberg.ErrInvalidArgument)
 	}
+	r.used = true
 	// The FileReader retains its reference until Close. The scanner releases
 	// only the additional reference returned here.
 	r.records.Retain()
