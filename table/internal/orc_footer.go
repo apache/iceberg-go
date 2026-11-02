@@ -342,6 +342,7 @@ func consumeORCProtoField(data []byte) (number int, wire int, value, rest []byte
 		if n <= 0 {
 			return 0, 0, nil, nil, fmt.Errorf("%w: malformed protobuf varint", iceberg.ErrInvalidSchema)
 		}
+
 		return number, wire, data[:n], data[n:], nil
 	case 1:
 		length = 8
@@ -359,6 +360,7 @@ func consumeORCProtoField(data []byte) (number int, wire int, value, rest []byte
 	if length > uint64(len(data)) {
 		return 0, 0, nil, nil, fmt.Errorf("%w: truncated ORC protobuf field", iceberg.ErrInvalidSchema)
 	}
+
 	return number, wire, data[:int(length)], data[int(length):], nil
 }
 
@@ -374,6 +376,7 @@ func encodeORCAttribute(name, value string) []byte {
 	b = append(b, value...)
 	out := binary.AppendUvarint(nil, 7<<3|2)
 	out = binary.AppendUvarint(out, uint64(len(b)))
+
 	return append(out, b...)
 }
 
@@ -387,5 +390,6 @@ func orcValidFooterSignature(file iceio.File) error {
 	if !bytes.Equal(prefix, []byte("ORC")) {
 		return fmt.Errorf("%w: missing ORC file magic", iceberg.ErrInvalidSchema)
 	}
+
 	return nil
 }
