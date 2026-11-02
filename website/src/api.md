@@ -483,6 +483,37 @@ err = txn.RollbackToSnapshot(targetSnapshotID)
 
 Tune retention with the `history.expire.min-snapshots-to-keep`, `history.expire.max-snapshot-age-ms`, and `history.expire.max-ref-age-ms` table properties (see [Configuration](./configuration.md)).
 
+### Snapshot integrity audit (v1 and later)
+
+Use `ValidateSnapshot` to inspect a snapshot's manifest list and entries without
+changing table data. This is especially useful for checking imported v1 tables
+before allowing them into production.
+
+```go
+report, err := tbl.ValidateSnapshot(ctx, snapshotID)
+if err != nil {
+    return err // I/O failed or the scan was canceled; report may be incomplete.
+}
+if !report.Valid() {
+    for _, issue := range report.Issues {
+        fmt.Printf("%s: %s (%s)\n", issue.Code, issue.FilePath, issue.ManifestPath)
+    }
+}
+```
+
+The report checks manifest versions, partition spec references, content types,
+manifest entry counts, duplicate manifest paths, and duplicate live content files
+across **all** manifests in a snapshot. Deleted entries do not count as live.
+A report is valid only when `Complete` is true and `Issues` is empty.
+This is a metadata-only audit: it does not check data-file contents or whether
+data-file objects still exist. The audit works with both v1 manifest lists and
+older v1 snapshots containing embedded `manifests` paths. For embedded
+manifests, the partition spec ID is checked only if the optional header contains it.
+
+The file uniqueness and manifest requirements come from the
+[Iceberg spec](https://iceberg.apache.org/spec/#content-file-uniqueness)
+and [manifest list spec](https://iceberg.apache.org/spec/#manifest-lists).
+
 ## Maintenance
 
 ### Orphan file cleanup
