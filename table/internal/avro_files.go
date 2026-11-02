@@ -187,7 +187,14 @@ func (r *avroRecordReader) Next() bool {
 	batch := r.records.RecordBatch()
 	columns := make([]arrow.Array, batch.NumCols())
 	for i, col := range batch.Columns() {
-		data := avroRetagData(col.Data(), r.schema.Field(i).Type)
+		data, err := avroRetagData(col.Data(), r.schema.Field(i).Type)
+		if err != nil {
+			for _, column := range columns[:i] {
+				column.Release()
+			}
+			r.readErr = fmt.Errorf("Avro field %q: %w", r.schema.Field(i).Name, err)
+			return false
+		}
 		columns[i] = array.MakeFromData(data)
 		data.Release()
 	}
@@ -199,13 +206,25 @@ func (r *avroRecordReader) Next() bool {
 	return true
 }
 
-func avroRetagData(source arrow.ArrayData, target arrow.DataType) *array.Data {
+func avroRetagData(source arrow.ArrayData, target arrow.DataType) (*array.Data, error) {
 	var children []arrow.ArrayData
 	if nested, ok := target.(arrow.NestedType); ok {
 		fields := nested.Fields()
-		children = make([]arrow.ArrayData, len(fields))
+		sourceChildren := source.Children()
+		if len(sourceChildren) != len(fields) {
+			return nil, fmt.Errorf("%w: Avro nested %s has %d children, expected %d",
+				iceberg.ErrInvalidSchema, target, len(sourceChildren), len(fields))
+		}
+		children = make([]arrow.ArrayData, 0, len(fields))
 		for i, field := range fields {
-			children[i] = avroRetagData(source.Children()[i], field.Type)
+			child, err := avroRetagData(sourceChildren[i], field.Type)
+			if err != nil {
+				for _, created := range children {
+					created.Release()
+				}
+				return nil, err
+			}
+			children = append(children, child)
 		}
 	}
 	data := array.NewData(target, source.Len(), source.Buffers(), children, source.NullN(), source.Offset())
@@ -213,7 +232,7 @@ func avroRetagData(source arrow.ArrayData, target arrow.DataType) *array.Data {
 		child.Release()
 	}
 
-	return data
+	return data, nil
 }
 
 func (r *avroFileReader) ReadTable(ctx context.Context) (arrow.Table, error) {
