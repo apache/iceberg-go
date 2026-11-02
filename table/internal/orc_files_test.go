@@ -199,6 +199,42 @@ func TestORCAttributesRejectMalformedFields(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestORCAttributePairsRejectAmbiguousAndIncompleteFields(t *testing.T) {
+	stringField := func(number uint64, value string) []byte {
+		out := binary.AppendUvarint(nil, number<<3|2)
+		out = binary.AppendUvarint(out, uint64(len(value)))
+		return append(out, value...)
+	}
+	wrapPair := func(fields ...[]byte) *orcpb.Type {
+		body := bytes.Join(fields, nil)
+		data := binary.AppendUvarint(nil, 7<<3|2)
+		data = binary.AppendUvarint(data, uint64(len(body)))
+		data = append(data, body...)
+		return &orcpb.Type{XXX_unrecognized: data}
+	}
+	for _, tc := range []struct {
+		name   string
+		fields [][]byte
+	}{
+		{"missing-value", [][]byte{stringField(1, "iceberg.id")}},
+		{"missing-key", [][]byte{stringField(2, "1")}},
+		{"duplicate-key", [][]byte{stringField(1, "iceberg.id"), stringField(1, "iceberg.required"), stringField(2, "1")}},
+		{"duplicate-value", [][]byte{stringField(1, "iceberg.id"), stringField(2, "1"), stringField(2, "2")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := orcTypeAttributes(wrapPair(tc.fields...))
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+	}
+	// Unknown StringPair fields are ignored as required by protobuf's
+	// forward-compatibility rules, not mistaken for the key or value.
+	unknown := binary.AppendUvarint(nil, 3<<3)
+	unknown = binary.AppendUvarint(unknown, 123)
+	attrs, err := orcTypeAttributes(wrapPair(stringField(1, "iceberg.id"), unknown, stringField(2, "7")))
+	require.NoError(t, err)
+	require.Equal(t, "7", attrs["iceberg.id"])
+}
+
 func TestORCCompressedAndInvalidFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.orc")
 	require.NoError(t, os.WriteFile(path, []byte("not-orc"), 0o644))
