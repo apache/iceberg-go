@@ -182,6 +182,33 @@ func TestORCRejectsDuplicateFieldID(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 }
 
+func TestORCRejectsReservedFieldIDs(t *testing.T) {
+	for _, tc := range []struct {
+		fieldID string
+		valid   bool
+	}{
+		{"2147483447", true},
+		{"2147483448", false},
+		{"2147483647", false},
+	} {
+		t.Run(tc.fieldID, func(t *testing.T) {
+			types := []*orcpb.Type{{
+				Kind:             orcpb.Type_LONG.Enum(),
+				XXX_unrecognized: encodeORCAttribute("iceberg.id", tc.fieldID),
+			}}
+			field, err := orcSchemaField(types, 0, "value", make(map[int]struct{}))
+			if tc.valid {
+				require.NoError(t, err)
+				id, ok := field.Metadata.GetValue("PARQUET:field_id")
+				require.True(t, ok)
+				require.Equal(t, tc.fieldID, id)
+			} else {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			}
+		})
+	}
+}
+
 func TestORCAttributesRejectMalformedFields(t *testing.T) {
 	attrs, err := orcTypeAttributes(&orcpb.Type{
 		XXX_unrecognized: append(encodeORCAttribute("iceberg.id", "42"),
