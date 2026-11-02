@@ -173,3 +173,11 @@ func TestORCRejectsNullRequiredField(t *testing.T) {
 	require.False(t, records.Next())
 	require.ErrorIs(t, records.Err(), iceberg.ErrInvalidSchema)
 }
+
+func TestORCSourceRejectsCanceledContextBeforeIO(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := (&ORCFileSource{}).GetReader(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+}
