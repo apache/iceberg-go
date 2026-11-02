@@ -232,9 +232,9 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 				seenFiles[key] = path
 			}
 		}
-		validateManifestEntryCount(report, path, "added", manifest.AddedDataFiles(), added)
-		validateManifestEntryCount(report, path, "existing", manifest.ExistingDataFiles(), existing)
-		validateManifestEntryCount(report, path, "deleted", manifest.DeletedDataFiles(), deleted)
+		validateManifestEntryCount(report, path, "added", manifest.AddedDataFiles(), added, manifest.Version())
+		validateManifestEntryCount(report, path, "existing", manifest.ExistingDataFiles(), existing, manifest.Version())
+		validateManifestEntryCount(report, path, "deleted", manifest.DeletedDataFiles(), deleted, manifest.Version())
 	}
 
 	report.Complete = true
@@ -342,10 +342,22 @@ func validateSnapshotFile(
 }
 
 func validateManifestEntryCount(
-	report *SnapshotValidationReport, manifestPath, kind string, expected int32, actual int64,
+	report *SnapshotValidationReport, manifestPath, kind string, expected int32, actual int64, version int,
 ) {
-	// V1 counts are optional. Decoders represent null by -1.
-	if expected < 0 || int64(expected) == actual {
+	// Only v1 manifest lists permit omitted counts. Decoders represent null
+	// with -1. Negative counts in v2/v3 (and values below -1 in v1) are invalid.
+	if expected == -1 && version == 1 {
+		return
+	}
+	if expected < 0 {
+		report.Issues = append(report.Issues, SnapshotValidationIssue{
+			Code: SnapshotIssueManifestCountMismatch, ManifestPath: manifestPath,
+			Detail: fmt.Sprintf("%s entries: invalid count %d in v%d manifest list", kind, expected, version),
+		})
+
+		return
+	}
+	if int64(expected) == actual {
 		return
 	}
 	report.Issues = append(report.Issues, SnapshotValidationIssue{
