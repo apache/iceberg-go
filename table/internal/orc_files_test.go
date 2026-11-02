@@ -28,6 +28,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/scritchley/orc"
@@ -305,4 +306,20 @@ func TestORCPyArrowMultipleBatches(t *testing.T) {
 	require.NoError(t, records.Err())
 	require.Equal(t, 5000, row)
 	require.Greater(t, batches, 1)
+}
+
+func TestORCStructDoesNotTreatMissingMembersAsNull(t *testing.T) {
+	typ := arrow.StructOf(
+		arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		arrow.Field{Name: "label", Type: arrow.BinaryTypes.String, Nullable: true},
+	)
+	appendStruct := func(value orc.Struct) error {
+		builder := array.NewBuilder(memory.DefaultAllocator, typ)
+		defer builder.Release()
+		return appendORCValue(builder, typ, value)
+	}
+
+	// A nullable child is allowed to be null, but its physical column must exist.
+	require.NoError(t, appendStruct(orc.Struct{"id": int64(7), "label": nil}))
+	require.ErrorIs(t, appendStruct(orc.Struct{"id": int64(7)}), iceberg.ErrInvalidSchema)
 }

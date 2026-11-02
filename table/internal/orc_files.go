@@ -120,6 +120,10 @@ func (r *orcFileReader) GetRecords(ctx context.Context, _ []int, tester any) (ar
 		defer builder.Release()
 		n := 0
 		for cursor.Stripes() {
+			if err := ctx.Err(); err != nil {
+				yield(nil, err)
+				return
+			}
 			for cursor.Next() {
 				if err := ctx.Err(); err != nil {
 					yield(nil, err)
@@ -340,7 +344,11 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 		b.Append(true)
 		for i := range st.NumFields() {
 			field := st.Field(i)
-			if err := appendORCField(b.FieldBuilder(i), field, data[field.Name]); err != nil {
+			member, exists := data[field.Name]
+			if !exists {
+				return fmt.Errorf("%w: ORC struct member %q is missing", iceberg.ErrInvalidSchema, field.Name)
+			}
+			if err := appendORCField(b.FieldBuilder(i), field, member); err != nil {
 				return fmt.Errorf("struct member %q: %w", field.Name, err)
 			}
 		}
