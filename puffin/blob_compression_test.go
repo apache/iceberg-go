@@ -241,10 +241,12 @@ func TestReadRejectsCompressedDeletionVectors(t *testing.T) {
 				Length:           int64(len(stored)),
 				CompressionCodec: &codec,
 			}
-			_, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFileWithMetadata(t, stored, meta)))
+			reader, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFileWithMetadata(t, stored, meta)))
+			require.NoError(t, err)
+			_, err = reader.ReadBlob(0)
 			require.ErrorContains(t, err, "deletion-vector-v1 must not be compressed")
 
-			reader, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, codec, stored)))
+			reader, err = puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, codec, stored)))
 			require.NoError(t, err)
 			_, err = reader.ReadBlobByMetadata(meta)
 			require.ErrorContains(t, err, "deletion-vector-v1 must not be compressed")
