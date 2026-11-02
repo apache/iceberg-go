@@ -92,6 +92,9 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 	if info.Content != iceberg.EntryContentData {
 		return nil, fmt.Errorf("%w: Avro delete-file writing is not implemented", iceberg.ErrNotImplemented)
 	}
+	if fs == nil {
+		return nil, fmt.Errorf("%w: missing Avro file IO", iceberg.ErrInvalidArgument)
+	}
 	fields := info.FileSchema.Fields()
 	if len(fields) != len(sc.Fields()) {
 		return nil, fmt.Errorf("%w: Avro file field count differs from Arrow", iceberg.ErrInvalidArgument)
@@ -99,6 +102,9 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 	for i, f := range fields {
 		if sc.Field(i).Name != f.Name {
 			return nil, fmt.Errorf("%w: Avro field %d name mismatch: %q != %q", iceberg.ErrInvalidArgument, i, sc.Field(i).Name, f.Name)
+		}
+		if err := validateAvroArrowType(f.Type, sc.Field(i).Type); err != nil {
+			return nil, fmt.Errorf("Avro field %q: %w", f.Name, err)
 		}
 	}
 	root, err := avroRecordSchema(fields, "iceberg_record")
@@ -140,12 +146,95 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 	counter := &avroCountingWriter{w: file}
 	ocfWriter, err := ocf.NewWriter(counter, parsed, opts...)
 	if err != nil {
-		_ = file.Close()
+		closeErr := file.Close()
+		removeErr := fs.Remove(context.Background(), info.FileName)
 
-		return nil, fmt.Errorf("create Avro OCF: %w", err)
+		return nil, errors.Join(fmt.Errorf("create Avro OCF: %w", err), closeErr, removeErr)
 	}
 
-	return &avroFileWriter{writer: ocfWriter, file: file, counter: counter, fs: fs, info: info, partitions: partitions, fields: fields, nulls: make(map[int]int64), values: make(map[int]int64)}, nil
+	return &avroFileWriter{writer: ocfWriter, file: file, counter: counter, fs: fs, info: info, partitions: partitions, fields: fields, schema: sc, nulls: make(map[int]int64), values: make(map[int]int64)}, nil
+}
+
+// validateAvroArrowType rejects incompatible Arrow physical types before
+// writing an OCF header. Without this check, timestamp units and nested field
+// order can silently change Iceberg values.
+func validateAvroArrowType(t iceberg.Type, dt arrow.DataType) error {
+	var valid bool
+	switch typ := t.(type) {
+	case iceberg.BooleanType:
+		valid = dt.ID() == arrow.BOOL
+	case iceberg.Int32Type:
+		valid = dt.ID() == arrow.INT32
+	case iceberg.Int64Type:
+		valid = dt.ID() == arrow.INT64
+	case iceberg.Float32Type:
+		valid = dt.ID() == arrow.FLOAT32
+	case iceberg.Float64Type:
+		valid = dt.ID() == arrow.FLOAT64
+	case iceberg.StringType:
+		valid = dt.ID() == arrow.STRING || dt.ID() == arrow.LARGE_STRING
+	case iceberg.BinaryType:
+		valid = dt.ID() == arrow.BINARY || dt.ID() == arrow.LARGE_BINARY
+	case iceberg.FixedType:
+		fixed, ok := dt.(*arrow.FixedSizeBinaryType)
+		valid = ok && fixed.ByteWidth == typ.Len()
+	case iceberg.DateType:
+		valid = dt.ID() == arrow.DATE32
+	case iceberg.TimeType:
+		valid = arrow.TypeEqual(dt, arrow.FixedWidthTypes.Time64us)
+	case iceberg.TimestampType:
+		ts, ok := dt.(*arrow.TimestampType)
+		valid = ok && ts.Unit == arrow.Microsecond && ts.TimeZone == ""
+	case iceberg.TimestampTzType:
+		ts, ok := dt.(*arrow.TimestampType)
+		if ok && ts.Unit == arrow.Microsecond {
+			switch ts.TimeZone {
+			case "UTC", "Etc/UTC", "+00:00", "Z":
+				valid = true
+			}
+		}
+	case *iceberg.StructType:
+		st, ok := dt.(*arrow.StructType)
+		if !ok || st.NumFields() != len(typ.Fields()) {
+			break
+		}
+		for i, field := range typ.Fields() {
+			if st.Field(i).Name != field.Name {
+				return fmt.Errorf("%w: Avro struct field %q was reordered", iceberg.ErrInvalidArgument, field.Name)
+			}
+			if err := validateAvroArrowType(field.Type, st.Field(i).Type); err != nil {
+				return fmt.Errorf("struct field %q: %w", field.Name, err)
+			}
+		}
+		valid = true
+	case *iceberg.ListType:
+		switch dt.(type) {
+		case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType:
+			if err := validateAvroArrowType(typ.Element, dt.(arrow.ListLikeType).Elem()); err != nil {
+				return fmt.Errorf("list element: %w", err)
+			}
+			valid = true
+		}
+	case *iceberg.MapType:
+		mt, ok := dt.(*arrow.MapType)
+		if !ok {
+			break
+		}
+		if err := validateAvroArrowType(typ.KeyType, mt.KeyType()); err != nil {
+			return fmt.Errorf("map key: %w", err)
+		}
+		if err := validateAvroArrowType(typ.ValueType, mt.ItemType()); err != nil {
+			return fmt.Errorf("map value: %w", err)
+		}
+		valid = true
+	default:
+		return fmt.Errorf("%w: Avro writing for %s", iceberg.ErrNotImplemented, t)
+	}
+	if !valid {
+		return fmt.Errorf("%w: Iceberg %s cannot be written from Arrow %s", iceberg.ErrInvalidArgument, t, dt)
+	}
+
+	return nil
 }
 
 type avroCountingWriter struct {
@@ -168,6 +257,7 @@ type avroFileWriter struct {
 	info       WriteFileInfo
 	partitions map[int]any
 	fields     []iceberg.NestedField
+	schema     *arrow.Schema
 	nulls      map[int]int64
 	values     map[int]int64
 	rows       int64
@@ -181,6 +271,9 @@ func (w *avroFileWriter) Write(batch arrow.RecordBatch) error {
 	}
 	if int(batch.NumCols()) != len(w.fields) {
 		return fmt.Errorf("%w: Avro batch has wrong number of columns", iceberg.ErrInvalidArgument)
+	}
+	if !w.schema.Equal(batch.Schema()) {
+		return fmt.Errorf("%w: Avro record batch schema changed", iceberg.ErrInvalidArgument)
 	}
 	for i, f := range w.fields {
 		if batch.Schema().Field(i).Name != f.Name {
@@ -218,12 +311,15 @@ func (w *avroFileWriter) Close() (_ iceberg.DataFile, err error) {
 	}
 	w.closed = true
 	if err = w.writer.Close(); err != nil {
-		_ = w.file.Close()
+		closeErr := w.file.Close()
+		removeErr := w.fs.Remove(context.Background(), w.info.FileName)
 
-		return nil, err
+		return nil, errors.Join(err, closeErr, removeErr)
 	}
 	if err = w.file.Close(); err != nil {
-		return nil, err
+		removeErr := w.fs.Remove(context.Background(), w.info.FileName)
+
+		return nil, errors.Join(err, removeErr)
 	}
 	stats := &DataFileStatistics{RecordCount: w.rows, ValueCounts: w.values, NullValueCounts: w.nulls}
 
@@ -406,7 +502,11 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 				if value == nil && t.ValueRequired {
 					return nil, errors.New("null required map value")
 				}
-				out[key.(string)] = value
+				keyString, ok := key.(string)
+				if !ok {
+					return nil, fmt.Errorf("%w: Avro map key must be a non-null string", iceberg.ErrInvalidArgument)
+				}
+				out[keyString] = value
 			}
 
 			return out, nil
@@ -416,6 +516,9 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 			key, err := avroValue(a.Keys(), int(i), t.KeyType)
 			if err != nil {
 				return nil, err
+			}
+			if key == nil {
+				return nil, fmt.Errorf("%w: null Avro map key", iceberg.ErrInvalidArgument)
 			}
 			value, err := avroValue(a.Items(), int(i), t.ValueType)
 			if err != nil {
@@ -453,7 +556,12 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 	case *array.Date32:
 		return int32(a.Value(row)), nil
 	case *array.Time64:
-		return int64(a.Value(row)), nil
+		value := int64(a.Value(row))
+		if value < 0 || value >= 86400000000 {
+			return nil, fmt.Errorf("%w: Avro time is outside a day", iceberg.ErrInvalidArgument)
+		}
+
+		return value, nil
 	case *array.Timestamp:
 		return int64(a.Value(row)), nil
 	default:

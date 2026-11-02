@@ -194,3 +194,99 @@ func TestAvroWriteTimestampValues(t *testing.T) {
 	require.NotNil(t, row["local"])
 	require.NotNil(t, row["utc"])
 }
+
+func TestAvroWriterRejectsIncompatibleArrowTypesBeforeCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		iceType   iceberg.Type
+		arrowType arrow.DataType
+	}{
+		{"int64_from_float64", iceberg.Int64Type{}, arrow.PrimitiveTypes.Float64},
+		{"time_nanoseconds", iceberg.TimeType{}, arrow.FixedWidthTypes.Time64ns},
+		{"timestamp_nanoseconds", iceberg.TimestampType{}, &arrow.TimestampType{Unit: arrow.Nanosecond}},
+		{"timestamp_utc_for_local", iceberg.TimestampType{}, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+		{"timestamp_missing_utc", iceberg.TimestampTzType{}, &arrow.TimestampType{Unit: arrow.Microsecond}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: tc.iceType})
+			as := arrow.NewSchema([]arrow.Field{{Name: "value", Type: tc.arrowType}}, nil)
+			name := filepath.Join(t.TempDir(), "invalid.avro")
+			_, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+				FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: name, Content: iceberg.EntryContentData,
+			}, as)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			_, err = os.Stat(name)
+			require.True(t, os.IsNotExist(err))
+		})
+	}
+}
+
+func TestAvroWriterRejectsReorderedNestedFields(t *testing.T) {
+	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "record", Type: &iceberg.StructType{
+		FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "first", Type: iceberg.Int32Type{}},
+			{ID: 3, Name: "second", Type: iceberg.Int32Type{}},
+		},
+	}})
+	as := arrow.NewSchema([]arrow.Field{{
+		Name: "record",
+		Type: arrow.StructOf(
+			arrow.Field{Name: "second", Type: arrow.PrimitiveTypes.Int32},
+			arrow.Field{Name: "first", Type: arrow.PrimitiveTypes.Int32},
+		),
+	}}, nil)
+	name := filepath.Join(t.TempDir(), "invalid.avro")
+	_, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: name, Content: iceberg.EntryContentData,
+	}, as)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = os.Stat(name)
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestAvroWriterRejectsChangedBatchSchema(t *testing.T) {
+	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.Int64Type{}})
+	as := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: filepath.Join(t.TempDir(), "data.avro"),
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	defer w.Abort()
+	changed := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Float64}}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, changed)
+	defer builder.Release()
+	builder.Field(0).(*array.Float64Builder).Append(1)
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+	require.ErrorIs(t, w.Write(batch), iceberg.ErrInvalidArgument)
+}
+
+func TestAvroWriterRejectsTimeOutsideDay(t *testing.T) {
+	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "time", Type: iceberg.TimeType{}})
+	as := arrow.NewSchema([]arrow.Field{{Name: "time", Type: arrow.FixedWidthTypes.Time64us}}, nil)
+	for _, value := range []arrow.Time64{-1, 86400000000} {
+		w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+			FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: filepath.Join(t.TempDir(), "data.avro"),
+			Content: iceberg.EntryContentData,
+		}, as)
+		require.NoError(t, err)
+		builder := array.NewRecordBuilder(memory.DefaultAllocator, as)
+		builder.Field(0).(*array.Time64Builder).Append(value)
+		batch := builder.NewRecordBatch()
+		require.ErrorIs(t, w.Write(batch), iceberg.ErrInvalidArgument)
+		batch.Release()
+		builder.Release()
+		require.NoError(t, w.Abort())
+	}
+}
+
+func TestAvroWriterRejectsMissingFileIO(t *testing.T) {
+	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.Int64Type{}})
+	as := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	_, err := (avroFormat{}).NewFileWriter(t.Context(), nil, nil, WriteFileInfo{
+		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: "data.avro",
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}
