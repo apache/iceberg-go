@@ -314,3 +314,26 @@ func TestUpdatePartitionStatisticsWritesAndStages(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 }
+
+func TestCollectPartitionStatisticsRejectsDuplicateLiveFiles(t *testing.T) {
+	spec := partitionedSpec()
+	const snapshotID = int64(1)
+	seq := int64(1)
+	file := newTestDataFileWithCount(t, spec,
+		"mem://default/table-location/data/duplicate.parquet",
+		map[int]any{1000: int32(2)}, 5)
+	entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(snapshotID),
+		&seq, &seq, file)
+	tbl := inspectFilesTableWithManifests(t, spec, inspectManifestSpec{
+		content: iceberg.ManifestContentData,
+		entries: []iceberg.ManifestEntry{entry, entry},
+	})
+	fs, err := tbl.FS(t.Context())
+	require.NoError(t, err)
+	pt, err := inspectPartitionType(tbl.Metadata())
+	require.NoError(t, err)
+
+	_, err = collectPartitionStatistics(t.Context(), fs, *tbl.CurrentSnapshot(), pt)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "duplicate live data file")
+}

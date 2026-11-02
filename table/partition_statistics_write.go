@@ -229,6 +229,7 @@ func collectPartitionStatistics(
 	}
 
 	trees := make(map[int32]*inspectPartitionAggregateTree)
+	seenPaths := make(map[string]string)
 	rows := make([]*inspectPartitionAggregate, 0)
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
@@ -249,7 +250,21 @@ func collectPartitionStatistics(
 				return nil, err
 			}
 
+			if entry == nil || entry.DataFile() == nil {
+				return nil, fmt.Errorf("%w: manifest %q contains a nil data file",
+					iceberg.ErrInvalidArgument, manifest.FilePath())
+			}
 			file := entry.DataFile()
+			path := file.FilePath()
+			if path == "" {
+				return nil, fmt.Errorf("%w: manifest %q contains an empty data file path",
+					iceberg.ErrInvalidArgument, manifest.FilePath())
+			}
+			if previous, duplicate := seenPaths[path]; duplicate {
+				return nil, fmt.Errorf("%w: duplicate live data file %q in manifests %q and %q",
+					iceberg.ErrInvalidArgument, path, previous, manifest.FilePath())
+			}
+			seenPaths[path] = manifest.FilePath()
 			if file.ContentType() != iceberg.EntryContentData {
 				return nil, fmt.Errorf("%w: v1 manifest %s contains a delete file",
 					iceberg.ErrInvalidArgument, manifest.FilePath())
