@@ -77,7 +77,7 @@ func (avroFormat) GetWriteProperties(props iceberg.Properties) any {
 }
 
 func (f avroFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitions map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
-	if len(batches) == 0 {
+	if len(batches) == 0 || batches[0] == nil {
 		return nil, fmt.Errorf("%w: no Avro input batches", iceberg.ErrInvalidArgument)
 	}
 	w, err := f.NewFileWriter(ctx, fs, partitions, info, batches[0].Schema())
@@ -299,6 +299,9 @@ func (w *avroFileWriter) Write(batch arrow.RecordBatch) (err error) {
 			w.failed = err
 		}
 	}()
+	if batch == nil {
+		return fmt.Errorf("%w: nil Avro record batch", iceberg.ErrInvalidArgument)
+	}
 	if int(batch.NumCols()) != len(w.fields) {
 		return fmt.Errorf("%w: Avro batch has wrong number of columns", iceberg.ErrInvalidArgument)
 	}
