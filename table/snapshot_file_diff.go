@@ -129,8 +129,12 @@ func (t Table) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toSnapshot
 
 	// A manifest rewrite can move the same data file into a different
 	// manifest without modifying table contents. Cancel those paths out.
-	for key := range fromFiles {
-		if _, ok := toFiles[key]; ok {
+	for key, fromFile := range fromFiles {
+		if toFile, ok := toFiles[key]; ok {
+			if fromFile.ContentType() != toFile.ContentType() {
+				return diff, fmt.Errorf("%w: content file %q changed type between snapshots",
+					ErrInvalidMetadata, key.path)
+			}
 			delete(fromFiles, key)
 			delete(toFiles, key)
 		}
@@ -188,21 +192,25 @@ func uniqueSnapshotManifests(from, to []iceberg.ManifestFile) (fromOnly, toOnly 
 // file may hold several different deletion vector blobs, so its path alone
 // is not enough to identify the vector.
 type snapshotDiffFileKey struct {
-	path    string
-	content iceberg.ManifestEntryContent
-	offset  int64
-	length  int64
+	path   string
+	vector bool
+	offset int64
+	length int64
 }
 
 func snapshotFileDiffKey(file iceberg.DataFile) (snapshotDiffFileKey, error) {
-	key := snapshotDiffFileKey{path: file.FilePath(), content: file.ContentType()}
+	key := snapshotDiffFileKey{path: file.FilePath()}
+	if key.path == "" {
+		return key, fmt.Errorf("%w: content file path is empty", ErrInvalidMetadata)
+	}
 	if IsDeletionVector(file) {
 		offset := file.ContentOffset()
 		length := file.ContentSizeInBytes()
-		if offset == nil || length == nil {
-			return key, fmt.Errorf("%w: deletion vector %q has no content offset or length",
+		if offset == nil || length == nil || *offset < 0 || *length <= 0 {
+			return key, fmt.Errorf("%w: deletion vector %q has an invalid offset or length",
 				ErrInvalidMetadata, file.FilePath())
 		}
+		key.vector = true
 		key.offset = *offset
 		key.length = *length
 	}
@@ -257,7 +265,7 @@ func sortSnapshotDiffFiles(files []iceberg.DataFile) {
 
 		return cmp.Or(
 			cmp.Compare(ak.path, bk.path),
-			cmp.Compare(ak.content, bk.content),
+			cmp.Compare(a.ContentType(), b.ContentType()),
 			cmp.Compare(ak.offset, bk.offset),
 			cmp.Compare(ak.length, bk.length),
 		)
