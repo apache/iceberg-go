@@ -366,9 +366,13 @@ func (r *Reader) readBlobData(meta BlobMetadata) ([]byte, error) {
 		return nil, errors.New("puffin: cannot read blob: type is required")
 	}
 
-	// Check for compressed blob (unsupported)
-	if meta.CompressionCodec != nil && *meta.CompressionCodec != "" {
-		return nil, fmt.Errorf("puffin: cannot read blob: compression %q not supported", *meta.CompressionCodec)
+	// Reject unknown codecs before issuing range reads.
+	codec := ""
+	if meta.CompressionCodec != nil {
+		codec = *meta.CompressionCodec
+	}
+	if codec != "" && codec != "lz4" && codec != "zstd" {
+		return nil, fmt.Errorf("puffin: cannot read blob: compression %q not supported", codec)
 	}
 
 	// Validate offset/length
@@ -380,6 +384,9 @@ func (r *Reader) readBlobData(meta BlobMetadata) ([]byte, error) {
 	data := make([]byte, meta.Length)
 	if _, err := r.r.ReadAt(data, meta.Offset); err != nil {
 		return nil, fmt.Errorf("puffin: read blob data: %w", err)
+	}
+	if codec != "" {
+		return readCompressedBlob(data, codec, r.maxBlobSize)
 	}
 
 	return data, nil

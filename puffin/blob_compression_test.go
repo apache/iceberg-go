@@ -1,0 +1,170 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package puffin_test
+
+import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"testing"
+
+	"github.com/apache/iceberg-go/puffin"
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
+	"github.com/stretchr/testify/require"
+)
+
+func compressedBlobTestFile(t *testing.T, codec string, payload []byte) []byte {
+	t.Helper()
+
+	footer, err := json.Marshal(puffin.Footer{Blobs: []puffin.BlobMetadata{{
+		Type:             puffin.BlobTypeDataSketchesTheta,
+		Fields:           []int32{1},
+		SnapshotID:       42,
+		SequenceNumber:   7,
+		Offset:           puffin.MagicSize,
+		Length:           int64(len(payload)),
+		CompressionCodec: &codec,
+	}}})
+	require.NoError(t, err)
+
+	var data bytes.Buffer
+	data.WriteString("PFA1")
+	data.Write(payload)
+	data.WriteString("PFA1")
+	data.Write(footer)
+	var trailer [12]byte
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(footer)))
+	copy(trailer[8:], "PFA1")
+	data.Write(trailer[:])
+
+	return data.Bytes()
+}
+
+func compressedBlobTestPayload(t *testing.T, codec string, data []byte) []byte {
+	t.Helper()
+
+	var output bytes.Buffer
+	switch codec {
+	case "lz4":
+		writer := lz4.NewWriter(&output)
+		require.NoError(t, writer.Apply(lz4.SizeOption(uint64(len(data)))))
+		_, err := writer.Write(data)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+	case "zstd":
+		writer, err := zstd.NewWriter(nil)
+		require.NoError(t, err)
+		defer writer.Close()
+
+		return writer.EncodeAll(data, nil)
+	}
+
+	return output.Bytes()
+}
+
+func TestReadCompressedPuffinBlobs(t *testing.T) {
+	raw := bytes.Repeat([]byte("iceberg blob content "), 256)
+	for _, codec := range []string{"lz4", "zstd"} {
+		t.Run(codec, func(t *testing.T) {
+			stored := compressedBlobTestPayload(t, codec, raw)
+			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, codec, stored)))
+			require.NoError(t, err)
+
+			blob, err := r.ReadBlob(0)
+			require.NoError(t, err)
+			require.Equal(t, raw, blob.Data)
+			require.Equal(t, int64(len(stored)), blob.Metadata.Length)
+			require.Equal(t, codec, *blob.Metadata.CompressionCodec)
+
+			byMetadata, err := r.ReadBlobByMetadata(r.Blobs()[0])
+			require.NoError(t, err)
+			require.Equal(t, raw, byMetadata)
+
+			all, err := r.ReadAllBlobs()
+			require.NoError(t, err)
+			require.Len(t, all, 1)
+			require.Equal(t, raw, all[0].Data)
+		})
+	}
+}
+
+func TestReadCompressedPuffinBlobHonorsUncompressedLimit(t *testing.T) {
+	raw := bytes.Repeat([]byte("a"), 4096)
+	for _, codec := range []string{"lz4", "zstd"} {
+		t.Run(codec, func(t *testing.T) {
+			stored := compressedBlobTestPayload(t, codec, raw)
+			require.Less(t, len(stored), 128)
+			r, err := puffin.NewReader(
+				bytes.NewReader(compressedBlobTestFile(t, codec, stored)),
+				puffin.WithMaxBlobSize(128),
+			)
+			require.NoError(t, err)
+
+			_, err = r.ReadBlob(0)
+			require.ErrorContains(t, err, "decompressed blob exceeds maximum size")
+		})
+	}
+}
+
+func TestReadCompressedPuffinBlobRejectsInvalidFrames(t *testing.T) {
+	raw := []byte("Puffin blob frame")
+	t.Run("unknown codec", func(t *testing.T) {
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "gzip", raw)))
+		require.NoError(t, err)
+		_, err = r.ReadBlob(0)
+		require.ErrorContains(t, err, "not supported")
+	})
+
+	t.Run("lz4 missing content size", func(t *testing.T) {
+		var output bytes.Buffer
+		writer := lz4.NewWriter(&output)
+		_, err := writer.Write(raw)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "lz4", output.Bytes())))
+		require.NoError(t, err)
+		_, err = r.ReadBlob(0)
+		require.ErrorContains(t, err, "missing content size")
+	})
+
+	t.Run("lz4 trailing frame", func(t *testing.T) {
+		frame := compressedBlobTestPayload(t, "lz4", raw)
+		frame = append(frame, 0xff)
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "lz4", frame)))
+		require.NoError(t, err)
+		_, err = r.ReadBlob(0)
+		require.ErrorContains(t, err, "trailing data")
+	})
+
+	t.Run("zstd missing content size", func(t *testing.T) {
+		var output bytes.Buffer
+		writer, err := zstd.NewWriter(&output)
+		require.NoError(t, err)
+		_, err = writer.Write(raw)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", output.Bytes())))
+		require.NoError(t, err)
+		_, err = r.ReadBlob(0)
+		require.ErrorContains(t, err, "missing content size")
+	})
+}
