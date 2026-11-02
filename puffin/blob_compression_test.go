@@ -32,7 +32,7 @@ import (
 func compressedBlobTestFile(t *testing.T, codec string, payload []byte) []byte {
 	t.Helper()
 
-	footer, err := json.Marshal(puffin.Footer{Blobs: []puffin.BlobMetadata{{
+	return compressedBlobTestFileWithMetadata(t, payload, puffin.BlobMetadata{
 		Type:             puffin.BlobTypeDataSketchesTheta,
 		Fields:           []int32{1},
 		SnapshotID:       42,
@@ -40,7 +40,12 @@ func compressedBlobTestFile(t *testing.T, codec string, payload []byte) []byte {
 		Offset:           puffin.MagicSize,
 		Length:           int64(len(payload)),
 		CompressionCodec: &codec,
-	}}})
+	})
+}
+
+func compressedBlobTestFileWithMetadata(t *testing.T, payload []byte, metadata puffin.BlobMetadata) []byte {
+	t.Helper()
+	footer, err := json.Marshal(puffin.Footer{Blobs: []puffin.BlobMetadata{metadata}})
 	require.NoError(t, err)
 
 	var data bytes.Buffer
@@ -219,6 +224,30 @@ func TestReadCompressedPuffinBlobZstdMultipleBlocksAndEmpty(t *testing.T) {
 			blob, err := r.ReadBlob(0)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, blob.Data)
+		})
+	}
+}
+
+func TestReadRejectsCompressedDeletionVectors(t *testing.T) {
+	for _, codec := range []string{"lz4", "zstd"} {
+		t.Run(codec, func(t *testing.T) {
+			stored := compressedBlobTestPayload(t, codec, []byte("invalid compressed deletion vector"))
+			meta := puffin.BlobMetadata{
+				Type:             puffin.BlobTypeDeletionVector,
+				Fields:           []int32{},
+				SnapshotID:       -1,
+				SequenceNumber:   -1,
+				Offset:           puffin.MagicSize,
+				Length:           int64(len(stored)),
+				CompressionCodec: &codec,
+			}
+			_, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFileWithMetadata(t, stored, meta)))
+			require.ErrorContains(t, err, "deletion-vector-v1 must not be compressed")
+
+			reader, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, codec, stored)))
+			require.NoError(t, err)
+			_, err = reader.ReadBlobByMetadata(meta)
+			require.ErrorContains(t, err, "deletion-vector-v1 must not be compressed")
 		})
 	}
 }
