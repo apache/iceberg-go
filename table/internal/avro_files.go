@@ -129,7 +129,7 @@ func (r *avroFileReader) GetRecords(ctx context.Context, _ []int, tester any) (a
 	// The FileReader retains its reference until Close. The scanner releases
 	// only the additional reference returned here.
 	r.records.Retain()
-	wrapped := &avroRecordReader{records: r.records, schema: r.schema}
+	wrapped := &avroRecordReader{records: r.records, schema: r.schema, ctx: ctx}
 	wrapped.refs.Store(1)
 
 	return wrapped, nil
@@ -143,6 +143,8 @@ type avroRecordReader struct {
 	schema  *arrow.Schema
 	current arrow.RecordBatch
 	refs    atomic.Int64
+	ctx     context.Context
+	readErr error
 }
 
 func (r *avroRecordReader) Retain() { r.refs.Add(1) }
@@ -155,13 +157,24 @@ func (r *avroRecordReader) Release() {
 	}
 }
 func (r *avroRecordReader) Schema() *arrow.Schema          { return r.schema }
-func (r *avroRecordReader) Err() error                     { return r.records.Err() }
+func (r *avroRecordReader) Err() error {
+	if r.readErr != nil {
+		return r.readErr
+	}
+
+	return r.records.Err()
+}
 func (r *avroRecordReader) Record() arrow.RecordBatch      { return r.current }
 func (r *avroRecordReader) RecordBatch() arrow.RecordBatch { return r.current }
 func (r *avroRecordReader) Next() bool {
 	if r.current != nil {
 		r.current.Release()
 		r.current = nil
+	}
+	if err := r.ctx.Err(); err != nil {
+		r.readErr = err
+
+		return false
 	}
 	if !r.records.Next() {
 		return false

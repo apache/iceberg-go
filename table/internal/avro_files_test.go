@@ -139,3 +139,17 @@ func TestAvroRejectsInvalidAndDuplicateFieldIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestAvroRecordReaderStopsOnContextCancellation(t *testing.T) {
+	const schema = `{"type":"record","name":"row","fields":[{"name":"id","type":"long","field-id":1}]}`
+	path := writeAvroOCF(t, schema, map[string]any{"id": int64(42)})
+	reader := openAvroFile(t, path, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	records, err := reader.GetRecords(ctx, nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+
+	cancel()
+	require.False(t, records.Next())
+	require.ErrorIs(t, records.Err(), context.Canceled)
+}
