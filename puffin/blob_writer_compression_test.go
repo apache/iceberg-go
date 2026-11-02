@@ -148,3 +148,54 @@ func TestLZ4BlobSpanningMultipleBlocks(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, data, decoded)
 }
+
+func TestMixedBlobCompressionUsesStoredOffsets(t *testing.T) {
+	var file bytes.Buffer
+	writer, err := puffin.NewWriter(&file)
+	require.NoError(t, err)
+
+	blobs := []struct {
+		codec string
+		data  []byte
+	}{
+		{codec: "", data: []byte("raw payload")},
+		{codec: "lz4", data: bytes.Repeat([]byte("lz4 payload"), 512)},
+		{codec: "zstd", data: bytes.Repeat([]byte("zstd payload"), 512)},
+	}
+	previousEnd := int64(puffin.MagicSize)
+	for _, blob := range blobs {
+		meta, err := writer.AddBlob(puffin.BlobMetadataInput{
+			Type:             puffin.BlobTypeDataSketchesTheta,
+			Fields:           []int32{1},
+			CompressionCodec: blob.codec,
+		}, blob.data)
+		require.NoError(t, err)
+		require.Equal(t, previousEnd, meta.Offset)
+		previousEnd = meta.Offset + meta.Length
+	}
+	require.NoError(t, writer.Finish())
+
+	reader, err := puffin.NewReader(bytes.NewReader(file.Bytes()))
+	require.NoError(t, err)
+	metadata := reader.Blobs()
+	require.Len(t, metadata, len(blobs))
+	for i, blob := range blobs {
+		meta := metadata[i]
+		encoded := file.Bytes()[meta.Offset : meta.Offset+meta.Length]
+		var decoded []byte
+		switch blob.codec {
+		case "":
+			decoded = encoded
+		case "lz4":
+			decoded, err = io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
+			require.NoError(t, err)
+		case "zstd":
+			decoder, decoderErr := zstd.NewReader(nil)
+			require.NoError(t, decoderErr)
+			decoded, err = decoder.DecodeAll(encoded, nil)
+			decoder.Close()
+			require.NoError(t, err)
+		}
+		require.Equal(t, blob.data, decoded)
+	}
+}
