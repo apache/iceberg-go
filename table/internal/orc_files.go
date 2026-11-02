@@ -291,6 +291,31 @@ type orcFileWriter struct {
 	closed          bool
 }
 
+// orcEqualityFieldIsRepeated checks whether the field is below a list or map.
+// Iceberg equality keys may be nested in structs, but not in repeated values.
+func orcEqualityFieldIsRepeated(schema *iceberg.Schema, id int) bool {
+	var visit func([]iceberg.NestedField, bool) bool
+	visit = func(fields []iceberg.NestedField, repeated bool) bool {
+		for _, field := range fields {
+			if field.ID == id {
+				return repeated
+			}
+			if nested, ok := field.Type.(iceberg.NestedType); ok {
+				childRepeated := repeated
+				switch field.Type.(type) {
+				case *iceberg.ListType, *iceberg.MapType:
+					childRepeated = true
+				}
+				if visit(nested.Fields(), childRepeated) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return visit(schema.Fields(), false)
+}
+
 func (orcFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, schema *arrow.Schema) (FileWriter, error) {
 	if info.FileSchema == nil || schema == nil {
 		return nil, fmt.Errorf("%w: missing ORC schema", iceberg.ErrInvalidArgument)
@@ -312,6 +337,13 @@ func (orcFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partit
 			}
 			if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
 				return nil, fmt.Errorf("%w: ORC equality field %d must be primitive", iceberg.ErrInvalidArgument, id)
+			}
+			switch field.Type.(type) {
+			case iceberg.Float32Type, iceberg.Float64Type:
+				return nil, fmt.Errorf("%w: ORC equality field %d cannot be floating-point", iceberg.ErrInvalidArgument, id)
+			}
+			if orcEqualityFieldIsRepeated(info.FileSchema, id) {
+				return nil, fmt.Errorf("%w: ORC equality field %d cannot be nested in a list or map", iceberg.ErrInvalidArgument, id)
 			}
 			if _, ok := seen[id]; ok {
 				return nil, fmt.Errorf("%w: duplicate ORC equality field %d", iceberg.ErrInvalidArgument, id)
@@ -653,6 +685,15 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 	}
 	if w.info.Content == iceberg.EntryContentPosDeletes && w.hasLastPosition && w.firstPath == w.lastPath {
 		path := w.firstPath
+		// File-scoped position deletes must include exact, untruncated path
+		// bounds to match the referenced_data_file metadata.
+		stats.ColAggs = map[int]StatsAgg{
+			iceberg.DeleteFilePathFieldID: &statsAggregator[string]{
+				primitiveType: iceberg.StringType{},
+				curMin:        iceberg.StringLiteral(path),
+				curMax:        iceberg.StringLiteral(path),
+			},
+		}
 		opts.ReferencedDataFile = &path
 	}
 
