@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -77,6 +78,9 @@ func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
 		{[]byte{0, 255}, []byte{1}, -1},
 		{[2]byte{0, 255}, [2]byte{1, 0}, -1},
 		{[]byte{1, 2}, []byte{1, 2}, 0},
+		{iceberg.Decimal{Val: decimal128.FromI64(-120), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, -1},
+		{iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, 0},
+		{iceberg.Decimal{Val: decimal128.FromI64(120), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, 1},
 	} {
 		got, err := comparePartitionStatisticValues(tc.a, tc.b)
 		require.NoError(t, err, "compare %v to %v", tc.a, tc.b)
@@ -88,6 +92,10 @@ func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 	_, err = comparePartitionStatisticValues(struct{ X int }{}, struct{ X int }{})
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	_, err = comparePartitionStatisticValues(
+		iceberg.Decimal{Val: decimal128.FromI64(10), Scale: 1},
+		iceberg.Decimal{Val: decimal128.FromI64(10), Scale: 2})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
 
 func TestSortPartitionStatisticsByTupleThenSpecID(t *testing.T) {
