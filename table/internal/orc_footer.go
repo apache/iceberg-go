@@ -134,6 +134,11 @@ func validateORCTypeTree(types []*orcpb.Type) error {
 		seen[index] = struct{}{}
 		pending = append(pending, types[index].GetSubtypes()...)
 	}
+	// Every footer type must be reachable from the root. Otherwise a
+	// malformed footer could contain columns that the reader silently drops.
+	if len(seen) != len(types) {
+		return fmt.Errorf("%w: ORC type tree contains %d unreferenced types", iceberg.ErrInvalidSchema, len(types)-len(seen))
+	}
 	return nil
 }
 
@@ -283,24 +288,28 @@ func orcTypeAttributes(typ *orcpb.Type) (map[string]string, error) {
 				return nil, fmt.Errorf("%w: invalid ORC attribute wire type", iceberg.ErrInvalidSchema)
 			}
 			var key, val string
+			var hasKey, hasValue bool
 			for len(value) > 0 {
 				n, w, part, remaining, err := consumeORCProtoField(value)
 				if err != nil {
 					return nil, err
 				}
-				if w != 2 {
-					return nil, fmt.Errorf("%w: invalid ORC attribute value", iceberg.ErrInvalidSchema)
-				}
-				if n == 1 {
-					key = string(part)
-				}
-				if n == 2 {
-					val = string(part)
+				switch n {
+				case 1:
+					if w != 2 || hasKey {
+						return nil, fmt.Errorf("%w: repeated or invalid ORC attribute key", iceberg.ErrInvalidSchema)
+					}
+					key, hasKey = string(part), true
+				case 2:
+					if w != 2 || hasValue {
+						return nil, fmt.Errorf("%w: repeated or invalid ORC attribute value", iceberg.ErrInvalidSchema)
+					}
+					val, hasValue = string(part), true
 				}
 				value = remaining
 			}
-			if key == "" {
-				return nil, fmt.Errorf("%w: empty ORC type attribute", iceberg.ErrInvalidSchema)
+			if !hasKey || !hasValue || key == "" {
+				return nil, fmt.Errorf("%w: incomplete ORC type attribute", iceberg.ErrInvalidSchema)
 			}
 			if _, exists := attrs[key]; exists {
 				return nil, fmt.Errorf("%w: duplicate ORC attribute %q", iceberg.ErrInvalidSchema, key)
