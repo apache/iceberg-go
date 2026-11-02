@@ -23,6 +23,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	avro "github.com/twmb/avro"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,6 +35,50 @@ func TestAvroRetagRejectsMissingNestedChildren(t *testing.T) {
 	converted, err := avroRetagData(source, target)
 	require.Nil(t, converted)
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
+
+func TestAvroRetagRejectsIncompatiblePhysicalTypes(t *testing.T) {
+	stringData := array.NewData(arrow.BinaryTypes.String, 0, nil, nil, 0, 0)
+	defer stringData.Release()
+	got, err := avroRetagData(stringData, &arrow.TimestampType{Unit: arrow.Microsecond})
+	require.Nil(t, got)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+	microData := array.NewData(&arrow.TimestampType{Unit: arrow.Microsecond}, 0, nil, nil, 0, 0)
+	defer microData.Release()
+	got, err = avroRetagData(microData, &arrow.TimestampType{Unit: arrow.Nanosecond})
+	require.Nil(t, got)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+	intData := array.NewData(arrow.PrimitiveTypes.Int64, 0, nil, nil, 0, 0)
+	defer intData.Release()
+	got, err = avroRetagData(intData, &arrow.TimestampType{Unit: arrow.Nanosecond})
+	require.NoError(t, err)
+	got.Release()
+}
+
+func TestAvroRejectsIncorrectTimestampPhysicalType(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		field   arrow.Field
+		node    avro.SchemaNode
+	}{
+		{
+			name: "string timestamp",
+			field: arrow.Field{Name: "ts", Type: arrow.BinaryTypes.String},
+			node: avro.SchemaNode{Type: "string", LogicalType: "timestamp-micros"},
+		},
+		{
+			name: "mismatched timestamp units",
+			field: arrow.Field{Name: "ts", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}},
+			node: avro.SchemaNode{Type: "long", LogicalType: "timestamp-micros"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decorateAvroField(test.field, test.node, nil, "field-id", make(map[int]struct{}))
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+	}
 }
 
 func TestAvroRetagPreservesValidPrimitiveData(t *testing.T) {
