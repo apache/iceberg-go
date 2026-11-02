@@ -104,7 +104,7 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 			return nil, fmt.Errorf("%w: Avro field %d name mismatch: %q != %q", iceberg.ErrInvalidArgument, i, sc.Field(i).Name, f.Name)
 		}
 		if err := validateAvroArrowType(f.Type, sc.Field(i).Type); err != nil {
-			return nil, fmt.Errorf("Avro field %q: %w", f.Name, err)
+			return nil, fmt.Errorf("avro field %q: %w", f.Name, err)
 		}
 	}
 	root, err := avroRecordSchema(fields, "iceberg_record")
