@@ -277,3 +277,20 @@ func TestCherryPickSnapshotTracksWAPPublication(t *testing.T) {
 	require.ErrorIs(t, err, table.ErrInvalidOperation)
 	require.ErrorContains(t, err, "already been published")
 }
+
+func TestCherryPickSnapshotV1FromDivergentBranch(t *testing.T) {
+	tbl := newBranchPlanningTable(t, iceberg.Properties{table.PropertyFormatVersion: "1"})
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, table.OpAppend, result.CurrentSnapshot().Summary.Operation)
+	require.Equal(t, strconv.FormatInt(source.SnapshotID, 10), result.CurrentSnapshot().Summary.Properties["source-snapshot-id"])
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
+}
