@@ -230,6 +230,7 @@ func TestORCAttributePairsRejectAmbiguousAndIncompleteFields(t *testing.T) {
 	stringField := func(number uint64, value string) []byte {
 		out := binary.AppendUvarint(nil, number<<3|2)
 		out = binary.AppendUvarint(out, uint64(len(value)))
+
 		return append(out, value...)
 	}
 	wrapPair := func(fields ...[]byte) *orcpb.Type {
@@ -237,6 +238,7 @@ func TestORCAttributePairsRejectAmbiguousAndIncompleteFields(t *testing.T) {
 		data := binary.AppendUvarint(nil, 7<<3|2)
 		data = binary.AppendUvarint(data, uint64(len(body)))
 		data = append(data, body...)
+
 		return &orcpb.Type{XXX_unrecognized: data}
 	}
 	for _, tc := range []struct {
@@ -397,6 +399,7 @@ func TestORCStructDoesNotTreatMissingMembersAsNull(t *testing.T) {
 	appendStruct := func(value orc.Struct) error {
 		builder := array.NewBuilder(memory.DefaultAllocator, typ)
 		defer builder.Release()
+
 		return appendORCValue(builder, typ, value)
 	}
 
