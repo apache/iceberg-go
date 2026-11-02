@@ -416,7 +416,7 @@ func icebergAvroType(t iceberg.Type, id int) (any, error) {
 	case iceberg.DecimalType:
 		return map[string]any{
 			"type": "fixed", "name": "decimal_" + strconv.Itoa(id),
-			"size": iceberginternal.DecimalRequiredBytes(typ.Precision()),
+			"size":        iceberginternal.DecimalRequiredBytes(typ.Precision()),
 			"logicalType": "decimal", "precision": typ.Precision(), "scale": typ.Scale(),
 		}, nil
 	case *iceberg.StructType:
@@ -475,6 +475,7 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 		if !ok || len(storage.Value(row)) != 16 {
 			return nil, fmt.Errorf("%w: Avro UUID requires 16-byte storage", iceberg.ErrInvalidArgument)
 		}
+
 		return append([]byte(nil), storage.Value(row)...), nil
 	case iceberg.DecimalType:
 		dec, ok := col.(*array.Decimal128)
@@ -485,6 +486,7 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 		if !value.FitsInPrecision(int32(t.Precision())) {
 			return nil, fmt.Errorf("%w: Avro decimal exceeds precision %d", iceberg.ErrInvalidArgument, t.Precision())
 		}
+
 		return avroSignedFixed(value.BigInt(), iceberginternal.DecimalRequiredBytes(t.Precision()))
 	case *iceberg.StructType:
 		a, ok := col.(*array.Struct)
@@ -630,5 +632,6 @@ func avroSignedFixed(value *big.Int, size int) ([]byte, error) {
 	if unscaled.Sign() < 0 {
 		unscaled.Add(unscaled, new(big.Int).Lsh(big.NewInt(1), uint(size*8)))
 	}
+
 	return unscaled.FillBytes(make([]byte, size)), nil
 }
