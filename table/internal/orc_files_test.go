@@ -407,3 +407,34 @@ func TestORCStructDoesNotTreatMissingMembersAsNull(t *testing.T) {
 	require.NoError(t, appendStruct(orc.Struct{"id": int64(7), "label": nil}))
 	require.ErrorIs(t, appendStruct(orc.Struct{"id": int64(7)}), iceberg.ErrInvalidSchema)
 }
+
+func TestORCRejectsExplicitColumnSelectionWithoutConsumingStream(t *testing.T) {
+	path := writeORCFixture(t, "struct<id:bigint>",
+		map[int]map[string]string{1: {"iceberg.id": "1"}},
+		[]any{int64(42)})
+	reader := openORCFixture(t, path, 1)
+
+	for _, cols := range [][]int{{0}, {}} {
+		_, err := reader.GetRecords(context.Background(), cols, nil)
+		require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	}
+	records, err := reader.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next())
+	require.Equal(t, int64(42), records.RecordBatch().Column(0).(*array.Int64).Value(0))
+	require.False(t, records.Next())
+	require.NoError(t, records.Err())
+}
+
+func TestORCRejectsExcessiveSchemaNesting(t *testing.T) {
+	types := make([]*orcpb.Type, maxORCTypeNesting+1)
+	types[0] = &orcpb.Type{
+		Kind: orcpb.Type_STRUCT.Enum(), FieldNames: []string{"value"}, Subtypes: []uint32{1},
+	}
+	for i := 1; i < len(types)-1; i++ {
+		types[i] = &orcpb.Type{Kind: orcpb.Type_LIST.Enum(), Subtypes: []uint32{uint32(i + 1)}}
+	}
+	types[len(types)-1] = &orcpb.Type{Kind: orcpb.Type_LONG.Enum()}
+	require.ErrorIs(t, validateORCTypeTree(types), iceberg.ErrInvalidSchema)
+}
