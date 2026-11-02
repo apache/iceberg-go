@@ -100,6 +100,8 @@ func GetFileFormat(format iceberg.FileFormat) FileFormat {
 	switch format {
 	case iceberg.ParquetFile:
 		return parquetFormat{}
+	case iceberg.OrcFile:
+		return orcFormat{}
 	default:
 		return nil
 	}
@@ -109,6 +111,8 @@ func FormatFromFileName(fileName string) FileFormat {
 	switch path.Ext(fileName) {
 	case ".parquet":
 		return parquetFormat{}
+	case ".orc":
+		return orcFormat{}
 	default:
 		return nil
 	}
