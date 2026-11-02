@@ -78,7 +78,7 @@ func (orcFormat) DataFileStatsFromMeta(meta Metadata, _ map[int]StatisticsCollec
 func (orcFormat) GetWriteProperties(iceberg.Properties) any { return struct{}{} }
 
 func (f orcFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
-	if len(batches) == 0 {
+	if len(batches) == 0 || batches[0] == nil {
 		return nil, fmt.Errorf("%w: no ORC batches", iceberg.ErrInvalidArgument)
 	}
 	w, err := f.NewFileWriter(ctx, fs, partitionValues, info, batches[0].Schema())
