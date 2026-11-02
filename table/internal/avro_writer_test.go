@@ -524,3 +524,13 @@ func TestAvroNanosecondTimestampRejectsIncompatibleTypes(t *testing.T) {
 		require.ErrorIs(t, validateAvroArrowType(tc.ice, tc.arr), iceberg.ErrInvalidArgument)
 	}
 }
+
+func TestAvroWriterRejectsNilBatches(t *testing.T) {
+	_, err := (avroFormat{}).WriteDataFile(context.Background(), nil, nil, WriteFileInfo{}, []arrow.RecordBatch{nil})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	writer := &avroFileWriter{}
+	err = writer.Write(nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorIs(t, writer.failed, iceberg.ErrInvalidArgument)
+}
