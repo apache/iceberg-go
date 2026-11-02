@@ -448,7 +448,7 @@ func TestORCTimestampUnitAndTimezone(t *testing.T) {
 
 func TestORCTimestampsRejectWrongTimezones(t *testing.T) {
 	for _, tc := range []struct {
-		ice iceberg.Type
+		ice   iceberg.Type
 		arrow arrow.DataType
 	}{
 		{iceberg.TimestampType{}, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
