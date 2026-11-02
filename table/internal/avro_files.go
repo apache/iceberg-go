@@ -192,7 +192,8 @@ func (r *avroRecordReader) Next() bool {
 			for _, column := range columns[:i] {
 				column.Release()
 			}
-			r.readErr = fmt.Errorf("Avro field %q: %w", r.schema.Field(i).Name, err)
+			r.readErr = fmt.Errorf("avro field %q: %w", r.schema.Field(i).Name, err)
+
 			return false
 		}
 		columns[i] = array.MakeFromData(data)
@@ -211,7 +212,7 @@ func avroRetagData(source arrow.ArrayData, target arrow.DataType) (*array.Data, 
 	// can be used. Avro timestamp-nanos may be decoded as an int64 by Arrow.
 	sourceType := source.DataType()
 	if sourceType.ID() != target.ID() &&
-		!(sourceType.ID() == arrow.INT64 && target.ID() == arrow.TIMESTAMP) {
+		(sourceType.ID() != arrow.INT64 || target.ID() != arrow.TIMESTAMP) {
 		return nil, fmt.Errorf("%w: cannot retag Avro %s as %s", iceberg.ErrInvalidSchema, sourceType, target)
 	}
 	if from, ok := sourceType.(*arrow.TimestampType); ok {
@@ -234,6 +235,7 @@ func avroRetagData(source arrow.ArrayData, target arrow.DataType) (*array.Data, 
 				for _, created := range children {
 					created.Release()
 				}
+
 				return nil, err
 			}
 			children = append(children, child)

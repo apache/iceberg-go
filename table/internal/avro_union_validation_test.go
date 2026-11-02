@@ -21,8 +21,8 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	avro "github.com/twmb/avro"
 	"github.com/stretchr/testify/require"
+	avro "github.com/twmb/avro"
 )
 
 func TestAvroReadSchemaUnionAlternatives(t *testing.T) {

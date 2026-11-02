@@ -23,8 +23,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
-	avro "github.com/twmb/avro"
 	"github.com/stretchr/testify/require"
+	avro "github.com/twmb/avro"
 )
 
 func TestAvroRetagRejectsMissingNestedChildren(t *testing.T) {
