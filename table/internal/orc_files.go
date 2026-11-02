@@ -311,8 +311,10 @@ func orcEqualityFieldIsRepeated(schema *iceberg.Schema, id int) bool {
 				}
 			}
 		}
+
 		return false
 	}
+
 	return visit(schema.Fields(), false)
 }
 
