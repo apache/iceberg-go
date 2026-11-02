@@ -187,3 +187,18 @@ func TestAvroRejectsExplicitColumnSelectionWithoutConsumingStream(t *testing.T) 
 	require.False(t, records.Next())
 	require.NoError(t, records.Err())
 }
+
+func TestAvroReadTablePreservesFieldIDs(t *testing.T) {
+	const schema = `{"type":"record","name":"row","fields":[{"name":"id","type":"long","field-id":1}]}`
+	path := writeAvroOCF(t, schema, map[string]any{"id": int64(7)}, map[string]any{"id": int64(9)})
+	reader := openAvroFile(t, path, 2)
+
+	tbl, err := reader.ReadTable(context.Background())
+	require.NoError(t, err)
+	defer tbl.Release()
+	require.Equal(t, int64(2), tbl.NumRows())
+	require.Equal(t, 1, tbl.NumCols())
+	fieldID, ok := tbl.Schema().Field(0).Metadata.GetValue("PARQUET:field_id")
+	require.True(t, ok)
+	require.Equal(t, "1", fieldID)
+}
