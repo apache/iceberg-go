@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -56,4 +57,18 @@ func TestValidFilePartitionValueType(t *testing.T) {
 			require.False(t, validFilePartitionValueType(tc.typ, tc.invalid))
 		})
 	}
+}
+
+func TestFileToDataFileRejectsUnknownTransformWithExplicitPartition(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("opaque-user-transform")
+	require.NoError(t, err)
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "opaque", Transform: unknown,
+	})
+
+	// No storage is needed: the invalid write is rejected before opening the file.
+	_, err = FileToDataFileWithOptions(context.Background(), nil, "unused.parquet",
+		simpleSchema(), spec, 0, nil,
+		WithFilePartitionValues(map[int]any{1000: "opaque-value"}))
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
