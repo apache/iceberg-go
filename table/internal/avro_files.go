@@ -117,7 +117,7 @@ func (r *avroFileReader) PrunedSchema(_ map[int]struct{}, _ iceberg.NameMapping)
 	return r.schema, nil, nil
 }
 
-func (r *avroFileReader) GetRecords(ctx context.Context, _ []int, tester any) (array.RecordReader, error) {
+func (r *avroFileReader) GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -126,6 +126,9 @@ func (r *avroFileReader) GetRecords(ctx context.Context, _ []int, tester any) (a
 	}
 	if r.used {
 		return nil, fmt.Errorf("%w: Avro file streams are single-use", iceberg.ErrInvalidArgument)
+	}
+	if cols != nil {
+		return nil, fmt.Errorf("%w: Avro column selection is not supported", iceberg.ErrNotImplemented)
 	}
 	if tester != nil {
 		return nil, fmt.Errorf("%w: Avro files do not support Parquet row-group filters", iceberg.ErrInvalidArgument)
