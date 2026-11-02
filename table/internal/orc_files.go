@@ -387,8 +387,13 @@ func orcByteRLESize(n int) int64 {
 // validatePositionBatch enforces the Iceberg ordering and nonnegative offsets
 // before mutating any column buffers.
 func (w *orcFileWriter) validatePositionBatch(batch arrow.RecordBatch) error {
-	pathCol, ok := batch.Column(0).(*array.String)
-	if !ok {
+	var pathAt func(int) string
+	switch col := batch.Column(0).(type) {
+	case *array.String:
+		pathAt = col.Value
+	case *array.LargeString:
+		pathAt = col.Value
+	default:
 		return fmt.Errorf("%w: ORC position deletes require string file_path", iceberg.ErrInvalidArgument)
 	}
 	positionCol, ok := batch.Column(1).(*array.Int64)
@@ -396,10 +401,10 @@ func (w *orcFileWriter) validatePositionBatch(batch arrow.RecordBatch) error {
 		return fmt.Errorf("%w: ORC position deletes require int64 pos", iceberg.ErrInvalidArgument)
 	}
 	for row := 0; row < int(batch.NumRows()); row++ {
-		if pathCol.IsNull(row) || positionCol.IsNull(row) {
+		if batch.Column(0).IsNull(row) || positionCol.IsNull(row) {
 			return fmt.Errorf("%w: ORC position deletes cannot contain null paths or offsets", iceberg.ErrInvalidArgument)
 		}
-		path, pos := pathCol.Value(row), positionCol.Value(row)
+		path, pos := pathAt(row), positionCol.Value(row)
 		if path == "" || pos < 0 {
 			return fmt.Errorf("%w: ORC position delete requires a nonempty path and nonnegative offset", iceberg.ErrInvalidArgument)
 		}
