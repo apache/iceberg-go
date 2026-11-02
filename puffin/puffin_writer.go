@@ -63,11 +63,14 @@ type Writer struct {
 // BlobMetadataInput contains fields the caller provides when adding a blob.
 // Offset, Length, and CompressionCodec are set by the writer.
 type BlobMetadataInput struct {
-	Type           BlobType
-	SnapshotID     int64
-	SequenceNumber int64
-	Fields         []int32
-	Properties     map[string]string
+	Type BlobType
+	// CompressionCodec is "", "lz4", or "zstd". An empty value writes raw bytes.
+	// Deletion vectors must not be compressed per the Puffin specification.
+	CompressionCodec string
+	SnapshotID       int64
+	SequenceNumber   int64
+	Fields           []int32
+	Properties       map[string]string
 }
 
 // NewWriter creates a new Writer and writes the file header magic.
@@ -155,6 +158,16 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 	fields := slices.Clone(input.Fields)
 	properties := maps.Clone(input.Properties)
 
+	// Encode before writing any bytes, so an unsupported codec or compression
+	// failure cannot leave a partially written blob in the output file.
+	if input.Type == BlobTypeDeletionVector && input.CompressionCodec != "" {
+		return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 must not be compressed")
+	}
+	encoded, err := compressBlob(input.CompressionCodec, data)
+	if err != nil {
+		return BlobMetadata{}, err
+	}
+
 	// Deletion vectors have special requirements per spec. Format matches
 	// the reader-side validateBlobs check so both sides surface the same
 	// "<type> requires X to be -1, got N" phrasing for log grep.
@@ -196,11 +209,15 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		SequenceNumber: input.SequenceNumber,
 		Fields:         fields,
 		Offset:         w.offset,
-		Length:         int64(len(data)),
+		Length:         int64(len(encoded)),
 		Properties:     properties,
 	}
+	if input.CompressionCodec != "" {
+		codec := input.CompressionCodec
+		meta.CompressionCodec = &codec
+	}
 
-	if err := w.write(data); err != nil {
+	if err := w.write(encoded); err != nil {
 		return BlobMetadata{}, fmt.Errorf("puffin: write blob: %w", err)
 	}
 
