@@ -2018,8 +2018,14 @@ case errors.Is(err, table.ErrCommitDiverged), errors.Is(err, table.ErrTransactio
     // unrecoverable: rebuild the operation from the latest table
 case errors.Is(err, table.ErrCommitFailed):
     // retriable: refresh and try again (the retry loop does this for you)
+case errors.Is(err, table.ErrCommitRejected):
+    // the catalog wrote nothing: fix the cause, then call Commit again
 }
 </code></pre>
+<p>A commit can also fail with <code>table.ErrCommitRejected</code>, which means the catalog
+rejected it before writing anything, for example an update the catalog can't
+apply or a REST 400, 401, 403 or 404. The commit is not retried, and the
+transaction can still be committed.</p>
 <h2 id="isolation-levels"><a class="header" href="#isolation-levels">Isolation levels</a></h2>
 <p>Delete and update operations are validated under an isolation level, set per
 operation through table properties:</p>
@@ -2777,6 +2783,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>In and NotIn follow SQL semantics for NULL.</strong> A multi-valued <code>NotIn</code>, <code>NOT(In(...))</code> and <code>NOT(NotIn(...))</code> no longer match rows where the column is NULL, consistent with <code>NotEqual</code>. A predicate under NOT on a column missing from an older data file no longer matches every row of that file; those rows match as a stored NULL would. Java's <code>Evaluator</code> still matches NULL for <code>notEq</code> and <code>notIn</code>, see <a href="https://github.com/apache/iceberg/issues/18701">apache/iceberg#18701</a>.</p>
+</li>
+<li>
+<p><strong>Commit rejections now match <code>table.ErrCommitRejected</code>.</strong> SQL, Glue, Hive and Hadoop failures while preparing metadata, plus REST commit responses 400, 401, 403 and 404, leave transactions committable (after a REST 404, the next <code>Commit</code> fails when it reloads the table). Existing <code>errors.Is</code> matches keep working, but SQL, Glue, Hive and Hadoop rejection messages now start with <code>commit rejected: </code>, so code that matches error text may need updating.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>

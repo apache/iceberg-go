@@ -266,8 +266,14 @@ case errors.Is(err, table.ErrCommitDiverged), errors.Is(err, table.ErrTransactio
     // unrecoverable: rebuild the operation from the latest table
 case errors.Is(err, table.ErrCommitFailed):
     // retriable: refresh and try again (the retry loop does this for you)
+case errors.Is(err, table.ErrCommitRejected):
+    // the catalog wrote nothing: fix the cause, then call Commit again
 }
 </code></pre>
+<p>A commit can also fail with <code>table.ErrCommitRejected</code>, which means the catalog
+rejected it before writing anything, for example an update the catalog can't
+apply or a REST 400, 401, 403 or 404. The commit is not retried, and the
+transaction can still be committed.</p>
 <h2 id="isolation-levels"><a class="header" href="#isolation-levels">Isolation levels</a></h2>
 <p>Delete and update operations are validated under an isolation level, set per
 operation through table properties:</p>
