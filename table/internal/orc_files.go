@@ -167,6 +167,7 @@ type orcFileWriter struct {
 	schema          *arrow.Schema
 	rows            int64
 	size            int64
+	failed          error
 	closed          bool
 }
 
@@ -222,10 +223,20 @@ func orcByteRLESize(n int) int64 {
 	return int64(n + (n+127)/128)
 }
 
-func (w *orcFileWriter) Write(batch arrow.RecordBatch) error {
+func (w *orcFileWriter) Write(batch arrow.RecordBatch) (err error) {
 	if w.closed {
 		return errors.New("ORC writer is closed")
 	}
+	if w.failed != nil {
+		return w.failed
+	}
+	// The mutable column buffers cannot be rolled back if encoding fails
+	// after some rows. Poison the writer rather than publishing partial data.
+	defer func() {
+		if err != nil {
+			w.failed = err
+		}
+	}()
 	if !w.schema.Equal(batch.Schema()) {
 		return fmt.Errorf("%w: ORC record batch schema changed", iceberg.ErrInvalidArgument)
 	}
@@ -312,6 +323,11 @@ func (w *orcFileWriter) Abort() error {
 func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 	if w.closed {
 		return nil, errors.New("ORC writer already closed")
+	}
+	if w.failed != nil {
+		w.closed = true
+		w.columns = nil
+		return nil, fmt.Errorf("ORC writer cannot close after a failed write: %w", w.failed)
 	}
 	w.closed = true
 	// Serialize before creating the destination so failures cannot leave an

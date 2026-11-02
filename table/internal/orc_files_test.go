@@ -282,3 +282,35 @@ func TestORCBytesWrittenDoesNotAssumeTenBytesPerInteger(t *testing.T) {
 	require.NoError(t, w.Write(batch))
 	require.Equal(t, int64(5), w.BytesWritten()) // Four one-byte zigzags and the RLE literal header.
 }
+
+func TestORCWriterDoesNotPublishAfterPartialBatchFailure(t *testing.T) {
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "time", Type: iceberg.TimeType{}, Required: true},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "time", Type: arrow.FixedWidthTypes.Time64us},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	b.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2}, nil)
+	b.Field(1).(*array.Time64Builder).AppendValues([]arrow.Time64{123, -1}, nil)
+	batch := b.NewRecordBatch()
+	defer batch.Release()
+
+	path := filepath.Join(t.TempDir(), "partial.orc")
+	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: iceSchema, Spec: *iceberg.UnpartitionedSpec, FileName: path,
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	require.ErrorIs(t, w.Write(batch), iceberg.ErrInvalidArgument)
+	// The earlier column and first time value have already been buffered.
+	// Retrying or closing must not produce a corrupt file with mismatched rows.
+	require.ErrorIs(t, w.Write(batch), iceberg.ErrInvalidArgument)
+	_, err = w.Close()
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+}
