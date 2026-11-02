@@ -156,7 +156,7 @@ func (r *avroRecordReader) Release() {
 		r.records.Release()
 	}
 }
-func (r *avroRecordReader) Schema() *arrow.Schema          { return r.schema }
+func (r *avroRecordReader) Schema() *arrow.Schema { return r.schema }
 func (r *avroRecordReader) Err() error {
 	if r.readErr != nil {
 		return r.readErr
