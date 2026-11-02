@@ -137,6 +137,45 @@ func TestPartitionStatisticsParquetWrite(t *testing.T) {
 	require.Error(t, err)
 }
 
+
+func TestCollectPartitionStatisticsFromLiveManifests(t *testing.T) {
+	spec := partitionedSpec()
+	const snapshotID = int64(1)
+	sequenceNumber := int64(1)
+	entry := func(name string, partition int32, count int64, status iceberg.ManifestEntryStatus) iceberg.ManifestEntry {
+		file := newTestDataFileWithCount(
+			t, spec, "mem://default/table-location/data/"+name+".parquet",
+			map[int]any{1000: partition}, count)
+		return iceberg.NewManifestEntry(status, new(snapshotID),
+			&sequenceNumber, &sequenceNumber, file)
+	}
+	tbl := inspectFilesTableWithManifests(t, spec, inspectManifestSpec{
+		content: iceberg.ManifestContentData,
+		entries: []iceberg.ManifestEntry{
+			entry("first", 2, 5, iceberg.EntryStatusADDED),
+			entry("second", 2, 7, iceberg.EntryStatusADDED),
+			entry("third", 10, 3, iceberg.EntryStatusADDED),
+			entry("removed", 10, 100, iceberg.EntryStatusDELETED),
+		},
+	})
+	ctx := t.Context()
+	fs, err := tbl.FS(ctx)
+	require.NoError(t, err)
+	pt, err := inspectPartitionType(tbl.Metadata())
+	require.NoError(t, err)
+
+	rows, err := collectPartitionStatistics(ctx, fs, *tbl.CurrentSnapshot(), pt)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.NoError(t, sortPartitionStatistics(rows, pt))
+	require.Equal(t, int32(2), rows[0].partition[1000])
+	require.Equal(t, int64(12), rows[0].dataRecordCount)
+	require.Equal(t, int32(2), rows[0].dataFileCount)
+	require.Equal(t, int32(10), rows[1].partition[1000])
+	require.Equal(t, int64(3), rows[1].dataRecordCount)
+	require.Equal(t, int32(1), rows[1].dataFileCount)
+}
+
 func TestTransactionPartitionStatisticsRegistration(t *testing.T) {
 	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, Type: BranchRef},
