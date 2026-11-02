@@ -15,6 +15,7 @@ package puffin_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"strconv"
 	"testing"
@@ -62,6 +63,11 @@ func TestWriteCompressedBlobs(t *testing.T) {
 				case "":
 					got = encoded
 				case "lz4":
+					// Puffin requires the LZ4 content-size flag, including for empty blobs.
+					require.GreaterOrEqual(t, len(encoded), 19)
+					require.Equal(t, uint32(0x184D2204), binary.LittleEndian.Uint32(encoded[:4]))
+					require.NotZero(t, encoded[4]&0x08)
+					require.Equal(t, uint64(len(input)), binary.LittleEndian.Uint64(encoded[6:14]))
 					got, err = io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
 					require.NoError(t, err)
 				case "zstd":
@@ -123,4 +129,22 @@ func TestCompressedWriterRejectsInvalidCodecWithoutWriting(t *testing.T) {
 	_, err = w.AddBlob(puffin.BlobMetadataInput{Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{}}, []byte("ok"))
 	require.NoError(t, err)
 	require.NoError(t, w.Finish())
+}
+
+func TestLZ4BlobSpanningMultipleBlocks(t *testing.T) {
+	data := bytes.Repeat([]byte("abcd1234"), (4<<20)/8+1)
+	var output bytes.Buffer
+	writer, err := puffin.NewWriter(&output)
+	require.NoError(t, err)
+	meta, err := writer.AddBlob(puffin.BlobMetadataInput{
+		Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: "lz4",
+	}, data)
+	require.NoError(t, err)
+	require.NoError(t, writer.Finish())
+	encoded := output.Bytes()[meta.Offset : meta.Offset+meta.Length]
+	require.NotZero(t, encoded[4]&0x08)
+	require.Equal(t, uint64(len(data)), binary.LittleEndian.Uint64(encoded[6:14]))
+	decoded, err := io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
+	require.NoError(t, err)
+	require.Equal(t, data, decoded)
 }

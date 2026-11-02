@@ -158,14 +158,8 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 	fields := slices.Clone(input.Fields)
 	properties := maps.Clone(input.Properties)
 
-	// Encode before writing any bytes, so an unsupported codec or compression
-	// failure cannot leave a partially written blob in the output file.
 	if input.Type == BlobTypeDeletionVector && input.CompressionCodec != "" {
 		return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 must not be compressed")
-	}
-	encoded, err := compressBlob(input.CompressionCodec, data)
-	if err != nil {
-		return BlobMetadata{}, err
 	}
 
 	// Deletion vectors have special requirements per spec. Format matches
@@ -201,6 +195,13 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		if properties["referenced-data-file"] == "" {
 			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a referenced-data-file property")
 		}
+	}
+
+	// Validate metadata before compressing potentially large blobs. Encode before
+	// writing any bytes so compression failures cannot leave partial output.
+	encoded, err := compressBlob(input.CompressionCodec, data)
+	if err != nil {
+		return BlobMetadata{}, err
 	}
 
 	meta := BlobMetadata{
