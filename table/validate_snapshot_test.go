@@ -423,3 +423,29 @@ func TestValidateSnapshotEmbeddedUsesHeaderSpecID(t *testing.T) {
 	require.Equal(t, SnapshotIssueUnknownPartitionSpec, report.Issues[0].Code)
 	require.Equal(t, int32(42), report.Issues[0].PartitionSpecID)
 }
+
+func TestValidateSnapshotChecksDeletedEntryContent(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://audit/deleted-content/"
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, prefix+"pos-deletes.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+	require.NoError(t, err)
+	manifest := writeValidationManifest(t, fs, 3, prefix+"data-manifest.avro",
+		iceberg.ManifestContentData, 1, nil, nil, []iceberg.DataFile{builder.Build()})
+	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1,
+		[]iceberg.ManifestFile{manifest})
+	zero := int64(0)
+	tbl := validationTable(t, 3, fs, Snapshot{
+		SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(),
+		ManifestList: list, FirstRowID: &zero, AddedRows: &zero,
+	})
+
+	report, err := tbl.ValidateSnapshot(t.Context(), 1)
+	require.NoError(t, err)
+	require.False(t, report.Valid())
+	require.True(t, report.Complete)
+	require.Zero(t, report.LiveFilesChecked)
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueInvalidFileContent, report.Issues[0].Code)
+}

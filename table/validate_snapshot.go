@@ -184,8 +184,6 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 			switch entry.Status() {
 			case iceberg.EntryStatusDELETED:
 				deleted++
-
-				continue
 			case iceberg.EntryStatusADDED:
 				added++
 			case iceberg.EntryStatusEXISTING:
@@ -195,7 +193,9 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 					snapshotID, path, entry.Status())
 			}
 
-			report.LiveFilesChecked++
+			if entry.Status() != iceberg.EntryStatusDELETED {
+				report.LiveFilesChecked++
+			}
 			file := entry.DataFile()
 			if file == nil {
 				return report, fmt.Errorf("read snapshot %d manifest %q: nil data file", snapshotID, path)
@@ -209,6 +209,11 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 				continue
 			}
 			validateSnapshotFile(report, version, manifest, file)
+			// Tombstones still have to obey the manifest's content and file-format
+			// constraints, but they are not live references for uniqueness checks.
+			if entry.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
 			key := snapshotValidationFileKey{path: filePath}
 			if IsDeletionVector(file) {
 				offset, length := file.ContentOffset(), file.ContentSizeInBytes()
