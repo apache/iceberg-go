@@ -168,9 +168,7 @@ func (i InspectTable) allManifestEntryReader(
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
-		func(yield func(iceberg.ManifestFile, error) bool) {
-			streamSnapshotManifests(ctx, snapshots, provider.cachedSet, provider.set, yield)
-		}), nil
+		provider.UniqueManifests(ctx, snapshots)), nil
 }
 
 func (i InspectTable) manifestEntryReaderFromManifestSource(

@@ -361,6 +361,16 @@ func (p ManifestProvider) Manifests(ctx context.Context, snapshot Snapshot) (ite
 	return slices.Values(set.borrowAllManifests()), nil
 }
 
+// UniqueManifests lazily yields the distinct manifests referenced by the given
+// snapshots, in first-seen order. It shares this provider's bounded manifest
+// cache and FileIO, with bounded concurrent prefetch of historical lists.
+// An error is yielded once and ends the sequence.
+func (p ManifestProvider) UniqueManifests(ctx context.Context, snapshots []Snapshot) iter.Seq2[iceberg.ManifestFile, error] {
+	return func(yield func(iceberg.ManifestFile, error) bool) {
+		streamSnapshotManifests(ctx, snapshots, p.cachedSet, p.set, yield)
+	}
+}
+
 func (p ManifestProvider) set(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
 	return p.cache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
 		return readSnapshotManifestSet(loadCtx, snapshot, p.fsF)
