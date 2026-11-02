@@ -466,3 +466,18 @@ func TestORCRejectsExcessiveSchemaNesting(t *testing.T) {
 	types[len(types)-1] = &orcpb.Type{Kind: orcpb.Type_LONG.Enum()}
 	require.ErrorIs(t, validateORCTypeTree(types), iceberg.ErrInvalidSchema)
 }
+
+func TestORCRecordReaderStopsOnContextCancellation(t *testing.T) {
+	path := writeORCFixture(t, "struct<id:bigint>",
+		map[int]map[string]string{1: {"iceberg.id": "1"}},
+		[]any{int64(42)})
+	reader := openORCFixture(t, path, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	records, err := reader.GetRecords(ctx, nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+
+	cancel()
+	require.False(t, records.Next())
+	require.ErrorIs(t, records.Err(), context.Canceled)
+}
