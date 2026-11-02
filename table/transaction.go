@@ -2268,8 +2268,13 @@ func WithAddDataFilesByPathConcurrency(concurrency int) AddDataFilesByPathOption
 // Void fields are set to null.
 // All supplied values must be correct for every row of their file.
 func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDataFilesByPathOption {
+	partitionValues := make(map[string]map[int]any, len(values))
+	for path, tuple := range values {
+		partitionValues[path] = cloneFilePartitionTuple(tuple)
+	}
+
 	return func(op *addFilesOperation) {
-		op.partitionValues = &values
+		op.partitionValues = &partitionValues
 	}
 }
 

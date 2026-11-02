@@ -209,3 +209,36 @@ func TestV1FileToDataFileExplicitPartitionValues(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, file.Partition()[1001])
 }
+
+func TestV1ImportPartitionOptionsSnapshotCallerValues(t *testing.T) {
+	tbl, fs, path, fieldID, bucketID := makeV1BucketImportFixture(t)
+	values := map[int]any{fieldID: bucketID}
+	option := table.WithFilePartitionValues(values)
+	values[fieldID] = int32(-1)
+	file, err := table.FileToDataFileWithOptions(t.Context(), fs, path,
+		tbl.Metadata().CurrentSchema(), tbl.Metadata().PartitionSpec(), 0, nil, option)
+	require.NoError(t, err)
+	require.Equal(t, bucketID, file.Partition()[fieldID])
+
+	byPath := map[string]map[int]any{path: {fieldID: bucketID}}
+	addOption := table.WithAddDataFilesByPathPartitionValues(byPath)
+	byPath[path][fieldID] = int32(-1)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false, addOption))
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	manifests, err := committed.CurrentSnapshot().Manifests(fs)
+	require.NoError(t, err)
+	require.NotEmpty(t, manifests)
+	var found bool
+	for _, manifest := range manifests {
+		for entry, entryErr := range manifest.Entries(fs, true) {
+			require.NoError(t, entryErr)
+			if entry.DataFile().FilePath() == path {
+				found = true
+				require.Equal(t, bucketID, entry.DataFile().Partition()[fieldID])
+			}
+		}
+	}
+	require.True(t, found)
+}

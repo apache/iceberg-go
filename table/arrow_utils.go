@@ -1916,9 +1916,28 @@ type fileToDataFileConfig struct {
 // explicitly represents a null partition. Callers must ensure that every row
 // in the file has the supplied partition value, as required by the Iceberg spec.
 func WithFilePartitionValues(values map[int]any) FileToDataFileOption {
+	partitionValues := cloneFilePartitionTuple(values)
+
 	return func(cfg *fileToDataFileConfig) {
-		cfg.partitionValues = values
+		cfg.partitionValues = partitionValues
 	}
+}
+
+// cloneFilePartitionTuple prevents the caller from changing partition values
+// while concurrently imported Parquet files are being inspected.
+func cloneFilePartitionTuple(values map[int]any) map[int]any {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[int]any, len(values))
+	for id, value := range values {
+		if raw, ok := value.([]byte); ok {
+			value = bytes.Clone(raw)
+		}
+		cloned[id] = value
+	}
+
+	return cloned
 }
 
 func validateFileBucketValue(field iceberg.PartitionField, value any, numBuckets int) error {
