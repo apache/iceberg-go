@@ -418,3 +418,44 @@ func TestSnapshotDiffRejectsDuplicateLiveFiles(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidMetadata)
 	require.ErrorContains(t, err, "duplicate live content file")
 }
+
+func TestSnapshotDiffRejectsPathSharedByDataAndDeleteFile(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://diff/shared-path/"
+	path := prefix + "shared.parquet"
+	data := diffTestFile(t, path, iceberg.EntryContentData)
+	deleteFile := diffTestFile(t, path, iceberg.EntryContentPosDeletes)
+
+	dataManifest := writeDiffTestManifest(t, fs, 2, prefix+"data.avro",
+		iceberg.ManifestContentData, 1, []iceberg.DataFile{data}, nil, nil)
+	deleteManifest := writeDiffTestManifest(t, fs, 2, prefix+"delete.avro",
+		iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{deleteFile}, nil, nil)
+
+	// A non-vector content file is identified by its path, even if a
+	// malformed manifest claims a different content type for that path.
+	_, err := snapshotDiffLiveFiles(t.Context(), fs, []iceberg.ManifestFile{dataManifest, deleteManifest})
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "duplicate live content file")
+}
+
+func TestSnapshotDiffRejectsChangedContentTypeAtSamePath(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://diff/changed-content/"
+	path := prefix + "shared.parquet"
+	data := diffTestFile(t, path, iceberg.EntryContentData)
+	deleteFile := diffTestFile(t, path, iceberg.EntryContentPosDeletes)
+	old := writeDiffTestManifest(t, fs, 2, prefix+"old.avro",
+		iceberg.ManifestContentData, 1, []iceberg.DataFile{data}, nil, nil)
+	newManifest := writeDiffTestManifest(t, fs, 2, prefix+"new.avro",
+		iceberg.ManifestContentDeletes, 2, []iceberg.DataFile{deleteFile}, nil, nil)
+	fromList := writeDiffTestManifestList(t, fs, prefix+"from.avro", 1, 1, []iceberg.ManifestFile{old})
+	toList := writeDiffTestManifestList(t, fs, prefix+"to.avro", 2, 2, []iceberg.ManifestFile{newManifest})
+	now := time.Now().UnixMilli()
+	tbl := diffTestTable(t, 2, fs,
+		Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: now, ManifestList: fromList},
+		Snapshot{SnapshotID: 2, SequenceNumber: 2, TimestampMs: now + 1, ManifestList: toList})
+
+	_, err := tbl.DiffSnapshotFiles(t.Context(), 1, 2)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "changed type")
+}
