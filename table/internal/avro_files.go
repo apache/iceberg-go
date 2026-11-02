@@ -172,6 +172,9 @@ func (r *avroRecordReader) Err() error {
 func (r *avroRecordReader) Record() arrow.RecordBatch      { return r.current }
 func (r *avroRecordReader) RecordBatch() arrow.RecordBatch { return r.current }
 func (r *avroRecordReader) Next() bool {
+	if r.readErr != nil {
+		return false
+	}
 	if r.current != nil {
 		r.current.Release()
 		r.current = nil
@@ -214,6 +217,16 @@ func avroRetagData(source arrow.ArrayData, target arrow.DataType) (*array.Data, 
 	if sourceType.ID() != target.ID() &&
 		(sourceType.ID() != arrow.INT64 || target.ID() != arrow.TIMESTAMP) {
 		return nil, fmt.Errorf("%w: cannot retag Avro %s as %s", iceberg.ErrInvalidSchema, sourceType, target)
+	}
+	if from, ok := sourceType.(*arrow.FixedSizeBinaryType); ok {
+		if to, ok := target.(*arrow.FixedSizeBinaryType); !ok || from.ByteWidth != to.ByteWidth {
+			return nil, fmt.Errorf("%w: Avro fixed-size binary width changed from %s to %s", iceberg.ErrInvalidSchema, sourceType, target)
+		}
+	}
+	if from, ok := sourceType.(*arrow.Decimal128Type); ok {
+		if to, ok := target.(*arrow.Decimal128Type); !ok || from.Precision != to.Precision || from.Scale != to.Scale {
+			return nil, fmt.Errorf("%w: Avro decimal type changed from %s to %s", iceberg.ErrInvalidSchema, sourceType, target)
+		}
 	}
 	if from, ok := sourceType.(*arrow.TimestampType); ok {
 		if to, ok := target.(*arrow.TimestampType); ok && from.Unit != to.Unit {
@@ -438,7 +451,7 @@ func addAvroFieldID(field arrow.Field, props map[string]any, property string, us
 	case int64:
 		id = value
 	case float64:
-		if math.Trunc(value) != value || value > math.MaxInt32 || value < 1 {
+		if math.Trunc(value) != value || value > math.MaxInt32-200 || value < 1 {
 			return field, fmt.Errorf("%w: invalid Avro %s %v", iceberg.ErrInvalidSchema, property, raw)
 		}
 		id = int64(value)
@@ -446,7 +459,7 @@ func addAvroFieldID(field arrow.Field, props map[string]any, property string, us
 
 		return field, fmt.Errorf("%w: Avro %s must be an integer", iceberg.ErrInvalidSchema, property)
 	}
-	if id < 1 || id > math.MaxInt32 {
+	if id < 1 || id > math.MaxInt32-200 {
 		return field, fmt.Errorf("%w: invalid Avro %s %d", iceberg.ErrInvalidSchema, property, id)
 	}
 	if _, exists := used[int(id)]; exists {
