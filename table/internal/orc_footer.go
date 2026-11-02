@@ -166,6 +166,7 @@ func orcStructFields(types []*orcpb.Type, root *orcpb.Type, seen map[int]struct{
 		}
 		fields[i] = f
 	}
+
 	return fields, nil
 }
 
@@ -272,6 +273,7 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 	default:
 		return field, fmt.Errorf("%w: ORC type %s", iceberg.ErrNotImplemented, t.GetKind())
 	}
+
 	return field, nil
 }
 
@@ -321,6 +323,7 @@ func orcTypeAttributes(typ *orcpb.Type) (map[string]string, error) {
 		}
 		data = rest
 	}
+
 	return attrs, nil
 }
 
