@@ -140,8 +140,8 @@ func TestORCWriterWritesIcebergIDsAndNullableStreams(t *testing.T) {
 }
 
 func TestORCWriterRejectsUnsupportedWithoutCreatingFile(t *testing.T) {
-	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "event_time", Required: true, Type: iceberg.TimestampType{}})
-	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "event_time", Type: arrow.FixedWidthTypes.Timestamp_us}}, nil)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "uuid", Required: true, Type: iceberg.UUIDType{}})
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "uuid", Type: arrow.BinaryTypes.String}}, nil)
 	name := filepath.Join(t.TempDir(), "unsupported.orc")
 	f := orcFormat{}
 	_, err := f.NewFileWriter(context.Background(), iceio.LocalFS{}, nil, WriteFileInfo{
@@ -309,6 +309,222 @@ func TestORCWriterDoesNotPublishAfterPartialBatchFailure(t *testing.T) {
 	// The earlier column and first time value have already been buffered.
 	// Retrying or closing must not produce a corrupt file with mismatched rows.
 	require.ErrorIs(t, w.Write(batch), iceberg.ErrInvalidArgument)
+	_, err = w.Close()
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestORCNestedStructListAndMap(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "inner", Type: iceberg.Int32Type{}},
+		}}},
+		iceberg.NestedField{ID: 3, Name: "nums", Type: &iceberg.ListType{
+			ElementID: 4, Element: iceberg.Int64Type{},
+		}},
+		iceberg.NestedField{ID: 5, Name: "labels", Type: &iceberg.MapType{
+			KeyID: 6, KeyType: iceberg.StringType{}, ValueID: 7, ValueType: iceberg.Int64Type{},
+		}},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "record", Type: arrow.StructOf(arrow.Field{Name: "inner", Type: arrow.PrimitiveTypes.Int32, Nullable: true}), Nullable: true},
+		{Name: "nums", Type: arrow.ListOfField(arrow.Field{Name: "element", Type: arrow.PrimitiveTypes.Int64, Nullable: true}), Nullable: true},
+		{Name: "labels", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64), Nullable: true},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	st := b.Field(0).(*array.StructBuilder)
+	st.Append(true)
+	st.FieldBuilder(0).(*array.Int32Builder).Append(42)
+	li := b.Field(1).(*array.ListBuilder)
+	li.Append(true)
+	li.ValueBuilder().(*array.Int64Builder).Append(2)
+	li.ValueBuilder().(*array.Int64Builder).AppendNull()
+	mp := b.Field(2).(*array.MapBuilder)
+	mp.Append(true)
+	mp.KeyBuilder().(*array.StringBuilder).Append("k")
+	mp.ItemBuilder().(*array.Int64Builder).Append(9)
+	rec := b.NewRecordBatch()
+	defer rec.Release()
+
+	path := filepath.Join(t.TempDir(), "nested.orc")
+	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec, FileName: path,
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(rec))
+	file, err := w.Close()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), file.Count())
+	require.Equal(t, int64(2), file.ValueCounts()[4])
+	require.Equal(t, int64(1), file.NullValueCounts()[4])
+	require.Equal(t, int64(1), file.ValueCounts()[6])
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	ps := raw[len(raw)-1-int(raw[len(raw)-1]):len(raw)-1]
+	footerSize := int(orcTestVarint(t, ps, 1))
+	footer := raw[len(raw)-1-len(ps)-footerSize:len(raw)-1-len(ps)]
+	types := orcTestFieldBytes(t, footer, 4)
+	require.Len(t, types, 8)
+	require.Equal(t, uint64(12), orcTestVarint(t, types[1], 1))
+	require.Equal(t, uint64(10), orcTestVarint(t, types[3], 1))
+	require.Equal(t, uint64(11), orcTestVarint(t, types[5], 1))
+	require.Equal(t, []byte{2}, orcTestFieldBytes(t, types[1], 2)[0])
+	require.Equal(t, []byte{4}, orcTestFieldBytes(t, types[3], 2)[0])
+	require.Equal(t, []byte{6, 7}, orcTestFieldBytes(t, types[5], 2)[0])
+	for i := 1; i <= 7; i++ {
+		require.Contains(t, string(types[i]), "iceberg.id")
+	}
+	mapping, err := (orcFormat{}).PathToIDMapping(schema)
+	require.NoError(t, err)
+	require.Equal(t, 2, mapping["record.inner"])
+	require.Equal(t, 4, mapping["nums.element"])
+	require.Equal(t, 7, mapping["labels.value"])
+}
+
+func TestORCTimestampUnitAndTimezone(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "local", Type: iceberg.TimestampType{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "utc", Type: iceberg.TimestampTzType{}, Required: true},
+		iceberg.NestedField{ID: 3, Name: "nano", Type: iceberg.TimestampNsType{}, Required: true},
+		iceberg.NestedField{ID: 4, Name: "utc_nano", Type: iceberg.TimestampTzNsType{}, Required: true},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "local", Type: &arrow.TimestampType{Unit: arrow.Microsecond}},
+		{Name: "utc", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+		{Name: "nano", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}},
+		{Name: "utc_nano", Type: &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"}},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	for i, timestamp := range []arrow.Timestamp{-1, 1_420_070_400_000_000, -1, 1_420_070_400_123_456_789} {
+		b.Field(i).(*array.TimestampBuilder).Append(timestamp)
+	}
+	rec := b.NewRecordBatch()
+	defer rec.Release()
+	name := filepath.Join(t.TempDir(), "ts.orc")
+	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec, FileName: name,
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(rec))
+	file, err := w.Close()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), file.Count())
+	raw, err := os.ReadFile(name)
+	require.NoError(t, err)
+	ps := raw[len(raw)-1-int(raw[len(raw)-1]):len(raw)-1]
+	footerSize := int(orcTestVarint(t, ps, 1))
+	footer := raw[len(raw)-1-len(ps)-footerSize:len(raw)-1-len(ps)]
+	types := orcTestFieldBytes(t, footer, 4)
+	require.Len(t, types, 5)
+	require.Equal(t, uint64(9), orcTestVarint(t, types[1], 1))
+	require.Equal(t, uint64(18), orcTestVarint(t, types[2], 1))
+	require.Equal(t, uint64(9), orcTestVarint(t, types[3], 1))
+	require.Equal(t, uint64(18), orcTestVarint(t, types[4], 1))
+	require.Contains(t, string(types[1]), "MICROS")
+	require.Contains(t, string(types[2]), "MICROS")
+	require.Contains(t, string(types[3]), "NANOS")
+	require.Contains(t, string(types[4]), "NANOS")
+	stripes := orcTestFieldBytes(t, footer, 3)
+	require.Len(t, stripes, 1)
+	stripe := stripes[0]
+	offset := int(orcTestVarint(t, stripe, 1) + orcTestVarint(t, stripe, 3))
+	size := int(orcTestVarint(t, stripe, 4))
+	sf := raw[offset:offset+size]
+	require.Equal(t, [][]byte{[]byte("UTC")}, orcTestFieldBytes(t, sf, 3))
+	streams := orcTestFieldBytes(t, sf, 1)
+	require.Len(t, streams, 8)
+	for i := 1; i < len(streams); i += 2 {
+		require.Equal(t, uint64(5), orcTestVarint(t, streams[i], 1))
+	}
+}
+
+func TestORCTimestampsRejectWrongTimezones(t *testing.T) {
+	for _, tc := range []struct {
+		ice iceberg.Type
+		arrow arrow.DataType
+	}{
+		{iceberg.TimestampType{}, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+		{iceberg.TimestampTzType{}, &arrow.TimestampType{Unit: arrow.Microsecond}},
+		{iceberg.TimestampNsType{}, &arrow.TimestampType{Unit: arrow.Microsecond}},
+		{iceberg.TimestampTzNsType{}, &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "Europe/Berlin"}},
+	} {
+		_, err := newORCColumn(iceberg.NestedField{ID: 1, Name: "ts", Type: tc.ice}, arrow.Field{Name: "ts", Type: tc.arrow})
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}
+}
+
+func TestORCPositionAndEqualityDeletes(t *testing.T) {
+	t.Run("position", func(t *testing.T) {
+		as := arrow.NewSchema([]arrow.Field{
+			{Name: "file_path", Type: arrow.BinaryTypes.String},
+			{Name: "pos", Type: arrow.PrimitiveTypes.Int64},
+		}, nil)
+		b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+		defer b.Release()
+		b.Field(0).(*array.StringBuilder).AppendValues([]string{"file.parquet", "file.parquet"}, nil)
+		b.Field(1).(*array.Int64Builder).AppendValues([]int64{2, 7}, nil)
+		rec := b.NewRecordBatch()
+		defer rec.Release()
+		path := filepath.Join(t.TempDir(), "positions.orc")
+		w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+			FileSchema: iceberg.PositionalDeleteSchema, Spec: *iceberg.UnpartitionedSpec,
+			FileName: path, Content: iceberg.EntryContentPosDeletes,
+		}, as)
+		require.NoError(t, err)
+		require.NoError(t, w.Write(rec))
+		df, err := w.Close()
+		require.NoError(t, err)
+		require.Equal(t, iceberg.EntryContentPosDeletes, df.ContentType())
+		require.Equal(t, int64(2), df.Count())
+		require.NotNil(t, df.ReferencedDataFile())
+		require.Equal(t, "file.parquet", *df.ReferencedDataFile())
+	})
+	t.Run("equality", func(t *testing.T) {
+		schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 5, Name: "id", Type: iceberg.Int32Type{}, Required: true})
+		as := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+		b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+		defer b.Release()
+		b.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 4}, nil)
+		rec := b.NewRecordBatch()
+		defer rec.Release()
+		w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+			FileSchema: schema, Spec: *iceberg.UnpartitionedSpec,
+			FileName: filepath.Join(t.TempDir(), "equal.orc"),
+			Content: iceberg.EntryContentEqDeletes, EqualityFieldIDs: []int{5},
+		}, as)
+		require.NoError(t, err)
+		require.NoError(t, w.Write(rec))
+		df, err := w.Close()
+		require.NoError(t, err)
+		require.Equal(t, iceberg.EntryContentEqDeletes, df.ContentType())
+		require.Equal(t, []int{5}, df.EqualityFieldIDs())
+	})
+}
+
+func TestORCPositionDeletesRejectOutOfOrder(t *testing.T) {
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	b.Field(0).(*array.StringBuilder).AppendValues([]string{"file.parquet", "file.parquet"}, nil)
+	b.Field(1).(*array.Int64Builder).AppendValues([]int64{9, 1}, nil)
+	rec := b.NewRecordBatch()
+	defer rec.Release()
+	path := filepath.Join(t.TempDir(), "invalid.orc")
+	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: iceberg.PositionalDeleteSchema, Spec: *iceberg.UnpartitionedSpec,
+		FileName: path, Content: iceberg.EntryContentPosDeletes,
+	}, as)
+	require.NoError(t, err)
+	require.ErrorIs(t, w.Write(rec), iceberg.ErrInvalidArgument)
 	_, err = w.Close()
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	_, err = os.Stat(path)
