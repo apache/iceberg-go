@@ -329,7 +329,8 @@ func orcTypeAttributes(typ *orcpb.Type) (map[string]string, error) {
 
 func consumeORCProtoField(data []byte) (number int, wire int, value, rest []byte, err error) {
 	tag, n := binary.Uvarint(data)
-	if n <= 0 || tag>>3 == 0 {
+	fieldNumber := tag >> 3
+	if n <= 0 || fieldNumber == 0 || fieldNumber > (1<<29)-1 {
 		return 0, 0, nil, nil, fmt.Errorf("%w: malformed ORC protobuf tag", iceberg.ErrInvalidSchema)
 	}
 	number, wire = int(tag>>3), int(tag&7)
