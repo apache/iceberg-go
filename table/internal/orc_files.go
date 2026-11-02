@@ -773,6 +773,7 @@ func orcTimestampNanos(nanos uint64) uint64 {
 		nanos /= 10
 		zeros++
 	}
+
 	return nanos<<3 | zeros
 }
 
@@ -782,6 +783,7 @@ func orcHasTimestamps(columns []orcColumn) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
