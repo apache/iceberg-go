@@ -480,3 +480,71 @@ func TestValidateSnapshotFileRejectsMixedContent(t *testing.T) {
 	require.Len(t, report.Issues, 1)
 	require.Equal(t, SnapshotIssueInvalidFileContent, report.Issues[0].Code)
 }
+
+func TestValidateSnapshotDeletionVectorTargets(t *testing.T) {
+	prefix := "mem://audit/dv-target/"
+	zero := int64(0)
+	cases := []struct {
+		name    string
+		added   []iceberg.DataFile
+		deleted []iceberg.DataFile
+		want    SnapshotValidationIssueCode
+	}{
+		{name: "different vectors same target", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 100), validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 200)}, want: SnapshotIssueDuplicateDeletionVector},
+		{name: "distinct targets share puffin", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 100), validationDeletionVector(t, prefix+"d.puffin", prefix+"b.parquet", 200)}},
+		{name: "replacement tombstone", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 200)}, deleted: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 100)}},
+		{name: "empty target", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", "", 100)}, want: SnapshotIssueMissingDeletionVectorTarget},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := iceio.NewMemFS()
+			manifest := writeValidationManifest(t, fs, 3, prefix+"delete.avro", iceberg.ManifestContentDeletes, 1, tc.added, nil, tc.deleted)
+			list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
+			tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
+			report, err := tbl.ValidateSnapshot(t.Context(), 1)
+			require.NoError(t, err)
+			if tc.want == "" {
+				require.True(t, report.Valid(), "%+v", report.Issues)
+
+				return
+			}
+			require.Len(t, report.Issues, 1)
+			require.Equal(t, tc.want, report.Issues[0].Code)
+		})
+	}
+}
+
+func TestValidateSnapshotMissingDeletionVectorTarget(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://audit/missing-dv-target/"
+	b, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		prefix+"d.puffin", iceberg.PuffinFile, nil, nil, nil, 1, 1024)
+	require.NoError(t, err)
+	file := b.ContentOffset(10).ContentSizeInBytes(32).Build()
+	manifest := writeValidationManifest(t, fs, 3, prefix+"manifest.avro", iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{file}, nil, nil)
+	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
+	zero := int64(0)
+	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
+	report, err := tbl.ValidateSnapshot(t.Context(), 1)
+	require.NoError(t, err)
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueMissingDeletionVectorTarget, report.Issues[0].Code)
+}
+
+func TestValidateSnapshotDuplicateDeletionVectorAcrossManifests(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://audit/dv-cross-manifest/"
+	a := validationDeletionVector(t, prefix+"a.puffin", prefix+"data.parquet", 100)
+	b := validationDeletionVector(t, prefix+"b.puffin", prefix+"data.parquet", 200)
+	first := writeValidationManifest(t, fs, 3, prefix+"a.avro", iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{a}, nil, nil)
+	second := writeValidationManifest(t, fs, 3, prefix+"b.avro", iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{b}, nil, nil)
+	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{first, second})
+	zero := int64(0)
+	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
+	report, err := tbl.ValidateSnapshot(t.Context(), 1)
+	require.NoError(t, err)
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueDuplicateDeletionVector, report.Issues[0].Code)
+	require.Equal(t, prefix+"a.avro", report.Issues[0].FirstManifestPath)
+	require.Equal(t, prefix+"data.parquet", report.Issues[0].Detail)
+}

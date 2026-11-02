@@ -35,6 +35,8 @@ type SnapshotValidationIssueCode string
 const (
 	SnapshotIssueDuplicateManifest           SnapshotValidationIssueCode = "duplicate-manifest"
 	SnapshotIssueDuplicateLiveFile           SnapshotValidationIssueCode = "duplicate-live-file"
+	SnapshotIssueDuplicateDeletionVector     SnapshotValidationIssueCode = "duplicate-deletion-vector"
+	SnapshotIssueMissingDeletionVectorTarget SnapshotValidationIssueCode = "missing-deletion-vector-target"
 	SnapshotIssueUnknownPartitionSpec        SnapshotValidationIssueCode = "unknown-partition-spec"
 	SnapshotIssueIncompatibleManifestVersion SnapshotValidationIssueCode = "incompatible-manifest-version"
 	SnapshotIssueInvalidManifestContent      SnapshotValidationIssueCode = "invalid-manifest-content"
@@ -77,6 +79,8 @@ func (r SnapshotValidationReport) Valid() bool {
 // It checks that the manifest list references known partition specs, that
 // manifest-list descriptors and file contents are valid for the table's format version, and
 // that a content file has at most one live reference across all manifests.
+// It also checks that each live deletion vector has a target path and that no data
+// file has more than one live deletion vector.
 // Deleted entries do not count as live references. Manifest entry counts are
 // checked only when the manifest list provides them (v1 may omit them).
 // For embedded manifests, partition spec IDs are checked only when present in
@@ -128,6 +132,7 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 	// The map intentionally tracks every live content file, regardless of its
 	// partition spec, entry status (ADDED/EXISTING), or file format.
 	seenFiles := make(map[snapshotValidationFileKey]string)
+	seenVectorTargets := make(map[string]snapshotValidationVector)
 
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
@@ -222,6 +227,23 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 				}
 				key.offset, key.length = *offset, *length
 				key.vector = true
+				target := file.ReferencedDataFile()
+				if target == nil || *target == "" {
+					report.Issues = append(report.Issues, SnapshotValidationIssue{
+						Code: SnapshotIssueMissingDeletionVectorTarget, ManifestPath: path, FilePath: filePath,
+					})
+				} else if previous, exists := seenVectorTargets[*target]; exists {
+					// A repeated reference to the same blob is already reported by
+					// the content-file uniqueness check below.
+					if previous.key != key {
+						report.Issues = append(report.Issues, SnapshotValidationIssue{
+							Code: SnapshotIssueDuplicateDeletionVector, ManifestPath: path,
+							FirstManifestPath: previous.manifest, FilePath: filePath, Detail: *target,
+						})
+					}
+				} else {
+					seenVectorTargets[*target] = snapshotValidationVector{key: key, manifest: path}
+				}
 			}
 			if firstManifest, exists := seenFiles[key]; exists {
 				report.Issues = append(report.Issues, SnapshotValidationIssue{
@@ -240,6 +262,11 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 	report.Complete = true
 
 	return report, nil
+}
+
+type snapshotValidationVector struct {
+	key      snapshotValidationFileKey
+	manifest string
 }
 
 type snapshotValidationFileKey struct {

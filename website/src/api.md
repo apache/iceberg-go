@@ -503,7 +503,9 @@ if !report.Valid() {
 
 The report checks manifest versions, partition spec references, content types,
 manifest entry counts, duplicate manifest paths, and duplicate live content files
-across **all** manifests in a snapshot. Deleted entries do not count as live.
+across **all** manifests in a snapshot. It also checks that live deletion vectors
+have a target path and that no two distinct vectors target the same data file.
+Deleted entries do not count as live.
 A report is valid only when `Complete` is true and `Issues` is empty.
 This is a metadata-only audit: it does not check data-file contents or whether
 data-file objects still exist. The audit works with both v1 manifest lists and
