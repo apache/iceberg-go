@@ -207,6 +207,18 @@ func (r *avroRecordReader) Next() bool {
 }
 
 func avroRetagData(source arrow.ArrayData, target arrow.DataType) (*array.Data, error) {
+	// Retagging shares the original buffers: only physically compatible types
+	// can be used. Avro timestamp-nanos may be decoded as an int64 by Arrow.
+	sourceType := source.DataType()
+	if sourceType.ID() != target.ID() &&
+		!(sourceType.ID() == arrow.INT64 && target.ID() == arrow.TIMESTAMP) {
+		return nil, fmt.Errorf("%w: cannot retag Avro %s as %s", iceberg.ErrInvalidSchema, sourceType, target)
+	}
+	if from, ok := sourceType.(*arrow.TimestampType); ok {
+		if to, ok := target.(*arrow.TimestampType); ok && from.Unit != to.Unit {
+			return nil, fmt.Errorf("%w: Avro timestamp unit changed from %s to %s", iceberg.ErrInvalidSchema, from.Unit, to.Unit)
+		}
+	}
 	var children []arrow.ArrayData
 	if nested, ok := target.(arrow.NestedType); ok {
 		fields := nested.Fields()
@@ -373,9 +385,24 @@ func decorateAvroField(field arrow.Field, node avro.SchemaNode, props map[string
 		field.Type = arrow.MapOfFields(key, value)
 	case "boolean", "int", "long", "float", "double", "bytes", "string", "fixed", "null":
 		if node.LogicalType == "timestamp-micros" || node.LogicalType == "timestamp-nanos" {
+			// Iceberg timestamps are Avro long values. Reinterpreting another
+			// physical type as a timestamp would corrupt the decoded buffers.
+			if node.Type != "long" {
+				return field, fmt.Errorf("%w: Avro %s requires long, got %s", iceberg.ErrInvalidSchema, node.LogicalType, node.Type)
+			}
 			unit := arrow.Microsecond
 			if node.LogicalType == "timestamp-nanos" {
 				unit = arrow.Nanosecond
+			}
+			switch original := field.Type.(type) {
+			case *arrow.Int64Type:
+				// The Arrow decoder can leave Iceberg's timestamp-nanos as int64.
+			case *arrow.TimestampType:
+				if original.Unit != unit {
+					return field, fmt.Errorf("%w: Avro timestamp source has unit %s, expected %s", iceberg.ErrInvalidSchema, original.Unit, unit)
+				}
+			default:
+				return field, fmt.Errorf("%w: Avro timestamp source has type %s", iceberg.ErrInvalidSchema, field.Type)
 			}
 			tz := ""
 			if value, ok := node.Props["adjust-to-utc"]; ok {
