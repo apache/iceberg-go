@@ -329,12 +329,21 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 		if left.Type().Elem().Kind() != reflect.Uint8 || right.Type().Elem().Kind() != reflect.Uint8 {
 			break
 		}
-		l := make([]byte, left.Len())
-		r := make([]byte, right.Len())
-		reflect.Copy(reflect.ValueOf(l), left)
-		reflect.Copy(reflect.ValueOf(r), right)
-
-		return bytes.Compare(l, r), nil
+		limit := min(left.Len(), right.Len())
+		for index := 0; index < limit; index++ {
+			aByte, bByte := left.Index(index).Uint(), right.Index(index).Uint()
+			if aByte != bByte {
+				return compareOrderedStats(aByte, bByte), nil
+			}
+		}
+		switch {
+		case left.Len() < right.Len():
+			return -1, nil
+		case left.Len() > right.Len():
+			return 1, nil
+		default:
+			return 0, nil
+		}
 	}
 
 	return 0, fmt.Errorf("%w: cannot order partition values of type %T",
