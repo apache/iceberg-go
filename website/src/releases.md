@@ -50,6 +50,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
     Relatedly, the previously unexported `isGCEnabled` is now `table.IsGCEnabled`, so the new package can gate destructive operations on the `gc.enabled` table property.
 - `maintenance.PurgeFiles` (previously `Table.PurgeFiles`) now calls `IO.Remove` concurrently, with up to 32 calls in flight, when the filesystem does not implement `BulkRemovableIO`. Custom IO implementations, including those registered with `io.Register`, must make `Remove` safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.
+- **Snapshot summaries report deletion vectors separately.** On v3 tables, DVs are counted under `added-dvs` and `removed-dvs` and no longer appear in `added-position-delete-files` or `removed-position-delete-files`. `added-files-size`, `removed-files-size` and `total-files-size` now count each DV's `content_size_in_bytes` instead of its whole Puffin file, so reported sizes go down. Dashboards built on these keys will show the change from the first snapshot committed after upgrading. Existing snapshots are not rewritten.
 
 ## Verifying and producing releases
 
