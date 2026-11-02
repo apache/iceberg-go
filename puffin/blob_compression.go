@@ -79,11 +79,12 @@ func readCompressedBlob(data []byte, codec string, maxBlobSize int64) ([]byte, e
 			return nil, fmt.Errorf("puffin: invalid zstd blob frame: %w", err)
 		}
 		// The decoder may need a window larger than a tiny caller-set blob
-		// limit, but its output is still strictly bounded below.
+		// limit, but its output is still strictly bounded below. Allow at least
+		// an 8 MiB window for small blobs written with standard encoders.
 		decoder, err := zstd.NewReader(
 			bytes.NewReader(data),
 			zstd.WithDecoderConcurrency(1),
-			zstd.WithDecoderMaxMemory(max(uint64(maxBlobSize), uint64(1<<20))),
+			zstd.WithDecoderMaxMemory(max(uint64(maxBlobSize), uint64(8<<20))),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("puffin: create zstd blob decoder: %w", err)

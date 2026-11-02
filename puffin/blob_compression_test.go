@@ -251,3 +251,26 @@ func TestReadRejectsCompressedDeletionVectors(t *testing.T) {
 		})
 	}
 }
+
+func TestReadSmallZstdBlobWithLargeWindow(t *testing.T) {
+	raw := bytes.Repeat([]byte("abc"), 100)
+	encoder, err := zstd.NewWriter(nil, zstd.WithWindowSize(8<<20), zstd.WithSingleSegment(false))
+	require.NoError(t, err)
+	frame := encoder.EncodeAll(raw, nil)
+	encoder.Close()
+	var initial zstd.Header
+	require.NoError(t, initial.Decode(frame))
+	require.False(t, initial.SingleSegment)
+	// Set a valid 8 MiB window descriptor while retaining the original blocks.
+	frame[5] = 0x68
+	var header zstd.Header
+	require.NoError(t, header.Decode(frame))
+	require.True(t, header.HasFCS)
+	require.Equal(t, uint64(8<<20), header.WindowSize)
+	require.Equal(t, uint64(len(raw)), header.FrameContentSize)
+	r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", frame)), puffin.WithMaxBlobSize(1024))
+	require.NoError(t, err)
+	blob, err := r.ReadBlob(0)
+	require.NoError(t, err)
+	require.Equal(t, raw, blob.Data)
+}

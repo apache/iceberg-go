@@ -77,7 +77,8 @@ type ReaderOption func(*Reader)
 
 // WithMaxBlobSize sets the maximum blob size allowed when reading.
 // This prevents OOM attacks from malicious files with huge blob lengths.
-// Default is DefaultMaxBlobSize (256 MB).
+// Default is DefaultMaxBlobSize (256 MB). Zstd frames also have a window
+// limit equal to the larger of this size and 8 MiB.
 func WithMaxBlobSize(size int64) ReaderOption {
 	return func(r *Reader) {
 		r.maxBlobSize = size
