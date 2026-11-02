@@ -554,6 +554,9 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 				if !ok {
 					return nil, fmt.Errorf("%w: Avro map key must be a non-null string", iceberg.ErrInvalidArgument)
 				}
+				if _, exists := out[keyString]; exists {
+					return nil, fmt.Errorf("%w: duplicate Avro map key %q", iceberg.ErrInvalidArgument, keyString)
+				}
 				out[keyString] = value
 			}
 
