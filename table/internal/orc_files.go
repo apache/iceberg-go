@@ -31,8 +31,8 @@ import (
 )
 
 // orcFormat implements an initial, uncompressed single-stripe ORC writer.
-// Primitive columns and timestamp types are supported. Nested types are
-// currently rejected before any output is created.
+// Uncompressed ORC output supports primitive and nested columns, timestamps,
+// and Iceberg data, positional delete, and equality delete file content.
 type orcFormat struct{}
 
 type orcWriteSummary struct {
@@ -50,8 +50,18 @@ func (orcFormat) PathToIDMapping(schema *iceberg.Schema) (map[string]int, error)
 		return nil, fmt.Errorf("%w: missing ORC schema", iceberg.ErrInvalidArgument)
 	}
 	result := make(map[string]int, schema.NumFields())
+	var addField func(string, iceberg.NestedField)
+	addField = func(prefix string, field iceberg.NestedField) {
+		path := prefix + field.Name
+		result[path] = field.ID
+		if nested, ok := field.Type.(iceberg.NestedType); ok {
+			for _, child := range nested.Fields() {
+				addField(path+".", child)
+			}
+		}
+	}
 	for _, field := range schema.Fields() {
-		result[field.Name] = field.ID
+		addField("", field)
 	}
 
 	return result, nil
@@ -80,6 +90,8 @@ func (f orcFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, part
 type orcColumn struct {
 	field        iceberg.NestedField
 	kind         uint64
+	children     []int
+	childNames   []string
 	present      []bool
 	integers     []uint64
 	integerBytes int64
@@ -111,6 +123,23 @@ func (c *orcColumn) addSecondary(value uint64) {
 func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn, error) {
 	c := orcColumn{field: field}
 	switch field.Type.(type) {
+	case *iceberg.StructType:
+		c.kind = 12
+		if _, ok := arrowField.Type.(*arrow.StructType); !ok {
+			return c, fmt.Errorf("%w: ORC %s expects an Arrow struct", iceberg.ErrInvalidArgument, field.Name)
+		}
+	case *iceberg.ListType:
+		c.kind = 10
+		switch arrowField.Type.(type) {
+		case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType:
+		default:
+			return c, fmt.Errorf("%w: ORC %s expects an Arrow list", iceberg.ErrInvalidArgument, field.Name)
+		}
+	case *iceberg.MapType:
+		c.kind = 11
+		if _, ok := arrowField.Type.(*arrow.MapType); !ok {
+			return c, fmt.Errorf("%w: ORC %s expects an Arrow map", iceberg.ErrInvalidArgument, field.Name)
+		}
 	case iceberg.BooleanType:
 		c.kind = 0
 		if arrowField.Type.ID() != arrow.BOOL {
@@ -191,13 +220,72 @@ func newORCColumn(field iceberg.NestedField, arrowField arrow.Field) (orcColumn,
 	return c, nil
 }
 
+// appendORCColumn assigns ORC type IDs in the format's depth-first order.
+func appendORCColumn(columns *[]orcColumn, field iceberg.NestedField, af arrow.Field) (int, error) {
+	c, err := newORCColumn(field, af)
+	if err != nil {
+		return 0, err
+	}
+	index := len(*columns)
+	*columns = append(*columns, c)
+
+	appendChild := func(child iceberg.NestedField, childArrow arrow.Field) error {
+		childArrow.Name = child.Name
+		id, err := appendORCColumn(columns, child, childArrow)
+		if err != nil {
+			return err
+		}
+		(*columns)[index].children = append((*columns)[index].children, id)
+
+		return nil
+	}
+
+	switch typ := field.Type.(type) {
+	case *iceberg.StructType:
+		arrowType := af.Type.(*arrow.StructType)
+		fields := typ.Fields()
+		if len(fields) != arrowType.NumFields() {
+			return 0, fmt.Errorf("%w: ORC %s struct field counts differ", iceberg.ErrInvalidArgument, field.Name)
+		}
+		for i, child := range fields {
+			if arrowType.Field(i).Name != child.Name {
+				return 0, fmt.Errorf("%w: ORC %s struct field %d differs", iceberg.ErrInvalidArgument, field.Name, i)
+			}
+			if err := appendChild(child, arrowType.Field(i)); err != nil {
+				return 0, err
+			}
+			(*columns)[index].childNames = append((*columns)[index].childNames, child.Name)
+		}
+	case *iceberg.ListType:
+		arrowType := af.Type.(arrow.ListLikeType)
+		if err := appendChild(typ.ElementField(), arrowType.ElemField()); err != nil {
+			return 0, err
+		}
+	case *iceberg.MapType:
+		arrowType := af.Type.(*arrow.MapType)
+		if err := appendChild(typ.KeyField(), arrowType.KeyField()); err != nil {
+			return 0, err
+		}
+		if err := appendChild(typ.ValueField(), arrowType.ItemField()); err != nil {
+			return 0, err
+		}
+	}
+
+	return index, nil
+}
+
 type orcFileWriter struct {
 	ctx             context.Context
 	fs              iceio.WriteFileIO
 	info            WriteFileInfo
 	partitionValues map[int]any
 	columns         []orcColumn
+	rootIDs         []int
 	schema          *arrow.Schema
+	lastPath        string
+	lastPosition    int64
+	hasLastPosition bool
+	firstPath       string
 	rows            int64
 	size            int64
 	failed          error
@@ -252,19 +340,23 @@ func (orcFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partit
 	if len(fields) != len(schema.Fields()) {
 		return nil, fmt.Errorf("%w: ORC schema field counts differ", iceberg.ErrInvalidArgument)
 	}
-	columns := make([]orcColumn, len(fields))
-	for i, f := range fields {
-		c, err := newORCColumn(f, schema.Field(i))
+	columns := make([]orcColumn, 0, len(fields))
+	rootIDs := make([]int, 0, len(fields))
+	for i, field := range fields {
+		id, err := appendORCColumn(&columns, field, schema.Field(i))
 		if err != nil {
 			return nil, err
 		}
-		columns[i] = c
+		rootIDs = append(rootIDs, id)
 	}
 	if fs == nil {
 		return nil, fmt.Errorf("%w: missing ORC file IO", iceberg.ErrInvalidArgument)
 	}
 
-	return &orcFileWriter{ctx: ctx, fs: fs, info: info, columns: columns, schema: schema, partitionValues: partitionValues}, nil
+	return &orcFileWriter{
+		ctx: ctx, fs: fs, info: info, columns: columns, rootIDs: rootIDs,
+		schema: schema, partitionValues: partitionValues,
+	}, nil
 }
 
 func (w *orcFileWriter) BytesWritten() int64 {
@@ -292,6 +384,37 @@ func orcByteRLESize(n int) int64 {
 	return int64(n + (n+127)/128)
 }
 
+// validatePositionBatch enforces the Iceberg ordering and nonnegative offsets
+// before mutating any column buffers.
+func (w *orcFileWriter) validatePositionBatch(batch arrow.RecordBatch) error {
+	pathCol, ok := batch.Column(0).(*array.String)
+	if !ok {
+		return fmt.Errorf("%w: ORC position deletes require string file_path", iceberg.ErrInvalidArgument)
+	}
+	positionCol, ok := batch.Column(1).(*array.Int64)
+	if !ok {
+		return fmt.Errorf("%w: ORC position deletes require int64 pos", iceberg.ErrInvalidArgument)
+	}
+	for row := 0; row < int(batch.NumRows()); row++ {
+		if pathCol.IsNull(row) || positionCol.IsNull(row) {
+			return fmt.Errorf("%w: ORC position deletes cannot contain null paths or offsets", iceberg.ErrInvalidArgument)
+		}
+		path, pos := pathCol.Value(row), positionCol.Value(row)
+		if path == "" || pos < 0 {
+			return fmt.Errorf("%w: ORC position delete requires a nonempty path and nonnegative offset", iceberg.ErrInvalidArgument)
+		}
+		if w.hasLastPosition && (path < w.lastPath || (path == w.lastPath && pos < w.lastPosition)) {
+			return fmt.Errorf("%w: ORC position deletes must be sorted by file_path and pos", iceberg.ErrInvalidArgument)
+		}
+		if !w.hasLastPosition {
+			w.firstPath = path
+		}
+		w.lastPath, w.lastPosition, w.hasLastPosition = path, pos, true
+	}
+
+	return nil
+}
+
 func (w *orcFileWriter) Write(batch arrow.RecordBatch) (err error) {
 	if w.closed {
 		return errors.New("ORC writer is closed")
@@ -299,108 +422,149 @@ func (w *orcFileWriter) Write(batch arrow.RecordBatch) (err error) {
 	if w.failed != nil {
 		return w.failed
 	}
-	// The mutable column buffers cannot be rolled back if encoding fails
-	// after some rows. Poison the writer rather than publishing partial data.
+	// A failed batch may have appended partial child streams. Never finalize it.
 	defer func() {
 		if err != nil {
 			w.failed = err
 		}
 	}()
-	if !w.schema.Equal(batch.Schema()) {
+	if batch == nil || !w.schema.Equal(batch.Schema()) {
 		return fmt.Errorf("%w: ORC record batch schema changed", iceberg.ErrInvalidArgument)
 	}
-	if int(batch.NumCols()) != len(w.columns) {
+	if int(batch.NumCols()) != len(w.rootIDs) {
 		return fmt.Errorf("%w: ORC record batch column count changed", iceberg.ErrInvalidArgument)
 	}
-	for i := range w.columns {
-		c := &w.columns[i]
-		if batch.Schema().Field(i).Name != c.field.Name {
-			return fmt.Errorf("%w: ORC column %q was reordered", iceberg.ErrInvalidArgument, c.field.Name)
+	if w.info.Content == iceberg.EntryContentPosDeletes {
+		if err := w.validatePositionBatch(batch); err != nil {
+			return err
 		}
 	}
-	for col := range w.columns {
-		c := &w.columns[col]
-		a := batch.Column(col)
-		for row := range int(batch.NumRows()) {
-			present := !a.IsNull(row)
-			if !present && c.field.Required {
-				return fmt.Errorf("%w: null required ORC column %q", iceberg.ErrInvalidArgument, c.field.Name)
-			}
-			c.present = append(c.present, present)
-			if !present {
-				c.nulls++
-
-				continue
-			}
-			switch a := a.(type) {
-			case *array.Boolean:
-				c.bits = append(c.bits, a.Value(row))
-			case *array.Int32:
-				c.addInteger(orcZigZag(int64(a.Value(row))))
-			case *array.Int64:
-				v := a.Value(row)
-				if c.field.ID == iceberg.DeleteFilePosFieldID && v < 0 {
-					return fmt.Errorf("%w: ORC position delete offset cannot be negative", iceberg.ErrInvalidArgument)
-				}
-				c.addInteger(orcZigZag(v))
-			case *array.Date32:
-				c.addInteger(orcZigZag(int64(a.Value(row))))
-			case *array.Timestamp:
-				v := int64(a.Value(row))
-				unit := int64(1_000_000)
-				if _, ok := c.field.Type.(iceberg.TimestampNsType); ok {
-					unit = 1_000_000_000
-				}
-				if _, ok := c.field.Type.(iceberg.TimestampTzNsType); ok {
-					unit = 1_000_000_000
-				}
-				seconds, fraction := v/unit, v%unit
-				if fraction < 0 {
-					seconds--
-					fraction += unit
-				}
-				// ORC timestamps use a 2015-01-01 base epoch and nanos in a SECONDARY stream.
-				c.addInteger(orcZigZag(seconds - 1_420_070_400))
-				if unit == 1_000_000 {
-					fraction *= 1_000
-				}
-				c.addSecondary(orcTimestampNanos(uint64(fraction)))
-			case *array.Time64:
-				v := int64(a.Value(row))
-				if v < 0 || v >= 86400000000 {
-					return fmt.Errorf("%w: ORC time is outside a day", iceberg.ErrInvalidArgument)
-				}
-				c.addInteger(orcZigZag(v))
-			case *array.Float32:
-				var b [4]byte
-				binary.LittleEndian.PutUint32(b[:], math.Float32bits(a.Value(row)))
-				c.data.Write(b[:])
-			case *array.Float64:
-				var b [8]byte
-				binary.LittleEndian.PutUint64(b[:], math.Float64bits(a.Value(row)))
-				c.data.Write(b[:])
-			case *array.String:
-				v := a.Value(row)
-				c.data.WriteString(v)
-				c.addLength(uint64(len(v)))
-			case *array.LargeString:
-				v := a.Value(row)
-				c.data.WriteString(v)
-				c.addLength(uint64(len(v)))
-			case *array.Binary:
-				v := a.Value(row)
-				c.data.Write(v)
-				c.addLength(uint64(len(v)))
-			case *array.LargeBinary:
-				v := a.Value(row)
-				c.data.Write(v)
-				c.addLength(uint64(len(v)))
-			default:
-				return fmt.Errorf("%w: unsupported Arrow ORC input %T", iceberg.ErrNotImplemented, a)
+	for col, id := range w.rootIDs {
+		for row := 0; row < int(batch.NumRows()); row++ {
+			if err := w.appendValue(id, batch.Column(col), row); err != nil {
+				return err
 			}
 		}
 	}
 	w.rows += batch.NumRows()
+
+	return nil
+}
+
+func (w *orcFileWriter) appendValue(id int, values arrow.Array, row int) error {
+	c := &w.columns[id]
+	present := !values.IsNull(row)
+	if !present && c.field.Required {
+		return fmt.Errorf("%w: null required ORC column %q", iceberg.ErrInvalidArgument, c.field.Name)
+	}
+	c.present = append(c.present, present)
+	if !present {
+		c.nulls++
+
+		return nil
+	}
+
+	switch c.kind {
+	case 12: // STRUCT
+		a := values.(*array.Struct)
+		for i, childID := range c.children {
+			if err := w.appendValue(childID, a.Field(i), row); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	case 10: // LIST
+		a := values.(interface {
+			ValueOffsets(int) (int64, int64)
+			ListValues() arrow.Array
+		})
+		start, end := a.ValueOffsets(row)
+		c.addLength(uint64(end - start))
+		child := a.ListValues()
+		for i := int(start); i < int(end); i++ {
+			if err := w.appendValue(c.children[0], child, i); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	case 11: // MAP
+		a := values.(*array.Map)
+		start, end := a.ValueOffsets(row)
+		c.addLength(uint64(end - start))
+		for i := int(start); i < int(end); i++ {
+			if err := w.appendValue(c.children[0], a.Keys(), i); err != nil {
+				return err
+			}
+			if err := w.appendValue(c.children[1], a.Items(), i); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	switch a := values.(type) {
+	case *array.Boolean:
+		c.bits = append(c.bits, a.Value(row))
+	case *array.Int32:
+		c.addInteger(orcZigZag(int64(a.Value(row))))
+	case *array.Int64:
+		v := a.Value(row)
+		c.addInteger(orcZigZag(v))
+	case *array.Date32:
+		c.addInteger(orcZigZag(int64(a.Value(row))))
+	case *array.Time64:
+		v := int64(a.Value(row))
+		if v < 0 || v >= 86400000000 {
+			return fmt.Errorf("%w: ORC time is outside a day", iceberg.ErrInvalidArgument)
+		}
+		c.addInteger(orcZigZag(v))
+	case *array.Timestamp:
+		v := int64(a.Value(row))
+		unit := int64(1_000_000)
+		switch c.field.Type.(type) {
+		case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+			unit = 1_000_000_000
+		}
+		seconds, fraction := v/unit, v%unit
+		if fraction < 0 {
+			seconds--
+			fraction += unit
+		}
+		c.addInteger(orcZigZag(seconds - 1_420_070_400))
+		if unit == 1_000_000 {
+			fraction *= 1_000
+		}
+		c.addSecondary(orcTimestampNanos(uint64(fraction)))
+	case *array.Float32:
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], math.Float32bits(a.Value(row)))
+		c.data.Write(b[:])
+	case *array.Float64:
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], math.Float64bits(a.Value(row)))
+		c.data.Write(b[:])
+	case *array.String:
+		v := a.Value(row)
+		c.data.WriteString(v)
+		c.addLength(uint64(len(v)))
+	case *array.LargeString:
+		v := a.Value(row)
+		c.data.WriteString(v)
+		c.addLength(uint64(len(v)))
+	case *array.Binary:
+		v := a.Value(row)
+		c.data.Write(v)
+		c.addLength(uint64(len(v)))
+	case *array.LargeBinary:
+		v := a.Value(row)
+		c.data.Write(v)
+		c.addLength(uint64(len(v)))
+	default:
+		return fmt.Errorf("%w: unsupported Arrow ORC input %T", iceberg.ErrNotImplemented, values)
+	}
 
 	return nil
 }
@@ -452,18 +616,24 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 	values := make(map[int]int64, len(w.columns))
 	for _, c := range w.columns {
 		nulls[c.field.ID] = c.nulls
-		values[c.field.ID] = w.rows
+		values[c.field.ID] = int64(len(c.present))
 	}
 	stats := &DataFileStatistics{
 		RecordCount: w.rows, NullValueCounts: nulls, ValueCounts: values,
 		EqualityFieldIDs: append([]int(nil), w.info.EqualityFieldIDs...),
 	}
 
-	return stats.ToDataFile(DataFileOpts{
+	opts := DataFileOpts{
 		Schema: w.info.FileSchema, Spec: w.info.Spec, Path: w.info.FileName,
 		Format: iceberg.OrcFile, Content: w.info.Content, FileSize: w.size,
 		PartitionValues: w.partitionValues, SortOrderID: w.info.SortOrderID,
-	}), nil
+	}
+	if w.info.Content == iceberg.EntryContentPosDeletes && w.hasLastPosition && w.firstPath == w.lastPath {
+		path := w.firstPath
+		opts.ReferencedDataFile = &path
+	}
+
+	return stats.ToDataFile(opts), nil
 }
 
 func (w *orcFileWriter) encode() ([]byte, error) {
@@ -479,34 +649,42 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 			out = append(out, present...)
 			stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(0, columnID, len(present)))
 		}
-		var data []byte
+
 		switch c.kind {
-		case 0:
-			data = orcEncodeByteRLE(orcPackBits(c.bits))
-		case 3, 4, 9, 15, 18:
-			data = orcEncodeIntegers(c.integers)
+		case 12: // STRUCT uses no data stream.
+		case 10, 11: // LIST and MAP store lengths, but no data stream.
+			lengths := orcEncodeIntegers(c.lengths)
+			out = append(out, lengths...)
+			stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(2, columnID, len(lengths)))
 		default:
-			data = c.data.Bytes()
-		}
-		out = append(out, data...)
-		stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(1, columnID, len(data)))
-		if c.kind == 7 || c.kind == 8 {
-			lengthData := orcEncodeIntegers(c.lengths)
-			out = append(out, lengthData...)
-			stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(2, columnID, len(lengthData)))
-		}
-		if c.kind == 9 || c.kind == 18 {
-			secondary := orcEncodeIntegers(c.secondary)
-			out = append(out, secondary...)
-			stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(5, columnID, len(secondary)))
+			var data []byte
+			switch c.kind {
+			case 0:
+				data = orcEncodeByteRLE(orcPackBits(c.bits))
+			case 3, 4, 9, 15, 18:
+				data = orcEncodeIntegers(c.integers)
+			default:
+				data = c.data.Bytes()
+			}
+			out = append(out, data...)
+			stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(1, columnID, len(data)))
+			if c.kind == 7 || c.kind == 8 {
+				lengths := orcEncodeIntegers(c.lengths)
+				out = append(out, lengths...)
+				stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(2, columnID, len(lengths)))
+			}
+			if c.kind == 9 || c.kind == 18 {
+				secondary := orcEncodeIntegers(c.secondary)
+				out = append(out, secondary...)
+				stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(5, columnID, len(secondary)))
+			}
 		}
 	}
 	if orcHasTimestamps(w.columns) {
-		// Declare the writer timezone to preserve wall-clock semantics.
 		stripeFooter = orcPBBytes(stripeFooter, 3, []byte("UTC"))
 	}
 	dataLength := len(out) - 3
-	// One encoding entry for the root and one for each leaf.
+	// Column encodings follow depth-first ORC type IDs, including nested types.
 	for i := 0; i <= len(w.columns); i++ {
 		stripeFooter = orcPBBytes(stripeFooter, 2, orcPBVarint(nil, 1, 0))
 	}
@@ -518,12 +696,12 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 	stripeInfo = orcPBVarint(stripeInfo, 5, uint64(w.rows))
 	root := orcPBVarint(nil, 1, 12) // STRUCT
 	var childIDs []byte
-	for i := range w.columns {
-		childIDs = binary.AppendUvarint(childIDs, uint64(i+1))
+	for _, id := range w.rootIDs {
+		childIDs = binary.AppendUvarint(childIDs, uint64(id+1))
 	}
 	root = orcPBBytes(root, 2, childIDs)
-	for _, c := range w.columns {
-		root = orcPBBytes(root, 3, []byte(c.field.Name))
+	for _, field := range w.info.FileSchema.Fields() {
+		root = orcPBBytes(root, 3, []byte(field.Name))
 	}
 	footer := orcPBVarint(nil, 1, 3)
 	footer = orcPBVarint(footer, 2, uint64(dataLength+len(stripeFooter)))
@@ -531,6 +709,16 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 	footer = orcPBBytes(footer, 4, root)
 	for _, c := range w.columns {
 		t := orcPBVarint(nil, 1, c.kind)
+		if len(c.children) > 0 {
+			var childIDs []byte
+			for _, id := range c.children {
+				childIDs = binary.AppendUvarint(childIDs, uint64(id+1))
+			}
+			t = orcPBBytes(t, 2, childIDs)
+		}
+		for _, name := range c.childNames {
+			t = orcPBBytes(t, 3, []byte(name))
+		}
 		t = orcPBBytes(t, 7, orcPair("iceberg.id", strconv.Itoa(c.field.ID)))
 		t = orcPBBytes(t, 7, orcPair("iceberg.required", strconv.FormatBool(c.field.Required)))
 		if _, ok := c.field.Type.(iceberg.TimeType); ok {
