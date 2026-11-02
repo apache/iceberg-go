@@ -364,9 +364,9 @@ func TestORCNestedStructListAndMap(t *testing.T) {
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
-	ps := raw[len(raw)-1-int(raw[len(raw)-1]):len(raw)-1]
+	ps := raw[len(raw)-1-int(raw[len(raw)-1]) : len(raw)-1]
 	footerSize := int(orcTestVarint(t, ps, 1))
-	footer := raw[len(raw)-1-len(ps)-footerSize:len(raw)-1-len(ps)]
+	footer := raw[len(raw)-1-len(ps)-footerSize : len(raw)-1-len(ps)]
 	types := orcTestFieldBytes(t, footer, 4)
 	require.Len(t, types, 8)
 	require.Equal(t, uint64(12), orcTestVarint(t, types[1], 1))
@@ -417,9 +417,9 @@ func TestORCTimestampUnitAndTimezone(t *testing.T) {
 	require.Equal(t, int64(1), file.Count())
 	raw, err := os.ReadFile(name)
 	require.NoError(t, err)
-	ps := raw[len(raw)-1-int(raw[len(raw)-1]):len(raw)-1]
+	ps := raw[len(raw)-1-int(raw[len(raw)-1]) : len(raw)-1]
 	footerSize := int(orcTestVarint(t, ps, 1))
-	footer := raw[len(raw)-1-len(ps)-footerSize:len(raw)-1-len(ps)]
+	footer := raw[len(raw)-1-len(ps)-footerSize : len(raw)-1-len(ps)]
 	types := orcTestFieldBytes(t, footer, 4)
 	require.Len(t, types, 5)
 	require.Equal(t, uint64(9), orcTestVarint(t, types[1], 1))
