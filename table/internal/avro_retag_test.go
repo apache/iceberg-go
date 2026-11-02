@@ -81,6 +81,46 @@ func TestAvroRejectsIncorrectTimestampPhysicalType(t *testing.T) {
 	}
 }
 
+func TestAvroRetagRejectsIncompatibleBinaryAndDecimalTypes(t *testing.T) {
+	fixed := array.NewData(&arrow.FixedSizeBinaryType{ByteWidth: 8}, 0, nil, nil, 0, 0)
+	defer fixed.Release()
+	got, err := avroRetagData(fixed, &arrow.FixedSizeBinaryType{ByteWidth: 16})
+	require.Nil(t, got)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+	decimal := array.NewData(&arrow.Decimal128Type{Precision: 9, Scale: 2}, 0, nil, nil, 0, 0)
+	defer decimal.Release()
+	got, err = avroRetagData(decimal, &arrow.Decimal128Type{Precision: 9, Scale: 3})
+	require.Nil(t, got)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
+
+func TestAvroRejectsReservedFieldIDs(t *testing.T) {
+	for _, tc := range []struct {
+		id    float64
+		valid bool
+	}{
+		{2147483447, true},
+		{2147483448, false},
+		{2147483647, false},
+	} {
+		field, err := addAvroFieldID(arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int64},
+			map[string]any{"field-id": tc.id}, "field-id", make(map[int]struct{}))
+		if tc.valid {
+			require.NoError(t, err)
+			require.NotEmpty(t, field.Metadata.Keys())
+		} else {
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		}
+	}
+}
+
+func TestAvroReaderErrorIsTerminal(t *testing.T) {
+	reader := &avroRecordReader{readErr: iceberg.ErrInvalidSchema}
+	require.False(t, reader.Next())
+	require.ErrorIs(t, reader.Err(), iceberg.ErrInvalidSchema)
+}
+
 func TestAvroRetagPreservesValidPrimitiveData(t *testing.T) {
 	source := array.NewData(arrow.PrimitiveTypes.Int64, 0, nil, nil, 0, 0)
 	defer source.Release()
