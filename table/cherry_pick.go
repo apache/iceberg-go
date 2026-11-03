@@ -58,7 +58,8 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 
 	source, err := meta.SnapshotByID(snapshotID)
 	if err != nil {
-		return err
+		return fmt.Errorf("cherry-pick source snapshot %d may be unavailable with snapshot-loading-mode=refs: %w",
+			snapshotID, err)
 	}
 	// Check both direct ancestry and earlier cherry-picks. A later snapshot
 	// may have removed the source files, so checking live paths is not enough.
