@@ -86,6 +86,13 @@ in order and runs the producer's validators against the fresh snapshot. It
 submits the commit only if it is still valid. An append staged after a rollback
 is rebuilt on the rollback target.
 
+`RollbackToSnapshot`, `AssertRefSnapshotID`, and `CherryPickSnapshot` pin the
+refs they guard. If a pinned ref moves, the commit fails instead of rewriting
+that assertion to the new head. Cherry-picks can still retry table-level
+conflicts when their pinned refs stay unchanged. A divergent replay onto a new
+branch also pins main; a fast-forward onto a missing branch points directly to
+the source snapshot and does not depend on main.
+
 Each replayed snapshot from a staged write gets the current timestamp, or one
 millisecond after its parent if that is later. Its timestamp reflects the
 attempt that commits it, not staging time.

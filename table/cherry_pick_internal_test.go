@@ -28,7 +28,7 @@ func TestCherryPickSnapshotRejectsMissingSnapshot(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 	err := txn.CherryPickSnapshot(t.Context(), 99999, nil)
 	require.ErrorIs(t, err, ErrSnapshotNotFound)
-	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
+	require.NotContains(t, err.Error(), "snapshot-loading-mode=refs")
 }
 
 func TestCherryPickSnapshotRejectsNonAppendOperation(t *testing.T) {
@@ -60,6 +60,7 @@ func TestCherryPickSnapshotRejectsNonAppendOperation(t *testing.T) {
 // source snapshot or its WAP ID was never published on the target branch.
 func TestCherryPickSnapshotRejectsIncompleteTargetAncestry(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
+	txn.tbl.snapshotHistoryRefsOnly = true
 	source := txn.meta.snapshotList[1]
 
 	missingParent := int64(999)
@@ -77,6 +78,29 @@ func TestCherryPickSnapshotRejectsIncompleteTargetAncestry(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidOperation)
 	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
 	require.Empty(t, txn.pinnedRefs, "rejected cherry-pick must not stage ref fences")
+}
+
+// Expiration legitimately truncates the oldest lineage even when all available
+// snapshots were loaded. Unlike REST refs mode, this is not a reason to reject.
+func TestCherryPickSnapshotAllowsExpiredTargetAncestry(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	source := txn.meta.snapshotList[1]
+	missingParent := int64(999)
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: &missingParent,
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      source.TimestampMs + 1,
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
+	source.Summary.Operation = OpDelete
+
+	err := txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorContains(t, err, "not an append")
+	require.NotContains(t, err.Error(), "incomplete target ancestry")
 }
 
 func TestCherryPickSnapshotChecksContextBeforeManifestIO(t *testing.T) {

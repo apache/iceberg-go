@@ -212,8 +212,16 @@ func TestCherryPickSnapshotRejectsSourceFileAlreadyOnTarget(t *testing.T) {
 	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, tbl, table.MainBranch))
 }
 
+func cherryPickRetryProps() iceberg.Properties {
+	return iceberg.Properties{
+		table.CommitNumRetriesKey:     "2",
+		table.CommitMinRetryWaitMsKey: "1",
+		table.CommitMaxRetryWaitMsKey: "2",
+	}
+}
+
 func TestCherryPickSnapshotRejectsConcurrentTargetMove(t *testing.T) {
-	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
 	source := tbl.SnapshotByName(branchPlanningRef)
 	require.NotNil(t, source)
@@ -227,6 +235,104 @@ func TestCherryPickSnapshotRejectsConcurrentTargetMove(t *testing.T) {
 	_, err := stale.Commit(t.Context())
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	assert.ElementsMatch(t, []int64{1, 3}, idsOnRef(t, tbl, table.MainBranch))
+}
+
+// A fast-forward followed by another append must never rebuild on the old
+// main head when an unrelated branch takes the next table-wide sequence number.
+func TestCherryPickSnapshotFastForwardThenAppendDoesNotLoseFilesOnRetry(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+
+	stale := tbl.NewTransaction()
+	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	reader := idRecordReader(t, tbl, 3)
+	require.NoError(t, stale.Append(t.Context(), reader, nil))
+	reader.Release()
+
+	// The competing writer changes another branch, not main.
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 4)
+	_, err := stale.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.ElementsMatch(t, []int64{1}, idsOnRef(t, tbl, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, tbl, branchPlanningRef))
+}
+
+func TestCherryPickSnapshotRejectsConcurrentReplayTargetMoveWithRetries(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+
+	stale := tbl.NewTransaction()
+	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+	_, err := stale.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.ElementsMatch(t, []int64{1, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
+}
+
+func TestCherryPickSnapshotRejectsConcurrentMainMoveForNewBranch(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+
+	const newTarget = "cherry-target"
+	stale, err := tbl.NewTransactionOnBranch(newTarget)
+	require.NoError(t, err)
+	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+	_, err = stale.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.Nil(t, tbl.SnapshotByName(newTarget))
+	assert.ElementsMatch(t, []int64{1, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
+}
+
+func TestCherryPickSnapshotFastForwardsRootToEmptyMain(t *testing.T) {
+	tbl := newBranchPlanningTable(t, nil)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 1)
+	require.Nil(t, tbl.CurrentSnapshot())
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	require.Nil(t, source.ParentSnapshotID)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := txn.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, source.SnapshotID, result.CurrentSnapshot().SnapshotID)
+	assert.ElementsMatch(t, []int64{1}, idsOnRef(t, result, table.MainBranch))
+}
+
+func TestCherryPickSnapshotFailedReplayDoesNotPinTransaction(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	dataPaths, _ := liveFilesOnRef(t, tbl, branchPlanningRef)
+	mainPaths, _ := liveFilesOnRef(t, tbl, table.MainBranch)
+	var sourcePath string
+	for _, path := range dataPaths {
+		if path != mainPaths[0] {
+			sourcePath = path
+		}
+	}
+	require.NotEmpty(t, sourcePath)
+	importTxn := tbl.NewTransaction()
+	require.NoError(t, importTxn.AddDataFilesByPath(t.Context(), []string{sourcePath}, nil, false))
+	tbl, err := importTxn.Commit(t.Context())
+	require.NoError(t, err)
+
+	stale := tbl.NewTransaction()
+	err = stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
+	require.ErrorContains(t, err, "already referenced")
+	require.NoError(t, stale.SetProperties(iceberg.Properties{"cherry-pick-failed-no-pin": "yes"}))
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+	result, err := stale.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "yes", result.Metadata().Properties()["cherry-pick-failed-no-pin"])
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, table.MainBranch))
 }
 
 func TestCherryPickSnapshotRejectsV3RowLineageReuse(t *testing.T) {

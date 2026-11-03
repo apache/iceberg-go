@@ -90,15 +90,15 @@ type Transaction struct {
 
 	// noReplay marks the commit as non-replayable: on a CAS conflict
 	// doCommit fails instead of refreshing and replaying. Set by
-	// snapshot producers whose staged snapshot carries delete-file
-	// removals; see the flag site in commitManifests.
+	// snapshot producers whose staged snapshot carries delete-file removals
+	// and by cherry-pick fast-forwards that precede later staged writes.
 	noReplay bool
 
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
-	// the commit: those from AssertRefSnapshotID and RollbackToSnapshot.
-	// doCommit's refresh-and-replay must not rewrite their assertions to
-	// the fresh head between retries, so a ref that has changed fails the
-	// commit.
+	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot,
+	// and CherryPickSnapshot. doCommit's refresh-and-replay must not rewrite
+	// their assertions to the fresh head between retries, so a ref that has
+	// changed fails the commit.
 	pinnedRefs map[string]struct{}
 
 	expirations []expirationRecord
@@ -484,6 +484,17 @@ func (t *Transaction) AssertRefSnapshotID(branch string) error {
 // hold of t.mx, so a concurrent Commit sees both or neither, and a failed
 // apply publishes no pins.
 func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []string) error {
+	return t.applyPinnedWithReplayPolicy(updates, reqs, refs, false)
+}
+
+// applyPinnedNoReplay atomically stages a ref move and forbids any CAS replay.
+// A later snapshot in the same transaction must not be rebuilt against the
+// pre-move head if another branch changed concurrently.
+func (t *Transaction) applyPinnedNoReplay(updates []Update, reqs []Requirement, refs []string) error {
+	return t.applyPinnedWithReplayPolicy(updates, reqs, refs, true)
+}
+
+func (t *Transaction) applyPinnedWithReplayPolicy(updates []Update, reqs []Requirement, refs []string, noReplay bool) error {
 	if err := t.checkNotNil(); err != nil {
 		return err
 	}
@@ -498,6 +509,9 @@ func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []s
 	}
 	for _, ref := range refs {
 		t.pinnedRefs[ref] = struct{}{}
+	}
+	if noReplay {
+		t.noReplay = true
 	}
 
 	return nil
