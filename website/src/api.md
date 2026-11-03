@@ -491,6 +491,10 @@ err = txn.ReplaceBranch("main", snapshotID)
 // Or use ReplaceBranchFromRef("main", "audit"), which can create a missing target.
 ```
 
+For a non-main target, call `tbl.NewTransactionOnBranch(target)` rather than
+`tbl.NewTransaction()`. The latter uses `main` as its commit branch, so a
+concurrent append to `main` can reject an otherwise independent promotion.
+
 Existing branch retention settings are preserved. Both the target and source
 snapshot IDs are pinned when promoting from a ref, and the target is pinned
 when replacing by ID. A pinned ref that moves prevents the normal retry of

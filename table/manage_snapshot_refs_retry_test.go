@@ -30,6 +30,37 @@ import (
 // promotion before rebuilding the append. Otherwise the append inherits main's
 // old files instead of the audited branch's files.
 func TestBranchPromotionAppendRetryKeepsAuditAncestry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(*Transaction) error
+	}{
+		{"fast-forward from branch", func(tx *Transaction) error {
+			return tx.FastForwardBranch(MainBranch, "audit")
+		}},
+		{"replace from branch", func(tx *Transaction) error {
+			return tx.ReplaceBranchFromRef(MainBranch, "audit")
+		}},
+		{"replace from tag", func(tx *Transaction) error {
+			return tx.ReplaceBranchFromRef(MainBranch, "release")
+		}},
+		{"replace by ID", func(tx *Transaction) error {
+			return tx.ReplaceBranch(MainBranch, 300)
+		}},
+		{"two staged moves", func(tx *Transaction) error {
+			if err := tx.ReplaceBranch(MainBranch, 200); err != nil {
+				return err
+			}
+			return tx.FastForwardBranch(MainBranch, "audit")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testBranchPromotionAppendRetryKeepsAuditAncestry(t, tc.stage)
+		})
+	}
+}
+
+func testBranchPromotionAppendRetryKeepsAuditAncestry(t *testing.T, stage func(*Transaction) error) {
+	t.Helper()
 	base := manageSnapshotRefsFixture(t)
 	baseBuilder, err := MetadataBuilderFromBase(base, "")
 	require.NoError(t, err)
@@ -57,7 +88,7 @@ func TestBranchPromotionAppendRetryKeepsAuditAncestry(t *testing.T) {
 	tbl := New(Identifier{"db", "branch-promotion-retry"}, base, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.FastForwardBranch(MainBranch, "audit"))
+	require.NoError(t, stage(tx))
 
 	auditID := int64(300)
 	snap := &Snapshot{

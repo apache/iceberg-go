@@ -40,6 +40,9 @@ import (
 // reload with snapshot-loading-mode=all before calling this method.
 // Use NewTransactionOnBranch(target) for a standalone promotion of a
 // non-main branch, so an unrelated main write does not block the commit.
+// For non-main targets, use Table.NewTransactionOnBranch(target) so an
+// unrelated main head move does not conflict with the transaction's implicit
+// commit-branch requirement.
 // Calls after other ref changes in this transaction use the staged ref heads.
 // A transaction without updates does not contact the catalog.
 func (t *Transaction) FastForwardBranch(target, source string) error {
@@ -51,6 +54,8 @@ func (t *Transaction) FastForwardBranch(target, source string) error {
 // Source may be a branch or tag and is left unchanged. If target is absent,
 // it is created as a branch with default retention; otherwise the target
 // branch retains its existing retention settings.
+// For non-main targets, use Table.NewTransactionOnBranch(target) to avoid
+// requiring main to remain unchanged during the commit.
 //
 // Both ref heads are pinned to their base snapshot IDs, so concurrent head
 // moves fail the commit and prevent the normal retry of a co-staged append.
@@ -109,6 +114,8 @@ func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) e
 // ancestry restriction. Unlike FastForwardBranch, this can move a branch
 // backwards or onto a different lineage. The branch must already exist; its
 // retention settings are preserved from the transaction's metadata.
+// For non-main targets, use Table.NewTransactionOnBranch(name) to avoid
+// requiring main to remain unchanged during the commit.
 //
 // Commit pins the target's snapshot ID, preventing the normal retry of a
 // co-staged append when the branch moves. No catalog's snapshot-ID requirement
