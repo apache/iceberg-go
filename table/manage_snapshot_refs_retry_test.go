@@ -133,17 +133,39 @@ func testBranchPromotionAppendRetryKeepsAuditAncestry(t *testing.T, stage func(*
 // second append after replacing the branch head with an older lineage. The
 // second append must not reuse the first one's table-wide sequence number.
 func TestBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			testBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t, version)
+		})
+	}
+}
+
+func testBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T, version int) {
+	t.Helper()
 	base := manageSnapshotRefsRetryFixture(t)
+	if version == 3 {
+		upgrade, err := MetadataBuilderFromBase(base, "")
+		require.NoError(t, err)
+		require.NoError(t, upgrade.SetFormatVersion(3))
+		base, err = upgrade.Build()
+		require.NoError(t, err)
+	}
 	peer, err := MetadataBuilderFromBase(base, "")
 	require.NoError(t, err)
 	diverged := int64(900)
-	require.NoError(t, peer.AddSnapshot(&Snapshot{
+	peerSnapshot := &Snapshot{
 		SnapshotID:       901,
 		ParentSnapshotID: &diverged,
 		SequenceNumber:   base.LastSequenceNumber() + 1,
 		TimestampMs:      base.LastUpdatedMillis() + 1000,
 		Summary:          &Summary{Operation: OpAppend},
-	}))
+	}
+	if version == 3 {
+		first, rows := int64(0), int64(5)
+		peerSnapshot.FirstRowID = &first
+		peerSnapshot.AddedRows = &rows
+	}
+	require.NoError(t, peer.AddSnapshot(peerSnapshot))
 	require.NoError(t, peer.SetSnapshotRef("diverged", 901, BranchRef))
 	catalogMeta, err := peer.Build()
 	require.NoError(t, err)
@@ -163,6 +185,15 @@ func TestBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T) 
 			ManifestList:     fmt.Sprintf("original-%d.avro", snapshotID),
 			Summary:          &Summary{Operation: OpAppend},
 		}
+		if version == 3 {
+			first := int64(0)
+			if snapshotID == 1002 {
+				first = 10
+			}
+			rows := int64(10)
+			snap.FirstRowID = &first
+			snap.AddedRows = &rows
+		}
 		add := NewAddSnapshotUpdate(snap)
 		add.rebuildManifestList = func(_ context.Context, fresh Metadata, parent *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
 			require.NotNil(t, parent)
@@ -170,6 +201,13 @@ func TestBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T) 
 			id := parent.SnapshotID
 			rebuilt.ParentSnapshotID = &id
 			rebuilt.SequenceNumber = max(fresh.LastSequenceNumber(), parent.SequenceNumber) + 1
+			if version == 3 {
+				first := fresh.NextRowID()
+				if parent.FirstRowID != nil && parent.AddedRows != nil {
+					first = max(first, *parent.FirstRowID+*parent.AddedRows)
+				}
+				rebuilt.FirstRowID = &first
+			}
 			rebuilt.ManifestList = fmt.Sprintf("rebuilt-%d.avro", snapshotID)
 
 			return &rebuilt, nil
@@ -197,4 +235,11 @@ func TestBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T) 
 	assert.Equal(t, int64(300), *second.ParentSnapshotID)
 	assert.Greater(t, second.SequenceNumber, first.SequenceNumber)
 	assert.Equal(t, int64(1002), committed.CurrentSnapshot().SnapshotID)
+	if version == 3 {
+		require.NotNil(t, first.FirstRowID)
+		require.NotNil(t, second.FirstRowID)
+		assert.Equal(t, int64(5), *first.FirstRowID)
+		assert.Equal(t, int64(15), *second.FirstRowID)
+		assert.Equal(t, int64(25), committed.Metadata().NextRowID())
+	}
 }
