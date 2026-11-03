@@ -96,10 +96,6 @@ func (t Table) RewritePositionDeleteFiles(
 	if err != nil {
 		return nil, 0, err
 	}
-	wfs, err := requireWriteFileIO(fs)
-	if err != nil {
-		return nil, 0, err
-	}
 	manifests, err := t.CurrentSnapshot().Manifests(fs)
 	if err != nil {
 		return nil, 0, err
@@ -200,6 +196,11 @@ func (t Table) RewritePositionDeleteFiles(
 
 		return strings.Compare(a.group.files[0].FilePath(), b.group.files[0].FilePath())
 	})
+
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	txn := t.NewTransaction()
 	if err := txn.AssertRefSnapshotID(""); err != nil {
@@ -388,11 +389,11 @@ func sortUniquePositionDeleteRows(rows []positionDeleteRow) []positionDeleteRow 
 	return slices.Compact(rows)
 }
 
-
 // A delete file's statistics can help planning, but do not establish an
 // explicit one-file scope for dropping rows during maintenance.
 func rewritePositionDeletePathInScope(df iceberg.DataFile, path string) bool {
 	target := explicitReferencedDataFile(df)
+
 	return target == "" || target == path
 }
 

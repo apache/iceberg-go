@@ -100,3 +100,60 @@ func TestRewritePositionDeleteFilesCommit(t *testing.T) {
 	_, _, err = tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 }
+
+func TestRewritePositionDeleteFilesDropsDanglingRowsFromUnscopedFiles(t *testing.T) {
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	a := tbl.Location() + "/data/a.parquet"
+	b := tbl.Location() + "/data/b.parquet"
+	dangling := tbl.Location() + "/data/removed.parquet"
+	writeParquetFile(t, a, schema, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	writeParquetFile(t, b, schema, `[{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{a, b}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	var deletes []iceberg.DataFile
+	for i := range 2 {
+		path := fmt.Sprintf("%s/data/unscoped-delete-%d.parquet", tbl.Location(), i)
+		writeParquetFile(t, path, table.PositionalDeleteArrowSchema, fmt.Sprintf(
+			`[{"file_path":%q,"pos":1},{"file_path":%q,"pos":0},{"file_path":%q,"pos":0}]`, a, b, dangling))
+		builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentPosDeletes, path, iceberg.ParquetFile, nil, nil, nil, 3, 128)
+		require.NoError(t, err)
+		deletes = append(deletes, builder.Build())
+	}
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(deletes...).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 4}, scanIDs(t, tbl))
+
+	updated, removed, err := tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 2, removed)
+	require.ElementsMatch(t, []int64{1, 4}, scanIDs(t, updated))
+
+	tasks, err := updated.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	var replacement iceberg.DataFile
+	for _, task := range tasks {
+		require.Len(t, task.DeleteFiles, 1)
+		if replacement == nil {
+			replacement = task.DeleteFiles[0]
+		}
+		require.Equal(t, replacement.FilePath(), task.DeleteFiles[0].FilePath())
+	}
+	require.Nil(t, replacement.ReferencedDataFile())
+	require.Equal(t, int64(2), replacement.Count(), "drop dangling and duplicate delete positions")
+
+	again, removed, err := updated.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	require.NoError(t, err)
+	require.Zero(t, removed)
+	require.Equal(t, updated.Metadata(), again.Metadata())
+}

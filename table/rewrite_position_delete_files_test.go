@@ -85,7 +85,6 @@ func TestRewritePositionDeleteFilesRejectsV3(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
 
-
 func TestRewritePositionDeletePathInScope(t *testing.T) {
 	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
 		iceberg.EntryContentPosDeletes, "delete.parquet", iceberg.ParquetFile,
