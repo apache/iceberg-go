@@ -254,7 +254,14 @@ func TestValidateSnapshotRejectsUnknownSnapshot(t *testing.T) {
 	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), 999)
 	require.Error(t, err)
 	assert.Nil(t, report)
-	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.ErrorIs(t, err, ErrSnapshotNotFound)
+}
+
+func TestValidateSnapshotWithoutMetadata(t *testing.T) {
+	var tbl Table
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.Nil(t, report)
 }
 
 func TestValidateSnapshotV1RejectsIncompatibleManifestDescriptor(t *testing.T) {

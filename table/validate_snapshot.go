@@ -98,12 +98,12 @@ func (r SnapshotValidationReport) Valid() bool {
 func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*SnapshotValidationReport, error) {
 	t := i.tbl
 	if t.metadata == nil {
-		return nil, fmt.Errorf("%w: table metadata is nil", iceberg.ErrInvalidArgument)
+		return nil, fmt.Errorf("%w: table metadata is nil", ErrInvalidMetadata)
 	}
 
 	snapshot := t.metadata.SnapshotByID(snapshotID)
 	if snapshot == nil {
-		return nil, fmt.Errorf("%w: snapshot %d not found", iceberg.ErrInvalidArgument, snapshotID)
+		return nil, fmt.Errorf("%w: snapshot %d not found", ErrSnapshotNotFound, snapshotID)
 	}
 	report := &SnapshotValidationReport{SnapshotID: snapshotID}
 	if err := ctx.Err(); err != nil {
