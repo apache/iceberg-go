@@ -144,7 +144,9 @@ func decideDanglingDeleteFiles(
 
 		switch df.ContentType() {
 		case iceberg.EntryContentPosDeletes:
-			if target := referencedDataFilePath(df); target != "" {
+			// Only an explicit referenced_data_file narrows applicability to one path.
+			// Equal file_path bounds are statistics, not a deletion scope.
+			if target := explicitReferencedDataFile(df); target != "" {
 				data, ok := dataByPath[target]
 				if ok && data.partition == key && data.sequence <= candidate.sequence {
 					continue
