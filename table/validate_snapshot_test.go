@@ -194,7 +194,11 @@ func TestEmbeddedValidationSpecIDV1OptionalHeaders(t *testing.T) {
 	})
 	const path = "mem://validation/legacy-v1.avro"
 	var original bytes.Buffer
-	_, err := iceberg.WriteManifest(path, &original, 1, spec, simpleSchema(), snapshotValidationTestID, nil)
+	snapshotID := snapshotValidationTestID
+	entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil,
+		newTestDataFile(t, spec, "file://header-fixture.parquet", map[int]any{1000: int32(1)}))
+	_, err := iceberg.WriteManifest(path, &original, 1, spec, simpleSchema(), snapshotID,
+		[]iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
 	reader, err := ocf.NewReader(bytes.NewReader(original.Bytes()))
 	require.NoError(t, err)
