@@ -24,6 +24,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
 
@@ -50,10 +51,8 @@ func (t *Transaction) dynamicOverwriteSpec() (*iceberg.PartitionSpec, error) {
 		return nil, err
 	}
 
-	if meta.formatVersion >= 3 {
-		// Row lineage in v3 needs dedicated first-row-ID reassignment when
-		// replacing partitions. Do not use rewrite semantics to bypass it.
-		return nil, fmt.Errorf("%w: dynamic partition overwrite does not support format v3 row lineage", ErrInvalidOperation)
+	if meta.formatVersion > 3 {
+		return nil, fmt.Errorf("%w: dynamic partition overwrite does not support format v%d", ErrInvalidOperation, meta.formatVersion)
 	}
 
 	spec, err := meta.CurrentSpec()
@@ -70,28 +69,97 @@ func (t *Transaction) dynamicOverwriteSpec() (*iceberg.PartitionSpec, error) {
 	return spec, nil
 }
 
-// DynamicPartitionOverwriteDataFiles atomically replaces all live data files
-// in the partitions represented by filesToAdd. Other partitions are unchanged.
-// An unpartitioned table has one logical partition, so a non-empty input
-// replaces all of its data, matching Java's ReplacePartitions operation.
+// checkDynamicOverwriteExistingSpecs rejects live files under older specs
+// before an Arrow writer creates data files. Different partition transforms
+// cannot be compared safely by comparing their stored partition tuples.
+func (t *Transaction) checkDynamicOverwriteExistingSpecs(ctx context.Context, fs iceio.IO, specID int) error {
+	snapshot := t.planningSnapshot(t.meta)
+	if snapshot == nil {
+		return nil
+	}
+	manifests, err := snapshot.Manifests(fs)
+	if err != nil {
+		return fmt.Errorf("dynamic partition overwrite: read manifests: %w", err)
+	}
+	for _, manifest := range manifests {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if int(manifest.PartitionSpecID()) == specID {
+			continue
+		}
+		for entry, err := range manifest.Entries(fs, true) {
+			if err != nil {
+				return fmt.Errorf("dynamic partition overwrite: read manifest %s: %w", manifest.FilePath(), err)
+			}
+			return fmt.Errorf("%w: dynamic partition overwrite cannot replace live file %q under partition spec %d (current %d)",
+				ErrInvalidOperation, entry.DataFile().FilePath(), manifest.PartitionSpecID(), specID)
+		}
+	}
+	return nil
+}
+
+// validateDynamicOverwriteConflicts uses exact stored partition tuples so
+// transformed and null partitions cannot become false-negative row predicates.
+// It rejects concurrent additions and removals in touched partitions while
+// allowing unrelated partition appends during refresh-and-replay.
+func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, touched map[string]struct{}) error {
+	if cc == nil || len(cc.concurrent) == 0 {
+		return nil
+	}
+	for _, snapshot := range cc.concurrent {
+		manifests, err := cc.manifestsFor(snapshot)
+		if err != nil {
+			return fmt.Errorf("dynamic partition overwrite: concurrent manifests for snapshot %d: %w", snapshot.SnapshotID, err)
+		}
+		for _, manifest := range manifests {
+			for entry, err := range manifest.Entries(cc.manifestReadIO(), false) {
+				if err != nil {
+					return fmt.Errorf("dynamic partition overwrite: read concurrent manifest %s: %w", manifest.FilePath(), err)
+				}
+				if entry.SnapshotID() != snapshot.SnapshotID || entry.Status() == iceberg.EntryStatusEXISTING {
+					continue
+				}
+				file := entry.DataFile()
+				conflict := ErrConflictingDataFiles
+				if file.ContentType() != iceberg.EntryContentData {
+					conflict = ErrConflictingDeleteFiles
+				}
+				if int(file.SpecID()) != specID {
+					return fmt.Errorf("%w: concurrent snapshot %d changed file %q under partition spec %d (current %d)",
+						conflict, snapshot.SnapshotID, file.FilePath(), file.SpecID(), specID)
+				}
+				key, err := canonicalPartitionKey(file.SpecID(), dataFilePartition(file))
+				if err != nil {
+					return fmt.Errorf("dynamic partition overwrite: concurrent file %q: %w", file.FilePath(), err)
+				}
+				if _, ok := touched[key]; ok {
+					return fmt.Errorf("%w: concurrent snapshot %d changed file %q in an overwritten partition",
+						conflict, snapshot.SnapshotID, file.FilePath())
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// DynamicPartitionOverwriteDataFiles atomically replaces all live data in
+// the partitions represented by filesToAdd. Empty input is a no-op; an
+// unpartitioned table has one partition. New partitions still use OpOverwrite.
 //
-// The added files must use the table's current partition spec. Existing live
-// data files must use that spec as well: overlapping partitions from an older
-// spec cannot be identified by comparing tuples from different transforms.
-// Rather than silently leave stale rows, this operation rejects mixed-spec
-// tables. It supports identity and transformed partition fields alike.
+// Added and existing live files must use the table's current partition spec.
+// Supports v1-v3, including v3 row lineage and associated deletion vectors.
+// Concurrent writes to touched partitions fail while independent appends to
+// other partitions can be retried unless delete-file removal prevents replay.
+// A missing target branch is pinned together with main to guard its origin.
+// Default partition and sort order changes also fail.
 //
-// The operation pins the target branch head and default table shape. A
-// concurrent snapshot commit or partition evolution fails instead of silently
-// leaving newly appended files in a replaced partition. This also means the
-// method should run on a fresh transaction, before other staged snapshot or
-// schema/spec changes.
-//
-// An empty input is a no-op. Format-v3 tables are rejected. All files must be pre-written and have valid DataFile metadata,
-// just as with AddDataFiles. Uncommitted files remain the caller's responsibility
-// if staging or the eventual transaction commit fails.
+// All input files must already exist. Uncommitted data files remain the
+// caller's responsibility after a staging or commit failure. By default this
+// sets the table's name mapping; WithoutAutoNameMapping disables that step.
+// WithoutDuplicateCheck is ignored to avoid adding an already live file twice.
 func (t *Transaction) DynamicPartitionOverwriteDataFiles(
-	ctx context.Context, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties,
+	ctx context.Context, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption,
 ) error {
 	spec, err := t.dynamicOverwriteSpec()
 	if err != nil {
@@ -102,6 +170,14 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+
+	var cfg dataFileCfg
+	for _, option := range opts {
+		option(&cfg)
+	}
+	if cfg.rewriteSemantics {
+		return fmt.Errorf("%w: dynamic partition overwrite cannot use data-preserving rewrite semantics", ErrInvalidOperation)
 	}
 
 	addedPaths, err := t.validateDataFilesToAdd(filesToAdd, "DynamicPartitionOverwriteDataFiles", true)
@@ -119,12 +195,19 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	if err != nil {
 		return err
 	}
+	if err := t.checkDynamicOverwriteExistingSpecs(ctx, fs, spec.ID()); err != nil {
+		return err
+	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
+	}
 
 	keys, err := dynamicPartitionKeys(filesToAdd)
 	if err != nil {
 		return err
 	}
-	var toDelete []iceberg.DataFile
+	var toDelete, deleteFilesToRemove []iceberg.DataFile
 	validationPlan := newPartitionValidationPlan(spec)
 	if snapshot := t.planningSnapshot(t.meta); snapshot != nil {
 		for df, err := range snapshot.dataFiles(fs, nil) {
@@ -156,63 +239,122 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 				toDelete = append(toDelete, df)
 			}
 		}
+
+		// A replaced partition has no surviving data that its old equality
+		// or position deletes should affect. Deletion vectors are tied to a
+		// particular data file and are removed separately with that file.
+		for entry, err := range snapshot.entries(fs, iceberg.ManifestContentDeletes, true) {
+			if err != nil {
+				return fmt.Errorf("dynamic partition overwrite: read delete files: %w", err)
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			df := entry.DataFile()
+			if _, exists := addedPaths[df.FilePath()]; exists {
+				return fmt.Errorf("%w: added file %q already exists as a delete file", ErrInvalidOperation, df.FilePath())
+			}
+			if IsDeletionVector(df) {
+				continue
+			}
+			if int(df.SpecID()) != spec.ID() {
+				return fmt.Errorf("%w: dynamic partition overwrite cannot replace deletes under spec %d (current %d)",
+					ErrInvalidOperation, df.SpecID(), spec.ID())
+			}
+			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
+			if err != nil {
+				return fmt.Errorf("dynamic partition overwrite live delete file %q: %w", df.FilePath(), err)
+			}
+			if _, touched := keys[key]; touched {
+				deleteFilesToRemove = append(deleteFilesToRemove, df)
+			}
+		}
 	}
 
+	var dvs liveDeletionVectors
+	if t.meta.formatVersion >= 3 && len(toDelete) != 0 {
+		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+			return err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	// A ref fence is important even if no files matched: an append to
-	// touched partition between planning and commit must not survive.
 	if err := t.AssertDefaultShape(); err != nil {
 		return err
 	}
-	if err := t.AssertRefSnapshotID(""); err != nil {
-		return err
+	branch := t.branch
+	if branch == "" {
+		branch = MainBranch
+	}
+	if t.baseRefSnapshotID(branch) == nil {
+		if err := t.AssertRefSnapshotID(branch); err != nil {
+			return err
+		}
+		if branch != MainBranch {
+			if err := t.AssertRefSnapshotID(MainBranch); err != nil {
+				return err
+			}
+		}
+	}
+
+	if !cfg.skipAutoNameMapping {
+		if err := t.ensureNameMapping(); err != nil {
+			return err
+		}
 	}
 
 	props := make(iceberg.Properties, len(snapshotProps)+1)
 	maps.Copy(props, snapshotProps)
 	props["replace-partitions"] = "true"
 
-	if len(toDelete) == 0 {
-		// ReplaceDataFiles delegates additions without removals to AddDataFiles,
-		// recording an append snapshot. ReplacePartitions must produce an
-		// overwrite snapshot even when it creates a previously empty partition:
-		// the operation type is part of Iceberg's cherry-pick semantics.
-		if err := t.ensureNameMapping(); err != nil {
-			return err
-		}
-		wfs, err := requireWriteFileIO(fs)
-		if err != nil {
-			return err
-		}
-		commitUUID := uuid.New()
-		producer := newOverwriteFilesProducer(OpOverwrite, t, wfs, &commitUUID, props)
-		for _, file := range filesToAdd {
-			producer.appendDataFile(file)
-		}
-		updates, reqs, err := producer.commit(ctx)
-		if err != nil {
-			return err
-		}
-
-		return t.apply(updates, reqs)
+	// Use one producer for additions and removals. In contrast,
+	// ReplaceDataFiles would scan manifests again and produce an append
+	// operation when there are no existing files in the touched partitions.
+	producer := newOverwriteFilesProducer(OpOverwrite, t, wfs, nil, props)
+	producer.setSkipDefaultValidator(true)
+	for _, file := range toDelete {
+		dvs.removeDataFile(producer, file)
+	}
+	for _, file := range deleteFilesToRemove {
+		producer.removeDeleteFile(file)
+	}
+	for _, file := range filesToAdd {
+		producer.appendDataFile(file)
+	}
+	updates, reqs, err := producer.commit(ctx)
+	if err != nil {
+		return err
 	}
 
-	return t.ReplaceDataFiles(ctx, toDelete, filesToAdd, props)
+	// Publish the staged snapshot and validator together so concurrent
+	// Commit cannot see one without the other.
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	t.validators = append(t.validators, func(cc *conflictContext) error {
+		return validateDynamicOverwriteConflicts(cc, spec.ID(), keys)
+	})
+	return nil
 }
 
 // DynamicPartitionOverwrite writes Arrow records to data files and replaces
-// only the partitions represented by the written records. In particular,
-// an empty reader never clears existing partitions.
+// only the partitions represented by the written records. Empty input is
+// a no-op. Supports v1-v3 and rejects live files under other partition specs.
+// Concurrent touched-partition changes fail; removal of delete files or DVs
+// prevents replay. Written files remain the caller's responsibility after
+// failure. Pass WithoutAutoNameMapping to avoid changing that property.
 func (t *Transaction) DynamicPartitionOverwrite(
-	ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties,
+	ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...WriteOption,
 ) error {
 	if rdr == nil {
 		return fmt.Errorf("%w: nil record reader for dynamic partition overwrite", ErrInvalidOperation)
 	}
-	if _, err := t.dynamicOverwriteSpec(); err != nil {
+	spec, err := t.dynamicOverwriteSpec()
+	if err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -225,6 +367,9 @@ func (t *Transaction) DynamicPartitionOverwrite(
 	}
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
+		return err
+	}
+	if err := t.checkDynamicOverwriteExistingSpecs(ctx, fs, spec.ID()); err != nil {
 		return err
 	}
 	wfs, err := requireWriteFileIO(fs)
@@ -248,13 +393,14 @@ func (t *Transaction) DynamicPartitionOverwrite(
 		written = append(written, df)
 	}
 
-	return t.DynamicPartitionOverwriteDataFiles(ctx, written, snapshotProps)
+	return t.DynamicPartitionOverwriteDataFiles(ctx, written, snapshotProps, opts...)
 }
 
 // DynamicPartitionOverwriteTable is the Arrow-table variant of
-// DynamicPartitionOverwrite.
+// DynamicPartitionOverwrite. It shares the v3, mixed-spec, concurrency and
+// uncommitted-file behavior of the record-reader method.
 func (t *Transaction) DynamicPartitionOverwriteTable(
-	ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties,
+	ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties, opts ...WriteOption,
 ) error {
 	if tbl == nil {
 		return fmt.Errorf("%w: nil Arrow table for dynamic partition overwrite", ErrInvalidOperation)
@@ -262,15 +408,16 @@ func (t *Transaction) DynamicPartitionOverwriteTable(
 	rdr := array.NewTableReader(tbl, batchSize)
 	defer rdr.Release()
 
-	return t.DynamicPartitionOverwrite(ctx, rdr, snapshotProps)
+	return t.DynamicPartitionOverwrite(ctx, rdr, snapshotProps, opts...)
 }
 
 // DynamicPartitionOverwrite commits a dynamic overwrite in one transaction.
+// It shares the mixed-spec, v3, concurrency and uncommitted-file rules above.
 func (t Table) DynamicPartitionOverwrite(
-	ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties,
+	ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...WriteOption,
 ) (*Table, error) {
 	txn := t.NewTransaction()
-	if err := txn.DynamicPartitionOverwrite(ctx, rdr, snapshotProps); err != nil {
+	if err := txn.DynamicPartitionOverwrite(ctx, rdr, snapshotProps, opts...); err != nil {
 		return nil, err
 	}
 
@@ -278,11 +425,12 @@ func (t Table) DynamicPartitionOverwrite(
 }
 
 // DynamicPartitionOverwriteTable is the Arrow-table convenience wrapper.
+// It shares the mixed-spec, v3, concurrency and uncommitted-file rules above.
 func (t Table) DynamicPartitionOverwriteTable(
-	ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties,
+	ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties, opts ...WriteOption,
 ) (*Table, error) {
 	txn := t.NewTransaction()
-	if err := txn.DynamicPartitionOverwriteTable(ctx, tbl, batchSize, snapshotProps); err != nil {
+	if err := txn.DynamicPartitionOverwriteTable(ctx, tbl, batchSize, snapshotProps, opts...); err != nil {
 		return nil, err
 	}
 
