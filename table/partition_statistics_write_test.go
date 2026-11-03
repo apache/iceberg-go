@@ -20,10 +20,12 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -409,15 +411,61 @@ func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
 			metadata[k] = v
 		}
 	}
-	var rewritten bytes.Buffer
-	writer, err := ocf.NewWriter(&rewritten, reader.Schema(), ocf.WithMetadata(metadata))
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
+	schema := reader.Schema()
 	require.NoError(t, reader.Close())
-	require.NoError(t, fs.WriteFile(t.Context(), "mem://stats/missing.avro", rewritten.Bytes()))
+	writeEmpty := func(path string) {
+		var rewritten bytes.Buffer
+		writer, err := ocf.NewWriter(&rewritten, schema, ocf.WithMetadata(metadata))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, fs.WriteFile(t.Context(), path, rewritten.Bytes()))
+	}
+	const missingID = "mem://stats/missing.avro"
+	writeEmpty(missingID)
 	pt := &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1000, Name: "id", Type: iceberg.Int32Type{}}}}
-	_, err = collectPartitionStatistics(t.Context(), fs, Snapshot{SnapshotID: 1, ManifestLocations: []string{"mem://stats/missing.avro"}}, pt, []iceberg.PartitionSpec{spec})
+	snapshot := Snapshot{SnapshotID: 1, ManifestLocations: []string{missingID}}
+	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec})
+	require.NoError(t, err)
+	require.Empty(t, rows)
+
+	fields := make([]iceberg.PartitionField, 0, spec.NumFields())
+	for _, field := range spec.Fields() {
+		fields = append(fields, field)
+	}
+	duplicateSpec := iceberg.NewPartitionSpecID(spec.ID()+7, fields...)
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec, duplicateSpec})
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+
+	wrongFields := slices.Clone(fields)
+	wrongFields[0].Transform = iceberg.BucketTransform{NumBuckets: 4}
+	wrongSpec := iceberg.NewPartitionSpecID(spec.ID(), wrongFields...)
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{wrongSpec})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	// Historical v1 partition fields may also omit their field IDs.
+	var rawFields []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(metadata["partition-spec"], &rawFields))
+	for _, field := range rawFields {
+		delete(field, "field-id")
+	}
+	metadata["partition-spec"], err = json.Marshal(rawFields)
+	require.NoError(t, err)
+	const missingBoth = "mem://stats/missing-both.avro"
+	writeEmpty(missingBoth)
+	snapshot.ManifestLocations = []string{missingBoth}
+	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec})
+	require.NoError(t, err)
+	require.Empty(t, rows)
+
+	// The generic manifest reader requires an ID, but v1 field IDs are
+	// still optional even if partition-spec-id is present.
+	metadata["partition-spec-id"] = []byte(strconv.Itoa(spec.ID()))
+	const missingFieldIDs = "mem://stats/missing-field-ids.avro"
+	writeEmpty(missingFieldIDs)
+	snapshot.ManifestLocations = []string{missingFieldIDs}
+	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec})
+	require.NoError(t, err)
+	require.Empty(t, rows)
 }
 
 func TestPartitionStatisticsRequiresPartitionFieldIDs(t *testing.T) {
