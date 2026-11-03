@@ -1168,6 +1168,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 				// Keep rebuilding later snapshots if the staged parent was
 				// rebuilt. A set-ref between two appends must not break the chain.
 				chainRebuilt = force || next.rebuilt
+
 				continue
 			}
 			if freshMeta == nil {
@@ -1188,6 +1189,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			}
 			if su.rebuildManifestList == nil {
 				staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: su.Snapshot}
+
 				continue
 			}
 
@@ -1196,6 +1198,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 				stagedSnapshotStillValid(su.Snapshot, freshMeta) {
 				freshHead = su.Snapshot
 				staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: su.Snapshot}
+
 				continue
 			}
 

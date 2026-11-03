@@ -50,6 +50,7 @@ func TestBranchPromotionAppendRetryKeepsAuditAncestry(t *testing.T) {
 			if err := tx.ReplaceBranch(MainBranch, 200); err != nil {
 				return err
 			}
+
 			return tx.FastForwardBranch(MainBranch, "audit")
 		}},
 	} {
