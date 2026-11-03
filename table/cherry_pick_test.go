@@ -397,6 +397,85 @@ func TestCherryPickSnapshotTracksWAPPublication(t *testing.T) {
 	require.ErrorContains(t, err, "already been published")
 }
 
+// Java validates a staged WAP ID against all retained target ancestors, not
+// only snapshots carrying the published-wap-id marker.
+func TestCherryPickSnapshotRejectsWAPIDOnAncestor(t *testing.T) {
+	tbl := newBranchPlanningTable(t, nil)
+	main := tbl.NewTransaction()
+	reader := idRecordReader(t, tbl, 1)
+	require.NoError(t, main.Append(t.Context(), reader, iceberg.Properties{"wap.id": "already-published"}))
+	reader.Release()
+	tbl, err := main.Commit(t.Context())
+	require.NoError(t, err)
+
+	branchTxn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	reader = idRecordReader(t, tbl, 2)
+	require.NoError(t, branchTxn.Append(t.Context(), reader, iceberg.Properties{"wap.id": "already-published"}))
+	reader.Release()
+	tbl, err = branchTxn.Commit(t.Context())
+	require.NoError(t, err)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+
+	txn := tbl.NewTransaction()
+	err = txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "already been published")
+}
+
+func TestCherryPickSnapshotMergeAppendUsesOnlySourceAdditions(t *testing.T) {
+	tbl := newBranchPlanningTable(t, iceberg.Properties{
+		table.ManifestMergeEnabledKey: "true",
+		table.ManifestMinMergeCountKey: "2",
+	})
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 3)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := txn.Commit(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{1, 3, 4}, idsOnRef(t, result, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, branchPlanningRef))
+}
+
+// The source manifest keeps its original spec even when the default evolves.
+// Replaying a file must use its registered spec ID and partition tuple.
+func TestCherryPickSnapshotFromOlderPartitionSpec(t *testing.T) {
+	tbl := newBranchPlanningTable(t, nil)
+	specTxn := tbl.NewTransaction()
+	require.NoError(t, table.NewUpdateSpec(specTxn, true).
+		AddField("id", iceberg.IdentityTransform{}, "id_part").Commit())
+	tbl, err := specTxn.Commit(t.Context())
+	require.NoError(t, err)
+	olderSpec := tbl.Spec().ID()
+
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+
+	specTxn = tbl.NewTransaction()
+	require.NoError(t, table.NewUpdateSpec(specTxn, true).RemoveField("id_part").Commit())
+	tbl, err = specTxn.Commit(t.Context())
+	require.NoError(t, err)
+	require.NotEqual(t, olderSpec, tbl.Spec().ID())
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := txn.Commit(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
+}
+
 func TestCherryPickSnapshotV1FromDivergentBranch(t *testing.T) {
 	tbl := newBranchPlanningTable(t, iceberg.Properties{table.PropertyFormatVersion: "1"})
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1)
