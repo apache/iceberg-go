@@ -291,3 +291,36 @@ func idsInTable(t *testing.T, tbl *table.Table) []int64 {
 
 	return ids
 }
+
+// TestMergeOnReadDeleteSkipsRowsAlreadyDeleted checks that a v2 merge-on-read
+// delete doesn't write position deletes for rows an earlier delete removed.
+// Such deletes change nothing, but they grow the delete files on every update
+// and make the snapshot's total-position-deletes overcount.
+func TestMergeOnReadDeleteSkipsRowsAlreadyDeleted(t *testing.T) {
+	ctx := context.Background()
+	tbl := newMergeOnReadTestTable(t)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+
+	tbl, err = tbl.Delete(ctx, iceberg.IsIn(iceberg.Reference("id"), int64(1), int64(2)), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, []int64{3}, idsInTable(t, tbl))
+	summary := tbl.CurrentSnapshot().Summary.Properties
+	assert.Equal(t, "1", summary["added-position-deletes"], "id=1 was already deleted")
+	assert.Equal(t, "2", summary["total-position-deletes"])
+}
