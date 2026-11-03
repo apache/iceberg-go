@@ -341,3 +341,36 @@ func TestDynamicPartitionOverwriteRejectsStagedDefaultSpecChange(t *testing.T) {
 	require.ErrorIs(t, err, ErrCommitFailed)
 	require.ErrorContains(t, err, "default spec id has changed")
 }
+
+func TestDynamicPartitionOverwriteRemovesOnlyTouchedPartitionDeletes(t *testing.T) {
+	ctx := t.Context()
+	spec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, spec)
+	dataA := newTestDataFile(t, spec, "file://old-a.parquet", map[int]any{1000: int32(1)})
+	dataB := newTestDataFile(t, spec, "file://old-b.parquet", map[int]any{1000: int32(2)})
+	require.NoError(t, seed.AddDataFiles(ctx, []iceberg.DataFile{dataA, dataB}, nil))
+	base, err := seed.meta.Build()
+	require.NoError(t, err)
+	fsF := func(context.Context) (iceio.IO, error) { return fs, nil }
+	tbl := New(Identifier{"db", "tbl"}, base, "metadata.json", fsF, nil)
+
+	deleteA := newTestPosDeleteFileForSpec(t, spec, "file://delete-a.parquet", map[int]any{1000: int32(1)}, dataA.FilePath())
+	deleteB := newTestPosDeleteFileForSpec(t, spec, "file://delete-b.parquet", map[int]any{1000: int32(2)}, dataB.FilePath())
+	addDeletes := tbl.NewTransaction()
+	require.NoError(t, addDeletes.NewRowDelta(nil).AddDeletes(deleteA, deleteB).Commit(ctx))
+	withDeletes, err := addDeletes.meta.Build()
+	require.NoError(t, err)
+
+	overwrite := New(Identifier{"db", "tbl"}, withDeletes, "metadata.json", fsF, nil).NewTransaction()
+	replacement := newTestDataFile(t, spec, "file://new-a.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, overwrite.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil))
+	updated, err := overwrite.meta.Build()
+	require.NoError(t, err)
+	snapshot := updated.CurrentSnapshot()
+	var liveDeletes []string
+	for entry, err := range snapshot.entries(fs, iceberg.ManifestContentDeletes, true) {
+		require.NoError(t, err)
+		liveDeletes = append(liveDeletes, entry.DataFile().FilePath())
+	}
+	require.Equal(t, []string{"file://delete-b.parquet"}, liveDeletes)
+}
