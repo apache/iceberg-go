@@ -325,6 +325,14 @@ func TestReplaceBranch(t *testing.T) {
 			assert.Empty(t, tx.meta.updates)
 		}
 	})
+	t.Run("unknown snapshot keeps error identity and explains refs mode", func(t *testing.T) {
+		base := manageSnapshotRefsFixture(t)
+		tbl, _ := newAssertRefTestTable(t, base, base)
+		err := tbl.NewTransaction().ReplaceBranch("qa", 99999)
+		require.ErrorIs(t, err, ErrSnapshotNotFound)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		assert.ErrorContains(t, err, "snapshot-loading-mode=refs")
+	})
 	t.Run("concurrent target move", func(t *testing.T) {
 		base := manageSnapshotRefsFixture(t)
 		peer, err := MetadataBuilderFromBase(base, "")
