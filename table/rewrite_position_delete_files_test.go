@@ -51,13 +51,19 @@ func TestSplitPositionDeleteRewriteGroup(t *testing.T) {
 		require.NoError(t, err)
 		files = append(files, b.Build())
 	}
-	groups := splitPositionDeleteRewriteGroup(&positionDeleteRewriteGroup{files: files}, 20)
+	sequences := map[string]int64{"a": 2, "b": 9, "c": 5, "d": 7}
+	group := &positionDeleteRewriteGroup{files: files, sequences: sequences}
+	groups := splitPositionDeleteRewriteGroup(group, 20)
 	require.Len(t, groups, 2)
 	require.Equal(t, "a", groups[0].files[0].FilePath())
 	require.Equal(t, "b", groups[0].files[1].FilePath())
+	require.Equal(t, int64(9), groups[0].maxSequence)
+	require.Equal(t, int64(2), groups[0].sequences["a"])
 	require.Equal(t, "c", groups[1].files[0].FilePath())
 	require.Equal(t, "d", groups[1].files[1].FilePath())
-	require.Empty(t, splitPositionDeleteRewriteGroup(&positionDeleteRewriteGroup{files: files}, 9))
+	require.Equal(t, int64(7), groups[1].maxSequence)
+	require.Equal(t, int64(5), groups[1].sequences["c"])
+	require.Empty(t, splitPositionDeleteRewriteGroup(group, 9))
 }
 
 func TestRewritePositionDeleteFilesEmptySnapshot(t *testing.T) {
