@@ -275,6 +275,9 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 		validateManifestEntryCount(report, path, "existing", manifest.ExistingDataFiles(), existing, manifest.Version())
 		validateManifestEntryCount(report, path, "deleted", manifest.DeletedDataFiles(), deleted, manifest.Version())
 	}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 
 	report.Complete = true
 
