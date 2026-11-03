@@ -41,13 +41,14 @@ type PositionDeleteRewriteOptions struct {
 
 type positionDeleteRewriteKey struct {
 	partition string
-	sequence  int64
 }
 
 type positionDeleteRewriteGroup struct {
-	files     []iceberg.DataFile
-	partition map[int]any
-	bytes     int64
+	files       []iceberg.DataFile
+	partition   map[int]any
+	sequences   map[string]int64
+	maxSequence int64
+	bytes       int64
 }
 
 // A job owns a file subset that fits the input budget and minimum count.
@@ -71,10 +72,11 @@ type positionDeleteRow struct {
 // data files that are no longer live in the planning snapshot.
 //
 // Only v2 files in the current partition spec and without the optional "row"
-// payload are selected. Groups never mix partition tuples or data sequence
-// numbers, so the replacement does not change delete applicability. Other
-// files are left untouched. Physical source files remain available to older
-// snapshots after the commit.
+// payload are selected. Groups never mix partition tuples. Each source file's
+// data sequence controls whether its rows are still applicable, while the
+// replacement inherits the maximum source sequence, as in Iceberg Java.
+// Other files are left untouched. Physical source files remain available to
+// older snapshots after the commit.
 func (t Table) RewritePositionDeleteFiles(
 	ctx context.Context, opts PositionDeleteRewriteOptions,
 ) (*Table, int, error) {
@@ -158,13 +160,17 @@ func (t Table) RewritePositionDeleteFiles(
 			if err != nil {
 				return nil, 0, fmt.Errorf("position delete %s: %w", df.FilePath(), err)
 			}
-			key := positionDeleteRewriteKey{partition: partition, sequence: entry.DataSequenceNumber()}
+			key := positionDeleteRewriteKey{partition: partition}
 			group := groups[key]
 			if group == nil {
-				group = &positionDeleteRewriteGroup{partition: df.Partition()}
+				group = &positionDeleteRewriteGroup{
+					partition: df.Partition(), sequences: make(map[string]int64),
+				}
 				groups[key] = group
 			}
 			group.files = append(group.files, df)
+			group.sequences[df.FilePath()] = entry.DataSequenceNumber()
+			group.maxSequence = max(group.maxSequence, entry.DataSequenceNumber())
 			group.bytes += df.FileSizeBytes()
 		}
 	}
@@ -187,13 +193,6 @@ func (t Table) RewritePositionDeleteFiles(
 		if order := strings.Compare(a.key.partition, b.key.partition); order != 0 {
 			return order
 		}
-		if a.key.sequence < b.key.sequence {
-			return -1
-		}
-		if a.key.sequence > b.key.sequence {
-			return 1
-		}
-
 		return strings.Compare(a.group.files[0].FilePath(), b.group.files[0].FilePath())
 	})
 
@@ -277,7 +276,7 @@ func (t Table) RewritePositionDeleteFiles(
 					continue
 				}
 				data, ok := live[path]
-				if !ok || data.partition != key.partition || data.sequence > key.sequence {
+				if !ok || data.partition != key.partition || data.sequence > group.sequences[df.FilePath()] {
 					continue
 				}
 				for _, part := range chunk.Chunks() {
@@ -324,7 +323,7 @@ func (t Table) RewritePositionDeleteFiles(
 			if err != nil {
 				return nil, 0, err
 			}
-			rewrite.AddDeleteFileWithDataSequenceNumber(newFile, key.sequence)
+			rewrite.AddDeleteFileWithDataSequenceNumber(newFile, group.maxSequence)
 		}
 		for _, df := range group.files {
 			rewrite.DeleteFile(df)
@@ -358,10 +357,11 @@ func splitPositionDeleteRewriteGroup(group *positionDeleteRewriteGroup, limit in
 			continue
 		}
 		if current == nil || size > limit-current.bytes {
-			current = &positionDeleteRewriteGroup{partition: group.partition}
+			current = &positionDeleteRewriteGroup{partition: group.partition, sequences: group.sequences}
 			groups = append(groups, current)
 		}
 		current.files = append(current.files, file)
+		current.maxSequence = max(current.maxSequence, group.sequences[file.FilePath()])
 		current.bytes += size
 	}
 
