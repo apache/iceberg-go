@@ -188,8 +188,25 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	if len(added) == 0 {
 		// Empty append snapshots are still valid commits and must move the
 		// target branch head, including when recording ingestion progress.
-		return t.AddDataFilesByPath(ctx, nil, props, false)
+		// Commit an empty append directly instead of setting name mapping as
+		// a side effect of AddDataFilesByPath.
+		wfs, err := requireWriteFileIO(fs)
+		if err != nil {
+			return err
+		}
+		meta, err := t.txnMeta()
+		if err != nil {
+			return err
+		}
+		updates, reqs, err := t.appendSnapshotProducer(meta, wfs, props).commit(ctx)
+		if err != nil {
+			return err
+		}
+
+		return t.apply(updates, reqs)
 	}
 
-	return t.AddDataFiles(ctx, added, props)
+	// The files already belong to this table. Cherry-picking does not need
+	// to modify its schema name mapping, which some catalogs disallow.
+	return t.AddDataFiles(ctx, added, props, WithoutAutoNameMapping())
 }
