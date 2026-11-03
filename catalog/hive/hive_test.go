@@ -847,6 +847,47 @@ func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHiveCommitTableRejectsOnlyFailuresBeforeMetadataWrite(t *testing.T) {
+	ctx := context.Background()
+	ident := TableIdentifier("test_database", "test_table")
+	newCatalog := func(t *testing.T) (*Catalog, *mockHiveClient) {
+		tableLocation := filepath.Join(t.TempDir(), "test_table")
+		metadataLocation := filepath.Join(tableLocation, "metadata", "v1.metadata.json")
+		writeHivePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, nil)
+
+		mockClient := &mockHiveClient{}
+		expectImmediateTableLock(mockClient, 1)
+		mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+			Return(hivePurgeTable(metadataLocation, tableLocation), nil).Once()
+
+		return NewCatalogWithClient(mockClient, iceberg.Properties{}), mockClient
+	}
+
+	t.Run("staging failure", func(t *testing.T) {
+		cat, mockClient := newCatalog(t)
+
+		_, _, err := cat.CommitTable(ctx, ident, nil, []table.Update{table.NewSetCurrentSchemaUpdate(99)})
+		require.ErrorIs(t, err, table.ErrCommitRejected)
+		require.NotErrorIs(t, err, table.ErrCommitFailed)
+		mockClient.AssertNotCalled(t, "AlterTable", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		mockClient.AssertExpectations(t)
+	})
+
+	t.Run("hms alter failure after metadata write", func(t *testing.T) {
+		cat, mockClient := newCatalog(t)
+		mockClient.On("AlterTable", mock.Anything, "test_database", "test_table", mock.AnythingOfType("*hive_metastore.Table")).
+			Return(errors.New("metastore unavailable")).Once()
+
+		_, _, err := cat.CommitTable(ctx, ident, nil, []table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"key": "value"}),
+		})
+		require.ErrorContains(t, err, "metastore unavailable")
+		require.NotErrorIs(t, err, table.ErrCommitRejected)
+		require.NotErrorIs(t, err, table.ErrCommitFailed)
+		mockClient.AssertExpectations(t)
+	})
+}
+
 func TestHiveDropTableLockFailureIsRetryable(t *testing.T) {
 	mockClient := &mockHiveClient{}
 	mockClient.On("Lock", mock.Anything, mock.AnythingOfType("*hive_metastore.LockRequest")).
@@ -2072,6 +2113,58 @@ func TestCreateViewDoesNotPersistCatalogProperties(t *testing.T) {
 	}
 
 	mockClient.AssertExpectations(t)
+}
+
+func TestCreateViewKeepsCallerVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		defaultCatalog string
+	}{
+		{name: "default catalog set", defaultCatalog: "prod"},
+		{name: "default catalog unset"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := require.New(t)
+
+			loc := "file://" + filepath.ToSlash(filepath.Join(t.TempDir(), "view_loc"))
+			mockClient := &mockHiveClient{}
+			mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+			mockClient.On("GetTable", mock.Anything, "test_database", "multi_view").Return(nil, errNoSuchObject).Twice()
+			mockClient.On("CreateTable", mock.Anything, mock.MatchedBy(func(tbl *hive_metastore.Table) bool {
+				return tbl.ViewOriginalText == "SELECT hive_sql" && tbl.ViewExpandedText == "SELECT hive_sql"
+			})).Return(nil).Once()
+
+			opts := []view.VersionOpt{view.WithVersionSummary(view.VersionSummary{"engine-version": "1.0"})}
+			if tt.defaultCatalog != "" {
+				opts = append(opts, view.WithDefaultViewCatalog(tt.defaultCatalog))
+			}
+			ver, err := view.NewVersion(1, 0, []view.Representation{
+				view.NewRepresentation(view.Representation{SQL: "SELECT trino_sql", Dialect: "trino"}),
+				view.NewRepresentation(view.Representation{SQL: "SELECT hive_sql", Dialect: "hive"}),
+			}, table.Identifier{"other_db"}, opts...)
+			assert.NoError(err)
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+			cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+			created, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "multi_view"), ver, schema,
+				catalog.WithViewLocation(loc))
+			assert.NoError(err)
+
+			f, err := os.Open(strings.TrimPrefix(created.MetadataLocation(), "file://"))
+			assert.NoError(err)
+			defer f.Close()
+			md, err := view.ParseMetadata(f)
+			assert.NoError(err)
+
+			got := md.CurrentVersion()
+			assert.Equal(ver.Representations, got.Representations)
+			assert.Equal(table.Identifier{"other_db"}, got.DefaultNamespace)
+			assert.Equal(tt.defaultCatalog, got.DefaultCatalog)
+			assert.Equal("1.0", got.Summary["engine-version"])
+
+			mockClient.AssertExpectations(t)
+		})
+	}
 }
 
 func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {

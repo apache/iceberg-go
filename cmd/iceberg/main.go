@@ -163,6 +163,8 @@ type PropertiesCmd struct {
 type CompactAnalyzeCmd struct {
 	TableID        string `arg:"positional,required" help:"full path to a table"`
 	TargetFileSize int64  `arg:"--target-file-size" default:"0" help:"target output file size in bytes"`
+	RewriteAll     bool   `arg:"--rewrite-all" help:"select every file regardless of size, deletes or minimum group size"`
+	MaxGroupSize   int64  `arg:"--max-group-size" default:"0" help:"maximum input bytes per group (default: the target file size)"`
 }
 
 type CompactRunCmd struct {
@@ -170,11 +172,14 @@ type CompactRunCmd struct {
 	TargetFileSize              int64  `arg:"--target-file-size" default:"0" help:"target output file size in bytes"`
 	PartialProgress             bool   `arg:"--partial-progress" help:"stage each group as a separate snapshot"`
 	PreserveDeadEqualityDeletes bool   `arg:"--preserve-dead-equality-deletes" help:"keep equality-delete files that are provably dead after the rewrite (default: drop them — recommended for sustained CDC workloads)"`
+	Sort                        bool   `arg:"--sort" help:"sort each group by the table's default sort order instead of bin-packing it"`
+	RewriteAll                  bool   `arg:"--rewrite-all" help:"select every file regardless of size, deletes or minimum group size"`
+	MaxGroupSize                int64  `arg:"--max-group-size" default:"0" help:"maximum input bytes per group (default: the target file size); with --sort, raise it so a group covers a partition, within memory"`
 }
 
 type CompactCmd struct {
 	Analyze *CompactAnalyzeCmd `arg:"subcommand:analyze" help:"analyze compaction plan"`
-	Run     *CompactRunCmd     `arg:"subcommand:run" help:"run bin-pack compaction"`
+	Run     *CompactRunCmd     `arg:"subcommand:run" help:"run bin-pack or sort compaction"`
 }
 
 type RewriteManifestsCmd struct {
@@ -197,7 +202,7 @@ type Args struct {
 	Files            *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
 	Rename           *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
 	Properties       *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
-	Compact          *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
+	Compact          *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack or sort compaction"`
 	RewriteManifests *RewriteManifestsCmd `arg:"subcommand:rewrite-manifests" help:"rewrite (compact) table manifests"`
 	Info             *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
 	Snapshots        *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
@@ -752,6 +757,8 @@ func runCompact(ctx context.Context, output Output, cat catalog.Catalog, cmd *Co
 			tableID:        cmd.Analyze.TableID,
 			targetFileSize: cmd.Analyze.TargetFileSize,
 			analyzeOnly:    true,
+			rewriteAll:     cmd.Analyze.RewriteAll,
+			maxGroupSize:   cmd.Analyze.MaxGroupSize,
 		})
 	case cmd.Run != nil:
 		compact(ctx, output, cat, compactConfig{
@@ -759,6 +766,9 @@ func runCompact(ctx context.Context, output Output, cat catalog.Catalog, cmd *Co
 			targetFileSize:              cmd.Run.TargetFileSize,
 			partialProgress:             cmd.Run.PartialProgress,
 			preserveDeadEqualityDeletes: cmd.Run.PreserveDeadEqualityDeletes,
+			sort:                        cmd.Run.Sort,
+			rewriteAll:                  cmd.Run.RewriteAll,
+			maxGroupSize:                cmd.Run.MaxGroupSize,
 		})
 	}
 }

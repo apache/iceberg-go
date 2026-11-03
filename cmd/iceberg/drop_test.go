@@ -43,6 +43,8 @@ type mockCatalogForDrop struct {
 
 func (m *mockCatalogForDrop) Close() error { return nil }
 
+func (m *mockCatalogForDrop) Name() string { return string(m.catalogType) }
+
 func (m *mockCatalogForDrop) CatalogType() catalog.Type {
 	return m.catalogType
 }
