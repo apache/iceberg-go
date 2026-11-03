@@ -651,8 +651,6 @@ func withCommitReplay(replay *stagedReplay) commitOption {
 	return func(o *commitOpts) { o.replay = replay }
 }
 
-// If replay leaves no updates, return the refreshed table without a catalog
-// commit.
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
 	var co commitOpts
 	for _, apply := range opts {
@@ -938,7 +936,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// treat them as fixed staged requirements.
 		submitReqs := reqs
 		if co.replay != nil {
-			submitReqs = append(slices.Clone(reqs), expirationAssertions(current, co.replay.branch, co.replay.plans, reqs)...)
+			submitReqs = append(slices.Clone(reqs), expirationAssertions(current, co.replay.branch, co.replay.walkedRefs, reqs)...)
 		}
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), submitReqs, updates)
@@ -1243,7 +1241,6 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 
 		result[i] = next
 
-		// The old manifest list is now an orphaned object in object storage.
 		orphanedPaths = append(orphanedPaths, su.Snapshot.ManifestList)
 		chainRebuilt = true
 	}

@@ -784,20 +784,17 @@ func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, 
 // position, with this call's options and cutoff time. Replanning retains
 // snapshots made reachable by concurrent commits, including rollback targets
 // and new branch heads. It can expire snapshots that a concurrent append moved
-// outside retention. Each attempt requires the refs that the plan read to be
-// unchanged since loading or refreshing the table.
+// outside retention. On each attempt, an expiry that removes snapshots or
+// refs requires the refs it read to be unchanged since loading or refreshing
+// the table.
 //
 // Retries replan even if staging or an earlier attempt produced no expiry
 // updates. If no updates remain, Commit returns the refreshed table without
 // committing. A transaction containing only expiries with no updates makes no
 // commit attempt and never refreshes or replans.
 //
-// A retry fails with ErrTransactionUnusable if GC is disabled after refresh,
-// a staged update cannot apply, or replanning changes whether a non-main
-// commit branch is removed. Only the last case also matches ErrCommitFailed.
-// Later staged changes depend on the original branch removal outcome, but a
-// new transaction from the refreshed table can plan consistently. An update
-// that cannot apply includes a ref update to a snapshot that a peer expired.
+// The replay failures that make the transaction unusable are listed on
+// ErrTransactionUnusable.
 //
 // The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {

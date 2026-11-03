@@ -139,8 +139,9 @@ snapshots that a concurrent append moved outside the retention window. A
 transaction that appends and expires snapshots rebases onto a concurrent append
 like any other append.
 
-Each attempt requires the refs that the plans read to be unchanged since
-loading or refreshing the table. If a concurrent commit moves one of those
+Each attempt requires the refs read by expiries that remove snapshots or refs
+to be unchanged since loading or refreshing the table. An expiry that removes
+nothing adds no such requirement. If a concurrent commit moves one of those
 refs before the attempt succeeds, it causes another conflict. The next attempt
 replans the expiry. If a concurrent commit creates a ref that the plan did not
 read, that ref does not cause a conflict. Expiring its snapshot also removes
@@ -155,14 +156,7 @@ the ref.
 - Post-commit cleanup deletes files for snapshots expired by the successful
   attempt, if cleanup is enabled.
 
-A retry fails with `ErrTransactionUnusable` in these cases:
-
-- Replanning changes whether a non-main commit branch is removed. Later staged
-  changes depend on the original outcome. The error also matches
-  `ErrCommitFailed`, because a new transaction from the refreshed table can plan
-  consistently.
-- GC is disabled after refresh. The error does not match `ErrCommitFailed`.
-  A new transaction fails when staging the expiry too.
-- A staged change cannot apply after refresh, such as a ref update to a snapshot
-  that a concurrent commit expired. The error does not match `ErrCommitFailed`.
-  The same operations fail again without new input.
+A retry fails with `ErrTransactionUnusable` if GC is disabled after refresh, a
+staged change no longer applies, or replanning changes whether a non-main
+commit branch is removed. `ErrTransactionUnusable` and `ErrCommitFailed` list
+these cases and which of them a new transaction can retry.

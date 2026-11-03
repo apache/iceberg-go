@@ -33,7 +33,8 @@ type stagedReplay struct {
 	// Snapshots use their most recent rebuild.
 	updates []Update
 
-	plans [][]string
+	// Refs walked by expiries that produced updates.
+	walkedRefs []string
 
 	// Updates from the last successful replay.
 	// ran distinguishes an empty replay from no replay.
@@ -43,10 +44,10 @@ type stagedReplay struct {
 
 func newStagedReplay(branch string, updates []Update, records []expirationRecord) *stagedReplay {
 	return &stagedReplay{
-		branch:  branch,
-		records: records,
-		updates: slices.Clone(updates),
-		plans:   stagedPlans(records),
+		branch:     branch,
+		records:    records,
+		updates:    slices.Clone(updates),
+		walkedRefs: stagedWalkedRefs(records),
 	}
 }
 
@@ -61,7 +62,7 @@ func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFi
 	var (
 		out          []Update
 		orphaned     []string
-		plans        [][]string
+		walkedRefs   []string
 		records      = r.records
 		chainRebuilt = force
 	)
@@ -88,7 +89,7 @@ func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFi
 				return out, orphaned, err
 			}
 			if len(updates) > 0 {
-				plans = append(plans, walked)
+				walkedRefs = append(walkedRefs, walked...)
 			}
 			i += rec.count
 
@@ -119,7 +120,7 @@ func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFi
 		}
 		i++
 	}
-	r.plans = plans
+	r.walkedRefs = walkedRefs
 	r.landed, r.ran = out, true
 
 	return out, orphaned, nil
@@ -149,20 +150,20 @@ func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Updat
 	return updates, walked, nil
 }
 
-func stagedPlans(records []expirationRecord) [][]string {
-	var plans [][]string
+func stagedWalkedRefs(records []expirationRecord) []string {
+	var refs []string
 	for _, rec := range records {
 		if rec.count > 0 {
-			plans = append(plans, rec.walked)
+			refs = append(refs, rec.walked...)
 		}
 	}
 
-	return plans
+	return refs
 }
 
 // Use base ref IDs, not staged IDs. The commit branch already has an assertion
 // that the transaction rebases.
-func expirationAssertions(base Metadata, branch string, plans [][]string, reqs []Requirement) []Requirement {
+func expirationAssertions(base Metadata, branch string, walkedRefs []string, reqs []Requirement) []Requirement {
 	asserted := map[string]bool{branch: true}
 	for _, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok {
@@ -171,12 +172,10 @@ func expirationAssertions(base Metadata, branch string, plans [][]string, reqs [
 	}
 
 	var names []string
-	for _, walked := range plans {
-		for _, name := range walked {
-			if !asserted[name] {
-				asserted[name] = true
-				names = append(names, name)
-			}
+	for _, name := range walkedRefs {
+		if !asserted[name] {
+			asserted[name] = true
+			names = append(names, name)
 		}
 	}
 	slices.Sort(names)

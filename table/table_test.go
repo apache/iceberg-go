@@ -2274,7 +2274,7 @@ func (t *TableWritingTestSuite) inBubble(f func()) {
 	})
 }
 
-func (t *TableWritingTestSuite) newExpireRetryTable(name string, files []string, sleepAfterFirst time.Duration) (*table.Table, *validatingCatalog) {
+func (t *TableWritingTestSuite) newExpireRetryTable(name string, count int, sleepAfterFirst time.Duration) (*table.Table, *validatingCatalog) {
 	fs := iceio.LocalFS{}
 	ident := table.Identifier{"default", name + "_v" + strconv.Itoa(t.formatVersion)}
 	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
@@ -2290,7 +2290,8 @@ func (t *TableWritingTestSuite) newExpireRetryTable(name string, files []string,
 	cat := &validatingCatalog{meta}
 	tbl := table.New(ident, meta, t.getMetadataLoc(),
 		func(ctx context.Context) (iceio.IO, error) { return fs, nil }, cat)
-	for i, file := range files {
+	for i := range count {
+		file := fmt.Sprintf("%s/%s_v%d/data-%d.parquet", t.location, name, t.formatVersion, i)
 		t.writeParquet(fs, file, t.arrTablePromotedTypes)
 		tx := tbl.NewTransaction()
 		t.Require().NoError(tx.AddDataFilesByPath(ctx, []string{file}, nil, false))
@@ -2300,7 +2301,7 @@ func (t *TableWritingTestSuite) newExpireRetryTable(name string, files []string,
 			time.Sleep(sleepAfterFirst)
 		}
 	}
-	t.Require().Len(tbl.Metadata().Snapshots(), len(files))
+	t.Require().Len(tbl.Metadata().Snapshots(), count)
 
 	return tbl, cat
 }
@@ -2319,11 +2320,7 @@ func snapshotIDsOf(meta table.Metadata) []int64 {
 //   - Concurrently, client rolls main -> snapshot 2
 func (t *TableWritingTestSuite) TestExpireSnapshotsReplansAfterRefRollback() {
 	t.inBubble(func() {
-		files := make([]string, 0, 5)
-		for i := range 5 {
-			files = append(files, fmt.Sprintf("%s/expire_replan_rollback_v%d/data-%d.parquet", t.location, t.formatVersion, i))
-		}
-		tbl, cat := t.newExpireRetryTable("expire_replan_rollback", files, 0)
+		tbl, cat := t.newExpireRetryTable("expire_replan_rollback", 5, 0)
 		snapshots := tbl.Metadata().Snapshots()
 		time.Sleep(time.Millisecond)
 
@@ -2350,11 +2347,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsReplansAfterRefRollback() {
 //   - expiring-tag -> snapshot 1, with a max ref age of one hour
 func (t *TableWritingTestSuite) TestExpireSnapshotsReplansAfterRefUpdate() {
 	t.inBubble(func() {
-		files := make([]string, 0, 3)
-		for i := range 3 {
-			files = append(files, fmt.Sprintf("%s/expire_replan_update_v%d/data-%d.parquet", t.location, t.formatVersion, i))
-		}
-		tbl, cat := t.newExpireRetryTable("expire_replan_update", files, 2*time.Hour)
+		tbl, cat := t.newExpireRetryTable("expire_replan_update", 3, 2*time.Hour)
 		snapshots := tbl.Metadata().Snapshots()
 
 		ctx := context.Background()

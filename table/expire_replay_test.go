@@ -32,8 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A millisecond sleep in synctest makes earlier snapshots older than the expiry cutoff.
-
 func newExpireReplayTable(t *testing.T, props iceberg.Properties) (*memIO, *reqValidatingCatalog, *Table) {
 	t.Helper()
 	spec := iceberg.NewPartitionSpec()
@@ -556,10 +554,7 @@ func TestExpirationAssertionsCoverPlansWithUpdates(t *testing.T) {
 }
 
 func TestExpireReplayAssertsWalkedRefFromAttemptBase(t *testing.T) {
-	// The staged plan keeps s3 for tag t. A peer then moves t to s2, which
-	// that plan expires.
-	stage := func(t *testing.T) (*recordingCatalog, *Transaction, int64, int64, int64) {
-		t.Helper()
+	synctest.Test(t, func(t *testing.T) {
 		fs, inner, tbl := newExpireReplayTable(t, nil)
 		tbl, s1 := appendOnBranch(t, tbl, MainBranch, "s1")
 		tbl, s2 := appendOnBranch(t, tbl, MainBranch, "s2")
@@ -575,44 +570,23 @@ func TestExpireReplayAssertsWalkedRefFromAttemptBase(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, sortedIDs(s3, s4), survivors(staged.Metadata()))
 
+		// The staged plan keeps s3 for tag t. A peer moves t to s2, which that
+		// plan expires, and moves it again after the first refresh.
 		peerUpdate(t, inner, NewSetSnapshotRefUpdate("t", s2, TagRef, 0, 0, 0))
-
-		return cat, tx, s1, s2, s4
-	}
-
-	t.Run("moved before the first attempt", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			cat, tx, _, s2, s4 := stage(t)
-
-			committed, err := tx.Commit(t.Context())
-			require.NoError(t, err)
-
-			meta := committed.Metadata()
-			assert.Equal(t, s2, refHead(t, meta, "t"))
-			assert.Equal(t, sortedIDs(s2, s4), survivors(meta))
-			assert.Len(t, cat.updates, 2)
-			assert.Contains(t, cat.lastReqs, AssertRefSnapshotID("t", &s2))
-		})
-	})
-
-	t.Run("moved again after the first refresh", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			cat, tx, s1, _, s4 := stage(t)
-			cat.before = func(attempt int) {
-				if attempt == 1 {
-					peerUpdate(t, cat.reqValidatingCatalog, NewSetSnapshotRefUpdate("t", s1, TagRef, 0, 0, 0))
-				}
+		cat.before = func(attempt int) {
+			if attempt == 1 {
+				peerUpdate(t, inner, NewSetSnapshotRefUpdate("t", s1, TagRef, 0, 0, 0))
 			}
+		}
 
-			committed, err := tx.Commit(t.Context())
-			require.NoError(t, err)
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
 
-			meta := committed.Metadata()
-			assert.Equal(t, s1, refHead(t, meta, "t"))
-			assert.Equal(t, sortedIDs(s1, s4), survivors(meta))
-			assert.Len(t, cat.updates, 3)
-			assert.Contains(t, cat.lastReqs, AssertRefSnapshotID("t", &s1))
-		})
+		meta := committed.Metadata()
+		assert.Equal(t, s1, refHead(t, meta, "t"))
+		assert.Equal(t, sortedIDs(s1, s4), survivors(meta))
+		assert.Len(t, cat.updates, 3)
+		assert.Contains(t, cat.lastReqs, AssertRefSnapshotID("t", &s1))
 	})
 }
 
@@ -719,27 +693,11 @@ func TestExpireReplayKeepsExplicitPin(t *testing.T) {
 	})
 }
 
-func manifestLists(fs *memIO) []string {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	var lists []string
-	for name := range fs.files {
-		if strings.HasPrefix(path.Base(name), "snap-") {
-			lists = append(lists, name)
-		}
-	}
-	slices.Sort(lists)
-
-	return lists
-}
-
 func manifestListsOf(meta Metadata, ids ...int64) []string {
 	lists := make([]string, len(ids))
 	for i, id := range ids {
 		lists[i] = meta.SnapshotByID(id).ManifestList
 	}
-	slices.Sort(lists)
 
 	return lists
 }
@@ -761,7 +719,7 @@ func TestExpireReplayCleansUpReplannedRemoval(t *testing.T) {
 
 		meta := committed.Metadata()
 		assert.Equal(t, sortedIDs(s3, p), survivors(meta))
-		assert.Equal(t, manifestListsOf(meta, s3, p), manifestLists(fs))
+		assertOnlyManifestList(t, fs, manifestListsOf(meta, s3, p)...)
 	})
 }
 
@@ -791,7 +749,7 @@ func TestExpireReplayCleansUpRebuiltSnapshotItExpires(t *testing.T) {
 		assert.Equal(t, []int64{a2}, survivors(meta))
 		assert.Equal(t, a1, parentOf(t, meta, a2))
 		assert.Equal(t, []string{"a1", "a2", "b1", "b2", "p"}, branchFiles(t, fs, meta, MainBranch))
-		assert.Equal(t, manifestListsOf(meta, a2), manifestLists(fs))
+		assertOnlyManifestList(t, fs, manifestListsOf(meta, a2)...)
 	})
 }
 

@@ -88,7 +88,7 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 	// their updates stage no ref requirement. The helper returns a fresh
 	// slice, so appending here cannot touch t.reqs.
 	reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
-	reqs = append(reqs, expirationAssertions(t.tbl.metadata, cmp.Or(t.branch, MainBranch), stagedPlans(t.expirations), reqs)...)
+	reqs = append(reqs, expirationAssertions(t.tbl.metadata, cmp.Or(t.branch, MainBranch), stagedWalkedRefs(t.expirations), reqs)...)
 
 	updates := make([]Update, len(meta.updates))
 	copy(updates, meta.updates)
