@@ -133,7 +133,11 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 			return nil, fmt.Errorf("%w: wrong Avro write properties %T", iceberg.ErrInvalidArgument, info.WriteProps)
 		}
 	}
-	var opts []ocf.WriterOpt
+	icebergSchemaJSON, err := json.Marshal(info.FileSchema)
+	if err != nil {
+		return nil, fmt.Errorf("iceberg schema: %w", err)
+	}
+	opts := []ocf.WriterOpt{ocf.WithMetadata(map[string][]byte{"iceberg.schema": icebergSchemaJSON})}
 	switch props.codec {
 	case "", "null":
 	case "snappy":

@@ -173,6 +173,9 @@ func TestAvroWriterProducesReadableOCF(t *testing.T) {
 	reader, err := ocf.NewReader(file)
 	require.NoError(t, err)
 	defer reader.Close()
+	icebergSchemaJSON, err := json.Marshal(sc)
+	require.NoError(t, err)
+	require.JSONEq(t, string(icebergSchemaJSON), string(reader.Metadata()["iceberg.schema"]))
 	var rows []map[string]any
 	for {
 		var rec map[string]any
