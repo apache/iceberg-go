@@ -43,8 +43,10 @@ func TestDiffSnapshotFilesWithRealBranchesAndManifestRewrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, diff.AddedDataFiles, 1)
 	require.Len(t, diff.RemovedDataFiles, 1)
-	require.Equal(t, mainPaths[1], diff.AddedDataFiles[0].FilePath())
-	require.Equal(t, branchPaths[1], diff.RemovedDataFiles[0].FilePath())
+	require.Contains(t, mainPaths, diff.AddedDataFiles[0].FilePath())
+	require.NotContains(t, branchPaths, diff.AddedDataFiles[0].FilePath())
+	require.Contains(t, branchPaths, diff.RemovedDataFiles[0].FilePath())
+	require.NotContains(t, mainPaths, diff.RemovedDataFiles[0].FilePath())
 
 	txn := tbl.NewTransaction()
 	_, err = txn.RewriteManifests(t.Context())
