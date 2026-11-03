@@ -392,8 +392,9 @@ func (w *avroFileWriter) Abort() error {
 func avroFieldName(name string) string {
 	valid := name != ""
 	for i, r := range name {
-		if r > 0xFFFF || !(unicode.IsLetter(r) || r == '_' || (i > 0 && unicode.IsDigit(r))) {
+		if r > 0xFFFF || (!unicode.IsLetter(r) && r != '_' && (i == 0 || !unicode.IsDigit(r))) {
 			valid = false
+
 			break
 		}
 	}
