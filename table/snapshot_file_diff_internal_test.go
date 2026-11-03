@@ -509,4 +509,3 @@ func TestSnapshotDiffRejectsInvalidDeletionVectorRanges(t *testing.T) {
 		})
 	}
 }
-
