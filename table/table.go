@@ -1047,7 +1047,7 @@ func validateNonRebasedRequirements(reqs []Requirement, branch string, pinned ma
 }
 
 const (
-	noReplayHint               = "commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals"
+	noReplayHint              = "commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals"
 	cherryPickFastForwardHint = "commit carries a cherry-pick fast-forward and cannot be replayed; reload the table and rebuild the transaction"
 )
 
