@@ -60,3 +60,27 @@ func TestDiffSnapshotFilesWithRealBranchesAndManifestRewrite(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, unchanged.HasChanges(), "rewriting manifests must not change physical files")
 }
+
+func TestDiffSnapshotFilesWithBranchDelete(t *testing.T) {
+	tbl := seedDivergentBranch(t, newBranchPlanningTable(t, nil))
+	before := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, before)
+	beforePaths, _ := liveFilesOnRef(t, tbl, branchPlanningRef)
+
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	require.NoError(t, txn.Delete(t.Context(),
+		iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(3)), nil))
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	after := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, after)
+	diff, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), before.SnapshotID, after.SnapshotID)
+	require.NoError(t, err)
+	require.Empty(t, diff.AddedDataFiles)
+	require.Len(t, diff.RemovedDataFiles, 1)
+	require.Contains(t, beforePaths, diff.RemovedDataFiles[0].FilePath())
+	require.Empty(t, diff.AddedDeleteFiles)
+	require.Empty(t, diff.RemovedDeleteFiles)
+}
