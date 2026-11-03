@@ -195,6 +195,10 @@ func snapshotFileDiffKey(file iceberg.DataFile) (deletionVectorBlobKey, error) {
 		return key, fmt.Errorf("%w: content file path is empty", ErrInvalidMetadata)
 	}
 	if IsDeletionVector(file) {
+		if ref := file.ReferencedDataFile(); ref == nil || *ref == "" {
+			return key, fmt.Errorf("%w: deletion vector %q is missing referenced_data_file",
+				ErrInvalidMetadata, file.FilePath())
+		}
 		offset, length := file.ContentOffset(), file.ContentSizeInBytes()
 		if offset == nil || length == nil || *offset < 0 || *length <= 0 {
 			return key, fmt.Errorf("%w: deletion vector %q has an invalid offset or length",

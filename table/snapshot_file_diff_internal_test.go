@@ -454,6 +454,34 @@ func TestSnapshotDiffSkipsDeletedOnlyManifests(t *testing.T) {
 	require.Empty(t, files)
 }
 
+func TestSnapshotDiffRejectsDeletionVectorWithoutReferencedDataFile(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		setEmptyReference bool
+	}{
+		{name: "missing"},
+		{name: "empty", setEmptyReference: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := iceio.NewMemFS()
+			builder, err := iceberg.NewDataFileBuilder(
+				*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+				"mem://diff/missing-ref.puffin", iceberg.PuffinFile, nil, nil, nil, 10, 1024)
+			require.NoError(t, err)
+			builder.ContentOffset(0).ContentSizeInBytes(32)
+			if tc.setEmptyReference {
+				builder.ReferencedDataFile("")
+			}
+			manifest := writeDiffTestManifest(t, fs, 3, "mem://diff/missing-ref.avro",
+				iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{builder.Build()}, nil, nil)
+
+			_, err = snapshotDiffLiveFiles(t.Context(), fs, []iceberg.ManifestFile{manifest})
+			require.ErrorIs(t, err, ErrInvalidMetadata)
+			require.ErrorContains(t, err, "referenced_data_file")
+		})
+	}
+}
+
 func TestSnapshotDiffRejectsInvalidDeletionVectorRanges(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
