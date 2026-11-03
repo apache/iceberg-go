@@ -193,6 +193,7 @@ func (t Table) RewritePositionDeleteFiles(
 		if order := strings.Compare(a.key.partition, b.key.partition); order != 0 {
 			return order
 		}
+
 		return strings.Compare(a.group.files[0].FilePath(), b.group.files[0].FilePath())
 	})
 
