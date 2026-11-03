@@ -45,8 +45,9 @@ import (
 // The target branch is pinned to its base head to prevent a concurrent append
 // from introducing duplicate file references between validation and commit.
 // A conflict must be retried with a new transaction and refreshed table.
-// Duplicate-publication checks require complete target ancestry; tables loaded
-// with snapshot-loading-mode=refs may need reloading with mode=all.
+// Duplicate-publication checks require complete target ancestry. Refs-only
+// loads and expired ancestors can both truncate it. Reload with
+// snapshot-loading-mode=all if the missing snapshots have not expired.
 func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -86,7 +87,7 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 			}
 		}
 		if !complete {
-			return fmt.Errorf("%w: cannot cherry-pick snapshot %d onto branch %q with incomplete target ancestry; snapshot-loading-mode=refs may omit required snapshots, reload with snapshot-loading-mode=all",
+			return fmt.Errorf("%w: cannot cherry-pick snapshot %d onto branch %q with incomplete target ancestry; snapshot-loading-mode=refs may omit snapshots, retry with snapshot-loading-mode=all if history has not expired",
 				ErrInvalidOperation, snapshotID, t.branch)
 		}
 	}
