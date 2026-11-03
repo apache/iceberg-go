@@ -483,10 +483,10 @@ func TestSnapshotDiffRejectsInvalidDeletionVectorRanges(t *testing.T) {
 		offset *int64
 		length *int64
 	}{
-		{name: "missing offset", length: ptrDiffInt64(32)},
-		{name: "missing length", offset: ptrDiffInt64(0)},
-		{name: "negative offset", offset: ptrDiffInt64(-1), length: ptrDiffInt64(32)},
-		{name: "zero length", offset: ptrDiffInt64(0), length: ptrDiffInt64(0)},
+		{name: "missing offset", length: new(int64(32))},
+		{name: "missing length", offset: new(int64(0))},
+		{name: "negative offset", offset: new(int64(-1)), length: new(int64(32))},
+		{name: "zero length", offset: new(int64(0)), length: new(int64(0))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := iceio.NewMemFS()
@@ -510,6 +510,3 @@ func TestSnapshotDiffRejectsInvalidDeletionVectorRanges(t *testing.T) {
 	}
 }
 
-func ptrDiffInt64(value int64) *int64 {
-	return &value
-}
