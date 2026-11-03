@@ -289,11 +289,19 @@ func TestCherryPickSnapshotRejectsConcurrentMainMoveForNewBranch(t *testing.T) {
 	stale, err := tbl.NewTransactionOnBranch(newTarget)
 	require.NoError(t, err)
 	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
-	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+
+	// The competing writer publishes exactly the same source to main.
+	// A new branch inherits main's files, so an unpinned retry would
+	// introduce two live entries for the source's data file.
+	publish := tbl.NewTransaction()
+	require.NoError(t, publish.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	tbl, err = publish.Commit(t.Context())
+	require.NoError(t, err)
+
 	_, err = stale.Commit(t.Context())
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	require.Nil(t, tbl.SnapshotByName(newTarget))
-	assert.ElementsMatch(t, []int64{1, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, tbl, table.MainBranch))
 }
 
 func TestCherryPickSnapshotFastForwardsRootToEmptyMain(t *testing.T) {
