@@ -514,6 +514,62 @@ func TestValidateSnapshotDeletionVectorTargets(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshotRejectsInvalidDeletionVectorBlobRanges(t *testing.T) {
+	const prefix = "mem://audit/invalid-dv-range/"
+	cases := []struct {
+		name      string
+		setOffset bool
+		offset    int64
+		setSize   bool
+		size      int64
+		valid     bool
+	}{
+		{"missing offset", false, 0, true, 32, false},
+		{"missing size", true, 100, false, 0, false},
+		{"negative offset", true, -1, true, 32, false},
+		{"zero size", true, 100, true, 0, false},
+		{"negative size", true, 100, true, -1, false},
+		{"valid range", true, 100, true, 32, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			builder, err := iceberg.NewDataFileBuilder(
+				*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+				prefix+"d.puffin", iceberg.PuffinFile, nil, nil, nil, 1, 1024)
+			require.NoError(t, err)
+			builder.ReferencedDataFile(prefix + "data.parquet")
+			if tc.setOffset {
+				builder.ContentOffset(tc.offset)
+			}
+			if tc.setSize {
+				builder.ContentSizeInBytes(tc.size)
+			}
+			fs := iceio.NewMemFS()
+			manifest := writeValidationManifest(t, fs, 3, prefix+"manifest.avro",
+				iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{builder.Build()}, nil, nil)
+			list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
+			zero := int64(0)
+			tbl := validationTable(t, 3, fs, Snapshot{
+				SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(),
+				ManifestList: list, FirstRowID: &zero, AddedRows: &zero,
+			})
+			report, err := tbl.ValidateSnapshot(t.Context(), 1)
+			require.NoError(t, err)
+			require.True(t, report.Complete)
+			require.EqualValues(t, 1, report.LiveFilesChecked)
+			if tc.valid {
+				require.True(t, report.Valid(), "%+v", report.Issues)
+
+				return
+			}
+			require.False(t, report.Valid())
+			require.Len(t, report.Issues, 1)
+			require.Equal(t, SnapshotIssueInvalidDeletionVectorRange, report.Issues[0].Code)
+			require.Equal(t, prefix+"d.puffin", report.Issues[0].FilePath)
+		})
+	}
+}
+
 func TestValidateSnapshotMissingDeletionVectorTarget(t *testing.T) {
 	fs := iceio.NewMemFS()
 	const prefix = "mem://audit/missing-dv-target/"
