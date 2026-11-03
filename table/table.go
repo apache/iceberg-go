@@ -587,6 +587,11 @@ type commitOpts struct {
 	// in snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
+	// noResume denotes a cherry-pick fast-forward. It selects a helpful
+	// conflict hint; Transaction.Commit also disallows a second submission
+	// after any failed attempt.
+	noResume bool
+
 	// pinnedRefs names refs whose assertions guard the commit and must
 	// not be rewritten to the fresh head between retries (see
 	// Transaction.pinnedRefs).
@@ -620,6 +625,10 @@ func withCommitNoReplay(noReplay bool) commitOption {
 	return func(o *commitOpts) { o.noReplay = noReplay }
 }
 
+func withCommitNoResume(noResume bool) commitOption {
+	return func(o *commitOpts) { o.noResume = noResume }
+}
+
 func withCommitPinnedRefs(refs map[string]struct{}) commitOption {
 	return func(o *commitOpts) { o.pinnedRefs = refs }
 }
@@ -632,6 +641,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	var co commitOpts
 	for _, apply := range opts {
 		apply(&co)
+	}
+	replayHint := noReplayHint
+	if co.noResume {
+		replayHint = cherryPickFastForwardHint
 	}
 
 	cfg, err := readRetryConfig(t.metadata.Properties())
@@ -794,7 +807,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			if err := validateNonRebasedRequirements(reqs, co.branch, pinned, current); err != nil {
 				if co.noReplay {
 					return nil, fmt.Errorf("%w: requirement no longer holds after refresh (%s): %w",
-						ErrTransactionUnusable, noReplayHint, err)
+						ErrTransactionUnusable, replayHint, err)
 				}
 
 				return nil, fmt.Errorf("%w: requirement no longer holds after refresh: %w", ErrTransactionUnusable, err)
@@ -915,7 +928,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// distinguishes this abort from an exhausted retry budget while
 		// preserving errors.Is(err, ErrCommitFailed).
 		if co.noReplay {
-			return nil, fmt.Errorf("%w (%s)", err, noReplayHint)
+			return nil, fmt.Errorf("%w (%s)", err, replayHint)
 		}
 	}
 
@@ -1033,7 +1046,10 @@ func validateNonRebasedRequirements(reqs []Requirement, branch string, pinned ma
 	return nil
 }
 
-const noReplayHint = "commit carries snapshot-relative delete-file removals or a cherry-pick fast-forward and cannot be replayed; reload the table and rebuild the operation"
+const (
+	noReplayHint               = "commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals"
+	cherryPickFastForwardHint = "commit carries a cherry-pick fast-forward and cannot be replayed; reload the table and rebuild the transaction"
+)
 
 // commitStateUnknownError marks a CommitTable failure after which the catalog
 // may have accepted the commit. Every other doCommit failure committed

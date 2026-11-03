@@ -257,6 +257,12 @@ func TestCherryPickSnapshotFastForwardThenAppendDoesNotLoseFilesOnRetry(t *testi
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	assert.ElementsMatch(t, []int64{1}, idsOnRef(t, tbl, table.MainBranch))
 	assert.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, tbl, branchPlanningRef))
+
+	// Explicitly resubmitting the same transaction must also fail. Unlike
+	// an ordinary resumable append, it carries an earlier ref fast-forward
+	// whose files could be lost if the later append were rebuilt.
+	_, err = stale.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
 }
 
 func TestCherryPickSnapshotRejectsConcurrentReplayTargetMoveWithRetries(t *testing.T) {

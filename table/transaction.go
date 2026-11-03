@@ -94,6 +94,12 @@ type Transaction struct {
 	// and by cherry-pick fast-forwards that precede later staged writes.
 	noReplay bool
 
+	// noResume is set for staged cherry-pick fast-forwards. An automatic
+	// retry is already disabled by noReplay, but resuming a failed Commit
+	// could rebuild later snapshots against the head before the ref move.
+	// Such a transaction must be reconstructed after any failed commit.
+	noResume bool
+
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
 	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot,
 	// ExpireSnapshots, and CherryPickSnapshot. doCommit's refresh-and-replay must not rewrite
@@ -510,6 +516,7 @@ func (t *Transaction) applyPinnedWithReplayPolicy(updates []Update, reqs []Requi
 	}
 	if noReplay {
 		t.noReplay = true
+		t.noResume = true
 	}
 
 	return nil
@@ -2622,6 +2629,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 			withCommitNoReplay(t.noReplay),
+			withCommitNoResume(t.noResume),
 			withCommitPinnedRefs(t.pinnedRefs),
 			withCommitResume(t.failedCommits),
 		)
@@ -2637,7 +2645,13 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			case errors.As(err, &unknown):
 				t.committed = true
 			default:
-				t.failedCommits++
+				if t.noResume {
+					// A resumed cherry-pick fast-forward could lose the
+					// moved snapshot's files when rebuilding later appends.
+					t.unusable = true
+				} else {
+					t.failedCommits++
+				}
 			}
 
 			return tbl, err
