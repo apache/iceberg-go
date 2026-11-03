@@ -94,8 +94,8 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // deterministic ties. Only tables with at least one partition field are
 // currently supported.
 // Partition fields whose source was dropped or whose result type changed are
-// not yet supported. Embedded manifests require a matching spec ID in their
-// headers and a partition tuple with all expected field IDs.
+// not yet supported. Embedded manifests may omit the v1 partition spec ID when the header
+// fields identify exactly one historical spec.
 //
 // Use a fresh transaction: a staged schema, spec, or snapshot change would
 // make the original head's partition type ambiguous. The branch head is pinned
@@ -285,17 +285,6 @@ func partitionStatisticsEmbeddedManifest(ctx context.Context, fs iceio.IO, manif
 		return nil, err
 	}
 	defer reader.Close()
-	// PartitionSpec() in the generic reader requires partition-spec-id, so
-	// validate the required V1 partition-spec metadata above when it is absent.
-	if len(raw) != 0 {
-		readSpec, err := reader.PartitionSpec()
-		if err != nil {
-			return nil, err
-		}
-		if !readSpec.Equals(expected) {
-			return nil, fmt.Errorf("%w: embedded manifest %q partition spec differs from table metadata", iceberg.ErrInvalidArgument, manifest.FilePath())
-		}
-	}
 
 	return descriptor, nil
 }
