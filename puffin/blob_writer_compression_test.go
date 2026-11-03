@@ -71,6 +71,9 @@ func TestWriteCompressedBlobs(t *testing.T) {
 					require.Equal(t, uint32(0x184D2204), binary.LittleEndian.Uint32(encoded[:4]))
 					require.NotZero(t, encoded[4]&0x08)
 					require.Equal(t, uint64(len(input)), binary.LittleEndian.Uint64(encoded[6:14]))
+					validHeader, headerErr := lz4.ValidFrameHeader(encoded[:15])
+					require.NoError(t, headerErr)
+					require.True(t, validHeader, "LZ4 frame header checksum must be valid")
 					got, err = io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
 					require.NoError(t, err)
 				case "zstd":
@@ -148,6 +151,36 @@ func TestLZ4BlobSpanningMultipleBlocks(t *testing.T) {
 	require.NotZero(t, encoded[4]&0x08)
 	require.Equal(t, uint64(len(data)), binary.LittleEndian.Uint64(encoded[6:14]))
 	decoded, err := io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
+	require.NoError(t, err)
+	require.Equal(t, data, decoded)
+}
+
+// Incompressible input exercises LZ4's uncompressed-block fallback, rather
+// than only the compressed blocks covered by the other writer tests.
+func TestLZ4BlobWithUncompressedBlock(t *testing.T) {
+	data := make([]byte, 64<<10)
+	state := uint32(0x12345678)
+	for i := range data {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		data[i] = byte(state)
+	}
+
+	var file bytes.Buffer
+	writer, err := puffin.NewWriter(&file)
+	require.NoError(t, err)
+	meta, err := writer.AddBlob(puffin.BlobMetadataInput{
+		Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: "lz4",
+	}, data)
+	require.NoError(t, err)
+	require.NoError(t, writer.Finish())
+
+	frame := file.Bytes()[meta.Offset : meta.Offset+meta.Length]
+	require.GreaterOrEqual(t, len(frame), 19)
+	require.NotZero(t, binary.LittleEndian.Uint32(frame[15:19])&(1<<31),
+		"LZ4 should store incompressible blocks uncompressed")
+	decoded, err := io.ReadAll(lz4.NewReader(bytes.NewReader(frame)))
 	require.NoError(t, err)
 	require.Equal(t, data, decoded)
 }
