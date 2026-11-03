@@ -28,12 +28,17 @@ import (
 )
 
 func newDynamicOverwriteTable(t *testing.T) (*table.Table, *concurrentTestCatalog) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}})
+	return newDynamicOverwriteTableWithSpec(t, spec)
+}
+
+func newDynamicOverwriteTableWithSpec(t *testing.T, spec iceberg.PartitionSpec) (*table.Table, *concurrentTestCatalog) {
 	t.Helper()
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
-	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}})
 	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location, iceberg.Properties{
 		table.PropertyFormatVersion:        "2",
+		table.WriteUpdateIsolationLevelKey: string(table.IsolationSnapshot),
 		table.CommitNumRetriesKey:          "2",
 		table.CommitMinRetryWaitMsKey:      "1",
 		table.CommitMaxRetryWaitMsKey:      "2",
@@ -64,8 +69,53 @@ func TestDynamicPartitionOverwriteArrowAndConcurrentCommit(t *testing.T) {
 	updated = appendRowsOnRef(t, updated, table.MainBranch, 1)
 	attemptsBefore := cat.attempts.Load()
 	_, err = stale.Commit(t.Context())
-	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrConflictingDataFiles)
 	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(),
-		"the pinned target must fail without retrying against the new main head")
+		"touched partition conflict should fail before another catalog submission")
 	assert.ElementsMatch(t, []int64{1, 1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
+}
+
+func TestDynamicPartitionOverwriteAllowsConcurrentOtherPartition(t *testing.T) {
+	base, cat := newDynamicOverwriteTable(t)
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+	stale := tbl.NewTransaction()
+	reader := idRecordReader(t, tbl, 1, 3)
+	require.NoError(t, stale.DynamicPartitionOverwrite(t.Context(), reader, nil))
+	reader.Release()
+
+	peer := appendRowsOnRef(t, tbl, table.MainBranch, 4)
+	attemptsBefore := cat.attempts.Load()
+	result, err := stale.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, attemptsBefore+2, cat.attempts.Load(), "different-partition append should allow refresh and retry")
+	assert.ElementsMatch(t, []int64{1, 2, 3, 4}, idsOnRef(t, result, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, peer, table.MainBranch))
+}
+
+func TestDynamicPartitionOverwriteMissingBranchPinsMain(t *testing.T) {
+	base, _ := newDynamicOverwriteTable(t)
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+	stale, err := tbl.NewTransactionOnBranch("audit")
+	require.NoError(t, err)
+	reader := idRecordReader(t, tbl, 1)
+	require.NoError(t, stale.DynamicPartitionOverwrite(t.Context(), reader, nil))
+	reader.Release()
+
+	peer := appendRowsOnRef(t, tbl, table.MainBranch, 1)
+	_, err = stale.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.ElementsMatch(t, []int64{1, 1, 2}, idsOnRef(t, peer, table.MainBranch))
+}
+
+func TestDynamicPartitionOverwriteBucketTransformWithFiles(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id_bucket", Transform: iceberg.BucketTransform{NumBuckets: 256},
+	})
+	base, _ := newDynamicOverwriteTableWithSpec(t, spec)
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+	reader := idRecordReader(t, tbl, 1, 3)
+	updated, err := tbl.DynamicPartitionOverwrite(t.Context(), reader, nil)
+	reader.Release()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
 }
