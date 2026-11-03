@@ -449,6 +449,20 @@ if err != nil { /* ... */ }
 
 arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 </code></pre>
+<h3 id="incremental-changelog-scans"><a class="header" href="#incremental-changelog-scans">Incremental changelog scans</a></h3>
+<p><code>NewIncrementalChangelogScan</code> returns rows added or deleted between snapshots. <code>PlanFiles</code> returns the tasks. <code>Read</code> reads a planned task list, and <code>ToArrowRecords</code> plans and reads. Remote planning is not supported.</p>
+<pre><code class="language-go">schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields(&quot;id&quot;, &quot;name&quot;),
+).FromSnapshotExclusive(startSnapshotID).ToArrowRecords(ctx)
+</code></pre>
+<p><code>FromSnapshotInclusive</code>, <code>FromSnapshotExclusive</code>, and <code>ToSnapshot</code> bound the snapshot range. Projection, row filters, and limits apply while the rows are read. If the start snapshot has been expired, changes in expired snapshots before the oldest retained one are not reported. Each snapshot that adds deletes is planned against every live data file, narrowed only by the partition filter, so the cost follows the table size rather than the size of the snapshot range.</p>
+<p>Each batch is the scan projection followed by three columns:</p>
+<ul>
+<li><code>_change_type</code> — <code>INSERT</code> or <code>DELETE</code></li>
+<li><code>_change_ordinal</code> — int32 ordinal of the snapshot that produced the change</li>
+<li><code>_commit_snapshot_id</code> — snapshot ID that committed the change</li>
+</ul>
+<p>Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. <code>UPDATE</code> rows are not produced. Delete-file handling is iceberg-go behavior.</p>
 <h2 id="writing-data"><a class="header" href="#writing-data">Writing data</a></h2>
 <p>The shortcut methods on <code>Table</code> open a transaction, perform the write, and commit. Use <code>NewTransaction</code> directly when you need to combine multiple operations.</p>
 <h3 id="append"><a class="header" href="#append">Append</a></h3>
