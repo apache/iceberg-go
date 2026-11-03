@@ -980,9 +980,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // branch check that follows rejects the commit.
 //
 // Assertions on refs in pinned guard the commit (an explicit
-// Transaction.AssertRefSnapshotID, a rollback, or snapshot expiry) and
-// are never rewritten: a ref that has changed must fail the commit, not
-// be replayed against the new head.
+// Transaction.AssertRefSnapshotID, a rollback, snapshot expiry, or a branch
+// fast-forward/replacement) and are never rewritten: a ref that has changed
+// must fail the commit, not be replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
@@ -1141,68 +1141,81 @@ func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 // list is rewritten to include the fresh parent's manifests so that the
 // rebuilt snapshot contains every committed file.
 func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int, force bool) (rebuilt []Update, orphanedPaths []string, err error) {
-	// Must mirror createSnapshotProducer's attempt-0 fallback, or a retried new
-	// branch rebuilds with a nil parent and silently drops main's data.
+	// A retry must replay staged branch moves in update order. Rebuilding an
+	// append on the refreshed branch head instead of a preceding promotion
+	// can silently drop the promoted branch's files.
 	var freshHead *Snapshot
 	if freshMeta != nil {
 		freshHead = latestSnapshotForBranch(freshMeta, branch)
 	}
 
-	result := make([]Update, len(updates))
-	copy(result, updates)
-
-	// A single transaction can stage several snapshots on the same branch (an
-	// append followed by a delete, say). They were chained at build time so
-	// snapshot[n].parent == snapshot[n-1]; on retry they must be replayed as a
-	// chain, each rebuilt snapshot becoming the parent of the next. Feeding
-	// every staged snapshot the same fresh branch head would turn the chain
-	// into siblings — the branch ref advances only to the last one, silently
-	// dropping the earlier snapshots' data. chainRebuilt forces every snapshot
-	// after the first rebuild to rebuild too: its recorded parent is an earlier
-	// staged snapshot that has itself just been reparented onto the fresh head.
-	// force rebuilds every snapshot from the start.
+	result := slices.Clone(updates)
+	type stagedSnapshot struct {
+		snapshot *Snapshot
+		rebuilt  bool
+	}
+	staged := make(map[int64]stagedSnapshot)
 	chainRebuilt := force
+
 	for i, u := range result {
-		su, ok := u.(*addSnapshotUpdate)
-		if !ok || su.rebuildManifestList == nil {
-			continue
+		switch su := u.(type) {
+		case *setSnapshotRefUpdate:
+			if su.RefName != branch || su.RefType != BranchRef {
+				continue
+			}
+			if next, ok := staged[su.SnapshotID]; ok {
+				freshHead = next.snapshot
+				// Keep rebuilding later snapshots if the staged parent was
+				// rebuilt. A set-ref between two appends must not break the chain.
+				chainRebuilt = force || next.rebuilt
+				continue
+			}
+			if freshMeta == nil {
+				return result, orphanedPaths, fmt.Errorf("%w: cannot replay staged move of branch %q to snapshot %d without refreshed metadata",
+					ErrCommitDiverged, branch, su.SnapshotID)
+			}
+			freshHead = freshMeta.SnapshotByID(su.SnapshotID)
+			if freshHead == nil {
+				return result, orphanedPaths, fmt.Errorf("%w: staged move of branch %q references unavailable snapshot %d",
+					ErrCommitDiverged, branch, su.SnapshotID)
+			}
+			// An explicit move to an existing snapshot starts a new lineage.
+			chainRebuilt = force
+
+		case *addSnapshotUpdate:
+			if su.Snapshot == nil {
+				continue
+			}
+			if su.rebuildManifestList == nil {
+				staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: su.Snapshot}
+				continue
+			}
+
+			if !chainRebuilt && freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
+				*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID &&
+				stagedSnapshotStillValid(su.Snapshot, freshMeta) {
+				freshHead = su.Snapshot
+				staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: su.Snapshot}
+				continue
+			}
+
+			oldManifestList := su.Snapshot.ManifestList
+			newSnap, rebuildErr := su.rebuildManifestList(ctx, freshMeta, freshHead, fs, attempt)
+			if rebuildErr != nil {
+				return result, orphanedPaths, rebuildErr
+			}
+			result[i] = &addSnapshotUpdate{
+				baseUpdate:          su.baseUpdate,
+				Snapshot:            newSnap,
+				ownManifests:        su.ownManifests,
+				rebuildManifestList: su.rebuildManifestList,
+				written:             su.written,
+			}
+			orphanedPaths = append(orphanedPaths, oldManifestList)
+			freshHead = newSnap
+			staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: newSnap, rebuilt: true}
+			chainRebuilt = true
 		}
-
-		// Skip only when nothing upstream changed: the running head still
-		// matches this snapshot's recorded parent, no earlier snapshot in this
-		// chain was rebuilt, and the table-wide values the rebuild recomputes
-		// are still acceptable. Saves an unnecessary S3 write.
-		if !chainRebuilt && freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
-			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID &&
-			stagedSnapshotStillValid(su.Snapshot, freshMeta) {
-			// Already parented on the running head; it becomes the parent of
-			// the next staged snapshot in the chain.
-			freshHead = su.Snapshot
-
-			continue
-		}
-
-		oldManifestList := su.Snapshot.ManifestList
-
-		newSnap, rebuildErr := su.rebuildManifestList(ctx, freshMeta, freshHead, fs, attempt)
-		if rebuildErr != nil {
-			return result, orphanedPaths, rebuildErr
-		}
-
-		result[i] = &addSnapshotUpdate{
-			baseUpdate:          su.baseUpdate,
-			Snapshot:            newSnap,
-			ownManifests:        su.ownManifests,
-			rebuildManifestList: su.rebuildManifestList,
-			written:             su.written,
-		}
-
-		// The old manifest list is now an orphaned object in object storage.
-		orphanedPaths = append(orphanedPaths, oldManifestList)
-
-		// Chain the next staged snapshot onto the one just rebuilt.
-		freshHead = newSnap
-		chainRebuilt = true
 	}
 
 	return result, orphanedPaths, nil

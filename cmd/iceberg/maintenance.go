@@ -97,7 +97,7 @@ type BranchDeleteCmd struct {
 	Yes        bool   `arg:"--yes" help:"skip confirmation prompt"`
 }
 
-// BranchFastForwardCmd advances a target branch to an ancestor-safe source ref.
+// BranchFastForwardCmd advances a branch to a source branch or tag, if not diverged.
 type BranchFastForwardCmd struct {
 	TableID    string `arg:"positional,required" help:"full path to a table"`
 	BranchName string `arg:"positional,required" help:"target branch name"`
@@ -116,7 +116,7 @@ type BranchReplaceCmd struct {
 type BranchCmd struct {
 	Create      *BranchCreateCmd      `arg:"subcommand:create" help:"create a branch"`
 	Delete      *BranchDeleteCmd      `arg:"subcommand:delete" help:"delete a branch"`
-	FastForward *BranchFastForwardCmd `arg:"subcommand:fast-forward" help:"advance a branch to an ancestor-safe source ref"`
+	FastForward *BranchFastForwardCmd `arg:"subcommand:fast-forward" help:"fast-forward a branch to a source branch or tag; fails if histories diverge"`
 	Replace     *BranchReplaceCmd     `arg:"subcommand:replace" help:"replace a branch head with a snapshot"`
 }
 

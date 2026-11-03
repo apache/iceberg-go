@@ -77,11 +77,13 @@ rejects when concurrent deletes touch the same files.
 iceberg-go can refresh the table and replay the operation against the latest
 snapshot between attempts. On each retry the table metadata is reloaded, the
 producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`
-and `AssertRefSnapshotID` pin the refs they guard, so a retry does not rebase
-those assertions. If a guarded ref has moved, the commit fails with
-`ErrCommitFailed` instead of retrying. An `ExpireSnapshots` that removes nothing
-adds no guards.
+re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`,
+`AssertRefSnapshotID`, `FastForwardBranch`, `ReplaceBranchFromRef`, and
+`ReplaceBranch` pin the refs they guard, so a retry does not rebase those
+assertions. A promotion from a ref pins both source and target. If a pinned ref
+has moved, the commit fails rather than retrying. A co-staged append that
+would normally rebase may therefore fail after a concurrent ref move.
+An `ExpireSnapshots` that removes nothing adds no guards.
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
 setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
@@ -101,6 +103,12 @@ _, err := cat.CreateTable(ctx, ident, schema,
 > change, as `ErrCommitFailed`, so the retry loop engages on all of them. A
 > commit on another branch that takes the staged snapshot's sequence number or
 > first-row-id is a conflict too, and the retry renumbers the snapshot.
+
+
+Snapshot-ID assertions do not detect concurrent retention-only edits in any
+catalog. REST requirements also cannot distinguish a ref type change that
+leaves the snapshot ID unchanged. Avoid changing ref retention concurrently
+with branch promotion.
 
 Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including the schema, spec, sort order, and pinned

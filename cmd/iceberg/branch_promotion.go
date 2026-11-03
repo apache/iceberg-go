@@ -39,7 +39,13 @@ func runBranchFastForward(ctx context.Context, output Output, cat catalog.Catalo
 	}
 
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
-	tx := tbl.NewTransaction()
+	tx, err := tbl.NewTransactionOnBranch(cmd.BranchName)
+	if err != nil {
+		output.Error(fmt.Errorf("cannot begin branch transaction: %w", err))
+		osExit(1)
+
+		return
+	}
 	if err := tx.FastForwardBranch(cmd.BranchName, cmd.SourceRef); err != nil {
 		output.Error(fmt.Errorf("cannot fast-forward branch: %w", err))
 		osExit(1)
@@ -47,8 +53,17 @@ func runBranchFastForward(ctx context.Context, output Output, cat catalog.Catalo
 		return
 	}
 
-	if err := confirmAction(fmt.Sprintf("Fast-forward branch %q on %s from ref %q?",
-		cmd.BranchName, tableIDString(tbl), cmd.SourceRef), cmd.Yes); err != nil {
+	newHead := tbl.SnapshotByName(cmd.SourceRef)
+	oldHead := tbl.SnapshotByName(cmd.BranchName)
+	var prompt string
+	if oldHead == nil {
+		prompt = fmt.Sprintf("Create branch %q on %s at snapshot %d from ref %q?",
+			cmd.BranchName, tableIDString(tbl), newHead.SnapshotID, cmd.SourceRef)
+	} else {
+		prompt = fmt.Sprintf("Fast-forward branch %q on %s from snapshot %d to %d (ref %q)?",
+			cmd.BranchName, tableIDString(tbl), oldHead.SnapshotID, newHead.SnapshotID, cmd.SourceRef)
+	}
+	if err := confirmAction(prompt, cmd.Yes); err != nil {
 		output.Error(err)
 		osExit(1)
 
@@ -75,7 +90,13 @@ func runBranchReplace(ctx context.Context, output Output, cat catalog.Catalog, c
 	}
 
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
-	tx := tbl.NewTransaction()
+	tx, err := tbl.NewTransactionOnBranch(cmd.BranchName)
+	if err != nil {
+		output.Error(fmt.Errorf("cannot begin branch transaction: %w", err))
+		osExit(1)
+
+		return
+	}
 	if err := tx.ReplaceBranch(cmd.BranchName, cmd.SnapshotID); err != nil {
 		output.Error(fmt.Errorf("cannot replace branch: %w", err))
 		osExit(1)
@@ -83,8 +104,9 @@ func runBranchReplace(ctx context.Context, output Output, cat catalog.Catalog, c
 		return
 	}
 
-	if err := confirmAction(fmt.Sprintf("Replace branch %q on %s with snapshot %d?",
-		cmd.BranchName, tableIDString(tbl), cmd.SnapshotID), cmd.Yes); err != nil {
+	oldHead := tbl.SnapshotByName(cmd.BranchName)
+	if err := confirmAction(fmt.Sprintf("Replace branch %q on %s from snapshot %d to %d?",
+		cmd.BranchName, tableIDString(tbl), oldHead.SnapshotID, cmd.SnapshotID), cmd.Yes); err != nil {
 		output.Error(err)
 		osExit(1)
 

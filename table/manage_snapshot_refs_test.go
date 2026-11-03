@@ -48,6 +48,18 @@ func manageSnapshotRefsFixture(t *testing.T) Metadata {
 	return result
 }
 
+func manageSnapshotRefsRetryFixture(t *testing.T) Metadata {
+	t.Helper()
+	base := manageSnapshotRefsFixture(t)
+	builder, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetProperties(assertRefRetryProps))
+	result, err := builder.Build()
+	require.NoError(t, err)
+
+	return result
+}
+
 func TestFastForwardBranch(t *testing.T) {
 	t.Run("preserves retention and leaves source unchanged", func(t *testing.T) {
 		base := manageSnapshotRefsFixture(t)
@@ -139,27 +151,64 @@ func TestFastForwardBranch(t *testing.T) {
 
 func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		move func(*MetadataBuilder) error
+		name  string
+		stage func(*Transaction) error
+		move  func(*MetadataBuilder) error
 	}{
-		{"target moved", func(b *MetadataBuilder) error { return b.SetSnapshotRef("qa", 200, BranchRef) }},
-		{"source moved", func(b *MetadataBuilder) error { return b.SetSnapshotRef("audit", 200, BranchRef) }},
-		{"target became tag with same id", func(b *MetadataBuilder) error { return b.SetSnapshotRef("qa", 100, TagRef) }},
+		{
+			name:  "target moved",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch("qa", "audit") },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef("qa", 200, BranchRef) },
+		},
+		{
+			name:  "source moved",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch("qa", "audit") },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef("audit", 200, BranchRef) },
+		},
+		{
+			name:  "target became tag with same id",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch("qa", "audit") },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef("qa", 100, TagRef) },
+		},
+		{
+			name:  "main target moved",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch(MainBranch, "audit") },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+		},
+		{
+			name:  "main source moved",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch("qa", MainBranch) },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+		},
+		{
+			name:  "no-op main target moved",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch(MainBranch, "qa") },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+		},
+		{
+			name:  "replace main moved",
+			stage: func(tx *Transaction) error { return tx.ReplaceBranch(MainBranch, 900) },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			base := manageSnapshotRefsFixture(t)
+			base := manageSnapshotRefsRetryFixture(t)
 			builder, err := MetadataBuilderFromBase(base, "")
 			require.NoError(t, err)
 			require.NoError(t, tc.move(builder))
 			current, err := builder.Build()
 			require.NoError(t, err)
+
 			tbl, cat := newAssertRefTestTable(t, base, current)
 			tx := tbl.NewTransaction()
-			require.NoError(t, tx.FastForwardBranch("qa", "audit"))
+			// Force a catalog commit even when the promotion is a no-op.
+			require.NoError(t, tx.SetProperties(iceberg.Properties{"promotion-marker": "staged"}))
+			require.NoError(t, tc.stage(tx))
 			_, err = tx.Commit(t.Context())
 			require.ErrorIs(t, err, ErrCommitFailed)
-			assert.Equal(t, int32(1), cat.attempts.Load())
-			assert.Equal(t, current.SnapshotByName("qa").SnapshotID, cat.metadata.SnapshotByName("qa").SnapshotID)
+			assert.Equal(t, int32(1), cat.attempts.Load(),
+				"a pinned ref must abort on refresh without a second commit attempt")
+			assert.NotContains(t, cat.metadata.Properties(), "promotion-marker")
 		})
 	}
 }
@@ -326,9 +375,24 @@ func TestNoOpBranchRefOperationsFenceMixedTransactions(t *testing.T) {
 			stage: func(tx *Transaction) error { return tx.ReplaceBranch("audit", 300) },
 			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef("audit", 200, BranchRef) },
 		},
+		{
+			name:  "no-op fast-forward target main changes",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch(MainBranch, "qa") },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+		},
+		{
+			name:  "no-op fast-forward source main changes",
+			stage: func(tx *Transaction) error { return tx.FastForwardBranch("qa", MainBranch) },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+		},
+		{
+			name:  "main replacement changes",
+			stage: func(tx *Transaction) error { return tx.ReplaceBranch(MainBranch, 300) },
+			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			base := manageSnapshotRefsFixture(t)
+			base := manageSnapshotRefsRetryFixture(t)
 			peer, err := MetadataBuilderFromBase(base, "")
 			require.NoError(t, err)
 			require.NoError(t, tc.move(peer))

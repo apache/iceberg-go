@@ -19,7 +19,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -32,7 +31,8 @@ import (
 // CLI test catalog validates the same requirements as an optimistic catalog.
 type branchPromotionCatalog struct {
 	*branchTagCommitCatalog
-	meta table.Metadata
+	meta             table.Metadata
+	moveMainOnCommit bool
 }
 
 func (c *branchPromotionCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
@@ -43,6 +43,21 @@ func (c *branchPromotionCatalog) LoadTable(_ context.Context, ident table.Identi
 func (c *branchPromotionCatalog) CommitTable(_ context.Context, _ table.Identifier,
 	reqs []table.Requirement, updates []table.Update,
 ) (table.Metadata, string, error) {
+	if c.moveMainOnCommit {
+		// A peer changes only main after the CLI loaded the table.
+		b, err := table.MetadataBuilderFromBase(c.meta, "")
+		if err != nil {
+			return nil, "", err
+		}
+		if err := b.SetSnapshotRef(table.MainBranch, 6000, table.BranchRef); err != nil {
+			return nil, "", err
+		}
+		c.meta, err = b.Build()
+		if err != nil {
+			return nil, "", err
+		}
+		c.moveMainOnCommit = false
+	}
 	for _, r := range reqs {
 		if err := r.Validate(c.meta); err != nil {
 			return nil, "", err
@@ -94,7 +109,7 @@ func TestRunBranchFastForward(t *testing.T) {
 	require.NoError(t, out.lastErr)
 	assert.Equal(t, int64(6000), cat.meta.SnapshotByName("feature-branch").SnapshotID)
 	assert.Equal(t, int64(6000), cat.meta.SnapshotByName("audit").SnapshotID)
-	assert.True(t, strings.Contains(out.message, "6000"))
+	assert.Contains(t, out.message, "6000")
 
 	// A tag can be a source and a missing target branch can be created.
 	cat = newBranchPromotionTestCatalog(t)
@@ -137,4 +152,40 @@ func TestRunBranchFastForwardRejectsInvalidNameBeforeLoading(t *testing.T) {
 	assert.Equal(t, 1, code)
 	require.Error(t, out.lastErr)
 	assert.Zero(t, cat.loadCount)
+}
+
+// Branch maintenance must fence the branch being updated, not an unrelated
+// main head. A concurrent main append must not reject this CLI command.
+func TestBranchPromotionCLIAllowsUnrelatedMainMove(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*branchPromotionOutput, *branchPromotionCatalog)
+	}{
+		{
+			name: "fast-forward",
+			run: func(out *branchPromotionOutput, cat *branchPromotionCatalog) {
+				runBranchFastForward(context.Background(), out, cat, &BranchFastForwardCmd{
+					TableID: "db.events", BranchName: "feature-branch", SourceRef: "audit", Yes: true,
+				})
+			},
+		},
+		{
+			name: "replace",
+			run: func(out *branchPromotionOutput, cat *branchPromotionCatalog) {
+				runBranchReplace(context.Background(), out, cat, &BranchReplaceCmd{
+					TableID: "db.events", BranchName: "feature-branch", SnapshotID: 6000, Yes: true,
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := newBranchPromotionTestCatalog(t)
+			cat.moveMainOnCommit = true
+			out := &branchPromotionOutput{}
+			tc.run(out, cat)
+			require.NoError(t, out.lastErr)
+			assert.Equal(t, int64(6000), cat.meta.SnapshotByName("feature-branch").SnapshotID)
+			assert.Equal(t, int64(6000), cat.meta.CurrentSnapshot().SnapshotID)
+		})
+	}
 }

@@ -95,8 +95,9 @@ type Transaction struct {
 	noReplay bool
 
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
-	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot, and
-	// ExpireSnapshots. doCommit's refresh-and-replay must not rewrite
+	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot,
+	// ExpireSnapshots, FastForwardBranch, ReplaceBranchFromRef, and ReplaceBranch.
+	// doCommit's refresh-and-replay must not rewrite
 	// their assertions to the fresh head between retries, so a ref that
 	// has changed fails the commit.
 	pinnedRefs map[string]struct{}
