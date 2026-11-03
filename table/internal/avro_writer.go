@@ -26,6 +26,9 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -323,7 +326,7 @@ func (w *avroFileWriter) Write(batch arrow.RecordBatch) (err error) {
 			if value == nil && f.Required {
 				return fmt.Errorf("%w: null required Avro field %q", iceberg.ErrInvalidArgument, f.Name)
 			}
-			record[f.Name] = value
+			record[avroFieldName(f.Name)] = value
 		}
 		if err := w.writer.Encode(record); err != nil {
 			return fmt.Errorf("encode Avro row %d: %w", row, err)
@@ -380,15 +383,60 @@ func (w *avroFileWriter) Abort() error {
 	return errors.Join(closeErr, removeErr)
 }
 
+
+ // avroFieldName mirrors Java AvroSchemaUtil.sanitize, including UTF-16 code units
+ // for characters outside the BMP. Retain valid names without allocating.
+func avroFieldName(name string) string {
+	valid := name != ""
+	for i, r := range name {
+		if r > 0xFFFF || !(unicode.IsLetter(r) || r == '_' || (i > 0 && unicode.IsDigit(r))) {
+			valid = false
+			break
+		}
+	}
+	if valid {
+		return name
+	}
+
+	var out strings.Builder
+	for i, unit := range utf16.Encode([]rune(name)) {
+		r := rune(unit)
+		switch {
+		case unicode.IsLetter(r) || r == '_' || (i > 0 && unicode.IsDigit(r)):
+			out.WriteRune(r)
+		case unicode.IsDigit(r):
+			out.WriteByte('_')
+			out.WriteRune(r)
+		default:
+			fmt.Fprintf(&out, "_x%X", unit)
+		}
+	}
+
+	return out.String()
+}
+
 // avroRecordSchema retains field IDs even when fields are renamed later.
 func avroRecordSchema(fields []iceberg.NestedField, name string) (any, error) {
 	out := make([]any, 0, len(fields))
+	names := make(map[string]string, len(fields))
 	for _, f := range fields {
+		if f.Name == "" {
+			return nil, fmt.Errorf("%w: empty Avro field name", iceberg.ErrInvalidArgument)
+		}
+		avroName := avroFieldName(f.Name)
+		if previous, exists := names[avroName]; exists {
+			return nil, fmt.Errorf("%w: Avro fields %q and %q have the same encoded name %q",
+				iceberg.ErrInvalidArgument, previous, f.Name, avroName)
+		}
+		names[avroName] = f.Name
 		typ, err := icebergAvroType(f.Type, f.ID)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", f.Name, err)
 		}
-		field := map[string]any{"name": f.Name, "type": typ, "field-id": f.ID}
+		field := map[string]any{"name": avroName, "type": typ, "field-id": f.ID}
+		if avroName != f.Name {
+			field["iceberg-field-name"] = f.Name
+		}
 		if !f.Required {
 			field["type"] = []any{"null", typ}
 			field["default"] = nil
@@ -524,7 +572,7 @@ func avroValue(col arrow.Array, row int, typ iceberg.Type) (any, error) {
 			if v == nil && f.Required {
 				return nil, fmt.Errorf("null required struct field %q", f.Name)
 			}
-			out[f.Name] = v
+			out[avroFieldName(f.Name)] = v
 		}
 
 		return out, nil

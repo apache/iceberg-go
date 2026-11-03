@@ -38,6 +38,83 @@ import (
 	"github.com/twmb/avro/ocf"
 )
 
+func TestAvroFieldNamesMatchJava(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{
+		{"normal_name", "normal_name"},
+		{"customer-id", "customer_x2Did"},
+		{"1st-value", "_1st_x2Dvalue"},
+		{"first name", "first_x20name"},
+		{"a.b", "a_x2Eb"},
+		{"emoji🚀", "emoji_xD83D_xDE80"},
+	} {
+		require.Equal(t, tc.want, avroFieldName(tc.name))
+	}
+}
+
+func TestAvroSchemaRejectsSanitizedNameCollisions(t *testing.T) {
+	_, err := avroRecordSchema([]iceberg.NestedField{
+		{ID: 1, Name: "a-b", Type: iceberg.Int32Type{}},
+		{ID: 2, Name: "a_x2Db", Type: iceberg.Int32Type{}},
+	}, "iceberg_record")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "same encoded name")
+}
+
+func TestAvroWriterSanitizesTopLevelAndNestedFields(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "1st-value", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "person", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "first name", Type: iceberg.StringType{}, Required: true},
+			},
+		}, Required: true},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "1st-value", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "person", Type: arrow.StructOf(
+			arrow.Field{Name: "first name", Type: arrow.BinaryTypes.String, Nullable: false},
+		), Nullable: false},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer builder.Release()
+	builder.Field(0).(*array.Int64Builder).Append(42)
+	nested := builder.Field(1).(*array.StructBuilder)
+	nested.Append(true)
+	nested.FieldBuilder(0).(*array.StringBuilder).Append("Ada")
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+
+	path := filepath.Join(t.TempDir(), "sanitized.avro")
+	w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: path,
+		Content: iceberg.EntryContentData,
+	}, as)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(batch))
+	_, err = w.Close()
+	require.NoError(t, err)
+
+	file, err := os.Open(path)
+	require.NoError(t, err)
+	defer file.Close()
+	reader, err := ocf.NewReader(file)
+	require.NoError(t, err)
+	defer reader.Close()
+	avroSchema := string(reader.Metadata()["avro.schema"])
+	require.Contains(t, avroSchema, `"name":"_1st_x2Dvalue"`)
+	require.Contains(t, avroSchema, `"iceberg-field-name":"1st-value"`)
+	require.Contains(t, avroSchema, `"name":"first_x20name"`)
+	require.Contains(t, avroSchema, `"iceberg-field-name":"first name"`)
+
+	var record map[string]any
+	require.NoError(t, reader.Decode(&record))
+	require.Equal(t, int64(42), record["_1st_x2Dvalue"])
+	decodedStruct, ok := record["person"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "Ada", decodedStruct["first_x20name"])
+	require.ErrorIs(t, reader.Decode(&record), io.EOF)
+}
+
 func TestAvroSchemaPreservesIcebergIDs(t *testing.T) {
 	sc := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 7, Name: "before_rename", Type: iceberg.Int64Type{}, Required: true},
