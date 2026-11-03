@@ -36,8 +36,8 @@ import (
 // so on) as queryable Arrow tables. It mirrors the metadata tables offered by
 // the Java, PyIceberg, and Rust clients.
 //
-// Obtain one via Table.Inspect. Each method returns an array.RecordReader that
-// the caller is responsible for releasing.
+// Obtain one via Table.Inspect. Metadata-table methods return an
+// array.RecordReader that the caller is responsible for releasing.
 type InspectTable struct {
 	tbl   Table
 	alloc memory.Allocator

@@ -106,7 +106,7 @@ func TestValidateSnapshotV1UniqueLiveFiles(t *testing.T) {
 		},
 	)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	require.NotNil(t, report)
 	assert.True(t, report.Valid())
@@ -127,7 +127,7 @@ func TestValidateSnapshotV1DuplicateLiveFileAcrossManifests(t *testing.T) {
 		},
 	)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	assert.False(t, report.Valid())
 	assert.True(t, report.Complete)
@@ -147,7 +147,7 @@ func TestValidateSnapshotV1DuplicateLiveFileWithinManifest(t *testing.T) {
 		},
 	)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	assert.False(t, report.Valid())
 	require.Len(t, report.Issues, 1)
@@ -165,7 +165,7 @@ func TestValidateSnapshotV1IgnoresDeletedEntriesForUniqueness(t *testing.T) {
 		},
 	)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	assert.True(t, report.Valid())
 	assert.Equal(t, int64(1), report.LiveFilesChecked)
@@ -178,7 +178,7 @@ func TestValidateSnapshotV1EmbeddedManifests(t *testing.T) {
 		},
 	)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	assert.True(t, report.Valid())
 	assert.Equal(t, int64(1), report.ManifestsChecked)
@@ -195,7 +195,7 @@ func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {
 		},
 	)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	assert.True(t, report.Complete)
 	assert.False(t, report.Valid())
@@ -208,7 +208,7 @@ func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {
 func TestValidateSnapshotV1EmptyManifestList(t *testing.T) {
 	tbl := v1SnapshotValidationTable(t, false, nil)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	assert.True(t, report.Valid())
 	assert.Zero(t, report.ManifestsChecked)
@@ -226,7 +226,7 @@ func TestValidateSnapshotV1MissingManifestReturnsIncompleteReport(t *testing.T) 
 		},
 	)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.Error(t, err)
 	require.NotNil(t, report)
 	assert.ErrorContains(t, err, "missing.avro")
@@ -240,7 +240,7 @@ func TestValidateSnapshotCanceledContextReturnsIncompleteReport(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	report, err := tbl.ValidateSnapshot(ctx, snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotValidationTestID)
 	require.ErrorIs(t, err, context.Canceled)
 	require.NotNil(t, report)
 	assert.False(t, report.Complete)
@@ -251,7 +251,7 @@ func TestValidateSnapshotCanceledContextReturnsIncompleteReport(t *testing.T) {
 func TestValidateSnapshotRejectsUnknownSnapshot(t *testing.T) {
 	tbl := v1SnapshotValidationTable(t, false, nil)
 
-	report, err := tbl.ValidateSnapshot(context.Background(), 999)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), 999)
 	require.Error(t, err)
 	assert.Nil(t, report)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
@@ -409,7 +409,7 @@ func TestValidateSnapshotV3DeletionVectors(t *testing.T) {
 	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
 	zero := int64(0)
 	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
-	report, err := tbl.ValidateSnapshot(context.Background(), 1)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), 1)
 	require.NoError(t, err)
 	require.True(t, report.Valid(), "%+v", report.Issues)
 
@@ -417,7 +417,7 @@ func TestValidateSnapshotV3DeletionVectors(t *testing.T) {
 	duplicate := writeValidationManifest(t, fs, 3, prefix+"duplicate.avro", iceberg.ManifestContentDeletes, 2, []iceberg.DataFile{vector1, vector1}, nil, nil)
 	list2 := writeValidationManifestListV3(t, fs, prefix+"list2.avro", 2, 2, []iceberg.ManifestFile{duplicate})
 	tbl2 := validationTable(t, 3, fs, Snapshot{SnapshotID: 2, SequenceNumber: 2, TimestampMs: time.Now().UnixMilli(), ManifestList: list2, FirstRowID: &zero, AddedRows: &zero})
-	report, err = tbl2.ValidateSnapshot(context.Background(), 2)
+	report, err = tbl2.Inspect().ValidateSnapshot(context.Background(), 2)
 	require.NoError(t, err)
 	require.Len(t, report.Issues, 1)
 	require.Equal(t, SnapshotIssueDuplicateLiveFile, report.Issues[0].Code)
@@ -436,7 +436,7 @@ func TestValidateSnapshotEmbeddedUsesHeaderSpecID(t *testing.T) {
 	_, err = iceberg.WriteManifest(path, &buf, 1, spec, simpleSchema(), snapshotValidationTestID, []iceberg.ManifestEntry{entry})
 	require.NoError(t, err)
 	require.NoError(t, writable.WriteFile(context.Background(), path, buf.Bytes()))
-	report, err := tbl.ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
 	require.NoError(t, err)
 	require.Len(t, report.Issues, 1)
 	require.Equal(t, SnapshotIssueUnknownPartitionSpec, report.Issues[0].Code)
@@ -460,7 +460,7 @@ func TestValidateSnapshotChecksDeletedEntries(t *testing.T) {
 		ManifestList: list, FirstRowID: &zero, AddedRows: &zero,
 	})
 
-	report, err := tbl.ValidateSnapshot(t.Context(), 1)
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
 	require.NoError(t, err)
 	require.True(t, report.Valid(), "%+v", report.Issues)
 	require.Zero(t, report.LiveFilesChecked)
@@ -501,7 +501,7 @@ func TestValidateSnapshotDeletionVectorTargets(t *testing.T) {
 			manifest := writeValidationManifest(t, fs, 3, prefix+"delete.avro", iceberg.ManifestContentDeletes, 1, tc.added, nil, tc.deleted)
 			list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
 			tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
-			report, err := tbl.ValidateSnapshot(t.Context(), 1)
+			report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
 			require.NoError(t, err)
 			if tc.want == "" {
 				require.True(t, report.Valid(), "%+v", report.Issues)
@@ -553,7 +553,7 @@ func TestValidateSnapshotRejectsInvalidDeletionVectorBlobRanges(t *testing.T) {
 				SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(),
 				ManifestList: list, FirstRowID: &zero, AddedRows: &zero,
 			})
-			report, err := tbl.ValidateSnapshot(t.Context(), 1)
+			report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
 			require.NoError(t, err)
 			require.True(t, report.Complete)
 			require.EqualValues(t, 1, report.LiveFilesChecked)
@@ -581,7 +581,7 @@ func TestValidateSnapshotMissingDeletionVectorTarget(t *testing.T) {
 	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
 	zero := int64(0)
 	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
-	report, err := tbl.ValidateSnapshot(t.Context(), 1)
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
 	require.NoError(t, err)
 	require.Len(t, report.Issues, 1)
 	require.Equal(t, SnapshotIssueMissingDeletionVectorTarget, report.Issues[0].Code)
@@ -597,7 +597,7 @@ func TestValidateSnapshotDuplicateDeletionVectorAcrossManifests(t *testing.T) {
 	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{first, second})
 	zero := int64(0)
 	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
-	report, err := tbl.ValidateSnapshot(t.Context(), 1)
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
 	require.NoError(t, err)
 	require.Len(t, report.Issues, 1)
 	require.Equal(t, SnapshotIssueDuplicateDeletionVector, report.Issues[0].Code)

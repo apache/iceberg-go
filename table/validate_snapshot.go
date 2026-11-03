@@ -90,11 +90,13 @@ func (r SnapshotValidationReport) Valid() bool {
 // The snapshot is never modified. I/O errors and cancellation return the
 // partial report with Complete=false and a non-nil error. Cancellation is
 // checked between reads; in-progress reads may not be interruptible. The audit
-// reads manifest metadata but does not read or stat data files.
+// reads projected manifest metadata without column statistics and does not
+// read or stat data files.
 //
 // Spec: https://iceberg.apache.org/spec/#content-file-uniqueness
 // Spec: https://iceberg.apache.org/spec/#manifest-lists
-func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*SnapshotValidationReport, error) {
+func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*SnapshotValidationReport, error) {
+	t := i.tbl
 	if t.metadata == nil {
 		return nil, fmt.Errorf("%w: table metadata is nil", iceberg.ErrInvalidArgument)
 	}
@@ -108,7 +110,8 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 		return report, err
 	}
 
-	fs, err := t.FS(ctx)
+	fsF := sharedSnapshotManifestFSF(t.fsF)
+	fs, err := fsF(ctx)
 	if err != nil {
 		return report, fmt.Errorf("load snapshot %d FileIO: %w", snapshotID, err)
 	}
@@ -116,10 +119,11 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 		return report, fmt.Errorf("snapshot %d FileIO is nil", snapshotID)
 	}
 
-	manifests, err := snapshot.Manifests(fs)
+	manifestSet, err := t.manifestSetWithFSF(ctx, *snapshot, fsF)
 	if err != nil {
 		return report, fmt.Errorf("read snapshot %d manifest list: %w", snapshotID, err)
 	}
+	manifests := manifestSet.borrowAllManifests()
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
@@ -132,7 +136,7 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 	seenManifests := make(map[string]struct{}, len(manifests))
 	// The map intentionally tracks every live content file, regardless of its
 	// partition spec, entry status (ADDED/EXISTING), or file format.
-	seenFiles := make(map[snapshotValidationFileKey]string)
+	seenFiles := make(map[deletionVectorBlobKey]string)
 	seenVectorTargets := make(map[string]snapshotValidationVector)
 
 	for _, manifest := range manifests {
@@ -176,7 +180,7 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 		validateSnapshotManifestDescriptor(report, manifest, version)
 
 		var added, existing, deleted int64
-		for entry, entryErr := range manifest.Entries(fs, false) {
+		for entry, entryErr := range iceberg.EntriesWithProjection(fs, manifest, false, iceberg.ManifestEntryProjection{}) {
 			if err := ctx.Err(); err != nil {
 				return report, err
 			}
@@ -220,7 +224,7 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 			if entry.Status() == iceberg.EntryStatusDELETED {
 				continue
 			}
-			key := snapshotValidationFileKey{path: filePath}
+			key := deletionVectorBlobKey{path: filePath}
 			validVectorRange := true
 			if IsDeletionVector(file) {
 				offset, length := file.ContentOffset(), file.ContentSizeInBytes()
@@ -232,7 +236,6 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 					})
 				} else {
 					key.offset, key.length = *offset, *length
-					key.vector = true
 				}
 				target := file.ReferencedDataFile()
 				if target == nil || *target == "" {
@@ -279,14 +282,8 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 }
 
 type snapshotValidationVector struct {
-	key      snapshotValidationFileKey
+	key      deletionVectorBlobKey
 	manifest string
-}
-
-type snapshotValidationFileKey struct {
-	path           string
-	vector         bool
-	offset, length int64
 }
 
 // Older embedded snapshots have no manifest-list descriptor. In that case,

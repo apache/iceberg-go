@@ -490,7 +490,7 @@ changing table data. This is especially useful for checking imported v1 tables
 before allowing them into production.
 
 ```go
-report, err := tbl.ValidateSnapshot(ctx, snapshotID)
+report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
 if err != nil {
     return err // I/O failed or the scan was canceled; report may be incomplete.
 }
