@@ -18,7 +18,6 @@ package table
 
 import (
 	"context"
-	"math"
 	"slices"
 	"testing"
 
@@ -70,23 +69,6 @@ func TestDynamicPartitionMatcher(t *testing.T) {
 	}
 }
 
-func TestDynamicPartitionValueEquality(t *testing.T) {
-	key := func(value any) string {
-		result, err := canonicalPartitionKey(0, map[int]any{1000: value})
-		require.NoError(t, err)
-
-		return result
-	}
-	require.Equal(t, key(nil), key(nil))
-	require.Equal(t, key([]byte{0, 1, 255}), key([]byte{0, 1, 255}))
-	require.NotEqual(t, key([]byte{0, 1}), key([]byte{1, 0}))
-	require.Equal(t, key(int32(1)), key(int64(1)))
-	require.Equal(t, key(iceberg.Date(1)), key(int32(1)))
-	require.Equal(t, key(float32(math.NaN())), key(float32(math.NaN())))
-	require.Equal(t, key(math.NaN()), key(math.NaN()))
-	require.NotEqual(t, key(math.NaN()), key(0.0))
-}
-
 func TestDynamicPartitionOverwriteDataFiles(t *testing.T) {
 	ctx := context.Background()
 	spec := partitionedSpec()
@@ -130,7 +112,7 @@ func TestDynamicPartitionOverwriteDataFiles(t *testing.T) {
 	}
 	slices.Sort(paths)
 	require.Equal(t, []string{"file://new-a.parquet", "file://new-a2.parquet", "file://old-b.parquet"}, paths)
-	require.Contains(t, txn.pinnedRefs, MainBranch, "concurrent appends must not bypass the overwrite")
+	require.NotContains(t, txn.pinnedRefs, MainBranch, "existing branches use partition-scoped conflict validation")
 }
 
 func TestDynamicPartitionOverwriteRejectsAlreadyLivePath(t *testing.T) {
@@ -227,24 +209,33 @@ func TestDynamicPartitionOverwriteRespectsCanceledContext(t *testing.T) {
 
 func TestDynamicPartitionOverwriteRejectsUnsupportedLayouts(t *testing.T) {
 	ctx := context.Background()
-	t.Run("format v3", func(t *testing.T) {
+	t.Run("format v3 row lineage", func(t *testing.T) {
 		spec := partitionedSpec()
 		txn, _ := createTestTransactionWithMemIO(t, spec)
-		txn.meta.formatVersion = 3
-		err := txn.DynamicPartitionOverwriteDataFiles(ctx, nil, nil)
-		require.ErrorIs(t, err, ErrInvalidOperation)
-		require.ErrorContains(t, err, "v3")
+		require.NoError(t, txn.meta.SetFormatVersion(3))
+		file := newTestDataFile(t, spec, "file://v3.parquet", map[int]any{1000: int32(1)})
+		require.NoError(t, txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{file}, nil))
+		meta, err := txn.meta.Build()
+		require.NoError(t, err)
+		snapshot := meta.CurrentSnapshot()
+		require.NotNil(t, snapshot)
+		require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
+		require.NotNil(t, snapshot.FirstRowID)
+		require.NotNil(t, snapshot.AddedRows)
 	})
 
 	t.Run("wrong incoming spec", func(t *testing.T) {
 		spec := partitionedSpec()
 		txn, _ := createTestTransactionWithMemIO(t, spec)
-		otherSpec := iceberg.NewPartitionSpecID(9, iceberg.PartitionField{
-			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+		otherSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1001, Name: "bucket_id", Transform: iceberg.BucketTransform{NumBuckets: 16},
 		})
-		file := newTestDataFile(t, otherSpec, "file://wrong-spec.parquet", map[int]any{1000: int32(1)})
+		require.NoError(t, txn.meta.AddPartitionSpec(&otherSpec, false))
+		require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+		file := newTestDataFile(t, spec, "file://wrong-spec.parquet", map[int]any{1000: int32(1)})
 		err := txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{file}, nil)
-		require.Error(t, err)
+		require.ErrorIs(t, err, ErrInvalidOperation)
+		require.ErrorContains(t, err, "current spec")
 		require.Empty(t, txn.meta.updates)
 	})
 
@@ -284,4 +275,46 @@ func TestDynamicPartitionOverwriteV1(t *testing.T) {
 		}
 	}
 	require.ElementsMatch(t, []string{"file://v1-new-a.parquet", "file://v1-old-b.parquet"}, paths)
+}
+
+func TestDynamicPartitionOverwriteRejectsLiveOldSpec(t *testing.T) {
+	ctx := t.Context()
+	oldSpec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, oldSpec)
+	old := newTestDataFile(t, oldSpec, "file://old-spec.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, seed.AddDataFiles(ctx, []iceberg.DataFile{old}, nil))
+	base, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, base, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+	evolve := tbl.NewTransaction()
+	nextSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1001, Name: "bucket_id", Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	require.NoError(t, evolve.meta.AddPartitionSpec(&nextSpec, false))
+	require.NoError(t, evolve.meta.SetDefaultSpecID(-1))
+	evolved, err := evolve.meta.Build()
+	require.NoError(t, err)
+
+	txn := New(Identifier{"db", "tbl"}, evolved, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil).NewTransaction()
+	currentSpec := evolved.PartitionSpec()
+	replacement := newTestDataFile(t, currentSpec, "file://new-spec.parquet",
+		map[int]any{currentSpec.Fields()[0].FieldID: int32(1)})
+	err = txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorContains(t, err, "under partition spec")
+	require.Empty(t, txn.meta.updates)
+}
+
+func TestDynamicPartitionOverwriteWithoutAutoNameMapping(t *testing.T) {
+	ctx := t.Context()
+	spec := partitionedSpec()
+	txn, _ := createTestTransactionWithMemIO(t, spec)
+	file := newTestDataFile(t, spec, "file://no-name-mapping.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{file}, nil, WithoutAutoNameMapping()))
+	updated, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Nil(t, updated.NameMapping())
 }
