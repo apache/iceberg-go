@@ -109,6 +109,9 @@ func TestORCWriterWritesIcebergIDsAndNullableStreams(t *testing.T) {
 	require.Equal(t, iceberg.OrcFile, dataFile.FileFormat())
 	require.Equal(t, int64(3), dataFile.Count())
 	require.Equal(t, int64(1), dataFile.NullValueCounts()[21])
+	require.Equal(t, []int64{3}, dataFile.SplitOffsets())
+	require.Greater(t, dataFile.ColumnSizes()[8], int64(0))
+	require.Greater(t, dataFile.ColumnSizes()[21], int64(0))
 	raw, err := os.ReadFile(name)
 	require.NoError(t, err)
 	require.True(t, bytes.HasPrefix(raw, []byte("ORC")))
@@ -132,11 +135,52 @@ func TestORCWriterWritesIcebergIDsAndNullableStreams(t *testing.T) {
 	stripes := orcTestFieldBytes(t, footer, 3)
 	require.Len(t, stripes, 1)
 	require.Equal(t, uint64(3), orcTestVarint(t, stripes[0], 5))
+	require.EqualValues(t, orcTestVarint(t, stripes[0], 3),
+		dataFile.ColumnSizes()[8]+dataFile.ColumnSizes()[21])
 	stripeFooterOffset := int(orcTestVarint(t, stripes[0], 1) + orcTestVarint(t, stripes[0], 3))
 	stripeFooterLength := int(orcTestVarint(t, stripes[0], 4))
 	stripeFooter := raw[stripeFooterOffset : stripeFooterOffset+stripeFooterLength]
 	require.Len(t, orcTestFieldBytes(t, stripeFooter, 2), 3)
 	require.Len(t, orcTestFieldBytes(t, stripeFooter, 1), 4)
+}
+
+func TestORCWriterJavaPrimitiveTypeAttributes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "count", Type: iceberg.Int64Type{}},
+		iceberg.NestedField{ID: 2, Name: "raw", Type: iceberg.BinaryType{}},
+	)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "count", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "raw", Type: arrow.BinaryTypes.Binary},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Field(0).(*array.Int64Builder).Append(42)
+	builder.Field(1).(*array.BinaryBuilder).Append([]byte("abc"))
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+	path := filepath.Join(t.TempDir(), "attributes.orc")
+	writer, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: schema, Spec: *iceberg.UnpartitionedSpec,
+		FileName: path, Content: iceberg.EntryContentData,
+	}, arrowSchema)
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(batch))
+	_, err = writer.Close()
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	psLength := int(raw[len(raw)-1])
+	ps := raw[len(raw)-1-psLength : len(raw)-1]
+	footerLength := int(orcTestVarint(t, ps, 1))
+	footer := raw[len(raw)-1-psLength-footerLength : len(raw)-1-psLength]
+	types := orcTestFieldBytes(t, footer, 4)
+	require.Len(t, types, 3)
+	require.Contains(t, string(types[1]), "iceberg.long-type")
+	require.Contains(t, string(types[1]), "LONG")
+	require.Contains(t, string(types[2]), "iceberg.binary-type")
+	require.Contains(t, string(types[2]), "BINARY")
 }
 
 func TestORCWriterRejectsUnsupportedWithoutCreatingFile(t *testing.T) {

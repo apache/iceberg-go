@@ -104,6 +104,7 @@ type orcColumn struct {
 	secondary      []uint64
 	secondaryBytes int64
 	nulls          int64
+	encodedBytes   int64
 }
 
 func (c *orcColumn) addInteger(value uint64) {
@@ -708,15 +709,18 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 	}
 	nulls := make(map[int]int64, len(w.columns))
 	values := make(map[int]int64, len(w.columns))
+	colSizes := make(map[int]int64, len(w.columns))
 	for i, c := range w.columns {
 		if !include[i] {
 			continue
 		}
 		values[c.field.ID] = w.rows
 		nulls[c.field.ID] = w.rows - int64(len(c.present)) + c.nulls
+		colSizes[c.field.ID] = c.encodedBytes
 	}
 	stats := &DataFileStatistics{
-		RecordCount: w.rows, NullValueCounts: nulls, ValueCounts: values,
+		RecordCount: w.rows, ColSizes: colSizes, NullValueCounts: nulls,
+		ValueCounts: values, SplitOffsets: []int64{3},
 		EqualityFieldIDs: append([]int(nil), w.info.EqualityFieldIDs...),
 	}
 
@@ -749,6 +753,7 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 	stripeFooter := []byte{}
 	for idx := range w.columns {
 		c := &w.columns[idx]
+		streamStart := len(out)
 		columnID := uint64(idx + 1)
 		if c.nulls > 0 {
 			present := orcEncodeByteRLE(orcPackBits(c.present))
@@ -785,6 +790,7 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 				stripeFooter = orcPBBytes(stripeFooter, 1, orcStream(5, columnID, len(secondary)))
 			}
 		}
+		c.encodedBytes = int64(len(out) - streamStart)
 	}
 	if orcHasTimestamps(w.columns) {
 		stripeFooter = orcPBBytes(stripeFooter, 3, []byte("UTC"))
@@ -826,6 +832,10 @@ func (w *orcFileWriter) encode() ([]byte, error) {
 			t = orcPBBytes(t, 3, []byte(name))
 		}
 		switch typ := c.field.Type.(type) {
+		case iceberg.Int64Type:
+			t = orcPBBytes(t, 7, orcPair("iceberg.long-type", "LONG"))
+		case iceberg.BinaryType:
+			t = orcPBBytes(t, 7, orcPair("iceberg.binary-type", "BINARY"))
 		case iceberg.DecimalType:
 			t = orcPBVarint(t, 5, uint64(typ.Precision()))
 			t = orcPBVarint(t, 6, uint64(typ.Scale()))
