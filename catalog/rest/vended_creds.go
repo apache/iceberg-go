@@ -452,9 +452,7 @@ func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
 	props := make(iceberg.Properties, len(p.baseProps))
 	maps.Copy(props, p.baseProps)
 	if credentialIndex >= 0 {
-		credentialConfig := p.credentials[credentialIndex].Config
-		clearOverriddenCredentialProperties(props, credentialConfig)
-		mergeVendedCredentials(props, credentialConfig, name)
+		mergeVendedCredentials(props, p.credentials[credentialIndex].Config, name)
 	}
 
 	return props
@@ -462,19 +460,28 @@ func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
 
 // mergeVendedCredentials layers vended storage credential properties over
 // config, the properties an IO for location is built from. Every site that
-// merges storage credentials goes through here.
+// merges storage credentials goes through here. Properties the credential
+// does not vend are kept, so user and catalog config fill in around it.
 //
-// A nonempty adls.token is the one case that also removes properties:
-// credentials the Azure FileIO selects ahead of the token would shadow it and
-// the read would 403; see adlsauth.ClearTokenShadowingCredentials. config is
-// always a copy built for one IO, and the Azure FileIO serves only location's
-// storage account, so the removals cannot reach another account's IO.
+// Two cases also remove properties:
 //
-// Unlike the S3 and GCS clearing in clearOverriddenCredentialProperties, which
-// keys on property presence, this keys on a nonempty value: the Azure FileIO
-// skips an empty adls.token, so clearing for one would discard working
-// credentials.
+//   - A vended S3 access key drops the base session token and its expiry. An
+//     STS session token only works with the key pair it was issued with, so a
+//     token left from the base config would get the read a 403. A token and
+//     expiry vended with the key are copied back in below.
+//   - A nonempty adls.token drops the credentials the Azure FileIO selects
+//     ahead of the token, which would shadow it and get the read a 403; see
+//     adlsauth.ClearTokenShadowingCredentials. config is always a copy built
+//     for one IO, and the Azure FileIO serves only location's storage account,
+//     so the removals cannot reach another account's IO. This keys on a
+//     nonempty value rather than presence: the Azure FileIO skips an empty
+//     adls.token, so clearing for one would discard working credentials.
 func mergeVendedCredentials(config, credentialConfig iceberg.Properties, location string) {
+	if _, ok := credentialConfig[iceio.S3AccessKeyID]; ok {
+		delete(config, iceio.S3SessionToken)
+		delete(config, keyS3TokenExpiresAtMs)
+	}
+
 	if credentialConfig[iceio.ADLSToken] != "" {
 		if acct, ok := adlsauth.AccountFor(location); ok {
 			adlsauth.ClearTokenShadowingCredentials(config, acct)
@@ -482,42 +489,6 @@ func mergeVendedCredentials(config, credentialConfig iceberg.Properties, locatio
 	}
 
 	maps.Copy(config, credentialConfig)
-}
-
-// clearOverriddenCredentialProperties prevents a matched credential from being
-// combined with optional fields from another credential. In particular, an S3
-// access/secret pair without a session token must not inherit a stale token
-// from the table or catalog configuration.
-func clearOverriddenCredentialProperties(props, credentialConfig iceberg.Properties) {
-	_, hasS3AccessKey := credentialConfig[iceio.S3AccessKeyID]
-	_, hasS3SecretKey := credentialConfig[iceio.S3SecretAccessKey]
-	_, hasS3SessionToken := credentialConfig[iceio.S3SessionToken]
-	if hasS3AccessKey || hasS3SecretKey || hasS3SessionToken {
-		delete(props, iceio.S3AccessKeyID)
-		delete(props, iceio.S3SecretAccessKey)
-		delete(props, iceio.S3SessionToken)
-		delete(props, keyS3TokenExpiresAtMs)
-	}
-
-	_, hasGCSOAuthToken := credentialConfig[iceio.GCSOAuthToken]
-	_, hasGCSOAuthExpiry := credentialConfig[iceio.GCSOAuthExpiresAt]
-	if hasGCSOAuthToken || hasGCSOAuthExpiry {
-		delete(props, iceio.GCSOAuthToken)
-		delete(props, iceio.GCSOAuthExpiresAt)
-	}
-
-	for key := range credentialConfig {
-		switch {
-		case strings.HasPrefix(key, iceio.ADLSSasTokenPrefix):
-			suffix := strings.TrimPrefix(key, iceio.ADLSSasTokenPrefix)
-			delete(props, iceio.ADLSSasTokenPrefix+suffix)
-			delete(props, keyAdlsSasExpiresAtMs+"."+suffix)
-		case strings.HasPrefix(key, keyAdlsSasExpiresAtMs+"."):
-			suffix := strings.TrimPrefix(key, keyAdlsSasExpiresAtMs+".")
-			delete(props, iceio.ADLSSasTokenPrefix+suffix)
-			delete(props, keyAdlsSasExpiresAtMs+"."+suffix)
-		}
-	}
 }
 
 func scopedFilesystemKey(credentialIndex int, location string) string {
