@@ -374,42 +374,41 @@ func defaultValueToJSON(typ Type, value any) any {
 }
 
 func (n *NestedField) UnmarshalJSON(b []byte) error {
-	type Alias NestedField
-	var next NestedField
 	aux := struct {
-		ID       *int      `json:"id"`
-		Required *bool     `json:"required"`
-		Type     typeIFace `json:"type"`
-		*Alias
-	}{
-		Alias: (*Alias)(&next),
-	}
+		ID             *int      `json:"id"`
+		Name           string    `json:"name"`
+		Required       *bool     `json:"required"`
+		Type           typeIFace `json:"type"`
+		Doc            string    `json:"doc"`
+		InitialDefault any       `json:"initial-default"`
+		WriteDefault   any       `json:"write-default"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	next.Type = aux.Type.Type
-
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
 	}
-	next.ID = *aux.ID
 
-	if next.Name == "" {
+	if aux.Name == "" {
 		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
 	}
 
-	if next.Type == nil {
-		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, next.Name)
+	if aux.Type.Type == nil {
+		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, aux.Name)
 	}
 
 	if aux.Required == nil {
 		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
 	}
-	next.Required = *aux.Required
 
-	*n = next
+	*n = NestedField{
+		Type: aux.Type.Type,
+		ID:   *aux.ID, Name: aux.Name, Required: *aux.Required, Doc: aux.Doc,
+		InitialDefault: aux.InitialDefault, WriteDefault: aux.WriteDefault,
+	}
 
 	return nil
 }
