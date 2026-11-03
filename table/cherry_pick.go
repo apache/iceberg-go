@@ -42,12 +42,21 @@ import (
 // copying files into another snapshot may reuse row IDs; fast-forwarding an
 // existing snapshot is safe because the lineage is not duplicated.
 //
-// The target branch is pinned to its base head to prevent a concurrent append
-// from introducing duplicate file references between validation and commit.
-// A conflict must be retried with a new transaction and refreshed table.
-// Duplicate-publication checks require complete target ancestry. Refs-only
-// loads and expired ancestors can both truncate it. Reload with
-// snapshot-loading-mode=all if the missing snapshots have not expired.
+// snapshotProps applies only when a divergent append is replayed. A fast-forward
+// reuses the source snapshot unchanged and ignores these properties. On replay,
+// source-snapshot-id and published-wap-id are derived from the source, while a
+// caller-supplied wap.id is discarded so the result is not staged.
+//
+// The target branch is pinned to its base head, and a new target branch also
+// pins main because its initial snapshot inherits main's files. A concurrent
+// move of either guarded ref fails the commit instead of rebasing. Fast-forward
+// transactions do not retry CAS conflicts because a later staged append must
+// not lose the fast-forwarded files during manifest-list reconstruction.
+//
+// Duplicate-publication checks need complete ancestry when REST loaded only
+// referenced snapshots (snapshot-loading-mode=refs). Reload in mode=all before
+// publishing from an incomplete refs-only view. Normal snapshot expiration may
+// remove old ancestors and does not by itself prevent cherry-picking.
 func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -59,8 +68,7 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 
 	source, err := meta.SnapshotByID(snapshotID)
 	if err != nil {
-		return fmt.Errorf("cherry-pick source snapshot %d may be unavailable with snapshot-loading-mode=refs: %w",
-			snapshotID, err)
+		return err
 	}
 	// Check both direct ancestry and earlier cherry-picks. A later snapshot
 	// may have removed the source files, so checking live paths is not enough.
@@ -86,8 +94,8 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 				return fmt.Errorf("%w: WAP ID %q has already been published", ErrInvalidOperation, wapID)
 			}
 		}
-		if !complete {
-			return fmt.Errorf("%w: cannot cherry-pick snapshot %d onto branch %q with incomplete target ancestry; snapshot-loading-mode=refs may omit snapshots, retry with snapshot-loading-mode=all if history has not expired",
+		if !complete && t.tbl.snapshotHistoryRefsOnly {
+			return fmt.Errorf("%w: cannot cherry-pick snapshot %d onto branch %q with incomplete target ancestry under snapshot-loading-mode=refs; reload with snapshot-loading-mode=all",
 				ErrInvalidOperation, snapshotID, t.branch)
 		}
 	}
@@ -109,10 +117,21 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 			return fmt.Errorf("%w: target ref %q is not a branch", ErrInvalidOperation, target)
 		}
 		update := meta.NewRetainingSnapshotRefUpdate(target, source.SnapshotID, BranchRef)
+		baseHead := t.baseRefSnapshotID(target)
+		req := AssertRefSnapshotID(target, baseHead)
+		if baseHead != nil {
+			req = assertBranchRefSnapshotID(target, baseHead)
+		}
+		reqs := []Requirement{req}
+		pins := []string{target}
+		if target != MainBranch && baseHead == nil {
+			// A new branch forks from main, so a concurrent main move
+			// invalidates the source's directly-applicable ancestry.
+			reqs = append(reqs, AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)))
+			pins = append(pins, MainBranch)
+		}
 
-		return t.applyPinned([]Update{update},
-			[]Requirement{assertBranchRefSnapshotID(target, t.baseRefSnapshotID(target))},
-			[]string{target})
+		return t.applyPinnedNoReplay([]Update{update}, reqs, pins)
 	}
 
 	if source.Summary == nil || source.Summary.Operation != OpAppend {
@@ -190,10 +209,8 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	}
 
 	// Unlike a normal fast append, replaying old files is not safe to rebase
-	// after the target branch moves. Recheck its original head on commit.
-	if err := t.AssertRefSnapshotID(""); err != nil {
-		return err
-	}
+	// after the target branch moves. Register pins only after the append is
+	// successfully staged, so a rejected cherry-pick leaves no stale fence.
 	if len(added) == 0 {
 		// Empty append snapshots are still valid commits and must move the
 		// target branch head, including when recording ingestion progress.
@@ -212,10 +229,36 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 			return err
 		}
 
-		return t.apply(updates, reqs)
+		if err := t.apply(updates, reqs); err != nil {
+			return err
+		}
+	} else {
+		// The files already belong to this table. Cherry-picking does not
+		// need to modify its schema name mapping.
+		if err := t.AddDataFiles(ctx, added, props, WithoutAutoNameMapping()); err != nil {
+			return err
+		}
 	}
 
-	// The files already belong to this table. Cherry-picking does not need
-	// to modify its schema name mapping, which some catalogs disallow.
-	return t.AddDataFiles(ctx, added, props, WithoutAutoNameMapping())
+	target := t.branch
+	if target == "" {
+		target = MainBranch
+	}
+	pins := []string{target}
+	if target != MainBranch && t.baseRefSnapshotID(target) == nil {
+		// Snapshot producers fork a newly created branch from main. Pin
+		// main too, or a retry could graft the source's files twice after
+		// another writer publishes them on main.
+		if err := t.apply(nil, []Requirement{
+			AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)),
+		}); err != nil {
+			return err
+		}
+		pins = append(pins, MainBranch)
+	}
+
+	// AddDataFiles and appendSnapshotProducer have already registered the
+	// base-head requirement on target. Mark it pinned without validating an
+	// assertion against the staged (and now advanced) target head.
+	return t.applyPinned(nil, nil, pins)
 }

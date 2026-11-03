@@ -135,6 +135,7 @@ type Table struct {
 	scanPlanningDirective    string
 	hasScanPlanningDirective bool
 	savedConfig              iceberg.Properties
+	snapshotHistoryRefsOnly  bool
 	reporter                 metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
@@ -266,6 +267,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.hasScanPlanningDirective = fresh.hasScanPlanningDirective
 	t.labels = fresh.labels
 	t.savedConfig = maps.Clone(fresh.savedConfig)
+	t.snapshotHistoryRefsOnly = fresh.snapshotHistoryRefsOnly
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
 	// of their own. Refresh runs inside commit retry loops, so unconditionally
 	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
@@ -957,6 +959,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
+		WithSnapshotHistoryLimitedToRefs(t.snapshotHistoryRefsOnly),
 	)
 	next.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, next.manifestContentCache)
 
@@ -980,8 +983,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // branch check that follows rejects the commit.
 //
 // Assertions on refs in pinned guard the commit (an explicit
-// Transaction.AssertRefSnapshotID, a rollback, or snapshot expiry) and
-// are never rewritten: a ref that has changed must fail the commit, not
+// Transaction.AssertRefSnapshotID, a rollback, snapshot expiry, or a
+// cherry-pick) and are never rewritten: a ref that has changed must fail the commit, not
 // be replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
@@ -1030,7 +1033,7 @@ func validateNonRebasedRequirements(reqs []Requirement, branch string, pinned ma
 	return nil
 }
 
-const noReplayHint = "commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals"
+const noReplayHint = "commit carries snapshot-relative delete-file removals or a cherry-pick fast-forward and cannot be replayed; reload the table and rebuild the operation"
 
 // commitStateUnknownError marks a CommitTable failure after which the catalog
 // may have accepted the commit. Every other doCommit failure committed
@@ -1581,6 +1584,15 @@ func WithLabels(l *iceberg.Labels) Option {
 
 	return func(t *Table) {
 		t.labels = l
+	}
+}
+
+// WithSnapshotHistoryLimitedToRefs records a partial REST snapshot load.
+// When true, an incomplete ancestry walk cannot prove that an older snapshot
+// or WAP ID was never published. This is load state, not a table property.
+func WithSnapshotHistoryLimitedToRefs(refsOnly bool) Option {
+	return func(t *Table) {
+		t.snapshotHistoryRefsOnly = refsOnly
 	}
 }
 

@@ -2014,7 +2014,9 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
 	mergeVendedCredentials(config, vended, ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved), table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved),
+		table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)),
+		table.WithSnapshotHistoryLimitedToRefs(mode == SnapshotModeRefs))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {

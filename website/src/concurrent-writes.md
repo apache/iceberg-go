@@ -78,10 +78,14 @@ iceberg-go can refresh the table and replay the operation against the latest
 snapshot between attempts. On each retry the table metadata is reloaded, the
 producer's validators re-run against the fresh snapshot, and the commit is
 re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`
-and `AssertRefSnapshotID` pin the refs they guard, so a retry does not rebase
-those assertions. If a guarded ref has moved, the commit fails with
+and `AssertRefSnapshotID`, as well as `CherryPickSnapshot`, pin the refs
+they guard, so a retry does not rebase those assertions. If a guarded ref has moved, the commit fails with
 `ErrCommitFailed` instead of retrying. An `ExpireSnapshots` that removes nothing
-adds no guards.
+adds no guards. A replayed cherry-pick pins its target branch; a new target
+also pins main because it forks from main. A fast-forwarded cherry-pick is
+non-replayable if another writer changes the table, even when the target branch
+does not move, because later snapshots in the same transaction must retain
+the fast-forwarded files. Rebuild the transaction from a fresh table on conflict.
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
 setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)

@@ -393,6 +393,21 @@ txn, err := tbl.NewTransactionOnBranch("staging")
 if err != nil { /* ... */ }
 ```
 
+Cherry-pick an existing snapshot onto the transaction's target branch:
+
+```go
+err := txn.CherryPickSnapshot(ctx, sourceSnapshotID, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+```
+
+A direct-child source fast-forwards without copying data and ignores
+`snapshotProps`. A divergent v1/v2 append is replayed with fresh snapshot
+metadata; user-supplied WAP publication markers are not trusted. Divergent v3
+appends and dynamic overwrites are not yet supported. Cherry-picks pin the
+original target branch head, and new branches also pin main. A concurrent
+move fails instead of rebasing the operation.
+
 `Commit` can retry on conflict (`ErrCommitFailed`) when `commit.retry.num-retries` is set. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 
 ## Schema and partition evolution
