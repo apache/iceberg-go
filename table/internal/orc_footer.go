@@ -76,6 +76,11 @@ func readORCFileSchema(file iceio.File) (*arrow.Schema, int64, error) {
 	if footerLen <= 0 || footerLen > footerEnd || footerLen > maxORCFooterBytes {
 		return nil, 0, fmt.Errorf("%w: invalid ORC footer length", iceberg.ErrInvalidSchema)
 	}
+	// The legacy ORC decoder allocates metadata based on the postscript length.
+	// Validate it against the physical file before opening the decoder.
+	if ps.GetMetadataLength() > uint64(footerEnd-footerLen) {
+		return nil, 0, fmt.Errorf("%w: invalid ORC metadata length", iceberg.ErrInvalidSchema)
+	}
 
 	encoded := io.NewSectionReader(file, footerEnd-footerLen, footerLen)
 	var decoder io.Reader
@@ -226,7 +231,7 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 		field.Type = arrow.PrimitiveTypes.Int32
 	case orcpb.Type_LONG:
 		switch attrs["iceberg.long-type"] {
-		case "":
+		case "", "LONG":
 			field.Type = arrow.PrimitiveTypes.Int64
 		case "TIME":
 			field.Type = arrow.FixedWidthTypes.Time64us
