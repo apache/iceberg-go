@@ -84,14 +84,18 @@ func writeDiffTestManifest(
 }
 
 func writeDiffTestManifestList(
-	t *testing.T, fs iceio.WriteFileIO, path string,
+	t *testing.T, fs iceio.WriteFileIO, version int, path string,
 	snapshotID, sequenceNumber int64, manifests []iceberg.ManifestFile,
 ) string {
 	t.Helper()
 	out, err := fs.Create(context.Background(), path)
 	require.NoError(t, err)
-	require.NoError(t, iceberg.WriteManifestList(2, out, snapshotID, nil,
-		&sequenceNumber, 0, manifests))
+	var sequence *int64
+	if version > 1 {
+		sequence = &sequenceNumber
+	}
+	require.NoError(t, iceberg.WriteManifestList(version, out, snapshotID, nil,
+		sequence, 0, manifests))
 	require.NoError(t, out.Close())
 
 	return path
@@ -173,19 +177,6 @@ func TestDiffSnapshotFilesV1EmbeddedManifests(t *testing.T) {
 	require.Equal(t, []string{c.FilePath()}, diffFilePaths(reverse.RemovedDataFiles))
 }
 
-func writeDiffTestManifestListV1(
-	t *testing.T, fs iceio.WriteFileIO, path string,
-	snapshotID int64, manifests []iceberg.ManifestFile,
-) string {
-	t.Helper()
-	out, err := fs.Create(context.Background(), path)
-	require.NoError(t, err)
-	require.NoError(t, iceberg.WriteManifestList(1, out, snapshotID, nil, nil, 0, manifests))
-	require.NoError(t, out.Close())
-
-	return path
-}
-
 func TestDiffSnapshotFilesV1ManifestLists(t *testing.T) {
 	fs := iceio.NewMemFS()
 	prefix := "mem://diff/v1-lists/"
@@ -199,9 +190,9 @@ func TestDiffSnapshotFilesV1ManifestLists(t *testing.T) {
 		iceberg.ManifestContentData, 1, []iceberg.DataFile{before}, nil, nil)
 	newManifest := writeDiffTestManifest(t, fs, 1, prefix+"new.avro",
 		iceberg.ManifestContentData, 2, nil, []iceberg.DataFile{after}, nil)
-	fromList := writeDiffTestManifestListV1(t, fs, prefix+"before-list.avro", 1,
+	fromList := writeDiffTestManifestList(t, fs, 1, prefix+"before-list.avro", 1, 0,
 		[]iceberg.ManifestFile{shared, oldManifest})
-	toList := writeDiffTestManifestListV1(t, fs, prefix+"after-list.avro", 2,
+	toList := writeDiffTestManifestList(t, fs, 1, prefix+"after-list.avro", 2, 0,
 		[]iceberg.ManifestFile{shared, newManifest})
 	now := time.Now().UnixMilli()
 	parent := int64(1)
@@ -242,9 +233,9 @@ func TestDiffSnapshotFilesV2ManifestRewriteAndDeleteFiles(t *testing.T) {
 		[]iceberg.DataFile{addedDelete}, nil, nil)
 
 	// A shared manifest that cannot be opened must not be read during diff.
-	fromList := writeDiffTestManifestList(t, fs, prefix+"list1.avro", 1, 1,
+	fromList := writeDiffTestManifestList(t, fs, 2, prefix+"list1.avro", 1, 1,
 		[]iceberg.ManifestFile{shared, oldData, oldDeletes})
-	toList := writeDiffTestManifestList(t, fs, prefix+"list2.avro", 2, 2,
+	toList := writeDiffTestManifestList(t, fs, 2, prefix+"list2.avro", 2, 2,
 		[]iceberg.ManifestFile{newDeletes, shared, newData})
 	now := time.Now().UnixMilli()
 	fromID := int64(1)
@@ -261,20 +252,6 @@ func TestDiffSnapshotFilesV2ManifestRewriteAndDeleteFiles(t *testing.T) {
 	require.Empty(t, diff.RemovedDataFiles, "manifest-only rewrite does not remove a data file")
 	require.Equal(t, []string{addedDelete.FilePath()}, diffFilePaths(diff.AddedDeleteFiles))
 	require.Equal(t, []string{removedDelete.FilePath()}, diffFilePaths(diff.RemovedDeleteFiles))
-}
-
-func writeDiffTestManifestListV3(
-	t *testing.T, fs iceio.WriteFileIO, path string,
-	snapshotID, sequenceNumber int64, manifests []iceberg.ManifestFile,
-) string {
-	t.Helper()
-	out, err := fs.Create(context.Background(), path)
-	require.NoError(t, err)
-	require.NoError(t, iceberg.WriteManifestList(3, out, snapshotID, nil,
-		&sequenceNumber, 0, manifests))
-	require.NoError(t, out.Close())
-
-	return path
 }
 
 func diffTestDeletionVector(
@@ -310,9 +287,9 @@ func TestDiffSnapshotFilesV3DeletionVectorsSharePuffinFile(t *testing.T) {
 	newManifest := writeDiffTestManifest(t, fs, 3, prefix+"new.avro",
 		iceberg.ManifestContentDeletes, 2, []iceberg.DataFile{newD, sameB, newA, newC}, nil, nil)
 
-	fromList := writeDiffTestManifestListV3(t, fs, prefix+"from-list.avro", 1, 1,
+	fromList := writeDiffTestManifestList(t, fs, 3, prefix+"from-list.avro", 1, 1,
 		[]iceberg.ManifestFile{oldManifest})
-	toList := writeDiffTestManifestListV3(t, fs, prefix+"to-list.avro", 2, 2,
+	toList := writeDiffTestManifestList(t, fs, 3, prefix+"to-list.avro", 2, 2,
 		[]iceberg.ManifestFile{newManifest})
 	now := time.Now().UnixMilli()
 	parent, zero := int64(1), int64(0)
@@ -454,8 +431,8 @@ func TestSnapshotDiffRejectsChangedContentTypeAtSamePath(t *testing.T) {
 		iceberg.ManifestContentData, 1, []iceberg.DataFile{data}, nil, nil)
 	newManifest := writeDiffTestManifest(t, fs, 2, prefix+"new.avro",
 		iceberg.ManifestContentDeletes, 2, []iceberg.DataFile{deleteFile}, nil, nil)
-	fromList := writeDiffTestManifestList(t, fs, prefix+"from.avro", 1, 1, []iceberg.ManifestFile{old})
-	toList := writeDiffTestManifestList(t, fs, prefix+"to.avro", 2, 2, []iceberg.ManifestFile{newManifest})
+	fromList := writeDiffTestManifestList(t, fs, 2, prefix+"from.avro", 1, 1, []iceberg.ManifestFile{old})
+	toList := writeDiffTestManifestList(t, fs, 2, prefix+"to.avro", 2, 2, []iceberg.ManifestFile{newManifest})
 	now := time.Now().UnixMilli()
 	tbl := diffTestTable(t, 2, fs,
 		Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: now, ManifestList: fromList},
@@ -508,4 +485,15 @@ func TestSnapshotDiffRejectsInvalidDeletionVectorRanges(t *testing.T) {
 			require.ErrorContains(t, err, "invalid offset or length")
 		})
 	}
+}
+
+func TestSnapshotDiffLiveFilesCanceledBeforeReading(t *testing.T) {
+	fs := iceio.NewMemFS()
+	manifest := iceberg.NewManifestBuilder(2, "mem://diff/unreadable.avro", 10, 0, 1).
+		SequenceNumber(1, 1).AddedFiles(1).Build()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := snapshotDiffLiveFiles(ctx, fs, []iceberg.ManifestFile{manifest})
+	require.ErrorIs(t, err, context.Canceled)
 }

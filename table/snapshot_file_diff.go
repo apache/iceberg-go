@@ -216,8 +216,10 @@ func snapshotDiffLiveFiles(ctx context.Context, fs iceio.IO, manifests []iceberg
 	group.SetLimit(min(maxConcurrentManifests, len(manifests)))
 
 	for i, manifest := range manifests {
-		if err := groupCtx.Err(); err != nil {
-			return nil, err
+		// Always call group.Wait even if an earlier worker failed or the
+		// context was canceled. Otherwise readers could outlive this call.
+		if groupCtx.Err() != nil {
+			break
 		}
 		// Unknown v1 counts are treated as nonzero by these helpers.
 		if !manifest.HasAddedFiles() && !manifest.HasExistingFiles() {
