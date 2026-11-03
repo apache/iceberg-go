@@ -37,7 +37,7 @@ const (
 	SnapshotIssueDuplicateLiveFile           SnapshotValidationIssueCode = "duplicate-live-file"
 	SnapshotIssueDuplicateDeletionVector     SnapshotValidationIssueCode = "duplicate-deletion-vector"
 	SnapshotIssueMissingDeletionVectorTarget SnapshotValidationIssueCode = "missing-deletion-vector-target"
-	SnapshotIssueInvalidDeletionVectorRange    SnapshotValidationIssueCode = "invalid-deletion-vector-range"
+	SnapshotIssueInvalidDeletionVectorRange  SnapshotValidationIssueCode = "invalid-deletion-vector-range"
 	SnapshotIssueUnknownPartitionSpec        SnapshotValidationIssueCode = "unknown-partition-spec"
 	SnapshotIssueIncompatibleManifestVersion SnapshotValidationIssueCode = "incompatible-manifest-version"
 	SnapshotIssueInvalidManifestContent      SnapshotValidationIssueCode = "invalid-manifest-content"
