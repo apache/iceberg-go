@@ -20,6 +20,8 @@ package table
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -33,18 +35,10 @@ func TestManifestProviderUniqueManifestsPreservesOrderAndDeduplicates(t *testing
 	first := iceberg.NewManifestBuilder(2, "mem://provider/first.avro", 10, 0, 1).SequenceNumber(1, 1).Build()
 	second := iceberg.NewManifestBuilder(2, "mem://provider/second.avro", 10, 0, 1).SequenceNumber(1, 1).Build()
 
-	writeList := func(snapshotID int64, path string, manifests []iceberg.ManifestFile) {
-		t.Helper()
-		var buf bytes.Buffer
-		sequenceNumber := snapshotID
-		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil, &sequenceNumber, 0, manifests))
-		require.NoError(t, fs.WriteFile(t.Context(), path, buf.Bytes()))
-	}
-
 	const firstList = "mem://provider/snap-1.avro"
 	const secondList = "mem://provider/snap-2.avro"
-	writeList(1, firstList, []iceberg.ManifestFile{shared, first})
-	writeList(2, secondList, []iceberg.ManifestFile{shared, second})
+	writeUniqueManifestTestList(t, fs, firstList, 1, []iceberg.ManifestFile{shared, first})
+	writeUniqueManifestTestList(t, fs, secondList, 2, []iceberg.ManifestFile{shared, second})
 
 	provider := ManifestProvider{
 		cache: newSnapshotManifestCache(),
@@ -130,5 +124,57 @@ func TestStreamSnapshotManifestsStopsWhenConsumerStops(t *testing.T) {
 
 			return false
 		})
+	require.Equal(t, 1, calls)
+}
+
+func writeUniqueManifestTestList(t *testing.T, fs iceio.WriteFileIO, path string, snapshotID int64, manifests []iceberg.ManifestFile) {
+	t.Helper()
+	var buf bytes.Buffer
+	sequenceNumber := snapshotID
+	require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil, &sequenceNumber, 0, manifests))
+	require.NoError(t, fs.WriteFile(t.Context(), path, buf.Bytes()))
+}
+
+func TestManifestProviderUniqueManifestsMoreThanPrefetchWindow(t *testing.T) {
+	fs := iceio.NewMemFS()
+	shared := iceberg.NewManifestBuilder(2, "mem://provider/shared.avro", 10, 0, 1).
+		SequenceNumber(1, 1).Build()
+	var snapshots []Snapshot
+	want := []string{shared.FilePath()}
+	for i := 1; i <= 13; i++ {
+		id := int64(i)
+		uniquePath := fmt.Sprintf("mem://provider/file-%02d.avro", i)
+		manifest := iceberg.NewManifestBuilder(2, uniquePath, 10, 0, id).
+			SequenceNumber(id, id).Build()
+		list := fmt.Sprintf("mem://provider/list-%02d.avro", i)
+		writeUniqueManifestTestList(t, fs, list, id, []iceberg.ManifestFile{shared, manifest})
+		snapshots = append(snapshots, Snapshot{SnapshotID: id, ManifestList: list})
+		want = append(want, uniquePath)
+	}
+
+	provider := ManifestProvider{cache: newSnapshotManifestCache(), fsF: testFSF(fs)}
+	for run := range 2 {
+		var got []string
+		for manifest, err := range provider.UniqueManifests(t.Context(), snapshots) {
+			require.NoError(t, err)
+			got = append(got, manifest.FilePath())
+		}
+		require.Equal(t, want, got, "run %d: preserve first-seen order", run)
+	}
+}
+
+func TestManifestProviderUniqueManifestsReportsMissingListOnce(t *testing.T) {
+	provider := ManifestProvider{cache: newSnapshotManifestCache(), fsF: testFSF(iceio.NewMemFS())}
+	snapshots := []Snapshot{
+		{SnapshotID: 1, ManifestList: "mem://provider/missing.avro"},
+		{SnapshotID: 2, ManifestList: "mem://provider/also-missing.avro"},
+	}
+	calls := 0
+	for manifest, err := range provider.UniqueManifests(t.Context(), snapshots) {
+		require.Nil(t, manifest)
+		require.Error(t, err)
+		require.True(t, strings.Contains(err.Error(), "snapshot 1"), "unexpected error: %v", err)
+		calls++
+	}
 	require.Equal(t, 1, calls)
 }
