@@ -45,6 +45,8 @@ import (
 // The target branch is pinned to its base head to prevent a concurrent append
 // from introducing duplicate file references between validation and commit.
 // A conflict must be retried with a new transaction and refreshed table.
+// Duplicate-publication checks require complete target ancestry; tables loaded
+// with snapshot-loading-mode=refs may need reloading with mode=all.
 func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -71,7 +73,8 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 
 			return snapshot
 		}
-		for _, ancestor := range AncestorsOf(head.SnapshotID, lookup) {
+		ancestors, complete := AncestorsOfChecked(head.SnapshotID, lookup)
+		for _, ancestor := range ancestors {
 			if ancestor.SnapshotID == snapshotID ||
 				(ancestor.Summary != nil && ancestor.Summary.Properties["source-snapshot-id"] == strconv.FormatInt(snapshotID, 10)) {
 				return fmt.Errorf("%w: snapshot %d has already been applied to target branch %q", ErrInvalidOperation, snapshotID, t.branch)
@@ -80,6 +83,10 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 				(ancestor.Summary.Properties["wap.id"] == wapID || ancestor.Summary.Properties["published-wap-id"] == wapID) {
 				return fmt.Errorf("%w: WAP ID %q has already been published", ErrInvalidOperation, wapID)
 			}
+		}
+		if !complete {
+			return fmt.Errorf("%w: cannot cherry-pick snapshot %d onto branch %q with incomplete target ancestry; snapshot-loading-mode=refs may omit required snapshots, reload with snapshot-loading-mode=all",
+				ErrInvalidOperation, snapshotID, t.branch)
 		}
 	}
 
