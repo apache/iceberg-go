@@ -303,6 +303,7 @@ func TestDynamicPartitionOverwriteRejectsLiveOldSpec(t *testing.T) {
 	var partitionFieldID int
 	for _, field := range currentSpec.Fields() {
 		partitionFieldID = field.FieldID
+
 		break
 	}
 	require.NotZero(t, partitionFieldID)
