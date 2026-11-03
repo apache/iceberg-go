@@ -151,9 +151,9 @@ func TestFastForwardBranch(t *testing.T) {
 
 func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		stage func(*Transaction) error
-		move  func(*MetadataBuilder) error
+		name    string
+		stage   func(*Transaction) error
+		move    func(*MetadataBuilder) error
 		wantErr error
 	}{
 		{
