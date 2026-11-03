@@ -1124,6 +1124,30 @@ func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 	return true
 }
 
+// snapshotReplayMetadata carries the table-wide counters of snapshots already
+// replayed. A branch replacement can reset the head to an older snapshot,
+// but it must not reset the sequence-number or row-ID allocation floor.
+type snapshotReplayMetadata struct {
+	Metadata
+	lastSequenceNumber int64
+	nextRowID          int64
+}
+
+func (m *snapshotReplayMetadata) LastSequenceNumber() int64 {
+	return m.lastSequenceNumber
+}
+
+func (m *snapshotReplayMetadata) NextRowID() int64 {
+	return m.nextRowID
+}
+
+func (m *snapshotReplayMetadata) recordSnapshot(snap *Snapshot) {
+	m.lastSequenceNumber = max(m.lastSequenceNumber, snap.SequenceNumber)
+	if snap.FirstRowID != nil && snap.AddedRows != nil {
+		m.nextRowID = max(m.nextRowID, *snap.FirstRowID) + *snap.AddedRows
+	}
+}
+
 // rebuildSnapshotUpdates returns a new slice of updates where any
 // addSnapshotUpdate that carries a rebuildManifestList closure has its
 // snapshot regenerated to inherit all data files committed to the branch
@@ -1147,6 +1171,20 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 	var freshHead *Snapshot
 	if freshMeta != nil {
 		freshHead = latestSnapshotForBranch(freshMeta, branch)
+	}
+
+	// Replaying an append, then a branch replacement, then another append
+	// still consumes two table-wide sequence numbers (and v3 row-ID ranges).
+	// Keep these floors across ref moves, even when they reset freshHead.
+	replayMeta := freshMeta
+	var counters *snapshotReplayMetadata
+	if freshMeta != nil {
+		counters = &snapshotReplayMetadata{
+			Metadata:           freshMeta,
+			lastSequenceNumber: freshMeta.LastSequenceNumber(),
+			nextRowID:          freshMeta.NextRowID(),
+		}
+		replayMeta = counters
 	}
 
 	result := slices.Clone(updates)
@@ -1189,21 +1227,27 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			}
 			if su.rebuildManifestList == nil {
 				staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: su.Snapshot}
+				if counters != nil {
+					counters.recordSnapshot(su.Snapshot)
+				}
 
 				continue
 			}
 
 			if !chainRebuilt && freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
 				*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID &&
-				stagedSnapshotStillValid(su.Snapshot, freshMeta) {
+				stagedSnapshotStillValid(su.Snapshot, replayMeta) {
 				freshHead = su.Snapshot
 				staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: su.Snapshot}
+				if counters != nil {
+					counters.recordSnapshot(su.Snapshot)
+				}
 
 				continue
 			}
 
 			oldManifestList := su.Snapshot.ManifestList
-			newSnap, rebuildErr := su.rebuildManifestList(ctx, freshMeta, freshHead, fs, attempt)
+			newSnap, rebuildErr := su.rebuildManifestList(ctx, replayMeta, freshHead, fs, attempt)
 			if rebuildErr != nil {
 				return result, orphanedPaths, rebuildErr
 			}
@@ -1217,6 +1261,9 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			orphanedPaths = append(orphanedPaths, oldManifestList)
 			freshHead = newSnap
 			staged[su.Snapshot.SnapshotID] = stagedSnapshot{snapshot: newSnap, rebuilt: true}
+			if counters != nil {
+				counters.recordSnapshot(newSnap)
+			}
 			chainRebuilt = true
 		}
 	}

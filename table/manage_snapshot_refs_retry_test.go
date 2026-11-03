@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	iceio "github.com/apache/iceberg-go/io"
@@ -126,4 +127,74 @@ func testBranchPromotionAppendRetryKeepsAuditAncestry(t *testing.T, stage func(*
 	require.NotNil(t, committed.CurrentSnapshot().ParentSnapshotID)
 	assert.Equal(t, auditID, *committed.CurrentSnapshot().ParentSnapshotID)
 	assert.Equal(t, auditID, committed.SnapshotByName("audit").SnapshotID)
+}
+
+// TestBranchPromotionRetryPreservesTableSequenceAcrossRefReset exercises a
+// second append after replacing the branch head with an older lineage. The
+// second append must not reuse the first one's table-wide sequence number.
+func TestBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T) {
+	base := manageSnapshotRefsRetryFixture(t)
+	peer, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	diverged := int64(900)
+	require.NoError(t, peer.AddSnapshot(&Snapshot{
+		SnapshotID:       901,
+		ParentSnapshotID: &diverged,
+		SequenceNumber:   base.LastSequenceNumber() + 1,
+		TimestampMs:      base.LastUpdatedMillis() + 1000,
+		Summary:          &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, peer.SetSnapshotRef("diverged", 901, BranchRef))
+	catalogMeta, err := peer.Build()
+	require.NoError(t, err)
+
+	cat := &flakyCatalog{metadata: catalogMeta, failUntilAttempt: 1, failWith: ErrCommitFailed}
+	tbl := New(Identifier{"db", "branch-promotion-sequence-retry"}, base, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AssertRefSnapshotID(MainBranch))
+
+	stageAppend := func(snapshotID, parentID, sequenceNumber int64) {
+		snap := &Snapshot{
+			SnapshotID:       snapshotID,
+			ParentSnapshotID: &parentID,
+			SequenceNumber:   sequenceNumber,
+			TimestampMs:      base.LastUpdatedMillis() + snapshotID,
+			ManifestList:     fmt.Sprintf("original-%d.avro", snapshotID),
+			Summary:          &Summary{Operation: OpAppend},
+		}
+		add := NewAddSnapshotUpdate(snap)
+		add.rebuildManifestList = func(_ context.Context, fresh Metadata, parent *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
+			require.NotNil(t, parent)
+			rebuilt := *snap
+			id := parent.SnapshotID
+			rebuilt.ParentSnapshotID = &id
+			rebuilt.SequenceNumber = max(fresh.LastSequenceNumber(), parent.SequenceNumber) + 1
+			rebuilt.ManifestList = fmt.Sprintf("rebuilt-%d.avro", snapshotID)
+
+			return &rebuilt, nil
+		}
+		require.NoError(t, tx.apply([]Update{
+			add,
+			tx.meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef),
+		}, nil))
+	}
+
+	stageAppend(1001, 100, base.LastSequenceNumber()+1)
+	require.NoError(t, tx.ReplaceBranch(MainBranch, 300))
+	stageAppend(1002, 300, base.LastSequenceNumber()+2)
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), cat.attempts.Load())
+	first := committed.Metadata().SnapshotByID(1001)
+	second := committed.Metadata().SnapshotByID(1002)
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+	require.NotNil(t, first.ParentSnapshotID)
+	require.NotNil(t, second.ParentSnapshotID)
+	assert.Equal(t, int64(100), *first.ParentSnapshotID)
+	assert.Equal(t, int64(300), *second.ParentSnapshotID)
+	assert.Greater(t, second.SequenceNumber, first.SequenceNumber)
+	assert.Equal(t, int64(1002), committed.CurrentSnapshot().SnapshotID)
 }
