@@ -154,6 +154,7 @@ func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 		name  string
 		stage func(*Transaction) error
 		move  func(*MetadataBuilder) error
+		wantErr error
 	}{
 		{
 			name:  "target moved",
@@ -166,9 +167,10 @@ func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef("audit", 200, BranchRef) },
 		},
 		{
-			name:  "target became tag with same id",
-			stage: func(tx *Transaction) error { return tx.FastForwardBranch("qa", "audit") },
-			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef("qa", 100, TagRef) },
+			name:    "target became tag with same id",
+			stage:   func(tx *Transaction) error { return tx.FastForwardBranch("qa", "audit") },
+			move:    func(b *MetadataBuilder) error { return b.SetSnapshotRef("qa", 100, TagRef) },
+			wantErr: ErrTransactionUnusable,
 		},
 		{
 			name:  "main target moved",
@@ -205,7 +207,14 @@ func TestFastForwardBranchPinsBothRefs(t *testing.T) {
 			require.NoError(t, tx.SetProperties(iceberg.Properties{"promotion-marker": "staged"}))
 			require.NoError(t, tc.stage(tx))
 			_, err = tx.Commit(t.Context())
-			require.ErrorIs(t, err, ErrCommitFailed)
+			wantErr := ErrCommitFailed
+			if tc.wantErr != nil {
+				wantErr = tc.wantErr
+			}
+			require.ErrorIs(t, err, wantErr)
+			if tc.wantErr != nil {
+				require.NotErrorIs(t, err, ErrCommitFailed)
+			}
 			assert.Equal(t, int32(1), cat.attempts.Load(),
 				"a pinned ref must abort on refresh without a second commit attempt")
 			assert.NotContains(t, cat.metadata.Properties(), "promotion-marker")
