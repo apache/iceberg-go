@@ -96,6 +96,41 @@ func orcScanFixture(t *testing.T, fs *iceio.MemFS, schema string, rows [][]any) 
 	return b.Build()
 }
 
+func TestORCScannerV1ProjectionAndFilter(t *testing.T) {
+	fs := iceio.NewMemFS()
+	data := orcScanFixture(t, fs, "struct<old_id:bigint,category:string>",
+		[][]any{{int64(1), "keep"}, {int64(2), "drop"}, {int64(3), "keep"}})
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	projection := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64})
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec,
+		UnsortedSortOrder, "mem://orc/table", iceberg.Properties{PropertyFormatVersion: "1"})
+	require.NoError(t, err)
+	filter := iceberg.EqualTo(iceberg.Reference("category"), "keep")
+	bound, err := iceberg.BindExpr(schema, filter, true)
+	require.NoError(t, err)
+	scan := &arrowScan{
+		fs: fs, metadata: metadata, scanSchema: schema, projectedSchema: projection,
+		filterSchema: schema, boundRowFilter: bound, caseSensitive: true,
+		rowLimit: ScanNoLimit, concurrency: 1,
+	}
+	_, records, err := scan.GetRecords(t.Context(), []FileScanTask{{File: data}})
+	require.NoError(t, err)
+	var ids []int64
+	for record, err := range records {
+		require.NoError(t, err)
+		values := record.Column(0).(*array.Int64)
+		for i := range values.Len() {
+			ids = append(ids, values.Value(i))
+		}
+		record.Release()
+	}
+	require.Equal(t, []int64{1, 3}, ids)
+}
+
 func TestORCScannerMultipleStripesFiltersAndDeletes(t *testing.T) {
 	fs := iceio.NewMemFS()
 	file := orcScanFixture(t, fs, "struct<old_id:bigint,category:string>", [][]any{{int64(1), "keep"}, {int64(2), "keep"}, {int64(3), "drop"}, {int64(4), "keep"}})
