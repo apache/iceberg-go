@@ -19,6 +19,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro/ocf"
 )
 
 const snapshotValidationTestID int64 = 41
@@ -183,6 +185,65 @@ func TestValidateSnapshotV1EmbeddedManifests(t *testing.T) {
 	assert.True(t, report.Valid())
 	assert.Equal(t, int64(1), report.ManifestsChecked)
 	assert.Equal(t, int64(1), report.LiveFilesChecked)
+}
+
+func TestEmbeddedValidationSpecIDV1OptionalHeaders(t *testing.T) {
+	fs := iceio.NewMemFS()
+	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	const path = "mem://validation/legacy-v1.avro"
+	var original bytes.Buffer
+	_, err := iceberg.WriteManifest(path, &original, 1, spec, simpleSchema(), snapshotValidationTestID, nil)
+	require.NoError(t, err)
+	reader, err := ocf.NewReader(bytes.NewReader(original.Bytes()))
+	require.NoError(t, err)
+	metadata := make(map[string][]byte)
+	for key, value := range reader.Metadata() {
+		if key != "partition-spec-id" && key != "avro.schema" && key != "avro.codec" {
+			metadata[key] = value
+		}
+	}
+	schema := reader.Schema()
+	require.NoError(t, reader.Close())
+
+	writeHeader := func() {
+		var output bytes.Buffer
+		writer, err := ocf.NewWriter(&output, schema, ocf.WithMetadata(metadata))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, fs.WriteFile(t.Context(), path, output.Bytes()))
+	}
+	writeHeader()
+	got, known, err := embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{spec})
+	require.NoError(t, err)
+	require.True(t, known)
+	require.EqualValues(t, spec.ID(), got)
+
+	var fields []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(metadata["partition-spec"], &fields))
+	for _, field := range fields {
+		delete(field, "field-id")
+	}
+	metadata["partition-spec"], err = json.Marshal(fields)
+	require.NoError(t, err)
+	writeHeader()
+	got, known, err = embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{spec})
+	require.NoError(t, err)
+	require.True(t, known)
+	require.EqualValues(t, spec.ID(), got)
+
+	ambiguous := iceberg.NewPartitionSpecID(8, spec.Field(0))
+	_, known, err = embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{spec, ambiguous})
+	require.NoError(t, err)
+	require.False(t, known)
+
+	unrelated := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.BucketTransform{NumBuckets: 4},
+	})
+	_, known, err = embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{unrelated})
+	require.NoError(t, err)
+	require.False(t, known)
 }
 
 func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {
