@@ -38,6 +38,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 )
 
 type Type string
@@ -113,19 +114,10 @@ func NewCreateViewCfg() CreateViewCfg {
 	}
 }
 
-// Catalog provides table and namespace operations plus an explicit resource
-// lifecycle. Implementations must release catalog-owned resources in Close.
-// Ownership of constructor-supplied dependencies depends on the implementation.
-// Using a catalog after Close is unsupported; repeated Close calls have
-// implementation-specific behavior.
-type Catalog interface {
-	io.Closer
-
-	// PurgeableCatalog provides the mandatory physical table deletion API.
+// TableCatalog contains the table operations supported by every catalog.
+// Callers that only manage tables can depend on this narrower interface.
+type TableCatalog interface {
 	PurgeableCatalog
-
-	// CatalogType returns the type of the catalog.
-	CatalogType() Type
 
 	// CreateTable creates a new iceberg table in the catalog using the provided identifier
 	// and schema. Options can be used to optionally provide location, partition spec, sort order,
@@ -145,6 +137,11 @@ type Catalog interface {
 	RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error)
 	// CheckTableExists reports whether the table exists.
 	CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error)
+}
+
+// NamespaceCatalog contains the namespace operations supported by every
+// catalog. All built-in catalogs implement these operations.
+type NamespaceCatalog interface {
 	// ListNamespaces returns the list of available namespaces, optionally filtering by a
 	// parent namespace
 	ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error)
@@ -162,11 +159,79 @@ type Catalog interface {
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
 }
 
+// Catalog combines universal table and namespace operations with catalog
+// identity and resource lifecycle. Implementations must release catalog-owned
+// resources in Close. Ownership of constructor-supplied dependencies depends
+// on the implementation. Using a catalog after Close is unsupported; repeated
+// Close calls have implementation-specific behavior.
+//
+// After v1, add new capabilities as optional interfaces, never as methods
+// on Catalog, to avoid breaking third-party catalog implementations.
+type Catalog interface {
+	io.Closer
+
+	// Name returns the catalog's configured logical name. Glue and Hive
+	// catalogs built without WithName return "glue" and "hive".
+	Name() string
+
+	// CatalogType returns the type of the catalog.
+	CatalogType() Type
+
+	TableCatalog
+	NamespaceCatalog
+}
+
+// As finds the first catalog in the wrapping chain that implements T.
+// Catalog decorators can expose a wrapped catalog with Unwrap() Catalog.
+// The outermost catalog is checked first, allowing decorators to intercept
+// optional operations. Unwrap may return nil to end the chain, and the
+// chain must terminate without cycles.
+func As[T any](cat Catalog) (T, bool) {
+	for cat != nil {
+		if capability, ok := any(cat).(T); ok {
+			return capability, true
+		}
+
+		wrapper, ok := cat.(interface{ Unwrap() Catalog })
+		if !ok {
+			break
+		}
+		cat = wrapper.Unwrap()
+	}
+
+	var zero T
+
+	return zero, false
+}
+
+// ViewCatalog is an optional capability for standard view operations.
+// Use As to discover support on a Catalog, including through decorators.
+// RenameView, RegisterView, and UpdateView are not part of this interface.
+type ViewCatalog interface {
+	// ListViews lists view identifiers in a namespace.
+	ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error]
+	// LoadView loads a view by its identifier.
+	LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error)
+	// CreateView creates a view using the given version and schema.
+	CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...CreateViewOpt) (*view.View, error)
+	// DropView removes an existing view.
+	DropView(ctx context.Context, identifier table.Identifier) error
+	// CheckViewExists reports whether the view exists.
+	CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error)
+}
+
+// UpdatableViewCatalog is an optional capability for updating existing views.
+// The REST catalog implements it; discover support with As.
+type UpdatableViewCatalog interface {
+	// UpdateView applies requirements and updates and returns the updated view.
+	UpdateView(ctx context.Context, ident table.Identifier, requirements []view.Requirement, updates []view.Update) (*view.View, error)
+}
+
 // TransactionalCatalog is an optional interface implemented by catalogs
 // that support atomic multi-table commits. Callers should check for this
-// capability via a type assertion:
+// capability via [As]:
 //
-//	if tc, ok := cat.(catalog.TransactionalCatalog); ok {
+//	if tc, ok := catalog.As[catalog.TransactionalCatalog](cat); ok {
 //	    err := tc.CommitTransaction(ctx, commits)
 //	}
 //
@@ -183,9 +248,9 @@ type TransactionalCatalog interface {
 // without creating a new table or rewriting its data.
 //
 // REST, Hive, and Glue catalogs implement this interface. Callers should
-// check for registration support with a type assertion:
+// check for registration support with [As]:
 //
-//	if registerable, ok := cat.(catalog.RegisterableCatalog); ok {
+//	if registerable, ok := catalog.As[catalog.RegisterableCatalog](cat); ok {
 //		tbl, err := registerable.RegisterTable(ctx, ident, metadataLocation)
 //	}
 //
@@ -217,9 +282,9 @@ type PurgeableCatalog interface {
 // RefreshableCredentialCatalog is an optional interface implemented by catalogs that
 // support temporarily-vended credentials. Temporarily-vended credentials scope object
 // storage access to just files allowed by the user making a related request to the
-// catalog. Callers should check for this capability via a type assertion:
+// catalog. Callers should check for this capability via [As]:
 //
-//	if rc, ok := cat.(catalog.RefreshableCredentialCatalog); ok {
+//	if rc, ok := catalog.As[catalog.RefreshableCredentialCatalog](cat); ok {
 //	    refreshed, err := rc.RefreshTableCredentials(ctx, tbl)
 //	    if err == nil {
 //	        tbl = refreshed

@@ -303,6 +303,26 @@ if err != nil { /* ... */ }
 arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 ```
 
+### Incremental changelog scans
+
+`NewIncrementalChangelogScan` returns rows added or deleted between snapshots. `PlanFiles` returns the tasks. `Read` reads a planned task list, and `ToArrowRecords` plans and reads. Remote planning is not supported.
+
+```go
+schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields("id", "name"),
+).FromSnapshotExclusive(startSnapshotID).ToArrowRecords(ctx)
+```
+
+`FromSnapshotInclusive`, `FromSnapshotExclusive`, and `ToSnapshot` bound the snapshot range. Projection, row filters, and limits apply while the rows are read. If the start snapshot has been expired, changes in expired snapshots before the oldest retained one are not reported. Each snapshot that adds deletes is planned against every live data file, narrowed only by the partition filter, so the cost follows the table size rather than the size of the snapshot range.
+
+Each batch is the scan projection followed by three columns:
+
+- `_change_type` — `INSERT` or `DELETE`
+- `_change_ordinal` — int32 ordinal of the snapshot that produced the change
+- `_commit_snapshot_id` — snapshot ID that committed the change
+
+Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. `UPDATE` rows are not produced. Delete-file handling is iceberg-go behavior.
+
 ## Writing data
 
 The shortcut methods on `Table` open a transaction, perform the write, and commit. Use `NewTransaction` directly when you need to combine multiple operations.
@@ -522,6 +542,22 @@ fmt.Printf("rewrote %d files into %d (%d -> %d bytes)\n",
 The `table/compaction` subpackage provides bin-packing planning. The `iceberg compact analyze` and `compact run` CLI commands wrap the same machinery - see [CLI](./cli.md).
 
 Compaction tasks represent complete data files, not independent scan splits. The planner collapses split tasks for the same file into one whole-file task, rejecting inconsistent delete or lineage metadata and dropping residual filters because they select files but do not filter rows during compaction. Direct calls to `ExecuteCompactionGroup` reject partial ranges and residual row filters. Attached delete files are still applied when rewriting each source file.
+
+To sort instead of bin-pack, pass `table.WithCompactionSortOrder` as a group option. Each group is sorted as a whole, so every output file holds a sorted, non-overlapping range of it. Output files record the order's `sort_order_id` when the order is one of the table's sort orders, every field has one source column, every field but the last is identity and the last preserves order (see `table.WithCompactionSortOrder`). Files of different groups still overlap, and by default a group is packed to one target file, so raise `compaction.Config.MaxGroupSizeBytes` until a group covers a partition. Set `compaction.Config.RewriteAll` to also rewrite files that are already well-sized:
+
+```go
+cfg := compaction.DefaultConfig()
+cfg.RewriteAll = true
+cfg.MaxGroupSizeBytes = 8 << 30 // 8 GiB per group
+plan, err := compaction.Analyze(ctx, tbl, cfg)
+if err != nil { /* ... */ }
+
+result, err := txn.RewriteDataFiles(ctx, groups /* from plan.Groups */, table.RewriteDataFilesOptions{
+    GroupOptions: []table.CompactionGroupOption{table.WithCompactionSortOrder(tbl.SortOrder())},
+})
+```
+
+When every file of a group already records the order's `sort_order_id` (for example, files written by an earlier sort rewrite), every sort field is identity, and no partition of the group has more files than the scan concurrency (`table.WithCompactionScanConcurrency`, `GOMAXPROCS` by default), the files are streamed and merged, holding up to about five batches per file instead of the whole group. Otherwise a sort rewrite holds each group decoded in memory, and with the batches queued for the writer that can reach about twice the group's decoded size, so keep `compaction.Config.MaxGroupSizeBytes` within what one rewrite can hold. The first sort rewrite of a table always takes this in-memory path, since its files do not record the order yet. The CLI equivalent is `iceberg compact run --sort [--rewrite-all] [--max-group-size BYTES]`, which uses the table's default sort order.
 
 ### Expiring snapshots
 

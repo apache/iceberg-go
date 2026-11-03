@@ -34,12 +34,22 @@ type compactConfig struct {
 	analyzeOnly                 bool
 	partialProgress             bool
 	preserveDeadEqualityDeletes bool
+	sort                        bool
+	rewriteAll                  bool
+	maxGroupSize                int64
 }
 
 func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg compactConfig) {
 	tbl := loadTable(ctx, output, cat, cfg.tableID)
 
+	if cfg.sort && tbl.SortOrder().IsUnsorted() {
+		output.Error(fmt.Errorf("--sort requires a default sort order on table %s", cfg.tableID))
+		osExit(1)
+	}
+
 	compCfg := compaction.DefaultConfig()
+	compCfg.RewriteAll = cfg.rewriteAll
+	compCfg.MaxGroupSizeBytes = cfg.maxGroupSize
 	if cfg.targetFileSize > 0 {
 		compCfg.TargetFileSizeBytes = cfg.targetFileSize
 		// Derive min/max using the same ratios as DefaultConfig (75%/180%).
@@ -125,6 +135,9 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 	tx := tbl.NewTransaction()
 	rewriteOpts := table.RewriteDataFilesOptions{
 		PartialProgress: cfg.partialProgress,
+	}
+	if cfg.sort {
+		rewriteOpts.GroupOptions = append(rewriteOpts.GroupOptions, table.WithCompactionSortOrder(tbl.SortOrder()))
 	}
 
 	// Cleanup of dead equality-delete files. The executor only

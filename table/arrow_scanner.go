@@ -1695,6 +1695,10 @@ type arrowScan struct {
 	// arrowBatchSize, when positive, overrides the table's
 	// read.parquet.batch-size property for this scan's reads.
 	arrowBatchSize int
+
+	// added is nil for a normal scan. A changelog deleted-row read sets it so
+	// rows matched by that snapshot's new deletes are kept.
+	added *addedDeleteState
 }
 
 // preparedFileRead contains the physical schema projection shared by all
@@ -2750,8 +2754,17 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	// row-dropping position step in the pipeline so cursors never run over a
 	// sequence an earlier step already shortened.
 	applyPosDeletes := positionalDeleteBitmap != nil && !positionalDeleteBitmap.IsEmpty() && !hasDV
+	addedPos, addedBitmap, addedEq, err := as.loadAddedDeletes(ctx, task.Value)
+	if err != nil {
+		return err
+	}
+	addedHasDV := addedBitmap != nil && !addedBitmap.IsEmpty()
+	// An added deletion vector supersedes added position deletes, matching the
+	// rule used for the deletes already on the task.
+	addedHasPos := addedPos != nil && !addedPos.IsEmpty() && !addedHasDV
+	stampPos := addedHasPos || addedHasDV
 	var posSource *rowPositionSource
-	if synthesizeRowID || applyPosDeletes || hasDV {
+	if synthesizeRowID || applyPosDeletes || hasDV || stampPos {
 		posSource = &rowPositionSource{}
 	}
 
@@ -2772,6 +2785,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	}
 
+	if stampPos {
+		pipeline = append(pipeline, stampChangelogFilePos(ctx, posSource.cursor()))
+	}
+
 	if applyPosDeletes {
 		pipeline = append(pipeline,
 			processPositionalDeleteBitmap(ctx, positionalDeleteBitmap, posSource.cursor()))
@@ -2788,6 +2805,13 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		}
 
 		pipeline = append(pipeline, eqFn)
+	}
+
+	if as.added != nil {
+		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos))
+		if stampPos {
+			pipeline = append(pipeline, dropChangelogFilePos)
+		}
 	}
 
 	if filterPlans != nil {
@@ -3046,6 +3070,22 @@ func newScanTaskChannel(taskCount, numWorkers int) chan tblutils.Enumerated[File
 }
 
 func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, positionDeleteLoader *lazyPositionDeleteLoader, dvLoader *lazyDeletionVectorLoader, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
+	cleanup := func() {
+		if positionDeleteLoader != nil {
+			positionDeleteLoader.release()
+		}
+		if as.added != nil && as.added.posLoader != nil {
+			as.added.posLoader.release()
+		}
+	}
+
+	return as.recordBatchesWithCleanup(ctx, tasks, 0, positionDeleteLoader, dvLoader, equalityDeleteLoader, invariants, cleanup)
+}
+
+// recordBatchesWithCleanup is recordBatchesFromTasksAndDeletes with the
+// cleanup run when iteration ends chosen by the caller. tasks start at
+// loaderOffset in the task slice positionDeleteLoader was built from.
+func (as *arrowScan) recordBatchesWithCleanup(ctx context.Context, tasks []FileScanTask, loaderOffset int, positionDeleteLoader *lazyPositionDeleteLoader, dvLoader *lazyDeletionVectorLoader, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants, cleanup func()) iter.Seq2[arrow.RecordBatch, error] {
 	return func(yield func(arrow.RecordBatch, error) bool) {
 		extSet := substrait.NewExtensionSet()
 		scanCtx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
@@ -3078,7 +3118,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 						var positionalDeleteBitmap *dv.RoaringPositionBitmap
 						if positionDeleteLoader != nil {
 							var err error
-							positionalDeleteBitmap, err = positionDeleteLoader.load(scanCtx, task.Index, filePath)
+							positionalDeleteBitmap, err = positionDeleteLoader.load(scanCtx, loaderOffset+task.Index, filePath)
 							if err != nil {
 								sink.fail(task, err)
 								cancel(err)
@@ -3134,10 +3174,6 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 			}
 		}()
 
-		var cleanup func()
-		if positionDeleteLoader != nil {
-			cleanup = positionDeleteLoader.release
-		}
 		createIteratorWithCleanup(scanCtx, uint(numWorkers), records, nil,
 			cancel, as.rowLimit, cleanup)(yield)
 	}
@@ -3150,6 +3186,64 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 // termination may finish the scan before the error is observed. Deletion-vector
 // errors are returned before the iterator is created.
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	resultSchema, reads, err := as.prepareTaskReads(ctx, tasks)
+	if err != nil {
+		return nil, nil, err
+	}
+	if reads == nil {
+		return resultSchema, func(yield func(arrow.RecordBatch, error) bool) {}, nil
+	}
+
+	return resultSchema, as.recordBatchesFromTasksAndDeletes(reads.ctx, tasks,
+		reads.positionDeletes, reads.deletionVectors, reads.equalityDeletes, reads.invariants), nil
+}
+
+// GetRecordsPerTask is GetRecords returning one single-use stream per task,
+// in task order. The streams share one set of delete-file loaders, so a
+// delete file that applies to several tasks is read once, and they may be
+// read concurrently and in any order. release frees the shared position
+// deletes and must be called once, after the last stream is done.
+func (as *arrowScan) GetRecordsPerTask(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, []iter.Seq2[arrow.RecordBatch, error], func(), error) {
+	// Added-delete reads go through GetRecords only. This path does not
+	// release the added position-delete loader.
+	if as.added != nil {
+		return nil, nil, nil, fmt.Errorf("%w: added-delete reads go through GetRecords only", ErrInvalidOperation)
+	}
+	resultSchema, reads, err := as.prepareTaskReads(ctx, tasks)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	streams := make([]iter.Seq2[arrow.RecordBatch, error], len(tasks))
+	if reads == nil {
+		for i := range streams {
+			streams[i] = func(yield func(arrow.RecordBatch, error) bool) {}
+		}
+
+		return resultSchema, streams, func() {}, nil
+	}
+
+	for i := range tasks {
+		streams[i] = as.recordBatchesWithCleanup(reads.ctx, tasks[i:i+1], i,
+			reads.positionDeletes, reads.deletionVectors, reads.equalityDeletes, reads.invariants, nil)
+	}
+
+	return resultSchema, streams, reads.positionDeletes.release, nil
+}
+
+// taskReads is the state shared by every task read of one scan: the
+// prepared context and the lazily loaded delete files.
+type taskReads struct {
+	ctx             context.Context
+	invariants      *arrowScanInvariants
+	positionDeletes *lazyPositionDeleteLoader
+	deletionVectors *lazyDeletionVectorLoader
+	equalityDeletes *lazyEqualityDeleteLoader
+}
+
+// prepareTaskReads resolves the projected Arrow schema and the state to
+// read tasks with. It returns nil reads when the row limit is zero.
+func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, *taskReads, error) {
 	var err error
 	as.useLargeTypes, err = strconv.ParseBool(as.options.Get(ScanOptionArrowUseLargeTypes, "false"))
 	if err != nil {
@@ -3179,7 +3273,7 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	}
 
 	if as.rowLimit == 0 {
-		return resultSchema, func(yield func(arrow.RecordBatch, error) bool) {}, nil
+		return resultSchema, nil, nil
 	}
 
 	if len(tasks) > 1 {
@@ -3217,7 +3311,19 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 
 	positionDeleteLoader := newLazyPositionDeleteLoader(as.fs, tasks)
+	if as.added != nil {
+		if err := as.prepareAddedDeleteLoaders(invariants); err != nil {
+			positionDeleteLoader.release()
 
-	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks,
-		positionDeleteLoader, dvLoader, equalityDeleteLoader, invariants), nil
+			return nil, nil, err
+		}
+	}
+
+	return resultSchema, &taskReads{
+		ctx:             ctx,
+		invariants:      invariants,
+		positionDeletes: positionDeleteLoader,
+		deletionVectors: dvLoader,
+		equalityDeletes: equalityDeleteLoader,
+	}, nil
 }

@@ -108,6 +108,25 @@ func newRewriteDeletionVector(t *testing.T, path, ref string, offset, length *in
 	return builder.Build()
 }
 
+type rewriteDeleteAddition struct {
+	File               iceberg.DataFile
+	DataSequenceNumber int64
+}
+
+// stageDeleteFileRewrite stages a row-preserving delete-file rewrite via the
+// public builder, preserving the source delete files' data sequence numbers.
+func stageDeleteFileRewrite(ctx context.Context, tx *table.Transaction, toRemove []iceberg.DataFile, toAdd []rewriteDeleteAddition) error {
+	rewrite := tx.NewRewrite(nil)
+	for _, file := range toRemove {
+		rewrite.DeleteFile(file)
+	}
+	for _, addition := range toAdd {
+		rewrite.AddDeleteFileWithDataSequenceNumber(addition.File, addition.DataSequenceNumber)
+	}
+
+	return rewrite.Commit(ctx)
+}
+
 func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
 	tbl := newReplaceFilesTestTable(t)
 
@@ -192,7 +211,7 @@ func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
 	assert.Equal(t, table.OpOverwrite, snap.Summary.Operation)
 }
 
-func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
+func TestRewriteDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 	tbl := newReplaceFilesTestTable(t)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
 	require.NoError(t, err)
@@ -227,14 +246,19 @@ func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 	require.NoError(t, err)
 
 	tx = tbl.NewTransaction()
-	require.NoError(t, tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	require.NoError(t, stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{oldDelete},
-		[]table.DeleteFileAddition{{
+		[]rewriteDeleteAddition{{
 			File:               newDeleteBuilder.Build(),
 			DataSequenceNumber: oldSequence,
-		}}, nil))
+		}}))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
+
+	snapshot := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	assert.Equal(t, table.OpReplace, snapshot.Summary.Operation,
+		"row-preserving delete-file rewrites must record a replace snapshot")
 
 	assert.Equal(t, oldSequence, currentManifestEntry(t, tbl, newDeletePath).DataSequenceNumber(),
 		"rewritten delete files must retain the replaced data sequence number")
@@ -244,7 +268,7 @@ func TestReplaceFilesWithDeleteFilesPreservesDataSequenceNumber(t *testing.T) {
 		"the replacement must preserve delete applicability")
 }
 
-func TestReplaceFilesWithDeleteFilesRejectsDVOnV2(t *testing.T) {
+func TestRewriteDeleteFilesRejectsDVOnV2(t *testing.T) {
 	tbl := newReplaceFilesTestTable(t)
 	ref := tbl.Location() + "/data/data.parquet"
 	dvBuilder, err := iceberg.NewDataFileBuilder(
@@ -256,27 +280,27 @@ func TestReplaceFilesWithDeleteFilesRejectsDVOnV2(t *testing.T) {
 	oldDelete := newPosDeleteFile(t, tbl.Location()+"/data/old-pos-delete.parquet")
 
 	tx := tbl.NewTransaction()
-	err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	err = stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{oldDelete},
-		[]table.DeleteFileAddition{{File: dv, DataSequenceNumber: 0}}, nil)
+		[]rewriteDeleteAddition{{File: dv, DataSequenceNumber: 0}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires table format version >= 3")
 }
 
-func TestReplaceFilesWithDeleteFilesRejectsPositionDeleteOnV3(t *testing.T) {
+func TestRewriteDeleteFilesRejectsPositionDeleteOnV3(t *testing.T) {
 	tbl := newReplaceFilesTestTableVersion(t, 3)
 	tx := tbl.NewTransaction()
-	err := tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	err := stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{newPosDeleteFile(t, "old-pos-delete.parquet")},
-		[]table.DeleteFileAddition{{
+		[]rewriteDeleteAddition{{
 			File:               newPosDeleteFile(t, "new-pos-delete.parquet"),
 			DataSequenceNumber: 0,
-		}}, nil)
+		}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must be a deletion vector for v3 table")
 }
 
-func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorMetadata(t *testing.T) {
+func TestRewriteDeleteFilesValidatesDeletionVectorMetadata(t *testing.T) {
 	tbl := newReplaceFilesTestTableVersion(t, 3)
 	oldDelete := newPosDeleteFile(t, "old-pos-delete.parquet")
 	ref := "data.parquet"
@@ -320,16 +344,16 @@ func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorMetadata(t *testing.T
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tx := tbl.NewTransaction()
-			err := tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+			err := stageDeleteFileRewrite(t.Context(), tx,
 				[]iceberg.DataFile{oldDelete},
-				[]table.DeleteFileAddition{{File: tt.file, DataSequenceNumber: 0}}, nil)
+				[]rewriteDeleteAddition{{File: tt.file, DataSequenceNumber: 0}})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.errSubstr)
 		})
 	}
 }
 
-func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorIdentity(t *testing.T) {
+func TestRewriteDeleteFilesValidatesDeletionVectorIdentity(t *testing.T) {
 	tbl := newReplaceFilesTestTableVersion(t, 3)
 	oldDelete := newPosDeleteFile(t, "old-pos-delete.parquet")
 	offsetA, offsetB := int64(8), int64(24)
@@ -337,24 +361,24 @@ func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorIdentity(t *testing.T
 
 	t.Run("duplicate referenced data file", func(t *testing.T) {
 		tx := tbl.NewTransaction()
-		err := tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+		err := stageDeleteFileRewrite(t.Context(), tx,
 			[]iceberg.DataFile{oldDelete},
-			[]table.DeleteFileAddition{
+			[]rewriteDeleteAddition{
 				{File: newRewriteDeletionVector(t, "a.puffin", "data.parquet", &offsetA, &length), DataSequenceNumber: 0},
 				{File: newRewriteDeletionVector(t, "b.puffin", "data.parquet", &offsetB, &length), DataSequenceNumber: 0},
-			}, nil)
+			})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must reference distinct data files")
 	})
 
 	t.Run("duplicate blob identity", func(t *testing.T) {
 		tx := tbl.NewTransaction()
-		err := tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+		err := stageDeleteFileRewrite(t.Context(), tx,
 			[]iceberg.DataFile{oldDelete},
-			[]table.DeleteFileAddition{
+			[]rewriteDeleteAddition{
 				{File: newRewriteDeletionVector(t, "shared.puffin", "data-a.parquet", &offsetA, &length), DataSequenceNumber: 0},
 				{File: newRewriteDeletionVector(t, "shared.puffin", "data-b.parquet", &offsetA, &length), DataSequenceNumber: 0},
-			}, nil)
+			})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "blob identity must be unique")
 	})
@@ -380,29 +404,29 @@ func TestReplaceFilesWithDeleteFilesValidatesDeletionVectorIdentity(t *testing.T
 		vectorA := newRewriteDeletionVector(t, sharedPath, tasks[0].File.FilePath(), &offsetA, &length)
 		vectorB := newRewriteDeletionVector(t, sharedPath, tasks[1].File.FilePath(), &offsetB, &length)
 		tx = sharedTbl.NewTransaction()
-		err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+		err = stageDeleteFileRewrite(t.Context(), tx,
 			[]iceberg.DataFile{sourceDelete},
-			[]table.DeleteFileAddition{
+			[]rewriteDeleteAddition{
 				{File: vectorA, DataSequenceNumber: sequence},
 				{File: vectorB, DataSequenceNumber: sequence},
-			}, nil)
+			})
 		require.NoError(t, err, "distinct DV blobs in one Puffin container must be accepted")
 		sharedTbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 
 		offsetC := offsetB + length
 		tx = sharedTbl.NewTransaction()
-		err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+		err = stageDeleteFileRewrite(t.Context(), tx,
 			[]iceberg.DataFile{vectorA},
-			[]table.DeleteFileAddition{{
+			[]rewriteDeleteAddition{{
 				File:               newRewriteDeletionVector(t, sharedPath, tasks[0].File.FilePath(), &offsetC, &length),
 				DataSequenceNumber: sequence,
-			}}, nil)
+			}})
 		require.NoError(t, err, "a new DV blob may reuse an existing container path while a sibling survives")
 	})
 }
 
-func TestReplaceFilesWithDeleteFilesRejectsDuplicatePaths(t *testing.T) {
+func TestRewriteDeleteFilesRejectsDuplicatePaths(t *testing.T) {
 	const path = "shared-delete-file"
 	offset, length := int64(8), int64(16)
 	pos := newPosDeleteFile(t, path)
@@ -427,19 +451,19 @@ func TestReplaceFilesWithDeleteFilesRejectsDuplicatePaths(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			tbl := newReplaceFilesTestTableVersion(t, tt.version)
-			additions := make([]table.DeleteFileAddition, len(tt.files))
+			additions := make([]rewriteDeleteAddition, len(tt.files))
 			for i, file := range tt.files {
-				additions[i] = table.DeleteFileAddition{File: file, DataSequenceNumber: 0}
+				additions[i] = rewriteDeleteAddition{File: file, DataSequenceNumber: 0}
 			}
 
-			err := tbl.NewTransaction().ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
-				[]iceberg.DataFile{newEqDeleteFile(t, "old-equality-delete.parquet")}, additions, nil)
+			err := stageDeleteFileRewrite(t.Context(), tbl.NewTransaction(),
+				[]iceberg.DataFile{newEqDeleteFile(t, "old-equality-delete.parquet")}, additions)
 			require.EqualError(t, err, tt.wantError)
 		})
 	}
 }
 
-func TestReplaceFilesWithDeleteFilesValidatesExistingPaths(t *testing.T) {
+func TestRewriteDeleteFilesValidatesExistingPaths(t *testing.T) {
 	for _, version := range []int{2, 3} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			tbl := newReplaceFilesTestTable(t)
@@ -471,12 +495,12 @@ func TestReplaceFilesWithDeleteFilesValidatesExistingPaths(t *testing.T) {
 			} {
 				t.Run(tt.name, func(t *testing.T) {
 					tx := tbl.NewTransaction()
-					err := tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+					err := stageDeleteFileRewrite(t.Context(), tx,
 						[]iceberg.DataFile{source},
-						[]table.DeleteFileAddition{{
+						[]rewriteDeleteAddition{{
 							File:               newEqDeleteFile(t, tt.path),
 							DataSequenceNumber: sequence,
-						}}, nil)
+						}})
 					if tt.name == "new delete file" {
 						require.NoError(t, err)
 
@@ -489,7 +513,7 @@ func TestReplaceFilesWithDeleteFilesValidatesExistingPaths(t *testing.T) {
 	}
 }
 
-func TestReplaceFilesWithDeleteFilesRejectsPartialPositionDeleteToDVRewrite(t *testing.T) {
+func TestRewriteDeleteFilesRejectsPartialPositionDeleteToDVRewrite(t *testing.T) {
 	tbl := newReplaceFilesTestTable(t)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
 	require.NoError(t, err)
@@ -534,22 +558,22 @@ func TestReplaceFilesWithDeleteFilesRejectsPartialPositionDeleteToDVRewrite(t *t
 	replacement := newRewriteDeletionVector(t, tbl.Location()+"/data/replacement.puffin", dataPath, &offset, &length)
 
 	tx = tbl.NewTransaction()
-	err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	err = stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{oldDeletes[0]},
-		[]table.DeleteFileAddition{{File: replacement, DataSequenceNumber: sequence}}, nil)
+		[]rewriteDeleteAddition{{File: replacement, DataSequenceNumber: sequence}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires replacing all applicable position-delete files")
 	assert.Contains(t, err.Error(), oldDeletes[1].FilePath())
 	assert.Contains(t, err.Error(), "partition-scoped")
 
 	tx = tbl.NewTransaction()
-	require.NoError(t, tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	require.NoError(t, stageDeleteFileRewrite(t.Context(), tx,
 		oldDeletes,
-		[]table.DeleteFileAddition{{File: replacement, DataSequenceNumber: sequence}}, nil),
+		[]rewriteDeleteAddition{{File: replacement, DataSequenceNumber: sequence}}),
 		"the DV rewrite should be accepted once every applicable position delete is replaced")
 }
 
-func TestReplaceFilesWithDeleteFilesRejectsDeletionVectorPartitionMismatch(t *testing.T) {
+func TestRewriteDeleteFilesRejectsDeletionVectorPartitionMismatch(t *testing.T) {
 	tbl, spec := newPartitionedReplaceFilesTestTable(t)
 	dataPath := tbl.Location() + "/data/data.parquet"
 	dataPartition := map[int]any{1000: int64(10)}
@@ -592,15 +616,15 @@ func TestReplaceFilesWithDeleteFilesRejectsDeletionVectorPartitionMismatch(t *te
 		Build()
 
 	tx = tbl.NewTransaction()
-	err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	err = stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{oldDelete},
-		[]table.DeleteFileAddition{{File: replacement, DataSequenceNumber: deleteSequence}}, nil)
+		[]rewriteDeleteAddition{{File: replacement, DataSequenceNumber: deleteSequence}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "partition spec or values")
 	assert.Contains(t, err.Error(), dataPath)
 }
 
-func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testing.T) {
+func TestRewriteDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testing.T) {
 	tbl, spec := newPartitionedReplaceFilesTestTable(t)
 	partition := map[int]any{1000: int64(10)}
 
@@ -675,16 +699,16 @@ func TestReplaceFilesWithDeleteFilesIgnoresOlderSurvivingPositionDelete(t *testi
 		Build()
 
 	tx = tbl.NewTransaction()
-	require.NoError(t, tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	require.NoError(t, stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{newPositionDelete},
-		[]table.DeleteFileAddition{{File: replacement, DataSequenceNumber: newPositionDeleteSequence}}, nil),
+		[]rewriteDeleteAddition{{File: replacement, DataSequenceNumber: newPositionDeleteSequence}}),
 		"an older position delete cannot apply to the newer target data file")
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, newPositionDeleteSequence, currentManifestEntry(t, tbl, replacement.FilePath()).DataSequenceNumber())
 }
 
-func TestReplaceFilesWithDeleteFilesRejectsSurvivingDeletionVector(t *testing.T) {
+func TestRewriteDeleteFilesRejectsSurvivingDeletionVector(t *testing.T) {
 	tbl, target := seedV3TableWithDV(t)
 	tasks, err := tbl.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
@@ -713,14 +737,14 @@ func TestReplaceFilesWithDeleteFilesRejectsSurvivingDeletionVector(t *testing.T)
 	replacement := newRewriteDeletionVector(t, tbl.Location()+"/data/replacement-dv.puffin", target, &offset, &length)
 	sequence := currentManifestEntry(t, tbl, siblingDVs[0].FilePath()).DataSequenceNumber()
 	tx = tbl.NewTransaction()
-	err = tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	err = stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{siblingDVs[0]},
-		[]table.DeleteFileAddition{{File: replacement, DataSequenceNumber: sequence}}, nil)
+		[]rewriteDeleteAddition{{File: replacement, DataSequenceNumber: sequence}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists and must be replaced")
 }
 
-func TestReplaceFilesWithDeleteFilesAllowsDroppedEqualityField(t *testing.T) {
+func TestRewriteDeleteFilesAllowsDroppedEqualityField(t *testing.T) {
 	tbl := newReplaceFilesTestTable(t)
 	oldDeleteBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
@@ -749,9 +773,9 @@ func TestReplaceFilesWithDeleteFilesAllowsDroppedEqualityField(t *testing.T) {
 	require.NoError(t, err)
 	newDelete := newDeleteBuilder.EqualityFieldIDs([]int{2}).Build()
 	tx = tbl.NewTransaction()
-	require.NoError(t, tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+	require.NoError(t, stageDeleteFileRewrite(t.Context(), tx,
 		[]iceberg.DataFile{oldDelete},
-		[]table.DeleteFileAddition{{File: newDelete, DataSequenceNumber: sequence}}, nil))
+		[]rewriteDeleteAddition{{File: newDelete, DataSequenceNumber: sequence}}))
 }
 
 // currentManifestEntry returns the manifest entry for path in the current
@@ -1265,12 +1289,12 @@ func TestReplaceFilesRejectsDeletionVectorSupersededByCurrentSnapshot(t *testing
 				require.NoError(t, err)
 				require.Len(t, rewritten, 1)
 
-				return tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+				return stageDeleteFileRewrite(t.Context(), tx,
 					[]iceberg.DataFile{superseded},
-					[]table.DeleteFileAddition{{
+					[]rewriteDeleteAddition{{
 						File:               rewritten[0],
 						DataSequenceNumber: currentManifestEntry(t, tbl, superseded.FilePath()).DataSequenceNumber(),
-					}}, nil)
+					}})
 			},
 		},
 	} {
@@ -1320,12 +1344,12 @@ func TestReplaceFilesRemovesLiveDeletionVectorNotSupersededEntry(t *testing.T) {
 		require.Len(t, rewritten, 1)
 
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.ReplaceFilesWithDeleteFiles(t.Context(), nil, nil,
+		require.NoError(t, stageDeleteFileRewrite(t.Context(), tx,
 			[]iceberg.DataFile{liveDV},
-			[]table.DeleteFileAddition{{
+			[]rewriteDeleteAddition{{
 				File:               rewritten[0],
 				DataSequenceNumber: currentManifestEntry(t, tbl, liveDV.FilePath()).DataSequenceNumber(),
-			}}, nil))
+			}}))
 		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
 

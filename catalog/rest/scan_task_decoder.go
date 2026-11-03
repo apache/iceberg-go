@@ -598,6 +598,7 @@ func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlan
 		spec:   spec,
 		fields: make([]partitionDecodeField, spec.NumFields()),
 	}
+	var sourceTypes partitionSourceTypeLookup
 	for i, field := range spec.Fields() {
 		transform := reflect.ValueOf(field.Transform)
 		if !transform.IsValid() || (transform.Kind() == reflect.Pointer && transform.IsNil()) {
@@ -610,7 +611,7 @@ func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlan
 			fieldName: field.Name,
 			sourceID:  field.FirstSourceID(),
 		}
-		sourceType, ok := findFieldType(fieldPlan.sourceID, metadata)
+		sourceType, ok := sourceTypes.find(fieldPlan.sourceID, metadata)
 		fieldPlan.sourceTypeFound = ok
 		if ok {
 			fieldPlan.resultType = field.Transform.ResultType(sourceType)
@@ -662,13 +663,31 @@ func decodePartition(
 	return partition, logicalTypes, nil
 }
 
-func findFieldType(fieldID int, metadata table.ScanPlanningMetadata) (iceberg.Type, bool) {
-	if current := metadata.CurrentSchema(); current != nil {
-		if typ, ok := current.FindTypeByID(fieldID); ok {
+// partitionSourceTypeLookup keeps the defensive copies of table schemas for
+// one decode plan. Metadata.Schemas clones the entire schema history, so
+// calling it for every historical partition field multiplies the cost.
+type partitionSourceTypeLookup struct {
+	current       *iceberg.Schema
+	history       []*iceberg.Schema
+	currentLoaded bool
+	historyLoaded bool
+}
+
+func (l *partitionSourceTypeLookup) find(fieldID int, metadata table.ScanPlanningMetadata) (iceberg.Type, bool) {
+	if !l.currentLoaded {
+		l.current = metadata.CurrentSchema()
+		l.currentLoaded = true
+	}
+	if l.current != nil {
+		if typ, ok := l.current.FindTypeByID(fieldID); ok {
 			return typ, true
 		}
 	}
-	for _, schema := range metadata.Schemas() {
+	if !l.historyLoaded {
+		l.history = metadata.Schemas()
+		l.historyLoaded = true
+	}
+	for _, schema := range l.history {
 		if schema == nil {
 			continue
 		}

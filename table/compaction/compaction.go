@@ -87,6 +87,31 @@ type Config struct {
 	// into the snapshot walk + RewriteDataFilesOptions.ExtraDeleteFilesToRemove
 	// — see CollectDeadEqualityDeletesWithSpecs.
 	PreserveDeadEqualityDeletes bool
+
+	// RewriteAll selects every file for rewriting regardless of size or
+	// deletes and keeps every packed group regardless of MinInputFiles.
+	// Mirrors Java's rewrite-all option. Use it with
+	// [table.WithCompactionSortOrder] to sort files that the size-based
+	// selection would skip as already optimal.
+	RewriteAll bool
+
+	// MaxGroupSizeBytes caps the total input size of one group. Candidates
+	// of a partition are packed into groups of up to this size, and each
+	// group is rewritten into files of about TargetFileSizeBytes, so group
+	// size and output file size are set independently. When zero, groups
+	// are packed to TargetFileSizeBytes (always positive; see Validate) and
+	// each group yields about one file. Mirrors Java's
+	// max-file-group-size-bytes.
+	//
+	// Bin-pack rewrites are unaffected by the group size beyond how work is
+	// split. Sort rewrites ([table.WithCompactionSortOrder]) depend on it:
+	// rows are ordered only within a group, so a partition split across
+	// several groups yields files that each span the partition's whole key
+	// range, and readers cannot skip any of them by min/max statistics. For
+	// example, 10 GB of small files with a 512 MB target is about 20
+	// separately sorted groups whose files all overlap; one 10 GB group is
+	// sorted once and written as about 20 files with disjoint key ranges.
+	MaxGroupSizeBytes int64
 }
 
 const (
@@ -142,8 +167,21 @@ func (cfg Config) Validate() error {
 	if cfg.DeleteRatioThreshold < 0 || cfg.DeleteRatioThreshold > 1 {
 		return fmt.Errorf("delete ratio threshold must be in [0,1], got %g", cfg.DeleteRatioThreshold)
 	}
+	if cfg.MaxGroupSizeBytes != 0 && cfg.MaxGroupSizeBytes < cfg.TargetFileSizeBytes {
+		return fmt.Errorf("max group size (%d) must be zero or at least the target file size (%d)",
+			cfg.MaxGroupSizeBytes, cfg.TargetFileSizeBytes)
+	}
 
 	return nil
+}
+
+// groupSizeBytes is the weight candidates are bin-packed to.
+func (cfg Config) groupSizeBytes() int64 {
+	if cfg.MaxGroupSizeBytes > 0 {
+		return cfg.MaxGroupSizeBytes
+	}
+
+	return cfg.TargetFileSizeBytes
 }
 
 // Group represents a set of files in the same partition
@@ -189,7 +227,8 @@ type Plan struct {
 
 // PlanCompaction analyzes the given scan tasks and produces a Plan.
 // Tasks are grouped by partition, classified as candidates or skipped,
-// and candidates are bin-packed into groups targeting TargetFileSizeBytes.
+// and candidates are bin-packed into groups of up to MaxGroupSizeBytes
+// (TargetFileSizeBytes when zero).
 // Tasks should come from one coherent scan plan; split tasks for the same file
 // are collapsed, retaining the first task's per-file delete and lineage data.
 // Residual filters select files to rewrite, but are not applied to file contents.
@@ -242,7 +281,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	var partitionBuckets []partitionBucket
 
 	for _, t := range wholeFileTasks {
-		if !cfg.isCandidate(t) {
+		if !cfg.RewriteAll && !cfg.isCandidate(t) {
 			plan.SkippedFiles++
 
 			continue
@@ -258,15 +297,17 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		partitionBuckets[index].candidates = append(partitionBuckets[index].candidates, t)
 	}
 
-	// Bin-pack candidates per partition.
+	// Group candidates per partition by size. This only splits the work;
+	// how each group's rows are rewritten (bin-pack or sort) is chosen per
+	// group with [table.CompactionGroupOption]s.
 	packer := internal.SlicePacker[table.FileScanTask]{
-		TargetWeight:    cfg.TargetFileSizeBytes,
+		TargetWeight:    cfg.groupSizeBytes(),
 		Lookback:        int(cfg.PackingLookback),
 		LargestBinFirst: false,
 	}
 
 	for _, bucket := range partitionBuckets {
-		if len(bucket.candidates) < int(cfg.MinInputFiles) {
+		if !cfg.RewriteAll && len(bucket.candidates) < int(cfg.MinInputFiles) {
 			plan.SkippedFiles += len(bucket.candidates)
 
 			continue
@@ -277,7 +318,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		})
 
 		for _, bin := range bins {
-			if len(bin) < int(cfg.MinInputFiles) {
+			if !cfg.RewriteAll && len(bin) < int(cfg.MinInputFiles) {
 				plan.SkippedFiles += len(bin)
 
 				continue
