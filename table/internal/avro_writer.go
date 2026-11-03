@@ -383,9 +383,8 @@ func (w *avroFileWriter) Abort() error {
 	return errors.Join(closeErr, removeErr)
 }
 
-
- // avroFieldName mirrors Java AvroSchemaUtil.sanitize, including UTF-16 code units
- // for characters outside the BMP. Retain valid names without allocating.
+// avroFieldName mirrors Java AvroSchemaUtil.sanitize, including UTF-16 code units
+// for characters outside the BMP. Retain valid names without allocating.
 func avroFieldName(name string) string {
 	valid := name != ""
 	for i, r := range name {
