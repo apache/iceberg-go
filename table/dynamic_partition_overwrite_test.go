@@ -300,8 +300,14 @@ func TestDynamicPartitionOverwriteRejectsLiveOldSpec(t *testing.T) {
 	txn := New(Identifier{"db", "tbl"}, evolved, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return fs, nil }, nil).NewTransaction()
 	currentSpec := evolved.PartitionSpec()
+	var partitionFieldID int
+	for _, field := range currentSpec.Fields() {
+		partitionFieldID = field.FieldID
+		break
+	}
+	require.NotZero(t, partitionFieldID)
 	replacement := newTestDataFile(t, currentSpec, "file://new-spec.parquet",
-		map[int]any{currentSpec.Fields()[0].FieldID: int32(1)})
+		map[int]any{partitionFieldID: int32(1)})
 	err = txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil)
 	require.ErrorIs(t, err, ErrInvalidOperation)
 	require.ErrorContains(t, err, "under partition spec")
@@ -317,4 +323,21 @@ func TestDynamicPartitionOverwriteWithoutAutoNameMapping(t *testing.T) {
 	updated, err := txn.meta.Build()
 	require.NoError(t, err)
 	require.Nil(t, updated.NameMapping())
+}
+
+func TestDynamicPartitionOverwriteRejectsStagedDefaultSpecChange(t *testing.T) {
+	baseSpec := iceberg.NewPartitionSpec()
+	txn, _ := createTestTransactionWithMemIO(t, baseSpec)
+	changedSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	require.NoError(t, txn.meta.AddPartitionSpec(&changedSpec, false))
+	require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+	spec, err := txn.meta.CurrentSpec()
+	require.NoError(t, err)
+	file := newTestDataFile(t, *spec, "file://staged-spec.parquet",
+		map[int]any{1000: int32(1)})
+	err = txn.DynamicPartitionOverwriteDataFiles(t.Context(), []iceberg.DataFile{file}, nil)
+	require.ErrorIs(t, err, ErrCommitFailed)
+	require.ErrorContains(t, err, "default spec id has changed")
 }
