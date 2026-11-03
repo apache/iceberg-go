@@ -28,6 +28,7 @@ func TestCherryPickSnapshotRejectsMissingSnapshot(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 	err := txn.CherryPickSnapshot(t.Context(), 99999, nil)
 	require.ErrorIs(t, err, ErrSnapshotNotFound)
+	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
 }
 
 func TestCherryPickSnapshotRejectsNonAppendOperation(t *testing.T) {
