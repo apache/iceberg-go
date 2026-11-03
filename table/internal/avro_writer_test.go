@@ -193,6 +193,48 @@ func TestAvroWriterProducesReadableOCF(t *testing.T) {
 	require.Equal(t, "c", rows[2]["name"])
 }
 
+func TestAvroWriterAcceptsJavaCompressionNames(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.Int32Type{}, Required: true},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer builder.Release()
+	builder.Field(0).(*array.Int32Builder).Append(7)
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+
+	for _, codec := range []string{"UNCOMPRESSED", "GZIP", "SnApPy"} {
+		t.Run(codec, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "data.avro")
+			w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+				FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: path,
+				Content: iceberg.EntryContentData, WriteProps: avroWriteProps{codec: codec},
+			}, as)
+			require.NoError(t, err)
+			require.NoError(t, w.Write(batch))
+			_, err = w.Close()
+			require.NoError(t, err)
+
+			file, err := os.Open(path)
+			require.NoError(t, err)
+			defer file.Close()
+			reader, err := ocf.NewReader(file)
+			require.NoError(t, err)
+			defer reader.Close()
+			if codec == "GZIP" {
+				require.Equal(t, "deflate", string(reader.Metadata()["avro.codec"]))
+			}
+			var record map[string]any
+			require.NoError(t, reader.Decode(&record))
+			require.Equal(t, int32(7), record["value"])
+			require.ErrorIs(t, reader.Decode(&record), io.EOF)
+		})
+	}
+}
+
 func TestAvroWriterRejectsUnsupportedTypeBeforeCreate(t *testing.T) {
 	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "variant", Type: iceberg.VariantType{}})
 	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "variant", Type: arrow.BinaryTypes.Binary, Nullable: true}}, nil)

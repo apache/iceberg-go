@@ -138,11 +138,11 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 		return nil, fmt.Errorf("iceberg schema: %w", err)
 	}
 	opts := []ocf.WriterOpt{ocf.WithMetadata(map[string][]byte{"iceberg.schema": icebergSchemaJSON})}
-	switch props.codec {
-	case "", "null":
+	switch strings.ToLower(props.codec) {
+	case "", "null", "uncompressed":
 	case "snappy":
 		opts = append(opts, ocf.WithCodec(ocf.SnappyCodec()))
-	case "deflate":
+	case "deflate", "gzip":
 		opts = append(opts, ocf.WithCodec(ocf.DeflateCodec(-1)))
 	case "zstd":
 		opts = append(opts, ocf.WithCodec(ocf.MustZstdCodec(nil, nil)))
