@@ -38,6 +38,7 @@ func TestCherryPickSnapshotFromDivergentBranch(t *testing.T) {
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
 	targetBefore := tbl.CurrentSnapshot().SnapshotID
 	require.NotEqual(t, base, targetBefore)
+	require.NotContains(t, tbl.Metadata().Properties(), table.DefaultNameMappingKey)
 
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, iceberg.Properties{
@@ -55,6 +56,8 @@ func TestCherryPickSnapshotFromDivergentBranch(t *testing.T) {
 		"a snapshot without WAP must not acquire a caller-supplied publication marker")
 	assert.NotContains(t, result.CurrentSnapshot().Summary.Properties, "wap.id",
 		"the published cherry-pick snapshot must not carry a staged WAP marker")
+	assert.NotContains(t, result.Metadata().Properties(), table.DefaultNameMappingKey,
+		"cherry-picking existing files must not add a name mapping")
 	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, table.MainBranch))
 	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
 
@@ -145,6 +148,14 @@ func TestCherryPickSnapshotAllowsEmptyAppend(t *testing.T) {
 	require.NotNil(t, source)
 	require.Equal(t, table.OpAppend, source.Summary.Operation)
 
+	// AddDataFilesByPath used to create the empty source snapshot installs
+	// name mapping. Remove it to verify cherry-picking does not re-add it.
+	removeMapping := tbl.NewTransaction()
+	require.NoError(t, removeMapping.RemoveProperties([]string{table.DefaultNameMappingKey}))
+	tbl, err = removeMapping.Commit(t.Context())
+	require.NoError(t, err)
+	require.NotContains(t, tbl.Metadata().Properties(), table.DefaultNameMappingKey)
+
 	tx, err := tbl.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
 	require.NoError(t, tx.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
@@ -156,6 +167,8 @@ func TestCherryPickSnapshotAllowsEmptyAppend(t *testing.T) {
 	assert.NotEqual(t, oldBranch.SnapshotID, newBranch.SnapshotID)
 	assert.Equal(t, oldBranch.SnapshotID, *newBranch.ParentSnapshotID)
 	assert.ElementsMatch(t, []int64{11}, idsOnRef(t, result, branchPlanningRef))
+	assert.NotContains(t, result.Metadata().Properties(), table.DefaultNameMappingKey,
+		"empty cherry-pick must not change the name mapping")
 
 	retry, err := result.NewTransactionOnBranch(branchPlanningRef)
 	require.NoError(t, err)
