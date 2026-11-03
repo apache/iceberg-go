@@ -50,6 +50,12 @@ type positionDeleteRewriteGroup struct {
 	bytes     int64
 }
 
+// A job owns a file subset that fits the input budget and minimum count.
+type positionDeleteRewriteJob struct {
+	key   positionDeleteRewriteKey
+	group *positionDeleteRewriteGroup
+}
+
 type positionDeleteLiveFile struct {
 	partition string
 	sequence  int64
@@ -167,6 +173,34 @@ func (t Table) RewritePositionDeleteFiles(
 		}
 	}
 
+	// Avoid opening a writer or requiring write-capable I/O when no group
+	// qualifies. Split before writing so the selected work is deterministic.
+	var jobs []positionDeleteRewriteJob
+	for key, group := range groups {
+		for _, chunk := range splitPositionDeleteRewriteGroup(group, opts.MaxInputBytes) {
+			if len(chunk.files) < opts.MinInputFiles || chunk.bytes > opts.MaxInputBytes {
+				continue
+			}
+			jobs = append(jobs, positionDeleteRewriteJob{key: key, group: chunk})
+		}
+	}
+	if len(jobs) == 0 {
+		return &t, 0, nil
+	}
+	slices.SortFunc(jobs, func(a, b positionDeleteRewriteJob) int {
+		if order := strings.Compare(a.key.partition, b.key.partition); order != 0 {
+			return order
+		}
+		if a.key.sequence < b.key.sequence {
+			return -1
+		}
+		if a.key.sequence > b.key.sequence {
+			return 1
+		}
+
+		return strings.Compare(a.group.files[0].FilePath(), b.group.files[0].FilePath())
+	})
+
 	txn := t.NewTransaction()
 	if err := txn.AssertRefSnapshotID(""); err != nil {
 		return nil, 0, err
@@ -193,110 +227,109 @@ func (t Table) RewritePositionDeleteFiles(
 	}()
 
 	var removed int
-	for key, group := range groups {
-		for _, group := range splitPositionDeleteRewriteGroup(group, opts.MaxInputBytes) {
-			if err := ctx.Err(); err != nil {
+	for _, job := range jobs {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		key, group := job.key, job.group
+		supported := true
+		for _, df := range group.files {
+			src, err := tblutils.GetFile(ctx, fs, df, true)
+			if err != nil {
 				return nil, 0, err
 			}
-			if len(group.files) < opts.MinInputFiles || group.bytes > opts.MaxInputBytes {
-				continue
+			rdr, err := src.GetReader(ctx)
+			if err != nil {
+				return nil, 0, err
 			}
-			supported := true
-			for _, df := range group.files {
-				src, err := tblutils.GetFile(ctx, fs, df, true)
-				if err != nil {
-					return nil, 0, err
-				}
-				rdr, err := src.GetReader(ctx)
-				if err != nil {
-					return nil, 0, err
-				}
-				schema, schemaErr := rdr.Schema()
-				closeErr := rdr.Close()
-				if schemaErr != nil {
-					return nil, 0, schemaErr
-				}
-				if closeErr != nil {
-					return nil, 0, closeErr
-				}
-				// The two-column writer cannot preserve optional deleted rows.
-				if schema.NumFields() != 2 ||
-					len(schema.FieldIndices("file_path")) != 1 ||
-					len(schema.FieldIndices("pos")) != 1 {
-					supported = false
-
-					break
-				}
+			schema, schemaErr := rdr.Schema()
+			closeErr := rdr.Close()
+			if schemaErr != nil {
+				return nil, 0, schemaErr
 			}
-			if !supported {
-				continue
+			if closeErr != nil {
+				return nil, 0, closeErr
 			}
+			// The two-column writer cannot preserve optional deleted rows.
+			if schema.NumFields() != 2 ||
+				len(schema.FieldIndices("file_path")) != 1 ||
+				len(schema.FieldIndices("pos")) != 1 {
+				supported = false
 
-			var rows []positionDeleteRow
-			for _, df := range group.files {
-				byPath, err := readDeletesForPaths(ctx, fs, df, nil)
-				if err != nil {
-					releasePosDeletes(byPath)
-
-					return nil, 0, fmt.Errorf("read position deletes from %s: %w", df.FilePath(), err)
-				}
-				for path, chunk := range byPath {
-					if !rewritePositionDeletePathInScope(df, path) {
-						continue
-					}
-					data, ok := live[path]
-					if !ok || data.partition != key.partition || data.sequence > key.sequence {
-						continue
-					}
-					for _, part := range chunk.Chunks() {
-						positions, ok := part.(*array.Int64)
-						if !ok {
-							releasePosDeletes(byPath)
-
-							return nil, 0, fmt.Errorf("%w: non-int64 position column in %s", iceberg.ErrInvalidSchema, df.FilePath())
-						}
-						if err := validateRewritePositionDeletePositions(df.FilePath(), positions); err != nil {
-							releasePosDeletes(byPath)
-
-							return nil, 0, err
-						}
-						for _, pos := range positions.Int64Values() {
-							rows = append(rows, positionDeleteRow{path: path, position: pos})
-						}
-					}
-				}
-				releasePosDeletes(byPath)
-			}
-
-			rows = sortUniquePositionDeleteRows(rows)
-			if len(rows) > 0 {
-				b := array.NewRecordBuilder(compute.GetAllocator(ctx), PositionalDeleteArrowSchema)
-				pathBuilder := b.Field(0).(*array.StringBuilder)
-				posBuilder := b.Field(1).(*array.Int64Builder)
-				for _, row := range rows {
-					pathBuilder.Append(row.path)
-					posBuilder.Append(row.position)
-				}
-				record := b.NewRecordBatch()
-				b.Release()
-				newFile, err := writer.writeFile(ctx, group.partition, WriteTask{
-					Uuid: uuid.New(), PartitionID: spec.ID(),
-					FileCount: 1, Schema: iceberg.PositionalDeleteSchema,
-					Batches: []arrow.RecordBatch{record},
-				})
-				if err != nil {
-					return nil, 0, err
-				}
-				rewrite.AddDeleteFileWithDataSequenceNumber(newFile, key.sequence)
-				produced = append(produced, newFile.FilePath())
-			}
-			for _, df := range group.files {
-				rewrite.DeleteFile(df)
-				removed++
+				break
 			}
 		}
-	}
+		if !supported {
+			continue
+		}
 
+		var rows []positionDeleteRow
+		for _, df := range group.files {
+			byPath, err := readDeletesForPaths(ctx, fs, df, nil)
+			if err != nil {
+				releasePosDeletes(byPath)
+
+				return nil, 0, fmt.Errorf("read position deletes from %s: %w", df.FilePath(), err)
+			}
+			for path, chunk := range byPath {
+				if !rewritePositionDeletePathInScope(df, path) {
+					continue
+				}
+				data, ok := live[path]
+				if !ok || data.partition != key.partition || data.sequence > key.sequence {
+					continue
+				}
+				for _, part := range chunk.Chunks() {
+					positions, ok := part.(*array.Int64)
+					if !ok {
+						releasePosDeletes(byPath)
+
+						return nil, 0, fmt.Errorf("%w: non-int64 position column in %s", iceberg.ErrInvalidSchema, df.FilePath())
+					}
+					if err := validateRewritePositionDeletePositions(df.FilePath(), positions); err != nil {
+						releasePosDeletes(byPath)
+
+						return nil, 0, err
+					}
+					for _, pos := range positions.Int64Values() {
+						rows = append(rows, positionDeleteRow{path: path, position: pos})
+					}
+				}
+			}
+			releasePosDeletes(byPath)
+		}
+
+		rows = sortUniquePositionDeleteRows(rows)
+		if len(rows) > 0 {
+			b := array.NewRecordBuilder(compute.GetAllocator(ctx), PositionalDeleteArrowSchema)
+			pathBuilder := b.Field(0).(*array.StringBuilder)
+			posBuilder := b.Field(1).(*array.Int64Builder)
+			for _, row := range rows {
+				pathBuilder.Append(row.path)
+				posBuilder.Append(row.position)
+			}
+			record := b.NewRecordBatch()
+			b.Release()
+			task := WriteTask{
+				Uuid: uuid.New(), PartitionID: spec.ID(),
+				FileCount: 1, Schema: iceberg.PositionalDeleteSchema,
+				Batches: []arrow.RecordBatch{record},
+			}
+			// Track the intended output before writing. A failed writer
+			// may have already created a partial file.
+			produced = append(produced, writer.loc.NewDataLocation(
+				task.GenerateDataFileName(writer.invariants.extension)))
+			newFile, err := writer.writeFile(ctx, group.partition, task)
+			if err != nil {
+				return nil, 0, err
+			}
+			rewrite.AddDeleteFileWithDataSequenceNumber(newFile, key.sequence)
+		}
+		for _, df := range group.files {
+			rewrite.DeleteFile(df)
+			removed++
+		}
+	}
 	if removed == 0 {
 		return &t, 0, nil
 	}
