@@ -92,10 +92,12 @@ func (t *Transaction) checkDynamicOverwriteExistingSpecs(ctx context.Context, fs
 			if err != nil {
 				return fmt.Errorf("dynamic partition overwrite: read manifest %s: %w", manifest.FilePath(), err)
 			}
+
 			return fmt.Errorf("%w: dynamic partition overwrite cannot replace live file %q under partition spec %d (current %d)",
 				ErrInvalidOperation, entry.DataFile().FilePath(), manifest.PartitionSpecID(), specID)
 		}
 	}
+
 	return nil
 }
 
@@ -140,6 +142,7 @@ func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, touched 
 			}
 		}
 	}
+
 	return nil
 }
 
