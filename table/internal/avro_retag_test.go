@@ -23,6 +23,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 	avro "github.com/twmb/avro"
@@ -138,4 +139,61 @@ func TestAvroSourceRejectsCanceledContextBeforeIO(t *testing.T) {
 
 	_, err := (&AvroFileSource{}).GetReader(ctx)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func avroTestRecordReader(t *testing.T) (*arrow.Schema, array.RecordReader) {
+	t.Helper()
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(42)
+	values := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(schema, []arrow.Array{values}, 1)
+	values.Release()
+	reader, err := array.NewRecordReader(schema, []arrow.RecordBatch{batch})
+	batch.Release()
+	require.NoError(t, err)
+	t.Cleanup(reader.Release)
+
+	return schema, reader
+}
+
+func TestAvroRecordReaderRejectsMismatchedDecoderColumns(t *testing.T) {
+	_, reader := avroTestRecordReader(t)
+	target := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "missing", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	wrapped := &avroRecordReader{records: reader, schema: target, ctx: context.Background()}
+	require.False(t, wrapped.Next())
+	require.ErrorIs(t, wrapped.Err(), iceberg.ErrInvalidSchema)
+	require.False(t, wrapped.Next())
+}
+
+type avroCancelOnNext struct {
+	array.RecordReader
+	cancel context.CancelFunc
+}
+
+func (r *avroCancelOnNext) Next() bool {
+	next := r.RecordReader.Next()
+	r.cancel()
+
+	return next
+}
+
+func TestAvroRecordReaderCancellationDuringDecode(t *testing.T) {
+	schema, reader := avroTestRecordReader(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wrapped := &avroRecordReader{
+		records: &avroCancelOnNext{RecordReader: reader, cancel: cancel},
+		schema:  schema,
+		ctx:     ctx,
+	}
+	require.False(t, wrapped.Next())
+	require.ErrorIs(t, wrapped.Err(), context.Canceled)
+	require.Nil(t, wrapped.RecordBatch())
 }

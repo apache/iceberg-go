@@ -191,9 +191,30 @@ func (r *avroRecordReader) Next() bool {
 		return false
 	}
 	if !r.records.Next() {
+		// Cancellation can happen while waiting for the decoder.
+		if err := r.ctx.Err(); err != nil {
+			r.readErr = err
+		}
+
+		return false
+	}
+	if err := r.ctx.Err(); err != nil {
+		r.readErr = err
+
 		return false
 	}
 	batch := r.records.RecordBatch()
+	if batch == nil {
+		r.readErr = fmt.Errorf("%w: Avro decoder returned a nil record batch", iceberg.ErrInvalidSchema)
+
+		return false
+	}
+	if batch.NumCols() != int64(r.schema.NumFields()) {
+		r.readErr = fmt.Errorf("%w: Avro decoder returned %d columns, expected %d",
+			iceberg.ErrInvalidSchema, batch.NumCols(), r.schema.NumFields())
+
+		return false
+	}
 	columns := make([]arrow.Array, batch.NumCols())
 	for i, col := range batch.Columns() {
 		data, err := avroRetagData(col.Data(), r.schema.Field(i).Type)
