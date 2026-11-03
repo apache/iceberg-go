@@ -37,6 +37,7 @@ const (
 	SnapshotIssueDuplicateLiveFile           SnapshotValidationIssueCode = "duplicate-live-file"
 	SnapshotIssueDuplicateDeletionVector     SnapshotValidationIssueCode = "duplicate-deletion-vector"
 	SnapshotIssueMissingDeletionVectorTarget SnapshotValidationIssueCode = "missing-deletion-vector-target"
+	SnapshotIssueInvalidDeletionVectorRange    SnapshotValidationIssueCode = "invalid-deletion-vector-range"
 	SnapshotIssueUnknownPartitionSpec        SnapshotValidationIssueCode = "unknown-partition-spec"
 	SnapshotIssueIncompatibleManifestVersion SnapshotValidationIssueCode = "incompatible-manifest-version"
 	SnapshotIssueInvalidManifestContent      SnapshotValidationIssueCode = "invalid-manifest-content"
@@ -220,30 +221,43 @@ func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*Snapsho
 				continue
 			}
 			key := snapshotValidationFileKey{path: filePath}
+			validVectorRange := true
 			if IsDeletionVector(file) {
 				offset, length := file.ContentOffset(), file.ContentSizeInBytes()
-				if offset == nil || length == nil {
-					return report, fmt.Errorf("read snapshot %d manifest %q: deletion vector %q is missing offset or length", snapshotID, path, filePath)
+				if offset == nil || length == nil || *offset < 0 || *length <= 0 {
+					validVectorRange = false
+					report.Issues = append(report.Issues, SnapshotValidationIssue{
+						Code: SnapshotIssueInvalidDeletionVectorRange, ManifestPath: path, FilePath: filePath,
+						Detail: "content_offset must be non-negative and content_size_in_bytes must be positive",
+					})
+				} else {
+					key.offset, key.length = *offset, *length
+					key.vector = true
 				}
-				key.offset, key.length = *offset, *length
-				key.vector = true
 				target := file.ReferencedDataFile()
 				if target == nil || *target == "" {
 					report.Issues = append(report.Issues, SnapshotValidationIssue{
 						Code: SnapshotIssueMissingDeletionVectorTarget, ManifestPath: path, FilePath: filePath,
 					})
-				} else if previous, exists := seenVectorTargets[*target]; exists {
-					// A repeated reference to the same blob is already reported by
-					// the content-file uniqueness check below.
-					if previous.key != key {
-						report.Issues = append(report.Issues, SnapshotValidationIssue{
-							Code: SnapshotIssueDuplicateDeletionVector, ManifestPath: path,
-							FirstManifestPath: previous.manifest, FilePath: filePath, Detail: *target,
-						})
+				} else if validVectorRange {
+					if previous, exists := seenVectorTargets[*target]; exists {
+						// A repeated reference to the same blob is already reported by
+						// the content-file uniqueness check below.
+						if previous.key != key {
+							report.Issues = append(report.Issues, SnapshotValidationIssue{
+								Code: SnapshotIssueDuplicateDeletionVector, ManifestPath: path,
+								FirstManifestPath: previous.manifest, FilePath: filePath, Detail: *target,
+							})
+						}
+					} else {
+						seenVectorTargets[*target] = snapshotValidationVector{key: key, manifest: path}
 					}
-				} else {
-					seenVectorTargets[*target] = snapshotValidationVector{key: key, manifest: path}
 				}
+			}
+			// An invalid blob location cannot safely participate in uniqueness
+			// checks. Keep auditing later entries instead of failing the scan.
+			if !validVectorRange {
+				continue
 			}
 			if firstManifest, exists := seenFiles[key]; exists {
 				report.Issues = append(report.Issues, SnapshotValidationIssue{
