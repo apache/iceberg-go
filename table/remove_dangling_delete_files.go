@@ -61,35 +61,6 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 	var candidates []danglingDeleteCandidate
 	seenDeletes := make(map[string]struct{})
 
-	// Collect live data before deciding which delete files are dangling.
-	for _, manifest := range manifests {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if manifest.ManifestContent() != iceberg.ManifestContentData {
-			continue
-		}
-		for entry, err := range manifest.Entries(fs, true) {
-			if err != nil {
-				return nil, err
-			}
-			df := entry.DataFile()
-			if df.ContentType() != iceberg.EntryContentData {
-				continue
-			}
-			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
-			if err != nil {
-				return nil, fmt.Errorf("data file %s: %w", df.FilePath(), err)
-			}
-			seq := max(int64(0), entry.DataSequenceNumber())
-			if current, ok := minByPartition[key]; !ok || seq < current {
-				minByPartition[key] = seq
-			}
-			minAll = min(minAll, seq)
-			dataByPath[df.FilePath()] = danglingDataFile{partition: key, sequence: seq}
-		}
-	}
-
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -116,6 +87,41 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 			candidates = append(candidates, danglingDeleteCandidate{
 				file: df, sequence: entry.DataSequenceNumber(),
 			})
+		}
+	}
+
+	// A table with no eligible delete files needs no live-data index.
+	// Read delete manifests first so metadata-only no-ops stay cheap.
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// Collect live data before deciding which delete files are dangling.
+	for _, manifest := range manifests {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if manifest.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		for entry, err := range manifest.Entries(fs, true) {
+			if err != nil {
+				return nil, err
+			}
+			df := entry.DataFile()
+			if df.ContentType() != iceberg.EntryContentData {
+				continue
+			}
+			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
+			if err != nil {
+				return nil, fmt.Errorf("data file %s: %w", df.FilePath(), err)
+			}
+			seq := max(int64(0), entry.DataSequenceNumber())
+			if current, ok := minByPartition[key]; !ok || seq < current {
+				minByPartition[key] = seq
+			}
+			minAll = min(minAll, seq)
+			dataByPath[df.FilePath()] = danglingDataFile{partition: key, sequence: seq}
 		}
 	}
 
