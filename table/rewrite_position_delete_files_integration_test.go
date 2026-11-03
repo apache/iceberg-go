@@ -157,3 +157,71 @@ func TestRewritePositionDeleteFilesDropsDanglingRowsFromUnscopedFiles(t *testing
 	require.Zero(t, removed)
 	require.Equal(t, updated.Metadata(), again.Metadata())
 }
+
+func TestRewritePositionDeleteFilesAcrossSequences(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	a, b := tbl.Location()+"/data/a.parquet", tbl.Location()+"/data/b.parquet"
+	writeParquetFile(t, a, schema, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	writeParquetFile(t, b, schema, `[{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(ctx, []string{a}, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// The first delete predates file b. Its row targeting b must not
+	// become applicable after the rewrite raises the replacement sequence.
+	olderPath := tbl.Location() + "/data/older-delete.parquet"
+	writeParquetFile(t, olderPath, table.PositionalDeleteArrowSchema, fmt.Sprintf(
+		`[{"file_path":%q,"pos":0},{"file_path":%q,"pos":0}]`, a, b))
+	olderBuilder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, olderPath, iceberg.ParquetFile, nil, nil, nil, 2, 128)
+	require.NoError(t, err)
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(olderBuilder.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(ctx, []string{b}, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	newerPath := tbl.Location() + "/data/newer-delete.parquet"
+	writeParquetFile(t, newerPath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path":%q,"pos":1}]`, a))
+	newerBuilder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, newerPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	newer := newerBuilder.Build()
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(newer).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	maxSourceSequence := currentManifestEntry(t, tbl, newer.FilePath()).DataSequenceNumber()
+	require.ElementsMatch(t, []int64{3, 4}, scanIDs(t, tbl))
+
+	updated, count, err := tbl.RewritePositionDeleteFiles(ctx, table.PositionDeleteRewriteOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 2, count, "delete files from separate commits should compact")
+	require.ElementsMatch(t, []int64{3, 4}, scanIDs(t, updated))
+
+	tasks, err := updated.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	var replacement iceberg.DataFile
+	for _, task := range tasks {
+		if task.File.FilePath() == a {
+			require.Len(t, task.DeleteFiles, 1)
+			replacement = task.DeleteFiles[0]
+		}
+	}
+	require.NotNil(t, replacement)
+	require.Equal(t, maxSourceSequence,
+		currentManifestEntry(t, updated, replacement.FilePath()).DataSequenceNumber())
+	require.Equal(t, int64(2), replacement.Count(),
+		"stale positions must not gain applicability from the replacement sequence")
+}
