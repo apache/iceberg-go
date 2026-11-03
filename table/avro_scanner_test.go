@@ -49,13 +49,17 @@ func avroScanFile(t *testing.T, fs *iceio.MemFS, rows ...any) iceberg.DataFile {
 }
 
 func runAvroScan(t *testing.T, fs *iceio.MemFS, task FileScanTask, filter iceberg.BooleanExpression) ([]int64, error) {
+	return runAvroScanVersion(t, fs, task, filter, "2")
+}
+
+func runAvroScanVersion(t *testing.T, fs *iceio.MemFS, task FileScanTask, filter iceberg.BooleanExpression, version string) ([]int64, error) {
 	t.Helper()
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
 	)
 	projected := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
-	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://avro/table", iceberg.Properties{PropertyFormatVersion: "2"})
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://avro/table", iceberg.Properties{PropertyFormatVersion: version})
 	require.NoError(t, err)
 	bound, err := iceberg.BindExpr(schema, filter, true)
 	require.NoError(t, err)
@@ -102,6 +106,19 @@ func TestAvroScannerProjectionFilterAndPositionDeletes(t *testing.T) {
 	ids, err = runAvroScan(t, fs, task, filter)
 	require.NoError(t, err)
 	require.Equal(t, []int64{4}, ids)
+}
+
+func TestAvroScannerV1ProjectionAndFilter(t *testing.T) {
+	fs := iceio.NewMemFS()
+	data := avroScanFile(t, fs,
+		map[string]any{"old_id": int64(1), "category": "keep"},
+		map[string]any{"old_id": int64(2), "category": "drop"},
+		map[string]any{"old_id": int64(3), "category": "keep"},
+	)
+	filter := iceberg.EqualTo(iceberg.Reference("category"), "keep")
+	ids, err := runAvroScanVersion(t, fs, FileScanTask{File: data}, filter, "1")
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 3}, ids)
 }
 
 func TestAvroScannerEmptyAndPartialTasks(t *testing.T) {
