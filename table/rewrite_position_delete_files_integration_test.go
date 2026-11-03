@@ -32,7 +32,7 @@ import (
 type readOnlyPositionDeleteIO struct{ iceio.IO }
 
 func TestRewritePositionDeleteFilesCommit(t *testing.T) {
-	tbl, _ := newConcurrentRewriteTestTable(t)
+	tbl, cat := newConcurrentRewriteTestTable(t)
 	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
 	require.NoError(t, err)
 	a, b := tbl.Location()+"/data/a.parquet", tbl.Location()+"/data/b.parquet"
@@ -97,8 +97,11 @@ func TestRewritePositionDeleteFilesCommit(t *testing.T) {
 	require.Zero(t, noOpCount)
 	require.Equal(t, updated.Metadata(), noOp.Metadata())
 
+	attemptsBefore := cat.attempts.Load()
 	_, _, err = tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.Equal(t, attemptsBefore+1, cat.attempts.Load(),
+		"the pinned planning snapshot must stop a stale delete rewrite without retrying")
 }
 
 func TestRewritePositionDeleteFilesDropsDanglingRowsFromUnscopedFiles(t *testing.T) {
