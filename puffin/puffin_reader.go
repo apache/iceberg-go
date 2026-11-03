@@ -370,13 +370,14 @@ func (r *Reader) readBlobData(meta BlobMetadata) ([]byte, error) {
 		return nil, errors.New("puffin: deletion-vector-v1 must not be compressed")
 	}
 
-	// Reject unknown codecs before issuing range reads.
+	// Reject unknown codecs before issuing range reads. An omitted codec
+	// means uncompressed; an explicitly empty codec is invalid.
 	codec := ""
 	if meta.CompressionCodec != nil {
 		codec = *meta.CompressionCodec
-	}
-	if codec != "" && codec != "lz4" && codec != "zstd" {
-		return nil, fmt.Errorf("puffin: cannot read blob: compression %q not supported", codec)
+		if codec != "lz4" && codec != "zstd" {
+			return nil, fmt.Errorf("puffin: cannot read blob: compression %q not supported", codec)
+		}
 	}
 
 	// Validate offset/length

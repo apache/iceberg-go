@@ -137,6 +137,18 @@ func TestReadCompressedPuffinBlobRejectsInvalidFrames(t *testing.T) {
 		require.ErrorContains(t, err, "not supported")
 	})
 
+	t.Run("explicit empty codec", func(t *testing.T) {
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "", raw)))
+		require.NoError(t, err)
+
+		_, err = r.ReadBlob(0)
+		require.ErrorContains(t, err, `compression "" not supported`)
+		_, err = r.ReadBlobByMetadata(r.Blobs()[0])
+		require.ErrorContains(t, err, `compression "" not supported`)
+		_, err = r.ReadAllBlobs()
+		require.ErrorContains(t, err, `compression "" not supported`)
+	})
+
 	t.Run("lz4 missing content size", func(t *testing.T) {
 		var output bytes.Buffer
 		writer := lz4.NewWriter(&output)
