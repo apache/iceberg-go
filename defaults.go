@@ -74,8 +74,10 @@ func hexDefault(typ Type, value any) (string, bool) {
 }
 
 // normalizeDefaults stores binary and fixed defaults in their hex single-value
-// form, the same form metadata JSON decodes to, so a schema holds no byte
-// slices that callers could share or change. When something is rewritten it
+// form, the same form metadata JSON decodes to, so the default of a binary or
+// fixed field no longer shares a byte slice with the caller. Byte slices
+// inside other defaults, such as a []byte in a []any or map[string]any
+// default, are left as they are. When something is rewritten it
 // copies the fields and nested types on the path to that default and reports
 // true; otherwise it returns fields itself. The input is never modified.
 func normalizeDefaults(fields []NestedField) ([]NestedField, bool) {
