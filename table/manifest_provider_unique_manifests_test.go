@@ -56,6 +56,42 @@ func TestManifestProviderUniqueManifestsPreservesOrderAndDeduplicates(t *testing
 	require.Equal(t, []string{shared.FilePath(), first.FilePath(), second.FilePath()}, paths)
 }
 
+// Legacy v1 snapshots can embed paths rather than referencing a manifest list.
+// UniqueManifests must preserve first-seen order across both representations.
+func TestManifestProviderUniqueManifestsV1EmbeddedAndListed(t *testing.T) {
+	fs := iceio.NewMemFS()
+	paths := []string{
+		"mem://provider/v1-shared.avro",
+		"mem://provider/v1-first.avro",
+		"mem://provider/v1-second.avro",
+	}
+	for _, path := range paths {
+		require.NoError(t, fs.WriteFile(t.Context(), path, []byte("manifest")))
+	}
+	list := "mem://provider/v1-list.avro"
+	listed := []iceberg.ManifestFile{
+		iceberg.NewManifestBuilder(1, paths[0], 8, 0, 1).Build(),
+		iceberg.NewManifestBuilder(1, paths[2], 8, 0, 2).Build(),
+	}
+	var buf bytes.Buffer
+	require.NoError(t, iceberg.WriteManifestList(1, &buf, 2, nil, nil, 0, listed))
+	require.NoError(t, fs.WriteFile(t.Context(), list, buf.Bytes()))
+	snapshots := []Snapshot{
+		{SnapshotID: 1, ManifestLocations: []string{paths[0], paths[1]}},
+		{SnapshotID: 2, ManifestList: list},
+	}
+	provider := ManifestProvider{cache: newSnapshotManifestCache(), fsF: testFSF(fs)}
+	for run := range 2 {
+		var got []string
+		for manifest, err := range provider.UniqueManifests(t.Context(), snapshots) {
+			require.NoError(t, err)
+			got = append(got, manifest.FilePath())
+			require.Equal(t, 1, manifest.Version())
+		}
+		require.Equal(t, paths, got, "run %d", run)
+	}
+}
+
 func TestManifestProviderUniqueManifestsCancelledBeforeRead(t *testing.T) {
 	provider := ManifestProvider{cache: newSnapshotManifestCache(), fsF: testFSF(iceio.NewMemFS())}
 	ctx, cancel := context.WithCancel(t.Context())
