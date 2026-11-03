@@ -241,7 +241,7 @@ func (t Table) RewritePositionDeleteFiles(
 					return nil, 0, fmt.Errorf("read position deletes from %s: %w", df.FilePath(), err)
 				}
 				for path, chunk := range byPath {
-					if target := referencedDataFilePath(df); target != "" && target != path {
+					if !rewritePositionDeletePathInScope(df, path) {
 						continue
 					}
 					data, ok := live[path]
@@ -254,6 +254,11 @@ func (t Table) RewritePositionDeleteFiles(
 							releasePosDeletes(byPath)
 
 							return nil, 0, fmt.Errorf("%w: non-int64 position column in %s", iceberg.ErrInvalidSchema, df.FilePath())
+						}
+						if err := validateRewritePositionDeletePositions(df.FilePath(), positions); err != nil {
+							releasePosDeletes(byPath)
+
+							return nil, 0, err
 						}
 						for _, pos := range positions.Int64Values() {
 							rows = append(rows, positionDeleteRow{path: path, position: pos})
@@ -348,4 +353,27 @@ func sortUniquePositionDeleteRows(rows []positionDeleteRow) []positionDeleteRow 
 	})
 
 	return slices.Compact(rows)
+}
+
+
+// A delete file's statistics can help planning, but do not establish an
+// explicit one-file scope for dropping rows during maintenance.
+func rewritePositionDeletePathInScope(df iceberg.DataFile, path string) bool {
+	target := explicitReferencedDataFile(df)
+	return target == "" || target == path
+}
+
+// Reject invalid positions before a rewrite could convert a null to zero or
+// carry a negative index into a replacement delete file.
+func validateRewritePositionDeletePositions(path string, positions *array.Int64) error {
+	if positions.NullN() != 0 {
+		return fmt.Errorf("%w: null position in delete file %s", iceberg.ErrInvalidSchema, path)
+	}
+	for _, pos := range positions.Int64Values() {
+		if pos < 0 {
+			return fmt.Errorf("%w: negative position %d in delete file %s", iceberg.ErrInvalidSchema, pos, path)
+		}
+	}
+
+	return nil
 }

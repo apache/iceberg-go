@@ -19,6 +19,8 @@ package table
 import (
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
@@ -81,4 +83,47 @@ func TestRewritePositionDeleteFilesRejectsV3(t *testing.T) {
 	tbl := New([]string{"db", "example"}, meta, "", nil, nil)
 	_, _, err = tbl.RewritePositionDeleteFiles(t.Context(), PositionDeleteRewriteOptions{})
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+}
+
+
+func TestRewritePositionDeletePathInScope(t *testing.T) {
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, "delete.parquet", iceberg.ParquetFile,
+		nil, nil, nil, 2, 128)
+	require.NoError(t, err)
+	builder.LowerBoundValues(map[int][]byte{filePathFieldID: []byte("old-metrics-path")})
+	builder.UpperBoundValues(map[int][]byte{filePathFieldID: []byte("old-metrics-path")})
+	require.True(t, rewritePositionDeletePathInScope(builder.Build(), "live.parquet"),
+		"file_path statistics do not define the referenced_data_file scope")
+
+	builder.ReferencedDataFile("target.parquet")
+	require.True(t, rewritePositionDeletePathInScope(builder.Build(), "target.parquet"))
+	require.False(t, rewritePositionDeletePathInScope(builder.Build(), "other.parquet"))
+}
+
+func TestValidateRewritePositionDeletePositions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		values  []int64
+		valid   []bool
+		invalid bool
+	}{
+		{name: "valid", values: []int64{0, 42}},
+		{name: "negative", values: []int64{-1}, invalid: true},
+		{name: "null", values: []int64{0}, valid: []bool{false}, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := array.NewInt64Builder(memory.DefaultAllocator)
+			builder.AppendValues(tc.values, tc.valid)
+			positions := builder.NewInt64Array()
+			builder.Release()
+			err := validateRewritePositionDeletePositions("delete.parquet", positions)
+			positions.Release()
+			if tc.invalid {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
