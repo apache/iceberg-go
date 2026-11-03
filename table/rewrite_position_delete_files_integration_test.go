@@ -18,13 +18,18 @@
 package table_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
+
+// Embedding only IO hides the writer methods provided by LocalFS.
+type readOnlyPositionDeleteIO struct{ iceio.IO }
 
 func TestRewritePositionDeleteFilesCommit(t *testing.T) {
 	tbl, _ := newConcurrentRewriteTestTable(t)
@@ -52,6 +57,20 @@ func TestRewritePositionDeleteFilesCommit(t *testing.T) {
 	require.NoError(t, err)
 	sequence := currentManifestEntry(t, tbl, deletes[0].FilePath()).DataSequenceNumber()
 	require.ElementsMatch(t, []int64{2, 3}, scanIDs(t, tbl))
+
+	// When all inputs exceed the configured budget, the action is a no-op
+	// and must not require a filesystem that can create files.
+	readOnlyFS := func(context.Context) (iceio.IO, error) {
+		return readOnlyPositionDeleteIO{IO: iceio.LocalFS{}}, nil
+	}
+	readOnly := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(), readOnlyFS, nil)
+	noOp, noOpCount, err := readOnly.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{
+		MinInputFiles: 1, MaxInputBytes: 1,
+	})
+	require.NoError(t, err)
+	require.Zero(t, noOpCount)
+	require.Equal(t, tbl.Metadata(), noOp.Metadata())
+
 	updated, count, err := tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
@@ -69,6 +88,15 @@ func TestRewritePositionDeleteFilesCommit(t *testing.T) {
 	require.NotNil(t, replacement)
 	require.Equal(t, sequence, currentManifestEntry(t, updated, replacement.FilePath()).DataSequenceNumber())
 	require.Equal(t, int64(1), replacement.Count())
+
+	// Only one delete file remains, so the default minimum of two prevents
+	// a rewrite even if the table is exposed through read-only I/O.
+	readOnly = table.New(updated.Identifier(), updated.Metadata(), updated.MetadataLocation(), readOnlyFS, nil)
+	noOp, noOpCount, err = readOnly.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	require.NoError(t, err)
+	require.Zero(t, noOpCount)
+	require.Equal(t, updated.Metadata(), noOp.Metadata())
+
 	_, _, err = tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 }
