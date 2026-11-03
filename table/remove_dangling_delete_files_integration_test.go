@@ -92,6 +92,55 @@ func TestRemoveDanglingDeleteFilesCommit(t *testing.T) {
 		"cleanup must not retry after a pinned branch head moves")
 }
 
+func TestRemoveDanglingDeleteFilesUnpartitionedCleanup(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	dataPath := tbl.Location() + "/data/live.parquet"
+	missingPath := tbl.Location() + "/data/missing.parquet"
+	posPath := tbl.Location() + "/data/dangling-pos.parquet"
+	eqPath := tbl.Location() + "/data/dangling-eq.parquet"
+
+	data, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		dataPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	pos, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		posPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	eq, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		eqPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+
+	// An explicit position-delete target is absent, and an equality delete
+	// does not apply to data from the same sequence number.
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).
+		AddRows(data.Build()).
+		AddDeletes(pos.ReferencedDataFile(missingPath).Build(), eq.EqualityFieldIDs([]int{1}).Build()).
+		Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	planned, err := tbl.PlanDanglingDeleteFiles(ctx)
+	require.NoError(t, err)
+	var paths []string
+	for _, file := range planned {
+		paths = append(paths, file.FilePath())
+	}
+	require.ElementsMatch(t, []string{posPath, eqPath}, paths)
+
+	updated, removed, err := tbl.RemoveDanglingDeleteFiles(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, removed)
+	require.Empty(t, mustPlanDangling(t, updated))
+
+	tasks, err := updated.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, dataPath, tasks[0].File.FilePath())
+	require.Empty(t, tasks[0].DeleteFiles)
+	require.Empty(t, tasks[0].EqualityDeleteFiles)
+}
+
 func mustPlanDangling(t *testing.T, tbl *table.Table) []iceberg.DataFile {
 	t.Helper()
 	files, err := tbl.PlanDanglingDeleteFiles(t.Context())
