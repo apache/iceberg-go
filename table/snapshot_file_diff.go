@@ -23,13 +23,15 @@ import (
 	"fmt"
 	"slices"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 )
 
 // SnapshotFileDiff describes the physical file changes between two snapshots.
 // Data and delete files are reported separately; position-delete files and
-// deletion vectors are both included in the delete-file slices.
+// equality deletes, and deletion vectors are included in the delete-file slices.
 //
 // A rewrite that replaces data files may change these slices even when the
 // logical table rows are unchanged. This is a file-level diff, not a row diff.
@@ -64,9 +66,12 @@ func (d SnapshotFileDiff) HasChanges() bool {
 // location, blob offset, and blob length as their identity.
 //
 // This works for v1 snapshots that embed manifest paths, as well as v1-v3
-// snapshots with manifest lists. It reads only metadata and never reads the
+// snapshots with manifest lists. It reads only manifest metadata, omitting
+// column statistics to bound memory use. Returned files must not be passed
+// to a ManifestWriter because their statistics are incomplete. It never reads
 // Parquet, Avro, or ORC data files.
-func (t Table) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toSnapshotID int64) (SnapshotFileDiff, error) {
+func (i InspectTable) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toSnapshotID int64) (SnapshotFileDiff, error) {
+	t := i.tbl
 	diff := SnapshotFileDiff{
 		FromSnapshotID: fromSnapshotID,
 		ToSnapshotID:   toSnapshotID,
@@ -89,21 +94,14 @@ func (t Table) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toSnapshot
 	if fromSnapshotID == toSnapshotID {
 		return diff, nil
 	}
-	if t.fsF == nil {
-		return diff, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
-	}
-
-	fs, err := t.fsF(ctx)
+	fsF := sharedSnapshotManifestFSF(t.fsF)
+	fs, err := fsF(ctx)
 	if err != nil {
 		return diff, fmt.Errorf("resolve table file IO: %w", err)
 	}
 	if fs == nil {
 		return diff, fmt.Errorf("%w: table file IO is nil", ErrInvalidOperation)
 	}
-	// Share the resolved FileIO between the two manifest-list loads and the
-	// changed manifest entries. Keep the normal bounded manifest-list cache.
-	fsF := func(context.Context) (iceio.IO, error) { return fs, nil }
-
 	fromSet, err := t.manifestSetWithFSF(ctx, *from, fsF)
 	if err != nil {
 		return diff, fmt.Errorf("read from snapshot %d manifests: %w", fromSnapshotID, err)
@@ -188,69 +186,79 @@ func uniqueSnapshotManifests(from, to []iceberg.ManifestFile) (fromOnly, toOnly 
 	return fromOnly, toOnly
 }
 
-// snapshotDiffFileKey uses the spec's identity for content files. A v3 Puffin
-// file may hold several different deletion vector blobs, so its path alone
-// is not enough to identify the vector.
-type snapshotDiffFileKey struct {
-	path   string
-	vector bool
-	offset int64
-	length int64
-}
-
-func snapshotFileDiffKey(file iceberg.DataFile) (snapshotDiffFileKey, error) {
-	key := snapshotDiffFileKey{path: file.FilePath()}
+// snapshotFileDiffKey identifies regular content files by path and v3
+// deletion vectors by Puffin path, blob offset, and length. Reuse the same
+// key as transaction validation so both APIs agree about DV identity.
+func snapshotFileDiffKey(file iceberg.DataFile) (deletionVectorBlobKey, error) {
+	key := deletionVectorBlobKey{path: file.FilePath()}
 	if key.path == "" {
 		return key, fmt.Errorf("%w: content file path is empty", ErrInvalidMetadata)
 	}
 	if IsDeletionVector(file) {
-		offset := file.ContentOffset()
-		length := file.ContentSizeInBytes()
+		offset, length := file.ContentOffset(), file.ContentSizeInBytes()
 		if offset == nil || length == nil || *offset < 0 || *length <= 0 {
 			return key, fmt.Errorf("%w: deletion vector %q has an invalid offset or length",
 				ErrInvalidMetadata, file.FilePath())
 		}
-		key.vector = true
-		key.offset = *offset
-		key.length = *length
+		key.offset, key.length = *offset, *length
 	}
 
 	return key, nil
 }
 
-func snapshotDiffLiveFiles(ctx context.Context, fs iceio.IO, manifests []iceberg.ManifestFile) (map[snapshotDiffFileKey]iceberg.DataFile, error) {
-	files := make(map[snapshotDiffFileKey]iceberg.DataFile)
-	for _, manifest := range manifests {
-		if err := ctx.Err(); err != nil {
+// Read changed manifests in parallel, then merge in manifest order so
+// duplicate-file diagnostics do not depend on goroutine scheduling.
+func snapshotDiffLiveFiles(ctx context.Context, fs iceio.IO, manifests []iceberg.ManifestFile) (map[deletionVectorBlobKey]iceberg.DataFile, error) {
+	const maxConcurrentManifests = 8
+
+	manifestFiles := make([][]iceberg.DataFile, len(manifests))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(min(maxConcurrentManifests, len(manifests)))
+
+	for i, manifest := range manifests {
+		if err := groupCtx.Err(); err != nil {
 			return nil, err
 		}
-		for entry, err := range manifest.Entries(fs, true) {
+		// Unknown v1 counts are treated as nonzero by these helpers.
+		if !manifest.HasAddedFiles() && !manifest.HasExistingFiles() {
+			continue
+		}
+
+		group.Go(func() error {
+			for entry, err := range iceberg.EntriesWithProjection(fs, manifest, true, iceberg.ManifestEntryProjection{}) {
+				if err != nil {
+					return fmt.Errorf("manifest %q: %w", manifest.FilePath(), err)
+				}
+				if err := groupCtx.Err(); err != nil {
+					return err
+				}
+				// ReadEntry already validates content types and returns a
+				// non-nil entry with a non-nil data file on success.
+				manifestFiles[i] = append(manifestFiles[i], entry.DataFile())
+			}
+
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	files := make(map[deletionVectorBlobKey]iceberg.DataFile)
+	for i, manifest := range manifests {
+		for _, file := range manifestFiles[i] {
+			key, err := snapshotFileDiffKey(file)
 			if err != nil {
 				return nil, fmt.Errorf("manifest %q: %w", manifest.FilePath(), err)
 			}
-			if err := ctx.Err(); err != nil {
-				return nil, err
+			if _, duplicate := files[key]; duplicate {
+				return nil, fmt.Errorf("%w: duplicate live content file %q in manifest %q",
+					ErrInvalidMetadata, file.FilePath(), manifest.FilePath())
 			}
-			if entry == nil || entry.DataFile() == nil {
-				return nil, fmt.Errorf("%w: manifest %q contains a nil data file", ErrInvalidMetadata, manifest.FilePath())
-			}
-			file := entry.DataFile()
-			switch file.ContentType() {
-			case iceberg.EntryContentData, iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
-				key, err := snapshotFileDiffKey(file)
-				if err != nil {
-					return nil, fmt.Errorf("manifest %q: %w", manifest.FilePath(), err)
-				}
-				if _, duplicate := files[key]; duplicate {
-					return nil, fmt.Errorf("%w: duplicate live content file %q in manifest %q",
-						ErrInvalidMetadata, file.FilePath(), manifest.FilePath())
-				}
-				files[key] = file
-			default:
-
-				return nil, fmt.Errorf("%w: unknown content type %d in manifest %q", ErrInvalidMetadata,
-					file.ContentType(), manifest.FilePath())
-			}
+			files[key] = file
 		}
 	}
 
@@ -265,7 +273,6 @@ func sortSnapshotDiffFiles(files []iceberg.DataFile) {
 
 		return cmp.Or(
 			cmp.Compare(ak.path, bk.path),
-			cmp.Compare(a.ContentType(), b.ContentType()),
 			cmp.Compare(ak.offset, bk.offset),
 			cmp.Compare(ak.length, bk.length),
 		)

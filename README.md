@@ -121,33 +121,6 @@ Tests requiring Spark 4 (currently the variant and unknown-type tests) automatic
 | Plan Scan for Snapshot   | Local + Remote |
 | Diff Snapshot Files      | X              |
 
-### Snapshot file diffs (v1-v3)
-
-Use `Table.DiffSnapshotFiles` to compare the live physical files referenced by
-any two snapshots, including snapshots on different branches:
-
-```go
-diff, err := tbl.DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
-if err != nil {
-    return err
-}
-for _, file := range diff.AddedDataFiles {
-    fmt.Println("added:", file.FilePath())
-}
-for _, file := range diff.RemovedDataFiles {
-    fmt.Println("removed:", file.FilePath())
-}
-```
-
-The result also includes `AddedDeleteFiles` and `RemovedDeleteFiles` for
-v2/v3 tables. It reads manifest metadata only, skips immutable manifests
-referenced by both snapshots, and excludes deleted manifest entries. In v1,
-snapshots may store either an embedded `manifests` array or a `manifest-list`.
-This reports changes in physical files, **not** logical row changes from
-compaction or merge-on-read deletes. See the
-[Iceberg snapshot specification](https://iceberg.apache.org/spec/#snapshots)
-and [manifest entry specification](https://iceberg.apache.org/spec/#manifest-files).
-
 ### REST Scan Planning
 
 REST catalogs can plan scans on the server, including asynchronous plans,
