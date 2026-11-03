@@ -56,10 +56,12 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 	}
 
 	minByPartition := make(map[string]int64)
-	dataByPath := make(map[string]danglingDataFile)
 	minAll := int64(math.MaxInt64)
 	var candidates []danglingDeleteCandidate
 	seenDeletes := make(map[string]struct{})
+	// Only position deletes with an explicit reference need a path lookup.
+	// Tracking those paths avoids retaining every live data-file path in memory.
+	referencedPaths := make(map[string]struct{})
 
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
@@ -87,6 +89,11 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 			candidates = append(candidates, danglingDeleteCandidate{
 				file: df, sequence: entry.DataSequenceNumber(),
 			})
+			if df.ContentType() == iceberg.EntryContentPosDeletes {
+				if target := explicitReferencedDataFile(df); target != "" {
+					referencedPaths[target] = struct{}{}
+				}
+			}
 		}
 	}
 
@@ -96,7 +103,9 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 		return nil, nil
 	}
 
-	// Collect live data before deciding which delete files are dangling.
+	// Collect the minimum data sequence by partition, but only retain file
+	// details for paths that are explicitly referenced by position deletes.
+	dataByPath := make(map[string]danglingDataFile, len(referencedPaths))
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -121,7 +130,9 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 				minByPartition[key] = seq
 			}
 			minAll = min(minAll, seq)
-			dataByPath[df.FilePath()] = danglingDataFile{partition: key, sequence: seq}
+			if _, referenced := referencedPaths[df.FilePath()]; referenced {
+				dataByPath[df.FilePath()] = danglingDataFile{partition: key, sequence: seq}
+			}
 		}
 	}
 
