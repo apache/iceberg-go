@@ -42,7 +42,7 @@ type danglingDataFile struct {
 // Deletion vectors are omitted: v3 data-file replacement removes them.
 func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile, error) {
 	snap := t.CurrentSnapshot()
-	if snap == nil || t.metadata.FormatVersion() < 2 || t.Spec().IsUnpartitioned() {
+	if snap == nil || t.metadata.FormatVersion() < 2 {
 		return nil, nil
 	}
 
@@ -194,8 +194,8 @@ func decideDanglingDeleteFiles(
 // and number of removed delete-file references; no-op returns the input table.
 //
 // As in Java's removeDanglingDeleteFiles action, unpartitioned tables are
-// skipped. Position-delete files containing both live and dangling records
-// are retained and can be cleaned by a separate position-delete rewrite.
+// eligible for cleanup. Position-delete files containing both live and dangling
+// records are retained and can be cleaned by a separate position-delete rewrite.
 func (t Table) RemoveDanglingDeleteFiles(ctx context.Context) (*Table, int, error) {
 	candidates, err := t.PlanDanglingDeleteFiles(ctx)
 	if err != nil {
