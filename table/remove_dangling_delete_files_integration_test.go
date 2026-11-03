@@ -32,7 +32,13 @@ func TestRemoveDanglingDeleteFilesCommit(t *testing.T) {
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}})
-	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location, iceberg.Properties{table.PropertyFormatVersion: "2"})
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location, iceberg.Properties{
+		table.PropertyFormatVersion:        "2",
+		table.CommitNumRetriesKey:          "2",
+		table.CommitMinRetryWaitMsKey:      "1",
+		table.CommitMaxRetryWaitMsKey:      "2",
+		table.CommitTotalRetryTimeoutMsKey: "1000",
+	})
 	require.NoError(t, err)
 	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
 	cat := &concurrentTestCatalog{metadata: meta, location: location + "/metadata/v1.metadata.json", fsF: fsF}
@@ -77,9 +83,13 @@ func TestRemoveDanglingDeleteFilesCommit(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.Len(t, tasks[0].DeleteFiles, 1)
 	require.Equal(t, liveFile.FilePath(), tasks[0].DeleteFiles[0].FilePath())
-	// The stale table must not replay the same cleanup on a moved branch.
+	// The stale table must not replay the same cleanup on a moved branch,
+	// even with retries enabled.
+	attemptsBefore := cat.attempts.Load()
 	_, _, err = tbl.RemoveDanglingDeleteFiles(t.Context())
 	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.Equal(t, attemptsBefore+1, cat.attempts.Load(),
+		"cleanup must not retry after a pinned branch head moves")
 }
 
 func mustPlanDangling(t *testing.T, tbl *table.Table) []iceberg.DataFile {
