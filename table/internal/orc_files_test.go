@@ -540,3 +540,48 @@ func TestORCReadExplicitBinaryType(t *testing.T) {
 	require.False(t, records.Next())
 	require.NoError(t, records.Err())
 }
+
+func TestORCReadJavaLongTypeAttribute(t *testing.T) {
+	path := writeORCFixture(t, "struct<value:bigint>",
+		map[int]map[string]string{1: {"iceberg.id": "1", "iceberg.long-type": "LONG"}},
+		[]any{int64(42)})
+	rd := openORCFixture(t, path, 1)
+	schema, err := rd.Schema()
+	require.NoError(t, err)
+	require.Equal(t, arrow.INT64, schema.Field(0).Type.ID())
+
+	records, err := rd.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next())
+	require.Equal(t, int64(42), records.RecordBatch().Column(0).(*array.Int64).Value(0))
+	require.False(t, records.Next())
+	require.NoError(t, records.Err())
+}
+
+func TestORCRejectsInvalidPostscriptMetadataLength(t *testing.T) {
+	path := writeORCFixture(t, "struct<value:bigint>",
+		map[int]map[string]string{1: {"iceberg.id": "1"}},
+		[]any{int64(42)})
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	psLen := int(raw[len(raw)-1])
+	psStart := len(raw) - 1 - psLen
+	var ps orcpb.PostScript
+	require.NoError(t, proto.Unmarshal(raw[psStart:len(raw)-1], protoadapt.MessageV2Of(&ps)))
+	metadataLength := uint64(len(raw)) + 1
+	ps.MetadataLength = &metadataLength
+	updatedPS, err := proto.Marshal(protoadapt.MessageV2Of(&ps))
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(updatedPS), 255)
+	updated := append([]byte{}, raw[:psStart]...)
+	updated = append(updated, updatedPS...)
+	updated = append(updated, byte(len(updatedPS)))
+	require.NoError(t, os.WriteFile(path, updated, 0o644))
+
+	f, err := iceio.LocalFS{}.Open(context.Background(), path)
+	require.NoError(t, err)
+	defer f.Close()
+	_, _, err = readORCFileSchema(f)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
