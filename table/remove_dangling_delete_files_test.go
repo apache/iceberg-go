@@ -54,6 +54,8 @@ func TestDecideDanglingDeleteFiles(t *testing.T) {
 	candidates := []danglingDeleteCandidate{
 		{file: makeDelete("pos-applicable", iceberg.EntryContentPosDeletes, "live-data"), sequence: 1},
 		{file: makeDelete("pos-absent", iceberg.EntryContentPosDeletes, "missing-data"), sequence: 2},
+		{file: makeDelete("pos-newer-target", iceberg.EntryContentPosDeletes, "future-data"), sequence: 2},
+		{file: makeDelete("pos-wrong-partition", iceberg.EntryContentPosDeletes, "other-partition"), sequence: 2},
 		{file: makeDelete("pos-old", iceberg.EntryContentPosDeletes, ""), sequence: 0},
 		{file: makeDelete("pos-same-seq", iceberg.EntryContentPosDeletes, ""), sequence: 1},
 		{file: makeDelete("eq-same-seq", iceberg.EntryContentEqDeletes, ""), sequence: 1},
@@ -68,8 +70,12 @@ func TestDecideDanglingDeleteFiles(t *testing.T) {
 	unscoped.UpperBoundValues(map[int][]byte{filePathFieldID: []byte("missing-data")})
 	candidates = append(candidates, danglingDeleteCandidate{file: unscoped.Build(), sequence: 2})
 
+	otherKey, err := canonicalPartitionKey(int32(spec.ID()), map[int]any{iceberg.PartitionDataIDStart: int64(8)})
+	require.NoError(t, err)
 	surviving := map[string]danglingDataFile{
-		"live-data": {partition: key, sequence: 1},
+		"live-data":       {partition: key, sequence: 1},
+		"future-data":     {partition: key, sequence: 3},
+		"other-partition": {partition: otherKey, sequence: 1},
 	}
 	got, err := decideDanglingDeleteFiles(meta, candidates, surviving, map[string]int64{key: 1}, 1)
 	require.NoError(t, err)
@@ -77,7 +83,9 @@ func TestDecideDanglingDeleteFiles(t *testing.T) {
 	for _, df := range got {
 		paths = append(paths, df.FilePath())
 	}
-	require.ElementsMatch(t, []string{"pos-absent", "pos-old", "eq-same-seq"}, paths)
+	require.ElementsMatch(t, []string{
+		"pos-absent", "pos-newer-target", "pos-wrong-partition", "pos-old", "eq-same-seq",
+	}, paths)
 }
 
 func TestRemoveDanglingDeleteFilesUnpartitionedNoop(t *testing.T) {
@@ -105,6 +113,7 @@ func TestDecideDanglingDeleteFilesGlobalEquality(t *testing.T) {
 		builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
 			iceberg.EntryContentEqDeletes, path, iceberg.ParquetFile, nil, nil, nil, 1, 128)
 		require.NoError(t, err)
+
 		return builder.EqualityFieldIDs([]int{1}).Build()
 	}
 	candidates := []danglingDeleteCandidate{
