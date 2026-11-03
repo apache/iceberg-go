@@ -313,6 +313,7 @@ func embeddedValidationSpecID(
 		if err != nil || id < 0 {
 			return 0, false, fmt.Errorf("invalid partition-spec-id %q", raw)
 		}
+
 		return int32(id), true, nil
 	}
 
