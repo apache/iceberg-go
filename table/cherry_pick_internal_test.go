@@ -54,6 +54,30 @@ func TestCherryPickSnapshotRejectsNonAppendOperation(t *testing.T) {
 	}
 }
 
+// REST snapshot-loading-mode=refs can provide both ref heads while omitting
+// the snapshots between them. An incomplete walk cannot prove that the
+// source snapshot or its WAP ID was never published on the target branch.
+func TestCherryPickSnapshotRejectsIncompleteTargetAncestry(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	source := txn.meta.snapshotList[1]
+
+	missingParent := int64(999)
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: &missingParent,
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      source.TimestampMs + 1,
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
+
+	err := txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
+	require.Empty(t, txn.pinnedRefs, "rejected cherry-pick must not stage ref fences")
+}
+
 func TestCherryPickSnapshotChecksContextBeforeManifestIO(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 	ctx, cancel := context.WithCancel(t.Context())
