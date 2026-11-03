@@ -44,6 +44,16 @@ func TestRemoveDanglingDeleteFilesCommit(t *testing.T) {
 	require.NoError(t, tx.NewRowDelta(nil).AddRows(data.Build()).Commit(t.Context()))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
+
+	// With no delete files, planning must leave the table unchanged.
+	before, err := tbl.PlanDanglingDeleteFiles(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, before)
+	noOp, noOpCount, err := tbl.RemoveDanglingDeleteFiles(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, noOpCount)
+	require.Equal(t, tbl.Metadata(), noOp.Metadata())
+
 	live, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes, location+"/data/live-delete.parquet", iceberg.ParquetFile, partition, nil, nil, 1, 128)
 	require.NoError(t, err)
 	dead, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes, location+"/data/dead-delete.parquet", iceberg.ParquetFile, map[int]any{1000: int64(8)}, nil, nil, 1, 128)
