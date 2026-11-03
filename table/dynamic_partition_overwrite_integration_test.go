@@ -34,10 +34,15 @@ func newDynamicOverwriteTable(t *testing.T) (*table.Table, *concurrentTestCatalo
 
 func newDynamicOverwriteTableWithSpec(t *testing.T, spec iceberg.PartitionSpec) (*table.Table, *concurrentTestCatalog) {
 	t.Helper()
+	return newDynamicOverwriteTableWithFormat(t, spec, "2")
+}
+
+func newDynamicOverwriteTableWithFormat(t *testing.T, spec iceberg.PartitionSpec, formatVersion string) (*table.Table, *concurrentTestCatalog) {
+	t.Helper()
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
 	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location, iceberg.Properties{
-		table.PropertyFormatVersion:        "2",
+		table.PropertyFormatVersion:        formatVersion,
 		table.WriteUpdateIsolationLevelKey: string(table.IsolationSnapshot),
 		table.CommitNumRetriesKey:          "2",
 		table.CommitMinRetryWaitMsKey:      "1",
@@ -118,4 +123,24 @@ func TestDynamicPartitionOverwriteBucketTransformWithFiles(t *testing.T) {
 	reader.Release()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
+}
+
+func TestDynamicPartitionOverwriteV3ArrowInheritsRowIDs(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	base, _ := newDynamicOverwriteTableWithFormat(t, spec, "3")
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+
+	reader := idRecordReader(t, tbl, 1, 3)
+	updated, err := tbl.DynamicPartitionOverwrite(t.Context(), reader, nil)
+	reader.Release()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
+
+	head := updated.SnapshotByName(table.MainBranch)
+	require.NotNil(t, head)
+	require.NotNil(t, head.FirstRowID)
+	require.NotNil(t, head.AddedRows)
+	assert.Positive(t, *head.AddedRows)
 }

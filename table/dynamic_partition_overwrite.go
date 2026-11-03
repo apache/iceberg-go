@@ -152,6 +152,7 @@ func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, touched 
 //
 // Added and existing live files must use the table's current partition spec.
 // Supports v1-v3, including v3 row lineage and associated deletion vectors.
+// On v3, a new data file may omit first_row_id and inherit it from its manifest.
 // Concurrent writes to touched partitions fail while independent appends to
 // other partitions can be retried unless delete-file removal prevents replay.
 // A missing target branch is pinned together with main to guard its origin.
@@ -183,7 +184,9 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 		return fmt.Errorf("%w: dynamic partition overwrite cannot use data-preserving rewrite semantics", ErrInvalidOperation)
 	}
 
-	addedPaths, err := t.validateDataFilesToAdd(filesToAdd, "DynamicPartitionOverwriteDataFiles", true)
+	// Dynamic overwrite adds new rows, so v3 first_row_id can be inherited
+	// from the manifest. Java ReplacePartitions uses the same inheritance.
+	addedPaths, err := t.validateDataFilesToAdd(filesToAdd, "DynamicPartitionOverwriteDataFiles", false)
 	if err != nil {
 		return err
 	}
