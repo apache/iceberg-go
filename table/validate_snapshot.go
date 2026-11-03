@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -84,8 +85,8 @@ func (r SnapshotValidationReport) Valid() bool {
 // file has more than one live deletion vector.
 // Deleted entries do not count as live references. Manifest entry counts are
 // checked only when the manifest list provides them (v1 may omit them).
-// For embedded manifests, partition spec IDs are checked only when present in
-// the manifest header, since that v1 field is optional.
+// For embedded v1 manifests, missing header spec IDs are inferred only when
+// the partition fields match exactly one known partition spec.
 //
 // The snapshot is never modified. I/O errors and cancellation return the
 // partial report with Complete=false and a non-nil error. Cancellation is
@@ -128,8 +129,9 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 		return report, err
 	}
 
-	specIDs := make(map[int]struct{})
-	for _, spec := range t.metadata.PartitionSpecs() {
+	specs := t.metadata.PartitionSpecs()
+	specIDs := make(map[int]struct{}, len(specs))
+	for _, spec := range specs {
 		specIDs[spec.ID()] = struct{}{}
 	}
 	version := t.metadata.FormatVersion()
@@ -167,7 +169,7 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 		seenManifests[path] = struct{}{}
 
 		if snapshot.ManifestList == "" && snapshot.ManifestLocations != nil {
-			specID, known, err := embeddedValidationSpecID(ctx, fs, path)
+			specID, known, err := embeddedValidationSpecID(ctx, fs, path, specs)
 			if err != nil {
 				return report, fmt.Errorf("read snapshot %d manifest %q header: %w", snapshotID, path, err)
 			}
@@ -289,10 +291,12 @@ type snapshotValidationVector struct {
 	manifest string
 }
 
-// Older embedded snapshots have no manifest-list descriptor. In that case,
-// inspect the optional spec ID in the manifest header instead of the synthetic
-// descriptor's default ID.
-func embeddedValidationSpecID(ctx context.Context, fs iceio.IO, path string) (int32, bool, error) {
+// Older v1 embedded snapshots have no manifest-list descriptor. Prefer their
+// optional header spec ID, or infer one only when the required partition-spec
+// fields identify exactly one spec in the table metadata.
+func embeddedValidationSpecID(
+	ctx context.Context, fs iceio.IO, path string, specs []iceberg.PartitionSpec,
+) (int32, bool, error) {
 	f, err := fs.Open(ctx, path)
 	if err != nil {
 		return 0, false, err
@@ -304,15 +308,40 @@ func embeddedValidationSpecID(ctx context.Context, fs iceio.IO, path string) (in
 	}
 	defer reader.Close()
 	raw, present := reader.Metadata()["partition-spec-id"]
-	if !present {
-		return 0, false, nil
-	}
-	id, err := strconv.ParseInt(string(raw), 10, 32)
-	if err != nil {
-		return 0, false, fmt.Errorf("invalid partition-spec-id: %w", err)
+	if present {
+		id, err := strconv.ParseInt(string(raw), 10, 32)
+		if err != nil || id < 0 {
+			return 0, false, fmt.Errorf("invalid partition-spec-id %q", raw)
+		}
+		return int32(id), true, nil
 	}
 
-	return int32(id), true, nil
+	var fields []iceberg.PartitionField
+	if err := json.Unmarshal(reader.Metadata()["partition-spec"], &fields); err != nil {
+		return 0, false, fmt.Errorf("invalid v1 partition-spec: %w", err)
+	}
+	// Legacy v1 headers may omit field-id, with sequential IDs from 1000.
+	for i := range fields {
+		if fields[i].FieldID == 0 {
+			fields[i].FieldID = iceberg.PartitionDataIDStart + i
+		}
+	}
+	var matched int32
+	found := false
+	for _, candidate := range specs {
+		actual := iceberg.NewPartitionSpecID(candidate.ID(), fields...)
+		if !actual.Equals(candidate) {
+			continue
+		}
+		// Equivalent historical specs cannot be distinguished safely.
+		if found {
+			return 0, false, nil
+		}
+		matched, found = int32(candidate.ID()), true
+	}
+	// A missing ID is legal in v1. When no spec matches, leave the
+	// partition-spec ID inconclusive rather than guessing from spec 0.
+	return matched, found, nil
 }
 
 func validateSnapshotSpec(report *SnapshotValidationReport, path string, specID int32, specIDs map[int]struct{}) {
