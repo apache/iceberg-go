@@ -2185,6 +2185,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 					return fmt.Errorf("%w: equality deletes can only be converted to deletion vectors",
 						ErrInvalidOperation)
 				}
+
 				continue
 			}
 			if addition.file.ContentType() != sourceContent {

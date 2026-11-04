@@ -334,5 +334,6 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		return nil, err
 	}
 	staged = true
+
 	return result, nil
 }

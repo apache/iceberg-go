@@ -241,9 +241,13 @@ func liveDeleteFileCount(t *testing.T, tbl *table.Table, content iceberg.Manifes
 				continue
 			}
 			file := entry.DataFile()
-			if file.ContentType() == content && !(content == iceberg.EntryContentPosDeletes && table.IsDeletionVector(file)) {
-				count++
+			if file.ContentType() != content {
+				continue
 			}
+			if content == iceberg.EntryContentPosDeletes && table.IsDeletionVector(file) {
+				continue
+			}
+			count++
 		}
 	}
 
