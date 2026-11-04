@@ -497,20 +497,24 @@ func (e *exprEvaluator) VisitNotEqual(term BoundTerm, lit Literal) bool {
 	return doCmp(e.st, term, lit) != 0
 }
 
+// The ordering comparisons are false for a NaN value, following IEEE 754 as
+// the Arrow row filter does. doCmp can't decide them alone, because
+// cmp.Compare orders NaN below every number.
+
 func (e *exprEvaluator) VisitGreater(term BoundTerm, lit Literal) bool {
-	return doCmp(e.st, term, lit) > 0
+	return !e.VisitIsNan(term) && doCmp(e.st, term, lit) > 0
 }
 
 func (e *exprEvaluator) VisitGreaterEqual(term BoundTerm, lit Literal) bool {
-	return doCmp(e.st, term, lit) >= 0
+	return !e.VisitIsNan(term) && doCmp(e.st, term, lit) >= 0
 }
 
 func (e *exprEvaluator) VisitLess(term BoundTerm, lit Literal) bool {
-	return doCmp(e.st, term, lit) < 0
+	return !e.VisitIsNan(term) && doCmp(e.st, term, lit) < 0
 }
 
 func (e *exprEvaluator) VisitLessEqual(term BoundTerm, lit Literal) bool {
-	return doCmp(e.st, term, lit) <= 0
+	return !e.VisitIsNan(term) && doCmp(e.st, term, lit) <= 0
 }
 
 func (e *exprEvaluator) VisitStartsWith(term BoundTerm, lit Literal) bool {
