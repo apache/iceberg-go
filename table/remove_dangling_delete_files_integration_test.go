@@ -55,10 +55,10 @@ func TestRemoveDanglingDeleteFilesCommit(t *testing.T) {
 	before, err := tbl.PlanDanglingDeleteFiles(t.Context())
 	require.NoError(t, err)
 	require.Empty(t, before)
-	noOp, noOpCount, err := tbl.RemoveDanglingDeleteFiles(t.Context())
+	noOp, err := tbl.RemoveDanglingDeleteFiles(t.Context())
 	require.NoError(t, err)
-	require.Zero(t, noOpCount)
-	require.Equal(t, tbl.Metadata(), noOp.Metadata())
+	require.Zero(t, noOp.RemovedDeleteFiles)
+	require.Equal(t, tbl.Metadata(), noOp.Table.Metadata())
 
 	live, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes, location+"/data/live-delete.parquet", iceberg.ParquetFile, partition, nil, nil, 1, 128)
 	require.NoError(t, err)
@@ -74,9 +74,10 @@ func TestRemoveDanglingDeleteFilesCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, planned, 1)
 	require.Equal(t, deadFile.FilePath(), planned[0].FilePath())
-	updated, count, err := tbl.RemoveDanglingDeleteFiles(t.Context())
+	result, err := tbl.RemoveDanglingDeleteFiles(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, 1, count)
+	require.Equal(t, 1, result.RemovedDeleteFiles)
+	updated := result.Table
 	require.Empty(t, mustPlanDangling(t, updated))
 	tasks, err := updated.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
@@ -86,7 +87,7 @@ func TestRemoveDanglingDeleteFilesCommit(t *testing.T) {
 	// The stale table must not replay the same cleanup on a moved branch,
 	// even with retries enabled.
 	attemptsBefore := cat.attempts.Load()
-	_, _, err = tbl.RemoveDanglingDeleteFiles(t.Context())
+	_, err = tbl.RemoveDanglingDeleteFiles(t.Context())
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	require.Equal(t, attemptsBefore+1, cat.attempts.Load(),
 		"cleanup must not retry after a pinned branch head moves")
@@ -128,9 +129,10 @@ func TestRemoveDanglingDeleteFilesUnpartitionedCleanup(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{posPath, eqPath}, paths)
 
-	updated, removed, err := tbl.RemoveDanglingDeleteFiles(ctx)
+	result, err := tbl.RemoveDanglingDeleteFiles(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 2, removed)
+	require.Equal(t, 2, result.RemovedDeleteFiles)
+	updated := result.Table
 	require.Empty(t, mustPlanDangling(t, updated))
 
 	tasks, err := updated.Scan().PlanFiles(ctx)
@@ -194,8 +196,91 @@ func TestRemoveDanglingDeleteFilesPrunesEqualityBounds(t *testing.T) {
 	require.Len(t, planned, 1)
 	require.Equal(t, danglingEquality.FilePath(), planned[0].FilePath())
 
-	updated, removed, err := tbl.RemoveDanglingDeleteFiles(ctx)
+	result, err := tbl.RemoveDanglingDeleteFiles(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, removed)
+	require.Equal(t, 1, result.RemovedDeleteFiles)
+	updated := result.Table
 	require.Empty(t, mustPlanDangling(t, updated))
+}
+
+func TestRemoveDanglingDeleteFilesTransactionStagesAfterRowDelta(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	data := newDataFile(t, tbl.Location()+"/data/live.parquet")
+	posBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/dangling.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).
+		AddRows(data).
+		AddDeletes(posBuilder.ReferencedDataFile(tbl.Location()+"/data/missing.parquet").Build()).
+		Commit(ctx))
+
+	result, err := tx.RemoveDanglingDeleteFiles(ctx)
+	require.NoError(t, err)
+	require.Nil(t, result.Table, "transaction action stages rather than commits")
+	require.Equal(t, 1, result.RemovedDeleteFiles)
+	require.Nil(t, tbl.CurrentSnapshot(), "base table must remain unchanged")
+
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Empty(t, mustPlanDangling(t, committed))
+	tasks, err := committed.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, data.FilePath(), tasks[0].File.FilePath())
+	require.Empty(t, tasks[0].DeleteFiles)
+}
+
+func TestRemoveDanglingDeleteFilesTransactionTargetsBranch(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	data := newDataFile(t, tbl.Location()+"/data/main.parquet")
+	posBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/main-delete.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	liveDelete := posBuilder.ReferencedDataFile(data.FilePath()).Build()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddRows(data).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(liveDelete).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// Fork from main, then remove the target data only on the branch.
+	branchTx, err := tbl.NewTransactionOnBranch("cleanup")
+	require.NoError(t, err)
+	rewrite := branchTx.NewRewrite(nil)
+	rewrite.DeleteFile(data)
+	require.NoError(t, rewrite.Commit(ctx))
+	tbl, err = branchTx.Commit(ctx)
+	require.NoError(t, err)
+	require.Empty(t, mustPlanDangling(t, tbl), "delete remains live on main")
+
+	branchTx, err = tbl.NewTransactionOnBranch("cleanup")
+	require.NoError(t, err)
+	require.NoError(t, branchTx.SetProperties(iceberg.Properties{"dangling-cleanup-test": "yes"}))
+	planned, err := branchTx.PlanDanglingDeleteFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	require.Equal(t, liveDelete.FilePath(), planned[0].FilePath())
+	result, err := branchTx.RemoveDanglingDeleteFiles(ctx)
+	require.NoError(t, err)
+	require.Nil(t, result.Table)
+	require.Equal(t, 1, result.RemovedDeleteFiles)
+
+	updated, err := branchTx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "yes", updated.Properties()["dangling-cleanup-test"])
+	mainData, mainDeletes := liveFilesOnRef(t, updated, table.MainBranch)
+	require.Contains(t, mainData, data.FilePath())
+	require.Contains(t, mainDeletes, liveDelete.FilePath())
+	_, branchDeletes := liveFilesOnRef(t, updated, "cleanup")
+	require.Empty(t, branchDeletes)
 }

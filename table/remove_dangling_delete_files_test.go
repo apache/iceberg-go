@@ -87,8 +87,8 @@ func TestRemoveDanglingDeleteFilesUnpartitionedNoop(t *testing.T) {
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, t.TempDir(), nil)
 	require.NoError(t, err)
 	tbl := New([]string{"db", "example"}, meta, "", nil, nil)
-	updated, count, err := tbl.RemoveDanglingDeleteFiles(t.Context())
+	result, err := tbl.RemoveDanglingDeleteFiles(t.Context())
 	require.NoError(t, err)
-	require.Zero(t, count)
-	require.Equal(t, tbl.Metadata(), updated.Metadata())
+	require.Zero(t, result.RemovedDeleteFiles)
+	require.Equal(t, tbl.Metadata(), result.Table.Metadata())
 }

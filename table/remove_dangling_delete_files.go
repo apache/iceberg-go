@@ -80,6 +80,17 @@ func decideDanglingDeleteFiles(candidates []iceberg.DataFile, tasks []FileScanTa
 	return dangling
 }
 
+// RemoveDanglingDeleteFilesResult reports delete-file references removed by cleanup.
+type RemoveDanglingDeleteFilesResult struct {
+	// Table is set by the table-level action after a successful commit.
+	// It is nil when the cleanup is only staged on a transaction.
+	Table *Table
+
+	// RemovedDeleteFiles counts removed position/equality delete files and
+	// deletion vectors. Physical files are never deleted by this action.
+	RemovedDeleteFiles int
+}
+
 // PlanDanglingDeleteFiles identifies delete files that are not attached to any
 // data file by an unfiltered scan of the current snapshot. It reads metadata
 // only; no physical data, delete files, or Puffin blobs are opened.
@@ -92,6 +103,47 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 	if snap == nil || t.metadata.FormatVersion() < 2 {
 		return nil, nil
 	}
+
+	return t.planDanglingDeleteFiles(ctx, snap, t.Scan())
+}
+
+// PlanDanglingDeleteFiles plans cleanup against the transaction's target branch.
+// It also sees snapshots already staged in the transaction, not just the
+// original table head. The scan is local so an external planner cannot read
+// committed catalog state instead of the staged metadata.
+func (tx *Transaction) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile, error) {
+	meta, err := tx.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	snap := tx.planningSnapshot(meta)
+	if snap == nil || meta.formatVersion < 2 {
+		return nil, nil
+	}
+
+	built, err := meta.Build()
+	if err != nil {
+		return nil, err
+	}
+	view := *tx.tbl
+	view.metadata = built
+	scan := view.Scan(WithScanPlanningMode(ScanPlanningLocal))
+	// Missing branches fork from main, matching Transaction.planningSnapshot.
+	// Existing branches must scan their own head using the current schema.
+	if tx.branch != "" && tx.branch != MainBranch && built.SnapshotByName(tx.branch) != nil {
+		branchScan, err := scan.UseRef(tx.branch)
+		_ = scan.Close()
+		if err != nil {
+			return nil, err
+		}
+		scan = branchScan
+	}
+
+	return view.planDanglingDeleteFiles(ctx, snap, scan)
+}
+
+func (t Table) planDanglingDeleteFiles(ctx context.Context, snap *Snapshot, scan *Scan) ([]iceberg.DataFile, error) {
+	defer scan.Close()
 
 	fs, err := t.FS(ctx)
 	if err != nil {
@@ -142,8 +194,6 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 		return nil, nil
 	}
 
-	scan := t.Scan()
-	defer scan.Close()
 	tasks, err := scan.PlanFiles(ctx)
 	if err != nil {
 		return nil, err
@@ -153,37 +203,67 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 }
 
 // RemoveDanglingDeleteFiles removes metadata references to whole dangling
-// delete files in one replace snapshot. It never deletes the physical files,
-// which may still be reachable through older snapshots. Returns the new table
-// and number of removed delete-file references; no-op returns the input table.
+// delete files in one replace snapshot. It never deletes physical files,
+// which may still be reachable through older snapshots.
 //
-// As in Java's removeDanglingDeleteFiles action, unpartitioned tables are
-// eligible for cleanup. Position-delete files containing both live and dangling
-// records are retained and can be cleaned by a separate position-delete rewrite.
-func (t Table) RemoveDanglingDeleteFiles(ctx context.Context) (*Table, int, error) {
-	candidates, err := t.PlanDanglingDeleteFiles(ctx)
+// The returned result contains the committed table. A no-op returns the input
+// table without writing a new snapshot. Use Transaction.RemoveDanglingDeleteFiles
+// to stage cleanup alongside other updates or target a non-main branch.
+func (t Table) RemoveDanglingDeleteFiles(ctx context.Context) (*RemoveDanglingDeleteFilesResult, error) {
+	tx, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	if len(candidates) == 0 {
-		return &t, 0, nil
+	result, err := tx.RemoveDanglingDeleteFiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if result.RemovedDeleteFiles == 0 {
+		result.Table = &t
+
+		return result, nil
 	}
 
-	txn := t.NewTransaction()
-	if err := txn.AssertRefSnapshotID(""); err != nil {
-		return nil, 0, err
+	result.Table, err = tx.Commit(ctx)
+
+	return result, err
+}
+
+// RemoveDanglingDeleteFiles stages the removal of entire dangling position and
+// equality delete files on the transaction's branch. It does not commit the
+// transaction or delete physical files. Unpartitioned tables are eligible;
+// partially dangling position-delete files require a separate rewrite.
+//
+// The branch head used for planning is pinned for the eventual commit. If it
+// changes concurrently, the commit fails rather than replaying stale removals.
+func (tx *Transaction) RemoveDanglingDeleteFiles(ctx context.Context) (*RemoveDanglingDeleteFilesResult, error) {
+	candidates, err := tx.PlanDanglingDeleteFiles(ctx)
+	if err != nil {
+		return nil, err
 	}
-	rewrite := txn.NewRewrite(nil)
+	result := &RemoveDanglingDeleteFilesResult{RemovedDeleteFiles: len(candidates)}
+	if len(candidates) == 0 {
+		return result, nil
+	}
+
+	// A transaction commit already asserts its base branch head. Pin that
+	// assertion against retries without revalidating it against snapshots
+	// staged earlier in this same transaction.
+	branch := tx.branch
+	if branch == "" {
+		branch = MainBranch
+	}
+	if err := tx.applyPinned(nil, nil, []string{branch}); err != nil {
+		return nil, err
+	}
+
+	rewrite := tx.NewRewrite(nil)
 	for _, df := range candidates {
 		rewrite.DeleteFile(df)
 	}
 	if err := rewrite.Commit(ctx); err != nil {
-		return nil, 0, err
-	}
-	updated, err := txn.Commit(ctx)
-	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	return updated, len(candidates), nil
+	return result, nil
 }
