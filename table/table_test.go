@@ -834,7 +834,7 @@ func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
 	tx := tbl.NewTransaction()
 	err := tx.AddDataFilesByPath(t.ctx, files, nil, false)
 	t.Error(err)
-	t.ErrorContains(err, "cannot infer partition value from parquet metadata for a non-linear partition field: baz_bucket_3 with transform bucket[3]")
+	t.ErrorContains(err, "cannot infer partition field \"baz_bucket_3\"")
 }
 
 func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpperMismatch() {

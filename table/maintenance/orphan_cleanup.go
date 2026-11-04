@@ -585,16 +585,12 @@ func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConc
 	}
 
 	// Pass 2: Read entries from each unique manifest in parallel.
-	type refEntry struct {
-		path   string
-		isData bool
-	}
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(min(maxConcurrency, len(uniqueManifests)), 1))
 	for _, m := range uniqueManifests {
 		g.Go(func() error {
-			var entries []refEntry
+			batch := referencePathBatch{referenced: referenced, mu: &mu}
 			// discardDeleted=true: skip DELETED-status entries when
 			// computing the reachable file set. A DELETED entry is
 			// not live in this snapshot and should not pin the file
@@ -610,26 +606,16 @@ func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConc
 				}
 				// All files tracked within a manifest (data files, equality deletes, position deletes)
 				// are considered "data files" for the purposes of gc.enabled.
-				entries = append(entries, refEntry{
-					path:   entry.DataFile().FilePath(),
-					isData: true,
-				})
+				batch.add(entry.DataFile().FilePath())
 				if ref := iceberginternal.BorrowedDataFileReferencedDataFile(entry.DataFile()); ref != nil {
 					// This is a deletion vector entry referencing a data file.
 					// Its FilePath() is the deletion vector (.dv) file itself (added above).
 					// We must also mark the referenced data file as referenced.
-					entries = append(entries, refEntry{
-						path:   *ref,
-						isData: true,
-					})
+					batch.add(*ref)
 				}
 			}
 
-			mu.Lock()
-			for _, e := range entries {
-				referenced[e.path] = e.isData
-			}
-			mu.Unlock()
+			batch.flush()
 
 			return nil
 		})
@@ -640,6 +626,35 @@ func getReferencedFiles(ctx context.Context, tbl *table.Table, fs io.IO, maxConc
 	}
 
 	return referenced, nil
+}
+
+// Bound the temporary path buffer for each concurrently read manifest.
+const referencePathBatchSize = 512
+
+type referencePathBatch struct {
+	paths      []string
+	referenced map[string]bool
+	mu         *sync.Mutex
+}
+
+func (b *referencePathBatch) add(path string) {
+	b.paths = append(b.paths, path)
+	if len(b.paths) == referencePathBatchSize {
+		b.flush()
+	}
+}
+
+func (b *referencePathBatch) flush() {
+	if len(b.paths) == 0 {
+		return
+	}
+	b.mu.Lock()
+	for _, path := range b.paths {
+		b.referenced[path] = true
+	}
+	b.mu.Unlock()
+	clear(b.paths)
+	b.paths = b.paths[:0]
 }
 
 func walkDirectory(ctx context.Context, fsys io.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {

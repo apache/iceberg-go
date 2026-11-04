@@ -865,12 +865,14 @@ func mergedManifestsCreated(track *trackingFS, preExisting map[string]struct{}) 
 // LoadTable advances the head to the next pre-built metadata, so the rewrite
 // must rebuild — and supersede the previous attempt's merged manifest — on
 // every retry, not just the first (which a static head would not exercise). It
-// returns ErrCommitFailed for the first `failures` CommitTable calls.
+// returns ErrCommitFailed for the first `failures` CommitTable calls, then
+// returns reject once if it is non-nil.
 type stagedHeadCatalog struct {
 	current          table.Metadata
 	heads            []table.Metadata
 	headIdx          int
 	failures         int
+	reject           error
 	commitTableCalls atomic.Int32
 	location         string
 	fsF              func(context.Context) (iceio.IO, error)
@@ -890,6 +892,9 @@ func (c *stagedHeadCatalog) CommitTable(_ context.Context, _ table.Identifier, _
 	n := c.commitTableCalls.Add(1)
 	if int(n) <= c.failures {
 		return nil, "", fmt.Errorf("%w: simulated 409 conflict", table.ErrCommitFailed)
+	}
+	if int(n) == c.failures+1 && c.reject != nil {
+		return nil, "", c.reject
 	}
 
 	meta, err := table.UpdateTableMetadata(c.current, updates, "")
@@ -1044,6 +1049,49 @@ func TestRewriteManifestsKeepsMergedManifestsUntilResumeLands(t *testing.T) {
 		}
 		assert.Truef(t, track.wasRemoved(p), "superseded manifest %s must be deleted once the commit lands", p)
 	}
+}
+
+func TestRewriteManifestsRejectionKeepsMergedManifests(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	track := &trackingFS{}
+	fsF := func(_ context.Context) (iceio.IO, error) { return track, nil }
+
+	h0, h1, _ := stagedRewriteHeads(t, ctx, dir, "2", fsF, track)
+
+	rejected := fmt.Errorf("%w: simulated metadata update failure", table.ErrCommitRejected)
+	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{h1}, failures: 1, reject: rejected, location: dir, fsF: fsF}
+	tbl := table.New(table.Identifier{"default", "staged"}, h0, dir+"/metadata/00000.json", fsF, cat)
+
+	preExisting := track.snapshotCreated()
+
+	txn := tbl.NewTransaction()
+	res, err := txn.RewriteManifests(ctx)
+	require.NoError(t, err)
+	staged := track.snapshotCreated()
+	_, err = txn.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrCommitRejected)
+	require.NotErrorIs(t, err, table.ErrTransactionUnusable)
+	require.EqualValues(t, 2, cat.commitTableCalls.Load(), "a rejection must not be retried")
+
+	merged := mergedManifestsCreated(track, preExisting)
+	require.Len(t, merged, 2, "the staged rewrite and its rebuild each write one merged manifest")
+	for _, p := range merged {
+		assert.Falsef(t, track.wasRemoved(p), "merged manifest %s must be kept while the transaction can commit", p)
+	}
+	var rebuiltLists int
+	for p := range track.snapshotCreated() {
+		if _, ok := staged[p]; ok || !strings.HasPrefix(filepath.Base(p), "snap-") {
+			continue
+		}
+		rebuiltLists++
+		assert.Truef(t, track.wasRemoved(p), "rebuilt manifest list %s must be deleted", p)
+	}
+	assert.Equal(t, 1, rebuiltLists)
+
+	committed, err := txn.Commit(ctx)
+	require.NoError(t, err)
+	assertCommittedManifestsExist(t, committed, track, res)
 }
 
 func committedManifestPaths(t *testing.T, committed *table.Table, fs iceio.IO) map[string]struct{} {

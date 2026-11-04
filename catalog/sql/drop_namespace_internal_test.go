@@ -235,7 +235,7 @@ func TestDropNamespaceDoesNotRaceWithObjectCreation(t *testing.T) {
 		{
 			name: "create view",
 			create: func(_ *testing.T, ctx context.Context, cat *Catalog, ident table.Identifier) error {
-				return cat.CreateView(ctx, ident, schema, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+				return createTestView(ctx, cat, ident, schema, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
 			},
 			exists: func(ctx context.Context, cat *Catalog, ident table.Identifier) (bool, error) {
 				return cat.CheckViewExists(ctx, ident)
@@ -382,4 +382,11 @@ func TestDropNamespaceDoesNotRaceWithUpdateNamespaceProperties(t *testing.T) {
 	exists, err := cat.CheckNamespaceExists(context.Background(), namespace)
 	require.NoError(t, err)
 	require.False(t, exists)
+}
+
+func createTestView(ctx context.Context, cat *Catalog, identifier table.Identifier, schema *iceberg.Schema, representation view.Representation, props iceberg.Properties) error {
+	version := &view.Version{Representations: []view.Representation{view.NewRepresentation(representation)}}
+	_, err := cat.CreateView(ctx, identifier, version, schema, catalog.WithViewProperties(props))
+
+	return err
 }

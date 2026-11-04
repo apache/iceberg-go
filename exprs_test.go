@@ -983,6 +983,12 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 	ref, ref2 := iceberg.Reference("a"), iceberg.Reference("b")
 	above, below := int64(math.MaxInt32)+1, int64(math.MinInt32)-1
 	above2, below2 := float64(math.MaxFloat32)+1e37, float64(-math.MaxFloat32)-1e37
+	boundFloat32 := func(pred iceberg.UnboundPredicate) iceberg.BooleanExpression {
+		bound, err := pred.Bind(sc, true)
+		require.NoError(t, err)
+
+		return bound
+	}
 
 	tests := []struct {
 		pred iceberg.UnboundPredicate
@@ -1005,14 +1011,19 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 		{iceberg.EqualTo(ref2, below2), iceberg.AlwaysFalse{}},
 		{iceberg.NotEqualTo(ref2, above2), iceberg.AlwaysTrue{}},
 		{iceberg.NotEqualTo(ref2, below2), iceberg.AlwaysTrue{}},
-		{iceberg.LessThan(ref2, above2), iceberg.AlwaysTrue{}},
-		{iceberg.LessThan(ref2, below2), iceberg.AlwaysFalse{}},
-		{iceberg.LessThanEqual(ref2, above2), iceberg.AlwaysTrue{}},
-		{iceberg.LessThanEqual(ref2, below2), iceberg.AlwaysFalse{}},
-		{iceberg.GreaterThan(ref2, above2), iceberg.AlwaysFalse{}},
-		{iceberg.GreaterThan(ref2, below2), iceberg.AlwaysTrue{}},
-		{iceberg.GreaterThanEqual(ref2, above2), iceberg.AlwaysFalse{}},
-		{iceberg.GreaterThanEqual(ref2, below2), iceberg.AlwaysTrue{}},
+		// a float comparison keeps NaN, the infinities and NULL, so it moves
+		// to the largest finite value instead of folding
+		{iceberg.LessThan(ref2, above2), boundFloat32(iceberg.LessThanEqual(ref2, float32(math.MaxFloat32)))},
+		{iceberg.LessThan(ref2, below2), boundFloat32(iceberg.LessThan(ref2, float32(-math.MaxFloat32)))},
+		{iceberg.LessThanEqual(ref2, above2), boundFloat32(iceberg.LessThanEqual(ref2, float32(math.MaxFloat32)))},
+		{iceberg.LessThanEqual(ref2, below2), boundFloat32(iceberg.LessThan(ref2, float32(-math.MaxFloat32)))},
+		{iceberg.GreaterThan(ref2, above2), boundFloat32(iceberg.GreaterThan(ref2, float32(math.MaxFloat32)))},
+		{iceberg.GreaterThan(ref2, below2), boundFloat32(iceberg.GreaterThanEqual(ref2, float32(-math.MaxFloat32)))},
+		{iceberg.GreaterThanEqual(ref2, above2), boundFloat32(iceberg.GreaterThan(ref2, float32(math.MaxFloat32)))},
+		{iceberg.GreaterThanEqual(ref2, below2), boundFloat32(iceberg.GreaterThanEqual(ref2, float32(-math.MaxFloat32)))},
+		// infinity is a float32 value, so it doesn't fold
+		{iceberg.LessThanEqual(ref2, math.Inf(1)), boundFloat32(iceberg.LessThanEqual(ref2, float32(math.Inf(1))))},
+		{iceberg.EqualTo(ref2, math.Inf(-1)), boundFloat32(iceberg.EqualTo(ref2, float32(math.Inf(-1))))},
 	}
 
 	for _, tt := range tests {
@@ -1048,6 +1059,68 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 				require.NoError(t, err)
 				assert.True(t, wantBound.Equals(bound), "expected %s, got %s", wantBound, bound)
 			})
+		}
+	})
+}
+
+func TestBindRejectsNaNLiterals(t *testing.T) {
+	dec, err := iceberg.DecimalTypeOf(9, 2)
+	require.NoError(t, err)
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "f32", Type: iceberg.PrimitiveTypes.Float32},
+		iceberg.NestedField{ID: 2, Name: "f64", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 3, Name: "dec", Type: dec},
+		iceberg.NestedField{ID: 4, Name: "i", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	f32NaN := iceberg.NewLiteral(float32(math.NaN()))
+	f64NaN := iceberg.NewLiteral(math.NaN())
+	one := iceberg.NewLiteral(1.0)
+
+	var exprs []iceberg.BooleanExpression
+	for _, col := range []string{"f32", "f64"} {
+		ref := iceberg.Reference(col)
+		for _, op := range []iceberg.Operation{
+			iceberg.OpEQ, iceberg.OpNEQ, iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ,
+		} {
+			exprs = append(exprs,
+				iceberg.LiteralPredicate(op, ref, f32NaN),
+				iceberg.LiteralPredicate(op, ref, f64NaN))
+		}
+		for _, op := range []iceberg.Operation{iceberg.OpIn, iceberg.OpNotIn} {
+			exprs = append(exprs,
+				iceberg.SetPredicate(op, ref, []iceberg.Literal{one, f64NaN}),
+				iceberg.SetPredicate(op, ref, []iceberg.Literal{one, f32NaN}))
+		}
+		// "NaN" parses to a NaN float only when the literal is converted.
+		exprs = append(exprs,
+			iceberg.EqualTo(ref, "NaN"),
+			iceberg.IsIn(ref, "1", "NaN"),
+			iceberg.NewNot(iceberg.EqualTo(ref, math.NaN())))
+	}
+	// A NaN converted to a decimal would otherwise bind as zero, and to an
+	// int it would fail with a cast error that gives no hint.
+	exprs = append(exprs,
+		iceberg.EqualTo(iceberg.Reference("dec"), math.NaN()),
+		iceberg.IsIn(iceberg.Reference("dec"), 1.0, math.NaN()),
+		iceberg.EqualTo(iceberg.Reference("i"), math.NaN()))
+
+	for _, expr := range exprs {
+		t.Run(expr.String(), func(t *testing.T) {
+			_, err := iceberg.BindExpr(schema, expr, true)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "use IsNaN or NotNaN instead")
+		})
+	}
+
+	t.Run("IsNaN, NotNaN and infinities still bind", func(t *testing.T) {
+		for _, expr := range []iceberg.BooleanExpression{
+			iceberg.IsNaN(iceberg.Reference("f64")),
+			iceberg.NotNaN(iceberg.Reference("f32")),
+			iceberg.EqualTo(iceberg.Reference("f64"), math.Inf(1)),
+			iceberg.IsIn(iceberg.Reference("f32"), float32(math.Inf(-1)), float32(1)),
+		} {
+			_, err := iceberg.BindExpr(schema, expr, true)
+			assert.NoError(t, err, expr.String())
 		}
 	})
 }

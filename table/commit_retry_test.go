@@ -231,6 +231,23 @@ func TestDoCommit_DoesNotRetryUnrelatedError(t *testing.T) {
 	assert.Equal(t, int32(1), cat.attempts.Load())
 }
 
+func TestDoCommit_RetriesConflictThatIsAlsoRejected(t *testing.T) {
+	cat := &flakyCatalog{
+		failUntilAttempt: 1,
+		failWith:         fmt.Errorf("%w: %w", ErrCommitFailed, ErrCommitRejected),
+	}
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	})
+	cat.metadata = tbl.Metadata()
+
+	_, err := tbl.doCommit(t.Context(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), cat.attempts.Load(), "a rejection that is also a conflict must be retried")
+}
+
 func TestDoCommit_RespectsContextCancellation(t *testing.T) {
 	cat := &flakyCatalog{
 		failUntilAttempt: 100,
@@ -1265,6 +1282,46 @@ func TestTransactionCommit_ResumeOfNonReplayableCommit(t *testing.T) {
 		require.ErrorIs(t, err, ErrTransactionUnusable)
 		require.ErrorIs(t, err, ErrCommitFailed)
 		assert.EqualError(t, err, "transaction cannot be committed again: requirement no longer holds after refresh ("+hint+"): "+
+			`requirement failed: branch "main" has changed: expected id 100, found 200`)
+		assert.Equal(t, int32(1), cat.attempts.Load(), "the resume must stop before the catalog")
+	})
+}
+
+func TestTransactionCommit_ResumeOfRejectedNonReplayableCommit(t *testing.T) {
+	head := int64(100)
+	rejected := fmt.Errorf("%w: simulated metadata update failure", ErrCommitRejected)
+	newRejectedTx := func(t *testing.T) (*Transaction, *sequentialCatalog, Metadata) {
+		base := newConflictTestMetadataWithProps(t, &head, nil)
+		cat := &sequentialCatalog{metadata: base, errs: []error{rejected}}
+		tbl := New(Identifier{"db", "no-replay"}, base, "metadata.json",
+			func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
+		tx.noReplay = true
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitRejected)
+		require.NotErrorIs(t, err, ErrTransactionUnusable)
+
+		return tx, cat, base
+	}
+
+	t.Run("branch unchanged lands", func(t *testing.T) {
+		tx, cat, _ := newRejectedTx(t)
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, "v", committed.Properties()["k"])
+		assert.Equal(t, int32(2), cat.attempts.Load())
+	})
+
+	t.Run("branch moved is unusable", func(t *testing.T) {
+		tx, cat, base := newRejectedTx(t)
+		cat.loadMeta = graftSnapshotOnto(t, base, MainBranch, 200)
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		assert.EqualError(t, err, "transaction cannot be committed again: requirement no longer holds after refresh ("+noReplayHint+"): "+
 			`requirement failed: branch "main" has changed: expected id 100, found 200`)
 		assert.Equal(t, int32(1), cat.attempts.Load(), "the resume must stop before the catalog")
 	})

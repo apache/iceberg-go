@@ -65,6 +65,11 @@ func streamSnapshotManifests(
 			}
 		}
 		for _, manifest := range set.borrowAllManifests() {
+			if err := ctx.Err(); err != nil {
+				yield(nil, err)
+
+				return
+			}
 			path := manifest.FilePath()
 			if _, ok := seen[path]; ok {
 				continue
@@ -103,6 +108,11 @@ func streamSnapshotManifests(
 					return
 				}
 				for _, manifest := range sets[i].borrowAllManifests() {
+					if err := ctx.Err(); err != nil {
+						yield(nil, err)
+
+						return
+					}
 					path := manifest.FilePath()
 					if _, ok := seen[path]; ok {
 						continue
@@ -212,6 +222,11 @@ func streamSnapshotManifests(
 		}
 
 		for _, manifest := range result.set.borrowAllManifests() {
+			if err := ctx.Err(); err != nil {
+				yield(nil, err)
+
+				return
+			}
 			path := manifest.FilePath()
 			if _, ok := seen[path]; ok {
 				continue
