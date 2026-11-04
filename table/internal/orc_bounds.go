@@ -20,6 +20,7 @@ package internal
 import (
 	"bytes"
 	"math"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -81,6 +82,28 @@ func addORCBound[T iceberg.LiteralType](agg StatsAgg, val T) {
 	bounds.updateMax(val)
 }
 
+// Strings and binary values may refer to Arrow buffers that callers release
+// between batches. Copy only on a changed extreme, not for every input row.
+func addORCStringBound(agg StatsAgg, val string) {
+	bounds := agg.(*statsAggregator[string])
+	if bounds.curMin == nil || bounds.cmp(val, bounds.curMin.Value()) < 0 {
+		bounds.updateMin(strings.Clone(val))
+	}
+	if bounds.curMax == nil || bounds.cmp(val, bounds.curMax.Value()) > 0 {
+		bounds.updateMax(strings.Clone(val))
+	}
+}
+
+func addORCBinaryBound(agg StatsAgg, val []byte) {
+	bounds := agg.(*statsAggregator[[]byte])
+	if bounds.curMin == nil || bounds.cmp(val, bounds.curMin.Value()) < 0 {
+		bounds.updateMin(bytes.Clone(val))
+	}
+	if bounds.curMax == nil || bounds.cmp(val, bounds.curMax.Value()) > 0 {
+		bounds.updateMax(bytes.Clone(val))
+	}
+}
+
 // trackBounds runs only after a primitive value has passed the ORC writer's
 // validation. Skip NaNs: Iceberg bounds cover non-null, non-NaN values.
 func (c *orcColumn) trackBounds(values arrow.Array, row int) {
@@ -110,15 +133,15 @@ func (c *orcColumn) trackBounds(values arrow.Array, row int) {
 			addORCBound(c.bounds, v)
 		}
 	case *array.String:
-		addORCBound(c.bounds, a.Value(row))
+		addORCStringBound(c.bounds, a.Value(row))
 	case *array.LargeString:
-		addORCBound(c.bounds, a.Value(row))
+		addORCStringBound(c.bounds, a.Value(row))
 	case *array.Binary:
-		addORCBound(c.bounds, bytes.Clone(a.Value(row)))
+		addORCBinaryBound(c.bounds, a.Value(row))
 	case *array.LargeBinary:
-		addORCBound(c.bounds, bytes.Clone(a.Value(row)))
+		addORCBinaryBound(c.bounds, a.Value(row))
 	case *array.FixedSizeBinary:
-		addORCBound(c.bounds, bytes.Clone(a.Value(row)))
+		addORCBinaryBound(c.bounds, a.Value(row))
 	case *extensions.UUIDArray:
 		addORCBound(c.bounds, uuid.UUID(a.Value(row)))
 	case *array.Decimal128:

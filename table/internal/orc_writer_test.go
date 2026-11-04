@@ -733,3 +733,19 @@ func TestORCBoundsRespectMetricsPlan(t *testing.T) {
 	require.Equal(t, []byte("ab"), df.LowerBoundValues()[2])
 	require.Equal(t, []byte("ae"), df.UpperBoundValues()[2])
 }
+
+func TestORCBinaryBoundsCopyExtremes(t *testing.T) {
+	bounds := newORCBounds(iceberg.NestedField{
+		ID: 1, Name: "payload", Type: iceberg.BinaryType{},
+	}, nil)
+	value := []byte{2, 3}
+	addORCBinaryBound(bounds, value)
+	value[0] = 9
+
+	lower, err := bounds.MinAsBytes()
+	require.NoError(t, err)
+	upper, err := bounds.MaxAsBytes()
+	require.NoError(t, err)
+	require.Equal(t, []byte{2, 3}, lower)
+	require.Equal(t, []byte{2, 3}, upper)
+}
