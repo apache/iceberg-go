@@ -468,7 +468,8 @@ func TestCherryPickSnapshotFromOlderPartitionSpec(t *testing.T) {
 		AddField("id", iceberg.IdentityTransform{}, "id_part").Commit())
 	tbl, err := specTxn.Commit(t.Context())
 	require.NoError(t, err)
-	olderSpec := tbl.Spec().ID()
+	spec := tbl.Spec()
+	olderSpec := spec.ID()
 
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1)
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
@@ -479,7 +480,8 @@ func TestCherryPickSnapshotFromOlderPartitionSpec(t *testing.T) {
 	require.NoError(t, table.NewUpdateSpec(specTxn, true).RemoveField("id_part").Commit())
 	tbl, err = specTxn.Commit(t.Context())
 	require.NoError(t, err)
-	require.NotEqual(t, olderSpec, tbl.Spec().ID())
+	spec = tbl.Spec()
+	require.NotEqual(t, olderSpec, spec.ID())
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
 
 	txn := tbl.NewTransaction()
