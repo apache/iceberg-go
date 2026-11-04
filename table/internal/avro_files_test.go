@@ -202,3 +202,30 @@ func TestAvroReadTablePreservesFieldIDs(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "1", fieldID)
 }
+
+func TestAvroRecordReaderMultipleBatches(t *testing.T) {
+	const schema = `{"type":"record","name":"row","fields":[{"name":"id","type":"long","field-id":1}]}`
+	const totalRows = 4097
+	rows := make([]any, totalRows)
+	for i := range rows {
+		rows[i] = map[string]any{"id": int64(i)}
+	}
+
+	path := writeAvroOCF(t, schema, rows...)
+	reader := openAvroFile(t, path, totalRows)
+	records, err := reader.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+
+	for batchIndex, wantRows := range []int64{2048, 2048, 1} {
+		require.True(t, records.Next())
+		batch := records.RecordBatch()
+		require.Equal(t, wantRows, batch.NumRows())
+		values := batch.Column(0).(*array.Int64)
+		first := int64(batchIndex * 2048)
+		require.Equal(t, first, values.Value(0))
+		require.Equal(t, first+wantRows-1, values.Value(values.Len()-1))
+	}
+	require.False(t, records.Next())
+	require.NoError(t, records.Err())
+}
