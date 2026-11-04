@@ -417,6 +417,13 @@ type StructType struct {
 	FieldList []NestedField `json:"fields"`
 }
 
+// NewStructType returns a struct type with the given fields. The fields are
+// copied, so later changes to a slice passed with fields... do not affect the
+// returned type.
+func NewStructType(fields ...NestedField) *StructType {
+	return &StructType{FieldList: slices.Clone(fields)}
+}
+
 func (s *StructType) Equals(other Type) bool {
 	st, ok := other.(*StructType)
 	if !ok {
@@ -428,7 +435,16 @@ func (s *StructType) Equals(other Type) bool {
 	})
 }
 
-func (s *StructType) Fields() []NestedField { return s.FieldList }
+// NumFields returns the number of fields in the struct.
+func (s *StructType) NumFields() int { return len(s.FieldList) }
+
+// Field returns the i-th field of the struct. It panics if i is out of range.
+func (s *StructType) Field(i int) NestedField { return s.FieldList[i] }
+
+// Fields returns a copy of the struct's fields. Changing the returned slice
+// does not change the struct. Use NumFields and Field to read the fields
+// without copying them.
+func (s *StructType) Fields() []NestedField { return slices.Clone(s.FieldList) }
 
 // The JSON methods of the nested types name every serialized field instead of
 // encoding through an alias of the type, so the wire format does not depend on
@@ -485,6 +501,12 @@ type ListType struct {
 	ElementID       int  `json:"element-id"`
 	Element         Type `json:"-"`
 	ElementRequired bool `json:"element-required"`
+}
+
+// NewListType returns a list type whose element field has the given ID, type
+// and required flag.
+func NewListType(elementID int, element Type, required bool) *ListType {
+	return &ListType{ElementID: elementID, Element: element, ElementRequired: required}
 }
 
 func (l *ListType) MarshalJSON() ([]byte, error) {
@@ -559,6 +581,15 @@ type MapType struct {
 	ValueID       int  `json:"value-id"`
 	ValueType     Type `json:"-"`
 	ValueRequired bool `json:"value-required"`
+}
+
+// NewMapType returns a map type with the given key and value fields. Map keys
+// are always required.
+func NewMapType(keyID int, key Type, valueID int, value Type, valueRequired bool) *MapType {
+	return &MapType{
+		KeyID: keyID, KeyType: key,
+		ValueID: valueID, ValueType: value, ValueRequired: valueRequired,
+	}
 }
 
 func (m *MapType) MarshalJSON() ([]byte, error) {
