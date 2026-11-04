@@ -58,7 +58,6 @@ func (s *AvroFileSource) GetReader(ctx context.Context) (FileReader, error) {
 	return reader, nil
 }
 
-
 type avroFileReader struct {
 	file     iceio.File
 	records  *ocf.Reader
@@ -151,10 +150,18 @@ func (r *avroRecordReader) Release() {
 		r.current = nil
 	}
 }
-func (r *avroRecordReader) Schema() *arrow.Schema { return r.schema }
-func (r *avroRecordReader) Err() error            { return r.readErr }
-func (r *avroRecordReader) Record() arrow.RecordBatch { return r.current }
-func (r *avroRecordReader) RecordBatch() arrow.RecordBatch { return r.current }
+func (r *avroRecordReader) Schema() *arrow.Schema {
+	return r.schema
+}
+func (r *avroRecordReader) Err() error {
+	return r.readErr
+}
+func (r *avroRecordReader) Record() arrow.RecordBatch {
+	return r.current
+}
+func (r *avroRecordReader) RecordBatch() arrow.RecordBatch {
+	return r.current
+}
 
 const avroRecordsPerBatch = 2048
 
@@ -183,6 +190,7 @@ func (r *avroRecordReader) Next() bool {
 		if err := r.records.Decode(&row); err != nil {
 			if errors.Is(err, io.EOF) {
 				r.finished = true
+
 				break
 			}
 			r.readErr = fmt.Errorf("decode Avro record: %w", err)
@@ -199,7 +207,7 @@ func (r *avroRecordReader) Next() bool {
 				return false
 			}
 			if err := appendAvroValue(builder.Field(i), value); err != nil {
-				r.readErr = fmt.Errorf("Avro field %q: %w", field.Name, err)
+				r.readErr = fmt.Errorf("avro field %q: %w", field.Name, err)
 				return false
 			}
 		}

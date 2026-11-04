@@ -48,7 +48,7 @@ func avroArrowSchema(schemaJSON string) (*arrow.Schema, error) {
 	for i, child := range root.Fields {
 		fields[i], err = avroArrowField(child.Name, child.Type, child.Props, "field-id", used)
 		if err != nil {
-			return nil, fmt.Errorf("Avro field %q: %w", child.Name, err)
+			return nil, fmt.Errorf("avro field %q: %w", child.Name, err)
 		}
 	}
 
@@ -60,6 +60,7 @@ func avroArrowField(name string, node avro.SchemaNode, props map[string]any, idP
 	if err != nil {
 		return arrow.Field{}, err
 	}
+
 	return addAvroFieldID(arrow.Field{Name: name, Type: typ, Nullable: nullable}, props, idProperty, used)
 }
 
@@ -108,6 +109,7 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 			}
 			fields[i] = field
 		}
+
 		return arrow.StructOf(fields...), nullable, nil
 
 	case "array":
@@ -150,6 +152,7 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 		if err != nil {
 			return nil, false, err
 		}
+
 		return arrow.ListOfField(element), nullable, nil
 
 	case "map":

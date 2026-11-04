@@ -60,7 +60,6 @@ func TestAvroSourceRejectsCanceledContextBeforeIO(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-
 func TestAvroRejectsInvalidLogicalPhysicalType(t *testing.T) {
 	for _, schema := range []string{
 		`{"type":"record","name":"row","fields":[{"name":"ts","field-id":1,"type":{"type":"string","logicalType":"timestamp-micros"}}]}`,
