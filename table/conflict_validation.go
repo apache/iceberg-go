@@ -1057,8 +1057,18 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				return nil, fmt.Errorf("partition field %q: %w", sourceField.name, err)
 			}
 
-			// Keep values needing a cast on the equality path, including
-			// strings that can cast to NaN floats during binding.
+			// x = NaN is never true and Bind rejects a NaN literal, so a NaN
+			// partition value matches through IsNaN, as in
+			// internal.BuildPartitionMatchPredicate. The value is checked after
+			// conversion to the source type, which also catches a string that
+			// casts to NaN.
+			if isNaNPartitionLiteral(lit, sourceField.fieldType) {
+				conjuncts = append(conjuncts, iceberg.IsNaN(iceberg.Reference(sourceField.name)))
+
+				continue
+			}
+
+			// Keep values needing a cast on the equality path.
 			if len(fieldIDs) == 1 && equalityDeleteLiteralCanUseSet(lit, sourceField.fieldType) {
 				key := equalityDeleteIdentityGroupKey{specID: specID, fieldID: partFieldID}
 				group := identityGroups[key]
@@ -1286,6 +1296,24 @@ var filePathFieldID = func() int {
 
 	return f.ID
 }()
+
+// isNaNPartitionLiteral reports whether a partition literal is a floating-point
+// NaN once converted to the source field's type. A literal that cannot be
+// converted is left for Bind to reject.
+func isNaNPartitionLiteral(lit iceberg.Literal, fieldType iceberg.Type) bool {
+	converted, err := lit.To(fieldType)
+	if err != nil {
+		return false
+	}
+	switch v := converted.(type) {
+	case iceberg.Float32Literal:
+		return math.IsNaN(float64(v))
+	case iceberg.Float64Literal:
+		return math.IsNaN(float64(v))
+	}
+
+	return false
+}
 
 // canonicalPartitionKey returns a deterministic, injective string key for a
 // (specID, partition) tuple. Partition values are compared post-transform
