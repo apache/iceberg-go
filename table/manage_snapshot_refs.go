@@ -38,8 +38,6 @@ import (
 // Fast-forward needs the full ancestor chain. With a REST catalog configured
 // with snapshot-loading-mode=refs, a valid fast-forward can be rejected;
 // reload with snapshot-loading-mode=all before calling this method.
-// Use NewTransactionOnBranch(target) for a standalone promotion of a
-// non-main branch, so an unrelated main write does not block the commit.
 // For non-main targets, use Table.NewTransactionOnBranch(target) so an
 // unrelated main head move does not conflict with the transaction's implicit
 // commit-branch requirement.
@@ -61,7 +59,6 @@ func (t *Transaction) FastForwardBranch(target, source string) error {
 // moves fail the commit and prevent the normal retry of a co-staged append.
 // No catalog's snapshot-ID requirement detects retention-only changes, and
 // REST catalogs also cannot detect ref type changes with the same snapshot ID.
-// For a standalone non-main update, use NewTransactionOnBranch(target).
 func (t *Transaction) ReplaceBranchFromRef(target, source string) error {
 	return t.moveBranchToRef(target, source, false)
 }
@@ -122,7 +119,6 @@ func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) e
 // detects retention-only changes, and REST catalogs also miss ref type changes
 // with the same ID. A REST catalog using snapshot-loading-mode=refs may omit a
 // requested historical snapshot; reload with snapshot-loading-mode=all.
-// Use NewTransactionOnBranch(name) when replacing a non-main branch alone.
 func (t *Transaction) ReplaceBranch(name string, snapshotID int64) error {
 	meta, err := t.txnMeta()
 	if err != nil {

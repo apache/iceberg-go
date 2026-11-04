@@ -243,3 +243,100 @@ func testBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T, 
 		assert.Equal(t, int64(25), committed.Metadata().NextRowID())
 	}
 }
+
+// A source ref can point at a snapshot created earlier in the same
+// transaction. Retry must pick the rebuilt version of that snapshot as the
+// parent of the next append, while preserving v3 row-ID allocation.
+func TestBranchPromotionRetryPromotesStagedSource(t *testing.T) {
+	base := manageSnapshotRefsRetryFixture(t)
+	upgrade, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	require.NoError(t, upgrade.SetFormatVersion(3))
+	base, err = upgrade.Build()
+	require.NoError(t, err)
+
+	peer, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	divergedID := int64(900)
+	peerFirst, peerRows := int64(0), int64(5)
+	require.NoError(t, peer.AddSnapshot(&Snapshot{
+		SnapshotID:       901,
+		ParentSnapshotID: &divergedID,
+		SequenceNumber:   base.LastSequenceNumber() + 1,
+		TimestampMs:      base.LastUpdatedMillis() + 1000,
+		FirstRowID:       &peerFirst,
+		AddedRows:        &peerRows,
+		Summary:          &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, peer.SetSnapshotRef("diverged", 901, BranchRef))
+	catalogMeta, err := peer.Build()
+	require.NoError(t, err)
+
+	cat := &flakyCatalog{metadata: catalogMeta, failUntilAttempt: 1, failWith: ErrCommitFailed}
+	tbl := New(Identifier{"db", "staged-source-promotion-retry"}, base, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	tx := tbl.NewTransaction()
+
+	stageSnapshot := func(id, parentID, sequence, firstRowID int64, advanceMain bool) {
+		rows := int64(10)
+		snap := &Snapshot{
+			SnapshotID:       id,
+			ParentSnapshotID: &parentID,
+			SequenceNumber:   sequence,
+			TimestampMs:      base.LastUpdatedMillis() + id,
+			ManifestList:     fmt.Sprintf("original-%d.avro", id),
+			FirstRowID:       &firstRowID,
+			AddedRows:        &rows,
+			Summary:          &Summary{Operation: OpAppend},
+		}
+		add := NewAddSnapshotUpdate(snap)
+		add.rebuildManifestList = func(_ context.Context, fresh Metadata, parent *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
+			if parent == nil {
+				return nil, fmt.Errorf("missing replay parent for snapshot %d", id)
+			}
+			rebuilt := *snap
+			replayedParentID := parent.SnapshotID
+			rebuilt.ParentSnapshotID = &replayedParentID
+			rebuilt.SequenceNumber = fresh.LastSequenceNumber() + 1
+			nextRowID := fresh.NextRowID()
+			rebuilt.FirstRowID = &nextRowID
+			rebuilt.ManifestList = fmt.Sprintf("rebuilt-%d.avro", id)
+
+			return &rebuilt, nil
+		}
+
+		updates := []Update{add}
+		if advanceMain {
+			updates = append(updates, tx.meta.NewRetainingSnapshotRefUpdate(MainBranch, id, BranchRef))
+		}
+		require.NoError(t, tx.apply(updates, nil))
+	}
+
+	// Create a snapshot without updating main, move audit to it, promote that
+	// staged audit head to main, then append on top of the promoted snapshot.
+	stageSnapshot(1001, 100, base.LastSequenceNumber()+1, 0, false)
+	require.NoError(t, tx.ReplaceBranch("audit", 1001))
+	require.NoError(t, tx.FastForwardBranch(MainBranch, "audit"))
+	stageSnapshot(1002, 1001, base.LastSequenceNumber()+2, 10, true)
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), cat.attempts.Load())
+
+	first := committed.Metadata().SnapshotByID(1001)
+	second := committed.Metadata().SnapshotByID(1002)
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+	require.NotNil(t, first.ParentSnapshotID)
+	require.NotNil(t, second.ParentSnapshotID)
+	assert.Equal(t, int64(100), *first.ParentSnapshotID)
+	assert.Equal(t, int64(1001), *second.ParentSnapshotID)
+	assert.Greater(t, second.SequenceNumber, first.SequenceNumber)
+	require.NotNil(t, first.FirstRowID)
+	require.NotNil(t, second.FirstRowID)
+	assert.Equal(t, int64(5), *first.FirstRowID)
+	assert.Equal(t, int64(15), *second.FirstRowID)
+	assert.Equal(t, int64(25), committed.Metadata().NextRowID())
+	assert.Equal(t, int64(1001), committed.SnapshotByName("audit").SnapshotID)
+	assert.Equal(t, int64(1002), committed.CurrentSnapshot().SnapshotID)
+}
