@@ -113,7 +113,7 @@ func TestORCWriterWritesIcebergIDsAndNullableStreams(t *testing.T) {
 	require.Equal(t, iceberg.OrcFile, dataFile.FileFormat())
 	require.Equal(t, int64(3), dataFile.Count())
 	for _, bound := range []struct {
-		id         int
+		id           int
 		lower, upper iceberg.Literal
 	}{
 		{8, iceberg.NewLiteral(int32(4)), iceberg.NewLiteral(int32(9))},

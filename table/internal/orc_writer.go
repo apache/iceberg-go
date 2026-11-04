@@ -768,7 +768,7 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 	stats := &DataFileStatistics{
 		RecordCount: w.rows, ColSizes: colSizes, NullValueCounts: nulls,
 		ValueCounts: values, NanValueCounts: nanCounts, ColAggs: bounds,
-		SplitOffsets: []int64{3},
+		SplitOffsets:     []int64{3},
 		EqualityFieldIDs: append([]int(nil), w.info.EqualityFieldIDs...),
 	}
 
