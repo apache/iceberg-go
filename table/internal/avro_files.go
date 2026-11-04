@@ -180,6 +180,7 @@ func (r *avroRecordReader) Next() bool {
 	}
 	if err := r.ctx.Err(); err != nil {
 		r.readErr = err
+
 		return false
 	}
 
@@ -189,6 +190,7 @@ func (r *avroRecordReader) Next() bool {
 	for count < avroRecordsPerBatch {
 		if err := r.ctx.Err(); err != nil {
 			r.readErr = err
+
 			return false
 		}
 		var row map[string]any
@@ -222,6 +224,7 @@ func (r *avroRecordReader) Next() bool {
 		return false
 	}
 	r.current = builder.NewRecordBatch()
+
 	return true
 }
 
