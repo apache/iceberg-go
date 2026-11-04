@@ -374,42 +374,41 @@ func defaultValueToJSON(typ Type, value any) any {
 }
 
 func (n *NestedField) UnmarshalJSON(b []byte) error {
-	type Alias NestedField
-	var next NestedField
 	aux := struct {
-		ID       *int      `json:"id"`
-		Required *bool     `json:"required"`
-		Type     typeIFace `json:"type"`
-		*Alias
-	}{
-		Alias: (*Alias)(&next),
-	}
+		ID             *int      `json:"id"`
+		Name           string    `json:"name"`
+		Required       *bool     `json:"required"`
+		Type           typeIFace `json:"type"`
+		Doc            string    `json:"doc"`
+		InitialDefault any       `json:"initial-default"`
+		WriteDefault   any       `json:"write-default"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	next.Type = aux.Type.Type
-
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
 	}
-	next.ID = *aux.ID
 
-	if next.Name == "" {
+	if aux.Name == "" {
 		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
 	}
 
-	if next.Type == nil {
-		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, next.Name)
+	if aux.Type.Type == nil {
+		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, aux.Name)
 	}
 
 	if aux.Required == nil {
 		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
 	}
-	next.Required = *aux.Required
 
-	*n = next
+	*n = NestedField{
+		Type: aux.Type.Type,
+		ID:   *aux.ID, Name: aux.Name, Required: *aux.Required, Doc: aux.Doc,
+		InitialDefault: aux.InitialDefault, WriteDefault: aux.WriteDefault,
+	}
 
 	return nil
 }
@@ -431,13 +430,28 @@ func (s *StructType) Equals(other Type) bool {
 
 func (s *StructType) Fields() []NestedField { return s.FieldList }
 
-func (s *StructType) MarshalJSON() ([]byte, error) {
-	type Alias StructType
+// The JSON methods of the nested types name every serialized field instead of
+// encoding through an alias of the type, so the wire format does not depend on
+// which Go fields are exported.
 
+func (s *StructType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-	}{Type: s.Type(), Alias: (*Alias)(s)})
+		Type   string        `json:"type"`
+		Fields []NestedField `json:"fields"`
+	}{Type: s.Type(), Fields: s.FieldList})
+}
+
+func (s *StructType) UnmarshalJSON(b []byte) error {
+	aux := struct {
+		Fields []NestedField `json:"fields"`
+	}{}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+
+	s.FieldList = aux.Fields
+
+	return nil
 }
 
 func (*StructType) Type() string { return "struct" }
@@ -474,13 +488,15 @@ type ListType struct {
 }
 
 func (l *ListType) MarshalJSON() ([]byte, error) {
-	type Alias ListType
-
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-		Element *typeIFace `json:"element"`
-	}{Type: l.Type(), Alias: (*Alias)(l), Element: &typeIFace{l.Element}})
+		Type            string     `json:"type"`
+		ElementID       int        `json:"element-id"`
+		ElementRequired bool       `json:"element-required"`
+		Element         *typeIFace `json:"element"`
+	}{
+		Type: l.Type(), ElementID: l.ElementID, ElementRequired: l.ElementRequired,
+		Element: &typeIFace{l.Element},
+	})
 }
 
 func (l *ListType) Equals(other Type) bool {
@@ -546,15 +562,15 @@ type MapType struct {
 }
 
 func (m *MapType) MarshalJSON() ([]byte, error) {
-	type Alias MapType
-
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-		KeyType   *typeIFace `json:"key"`
-		ValueType *typeIFace `json:"value"`
+		Type          string     `json:"type"`
+		KeyID         int        `json:"key-id"`
+		ValueID       int        `json:"value-id"`
+		ValueRequired bool       `json:"value-required"`
+		KeyType       *typeIFace `json:"key"`
+		ValueType     *typeIFace `json:"value"`
 	}{
-		Type: m.Type(), Alias: (*Alias)(m),
+		Type: m.Type(), KeyID: m.KeyID, ValueID: m.ValueID, ValueRequired: m.ValueRequired,
 		KeyType:   &typeIFace{m.KeyType},
 		ValueType: &typeIFace{m.ValueType},
 	})
