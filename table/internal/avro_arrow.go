@@ -260,16 +260,19 @@ func appendAvroValue(b array.Builder, value any) error {
 	case *array.Int32Builder:
 		if v, ok := value.(int32); ok {
 			builder.Append(v)
+
 			return nil
 		}
 	case *array.Int64Builder:
 		if v, ok := value.(int64); ok {
 			builder.Append(v)
+
 			return nil
 		}
 	case *array.Float32Builder:
 		if v, ok := value.(float32); ok {
 			builder.Append(v)
+
 			return nil
 		}
 	case *array.Float64Builder:
