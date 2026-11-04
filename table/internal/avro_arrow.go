@@ -80,6 +80,24 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 		nullable = true
 	}
 
+	// Iceberg timestamp and other logical annotations must match their
+	// Avro physical types. Do not silently reinterpret a different type.
+	switch node.LogicalType {
+	case "timestamp-micros", "timestamp-nanos", "local-timestamp-micros",
+		"local-timestamp-nanos", "time-micros":
+		if node.Type != "long" {
+			return nil, false, fmt.Errorf("%w: Avro %s requires long, got %s", iceberg.ErrInvalidSchema, node.LogicalType, node.Type)
+		}
+	case "date", "time-millis":
+		if node.Type != "int" {
+			return nil, false, fmt.Errorf("%w: Avro %s requires int, got %s", iceberg.ErrInvalidSchema, node.LogicalType, node.Type)
+		}
+	case "decimal":
+		if node.Type != "bytes" && node.Type != "fixed" {
+			return nil, false, fmt.Errorf("%w: Avro decimal requires bytes or fixed, got %s", iceberg.ErrInvalidSchema, node.Type)
+		}
+	}
+
 	switch node.Type {
 	case "record":
 		fields := make([]arrow.Field, len(node.Fields))
@@ -348,6 +366,9 @@ func appendAvroValue(b array.Builder, value any) error {
 		switch values := value.(type) {
 		case map[string]any:
 			for key, v := range values {
+				if v == nil && !builder.Type().(*arrow.MapType).ItemField().Nullable {
+					return fmt.Errorf("%w: null Avro map value", iceberg.ErrInvalidSchema)
+				}
 				if err := appendAvroValue(builder.KeyBuilder(), key); err != nil {
 					return err
 				}
@@ -361,6 +382,9 @@ func appendAvroValue(b array.Builder, value any) error {
 				pair, ok := item.(map[string]any)
 				if !ok || pair["key"] == nil {
 					return fmt.Errorf("%w: invalid Avro array-backed map entry", iceberg.ErrInvalidSchema)
+				}
+				if pair["value"] == nil && !builder.Type().(*arrow.MapType).ItemField().Nullable {
+					return fmt.Errorf("%w: null Avro map value", iceberg.ErrInvalidSchema)
 				}
 				if err := appendAvroValue(builder.KeyBuilder(), pair["key"]); err != nil {
 					return err

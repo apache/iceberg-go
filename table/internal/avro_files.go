@@ -239,16 +239,6 @@ func (r *avroFileReader) ReadTable(ctx context.Context) (arrow.Table, error) {
 	return array.NewTableFromRecords(records.Schema(), batches), nil
 }
 
-func (r *avroFileReader) Close() error {
-	if r.closed {
-		return nil
-	}
-	r.closed = true
-	r.records.Release()
-
-	return r.file.Close()
-}
-
 
 func (r *avroFileReader) Close() error {
 	if r.closed {
