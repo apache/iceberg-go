@@ -83,24 +83,21 @@ func TestCherryPickSnapshotRejectsIncompleteTargetAncestry(t *testing.T) {
 // Expiration legitimately truncates the oldest lineage even when all available
 // snapshots were loaded. Unlike REST refs mode, this is not a reason to reject.
 func TestCherryPickSnapshotAllowsExpiredTargetAncestry(t *testing.T) {
-	txn := newTransactionWithSnapshotRefs(t)
-	source := txn.meta.snapshotList[1]
+	seeded := newTransactionWithSnapshotRefs(t)
+	// Snapshot 10 is retained, but its parent has expired. Snapshot 20 is
+	// still a direct child and can be fast-forwarded even if its operation
+	// is not an append.
 	missingParent := int64(999)
-	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
-		SnapshotID:       30,
-		ParentSnapshotID: &missingParent,
-		SequenceNumber:   3,
-		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
-		Summary:          &Summary{Operation: OpAppend},
-		TimestampMs:      source.TimestampMs + 1,
-	}))
-	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
-	source.Summary.Operation = OpDelete
+	seeded.meta.snapshotList[0].ParentSnapshotID = &missingParent
+	seeded.meta.snapshotList[1].Summary.Operation = OpDelete
 
-	err := txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
-	require.ErrorIs(t, err, ErrInvalidOperation)
-	require.ErrorContains(t, err, "not an append")
-	require.NotContains(t, err.Error(), "incomplete target ancestry")
+	meta, err := seeded.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", seeded.tbl.fsF, nil)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), 20, nil))
+	require.Equal(t, int64(20), txn.meta.refs[MainBranch].SnapshotID)
+	require.Contains(t, txn.pinnedRefs, MainBranch)
 }
 
 func TestCherryPickSnapshotChecksContextBeforeManifestIO(t *testing.T) {
