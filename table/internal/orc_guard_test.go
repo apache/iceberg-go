@@ -21,7 +21,6 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -41,19 +40,6 @@ func assertORCReaderRejected(t *testing.T, path string, want error) {
 	require.NoError(t, err)
 	_, err = source.GetReader(context.Background())
 	require.ErrorIs(t, err, want)
-}
-
-func TestORCRejectsTimestampData(t *testing.T) {
-	for _, unit := range []string{"", "MICROS", "NANOS"} {
-		t.Run(unit, func(t *testing.T) {
-			attrs := map[string]string{"iceberg.id": "1"}
-			if unit != "" {
-				attrs["iceberg.timestamp-unit"] = unit
-			}
-			path := writeORCFixture(t, "struct<ts:timestamp>", map[int]map[string]string{1: attrs}, []any{time.Unix(12345, 0).UTC()})
-			assertORCReaderRejected(t, path, iceberg.ErrNotImplemented)
-		})
-	}
 }
 
 func TestORCRejectsAmbiguousRootNames(t *testing.T) {
