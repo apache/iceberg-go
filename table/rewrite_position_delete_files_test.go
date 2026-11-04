@@ -73,10 +73,18 @@ func TestRewritePositionDeleteFilesEmptySnapshot(t *testing.T) {
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, t.TempDir(), nil)
 	require.NoError(t, err)
 	tbl := New([]string{"db", "example"}, meta, "", nil, nil)
-	updated, rewritten, err := tbl.RewritePositionDeleteFiles(t.Context(), PositionDeleteRewriteOptions{})
+	result, err := tbl.RewritePositionDeleteFiles(t.Context(), PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
-	require.Zero(t, rewritten)
-	require.Equal(t, tbl.Metadata(), updated.Metadata())
+	require.Zero(t, result.RemovedDeleteFiles)
+	require.Zero(t, result.AddedDeleteFiles)
+	require.Equal(t, tbl.Metadata(), result.Table.Metadata())
+
+	txn := tbl.NewTransaction()
+	staged, err := txn.RewritePositionDeleteFiles(t.Context(), PositionDeleteRewriteOptions{})
+	require.NoError(t, err)
+	require.Zero(t, staged.RemovedDeleteFiles)
+	require.Nil(t, staged.Table)
+
 }
 
 func TestRewritePositionDeleteFilesRejectsV3(t *testing.T) {
@@ -87,7 +95,7 @@ func TestRewritePositionDeleteFilesRejectsV3(t *testing.T) {
 		iceberg.Properties{PropertyFormatVersion: "3"})
 	require.NoError(t, err)
 	tbl := New([]string{"db", "example"}, meta, "", nil, nil)
-	_, _, err = tbl.RewritePositionDeleteFiles(t.Context(), PositionDeleteRewriteOptions{})
+	_, err = tbl.RewritePositionDeleteFiles(t.Context(), PositionDeleteRewriteOptions{})
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
 

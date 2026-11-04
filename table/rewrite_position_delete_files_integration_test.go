@@ -64,16 +64,20 @@ func TestRewritePositionDeleteFilesCommit(t *testing.T) {
 		return readOnlyPositionDeleteIO{IO: iceio.LocalFS{}}, nil
 	}
 	readOnly := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(), readOnlyFS, nil)
-	noOp, noOpCount, err := readOnly.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{
+	noOp, err := readOnly.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{
 		MinInputFiles: 1, MaxInputBytes: 1,
 	})
 	require.NoError(t, err)
-	require.Zero(t, noOpCount)
-	require.Equal(t, tbl.Metadata(), noOp.Metadata())
+	require.Zero(t, noOp.RemovedDeleteFiles)
+	require.Equal(t, tbl.Metadata(), noOp.Table.Metadata())
 
-	updated, count, err := tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	result, err := tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
-	require.Equal(t, 2, count)
+	updated := result.Table
+	require.Equal(t, 2, result.RemovedDeleteFiles)
+	require.Equal(t, 1, result.AddedDeleteFiles)
+	require.Equal(t, int64(256), result.BytesBefore)
+	require.Positive(t, result.BytesAfter)
 	require.ElementsMatch(t, []int64{2, 3}, scanIDs(t, updated))
 	tasks, err := updated.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
@@ -92,13 +96,13 @@ func TestRewritePositionDeleteFilesCommit(t *testing.T) {
 	// Only one delete file remains, so the default minimum of two prevents
 	// a rewrite even if the table is exposed through read-only I/O.
 	readOnly = table.New(updated.Identifier(), updated.Metadata(), updated.MetadataLocation(), readOnlyFS, nil)
-	noOp, noOpCount, err = readOnly.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	noOp, err = readOnly.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
-	require.Zero(t, noOpCount)
-	require.Equal(t, updated.Metadata(), noOp.Metadata())
+	require.Zero(t, noOp.RemovedDeleteFiles)
+	require.Equal(t, updated.Metadata(), noOp.Table.Metadata())
 
 	attemptsBefore := cat.attempts.Load()
-	_, _, err = tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	_, err = tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	require.Equal(t, attemptsBefore+1, cat.attempts.Load(),
 		"the pinned planning snapshot must stop a stale delete rewrite without retrying")
@@ -136,9 +140,11 @@ func TestRewritePositionDeleteFilesDropsDanglingRowsFromUnscopedFiles(t *testing
 	require.NoError(t, err)
 	require.ElementsMatch(t, []int64{1, 4}, scanIDs(t, tbl))
 
-	updated, removed, err := tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	result, err := tbl.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
-	require.Equal(t, 2, removed)
+	updated := result.Table
+	require.Equal(t, 2, result.RemovedDeleteFiles)
+	require.Equal(t, 1, result.AddedDeleteFiles)
 	require.ElementsMatch(t, []int64{1, 4}, scanIDs(t, updated))
 
 	tasks, err := updated.Scan().PlanFiles(t.Context())
@@ -155,10 +161,10 @@ func TestRewritePositionDeleteFilesDropsDanglingRowsFromUnscopedFiles(t *testing
 	require.Nil(t, replacement.ReferencedDataFile())
 	require.Equal(t, int64(2), replacement.Count(), "drop dangling and duplicate delete positions")
 
-	again, removed, err := updated.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
+	again, err := updated.RewritePositionDeleteFiles(t.Context(), table.PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
-	require.Zero(t, removed)
-	require.Equal(t, updated.Metadata(), again.Metadata())
+	require.Zero(t, again.RemovedDeleteFiles)
+	require.Equal(t, updated.Metadata(), again.Table.Metadata())
 }
 
 func TestRewritePositionDeleteFilesAcrossSequences(t *testing.T) {
@@ -208,9 +214,11 @@ func TestRewritePositionDeleteFilesAcrossSequences(t *testing.T) {
 	maxSourceSequence := currentManifestEntry(t, tbl, newer.FilePath()).DataSequenceNumber()
 	require.ElementsMatch(t, []int64{3, 4}, scanIDs(t, tbl))
 
-	updated, count, err := tbl.RewritePositionDeleteFiles(ctx, table.PositionDeleteRewriteOptions{})
+	result, err := tbl.RewritePositionDeleteFiles(ctx, table.PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
-	require.Equal(t, 2, count, "delete files from separate commits should compact")
+	updated := result.Table
+	require.Equal(t, 2, result.RemovedDeleteFiles, "delete files from separate commits should compact")
+	require.Equal(t, 1, result.AddedDeleteFiles)
 	require.ElementsMatch(t, []int64{3, 4}, scanIDs(t, updated))
 
 	tasks, err := updated.Scan().PlanFiles(ctx)
@@ -271,9 +279,64 @@ func TestRewritePositionDeleteFilesPreservesCrossSpecPathScopedDeletes(t *testin
 
 	// Combining these sources can lose their path-based scope because the
 	// output may be partition-scoped. Keep the original files instead.
-	updated, rewritten, err := tbl.RewritePositionDeleteFiles(ctx, table.PositionDeleteRewriteOptions{})
+	result, err := tbl.RewritePositionDeleteFiles(ctx, table.PositionDeleteRewriteOptions{})
 	require.NoError(t, err)
-	require.Zero(t, rewritten)
-	require.Equal(t, tbl.Metadata(), updated.Metadata())
-	require.ElementsMatch(t, []int64{2}, scanIDs(t, updated))
+	require.Zero(t, result.RemovedDeleteFiles)
+	require.Zero(t, result.AddedDeleteFiles)
+	require.Equal(t, tbl.Metadata(), result.Table.Metadata())
+	require.ElementsMatch(t, []int64{2}, scanIDs(t, result.Table))
+}
+
+
+func TestRewritePositionDeleteFilesStagesOnTargetBranch(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/branch-data.parquet"
+	writeParquetFile(t, dataPath, schema, "[{\"id\":1,\"data\":\"a\"},{\"id\":2,\"data\":\"b\"}]")
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{dataPath}, nil, false))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	var deletes []iceberg.DataFile
+	for i := range 2 {
+		path := fmt.Sprintf("%s/data/branch-delete-%d.parquet", tbl.Location(), i)
+		writeParquetFile(t, path, table.PositionalDeleteArrowSchema,
+			fmt.Sprintf("[{\"file_path\":%q,\"pos\":0}]", dataPath))
+		builder, buildErr := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentPosDeletes, path, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+		require.NoError(t, buildErr)
+		deletes = append(deletes, builder.Build())
+	}
+	txn, err = tbl.NewTransactionOnBranch("feature")
+	require.NoError(t, err)
+	require.NoError(t, txn.NewRowDelta(nil).AddDeletes(deletes...).Commit(ctx))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, tbl, table.MainBranch))
+	require.ElementsMatch(t, []int64{2}, idsOnRef(t, tbl, "feature"))
+
+	txn, err = tbl.NewTransactionOnBranch("feature")
+	require.NoError(t, err)
+	commitsBefore := cat.attempts.Load()
+	result, err := txn.RewritePositionDeleteFiles(ctx, table.PositionDeleteRewriteOptions{})
+	require.NoError(t, err)
+	require.Nil(t, result.Table, "transaction rewrite must not commit itself")
+	require.Equal(t, 2, result.RemovedDeleteFiles)
+	require.Equal(t, 1, result.AddedDeleteFiles)
+	require.Equal(t, int64(256), result.BytesBefore)
+	require.Positive(t, result.BytesAfter)
+	require.Equal(t, commitsBefore, cat.attempts.Load(), "staging must not contact the catalog")
+
+	require.NoError(t, txn.SetProperties(iceberg.Properties{"test.position-delete-rewrite": "staged"}))
+	updated, err := txn.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, commitsBefore+1, cat.attempts.Load())
+	require.Equal(t, "staged", updated.Properties()["test.position-delete-rewrite"])
+	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, updated, table.MainBranch))
+	require.ElementsMatch(t, []int64{2}, idsOnRef(t, updated, "feature"))
 }

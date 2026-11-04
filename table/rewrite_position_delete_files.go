@@ -67,21 +67,69 @@ type positionDeleteRow struct {
 	position int64
 }
 
-// RewritePositionDeleteFiles compacts compatible classic Parquet position
-// delete files without rewriting data files. It also removes records targeting
-// data files that are no longer live in the planning snapshot.
+// PositionDeleteRewriteResult summarizes a position delete file rewrite.
+// Table is set when the table-level action has committed. Transaction callers
+// receive a nil Table until they commit their transaction.
+type PositionDeleteRewriteResult struct {
+	Table *Table
+
+	RemovedDeleteFiles int
+	AddedDeleteFiles   int
+	BytesBefore        int64
+	BytesAfter         int64
+}
+
+// RewritePositionDeleteFiles compacts compatible v2 position delete files on
+// main and commits the rewrite. Use [Transaction.RewritePositionDeleteFiles]
+// to target another branch or combine the rewrite with other updates.
 //
-// Only v2 files in the current partition spec and without the optional "row"
-// payload are selected. Groups never mix partition tuples. Each source file's
-// data sequence controls whether its rows are still applicable, while the
-// replacement inherits the maximum source sequence, as in Iceberg Java.
-// Other files are left untouched. Physical source files remain available to
-// older snapshots after the commit.
+// The action holds decoded delete rows in memory. A concurrent commit advancing
+// main invalidates the pinned planning snapshot and fails the whole commit
+// instead of retrying against the changed snapshot.
 func (t Table) RewritePositionDeleteFiles(
 	ctx context.Context, opts PositionDeleteRewriteOptions,
-) (*Table, int, error) {
-	if t.metadata.FormatVersion() != 2 {
-		return nil, 0, fmt.Errorf("%w: position delete rewrites require v2 table format", iceberg.ErrNotImplemented)
+) (*PositionDeleteRewriteResult, error) {
+	txn, err := t.NewTransactionOnBranch(MainBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := txn.RewritePositionDeleteFiles(ctx, opts)
+	if err != nil {
+		return result, err
+	}
+
+	committed, err := txn.Commit(ctx)
+	if err == nil {
+		result.Table = committed
+	}
+
+	return result, err
+}
+
+// RewritePositionDeleteFiles stages a rewrite of compatible classic Parquet
+// position delete files without rewriting data files. It removes records
+// targeting data files that are no longer live in the target branch snapshot.
+//
+// Only v2 files in the current partition spec without optional deleted-row
+// payloads are selected. Groups never mix partition tuples. Each source's data
+// sequence controls its applicable rows; replacements inherit the maximum
+// source sequence. Physical source files remain available to older snapshots.
+//
+// The target branch snapshot is pinned. A concurrent commit advancing that
+// branch fails the eventual transaction commit rather than replaying the
+// rewrite. Decoded delete rows are kept in memory during sorting. Successfully
+// staged outputs must be retained until Transaction.Commit; abandoned
+// transactions may leave files for orphan cleanup.
+func (t *Transaction) RewritePositionDeleteFiles(
+	ctx context.Context, opts PositionDeleteRewriteOptions,
+) (*PositionDeleteRewriteResult, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	if meta.formatVersion != 2 {
+		return nil, fmt.Errorf("%w: position delete rewrites require v2 table format", iceberg.ErrNotImplemented)
 	}
 	if opts.MinInputFiles <= 0 {
 		opts.MinInputFiles = 2
@@ -89,18 +137,22 @@ func (t Table) RewritePositionDeleteFiles(
 	if opts.MaxInputBytes <= 0 {
 		opts.MaxInputBytes = 128 << 20
 	}
-	if snap := t.CurrentSnapshot(); snap == nil {
-		return &t, 0, nil
+	snap := t.planningSnapshot(meta)
+	if snap == nil {
+		return &PositionDeleteRewriteResult{}, nil
 	}
-	spec := t.Spec()
+	spec, err := meta.CurrentSpec()
+	if err != nil {
+		return nil, err
+	}
 
-	fs, err := t.FS(ctx)
+	fs, err := t.tbl.FS(ctx)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	manifests, err := t.CurrentSnapshot().Manifests(fs)
+	manifests, err := snap.Manifests(fs)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	live := make(map[string]positionDeleteLiveFile)
@@ -108,14 +160,14 @@ func (t Table) RewritePositionDeleteFiles(
 	// removeDanglingDeleteFiles; the two features can merge in either order.
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		if manifest.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
 		for entry, err := range manifest.Entries(fs, true) {
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			df := entry.DataFile()
 			if df.ContentType() != iceberg.EntryContentData {
@@ -123,10 +175,10 @@ func (t Table) RewritePositionDeleteFiles(
 			}
 			partition, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
-				return nil, 0, fmt.Errorf("data file %s: %w", df.FilePath(), err)
+				return nil, fmt.Errorf("data file %s: %w", df.FilePath(), err)
 			}
 			if entry.DataSequenceNumber() < 0 {
-				return nil, 0, fmt.Errorf("%w: data file %s has unknown sequence number", ErrInvalidMetadata, df.FilePath())
+				return nil, fmt.Errorf("%w: data file %s has unknown sequence number", ErrInvalidMetadata, df.FilePath())
 			}
 			live[df.FilePath()] = positionDeleteLiveFile{partition: partition, sequence: entry.DataSequenceNumber()}
 		}
@@ -136,14 +188,14 @@ func (t Table) RewritePositionDeleteFiles(
 	seen := make(map[string]struct{})
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
 		for entry, err := range manifest.Entries(fs, true) {
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			df := entry.DataFile()
 			if df.ContentType() != iceberg.EntryContentPosDeletes ||
@@ -158,7 +210,7 @@ func (t Table) RewritePositionDeleteFiles(
 			seen[df.FilePath()] = struct{}{}
 			partition, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
-				return nil, 0, fmt.Errorf("position delete %s: %w", df.FilePath(), err)
+				return nil, fmt.Errorf("position delete %s: %w", df.FilePath(), err)
 			}
 			key := positionDeleteRewriteKey{partition: partition}
 			group := groups[key]
@@ -187,7 +239,7 @@ func (t Table) RewritePositionDeleteFiles(
 		}
 	}
 	if len(jobs) == 0 {
-		return &t, 0, nil
+		return &PositionDeleteRewriteResult{}, nil
 	}
 	slices.SortFunc(jobs, func(a, b positionDeleteRewriteJob) int {
 		if order := strings.Compare(a.key.partition, b.key.partition); order != 0 {
@@ -199,57 +251,56 @@ func (t Table) RewritePositionDeleteFiles(
 
 	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	txn := t.NewTransaction()
-	if err := txn.AssertRefSnapshotID(""); err != nil {
-		return nil, 0, err
+	if err := t.AssertRefSnapshotID(""); err != nil {
+		return nil, err
 	}
-	rewrite := txn.NewRewrite(nil)
-	props := maps.Clone(t.Properties())
+	rewrite := t.NewRewrite(nil)
+	props := maps.Clone(meta.props)
 	if props == nil {
 		props = make(iceberg.Properties)
 	}
 	props[WriteFormatDefaultKey] = string(iceberg.ParquetFile)
-	writer, err := newPositionDeleteWriter(t.Location(), wfs, txn.meta, props)
+	writer, err := newPositionDeleteWriter(meta.loc, wfs, meta, props)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	var produced []string
-	commitStarted := false
+	staged := false
 	defer func() {
-		if !commitStarted {
+		if !staged {
 			for _, path := range produced {
 				_ = wfs.Remove(context.WithoutCancel(ctx), path)
 			}
 		}
 	}()
 
-	var removed int
+	result := &PositionDeleteRewriteResult{}
 	for _, job := range jobs {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		key, group := job.key, job.group
 		supported := true
 		for _, df := range group.files {
 			src, err := tblutils.GetFile(ctx, fs, df, true)
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			rdr, err := src.GetReader(ctx)
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			schema, schemaErr := rdr.Schema()
 			closeErr := rdr.Close()
 			if schemaErr != nil {
-				return nil, 0, schemaErr
+				return nil, schemaErr
 			}
 			if closeErr != nil {
-				return nil, 0, closeErr
+				return nil, closeErr
 			}
 			// The two-column writer cannot preserve optional deleted rows.
 			if schema.NumFields() != 2 ||
@@ -271,7 +322,7 @@ func (t Table) RewritePositionDeleteFiles(
 			if err != nil {
 				releasePosDeletes(byPath)
 
-				return nil, 0, fmt.Errorf("read position deletes from %s: %w", df.FilePath(), err)
+				return nil, fmt.Errorf("read position deletes from %s: %w", df.FilePath(), err)
 			}
 			for path, chunk := range byPath {
 				if !rewritePositionDeletePathInScope(df, path) {
@@ -294,12 +345,12 @@ func (t Table) RewritePositionDeleteFiles(
 					if !ok {
 						releasePosDeletes(byPath)
 
-						return nil, 0, fmt.Errorf("%w: non-int64 position column in %s", iceberg.ErrInvalidSchema, df.FilePath())
+						return nil, fmt.Errorf("%w: non-int64 position column in %s", iceberg.ErrInvalidSchema, df.FilePath())
 					}
 					if err := validateRewritePositionDeletePositions(df.FilePath(), positions); err != nil {
 						releasePosDeletes(byPath)
 
-						return nil, 0, err
+						return nil, err
 					}
 					for _, pos := range positions.Int64Values() {
 						rows = append(rows, positionDeleteRow{path: path, position: pos})
@@ -337,30 +388,30 @@ func (t Table) RewritePositionDeleteFiles(
 				task.GenerateDataFileName(writer.invariants.extension)))
 			newFile, err := writer.writeFile(ctx, group.partition, task)
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			rewrite.AddDeleteFileWithDataSequenceNumber(newFile, group.maxSequence)
+			result.AddedDeleteFiles++
+			result.BytesAfter += newFile.FileSizeBytes()
 		}
 		for _, df := range group.files {
 			rewrite.DeleteFile(df)
-			removed++
+			result.RemovedDeleteFiles++
+			result.BytesBefore += df.FileSizeBytes()
 		}
 	}
-	if removed == 0 {
-		return &t, 0, nil
+	if result.RemovedDeleteFiles == 0 {
+		return result, nil
 	}
 	if err := rewrite.Commit(ctx); err != nil {
-		return nil, 0, err
-	}
-	// A failed catalog response may represent an unknown commit state.
-	// Do not delete newly written objects after an attempted commit.
-	commitStarted = true
-	updated, err := txn.Commit(ctx)
-	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	return updated, removed, nil
+	// This transaction still needs to commit. Do not delete staged output
+	// files when returning successfully to its caller.
+	staged = true
+
+	return result, nil
 }
 
 func splitPositionDeleteRewriteGroup(group *positionDeleteRewriteGroup, limit int64) []*positionDeleteRewriteGroup {
