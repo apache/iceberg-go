@@ -38,6 +38,19 @@ import (
 	"github.com/twmb/avro/ocf"
 )
 
+func TestAvroFormatNotRegisteredForTableWrites(t *testing.T) {
+	require.Nil(t, GetFileFormat(iceberg.AvroFile))
+	require.NotNil(t, GetFileFormat(iceberg.ParquetFile))
+}
+
+func TestAvroDefaultCompressionMatchesJava(t *testing.T) {
+	format := avroFormat{}
+	require.Equal(t, avroWriteProps{codec: "gzip"}, format.GetWriteProperties(nil))
+	require.Equal(t, avroWriteProps{codec: "snappy"}, format.GetWriteProperties(iceberg.Properties{
+		"write.avro.compression-codec": "snappy",
+	}))
+}
+
 func TestAvroFieldNamesMatchJava(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
 		{"normal_name", "normal_name"},
@@ -173,6 +186,7 @@ func TestAvroWriterProducesReadableOCF(t *testing.T) {
 	reader, err := ocf.NewReader(file)
 	require.NoError(t, err)
 	defer reader.Close()
+	require.Equal(t, "deflate", string(reader.Metadata()["avro.codec"]))
 	icebergSchemaJSON, err := json.Marshal(sc)
 	require.NoError(t, err)
 	require.JSONEq(t, string(icebergSchemaJSON), string(reader.Metadata()["iceberg.schema"]))
@@ -206,12 +220,21 @@ func TestAvroWriterAcceptsJavaCompressionNames(t *testing.T) {
 	batch := builder.NewRecordBatch()
 	defer batch.Release()
 
-	for _, codec := range []string{"UNCOMPRESSED", "GZIP", "SnApPy"} {
-		t.Run(codec, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		props     any
+		wantCodec string
+	}{
+		{name: "default", wantCodec: "deflate"},
+		{name: "uncompressed", props: avroWriteProps{codec: "UNCOMPRESSED"}},
+		{name: "gzip", props: avroWriteProps{codec: "GZIP"}, wantCodec: "deflate"},
+		{name: "snappy", props: avroWriteProps{codec: "SnApPy"}, wantCodec: "snappy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "data.avro")
 			w, err := (avroFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
 				FileSchema: sc, Spec: *iceberg.UnpartitionedSpec, FileName: path,
-				Content: iceberg.EntryContentData, WriteProps: avroWriteProps{codec: codec},
+				Content: iceberg.EntryContentData, WriteProps: tc.props,
 			}, as)
 			require.NoError(t, err)
 			require.NoError(t, w.Write(batch))
@@ -224,8 +247,8 @@ func TestAvroWriterAcceptsJavaCompressionNames(t *testing.T) {
 			reader, err := ocf.NewReader(file)
 			require.NoError(t, err)
 			defer reader.Close()
-			if codec == "GZIP" {
-				require.Equal(t, "deflate", string(reader.Metadata()["avro.codec"]))
+			if tc.wantCodec != "" {
+				require.Equal(t, tc.wantCodec, string(reader.Metadata()["avro.codec"]))
 			}
 			var record map[string]any
 			require.NoError(t, reader.Decode(&record))

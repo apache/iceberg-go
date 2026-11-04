@@ -76,7 +76,7 @@ func (avroFormat) DataFileStatsFromMeta(meta Metadata, _ map[int]StatisticsColle
 }
 
 func (avroFormat) GetWriteProperties(props iceberg.Properties) any {
-	return avroWriteProps{codec: props.Get("write.avro.compression-codec", "snappy")}
+	return avroWriteProps{codec: props.Get("write.avro.compression-codec", "gzip")}
 }
 
 func (f avroFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitions map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
@@ -125,7 +125,7 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 	if err != nil {
 		return nil, fmt.Errorf("avro schema: %w", err)
 	}
-	var props avroWriteProps
+	props := avroWriteProps{codec: "gzip"}
 	if info.WriteProps != nil {
 		var ok bool
 		props, ok = info.WriteProps.(avroWriteProps)

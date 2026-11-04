@@ -137,6 +137,9 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	for _, apply := range opts {
 		apply(&w)
 	}
+	if w.format == nil {
+		return nil, fmt.Errorf("%w: writing %s files is not supported", iceberg.ErrNotImplemented, w.fileFormat)
+	}
 
 	statsCols, err := computeStatsPlan(w.fileSchema, metricsPropsFor(w.content, meta.props))
 	if err != nil {
