@@ -55,6 +55,7 @@ func (t *Transaction) RollbackToTime(timestampMs int64) error {
 	// staged branch head and ancestors, not the table's immutable base.
 	lookup := func(id int64) *Snapshot {
 		snapshot, _ := meta.SnapshotByID(id)
+
 		return snapshot
 	}
 	if lookup(ref.SnapshotID) == nil {
