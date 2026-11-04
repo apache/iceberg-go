@@ -49,9 +49,9 @@ func TestTableAvroWritesRejectedBeforeReaderAvailable(t *testing.T) {
 	t.Run("streaming writer", func(t *testing.T) {
 		writeID := uuid.New()
 		args := recordWritingArgs{
-			fs: iceio.LocalFS{},
+			fs:        iceio.LocalFS{},
 			writeUUID: &writeID,
-			counter: func(yield func(int) bool) { yield(0) },
+			counter:   func(yield func(int) bool) { yield(0) },
 		}
 		factory, err := newWriterFactory(location, args, builder, schema, 1024)
 		require.Nil(t, factory)
