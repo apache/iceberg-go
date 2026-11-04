@@ -1044,54 +1044,115 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 		return nil
 	}
 
-	rewrittenPaths := make(map[string]struct{}, len(rewrittenFiles))
-	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
-	for _, df := range rewrittenFiles {
-		rewrittenPaths[df.FilePath()] = struct{}{}
-		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
-		if err != nil {
-			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
-				df.FilePath(), df.SpecID(), err)
-		}
-		rewrittenPartitions[key] = struct{}{}
+	rewritten, err := newRewrittenFileSet(rewrittenFiles)
+	if err != nil {
+		return err
 	}
 
 	return ctx.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
-		df := e.DataFile()
-		switch df.ContentType() {
-		case iceberg.EntryContentPosDeletes:
-			if path := referencedDataFilePath(df); path != "" {
-				if _, overlap := rewrittenPaths[path]; overlap {
-					return fmt.Errorf("%w: snapshot %d added pos-delete %s referencing rewritten file %s",
-						ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), path)
-				}
+		added, err := newAddedDelete(snap, e.DataFile())
+		if err != nil {
+			return err
+		}
 
-				return nil
-			}
+		return rewritten.conflict(added)
+	})
+}
 
-			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
-			if err != nil {
-				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
-					df.FilePath(), df.SpecID(), err)
-			}
-			if _, overlap := rewrittenPartitions[key]; overlap {
-				return fmt.Errorf("%w: snapshot %d added partition-scoped pos-delete %s overlapping rewritten partition (spec %d)",
-					ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), df.SpecID())
+// addedDelete is a delete file added by a concurrent snapshot, reduced to
+// what rewrittenFileSet.conflict needs, so callers can keep it without
+// holding on to manifest entries.
+type addedDelete struct {
+	snapshotID int64
+	path       string
+	specID     int32
+	content    iceberg.ManifestEntryContent
+	// refPath is the data file a position delete targets, or "" when the
+	// delete is partition-scoped.
+	refPath string
+	// partitionKey is set only for partition-scoped position deletes.
+	partitionKey string
+}
+
+func newAddedDelete(snap Snapshot, df iceberg.DataFile) (addedDelete, error) {
+	added := addedDelete{
+		snapshotID: snap.SnapshotID,
+		path:       df.FilePath(),
+		specID:     df.SpecID(),
+		content:    df.ContentType(),
+	}
+	if added.content != iceberg.EntryContentPosDeletes {
+		return added, nil
+	}
+
+	if added.refPath = referencedDataFilePath(df); added.refPath != "" {
+		return added, nil
+	}
+
+	key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
+	if err != nil {
+		return added, fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
+			df.FilePath(), df.SpecID(), err)
+	}
+	added.partitionKey = key
+
+	return added, nil
+}
+
+// rewrittenFileSet indexes the data files a rewrite replaces by path and by
+// (spec, partition).
+type rewrittenFileSet struct {
+	paths      map[string]struct{}
+	partitions map[string]struct{}
+}
+
+func newRewrittenFileSet(files []iceberg.DataFile) (rewrittenFileSet, error) {
+	set := rewrittenFileSet{
+		paths:      make(map[string]struct{}, len(files)),
+		partitions: make(map[string]struct{}, len(files)),
+	}
+	for _, df := range files {
+		set.paths[df.FilePath()] = struct{}{}
+		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
+		if err != nil {
+			return set, fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
+				df.FilePath(), df.SpecID(), err)
+		}
+		set.partitions[key] = struct{}{}
+	}
+
+	return set, nil
+}
+
+// conflict returns ErrConflictingDeleteFiles when d could apply to a file in
+// the set.
+func (s rewrittenFileSet) conflict(d addedDelete) error {
+	switch d.content {
+	case iceberg.EntryContentPosDeletes:
+		if d.refPath != "" {
+			if _, overlap := s.paths[d.refPath]; overlap {
+				return fmt.Errorf("%w: snapshot %d added pos-delete %s referencing rewritten file %s",
+					ErrConflictingDeleteFiles, d.snapshotID, d.path, d.refPath)
 			}
 
 			return nil
-
-		case iceberg.EntryContentEqDeletes:
-			// Conservative: any concurrent eq-delete is a conflict
-			// for a rewrite, because the predicate could cover a
-			// rewritten file. Follow-up: accept partition-overlap
-			// hints to narrow this.
-			return fmt.Errorf("%w: snapshot %d added equality delete %s during rewrite",
-				ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath())
 		}
 
-		return nil
-	})
+		if _, overlap := s.partitions[d.partitionKey]; overlap {
+			return fmt.Errorf("%w: snapshot %d added partition-scoped pos-delete %s overlapping rewritten partition (spec %d)",
+				ErrConflictingDeleteFiles, d.snapshotID, d.path, d.specID)
+		}
+
+	case iceberg.EntryContentEqDeletes:
+		// Conservative: any concurrent eq-delete is a conflict
+		// for a rewrite, because the predicate could cover a
+		// rewritten file. Follow-up: accept partition-overlap
+		// hints to narrow this.
+		return fmt.Errorf("%w: snapshot %d added equality delete %s during rewrite",
+			ErrConflictingDeleteFiles, d.snapshotID, d.path)
+	}
+
+	return nil
 }
 
 // referencedDataFilePath resolves the single data file a pos-delete
