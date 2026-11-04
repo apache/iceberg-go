@@ -349,6 +349,7 @@ func primitiveArrowType(t variant.Type, info *fieldInfo) arrow.DataType {
 		return arrow.FixedWidthTypes.Boolean
 	case variant.Int8, variant.Int16, variant.Int32:
 		// Never narrower than INT32: same physical type, and later values within int32 range stay typed.
+		// The sampled width is intentionally not kept: readers that rebuild from the annotation (e.g. Java) see int32.
 		return arrow.PrimitiveTypes.Int32
 	case variant.Int64:
 		return arrow.PrimitiveTypes.Int64

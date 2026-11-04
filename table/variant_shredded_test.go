@@ -604,7 +604,7 @@ func TestShreddedVariantAddFilesBounds(t *testing.T) {
 		var bld variant.Builder
 		start := bld.Offset()
 		entries := []variant.FieldEntry{bld.NextField(start, "$['a']")}
-		require.NoError(t, bld.AppendInt(a))
+		require.NoError(t, bld.UnsafeAppendEncoded(binary.LittleEndian.AppendUint64([]byte{byte(variant.PrimitiveInt64) << 2}, uint64(a))))
 		entries = append(entries, bld.NextField(start, "$['b']"))
 		require.NoError(t, bld.AppendString(b))
 		require.NoError(t, bld.FinishObject(start, entries))
