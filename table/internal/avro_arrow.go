@@ -225,14 +225,17 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 			if node.Precision < 1 || node.Precision > 38 || node.Scale < 0 || node.Scale > node.Precision {
 				return nil, false, fmt.Errorf("%w: invalid or unsupported Avro decimal(%d,%d)", iceberg.ErrNotImplemented, node.Precision, node.Scale)
 			}
+
 			return &arrow.Decimal128Type{Precision: int32(node.Precision), Scale: int32(node.Scale)}, nullable, nil
 		}
 		if node.Type == "fixed" {
 			if node.Size <= 0 {
 				return nil, false, fmt.Errorf("%w: invalid Avro fixed size", iceberg.ErrInvalidSchema)
 			}
+
 			return &arrow.FixedSizeBinaryType{ByteWidth: node.Size}, nullable, nil
 		}
+
 		return arrow.BinaryTypes.Binary, nullable, nil
 	default:
 		return nil, false, fmt.Errorf("%w: unsupported Avro type %q", iceberg.ErrNotImplemented, node.Type)
