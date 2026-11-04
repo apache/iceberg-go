@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,6 +80,54 @@ func TestConvertEqualityDeletesMergesExistingPositionDeletes(t *testing.T) {
 	require.Equal(t, 1, liveDVCount(t, result.Table))
 	require.Equal(t, []int64{1, 3, 5}, idsInTable(t, result.Table),
 		"the old position delete and the new equality delete must both remain applied")
+}
+
+// A legacy position-delete file can cover multiple data files. Replacing it
+// with a DV for only one of those files must not leave the shared file live.
+func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := newMergeOnReadTestTableVersion(t, "2")
+	tbl = appendEqualityConversionRows(t, tbl,
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	tbl = appendEqualityConversionRows(t, tbl,
+		`[{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
+
+	scan := tbl.Scan()
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	positionPath := tbl.Location() + "/data/shared-position-delete.parquet"
+	writeParquetFile(t, positionPath, table.PositionalDeleteArrowSchema, fmt.Sprintf(
+		`[{"file_path":%q,"pos":0},{"file_path":%q,"pos":0}]`,
+		tasks[0].File.FilePath(), tasks[1].File.FilePath()))
+	info, err := os.Stat(positionPath)
+	require.NoError(t, err)
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, positionPath, iceberg.ParquetFile, nil, nil, nil, 2, info.Size())
+	require.NoError(t, err)
+	// Deliberately omit ReferencedDataFile: both files share this delete file.
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(builder.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+	beforeSnapshot := tbl.CurrentSnapshot().SnapshotID
+	require.Equal(t, []int64{4}, idsInTable(t, tbl))
+
+	_, err = tbl.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.Equal(t, beforeSnapshot, tbl.CurrentSnapshot().SnapshotID)
+	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentEqDeletes))
+	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
+	require.Zero(t, liveDVCount(t, tbl))
+	require.Equal(t, []int64{4}, idsInTable(t, tbl))
 }
 
 func TestConvertEqualityDeletesMergesExistingDeletionVector(t *testing.T) {

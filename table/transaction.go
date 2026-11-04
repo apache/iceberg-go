@@ -2205,15 +2205,11 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			}
 		}
 	}
-	positionDeletesToValidate := survivingPositionDeletes
-	if cfg.equalityDeleteToDVConversion {
-		// The conversion reader and writer merge these position deletes into each
-		// replacement vector. Other rewrite paths must remove every applicable
-		// position-delete file and keep this validation enabled.
-		positionDeletesToValidate = nil
-	}
+	// Every new DV must replace all applicable legacy position-delete files.
+	// A conversion that leaves an unscoped position-delete file behind is
+	// unsafe, even if its positions were already merged into the new vector.
 	if err := validateAddedDeletionVectorTargets(setDeleteFilesToAdd.dvsByRef, liveDataFiles,
-		positionDeletesToValidate, deleteSequenceNumber); err != nil {
+		survivingPositionDeletes, deleteSequenceNumber); err != nil {
 		return err
 	}
 
