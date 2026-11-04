@@ -35,10 +35,13 @@ import (
 // fields remain plain integers without atomics.
 //
 // The scanned/skipped manifest counts measure partition-spec pruning (the
-// filter applied while listing manifests). The per-entry skipped-data-files /
-// skipped-delete-files counts (which would be incremented inside the concurrent
-// manifest-entry loop, and would use atomics) and indexed-delete-files are left
-// for a follow-up and omitted rather than reported as zero.
+// filter applied while listing manifests). The skipped data/delete file counts
+// measure the next step: entries the scan reads from scanned manifests (live
+// entries for table scans) that the partition or inclusive metrics evaluator
+// rejected. Each manifest worker counts its own rejections and the planner
+// merges them after the workers finish. Entries in pruned manifests count only
+// toward the skipped manifest counts. indexed-delete-files is left for a
+// follow-up and omitted rather than reported as zero.
 type scanMetricsAccumulator struct {
 	totalDataManifests     int64
 	totalDeleteManifests   int64
@@ -46,6 +49,8 @@ type scanMetricsAccumulator struct {
 	scannedDeleteManifests int64
 	skippedDataManifests   int64
 	skippedDeleteManifests int64
+	skippedDataFiles       int64
+	skippedDeleteFiles     int64
 
 	resultDataFiles       int64
 	resultDeleteFiles     int64
@@ -54,6 +59,31 @@ type scanMetricsAccumulator struct {
 	positionalDeleteFiles int64
 	equalityDeleteFiles   int64
 	dvs                   int64
+}
+
+// countRejections wraps a data-file filter so every file it rejects increments
+// *skipped. Errors are passed through and not counted. Build the wrapper inside
+// the manifest worker that owns skipped, never in the evaluator caches that
+// workers share.
+func countRejections(filter func(iceberg.DataFile) (bool, error), skipped *int64) func(iceberg.DataFile) (bool, error) {
+	return func(df iceberg.DataFile) (bool, error) {
+		use, err := filter(df)
+		if err == nil && !use {
+			*skipped++
+		}
+
+		return use, err
+	}
+}
+
+// addSkippedFiles merges one manifest's rejected-entry count into the counter
+// for that manifest's content type, as Java does in ManifestReader.entries.
+func (acc *scanMetricsAccumulator) addSkippedFiles(manifest iceberg.ManifestFile, skipped int64) {
+	if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
+		acc.skippedDeleteFiles += skipped
+	} else {
+		acc.skippedDataFiles += skipped
+	}
 }
 
 func counterCount(v int64) *metrics.CounterResult {
@@ -107,8 +137,8 @@ func (acc *scanMetricsAccumulator) addResultDeleteMetrics(t FileScanTask) {
 // describes exactly what was used rather than re-resolving it here. projected may
 // be nil when the projection could not be resolved, in which case the report
 // simply carries no projected fields. Only the metrics that are actually measured
-// are populated; unmeasured ones (e.g. skipped-data-files, indexed-delete-files)
-// are left unset and omitted.
+// are populated; unmeasured ones (e.g. indexed-delete-files) are left unset and
+// omitted.
 func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema, projected *iceberg.Schema, planning time.Duration) metrics.ScanReport {
 	ids, names := projectedFields(projected)
 	envCtx := iceberg.EnvironmentContext()
@@ -154,6 +184,8 @@ func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema, projected
 			ScannedDeleteManifests:     counterCount(acc.scannedDeleteManifests),
 			SkippedDataManifests:       counterCount(acc.skippedDataManifests),
 			SkippedDeleteManifests:     counterCount(acc.skippedDeleteManifests),
+			SkippedDataFiles:           counterCount(acc.skippedDataFiles),
+			SkippedDeleteFiles:         counterCount(acc.skippedDeleteFiles),
 			TotalFileSizeInBytes:       counterBytes(acc.totalFileSize),
 			TotalDeleteFileSizeInBytes: counterBytes(acc.totalDeleteFileSize),
 			EqualityDeleteFiles:        counterCount(acc.equalityDeleteFiles),
