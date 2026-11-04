@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -83,7 +84,7 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 	return t.apply([]Update{NewRemovePartitionStatisticsUpdate(snapshotID)}, nil)
 }
 
-// UpdatePartitionStatistics computes and writes a Parquet partition statistics
+// ComputePartitionStatistics computes and writes a Parquet partition statistics
 // file for the transaction's current v1 branch head, and stages its metadata
 // reference. The caller must Commit to publish the reference. It does not
 // rewrite any data files or create a new table snapshot.
@@ -102,7 +103,7 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // to prevent an OCC retry from publishing statistics for a different snapshot.
 // The returned file may become orphaned if Commit fails; orphan-file cleanup
 // can remove it once it is no longer needed.
-func (t *Transaction) UpdatePartitionStatistics(ctx context.Context) (*PartitionStatisticsFile, error) {
+func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*PartitionStatisticsFile, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
@@ -189,9 +190,9 @@ func (t *Transaction) UpdatePartitionStatistics(ctx context.Context) (*Partition
 	return &stats, nil
 }
 
-// inspectPartitionType omits fields whose source is no longer in the current
-// schema. Statistics must instead include every historical partition field.
-// Reject those tables until historical projection is supported.
+// validatePartitionStatisticsSourceTypes rejects historical partition fields
+// whose source is missing or whose result type changed. The unified partition
+// type would otherwise omit historical values or misrepresent their types.
 func validatePartitionStatisticsSourceTypes(meta Metadata) error {
 	current := meta.CurrentSchema()
 	for _, spec := range meta.PartitionSpecs() {
@@ -277,15 +278,6 @@ func partitionStatisticsEmbeddedManifest(ctx context.Context, fs iceio.IO, manif
 	}
 	descriptor := iceberg.NewManifestBuilder(1, manifest.FilePath(), manifest.Length(), int32(id), manifest.SnapshotID()).
 		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).AddedRows(-1).ExistingRows(-1).DeletedRows(-1).Build()
-	if _, err := f.Seek(0, 0); err != nil {
-		return nil, err
-	}
-	reader, err := iceberg.NewManifestReader(descriptor, f)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-
 	return descriptor, nil
 }
 
@@ -412,15 +404,8 @@ func validatePartitionStatisticsTuple(spec iceberg.PartitionSpec, path string, v
 // inspectPartitionKey's text ordering (where "10" sorts before "2").
 // A spec ID only breaks equal tuple ties; it is not the primary sort key.
 func sortPartitionStatistics(rows []*inspectPartitionAggregate, partitionType *iceberg.StructType) error {
-	for _, row := range rows {
-		for _, field := range partitionType.FieldList {
-			value := row.partition[field.ID]
-			if _, err := comparePartitionStatisticValues(value, value); err != nil {
-				return fmt.Errorf("partition field %q: %w", field.Name, err)
-			}
-		}
-	}
-
+	// Collection already validates each partition value before using it as
+	// an aggregate key. Do not repeat that validation for every output row.
 	var sortErr error
 	slices.SortStableFunc(rows, func(a, b *inspectPartitionAggregate) int {
 		for _, field := range partitionType.FieldList {
@@ -473,6 +458,25 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 
 		return left.Val.Cmp(right.Val), nil
 	}
+	// Java's UUID.compareTo orders each 64-bit half as a signed integer.
+	// Binary and fixed partitions retain unsigned lexicographic ordering.
+	if left, ok := a.(uuid.UUID); ok {
+		right, valid := b.(uuid.UUID)
+		if !valid {
+			return 0, fmt.Errorf("%w: incompatible partition values %T and %T",
+				iceberg.ErrInvalidArgument, a, b)
+		}
+		if cmp := compareOrderedStats(int64(binary.BigEndian.Uint64(left[:8])),
+			int64(binary.BigEndian.Uint64(right[:8]))); cmp != 0 {
+			return cmp, nil
+		}
+		return compareOrderedStats(int64(binary.BigEndian.Uint64(left[8:])),
+			int64(binary.BigEndian.Uint64(right[8:]))), nil
+	}
+	if _, ok := b.(uuid.UUID); ok {
+		return 0, fmt.Errorf("%w: incompatible partition values %T and %T",
+			iceberg.ErrInvalidArgument, a, b)
+	}
 	left, right := reflect.ValueOf(a), reflect.ValueOf(b)
 	if left.Kind() != right.Kind() {
 		return 0, fmt.Errorf("%w: incompatible partition values %T and %T",
@@ -494,15 +498,29 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return compareOrderedStats(left.Uint(), right.Uint()), nil
 	case reflect.Float32, reflect.Float64:
-		if math.IsNaN(left.Float()) || math.IsNaN(right.Float()) {
-			return 0, fmt.Errorf("%w: NaN partition ordering is unsupported",
-				iceberg.ErrNotImplemented)
+		// Match Java Float.compare/Double.compare: all NaNs compare equal
+		// and sort after +Inf; -0 sorts before +0.
+		aFloat, bFloat := left.Float(), right.Float()
+		switch {
+		case math.IsNaN(aFloat):
+			if math.IsNaN(bFloat) {
+				return 0, nil
+			}
+			return 1, nil
+		case math.IsNaN(bFloat):
+			return -1, nil
+		case aFloat == 0 && bFloat == 0:
+			switch {
+			case math.Signbit(aFloat) == math.Signbit(bFloat):
+				return 0, nil
+			case math.Signbit(aFloat):
+				return -1, nil
+			default:
+				return 1, nil
+			}
+		default:
+			return compareOrderedStats(aFloat, bFloat), nil
 		}
-		if (left.Float() == 0 && math.Signbit(left.Float())) || (right.Float() == 0 && math.Signbit(right.Float())) {
-			return 0, fmt.Errorf("%w: negative zero partition ordering is unsupported", iceberg.ErrNotImplemented)
-		}
-
-		return compareOrderedStats(left.Float(), right.Float()), nil
 	case reflect.String:
 		return bytes.Compare([]byte(left.String()), []byte(right.String())), nil
 	case reflect.Slice, reflect.Array:
