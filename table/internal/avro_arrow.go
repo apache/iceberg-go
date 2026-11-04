@@ -247,12 +247,14 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 func appendAvroValue(b array.Builder, value any) error {
 	if value == nil {
 		b.AppendNull()
+
 		return nil
 	}
 	switch builder := b.(type) {
 	case *array.BooleanBuilder:
 		if v, ok := value.(bool); ok {
 			builder.Append(v)
+
 			return nil
 		}
 	case *array.Int32Builder:
@@ -422,6 +424,7 @@ func appendAvroValue(b array.Builder, value any) error {
 			return nil
 		}
 	}
+
 	return fmt.Errorf("%w: Avro value %T cannot be decoded into %s", iceberg.ErrInvalidSchema, value, b.Type())
 }
 
