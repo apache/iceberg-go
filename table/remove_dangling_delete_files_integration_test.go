@@ -148,3 +148,55 @@ func mustPlanDangling(t *testing.T, tbl *table.Table) []iceberg.DataFile {
 
 	return files
 }
+
+func TestRemoveDanglingDeleteFilesPrunesEqualityBounds(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	makeFile := func(content iceberg.ManifestEntryContent, name, value string) iceberg.DataFile {
+		t.Helper()
+		builder, err := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec, content, tbl.Location()+"/data/"+name,
+			iceberg.ParquetFile, nil, nil, nil, 1, 128)
+		require.NoError(t, err)
+		builder.LowerBoundValues(map[int][]byte{2: []byte(value)})
+		builder.UpperBoundValues(map[int][]byte{2: []byte(value)})
+		builder.ValueCounts(map[int]int64{2: 1})
+		builder.NullValueCounts(map[int]int64{2: 0})
+		if content == iceberg.EntryContentEqDeletes {
+			builder.EqualityFieldIDs([]int{2})
+		}
+
+		return builder.Build()
+	}
+
+	data := makeFile(iceberg.EntryContentData, "live.parquet", "a")
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddRows(data).Commit(ctx))
+	var err error
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	liveEquality := makeFile(iceberg.EntryContentEqDeletes, "live-eq.parquet", "a")
+	danglingEquality := makeFile(iceberg.EntryContentEqDeletes, "dangling-eq.parquet", "z")
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(liveEquality, danglingEquality).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].EqualityDeleteFiles, 1)
+	require.Equal(t, liveEquality.FilePath(), tasks[0].EqualityDeleteFiles[0].FilePath())
+
+	planned, err := tbl.PlanDanglingDeleteFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	require.Equal(t, danglingEquality.FilePath(), planned[0].FilePath())
+
+	updated, removed, err := tbl.RemoveDanglingDeleteFiles(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, removed)
+	require.Empty(t, mustPlanDangling(t, updated))
+}
+

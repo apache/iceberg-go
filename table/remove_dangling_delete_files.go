@@ -18,28 +18,75 @@ package table
 
 import (
 	"context"
-	"fmt"
-	"math"
 
 	"github.com/apache/iceberg-go"
 )
 
-type danglingDeleteCandidate struct {
-	file     iceberg.DataFile
-	sequence int64
+// danglingDeleteKey follows the scan-planning identity of a delete file.
+// Regular position/equality deletes are identified by path. Multiple deletion
+// vectors can share a Puffin file, so each vector needs its own blob identity.
+type danglingDeleteKey struct {
+	path       string
+	referenced string
+	offset     int64
+	length     int64
+	vector     bool
 }
 
-type danglingDataFile struct {
-	partition string
-	sequence  int64
+func keyForDanglingDelete(df iceberg.DataFile) danglingDeleteKey {
+	key := danglingDeleteKey{path: df.FilePath()}
+	if !IsDeletionVector(df) {
+		return key
+	}
+
+	key.vector = true
+	key.referenced = explicitReferencedDataFile(df)
+	key.offset, key.length = -1, -1
+	if offset := df.ContentOffset(); offset != nil {
+		key.offset = *offset
+	}
+	if length := df.ContentSizeInBytes(); length != nil {
+		key.length = *length
+	}
+
+	return key
 }
 
-// PlanDanglingDeleteFiles identifies whole delete files that cannot affect
-// any data file in the current snapshot. No physical files are read or removed.
+// decideDanglingDeleteFiles mirrors Java's RemoveDanglingDeleteFilesAction:
+// delete files that are referenced by at least one scan task are still live.
+// This includes metrics pruning and DV supersession, not only partition and
+// sequence checks. Do not inspect physical delete-file contents.
+func decideDanglingDeleteFiles(candidates []iceberg.DataFile, tasks []FileScanTask) []iceberg.DataFile {
+	referenced := make(map[danglingDeleteKey]struct{})
+	for _, task := range tasks {
+		for _, df := range task.DeleteFiles {
+			referenced[keyForDanglingDelete(df)] = struct{}{}
+		}
+		for _, df := range task.EqualityDeleteFiles {
+			referenced[keyForDanglingDelete(df)] = struct{}{}
+		}
+		for _, df := range task.DeletionVectorFiles {
+			referenced[keyForDanglingDelete(df)] = struct{}{}
+		}
+	}
+
+	var dangling []iceberg.DataFile
+	for _, df := range candidates {
+		if _, ok := referenced[keyForDanglingDelete(df)]; !ok {
+			dangling = append(dangling, df)
+		}
+	}
+
+	return dangling
+}
+
+// PlanDanglingDeleteFiles identifies delete files that are not attached to any
+// data file by an unfiltered scan of the current snapshot. It reads metadata
+// only; no physical data, delete files, or Puffin blobs are opened.
 //
-// Position deletes apply at an equal or newer sequence; equality deletes
-// require a strictly newer sequence. Unpartitioned equality deletes are global.
-// Deletion vectors are omitted: v3 data-file replacement removes them.
+// Position and equality deletes use the scan planner's partition, sequence,
+// and metrics checks. DVs are identified by their blob, not just Puffin path.
+// Unknown delete sequence numbers and incomplete DV metadata are retained.
 func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile, error) {
 	snap := t.CurrentSnapshot()
 	if snap == nil || t.metadata.FormatVersion() < 2 {
@@ -55,14 +102,8 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 		return nil, err
 	}
 
-	minByPartition := make(map[string]int64)
-	minAll := int64(math.MaxInt64)
-	var candidates []danglingDeleteCandidate
-	seenDeletes := make(map[string]struct{})
-	// Only position deletes with an explicit reference need a path lookup.
-	// Tracking those paths avoids retaining every live data-file path in memory.
-	referencedPaths := make(map[string]struct{})
-
+	seen := make(map[danglingDeleteKey]struct{})
+	var candidates []iceberg.DataFile
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -79,113 +120,36 @@ func (t Table) PlanDanglingDeleteFiles(ctx context.Context) ([]iceberg.DataFile,
 				df.ContentType() != iceberg.EntryContentEqDeletes {
 				continue
 			}
-			if IsDeletionVector(df) || entry.DataSequenceNumber() < 0 {
+			if entry.DataSequenceNumber() < 0 {
 				continue
 			}
-			if _, ok := seenDeletes[df.FilePath()]; ok {
+			if IsDeletionVector(df) &&
+				(df.ReferencedDataFile() == nil || df.ContentOffset() == nil || df.ContentSizeInBytes() == nil) {
 				continue
 			}
-			seenDeletes[df.FilePath()] = struct{}{}
-			candidates = append(candidates, danglingDeleteCandidate{
-				file: df, sequence: entry.DataSequenceNumber(),
-			})
-			if df.ContentType() == iceberg.EntryContentPosDeletes {
-				if target := explicitReferencedDataFile(df); target != "" {
-					referencedPaths[target] = struct{}{}
-				}
+
+			key := keyForDanglingDelete(df)
+			if _, ok := seen[key]; ok {
+				continue
 			}
+			seen[key] = struct{}{}
+			candidates = append(candidates, df)
 		}
 	}
 
-	// A table with no eligible delete files needs no live-data index.
-	// Read delete manifests first so metadata-only no-ops stay cheap.
+	// No delete files means no scan planning, which matters for append-only tables.
 	if len(candidates) == 0 {
 		return nil, nil
 	}
 
-	// Collect the minimum data sequence by partition, but only retain file
-	// details for paths that are explicitly referenced by position deletes.
-	dataByPath := make(map[string]danglingDataFile, len(referencedPaths))
-	for _, manifest := range manifests {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if manifest.ManifestContent() != iceberg.ManifestContentData {
-			continue
-		}
-		for entry, err := range manifest.Entries(fs, true) {
-			if err != nil {
-				return nil, err
-			}
-			df := entry.DataFile()
-			if df.ContentType() != iceberg.EntryContentData {
-				continue
-			}
-			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
-			if err != nil {
-				return nil, fmt.Errorf("data file %s: %w", df.FilePath(), err)
-			}
-			seq := max(int64(0), entry.DataSequenceNumber())
-			if current, ok := minByPartition[key]; !ok || seq < current {
-				minByPartition[key] = seq
-			}
-			minAll = min(minAll, seq)
-			if _, referenced := referencedPaths[df.FilePath()]; referenced {
-				dataByPath[df.FilePath()] = danglingDataFile{partition: key, sequence: seq}
-			}
-		}
+	scan := t.Scan()
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	return decideDanglingDeleteFiles(t.metadata, candidates, dataByPath, minByPartition, minAll)
-}
-
-func decideDanglingDeleteFiles(
-	meta Metadata,
-	candidates []danglingDeleteCandidate,
-	dataByPath map[string]danglingDataFile,
-	minByPartition map[string]int64,
-	minAll int64,
-) ([]iceberg.DataFile, error) {
-	var dangling []iceberg.DataFile
-	for _, candidate := range candidates {
-		df := candidate.file
-		spec := meta.PartitionSpecByID(int(df.SpecID()))
-		if spec == nil {
-			return nil, fmt.Errorf("delete file %s references unknown partition spec %d", df.FilePath(), df.SpecID())
-		}
-		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
-		if err != nil {
-			return nil, fmt.Errorf("delete file %s: %w", df.FilePath(), err)
-		}
-		minSeq, exists := minByPartition[key]
-
-		switch df.ContentType() {
-		case iceberg.EntryContentPosDeletes:
-			// Only an explicit referenced_data_file narrows applicability to one path.
-			// Equal file_path bounds are statistics, not a deletion scope.
-			if target := explicitReferencedDataFile(df); target != "" {
-				data, ok := dataByPath[target]
-				if ok && data.partition == key && data.sequence <= candidate.sequence {
-					continue
-				}
-			} else if exists && minSeq <= candidate.sequence {
-				continue
-			}
-		case iceberg.EntryContentEqDeletes:
-			if spec.IsUnpartitioned() {
-				if minAll < candidate.sequence {
-					continue
-				}
-			} else if exists && minSeq < candidate.sequence {
-				continue
-			}
-		default:
-			continue
-		}
-		dangling = append(dangling, df)
-	}
-
-	return dangling, nil
+	return decideDanglingDeleteFiles(candidates, tasks), nil
 }
 
 // RemoveDanglingDeleteFiles removes metadata references to whole dangling
