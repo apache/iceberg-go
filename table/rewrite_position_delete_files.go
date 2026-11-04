@@ -265,6 +265,7 @@ func (t Table) RewritePositionDeleteFiles(
 		}
 
 		var rows []positionDeleteRow
+		crossSpecTarget := false
 		for _, df := range group.files {
 			byPath, err := readDeletesForPaths(ctx, fs, df, nil)
 			if err != nil {
@@ -277,8 +278,16 @@ func (t Table) RewritePositionDeleteFiles(
 					continue
 				}
 				data, ok := live[path]
-				if !ok || data.partition != key.partition || data.sequence > group.sequences[df.FilePath()] {
+				if !ok || data.sequence > group.sequences[df.FilePath()] {
 					continue
+				}
+				if data.partition != key.partition {
+					// A path-scoped delete can target data written with an
+					// older spec. The replacement may not retain that scope,
+					// so leave the entire source group untouched.
+					crossSpecTarget = true
+
+					break
 				}
 				for _, part := range chunk.Chunks() {
 					positions, ok := part.(*array.Int64)
@@ -298,6 +307,12 @@ func (t Table) RewritePositionDeleteFiles(
 				}
 			}
 			releasePosDeletes(byPath)
+			if crossSpecTarget {
+				break
+			}
+		}
+		if crossSpecTarget {
+			continue
 		}
 
 		rows = sortUniquePositionDeleteRows(rows)

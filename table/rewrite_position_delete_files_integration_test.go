@@ -228,3 +228,52 @@ func TestRewritePositionDeleteFilesAcrossSequences(t *testing.T) {
 	require.Equal(t, int64(2), replacement.Count(),
 		"stale positions must not gain applicability from the replacement sequence")
 }
+
+func TestRewritePositionDeleteFilesPreservesCrossSpecPathScopedDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/old-spec.parquet"
+	writeParquetFile(t, dataPath, schema, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(ctx, []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// The data remains on the old unpartitioned spec, while the new delete
+	// files refer to its path from the evolved partition spec.
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSpec(false).
+		AddField("id", iceberg.IdentityTransform{}, "id_identity").Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	spec := tbl.Spec()
+	require.Equal(t, 1, spec.NumFields())
+	partition := map[int]any{spec.Field(0).FieldID: int64(1)}
+
+	var deletes []iceberg.DataFile
+	for i := range 2 {
+		path := fmt.Sprintf("%s/data/cross-spec-delete-%d.parquet", tbl.Location(), i)
+		writeParquetFile(t, path, table.PositionalDeleteArrowSchema,
+			fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, dataPath))
+		builder, buildErr := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+			path, iceberg.ParquetFile, partition, nil, nil, 1, 128)
+		require.NoError(t, buildErr)
+		deletes = append(deletes, builder.ReferencedDataFile(dataPath).Build())
+	}
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(deletes...).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{2}, scanIDs(t, tbl))
+
+	// Combining these sources can lose their path-based scope because the
+	// output may be partition-scoped. Keep the original files instead.
+	updated, rewritten, err := tbl.RewritePositionDeleteFiles(ctx, table.PositionDeleteRewriteOptions{})
+	require.NoError(t, err)
+	require.Zero(t, rewritten)
+	require.Equal(t, tbl.Metadata(), updated.Metadata())
+	require.ElementsMatch(t, []int64{2}, scanIDs(t, updated))
+}
