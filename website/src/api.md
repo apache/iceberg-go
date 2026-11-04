@@ -236,7 +236,8 @@ if err != nil { /* ... */ }
 fmt.Println(arrowSchema)
 for batch, err := range batches {
     if err != nil { /* ... */ }
-    fmt.Printf("batch with %d rows\n", batch.NumRows())
+    fmt.Printf("batch with %d rows
+", batch.NumRows())
     batch.Release()
 }
 ```
@@ -249,7 +250,8 @@ for batch, err := range batches {
 arrowTbl, err := tbl.Scan().ToArrowTable(ctx)
 if err != nil { /* ... */ }
 defer arrowTbl.Release()
-fmt.Printf("%d rows in %d cols\n", arrowTbl.NumRows(), arrowTbl.NumCols())
+fmt.Printf("%d rows in %d cols
+", arrowTbl.NumRows(), arrowTbl.NumCols())
 ```
 
 ### Projection and filters
@@ -496,7 +498,8 @@ if err != nil {
 }
 if !report.Valid() {
     for _, issue := range report.Issues {
-        fmt.Printf("%s: %s (%s)\n", issue.Code, issue.FilePath, issue.ManifestPath)
+        fmt.Printf("%s: %s (%s)
+", issue.Code, issue.FilePath, issue.ManifestPath)
     }
 }
 ```
@@ -510,7 +513,9 @@ A report is valid only when `Complete` is true and `Issues` is empty.
 This is a metadata-only audit: it does not check data-file contents or whether
 data-file objects still exist. The audit works with both v1 manifest lists and
 older v1 snapshots containing embedded `manifests` paths. For embedded
-manifests, the partition spec ID is checked only if the optional header contains it.
+manifests, the partition spec ID is checked when the optional header provides it,
+or inferred when the partition fields match exactly one historical spec.
+Otherwise the spec ID is left inconclusive rather than guessed.
 
 The file uniqueness and manifest requirements come from the
 [Iceberg spec](https://iceberg.apache.org/spec/#content-file-uniqueness)
@@ -533,7 +538,8 @@ result, err := maintenance.DeleteOrphanFiles(ctx, tbl,
     maintenance.WithCleanupMaxConcurrency(8),
 )
 if err != nil { /* ... */ }
-fmt.Printf("removed %d files\n", len(result.DeletedFiles))
+fmt.Printf("removed %d files
+", len(result.DeletedFiles))
 ```
 
 Also see `maintenance.WithCleanupLocation`, `maintenance.WithCleanupDeleteFunc`, `maintenance.WithPrefixMismatchMode`, `maintenance.WithEqualSchemes`, and `maintenance.WithEqualAuthorities` in `table/maintenance/orphan_cleanup.go`.
@@ -548,7 +554,8 @@ result, err := txn.RewriteDataFiles(ctx, groups /* []table.CompactionTaskGroup *
 if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
-fmt.Printf("rewrote %d files into %d (%d -> %d bytes)\n",
+fmt.Printf("rewrote %d files into %d (%d -> %d bytes)
+",
     result.RemovedDataFiles, result.AddedDataFiles, result.BytesBefore, result.BytesAfter)
 ```
 

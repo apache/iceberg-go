@@ -19,9 +19,7 @@ package table
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strconv"
 
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/twmb/avro/ocf"
@@ -165,6 +163,9 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 			report.Issues = append(report.Issues, SnapshotValidationIssue{
 				Code: SnapshotIssueDuplicateManifest, ManifestPath: path,
 			})
+			// Do not re-read the same manifest and generate a duplicate-file
+			// issue for every live entry in it.
+			continue
 		}
 		seenManifests[path] = struct{}{}
 
@@ -307,44 +308,19 @@ func embeddedValidationSpecID(
 		return 0, false, err
 	}
 	defer reader.Close()
-	raw, present := reader.Metadata()["partition-spec-id"]
-	if present {
-		id, err := strconv.ParseInt(string(raw), 10, 32)
-		if err != nil || id < 0 {
-			return 0, false, fmt.Errorf("invalid partition-spec-id %q", raw)
-		}
 
-		return int32(id), true, nil
+	header, err := parseEmbeddedManifestSpecHeader(reader.Metadata())
+	if err != nil {
+		return 0, false, err
 	}
+	specsByID := make(map[int32]iceberg.PartitionSpec, len(specs))
+	for _, spec := range specs {
+		specsByID[int32(spec.ID())] = spec
+	}
+	id, known, _ := header.resolve(specsByID)
 
-	var fields []iceberg.PartitionField
-	if err := json.Unmarshal(reader.Metadata()["partition-spec"], &fields); err != nil {
-		return 0, false, fmt.Errorf("invalid v1 partition-spec: %w", err)
-	}
-	// Legacy v1 headers may omit field-id, with sequential IDs from 1000.
-	for i := range fields {
-		if fields[i].FieldID == 0 {
-			fields[i].FieldID = iceberg.PartitionDataIDStart + i
-		}
-	}
-	var matched int32
-	found := false
-	for _, candidate := range specs {
-		actual := iceberg.NewPartitionSpecID(candidate.ID(), fields...)
-		if !actual.Equals(candidate) {
-			continue
-		}
-		// Equivalent historical specs cannot be distinguished safely.
-		if found {
-			return 0, false, nil
-		}
-		matched, found = int32(candidate.ID()), true
-	}
-	// A missing ID is legal in v1. When no spec matches, leave the
-	// partition-spec ID inconclusive rather than guessing from spec 0.
-	return matched, found, nil
+	return id, known, nil
 }
-
 func validateSnapshotSpec(report *SnapshotValidationReport, path string, specID int32, specIDs map[int]struct{}) {
 	if _, found := specIDs[int(specID)]; !found {
 		report.Issues = append(report.Issues, SnapshotValidationIssue{

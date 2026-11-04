@@ -257,6 +257,7 @@ func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {
 		},
 		[]iceberg.ManifestEntry{
 			v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://same.parquet"),
+			v1ValidationEntry(t, iceberg.EntryStatusEXISTING, "file://other.parquet"),
 		},
 	)
 
@@ -265,9 +266,9 @@ func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {
 	assert.True(t, report.Complete)
 	assert.False(t, report.Valid())
 	assert.Equal(t, int64(2), report.ManifestsChecked)
-	require.Len(t, report.Issues, 2)
+	assert.Equal(t, int64(2), report.LiveFilesChecked)
+	require.Len(t, report.Issues, 1)
 	assert.Equal(t, SnapshotIssueDuplicateManifest, report.Issues[0].Code)
-	assert.Equal(t, SnapshotIssueDuplicateLiveFile, report.Issues[1].Code)
 }
 
 func TestValidateSnapshotV1EmptyManifestList(t *testing.T) {
