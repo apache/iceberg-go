@@ -53,6 +53,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -995,6 +996,15 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				return nil, fmt.Errorf("partition field %q: %w", sourceField.name, err)
 			}
 
+			// x = NaN is never true and Bind rejects a NaN literal, so a NaN
+			// partition value matches through IsNaN, as in
+			// internal.BuildPartitionMatchPredicate.
+			if isNaNPartitionLiteral(lit) {
+				conjuncts = append(conjuncts, iceberg.IsNaN(iceberg.Reference(sourceField.name)))
+
+				continue
+			}
+
 			conjuncts = append(conjuncts, iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.name), lit))
 		}
 
@@ -1192,6 +1202,18 @@ var filePathFieldID = func() int {
 
 	return f.ID
 }()
+
+// isNaNPartitionLiteral reports whether a partition literal is a floating-point NaN.
+func isNaNPartitionLiteral(lit iceberg.Literal) bool {
+	switch v := lit.Any().(type) {
+	case float32:
+		return math.IsNaN(float64(v))
+	case float64:
+		return math.IsNaN(v)
+	}
+
+	return false
+}
 
 // canonicalPartitionKey returns a deterministic, injective string key for a
 // (specID, partition) tuple. Partition values are compared post-transform

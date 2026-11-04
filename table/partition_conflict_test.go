@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -441,6 +442,73 @@ func TestRowDeltaValidate_NullIdentityPartitionRejected(t *testing.T) {
 	err = validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
+
+// ---------------------------------------------------------------------------
+// NaN identity partition: Bind rejects x = NaN, so the filter uses IsNaN
+// ---------------------------------------------------------------------------
+
+func TestEqDeletePartitionsToFilterUsesIsNaNForNaNPartition(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
+	)
+	meta := partitionedConflictMeta(t, schema, 2, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+
+	filter, err := eqDeletePartitionsToFilter([]iceberg.DataFile{
+		equalityDeleteTestFile(t, spec, "eq-nan.parquet", map[int]any{fieldID: math.NaN()}),
+	}, meta)
+	require.NoError(t, err)
+
+	expected := iceberg.IsNaN(iceberg.Reference("score"))
+	assert.True(t, filter.Equals(expected), "got %s, want %s", filter, expected)
+	_, err = iceberg.BindExpr(schema, filter, true)
+	require.NoError(t, err)
+}
+
+func checkNaNPartitionEqDeleteConflict(t *testing.T, concurrentValue float64) error {
+	t.Helper()
+	dir := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
+	)
+
+	writerBaseID := int64(259)
+	baseMeta := partitionedConflictMeta(t, schema, 2, &writerBaseID)
+	concSnapshotID := int64(260)
+
+	spec := baseMeta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+
+	mf := writeTestManifest(t, dir, spec, schema, concSnapshotID,
+		map[int]any{fieldID: concurrentValue}, dir+"/score-data.parquet")
+	listPath := writeTestManifestList(t, dir, concSnapshotID, []iceberg.ManifestFile{mf})
+
+	ctx := buildPartitionedContext(t, baseMeta, listPath, writerBaseID, concSnapshotID)
+	require.Len(t, ctx.concurrent, 1)
+
+	eqDf, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentEqDeletes,
+		dir+"/nan-score-eq-del.parquet", iceberg.ParquetFile,
+		map[int]any{fieldID: math.NaN()}, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+
+	return validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
+}
+
+func TestRowDeltaValidate_NaNIdentityPartitionRejected(t *testing.T) {
+	err := checkNaNPartitionEqDeleteConflict(t, math.NaN())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
+
+func TestRowDeltaValidate_NaNIdentityPartitionDifferentAllowed(t *testing.T) {
+	require.NoError(t, checkNaNPartitionEqDeleteConflict(t, 1.5))
 }
 
 // ---------------------------------------------------------------------------
