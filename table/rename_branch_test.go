@@ -29,7 +29,7 @@ import (
 type renameBranchTestCatalog struct {
 	metadata Metadata
 	reqs     []Requirement
-	updates []Update
+	updates  []Update
 	commits  int
 }
 
