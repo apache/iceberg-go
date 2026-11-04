@@ -36,6 +36,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/avro/ocf"
 )
@@ -77,11 +78,22 @@ func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
 		{int64(10), int64(-2), 1},
 		{uint64(1), uint64(2), -1},
 		{float64(-1.5), float64(0), -1},
+		{float64(math.Copysign(0, -1)), float64(0), -1},
+		{float64(0), float64(math.Copysign(0, -1)), 1},
+		{float32(math.Copysign(0, -1)), float32(0), -1},
+		{math.Inf(-1), -math.MaxFloat64, -1},
+		{math.NaN(), math.Inf(1), 1},
+		{math.Inf(1), math.NaN(), -1},
+		{math.NaN(), math.NaN(), 0},
+		{float32(math.NaN()), float32(math.NaN()), 0},
+		{float32(math.NaN()), float32(math.Inf(1)), 1},
 		{false, true, -1},
 		{"10", "2", -1},
 		{[]byte{0, 255}, []byte{1}, -1},
 		{[2]byte{0, 255}, [2]byte{1, 0}, -1},
 		{[]byte{1, 2}, []byte{1, 2}, 0},
+		{uuid.MustParse("80000000-0000-0000-0000-000000000000"), uuid.MustParse("7fffffff-ffff-ffff-ffff-ffffffffffff"), -1},
+		{uuid.MustParse("00000000-0000-0000-8000-000000000000"), uuid.MustParse("00000000-0000-0000-7fff-ffffffffffff"), -1},
 		{iceberg.Decimal{Val: decimal128.FromI64(-120), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, -1},
 		{iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, 0},
 		{iceberg.Decimal{Val: decimal128.FromI64(120), Scale: 2}, iceberg.Decimal{Val: decimal128.FromI64(30), Scale: 2}, 1},
@@ -90,11 +102,7 @@ func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
 		require.NoError(t, err, "compare %v to %v", tc.a, tc.b)
 		require.Equal(t, tc.want, got)
 	}
-	_, err := comparePartitionStatisticValues(math.NaN(), 1.0)
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
-	_, err = comparePartitionStatisticValues(math.Copysign(0, -1), 0.0)
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
-	_, err = comparePartitionStatisticValues(struct{ X int }{}, struct{ X int }{})
+	_, err := comparePartitionStatisticValues(struct{ X int }{}, struct{ X int }{})
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 	_, err = comparePartitionStatisticValues(
 		iceberg.Decimal{Val: decimal128.FromI64(10), Scale: 1},
@@ -120,6 +128,45 @@ func TestSortPartitionStatisticsByTupleThenSpecID(t *testing.T) {
 	require.Nil(t, rows[0].partition[1000])
 	require.EqualValues(t, -1, rows[1].partition[1000])
 	require.EqualValues(t, 10, rows[5].partition[1000])
+}
+
+func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
+	t.Run("float", func(t *testing.T) {
+		pt := &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
+		}}
+		rows := []*inspectPartitionAggregate{
+			{partition: map[int]any{1000: math.NaN()}, specID: 6},
+			{partition: map[int]any{1000: float64(0)}, specID: 3},
+			{partition: map[int]any{1000: math.Inf(1)}, specID: 5},
+			{partition: map[int]any{1000: math.Copysign(0, -1)}, specID: 2},
+			{partition: map[int]any{1000: math.Inf(-1)}, specID: 1},
+			{partition: map[int]any{1000: math.Float64frombits(0xfff8000000000001)}, specID: 7},
+		}
+		require.NoError(t, sortPartitionStatistics(rows, pt))
+		require.Equal(t, []int32{1, 2, 3, 5, 6, 7}, []int32{
+			rows[0].specID, rows[1].specID, rows[2].specID,
+			rows[3].specID, rows[4].specID, rows[5].specID,
+		})
+		require.True(t, math.Signbit(rows[1].partition[1000].(float64)))
+		require.False(t, math.Signbit(rows[2].partition[1000].(float64)))
+		require.True(t, math.IsNaN(rows[4].partition[1000].(float64)))
+	})
+	t.Run("uuid", func(t *testing.T) {
+		pt := &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.UUID},
+		}}
+		rows := []*inspectPartitionAggregate{
+			{partition: map[int]any{1000: uuid.MustParse("7fffffff-ffff-ffff-0000-000000000000")}, specID: 4},
+			{partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-7fff-ffffffffffff")}, specID: 3},
+			{partition: map[int]any{1000: uuid.MustParse("80000000-0000-0000-0000-000000000000")}, specID: 1},
+			{partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-8000-000000000000")}, specID: 2},
+		}
+		require.NoError(t, sortPartitionStatistics(rows, pt))
+		require.Equal(t, []int32{1, 2, 3, 4}, []int32{
+			rows[0].specID, rows[1].specID, rows[2].specID, rows[3].specID,
+		})
+	})
 }
 
 func TestPartitionStatisticsParquetWrite(t *testing.T) {
@@ -255,16 +302,16 @@ func TestTransactionPartitionStatisticsRegistration(t *testing.T) {
 	require.Error(t, nilTx.SetPartitionStatistics(stats))
 }
 
-func TestUpdatePartitionStatisticsRejectsNonV1AndMissingSnapshot(t *testing.T) {
+func TestComputePartitionStatisticsRejectsNonV1AndMissingSnapshot(t *testing.T) {
 	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, Type: BranchRef},
 	})
 	tx := tbl.NewTransaction()
-	_, err := tx.UpdatePartitionStatistics(t.Context())
+	_, err := tx.ComputePartitionStatistics(t.Context())
 	require.True(t, errors.Is(err, iceberg.ErrNotImplemented))
 
 	tx.meta.formatVersion = 1
-	_, err = tx.UpdatePartitionStatistics(t.Context())
+	_, err = tx.ComputePartitionStatistics(t.Context())
 	// The fixture's schema is unpartitioned. Fail before any filesystem IO.
 	require.True(t, errors.Is(err, iceberg.ErrNotImplemented))
 }
@@ -296,7 +343,7 @@ func TestPartitionStatisticsRejectsDroppedAndPromotedSources(t *testing.T) {
 	require.ErrorIs(t, validatePartitionStatisticsSourceTypes(meta), iceberg.ErrNotImplemented)
 }
 
-func TestUpdatePartitionStatisticsWritesAndStages(t *testing.T) {
+func TestComputePartitionStatisticsWritesAndStages(t *testing.T) {
 	spec := partitionedSpec()
 	const snapshotID = int64(1)
 	sequenceNumber := int64(1)
@@ -309,7 +356,7 @@ func TestUpdatePartitionStatisticsWritesAndStages(t *testing.T) {
 	require.NoError(t, err)
 	tbl = New(tbl.Identifier(), &metadataV1{commonMetadata: base}, "metadata.json", func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
 	tx := tbl.NewTransaction()
-	stats, err := tx.UpdatePartitionStatistics(t.Context())
+	stats, err := tx.ComputePartitionStatistics(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, snapshotID, stats.SnapshotID)
 	metadata, err := tx.meta.Build()
@@ -476,7 +523,7 @@ func TestPartitionStatisticsRequiresPartitionFieldIDs(t *testing.T) {
 	require.ErrorIs(t, validatePartitionStatisticsTuple(spec, "file", map[int]any{1001: int32(3)}), iceberg.ErrInvalidArgument)
 }
 
-func TestUpdatePartitionStatisticsEmbeddedManifest(t *testing.T) {
+func TestComputePartitionStatisticsEmbeddedManifest(t *testing.T) {
 	fs := iceio.NewMemFS()
 	spec := partitionedSpec()
 	f := newTestDataFileWithCount(t, spec, "mem://table/data/a.parquet", map[int]any{1000: int32(7)}, 12)
@@ -496,7 +543,7 @@ func TestUpdatePartitionStatisticsEmbeddedManifest(t *testing.T) {
 	require.NoError(t, err)
 	tbl := New(Identifier{"db", "table"}, metadata, "mem://table/metadata.json", func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
 	tx := tbl.NewTransaction()
-	stats, err := tx.UpdatePartitionStatistics(t.Context())
+	stats, err := tx.ComputePartitionStatistics(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(1), stats.SnapshotID)
 	result, err := tx.meta.Build()
