@@ -41,6 +41,9 @@ import (
 // Replaying file additions is currently limited to v1 and v2. In v3,
 // copying files into another snapshot may reuse row IDs; fast-forwarding an
 // existing snapshot is safe because the lineage is not duplicated.
+// Divergent replace-partitions overwrites also require ancestry, removed-file,
+// and changed-partition validation. Both follow-ups are tracked in
+// https://github.com/apache/iceberg-go/issues/2415.
 //
 // snapshotProps applies only when a divergent append is replayed. A fast-forward
 // reuses the source snapshot unchanged and ignores these properties. On replay,
@@ -135,10 +138,13 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	}
 
 	if source.Summary == nil || source.Summary.Operation != OpAppend {
+		// TODO(#2415): replay eligible replace-partitions overwrites only
+		// after validating ancestry, removed files, and partition conflicts.
 		return fmt.Errorf("%w: snapshot %d is not an append and cannot be replayed onto a divergent branch",
 			ErrInvalidOperation, snapshotID)
 	}
 	if meta.formatVersion >= 3 {
+		// TODO(#2415): reassign row IDs when replaying v3 append files.
 		return fmt.Errorf("%w: replaying v3 append snapshots requires row ID reassignment",
 			iceberg.ErrNotImplemented)
 	}

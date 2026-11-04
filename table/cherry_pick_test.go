@@ -100,6 +100,47 @@ func TestCherryPickSnapshotFastForwardsDirectChild(t *testing.T) {
 	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
 }
 
+func TestCherryPickSnapshotFastForwardsToMissingBranch(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+
+	const target = "cherry-fast-forward"
+	txn, err := tbl.NewTransactionOnBranch(target)
+	require.NoError(t, err)
+	require.Nil(t, tbl.SnapshotByName(target))
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	picked := result.SnapshotByName(target)
+	require.NotNil(t, picked)
+	require.Equal(t, source.SnapshotID, picked.SnapshotID)
+	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, target))
+	assert.ElementsMatch(t, []int64{1}, idsOnRef(t, result, table.MainBranch))
+}
+
+// A missing branch starts at main. Even a direct-child fast-forward must
+// pin that inherited head, because concurrent changes would invalidate it.
+func TestCherryPickSnapshotFastForwardToMissingBranchPinsMain(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+
+	const target = "cherry-fast-forward"
+	stale, err := tbl.NewTransactionOnBranch(target)
+	require.NoError(t, err)
+	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+	_, err = stale.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.Nil(t, tbl.SnapshotByName(target))
+	assert.ElementsMatch(t, []int64{1, 3}, idsOnRef(t, tbl, table.MainBranch))
+}
+
 func TestCherryPickSnapshotFastForwardsNonAppendSnapshot(t *testing.T) {
 	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
 	branchTxn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
