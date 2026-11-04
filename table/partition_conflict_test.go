@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -241,10 +242,10 @@ func TestEqDeletePartitionsToFilterDeduplicatesPartitions(t *testing.T) {
 	filter, err := eqDeletePartitionsToFilter(files, countingMeta)
 	require.NoError(t, err)
 
-	expected := iceberg.NewOr(
-		iceberg.EqualTo(iceberg.Reference("region"), "us-east-1"),
-		iceberg.EqualTo(iceberg.Reference("region"), "eu-west-1"),
-	)
+	expected := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("region"), []iceberg.Literal{
+		iceberg.StringLiteral("us-east-1"),
+		iceberg.StringLiteral("eu-west-1"),
+	})
 	assert.True(t, filter.Equals(expected), "duplicate equality-delete partitions should produce one filter term")
 	assert.Equal(t, 1, countingMeta.currentSchemaCalls,
 		"the current schema should be cloned once per filter")
@@ -802,4 +803,123 @@ func TestRowDeltaValidate_DayTransformFallsBackToAlwaysTrue(t *testing.T) {
 	err = validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
 	require.Error(t, err, "day-partitioned eq-delete must trigger conservative AlwaysTrue fallback even for a different day")
 	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
+
+func TestEqDeleteConflictSingleFieldWithNullAndSeparatedValues(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String},
+	)
+	meta := partitionedConflictMeta(t, schema, 1, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+
+	var files []iceberg.DataFile
+	values := []any{"west", "east", nil, "central"}
+	for i := range 32 {
+		value := values[i%len(values)]
+		files = append(files, equalityDeleteTestFile(t, spec,
+			fmt.Sprintf("delete-%d.parquet", i), map[int]any{fieldID: value}))
+	}
+	filter, err := eqDeletePartitionsToFilter(files, meta)
+	require.NoError(t, err)
+
+	want := iceberg.NewOr(
+		iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("region"),
+			[]iceberg.Literal{
+				iceberg.StringLiteral("west"),
+				iceberg.StringLiteral("east"),
+				iceberg.StringLiteral("central"),
+			}),
+		iceberg.IsNull(iceberg.Reference("region")),
+	)
+	require.True(t, filter.Equals(want), "single-field values must be grouped without dropping nulls")
+	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, true)
+	require.NoError(t, err)
+}
+
+func TestEqDeleteConflictLargeMultiFieldPredicateBinds(t *testing.T) {
+	const fieldCount = 3
+	fields := make([]iceberg.NestedField, fieldCount)
+	partFields := make([]iceberg.PartitionField, fieldCount)
+	for i := range fields {
+		fields[i] = iceberg.NestedField{
+			ID: i + 1, Name: fmt.Sprintf("field_%d", i), Type: iceberg.PrimitiveTypes.String,
+		}
+		partFields[i] = iceberg.PartitionField{
+			FieldID: 1000 + i, SourceIDs: []int{i + 1},
+			Name: fmt.Sprintf("field_%d", i), Transform: iceberg.IdentityTransform{},
+		}
+	}
+	schema := iceberg.NewSchema(0, fields...)
+	spec := iceberg.NewPartitionSpec(partFields...)
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "file:///tmp/conflict-balanced",
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	files := make([]iceberg.DataFile, 256)
+	for i := range files {
+		p := make(map[int]any, fieldCount)
+		for field := range fieldCount {
+			p[1000+field] = fmt.Sprintf("v-%d-%d", i, field)
+		}
+		files[i] = equalityDeleteTestFile(t, spec, fmt.Sprintf("del-%d.parquet", i), p)
+	}
+
+	filter, err := eqDeletePartitionsToFilter(files, meta)
+	require.NoError(t, err)
+	require.Equal(t, iceberg.OpOr, filter.Op())
+	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, true)
+	require.NoError(t, err)
+}
+
+func TestEqDeleteConflictLargeSparseSetPreservesMetricsPruning(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32})
+	meta := partitionedConflictMeta(t, schema, 1, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+	files := make([]iceberg.DataFile, 401)
+	for i := range files {
+		files[i] = equalityDeleteTestFile(t, spec, fmt.Sprintf("delete-%d.parquet", i), map[int]any{fieldID: int32(i * 2)})
+	}
+	filter, err := eqDeletePartitionsToFilter(files, meta)
+	require.NoError(t, err)
+	evaluate, err := newInclusiveMetricsEvaluator(schema, filter, true, true)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		value int32
+		want  bool
+	}{{0, true}, {1, false}, {199, false}, {200, true}, {399, false}, {400, true}, {799, false}, {800, true}, {801, false}} {
+		raw, err := iceberg.NewLiteral(tc.value).MarshalBinary()
+		require.NoError(t, err)
+		got, err := evaluate(inclusiveMetricsInTestFile(t, raw, raw))
+		require.NoError(t, err)
+		require.Equalf(t, tc.want, got, "value=%d", tc.value)
+	}
+}
+
+// NaN equality must remain an equality predicate: Go map lookup cannot find
+// a NaN key, so placing it in an IN set can miss a conflicting partition.
+func TestEqDeleteConflictNaNPartition(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Float64})
+	meta := partitionedConflictMeta(t, schema, 1, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+	values := []float64{1, 2, 3, 4, 5, 6, 7, math.NaN()}
+	files := make([]iceberg.DataFile, 32)
+	for i := range files {
+		value := values[i%len(values)]
+		files[i] = equalityDeleteTestFile(t, spec, fmt.Sprintf("delete-%d.parquet", i), map[int]any{fieldID: value})
+	}
+	filter, err := eqDeletePartitionsToFilter(files, meta)
+	require.NoError(t, err)
+	filters := newKeyDefaultMapWrapErr(func(id int) (iceberg.BooleanExpression, error) {
+		return buildPartitionProjection(id, meta, schema, filter, true)
+	})
+	evaluate, err := buildPartitionEvaluator(spec.ID(), meta, schema, filters, true)
+	require.NoError(t, err)
+	for _, i := range []int{0, 6, 7} {
+		got, err := evaluate(files[i])
+		require.NoError(t, err)
+		require.True(t, got, "partition %d must match", i)
+	}
 }

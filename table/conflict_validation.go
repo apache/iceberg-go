@@ -873,8 +873,9 @@ type equalityDeletePartitionSpecInfo struct {
 }
 
 type equalityDeleteSourceFieldInfo struct {
-	name  string
-	found bool
+	name      string
+	fieldType iceberg.Type
+	found     bool
 }
 
 // NaNs are not equal to themselves as Go map keys, while the existing
@@ -902,15 +903,12 @@ type equalityDeleteIdentityGroupKey struct {
 
 type equalityDeleteIdentityGroup struct {
 	fieldName string
-	fieldType iceberg.Type
 	index     int
 	literals  []iceberg.Literal
 }
 
-// balancedConflictDisjunction keeps multi-field partition filters shallow.
-// The old left fold required traversal depth proportional to the number of
-// distinct partitions. Pairwise folding takes logarithmic depth without
-// changing OR semantics or the input order of unrelated terms.
+// balancedConflictDisjunction combines partition terms pairwise so the OR
+// expression tree has logarithmic depth while preserving term order.
 func balancedConflictDisjunction(terms []iceberg.BooleanExpression) iceberg.BooleanExpression {
 	if len(terms) == 0 {
 		return iceberg.AlwaysTrue{}
@@ -979,23 +977,37 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 			specInfoByID[specID] = specInfo
 		}
 
+		// Sort partition field IDs for deterministic expression order.
 		fieldIDs := make([]int, 0, len(p))
 		for id := range p {
 			fieldIDs = append(fieldIDs, id)
 		}
 		sort.Ints(fieldIDs)
 
-		// A non-identity value is already transformed, so applying another
-		// row-space transform could miss conflicts. Keep the full-table
-		// fallback even when other fields have identity transforms.
+		// Non-identity transforms (bucket, day, hour, truncate, year, month) store
+		// post-transform values in DataFile.Partition(). Building a row-space predicate
+		// with those values would cause validateAddedDataFilesMatchingFilter to
+		// re-apply the transform, producing wrong matches (double-transformation).
+		// Fall back to AlwaysTrue (conservative: treat the eq-delete as table-wide)
+		// until a full PartitionSet-style partition-space approach is added.
+		identityOnly := true
 		for _, fid := range fieldIDs {
 			if pf, ok := specInfo.fields[fid]; ok {
 				if _, isIdentity := pf.Transform.(iceberg.IdentityTransform); !isIdentity {
-					return iceberg.AlwaysTrue{}, nil
+					identityOnly = false
+
+					break
 				}
 			}
 		}
+		if !identityOnly {
+			return iceberg.AlwaysTrue{}, nil
+		}
 
+		// canonicalPartitionKey is injective for the supported partition values
+		// and includes the spec ID. If a custom Literal implementation is not
+		// part of that closed set, skip deduplication and let the existing literal
+		// conversion below preserve its behavior.
 		if key, err := canonicalPartitionKey(f.SpecID(), p); err == nil {
 			if _, duplicate := seen[key]; duplicate {
 				continue
@@ -1011,13 +1023,15 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				return nil, fmt.Errorf("partition field ID %d not found in spec %d", partFieldID, f.SpecID())
 			}
 
+			// Resolve each source field at most once per partition spec. The
+			// current schema is cloned lazily, and only once for this filter.
 			sourceField, resolved := specInfo.sourceFields[partFieldID]
 			if !resolved {
 				if currentSchema == nil {
 					currentSchema = meta.CurrentSchema()
 				}
 				field, found := currentSchema.FindFieldByID(pf.FirstSourceID())
-				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, found: found}
+				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, fieldType: field.Type, found: found}
 				specInfo.sourceFields[partFieldID] = sourceField
 			}
 			if !sourceField.found {
@@ -1036,30 +1050,21 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				return nil, fmt.Errorf("partition field %q: %w", sourceField.name, err)
 			}
 
-			if len(fieldIDs) == 1 && len(files) >= 32 && equalityDeleteLiteralCanUseSet(lit) {
+			// Keep values needing a cast on the equality path, including
+			// strings that can cast to NaN floats during binding.
+			if len(fieldIDs) == 1 && equalityDeleteLiteralCanUseSet(lit) && lit.Type().Equals(sourceField.fieldType) {
 				key := equalityDeleteIdentityGroupKey{specID: specID, fieldID: partFieldID}
 				group := identityGroups[key]
-				var fieldType iceberg.Type
 				if group == nil {
-					field, _ := currentSchema.FindFieldByID(pf.FirstSourceID())
-					fieldType = field.Type
-				} else {
-					fieldType = group.fieldType
+					group = &equalityDeleteIdentityGroup{fieldName: sourceField.name, index: len(terms)}
+					identityGroups[key] = group
+					groups = append(groups, group)
+					terms = append(terms, nil)
 				}
-				// Do not change binding behavior for malformed values requiring
-				// a cast. In particular, a string can cast to a NaN float.
-				if lit.Type().Equals(fieldType) {
-					if group == nil {
-						group = &equalityDeleteIdentityGroup{fieldName: sourceField.name, fieldType: fieldType, index: len(terms)}
-						identityGroups[key] = group
-						groups = append(groups, group)
-						terms = append(terms, nil)
-					}
-					group.literals = append(group.literals, lit)
-					grouped = true
+				group.literals = append(group.literals, lit)
+				grouped = true
 
-					break
-				}
+				break
 			}
 
 			conjuncts = append(conjuncts,
@@ -1079,6 +1084,13 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 	}
 
 	for _, group := range groups {
+		if len(group.literals) == 1 {
+			terms[group.index] = iceberg.LiteralPredicate(iceberg.OpEQ,
+				iceberg.Reference(group.fieldName), group.literals[0])
+
+			continue
+		}
+
 		// Keep IN sets within the metrics evaluator's per-value limit.
 		for start := 0; start < len(group.literals); start += inPredicateLimit {
 			end := min(start+inPredicateLimit, len(group.literals))
