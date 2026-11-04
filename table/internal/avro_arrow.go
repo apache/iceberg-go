@@ -147,6 +147,7 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 			if err != nil {
 				return nil, false, err
 			}
+
 			return arrow.MapOfFields(key, value), nullable, nil
 		}
 		element, err := avroArrowField("element", *node.Items, node.Props, "element-id", used)
@@ -168,6 +169,7 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 		if err != nil {
 			return nil, false, err
 		}
+
 		return arrow.MapOfFields(key, value), nullable, nil
 
 	case "boolean":
@@ -198,6 +200,7 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 					tz = "UTC"
 				}
 			}
+
 			return &arrow.TimestampType{Unit: unit, TimeZone: tz}, nullable, nil
 		case "time-micros":
 			return &arrow.Time64Type{Unit: arrow.Microsecond}, nullable, nil

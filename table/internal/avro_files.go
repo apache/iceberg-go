@@ -144,21 +144,26 @@ type avroRecordReader struct {
 }
 
 func (r *avroRecordReader) Retain() { r.refs.Add(1) }
+
 func (r *avroRecordReader) Release() {
 	if r.refs.Add(-1) == 0 && r.current != nil {
 		r.current.Release()
 		r.current = nil
 	}
 }
+
 func (r *avroRecordReader) Schema() *arrow.Schema {
 	return r.schema
 }
+
 func (r *avroRecordReader) Err() error {
 	return r.readErr
 }
+
 func (r *avroRecordReader) Record() arrow.RecordBatch {
 	return r.current
 }
+
 func (r *avroRecordReader) RecordBatch() arrow.RecordBatch {
 	return r.current
 }
@@ -246,7 +251,6 @@ func (r *avroFileReader) ReadTable(ctx context.Context) (arrow.Table, error) {
 
 	return array.NewTableFromRecords(records.Schema(), batches), nil
 }
-
 
 func (r *avroFileReader) Close() error {
 	if r.closed {
