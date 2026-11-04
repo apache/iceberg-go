@@ -236,8 +236,7 @@ if err != nil { /* ... */ }
 fmt.Println(arrowSchema)
 for batch, err := range batches {
     if err != nil { /* ... */ }
-    fmt.Printf("batch with %d rows
-", batch.NumRows())
+    fmt.Printf("batch with %d rows\n", batch.NumRows())
     batch.Release()
 }
 ```
@@ -250,8 +249,7 @@ for batch, err := range batches {
 arrowTbl, err := tbl.Scan().ToArrowTable(ctx)
 if err != nil { /* ... */ }
 defer arrowTbl.Release()
-fmt.Printf("%d rows in %d cols
-", arrowTbl.NumRows(), arrowTbl.NumCols())
+fmt.Printf("%d rows in %d cols\n", arrowTbl.NumRows(), arrowTbl.NumCols())
 ```
 
 ### Projection and filters
@@ -498,8 +496,7 @@ if err != nil {
 }
 if !report.Valid() {
     for _, issue := range report.Issues {
-        fmt.Printf("%s: %s (%s)
-", issue.Code, issue.FilePath, issue.ManifestPath)
+        fmt.Printf("%s: %s (%s)\n", issue.Code, issue.FilePath, issue.ManifestPath)
     }
 }
 ```
@@ -538,8 +535,7 @@ result, err := maintenance.DeleteOrphanFiles(ctx, tbl,
     maintenance.WithCleanupMaxConcurrency(8),
 )
 if err != nil { /* ... */ }
-fmt.Printf("removed %d files
-", len(result.DeletedFiles))
+fmt.Printf("removed %d files\n", len(result.DeletedFiles))
 ```
 
 Also see `maintenance.WithCleanupLocation`, `maintenance.WithCleanupDeleteFunc`, `maintenance.WithPrefixMismatchMode`, `maintenance.WithEqualSchemes`, and `maintenance.WithEqualAuthorities` in `table/maintenance/orphan_cleanup.go`.
@@ -554,8 +550,7 @@ result, err := txn.RewriteDataFiles(ctx, groups /* []table.CompactionTaskGroup *
 if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
-fmt.Printf("rewrote %d files into %d (%d -> %d bytes)
-",
+fmt.Printf("rewrote %d files into %d (%d -> %d bytes)\n",
     result.RemovedDataFiles, result.AddedDataFiles, result.BytesBefore, result.BytesAfter)
 ```
 
