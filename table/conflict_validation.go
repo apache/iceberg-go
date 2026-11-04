@@ -873,8 +873,66 @@ type equalityDeletePartitionSpecInfo struct {
 }
 
 type equalityDeleteSourceFieldInfo struct {
-	name  string
-	found bool
+	name      string
+	fieldType iceberg.Type
+	found     bool
+}
+
+// NaNs are not equal to themselves as Go map keys, while the existing
+// equality evaluator compares two NaNs as equal. Binary sets use hash keys,
+// which can collide, so retain individual predicates for those values too.
+// Keep literals that require a cast on the equality path.
+func equalityDeleteLiteralCanUseSet(lit iceberg.Literal, fieldType iceberg.Type) bool {
+	switch value := lit.(type) {
+	case iceberg.Float32Literal:
+		return !math.IsNaN(float64(value)) && lit.Type().Equals(fieldType)
+	case iceberg.Float64Literal:
+		return !math.IsNaN(float64(value)) && lit.Type().Equals(fieldType)
+	case iceberg.DecimalLiteral:
+		// DecimalLiteral.Type reports a placeholder precision of 9.
+		// Equal scales bind without conversion for any declared precision.
+		decimalType, ok := fieldType.(iceberg.DecimalType)
+
+		return ok && value.Scale == decimalType.Scale()
+	case iceberg.BoolLiteral, iceberg.Int32Literal, iceberg.Int64Literal,
+		iceberg.DateLiteral, iceberg.TimeLiteral, iceberg.TimestampLiteral,
+		iceberg.TimestampNsLiteral, iceberg.StringLiteral, iceberg.UUIDLiteral:
+		return lit.Type().Equals(fieldType)
+	default:
+		return false
+	}
+}
+
+type equalityDeleteIdentityGroupKey struct {
+	specID  int
+	fieldID int
+}
+
+type equalityDeleteIdentityGroup struct {
+	fieldName string
+	index     int
+	literals  []iceberg.Literal
+}
+
+// balancedConflictDisjunction combines partition terms pairwise so the OR
+// expression tree has logarithmic depth while preserving term order.
+func balancedConflictDisjunction(terms []iceberg.BooleanExpression) iceberg.BooleanExpression {
+	if len(terms) == 0 {
+		return iceberg.AlwaysTrue{}
+	}
+	for len(terms) > 1 {
+		next := terms[:0]
+		for i := 0; i < len(terms); i += 2 {
+			if i+1 == len(terms) {
+				next = append(next, terms[i])
+			} else {
+				next = append(next, iceberg.NewOr(terms[i], terms[i+1]))
+			}
+		}
+		terms = next
+	}
+
+	return terms[0]
 }
 
 // eqDeletePartitionsToFilter converts equality-delete data files into an
@@ -897,6 +955,8 @@ type equalityDeleteSourceFieldInfo struct {
 func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceberg.BooleanExpression, error) {
 	terms := make([]iceberg.BooleanExpression, 0, len(files))
 	specInfoByID := make(map[int]*equalityDeletePartitionSpecInfo)
+	var identityGroups map[equalityDeleteIdentityGroupKey]*equalityDeleteIdentityGroup
+	var groups []*equalityDeleteIdentityGroup
 	seen := make(map[string]struct{}, len(files))
 	var currentSchema *iceberg.Schema
 
@@ -963,6 +1023,7 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 		}
 
 		conjuncts := make([]iceberg.BooleanExpression, 0, len(p))
+		grouped := false
 		for _, partFieldID := range fieldIDs {
 			pf, ok := specInfo.fields[partFieldID]
 			if !ok {
@@ -977,7 +1038,7 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 					currentSchema = meta.CurrentSchema()
 				}
 				field, found := currentSchema.FindFieldByID(pf.FirstSourceID())
-				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, found: found}
+				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, fieldType: field.Type, found: found}
 				specInfo.sourceFields[partFieldID] = sourceField
 			}
 			if !sourceField.found {
@@ -998,32 +1059,65 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 
 			// x = NaN is never true and Bind rejects a NaN literal, so a NaN
 			// partition value matches through IsNaN, as in
-			// internal.BuildPartitionMatchPredicate.
-			if isNaNPartitionLiteral(lit) {
+			// internal.BuildPartitionMatchPredicate. The value is checked after
+			// conversion to the source type, which also catches a string that
+			// casts to NaN.
+			if isNaNPartitionLiteral(lit, sourceField.fieldType) {
 				conjuncts = append(conjuncts, iceberg.IsNaN(iceberg.Reference(sourceField.name)))
 
 				continue
 			}
 
-			conjuncts = append(conjuncts, iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.name), lit))
+			// Keep values needing a cast on the equality path.
+			if len(fieldIDs) == 1 && equalityDeleteLiteralCanUseSet(lit, sourceField.fieldType) {
+				key := equalityDeleteIdentityGroupKey{specID: specID, fieldID: partFieldID}
+				group := identityGroups[key]
+				if group == nil {
+					if identityGroups == nil {
+						identityGroups = make(map[equalityDeleteIdentityGroupKey]*equalityDeleteIdentityGroup)
+					}
+					group = &equalityDeleteIdentityGroup{fieldName: sourceField.name, index: len(terms)}
+					identityGroups[key] = group
+					groups = append(groups, group)
+					terms = append(terms, nil)
+				}
+				group.literals = append(group.literals, lit)
+				grouped = true
+
+				break
+			}
+
+			conjuncts = append(conjuncts,
+				iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.name), lit))
+		}
+		if grouped {
+			continue
 		}
 
+		var term iceberg.BooleanExpression
 		if len(conjuncts) == 1 {
-			terms = append(terms, conjuncts[0])
+			term = conjuncts[0]
 		} else {
-			terms = append(terms, iceberg.NewAnd(conjuncts[0], conjuncts[1], conjuncts[2:]...))
+			term = iceberg.NewAnd(conjuncts[0], conjuncts[1], conjuncts[2:]...)
+		}
+		terms = append(terms, term)
+	}
+
+	for _, group := range groups {
+		// SetPredicate keeps singleton groups as ordinary equality predicates.
+		// Keep larger IN sets within the metrics evaluator's per-value limit.
+		for start := 0; start < len(group.literals); start += inPredicateLimit {
+			end := min(start+inPredicateLimit, len(group.literals))
+			term := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference(group.fieldName), group.literals[start:end])
+			if start == 0 {
+				terms[group.index] = term
+			} else {
+				terms = append(terms, term)
+			}
 		}
 	}
 
-	if len(terms) == 0 {
-		return iceberg.AlwaysTrue{}, nil
-	}
-
-	if len(terms) == 1 {
-		return terms[0], nil
-	}
-
-	return iceberg.NewOr(terms[0], terms[1], terms[2:]...), nil
+	return balancedConflictDisjunction(terms), nil
 }
 
 // validateNoNewDeletesForRewrittenFiles rejects the commit if any
@@ -1203,13 +1297,19 @@ var filePathFieldID = func() int {
 	return f.ID
 }()
 
-// isNaNPartitionLiteral reports whether a partition literal is a floating-point NaN.
-func isNaNPartitionLiteral(lit iceberg.Literal) bool {
-	switch v := lit.Any().(type) {
-	case float32:
+// isNaNPartitionLiteral reports whether a partition literal is a floating-point
+// NaN once converted to the source field's type. A literal that cannot be
+// converted is left for Bind to reject.
+func isNaNPartitionLiteral(lit iceberg.Literal, fieldType iceberg.Type) bool {
+	converted, err := lit.To(fieldType)
+	if err != nil {
+		return false
+	}
+	switch v := converted.(type) {
+	case iceberg.Float32Literal:
 		return math.IsNaN(float64(v))
-	case float64:
-		return math.IsNaN(v)
+	case iceberg.Float64Literal:
+		return math.IsNaN(float64(v))
 	}
 
 	return false
