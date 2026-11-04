@@ -55,6 +55,7 @@ func TestRollbackToTimeStrictlyBeforeTimestamp(t *testing.T) {
 				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 				require.Equal(t, int64(30), tx.meta.refs[MainBranch].SnapshotID)
 				require.Empty(t, tx.meta.updates)
+
 				return
 			}
 
