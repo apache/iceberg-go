@@ -375,7 +375,7 @@ func (r *Reader) readBlobData(meta BlobMetadata) ([]byte, error) {
 	codec := ""
 	if meta.CompressionCodec != nil {
 		codec = *meta.CompressionCodec
-		if codec != "lz4" && codec != "zstd" {
+		if codec != CompressionCodecLZ4 && codec != CompressionCodecZstd {
 			return nil, fmt.Errorf("puffin: cannot read blob: compression %q not supported", codec)
 		}
 	}

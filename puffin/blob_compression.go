@@ -28,6 +28,12 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
+// CompressionCodecLZ4 is the Puffin LZ4 frame codec.
+const CompressionCodecLZ4 = "lz4"
+
+// CompressionCodecZstd is the Puffin Zstandard frame codec.
+const CompressionCodecZstd = "zstd"
+
 // readCompressedBlob decompresses one Puffin blob frame. Puffin requires
 // compressed blobs to include their uncompressed content size in the frame.
 // Bound both the advertised size and the actual output to maxBlobSize.
@@ -43,7 +49,7 @@ func readCompressedBlob(data []byte, codec string, maxBlobSize int64) ([]byte, e
 	)
 
 	switch codec {
-	case "lz4":
+	case CompressionCodecLZ4:
 		input := bytes.NewReader(data)
 		header, err := readLZ4FrameHeader(input)
 		if err != nil {
@@ -63,7 +69,7 @@ func readCompressedBlob(data []byte, codec string, maxBlobSize int64) ([]byte, e
 		}
 		decoded = lz4.NewReader(bytes.NewReader(data))
 
-	case "zstd":
+	case CompressionCodecZstd:
 		var header zstd.Header
 		if err := header.Decode(data); err != nil {
 			return nil, fmt.Errorf("puffin: invalid zstd blob frame: %w", err)

@@ -66,14 +66,14 @@ func compressedBlobTestPayload(t *testing.T, codec string, data []byte) []byte {
 
 	var output bytes.Buffer
 	switch codec {
-	case "lz4":
+	case puffin.CompressionCodecLZ4:
 		writer := lz4.NewWriter(&output)
 		require.NoError(t, writer.Apply(lz4.SizeOption(uint64(len(data)))))
 		_, err := writer.Write(data)
 		require.NoError(t, err)
 		require.NoError(t, writer.Close())
 
-	case "zstd":
+	case puffin.CompressionCodecZstd:
 		writer, err := zstd.NewWriter(nil)
 		require.NoError(t, err)
 		defer writer.Close()
@@ -86,7 +86,7 @@ func compressedBlobTestPayload(t *testing.T, codec string, data []byte) []byte {
 
 func TestReadCompressedPuffinBlobs(t *testing.T) {
 	raw := bytes.Repeat([]byte("iceberg blob content "), 256)
-	for _, codec := range []string{"lz4", "zstd"} {
+	for _, codec := range []string{puffin.CompressionCodecLZ4, puffin.CompressionCodecZstd} {
 		t.Run(codec, func(t *testing.T) {
 			stored := compressedBlobTestPayload(t, codec, raw)
 			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, codec, stored)))
@@ -112,7 +112,7 @@ func TestReadCompressedPuffinBlobs(t *testing.T) {
 
 func TestReadCompressedPuffinBlobHonorsUncompressedLimit(t *testing.T) {
 	raw := bytes.Repeat([]byte("a"), 4096)
-	for _, codec := range []string{"lz4", "zstd"} {
+	for _, codec := range []string{puffin.CompressionCodecLZ4, puffin.CompressionCodecZstd} {
 		t.Run(codec, func(t *testing.T) {
 			stored := compressedBlobTestPayload(t, codec, raw)
 			require.Less(t, len(stored), 128)
@@ -156,16 +156,16 @@ func TestReadCompressedPuffinBlobRejectsInvalidFrames(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, writer.Close())
 
-		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "lz4", output.Bytes())))
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, puffin.CompressionCodecLZ4, output.Bytes())))
 		require.NoError(t, err)
 		_, err = r.ReadBlob(0)
 		require.ErrorContains(t, err, "missing content size")
 	})
 
 	t.Run("lz4 trailing frame", func(t *testing.T) {
-		frame := compressedBlobTestPayload(t, "lz4", raw)
+		frame := compressedBlobTestPayload(t, puffin.CompressionCodecLZ4, raw)
 		frame = append(frame, 0xff)
-		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "lz4", frame)))
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, puffin.CompressionCodecLZ4, frame)))
 		require.NoError(t, err)
 		_, err = r.ReadBlob(0)
 		require.ErrorContains(t, err, "trailing data")
@@ -179,7 +179,7 @@ func TestReadCompressedPuffinBlobRejectsInvalidFrames(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, writer.Close())
 
-		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", output.Bytes())))
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, puffin.CompressionCodecZstd, output.Bytes())))
 		require.NoError(t, err)
 		_, err = r.ReadBlob(0)
 		require.ErrorContains(t, err, "missing content size")
@@ -188,19 +188,19 @@ func TestReadCompressedPuffinBlobRejectsInvalidFrames(t *testing.T) {
 
 func TestReadCompressedPuffinBlobRejectsZstdTrailingFrames(t *testing.T) {
 	data := bytes.Repeat([]byte("single frame"), 256)
-	frame := compressedBlobTestPayload(t, "zstd", data)
+	frame := compressedBlobTestPayload(t, puffin.CompressionCodecZstd, data)
 	for _, tc := range []struct {
 		name     string
 		trailing []byte
 	}{
 		{"empty frame", []byte{0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x01, 0x00, 0x00}},
 		{"skippable frame", []byte{0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0}},
-		{"nonempty frame", compressedBlobTestPayload(t, "zstd", []byte("other"))},
+		{"nonempty frame", compressedBlobTestPayload(t, puffin.CompressionCodecZstd, []byte("other"))},
 		{"trailing byte", []byte{0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := append(bytes.Clone(frame), tc.trailing...)
-			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", payload)))
+			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, puffin.CompressionCodecZstd, payload)))
 			require.NoError(t, err)
 			_, err = r.ReadBlob(0)
 			require.ErrorContains(t, err, "trailing data")
@@ -209,9 +209,9 @@ func TestReadCompressedPuffinBlobRejectsZstdTrailingFrames(t *testing.T) {
 }
 
 func TestReadCompressedPuffinBlobRejectsTruncatedZstd(t *testing.T) {
-	frame := compressedBlobTestPayload(t, "zstd", bytes.Repeat([]byte("hello"), 100))
+	frame := compressedBlobTestPayload(t, puffin.CompressionCodecZstd, bytes.Repeat([]byte("hello"), 100))
 	for n := 1; n < len(frame); n++ {
-		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", frame[:n])))
+		r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, puffin.CompressionCodecZstd, frame[:n])))
 		require.NoError(t, err)
 		_, err = r.ReadBlob(0)
 		require.Error(t, err, "truncated at %d of %d", n, len(frame))
@@ -227,11 +227,11 @@ func TestReadCompressedPuffinBlobZstdMultipleBlocksAndEmpty(t *testing.T) {
 		name        string
 		frame, want []byte
 	}{
-		{"multiple blocks", compressedBlobTestPayload(t, "zstd", large), large},
+		{"multiple blocks", compressedBlobTestPayload(t, puffin.CompressionCodecZstd, large), large},
 		{"empty", []byte{0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x01, 0x00, 0x00}, []byte{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", tc.frame)))
+			r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, puffin.CompressionCodecZstd, tc.frame)))
 			require.NoError(t, err)
 			blob, err := r.ReadBlob(0)
 			require.NoError(t, err)
@@ -241,7 +241,7 @@ func TestReadCompressedPuffinBlobZstdMultipleBlocksAndEmpty(t *testing.T) {
 }
 
 func TestReadRejectsCompressedDeletionVectors(t *testing.T) {
-	for _, codec := range []string{"lz4", "zstd"} {
+	for _, codec := range []string{puffin.CompressionCodecLZ4, puffin.CompressionCodecZstd} {
 		t.Run(codec, func(t *testing.T) {
 			stored := compressedBlobTestPayload(t, codec, []byte("invalid compressed deletion vector"))
 			meta := puffin.BlobMetadata{
@@ -282,7 +282,7 @@ func TestReadSmallZstdBlobWithLargeWindow(t *testing.T) {
 	require.True(t, header.HasFCS)
 	require.Equal(t, uint64(8<<20), header.WindowSize)
 	require.Equal(t, uint64(len(raw)), header.FrameContentSize)
-	r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, "zstd", frame)), puffin.WithMaxBlobSize(1024))
+	r, err := puffin.NewReader(bytes.NewReader(compressedBlobTestFile(t, puffin.CompressionCodecZstd, frame)), puffin.WithMaxBlobSize(1024))
 	require.NoError(t, err)
 	blob, err := r.ReadBlob(0)
 	require.NoError(t, err)
