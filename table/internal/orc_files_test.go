@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -583,5 +584,60 @@ func TestORCRejectsInvalidPostscriptMetadataLength(t *testing.T) {
 	require.NoError(t, err)
 	defer f.Close()
 	_, _, err = readORCFileSchema(f)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}
+
+func TestORCReadTimestampUnits(t *testing.T) {
+	instant := time.Date(2024, time.May, 6, 12, 34, 56, 123456789, time.UTC)
+	for _, tc := range []struct {
+		name string
+		unit string
+		arrowUnit arrow.TimeUnit
+		want arrow.Timestamp
+	}{
+		{"default-micros", "", arrow.Microsecond, arrow.Timestamp(instant.UnixMicro())},
+		{"explicit-micros", "MICROS", arrow.Microsecond, arrow.Timestamp(instant.UnixMicro())},
+		{"nanos", "NANOS", arrow.Nanosecond, arrow.Timestamp(instant.UnixNano())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attributes := map[int]map[string]string{1: {"iceberg.id": "1"}}
+			if tc.unit != "" {
+				attributes[1]["iceberg.timestamp-unit"] = tc.unit
+			}
+			path := writeORCFixture(t, "struct<ts:timestamp>", attributes,
+				[]any{instant}, []any{nil})
+			rd := openORCFixture(t, path, 2)
+			schema, err := rd.Schema()
+			require.NoError(t, err)
+			stampType, ok := schema.Field(0).Type.(*arrow.TimestampType)
+			require.True(t, ok)
+			require.Equal(t, tc.arrowUnit, stampType.Unit)
+			require.Empty(t, stampType.TimeZone)
+
+			records, err := rd.GetRecords(t.Context(), nil, nil)
+			require.NoError(t, err)
+			defer records.Release()
+			require.True(t, records.Next())
+			values := records.RecordBatch().Column(0).(*array.Timestamp)
+			require.Equal(t, tc.want, values.Value(0))
+			require.True(t, values.IsNull(1))
+			require.False(t, records.Next())
+			require.NoError(t, records.Err())
+		})
+	}
+}
+
+func TestORCTimestampRejectsInvalidUnitAndNanosecondOverflow(t *testing.T) {
+	for _, unit := range []string{"MILLIS", "UTC", "NANO"} {
+		_, err := orcSchemaField([]*orcpb.Type{{
+			Kind: orcpb.Type_TIMESTAMP.Enum(),
+			XXX_unrecognized: encodeORCAttribute("iceberg.timestamp-unit", unit),
+		}}, 0, "ts", map[int]struct{}{})
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	}
+	timestampType := &arrow.TimestampType{Unit: arrow.Nanosecond}
+	builder := array.NewBuilder(memory.DefaultAllocator, timestampType)
+	defer builder.Release()
+	err := appendORCValue(builder, timestampType, time.Date(2500, time.January, 1, 0, 0, 0, 0, time.UTC))
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 }

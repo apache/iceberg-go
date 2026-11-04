@@ -321,7 +321,25 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 		if !ok {
 			return badType()
 		}
-		b.Append(arrow.Timestamp(v.UnixMicro()))
+		ts, ok := dataType.(*arrow.TimestampType)
+		if !ok {
+			return badType()
+		}
+		switch ts.Unit {
+		case arrow.Microsecond:
+			b.Append(arrow.Timestamp(v.UnixMicro()))
+		case arrow.Nanosecond:
+			// Do not use UnixNano without a range check: it overflows for
+			// dates outside the range supported by int64 nanoseconds.
+			nanos := new(big.Int).Mul(big.NewInt(v.Unix()), big.NewInt(1_000_000_000))
+			nanos.Add(nanos, big.NewInt(int64(v.Nanosecond())))
+			if !nanos.IsInt64() {
+				return badType()
+			}
+			b.Append(arrow.Timestamp(nanos.Int64()))
+		default:
+			return fmt.Errorf("%w: unsupported ORC timestamp unit %v", iceberg.ErrNotImplemented, ts.Unit)
+		}
 	case *array.Decimal128Builder:
 		v, ok := value.(orc.Decimal)
 		if !ok || v.Int == nil {

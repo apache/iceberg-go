@@ -263,7 +263,16 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 	case orcpb.Type_DATE:
 		field.Type = arrow.FixedWidthTypes.Date32
 	case orcpb.Type_TIMESTAMP:
-		return field, fmt.Errorf("%w: ORC timestamps", iceberg.ErrNotImplemented)
+		// ORC stores nanosecond precision. Iceberg defaults to microseconds
+		// unless the timestamp-unit attribute explicitly requests nanos.
+		switch attrs["iceberg.timestamp-unit"] {
+		case "", "MICROS":
+			field.Type = &arrow.TimestampType{Unit: arrow.Microsecond}
+		case "NANOS":
+			field.Type = &arrow.TimestampType{Unit: arrow.Nanosecond}
+		default:
+			return field, fmt.Errorf("%w: invalid ORC timestamp unit %q", iceberg.ErrInvalidSchema, attrs["iceberg.timestamp-unit"])
+		}
 	case orcpb.Type_DECIMAL:
 		precision, scale := t.GetPrecision(), t.GetScale()
 		if precision == 0 {
