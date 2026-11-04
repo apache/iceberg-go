@@ -590,10 +590,10 @@ func TestORCRejectsInvalidPostscriptMetadataLength(t *testing.T) {
 func TestORCReadTimestampUnits(t *testing.T) {
 	instant := time.Date(2024, time.May, 6, 12, 34, 56, 123456789, time.UTC)
 	for _, tc := range []struct {
-		name string
-		unit string
+		name      string
+		unit      string
 		arrowUnit arrow.TimeUnit
-		want arrow.Timestamp
+		want      arrow.Timestamp
 	}{
 		{"default-micros", "", arrow.Microsecond, arrow.Timestamp(instant.UnixMicro())},
 		{"explicit-micros", "MICROS", arrow.Microsecond, arrow.Timestamp(instant.UnixMicro())},
@@ -630,7 +630,7 @@ func TestORCReadTimestampUnits(t *testing.T) {
 func TestORCTimestampRejectsInvalidUnitAndNanosecondOverflow(t *testing.T) {
 	for _, unit := range []string{"MILLIS", "UTC", "NANO"} {
 		_, err := orcSchemaField([]*orcpb.Type{{
-			Kind: orcpb.Type_TIMESTAMP.Enum(),
+			Kind:             orcpb.Type_TIMESTAMP.Enum(),
 			XXX_unrecognized: encodeORCAttribute("iceberg.timestamp-unit", unit),
 		}}, 0, "ts", map[int]struct{}{})
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
