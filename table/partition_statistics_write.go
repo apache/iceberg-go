@@ -470,6 +470,7 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 			int64(binary.BigEndian.Uint64(right[:8]))); cmp != 0 {
 			return cmp, nil
 		}
+
 		return compareOrderedStats(int64(binary.BigEndian.Uint64(left[8:])),
 			int64(binary.BigEndian.Uint64(right[8:]))), nil
 	}
@@ -506,6 +507,7 @@ func comparePartitionStatisticValues(a, b any) (int, error) {
 			if math.IsNaN(bFloat) {
 				return 0, nil
 			}
+
 			return 1, nil
 		case math.IsNaN(bFloat):
 			return -1, nil
