@@ -268,7 +268,7 @@ iceberg.NotNull(iceberg.Reference(&quot;user_id&quot;))
 <pre><code class="language-go">iceberg.IsNaN(iceberg.Reference(&quot;ratio&quot;))
 iceberg.NotNaN(iceberg.Reference(&quot;ratio&quot;))
 </code></pre>
-<p>Operators <code>OpIsNan</code> and <code>OpNotNan</code>. Use these instead of <code>EqualTo(..., math.NaN())</code> - NaN is never equal to itself.</p>
+<p>Operators <code>OpIsNan</code> and <code>OpNotNan</code>. Use these instead of <code>EqualTo(..., math.NaN())</code> - NaN is never equal to itself, so a comparison or <code>In</code>/<code>NotIn</code> with a NaN literal fails to bind with <code>ErrInvalidArgument</code>.</p>
 <h2 id="string-prefix"><a class="header" href="#string-prefix">String prefix</a></h2>
 <pre><code class="language-go">iceberg.StartsWith(iceberg.Reference(&quot;path&quot;), &quot;/var/log/&quot;)
 iceberg.NotStartsWith(iceberg.Reference(&quot;name&quot;), &quot;tmp_&quot;)

@@ -1852,7 +1852,7 @@ iceberg.NotNull(iceberg.Reference(&quot;user_id&quot;))
 <pre><code class="language-go">iceberg.IsNaN(iceberg.Reference(&quot;ratio&quot;))
 iceberg.NotNaN(iceberg.Reference(&quot;ratio&quot;))
 </code></pre>
-<p>Operators <code>OpIsNan</code> and <code>OpNotNan</code>. Use these instead of <code>EqualTo(..., math.NaN())</code> - NaN is never equal to itself.</p>
+<p>Operators <code>OpIsNan</code> and <code>OpNotNan</code>. Use these instead of <code>EqualTo(..., math.NaN())</code> - NaN is never equal to itself, so a comparison or <code>In</code>/<code>NotIn</code> with a NaN literal fails to bind with <code>ErrInvalidArgument</code>.</p>
 <h2 id="string-prefix"><a class="header" href="#string-prefix">String prefix</a></h2>
 <pre><code class="language-go">iceberg.StartsWith(iceberg.Reference(&quot;path&quot;), &quot;/var/log/&quot;)
 iceberg.NotStartsWith(iceberg.Reference(&quot;name&quot;), &quot;tmp_&quot;)
@@ -2696,6 +2696,9 @@ make integration-external-rest
 <p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
+<li>
+<p><strong>Predicates reject NaN literals when bound.</strong> <code>EqualTo</code>, <code>NotEqualTo</code>, <code>LessThan</code>, <code>LessThanEqual</code>, <code>GreaterThan</code>, <code>GreaterThanEqual</code>, <code>IsIn</code>, <code>NotIn</code> and <code>LiteralPredicate</code>/<code>SetPredicate</code> with a NaN float literal now fail in <code>Bind</code> with <code>ErrInvalidArgument</code>, as Java does. That includes the string <code>&quot;NaN&quot;</code> on a float column and a NaN on a decimal column, which used to bind as zero. Scans, <code>ExpressionEvaluator</code> and the metrics evaluators all bind first, so they return the error too. Use <code>IsNaN</code> and <code>NotNaN</code> to match NaN values.</p>
+</li>
 <li>
 <p><strong>SQL view APIs align with <code>catalog.ViewCatalog</code>.</strong> <code>CreateView</code> now takes a <code>*view.Version</code>, schema and options, and returns <code>*view.View</code>. <code>LoadView</code> now returns <code>*view.View</code>; use <code>Metadata()</code> to access its metadata. If the caller leaves <code>DefaultCatalog</code> empty, SQL still sets it to the catalog name.</p>
 </li>
