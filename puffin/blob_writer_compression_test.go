@@ -19,7 +19,6 @@ package puffin_test
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
 	"strconv"
 	"testing"
 
@@ -30,9 +29,10 @@ import (
 )
 
 func TestWriteCompressedBlobs(t *testing.T) {
-	for _, codec := range []string{"", "lz4", "zstd"} {
+	for _, codec := range []string{"", puffin.CompressionCodecLZ4, puffin.CompressionCodecZstd} {
 		for _, input := range [][]byte{nil, []byte("hello, Iceberg!"), bytes.Repeat([]byte("Iceberg"), 2000)} {
 			t.Run(codec+"/"+strconv.Itoa(len(input)), func(t *testing.T) {
+				t.Parallel()
 				var file bytes.Buffer
 				writer, err := puffin.NewWriter(&file)
 				require.NoError(t, err)
@@ -61,11 +61,10 @@ func TestWriteCompressedBlobs(t *testing.T) {
 				require.Len(t, blobs, 1)
 				require.Equal(t, meta, blobs[0])
 				encoded := file.Bytes()[meta.Offset : meta.Offset+meta.Length]
-				var got []byte
 				switch codec {
 				case "":
-					got = encoded
-				case "lz4":
+					require.Equal(t, string(input), string(encoded))
+				case puffin.CompressionCodecLZ4:
 					// Puffin requires the LZ4 content-size flag, including for empty blobs.
 					require.GreaterOrEqual(t, len(encoded), 19)
 					require.Equal(t, uint32(0x184D2204), binary.LittleEndian.Uint32(encoded[:4]))
@@ -74,20 +73,24 @@ func TestWriteCompressedBlobs(t *testing.T) {
 					validHeader, headerErr := lz4.ValidFrameHeader(encoded[:15])
 					require.NoError(t, headerErr)
 					require.True(t, validHeader, "LZ4 frame header checksum must be valid")
-					got, err = io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
-					require.NoError(t, err)
-				case "zstd":
+				case puffin.CompressionCodecZstd:
 					var header zstd.Header
 					require.NoError(t, header.Decode(encoded))
 					require.True(t, header.HasFCS)
 					require.Equal(t, uint64(len(input)), header.FrameContentSize)
-					decoder, decoderErr := zstd.NewReader(nil)
-					require.NoError(t, decoderErr)
-					got, err = decoder.DecodeAll(encoded, nil)
-					decoder.Close()
-					require.NoError(t, err)
 				}
-				require.Equal(t, string(input), string(got))
+
+				blob, err := reader.ReadBlob(0)
+				require.NoError(t, err)
+				require.Equal(t, string(input), string(blob.Data))
+				require.Equal(t, meta, blob.Metadata)
+				byMetadata, err := reader.ReadBlobByMetadata(meta)
+				require.NoError(t, err)
+				require.Equal(t, string(input), string(byMetadata))
+				all, err := reader.ReadAllBlobs()
+				require.NoError(t, err)
+				require.Len(t, all, 1)
+				require.Equal(t, string(input), string(all[0].Data))
 			})
 		}
 	}
@@ -100,13 +103,19 @@ func TestZstdBlobFrameContentSizeBoundaries(t *testing.T) {
 			writer, err := puffin.NewWriter(&output)
 			require.NoError(t, err)
 			meta, err := writer.AddBlob(puffin.BlobMetadataInput{
-				Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: "zstd",
+				Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: puffin.CompressionCodecZstd,
 			}, bytes.Repeat([]byte{42}, size))
 			require.NoError(t, err)
 			var header zstd.Header
 			require.NoError(t, header.Decode(output.Bytes()[meta.Offset:meta.Offset+meta.Length]))
 			require.True(t, header.HasFCS)
 			require.Equal(t, uint64(size), header.FrameContentSize)
+			require.NoError(t, writer.Finish())
+			reader, err := puffin.NewReader(bytes.NewReader(output.Bytes()))
+			require.NoError(t, err)
+			blob, err := reader.ReadBlob(0)
+			require.NoError(t, err)
+			require.Equal(t, string(bytes.Repeat([]byte{42}, size)), string(blob.Data))
 		})
 	}
 }
@@ -128,7 +137,7 @@ func TestCompressedWriterRejectsInvalidCodecWithoutWriting(t *testing.T) {
 		Fields:           []int32{},
 		SnapshotID:       -1,
 		SequenceNumber:   -1,
-		CompressionCodec: "lz4",
+		CompressionCodec: puffin.CompressionCodecLZ4,
 	}, []byte("payload"))
 	require.ErrorContains(t, err, "must not be compressed")
 	require.Equal(t, n, buf.Len())
@@ -143,16 +152,18 @@ func TestLZ4BlobSpanningMultipleBlocks(t *testing.T) {
 	writer, err := puffin.NewWriter(&output)
 	require.NoError(t, err)
 	meta, err := writer.AddBlob(puffin.BlobMetadataInput{
-		Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: "lz4",
+		Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: puffin.CompressionCodecLZ4,
 	}, data)
 	require.NoError(t, err)
 	require.NoError(t, writer.Finish())
 	encoded := output.Bytes()[meta.Offset : meta.Offset+meta.Length]
 	require.NotZero(t, encoded[4]&0x08)
 	require.Equal(t, uint64(len(data)), binary.LittleEndian.Uint64(encoded[6:14]))
-	decoded, err := io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
+	reader, err := puffin.NewReader(bytes.NewReader(output.Bytes()))
 	require.NoError(t, err)
-	require.Equal(t, data, decoded)
+	blob, err := reader.ReadBlob(0)
+	require.NoError(t, err)
+	require.Equal(t, data, blob.Data)
 }
 
 // Incompressible input exercises LZ4's uncompressed-block fallback, rather
@@ -171,7 +182,7 @@ func TestLZ4BlobWithUncompressedBlock(t *testing.T) {
 	writer, err := puffin.NewWriter(&file)
 	require.NoError(t, err)
 	meta, err := writer.AddBlob(puffin.BlobMetadataInput{
-		Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: "lz4",
+		Type: puffin.BlobTypeDataSketchesTheta, Fields: []int32{1}, CompressionCodec: puffin.CompressionCodecLZ4,
 	}, data)
 	require.NoError(t, err)
 	require.NoError(t, writer.Finish())
@@ -180,9 +191,11 @@ func TestLZ4BlobWithUncompressedBlock(t *testing.T) {
 	require.GreaterOrEqual(t, len(frame), 19)
 	require.NotZero(t, binary.LittleEndian.Uint32(frame[15:19])&(1<<31),
 		"LZ4 should store incompressible blocks uncompressed")
-	decoded, err := io.ReadAll(lz4.NewReader(bytes.NewReader(frame)))
+	reader, err := puffin.NewReader(bytes.NewReader(file.Bytes()))
 	require.NoError(t, err)
-	require.Equal(t, data, decoded)
+	blob, err := reader.ReadBlob(0)
+	require.NoError(t, err)
+	require.Equal(t, data, blob.Data)
 }
 
 func TestMixedBlobCompressionUsesStoredOffsets(t *testing.T) {
@@ -195,8 +208,8 @@ func TestMixedBlobCompressionUsesStoredOffsets(t *testing.T) {
 		data  []byte
 	}{
 		{codec: "", data: []byte("raw payload")},
-		{codec: "lz4", data: bytes.Repeat([]byte("lz4 payload"), 512)},
-		{codec: "zstd", data: bytes.Repeat([]byte("zstd payload"), 512)},
+		{codec: puffin.CompressionCodecLZ4, data: bytes.Repeat([]byte("lz4 payload"), 512)},
+		{codec: puffin.CompressionCodecZstd, data: bytes.Repeat([]byte("zstd payload"), 512)},
 	}
 	previousEnd := int64(puffin.MagicSize)
 	for _, blob := range blobs {
@@ -217,21 +230,20 @@ func TestMixedBlobCompressionUsesStoredOffsets(t *testing.T) {
 	require.Len(t, metadata, len(blobs))
 	for i, blob := range blobs {
 		meta := metadata[i]
-		encoded := file.Bytes()[meta.Offset : meta.Offset+meta.Length]
-		var decoded []byte
-		switch blob.codec {
-		case "":
-			decoded = encoded
-		case "lz4":
-			decoded, err = io.ReadAll(lz4.NewReader(bytes.NewReader(encoded)))
-			require.NoError(t, err)
-		case "zstd":
-			decoder, decoderErr := zstd.NewReader(nil)
-			require.NoError(t, decoderErr)
-			decoded, err = decoder.DecodeAll(encoded, nil)
-			decoder.Close()
-			require.NoError(t, err)
+		if blob.codec == "" {
+			require.Nil(t, meta.CompressionCodec)
+		} else {
+			require.Equal(t, blob.codec, *meta.CompressionCodec)
 		}
-		require.Equal(t, blob.data, decoded)
+		got, err := reader.ReadBlob(i)
+		require.NoError(t, err)
+		require.Equal(t, blob.data, got.Data)
+		require.Equal(t, meta, got.Metadata)
+		byMetadata, err := reader.ReadBlobByMetadata(meta)
+		require.NoError(t, err)
+		require.Equal(t, blob.data, byMetadata)
 	}
+	all, err := reader.ReadAllBlobs()
+	require.NoError(t, err)
+	require.Len(t, all, len(blobs))
 }

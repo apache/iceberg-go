@@ -18,8 +18,8 @@ package puffin
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
@@ -31,7 +31,7 @@ func compressBlob(codec string, data []byte) ([]byte, error) {
 	switch codec {
 	case "":
 		return data, nil
-	case "lz4":
+	case CompressionCodecLZ4:
 		// The lz4 library intentionally omits the content-size field when
 		// SizeOption(0) is used. Write the empty frame explicitly instead.
 		if len(data) == 0 {
@@ -50,64 +50,61 @@ func compressBlob(codec string, data []byte) ([]byte, error) {
 		}
 
 		return buf.Bytes(), nil
-	case "zstd":
-		options := []zstd.EOption{zstd.WithEncoderConcurrency(1), zstd.WithZeroFrames(true)}
-		// Non-single-segment frames omit content size for inputs below 256 bytes.
-		if len(data) < 256 {
-			options = append(options, zstd.WithSingleSegment(true))
-		}
-		encoder, err := zstd.NewWriter(nil, options...)
+	case CompressionCodecZstd:
+		// Short Zstd frames need the single-segment flag to include a content size.
+		encoder, err := sharedZstdBlobEncoder(len(data) < 256)
 		if err != nil {
-			return nil, fmt.Errorf("puffin: configure zstd compression: %w", err)
-		}
-		result := encoder.EncodeAll(data, nil)
-		if err := encoder.Close(); err != nil {
-			return nil, fmt.Errorf("puffin: finalize zstd blob: %w", err)
+			return nil, err
 		}
 
-		return result, nil
+		return encoder.EncodeAll(data, nil), nil
 	default:
 		return nil, fmt.Errorf("puffin: unsupported blob compression codec %q", codec)
 	}
 }
 
 // emptyLZ4Frame is an independent-block frame with an explicit zero content
-// size. A conventional lz4.Writer cannot emit this header using SizeOption(0).
+// size. LZ4 SizeOption(0) omits that field. The header checksum (0x12) is
+// verified by lz4.ValidFrameHeader in the writer tests.
 func emptyLZ4Frame() []byte {
-	frame := make([]byte, 4+2+8+1+4)
-	binary.LittleEndian.PutUint32(frame[:4], lz4FrameMagic)
-	frame[4] = lz4FrameVersionOne | 0x20 | lz4FrameContentSizeFlag
-	frame[5] = 0x70 // 4 MiB maximum block size
-	frame[14] = emptyLZ4HeaderChecksum(frame[4:14])
-
-	return frame
+	return []byte{
+		0x04, 0x22, 0x4d, 0x18, // frame magic
+		0x68, 0x70, // frame flags and 4 MiB block size
+		0, 0, 0, 0, 0, 0, 0, 0, // content size: zero
+		0x12,       // frame descriptor checksum
+		0, 0, 0, 0, // end mark
+	}
 }
 
-// XXH32 with seed zero for a 10-byte LZ4 frame descriptor.
-func emptyLZ4HeaderChecksum(descriptor []byte) byte {
-	const (
-		prime1 uint32 = 2654435761
-		prime3 uint32 = 3266489917
-		prime4 uint32 = 668265263
-		prime5 uint32 = 374761393
-	)
-	rotl := func(x uint32, r uint) uint32 { return x<<r | x>>(32-r) }
-	h := prime5 + uint32(len(descriptor))
-	remaining := descriptor
-	for len(remaining) >= 4 {
-		h += binary.LittleEndian.Uint32(remaining[:4]) * prime3
-		h = rotl(h, 17) * prime4
-		remaining = remaining[4:]
-	}
-	for _, b := range remaining {
-		h += uint32(b) * prime5
-		h = rotl(h, 11) * prime1
-	}
-	h ^= h >> 15
-	h *= 2246822519
-	h ^= h >> 13
-	h *= prime3
-	h ^= h >> 16
+var (
+	zstdBlobEncoderOnce          sync.Once
+	zstdBlobEncoder              *zstd.Encoder
+	zstdBlobSingleSegmentEncoder *zstd.Encoder
+	zstdBlobEncoderErr           error
+)
 
-	return byte(h >> 8)
+// sharedZstdBlobEncoder lazily creates two reusable encoders. EncodeAll can be
+// called concurrently and does not require resetting or closing the encoder.
+func sharedZstdBlobEncoder(singleSegment bool) (*zstd.Encoder, error) {
+	zstdBlobEncoderOnce.Do(func() {
+		options := []zstd.EOption{zstd.WithEncoderConcurrency(1), zstd.WithZeroFrames(true)}
+		zstdBlobEncoder, zstdBlobEncoderErr = zstd.NewWriter(nil, options...)
+		if zstdBlobEncoderErr != nil {
+			return
+		}
+		zstdBlobSingleSegmentEncoder, zstdBlobEncoderErr = zstd.NewWriter(
+			nil, append(options, zstd.WithSingleSegment(true))...,
+		)
+		if zstdBlobEncoderErr != nil {
+			zstdBlobEncoder.Close()
+		}
+	})
+	if zstdBlobEncoderErr != nil {
+		return nil, fmt.Errorf("puffin: configure zstd compression: %w", zstdBlobEncoderErr)
+	}
+	if singleSegment {
+		return zstdBlobSingleSegmentEncoder, nil
+	}
+
+	return zstdBlobEncoder, nil
 }

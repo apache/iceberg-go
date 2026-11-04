@@ -64,14 +64,14 @@ type Writer struct {
 // Offset and Length are computed by the writer. CompressionCodec selects the
 // blob's compression and is omitted from footer metadata when empty.
 type BlobMetadataInput struct {
-	Type BlobType
-	// CompressionCodec is "", "lz4", or "zstd". An empty value writes raw bytes.
-	// Deletion vectors must not be compressed per the Puffin specification.
+	Type           BlobType
+	SnapshotID     int64
+	SequenceNumber int64
+	Fields         []int32
+	Properties     map[string]string
+	// CompressionCodec selects CompressionCodecLZ4 or CompressionCodecZstd.
+	// An empty value writes raw bytes. Deletion vectors must not be compressed.
 	CompressionCodec string
-	SnapshotID       int64
-	SequenceNumber   int64
-	Fields           []int32
-	Properties       map[string]string
 }
 
 // NewWriter creates a new Writer and writes the file header magic.
