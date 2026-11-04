@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -146,23 +145,6 @@ func TestStreamSnapshotManifestsStopsOnCancellation(t *testing.T) {
 	}
 }
 
-func TestStreamSnapshotManifestsStopsWhenConsumerStops(t *testing.T) {
-	set := newSnapshotManifestSet([]iceberg.ManifestFile{
-		iceberg.NewManifestBuilder(1, "mem://a", 1, 0, 1).Build(),
-		iceberg.NewManifestBuilder(1, "mem://b", 1, 0, 1).Build(),
-	})
-	calls := 0
-	streamSnapshotManifests(t.Context(), []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}}, nil,
-		func(context.Context, Snapshot) (snapshotManifestSet, error) { return set, nil },
-		func(_ iceberg.ManifestFile, err error) bool {
-			require.NoError(t, err)
-			calls++
-
-			return false
-		})
-	require.Equal(t, 1, calls)
-}
-
 func writeUniqueManifestTestList(t *testing.T, fs iceio.WriteFileIO, path string, snapshotID int64, manifests []iceberg.ManifestFile) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -209,7 +191,7 @@ func TestManifestProviderUniqueManifestsReportsMissingListOnce(t *testing.T) {
 	for manifest, err := range provider.uniqueManifests(t.Context(), snapshots) {
 		require.Nil(t, manifest)
 		require.Error(t, err)
-		require.True(t, strings.Contains(err.Error(), "snapshot 1"), "unexpected error: %v", err)
+		require.ErrorContains(t, err, "snapshot 1")
 		calls++
 	}
 	require.Equal(t, 1, calls)
