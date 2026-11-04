@@ -84,7 +84,6 @@ func TestRewritePositionDeleteFilesEmptySnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, staged.RemovedDeleteFiles)
 	require.Nil(t, staged.Table)
-
 }
 
 func TestRewritePositionDeleteFilesRejectsV3(t *testing.T) {
