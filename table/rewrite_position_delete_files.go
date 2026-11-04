@@ -385,7 +385,7 @@ func (t *Transaction) RewritePositionDeleteFiles(
 			// Track the intended output before writing. A failed writer
 			// may have already created a partial file.
 			produced = append(produced, writer.loc.NewDataLocation(
-				task.GenerateDataFileName(writer.invariants.extension)))
+				task.GenerateDataFileName(writer.invariants.extension), ""))
 			newFile, err := writer.writeFile(ctx, group.partition, task)
 			if err != nil {
 				return nil, err
