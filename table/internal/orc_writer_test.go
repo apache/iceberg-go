@@ -717,7 +717,7 @@ func TestORCBoundsRespectMetricsPlan(t *testing.T) {
 	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
 		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec,
 		FileName: filepath.Join(t.TempDir(), "stats.orc"),
-		Content: iceberg.EntryContentData,
+		Content:  iceberg.EntryContentData,
 		StatsCols: map[int]StatisticsCollector{
 			1: {Mode: MetricsMode{Typ: MetricModeCounts}},
 			2: {Mode: MetricsMode{Typ: MetricModeTruncate, Len: 2}},
