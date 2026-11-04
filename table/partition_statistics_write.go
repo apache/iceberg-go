@@ -21,12 +21,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
 	"slices"
-	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -223,61 +221,50 @@ func partitionStatisticsEmbeddedManifest(ctx context.Context, fs iceio.IO, manif
 		return nil, err
 	}
 	defer f.Close()
-	header, err := ocf.NewReader(f)
+	ocfReader, err := ocf.NewReader(f)
 	if err != nil {
 		return nil, fmt.Errorf("read embedded manifest %q: %w", manifest.FilePath(), err)
 	}
-	raw := header.Metadata()["partition-spec-id"]
-	var fields []iceberg.PartitionField
-	if err := json.Unmarshal(header.Metadata()["partition-spec"], &fields); err != nil {
-		return nil, fmt.Errorf("%w: embedded manifest %q has an invalid partition spec: %v",
-			iceberg.ErrInvalidArgument, manifest.FilePath(), err)
-	}
-	if err := header.Close(); err != nil {
+	header, parseErr := parseEmbeddedManifestSpecHeader(ocfReader.Metadata())
+	if err := ocfReader.Close(); err != nil {
 		return nil, err
 	}
-	// V1 manifests can omit both partition-spec-id and partition field IDs.
-	// The latter were assigned sequentially from 1000 by V1 writers.
-	for i := range fields {
-		if fields[i].FieldID == 0 {
-			fields[i].FieldID = iceberg.PartitionDataIDStart + i
-		}
+	if parseErr != nil {
+		return nil, fmt.Errorf("%w: embedded manifest %q: %v",
+			iceberg.ErrInvalidArgument, manifest.FilePath(), parseErr)
 	}
 
-	var id int64
-	if len(raw) == 0 {
-		found := false
-		for candidateID, candidate := range specs {
-			actual := iceberg.NewPartitionSpecID(int(candidateID), fields...)
-			if !actual.Equals(candidate) {
-				continue
-			}
-			if found {
-				return nil, fmt.Errorf("%w: embedded manifest %q has an ambiguous partition spec without an ID",
-					iceberg.ErrNotImplemented, manifest.FilePath())
-			}
-			id, found = int64(candidateID), true
+	id, found, ambiguous := header.resolve(specs)
+	if !found {
+		if ambiguous {
+			return nil, fmt.Errorf("%w: embedded manifest %q has an ambiguous partition spec without an ID",
+				iceberg.ErrNotImplemented, manifest.FilePath())
 		}
-		if !found {
-			return nil, fmt.Errorf("%w: embedded manifest %q has no matching partition spec",
-				iceberg.ErrInvalidArgument, manifest.FilePath())
-		}
-	} else {
-		id, err = strconv.ParseInt(string(raw), 10, 32)
-		if err != nil || id < 0 {
-			return nil, fmt.Errorf("%w: embedded manifest %q has invalid partition spec ID", iceberg.ErrInvalidArgument, manifest.FilePath())
-		}
+
+		return nil, fmt.Errorf("%w: embedded manifest %q has no matching partition spec",
+			iceberg.ErrInvalidArgument, manifest.FilePath())
 	}
-	expected, ok := specs[int32(id)]
+	expected, ok := specs[id]
 	if !ok {
-		return nil, fmt.Errorf("%w: embedded manifest %q references unknown partition spec %d", iceberg.ErrInvalidArgument, manifest.FilePath(), id)
+		return nil, fmt.Errorf("%w: embedded manifest %q references unknown partition spec %d",
+			iceberg.ErrInvalidArgument, manifest.FilePath(), id)
 	}
-	actual := iceberg.NewPartitionSpecID(int(id), fields...)
+	actual := iceberg.NewPartitionSpecID(int(id), header.fields...)
 	if !actual.Equals(expected) {
-		return nil, fmt.Errorf("%w: embedded manifest %q partition spec differs from table metadata", iceberg.ErrInvalidArgument, manifest.FilePath())
+		return nil, fmt.Errorf("%w: embedded manifest %q partition spec differs from table metadata",
+			iceberg.ErrInvalidArgument, manifest.FilePath())
 	}
-	descriptor := iceberg.NewManifestBuilder(1, manifest.FilePath(), manifest.Length(), int32(id), manifest.SnapshotID()).
+	descriptor := iceberg.NewManifestBuilder(1, manifest.FilePath(), manifest.Length(), id, manifest.SnapshotID()).
 		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).AddedRows(-1).ExistingRows(-1).DeletedRows(-1).Build()
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil, err
+	}
+	reader, err := iceberg.NewManifestReader(descriptor, f)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
 	return descriptor, nil
 }
 
