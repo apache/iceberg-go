@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -41,8 +43,14 @@ func newDynamicOverwriteTableWithSpec(t *testing.T, spec iceberg.PartitionSpec) 
 
 func newDynamicOverwriteTableWithFormat(t *testing.T, spec iceberg.PartitionSpec, formatVersion string) (*table.Table, *concurrentTestCatalog) {
 	t.Helper()
-	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
+
+	return newDynamicOverwriteTableWithSchema(t, schema, spec, formatVersion)
+}
+
+func newDynamicOverwriteTableWithSchema(t *testing.T, schema *iceberg.Schema, spec iceberg.PartitionSpec, formatVersion string) (*table.Table, *concurrentTestCatalog) {
+	t.Helper()
+	location := filepath.ToSlash(t.TempDir())
 	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location, iceberg.Properties{
 		table.PropertyFormatVersion:        formatVersion,
 		table.WriteUpdateIsolationLevelKey: string(table.IsolationSnapshot),
@@ -145,4 +153,69 @@ func TestDynamicPartitionOverwriteV3ArrowInheritsRowIDs(t *testing.T) {
 	require.NotNil(t, head.FirstRowID)
 	require.NotNil(t, head.AddedRows)
 	assert.Positive(t, *head.AddedRows)
+}
+
+func dynamicOverwriteJSONReader(t *testing.T, tbl *table.Table, rows string) array.RecordReader {
+	t.Helper()
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{rows})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+
+	return array.NewTableReader(data, -1)
+}
+
+// A null source value must be stored as a null partition tuple, and a
+// replacement of that partition must leave non-null partitions untouched.
+func TestDynamicPartitionOverwriteNullIdentityPartition(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "group", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "group", Transform: iceberg.IdentityTransform{},
+	})
+	tbl, _ := newDynamicOverwriteTableWithSchema(t, schema, spec, "2")
+
+	seed := dynamicOverwriteJSONReader(t, tbl, `[{"id":1,"group":null},{"id":2,"group":7},{"id":3,"group":null}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.Append(t.Context(), seed, nil))
+	seed.Release()
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, tbl, table.MainBranch))
+
+	replacement := dynamicOverwriteJSONReader(t, tbl, `[{"id":4,"group":null},{"id":5,"group":null}]`)
+	updated, err := tbl.DynamicPartitionOverwrite(t.Context(), replacement, nil)
+	replacement.Release()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{2, 4, 5}, idsOnRef(t, updated, table.MainBranch))
+}
+
+// The manifest decoder and Arrow writer can represent day partitions with
+// different Go types. An overwrite must still match their logical values.
+func TestDynamicPartitionOverwriteDatePartition(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "event_date", Type: iceberg.PrimitiveTypes.Date, Required: true},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "event_day", Transform: iceberg.DayTransform{},
+	})
+	tbl, _ := newDynamicOverwriteTableWithSchema(t, schema, spec, "2")
+
+	seed := dynamicOverwriteJSONReader(t, tbl, `[{"id":1,"event_date":"2026-02-10"},{"id":2,"event_date":"2026-02-11"},{"id":3,"event_date":"2026-02-10"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.Append(t.Context(), seed, nil))
+	seed.Release()
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, tbl, table.MainBranch))
+
+	replacement := dynamicOverwriteJSONReader(t, tbl, `[{"id":4,"event_date":"2026-02-10"}]`)
+	updated, err := tbl.DynamicPartitionOverwrite(t.Context(), replacement, nil)
+	replacement.Release()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{2, 4}, idsOnRef(t, updated, table.MainBranch))
 }
