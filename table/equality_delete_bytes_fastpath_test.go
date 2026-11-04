@@ -19,6 +19,7 @@ package table
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -170,6 +171,100 @@ func TestProcessEqualityDeletesNestedStringDoesNotBuildUnusedIndex(t *testing.T)
 	assert.Nil(t, deleteSet.singleBytes)
 }
 
+func TestProcessEqualityDeletesSingleBytesDictionary(t *testing.T) {
+	tests := []struct {
+		name       string
+		dictionary []string
+		indices    string
+		offset     int
+		key        string
+		wantFast   bool
+		wantIDs    []int64
+	}{
+		{
+			name: "no_match", dictionary: []string{"apple", "bob", "cherry"}, indices: "[0, 1, 2, 0, 1, 2]",
+			key: "\x01\x00\x00\x00\x03zzz", wantFast: true, wantIDs: []int64{1, 2, 3, 4, 5, 6},
+		},
+		{
+			name: "null_index_without_null_entry", dictionary: []string{"apple", "bob"}, indices: "[0, null, 1, null, 0, 1]",
+			key: "\x00", wantFast: true, wantIDs: []int64{1, 3, 5, 6},
+		},
+		{
+			name: "empty_dictionary_null_key", dictionary: []string{}, indices: "[null, null, null]",
+			key: "\x00", wantFast: true, wantIDs: nil,
+		},
+		{
+			name: "empty_dictionary_without_null_key", dictionary: []string{}, indices: "[null, null, null]",
+			key: "\x01\x00\x00\x00\x05apple", wantFast: true, wantIDs: []int64{1, 2, 3},
+		},
+		{
+			name: "sliced", dictionary: []string{"apple", "bob", "cherry"}, indices: "[0, 1, 2, 0, 1, 2]", offset: 2,
+			key: "\x01\x00\x00\x00\x05apple", wantFast: true, wantIDs: []int64{3, 5, 6},
+		},
+		{
+			name: "dictionary_larger_than_batch", dictionary: []string{"apple", "bob", "cherry", "date"}, indices: "[0, 3]",
+			key: "\x01\x00\x00\x00\x05apple", wantFast: false, wantIDs: []int64{2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+
+			valueBuilder := array.NewStringBuilder(mem)
+			valueBuilder.AppendValues(tt.dictionary, nil)
+			dictionary := valueBuilder.NewArray()
+			valueBuilder.Release()
+			defer dictionary.Release()
+			indices, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int16, strings.NewReader(tt.indices))
+			require.NoError(t, err)
+			defer indices.Release()
+			dictType := &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: arrow.BinaryTypes.String}
+			values := array.NewDictionaryArray(dictType, indices, dictionary)
+			defer values.Release()
+			idBuilder := array.NewInt64Builder(mem)
+			for id := range values.Len() {
+				idBuilder.Append(int64(id + 1))
+			}
+			ids := idBuilder.NewArray()
+			idBuilder.Release()
+			defer ids.Release()
+
+			schema := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+				{Name: "value", Type: dictType, Nullable: true},
+			}, nil)
+			full := array.NewRecordBatch(schema, []arrow.Array{ids, values}, int64(values.Len()))
+			defer full.Release()
+			record := full.NewSlice(int64(tt.offset), full.NumRows())
+			defer record.Release()
+
+			deleteSet := &equalityDeleteSet{keys: set[string]{tt.key: {}}, fieldIDs: []int{2}, colNames: []string{"value"}}
+			fileSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.String},
+			)
+			process, err := processEqualityDeletesColumnarForFile(ctx,
+				[]*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")
+			require.NoError(t, err)
+
+			record.Retain()
+			got, err := process(record)
+			require.NoError(t, err)
+			defer got.Release()
+			assert.Equal(t, tt.wantIDs, got.Column(0).(*array.Int64).Int64Values())
+			if len(tt.wantIDs) == int(record.NumRows()) {
+				assert.Same(t, record, got)
+			}
+
+			var mask equalityDeleteMask
+			defer mask.release()
+			assert.Equal(t, tt.wantFast, mask.applySingleBytes(record.Column(1), deleteSet.singleBytes, mem))
+		})
+	}
+}
+
 func buildBenchDeleteSetSingleString(numDeletes int, noMatch bool) *equalityDeleteSet {
 	keys := make(set[string], numDeletes)
 	var buf bytes.Buffer
@@ -192,7 +287,9 @@ func buildBenchDeleteSetSingleString(numDeletes int, noMatch bool) *equalityDele
 	}
 }
 
-func BenchmarkProcessEqualityDeletesSingleString(b *testing.B) {
+func benchSingleStringEqualityDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.RecordBatch) {
+	b.Helper()
+
 	for _, noMatch := range []bool{false, true} {
 		name := "matches"
 		if noMatch {
@@ -205,7 +302,7 @@ func BenchmarkProcessEqualityDeletesSingleString(b *testing.B) {
 					mode = "fast"
 				}
 				b.Run(mode, func(b *testing.B) {
-					benchEqDeletesForFile(b, buildBenchRecordString, func(n int) *equalityDeleteSet {
+					benchEqDeletesForFile(b, buildRec, func(n int) *equalityDeleteSet {
 						deleteSet := buildBenchDeleteSetSingleString(n, noMatch)
 						if !fast {
 							deleteSet.singleBytesOnce.Do(func() {})
@@ -217,4 +314,37 @@ func BenchmarkProcessEqualityDeletesSingleString(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkProcessEqualityDeletesSingleString(b *testing.B) {
+	benchSingleStringEqualityDeletes(b, buildBenchRecordString)
+}
+
+// 1,000 distinct names keep the dictionary no larger than the smallest
+// benchmark batch, so the dictionary path always applies.
+func buildBenchRecordStringDictionary(mem memory.Allocator, numRows int) arrow.RecordBatch {
+	dictType := &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "name", Type: dictType},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, schema)
+	defer bldr.Release()
+
+	idBldr := bldr.Field(0).(*array.Int64Builder)
+	nameBldr := bldr.Field(1).(*array.BinaryDictionaryBuilder)
+
+	for i := range numRows {
+		idBldr.Append(int64(i))
+		if err := nameBldr.AppendString(fmt.Sprintf("user-%08d", i%1000)); err != nil {
+			panic(err)
+		}
+	}
+
+	return bldr.NewRecordBatch()
+}
+
+func BenchmarkProcessEqualityDeletesSingleStringDictionary(b *testing.B) {
+	benchSingleStringEqualityDeletes(b, buildBenchRecordStringDictionary)
 }
