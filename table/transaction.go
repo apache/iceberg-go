@@ -2247,7 +2247,11 @@ type AddDataFilesByPathOption func(addFilesOp *addFilesOperation)
 
 type addFilesOperation struct {
 	concurrency     int
-	partitionValues map[string]map[int]any
+	partitionValues *addFilesPartitionValues
+}
+
+type addFilesPartitionValues struct {
+	byPath map[string]map[int]any
 }
 
 // WithAddDataFilesByPathConcurrency overrides the concurrency used by AddDataFilesByPath.
@@ -2274,7 +2278,7 @@ func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDat
 	}
 
 	return func(op *addFilesOperation) {
-		op.partitionValues = partitionValues
+		op.partitionValues = &addFilesPartitionValues{byPath: partitionValues}
 	}
 }
 
@@ -2301,7 +2305,10 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		}
 		set[filePath] = struct{}{}
 	}
-	partitionValues := addFilesOp.partitionValues
+	var partitionValues map[string]map[int]any
+	if addFilesOp.partitionValues != nil {
+		partitionValues = addFilesOp.partitionValues.byPath
+	}
 	for filePath := range partitionValues {
 		if _, ok := set[filePath]; !ok {
 			return fmt.Errorf("%w: partition values supplied for path %q not present in AddDataFilesByPath", iceberg.ErrInvalidArgument, filePath)
