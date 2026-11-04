@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
@@ -922,4 +923,63 @@ func TestEqDeleteConflictNaNPartition(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, got, "partition %d must match", i)
 	}
+}
+
+func TestEqDeleteConflictDecimalPrecisionPreservesGrouping(t *testing.T) {
+	// DecimalLiteral.Type reports decimal(9, scale), even when the source
+	// column has higher precision. Grouping must use the actual source scale.
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(18, 2)},
+	)
+	meta := partitionedConflictMeta(t, schema, 1, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+
+	values := []iceberg.Decimal{
+		{Val: decimal128.FromI64(123), Scale: 2},
+		{Val: decimal128.FromI64(456), Scale: 2},
+		{Val: decimal128.FromI64(789), Scale: 2},
+	}
+	files := make([]iceberg.DataFile, len(values))
+	literals := make([]iceberg.Literal, len(values))
+	for i, value := range values {
+		files[i] = equalityDeleteTestFile(t, spec, fmt.Sprintf("decimal-%d.parquet", i),
+			map[int]any{fieldID: value})
+		literals[i] = iceberg.NewLiteral(value)
+	}
+
+	filter, err := eqDeletePartitionsToFilter(files, meta)
+	require.NoError(t, err)
+	want := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("amount"), literals)
+	require.True(t, filter.Equals(want), "decimal precision must not disable safe IN grouping")
+
+	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, true)
+	require.NoError(t, err)
+}
+
+func TestEqDeleteConflictCastValuePreservesEqualityPredicate(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
+	)
+	meta := partitionedConflictMeta(t, schema, 1, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+
+	files := []iceberg.DataFile{
+		equalityDeleteTestFile(t, spec, "float-1.parquet", map[int]any{fieldID: float64(1)}),
+		equalityDeleteTestFile(t, spec, "cast-nan.parquet", map[int]any{fieldID: "NaN"}),
+		equalityDeleteTestFile(t, spec, "float-2.parquet", map[int]any{fieldID: float64(2)}),
+	}
+
+	filter, err := eqDeletePartitionsToFilter(files, meta)
+	require.NoError(t, err)
+	want := iceberg.NewOr(
+		iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), []iceberg.Literal{
+			iceberg.Float64Literal(1), iceberg.Float64Literal(2),
+		}),
+		iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("value"), iceberg.StringLiteral("NaN")),
+	)
+	require.True(t, filter.Equals(want), "cast values must retain individual equality predicates")
+	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, true)
+	require.NoError(t, err)
 }

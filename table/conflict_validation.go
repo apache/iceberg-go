@@ -881,16 +881,22 @@ type equalityDeleteSourceFieldInfo struct {
 // NaNs are not equal to themselves as Go map keys, while the existing
 // equality evaluator compares two NaNs as equal. Binary sets use hash keys,
 // which can collide, so retain individual predicates for those values too.
-func equalityDeleteLiteralCanUseSet(lit iceberg.Literal) bool {
+// Keep literals that require a cast on the equality path.
+func equalityDeleteLiteralCanUseSet(lit iceberg.Literal, fieldType iceberg.Type) bool {
 	switch value := lit.(type) {
 	case iceberg.Float32Literal:
-		return !math.IsNaN(float64(value))
+		return !math.IsNaN(float64(value)) && lit.Type().Equals(fieldType)
 	case iceberg.Float64Literal:
-		return !math.IsNaN(float64(value))
+		return !math.IsNaN(float64(value)) && lit.Type().Equals(fieldType)
+	case iceberg.DecimalLiteral:
+		// DecimalLiteral.Type reports a placeholder precision of 9.
+		// Equal scales bind without conversion for any declared precision.
+		decimalType, ok := fieldType.(iceberg.DecimalType)
+		return ok && value.Scale == decimalType.Scale()
 	case iceberg.BoolLiteral, iceberg.Int32Literal, iceberg.Int64Literal,
 		iceberg.DateLiteral, iceberg.TimeLiteral, iceberg.TimestampLiteral,
-		iceberg.TimestampNsLiteral, iceberg.StringLiteral, iceberg.UUIDLiteral, iceberg.DecimalLiteral:
-		return true
+		iceberg.TimestampNsLiteral, iceberg.StringLiteral, iceberg.UUIDLiteral:
+		return lit.Type().Equals(fieldType)
 	default:
 		return false
 	}
@@ -948,7 +954,7 @@ func balancedConflictDisjunction(terms []iceberg.BooleanExpression) iceberg.Bool
 func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceberg.BooleanExpression, error) {
 	terms := make([]iceberg.BooleanExpression, 0, len(files))
 	specInfoByID := make(map[int]*equalityDeletePartitionSpecInfo)
-	identityGroups := make(map[equalityDeleteIdentityGroupKey]*equalityDeleteIdentityGroup)
+	var identityGroups map[equalityDeleteIdentityGroupKey]*equalityDeleteIdentityGroup
 	var groups []*equalityDeleteIdentityGroup
 	seen := make(map[string]struct{}, len(files))
 	var currentSchema *iceberg.Schema
@@ -1052,10 +1058,13 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 
 			// Keep values needing a cast on the equality path, including
 			// strings that can cast to NaN floats during binding.
-			if len(fieldIDs) == 1 && equalityDeleteLiteralCanUseSet(lit) && lit.Type().Equals(sourceField.fieldType) {
+			if len(fieldIDs) == 1 && equalityDeleteLiteralCanUseSet(lit, sourceField.fieldType) {
 				key := equalityDeleteIdentityGroupKey{specID: specID, fieldID: partFieldID}
 				group := identityGroups[key]
 				if group == nil {
+					if identityGroups == nil {
+						identityGroups = make(map[equalityDeleteIdentityGroupKey]*equalityDeleteIdentityGroup)
+					}
 					group = &equalityDeleteIdentityGroup{fieldName: sourceField.name, index: len(terms)}
 					identityGroups[key] = group
 					groups = append(groups, group)
@@ -1084,14 +1093,8 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 	}
 
 	for _, group := range groups {
-		if len(group.literals) == 1 {
-			terms[group.index] = iceberg.LiteralPredicate(iceberg.OpEQ,
-				iceberg.Reference(group.fieldName), group.literals[0])
-
-			continue
-		}
-
-		// Keep IN sets within the metrics evaluator's per-value limit.
+		// SetPredicate keeps singleton groups as ordinary equality predicates.
+		// Keep larger IN sets within the metrics evaluator's per-value limit.
 		for start := 0; start < len(group.literals); start += inPredicateLimit {
 			end := min(start+inPredicateLimit, len(group.literals))
 			term := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference(group.fieldName), group.literals[start:end])
