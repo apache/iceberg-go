@@ -154,7 +154,7 @@ func (t textOutput) Files(ctx context.Context, tbl *table.Table, history bool) {
 				snap.SnapshotID, snapshotSchemaText(snap.SchemaID), manifest),
 		})
 
-		afs, err := tbl.FS(context.TODO())
+		afs, err := tbl.FS(ctx)
 		if err != nil {
 			t.Error(err)
 			osExit(1)
