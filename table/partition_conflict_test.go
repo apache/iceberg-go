@@ -446,6 +446,73 @@ func TestRowDeltaValidate_NullIdentityPartitionRejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// NaN identity partition: Bind rejects x = NaN, so the filter uses IsNaN
+// ---------------------------------------------------------------------------
+
+func TestEqDeletePartitionsToFilterUsesIsNaNForNaNPartition(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
+	)
+	meta := partitionedConflictMeta(t, schema, 2, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+
+	filter, err := eqDeletePartitionsToFilter([]iceberg.DataFile{
+		equalityDeleteTestFile(t, spec, "eq-nan.parquet", map[int]any{fieldID: math.NaN()}),
+	}, meta)
+	require.NoError(t, err)
+
+	expected := iceberg.IsNaN(iceberg.Reference("score"))
+	assert.True(t, filter.Equals(expected), "got %s, want %s", filter, expected)
+	_, err = iceberg.BindExpr(schema, filter, true)
+	require.NoError(t, err)
+}
+
+func checkNaNPartitionEqDeleteConflict(t *testing.T, concurrentValue float64) error {
+	t.Helper()
+	dir := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
+	)
+
+	writerBaseID := int64(259)
+	baseMeta := partitionedConflictMeta(t, schema, 2, &writerBaseID)
+	concSnapshotID := int64(260)
+
+	spec := baseMeta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+
+	mf := writeTestManifest(t, dir, spec, schema, concSnapshotID,
+		map[int]any{fieldID: concurrentValue}, dir+"/score-data.parquet")
+	listPath := writeTestManifestList(t, dir, concSnapshotID, []iceberg.ManifestFile{mf})
+
+	ctx := buildPartitionedContext(t, baseMeta, listPath, writerBaseID, concSnapshotID)
+	require.Len(t, ctx.concurrent, 1)
+
+	eqDf, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentEqDeletes,
+		dir+"/nan-score-eq-del.parquet", iceberg.ParquetFile,
+		map[int]any{fieldID: math.NaN()}, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+
+	return validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
+}
+
+func TestRowDeltaValidate_NaNIdentityPartitionRejected(t *testing.T) {
+	err := checkNaNPartitionEqDeleteConflict(t, math.NaN())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
+
+func TestRowDeltaValidate_NaNIdentityPartitionDifferentAllowed(t *testing.T) {
+	require.NoError(t, checkNaNPartitionEqDeleteConflict(t, 1.5))
+}
+
+// ---------------------------------------------------------------------------
 // UUID partition column: same UUID rejected, different UUID allowed
 // ---------------------------------------------------------------------------
 
@@ -898,8 +965,8 @@ func TestEqDeleteConflictLargeSparseSetPreservesMetricsPruning(t *testing.T) {
 	}
 }
 
-// NaN equality must remain an equality predicate: Go map lookup cannot find
-// a NaN key, so placing it in an IN set can miss a conflicting partition.
+// A NaN partition must stay out of the IN set, because Go map lookup cannot
+// find a NaN key, and match through IsNaN, because Bind rejects x = NaN.
 func TestEqDeleteConflictNaNPartition(t *testing.T) {
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Float64})
 	meta := partitionedConflictMeta(t, schema, 1, nil)
@@ -977,9 +1044,9 @@ func TestEqDeleteConflictCastValuePreservesEqualityPredicate(t *testing.T) {
 		iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), []iceberg.Literal{
 			iceberg.Float64Literal(1), iceberg.Float64Literal(2),
 		}),
-		iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("value"), iceberg.StringLiteral("NaN")),
+		iceberg.IsNaN(iceberg.Reference("value")),
 	)
-	require.True(t, filter.Equals(want), "cast values must retain individual equality predicates")
+	require.True(t, filter.Equals(want), "got %s: cast values must stay out of the IN set, and a cast to NaN must use IsNaN", filter)
 	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, true)
 	require.NoError(t, err)
 }

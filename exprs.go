@@ -712,7 +712,8 @@ func (bp *boundUnaryPredicate[T]) String() string {
 // a single literal argument, such as LessThan or StartsWith.
 //
 // Panics if the operation provided is not a valid Literal operation,
-// if the term is nil or if the literal is nil.
+// if the term is nil or if the literal is nil. Binding the predicate fails
+// with ErrInvalidArgument for a NaN literal; use IsNaN or NotNaN instead.
 func LiteralPredicate(op Operation, t UnboundTerm, lit Literal) UnboundPredicate {
 	switch {
 	case op < OpLT || op > OpNotStartsWith:
@@ -727,6 +728,32 @@ func LiteralPredicate(op Operation, t UnboundTerm, lit Literal) UnboundPredicate
 	}
 
 	return &unboundLiteralPredicate{op: op, term: t, lit: lit}
+}
+
+// isNaNLiteral reports whether lit is a floating-point NaN.
+func isNaNLiteral(lit Literal) bool {
+	switch l := lit.(type) {
+	case Float32Literal:
+		return math.IsNaN(float64(l))
+	case Float64Literal:
+		return math.IsNaN(float64(l))
+	}
+
+	return false
+}
+
+// checkNotNaN rejects a NaN literal. x = NaN is never true under IEEE 754, so
+// NaN must be matched with IsNaN or NotNaN, as in Java. Bind checks the
+// literal both before and after converting it to the term's type: a NaN
+// converted to a decimal becomes zero, and the string "NaN" converted to a
+// float becomes NaN.
+func checkNotNaN(op Operation, term BoundTerm, lit Literal) error {
+	if isNaNLiteral(lit) {
+		return fmt.Errorf("%w: cannot bind %s on %q with a NaN literal, use IsNaN or NotNaN instead",
+			ErrInvalidArgument, op, term.Ref().Field().Name)
+	}
+
+	return nil
 }
 
 type unboundLiteralPredicate struct {
@@ -764,8 +791,14 @@ func (ul *unboundLiteralPredicate) Bind(schema *Schema, caseSensitive bool) (Boo
 			ErrType, bound.Type())
 	}
 
+	if err := checkNotNaN(ul.op, bound, ul.lit); err != nil {
+		return nil, err
+	}
 	lit, err := ul.lit.To(bound.Type())
 	if err != nil {
+		return nil, err
+	}
+	if err := checkNotNaN(ul.op, bound, lit); err != nil {
 		return nil, err
 	}
 
@@ -903,7 +936,8 @@ func (blp *boundLiteralPredicate[T]) AsUnbound(r Reference, l Literal) UnboundPr
 // of literals as the argument, like In or NotIn. Duplicate literals will be folded
 // into a set, only maintaining the unique literals.
 //
-// Will panic if op is not a valid Set operation
+// Will panic if op is not a valid Set operation. Binding the predicate fails
+// with ErrInvalidArgument if any literal is NaN; use IsNaN or NotNaN instead.
 func SetPredicate(op Operation, t UnboundTerm, lits []Literal) BooleanExpression {
 	if op < OpIn || op > OpNotIn {
 		panic(fmt.Errorf("%w: invalid operation for SetPredicate: %s",
@@ -983,8 +1017,14 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 
 	typedSet := make(literalSet, lits.Len())
 	for _, v := range lits.Members() {
+		if err := checkNotNaN(op, term, v); err != nil {
+			return nil, err
+		}
 		casted, err := v.To(boundType)
 		if err != nil {
+			return nil, err
+		}
+		if err := checkNotNaN(op, term, casted); err != nil {
 			return nil, err
 		}
 		switch casted.(type) {
