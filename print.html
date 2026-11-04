@@ -2666,6 +2666,12 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong><code>LocationProvider.NewDataLocation</code> takes the partition path.</strong> The method is now <code>NewDataLocation(dataFileName, partitionPath string)</code>, matching Iceberg Java and PyIceberg, so custom <code>LocationProvider</code> implementations must add the argument. Callers pass the partition path there, or <code>&quot;&quot;</code> for an unpartitioned file, instead of prefixing the file name.</p>
+</li>
+<li>
+<p><strong>Partitioned data files follow the table's location provider.</strong> With <code>write.object-storage.enabled=true</code> and the default <code>write.object-storage.partitioned-paths=true</code>, new partitioned files land under <code>data/&lt;hash&gt;/&lt;partition&gt;/</code> instead of <code>data/&lt;partition&gt;/&lt;hash&gt;/</code>, which can affect prefix-based lifecycle rules and bucket policies. <code>write.object-storage.partitioned-paths=false</code> and <code>write.data.path</code> now apply to partitioned writes. Partitioned paths also no longer percent-encode the table location: <code>s3://bucket/my table</code> stays literal instead of becoming <code>my%20table</code>, as for unpartitioned writes. Existing files stay where they are.</p>
+</li>
+<li>
 <p><strong>Catalog capabilities split into narrower interfaces.</strong> <code>catalog.Catalog</code> now embeds <code>TableCatalog</code> and <code>NamespaceCatalog</code> with unchanged table and namespace methods. <code>Name() string</code> is now required, breaking third-party catalogs and test fakes. <code>ViewCatalog</code> is optional (REST and Hive), while REST also implements <code>UpdatableViewCatalog</code> for <code>UpdateView</code>. Use <code>catalog.As[T](cat)</code> and the <code>Unwrap() Catalog</code> convention to discover optional capabilities through decorators. Future capabilities should use optional interfaces rather than extending <code>Catalog</code>.</p>
 </li>
 <li>
