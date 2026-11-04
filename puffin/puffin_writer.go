@@ -61,13 +61,17 @@ type Writer struct {
 }
 
 // BlobMetadataInput contains fields the caller provides when adding a blob.
-// Offset, Length, and CompressionCodec are set by the writer.
+// Offset and Length are computed by the writer. CompressionCodec selects the
+// blob's compression and is omitted from footer metadata when empty.
 type BlobMetadataInput struct {
 	Type           BlobType
 	SnapshotID     int64
 	SequenceNumber int64
 	Fields         []int32
 	Properties     map[string]string
+	// CompressionCodec selects CompressionCodecLZ4 or CompressionCodecZstd.
+	// An empty value writes raw bytes. Deletion vectors must not be compressed.
+	CompressionCodec string
 }
 
 // NewWriter creates a new Writer and writes the file header magic.
@@ -155,6 +159,10 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 	fields := slices.Clone(input.Fields)
 	properties := maps.Clone(input.Properties)
 
+	if input.Type == BlobTypeDeletionVector && input.CompressionCodec != "" {
+		return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 must not be compressed")
+	}
+
 	// Deletion vectors have special requirements per spec. Format matches
 	// the reader-side validateBlobs check so both sides surface the same
 	// "<type> requires X to be -1, got N" phrasing for log grep.
@@ -190,17 +198,28 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		}
 	}
 
+	// Validate metadata before compressing potentially large blobs. Encode before
+	// writing any bytes so compression failures cannot leave partial output.
+	encoded, err := compressBlob(input.CompressionCodec, data)
+	if err != nil {
+		return BlobMetadata{}, err
+	}
+
 	meta := BlobMetadata{
 		Type:           input.Type,
 		SnapshotID:     input.SnapshotID,
 		SequenceNumber: input.SequenceNumber,
 		Fields:         fields,
 		Offset:         w.offset,
-		Length:         int64(len(data)),
+		Length:         int64(len(encoded)),
 		Properties:     properties,
 	}
+	if input.CompressionCodec != "" {
+		codec := input.CompressionCodec
+		meta.CompressionCodec = &codec
+	}
 
-	if err := w.write(data); err != nil {
+	if err := w.write(encoded); err != nil {
 		return BlobMetadata{}, fmt.Errorf("puffin: write blob: %w", err)
 	}
 

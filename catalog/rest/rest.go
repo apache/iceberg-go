@@ -907,8 +907,9 @@ func toProps(o *options) iceberg.Properties {
 }
 
 type Catalog struct {
-	baseURI *url.URL
-	cl      *http.Client
+	ioRegistry *iceio.Registry
+	baseURI    *url.URL
+	cl         *http.Client
 	// closeSession releases transports owned by the catalog. Caller-provided
 	// transports are excluded when the session is constructed.
 	closeSession     func()
@@ -1073,6 +1074,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
+	r.ioRegistry = ops.ioRegistry
 	baseuri, err := url.Parse(uri)
 	if err != nil {
 		return err
@@ -1340,6 +1342,7 @@ func (r *Catalog) tableFromResponse(
 		refresher := &vendedCredentialRefresher{
 			mu:         semaphore.NewWeighted(1),
 			identifier: identifier,
+			ioRegistry: r.ioRegistry,
 			location:   loc,
 			props:      config,
 			vended:     vended,
@@ -1349,7 +1352,7 @@ func (r *Catalog) tableFromResponse(
 		}
 		fsF = refresher.loadFS
 	} else {
-		fsF = iceio.LoadFSFunc(config, loc)
+		fsF = loadRegistryFSFunc(r.ioRegistry, config, loc)
 	}
 
 	// Resolve the reporter from the client-supplied properties only (see the
