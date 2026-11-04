@@ -29,11 +29,13 @@ import (
 
 func newDynamicOverwriteTable(t *testing.T) (*table.Table, *concurrentTestCatalog) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}})
+
 	return newDynamicOverwriteTableWithSpec(t, spec)
 }
 
 func newDynamicOverwriteTableWithSpec(t *testing.T, spec iceberg.PartitionSpec) (*table.Table, *concurrentTestCatalog) {
 	t.Helper()
+
 	return newDynamicOverwriteTableWithFormat(t, spec, "2")
 }
 

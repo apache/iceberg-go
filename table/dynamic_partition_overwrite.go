@@ -344,6 +344,7 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	t.validators = append(t.validators, func(cc *conflictContext) error {
 		return validateDynamicOverwriteConflicts(cc, spec.ID(), keys)
 	})
+
 	return nil
 }
 

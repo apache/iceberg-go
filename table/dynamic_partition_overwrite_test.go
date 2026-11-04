@@ -232,11 +232,12 @@ func TestDynamicPartitionOverwriteRejectsUnsupportedLayouts(t *testing.T) {
 		})
 		require.NoError(t, txn.meta.AddPartitionSpec(&otherSpec, false))
 		require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+		updatesBefore := slices.Clone(txn.meta.updates)
 		file := newTestDataFile(t, spec, "file://wrong-spec.parquet", map[int]any{1000: int32(1)})
 		err := txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{file}, nil)
 		require.ErrorIs(t, err, ErrInvalidOperation)
 		require.ErrorContains(t, err, "current spec")
-		require.Empty(t, txn.meta.updates)
+		require.Equal(t, updatesBefore, txn.meta.updates)
 	})
 
 	t.Run("nil transaction", func(t *testing.T) {
