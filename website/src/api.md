@@ -504,15 +504,17 @@ if !report.Valid() {
 The report checks manifest versions, partition spec references, content types,
 manifest entry counts, duplicate manifest paths, and duplicate live content files
 across **all** manifests in a snapshot. It also checks that live deletion vectors
-have a target path and that no two distinct vectors target the same data file.
+have a target path, that their blob ranges fit within the recorded file size,
+and that no two distinct vectors target the same data file.
 Deleted entries do not count as live.
 A report is valid only when `Complete` is true and `Issues` is empty.
 This is a metadata-only audit: it does not check data-file contents or whether
 data-file objects still exist. The audit works with both v1 manifest lists and
 older v1 snapshots containing embedded `manifests` paths. For embedded
-manifests, the partition spec ID is checked when the optional header provides it,
-or inferred when the partition fields match exactly one historical spec.
-Otherwise the spec ID is left inconclusive rather than guessed.
+manifests, the partition spec ID is checked against table metadata when the
+optional header provides it, or inferred when the partition fields match exactly
+one historical spec. Missing, ambiguous, or mismatched partition specs are
+reported as issues rather than silently accepted.
 
 The file uniqueness and manifest requirements come from the
 [Iceberg spec](https://iceberg.apache.org/spec/#content-file-uniqueness)

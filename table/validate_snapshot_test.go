@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -639,6 +640,9 @@ func TestValidateSnapshotRejectsInvalidDeletionVectorBlobRanges(t *testing.T) {
 		{"negative offset", true, -1, true, 32, false},
 		{"zero size", true, 100, true, 0, false},
 		{"negative size", true, 100, true, -1, false},
+		{"range exceeds container", true, 1000, true, 32, false},
+		{"offset plus size overflows", true, math.MaxInt64 - 4, true, 16, false},
+		{"range ends at container end", true, 992, true, 32, true},
 		{"valid range", true, 100, true, 32, true},
 	}
 	for _, tc := range cases {

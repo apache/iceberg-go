@@ -239,11 +239,14 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 			validVectorRange := true
 			if IsDeletionVector(file) {
 				offset, length := file.ContentOffset(), file.ContentSizeInBytes()
-				if offset == nil || length == nil || *offset < 0 || *length <= 0 {
+				// Check the range against the recorded container length without
+				// adding offset and length, which could overflow int64.
+				if offset == nil || length == nil || *offset < 0 || *length <= 0 ||
+					file.FileSizeBytes() < 0 || *offset > file.FileSizeBytes()-*length {
 					validVectorRange = false
 					report.Issues = append(report.Issues, SnapshotValidationIssue{
 						Code: SnapshotIssueInvalidDeletionVectorRange, ManifestPath: path, FilePath: filePath,
-						Detail: "content_offset must be non-negative and content_size_in_bytes must be positive",
+						Detail: "deletion vector blob range must be within file_size_in_bytes",
 					})
 				} else {
 					key.offset, key.length = *offset, *length
