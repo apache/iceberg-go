@@ -170,7 +170,7 @@ func TestRenameBranchRejectsConcurrentDestinationCreation(t *testing.T) {
 	require.Len(t, cat.reqs, 3, "source and destination checks must both reach the catalog")
 	refs := maps.Collect(cat.metadata.Refs())
 	require.Contains(t, refs, "dev")
-	require.Equal(t, TagRef, refs["review"].SnapshotRefType)
+	require.Equal(t, TagRef, refs["review"].Type)
 }
 
 func setRenameBranchTestRef(t *testing.T, cat *renameBranchTestCatalog, name string, id int64, refType RefType) {

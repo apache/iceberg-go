@@ -59,8 +59,8 @@ func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error
 	if !sourceFound {
 		return nil, fmt.Errorf("%w: branch %q does not exist", iceberg.ErrInvalidArgument, from)
 	}
-	if source.SnapshotRefType != BranchRef {
-		return nil, fmt.Errorf("%w: ref %q is a %s, not a branch", iceberg.ErrInvalidArgument, from, source.SnapshotRefType)
+	if source.Type != BranchRef {
+		return nil, fmt.Errorf("%w: ref %q is a %s, not a branch", iceberg.ErrInvalidArgument, from, source.Type)
 	}
 	if destinationFound {
 		return nil, fmt.Errorf("%w: ref %q already exists", iceberg.ErrInvalidArgument, to)
