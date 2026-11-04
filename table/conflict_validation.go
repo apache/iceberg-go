@@ -892,6 +892,7 @@ func equalityDeleteLiteralCanUseSet(lit iceberg.Literal, fieldType iceberg.Type)
 		// DecimalLiteral.Type reports a placeholder precision of 9.
 		// Equal scales bind without conversion for any declared precision.
 		decimalType, ok := fieldType.(iceberg.DecimalType)
+
 		return ok && value.Scale == decimalType.Scale()
 	case iceberg.BoolLiteral, iceberg.Int32Literal, iceberg.Int64Literal,
 		iceberg.DateLiteral, iceberg.TimeLiteral, iceberg.TimestampLiteral,
