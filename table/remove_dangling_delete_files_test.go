@@ -92,4 +92,3 @@ func TestRemoveDanglingDeleteFilesUnpartitionedNoop(t *testing.T) {
 	require.Zero(t, count)
 	require.Equal(t, tbl.Metadata(), updated.Metadata())
 }
-

@@ -199,4 +199,3 @@ func TestRemoveDanglingDeleteFilesPrunesEqualityBounds(t *testing.T) {
 	require.Equal(t, 1, removed)
 	require.Empty(t, mustPlanDangling(t, updated))
 }
-
