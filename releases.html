@@ -376,6 +376,9 @@
 <p><code>maintenance.PurgeFiles</code> (previously <code>Table.PurgeFiles</code>) now calls <code>IO.Remove</code> concurrently, with up to 32 calls in flight, when the filesystem does not implement <code>BulkRemovableIO</code>. Custom IO implementations, including those registered with <code>io.Register</code>, must make <code>Remove</code> safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.</p>
 </li>
 <li>
+<p><strong>Snapshot summaries report deletion vectors separately.</strong> On v3 tables, DVs are counted under <code>added-dvs</code> and <code>removed-dvs</code> instead of <code>added-position-delete-files</code> and <code>removed-position-delete-files</code>. <code>added-files-size</code> and <code>removed-files-size</code> use each DV's <code>content_size_in_bytes</code> instead of its whole Puffin file, so they go down for commits with DVs. <code>total-files-size</code> is updated from these values. Partition summaries, commit reports and OTel metrics change the same way. Existing snapshots are not rewritten.</p>
+</li>
+<li>
 <p><strong>Partition and sort source accessors renamed.</strong> Replace <code>PartitionField.SourceID()</code> and <code>SortField.SourceID()</code> with <code>FirstSourceID()</code>. Their behavior and serialized fields are unchanged.</p>
 </li>
 <li>
