@@ -983,6 +983,12 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 	ref, ref2 := iceberg.Reference("a"), iceberg.Reference("b")
 	above, below := int64(math.MaxInt32)+1, int64(math.MinInt32)-1
 	above2, below2 := float64(math.MaxFloat32)+1e37, float64(-math.MaxFloat32)-1e37
+	boundFloat32 := func(pred iceberg.UnboundPredicate) iceberg.BooleanExpression {
+		bound, err := pred.Bind(sc, true)
+		require.NoError(t, err)
+
+		return bound
+	}
 
 	tests := []struct {
 		pred iceberg.UnboundPredicate
@@ -1005,14 +1011,19 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 		{iceberg.EqualTo(ref2, below2), iceberg.AlwaysFalse{}},
 		{iceberg.NotEqualTo(ref2, above2), iceberg.AlwaysTrue{}},
 		{iceberg.NotEqualTo(ref2, below2), iceberg.AlwaysTrue{}},
-		{iceberg.LessThan(ref2, above2), iceberg.AlwaysTrue{}},
-		{iceberg.LessThan(ref2, below2), iceberg.AlwaysFalse{}},
-		{iceberg.LessThanEqual(ref2, above2), iceberg.AlwaysTrue{}},
-		{iceberg.LessThanEqual(ref2, below2), iceberg.AlwaysFalse{}},
-		{iceberg.GreaterThan(ref2, above2), iceberg.AlwaysFalse{}},
-		{iceberg.GreaterThan(ref2, below2), iceberg.AlwaysTrue{}},
-		{iceberg.GreaterThanEqual(ref2, above2), iceberg.AlwaysFalse{}},
-		{iceberg.GreaterThanEqual(ref2, below2), iceberg.AlwaysTrue{}},
+		// a float comparison keeps NaN, the infinities and NULL, so it moves
+		// to the largest finite value instead of folding
+		{iceberg.LessThan(ref2, above2), boundFloat32(iceberg.LessThanEqual(ref2, float32(math.MaxFloat32)))},
+		{iceberg.LessThan(ref2, below2), boundFloat32(iceberg.LessThan(ref2, float32(-math.MaxFloat32)))},
+		{iceberg.LessThanEqual(ref2, above2), boundFloat32(iceberg.LessThanEqual(ref2, float32(math.MaxFloat32)))},
+		{iceberg.LessThanEqual(ref2, below2), boundFloat32(iceberg.LessThan(ref2, float32(-math.MaxFloat32)))},
+		{iceberg.GreaterThan(ref2, above2), boundFloat32(iceberg.GreaterThan(ref2, float32(math.MaxFloat32)))},
+		{iceberg.GreaterThan(ref2, below2), boundFloat32(iceberg.GreaterThanEqual(ref2, float32(-math.MaxFloat32)))},
+		{iceberg.GreaterThanEqual(ref2, above2), boundFloat32(iceberg.GreaterThan(ref2, float32(math.MaxFloat32)))},
+		{iceberg.GreaterThanEqual(ref2, below2), boundFloat32(iceberg.GreaterThanEqual(ref2, float32(-math.MaxFloat32)))},
+		// infinity is a float32 value, so it doesn't fold
+		{iceberg.LessThanEqual(ref2, math.Inf(1)), boundFloat32(iceberg.LessThanEqual(ref2, float32(math.Inf(1))))},
+		{iceberg.EqualTo(ref2, math.Inf(-1)), boundFloat32(iceberg.EqualTo(ref2, float32(math.Inf(-1))))},
 	}
 
 	for _, tt := range tests {
