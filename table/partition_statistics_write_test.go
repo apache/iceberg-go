@@ -260,6 +260,65 @@ func TestCollectPartitionStatisticsFromLiveManifests(t *testing.T) {
 	require.Equal(t, int32(1), rows[1].dataFileCount)
 }
 
+func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
+	decimalType := iceberg.MustDecimalTypeOf(10, 2)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{},
+	})
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "amount", Type: decimalType, Required: true,
+	})
+	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "amount", Type: decimalType},
+	}}
+	amount := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
+	const snapshotID = int64(7)
+	files := []iceberg.DataFile{
+		newTestDataFileWithCount(t, spec, "mem://stats/decimal-a.parquet", map[int]any{1000: amount}, 4),
+		newTestDataFileWithCount(t, spec, "mem://stats/decimal-b.parquet", map[int]any{1000: iceberg.DecimalLiteral(amount)}, 6),
+	}
+	entries := make([]iceberg.ManifestEntry, 0, len(files))
+	for _, df := range files {
+		entries = append(entries, iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(snapshotID), nil, nil, df))
+	}
+
+	const manifestPath = "mem://stats/decimal-manifest.avro"
+	var encoded bytes.Buffer
+	_, err := iceberg.WriteManifest(manifestPath, &encoded, 1, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	fs := iceio.NewMemFS()
+	require.NoError(t, fs.WriteFile(t.Context(), manifestPath, encoded.Bytes()))
+
+	snapshot := Snapshot{SnapshotID: snapshotID, ManifestLocations: []string{manifestPath}}
+	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, partitionType, []iceberg.PartitionSpec{spec})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, amount, rows[0].partition[1000])
+	require.Equal(t, int64(10), rows[0].dataRecordCount)
+	require.Equal(t, int32(2), rows[0].dataFileCount)
+	require.NoError(t, sortPartitionStatistics(rows, partitionType))
+
+	const statsPath = "mem://stats/decimal-stats.parquet"
+	_, err = writePartitionStatisticsParquet(t.Context(), fs, statsPath, partitionType, rows)
+	require.NoError(t, err)
+	stored, err := fs.Open(t.Context(), statsPath)
+	require.NoError(t, err)
+	content, err := io.ReadAll(stored)
+	require.NoError(t, err)
+	require.NoError(t, stored.Close())
+	reader, err := file.NewParquetReader(bytes.NewReader(content))
+	require.NoError(t, err)
+	defer reader.Close()
+	arrowReader, err := pqarrow.NewFileReader(reader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	result, err := arrowReader.ReadTable(t.Context())
+	require.NoError(t, err)
+	defer result.Release()
+	require.EqualValues(t, 1, result.NumRows())
+	partition := result.Column(0).Data().Chunk(0).(*array.Struct)
+	require.Equal(t, amount.Val, partition.Field(0).(*array.Decimal128).Value(0))
+}
+
 func TestTransactionPartitionStatisticsRegistration(t *testing.T) {
 	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, Type: BranchRef},

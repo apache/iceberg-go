@@ -254,18 +254,10 @@ func partitionStatisticsEmbeddedManifest(ctx context.Context, fs iceio.IO, manif
 		return nil, fmt.Errorf("%w: embedded manifest %q partition spec differs from table metadata",
 			iceberg.ErrInvalidArgument, manifest.FilePath())
 	}
-	descriptor := iceberg.NewManifestBuilder(1, manifest.FilePath(), manifest.Length(), id, manifest.SnapshotID()).
-		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).AddedRows(-1).ExistingRows(-1).DeletedRows(-1).Build()
-	if _, err := f.Seek(0, 0); err != nil {
-		return nil, err
-	}
-	reader, err := iceberg.NewManifestReader(descriptor, f)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-
-	return descriptor, nil
+	// Entries will open and validate the descriptor through ManifestFile.Entries.
+	// Constructing and closing another reader here only repeats that work.
+	return iceberg.NewManifestBuilder(1, manifest.FilePath(), manifest.Length(), id, manifest.SnapshotID()).
+		AddedFiles(-1).ExistingFiles(-1).DeletedFiles(-1).AddedRows(-1).ExistingRows(-1).DeletedRows(-1).Build(), nil
 }
 
 // collectPartitionStatistics reads only manifest metadata, not Parquet data.
@@ -349,6 +341,19 @@ func collectPartitionStatistics(
 			partition := inspectCoercePartition(values, partitionType)
 			for _, field := range partitionType.FieldList {
 				value := partition[field.ID]
+				// Manifest decoding uses DecimalLiteral, while callers can
+				// supply Decimal. Normalize before building aggregate keys
+				// so both representations count toward the same partition.
+				if literal, ok := value.(iceberg.DecimalLiteral); ok {
+					value = iceberg.Decimal(literal)
+					partition[field.ID] = value
+				}
+				if decimal, ok := value.(iceberg.Decimal); ok {
+					if typ, ok := field.Type.(iceberg.DecimalType); ok && decimal.Scale != typ.Scale() {
+						return nil, fmt.Errorf("%w: partition field %q has decimal scale %d, expected %d",
+							iceberg.ErrInvalidArgument, field.Name, decimal.Scale, typ.Scale())
+					}
+				}
 				if _, err := comparePartitionStatisticValues(value, value); err != nil {
 					return nil, fmt.Errorf("partition field %q: %w", field.Name, err)
 				}
