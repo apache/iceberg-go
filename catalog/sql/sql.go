@@ -1604,6 +1604,12 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		ioProps = make(iceberg.Properties)
 	}
 	maps.Copy(ioProps, cfg.Properties)
+
+	if version != nil && version.DefaultCatalog == "" {
+		version = version.Clone()
+		version.DefaultCatalog = c.name
+	}
+
 	createdView, err := view.CreateViewFromVersion(ctx, identifier, schema, version, loc, ioProps, cfg.Properties)
 	if err != nil {
 		return nil, err

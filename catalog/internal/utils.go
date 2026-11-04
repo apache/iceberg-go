@@ -281,7 +281,22 @@ func ValidateRequirements(ident table.Identifier, current table.Metadata, reqs [
 	return nil
 }
 
-func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
+// RejectUnlessConflict wraps non-conflict errors with table.ErrCommitRejected.
+// Use it only before the catalog has written anything.
+func RejectUnlessConflict(err error) error {
+	if err == nil || errors.Is(err, table.ErrCommitFailed) {
+		return err
+	}
+
+	return fmt.Errorf("%w: %w", table.ErrCommitRejected, err)
+}
+
+// UpdateAndStageTable applies updates to the current table without writing
+// anything. Every error it returns matches table.ErrCommitRejected unless it
+// matches table.ErrCommitFailed.
+func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (_ *table.StagedTable, err error) {
+	defer func() { err = RejectUnlessConflict(err) }()
+
 	var (
 		baseMeta        table.Metadata
 		currentMetadata table.Metadata
@@ -293,7 +308,6 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 		baseMeta = currentMetadata
 		metadataLoc = current.MetadataLocation()
 	} else {
-		var err error
 		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
 		if err != nil {
 			return nil, err

@@ -238,7 +238,7 @@ func (s *SQLIntegrationSuite) TestCreateView() {
 	// Create a view
 	viewSQL := fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table")
 
-	err = createTestView(s.cat, s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, view.Representation{SQL: viewSQL, Dialect: "spark"}, iceberg.Properties{"foobar": "baz"})
+	err = createTestView(s.ctx, s.cat, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, view.Representation{SQL: viewSQL, Dialect: "spark"}, iceberg.Properties{"foobar": "baz"})
 	s.Require().NoError(err)
 
 	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
