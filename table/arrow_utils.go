@@ -26,6 +26,7 @@ import (
 	"iter"
 	"log/slog"
 	"regexp"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1853,11 +1854,7 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (result map[
 	return result, nil
 }
 
-func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilder, filePaths []string, concurrency int, partitionValuesByPath ...map[string]map[int]any) (_ []iceberg.DataFile, err error) {
-	var suppliedByPath map[string]map[int]any
-	if len(partitionValuesByPath) > 0 {
-		suppliedByPath = partitionValuesByPath[0]
-	}
+func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilder, filePaths []string, concurrency int, partitionValuesByPath map[string]map[int]any) (_ []iceberg.DataFile, err error) {
 	partitionSpec, err := meta.CurrentSpec()
 	if err != nil || partitionSpec == nil {
 		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
@@ -1888,7 +1885,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			// Pass 0 so AddDataFilesByPath does not claim sort_order_id on files
 			// it did not write (#1184). Callers that know the file's
 			// sort layout use FileToDataFile with an explicit id.
-			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, 0, meta.props, suppliedByPath[filePath])
+			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, 0, meta.props, partitionValuesByPath[filePath])
 
 			return nil
 		})
@@ -1913,8 +1910,9 @@ type fileToDataFileConfig struct {
 // transforms such as bucket[N], which cannot be inferred from Parquet statistics.
 // For a spec containing a bucket transform, all non-void fields must be supplied.
 // Each supplied value must match the transform's result type. A nil value
-// explicitly represents a null partition. Callers must ensure that every row
-// in the file has the supplied partition value, as required by the Iceberg spec.
+// explicitly represents a null partition. Values for order-preserving
+// transforms are checked against Parquet bounds when available. Callers remain
+// responsible for ensuring that all rows agree with the partition values.
 func WithFilePartitionValues(values map[int]any) FileToDataFileOption {
 	partitionValues := cloneFilePartitionTuple(values)
 
@@ -2033,14 +2031,7 @@ func validateFilePartitionValues(schema *iceberg.Schema, spec iceberg.PartitionS
 			if err := validateFileBucketValue(field, value, transform.NumBuckets); err != nil {
 				return err
 			}
-		case *iceberg.BucketTransform:
-			if transform == nil {
-				return fmt.Errorf("%w: nil bucket transform for partition field %q", iceberg.ErrInvalidArgument, field.Name)
-			}
-			if err := validateFileBucketValue(field, value, transform.NumBuckets); err != nil {
-				return err
-			}
-		case iceberg.VoidTransform, *iceberg.VoidTransform:
+		case iceberg.VoidTransform:
 			if value != nil {
 				return fmt.Errorf("%w: void partition field %q (id %d) must be null",
 					iceberg.ErrInvalidArgument, field.Name, field.FieldID)
@@ -2095,11 +2086,7 @@ func FileToDataFileWithOptions(ctx context.Context, fileIO iceio.IO, filePath st
 	return fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, sortOrderID, props, cfg.partitionValues), nil
 }
 
-func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties, suppliedPartitionValues ...map[int]any) iceberg.DataFile {
-	var supplied map[int]any
-	if len(suppliedPartitionValues) > 0 {
-		supplied = suppliedPartitionValues[0]
-	}
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties, supplied map[int]any) iceberg.DataFile {
 	// Explicit partition tuples must not bypass the Iceberg requirement that
 	// writers reject unknown partition transforms.
 	if err := checkNoUnknownTransform(&currentSpec); err != nil {
@@ -2138,19 +2125,27 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	hasBucket := false
 	for _, field := range currentSpec.Fields() {
 		switch field.Transform.(type) {
-		case iceberg.BucketTransform, *iceberg.BucketTransform:
+		case iceberg.BucketTransform:
 			hasBucket = true
 		}
 	}
 	partitionValues := make(map[int]any, currentSpec.NumFields())
 	for _, field := range currentSpec.Fields() {
 		if value, ok := supplied[field.FieldID]; ok {
+			if field.Transform.PreservesOrder() {
+				// Keep the same lower/upper bound checks as the inference path.
+				inferred := statistics.PartitionValue(field, currentSchema)
+				if inferred != nil && !reflect.DeepEqual(value, inferred) {
+					panic(fmt.Errorf("%w: supplied partition value for field %q (id %d) does not match Parquet bounds: got %v, expected %v",
+						iceberg.ErrInvalidArgument, field.Name, field.FieldID, value, inferred))
+				}
+			}
 			partitionValues[field.FieldID] = value
 
 			continue
 		}
 		switch field.Transform.(type) {
-		case iceberg.VoidTransform, *iceberg.VoidTransform:
+		case iceberg.VoidTransform:
 			// Iceberg v1 uses void transforms to drop a partition field
 			// without changing its field ID or position.
 			partitionValues[field.FieldID] = nil

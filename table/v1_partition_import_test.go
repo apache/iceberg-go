@@ -204,10 +204,89 @@ func TestV1FileToDataFileExplicitPartitionValues(t *testing.T) {
 	require.Equal(t, int32(7), file.Partition()[1001])
 	require.Nil(t, file.Partition()[1002])
 
-	// An explicit null must not be replaced with a value from the footer.
-	file, err = convert(map[int]any{1000: bucketID, 1001: nil})
+	// A supplied value cannot override the footer for identity partitions.
+	_, err = convert(map[int]any{1000: bucketID, 1001: int32(99)})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = convert(map[int]any{1000: bucketID, 1001: nil})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}
+
+func TestV1FileToDataFileChecksSuppliedOrderPreservingBounds(t *testing.T) {
+	tbl, fs, path, _, _ := makeV1BucketImportFixture(t)
+	spec := iceberg.NewPartitionSpecID(1,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1001, Name: "id_truncated", Transform: iceberg.TruncateTransform{Width: 10}},
+	)
+	convert := func(values map[int]any) (iceberg.DataFile, error) {
+		return table.FileToDataFileWithOptions(t.Context(), fs, path, tbl.Metadata().CurrentSchema(), spec, 0, nil,
+			table.WithFilePartitionValues(values))
+	}
+
+	file, err := convert(map[int]any{1000: int32(7), 1001: int32(0)})
 	require.NoError(t, err)
-	require.Nil(t, file.Partition()[1001])
+	require.Equal(t, int32(7), file.Partition()[1000])
+	require.Equal(t, int32(0), file.Partition()[1001])
+
+	inferred, err := convert(nil)
+	require.NoError(t, err)
+	require.Equal(t, file.Partition(), inferred.Partition())
+
+	for _, tc := range []struct {
+		name   string
+		values map[int]any
+	}{
+		{"incorrect identity", map[int]any{1000: int32(99), 1001: int32(0)}},
+		{"incorrect truncate", map[int]any{1000: int32(7), 1001: int32(10)}},
+		{"null identity over non-null rows", map[int]any{1000: nil, 1001: int32(0)}},
+		{"null truncate over non-null rows", map[int]any{1000: int32(7), 1001: nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := convert(tc.values)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "does not match Parquet bounds")
+		})
+	}
+}
+
+func TestV1AddDataFilesByPathRejectsSuppliedIdentityMismatch(t *testing.T) {
+	_, fs, path, _, _ := makeV1BucketImportFixture(t)
+	dir := filepath.Dir(path)
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, dir, iceberg.Properties{
+		table.PropertyFormatVersion: "1",
+	})
+	require.NoError(t, err)
+	tbl := table.New(table.Identifier{"default", "identity_import"}, meta, filepath.Join(dir, "metadata", "00000.json"),
+		func(context.Context) (iceio.IO, error) { return fs, nil }, &mergeCatalog{meta: meta})
+
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{"incorrect identity", int32(99)},
+		{"null identity", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := tbl.NewTransaction()
+			err := tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false,
+				table.WithAddDataFilesByPathPartitionValues(map[string]map[int]any{
+					path: {1000: tc.value},
+				}))
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "does not match Parquet bounds")
+		})
+	}
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false,
+		table.WithAddDataFilesByPathPartitionValues(map[string]map[int]any{
+			path: {1000: int32(7)},
+		})))
 }
 
 func TestV1ImportPartitionOptionsSnapshotCallerValues(t *testing.T) {

@@ -31,9 +31,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Preserve compatibility for callers that store FileToDataFile as a function value.
-var _ func(context.Context, iceio.IO, string, *iceberg.Schema, iceberg.PartitionSpec, int, iceberg.Properties) (iceberg.DataFile, error) = table.FileToDataFile
-
 func TestFileToDataFile(t *testing.T) {
 	ctx := context.Background()
 	fs := iceio.LocalFS{}
