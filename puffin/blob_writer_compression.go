@@ -96,7 +96,7 @@ func sharedZstdBlobEncoder(singleSegment bool) (*zstd.Encoder, error) {
 			nil, append(options, zstd.WithSingleSegment(true))...,
 		)
 		if zstdBlobEncoderErr != nil {
-			zstdBlobEncoder.Close()
+			_ = zstdBlobEncoder.Close()
 		}
 	})
 	if zstdBlobEncoderErr != nil {
