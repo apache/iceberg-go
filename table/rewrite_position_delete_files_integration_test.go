@@ -287,7 +287,6 @@ func TestRewritePositionDeleteFilesPreservesCrossSpecPathScopedDeletes(t *testin
 	require.ElementsMatch(t, []int64{2}, scanIDs(t, result.Table))
 }
 
-
 func TestRewritePositionDeleteFilesStagesOnTargetBranch(t *testing.T) {
 	ctx := t.Context()
 	tbl, cat := newConcurrentRewriteTestTable(t)
