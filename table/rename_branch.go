@@ -35,6 +35,9 @@ func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error
 	if from == "" || to == "" {
 		return nil, fmt.Errorf("%w: branch names must not be empty", iceberg.ErrInvalidArgument)
 	}
+	if from == to {
+		return nil, fmt.Errorf("%w: source and destination branch names must differ", iceberg.ErrInvalidArgument)
+	}
 	if from == MainBranch || to == MainBranch {
 		return nil, fmt.Errorf("%w: cannot rename or replace the main branch", iceberg.ErrInvalidArgument)
 	}
