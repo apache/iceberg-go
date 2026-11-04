@@ -47,8 +47,7 @@ func (v View) History() []VersionLogEntry {
 // for a version that is missing from metadata.
 func (v View) VersionAsOf(timestampMs int64, inclusive bool) *Version {
 	history := v.metadata.VersionLog()
-	for i := len(history) - 1; i >= 0; i-- {
-		entry := history[i]
+	for _, entry := range slices.Backward(history) {
 		if (inclusive && entry.TimestampMS <= timestampMs) ||
 			(!inclusive && entry.TimestampMS < timestampMs) {
 			return v.VersionByID(entry.VersionID)
