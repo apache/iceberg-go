@@ -361,9 +361,9 @@ func sameCompactionMetadata(a, b table.FileScanTask) bool {
 		if len(a) != len(b) {
 			return false
 		}
-		// Scan planning commonly reuses the same immutable delete-file slice
-		// for every split of a physical file. Equal slice headers prove equal
-		// contents without walking and reflecting over every delete file.
+		// Scan planning commonly reuses immutable delete-file slices across
+		// splits. The same backing array and length prove identical elements,
+		// regardless of capacity, without a deep comparison.
 		if len(a) == 0 || &a[0] == &b[0] {
 			return true
 		}

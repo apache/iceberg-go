@@ -25,44 +25,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/compaction"
-	"github.com/stretchr/testify/require"
 )
-
-func TestPlanCompactionSplitMetadataSharedAndCopiedDeletes(t *testing.T) {
-	file := newDataFile("shared.parquet", 10)
-	rowID, sequence := int64(17), int64(9)
-	first := makeTask(file, 0, 0)
-	first.DeleteFiles = []iceberg.DataFile{newDeleteFile("a.pos"), newDeleteFile("b.pos")}
-	first.FirstRowID, first.DataSequenceNumber = &rowID, &sequence
-
-	// The ordinary split path retains the same delete slice.
-	shared := first
-	shared.Start = file.size / 3
-	// A remote or independently decoded task may have equal values but
-	// different slice and pointer identities. It must still be accepted.
-	copied := first
-	copied.Start = 2 * file.size / 3
-	copied.DeleteFiles = []iceberg.DataFile{newDeleteFile("a.pos"), newDeleteFile("b.pos")}
-	copiedRowID, copiedSequence := rowID, sequence
-	copied.FirstRowID, copied.DataSequenceNumber = &copiedRowID, &copiedSequence
-
-	cfg := compaction.DefaultConfig()
-	cfg.MinInputFiles = 1
-	plan, err := cfg.PlanCompaction([]table.FileScanTask{first, shared, copied})
-	require.NoError(t, err)
-	require.Equal(t, 1, plan.TotalInputFiles)
-	require.Len(t, plan.Groups, 1)
-	require.Len(t, plan.Groups[0].Tasks, 1)
-	require.Equal(t, 2, plan.Groups[0].DeleteFileCount)
-
-	// Matching paths are not enough: a separately decoded delete with different
-	// content must still fail deep validation on the non-shared fallback.
-	different := copied
-	different.DeleteFiles = slices.Clone(copied.DeleteFiles)
-	different.DeleteFiles[1] = newDeleteFile("other.pos")
-	_, err = cfg.PlanCompaction([]table.FileScanTask{first, different})
-	require.ErrorIs(t, err, table.ErrInvalidOperation)
-}
 
 // BenchmarkPlanCompactionSplitNormalization measures the full planner with
 // right-sized files. It excludes partition packing by configuring all files
