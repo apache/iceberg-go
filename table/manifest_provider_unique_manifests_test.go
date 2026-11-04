@@ -49,7 +49,7 @@ func TestManifestProviderUniqueManifestsPreservesOrderAndDeduplicates(t *testing
 		{SnapshotID: 2, ManifestList: secondList},
 	}
 	var paths []string
-	for manifest, err := range provider.UniqueManifests(t.Context(), snapshots) {
+	for manifest, err := range provider.uniqueManifests(t.Context(), snapshots) {
 		require.NoError(t, err)
 		paths = append(paths, manifest.FilePath())
 	}
@@ -57,7 +57,7 @@ func TestManifestProviderUniqueManifestsPreservesOrderAndDeduplicates(t *testing
 }
 
 // Legacy v1 snapshots can embed paths rather than referencing a manifest list.
-// UniqueManifests must preserve first-seen order across both representations.
+// uniqueManifests must preserve first-seen order across both representations.
 func TestManifestProviderUniqueManifestsV1EmbeddedAndListed(t *testing.T) {
 	fs := iceio.NewMemFS()
 	paths := []string{
@@ -83,7 +83,7 @@ func TestManifestProviderUniqueManifestsV1EmbeddedAndListed(t *testing.T) {
 	provider := ManifestProvider{cache: newSnapshotManifestCache(), fsF: testFSF(fs)}
 	for run := range 2 {
 		var got []string
-		for manifest, err := range provider.UniqueManifests(t.Context(), snapshots) {
+		for manifest, err := range provider.uniqueManifests(t.Context(), snapshots) {
 			require.NoError(t, err)
 			got = append(got, manifest.FilePath())
 			require.Equal(t, 1, manifest.Version())
@@ -98,7 +98,7 @@ func TestManifestProviderUniqueManifestsCancelledBeforeRead(t *testing.T) {
 	cancel()
 
 	count := 0
-	for manifest, err := range provider.UniqueManifests(ctx, []Snapshot{{SnapshotID: 1}}) {
+	for manifest, err := range provider.uniqueManifests(ctx, []Snapshot{{SnapshotID: 1}}) {
 		require.Nil(t, manifest)
 		require.ErrorIs(t, err, context.Canceled)
 		count++
@@ -191,7 +191,7 @@ func TestManifestProviderUniqueManifestsMoreThanPrefetchWindow(t *testing.T) {
 	provider := ManifestProvider{cache: newSnapshotManifestCache(), fsF: testFSF(fs)}
 	for run := range 2 {
 		var got []string
-		for manifest, err := range provider.UniqueManifests(t.Context(), snapshots) {
+		for manifest, err := range provider.uniqueManifests(t.Context(), snapshots) {
 			require.NoError(t, err)
 			got = append(got, manifest.FilePath())
 		}
@@ -206,7 +206,7 @@ func TestManifestProviderUniqueManifestsReportsMissingListOnce(t *testing.T) {
 		{SnapshotID: 2, ManifestList: "mem://provider/also-missing.avro"},
 	}
 	calls := 0
-	for manifest, err := range provider.UniqueManifests(t.Context(), snapshots) {
+	for manifest, err := range provider.uniqueManifests(t.Context(), snapshots) {
 		require.Nil(t, manifest)
 		require.Error(t, err)
 		require.True(t, strings.Contains(err.Error(), "snapshot 1"), "unexpected error: %v", err)

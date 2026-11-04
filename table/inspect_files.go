@@ -168,7 +168,7 @@ func (i InspectTable) allManifestEntryReader(
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
-		provider.UniqueManifests(ctx, snapshots)), nil
+		provider.uniqueManifests(ctx, snapshots)), nil
 }
 
 func (i InspectTable) manifestEntryReaderFromManifestSource(
