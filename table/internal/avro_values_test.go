@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,6 +66,13 @@ func TestAvroUUIDValues(t *testing.T) {
 	second := [16]byte{15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0}
 	path := writeAvroOCF(t, schema, map[string]any{"value": first}, map[string]any{"value": nil}, map[string]any{"value": second})
 	reader := openAvroFile(t, path, 3)
+	arrowSchema, err := reader.Schema()
+	require.NoError(t, err)
+	iceSchema, err := table.ArrowSchemaToIceberg(arrowSchema, false, nil)
+	require.NoError(t, err)
+	field, found := iceSchema.FindFieldByID(1)
+	require.True(t, found)
+	require.Equal(t, iceberg.PrimitiveTypes.UUID, field.Type)
 	records, err := reader.GetRecords(context.Background(), nil, nil)
 	require.NoError(t, err)
 	defer records.Release()

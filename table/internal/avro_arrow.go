@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	avro "github.com/twmb/avro"
 )
@@ -210,6 +211,13 @@ func avroArrowType(node avro.SchemaNode, used map[int]struct{}) (arrow.DataType,
 	case "enum", "string":
 		return arrow.BinaryTypes.String, nullable, nil
 	case "bytes", "fixed":
+		if node.LogicalType == "uuid" {
+			if node.Type != "fixed" || node.Size != 16 {
+				return nil, false, fmt.Errorf("%w: Avro UUID must use fixed(16)", iceberg.ErrInvalidSchema)
+			}
+
+			return extensions.NewUUIDType(), nullable, nil
+		}
 		if node.LogicalType == "decimal" {
 			if node.Precision < 1 || node.Precision > 38 || node.Scale < 0 || node.Scale > node.Precision {
 				return nil, false, fmt.Errorf("%w: invalid or unsupported Avro decimal(%d,%d)", iceberg.ErrNotImplemented, node.Precision, node.Scale)
@@ -269,6 +277,15 @@ func appendAvroValue(b array.Builder, value any) error {
 	case *array.BinaryBuilder:
 		if v, ok := value.([]byte); ok {
 			builder.Append(v)
+			return nil
+		}
+	case *extensions.UUIDBuilder:
+		v, ok := avroFixedBytes(value)
+		if ok && len(v) == 16 {
+			var id [16]byte
+			copy(id[:], v)
+			builder.AppendBytes(id)
+
 			return nil
 		}
 	case *array.FixedSizeBinaryBuilder:
