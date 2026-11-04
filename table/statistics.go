@@ -37,6 +37,16 @@ type StatisticsFile struct {
 	BlobMetadata          []BlobMetadata `json:"blob-metadata"`
 }
 
+// MarshalJSON writes nil BlobMetadata as [], since the spec requires the field.
+func (s StatisticsFile) MarshalJSON() ([]byte, error) {
+	type statisticsFile StatisticsFile
+	if s.BlobMetadata == nil {
+		s.BlobMetadata = []BlobMetadata{}
+	}
+
+	return json.Marshal(statisticsFile(s))
+}
+
 // BlobMetadata is the metadata of a statistics or indices blob.
 // Its type uses the same Puffin blob identifiers as the file reader and writer.
 type BlobMetadata struct {
