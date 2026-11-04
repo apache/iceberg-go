@@ -336,7 +336,7 @@ func TestCherryPickSnapshotFailedReplayDoesNotPinTransaction(t *testing.T) {
 	err = stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
 	require.ErrorContains(t, err, "already referenced")
 	require.NoError(t, stale.SetProperties(iceberg.Properties{"cherry-pick-failed-no-pin": "yes"}))
-	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+	appendRowsOnRef(t, tbl, table.MainBranch, 3)
 	result, err := stale.Commit(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "yes", result.Metadata().Properties()["cherry-pick-failed-no-pin"])
@@ -435,7 +435,7 @@ func TestCherryPickSnapshotRejectsWAPIDOnAncestor(t *testing.T) {
 
 func TestCherryPickSnapshotMergeAppendUsesOnlySourceAdditions(t *testing.T) {
 	tbl := newBranchPlanningTable(t, iceberg.Properties{
-		table.ManifestMergeEnabledKey: "true",
+		table.ManifestMergeEnabledKey:  "true",
 		table.ManifestMinMergeCountKey: "2",
 	})
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1)
