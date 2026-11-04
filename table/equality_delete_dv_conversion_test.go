@@ -243,6 +243,34 @@ func TestConvertEqualityDeletesPreservesSameSnapshotSequenceSemantics(t *testing
 	require.Equal(t, []int64{7}, idsInTable(t, result.Table))
 }
 
+// Replacing equality deletes with a new DV must not change the applicability
+// of older delete files to newer data files that contain the same key.
+func TestConvertEqualityDeletesPreservesMultipleDeleteSequences(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+		`[{"id":1,"data":"old"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
+	tbl = appendEqualityConversionRows(t, tbl,
+		`[{"id":1,"data":"new"},{"id":4,"data":"d"}]`)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+	require.Equal(t, []int64{1, 3, 4}, idsInTable(t, tbl))
+
+	result, err := tbl.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, result.ConvertedEqualityDeleteFiles)
+	require.Equal(t, []int64{1, 3, 4}, idsInTable(t, result.Table),
+		"an older equality delete must not delete a newer row after conversion")
+	require.Zero(t, liveDeleteFileCount(t, result.Table, iceberg.EntryContentEqDeletes))
+
+	// Re-running the maintenance action must not create another snapshot.
+	convertedSnapshotID := result.Table.CurrentSnapshot().SnapshotID
+	again, err := result.Table.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Zero(t, again.ConvertedEqualityDeleteFiles)
+	require.Zero(t, again.AddedDeletionVectors)
+	require.Equal(t, convertedSnapshotID, again.Table.CurrentSnapshot().SnapshotID)
+}
+
 func TestConvertEqualityDeletesRequiresV3(t *testing.T) {
 	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "2"),
 		`[{"id":1,"data":"a"}]`)
