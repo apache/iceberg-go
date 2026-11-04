@@ -278,16 +278,19 @@ func appendAvroValue(b array.Builder, value any) error {
 	case *array.Float64Builder:
 		if v, ok := value.(float64); ok {
 			builder.Append(v)
+
 			return nil
 		}
 	case *array.StringBuilder:
 		if v, ok := value.(string); ok {
 			builder.Append(v)
+
 			return nil
 		}
 	case *array.BinaryBuilder:
 		if v, ok := value.([]byte); ok {
 			builder.Append(v)
+
 			return nil
 		}
 	case *extensions.UUIDBuilder:
@@ -303,6 +306,7 @@ func appendAvroValue(b array.Builder, value any) error {
 		v, ok := avroFixedBytes(value)
 		if ok && len(v) == builder.Type().(*arrow.FixedSizeBinaryType).ByteWidth {
 			builder.Append(v)
+
 			return nil
 		}
 	case *array.Decimal128Builder:
@@ -313,9 +317,11 @@ func appendAvroValue(b array.Builder, value any) error {
 				n := scaled.Num()
 				if n.BitLen() <= 127 && len(strings.TrimPrefix(n.String(), "-")) <= int(typ.Precision) {
 					builder.Append(decimal128.FromBigInt(n))
+
 					return nil
 				}
 			}
+
 			return fmt.Errorf("%w: Avro decimal exceeds declared precision or scale", iceberg.ErrInvalidSchema)
 		}
 	case *array.TimestampBuilder:
@@ -323,6 +329,7 @@ func appendAvroValue(b array.Builder, value any) error {
 		switch v := value.(type) {
 		case int64:
 			builder.Append(arrow.Timestamp(v))
+
 			return nil
 		case time.Time:
 			if typ.Unit == arrow.Nanosecond {
@@ -330,33 +337,40 @@ func appendAvroValue(b array.Builder, value any) error {
 			} else {
 				builder.Append(arrow.Timestamp(v.UnixMicro()))
 			}
+
 			return nil
 		}
 	case *array.Date32Builder:
 		switch v := value.(type) {
 		case int32:
 			builder.Append(arrow.Date32(v))
+
 			return nil
 		case time.Time:
 			builder.Append(arrow.Date32(v.Unix() / 86400))
+
 			return nil
 		}
 	case *array.Time32Builder:
 		switch v := value.(type) {
 		case int32:
 			builder.Append(arrow.Time32(v))
+
 			return nil
 		case time.Duration:
 			builder.Append(arrow.Time32(v / time.Millisecond))
+
 			return nil
 		}
 	case *array.Time64Builder:
 		switch v := value.(type) {
 		case int64:
 			builder.Append(arrow.Time64(v))
+
 			return nil
 		case time.Duration:
 			builder.Append(arrow.Time64(v / time.Microsecond))
+
 			return nil
 		}
 	case *array.StructBuilder:
@@ -375,6 +389,7 @@ func appendAvroValue(b array.Builder, value any) error {
 				return fmt.Errorf("struct field %q: %w", field.Name, err)
 			}
 		}
+
 		return nil
 	case *array.ListBuilder:
 		values, ok := value.([]any)
@@ -391,6 +406,7 @@ func appendAvroValue(b array.Builder, value any) error {
 				return err
 			}
 		}
+
 		return nil
 	case *array.MapBuilder:
 		builder.Append(true)
@@ -407,6 +423,7 @@ func appendAvroValue(b array.Builder, value any) error {
 					return err
 				}
 			}
+
 			return nil
 		case []any:
 			for _, item := range values {
@@ -424,6 +441,7 @@ func appendAvroValue(b array.Builder, value any) error {
 					return err
 				}
 			}
+
 			return nil
 		}
 	}
@@ -443,5 +461,6 @@ func avroFixedBytes(value any) ([]byte, bool) {
 	for i := range b {
 		b[i] = byte(v.Index(i).Uint())
 	}
+
 	return b, true
 }
