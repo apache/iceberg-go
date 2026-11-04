@@ -595,6 +595,37 @@ err := txn.ExpireSnapshots(/* options */)
 err = txn.RollbackToSnapshot(targetSnapshotID)
 </code></pre>
 <p>Tune retention with the <code>history.expire.min-snapshots-to-keep</code>, <code>history.expire.max-snapshot-age-ms</code>, and <code>history.expire.max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
+<h3 id="snapshot-integrity-audit-v1-and-later"><a class="header" href="#snapshot-integrity-audit-v1-and-later">Snapshot integrity audit (v1 and later)</a></h3>
+<p>Use <code>ValidateSnapshot</code> to inspect a snapshot's manifest list and entries without
+changing table data. This is especially useful for checking imported v1 tables
+before allowing them into production.</p>
+<pre><code class="language-go">report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+if err != nil {
+    return err // I/O failed or the scan was canceled; report may be incomplete.
+}
+if !report.Valid() {
+    for _, issue := range report.Issues {
+        fmt.Printf(&quot;%s: %s (%s)\n&quot;, issue.Code, issue.FilePath, issue.ManifestPath)
+    }
+}
+</code></pre>
+<p>The report checks manifest versions, partition spec references, content types,
+manifest entry counts, duplicate manifest paths, and duplicate live content files
+across <strong>all</strong> manifests in a snapshot. It also checks that live deletion vectors
+have a target path, that their blob ranges fit within the recorded file size,
+and that no two distinct vectors target the same data file.
+Deleted entries do not count as live.
+A report is valid only when <code>Complete</code> is true and <code>Issues</code> is empty.
+This is a metadata-only audit: it does not check data-file contents or whether
+data-file objects still exist. The audit works with both v1 manifest lists and
+older v1 snapshots containing embedded <code>manifests</code> paths. For embedded
+manifests, the partition spec ID is checked against table metadata when the
+optional header provides it, or inferred when the partition fields match exactly
+one historical spec. Missing, ambiguous, or mismatched partition specs are
+reported as issues rather than silently accepted.</p>
+<p>The file uniqueness and manifest requirements come from the
+<a href="https://iceberg.apache.org/spec/#content-file-uniqueness">Iceberg spec</a>
+and <a href="https://iceberg.apache.org/spec/#manifest-lists">manifest list spec</a>.</p>
 <h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
