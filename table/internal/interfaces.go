@@ -100,8 +100,7 @@ func GetFileFormat(format iceberg.FileFormat) FileFormat {
 	switch format {
 	case iceberg.ParquetFile:
 		return parquetFormat{}
-	case iceberg.OrcFile:
-		return orcFormat{}
+	// ORC stays off the table write path until a reader can scan its files.
 	default:
 		return nil
 	}

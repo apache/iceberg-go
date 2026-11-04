@@ -6,11 +6,15 @@
 // "License"); you may not use this file except in compliance
 // with the License.  You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package internal
 
 import (
@@ -32,9 +36,13 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 )
 
-// orcFormat implements an initial, uncompressed single-stripe ORC writer.
-// Uncompressed ORC output supports primitive and nested columns, timestamps,
-// and Iceberg data, positional delete, and equality delete file content.
+// orcFormat implements a standalone ORC writer for primitive and nested data,
+// position-delete, and equality-delete files. It is not selectable through the
+// table write path until iceberg-go has an ORC reader.
+//
+// The encoder holds an entire uncompressed stripe in memory and assembles the
+// whole file on Close, potentially using multiple times the file size in RAM.
+// Compression, including write.orc.compression-codec, is not supported.
 type orcFormat struct{}
 
 type orcWriteSummary struct {
@@ -105,6 +113,8 @@ type orcColumn struct {
 	secondaryBytes int64
 	nulls          int64
 	encodedBytes   int64
+	bounds         StatsAgg
+	nanCount       int64
 }
 
 func (c *orcColumn) addInteger(value uint64) {
@@ -406,6 +416,21 @@ func (orcFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partit
 		return nil, fmt.Errorf("%w: missing ORC file IO", iceberg.ErrInvalidArgument)
 	}
 
+	// ORC list/map children are not eligible for Iceberg file-level bounds.
+	var initBounds func(int, bool)
+	initBounds = func(id int, repeated bool) {
+		c := &columns[id]
+		if !repeated {
+			c.bounds = newORCBounds(c.field, info.StatsCols)
+		}
+		for _, child := range c.children {
+			initBounds(child, repeated || c.kind == 10 || c.kind == 11)
+		}
+	}
+	for _, id := range rootIDs {
+		initBounds(id, false)
+	}
+
 	return &orcFileWriter{
 		ctx: ctx, fs: fs, info: info, columns: columns, rootIDs: rootIDs,
 		schema: schema, partitionValues: partitionValues,
@@ -618,10 +643,16 @@ func (w *orcFileWriter) appendValue(id int, values arrow.Array, row int) error {
 		}
 		c.addSecondary(orcTimestampNanos(uint64(fraction)))
 	case *array.Float32:
+		if math.IsNaN(float64(a.Value(row))) {
+			c.nanCount++
+		}
 		var b [4]byte
 		binary.LittleEndian.PutUint32(b[:], math.Float32bits(a.Value(row)))
 		c.data.Write(b[:])
 	case *array.Float64:
+		if math.IsNaN(a.Value(row)) {
+			c.nanCount++
+		}
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], math.Float64bits(a.Value(row)))
 		c.data.Write(b[:])
@@ -644,6 +675,8 @@ func (w *orcFileWriter) appendValue(id int, values arrow.Array, row int) error {
 	default:
 		return fmt.Errorf("%w: unsupported Arrow ORC input %T", iceberg.ErrNotImplemented, values)
 	}
+
+	c.trackBounds(values, row)
 
 	return nil
 }
@@ -710,17 +743,32 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 	nulls := make(map[int]int64, len(w.columns))
 	values := make(map[int]int64, len(w.columns))
 	colSizes := make(map[int]int64, len(w.columns))
+	nanCounts := make(map[int]int64)
+	bounds := make(map[int]StatsAgg)
 	for i, c := range w.columns {
 		if !include[i] {
 			continue
 		}
+		if w.info.StatsCols != nil {
+			plan, ok := w.info.StatsCols[c.field.ID]
+			if !ok || plan.Mode.Typ == MetricModeNone {
+				continue
+			}
+		}
 		values[c.field.ID] = w.rows
 		nulls[c.field.ID] = w.rows - int64(len(c.present)) + c.nulls
 		colSizes[c.field.ID] = c.encodedBytes
+		if c.kind == 5 || c.kind == 6 {
+			nanCounts[c.field.ID] = c.nanCount
+		}
+		if c.bounds != nil {
+			bounds[c.field.ID] = c.bounds
+		}
 	}
 	stats := &DataFileStatistics{
 		RecordCount: w.rows, ColSizes: colSizes, NullValueCounts: nulls,
-		ValueCounts: values, SplitOffsets: []int64{3},
+		ValueCounts: values, NanValueCounts: nanCounts, ColAggs: bounds,
+		SplitOffsets: []int64{3},
 		EqualityFieldIDs: append([]int(nil), w.info.EqualityFieldIDs...),
 	}
 
@@ -733,13 +781,11 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 		path := w.firstPath
 		// File-scoped position deletes must include exact, untruncated path
 		// bounds to match the referenced_data_file metadata.
-		stats.ColAggs = map[int]StatsAgg{
-			iceberg.DeleteFilePathFieldID: &statsAggregator[string]{
+		stats.ColAggs[iceberg.DeleteFilePathFieldID] = &statsAggregator[string]{
 				primitiveType: iceberg.StringType{},
 				curMin:        iceberg.StringLiteral(path),
 				curMax:        iceberg.StringLiteral(path),
-			},
-		}
+			}
 		opts.ReferencedDataFile = &path
 	}
 

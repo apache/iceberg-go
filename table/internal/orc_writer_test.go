@@ -6,11 +6,15 @@
 // "License"); you may not use this file except in compliance
 // with the License.  You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package internal
 
 import (
@@ -108,6 +112,20 @@ func TestORCWriterWritesIcebergIDsAndNullableStreams(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, iceberg.OrcFile, dataFile.FileFormat())
 	require.Equal(t, int64(3), dataFile.Count())
+	for _, bound := range []struct {
+		id         int
+		lower, upper iceberg.Literal
+	}{
+		{8, iceberg.NewLiteral(int32(4)), iceberg.NewLiteral(int32(9))},
+		{21, iceberg.NewLiteral("a"), iceberg.NewLiteral("long")},
+	} {
+		lower, err := bound.lower.MarshalBinary()
+		require.NoError(t, err)
+		upper, err := bound.upper.MarshalBinary()
+		require.NoError(t, err)
+		require.Equal(t, lower, dataFile.LowerBoundValues()[bound.id])
+		require.Equal(t, upper, dataFile.UpperBoundValues()[bound.id])
+	}
 	require.Equal(t, int64(1), dataFile.NullValueCounts()[21])
 	require.Equal(t, []int64{3}, dataFile.SplitOffsets())
 	require.Greater(t, dataFile.ColumnSizes()[8], int64(0))
@@ -672,4 +690,46 @@ func TestORCWriterRejectsNilBatches(t *testing.T) {
 	err = writer.Write(nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorIs(t, writer.failed, iceberg.ErrInvalidArgument)
+}
+
+func TestORCNotSelectableForTableWritesWithoutReader(t *testing.T) {
+	require.Nil(t, GetFileFormat(iceberg.OrcFile))
+	rdr, err := FormatFromFileName("data.orc").Open(t.Context(), nil, "data.orc")
+	require.Nil(t, rdr)
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+}
+
+func TestORCBoundsRespectMetricsPlan(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int32Type{}},
+		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.StringType{}},
+	)
+	as := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "value", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, as)
+	defer b.Release()
+	b.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 3}, nil)
+	b.Field(1).(*array.StringBuilder).AppendValues([]string{"abc", "adb"}, nil)
+	rec := b.NewRecordBatch()
+	defer rec.Release()
+	w, err := (orcFormat{}).NewFileWriter(t.Context(), iceio.LocalFS{}, nil, WriteFileInfo{
+		FileSchema: sc, Spec: *iceberg.UnpartitionedSpec,
+		FileName: filepath.Join(t.TempDir(), "stats.orc"),
+		Content: iceberg.EntryContentData,
+		StatsCols: map[int]StatisticsCollector{
+			1: {Mode: MetricsMode{Typ: MetricModeCounts}},
+			2: {Mode: MetricsMode{Typ: MetricModeTruncate, Len: 2}},
+		},
+	}, as)
+	require.NoError(t, err)
+	require.NoError(t, w.Write(rec))
+	df, err := w.Close()
+	require.NoError(t, err)
+	require.NotContains(t, df.LowerBoundValues(), 1)
+	require.NotContains(t, df.UpperBoundValues(), 1)
+	require.Equal(t, int64(2), df.ValueCounts()[1])
+	require.Equal(t, []byte("ab"), df.LowerBoundValues()[2])
+	require.Equal(t, []byte("ae"), df.UpperBoundValues()[2])
 }
