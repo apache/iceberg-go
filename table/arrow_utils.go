@@ -601,10 +601,11 @@ func ensureSmallArrowTypes(dt arrow.DataType) (arrow.DataType, error) {
 }
 
 type convertToArrow struct {
-	metadata        map[string]string
-	includeFieldIDs bool
-	useLargeTypes   bool
-	tableProperties iceberg.Properties
+	metadata           map[string]string
+	includeFieldIDs    bool
+	useLargeTypes      bool
+	tableProperties    iceberg.Properties
+	dictionaryFieldIDs set[int]
 }
 
 func (c convertToArrow) Schema(_ *iceberg.Schema, result arrow.Field) arrow.Field {
@@ -632,8 +633,21 @@ func (c convertToArrow) Field(field iceberg.NestedField, result arrow.Field) arr
 	}
 
 	result.Name, result.Nullable = field.Name, !field.Required
+	if _, ok := c.dictionaryFieldIDs[field.ID]; ok {
+		result.Type = dictionaryArrowType(field.Type)
+	}
 
 	return result
+}
+
+// dictionaryArrowType requires t to be an Iceberg string or binary type.
+func dictionaryArrowType(t iceberg.Type) *arrow.DictionaryType {
+	valueType := arrow.BinaryTypes.String
+	if _, ok := t.(iceberg.BinaryType); ok {
+		valueType = arrow.BinaryTypes.Binary
+	}
+
+	return &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: valueType}
 }
 
 func (c convertToArrow) List(list iceberg.ListType, elemResult arrow.Field) arrow.Field {
@@ -790,6 +804,8 @@ type ArrowSchemaOptions struct {
 	IncludeFieldIDs bool
 	UseLargeTypes   bool
 	TableProperties iceberg.Properties
+
+	dictionaryFieldIDs set[int]
 }
 
 // SchemaToArrowSchema converts an Iceberg schema to an Arrow schema. If the metadata parameter
@@ -809,10 +825,11 @@ func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, include
 // metadata in the table properties.
 func SchemaToArrowSchemaWithOptions(sc *iceberg.Schema, opts ArrowSchemaOptions) (*arrow.Schema, error) {
 	top, err := iceberg.Visit(sc, convertToArrow{
-		metadata:        opts.Metadata,
-		includeFieldIDs: opts.IncludeFieldIDs,
-		useLargeTypes:   opts.UseLargeTypes,
-		tableProperties: opts.TableProperties,
+		metadata:           opts.Metadata,
+		includeFieldIDs:    opts.IncludeFieldIDs,
+		useLargeTypes:      opts.UseLargeTypes,
+		tableProperties:    opts.TableProperties,
+		dictionaryFieldIDs: opts.dictionaryFieldIDs,
 	})
 	if err != nil {
 		return nil, err
@@ -837,9 +854,10 @@ func TypeToArrowType(t iceberg.Type, includeFieldIDs bool, useLargeTypes bool) (
 func TypeToArrowTypeWithOptions(t iceberg.Type, opts ArrowSchemaOptions) (arrow.DataType, error) {
 	top, err := iceberg.Visit(iceberg.NewSchema(0, iceberg.NestedField{Type: t}),
 		convertToArrow{
-			includeFieldIDs: opts.IncludeFieldIDs,
-			useLargeTypes:   opts.UseLargeTypes,
-			tableProperties: opts.TableProperties,
+			includeFieldIDs:    opts.IncludeFieldIDs,
+			useLargeTypes:      opts.UseLargeTypes,
+			tableProperties:    opts.TableProperties,
+			dictionaryFieldIDs: opts.dictionaryFieldIDs,
 		})
 	if err != nil {
 		return nil, err
@@ -1021,6 +1039,14 @@ func defaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
 
 // defaultToArray creates an Arrow array of length n filled with the given default value v.
 func defaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memory.Allocator) arrow.Array {
+	if dictType, ok := dt.(*arrow.DictionaryType); ok {
+		plain := defaultToArray(v, t, dictType.ValueType, n, alloc)
+		defer plain.Release()
+
+		return retOrPanic(compute.DictionaryEncodeArray(compute.WithAllocator(context.Background(), alloc),
+			compute.DictionaryEncodeOptions{}, plain))
+	}
+
 	sc := defaultToScalar(v, t, dt)
 	out, err := scalar.MakeArrayFromScalar(sc, n, alloc)
 	if err != nil {
@@ -1048,13 +1074,15 @@ type arrowProjectionVisitor struct {
 	useLargeTypes        bool
 	useWriteDefault      bool
 	allowMissingRequired bool
+	dictionaryFieldIDs   set[int]
 }
 
 func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType {
 	return retOrPanic(TypeToArrowTypeWithOptions(t, ArrowSchemaOptions{
-		IncludeFieldIDs: a.includeFieldIDs,
-		UseLargeTypes:   a.useLargeTypes,
-		TableProperties: a.tableProperties,
+		IncludeFieldIDs:    a.includeFieldIDs,
+		UseLargeTypes:      a.useLargeTypes,
+		TableProperties:    a.tableProperties,
+		dictionaryFieldIDs: a.dictionaryFieldIDs,
 	}))
 }
 
@@ -1069,6 +1097,14 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 		vals.Retain()
 
 		return vals
+	}
+
+	if _, ok := a.dictionaryFieldIDs[field.ID]; ok {
+		if !field.Type.Equals(typ) {
+			retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
+		}
+
+		return a.toDictionary(vals, dictionaryArrowType(field.Type))
 	}
 
 	if !field.Type.Equals(typ) {
@@ -1167,6 +1203,24 @@ func (a *arrowProjectionVisitor) rewrapExtension(targetType arrow.DataType, vals
 	defer storage.Release()
 
 	return array.NewExtensionArrayWithStorage(tgtExt, storage), true
+}
+
+// Parquet dictionary reads can return plain arrays when the stored Arrow
+// schema gives the column a large type.
+func (a *arrowProjectionVisitor) toDictionary(vals arrow.Array, target *arrow.DictionaryType) arrow.Array {
+	if arrow.TypeEqual(vals.DataType(), target) {
+		vals.Retain()
+
+		return vals
+	}
+
+	if !arrow.TypeEqual(vals.DataType(), target.ValueType) {
+		plain := retOrPanic(compute.CastArray(a.ctx, vals, compute.SafeCastOptions(target.ValueType)))
+		defer plain.Release()
+		vals = plain
+	}
+
+	return retOrPanic(compute.DictionaryEncodeArray(a.ctx, compute.DictionaryEncodeOptions{}, vals))
 }
 
 func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool) bool {
@@ -1274,6 +1328,9 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			fields[i] = a.constructField(field, arr.DataType())
 		} else {
 			dt := a.typeToArrowType(field.Type)
+			if _, ok := a.dictionaryFieldIDs[field.ID]; ok {
+				dt = dictionaryArrowType(field.Type)
+			}
 			alloc := compute.GetAllocator(a.ctx)
 
 			switch {
@@ -1444,6 +1501,8 @@ type SchemaOptions struct {
 	UseWriteDefault      bool
 	AllowMissingRequired bool
 	TableProperties      iceberg.Properties
+
+	dictionaryFieldIDs set[int]
 }
 
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
@@ -1476,6 +1535,7 @@ func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 			useLargeTypes:        opts.UseLargeTypes,
 			useWriteDefault:      opts.UseWriteDefault,
 			allowMissingRequired: opts.AllowMissingRequired,
+			dictionaryFieldIDs:   opts.dictionaryFieldIDs,
 		}, arrowAccessor{fileSchema: fileSchema})
 	if err != nil {
 		return nil, err

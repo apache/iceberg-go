@@ -1523,6 +1523,29 @@ func WithArrowBatchSize(n int) ScanOption {
 	}
 }
 
+// WithDictionaryColumns returns the named string and binary columns as Arrow
+// dictionary arrays. Names may be dotted paths to nested fields. They are
+// resolved when the scan reads, against the schema it reads with, honoring
+// [WithCaseSensitive].
+//
+// Requested columns always have type dictionary<int32, utf8> or
+// dictionary<int32, binary>, in the declared schema and in every batch, even
+// with the arrow.use_large_types option or when a data file stores the column
+// plain, as a large type, or as another dictionary type. Columns that are not
+// requested keep their usual types.
+//
+// The dictionary can differ from one batch to the next, including within a
+// file, so callers must not rely on dictionary identity across batches.
+//
+// Reading fails if a name does not exist or names a column of another type. A
+// valid name that the scan does not project is ignored. Repeated calls replace
+// the earlier list.
+func WithDictionaryColumns(names ...string) ScanOption {
+	return func(scan *Scan) {
+		scan.dictionaryColumns = slices.Clone(names)
+	}
+}
+
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	directive, directiveErr := t.ScanPlanningDirective()
 	s := &Scan{
