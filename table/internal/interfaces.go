@@ -96,11 +96,12 @@ type FileFormat interface {
 	NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, arrowSchema *arrow.Schema) (FileWriter, error)
 }
 
+// GetFileFormat selects only formats that support both table reads and writes.
+// ORC is not selectable until iceberg-go has an ORC reader.
 func GetFileFormat(format iceberg.FileFormat) FileFormat {
 	switch format {
 	case iceberg.ParquetFile:
 		return parquetFormat{}
-	// ORC stays off the table write path until a reader can scan its files.
 	default:
 		return nil
 	}

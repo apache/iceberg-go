@@ -782,10 +782,10 @@ func (w *orcFileWriter) Close() (iceberg.DataFile, error) {
 		// File-scoped position deletes must include exact, untruncated path
 		// bounds to match the referenced_data_file metadata.
 		stats.ColAggs[iceberg.DeleteFilePathFieldID] = &statsAggregator[string]{
-				primitiveType: iceberg.StringType{},
-				curMin:        iceberg.StringLiteral(path),
-				curMax:        iceberg.StringLiteral(path),
-			}
+			primitiveType: iceberg.StringType{},
+			curMin:        iceberg.StringLiteral(path),
+			curMax:        iceberg.StringLiteral(path),
+		}
 		opts.ReferencedDataFile = &path
 	}
 
