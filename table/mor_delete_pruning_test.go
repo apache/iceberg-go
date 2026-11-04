@@ -80,7 +80,7 @@ func newMergeOnReadTestTable(t *testing.T) *table.Table {
 
 // newMergeOnReadTestTableVersion builds a merge-on-read table at the given
 // format version, capping row groups at 5 rows so a 10-row append spans two.
-func newMergeOnReadTestTableVersion(t *testing.T, formatVersion string) *table.Table {
+func newMergeOnReadTestTableVersion(t testing.TB, formatVersion string) *table.Table {
 	t.Helper()
 
 	location := filepath.ToSlash(t.TempDir())
