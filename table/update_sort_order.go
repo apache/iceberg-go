@@ -97,13 +97,24 @@ func (u *UpdateSortOrder) buildOrder(meta Metadata) (SortOrder, error) {
 			return SortOrder{}, fmt.Errorf("%w: sort field %q has no transform", ErrInvalidTransform, col.name)
 		}
 
-		bound, err := iceberg.Reference(col.name).Bind(schema, u.caseSensitive)
-		if err != nil {
-			return SortOrder{}, fmt.Errorf("cannot bind sort field %q: %w", col.name, err)
+		var field iceberg.NestedField
+		var found bool
+		if u.caseSensitive {
+			field, found = schema.FindFieldByName(col.name)
+		} else {
+			field, found = schema.FindFieldByNameCaseInsensitive(col.name)
+		}
+		if !found {
+			return SortOrder{}, fmt.Errorf("cannot bind sort field %q: %w", col.name, iceberg.ErrInvalidSchema)
+		}
+		// Expression binding panics on complex fields. Reject them before
+		// constructing an expression, as Iceberg only sorts primitive values.
+		if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
+			return SortOrder{}, fmt.Errorf("cannot sort by non-primitive source field: %s", field.Type.Type())
 		}
 
 		fields = append(fields, SortField{
-			SourceIDs: []int{bound.Ref().Field().ID},
+			SourceIDs: []int{field.ID},
 			Transform: col.transform,
 			Direction: col.direction,
 			NullOrder: col.nullOrder,
