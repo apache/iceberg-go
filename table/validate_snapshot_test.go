@@ -219,8 +219,9 @@ func TestEmbeddedValidationSpecIDV1OptionalHeaders(t *testing.T) {
 		require.NoError(t, fs.WriteFile(t.Context(), path, output.Bytes()))
 	}
 	writeHeader()
-	got, known, err := embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{spec})
+	got, known, detail, err := embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: spec})
 	require.NoError(t, err)
+	require.Empty(t, detail)
 	require.True(t, known)
 	require.EqualValues(t, spec.ID(), got)
 
@@ -232,22 +233,25 @@ func TestEmbeddedValidationSpecIDV1OptionalHeaders(t *testing.T) {
 	metadata["partition-spec"], err = json.Marshal(fields)
 	require.NoError(t, err)
 	writeHeader()
-	got, known, err = embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{spec})
+	got, known, detail, err = embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: spec})
 	require.NoError(t, err)
+	require.Empty(t, detail)
 	require.True(t, known)
 	require.EqualValues(t, spec.ID(), got)
 
 	ambiguous := iceberg.NewPartitionSpecID(8, spec.Field(0))
-	_, known, err = embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{spec, ambiguous})
+	_, known, detail, err = embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: spec, 8: ambiguous})
 	require.NoError(t, err)
 	require.False(t, known)
+	require.Contains(t, detail, "multiple partition specs")
 
 	unrelated := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.BucketTransform{NumBuckets: 4},
 	})
-	_, known, err = embeddedValidationSpecID(t.Context(), fs, path, []iceberg.PartitionSpec{unrelated})
+	_, known, detail, err = embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: unrelated})
 	require.NoError(t, err)
 	require.False(t, known)
+	require.Contains(t, detail, "no matching partition spec")
 }
 
 func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {
@@ -514,6 +518,39 @@ func TestValidateSnapshotEmbeddedUsesHeaderSpecID(t *testing.T) {
 	require.Len(t, report.Issues, 1)
 	require.Equal(t, SnapshotIssueUnknownPartitionSpec, report.Issues[0].Code)
 	require.Equal(t, int32(42), report.Issues[0].PartitionSpecID)
+}
+
+func TestValidateSnapshotEmbeddedV1RejectsMismatchedHeaderSpec(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, true, nil,
+		[]iceberg.ManifestEntry{v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://original.parquet")})
+	fs, err := tbl.FS(t.Context())
+	require.NoError(t, err)
+	writable, ok := fs.(iceio.WriteFileIO)
+	require.True(t, ok)
+
+	// The header ID exists in the table, but the header has a different
+	// partition definition. An audit must not mark this snapshot valid.
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	snapshotID := snapshotValidationTestID
+	entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil,
+		newTestDataFile(t, spec, "file://mismatch.parquet", map[int]any{1000: int32(1)}))
+	const path = "mem://default/table-location/metadata/validate-0.avro"
+	var buf bytes.Buffer
+	_, err = iceberg.WriteManifest(path, &buf, 1, spec, simpleSchema(), snapshotID,
+		[]iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, writable.WriteFile(t.Context(), path, buf.Bytes()))
+
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), snapshotID)
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.True(t, report.Complete)
+	require.False(t, report.Valid())
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueUnknownPartitionSpec, report.Issues[0].Code)
+	require.Contains(t, report.Issues[0].Detail, "partition fields differ")
 }
 
 func TestValidateSnapshotChecksDeletedEntries(t *testing.T) {

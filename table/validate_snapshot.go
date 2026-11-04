@@ -129,8 +129,10 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 
 	specs := t.metadata.PartitionSpecs()
 	specIDs := make(map[int]struct{}, len(specs))
+	specsByID := make(map[int32]iceberg.PartitionSpec, len(specs))
 	for _, spec := range specs {
 		specIDs[spec.ID()] = struct{}{}
+		specsByID[int32(spec.ID())] = spec
 	}
 	version := t.metadata.FormatVersion()
 	seenManifests := make(map[string]struct{}, len(manifests))
@@ -170,12 +172,18 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 		seenManifests[path] = struct{}{}
 
 		if snapshot.ManifestList == "" && snapshot.ManifestLocations != nil {
-			specID, known, err := embeddedValidationSpecID(ctx, fs, path, specs)
+			specID, known, detail, err := embeddedValidationSpecID(ctx, fs, path, specsByID)
 			if err != nil {
 				return report, fmt.Errorf("read snapshot %d manifest %q header: %w", snapshotID, path, err)
 			}
 			if known {
 				validateSnapshotSpec(report, path, specID, specIDs)
+			}
+			if detail != "" {
+				report.Issues = append(report.Issues, SnapshotValidationIssue{
+					Code: SnapshotIssueUnknownPartitionSpec, ManifestPath: path,
+					PartitionSpecID: specID, Detail: detail,
+				})
 			}
 		} else {
 			validateSnapshotSpec(report, path, manifest.PartitionSpecID(), specIDs)
@@ -296,31 +304,39 @@ type snapshotValidationVector struct {
 // optional header spec ID, or infer one only when the required partition-spec
 // fields identify exactly one spec in the table metadata.
 func embeddedValidationSpecID(
-	ctx context.Context, fs iceio.IO, path string, specs []iceberg.PartitionSpec,
-) (int32, bool, error) {
+	ctx context.Context, fs iceio.IO, path string, specs map[int32]iceberg.PartitionSpec,
+) (int32, bool, string, error) {
 	f, err := fs.Open(ctx, path)
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	defer f.Close()
 	reader, err := ocf.NewReader(f)
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	defer reader.Close()
 
 	header, err := parseEmbeddedManifestSpecHeader(reader.Metadata())
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
-	specsByID := make(map[int32]iceberg.PartitionSpec, len(specs))
-	for _, spec := range specs {
-		specsByID[int32(spec.ID())] = spec
-	}
-	id, known, _ := header.resolve(specsByID)
+	id, known, ambiguous := header.resolve(specs)
+	if !known {
+		if ambiguous {
+			return 0, false, "embedded v1 header matches multiple partition specs", nil
+		}
 
-	return id, known, nil
+		return 0, false, "embedded v1 header has no matching partition spec", nil
+	}
+	if spec, exists := specs[id]; exists &&
+		!iceberg.NewPartitionSpecID(int(id), header.fields...).Equals(spec) {
+		return id, true, "embedded v1 header partition fields differ from table spec", nil
+	}
+
+	return id, true, "", nil
 }
+
 func validateSnapshotSpec(report *SnapshotValidationReport, path string, specID int32, specIDs map[int]struct{}) {
 	if _, found := specIDs[int(specID)]; !found {
 		report.Issues = append(report.Issues, SnapshotValidationIssue{
