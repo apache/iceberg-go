@@ -150,8 +150,8 @@ func TestRenameBranchRejectsConcurrentSourceMove(t *testing.T) {
 		SequenceNumber:   builder.currentLastSequenceNumber() + 1,
 		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
 		ManifestList:     "/snap-43.avro",
-		SchemaID:        &schemaID,
-		Summary:         &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		Summary:          &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snapshot))
 	require.NoError(t, builder.SetSnapshotRef("dev", 43, BranchRef))
