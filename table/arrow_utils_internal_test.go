@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -880,4 +881,63 @@ func TestCheckNoUnknownTransformInSpecs(t *testing.T) {
 		}
 		require.NoError(t, checkNoUnknownTransformInSpecs(meta, files))
 	})
+}
+
+func TestCheckSchemaCompat(t *testing.T) {
+	requested := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 3, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+		}}},
+		iceberg.NestedField{ID: 4, Name: "note", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	t.Run("compatible", func(t *testing.T) {
+		// int promotes to long, and an optional field may be missing.
+		provided := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			}}},
+		)
+		assert.NoError(t, checkSchemaCompat(requested, provided))
+	})
+
+	t.Run("mismatch reports every field", func(t *testing.T) {
+		provided := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "lat", Type: iceberg.PrimitiveTypes.String},
+			}}},
+		)
+		err := checkSchemaCompat(requested, provided)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.Equal(t, `invalid schema: mismatch in fields:
+   Table Field                                            Requested Field
+✅  1: id: required long                                   1: id: required long
+✅  2: location: optional struct<3: lat: optional double>  2: location: optional struct<3: lat: optional string>
+❌  3: lat: optional double                                3: lat: optional string
+✅  4: note: optional string                               missing
+`, err.Error())
+	})
+}
+
+// BenchmarkCheckSchemaCompat checks a wide, compatible schema, as is done for
+// every data file added to a table.
+func BenchmarkCheckSchemaCompat(b *testing.B) {
+	fields := make([]iceberg.NestedField, 250)
+	for i := range fields {
+		fields[i] = iceberg.NestedField{
+			ID: i + 1, Name: "col_" + strconv.Itoa(i), Type: iceberg.PrimitiveTypes.String,
+		}
+	}
+	requested := iceberg.NewSchema(0, fields...)
+	provided := iceberg.NewSchema(0, fields...)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := checkSchemaCompat(requested, provided); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
