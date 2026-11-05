@@ -19,7 +19,6 @@ package table_test
 
 import (
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,7 +41,7 @@ func TestTransactionSetLocationStagesMetadataUpdate(t *testing.T) {
 
 	staged, err := tx.StagedTable()
 	require.NoError(t, err)
-	assert.Equal(t, newLocation, staged.Location())
+	assert.Equal(t, "s3://bucket/new-location", staged.Location())
 	assert.Equal(t, original, tbl.Location(), "the original table stays unchanged until commit")
 
 	commit, err := tx.TableCommit()
@@ -51,7 +50,7 @@ func TestTransactionSetLocationStagesMetadataUpdate(t *testing.T) {
 	assert.Equal(t, table.UpdateSetLocation, commit.Updates[0].Action())
 	updateJSON, err := json.Marshal(commit.Updates[0])
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"action\":\"set-location\",\"location\":\"s3://bucket/new-location///\"}", string(updateJSON))
+	assert.JSONEq(t, `{"action":"set-location","location":"s3://bucket/new-location"}`, string(updateJSON))
 	require.Len(t, commit.Requirements, 2)
 	assert.Equal(t, "assert-ref-snapshot-id", commit.Requirements[0].GetType())
 	assert.Equal(t, "assert-table-uuid", commit.Requirements[1].GetType())
@@ -77,22 +76,49 @@ func TestTransactionSetLocationRepeatedSameLocation(t *testing.T) {
 	require.Len(t, commit.Updates, 1)
 }
 
-func TestTransactionSetLocationPreservesTrailingSlash(t *testing.T) {
+func TestTransactionSetLocationStripsTrailingSlash(t *testing.T) {
 	tx := newCommitTestTable(t).NewTransaction()
 	require.NoError(t, tx.SetLocation("s3://bucket/new/"))
 
 	staged, err := tx.StagedTable()
 	require.NoError(t, err)
-	assert.Equal(t, "s3://bucket/new/", staged.Location())
+	assert.Equal(t, "s3://bucket/new", staged.Location())
 }
 
 func TestTransactionSetLocationRejectsEmptyLocation(t *testing.T) {
-	for _, location := range []string{"", " ", "\t\n"} {
+	for _, location := range []string{"", " ", "\t\n", "///"} {
 		t.Run("location="+location, func(t *testing.T) {
 			tx := newCommitTestTable(t).NewTransaction()
 			err := tx.SetLocation(location)
-			require.Error(t, err)
-			assert.True(t, errors.Is(err, iceberg.ErrInvalidArgument))
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+			commit, err := tx.TableCommit()
+			require.NoError(t, err)
+			assert.Empty(t, commit.Updates)
+		})
+	}
+}
+
+
+func TestTransactionSetLocationTrailingSlashNoOp(t *testing.T) {
+	tbl := newCommitTestTable(t)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetLocation(tbl.Location()+"///"))
+
+	commit, err := tx.TableCommit()
+	require.NoError(t, err)
+	assert.Empty(t, commit.Updates)
+}
+
+func TestTransactionSetLocationRejectsCrossStorageBoundary(t *testing.T) {
+	for _, location := range []string{
+		"s3://another-bucket/relocated",
+		"gs://bucket/relocated",
+		"/tmp/relocated",
+	} {
+		t.Run(location, func(t *testing.T) {
+			tx := newCommitTestTable(t).NewTransaction()
+			require.ErrorIs(t, tx.SetLocation(location), iceberg.ErrNotImplemented)
 
 			commit, err := tx.TableCommit()
 			require.NoError(t, err)
@@ -228,6 +254,63 @@ func TestTransactionSetLocationWritesEqualityDeletesToStagedPath(t *testing.T) {
 				"equality deletes must use the staged data directory: %s", files[0].FilePath())
 		})
 	}
+}
+
+
+func TestTransactionSetLocationRewriteDataFilesUsesStagedLocation(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for _, data := range []string{
+		`[{"id": 1, "data": "one"}]`,
+		`[{"id": 2, "data": "two"}]`,
+	} {
+		records, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{data})
+		require.NoError(t, err)
+		tx := tbl.NewTransaction()
+		err = tx.AppendTable(t.Context(), records, 1, nil)
+		records.Release()
+		require.NoError(t, err)
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	originalLocation := tbl.Location()
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	newLocation := filepath.ToSlash(filepath.Join(t.TempDir(), "relocated"))
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetLocation(newLocation+"/"))
+	result, err := tx.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{
+		PartitionKey: "all",
+		Tasks:        tasks,
+	}}, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.RewrittenGroups)
+
+	staged, err := tx.StagedTable()
+	require.NoError(t, err)
+	require.Equal(t, newLocation, staged.Location())
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, newLocation, committed.Location())
+	require.Equal(t, originalLocation, tbl.Location())
+
+	newTasks, err := committed.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, newTasks)
+	for _, task := range newTasks {
+		require.True(t, strings.HasPrefix(task.File.FilePath(), newLocation+"/data/"),
+			"compacted file must use staged location: %s", task.File.FilePath())
+	}
+
+	rows, err := committed.Scan().ToArrowTable(t.Context())
+	require.NoError(t, err)
+	defer rows.Release()
+	require.EqualValues(t, 2, rows.NumRows())
 }
 
 func TestTransactionSetLocationDoesNotMoveExistingFiles(t *testing.T) {

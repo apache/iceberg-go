@@ -19,6 +19,7 @@ package table
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -26,10 +27,29 @@ import (
 
 // SetLocation stages a change to the table's base location. Subsequent
 // writes in the transaction use the new location; existing files are not moved.
-// The location is stored as provided. Call Commit to persist the change.
+// Trailing slashes are stripped so generated paths have no double separators.
+// Changes across storage schemes or buckets require multi-location FileIO support.
+// Call Commit to persist the change.
 func (t *Transaction) SetLocation(location string) error {
+	location = strings.TrimRight(location, "/")
 	if strings.TrimSpace(location) == "" {
 		return fmt.Errorf("%w: table location must not be empty", iceberg.ErrInvalidArgument)
+	}
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+
+	current, err := url.Parse(t.tbl.Location())
+	if err != nil {
+		return fmt.Errorf("%w: invalid current table location: %v", iceberg.ErrInvalidArgument, err)
+	}
+	next, err := url.Parse(location)
+	if err != nil {
+		return fmt.Errorf("%w: invalid table location: %v", iceberg.ErrInvalidArgument, err)
+	}
+	if current.Scheme != next.Scheme || current.Host != next.Host {
+		return fmt.Errorf("%w: moving a table between storage schemes or buckets requires multi-location FileIO",
+			iceberg.ErrNotImplemented)
 	}
 
 	return t.apply([]Update{NewSetLocationUpdate(location)}, nil)

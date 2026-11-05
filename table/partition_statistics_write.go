@@ -164,7 +164,7 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 		return nil, fmt.Errorf("partition statistics: %w", err)
 	}
 
-	locationProvider, err := t.stagedLocationProvider()
+	locationProvider, err := t.tbl.LocationProvider()
 	if err != nil {
 		return nil, err
 	}
