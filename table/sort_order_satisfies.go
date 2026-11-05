@@ -58,7 +58,9 @@ func (s SortField) Satisfies(required SortField) bool {
 
 // Satisfies checks whether this sort order satisfies another using Iceberg
 // Java's field-by-field prefix rules. Order IDs are ignored, and every order
-// satisfies the unsorted order. It does not inspect the sorted data.
+// satisfies the unsorted order. This is not a proof of physical row ordering:
+// for example, (day(ts), id) satisfies (month(ts), id) by these rules even
+// though IDs need not be globally ordered within each month.
 func (s SortOrder) Satisfies(required SortOrder) bool {
 	if len(s.fields) < len(required.fields) {
 		return false
