@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"testing"
 
@@ -105,6 +106,34 @@ func TestRenameBranchPreservesMetadata(t *testing.T) {
 	require.Contains(t, maps.Collect(tbl.Metadata().Refs()), "dev", "original table is unchanged")
 }
 
+func TestRenameBranchCommitWireFormat(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	_, err := tbl.RenameBranch(t.Context(), "dev", "review")
+	require.NoError(t, err)
+
+	require.Len(t, cat.reqs, 3)
+	sourceReq, err := json.Marshal(cat.reqs[1])
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"assert-ref-snapshot-id","ref":"dev","snapshot-id":42}`, string(sourceReq))
+
+	destinationReq, err := json.Marshal(cat.reqs[2])
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"assert-ref-snapshot-id","ref":"review","snapshot-id":null}`, string(destinationReq))
+
+	require.Len(t, cat.updates, 2)
+	createUpdate, err := json.Marshal(cat.updates[0])
+	require.NoError(t, err)
+	require.JSONEq(t,
+		`{"action":"set-snapshot-ref","ref-name":"review","type":"branch","snapshot-id":42,`+
+			`"max-ref-age-ms":1000,"max-snapshot-age-ms":2000,"min-snapshots-to-keep":3}`,
+		string(createUpdate),
+	)
+
+	removeUpdate, err := json.Marshal(cat.updates[1])
+	require.NoError(t, err)
+	require.JSONEq(t, `{"action":"remove-snapshot-ref","ref-name":"dev"}`, string(removeUpdate))
+}
+
 func TestRenameBranchPreservesOptionalRetention(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -129,6 +158,22 @@ func TestRenameBranchPreservesOptionalRetention(t *testing.T) {
 			refs := maps.Collect(renamed.Metadata().Refs())
 			require.Equal(t, expected, refs["renamed"])
 			require.NotContains(t, refs, "feature")
+
+			// An unset policy must stay absent in the REST update, not become
+			// an explicit default retention value.
+			updateJSON, err := json.Marshal(cat.updates[0])
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(updateJSON, &fields))
+			if expected.MaxRefAgeMs == nil {
+				require.NotContains(t, fields, "max-ref-age-ms")
+			}
+			if expected.MaxSnapshotAgeMs == nil {
+				require.NotContains(t, fields, "max-snapshot-age-ms")
+			}
+			if expected.MinSnapshotsToKeep == nil {
+				require.NotContains(t, fields, "min-snapshots-to-keep")
+			}
 		})
 	}
 }
@@ -148,6 +193,10 @@ func TestRenameBranchRejectsInvalidRefs(t *testing.T) {
 			t.Helper()
 			setRenameBranchTestRef(t, cat, "review", 42, BranchRef)
 		}},
+		{name: "existing destination tag", from: "dev", to: "review", change: func(t *testing.T, cat *renameBranchTestCatalog) {
+			t.Helper()
+			setRenameBranchTestRef(t, cat, "review", 42, TagRef)
+		}},
 		{name: "source is tag", from: "dev", to: "review", change: func(t *testing.T, cat *renameBranchTestCatalog) {
 			t.Helper()
 			setRenameBranchTestRef(t, cat, "dev", 42, TagRef)
@@ -164,6 +213,18 @@ func TestRenameBranchRejectsInvalidRefs(t *testing.T) {
 			require.Zero(t, cat.commits)
 		})
 	}
+}
+
+func TestRenameBranchPreservesConcurrentUnrelatedRef(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	setRenameBranchTestRef(t, cat, "other", 42, TagRef)
+
+	updated, err := tbl.RenameBranch(t.Context(), "dev", "review")
+	require.NoError(t, err)
+	refs := maps.Collect(updated.Metadata().Refs())
+	require.NotContains(t, refs, "dev")
+	require.Contains(t, refs, "review")
+	require.Equal(t, TagRef, refs["other"].Type)
 }
 
 func TestRenameBranchRejectsConcurrentSourceMove(t *testing.T) {

@@ -81,9 +81,8 @@ func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error
 		minSnapshotsToKeep = *source.MinSnapshotsToKeep
 	}
 
-	// Send both ref assertions directly to the catalog in one atomic commit.
-	// Transaction.apply in older versions deduplicates requirements by type,
-	// which would otherwise drop the destination-absence assertion.
+	// Send both source and destination assertions in the same atomic catalog
+	// commit to guard the branch head and destination name independently.
 	requirements := []Requirement{
 		AssertTableUUID(t.metadata.TableUUID()),
 		assertBranchRefSnapshotID(from, &source.SnapshotID),
