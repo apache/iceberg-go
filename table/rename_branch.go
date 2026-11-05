@@ -24,49 +24,63 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-// RenameBranch atomically renames an existing branch without creating a snapshot.
-// The renamed branch retains its snapshot ID and retention settings. The main
-// branch cannot be renamed or replaced, and an existing ref cannot be overwritten.
-// Concurrent source snapshot moves and destination creation fail the commit.
-// For catalogs that validate requirements locally, source ref type changes also
-// fail. The standard REST requirement checks snapshot IDs only, so concurrent
-// retention or type changes with the same snapshot ID are not fully protected.
+// RenameBranch atomically renames a branch using the table's normal transaction
+// commit path. The snapshot and retention policy are preserved.
 func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if from == "" || to == "" {
-		return nil, fmt.Errorf("%w: branch names must not be empty", iceberg.ErrInvalidArgument)
-	}
-	if from == to {
-		return nil, fmt.Errorf("%w: source and destination branch names must differ", iceberg.ErrInvalidArgument)
-	}
-	if from == MainBranch || to == MainBranch {
-		return nil, fmt.Errorf("%w: cannot rename or replace the main branch", iceberg.ErrInvalidArgument)
 	}
 	if t.metadata == nil || t.cat == nil {
 		return nil, fmt.Errorf("%w: rename branch requires a loaded table and catalog", iceberg.ErrInvalidArgument)
 	}
 
-	var source SnapshotRef
-	var sourceFound, destinationFound bool
-	for name, ref := range t.metadata.Refs() {
-		switch name {
-		case from:
-			source = ref
-			sourceFound = true
-		case to:
-			destinationFound = true
-		}
+	tx := t.NewTransaction()
+	if err := tx.RenameBranch(from, to); err != nil {
+		return nil, err
 	}
-	if !sourceFound {
-		return nil, fmt.Errorf("%w: branch %q does not exist", iceberg.ErrInvalidArgument, from)
+
+	updated, err := tx.Commit(ctx)
+	if err != nil {
+		return updated, fmt.Errorf("rename branch %q to %q: %w", from, to, err)
+	}
+
+	return updated, nil
+}
+
+// RenameBranch stages a branch rename in this transaction, so it can be
+// committed atomically with other table updates. The source must be a branch,
+// the destination must not exist, and main cannot be renamed or replaced.
+// The source keeps its snapshot and retention settings.
+//
+// Both refs are pinned to their values in the transaction's base metadata.
+// Concurrent source snapshot moves and destination creation fail the commit.
+// Catalogs that validate requirements locally also reject source type changes.
+// REST requirements only compare snapshot IDs, so retention-only changes or
+// type changes with an unchanged ID cannot be detected by the REST catalog.
+func (t *Transaction) RenameBranch(from, to string) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+	if from == "" || to == "" {
+		return fmt.Errorf("%w: branch names must not be empty", iceberg.ErrInvalidArgument)
+	}
+	if from == to {
+		return fmt.Errorf("%w: source and destination branch names must differ", iceberg.ErrInvalidArgument)
+	}
+	if from == MainBranch || to == MainBranch {
+		return fmt.Errorf("%w: cannot rename or replace the main branch", iceberg.ErrInvalidArgument)
+	}
+
+	source, ok := meta.refs[from]
+	if !ok {
+		return fmt.Errorf("%w: branch %q does not exist", iceberg.ErrInvalidArgument, from)
 	}
 	if source.Type != BranchRef {
-		return nil, fmt.Errorf("%w: ref %q is a %s, not a branch", iceberg.ErrInvalidArgument, from, source.Type)
+		return fmt.Errorf("%w: ref %q is a %s, not a branch", iceberg.ErrInvalidArgument, from, source.Type)
 	}
-	if destinationFound {
-		return nil, fmt.Errorf("%w: ref %q already exists", iceberg.ErrInvalidArgument, to)
+	if _, exists := meta.refs[to]; exists {
+		return fmt.Errorf("%w: ref %q already exists", iceberg.ErrInvalidArgument, to)
 	}
 
 	var maxRefAgeMs, maxSnapshotAgeMs int64
@@ -81,27 +95,15 @@ func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error
 		minSnapshotsToKeep = *source.MinSnapshotsToKeep
 	}
 
-	// Send both source and destination assertions in the same atomic catalog
-	// commit to guard the branch head and destination name independently.
-	requirements := []Requirement{
-		AssertTableUUID(t.metadata.TableUUID()),
-		assertBranchRefSnapshotID(from, &source.SnapshotID),
-		AssertRefSnapshotID(to, nil),
-	}
 	updates := []Update{
 		NewSetSnapshotRefUpdate(to, source.SnapshotID, BranchRef,
 			maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep),
 		NewRemoveSnapshotRefUpdate(from),
 	}
-
-	metadata, metadataLocation, err := t.cat.CommitTable(ctx, t.identifier, requirements, updates)
-	if err != nil {
-		return nil, fmt.Errorf("rename branch %q to %q: %w", from, to, err)
+	requirements := []Requirement{
+		assertBranchRefSnapshotID(from, t.baseRefSnapshotID(from)),
+		AssertRefSnapshotID(to, t.baseRefSnapshotID(to)),
 	}
 
-	updated := t
-	updated.metadata = metadata
-	updated.metadataLocation = metadataLocation
-
-	return &updated, nil
+	return t.applyPinned(updates, requirements, []string{from, to})
 }

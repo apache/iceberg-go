@@ -20,27 +20,39 @@ package table
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
 
 type renameBranchTestCatalog struct {
-	metadata Metadata
-	reqs     []Requirement
-	updates  []Update
-	commits  int
+	metadata      Metadata
+	reqs          []Requirement
+	updates       []Update
+	commits       int
+	loads         int
+	failFirst     bool
+	firstConflict func()
 }
 
 func (c *renameBranchTestCatalog) CommitTable(_ context.Context, _ Identifier, reqs []Requirement, updates []Update) (Metadata, string, error) {
 	c.commits++
 	c.reqs = reqs
 	c.updates = updates
+	if c.failFirst && c.commits == 1 {
+		if c.firstConflict != nil {
+			c.firstConflict()
+		}
+
+		return nil, "", ErrCommitFailed
+	}
 	for _, req := range reqs {
 		if err := req.Validate(c.metadata); err != nil {
-			return nil, "", err
+			return nil, "", fmt.Errorf("%w: %w", ErrCommitFailed, err)
 		}
 	}
 	builder, err := MetadataBuilderFromBase(c.metadata, "/metadata/current.json")
@@ -62,7 +74,10 @@ func (c *renameBranchTestCatalog) CommitTable(_ context.Context, _ Identifier, r
 }
 
 func (c *renameBranchTestCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
-	return &Table{identifier: ident, metadata: c.metadata, metadataLocation: "/metadata/current.json", cat: c}, nil
+	c.loads++
+
+	return New(ident, c.metadata, "/metadata/current.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
 }
 
 func newRenameBranchTestTable(t *testing.T) (*Table, *renameBranchTestCatalog) {
@@ -84,7 +99,8 @@ func newRenameBranchTestTable(t *testing.T) (*Table, *renameBranchTestCatalog) {
 	require.NoError(t, err)
 	cat := &renameBranchTestCatalog{metadata: meta}
 
-	return &Table{identifier: Identifier{"db", "test"}, metadata: meta, metadataLocation: "/metadata/current.json", cat: cat}, cat
+	return New(Identifier{"db", "test"}, meta, "/metadata/current.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat), cat
 }
 
 func TestRenameBranchPreservesMetadata(t *testing.T) {
@@ -94,7 +110,7 @@ func TestRenameBranchPreservesMetadata(t *testing.T) {
 	updated, err := tbl.RenameBranch(context.Background(), "dev", "review")
 	require.NoError(t, err)
 	require.Equal(t, 1, cat.commits)
-	require.Len(t, cat.reqs, 3)
+	require.Len(t, cat.reqs, 4)
 	require.Len(t, cat.updates, 2)
 	require.Equal(t, "/metadata/renamed.json", updated.MetadataLocation())
 
@@ -111,12 +127,12 @@ func TestRenameBranchCommitWireFormat(t *testing.T) {
 	_, err := tbl.RenameBranch(t.Context(), "dev", "review")
 	require.NoError(t, err)
 
-	require.Len(t, cat.reqs, 3)
-	sourceReq, err := json.Marshal(cat.reqs[1])
+	require.Len(t, cat.reqs, 4)
+	sourceReq, err := json.Marshal(cat.reqs[0])
 	require.NoError(t, err)
 	require.JSONEq(t, `{"type":"assert-ref-snapshot-id","ref":"dev","snapshot-id":42}`, string(sourceReq))
 
-	destinationReq, err := json.Marshal(cat.reqs[2])
+	destinationReq, err := json.Marshal(cat.reqs[1])
 	require.NoError(t, err)
 	require.JSONEq(t, `{"type":"assert-ref-snapshot-id","ref":"review","snapshot-id":null}`, string(destinationReq))
 
@@ -250,7 +266,7 @@ func TestRenameBranchRejectsConcurrentSourceMove(t *testing.T) {
 	_, err = tbl.RenameBranch(context.Background(), "dev", "review")
 	require.Error(t, err)
 	require.Equal(t, 1, cat.commits)
-	require.Len(t, cat.reqs, 3)
+	require.Len(t, cat.reqs, 4)
 	refs := maps.Collect(cat.metadata.Refs())
 	require.Equal(t, int64(43), refs["dev"].SnapshotID)
 	require.NotContains(t, refs, "review")
@@ -291,7 +307,7 @@ func TestRenameBranchRejectsConcurrentDestinationCreation(t *testing.T) {
 	_, err := tbl.RenameBranch(context.Background(), "dev", "review")
 	require.Error(t, err)
 	require.Equal(t, 1, cat.commits)
-	require.Len(t, cat.reqs, 3, "source and destination checks must both reach the catalog")
+	require.Len(t, cat.reqs, 4, "source and destination checks must both reach the catalog")
 	refs := maps.Collect(cat.metadata.Refs())
 	require.Contains(t, refs, "dev")
 	require.Equal(t, TagRef, refs["review"].Type)
@@ -314,4 +330,83 @@ func TestRenameBranchRespectsCancellation(t *testing.T) {
 	_, err := tbl.RenameBranch(ctx, "dev", "review")
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, cat.commits)
+}
+
+func TestTransactionRenameBranchWithOtherUpdates(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	tx := tbl.NewTransaction()
+
+	require.NoError(t, tx.SetProperties(iceberg.Properties{"combined": "true"}))
+	require.NoError(t, tx.RenameBranch("dev", "review"))
+	require.Zero(t, cat.commits, "staging must not commit the table")
+
+	updated, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, cat.commits)
+	require.Equal(t, "true", updated.Properties()["combined"])
+	require.Len(t, cat.updates, 3)
+
+	refs := maps.Collect(updated.Metadata().Refs())
+	require.NotContains(t, refs, "dev")
+	require.Contains(t, refs, "review")
+	require.Equal(t, int64(42), refs["review"].SnapshotID)
+}
+
+func TestTransactionRenameBranchFailedStageKeepsEarlierUpdates(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{"keep": "yes"}))
+
+	require.ErrorIs(t, tx.RenameBranch("dev", MainBranch), iceberg.ErrInvalidArgument)
+	updated, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "yes", updated.Properties()["keep"])
+	require.Len(t, cat.updates, 1)
+	require.Contains(t, maps.Collect(updated.Metadata().Refs()), "dev")
+}
+
+func enableRenameBranchRetries(t *testing.T, tbl *Table, cat *renameBranchTestCatalog) {
+	t.Helper()
+	builder, err := MetadataBuilderFromBase(cat.metadata, "/metadata/current.json")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetProperties(iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	cat.metadata = meta
+	tbl.metadata = meta
+}
+
+func TestRenameBranchRetriesUnrelatedConflict(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	enableRenameBranchRetries(t, tbl, cat)
+	cat.failFirst = true
+
+	updated, err := tbl.RenameBranch(t.Context(), "dev", "review")
+	require.NoError(t, err)
+	require.Equal(t, 2, cat.commits)
+	require.Equal(t, 1, cat.loads)
+	refs := maps.Collect(updated.Metadata().Refs())
+	require.NotContains(t, refs, "dev")
+	require.Equal(t, int64(42), refs["review"].SnapshotID)
+}
+
+func TestRenameBranchRetryCannotOverwriteNewDestination(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	enableRenameBranchRetries(t, tbl, cat)
+	cat.failFirst = true
+	cat.firstConflict = func() {
+		setRenameBranchTestRef(t, cat, "review", 42, TagRef)
+	}
+
+	_, err := tbl.RenameBranch(t.Context(), "dev", "review")
+	require.ErrorIs(t, err, ErrTransactionUnusable)
+	require.Equal(t, 1, cat.commits, "the pinned destination must fail before a retry")
+	require.Equal(t, 1, cat.loads)
+	refs := maps.Collect(cat.metadata.Refs())
+	require.Contains(t, refs, "dev")
+	require.Equal(t, TagRef, refs["review"].Type)
 }
