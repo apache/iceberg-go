@@ -151,7 +151,7 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 		counter:   internal.Counter(0),
 	}
 
-	dataFiles, err := equalityDeleteRecordsToDataFiles(ctx, t.tbl.Location(), meta, deleteSchema, equalityFieldIDs, args)
+	dataFiles, err := equalityDeleteRecordsToDataFiles(ctx, meta.loc, meta, deleteSchema, equalityFieldIDs, args)
 	if err != nil {
 		return nil, err
 	}

@@ -430,6 +430,11 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		return &RewriteResult{}, nil
 	}
 
+	staged, err := t.StagedTable()
+	if err != nil {
+		return nil, err
+	}
+
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
 	stagedDeleteFiles := make(map[string]struct{})
@@ -443,7 +448,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			continue
 		}
 
-		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group, opts.GroupOptions...)
+		gr, err := ExecuteCompactionGroup(ctx, staged.Table, group, opts.GroupOptions...)
 		if err != nil {
 			return result, err
 		}
