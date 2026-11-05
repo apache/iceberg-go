@@ -292,6 +292,8 @@ type DataFileOpts struct {
 	Content         iceberg.ManifestEntryContent
 	FileSize        int64
 	PartitionValues map[int]any
+	// PreserveNullPartitionValues distinguishes an explicit null from an omitted value.
+	PreserveNullPartitionValues bool
 	// SortOrderID claims the file's rows are fully sorted by that order; zero
 	// makes no claim and leaves the field absent.
 	SortOrderID int
@@ -313,9 +315,9 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		for _, field := range opts.Spec.Fields() {
 			sourceField, sourceFieldFound := opts.Schema.FindFieldByIDRef(
 				field.FirstSourceID(), iceberginternal.SchemaRef{})
-			partitionVal := opts.PartitionValues[field.FieldID]
+			partitionVal, supplied := opts.PartitionValues[field.FieldID]
 			switch {
-			case partitionVal != nil:
+			case partitionVal != nil || (supplied && opts.PreserveNullPartitionValues):
 				// prioritizing caller-supplied value.
 				fieldIDToPartitionData[field.FieldID] = partitionVal
 			case field.Transform.PreservesOrder() && sourceFieldFound:

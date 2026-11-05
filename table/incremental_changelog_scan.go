@@ -270,6 +270,7 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		if err != nil {
 			return nil, err
 		}
+		acc.skippedDataFiles += entries.metrics.skippedDataFiles
 		dataEntries = entries.dataEntries
 	}
 

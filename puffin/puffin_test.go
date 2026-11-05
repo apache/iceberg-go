@@ -1247,20 +1247,29 @@ func TestReadJavaUncompressedMetricData(t *testing.T) {
 	assert.Len(t, blob1.Data, 83)
 }
 
-// TestReadJavaCompressedMetricData verifies our reader correctly rejects
-// the zstd-compressed fixture since compression is not yet supported.
+// TestReadJavaCompressedMetricData verifies that Java-produced zstd blobs
+// decode to the same bytes as the canonical uncompressed Puffin fixture.
 func TestReadJavaCompressedMetricData(t *testing.T) {
-	data := readFixture(t, "sample-metric-data-compressed-zstd.bin")
-	r, err := puffin.NewReader(bytes.NewReader(data))
+	compressed := readFixture(t, "sample-metric-data-compressed-zstd.bin")
+	r, err := puffin.NewReader(bytes.NewReader(compressed))
 	require.NoError(t, err)
 
-	// Metadata should be readable (compression is per-blob, not footer)
+	plain := readFixture(t, "sample-metric-data-uncompressed.bin")
+	uncompressed, err := puffin.NewReader(bytes.NewReader(plain))
+	require.NoError(t, err)
+
 	blobs := r.Blobs()
 	require.Len(t, blobs, 2)
+	for i, meta := range blobs {
+		require.NotNil(t, meta.CompressionCodec)
+		assert.Equal(t, "zstd", *meta.CompressionCodec)
 
-	// But reading blob data should fail due to compression
-	_, err = r.ReadBlob(0)
-	assert.ErrorContains(t, err, "compression")
+		got, err := r.ReadBlob(i)
+		require.NoError(t, err)
+		want, err := uncompressed.ReadBlob(i)
+		require.NoError(t, err)
+		assert.Equal(t, want.Data, got.Data)
+	}
 }
 
 // TestWriterBitIdenticalWithJava verifies that our writer produces

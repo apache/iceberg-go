@@ -77,7 +77,14 @@ func NewSchema(id int, fields ...NestedField) *Schema {
 // NewSchemaWithIdentifiers constructs a new schema with the provided ID
 // and fields, along with a slice of field IDs to be listed as identifier
 // fields.
+//
+// The defaults of binary and fixed fields, including fields nested in structs,
+// lists and maps, are stored as hex strings when given as []byte,
+// [BinaryLiteral] or [FixedLiteral], the form they take in metadata JSON.
+// Byte slices inside other defaults are left as they are. The provided fields
+// and types are not modified.
 func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
+	fields, _ = normalizeDefaults(fields)
 	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
 	s.init()
 
@@ -295,13 +302,12 @@ func (s *Schema) FieldIDs() []int {
 }
 
 func (s *Schema) UnmarshalJSON(b []byte) error {
-	type Alias Schema
-	var decoded Schema
 	aux := struct {
-		Type   *string         `json:"type"`
-		Fields json.RawMessage `json:"fields"`
-		*Alias
-	}{Alias: (*Alias)(&decoded)}
+		Type               *string         `json:"type"`
+		Fields             json.RawMessage `json:"fields"`
+		ID                 int             `json:"schema-id"`
+		IdentifierFieldIDs []int           `json:"identifier-field-ids"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -326,14 +332,14 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	decoded.fields = fields
-	if decoded.IdentifierFieldIDs == nil {
-		decoded.IdentifierFieldIDs = []int{}
+	ids := aux.IdentifierFieldIDs
+	if ids == nil {
+		ids = []int{}
 	}
 
-	s.ID = decoded.ID
-	s.IdentifierFieldIDs = decoded.IdentifierFieldIDs
-	s.fields = decoded.fields
+	s.ID = aux.ID
+	s.IdentifierFieldIDs = ids
+	s.fields = fields
 	s.idToName.Store(nil)
 	s.idToField.Store(nil)
 	s.nameToID.Store(nil)
@@ -354,17 +360,14 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 		fields = []NestedField{}
 	}
 
-	type Alias Schema
-
-	// Keep this literal in sync with every JSON-marshaled Schema field. Copying
-	// the whole Schema would also copy its lazy atomic caches after they are used.
-	aliasCopy := Alias{ID: s.ID, IdentifierFieldIDs: ids}
-
+	// Name every serialized field instead of encoding through an alias of
+	// Schema, so the wire format does not depend on which fields are exported.
 	return json.Marshal(struct {
-		Type   string        `json:"type"`
-		Fields []NestedField `json:"fields"`
-		*Alias
-	}{Type: "struct", Fields: fields, Alias: &aliasCopy})
+		Type               string        `json:"type"`
+		Fields             []NestedField `json:"fields"`
+		ID                 int           `json:"schema-id"`
+		IdentifierFieldIDs []int         `json:"identifier-field-ids"`
+	}{Type: "struct", Fields: fields, ID: s.ID, IdentifierFieldIDs: ids})
 }
 
 func cloneFields(fields []NestedField) []NestedField {
