@@ -145,8 +145,13 @@ func TestRenameBranchRejectsConcurrentSourceMove(t *testing.T) {
 	schemaID := builder.currentSchemaID
 	parentID := int64(42)
 	snapshot := Snapshot{
-		SnapshotID: 43, ParentSnapshotID: &parentID, TimestampMs: builder.base.LastUpdatedMillis() + 1,
-		ManifestList: "/snap-43.avro", SchemaID: &schemaID, Summary: &Summary{Operation: OpAppend},
+		SnapshotID:       43,
+		ParentSnapshotID: &parentID,
+		SequenceNumber:   builder.currentLastSequenceNumber() + 1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-43.avro",
+		SchemaID:        &schemaID,
+		Summary:         &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snapshot))
 	require.NoError(t, builder.SetSnapshotRef("dev", 43, BranchRef))
