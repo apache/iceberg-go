@@ -20,11 +20,13 @@ package iceberg
 import (
 	"bytes"
 	"compress/flate"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"iter"
 	"math"
 	"math/big"
 	"strconv"
@@ -929,7 +931,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV1() {
 	}, nil)
 	defer mockfs.AssertExpectations(m.T())
 	entries := make([]ManifestEntry, 0, 2)
-	for entry, err := range manifest.Entries(&mockfs, false) {
+	for entry, err := range manifest.Entries(m.T().Context(), &mockfs, false) {
 		m.Require().NoError(err)
 		entries = append(entries, entry)
 	}
@@ -4754,7 +4756,7 @@ func (m *ManifestTestSuite) TestEntriesEarlyBreakClosesFile() {
 	defer mockfs.AssertExpectations(m.T())
 
 	yielded := 0
-	for entry, err := range manifest.Entries(&mockfs, false) {
+	for entry, err := range manifest.Entries(m.T().Context(), &mockfs, false) {
 		m.Require().NoError(err, "no error expected on a healthy manifest before break")
 		m.Require().NotNil(entry)
 		yielded++
@@ -4787,7 +4789,7 @@ func (m *ManifestTestSuite) TestEntriesMidStreamErrorYieldsAndStops() {
 		gotError error
 		yields   int
 	)
-	for entry, err := range manifest.Entries(&mockfs, false) {
+	for entry, err := range manifest.Entries(m.T().Context(), &mockfs, false) {
 		yields++
 		if err != nil {
 			gotError = err
@@ -4822,7 +4824,7 @@ func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
 		entries []ManifestEntry
 		errs    []error
 	)
-	for entry, err := range manifest.Entries(&mockfs, false) {
+	for entry, err := range manifest.Entries(m.T().Context(), &mockfs, false) {
 		if err != nil {
 			errs = append(errs, err)
 
@@ -4999,4 +5001,28 @@ func TestManifestListRoundTripsDeleteManifestContent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, EntryContentPosDeletes, entries[0].DataFile().ContentType())
+}
+
+func TestManifestEntriesPassContextToOpen(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "caller")
+	m := NewManifestBuilder(2, "s3://bucket/m.avro", 0, 0, 1).Build()
+
+	for name, entries := range map[string]func(iceio.IO) iter.Seq2[ManifestEntry, error]{
+		"Entries": func(fs iceio.IO) iter.Seq2[ManifestEntry, error] { return m.Entries(ctx, fs, false) },
+		"EntriesWithProjection": func(fs iceio.IO) iter.Seq2[ManifestEntry, error] {
+			return EntriesWithProjection(ctx, fs, m, false, ManifestEntryProjection{})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := &iomock.ContextProbe{}
+			for _, err := range entries(probe) {
+				require.ErrorIs(t, err, iomock.ErrContextProbe)
+
+				break
+			}
+			require.NotNil(t, probe.Ctx)
+			require.Equal(t, "caller", probe.Ctx.Value(key{}))
+		})
+	}
 }
