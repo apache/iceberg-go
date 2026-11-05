@@ -704,7 +704,7 @@ func TestOpenManifestShortCircuitsMetricsEvaluation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			evaluations := make([]string, 0, 2)
-			entries, err := openManifest(
+			entries, err := openManifest(t.Context(),
 				fs,
 				manifest,
 				func(iceberg.DataFile) (bool, error) {

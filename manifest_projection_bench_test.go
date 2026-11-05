@@ -144,9 +144,9 @@ func benchmarkManifestEntryRead(
 		count := 0
 		var entries iter.Seq2[ManifestEntry, error]
 		if projection == nil {
-			entries = fixture.manifest.Entries(fixture.fs, true)
+			entries = fixture.manifest.Entries(b.Context(), fixture.fs, true)
 		} else {
-			entries = EntriesWithProjection(fixture.fs, fixture.manifest, true, *projection)
+			entries = EntriesWithProjection(b.Context(), fixture.fs, fixture.manifest, true, *projection)
 		}
 		for entry, err := range entries {
 			if err != nil {
