@@ -39,8 +39,9 @@ type EqualityDeleteToDVResult struct {
 	ConvertedEqualityDeleteFiles int
 	// AddedDeletionVectors is the number of file-specific deletion vectors added.
 	AddedDeletionVectors int
-	// RemovedPositionDeleteFiles is the number of explicitly file-scoped legacy
-	// position delete files removed with the conversion.
+	// RemovedPositionDeleteFiles is the number of legacy position delete files
+	// scoped to one data file, either by referenced_data_file or equal
+	// file_path bounds, removed with the conversion.
 	RemovedPositionDeleteFiles int
 	// ReplacedDeletionVectors is the number of existing vectors merged into new
 	// vectors and removed by the rewrite.
@@ -127,11 +128,29 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 	if len(equalityDeleteFiles) == 0 {
 		return &EqualityDeleteToDVResult{}, nil
 	}
-	if err := t.AssertRefSnapshotID(""); err != nil {
-		return nil, err
+	// Only projected equality keys are needed to resolve their matching row
+	// positions. Missing (dropped) keys are handled by the delete loader.
+	keyNames := make(map[string]struct{})
+	for _, file := range equalityDeleteFiles {
+		for _, id := range file.EqualityFieldIDs() {
+			if name, ok := meta.CurrentSchema().FindColumnName(id); ok {
+				keyNames[name] = struct{}{}
+			}
+		}
+	}
+	selectedFields := make([]string, 0, len(keyNames))
+	for name := range keyNames {
+		selectedFields = append(selectedFields, name)
+	}
+	slices.Sort(selectedFields)
+	scanOpts := []ScanOption{WithScanPlanningMode(ScanPlanningLocal)}
+	// WithSelectedFields with no names selects every column. Keep that
+	// fallback when all equality keys were dropped from the current schema.
+	if len(selectedFields) > 0 {
+		scanOpts = append(scanOpts, WithSelectedFields(selectedFields...))
 	}
 
-	scan, err := t.Scan(WithScanPlanningMode(ScanPlanningLocal))
+	scan, err := t.Scan(scanOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -223,25 +242,11 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 
 	result := &EqualityDeleteToDVResult{ConvertedEqualityDeleteFiles: len(equalityDeleteFiles)}
 	deleteFilesToRemove := make([]iceberg.DataFile, 0, len(equalityDeleteFiles))
-	seenDeletePaths := make(map[string]struct{}, len(equalityDeleteFiles))
-	seenDVRefs := make(map[pathRefKey]struct{})
 	addRemoval := func(file iceberg.DataFile) {
-		if IsDeletionVector(file) {
-			key := pathRefKey{path: file.FilePath(), ref: explicitReferencedDataFile(file)}
-			if _, exists := seenDVRefs[key]; exists {
-				return
-			}
-			seenDVRefs[key] = struct{}{}
-			deleteFilesToRemove = append(deleteFilesToRemove, file)
-			result.ReplacedDeletionVectors++
-
-			return
-		}
-		if _, exists := seenDeletePaths[file.FilePath()]; exists {
-			return
-		}
-		seenDeletePaths[file.FilePath()] = struct{}{}
 		deleteFilesToRemove = append(deleteFilesToRemove, file)
+		if IsDeletionVector(file) {
+			result.ReplacedDeletionVectors++
+		}
 	}
 
 	equalityPaths := make([]string, 0, len(equalityDeleteFiles))
@@ -294,12 +299,9 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 			addRemoval(file)
 		}
 		for _, file := range task.DeleteFiles {
-			if explicitReferencedDataFile(file) == path {
-				before := len(deleteFilesToRemove)
+			if referencedDataFilePath(file) == path {
 				addRemoval(file)
-				if len(deleteFilesToRemove) > before {
-					result.RemovedPositionDeleteFiles++
-				}
+				result.RemovedPositionDeleteFiles++
 			}
 		}
 	}
@@ -337,7 +339,7 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 	}
 
 	if err := t.replaceFiles(ctx, nil, nil, deleteFilesToRemove, nil, additions, nil,
-		withRewriteSemantics(), withEqualityDeleteToDVConversion()); err != nil {
+		withRewriteSemantics(), withEqualityDeleteToDVConversion(), WithoutAutoNameMapping()); err != nil {
 		return nil, err
 	}
 	staged = true
