@@ -27,13 +27,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Use the in-memory filesystem so the metadata-only commit stays offline.
 // A REST refs-mode load may keep the heads of two branches while omitting
 // their common parent (snapshot 10). This ancestry is not safe for a
 // duplicate-publication check, even after table or credential refreshes.
 const cherryPickRefsMetadata = `{
 	"format-version": 1,
 	"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
-	"location": "s3://warehouse/database/table",
+	"location": "mem://cherry-pick-refs/database/table",
 	"last-updated-ms": 1646787054459,
 	"last-column-id": 1,
 	"schema": {"type": "struct", "schema-id": 0, "fields": [
@@ -60,14 +61,14 @@ const cherryPickRefsMetadata = `{
 			"snapshot-id": 20, "parent-snapshot-id": 10,
 			"timestamp-ms": 1646787054000,
 			"summary": {"operation": "append"},
-			"manifest-list": "s3://warehouse/database/table/metadata/snap-20.avro",
+			"manifest-list": "mem://cherry-pick-refs/database/table/metadata/snap-20.avro",
 			"schema-id": 0
 		},
 		{
 			"snapshot-id": 30, "parent-snapshot-id": 10,
 			"timestamp-ms": 1646787054459,
 			"summary": {"operation": "append"},
-			"manifest-list": "s3://warehouse/database/table/metadata/snap-30.avro",
+			"manifest-list": "mem://cherry-pick-refs/database/table/metadata/snap-30.avro",
 			"schema-id": 0
 		}
 	],
@@ -76,7 +77,7 @@ const cherryPickRefsMetadata = `{
 }`
 
 func TestCherryPickRefsModePersistsAcrossRESTTableLifecycle(t *testing.T) {
-	const metadataLoc = "s3://warehouse/database/table/metadata/00002.metadata.json"
+	const metadataLoc = "mem://cherry-pick-refs/database/table/metadata/00002.metadata.json"
 	respond := func(w http.ResponseWriter) {
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 			"metadata-location": metadataLoc,
@@ -102,7 +103,7 @@ func TestCherryPickRefsModePersistsAcrossRESTTableLifecycle(t *testing.T) {
 		creds: func(w http.ResponseWriter, req *http.Request) {
 			require.Equal(t, http.MethodGet, req.Method)
 			require.NoError(t, json.NewEncoder(w).Encode(storageCredentialsBody(
-				"s3://warehouse/database/table",
+				"mem://cherry-pick-refs/database/table",
 				map[string]string{"s3.access-key-id": "vended-key", "s3.secret-access-key": "vended-secret"},
 			)))
 		},
