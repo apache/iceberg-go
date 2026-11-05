@@ -42,14 +42,14 @@ func (v View) History() []VersionLogEntry {
 // exact timestamp are excluded. The version log, not the version creation
 // timestamp, determines which version was current, including after rollbacks.
 //
+// If multiple changes have the same timestamp, the last log entry wins.
 // It returns nil when the requested time precedes the retained history or the
 // selected version is no longer retained. It never substitutes an older entry
 // for a version that is missing from metadata.
 func (v View) VersionAsOf(timestampMs int64, inclusive bool) *Version {
 	history := v.metadata.VersionLog()
 	for _, entry := range slices.Backward(history) {
-		if (inclusive && entry.TimestampMS <= timestampMs) ||
-			(!inclusive && entry.TimestampMS < timestampMs) {
+		if entry.TimestampMS < timestampMs || (inclusive && entry.TimestampMS == timestampMs) {
 			return v.VersionByID(entry.VersionID)
 		}
 	}
