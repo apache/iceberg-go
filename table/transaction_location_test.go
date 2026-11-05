@@ -190,6 +190,46 @@ func TestTransactionSetLocationWritesToStagedPaths(t *testing.T) {
 	}
 }
 
+// Equality-delete writing is a separate path from Append. It must use the
+// staged table location and any staged write.data.path override as well.
+func TestTransactionSetLocationWritesEqualityDeletesToStagedPath(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		overridePath bool
+	}{
+		{name: "new table location"},
+		{name: "custom data path", overridePath: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := newEqDeleteTestTable(t, "2")
+			location := filepath.ToSlash(filepath.Join(t.TempDir(), "relocated"))
+			dataPath := location + "/data"
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.SetLocation(location))
+			if tc.overridePath {
+				dataPath = filepath.ToSlash(filepath.Join(t.TempDir(), "override-data"))
+				require.NoError(t, tx.SetProperties(iceberg.Properties{
+					table.WriteDataPathKey: dataPath,
+				}))
+			}
+
+			deleteSchema, err := table.SchemaToArrowSchema(
+				iceberg.NewSchema(0, iceberg.NestedField{
+					ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+				}), nil, true, false)
+			require.NoError(t, err)
+			records, release := makeEqDeleteRecords(t, deleteSchema, `[{"id": 7}]`)
+			defer release()
+
+			files, err := tx.WriteEqualityDeletes(t.Context(), []int{1}, records)
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			require.True(t, strings.HasPrefix(files[0].FilePath(), dataPath+"/"),
+				"equality deletes must use the staged data directory: %s", files[0].FilePath())
+		})
+	}
+}
+
 func TestTransactionSetLocationDoesNotMoveExistingFiles(t *testing.T) {
 	tbl, _ := newConcurrentRewriteTestTable(t)
 	originalLocation := tbl.Location()
