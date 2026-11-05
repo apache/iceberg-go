@@ -313,7 +313,14 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		}
 	}()
 	if writer != nil {
-		outputPath = t.tbl.Location() + "/data/00000-0-" + uuid.New().String() + "-equality-delete-conversion.puffin"
+		// Respect staged table location and write.data.path properties, including
+		// object store location providers. The base table may still point elsewhere.
+		locationProvider, err := LoadLocationProvider(meta.loc, meta.props)
+		if err != nil {
+			return nil, fmt.Errorf("resolve deletion vector location: %w", err)
+		}
+		outputPath = locationProvider.NewDataLocation(
+			"00000-0-"+uuid.New().String()+"-equality-delete-conversion.puffin", "")
 		deletionVectors, err := writer.Flush(ctx, outputPath)
 		if err != nil {
 			return nil, err
