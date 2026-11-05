@@ -166,7 +166,7 @@ func TestTransactionRemoveStatisticsNoOp(t *testing.T) {
 	// A no-op must not try to write a new metadata file through a catalog.
 	committed, err := tx.Commit(t.Context())
 	require.NoError(t, err)
-	require.Same(t, tbl, committed)
+	require.Same(t, tbl.metadata, committed.metadata)
 	require.ErrorContains(t, tx.RemoveStatistics(103), "already been committed")
 }
 
