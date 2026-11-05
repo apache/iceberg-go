@@ -77,7 +77,7 @@ func (t *Transaction) checkDynamicOverwriteExistingSpecs(ctx context.Context, fs
 	if snapshot == nil {
 		return nil
 	}
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(ctx, fs)
 	if err != nil {
 		return fmt.Errorf("dynamic partition overwrite: read manifests: %w", err)
 	}
@@ -88,7 +88,7 @@ func (t *Transaction) checkDynamicOverwriteExistingSpecs(ctx context.Context, fs
 		if int(manifest.PartitionSpecID()) == specID {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, true) {
+		for entry, err := range manifest.Entries(ctx, fs, true) {
 			if err != nil {
 				return fmt.Errorf("dynamic partition overwrite: read manifest %s: %w", manifest.FilePath(), err)
 			}
@@ -115,7 +115,7 @@ func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, touched 
 			return fmt.Errorf("dynamic partition overwrite: concurrent manifests for snapshot %d: %w", snapshot.SnapshotID, err)
 		}
 		for _, manifest := range manifests {
-			for entry, err := range manifest.Entries(cc.manifestReadIO(), false) {
+			for entry, err := range manifest.Entries(cc.ctx, cc.manifestReadIO(), false) {
 				if err != nil {
 					return fmt.Errorf("dynamic partition overwrite: read concurrent manifest %s: %w", manifest.FilePath(), err)
 				}
@@ -216,7 +216,7 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	var toDelete, deleteFilesToRemove []iceberg.DataFile
 	validationPlan := newPartitionValidationPlan(spec)
 	if snapshot := t.planningSnapshot(t.meta); snapshot != nil {
-		for df, err := range snapshot.dataFiles(fs, nil) {
+		for df, err := range snapshot.dataFiles(ctx, fs, nil) {
 			if err != nil {
 				return err
 			}
@@ -249,7 +249,7 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 		// A replaced partition has no surviving data that its old equality
 		// or position deletes should affect. Deletion vectors are tied to a
 		// particular data file and are removed separately with that file.
-		for entry, err := range snapshot.entries(fs, iceberg.ManifestContentDeletes, true) {
+		for entry, err := range snapshot.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 			if err != nil {
 				return fmt.Errorf("dynamic partition overwrite: read delete files: %w", err)
 			}
@@ -279,7 +279,7 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 
 	var dvs liveDeletionVectors
 	if t.meta.formatVersion >= 3 && len(toDelete) != 0 {
-		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+		if dvs, err = t.readLiveDeletionVectors(ctx, fs); err != nil {
 			return err
 		}
 	}

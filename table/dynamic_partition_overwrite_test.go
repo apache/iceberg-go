@@ -104,7 +104,7 @@ func TestDynamicPartitionOverwriteDataFiles(t *testing.T) {
 	require.Equal(t, "dynamic-test", snapshot.Summary.Properties["source"])
 
 	var paths []string
-	for df, err := range snapshot.dataFiles(fs, nil) {
+	for df, err := range snapshot.dataFiles(ctx, fs, nil) {
 		require.NoError(t, err)
 		if df.ContentType() == iceberg.EntryContentData {
 			paths = append(paths, df.FilePath())
@@ -145,7 +145,7 @@ func TestDynamicPartitionOverwriteAppendsNewPartition(t *testing.T) {
 	snapshot := metadata.CurrentSnapshot()
 	require.NotNil(t, snapshot)
 	var files []string
-	for df, err := range snapshot.dataFiles(fs, nil) {
+	for df, err := range snapshot.dataFiles(ctx, fs, nil) {
 		require.NoError(t, err)
 		files = append(files, df.FilePath())
 	}
@@ -178,7 +178,7 @@ func TestDynamicPartitionOverwriteUnpartitionedReplacesAllFiles(t *testing.T) {
 	require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
 	require.Equal(t, "true", snapshot.Summary.Properties["replace-partitions"])
 	var paths []string
-	for df, err := range snapshot.dataFiles(fs, nil) {
+	for df, err := range snapshot.dataFiles(ctx, fs, nil) {
 		require.NoError(t, err)
 		if df.ContentType() == iceberg.EntryContentData {
 			paths = append(paths, df.FilePath())
@@ -269,7 +269,7 @@ func TestDynamicPartitionOverwriteV1(t *testing.T) {
 	require.NotNil(t, snapshot)
 	require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
 	var paths []string
-	for file, err := range snapshot.dataFiles(fs, nil) {
+	for file, err := range snapshot.dataFiles(ctx, fs, nil) {
 		require.NoError(t, err)
 		if file.ContentType() == iceberg.EntryContentData {
 			paths = append(paths, file.FilePath())
@@ -370,7 +370,7 @@ func TestDynamicPartitionOverwriteRemovesOnlyTouchedPartitionDeletes(t *testing.
 	require.NoError(t, err)
 	snapshot := updated.CurrentSnapshot()
 	var liveDeletes []string
-	for entry, err := range snapshot.entries(fs, iceberg.ManifestContentDeletes, true) {
+	for entry, err := range snapshot.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 		require.NoError(t, err)
 		liveDeletes = append(liveDeletes, entry.DataFile().FilePath())
 	}
