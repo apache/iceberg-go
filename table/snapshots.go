@@ -429,10 +429,9 @@ func (s Snapshot) ValidateRowLineage() error {
 	return nil
 }
 
-func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) {
+func (s Snapshot) Manifests(ctx context.Context, fio iceio.IO) (_ []iceberg.ManifestFile, err error) {
 	if s.ManifestList != "" {
-		// No caller context to thread here.
-		f, err := fio.Open(context.Background(), s.ManifestList)
+		f, err := fio.Open(ctx, s.ManifestList)
 		if err != nil {
 			return nil, fmt.Errorf("could not open manifest file: %w", err)
 		}
@@ -443,7 +442,7 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 	if s.ManifestLocations != nil {
 		manifests := make([]iceberg.ManifestFile, len(s.ManifestLocations))
 		for i, path := range s.ManifestLocations {
-			length, err := embeddedManifestLength(fio, path)
+			length, err := embeddedManifestLength(ctx, fio, path)
 			if err != nil {
 				return nil, err
 			}
@@ -464,7 +463,7 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 	return nil, nil
 }
 
-func embeddedManifestLength(fio iceio.IO, path string) (_ int64, err error) {
+func embeddedManifestLength(ctx context.Context, fio iceio.IO, path string) (_ int64, err error) {
 	if fio == nil {
 		return 0, fmt.Errorf("cannot stat embedded manifest %q without IO", path)
 	}
@@ -478,7 +477,7 @@ func embeddedManifestLength(fio iceio.IO, path string) (_ int64, err error) {
 		return info.Size(), nil
 	}
 
-	f, err := fio.Open(context.Background(), path)
+	f, err := fio.Open(ctx, path)
 	if err != nil {
 		return 0, fmt.Errorf("could not open embedded manifest %q: %w", path, err)
 	}
@@ -492,9 +491,9 @@ func embeddedManifestLength(fio iceio.IO, path string) (_ int64, err error) {
 	return info.Size(), nil
 }
 
-func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryContent]) iter.Seq2[iceberg.DataFile, error] {
+func (s Snapshot) dataFiles(ctx context.Context, fio iceio.IO, fileFilter set[iceberg.ManifestEntryContent]) iter.Seq2[iceberg.DataFile, error] {
 	return func(yield func(iceberg.DataFile, error) bool) {
-		manifests, err := s.Manifests(fio)
+		manifests, err := s.Manifests(ctx, fio)
 		if err != nil {
 			yield(nil, err)
 
@@ -506,7 +505,7 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 			// removal, not files reachable from this snapshot. Yielding
 			// them would make existence and duplicate checks treat a
 			// file deleted by this snapshot as still live.
-			for entry, err := range m.Entries(fio, true) {
+			for entry, err := range m.Entries(ctx, fio, true) {
 				if err != nil {
 					yield(nil, err)
 
@@ -536,9 +535,9 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 // manifestContent < 0 yields entries across both data and delete
 // manifests. Set discardDeleted to skip DELETED entries: they are files
 // already removed from the table, not files still in it.
-func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
+func (s Snapshot) entries(ctx context.Context, fio iceio.IO, manifestContent iceberg.ManifestContent, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
 	return func(yield func(iceberg.ManifestEntry, error) bool) {
-		manifests, err := s.Manifests(fio)
+		manifests, err := s.Manifests(ctx, fio)
 		if err != nil {
 			yield(nil, err)
 
@@ -550,7 +549,7 @@ func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent,
 				continue
 			}
 
-			for entry, err := range m.Entries(fio, discardDeleted) {
+			for entry, err := range m.Entries(ctx, fio, discardDeleted) {
 				if err != nil {
 					yield(nil, err)
 

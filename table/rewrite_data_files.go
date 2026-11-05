@@ -753,7 +753,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		// commit-time validator never sees them, while its planned tasks lack
 		// any delete files they added. Rewriting anyway would write the deleted
 		// rows back and then drop those deletes as dead.
-		if err := sincePlanning.validate(current.Metadata(), fs, batchGroups); err != nil {
+		if err := sincePlanning.validate(ctx, current.Metadata(), fs, batchGroups); err != nil {
 			if !errors.Is(err, ErrConflictingDeleteFiles) {
 				return result, fmt.Errorf("validate partial rewrite batch %d against its planning snapshot: %w", batchNum, err)
 			}
@@ -1001,9 +1001,9 @@ type deletesSincePlanning struct {
 // validate collects the deletes committed between d.checked and current,
 // then returns ErrConflictingDeleteFiles when any delete committed since
 // planning could apply to a data file in groups.
-func (d *deletesSincePlanning) validate(current Metadata, fs iceio.IO, groups []CompactionTaskGroup) error {
+func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, fs iceio.IO, groups []CompactionTaskGroup) error {
 	// The rewrite validator binds no filters, so case sensitivity is moot.
-	cc, err := newConflictContext(d.checked, current, d.branch, fs, true)
+	cc, err := newConflictContext(ctx, d.checked, current, d.branch, fs, true)
 	if err != nil {
 		return err
 	}
