@@ -22,6 +22,13 @@ import "slices"
 // VersionByID returns a retained view version by ID, or nil if the version
 // is not available in this view's metadata. The returned version is a copy.
 func (v View) VersionByID(versionID int64) *Version {
+	// The built-in metadata keeps a lazy version index. Avoid cloning the
+	// entire version list to look up one version.
+	if md, ok := v.metadata.(*metadata); ok {
+		return md.lazyVersionsByID()[versionID].Clone()
+	}
+
+	// Preserve support for other Metadata implementations.
 	for _, version := range v.metadata.Versions() {
 		if version.VersionID == versionID {
 			return version.Clone()

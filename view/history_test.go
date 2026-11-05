@@ -221,6 +221,7 @@ func TestVersionAsOfTruncatedHistory(t *testing.T) {
 	// If a log entry refers to a version that has been expired, do not
 	// incorrectly return an older or newer version in its place.
 	md.VersionList = md.VersionList[1:]
+	md.init() // Rebuild indexes after changing the metadata test fixture.
 	require.Nil(t, vw.VersionAsOf(3000))
 	require.EqualValues(t, 2, vw.VersionAsOf(4000).VersionID)
 }
@@ -268,4 +269,16 @@ func TestVersionAsOfAfterHistoryExpiration(t *testing.T) {
 	require.Nil(t, retained.VersionByID(1))
 	require.Nil(t, retained.VersionAsOf(3999))
 	require.EqualValues(t, 2, retained.VersionAsOf(4000).VersionID)
+}
+
+func TestVersionByIDWithCustomMetadata(t *testing.T) {
+	vw := viewWithVersionHistory(t)
+	// The fast indexed path is optional. Custom metadata can use Versions().
+	custom := New(vw.Identifier(), struct{ Metadata }{vw.Metadata()}, vw.MetadataLocation())
+
+	require.Nil(t, custom.VersionByID(99))
+	version := custom.VersionByID(1)
+	require.NotNil(t, version)
+	version.Summary["operation"] = "changed"
+	require.Equal(t, "create", custom.VersionByID(1).Summary["operation"])
 }
