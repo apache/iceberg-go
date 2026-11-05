@@ -1975,7 +1975,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
 	liveDataFiles := make(map[string]rewriteFileState)
 	survivingPositionDeletes := make([]rewriteFileState, 0)
-	for entry, err := range s.entries(fs, -1, false) {
+	for entry, err := range s.entries(ctx, fs, -1, false) {
 		if err != nil {
 			return err
 		}
