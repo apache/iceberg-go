@@ -18,7 +18,9 @@
 package table_test
 
 import (
+	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -53,7 +55,6 @@ func newDynamicOverwriteTableWithSchema(t *testing.T, schema *iceberg.Schema, sp
 	location := filepath.ToSlash(t.TempDir())
 	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location, iceberg.Properties{
 		table.PropertyFormatVersion:        formatVersion,
-		table.WriteUpdateIsolationLevelKey: string(table.IsolationSnapshot),
 		table.CommitNumRetriesKey:          "2",
 		table.CommitMinRetryWaitMsKey:      "1",
 		table.CommitMaxRetryWaitMsKey:      "2",
@@ -218,4 +219,157 @@ func TestDynamicPartitionOverwriteDatePartition(t *testing.T) {
 	replacement.Release()
 	require.NoError(t, err)
 	require.ElementsMatch(t, []int64{2, 4}, idsOnRef(t, updated, table.MainBranch))
+}
+// newDynamicOverwriteV3MoRTable writes two rows in each partition so a
+// partial DELETE creates a deletion vector instead of dropping a whole file.
+func newDynamicOverwriteV3MoRTable(t *testing.T) (*table.Table, *concurrentTestCatalog) {
+	t.Helper()
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "group", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "group", Transform: iceberg.IdentityTransform{},
+	})
+	tbl, cat := newDynamicOverwriteTableWithSchema(t, schema, spec, "3")
+	setMode := tbl.NewTransaction()
+	require.NoError(t, setMode.SetProperties(iceberg.Properties{table.WriteDeleteModeKey: table.WriteModeMergeOnRead}))
+	var err error
+	tbl, err = setMode.Commit(t.Context())
+	require.NoError(t, err)
+	seed := dynamicOverwriteJSONReader(t, tbl,
+		`[{"id":1,"group":10},{"id":2,"group":10},{"id":3,"group":20},{"id":4,"group":20}]`)
+	tbl, err = tbl.Append(t.Context(), seed, nil)
+	seed.Release()
+	require.NoError(t, err)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2, "each partition needs its own data file")
+	return tbl, cat
+}
+
+// The overwrite must remove the DV tied to the replaced data file, preserve
+// the DV for the untouched partition, and preserve row IDs for surviving rows.
+func TestDynamicPartitionOverwriteV3RemovesOnlyTouchedDeletionVectors(t *testing.T) {
+	tbl, _ := newDynamicOverwriteV3MoRTable(t)
+	originalRowIDs := rowIDByID(t, tbl)
+	var err error
+	for _, id := range []int64{1, 3} {
+		tbl, err = tbl.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference("id"), id), nil)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 2, liveDVCountOnRef(t, tbl, table.MainBranch))
+	require.ElementsMatch(t, []int64{2, 4}, idsOnRef(t, tbl, table.MainBranch))
+	beforeData, _ := liveFilesOnRef(t, tbl, table.MainBranch)
+	require.Len(t, beforeData, 2)
+	replacement := dynamicOverwriteJSONReader(t, tbl, `[{"id":5,"group":10}]`)
+	updated, err := tbl.DynamicPartitionOverwrite(t.Context(), replacement, nil)
+	replacement.Release()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{4, 5}, idsOnRef(t, updated, table.MainBranch))
+	require.Equal(t, 1, liveDVCountOnRef(t, updated, table.MainBranch))
+	afterData, _ := liveFilesOnRef(t, updated, table.MainBranch)
+	require.Len(t, afterData, 2)
+	var retained, replaced int
+	for _, path := range beforeData {
+		refs := map[string]struct{}{path: {}}
+		if slices.Contains(afterData, path) {
+			retained++
+			require.Len(t, deleteEntriesReferencing(t, updated, refs), 1,
+				"the untouched data file must keep its deletion vector")
+		} else {
+			replaced++
+			require.Empty(t, deleteEntriesReferencing(t, updated, refs),
+				"the replaced data file must not keep its deletion vector")
+		}
+	}
+	require.Equal(t, 1, retained)
+	require.Equal(t, 1, replaced)
+	rowIDs := rowIDByID(t, updated)
+	require.Equal(t, originalRowIDs[4], rowIDs[4], "untouched rows must keep their _row_id")
+	require.Greater(t, rowIDs[5],
+		max(originalRowIDs[1], originalRowIDs[2], originalRowIDs[3], originalRowIDs[4]),
+		"the replacement row must receive a fresh _row_id")
+}
+
+// Concurrent deletion vectors in replaced partitions must conflict, while
+// ones in other partitions must survive a refresh-and-replay of the overwrite.
+func TestDynamicPartitionOverwriteConcurrentDeletionVectors(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deleteID int64
+		conflict bool
+	}{
+		{name: "touched partition", deleteID: 1, conflict: true},
+		{name: "other partition", deleteID: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, cat := newDynamicOverwriteV3MoRTable(t)
+			stale := tbl.NewTransaction()
+			replacement := dynamicOverwriteJSONReader(t, tbl, `[{"id":5,"group":10}]`)
+			require.NoError(t, stale.DynamicPartitionOverwrite(t.Context(), replacement, nil))
+			replacement.Release()
+			peer, err := tbl.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference("id"), tc.deleteID), nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, liveDVCountOnRef(t, peer, table.MainBranch),
+				"concurrent writer must add a deletion vector")
+			attemptsBefore := cat.attempts.Load()
+			updated, err := stale.Commit(t.Context())
+			if tc.conflict {
+				require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+				require.Equal(t, attemptsBefore+1, cat.attempts.Load())
+				require.ElementsMatch(t, []int64{2, 3, 4}, idsOnRef(t, peer, table.MainBranch))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, attemptsBefore+2, cat.attempts.Load(),
+				"the independent delete must survive a refresh and retry")
+			require.ElementsMatch(t, []int64{4, 5}, idsOnRef(t, updated, table.MainBranch))
+			require.Equal(t, 1, liveDVCountOnRef(t, updated, table.MainBranch))
+		})
+	}
+}
+
+// Count data files recursively to catch writes in existing partition
+// subdirectories as well as new ones.
+func dynamicOverwriteDataPaths(t *testing.T, tbl *table.Table) []string {
+	t.Helper()
+	var paths []string
+	err := filepath.WalkDir(filepath.Join(tbl.Location(), "data"), func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			paths = append(paths, filepath.ToSlash(path))
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	slices.Sort(paths)
+	return paths
+}
+
+// A table with an old-spec manifest must be rejected before the Arrow writer
+// creates any new files, because those paths would otherwise be orphaned.
+func TestDynamicPartitionOverwriteArrowRejectsOldSpecBeforeWriting(t *testing.T) {
+	base, _ := newDynamicOverwriteTable(t)
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+	evolve := tbl.NewTransaction()
+	require.NoError(t, evolve.UpdateSpec(true).
+		RemoveField("id").
+		AddField("id", iceberg.BucketTransform{NumBuckets: 16}, "id_bucket").
+		Commit())
+	var err error
+	tbl, err = evolve.Commit(t.Context())
+	require.NoError(t, err)
+	before := dynamicOverwriteDataPaths(t, tbl)
+	require.NotEmpty(t, before, "test requires already-written data files")
+	replacement := idRecordReader(t, tbl, 3)
+	_, err = tbl.DynamicPartitionOverwrite(t.Context(), replacement, nil)
+	replacement.Release()
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "under partition spec")
+	require.Equal(t, before, dynamicOverwriteDataPaths(t, tbl),
+		"rejecting an old-spec table must not leave new data files behind")
+	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, tbl, table.MainBranch))
 }
