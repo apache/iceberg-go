@@ -190,3 +190,81 @@ func TestOauth2AuthManager_AuthHeaderWithContext_SharesRefresh(t *testing.T) {
 	assert.Equal(t, "Authorization", key)
 	assert.Equal(t, "Bearer shared_token", value)
 }
+
+// sequenceTokenSource returns its tokens in order, repeating the last one, and
+// counts Token calls.
+type sequenceTokenSource struct {
+	tokens []*oauth2.Token
+	err    error
+	calls  atomic.Int32
+}
+
+func (s *sequenceTokenSource) Token() (*oauth2.Token, error) {
+	n := int(s.calls.Add(1))
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	return s.tokens[min(n, len(s.tokens))-1], nil
+}
+
+func TestNewOauth2AuthManager_ReusesValidToken(t *testing.T) {
+	// An empty TokenType defaults to Bearer, as oauth2.Token.Type does.
+	source := &sequenceTokenSource{tokens: []*oauth2.Token{
+		{AccessToken: "a", Expiry: time.Now().Add(time.Hour)},
+	}}
+	manager := NewOauth2AuthManager(source)
+
+	for range 3 {
+		key, value, err := manager.AuthHeader()
+		require.NoError(t, err)
+		assert.Equal(t, "Authorization", key)
+		assert.Equal(t, "Bearer a", value)
+	}
+	assert.EqualValues(t, 1, source.calls.Load(), "a valid token must be reused, not refetched per request")
+}
+
+func TestNewOauth2AuthManager_RefreshesExpiredToken(t *testing.T) {
+	source := &sequenceTokenSource{tokens: []*oauth2.Token{
+		{AccessToken: "a", TokenType: "Bearer", Expiry: time.Now().Add(-time.Minute)},
+		{AccessToken: "b", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)},
+	}}
+	manager := NewOauth2AuthManager(source)
+
+	for _, want := range []string{"Bearer a", "Bearer b", "Bearer b"} {
+		_, value, err := manager.AuthHeaderWithContext(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, want, value)
+	}
+	assert.EqualValues(t, 2, source.calls.Load())
+}
+
+func TestNewOauth2AuthManager_RetrieveErrorIsOAuthError(t *testing.T) {
+	manager := NewOauth2AuthManager(&sequenceTokenSource{err: &oauth2.RetrieveError{
+		ErrorCode:        "invalid_grant",
+		ErrorDescription: "Token has been expired or revoked.",
+	}})
+
+	_, _, err := manager.AuthHeader()
+	require.ErrorIs(t, err, ErrOAuthError)
+	assert.Contains(t, err.Error(), "invalid_grant")
+	assert.Contains(t, err.Error(), "Token has been expired or revoked.")
+}
+
+func TestNewOauth2AuthManager_CanceledContextSkipsSource(t *testing.T) {
+	source := &sequenceTokenSource{tokens: []*oauth2.Token{{AccessToken: "a"}}}
+	manager := NewOauth2AuthManager(source)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := manager.AuthHeaderWithContext(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, source.calls.Load(), "a canceled caller must not trigger a refresh")
+}
+
+func TestNewOauth2AuthManager_NilSourcePanics(t *testing.T) {
+	assert.PanicsWithValue(t, "rest: NewOauth2AuthManager called with a nil oauth2.TokenSource", func() {
+		NewOauth2AuthManager(nil)
+	})
+}
