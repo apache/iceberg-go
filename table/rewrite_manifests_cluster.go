@@ -173,7 +173,7 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 
 	for _, manifest := range manifests {
 		specID := int(manifest.PartitionSpecID())
-		for entry, entryErr := range m.snap.iterManifestEntries(manifest, true) {
+		for entry, entryErr := range m.snap.iterManifestEntries(m.operationContext(), manifest, true) {
 			if entryErr != nil {
 				return nil, entryErr
 			}
