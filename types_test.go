@@ -409,6 +409,83 @@ func TestStructTypeUnmarshalErrorLeavesTypeUnchanged(t *testing.T) {
 	assert.Equal(t, kept(), typ)
 }
 
+// TestNestedTypeConstructorsMatchLiterals pins that each constructor builds the
+// same value, with the same JSON, as the composite literal it replaces.
+func TestNestedTypeConstructorsMatchLiterals(t *testing.T) {
+	fields := []iceberg.NestedField{
+		{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String},
+	}
+
+	tests := []struct {
+		name        string
+		constructed iceberg.Type
+		literal     iceberg.Type
+	}{
+		{"struct", iceberg.NewStructType(fields...), &iceberg.StructType{FieldList: fields}},
+		{"empty struct", iceberg.NewStructType(), &iceberg.StructType{}},
+		{"empty non-nil struct", iceberg.NewStructType([]iceberg.NestedField{}...), &iceberg.StructType{FieldList: []iceberg.NestedField{}}},
+		{"list", iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, true), &iceberg.ListType{ElementID: 3, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: true}},
+		{
+			"map",
+			iceberg.NewMapType(4, iceberg.PrimitiveTypes.String, 5, iceberg.PrimitiveTypes.Float64, false),
+			&iceberg.MapType{KeyID: 4, KeyType: iceberg.PrimitiveTypes.String, ValueID: 5, ValueType: iceberg.PrimitiveTypes.Float64, ValueRequired: false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.literal, tt.constructed)
+			assert.True(t, tt.constructed.Equals(tt.literal))
+
+			want, err := json.Marshal(tt.literal)
+			require.NoError(t, err)
+			got, err := json.Marshal(tt.constructed)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(want), string(got))
+		})
+	}
+}
+
+func TestNewStructTypeCopiesFields(t *testing.T) {
+	fields := []iceberg.NestedField{
+		{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+	}
+	st := iceberg.NewStructType(fields...)
+
+	fields[0].Name = "changed"
+
+	assert.Equal(t, "a", st.Field(0).Name)
+}
+
+func TestStructTypeFieldsReturnsCopy(t *testing.T) {
+	st := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String},
+	}}
+
+	got := st.Fields()
+	got[0].Name = "changed"
+	got[1].Type = iceberg.PrimitiveTypes.Bool
+
+	assert.Equal(t, "a", st.Field(0).Name)
+	assert.Equal(t, iceberg.PrimitiveTypes.String, st.Field(1).Type)
+}
+
+func TestStructTypeFieldAccessors(t *testing.T) {
+	st := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	require.Equal(t, 2, st.NumFields())
+	assert.Equal(t, "a", st.Field(0).Name)
+	assert.Equal(t, 2, st.Field(1).ID)
+	assert.Equal(t, st.FieldList, st.Fields())
+	assert.Zero(t, iceberg.NewStructType().NumFields())
+	assert.Panics(t, func() { st.Field(2) })
+}
+
 var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.Bool,
 	iceberg.PrimitiveTypes.Int32,
