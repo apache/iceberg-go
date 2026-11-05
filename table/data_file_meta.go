@@ -177,6 +177,12 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		return nil, errors.New("file metadata is required")
 	}
 
+	// This helper takes Parquet footer metadata. The format factory also
+	// supports other writers, whose metadata must not be interpreted as Parquet.
+	if args.Format != iceberg.ParquetFile {
+		return nil, fmt.Errorf("unsupported file format: %s", args.Format)
+	}
+
 	format := tblutils.GetFileFormat(args.Format)
 	if format == nil {
 		return nil, errors.New("unsupported file format: " + string(args.Format))

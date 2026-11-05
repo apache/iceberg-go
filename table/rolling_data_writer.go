@@ -179,6 +179,11 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 
 	format := tblutils.GetFileFormat(fileFormat)
+	if format == nil {
+		stopCount()
+
+		return nil, fmt.Errorf("%w: writing %s files is not supported", iceberg.ErrNotImplemented, fileFormat)
+	}
 
 	var rowGroupTargetSizeBytes int64
 	if fileFormat == iceberg.ParquetFile {

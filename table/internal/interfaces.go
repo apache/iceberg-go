@@ -96,6 +96,7 @@ type FileFormat interface {
 	NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, arrowSchema *arrow.Schema) (FileWriter, error)
 }
 
+// Do not enable Avro for table writes until table scans can read Avro data files.
 func GetFileFormat(format iceberg.FileFormat) FileFormat {
 	switch format {
 	case iceberg.ParquetFile:
@@ -109,6 +110,8 @@ func FormatFromFileName(fileName string) FileFormat {
 	switch path.Ext(fileName) {
 	case ".parquet":
 		return parquetFormat{}
+	case ".avro":
+		return avroFormat{}
 	default:
 		return nil
 	}
