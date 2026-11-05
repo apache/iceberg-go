@@ -24,7 +24,7 @@ import (
 
 func TestEqualityDeletePositionBufferConcurrent(t *testing.T) {
 	const (
-		workers          = 12
+		workers           = 12
 		positionsPerBatch = 32
 	)
 
