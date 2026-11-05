@@ -239,3 +239,41 @@ func TestVersionAsOfAfterHistoryExpiration(t *testing.T) {
 	require.Nil(t, retained.VersionAsOf(3999))
 	require.EqualValues(t, 2, retained.VersionAsOf(4000).VersionID)
 }
+
+func TestVersionAsOfBuilderCreatedHistory(t *testing.T) {
+	first, err := NewMetadataBuilder().
+		SetLoc("s3://warehouse/db/view").
+		SetCurrentVersion(newTestVersionWithSQL(1, 0, "SELECT 1", WithTimestampMS(1000)), newTestSchema(0)).
+		Build()
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(first.Metadata)
+	require.NoError(t, err)
+	second, err := builder.
+		SetCurrentVersion(newTestVersionWithSQL(2, 0, "SELECT 2", WithTimestampMS(2000)), newTestSchema(0)).
+		Build()
+	require.NoError(t, err)
+
+	builder, err = MetadataBuilderFromBase(second.Metadata)
+	require.NoError(t, err)
+	rolledBack, err := builder.SetCurrentVersionID(1).Build()
+	require.NoError(t, err)
+
+	vw := New([]string{"db", "view"}, rolledBack.Metadata, "s3://warehouse/db/view/metadata.json")
+	history := vw.History()
+	require.Len(t, history, 3)
+	require.Equal(t, []VersionLogEntry{
+		{TimestampMS: 1000, VersionID: 1},
+		{TimestampMS: 2000, VersionID: 2},
+	}, history[:2])
+	require.EqualValues(t, 1, history[2].VersionID)
+	require.Greater(t, history[2].TimestampMS, int64(2000))
+
+	require.Nil(t, vw.VersionAsOf(999))
+	require.EqualValues(t, 1, vw.VersionAsOf(1000).VersionID)
+	require.EqualValues(t, 2, vw.VersionAsOf(2000).VersionID)
+	require.EqualValues(t, 2, vw.VersionAsOf(history[2].TimestampMS-1).VersionID)
+	require.EqualValues(t, 1, vw.VersionAsOf(history[2].TimestampMS).VersionID)
+	require.EqualValues(t, 1, vw.VersionAsOf(history[2].TimestampMS+1).VersionID)
+	require.Equal(t, vw.CurrentVersion().VersionID, vw.VersionAsOf(history[2].TimestampMS).VersionID)
+}
