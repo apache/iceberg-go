@@ -161,10 +161,10 @@ func (u *UpdateSortOrder) BuildUpdates() ([]Update, []Requirement, error) {
 		return nil, nil, nil
 	}
 
-	// A transaction may replace the sort order more than once. Validate the
-	// staged order now; Transaction.apply retains the first requirement of
-	// each type, protecting the original base order at catalog commit time.
-	reqs := []Requirement{AssertDefaultSortOrderID(meta.DefaultSortOrder())}
+	// A transaction may replace the sort order more than once. Pin the
+	// original base order, not the changing staged order, so all replacements
+	// retain one consistent concurrency requirement at catalog commit time.
+	reqs := []Requirement{AssertDefaultSortOrderID(u.txn.tbl.Metadata().DefaultSortOrder())}
 	if meta.CurrentSchema().ID == u.txn.tbl.Metadata().CurrentSchema().ID {
 		reqs = append(reqs, AssertCurrentSchemaID(meta.CurrentSchema().ID))
 	}
