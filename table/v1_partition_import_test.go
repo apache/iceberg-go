@@ -150,13 +150,13 @@ func TestV1AddDataFilesByPathBucketPartitionCommit(t *testing.T) {
 
 	snapshot := committed.CurrentSnapshot()
 	require.NotNil(t, snapshot)
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 	require.NotEmpty(t, manifests)
 
 	var imported int
 	for _, manifest := range manifests {
-		for entry, err := range manifest.Entries(fs, true) {
+		for entry, err := range manifest.Entries(t.Context(), fs, true) {
 			require.NoError(t, err)
 			if entry.DataFile().FilePath() == path {
 				imported++
@@ -306,12 +306,12 @@ func TestV1ImportPartitionOptionsSnapshotCallerValues(t *testing.T) {
 	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false, addOption))
 	committed, err := tx.Commit(t.Context())
 	require.NoError(t, err)
-	manifests, err := committed.CurrentSnapshot().Manifests(fs)
+	manifests, err := committed.CurrentSnapshot().Manifests(t.Context(), fs)
 	require.NoError(t, err)
 	require.NotEmpty(t, manifests)
 	var found bool
 	for _, manifest := range manifests {
-		for entry, entryErr := range manifest.Entries(fs, true) {
+		for entry, entryErr := range manifest.Entries(t.Context(), fs, true) {
 			require.NoError(t, entryErr)
 			if entry.DataFile().FilePath() == path {
 				found = true

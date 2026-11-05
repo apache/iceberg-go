@@ -315,7 +315,7 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 
 	entries := make([]iceberg.ManifestEntry, 0, 1)
-	for entry, err := range mf[0].Entries(updatedFS, false) {
+	for entry, err := range mf[0].Entries(s.T().Context(), updatedFS, false) {
 		s.Require().NoError(err)
 		entries = append(entries, entry)
 	}
