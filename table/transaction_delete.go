@@ -200,8 +200,36 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 			return nil, err
 		}
 		if len(referenced) > 0 {
+			// A first v3 deletion vector is otherwise replayable. If a
+			// concurrent writer adds a DV for the same file, replaying ours
+			// would leave two live vectors and make the table unreadable.
+			dvTargets := make(map[string]struct{}, len(referenced))
+			if meta.formatVersion >= 3 {
+				for _, ref := range referenced {
+					dvTargets[ref] = struct{}{}
+				}
+			}
 			t.addValidator(func(cc *conflictContext) error {
-				return validateDataFilesExist(cc, referenced)
+				if err := validateDataFilesExist(cc, referenced); err != nil {
+					return err
+				}
+				if len(dvTargets) == 0 {
+					return nil
+				}
+
+				return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, entry iceberg.ManifestEntry) error {
+					file := entry.DataFile()
+					ref := explicitReferencedDataFile(file)
+					if !IsDeletionVector(file) || ref == "" {
+						return nil
+					}
+					if _, ok := dvTargets[ref]; ok {
+						return fmt.Errorf("cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and retry the delete",
+							ref, snap.SnapshotID, file.FilePath())
+					}
+
+					return nil
+				})
 			})
 		}
 	}
