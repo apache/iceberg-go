@@ -222,7 +222,10 @@ func init() {
 	}))
 }
 
-var _ catalog.Catalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog     = (*Catalog)(nil)
+	_ catalog.ViewCatalog = (*Catalog)(nil)
+)
 
 const namespaceExistsProperty = "exists"
 
@@ -1566,34 +1569,50 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 }
 
 // CreateView creates a new view in the catalog.
-func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, representation view.Representation, props iceberg.Properties) error {
+func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
 	if c.isV0() {
-		return errViewsUnsupportedOnV0
+		return nil, errViewsUnsupportedOnV0
 	}
 
 	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
-		return err
+		return nil, err
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(identifier)
 	viewIdent := catalog.ObjectNameFromIdent(identifier)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !exists {
-		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
+		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
+	}
+
+	cfg := catalog.NewCreateViewCfg()
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	loc, err := internal.ResolveTableLocationWithNamespace(
-		ctx, "", nsIdent, ns, viewIdent, c.props, c.LoadNamespaceProperties)
+		ctx, cfg.Location, nsIdent, ns, viewIdent, c.props, c.LoadNamespaceProperties)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	createdView, err := view.CreateView(ctx, c.name, identifier, schema, representation, nsIdent, loc, props)
+	ioProps := maps.Clone(c.props)
+	if ioProps == nil {
+		ioProps = make(iceberg.Properties)
+	}
+	maps.Copy(ioProps, cfg.Properties)
+
+	if version != nil && version.DefaultCatalog == "" {
+		version = version.Clone()
+		version.DefaultCatalog = c.name
+	}
+
+	createdView, err := view.CreateViewFromVersion(ctx, identifier, schema, version, loc, ioProps, cfg.Properties)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	metadataLocation := createdView.MetadataLocation()
 
@@ -1630,13 +1649,17 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 				err = collisionErr
 			}
 		}
-		loadFS := io.LoadFSFunc(c.props, metadataLocation)
+		loadFS := io.LoadFSFunc(ioProps, metadataLocation)
 		if cleanupErr := removeUncommittedMetadata(ctx, metadataLocation, loadFS); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
 	}
 
-	return err
+	if err != nil {
+		return nil, err
+	}
+
+	return createdView, nil
 }
 
 // DropView deletes a view from the catalog.
@@ -1745,7 +1768,7 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 }
 
 // LoadView loads a view from the catalog.
-func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
+func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
 	if c.isV0() {
 		return nil, errViewsUnsupportedOnV0
 	}
@@ -1790,5 +1813,5 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (vi
 		return nil, err
 	}
 
-	return loadedView.Metadata(), nil
+	return loadedView, nil
 }
