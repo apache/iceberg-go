@@ -32,8 +32,9 @@ import (
 // Each buffer has its own mutex so parallel scans of different files do not
 // contend on a table-wide lock. The scan finishes before bitmap is read.
 type equalityDeletePositionBuffer struct {
-	mu     sync.Mutex
-	bitmap *dv.RoaringPositionBitmap
+	mu              sync.Mutex
+	bitmap          *dv.RoaringPositionBitmap
+	invalidPosition int64
 }
 
 func (b *equalityDeletePositionBuffer) addPositions(positions []int64) {
@@ -43,6 +44,16 @@ func (b *equalityDeletePositionBuffer) addPositions(positions []int64) {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if b.invalidPosition < 0 {
+		return
+	}
+	for _, position := range positions {
+		if position < 0 {
+			b.invalidPosition = position
+			return
+		}
+	}
 
 	if b.bitmap == nil {
 		b.bitmap = dv.NewRoaringPositionBitmap()
@@ -234,6 +245,16 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 				return nil, err
 			}
 			record.Release()
+		}
+	}
+
+	// A row-position cursor should never produce negative positions. Unlike
+	// DVWriter.Add, DVWriter.Load accepts an unsigned bitmap, so reject
+	// invalid positions before they can wrap to huge uint64 values.
+	for path, positions := range positionsByPath {
+		if positions.invalidPosition < 0 {
+			return nil, fmt.Errorf("%w: negative equality-delete row position %d for data file %s",
+				iceberg.ErrInvalidArgument, positions.invalidPosition, path)
 		}
 	}
 
