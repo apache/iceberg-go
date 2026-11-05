@@ -890,6 +890,10 @@ func TestRowDeltaDVSupersessionSingleSnapshot(t *testing.T) {
 	assert.Equal(t, table.OpDelete, snap.Summary.Operation)
 	assert.Equal(t, "1", snap.Summary.Properties["added-delete-files"])
 	assert.Equal(t, "1", snap.Summary.Properties["removed-delete-files"])
+	assert.Equal(t, "1", snap.Summary.Properties["added-dvs"])
+	assert.Equal(t, "1", snap.Summary.Properties["removed-dvs"])
+	assert.NotContains(t, snap.Summary.Properties, "added-position-delete-files")
+	assert.NotContains(t, snap.Summary.Properties, "removed-position-delete-files")
 
 	fs := iceio.LocalFS{}
 	liveDVs, removedDVs := snapshotDVEntries(t, snap, fs)

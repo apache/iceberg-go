@@ -725,7 +725,7 @@ func TestPrefixScopedIOUsesLongestCredentialPerLocation(t *testing.T) {
 	assert.Equal(t, "yes", p.propertiesForLocation("s3://other/table/file.parquet")["base"])
 }
 
-func TestPrefixScopedIOReplacesS3CredentialAtomically(t *testing.T) {
+func TestPrefixScopedIODropsStaleS3SessionTokenForVendedKeyPair(t *testing.T) {
 	t.Parallel()
 
 	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
@@ -748,6 +748,87 @@ func TestPrefixScopedIOReplacesS3CredentialAtomically(t *testing.T) {
 	assert.Equal(t, "plan-secret", props[iceio.S3SecretAccessKey])
 	assert.NotContains(t, props, iceio.S3SessionToken)
 	assert.NotContains(t, props, keyS3TokenExpiresAtMs)
+}
+
+// TestPrefixScopedIOLayersPartialS3Credential matches the table-wide sites
+// (TestTableResponseLayersPartialS3Credential): a credential that vends only
+// a session token keeps the base key pair.
+func TestPrefixScopedIOLayersPartialS3Credential(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.S3AccessKeyID:     "static-key",
+		iceio.S3SecretAccessKey: "static-secret",
+	}, []StorageCredential{{
+		Prefix: "s3://bucket/data/",
+		Config: iceberg.Properties{iceio.S3SessionToken: "vended-token"},
+	}})
+
+	props := p.propertiesForLocation("s3://bucket/data/file.parquet")
+	assert.Equal(t, "static-key", props[iceio.S3AccessKeyID])
+	assert.Equal(t, "static-secret", props[iceio.S3SecretAccessKey])
+	assert.Equal(t, "vended-token", props[iceio.S3SessionToken])
+}
+
+func TestMergeVendedCredentialsS3SessionToken(t *testing.T) {
+	t.Parallel()
+
+	base := iceberg.Properties{
+		iceio.S3AccessKeyID:     "base-key",
+		iceio.S3SecretAccessKey: "base-secret",
+		iceio.S3SessionToken:    "base-token",
+		keyS3TokenExpiresAtMs:   "1000",
+	}
+
+	tests := []struct {
+		name   string
+		vended iceberg.Properties
+		want   iceberg.Properties
+	}{
+		{
+			name:   "key pair without token drops base token and expiry",
+			vended: iceberg.Properties{iceio.S3AccessKeyID: "key", iceio.S3SecretAccessKey: "secret"},
+			want:   iceberg.Properties{iceio.S3AccessKeyID: "key", iceio.S3SecretAccessKey: "secret"},
+		},
+		{
+			name: "key pair with token drops base expiry",
+			vended: iceberg.Properties{
+				iceio.S3AccessKeyID: "key", iceio.S3SecretAccessKey: "secret", iceio.S3SessionToken: "token",
+			},
+			want: iceberg.Properties{
+				iceio.S3AccessKeyID: "key", iceio.S3SecretAccessKey: "secret", iceio.S3SessionToken: "token",
+			},
+		},
+		{
+			name: "key pair with token and expiry replaces both",
+			vended: iceberg.Properties{
+				iceio.S3AccessKeyID: "key", iceio.S3SecretAccessKey: "secret",
+				iceio.S3SessionToken: "token", keyS3TokenExpiresAtMs: "2000",
+			},
+			want: iceberg.Properties{
+				iceio.S3AccessKeyID: "key", iceio.S3SecretAccessKey: "secret",
+				iceio.S3SessionToken: "token", keyS3TokenExpiresAtMs: "2000",
+			},
+		},
+		{
+			name:   "token only layers onto base key pair",
+			vended: iceberg.Properties{iceio.S3SessionToken: "token"},
+			want: iceberg.Properties{
+				iceio.S3AccessKeyID: "base-key", iceio.S3SecretAccessKey: "base-secret",
+				iceio.S3SessionToken: "token", keyS3TokenExpiresAtMs: "1000",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := maps.Clone(base)
+			mergeVendedCredentials(config, tt.vended, "s3://bucket/table/metadata.json")
+			assert.Equal(t, tt.want, config)
+		})
+	}
 }
 
 func TestPrefixScopedIOClearsStaleADLSAuthForVendedToken(t *testing.T) {

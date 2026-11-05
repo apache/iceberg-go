@@ -77,7 +77,7 @@ iceberg.IsNaN(iceberg.Reference("ratio"))
 iceberg.NotNaN(iceberg.Reference("ratio"))
 ```
 
-Operators `OpIsNan` and `OpNotNan`. Use these instead of `EqualTo(..., math.NaN())` - NaN is never equal to itself.
+Operators `OpIsNan` and `OpNotNan`. Use these instead of `EqualTo(..., math.NaN())` - NaN is never equal to itself, so a comparison or `In`/`NotIn` with a NaN literal fails to bind with `ErrInvalidArgument`.
 
 ## String prefix
 
