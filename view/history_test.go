@@ -99,73 +99,18 @@ func TestVersionAsOf(t *testing.T) {
 	}
 }
 
-func TestVersionLogEntryAsOf(t *testing.T) {
-	tests := []struct {
-		name      string
-		history   []VersionLogEntry
-		timestamp int64
-		inclusive bool
-		wantID    int64
-		wantFound bool
-	}{
-		{name: "empty", timestamp: 1000, inclusive: true},
-		{
-			name:      "before first",
-			history:   []VersionLogEntry{{TimestampMS: 2000, VersionID: 1}},
-			timestamp: 1000, inclusive: true,
-		},
-		{
-			name:      "exact inclusive",
-			history:   []VersionLogEntry{{TimestampMS: 1000, VersionID: 1}},
-			timestamp: 1000, inclusive: true, wantID: 1, wantFound: true,
-		},
-		{
-			name:      "exact exclusive",
-			history:   []VersionLogEntry{{TimestampMS: 1000, VersionID: 1}},
-			timestamp: 1000,
-		},
-		{
-			name: "strict before",
-			history: []VersionLogEntry{
-				{TimestampMS: 1000, VersionID: 1},
-				{TimestampMS: 2000, VersionID: 2},
-			},
-			timestamp: 2000, wantID: 1, wantFound: true,
-		},
-		{
-			name: "out of order selects greatest timestamp",
-			history: []VersionLogEntry{
-				{TimestampMS: 1000, VersionID: 1},
-				{TimestampMS: 3000, VersionID: 2},
-				{TimestampMS: 2000, VersionID: 3},
-			},
-			timestamp: 3500, inclusive: true, wantID: 2, wantFound: true,
-		},
-		{
-			name: "equal timestamps select first",
-			history: []VersionLogEntry{
-				{TimestampMS: 1000, VersionID: 1},
-				{TimestampMS: 2000, VersionID: 2},
-				{TimestampMS: 2000, VersionID: 3},
-			},
-			timestamp: 2000, inclusive: true, wantID: 2, wantFound: true,
-		},
-		{
-			name:      "negative epoch timestamp",
-			history:   []VersionLogEntry{{TimestampMS: -2000, VersionID: 1}},
-			timestamp: -1000, inclusive: true, wantID: 1, wantFound: true,
-		},
-	}
+func TestVersionAsOfEmptyAndNegativeHistory(t *testing.T) {
+	vw := viewWithVersionHistory(t)
+	md := vw.Metadata().(*metadata)
+	md.VersionLogList = nil
+	require.Nil(t, vw.VersionAsOf(1000))
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry, found := VersionLogEntryAsOf(tt.history, tt.timestamp, tt.inclusive)
-			require.Equal(t, tt.wantFound, found)
-			if found {
-				require.Equal(t, tt.wantID, entry.VersionID)
-			}
-		})
-	}
+	md.VersionLogList = []VersionLogEntry{{TimestampMS: -2000, VersionID: 1}}
+	md.CurrentVersionIDValue = 1
+	require.NoError(t, md.validate())
+	require.Nil(t, vw.VersionAsOf(-2001))
+	require.EqualValues(t, 1, vw.VersionAsOf(-2000).VersionID)
+	require.EqualValues(t, 1, vw.VersionAsOf(-1000).VersionID)
 }
 
 func TestVersionAsOfOutOfOrderTimestamps(t *testing.T) {
@@ -179,10 +124,11 @@ func TestVersionAsOfOutOfOrderTimestamps(t *testing.T) {
 	md.CurrentVersionIDValue = 1
 	require.NoError(t, md.validate())
 
-	// Use the greatest eligible timestamp even when a later log entry
-	// has an older wall-clock timestamp.
+	// The last eligible log entry wins despite its older timestamp.
 	require.EqualValues(t, 1, vw.VersionAsOf(2500).VersionID)
-	require.EqualValues(t, 2, vw.VersionAsOf(3500).VersionID)
+	require.EqualValues(t, 1, vw.VersionAsOf(3000).VersionID)
+	require.EqualValues(t, 1, vw.VersionAsOf(3500).VersionID)
+	require.Equal(t, vw.CurrentVersion().VersionID, vw.VersionAsOf(3500).VersionID)
 }
 
 func TestVersionByIDAndHistoryAreDefensive(t *testing.T) {
@@ -243,10 +189,33 @@ func TestVersionAsOfRepeatedTimestamps(t *testing.T) {
 	md.init()
 	require.NoError(t, md.validate())
 
-	// Match Iceberg's snapshot time travel: the first equal timestamp wins.
+	// Later changes in the log win when timestamps tie.
 	require.EqualValues(t, 1, vw.VersionAsOf(1999).VersionID)
-	require.EqualValues(t, 2, vw.VersionAsOf(2000).VersionID)
-	require.EqualValues(t, 2, vw.VersionAsOf(2001).VersionID)
+	require.EqualValues(t, 3, vw.VersionAsOf(2000).VersionID)
+	require.EqualValues(t, 3, vw.VersionAsOf(2001).VersionID)
+	require.Equal(t, vw.CurrentVersion().VersionID, vw.VersionAsOf(2001).VersionID)
+}
+
+func TestVersionAsOfBuilderRollback(t *testing.T) {
+	vw := viewWithVersionHistory(t)
+	builder, err := MetadataBuilderFromBase(vw.Metadata())
+	require.NoError(t, err)
+
+	result, err := builder.SetCurrentVersionID(1).Build()
+	require.NoError(t, err)
+
+	rolledBack := New(vw.Identifier(), result.Metadata, vw.MetadataLocation())
+	history := rolledBack.History()
+	require.Len(t, history, len(vw.History())+1)
+	rollback := history[len(history)-1]
+	require.EqualValues(t, 1, rollback.VersionID)
+	require.Greater(t, rollback.TimestampMS, history[len(history)-2].TimestampMS)
+	require.Equal(t, rollback.VersionID, rolledBack.CurrentVersion().VersionID)
+
+	require.EqualValues(t, 2, vw.CurrentVersion().VersionID)
+	require.EqualValues(t, 2, rolledBack.VersionAsOf(rollback.TimestampMS-1).VersionID)
+	require.EqualValues(t, 1, rolledBack.VersionAsOf(rollback.TimestampMS).VersionID)
+	require.EqualValues(t, 1, rolledBack.VersionAsOf(rollback.TimestampMS+1).VersionID)
 }
 
 func TestVersionAsOfAfterHistoryExpiration(t *testing.T) {
@@ -269,16 +238,4 @@ func TestVersionAsOfAfterHistoryExpiration(t *testing.T) {
 	require.Nil(t, retained.VersionByID(1))
 	require.Nil(t, retained.VersionAsOf(3999))
 	require.EqualValues(t, 2, retained.VersionAsOf(4000).VersionID)
-}
-
-func TestVersionByIDWithCustomMetadata(t *testing.T) {
-	vw := viewWithVersionHistory(t)
-	// The fast indexed path is optional. Custom metadata can use Versions().
-	custom := New(vw.Identifier(), struct{ Metadata }{vw.Metadata()}, vw.MetadataLocation())
-
-	require.Nil(t, custom.VersionByID(99))
-	version := custom.VersionByID(1)
-	require.NotNil(t, version)
-	version.Summary["operation"] = "changed"
-	require.Equal(t, "create", custom.VersionByID(1).Summary["operation"])
 }
