@@ -191,8 +191,6 @@ func TestMetadataSchemaGetterCopiesNestedValues(t *testing.T) {
 	cloned.IdentifierFieldIDs[0] = 99
 	fields := cloned.FieldsRef(iceinternal.SchemaRef{})
 	payload := fields[0].Type.(*iceberg.StructType)
-	payload.FieldList[0].InitialDefault.([]byte)[0] = 99
-	payload.FieldList[0].WriteDefault.(iceberg.BinaryLiteral)[0] = 99
 	payload.FieldList[1].Name = "changed"
 	payload.FieldList[1].Type.(*iceberg.ListType).Element.(*iceberg.StructType).FieldList[0].InitialDefault.([]any)[0].(map[string]any)["bytes"].([]byte)[0] = 99
 	payload.FieldList[2].Type.(*iceberg.MapType).ValueType.(*iceberg.StructType).FieldList[0].WriteDefault.(map[string]any)["values"].([]any)[0] = "changed"

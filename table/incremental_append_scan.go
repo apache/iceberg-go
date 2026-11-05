@@ -205,6 +205,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if err != nil {
 		return nil, err
 	}
+	acc.skippedDataFiles += entries.metrics.skippedDataFiles
 
 	tasks := make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, entry := range entries.dataEntries {
