@@ -317,6 +317,50 @@ func TestUpdateSortOrderWithStagedSchema(t *testing.T) {
 	require.NotEmpty(t, commit.Updates)
 }
 
+// Java rejects a case-insensitive name index if two distinct field IDs differ
+// only in case. Do not silently select either field based on Go map iteration.
+func TestUpdateSortOrderRejectsAmbiguousCaseInsensitiveNames(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ID", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 3, Name: "unique", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,
+		"file:///tmp/ambiguous-sort-names", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"ambiguous-sort-names"}, meta, "", nil, nil)
+
+	for _, name := range []string{"id", "unique"} {
+		t.Run("case insensitive "+name, func(t *testing.T) {
+			txn := tbl.NewTransaction()
+			builder := txn.UpdateSortOrder(false).Asc(name, table.NullsFirst)
+			_, err := builder.Apply()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, "ambiguous case-insensitive sort column")
+			require.ErrorIs(t, builder.Commit(), iceberg.ErrInvalidSchema)
+
+			commit, err := txn.TableCommit()
+			require.NoError(t, err)
+			require.Empty(t, commit.Updates)
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		id   int
+	}{
+		{name: "ID", id: 1},
+		{name: "id", id: 2},
+	} {
+		t.Run("case sensitive "+tc.name, func(t *testing.T) {
+			txn := tbl.NewTransaction()
+			require.NoError(t, txn.UpdateSortOrder(true).Asc(tc.name, table.NullsFirst).Commit())
+			staged, err := txn.StagedTable()
+			require.NoError(t, err)
+			require.Equal(t, tc.id, staged.Metadata().SortOrder().Field(0).FirstSourceID())
+		})
+	}
+}
+
 func TestUpdateSortOrderNilTransaction(t *testing.T) {
 	builder := table.NewUpdateSortOrder(nil, true).Asc("id", table.NullsFirst)
 	_, err := builder.Apply()
