@@ -55,6 +55,14 @@ func TestTransactionStatisticsRegistration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []StatisticsFile{stats}, slices.Collect(meta.Statistics()))
 
+	// Removing another snapshot must not stage a metadata update.
+	stagedUpdateCount := len(tx.meta.updates)
+	require.NoError(t, tx.RemoveStatistics(999))
+	require.Len(t, tx.meta.updates, stagedUpdateCount)
+	meta, err = tx.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, []StatisticsFile{stats}, slices.Collect(meta.Statistics()))
+
 	replacement := stats
 	replacement.StatisticsPath = "s3://warehouse/db/stats/metadata/replaced.puffin"
 	replacement.FileSizeInBytes = 2048
