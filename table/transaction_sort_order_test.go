@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -86,4 +87,36 @@ func TestReplaceSortOrder(t *testing.T) {
 		require.Equal(t, 2, staged.SortOrder().OrderID())
 		require.Len(t, staged.Metadata().SortOrders(), 3)
 	})
+}
+
+func TestReplaceSortOrderReusesHistoricalOrderInTransaction(t *testing.T) {
+	byID := table.SortField{
+		SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
+		Direction: table.SortASC, NullOrder: table.NullsFirst,
+	}
+	byName := table.SortField{
+		SourceIDs: []int{2}, Transform: iceberg.IdentityTransform{},
+		Direction: table.SortDESC, NullOrder: table.NullsLast,
+	}
+	txn := testNonPartitionedTable.NewTransaction()
+	require.NoError(t, txn.ReplaceSortOrder(sortOrderOf(t, byID)))
+	require.NoError(t, txn.ReplaceSortOrder(sortOrderOf(t, byName)))
+
+	before, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.NoError(t, txn.ReplaceSortOrder(sortOrderOf(t, byID)))
+
+	after, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.Len(t, after.Updates, len(before.Updates)+1)
+
+	// -1 would resolve to the last added order (2), not the reused order (1).
+	raw, err := json.Marshal(after.Updates[len(after.Updates)-1])
+	require.NoError(t, err)
+	require.JSONEq(t, `{"action":"set-default-sort-order","sort-order-id":1}`, string(raw))
+
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	require.Equal(t, 1, staged.Metadata().DefaultSortOrder())
+	require.Len(t, staged.Metadata().SortOrders(), 3)
 }
