@@ -193,14 +193,14 @@ func TestTransactionSetLocationWritesToStagedPaths(t *testing.T) {
 
 			fsys, err := staged.FS(t.Context())
 			require.NoError(t, err)
-			manifests, err := snapshot.Manifests(fsys)
+			manifests, err := snapshot.Manifests(t.Context(), fsys)
 			require.NoError(t, err)
 			require.Len(t, manifests, 1)
 			require.True(t, strings.HasPrefix(manifests[0].FilePath(), metadataPath+"/"),
 				manifests[0].FilePath())
 
 			var dataFiles int
-			for entry, err := range manifests[0].Entries(fsys, false) {
+			for entry, err := range manifests[0].Entries(t.Context(), fsys, false) {
 				require.NoError(t, err)
 				require.True(t, strings.HasPrefix(entry.DataFile().FilePath(), dataPath+"/"),
 					entry.DataFile().FilePath())

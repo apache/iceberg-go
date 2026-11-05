@@ -448,7 +448,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			continue
 		}
 
-		gr, err := ExecuteCompactionGroup(ctx, &staged.Table, group, opts.GroupOptions...)
+		gr, err := ExecuteCompactionGroup(ctx, staged.Table, group, opts.GroupOptions...)
 		if err != nil {
 			return result, err
 		}
