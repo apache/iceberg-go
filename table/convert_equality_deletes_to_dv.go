@@ -134,7 +134,7 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(ctx, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, true) {
+		for entry, err := range manifest.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, err
 			}
