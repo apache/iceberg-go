@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -56,6 +57,46 @@ func TestConvertEqualityDeletesToDeletionVectors(t *testing.T) {
 	conversionRows := readChangelog(t, ctx,
 		result.Table.NewIncrementalChangelogScan().FromSnapshotExclusive(deleteSnapshot))
 	require.Empty(t, conversionRows)
+}
+
+// A conversion staged after write.data.path changes must use the transaction's
+// updated output location, not the base table's data directory.
+func TestConvertEqualityDeletesUsesStagedDataPath(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+
+	dataPath := filepath.ToSlash(filepath.Join(t.TempDir(), "custom-dv-data"))
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{table.WriteDataPathKey: dataPath}))
+
+	result, err := tx.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.AddedDeletionVectors)
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1}, idsInTable(t, committed))
+
+	fs, err := committed.FS(ctx)
+	require.NoError(t, err)
+	manifests, err := committed.CurrentSnapshot().Manifests(fs)
+	require.NoError(t, err)
+
+	var dvPaths []string
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
+			continue
+		}
+		for entry, err := range manifest.Entries(fs, false) {
+			require.NoError(t, err)
+			if entry.Status() != iceberg.EntryStatusDELETED && table.IsDeletionVector(entry.DataFile()) {
+				dvPaths = append(dvPaths, entry.DataFile().FilePath())
+			}
+		}
+	}
+	require.Len(t, dvPaths, 1)
+	require.True(t, strings.HasPrefix(dvPaths[0], dataPath+"/"), dvPaths[0])
 }
 
 func TestConvertEqualityDeletesMergesExistingPositionDeletes(t *testing.T) {
