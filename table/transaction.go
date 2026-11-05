@@ -2670,6 +2670,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			WithScanPlanningDirective(t.tbl.scanPlanningDirective, t.tbl.hasScanPlanningDirective),
 			WithLabels(t.tbl.labels),
 			WithSavedConfig(t.tbl.savedConfig),
+			WithSnapshotHistoryLimitedToRefsFrom(t.tbl),
 		),
 	}, nil
 }
