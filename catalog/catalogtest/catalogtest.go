@@ -96,6 +96,15 @@ type Config struct {
 	// the rename tests are replaced by one asserting that RenameTable returns
 	// iceberg.ErrNotImplemented and leaves the source table in place.
 	SupportsRenameTable bool
+
+	// SupportsNestedNamespaces reports whether the catalog can create a
+	// namespace inside another one. When it is true, the suite also checks
+	// listing a namespace's children and refusing to drop a namespace that
+	// still has children. It mirrors Java's supportsNestedNamespaces, which
+	// is false by default. Unlike the other flags it has no not-supported
+	// test: Hive and Glue reject nested namespaces with their own error, not
+	// iceberg.ErrNotImplemented.
+	SupportsNestedNamespaces bool
 }
 
 // RunCatalogTests runs the conformance suite against the catalog described by
@@ -135,6 +144,10 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Run("DropMissingNamespace", func(t *testing.T) { testDropMissingNamespace(t, cfg) })
 	t.Run("DropNamespaceNotEmpty", func(t *testing.T) { testDropNamespaceNotEmpty(t, cfg) })
 	t.Run("ListNamespaces", func(t *testing.T) { testListNamespaces(t, cfg) })
+	if cfg.SupportsNestedNamespaces {
+		t.Run("ListNestedNamespaces", func(t *testing.T) { testListNestedNamespaces(t, cfg) })
+		t.Run("DropNamespaceWithNestedNamespace", func(t *testing.T) { testDropNamespaceWithNestedNamespace(t, cfg) })
+	}
 
 	t.Run("LoadNamespaceProperties", func(t *testing.T) { testLoadNamespaceProperties(t, cfg) })
 	if cfg.SupportsNamespaceProperties {
