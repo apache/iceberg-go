@@ -223,7 +223,38 @@ func (t *Transaction) StageRewrittenDataFilesByPath(
 		rewrite.AddDataFile(df)
 	}
 
-	return rewrite.Commit(ctx)
+	if err := rewrite.Commit(ctx); err != nil {
+		return err
+	}
+
+	// A concurrent commit may reference a replacement path after planning.
+	// The rewrite validator checks source files and deletes, but not newly
+	// referenced replacement paths.
+	t.addValidator(func(cc *conflictContext) error {
+		if cc == nil {
+			return nil
+		}
+		for _, content := range []iceberg.ManifestContent{
+			iceberg.ManifestContentData,
+			iceberg.ManifestContentDeletes,
+		} {
+			if err := cc.forEachAddedEntry(content, func(snap Snapshot, entry iceberg.ManifestEntry) error {
+				path := entry.DataFile().FilePath()
+				if _, exists := toAdd[path]; exists {
+					return fmt.Errorf("%w: replacement file %q was added in concurrent snapshot %d",
+						ErrConflictingDataFiles, path, snap.SnapshotID)
+				}
+
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	return nil
 }
 
 // completePathRewriteMetricTotals sums only columns reported by every file.

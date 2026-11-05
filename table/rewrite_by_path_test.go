@@ -363,6 +363,50 @@ func TestStageRewrittenDataFilesByPathRejectsConcurrentEqualityDelete(t *testing
 	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
 }
 
+func TestStageRewrittenDataFilesByPathRejectsConcurrentReplacementPath(t *testing.T) {
+	tbl, oldPath, replacementPath := newPathRewriteFixture(t)
+
+	leader := tbl.NewTransaction()
+	require.NoError(t, leader.StageRewrittenDataFilesByPath(t.Context(),
+		[]string{oldPath}, []string{replacementPath}, nil))
+
+	peer := tbl.NewTransaction()
+	require.NoError(t, peer.AddDataFilesByPath(t.Context(), []string{replacementPath}, nil, false))
+	peerTable, err := peer.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, err = leader.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrConflictingDataFiles)
+	require.ErrorContains(t, err, replacementPath)
+
+	paths, _ := liveFilesOnRef(t, peerTable, table.MainBranch)
+	assert.ElementsMatch(t, []string{oldPath, replacementPath}, paths)
+}
+
+func TestStageRewrittenDataFilesByPathAllowsConcurrentUnrelatedAppend(t *testing.T) {
+	tbl, oldPath, replacementPath := newPathRewriteFixture(t)
+	sc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	otherPath := tbl.Location() + "/data/concurrent-unrelated.parquet"
+	writeParquetFile(t, otherPath, sc, `[{"id":3,"data":"third"}]`)
+
+	leader := tbl.NewTransaction()
+	require.NoError(t, leader.StageRewrittenDataFilesByPath(t.Context(),
+		[]string{oldPath}, []string{replacementPath}, nil))
+
+	peer := tbl.NewTransaction()
+	require.NoError(t, peer.AddDataFilesByPath(t.Context(), []string{otherPath}, nil, false))
+	_, err = peer.Commit(t.Context())
+	require.NoError(t, err)
+
+	result, err := leader.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, table.OpReplace, result.CurrentSnapshot().Summary.Operation)
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, table.MainBranch))
+	paths, _ := liveFilesOnRef(t, result, table.MainBranch)
+	assert.ElementsMatch(t, []string{replacementPath, otherPath}, paths)
+}
+
 func TestStageRewrittenDataFilesByPathTargetsBranch(t *testing.T) {
 	tbl := newBranchPlanningTable(t, nil)
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 3, 4)
