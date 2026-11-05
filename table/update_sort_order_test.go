@@ -113,7 +113,11 @@ func TestUpdateSortOrderReplaceAndReuse(t *testing.T) {
 
 	commits, err := txn.TableCommit()
 	require.NoError(t, err)
-	require.Len(t, commits.Requirements, 3, "deduplicate requirements across staged replacements")
+	require.Len(t, commits.Requirements, 4, "deduplicate requirements across staged replacements")
+	require.Equal(t, "assert-default-sort-order-id", commits.Requirements[0].GetType())
+	require.Equal(t, "assert-current-schema-id", commits.Requirements[1].GetType())
+	require.Equal(t, "assert-ref-snapshot-id", commits.Requirements[2].GetType())
+	require.Equal(t, "assert-table-uuid", commits.Requirements[3].GetType())
 }
 
 func TestUpdateSortOrderNoopAndUnsortedAddition(t *testing.T) {
