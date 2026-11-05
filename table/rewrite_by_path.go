@@ -114,7 +114,7 @@ func (t *Transaction) StageRewrittenDataFilesByPath(
 	// The scan below only exposes delete files that apply to planned data
 	// files. A live delete file with no matching data file still reserves its
 	// path in the table, so check all delete manifest entries before staging.
-	for entry, err := range snapshot.entries(fs, iceberg.ManifestContentDeletes, true) {
+	for entry, err := range snapshot.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return err
 		}
