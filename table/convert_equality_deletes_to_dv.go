@@ -28,6 +28,30 @@ import (
 	"github.com/google/uuid"
 )
 
+// equalityDeletePositionBuffer accumulates matched positions for one data file.
+// Each buffer has its own mutex so parallel scans of different files do not
+// contend on a table-wide lock. The scan finishes before bitmap is read.
+type equalityDeletePositionBuffer struct {
+	mu     sync.Mutex
+	bitmap *dv.RoaringPositionBitmap
+}
+
+func (b *equalityDeletePositionBuffer) addPositions(positions []int64) {
+	if len(positions) == 0 {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.bitmap == nil {
+		b.bitmap = dv.NewRoaringPositionBitmap()
+	}
+	for _, position := range positions {
+		b.bitmap.Set(uint64(position))
+	}
+}
+
 // EqualityDeleteToDVResult summarizes an equality-delete conversion.
 type EqualityDeleteToDVResult struct {
 	// Table is the table returned by the table-level action. It is nil when the
@@ -170,10 +194,9 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 	}
 	baseTasks := make([]FileScanTask, 0, len(plannedTasks))
 	addedDeleteTasks := make([]FileScanTask, 0, len(plannedTasks))
-	positionsByPath := make(map[string]*dv.RoaringPositionBitmap)
+	positionsByPath := make(map[string]*equalityDeletePositionBuffer)
 	positionSinks := make(map[string]func([]int64))
 	addedTaskByPath := make(map[string]int)
-	var positionsMu sync.Mutex
 	for _, task := range plannedTasks {
 		if len(task.EqualityDeleteFiles) == 0 {
 			continue
@@ -183,20 +206,9 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		}
 		path := task.File.FilePath()
 		if _, exists := positionsByPath[path]; !exists {
-			filePath := path
-			positionsByPath[path] = nil
-			positionSinks[path] = func(positions []int64) {
-				positionsMu.Lock()
-				bitmap := positionsByPath[filePath]
-				if bitmap == nil {
-					bitmap = dv.NewRoaringPositionBitmap()
-					positionsByPath[filePath] = bitmap
-				}
-				for _, position := range positions {
-					bitmap.Set(uint64(position))
-				}
-				positionsMu.Unlock()
-			}
+			positions := &equalityDeletePositionBuffer{}
+			positionsByPath[path] = positions
+			positionSinks[path] = positions.addPositions
 		}
 
 		base := task
@@ -266,7 +278,7 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 			continue
 		}
 		seenDataPaths[path] = struct{}{}
-		positions := positionsByPath[path]
+		positions := positionsByPath[path].bitmap
 		if positions == nil || positions.IsEmpty() {
 			continue
 		}
