@@ -57,6 +57,32 @@ type Oauth2AuthManager struct {
 
 var _ ContextAuthManager = (*Oauth2AuthManager)(nil)
 
+// NewOauth2AuthManager returns an AuthManager that sends tokens from ts, for
+// identity providers the built-in client-credentials flow can't reach, such as
+// Google Application Default Credentials for BigLake. Pass the result to
+// WithAuthManager.
+//
+// Like oauth2.NewClient, it wraps ts in oauth2.ReuseTokenSource, so ts is
+// called only when the cached token is missing or expired. A token without an
+// expiry is reused indefinitely. The header uses the token's type, and an
+// *oauth2.RetrieveError from ts is reported as ErrOAuthError.
+//
+// The built-in flows bound each refresh with their own HTTP client timeout.
+// A refresh through ts is bounded only by the HTTP client ts uses; for
+// sources built from a context, such as google.DefaultTokenSource, that is
+// the client in the context's oauth2.HTTPClient value, or
+// http.DefaultClient, which has no timeout. AuthHeaderWithContext still
+// returns when its context is done.
+//
+// NewOauth2AuthManager panics if ts is nil.
+func NewOauth2AuthManager(ts oauth2.TokenSource) *Oauth2AuthManager {
+	if ts == nil {
+		panic("rest: NewOauth2AuthManager called with a nil oauth2.TokenSource")
+	}
+
+	return &Oauth2AuthManager{tokenSource: oauth2.ReuseTokenSource(nil, ts)}
+}
+
 // AuthHeader returns the authorization header with the bearer token.
 func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
 	tok, err, _ := o.refresh.Do("token", o.fetchToken)

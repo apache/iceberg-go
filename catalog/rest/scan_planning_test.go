@@ -967,7 +967,7 @@ func TestScanPlanningEndpointGating(t *testing.T) {
 	}
 }
 
-func newScanPlanningTestCatalog(t *testing.T, endpoints []endpoint, register func(*http.ServeMux)) *Catalog {
+func newScanPlanningTestCatalog(t *testing.T, endpoints []endpoint, register func(*http.ServeMux), opts ...Option) *Catalog {
 	t.Helper()
 
 	mux := http.NewServeMux()
@@ -991,7 +991,7 @@ func newScanPlanningTestCatalog(t *testing.T, endpoints []endpoint, register fun
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, opts...)
 	require.NoError(t, err)
 
 	return cat
@@ -1932,7 +1932,7 @@ func TestPlanScopedIOExpiredCredentials(t *testing.T) {
 		},
 	}}
 
-	planIO := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil)
+	planIO := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil, nil)
 	require.NotNil(t, planIO)
 
 	p, ok := planIO.(*planScopedIO)
@@ -1971,7 +1971,7 @@ func TestPlanScopedIOAlreadyExpiredCredentials(t *testing.T) {
 		},
 	}}
 
-	p, ok := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil).(*planScopedIO)
+	p, ok := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil, nil).(*planScopedIO)
 	require.True(t, ok)
 	p.refresher.nowFunc = func() time.Time { return now }
 
@@ -2000,7 +2000,7 @@ func TestPlanScopedIOIgnoresExpiredCredentialForUnrelatedPrefix(t *testing.T) {
 		},
 	}
 
-	p, ok := planIOFromCredentials(creds, "file:///metadata/v1.json", nil).(*planScopedIO)
+	p, ok := planIOFromCredentials(creds, "file:///metadata/v1.json", nil, nil).(*planScopedIO)
 	require.True(t, ok)
 	p.refresher.nowFunc = func() time.Time { return now }
 
@@ -2022,7 +2022,7 @@ func TestPlanScopedIOCredentialsWithoutExpiry(t *testing.T) {
 
 	creds := []StorageCredential{{Prefix: "file:///bucket/", Config: iceberg.Properties{"s3.access-key-id": "vended"}}}
 
-	p, ok := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil).(*planScopedIO)
+	p, ok := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil, nil).(*planScopedIO)
 	require.True(t, ok)
 
 	_, err := p.Load(context.Background())

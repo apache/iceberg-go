@@ -1,0 +1,720 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package table
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro/ocf"
+)
+
+const snapshotValidationTestID int64 = 41
+
+func v1ValidationEntry(t *testing.T, status iceberg.ManifestEntryStatus, path string) iceberg.ManifestEntry {
+	t.Helper()
+
+	data := newTestDataFile(t, iceberg.NewPartitionSpec(), path, nil)
+	snapshotID := snapshotValidationTestID
+
+	return iceberg.NewManifestEntry(status, &snapshotID, nil, nil, data)
+}
+
+// v1SnapshotValidationTable builds actual v1 Avro manifests and a v1 manifest
+// list. No data files are written because the audit only reads metadata.
+func v1SnapshotValidationTable(
+	t *testing.T,
+	embedded bool,
+	modify func([]iceberg.ManifestFile) []iceberg.ManifestFile,
+	groups ...[]iceberg.ManifestEntry,
+) *Table {
+	t.Helper()
+
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 1
+
+	manifests := make([]iceberg.ManifestFile, 0, len(groups))
+	for i, entries := range groups {
+		path := fmt.Sprintf("mem://default/table-location/metadata/validate-%d.avro", i)
+		var buf bytes.Buffer
+		manifest, err := iceberg.WriteManifest(path, &buf, 1, spec, simpleSchema(), snapshotValidationTestID, entries)
+		require.NoError(t, err)
+		require.NoError(t, fs.WriteFile(ctx, path, buf.Bytes()))
+		manifests = append(manifests, manifest)
+	}
+	if modify != nil {
+		manifests = modify(manifests)
+	}
+
+	snapshot := Snapshot{
+		SnapshotID:  snapshotValidationTestID,
+		TimestampMs: time.Now().UnixMilli(),
+		Summary:     &Summary{Operation: OpAppend},
+	}
+	if embedded {
+		for _, mf := range manifests {
+			snapshot.ManifestLocations = append(snapshot.ManifestLocations, mf.FilePath())
+		}
+	} else {
+		const listPath = "mem://default/table-location/metadata/validation-list.avro"
+		var listBuf bytes.Buffer
+		require.NoError(t, iceberg.WriteManifestList(1, &listBuf, snapshotValidationTestID,
+			nil, nil, 0, manifests))
+		require.NoError(t, fs.WriteFile(ctx, listPath, listBuf.Bytes()))
+		snapshot.ManifestList = listPath
+	}
+
+	require.NoError(t, txn.meta.AddSnapshot(&snapshot))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, snapshotValidationTestID, BranchRef))
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "audit"}, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+}
+
+func TestValidateSnapshotV1UniqueLiveFiles(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false, nil,
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://first.parquet"),
+		},
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusEXISTING, "file://second.parquet"),
+		},
+	)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	assert.True(t, report.Valid())
+	assert.True(t, report.Complete)
+	assert.Equal(t, snapshotValidationTestID, report.SnapshotID)
+	assert.Equal(t, int64(2), report.ManifestsChecked)
+	assert.Equal(t, int64(2), report.LiveFilesChecked)
+	assert.Empty(t, report.Issues)
+}
+
+func TestValidateSnapshotV1DuplicateLiveFileAcrossManifests(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false, nil,
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://same.parquet"),
+		},
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusEXISTING, "file://same.parquet"),
+		},
+	)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	assert.False(t, report.Valid())
+	assert.True(t, report.Complete)
+	assert.Equal(t, int64(2), report.LiveFilesChecked)
+	require.Len(t, report.Issues, 1)
+	assert.Equal(t, SnapshotIssueDuplicateLiveFile, report.Issues[0].Code)
+	assert.Equal(t, "file://same.parquet", report.Issues[0].FilePath)
+	assert.Contains(t, report.Issues[0].FirstManifestPath, "validate-0.avro")
+	assert.Contains(t, report.Issues[0].ManifestPath, "validate-1.avro")
+}
+
+func TestValidateSnapshotV1DuplicateLiveFileWithinManifest(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false, nil,
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://same.parquet"),
+			v1ValidationEntry(t, iceberg.EntryStatusEXISTING, "file://same.parquet"),
+		},
+	)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	assert.False(t, report.Valid())
+	require.Len(t, report.Issues, 1)
+	assert.Equal(t, SnapshotIssueDuplicateLiveFile, report.Issues[0].Code)
+	assert.Equal(t, report.Issues[0].FirstManifestPath, report.Issues[0].ManifestPath)
+}
+
+func TestValidateSnapshotV1IgnoresDeletedEntriesForUniqueness(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false, nil,
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://same.parquet"),
+		},
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusDELETED, "file://same.parquet"),
+		},
+	)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	assert.True(t, report.Valid())
+	assert.Equal(t, int64(1), report.LiveFilesChecked)
+}
+
+func TestValidateSnapshotV1EmbeddedManifests(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, true, nil,
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://embedded.parquet"),
+		},
+	)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	assert.True(t, report.Valid())
+	assert.Equal(t, int64(1), report.ManifestsChecked)
+	assert.Equal(t, int64(1), report.LiveFilesChecked)
+}
+
+func TestEmbeddedValidationSpecIDV1OptionalHeaders(t *testing.T) {
+	fs := iceio.NewMemFS()
+	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	const path = "mem://validation/legacy-v1.avro"
+	var original bytes.Buffer
+	snapshotID := snapshotValidationTestID
+	entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil,
+		newTestDataFile(t, spec, "file://header-fixture.parquet", map[int]any{1000: int32(1)}))
+	_, err := iceberg.WriteManifest(path, &original, 1, spec, simpleSchema(), snapshotID,
+		[]iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	reader, err := ocf.NewReader(bytes.NewReader(original.Bytes()))
+	require.NoError(t, err)
+	metadata := make(map[string][]byte)
+	for key, value := range reader.Metadata() {
+		if key != "partition-spec-id" && key != "avro.schema" && key != "avro.codec" {
+			metadata[key] = value
+		}
+	}
+	schema := reader.Schema()
+	require.NoError(t, reader.Close())
+
+	writeHeader := func() {
+		var output bytes.Buffer
+		writer, err := ocf.NewWriter(&output, schema, ocf.WithMetadata(metadata))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, fs.WriteFile(t.Context(), path, output.Bytes()))
+	}
+	writeHeader()
+	got, known, detail, err := embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: spec})
+	require.NoError(t, err)
+	require.Empty(t, detail)
+	require.True(t, known)
+	require.EqualValues(t, spec.ID(), got)
+
+	var fields []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(metadata["partition-spec"], &fields))
+	for _, field := range fields {
+		delete(field, "field-id")
+	}
+	metadata["partition-spec"], err = json.Marshal(fields)
+	require.NoError(t, err)
+	writeHeader()
+	got, known, detail, err = embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: spec})
+	require.NoError(t, err)
+	require.Empty(t, detail)
+	require.True(t, known)
+	require.EqualValues(t, spec.ID(), got)
+
+	ambiguous := iceberg.NewPartitionSpecID(8, spec.Field(0))
+	_, known, detail, err = embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: spec, 8: ambiguous})
+	require.NoError(t, err)
+	require.False(t, known)
+	require.Contains(t, detail, "multiple partition specs")
+
+	unrelated := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.BucketTransform{NumBuckets: 4},
+	})
+	_, known, detail, err = embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: unrelated})
+	require.NoError(t, err)
+	require.False(t, known)
+	require.Contains(t, detail, "no matching partition spec")
+}
+
+func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false,
+		func(manifests []iceberg.ManifestFile) []iceberg.ManifestFile {
+			return append(manifests, manifests[0])
+		},
+		[]iceberg.ManifestEntry{
+			v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://same.parquet"),
+			v1ValidationEntry(t, iceberg.EntryStatusEXISTING, "file://other.parquet"),
+		},
+	)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	assert.True(t, report.Complete)
+	assert.False(t, report.Valid())
+	assert.Equal(t, int64(2), report.ManifestsChecked)
+	assert.Equal(t, int64(2), report.LiveFilesChecked)
+	require.Len(t, report.Issues, 1)
+	assert.Equal(t, SnapshotIssueDuplicateManifest, report.Issues[0].Code)
+}
+
+func TestValidateSnapshotV1EmptyManifestList(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false, nil)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	assert.True(t, report.Valid())
+	assert.Zero(t, report.ManifestsChecked)
+	assert.Zero(t, report.LiveFilesChecked)
+}
+
+func TestValidateSnapshotV1MissingManifestReturnsIncompleteReport(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false,
+		func(_ []iceberg.ManifestFile) []iceberg.ManifestFile {
+			return []iceberg.ManifestFile{
+				iceberg.NewManifestBuilder(1,
+					"mem://default/table-location/metadata/missing.avro", 123, 0,
+					snapshotValidationTestID).AddedFiles(1).Build(),
+			}
+		},
+	)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.Error(t, err)
+	require.NotNil(t, report)
+	assert.ErrorContains(t, err, "missing.avro")
+	assert.False(t, report.Complete)
+	assert.False(t, report.Valid())
+	assert.Equal(t, int64(1), report.ManifestsChecked)
+}
+
+func TestValidateSnapshotCanceledContextReturnsIncompleteReport(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotValidationTestID)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotNil(t, report)
+	assert.False(t, report.Complete)
+	assert.False(t, report.Valid())
+	assert.Zero(t, report.ManifestsChecked)
+}
+
+func TestValidateSnapshotRejectsUnknownSnapshot(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, false, nil)
+
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), 999)
+	require.Error(t, err)
+	assert.Nil(t, report)
+	assert.ErrorIs(t, err, ErrSnapshotNotFound)
+}
+
+func TestValidateSnapshotWithoutMetadata(t *testing.T) {
+	var tbl Table
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.Nil(t, report)
+}
+
+func TestValidateSnapshotV1RejectsIncompatibleManifestDescriptor(t *testing.T) {
+	manifest := iceberg.NewManifestBuilder(2, "file://manifest.avro", 123, 99,
+		snapshotValidationTestID).
+		Content(iceberg.ManifestContentDeletes).
+		Build()
+	report := &SnapshotValidationReport{}
+	validateSnapshotSpec(report, manifest.FilePath(), manifest.PartitionSpecID(), map[int]struct{}{0: {}})
+	validateSnapshotManifestDescriptor(report, manifest, 1)
+
+	require.Len(t, report.Issues, 3)
+	assert.Equal(t, SnapshotIssueUnknownPartitionSpec, report.Issues[0].Code)
+	assert.Equal(t, int32(99), report.Issues[0].PartitionSpecID)
+	assert.Equal(t, SnapshotIssueIncompatibleManifestVersion, report.Issues[1].Code)
+	assert.Equal(t, SnapshotIssueInvalidManifestContent, report.Issues[2].Code)
+}
+
+func TestValidateManifestEntryCountOptionalV1(t *testing.T) {
+	report := &SnapshotValidationReport{}
+	validateManifestEntryCount(report, "manifest", "added", -1, 2, 1)
+	validateManifestEntryCount(report, "manifest", "added", 2, 2, 1)
+	assert.Empty(t, report.Issues)
+
+	validateManifestEntryCount(report, "manifest", "added", 3, 2, 1)
+	require.Len(t, report.Issues, 1)
+	assert.Equal(t, SnapshotIssueManifestCountMismatch, report.Issues[0].Code)
+	assert.Contains(t, report.Issues[0].Detail, "reports 3, found 2")
+}
+
+func TestValidateManifestEntryCountRequiredInV2AndV3(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		report := &SnapshotValidationReport{}
+		validateManifestEntryCount(report, "manifest", "added", -1, 2, version)
+		require.Len(t, report.Issues, 1)
+		assert.Equal(t, SnapshotIssueManifestCountMismatch, report.Issues[0].Code)
+		assert.Contains(t, report.Issues[0].Detail, "invalid count -1")
+
+		report = &SnapshotValidationReport{}
+		validateManifestEntryCount(report, "manifest", "deleted", 0, 0, version)
+		assert.Empty(t, report.Issues)
+	}
+
+	report := &SnapshotValidationReport{}
+	validateManifestEntryCount(report, "manifest", "existing", -2, 0, 1)
+	require.Len(t, report.Issues, 1)
+	assert.Equal(t, SnapshotIssueManifestCountMismatch, report.Issues[0].Code)
+}
+
+func writeValidationManifest(
+	t *testing.T, fs iceio.WriteFileIO, version int, path string,
+	content iceberg.ManifestContent, snapshotID int64,
+	added, existing, deleted []iceberg.DataFile,
+) iceberg.ManifestFile {
+	t.Helper()
+	var buf bytes.Buffer
+	wr, err := iceberg.NewManifestWriter(
+		version, &buf, *iceberg.UnpartitionedSpec, simpleSchema(), snapshotID,
+		iceberg.WithManifestWriterContent(content))
+	require.NoError(t, err)
+
+	seq := int64(1)
+	for _, file := range added {
+		require.NoError(t, wr.Add(iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, &snapshotID, nil, nil, file)))
+	}
+	for _, file := range existing {
+		var dataSeq, fileSeq *int64
+		if version > 1 {
+			dataSeq, fileSeq = &seq, &seq
+		}
+		require.NoError(t, wr.Existing(iceberg.NewManifestEntry(
+			iceberg.EntryStatusEXISTING, &snapshotID, dataSeq, fileSeq, file)))
+	}
+	for _, file := range deleted {
+		var dataSeq, fileSeq *int64
+		if version > 1 {
+			dataSeq, fileSeq = &seq, &seq
+		}
+		require.NoError(t, wr.Delete(iceberg.NewManifestEntry(
+			iceberg.EntryStatusDELETED, &snapshotID, dataSeq, fileSeq, file)))
+	}
+	require.NoError(t, wr.Close())
+	require.NoError(t, fs.WriteFile(context.Background(), path, buf.Bytes()))
+	manifest, err := wr.ToManifestFile(
+		path, int64(buf.Len()), iceberg.WithManifestFileContent(content))
+	require.NoError(t, err)
+
+	return manifest
+}
+
+func validationTable(
+	t *testing.T, version int, fs iceio.IO, snapshots ...Snapshot,
+) *Table {
+	t.Helper()
+	spec := *iceberg.UnpartitionedSpec
+	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder,
+		"mem://validation/table", iceberg.Properties{PropertyFormatVersion: strconv.Itoa(version)})
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	for i := range snapshots {
+		require.NoError(t, builder.AddSnapshot(&snapshots[i]))
+	}
+	require.NotEmpty(t, snapshots)
+	require.NoError(t, builder.SetSnapshotRef(
+		MainBranch, snapshots[len(snapshots)-1].SnapshotID, BranchRef))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "diff"}, meta, "mem://validation/table/metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+}
+
+func writeValidationManifestListV3(
+	t *testing.T, fs iceio.WriteFileIO, path string,
+	snapshotID, sequenceNumber int64, manifests []iceberg.ManifestFile,
+) string {
+	t.Helper()
+	out, err := fs.Create(context.Background(), path)
+	require.NoError(t, err)
+	require.NoError(t, iceberg.WriteManifestList(3, out, snapshotID, nil,
+		&sequenceNumber, 0, manifests))
+	require.NoError(t, out.Close())
+
+	return path
+}
+
+func validationDeletionVector(
+	t *testing.T, puffinPath, dataPath string, offset int64,
+) iceberg.DataFile {
+	t.Helper()
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		puffinPath, iceberg.PuffinFile, nil, nil, nil, 10, 1024)
+	require.NoError(t, err)
+
+	return builder.
+		ReferencedDataFile(dataPath).
+		ContentOffset(offset).
+		ContentSizeInBytes(32).
+		Build()
+}
+
+func TestValidateSnapshotV3DeletionVectors(t *testing.T) {
+	fs := iceio.NewMemFS()
+	prefix := "mem://audit/v3/"
+	vector1 := validationDeletionVector(t, prefix+"deletes.puffin", prefix+"a.parquet", 100)
+	vector2 := validationDeletionVector(t, prefix+"deletes.puffin", prefix+"b.parquet", 200)
+	manifest := writeValidationManifest(t, fs, 3, prefix+"deletes.avro", iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{vector1, vector2}, nil, nil)
+	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
+	zero := int64(0)
+	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, report.Valid(), "%+v", report.Issues)
+
+	// The same blob referenced twice remains a duplicate.
+	duplicate := writeValidationManifest(t, fs, 3, prefix+"duplicate.avro", iceberg.ManifestContentDeletes, 2, []iceberg.DataFile{vector1, vector1}, nil, nil)
+	list2 := writeValidationManifestListV3(t, fs, prefix+"list2.avro", 2, 2, []iceberg.ManifestFile{duplicate})
+	tbl2 := validationTable(t, 3, fs, Snapshot{SnapshotID: 2, SequenceNumber: 2, TimestampMs: time.Now().UnixMilli(), ManifestList: list2, FirstRowID: &zero, AddedRows: &zero})
+	report, err = tbl2.Inspect().ValidateSnapshot(context.Background(), 2)
+	require.NoError(t, err)
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueDuplicateLiveFile, report.Issues[0].Code)
+}
+
+func TestValidateSnapshotEmbeddedUsesHeaderSpecID(t *testing.T) {
+	entry := v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://embedded.parquet")
+	tbl := v1SnapshotValidationTable(t, true, nil, []iceberg.ManifestEntry{entry})
+	fs, err := tbl.FS(context.Background())
+	require.NoError(t, err)
+	writable, ok := fs.(iceio.WriteFileIO)
+	require.True(t, ok)
+	path := "mem://default/table-location/metadata/validate-0.avro"
+	var buf bytes.Buffer
+	spec := iceberg.NewPartitionSpecID(42)
+	_, err = iceberg.WriteManifest(path, &buf, 1, spec, simpleSchema(), snapshotValidationTestID, []iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, writable.WriteFile(context.Background(), path, buf.Bytes()))
+	report, err := tbl.Inspect().ValidateSnapshot(context.Background(), snapshotValidationTestID)
+	require.NoError(t, err)
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueUnknownPartitionSpec, report.Issues[0].Code)
+	require.Equal(t, int32(42), report.Issues[0].PartitionSpecID)
+}
+
+func TestValidateSnapshotEmbeddedV1RejectsMismatchedHeaderSpec(t *testing.T) {
+	tbl := v1SnapshotValidationTable(t, true, nil,
+		[]iceberg.ManifestEntry{v1ValidationEntry(t, iceberg.EntryStatusADDED, "file://original.parquet")})
+	fs, err := tbl.FS(t.Context())
+	require.NoError(t, err)
+	writable, ok := fs.(iceio.WriteFileIO)
+	require.True(t, ok)
+
+	// The header ID exists in the table, but the header has a different
+	// partition definition. An audit must not mark this snapshot valid.
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	snapshotID := snapshotValidationTestID
+	entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil,
+		newTestDataFile(t, spec, "file://mismatch.parquet", map[int]any{1000: int32(1)}))
+	const path = "mem://default/table-location/metadata/validate-0.avro"
+	var buf bytes.Buffer
+	_, err = iceberg.WriteManifest(path, &buf, 1, spec, simpleSchema(), snapshotID,
+		[]iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, writable.WriteFile(t.Context(), path, buf.Bytes()))
+
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), snapshotID)
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.True(t, report.Complete)
+	require.False(t, report.Valid())
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueUnknownPartitionSpec, report.Issues[0].Code)
+	require.Contains(t, report.Issues[0].Detail, "partition fields differ")
+}
+
+func TestValidateSnapshotChecksDeletedEntries(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://audit/deleted-content/"
+	dataFile, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData, prefix+"old.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+	require.NoError(t, err)
+	manifest := writeValidationManifest(t, fs, 3, prefix+"data-manifest.avro",
+		iceberg.ManifestContentData, 1, nil, nil, []iceberg.DataFile{dataFile.Build()})
+	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1,
+		[]iceberg.ManifestFile{manifest})
+	zero := int64(0)
+	tbl := validationTable(t, 3, fs, Snapshot{
+		SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(),
+		ManifestList: list, FirstRowID: &zero, AddedRows: &zero,
+	})
+
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
+	require.NoError(t, err)
+	require.True(t, report.Valid(), "%+v", report.Issues)
+	require.Zero(t, report.LiveFilesChecked)
+}
+
+func TestValidateSnapshotFileRejectsMixedContent(t *testing.T) {
+	// ManifestWriter rejects mixed-content entries before encoding them.
+	// Exercise the audit's content rule directly for malformed metadata.
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, "mem://audit/deleted-content/pos-deletes.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+	require.NoError(t, err)
+	manifest := iceberg.NewManifestBuilder(3,
+		"mem://audit/deleted-content/data-manifest.avro", 100, 0, 1).Build()
+	report := &SnapshotValidationReport{}
+	validateSnapshotFile(report, 3, manifest, builder.Build())
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueInvalidFileContent, report.Issues[0].Code)
+}
+
+func TestValidateSnapshotDeletionVectorTargets(t *testing.T) {
+	prefix := "mem://audit/dv-target/"
+	zero := int64(0)
+	cases := []struct {
+		name    string
+		added   []iceberg.DataFile
+		deleted []iceberg.DataFile
+		want    SnapshotValidationIssueCode
+	}{
+		{name: "different vectors same target", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 100), validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 200)}, want: SnapshotIssueDuplicateDeletionVector},
+		{name: "distinct targets share puffin", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 100), validationDeletionVector(t, prefix+"d.puffin", prefix+"b.parquet", 200)}},
+		{name: "replacement tombstone", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 200)}, deleted: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", prefix+"a.parquet", 100)}},
+		{name: "empty target", added: []iceberg.DataFile{validationDeletionVector(t, prefix+"d.puffin", "", 100)}, want: SnapshotIssueMissingDeletionVectorTarget},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := iceio.NewMemFS()
+			manifest := writeValidationManifest(t, fs, 3, prefix+"delete.avro", iceberg.ManifestContentDeletes, 1, tc.added, nil, tc.deleted)
+			list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
+			tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
+			report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
+			require.NoError(t, err)
+			if tc.want == "" {
+				require.True(t, report.Valid(), "%+v", report.Issues)
+
+				return
+			}
+			require.Len(t, report.Issues, 1)
+			require.Equal(t, tc.want, report.Issues[0].Code)
+		})
+	}
+}
+
+func TestValidateSnapshotRejectsInvalidDeletionVectorBlobRanges(t *testing.T) {
+	const prefix = "mem://audit/invalid-dv-range/"
+	cases := []struct {
+		name      string
+		setOffset bool
+		offset    int64
+		setSize   bool
+		size      int64
+		valid     bool
+	}{
+		{"missing offset", false, 0, true, 32, false},
+		{"missing size", true, 100, false, 0, false},
+		{"negative offset", true, -1, true, 32, false},
+		{"zero size", true, 100, true, 0, false},
+		{"negative size", true, 100, true, -1, false},
+		{"range exceeds container", true, 1000, true, 32, false},
+		{"offset plus size overflows", true, math.MaxInt64 - 4, true, 16, false},
+		{"range ends at container end", true, 992, true, 32, true},
+		{"valid range", true, 100, true, 32, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			builder, err := iceberg.NewDataFileBuilder(
+				*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+				prefix+"d.puffin", iceberg.PuffinFile, nil, nil, nil, 1, 1024)
+			require.NoError(t, err)
+			builder.ReferencedDataFile(prefix + "data.parquet")
+			if tc.setOffset {
+				builder.ContentOffset(tc.offset)
+			}
+			if tc.setSize {
+				builder.ContentSizeInBytes(tc.size)
+			}
+			fs := iceio.NewMemFS()
+			manifest := writeValidationManifest(t, fs, 3, prefix+"manifest.avro",
+				iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{builder.Build()}, nil, nil)
+			list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
+			zero := int64(0)
+			tbl := validationTable(t, 3, fs, Snapshot{
+				SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(),
+				ManifestList: list, FirstRowID: &zero, AddedRows: &zero,
+			})
+			report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
+			require.NoError(t, err)
+			require.True(t, report.Complete)
+			require.EqualValues(t, 1, report.LiveFilesChecked)
+			if tc.valid {
+				require.True(t, report.Valid(), "%+v", report.Issues)
+
+				return
+			}
+			require.False(t, report.Valid())
+			require.Len(t, report.Issues, 1)
+			require.Equal(t, SnapshotIssueInvalidDeletionVectorRange, report.Issues[0].Code)
+			require.Equal(t, prefix+"d.puffin", report.Issues[0].FilePath)
+		})
+	}
+}
+
+func TestValidateSnapshotMissingDeletionVectorTarget(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://audit/missing-dv-target/"
+	b, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		prefix+"d.puffin", iceberg.PuffinFile, nil, nil, nil, 1, 1024)
+	require.NoError(t, err)
+	file := b.ContentOffset(10).ContentSizeInBytes(32).Build()
+	manifest := writeValidationManifest(t, fs, 3, prefix+"manifest.avro", iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{file}, nil, nil)
+	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{manifest})
+	zero := int64(0)
+	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
+	require.NoError(t, err)
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueMissingDeletionVectorTarget, report.Issues[0].Code)
+}
+
+func TestValidateSnapshotDuplicateDeletionVectorAcrossManifests(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://audit/dv-cross-manifest/"
+	a := validationDeletionVector(t, prefix+"a.puffin", prefix+"data.parquet", 100)
+	b := validationDeletionVector(t, prefix+"b.puffin", prefix+"data.parquet", 200)
+	first := writeValidationManifest(t, fs, 3, prefix+"a.avro", iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{a}, nil, nil)
+	second := writeValidationManifest(t, fs, 3, prefix+"b.avro", iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{b}, nil, nil)
+	list := writeValidationManifestListV3(t, fs, prefix+"list.avro", 1, 1, []iceberg.ManifestFile{first, second})
+	zero := int64(0)
+	tbl := validationTable(t, 3, fs, Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli(), ManifestList: list, FirstRowID: &zero, AddedRows: &zero})
+	report, err := tbl.Inspect().ValidateSnapshot(t.Context(), 1)
+	require.NoError(t, err)
+	require.Len(t, report.Issues, 1)
+	require.Equal(t, SnapshotIssueDuplicateDeletionVector, report.Issues[0].Code)
+	require.Equal(t, prefix+"a.avro", report.Issues[0].FirstManifestPath)
+	require.Equal(t, prefix+"data.parquet", report.Issues[0].Detail)
+}
