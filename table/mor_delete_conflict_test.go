@@ -117,6 +117,27 @@ func TestMergeOnReadDeleteConflict_ReferencedDataFileRemoved(t *testing.T) {
 	require.ErrorIs(t, err, table.ErrDataFilesMissing)
 }
 
+// A first deletion vector is replayable until another writer commits a
+// vector for the same data file. The second writer must reject replay instead
+// of leaving two live vectors, which makes all subsequent scans fail.
+func TestMergeOnReadDeleteConflict_ConcurrentFirstDeletionVector(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendTenRows(t, newV3MoRConflictTestTable(t))
+
+	pending := tbl.NewTransaction()
+	require.NoError(t, pending.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(7)), nil))
+
+	// Both writers plan against the same file with no existing DV.
+	peer, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDVCount(t, peer))
+
+	_, err = pending.Commit(ctx)
+	require.ErrorContains(t, err, "concurrent snapshot")
+	require.Equal(t, 1, liveDVCount(t, peer))
+	require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, peer))
+}
+
 // TestMergeOnReadDeleteConflict_NoConflictCommits is the control: a MoR delete
 // with no concurrent removal commits cleanly and deletes only the targeted row.
 func TestMergeOnReadDeleteConflict_NoConflictCommits(t *testing.T) {
