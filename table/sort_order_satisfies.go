@@ -29,7 +29,7 @@ import (
 func (s SortField) Satisfies(required SortField) bool {
 	if !slices.Equal(s.SourceIDs, required.SourceIDs) ||
 		s.Direction != required.Direction || s.NullOrder != required.NullOrder ||
-		isNilSortTransform(s.Transform) || isNilSortTransform(required.Transform) {
+		isNilSatisfactionTransform(s.Transform) || isNilSatisfactionTransform(required.Transform) {
 		return false
 	}
 
@@ -71,7 +71,7 @@ func (s SortOrder) Satisfies(required SortOrder) bool {
 	return true
 }
 
-func isNilSortTransform(transform iceberg.Transform) bool {
+func isNilSatisfactionTransform(transform iceberg.Transform) bool {
 	if transform == nil {
 		return true
 	}
