@@ -294,3 +294,52 @@ func TestUpdateSnapshotSummariesPreservesLargeTotals(t *testing.T) {
 	assert.Equal(t, "4000000000", result.Properties[totalRecordsKey])
 	assert.Equal(t, "9000000000", result.Properties[totalFileSizeKey])
 }
+
+func TestSnapshotSummaryCollectorDeletionVectors(t *testing.T) {
+	var ssc SnapshotSummaryCollector
+	spec := *iceberg.UnpartitionedSpec
+
+	// Two DVs that share one Puffin file, as DVWriter writes them.
+	newDV := func(ref string, count, offset, size int64) iceberg.DataFile {
+		return must(iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+			"/path/to/batch.puffin", iceberg.PuffinFile, nil, nil, nil, count, 1000)).
+			ReferencedDataFile(ref).
+			ContentOffset(offset).
+			ContentSizeInBytes(size).
+			Build()
+	}
+	dvA := newDV("/path/to/data-a.parquet", 2, 4, 300)
+	dvB := newDV("/path/to/data-b.parquet", 4, 304, 400)
+
+	oldDV := must(iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+		"/path/to/old.puffin", iceberg.PuffinFile, nil, nil, nil, 1, 600)).
+		ReferencedDataFile("/path/to/data-a.parquet").
+		ContentOffset(4).
+		ContentSizeInBytes(250).
+		Build()
+
+	posDelete := must(iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+		"/path/to/pos-delete.parquet", iceberg.ParquetFile, nil, nil, nil, 3, 800)).Build()
+
+	require.NoError(t, ssc.addFile(dvA, tableSchemaSimple, spec))
+	require.NoError(t, ssc.addFile(dvB, tableSchemaSimple, spec))
+	require.NoError(t, ssc.addFile(posDelete, tableSchemaSimple, spec))
+	require.NoError(t, ssc.removeFile(oldDV, tableSchemaSimple, spec))
+
+	props := ssc.build()
+
+	// DVs are counted on their own...
+	assert.Equal(t, "2", props["added-dvs"])
+	assert.Equal(t, "1", props["removed-dvs"])
+	// ...and are not counted as position delete files.
+	assert.Equal(t, "1", props["added-position-delete-files"])
+	assert.NotContains(t, props, "removed-position-delete-files")
+	// DVs still count as delete files and as position deletes.
+	assert.Equal(t, "3", props["added-delete-files"])
+	assert.Equal(t, "1", props["removed-delete-files"])
+	assert.Equal(t, "9", props["added-position-deletes"]) // 2 + 4 + 3
+	assert.Equal(t, "1", props["removed-position-deletes"])
+	// A DV counts only its own blob, not the whole shared Puffin file.
+	assert.Equal(t, "1500", props["added-files-size"]) // 300 + 400 + 800
+	assert.Equal(t, "250", props["removed-files-size"])
+}
