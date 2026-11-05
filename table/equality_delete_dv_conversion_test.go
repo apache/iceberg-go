@@ -61,6 +61,25 @@ func TestConvertEqualityDeletesToDeletionVectors(t *testing.T) {
 
 // A conversion staged after write.data.path changes must use the transaction's
 // updated output location, not the base table's data directory.
+// Equality deletes may use different key sets. Each must resolve against the
+// same data file before their positions are merged into a single DV.
+func TestConvertEqualityDeletesWithDifferentEqualityFields(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+	tbl = appendEqualityDelete(t, tbl, []int{2}, `[{"data":"c"}]`)
+
+	require.Equal(t, []int64{1, 4}, idsInTable(t, tbl))
+	result, err := tbl.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, result.ConvertedEqualityDeleteFiles)
+	require.Equal(t, 1, result.AddedDeletionVectors)
+	require.Equal(t, 1, liveDVCount(t, result.Table))
+	require.Zero(t, liveDeleteFileCount(t, result.Table, iceberg.EntryContentEqDeletes))
+	require.Equal(t, []int64{1, 4}, idsInTable(t, result.Table))
+}
+
 func TestConvertEqualityDeletesUsesStagedDataPath(t *testing.T) {
 	ctx := t.Context()
 	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
