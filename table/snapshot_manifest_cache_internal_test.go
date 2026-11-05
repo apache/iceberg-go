@@ -874,7 +874,7 @@ func TestSnapshotManifestCacheSharesErrorsFromLiveProducer(t *testing.T) {
 func TestAllManifestsEarlyStopDoesNotFailConcurrentScan(t *testing.T) {
 	scan, fs := scanWithManifestCount(t, 1)
 	previous := scan.metadata.CurrentSnapshot()
-	manifests, err := previous.Manifests(fs)
+	manifests, err := previous.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 	const currentList = "mem://planning/table/metadata/snap-2.avro"
 	var list bytes.Buffer

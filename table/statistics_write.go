@@ -36,12 +36,9 @@ func (t *Transaction) SetStatistics(stats StatisticsFile) error {
 		return fmt.Errorf("%w: statistics path must be nonempty, and file and footer sizes must be positive with footer size at most file size",
 			iceberg.ErrInvalidArgument)
 	}
-	if stats.BlobMetadata == nil {
-		return fmt.Errorf("%w: statistics blob-metadata must be a list", iceberg.ErrInvalidArgument)
-	}
 	for idx, blob := range stats.BlobMetadata {
-		if blob.Type == "" || blob.Fields == nil {
-			return fmt.Errorf("%w: statistics blob %d requires a type and fields list",
+		if blob.Type == "" {
+			return fmt.Errorf("%w: statistics blob %d requires a type",
 				iceberg.ErrInvalidArgument, idx)
 		}
 	}

@@ -130,9 +130,7 @@ func TestTransactionSetStatisticsRejectsInvalidFiles(t *testing.T) {
 		{"nonpositive file size", func(s *StatisticsFile) { s.FileSizeInBytes = 0 }},
 		{"nonpositive footer size", func(s *StatisticsFile) { s.FileFooterSizeInBytes = 0 }},
 		{"footer exceeds file", func(s *StatisticsFile) { s.FileFooterSizeInBytes = 1025 }},
-		{"null blob list", func(s *StatisticsFile) { s.BlobMetadata = nil }},
 		{"empty blob type", func(s *StatisticsFile) { s.BlobMetadata[0].Type = "" }},
-		{"null blob fields", func(s *StatisticsFile) { s.BlobMetadata[0].Fields = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,6 +182,60 @@ func TestTransactionSetStatisticsAllowsUnretainedSnapshot(t *testing.T) {
 	meta, err := tx.meta.Build()
 	require.NoError(t, err)
 	require.Equal(t, []StatisticsFile{stats}, slices.Collect(meta.Statistics()))
+}
+
+func TestTransactionSetStatisticsAcceptsNilCollections(t *testing.T) {
+	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
+	})
+	cases := []struct {
+		name      string
+		change    func(*StatisticsFile)
+		wantBlobs int
+	}{
+		{"nil blob metadata", func(s *StatisticsFile) { s.BlobMetadata = nil }, 0},
+		{"nil blob fields", func(s *StatisticsFile) { s.BlobMetadata[0].Fields = nil }, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := tbl.NewTransaction()
+			stats := testStatisticsRegistrationFile()
+			tc.change(&stats)
+			require.NoError(t, tx.SetStatistics(stats))
+
+			meta, err := tx.meta.Build()
+			require.NoError(t, err)
+			encoded, err := json.Marshal(meta)
+			require.NoError(t, err)
+
+			var payload struct {
+				Statistics []struct {
+					Blobs json.RawMessage `json:"blob-metadata"`
+				} `json:"statistics"`
+			}
+			require.NoError(t, json.Unmarshal(encoded, &payload))
+			require.Len(t, payload.Statistics, 1)
+			if tc.wantBlobs == 0 {
+				require.JSONEq(t, "[]", string(payload.Statistics[0].Blobs))
+			} else {
+				var blobs []struct {
+					Fields json.RawMessage `json:"fields"`
+				}
+				require.NoError(t, json.Unmarshal(payload.Statistics[0].Blobs, &blobs))
+				require.Len(t, blobs, 1)
+				require.JSONEq(t, "[]", string(blobs[0].Fields))
+			}
+
+			parsed, err := ParseMetadataBytes(encoded)
+			require.NoError(t, err)
+			registered := slices.Collect(parsed.Statistics())
+			require.Len(t, registered, 1)
+			require.Len(t, registered[0].BlobMetadata, tc.wantBlobs)
+			if tc.wantBlobs == 1 {
+				require.Empty(t, registered[0].BlobMetadata[0].Fields)
+			}
+		})
+	}
 }
 
 func TestTransactionSetStatisticsOmitsUnsetBlobProperties(t *testing.T) {

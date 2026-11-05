@@ -246,7 +246,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		return err
 	}
 
-	referenced, err := rd.txn.headDataFiles(fs, rd.referencedDataFiles(), rd.dataFiles)
+	referenced, err := rd.txn.headDataFiles(ctx, fs, rd.referencedDataFiles(), rd.dataFiles)
 	if err != nil {
 		return err
 	}
@@ -256,7 +256,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 	// Find live DVs that would be superseded by added DVs, regardless of
 	// whether removals are present. If any such live DVs exist and are not
 	// being removed, the commit must fail.
-	replacedLive, err := rd.findReplacedLiveDVs(fs, meta)
+	replacedLive, err := rd.findReplacedLiveDVs(ctx, fs, meta)
 	if err != nil {
 		return err
 	}
@@ -285,7 +285,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		// live DVs whose referenced data file this delta adds a
 		// replacement for; validateRemovedDeletes checks each is
 		// actually removed.
-		resolvedRemovals, err := rd.resolveRemovedDeletes(fs, meta)
+		resolvedRemovals, err := rd.resolveRemovedDeletes(ctx, fs, meta)
 		if err != nil {
 			return err
 		}
@@ -470,7 +470,7 @@ func (rd *RowDelta) validateAddedDeletionVectors() error {
 // adds a replacement for. This is used to enforce the v3 spec invariant
 // that at most one live DV can exist per data file: if any such live DVs
 // are found and they are not being explicitly removed, the commit must fail.
-func (rd *RowDelta) findReplacedLiveDVs(fs iceio.IO, meta *MetadataBuilder) ([]iceberg.DataFile, error) {
+func (rd *RowDelta) findReplacedLiveDVs(ctx context.Context, fs iceio.IO, meta *MetadataBuilder) ([]iceberg.DataFile, error) {
 	snap := rd.txn.planningSnapshot(meta)
 	if snap == nil {
 		// No existing snapshot means no live DVs to worry about.
@@ -490,7 +490,7 @@ func (rd *RowDelta) findReplacedLiveDVs(fs iceio.IO, meta *MetadataBuilder) ([]i
 	}
 
 	var replacedLive []iceberg.DataFile
-	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes, true) {
+	for entry, err := range snap.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return nil, err
 		}
@@ -534,7 +534,7 @@ func (rd *RowDelta) findReplacedLiveDVs(fs iceio.IO, meta *MetadataBuilder) ([]i
 // than one live entry at the path is rejected: the producer would
 // tombstone every matching entry while the snapshot summary counts
 // only one removal.
-func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (resolved []iceberg.DataFile, _ error) {
+func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta *MetadataBuilder) (resolved []iceberg.DataFile, _ error) {
 	snap := rd.txn.planningSnapshot(meta)
 	if snap == nil {
 		return nil, errors.New("cannot remove delete files from a table without an existing snapshot")
@@ -546,7 +546,7 @@ func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (r
 	}
 
 	liveByPath := make(map[string][]iceberg.DataFile, len(rd.removedDels))
-	for entry, err := range snap.entries(fs, iceberg.ManifestContentDeletes, true) {
+	for entry, err := range snap.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return nil, err
 		}
