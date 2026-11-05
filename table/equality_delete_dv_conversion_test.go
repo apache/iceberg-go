@@ -33,7 +33,7 @@ import (
 
 func TestConvertEqualityDeletesToDeletionVectors(t *testing.T) {
 	ctx := t.Context()
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"}]`)
 	beforeDelete := tbl.CurrentSnapshot().SnapshotID
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2},{"id":4}]`)
@@ -63,7 +63,7 @@ func TestConvertEqualityDeletesToDeletionVectors(t *testing.T) {
 // updated output location, not the base table's data directory.
 func TestConvertEqualityDeletesUsesStagedDataPath(t *testing.T) {
 	ctx := t.Context()
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
 
@@ -101,7 +101,7 @@ func TestConvertEqualityDeletesUsesStagedDataPath(t *testing.T) {
 
 func TestConvertEqualityDeletesMergesExistingPositionDeletes(t *testing.T) {
 	ctx := t.Context()
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "2"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "2"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"}]`)
 	var err error
 	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
@@ -128,9 +128,9 @@ func TestConvertEqualityDeletesMergesExistingPositionDeletes(t *testing.T) {
 func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
 	ctx := t.Context()
 	tbl := newMergeOnReadTestTableVersion(t, "2")
-	tbl = appendEqualityConversionRows(t, tbl,
+	tbl = appendRows(t, tbl,
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
-	tbl = appendEqualityConversionRows(t, tbl,
+	tbl = appendRows(t, tbl,
 		`[{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
 
 	scan := tbl.Scan()
@@ -173,7 +173,7 @@ func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
 
 func TestConvertEqualityDeletesMergesExistingDeletionVector(t *testing.T) {
 	ctx := t.Context()
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"}]`)
 	var err error
 	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
@@ -213,7 +213,7 @@ func TestConvertEqualityDeletesWritesOneVectorPerPartitionFile(t *testing.T) {
 
 func TestConvertEqualityDeletesAcrossDataFileSplits(t *testing.T) {
 	ctx := t.Context()
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"},{"id":6,"data":"f"},{"id":7,"data":"g"},{"id":8,"data":"h"},{"id":9,"data":"i"},{"id":10,"data":"j"}]`)
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.SetProperties(iceberg.Properties{table.ReadSplitTargetSizeKey: "1"}))
@@ -234,7 +234,7 @@ func TestConvertEqualityDeletesAcrossDataFileSplits(t *testing.T) {
 }
 
 func TestConvertEqualityDeletesRemovesDeletesWithNoMatches(t *testing.T) {
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":99}]`)
 
@@ -288,10 +288,10 @@ func TestConvertEqualityDeletesPreservesSameSnapshotSequenceSemantics(t *testing
 // of older delete files to newer data files that contain the same key.
 func TestConvertEqualityDeletesPreservesMultipleDeleteSequences(t *testing.T) {
 	ctx := t.Context()
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"old"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
-	tbl = appendEqualityConversionRows(t, tbl,
+	tbl = appendRows(t, tbl,
 		`[{"id":1,"data":"new"},{"id":4,"data":"d"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
 	require.Equal(t, []int64{1, 3, 4}, idsInTable(t, tbl))
@@ -312,31 +312,97 @@ func TestConvertEqualityDeletesPreservesMultipleDeleteSequences(t *testing.T) {
 	require.Equal(t, convertedSnapshotID, again.Table.CurrentSnapshot().SnapshotID)
 }
 
+// A global equality delete uses an unpartitioned delete spec even when the
+// existing data files were written with a partitioned spec.
+func TestConvertEqualityDeletesGlobalDeleteAcrossPartitions(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newPartitionedMergeOnReadTestTable(t),
+		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":1,"category":"y"},{"id":3,"category":"y"}]`)
+
+	// Leave the data files in their original category partitions, but write
+	// the next equality delete using a new unpartitioned spec.
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSpec(true).RemoveField("category").Commit())
+	var err error
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Zero(t, tbl.Spec().NumFields())
+
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
+	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+
+	result, err := tbl.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.ConvertedEqualityDeleteFiles)
+	require.Equal(t, 2, result.AddedDeletionVectors)
+	require.Equal(t, 2, liveDVCount(t, result.Table))
+	require.Zero(t, liveDeleteFileCount(t, result.Table, iceberg.EntryContentEqDeletes))
+	require.Equal(t, []int64{2, 3}, idsInTable(t, result.Table))
+}
+
+func TestConvertEqualityDeletesUnpartitionedSpec(t *testing.T) {
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`)
+	require.Zero(t, tbl.Spec().NumFields())
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+
+	result, err := tbl.ConvertEqualityDeletesToDeletionVectors(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.AddedDeletionVectors)
+	require.Equal(t, 1, liveDVCount(t, result.Table))
+	require.Equal(t, []int64{1, 3}, idsInTable(t, result.Table))
+}
+
+func TestConvertEqualityDeletesOnBranchLeavesMainUntouched(t *testing.T) {
+	ctx := t.Context()
+	tbl := newBranchPlanningTable(t, iceberg.Properties{table.PropertyFormatVersion: "3"})
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2, 3, 4)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 5)
+
+	// Write an equality delete onto the branch only.
+	deleteSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
+	arrowSchema, err := table.SchemaToArrowSchema(deleteSchema, nil, true, false)
+	require.NoError(t, err)
+	deletePath := filepath.ToSlash(filepath.Join(tbl.Location(), "data", "branch-equality-delete.parquet"))
+	writeParquetFile(t, deletePath, arrowSchema, `[{"id":2},{"id":5}]`)
+	info, err := os.Stat(deletePath)
+	require.NoError(t, err)
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentEqDeletes, deletePath, iceberg.ParquetFile, nil, nil, nil, 2, info.Size())
+	require.NoError(t, err)
+	builder.EqualityFieldIDs([]int{1})
+
+	tx, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(builder.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 3, 4}, idsOnRef(t, tbl, branchPlanningRef))
+	require.Equal(t, []int64{1, 2, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
+
+	tx, err = tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	result, err := tx.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.ConvertedEqualityDeleteFiles)
+	require.Equal(t, 2, result.AddedDeletionVectors)
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{1, 3, 4}, idsOnRef(t, tbl, branchPlanningRef))
+	require.Equal(t, 2, liveDVCountOnRef(t, tbl, branchPlanningRef))
+	require.Equal(t, []int64{1, 2, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
+	require.Zero(t, liveDVCountOnRef(t, tbl, table.MainBranch))
+}
+
 func TestConvertEqualityDeletesRequiresV3(t *testing.T) {
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "2"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "2"),
 		`[{"id":1,"data":"a"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
 
 	_, err := tbl.ConvertEqualityDeletesToDeletionVectors(t.Context())
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
-}
-
-func appendEqualityConversionRows(t *testing.T, tbl *table.Table, rowsJSON string) *table.Table {
-	t.Helper()
-
-	schema, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
-	require.NoError(t, err)
-	data, err := array.TableFromJSON(memory.DefaultAllocator, schema, []string{rowsJSON})
-	require.NoError(t, err)
-	defer data.Release()
-
-	reader := array.NewTableReader(data, -1)
-	defer reader.Release()
-
-	out, err := tbl.Append(t.Context(), reader, nil)
-	require.NoError(t, err)
-
-	return out
 }
 
 func liveDeleteFileCount(t *testing.T, tbl *table.Table, content iceberg.ManifestEntryContent) int {
@@ -373,7 +439,7 @@ func liveDeleteFileCount(t *testing.T, tbl *table.Table, content iceberg.Manifes
 }
 
 func TestConvertEqualityDeletesTransactionStagesOneReplace(t *testing.T) {
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
 
@@ -391,7 +457,7 @@ func TestConvertEqualityDeletesTransactionStagesOneReplace(t *testing.T) {
 
 func TestConvertEqualityDeletesRejectsStaleTransactionAtCommit(t *testing.T) {
 	ctx := t.Context()
-	tbl := appendEqualityConversionRows(t, newMergeOnReadTestTableVersion(t, "3"),
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
 
@@ -399,7 +465,7 @@ func TestConvertEqualityDeletesRejectsStaleTransactionAtCommit(t *testing.T) {
 	_, err := tx.ConvertEqualityDeletesToDeletionVectors(ctx)
 	require.NoError(t, err)
 
-	concurrent := appendEqualityConversionRows(t, tbl, `[{"id":3,"data":"concurrent"}]`)
+	concurrent := appendRows(t, tbl, `[{"id":3,"data":"concurrent"}]`)
 	_, err = tx.Commit(ctx)
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	require.Equal(t, []int64{1, 3}, idsInTable(t, concurrent),
