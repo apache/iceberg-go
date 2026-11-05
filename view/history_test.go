@@ -113,8 +113,10 @@ func TestVersionByIDAndHistoryAreDefensive(t *testing.T) {
 	first.Representations[0] = NewRepresentation(Representation{
 		SQL: "SELECT 999", Dialect: "spark",
 	})
+	first.DefaultNamespace[0] = "changed"
 	require.Equal(t, "create", vw.VersionByID(1).Summary["operation"])
 	require.Equal(t, "SELECT 1", vw.VersionByID(1).Representations[0].SQL)
+	require.Equal(t, "db", vw.VersionByID(1).DefaultNamespace[0])
 
 	history := vw.History()
 	require.Len(t, history, 4)
@@ -139,4 +141,49 @@ func TestVersionAsOfTruncatedHistory(t *testing.T) {
 	md.VersionList = md.VersionList[1:]
 	require.Nil(t, vw.VersionAsOf(3000, true))
 	require.EqualValues(t, 2, vw.VersionAsOf(4000, true).VersionID)
+}
+
+func TestVersionAsOfRepeatedTimestamps(t *testing.T) {
+	vw := viewWithVersionHistory(t)
+	md := vw.Metadata().(*metadata)
+
+	third := md.VersionList[1].Clone()
+	third.VersionID = 3
+	third.Representations[0].SQL = "SELECT 3"
+	md.VersionList = append(md.VersionList, third)
+	md.CurrentVersionIDValue = 3
+	md.VersionLogList = []VersionLogEntry{
+		{TimestampMS: 1000, VersionID: 1},
+		{TimestampMS: 2000, VersionID: 2},
+		{TimestampMS: 2000, VersionID: 3},
+	}
+	md.init()
+	require.NoError(t, md.validate())
+
+	// Two updates in the same millisecond must use log order to break ties.
+	require.EqualValues(t, 1, vw.VersionAsOf(2000, false).VersionID)
+	require.EqualValues(t, 3, vw.VersionAsOf(2000, true).VersionID)
+	require.EqualValues(t, 3, vw.VersionAsOf(2001, false).VersionID)
+}
+
+func TestVersionAsOfAfterHistoryExpiration(t *testing.T) {
+	vw := viewWithVersionHistory(t)
+	builder, err := MetadataBuilderFromBase(vw.Metadata())
+	require.NoError(t, err)
+
+	// Match Java's history normalization: after version 1 expires, all
+	// entries before its last occurrence are removed, even if version 2
+	// was active at some earlier point.
+	result, err := builder.SetProperties(iceberg.Properties{
+		VersionHistorySizeKey: "1",
+	}).Build()
+	require.NoError(t, err)
+
+	retained := New(vw.Identifier(), result.Metadata, vw.MetadataLocation())
+	require.Equal(t, []VersionLogEntry{
+		{TimestampMS: 4000, VersionID: 2},
+	}, retained.History())
+	require.Nil(t, retained.VersionByID(1))
+	require.Nil(t, retained.VersionAsOf(3999, true))
+	require.EqualValues(t, 2, retained.VersionAsOf(4000, true).VersionID)
 }
