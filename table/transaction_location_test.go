@@ -189,3 +189,37 @@ func TestTransactionSetLocationWritesToStagedPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestTransactionSetLocationDoesNotMoveExistingFiles(t *testing.T) {
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	originalLocation := tbl.Location()
+
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	records, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema,
+		[]string{`[{"id": 1, "data": "existing"}]`})
+	require.NoError(t, err)
+	defer records.Release()
+
+	seed := tbl.NewTransaction()
+	require.NoError(t, seed.AppendTable(t.Context(), records, 1, nil))
+	tbl, err = seed.Commit(t.Context())
+	require.NoError(t, err)
+
+	originalManifestList := tbl.CurrentSnapshot().ManifestList
+	require.True(t, strings.HasPrefix(originalManifestList, originalLocation+"/metadata/"))
+
+	newLocation := filepath.ToSlash(filepath.Join(t.TempDir(), "relocated"))
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetLocation(newLocation))
+	relocated, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, newLocation, relocated.Location())
+	require.Equal(t, originalManifestList, relocated.CurrentSnapshot().ManifestList)
+
+	// The relocated table still reads data through its original file paths.
+	rows, err := relocated.Scan().ToArrowTable(t.Context())
+	require.NoError(t, err)
+	defer rows.Release()
+	require.EqualValues(t, 1, rows.NumRows())
+}
