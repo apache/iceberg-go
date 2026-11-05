@@ -582,9 +582,13 @@ func TestCherryPickSnapshotExistingBranchReplaySurvivesMainAdvance(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
 
-	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+	mainAdvanced := appendRowsOnRef(t, tbl, table.MainBranch, 4)
+	assert.ElementsMatch(t, []int64{1, 4}, idsOnRef(t, mainAdvanced, table.MainBranch))
+
 	result, err := stale.Commit(t.Context())
 	require.NoError(t, err)
+	require.Equal(t, mainAdvanced.CurrentSnapshot().SnapshotID, result.CurrentSnapshot().SnapshotID,
+		"replaying onto another branch must not move main")
 	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, branchPlanningRef))
 	assert.ElementsMatch(t, []int64{1, 4}, idsOnRef(t, result, table.MainBranch))
 }
