@@ -99,7 +99,6 @@ func TestTransactionSetLocationRejectsEmptyLocation(t *testing.T) {
 	}
 }
 
-
 func TestTransactionSetLocationTrailingSlashNoOp(t *testing.T) {
 	tbl := newCommitTestTable(t)
 	tx := tbl.NewTransaction()
@@ -255,7 +254,6 @@ func TestTransactionSetLocationWritesEqualityDeletesToStagedPath(t *testing.T) {
 		})
 	}
 }
-
 
 func TestTransactionSetLocationRewriteDataFilesUsesStagedLocation(t *testing.T) {
 	tbl := newRewriteTestTable(t)
