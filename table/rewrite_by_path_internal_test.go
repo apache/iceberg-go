@@ -39,15 +39,15 @@ func (f pathRewriteMetricsFile) NaNValueCounts() map[int]int64  { return f.nans 
 
 func TestValidatePathRewriteMetricsAllowsMissingReplacementNaNStats(t *testing.T) {
 	source := pathRewriteMetricsFile{
-		path: "source.parquet",
+		path:   "source.parquet",
 		values: map[int]int64{1: 2},
-		nulls: map[int]int64{1: 0},
-		nans: map[int]int64{1: 0},
+		nulls:  map[int]int64{1: 0},
+		nans:   map[int]int64{1: 0},
 	}
 	replacement := pathRewriteMetricsFile{
-		path: "replacement.parquet",
+		path:   "replacement.parquet",
 		values: map[int]int64{1: 2},
-		nulls: map[int]int64{1: 0},
+		nulls:  map[int]int64{1: 0},
 	}
 	require.NoError(t, validatePathRewriteMetrics(
 		[]iceberg.DataFile{source}, []iceberg.DataFile{replacement}, nil))
