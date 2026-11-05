@@ -105,6 +105,34 @@ func TestRenameBranchPreservesMetadata(t *testing.T) {
 	require.Contains(t, maps.Collect(tbl.Metadata().Refs()), "dev", "original table is unchanged")
 }
 
+func TestRenameBranchPreservesOptionalRetention(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []setSnapshotRefOption
+	}{
+		{name: "unset"},
+		{name: "only max ref age", opts: []setSnapshotRefOption{WithMaxRefAgeMs(1000)}},
+		{name: "only min snapshots", opts: []setSnapshotRefOption{WithMinSnapshotsToKeep(2)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, cat := newRenameBranchTestTable(t)
+			builder, err := MetadataBuilderFromBase(cat.metadata, "/metadata/current.json")
+			require.NoError(t, err)
+			require.NoError(t, builder.SetSnapshotRef("feature", 42, BranchRef, tc.opts...))
+			cat.metadata, err = builder.Build()
+			require.NoError(t, err)
+			tbl.metadata = cat.metadata
+
+			expected := maps.Collect(tbl.Metadata().Refs())["feature"]
+			renamed, err := tbl.RenameBranch(t.Context(), "feature", "renamed")
+			require.NoError(t, err)
+			refs := maps.Collect(renamed.Metadata().Refs())
+			require.Equal(t, expected, refs["renamed"])
+			require.NotContains(t, refs, "feature")
+		})
+	}
+}
+
 func TestRenameBranchRejectsInvalidRefs(t *testing.T) {
 	for _, tc := range []struct {
 		name, from, to string
