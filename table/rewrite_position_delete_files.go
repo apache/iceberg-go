@@ -150,7 +150,7 @@ func (t *Transaction) RewritePositionDeleteFiles(
 	if err != nil {
 		return nil, err
 	}
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(ctx, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (t *Transaction) RewritePositionDeleteFiles(
 		if manifest.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, true) {
+		for entry, err := range manifest.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, err
 			}
@@ -193,7 +193,7 @@ func (t *Transaction) RewritePositionDeleteFiles(
 		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, true) {
+		for entry, err := range manifest.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, err
 			}
