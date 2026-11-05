@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	iceberg "github.com/apache/iceberg-go"
@@ -50,4 +51,101 @@ func TestCloneDefaultValue(t *testing.T) {
 	assert.Equal(t, iceberg.FixedLiteral{5, 6}, original["nested"].([]any)[0].(map[string]any)["fixed"])
 	assert.NotContains(t, original, "added")
 	assert.NotContains(t, original["nested"].([]any)[0], "added")
+}
+
+func TestNewSchemaStoresByteDefaultsAsHex(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   iceberg.Type
+		value any
+	}{
+		{"binary bytes", iceberg.PrimitiveTypes.Binary, []byte{0x0a, 0xff}},
+		{"binary literal", iceberg.PrimitiveTypes.Binary, iceberg.BinaryLiteral{0x0a, 0xff}},
+		{"fixed bytes", iceberg.MustFixedTypeOf(2), []byte{0x0a, 0xff}},
+		{"fixed literal", iceberg.MustFixedTypeOf(2), iceberg.FixedLiteral{0x0a, 0xff}},
+		{"hex string", iceberg.PrimitiveTypes.Binary, "0aff"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "b", Type: tt.typ, InitialDefault: tt.value, WriteDefault: tt.value,
+			})
+
+			field := sc.Field(0)
+			assert.Equal(t, "0aff", field.InitialDefault)
+			assert.Equal(t, "0aff", field.WriteDefault)
+		})
+	}
+}
+
+func TestNewSchemaLeavesOtherDefaultsAlone(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.PrimitiveTypes.String, InitialDefault: "0aff"},
+		iceberg.NestedField{ID: 2, Name: "i", Type: iceberg.PrimitiveTypes.Int32, InitialDefault: int32(7)},
+		iceberg.NestedField{ID: 3, Name: "n", Type: iceberg.PrimitiveTypes.Binary},
+	)
+
+	assert.Equal(t, "0aff", sc.Field(0).InitialDefault)
+	assert.Equal(t, int32(7), sc.Field(1).InitialDefault)
+	assert.Nil(t, sc.Field(2).InitialDefault)
+}
+
+// A schema built in process must equal the same schema read back from
+// metadata, where binary and fixed defaults are hex strings.
+func TestNewSchemaByteDefaultsSurviveJSONRoundTrip(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "b", Type: iceberg.PrimitiveTypes.Binary, InitialDefault: []byte{1, 2}},
+		iceberg.NestedField{ID: 2, Name: "f", Type: iceberg.MustFixedTypeOf(2), WriteDefault: iceberg.FixedLiteral{3, 4}},
+	)
+
+	data, err := json.Marshal(sc)
+	require.NoError(t, err)
+
+	var decoded iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.True(t, sc.Equals(&decoded), "built: %v, decoded: %v", sc.Fields(), decoded.Fields())
+}
+
+func TestNewSchemaByteDefaultIsIsolatedFromCaller(t *testing.T) {
+	value := []byte{1, 2}
+	sc := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "b", Type: iceberg.PrimitiveTypes.Binary, InitialDefault: value,
+	})
+
+	value[0] = 9
+	assert.Equal(t, "0102", sc.Field(0).InitialDefault)
+}
+
+func TestNewSchemaNormalizesNestedByteDefaultsWithoutModifyingCaller(t *testing.T) {
+	inner := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 5, Name: "payload", Type: iceberg.PrimitiveTypes.Binary, InitialDefault: []byte{1, 2}},
+		{ID: 6, Name: "label", Type: iceberg.PrimitiveTypes.String, InitialDefault: "x"},
+	}}
+	list := &iceberg.ListType{ElementID: 4, Element: inner, ElementRequired: true}
+	mapType := &iceberg.MapType{
+		KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+		ValueID: 3, ValueType: list, ValueRequired: true,
+	}
+	fields := []iceberg.NestedField{
+		{ID: 1, Name: "m", Type: mapType},
+		{ID: 7, Name: "top", Type: iceberg.PrimitiveTypes.Binary, WriteDefault: []byte{3}},
+	}
+
+	sc := iceberg.NewSchema(0, fields...)
+
+	payload, ok := sc.FindFieldByID(5)
+	require.True(t, ok)
+	assert.Equal(t, "0102", payload.InitialDefault)
+	label, ok := sc.FindFieldByID(6)
+	require.True(t, ok)
+	assert.Equal(t, "x", label.InitialDefault)
+	top, ok := sc.FindFieldByID(7)
+	require.True(t, ok)
+	assert.Equal(t, "03", top.WriteDefault)
+
+	assert.Equal(t, []byte{1, 2}, inner.FieldList[0].InitialDefault)
+	assert.Same(t, list, mapType.ValueType)
+	assert.Same(t, inner, list.Element)
+	assert.Equal(t, []byte{3}, fields[1].WriteDefault)
 }

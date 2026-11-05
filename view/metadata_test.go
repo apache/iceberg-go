@@ -761,8 +761,6 @@ func TestCloneSchemaCopiesNestedValues(t *testing.T) {
 	fields := cloned.FieldsRef(iceinternal.SchemaRef{})
 	structField := fields[0].Type.(*iceberg.StructType)
 	structField.FieldList[0].Name = "changed"
-	structField.FieldList[0].InitialDefault.([]byte)[0] = 9
-	structField.FieldList[0].WriteDefault.(iceberg.BinaryLiteral)[0] = 9
 	listField := fields[1].Type.(*iceberg.ListType)
 	listField.Element.(*iceberg.StructType).FieldList[0].Name = "changed"
 	mapField := fields[2].Type.(*iceberg.MapType)
@@ -771,8 +769,8 @@ func TestCloneSchemaCopiesNestedValues(t *testing.T) {
 	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
 	originalStruct := schema.Field(0).Type.(*iceberg.StructType)
 	assert.Equal(t, "nested", originalStruct.FieldList[0].Name)
-	assert.Equal(t, []byte{1}, originalStruct.FieldList[0].InitialDefault)
-	assert.Equal(t, iceberg.BinaryLiteral{2}, originalStruct.FieldList[0].WriteDefault)
+	assert.Equal(t, "01", originalStruct.FieldList[0].InitialDefault)
+	assert.Equal(t, "02", originalStruct.FieldList[0].WriteDefault)
 	assert.Equal(t, "element", schema.Field(1).Type.(*iceberg.ListType).Element.(*iceberg.StructType).FieldList[0].Name)
 	assert.Equal(t, "value", schema.Field(2).Type.(*iceberg.MapType).ValueType.(*iceberg.StructType).FieldList[0].Name)
 }
