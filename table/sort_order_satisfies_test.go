@@ -175,3 +175,86 @@ func TestSortFieldSatisfiesRejectsNilTransforms(t *testing.T) {
 	require.False(t, typedNil.Satisfies(valid))
 	require.False(t, valid.Satisfies(typedNil))
 }
+
+func TestSortFieldSatisfiesRequiresSourceIDs(t *testing.T) {
+	valid := satisfyingSortField([]int{1}, iceberg.IdentityTransform{}, table.SortASC, table.NullsLast)
+	noSources := satisfyingSortField(nil, iceberg.IdentityTransform{}, table.SortASC, table.NullsLast)
+	emptySources := satisfyingSortField([]int{}, iceberg.IdentityTransform{}, table.SortASC, table.NullsLast)
+
+	require.False(t, noSources.Satisfies(noSources))
+	require.False(t, noSources.Satisfies(emptySources))
+	require.False(t, valid.Satisfies(noSources))
+	require.False(t, noSources.Satisfies(valid))
+}
+
+func TestSortFieldSatisfiesOpaqueTransforms(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom-sort[4]")
+	require.NoError(t, err)
+	sameUnknown, err := iceberg.ParseTransform("custom-sort[4]")
+	require.NoError(t, err)
+	otherUnknown, err := iceberg.ParseTransform("custom-sort[8]")
+	require.NoError(t, err)
+
+	field := func(transform iceberg.Transform) table.SortField {
+		return satisfyingSortField([]int{1}, transform, table.SortASC, table.NullsLast)
+	}
+
+	require.True(t, field(unknown).Satisfies(field(sameUnknown)))
+	require.False(t, field(unknown).Satisfies(field(otherUnknown)))
+	require.False(t, field(iceberg.IdentityTransform{}).Satisfies(field(unknown)))
+	require.False(t, field(unknown).Satisfies(field(iceberg.IdentityTransform{})))
+	require.True(t, field(iceberg.VoidTransform{}).Satisfies(field(iceberg.VoidTransform{})))
+	require.False(t, field(iceberg.VoidTransform{}).Satisfies(field(iceberg.IdentityTransform{})))
+}
+
+func TestSortFieldSatisfiesMixedPointerAndValueTransforms(t *testing.T) {
+	identity := iceberg.IdentityTransform{}
+	year := iceberg.YearTransform{}
+	day := iceberg.DayTransform{}
+	truncate2 := iceberg.TruncateTransform{Width: 2}
+	truncate4 := iceberg.TruncateTransform{Width: 4}
+	bucket := iceberg.BucketTransform{NumBuckets: 4}
+
+	field := func(transform iceberg.Transform) table.SortField {
+		return satisfyingSortField([]int{1}, transform, table.SortDESC, table.NullsFirst)
+	}
+
+	require.True(t, field(&identity).Satisfies(field(identity)))
+	require.True(t, field(identity).Satisfies(field(&identity)))
+	require.True(t, field(&identity).Satisfies(field(&year)))
+	require.True(t, field(&day).Satisfies(field(year)))
+	require.True(t, field(day).Satisfies(field(&year)))
+	require.False(t, field(&year).Satisfies(field(day)))
+	require.True(t, field(&truncate4).Satisfies(field(truncate2)))
+	require.True(t, field(truncate4).Satisfies(field(&truncate2)))
+	require.False(t, field(&truncate2).Satisfies(field(&truncate4)))
+	require.True(t, field(&bucket).Satisfies(field(bucket)))
+	require.True(t, field(bucket).Satisfies(field(&bucket)))
+}
+
+func TestSortOrderSatisfiesMultiSourceField(t *testing.T) {
+	transform, err := iceberg.ParseTransform("multi-source[2]")
+	require.NoError(t, err)
+
+	field := func(ids []int) table.SortField {
+		return satisfyingSortField(ids, transform, table.SortASC, table.NullsLast)
+	}
+
+	actual := satisfyingSortOrder(t, 1, field([]int{1, 2}),
+		satisfyingSortField([]int{3}, iceberg.IdentityTransform{}, table.SortASC, table.NullsLast))
+	compatible := satisfyingSortOrder(t, 2, field([]int{1, 2}))
+	reversed := satisfyingSortOrder(t, 3, field([]int{2, 1}))
+	shorterSourceList := satisfyingSortOrder(t, 4, field([]int{1}))
+
+	require.True(t, actual.Satisfies(compatible))
+	require.False(t, compatible.Satisfies(actual))
+	require.False(t, actual.Satisfies(reversed))
+	require.False(t, actual.Satisfies(shorterSourceList))
+}
+
+func TestSortFieldSatisfiesRejectsTwoTypedNilTransforms(t *testing.T) {
+	var nilTruncate *iceberg.TruncateTransform
+	field := satisfyingSortField([]int{1}, nilTruncate, table.SortASC, table.NullsFirst)
+
+	require.False(t, field.Satisfies(field))
+}
