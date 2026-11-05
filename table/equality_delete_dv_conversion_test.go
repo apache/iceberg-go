@@ -99,7 +99,7 @@ func TestConvertEqualityDeletesUsesStagedDataPath(t *testing.T) {
 
 	fs, err := committed.FS(ctx)
 	require.NoError(t, err)
-	manifests, err := committed.CurrentSnapshot().Manifests(fs)
+	manifests, err := committed.CurrentSnapshot().Manifests(ctx, fs)
 	require.NoError(t, err)
 
 	var dvPaths []string
@@ -107,7 +107,7 @@ func TestConvertEqualityDeletesUsesStagedDataPath(t *testing.T) {
 		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, false) {
+		for entry, err := range manifest.Entries(ctx, fs, false) {
 			require.NoError(t, err)
 			if entry.Status() != iceberg.EntryStatusDELETED && table.IsDeletionVector(entry.DataFile()) {
 				dvPaths = append(dvPaths, entry.DataFile().FilePath())
@@ -178,6 +178,14 @@ func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+
+	// Enable retries so the final commit verifies replay after the peer update,
+	// rather than failing immediately when main changes.
+	retryTx := tbl.NewTransaction()
+	require.NoError(t, retryTx.SetProperties(iceberg.Properties{table.CommitNumRetriesKey: "2"}))
+	tbl, err = retryTx.Commit(ctx)
+	require.NoError(t, err)
+
 	beforeSnapshot := tbl.CurrentSnapshot().SnapshotID
 	require.Equal(t, []int64{4}, idsInTable(t, tbl))
 
@@ -483,10 +491,11 @@ func TestConvertEqualityDeletesRequiresV3(t *testing.T) {
 func liveDeleteFileCount(t *testing.T, tbl *table.Table, content iceberg.ManifestEntryContent) int {
 	t.Helper()
 
-	fs, err := tbl.FS(t.Context())
+	ctx := t.Context()
+	fs, err := tbl.FS(ctx)
 	require.NoError(t, err)
 	snapshot := tbl.CurrentSnapshot()
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(ctx, fs)
 	require.NoError(t, err)
 
 	count := 0
@@ -494,7 +503,7 @@ func liveDeleteFileCount(t *testing.T, tbl *table.Table, content iceberg.Manifes
 		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, false) {
+		for entry, err := range manifest.Entries(ctx, fs, false) {
 			require.NoError(t, err)
 			if entry.Status() == iceberg.EntryStatusDELETED {
 				continue
