@@ -1487,6 +1487,7 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 		// Credential refresh does not return table config, so carry the
 		// existing scan-planning directive over verbatim.
 		table.WithScanPlanningDirectiveFrom(tbl),
+		table.WithSnapshotHistoryLimitedToRefsFrom(tbl),
 	}
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.

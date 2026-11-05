@@ -493,8 +493,11 @@ A direct-child source fast-forwards without copying data and ignores
 metadata; user-supplied WAP publication markers are not trusted. Divergent v3
 appends and divergent replace-partitions overwrites are tracked in
 [issue #2415](https://github.com/apache/iceberg-go/issues/2415). Cherry-picks
-pin the refs they rely on. A moved pinned ref fails the commit; other conflicts
-can be retried under the normal commit retry policy.
+appends and divergent replace-partitions overwrites are tracked in
+[issue #2415](https://github.com/apache/iceberg-go/issues/2415). Cherry-picks
+pin the refs they rely on. Divergent replays onto new branches also pin main;
+fast-forwards onto new branches do not. A moved pinned ref fails the commit;
+other conflicts can be retried under the normal commit retry policy.
 
 `Commit` retries a conflict (`ErrCommitFailed`) up to `commit.retry.num-retries` times, 4 by default. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 

@@ -121,26 +121,6 @@ func TestCherryPickSnapshotFastForwardsToMissingBranch(t *testing.T) {
 	assert.ElementsMatch(t, []int64{1}, idsOnRef(t, result, table.MainBranch))
 }
 
-// A missing branch starts at main. Even a direct-child fast-forward must
-// pin that inherited head, because concurrent changes would invalidate it.
-func TestCherryPickSnapshotFastForwardToMissingBranchPinsMain(t *testing.T) {
-	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
-	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
-	source := tbl.SnapshotByName(branchPlanningRef)
-	require.NotNil(t, source)
-
-	const target = "cherry-fast-forward"
-	stale, err := tbl.NewTransactionOnBranch(target)
-	require.NoError(t, err)
-	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
-
-	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
-	_, err = stale.Commit(t.Context())
-	require.ErrorIs(t, err, table.ErrCommitFailed)
-	require.Nil(t, tbl.SnapshotByName(target))
-	assert.ElementsMatch(t, []int64{1, 3}, idsOnRef(t, tbl, table.MainBranch))
-}
-
 func TestCherryPickSnapshotFastForwardsNonAppendSnapshot(t *testing.T) {
 	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
 	branchTxn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
@@ -275,6 +255,7 @@ func TestCherryPickSnapshotRejectsConcurrentTargetMove(t *testing.T) {
 	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
 	_, err := stale.Commit(t.Context())
 	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
 	assert.ElementsMatch(t, []int64{1, 3}, idsOnRef(t, tbl, table.MainBranch))
 }
 
@@ -296,6 +277,7 @@ func TestCherryPickSnapshotFastForwardThenAppendDoesNotLoseFilesOnRetry(t *testi
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 4)
 	_, err := stale.Commit(t.Context())
 	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
 	assert.ElementsMatch(t, []int64{1}, idsOnRef(t, tbl, table.MainBranch))
 	assert.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, tbl, branchPlanningRef))
 }
@@ -542,4 +524,61 @@ func TestCherryPickSnapshotV1FromDivergentBranch(t *testing.T) {
 	require.Equal(t, strconv.FormatInt(source.SnapshotID, 10), result.CurrentSnapshot().Summary.Properties["source-snapshot-id"])
 	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, table.MainBranch))
 	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, branchPlanningRef))
+}
+
+// The source may introduce several files in one snapshot. Cherry-picking must
+// replay each addition, without replaying files inherited from its parent.
+func TestCherryPickSnapshotReplaysMultipleSourceFiles(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, nil), table.MainBranch, 1)
+	mainPaths, _ := liveFilesOnRef(t, tbl, table.MainBranch)
+	require.Len(t, mainPaths, 1)
+
+	var sourcePaths []string
+	for i, ref := range []string{"file-a", "file-b"} {
+		tbl = appendRowsOnRef(t, tbl, ref, int64(i+2))
+		paths, _ := liveFilesOnRef(t, tbl, ref)
+		for _, path := range paths {
+			if path != mainPaths[0] {
+				sourcePaths = append(sourcePaths, path)
+			}
+		}
+	}
+	require.Len(t, sourcePaths, 2)
+
+	sourceTxn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	require.NoError(t, sourceTxn.AddDataFilesByPath(t.Context(), sourcePaths, nil, false))
+	tbl, err = sourceTxn.Commit(t.Context())
+	require.NoError(t, err)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+
+	pick := tbl.NewTransaction()
+	require.NoError(t, pick.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+	result, err := pick.Commit(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{1, 2, 3, 4}, idsOnRef(t, result, table.MainBranch))
+	paths, _ := liveFilesOnRef(t, result, table.MainBranch)
+	require.Len(t, paths, 4)
+}
+
+// A replay onto an existing branch pins that branch, not main. An unrelated
+// main append may cause a table-wide CAS retry, but must not fail the replay.
+func TestCherryPickSnapshotExistingBranchReplaySurvivesMainAdvance(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, "cherry-source", 2)
+	source := tbl.SnapshotByName("cherry-source")
+	require.NotNil(t, source)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 3)
+
+	stale, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+	result, err := stale.Commit(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, result, branchPlanningRef))
+	assert.ElementsMatch(t, []int64{1, 4}, idsOnRef(t, result, table.MainBranch))
 }

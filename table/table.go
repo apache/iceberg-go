@@ -54,7 +54,8 @@ import (
 // catalog implementations should wrap it so callers can detect conflicts
 // with errors.Is(err, table.ErrCommitFailed). Calling Transaction.Commit
 // again retries the conflict unless the error also matches
-// ErrTransactionUnusable.
+// ErrTransactionUnusable. A cherry-pick fast-forward that loses a CAS race
+// returns both errors and must be rebuilt in a new transaction.
 //
 // After refresh, these failures match ErrCommitFailed: a stale requirement,
 // a validator conflict, a deleted commit branch, or a replanned expiry that
@@ -90,11 +91,19 @@ var ErrCommitRejected = errors.New("commit rejected")
 // non-replayable commit whose branch has moved), a validator conflict with a
 // concurrent commit, a diverged base snapshot, files to rewrite that a
 // concurrent commit removed, a commit branch that became a tag or was
+<<<<<<< HEAD
 // deleted, a replaced table, or a staged update that cannot apply after
 // refresh. With snapshot expiry, they also include disabled GC and replanning
 // that changes whether a commit branch other than main is removed. Only the
 // commit branch's head assertion is rebased. A staged update that cannot
 // apply keeps the builder's error as its cause.
+=======
+// deleted, a replaced table, or a staged update that cannot apply after
+// refresh. With snapshot expiry, they also include disabled GC and replanning
+// that changes whether a commit branch other than main is removed. Only the
+// commit branch's head assertion is rebased. A staged update that cannot
+// apply keeps the builder's error as its cause.
+>>>>>>> eb35d1e7 (fix(table): address cherry-pick concurrency and REST history review)
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -605,8 +614,8 @@ type commitOpts struct {
 
 	// noReplay makes a CAS conflict terminal: doCommit returns the
 	// ErrCommitFailed error instead of entering refresh-and-replay.
-	// Set for commits carrying delete-file removals; see the flag site
-	// in snapshotProducer.commitManifests for the rationale.
+	// Set for commits carrying delete-file removals; see the flag site in
+	// snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
 	// pinnedRefs names refs whose assertions guard the commit and must
@@ -1584,6 +1593,17 @@ func WithSnapshotHistoryLimitedToRefs(refsOnly bool) Option {
 	return func(t *Table) {
 		t.snapshotHistoryRefsOnly = refsOnly
 	}
+}
+
+// WithSnapshotHistoryLimitedToRefsFrom preserves src's REST snapshot load mode
+// when rebuilding a table without reloading metadata, such as after refreshing
+// storage credentials. A nil source leaves the mode unchanged.
+func WithSnapshotHistoryLimitedToRefsFrom(src *Table) Option {
+	if src == nil {
+		return noopTableOption
+	}
+
+	return WithSnapshotHistoryLimitedToRefs(src.snapshotHistoryRefsOnly)
 }
 
 // WithSavedConfig supplies a set of properties used to create a *Table

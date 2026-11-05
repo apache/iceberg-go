@@ -108,3 +108,34 @@ func TestCherryPickSnapshotChecksContextBeforeManifestIO(t *testing.T) {
 	err := txn.CherryPickSnapshot(ctx, 20, nil)
 	require.True(t, errors.Is(err, context.Canceled))
 }
+
+// A fast-forwarded ref points directly at the source. Creating that ref does
+// not fork from main, so main must not be pinned by this operation.
+func TestCherryPickSnapshotFastForwardToMissingBranchDoesNotPinMain(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	txn.branch = "new-target"
+
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), 20, nil))
+	require.Contains(t, txn.pinnedRefs, "new-target")
+	require.NotContains(t, txn.pinnedRefs, MainBranch)
+	require.Equal(t, int64(20), txn.meta.refs["new-target"].SnapshotID)
+}
+
+func TestCherryPickSnapshotFastForwardPreservesBranchRetention(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	ref := txn.meta.refs[MainBranch]
+	minSnapshots := 3
+	maxSnapshotAge := int64(100_000)
+	maxRefAge := int64(200_000)
+	ref.MinSnapshotsToKeep = &minSnapshots
+	ref.MaxSnapshotAgeMs = &maxSnapshotAge
+	ref.MaxRefAgeMs = &maxRefAge
+	txn.meta.refs[MainBranch] = ref
+
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), 20, nil))
+	got := txn.meta.refs[MainBranch]
+	require.Equal(t, int64(20), got.SnapshotID)
+	require.Equal(t, minSnapshots, *got.MinSnapshotsToKeep)
+	require.Equal(t, maxSnapshotAge, *got.MaxSnapshotAgeMs)
+	require.Equal(t, maxRefAge, *got.MaxRefAgeMs)
+}

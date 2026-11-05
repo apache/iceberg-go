@@ -50,11 +50,12 @@ import (
 // source-snapshot-id and published-wap-id are derived from the source, while a
 // caller-supplied wap.id is discarded so the result is not staged.
 //
-// The target branch is pinned to its base head, and a new target branch also
-// pins main because its initial snapshot inherits main's files. A concurrent
-// move of either guarded ref fails the commit instead of rebasing. Fast-forward
-// transactions do not retry CAS conflicts because a later staged append must
-// not lose the fast-forwarded files during manifest-list reconstruction.
+// The target branch is pinned to its base head. Divergent replay onto a new
+// target also pins main because its append inherits main's files. A fast-forward
+// onto a new target points directly to the source, so does not pin main.
+// Moving a pinned ref fails rather than rebasing. Fast-forward transactions
+// do not retry any CAS conflict because later staged writes must not lose the
+// fast-forwarded files during manifest-list reconstruction.
 //
 // Duplicate-publication checks need complete ancestry when REST loaded only
 // referenced snapshots (snapshot-loading-mode=refs). Reload in mode=all before
@@ -125,16 +126,9 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 		if baseHead != nil {
 			req = assertBranchRefSnapshotID(target, baseHead)
 		}
-		reqs := []Requirement{req}
-		pins := []string{target}
-		if target != MainBranch && baseHead == nil {
-			// A new branch forks from main, so a concurrent main move
-			// invalidates the source's directly-applicable ancestry.
-			reqs = append(reqs, AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)))
-			pins = append(pins, MainBranch)
-		}
-
-		return t.applyPinnedNoReplay([]Update{update}, reqs, pins)
+		// A fast-forward to a missing branch references source directly;
+		// unlike a replay, it does not fork from main.
+		return t.applyPinnedNoReplay([]Update{update}, []Requirement{req}, []string{target})
 	}
 
 	if source.Summary == nil || source.Summary.Operation != OpAppend {
