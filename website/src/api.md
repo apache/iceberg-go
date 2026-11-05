@@ -303,6 +303,26 @@ if err != nil { /* ... */ }
 arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 ```
 
+### Incremental changelog scans
+
+`NewIncrementalChangelogScan` returns rows added or deleted between snapshots. `PlanFiles` returns the tasks. `Read` reads a planned task list, and `ToArrowRecords` plans and reads. Remote planning is not supported.
+
+```go
+schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields("id", "name"),
+).FromSnapshotExclusive(startSnapshotID).ToArrowRecords(ctx)
+```
+
+`FromSnapshotInclusive`, `FromSnapshotExclusive`, and `ToSnapshot` bound the snapshot range. Projection, row filters, and limits apply while the rows are read. If the start snapshot has been expired, changes in expired snapshots before the oldest retained one are not reported. Each snapshot that adds deletes is planned against every live data file, narrowed only by the partition filter, so the cost follows the table size rather than the size of the snapshot range.
+
+Each batch is the scan projection followed by three columns:
+
+- `_change_type` — `INSERT` or `DELETE`
+- `_change_ordinal` — int32 ordinal of the snapshot that produced the change
+- `_commit_snapshot_id` — snapshot ID that committed the change
+
+Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. `UPDATE` rows are not produced. Delete-file handling is iceberg-go behavior.
+
 ## Writing data
 
 The shortcut methods on `Table` open a transaction, perform the write, and commit. Use `NewTransaction` directly when you need to combine multiple operations.
@@ -507,6 +527,43 @@ err = txn.RollbackToSnapshot(targetSnapshotID)
 ```
 
 Tune retention with the `history.expire.min-snapshots-to-keep`, `history.expire.max-snapshot-age-ms`, and `history.expire.max-ref-age-ms` table properties (see [Configuration](./configuration.md)).
+
+### Snapshot integrity audit (v1 and later)
+
+Use `ValidateSnapshot` to inspect a snapshot's manifest list and entries without
+changing table data. This is especially useful for checking imported v1 tables
+before allowing them into production.
+
+```go
+report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+if err != nil {
+    return err // I/O failed or the scan was canceled; report may be incomplete.
+}
+if !report.Valid() {
+    for _, issue := range report.Issues {
+        fmt.Printf("%s: %s (%s)\n", issue.Code, issue.FilePath, issue.ManifestPath)
+    }
+}
+```
+
+The report checks manifest versions, partition spec references, content types,
+manifest entry counts, duplicate manifest paths, and duplicate live content files
+across **all** manifests in a snapshot. It also checks that live deletion vectors
+have a target path, that their blob ranges fit within the recorded file size,
+and that no two distinct vectors target the same data file.
+Deleted entries do not count as live.
+A report is valid only when `Complete` is true and `Issues` is empty.
+This is a metadata-only audit: it does not check data-file contents or whether
+data-file objects still exist. The audit works with both v1 manifest lists and
+older v1 snapshots containing embedded `manifests` paths. For embedded
+manifests, the partition spec ID is checked against table metadata when the
+optional header provides it, or inferred when the partition fields match exactly
+one historical spec. Missing, ambiguous, or mismatched partition specs are
+reported as issues rather than silently accepted.
+
+The file uniqueness and manifest requirements come from the
+[Iceberg spec](https://iceberg.apache.org/spec/#content-file-uniqueness)
+and [manifest list spec](https://iceberg.apache.org/spec/#manifest-lists).
 
 ## Maintenance
 

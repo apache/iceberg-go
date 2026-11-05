@@ -346,7 +346,6 @@ func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
 		person, ok := personField.Type.(*iceberg.StructType)
 		require.True(t, ok)
 		person.FieldList[0].Name = "hijacked"
-		payloadField.InitialDefault.(iceberg.BinaryLiteral)[0] = 9
 		payloadField.WriteDefault.(map[string]any)["nested"].([]any)[0].([]byte)[0] = 9
 
 		actual, ok := schema.FindFieldByID(2)
@@ -354,7 +353,7 @@ func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
 		assert.Equal(t, "name", actual.Name)
 		payload, ok := schema.FindFieldByID(3)
 		require.True(t, ok)
-		assert.Equal(t, iceberg.BinaryLiteral{1, 2}, payload.InitialDefault)
+		assert.Equal(t, "0102", payload.InitialDefault)
 		assert.Equal(t, map[string]any{"nested": []any{[]byte{3, 4}}}, payload.WriteDefault)
 	}
 

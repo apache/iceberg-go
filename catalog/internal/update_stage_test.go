@@ -92,6 +92,69 @@ func TestUpdateAndStageTableRejectsEmptyMetadataLocationForExistingTable(t *test
 	require.Contains(t, err.Error(), "invalid metadata location")
 }
 
+func TestUpdateAndStageTableClassifiesFailures(t *testing.T) {
+	metadata, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "file:///tmp/table",
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	current := table.New(table.Identifier{"db", "tbl"}, metadata, "file:///tmp/table/metadata/v1.metadata.json", nil, nil)
+	parent := int64(1)
+	errTag := errors.New("requirement failed: ref \"t\" is a tag")
+
+	tests := []struct {
+		name    string
+		current *table.Table
+		reqs    []table.Requirement
+		updates []table.Update
+		want    []error
+		notWant error
+	}{
+		{
+			name:    "metadata builder error",
+			current: current,
+			updates: []table.Update{table.NewSetCurrentSchemaUpdate(99)},
+			want:    []error{table.ErrCommitRejected},
+			notWant: table.ErrCommitFailed,
+		},
+		{
+			name:    "requirement failure that is not a conflict",
+			current: current,
+			reqs:    []table.Requirement{failingRequirement{errTag}},
+			want:    []error{table.ErrCommitRejected, errTag},
+			notWant: table.ErrCommitFailed,
+		},
+		{
+			name:    "requirement failure",
+			current: current,
+			reqs:    []table.Requirement{table.AssertCurrentSchemaID(99)},
+			want:    []error{table.ErrCommitFailed},
+			notWant: table.ErrCommitRejected,
+		},
+		{
+			name:    "stale sequence number",
+			current: current,
+			updates: []table.Update{table.NewAddSnapshotUpdate(&table.Snapshot{
+				SnapshotID:       2,
+				ParentSnapshotID: &parent,
+				SequenceNumber:   metadata.LastSequenceNumber(),
+				TimestampMs:      metadata.LastUpdatedMillis(),
+				ManifestList:     "file:///tmp/table/metadata/snap-2.avro",
+			})},
+			want:    []error{table.ErrCommitFailed},
+			notWant: table.ErrCommitRejected,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			staged, err := UpdateAndStageTable(t.Context(), nil, tt.current, table.Identifier{"db", "tbl"}, tt.reqs, tt.updates, nil)
+			require.Nil(t, staged)
+			for _, want := range tt.want {
+				require.ErrorIs(t, err, want)
+			}
+			require.NotErrorIs(t, err, tt.notWant)
+		})
+	}
+}
+
 func TestParseMetadataVersionAcceptsLegacyMetadataLocation(t *testing.T) {
 	require.Equal(t, 1, ParseMetadataVersion("file:///tmp/table/metadata/v1.metadata.json"))
 	require.Equal(t, 2, ParseMetadataVersion("file:///tmp/table/metadata/v2.gz.metadata.json"))
