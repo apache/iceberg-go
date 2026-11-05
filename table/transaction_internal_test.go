@@ -191,7 +191,7 @@ func liveDataFilePathsForSnapshot(t *testing.T, snap *Snapshot, fs iceio.IO) []s
 	t.Helper()
 	require.NotNil(t, snap)
 	var paths []string
-	for e, err := range snap.entries(fs, iceberg.ManifestContentData, true) {
+	for e, err := range snap.entries(t.Context(), fs, iceberg.ManifestContentData, true) {
 		require.NoError(t, err)
 		if e.DataFile().ContentType() == iceberg.EntryContentData {
 			paths = append(paths, e.DataFile().FilePath())
