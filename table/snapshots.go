@@ -70,6 +70,7 @@ const (
 	addedPosDeleteFilesKey    = "added-position-delete-files"
 	addedRecordsKey           = "added-records"
 	addedEqDeleteFilesKey     = "added-equality-delete-files"
+	addedDVsKey               = "added-dvs"
 	deletedDataFilesKey       = "deleted-data-files"
 	deletedRecordsKey         = "deleted-records"
 	removedDeleteFilesKey     = "removed-delete-files"
@@ -78,6 +79,7 @@ const (
 	removedFileSizeKey        = "removed-files-size"
 	removedPosDeletesKey      = "removed-position-deletes"
 	removedPosDeleteFilesKey  = "removed-position-delete-files"
+	removedDVsKey             = "removed-dvs"
 	totalEqDeletesKey         = "total-equality-deletes"
 	totalPosDeletesKey        = "total-position-deletes"
 	totalDataFilesKey         = "total-data-files"
@@ -97,6 +99,8 @@ type updateMetrics struct {
 	removedEqDeleteFiles  int64
 	addedPosDeleteFiles   int64
 	removedPosDeleteFiles int64
+	addedDVs              int64
+	removedDVs            int64
 	addedDeleteFiles      int64
 	removedDeleteFiles    int64
 	addedRecords          int64
@@ -107,15 +111,29 @@ type updateMetrics struct {
 	removedEqDeletes      int64
 }
 
+// contentSizeInBytes returns the bytes a file contributes to the table. A DV
+// shares its Puffin file with other DVs, so it counts only its own blob.
+func contentSizeInBytes(df iceberg.DataFile) int64 {
+	if IsDeletionVector(df) && df.ContentSizeInBytes() != nil {
+		return *df.ContentSizeInBytes()
+	}
+
+	return df.FileSizeBytes()
+}
+
 func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
-	m.addedFileSize += df.FileSizeBytes()
+	m.addedFileSize += contentSizeInBytes(df)
 	switch df.ContentType() {
 	case iceberg.EntryContentData:
 		m.addedDataFiles++
 		m.addedRecords += df.Count()
 	case iceberg.EntryContentPosDeletes:
 		m.addedDeleteFiles++
-		m.addedPosDeleteFiles++
+		if IsDeletionVector(df) {
+			m.addedDVs++
+		} else {
+			m.addedPosDeleteFiles++
+		}
 		m.addedPosDeletes += df.Count()
 	case iceberg.EntryContentEqDeletes:
 		m.addedDeleteFiles++
@@ -129,14 +147,18 @@ func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
 }
 
 func (m *updateMetrics) removeFile(df iceberg.DataFile) error {
-	m.removedFileSize += df.FileSizeBytes()
+	m.removedFileSize += contentSizeInBytes(df)
 	switch df.ContentType() {
 	case iceberg.EntryContentData:
 		m.removedDataFiles++
 		m.deletedRecords += df.Count()
 	case iceberg.EntryContentPosDeletes:
 		m.removedDeleteFiles++
-		m.removedPosDeleteFiles++
+		if IsDeletionVector(df) {
+			m.removedDVs++
+		} else {
+			m.removedPosDeleteFiles++
+		}
 		m.removedPosDeletes += df.Count()
 	case iceberg.EntryContentEqDeletes:
 		m.removedDeleteFiles++
@@ -165,6 +187,8 @@ func (m *updateMetrics) toProps() iceberg.Properties {
 	setWhenPositive(props, removedEqDeleteFilesKey, m.removedEqDeleteFiles)
 	setWhenPositive(props, addedPosDeleteFilesKey, m.addedPosDeleteFiles)
 	setWhenPositive(props, removedPosDeleteFilesKey, m.removedPosDeleteFiles)
+	setWhenPositive(props, addedDVsKey, m.addedDVs)
+	setWhenPositive(props, removedDVsKey, m.removedDVs)
 	setWhenPositive(props, addedDeleteFilesKey, m.addedDeleteFiles)
 	setWhenPositive(props, removedDeleteFilesKey, m.removedDeleteFiles)
 	setWhenPositive(props, addedRecordsKey, m.addedRecords)

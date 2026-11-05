@@ -64,6 +64,8 @@ func TestBuildScanReport(t *testing.T) {
 		dvs:                   1,
 		resultDeleteFiles:     4,
 		totalDeleteFileSize:   512,
+		skippedDataFiles:      7,
+		skippedDeleteFiles:    3,
 	}
 
 	sr := scan.buildScanReport(acc, meta.CurrentSchema(), meta.CurrentSchema(), 5*time.Millisecond)
@@ -91,6 +93,10 @@ func TestBuildScanReport(t *testing.T) {
 	assert.Equal(t, int64(1), m.PositionalDeleteFiles.Value)
 	assert.Equal(t, int64(2), m.EqualityDeleteFiles.Value)
 	assert.Equal(t, int64(1), m.DVs.Value)
+	require.NotNil(t, m.SkippedDataFiles)
+	assert.Equal(t, int64(7), m.SkippedDataFiles.Value)
+	require.NotNil(t, m.SkippedDeleteFiles)
+	assert.Equal(t, int64(3), m.SkippedDeleteFiles.Value)
 
 	require.NotNil(t, m.TotalFileSizeInBytes)
 	assert.Equal(t, metrics.UnitBytes, m.TotalFileSizeInBytes.Unit)
@@ -98,7 +104,6 @@ func TestBuildScanReport(t *testing.T) {
 	assert.Equal(t, int64(512), m.TotalDeleteFileSizeInBytes.Value)
 
 	// Unmeasured metrics are left unset (omitted on the wire).
-	assert.Nil(t, m.SkippedDataFiles)
 	assert.Nil(t, m.IndexedDeleteFiles)
 }
 
