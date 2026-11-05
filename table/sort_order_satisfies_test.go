@@ -260,3 +260,27 @@ func TestSortFieldSatisfiesRejectsTwoTypedNilTransforms(t *testing.T) {
 
 	require.False(t, field.Satisfies(field))
 }
+
+func TestSortFieldSatisfiesCompleteTimeTransformMatrix(t *testing.T) {
+	// Mirror Java TestTimeTransforms for all 16 relationships.
+	// The ordering implications apply equally to descending sorts.
+	transforms := []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{"year", iceberg.YearTransform{}},
+		{"month", iceberg.MonthTransform{}},
+		{"day", iceberg.DayTransform{}},
+		{"hour", iceberg.HourTransform{}},
+	}
+
+	for actualIndex, actual := range transforms {
+		for requiredIndex, required := range transforms {
+			t.Run(actual.name+"-to-"+required.name, func(t *testing.T) {
+				actualField := satisfyingSortField([]int{1}, actual.transform, table.SortDESC, table.NullsLast)
+				requiredField := satisfyingSortField([]int{1}, required.transform, table.SortDESC, table.NullsLast)
+				require.Equal(t, actualIndex >= requiredIndex, actualField.Satisfies(requiredField))
+			})
+		}
+	}
+}
