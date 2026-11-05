@@ -205,7 +205,7 @@ func (s *IncrementalChangelogScan) liveDeletesBeforeRange(ctx context.Context, p
 
 		return s.deletesLiveBeforeExpiredParent(ctx, plan, snapshots[0])
 	}
-	manifests, err := parent.Manifests(plan.fs)
+	manifests, err := parent.Manifests(ctx, plan.fs)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ func (s *IncrementalChangelogScan) liveDeletesBeforeRange(ctx context.Context, p
 func (s *IncrementalChangelogScan) deletesLiveBeforeExpiredParent(
 	ctx context.Context, plan changelogTaskPlan, snapshot Snapshot,
 ) ([]iceberg.ManifestEntry, error) {
-	manifests, err := snapshot.Manifests(plan.fs)
+	manifests, err := snapshot.Manifests(ctx, plan.fs)
 	if err != nil {
 		return nil, err
 	}
@@ -793,7 +793,7 @@ func readCachedManifestEntries(
 		entries, ok := decoded[path]
 		if !ok {
 			var err error
-			entries, err = openManifestWithOptions(fs, manifest, partitionFilter, metricsEval, false, false)
+			entries, err = openManifestWithOptions(ctx, fs, manifest, partitionFilter, metricsEval, false, false)
 			if err != nil {
 				return nil, err
 			}
@@ -825,7 +825,7 @@ func readManifestEntries(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		entries, err := openManifestWithOptions(fs, manifest, keep, keep, discardDeleted, discardExisting)
+		entries, err := openManifestWithOptions(ctx, fs, manifest, keep, keep, discardDeleted, discardExisting)
 		if err != nil {
 			return nil, err
 		}
