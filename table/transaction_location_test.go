@@ -20,8 +20,12 @@ package table_test
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -115,4 +119,73 @@ func TestTransactionSetLocationAfterCommitIsRejected(t *testing.T) {
 
 	err := tx.SetLocation("s3://bucket/new")
 	require.ErrorContains(t, err, "already been committed")
+}
+
+func TestTransactionSetLocationWritesToStagedPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		formatVersion int
+		overridePaths bool
+	}{
+		{name: "v2", formatVersion: 2},
+		{name: "v3", formatVersion: 3},
+		{name: "staged_write_properties", formatVersion: 2, overridePaths: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, _ := newConcurrentRewriteTestTableVersion(t, tc.formatVersion)
+			originalLocation := tbl.Location()
+			newLocation := filepath.ToSlash(filepath.Join(t.TempDir(), "relocated"))
+			dataPath := newLocation + "/data"
+			metadataPath := newLocation + "/metadata"
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.SetLocation(newLocation))
+			if tc.overridePaths {
+				dataPath = filepath.ToSlash(filepath.Join(t.TempDir(), "custom-data"))
+				metadataPath = filepath.ToSlash(filepath.Join(t.TempDir(), "custom-metadata"))
+				require.NoError(t, tx.SetProperties(iceberg.Properties{
+					table.WriteDataPathKey:     dataPath,
+					table.WriteMetadataPathKey: metadataPath,
+				}))
+			}
+
+			arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+			require.NoError(t, err)
+			records, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema,
+				[]string{`[{"id": 1, "data": "row"}]`})
+			require.NoError(t, err)
+			defer records.Release()
+
+			require.NoError(t, tx.AppendTable(t.Context(), records, 1, nil))
+			staged, err := tx.StagedTable()
+			require.NoError(t, err)
+			require.Equal(t, newLocation, staged.Location())
+			require.Equal(t, originalLocation, tbl.Location())
+
+			snapshot := staged.CurrentSnapshot()
+			require.NotNil(t, snapshot)
+			require.True(t, strings.HasPrefix(snapshot.ManifestList, metadataPath+"/"), snapshot.ManifestList)
+
+			fsys, err := staged.FS(t.Context())
+			require.NoError(t, err)
+			manifests, err := snapshot.Manifests(fsys)
+			require.NoError(t, err)
+			require.Len(t, manifests, 1)
+			require.True(t, strings.HasPrefix(manifests[0].FilePath(), metadataPath+"/"),
+				manifests[0].FilePath())
+
+			var dataFiles int
+			for entry, err := range manifests[0].Entries(fsys, false) {
+				require.NoError(t, err)
+				require.True(t, strings.HasPrefix(entry.DataFile().FilePath(), dataPath+"/"),
+					entry.DataFile().FilePath())
+				dataFiles++
+			}
+			require.Equal(t, 1, dataFiles)
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, newLocation, committed.Location())
+		})
+	}
 }
