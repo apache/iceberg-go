@@ -122,15 +122,22 @@ func TestCherryPickSnapshotFastForwardToMissingBranchDoesNotPinMain(t *testing.T
 }
 
 func TestCherryPickSnapshotFastForwardPreservesBranchRetention(t *testing.T) {
-	txn := newTransactionWithSnapshotRefs(t)
-	ref := txn.meta.refs[MainBranch]
+	seeded := newTransactionWithSnapshotRefs(t)
+	ref := seeded.meta.refs[MainBranch]
 	minSnapshots := 3
 	maxSnapshotAge := int64(100_000)
 	maxRefAge := int64(200_000)
 	ref.MinSnapshotsToKeep = &minSnapshots
 	ref.MaxSnapshotAgeMs = &maxSnapshotAge
 	ref.MaxRefAgeMs = &maxRefAge
-	txn.meta.refs[MainBranch] = ref
+	seeded.meta.refs[MainBranch] = ref
+
+	// The branch and its retention settings must exist in the base table,
+	// not only in the staged builder, before pinning its snapshot ID.
+	meta, err := seeded.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", seeded.tbl.fsF, nil)
+	txn := tbl.NewTransaction()
 
 	require.NoError(t, txn.CherryPickSnapshot(t.Context(), 20, nil))
 	got := txn.meta.refs[MainBranch]
