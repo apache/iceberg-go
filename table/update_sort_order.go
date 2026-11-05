@@ -106,6 +106,7 @@ func isNilSortTransform(transform iceberg.Transform) bool {
 	}
 
 	value := reflect.ValueOf(transform)
+
 	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
