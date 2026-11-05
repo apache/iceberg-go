@@ -220,6 +220,7 @@ func TestDynamicPartitionOverwriteDatePartition(t *testing.T) {
 	require.NoError(t, err)
 	require.ElementsMatch(t, []int64{2, 4}, idsOnRef(t, updated, table.MainBranch))
 }
+
 // newDynamicOverwriteV3MoRTable writes two rows in each partition so a
 // partial DELETE creates a deletion vector instead of dropping a whole file.
 func newDynamicOverwriteV3MoRTable(t *testing.T) (*table.Table, *concurrentTestCatalog) {
