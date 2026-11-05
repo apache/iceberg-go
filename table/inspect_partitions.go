@@ -153,27 +153,55 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 		return nil, fmt.Errorf("inspect partitions: %w", err)
 	}
 
-	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
-	defer bldr.Release()
-	for _, aggregate := range aggregates {
-		if err := appendPartitionAggregate(bldr, partitionType, aggregate); err != nil {
-			return nil, fmt.Errorf("inspect partitions: append partition: %w", err)
+	return i.partitionAggregateReader(ctx, arrowSchema, partitionType, aggregates), nil
+}
+
+// partitionAggregateReader encodes at most inspectRecordBatchSize partitions per
+// Arrow batch. Aggregate discovery is eager, but the Arrow buffers are bounded
+// and released as each record is consumed.
+func (i InspectTable) partitionAggregateReader(
+	ctx context.Context,
+	arrowSchema *arrow.Schema,
+	partitionType *iceberg.StructType,
+	aggregates []*inspectPartitionAggregate,
+) array.RecordReader {
+	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
+		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+		defer bldr.Release()
+
+		for index, aggregate := range aggregates {
+			if index&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					_ = yield(nil, err)
+
+					return
+				}
+			}
+			if err := appendPartitionAggregate(bldr, partitionType, *aggregate); err != nil {
+				_ = yield(nil, fmt.Errorf("inspect partitions: append partition: %w", err))
+
+				return
+			}
+			if (index+1)%inspectRecordBatchSize == 0 {
+				if !yield(bldr.NewRecordBatch(), nil) {
+					return
+				}
+			}
 		}
-	}
 
-	rr, err := singleBatchReader(arrowSchema, bldr)
-	if err != nil {
-		return nil, fmt.Errorf("inspect partitions: %w", err)
-	}
-
-	return rr, nil
+		// Match the prior single-batch API for empty tables, but do not emit
+		// an extra empty batch after an exact multiple of the batch size.
+		if len(aggregates) == 0 || len(aggregates)%inspectRecordBatchSize != 0 {
+			_ = yield(bldr.NewRecordBatch(), nil)
+		}
+	})
 }
 
 // inspectPartitionManifestConcurrency bounds concurrent manifest reads and
 // per-manifest partition aggregation state.
 const inspectPartitionManifestConcurrency = 8
 
-func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]inspectPartitionAggregate, error) {
+func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]*inspectPartitionAggregate, error) {
 	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil
@@ -265,13 +293,11 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 		}
 	}
 
-	result := make([]inspectPartitionAggregate, 0, len(aggregates))
-	for _, aggregate := range aggregates {
-		result = append(result, *aggregate)
-	}
-	sort.Slice(result, func(left, right int) bool { return result[left].orderingKey < result[right].orderingKey })
+	sort.Slice(aggregates, func(left, right int) bool {
+		return aggregates[left].orderingKey < aggregates[right].orderingKey
+	})
 
-	return result, nil
+	return aggregates, nil
 }
 
 // foldInspectPartitionManifest performs the original partition accounting using

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -148,7 +149,7 @@ func CreateView(
 	loc string,
 	props iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
+	return CreateViewWithIOProperties(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
 }
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
@@ -165,26 +166,8 @@ func CreateViewWithIOProperties(
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
 ) (*View, error) {
-	return createView(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, ioProps, metadataProps)
-}
-
-func createView(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	ioProps iceberg.Properties,
-	metadataProps iceberg.Properties,
-) (*View, error) {
-	versionId := int64(1)
-
-	builder := NewMetadataBuilder()
-
 	viewVersion, err := NewVersionFromSQL(
-		versionId,
+		InitialVersionID,
 		schema.ID,
 		representation,
 		defaultNS,
@@ -193,7 +176,39 @@ func createView(
 	if err != nil {
 		return nil, err
 	}
-	viewMD, err := builder.
+
+	return CreateViewFromVersion(ctx, viewIdent, schema, viewVersion, loc, ioProps, metadataProps)
+}
+
+// CreateViewFromVersion creates a view whose first version is version, kept as
+// given apart from its IDs. A nil default namespace defaults to the view's
+// namespace, a nil summary to the engine name, and a zero timestamp to now.
+func CreateViewFromVersion(
+	ctx context.Context,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	version *Version,
+	loc string,
+	ioProps iceberg.Properties,
+	metadataProps iceberg.Properties,
+) (*View, error) {
+	if version == nil {
+		return nil, fmt.Errorf("%w: view version is required", ErrInvalidViewMetadata)
+	}
+
+	viewVersion := version.Clone()
+	viewVersion.VersionID = InitialVersionID
+	if viewVersion.DefaultNamespace == nil && len(viewIdent) > 0 {
+		viewVersion.DefaultNamespace = slices.Clone(viewIdent[:len(viewIdent)-1])
+	}
+	if viewVersion.Summary == nil {
+		viewVersion.Summary = VersionSummary{viewEngineProperty: defaultViewEngine}
+	}
+	if viewVersion.TimestampMS == 0 {
+		viewVersion.TimestampMS = time.Now().UnixMilli()
+	}
+
+	viewMD, err := NewMetadataBuilder().
 		SetLoc(loc).
 		SetCurrentVersion(
 			viewVersion,

@@ -157,6 +157,10 @@ type manifestEntries struct {
 	equalityDeleteEntries   []iceberg.ManifestEntry
 	dvEntries               []iceberg.ManifestEntry
 	mu                      sync.Mutex
+
+	// metrics carries only the skipped data and delete file counts from
+	// collection, for callers that merge them into a scan report.
+	metrics scanMetricsAccumulator
 }
 
 type classifiedManifestEntries struct {
@@ -1282,6 +1286,7 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 
 	manifestResults := make([]classifiedManifestEntries, len(manifestList))
+	skippedFiles := make([]int64, len(manifestList))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
@@ -1310,11 +1315,14 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 				// Keep pruning stats until equality and positional deletes are indexed.
 				projection = &iceberg.ManifestEntryProjection{IncludePruningStats: true}
 			}
+			var skipped int64
 			manifestEntries, err := openManifestWithReadOptions(
-				fs, mf, partEval, metricsEval, projection, false, discardDeleted, discardExisting)
+				fs, mf, countRejections(partEval, &skipped), countRejections(metricsEval, &skipped),
+				projection, false, discardDeleted, discardExisting)
 			if err != nil {
 				return err
 			}
+			skippedFiles[manifestIndex] = skipped
 			classified, err := classifyManifestEntries(manifestEntries)
 			if err != nil {
 				return err
@@ -1329,7 +1337,12 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 		return nil, err
 	}
 
-	return flattenClassifiedManifestEntries(manifestResults), nil
+	entries := flattenClassifiedManifestEntries(manifestResults)
+	for i, mf := range manifestList {
+		entries.metrics.addSkippedFiles(mf, skippedFiles[i])
+	}
+
+	return entries, nil
 }
 
 func (scan *Scan) dataManifestProjection(retainDataFileStats bool) (iceberg.ManifestEntryProjection, bool) {
@@ -1383,13 +1396,16 @@ func (scan *Scan) planDataManifestTasks(
 	eqDeleteIndex *equalityDeleteIndex,
 ) ([]FileScanTask, error) {
 	return scan.planDataManifestTasksWithOptions(
-		ctx, manifestList, schema, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex, false, false)
+		ctx, manifestList, schema, &scanMetricsAccumulator{}, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex, false, false)
 }
 
+// planDataManifestTasksWithOptions merges the data entries its manifest
+// workers reject into acc.skippedDataFiles once all workers finish.
 func (scan *Scan) planDataManifestTasksWithOptions(
 	ctx context.Context,
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
 	minSeqNum int64,
 	posDeleteIndex *positionalDeleteIndex,
 	dvIndex map[string]iceberg.ManifestEntry,
@@ -1408,6 +1424,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 	}
 
 	taskBatches := make([][]FileScanTask, len(manifestList))
+	skippedFiles := make([]int64, len(manifestList))
 	taskCapacities := make([]int, len(manifestList))
 	taskOffsets := make([]int, len(manifestList))
 	directBuffer := scan.rowFilter == nil || scan.rowFilter.Equals(iceberg.AlwaysTrue{})
@@ -1480,7 +1497,10 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 				stripTaskColumnStats = p.IncludePruningStats && !dropColumnStats
 				projection = &p
 			}
-			err = streamManifest(fs, manifest, partEval, metricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
+			var skipped int64
+			countedPartEval := countRejections(partEval, &skipped)
+			countedMetricsEval := countRejections(metricsEval, &skipped)
+			err = streamManifest(fs, manifest, countedPartEval, countedMetricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
 				dataFile := entry.DataFile()
 				if dataFile.ContentType() != iceberg.EntryContentData {
 					return fmt.Errorf("%w: data manifest contains %s file %q",
@@ -1505,6 +1525,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 			}
 
 			taskBatches[index] = tasks
+			skippedFiles[index] = skipped
 
 			return nil
 		})
@@ -1512,6 +1533,9 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+	for index, manifest := range manifestList {
+		acc.addSkippedFiles(manifest, skippedFiles[index])
 	}
 
 	var results []FileScanTask
@@ -1761,6 +1785,7 @@ func (scan *Scan) planFilesLocal(
 		if err != nil {
 			return nil, err
 		}
+		acc.skippedDeleteFiles += deleteEntries.metrics.skippedDeleteFiles
 	}
 	// Equality-delete pruning is the only data-manifest consumer of column
 	// metrics after the delete entries have been indexed. Positional deletes and
@@ -1785,7 +1810,7 @@ func (scan *Scan) planFilesLocal(
 	// Step 4: Stream data entries into per-manifest task batches, then flatten
 	// them in manifest order.
 	plannedTasks, err := scan.planDataManifestTasksWithOptions(
-		ctx, dataManifests, schema, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex,
+		ctx, dataManifests, schema, acc, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex,
 		projectScanColumns, retainDataFileStats)
 	if err != nil {
 		return nil, err
@@ -2186,9 +2211,19 @@ func bindReadTasksResiduals(
 // therefore still hold its whole decoded contents while it waits. The bound for
 // a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	return scan.readFileTasks(ctx, tasks, nil)
+}
+
+// readFileTasks reads tasks. addedDeletes, when non-nil, is paired with the
+// single data file in tasks: rows that survive that task's own deletes are
+// kept only when they match addedDeletes. Normal scans pass nil.
+func (scan *Scan) readFileTasks(ctx context.Context, tasks []FileScanTask, addedDeletes *FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	as, readTasks, releasePlanIO, err := scan.arrowScanForTasks(ctx, tasks)
 	if err != nil {
 		return nil, nil, err
+	}
+	if addedDeletes != nil {
+		as.added = &addedDeleteState{deletes: addedDeletes}
 	}
 
 	readRecords := scan.readRecords

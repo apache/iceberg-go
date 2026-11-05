@@ -909,7 +909,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	// Only add the update if there are actually snapshots to delete
 	if len(snapsToDelete) > 0 {
-		updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit))
+		removal := NewRemoveSnapshotsUpdate(snapsToDelete, cfg.postCommit)
+		removal.expired = captureExpired(snapsToDelete, lookup, slices.Values(meta.statisticsList), slices.Values(meta.partitionStatsList))
+		updates = append(updates, removal)
 	}
 
 	// A no-op expiry must not pin the commit branch, which would stop the
@@ -1080,7 +1082,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	if err != nil {
 		return err
 	}
-	dataFiles, err := filesToDataFiles(ctx, fs, meta, filesToAdd, 1)
+	dataFiles, err := filesToDataFiles(ctx, fs, meta, filesToAdd, 1, nil)
 	if err != nil {
 		return err
 	}
@@ -2244,7 +2246,12 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 type AddDataFilesByPathOption func(addFilesOp *addFilesOperation)
 
 type addFilesOperation struct {
-	concurrency int
+	concurrency     int
+	partitionValues *addFilesPartitionValues
+}
+
+type addFilesPartitionValues struct {
+	byPath map[string]map[int]any
 }
 
 // WithAddDataFilesByPathConcurrency overrides the concurrency used by AddDataFilesByPath.
@@ -2257,8 +2264,28 @@ func WithAddDataFilesByPathConcurrency(concurrency int) AddDataFilesByPathOption
 	}
 }
 
+// WithAddDataFilesByPathPartitionValues supplies the partition tuple for each
+// existing data file, indexed first by file path and then by partition field ID.
+// Bucket partitions cannot be inferred from Parquet min/max statistics, so the
+// caller must provide all non-void partition fields for bucket specs. For other
+// specs, unlisted fields are inferred when their transforms preserve order.
+// Void fields are set to null.
+// All supplied values must be correct for every row of their file.
+func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDataFilesByPathOption {
+	partitionValues := make(map[string]map[int]any, len(values))
+	for path, tuple := range values {
+		partitionValues[path] = cloneFilePartitionTuple(tuple)
+	}
+
+	return func(op *addFilesOperation) {
+		op.partitionValues = &addFilesPartitionValues{byPath: partitionValues}
+	}
+}
+
 // AddDataFilesByPath adds data files at the provided paths to the table.
 // Unlike AddDataFiles, it opens each file to read its schema and statistics.
+// Use WithAddDataFilesByPathPartitionValues for partition transforms whose
+// values cannot be inferred from column statistics (for example, bucket[N]).
 func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddDataFilesByPathOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -2277,6 +2304,15 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 			return errors.New("file paths must be unique for AddDataFilesByPath")
 		}
 		set[filePath] = struct{}{}
+	}
+	var partitionValues map[string]map[int]any
+	if addFilesOp.partitionValues != nil {
+		partitionValues = addFilesOp.partitionValues.byPath
+	}
+	for filePath := range partitionValues {
+		if _, ok := set[filePath]; !ok {
+			return fmt.Errorf("%w: partition values supplied for path %q not present in AddDataFilesByPath", iceberg.ErrInvalidArgument, filePath)
+		}
 	}
 
 	fs, err := t.tbl.fsF(ctx)
@@ -2327,7 +2363,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 
-	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency)
+	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)
 	if err != nil {
 		return err
 	}
@@ -2632,10 +2668,19 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		// otherwise a retry would re-run the catalog commit.
 		t.committed = true
 
+		var removals []*removeSnapshotsUpdate
 		for _, u := range meta.updates {
+			if removal, ok := u.(*removeSnapshotsUpdate); ok {
+				removals = append(removals, removal)
+
+				continue
+			}
 			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
 				err = errors.Join(err, perr)
 			}
+		}
+		if perr := deleteExpiredFiles(ctx, t.tbl, tbl, removals...); perr != nil {
+			err = errors.Join(err, perr)
 		}
 
 		return tbl, err

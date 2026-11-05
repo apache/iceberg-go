@@ -405,12 +405,25 @@ func (t *toSubstraitExpr) makeSetFunc(id extensions.ID, term iceberg.BoundTerm, 
 		t.bldr.Literal(expr.NewNestedLiteral(val, false)))
 }
 
+// VisitIn is NULL for a NULL term, as SQL IN and Equal are. Arrow's is_in is
+// false for it, so it is or-ed with (is_null(x) AND NULL), which is false for
+// any other value. NotIn negates the result, so it never matches NULL either.
+// Java's Evaluator matches NULL for notIn instead, see
+// https://github.com/apache/iceberg/issues/18701.
 func (t *toSubstraitExpr) VisitIn(term iceberg.BoundTerm, lits iceberg.Set[iceberg.Literal]) expr.Builder {
-	return t.makeSetFunc(isInID, term, lits)
+	nullIfNull := t.bldr.ScalarFunc(andID).Args(
+		t.makeRefFunc(isNullID, term).(expr.FuncArgBuilder),
+		t.bldr.Wrap(expr.NewNullLiteral(&types.BooleanType{Nullability: types.NullabilityNullable}), nil),
+	)
+
+	return t.bldr.ScalarFunc(orID).Args(
+		t.makeSetFunc(isInID, term, lits).(expr.FuncArgBuilder),
+		nullIfNull,
+	)
 }
 
 func (t *toSubstraitExpr) VisitNotIn(term iceberg.BoundTerm, lits iceberg.Set[iceberg.Literal]) expr.Builder {
-	return t.bldr.ScalarFunc(notID).Args(t.makeSetFunc(isInID, term, lits).(expr.FuncArgBuilder))
+	return t.bldr.ScalarFunc(notID).Args(t.VisitIn(term, lits).(expr.FuncArgBuilder))
 }
 
 func (t *toSubstraitExpr) makeRefFunc(id extensions.ID, term iceberg.BoundTerm) expr.Builder {
