@@ -17,21 +17,12 @@
 
 package view
 
-import "slices"
-
 // VersionByID returns a retained view version by ID, or nil if the version
 // is not available in this view's metadata. The returned version is a copy.
 func (v View) VersionByID(versionID int64) *Version {
-	// The built-in metadata keeps a lazy version index. Avoid cloning the
-	// entire version list to look up one version.
-	if md, ok := v.metadata.(*metadata); ok {
-		return md.lazyVersionsByID()[versionID].Clone()
-	}
-
-	// Preserve support for other Metadata implementations.
 	for _, version := range v.metadata.Versions() {
 		if version.VersionID == versionID {
-			return version.Clone()
+			return version
 		}
 	}
 
@@ -41,32 +32,7 @@ func (v View) VersionByID(versionID int64) *Version {
 // History returns the retained changes to the current view version in order.
 // The returned slice is independent of the view's metadata.
 func (v View) History() []VersionLogEntry {
-	return slices.Clone(v.metadata.VersionLog())
-}
-
-// VersionLogEntryAsOf returns the entry with the greatest timestamp at or
-// before timestampMs, or strictly before it when inclusive is false.
-// Entries may be out of chronological order due to clock skew. If timestamps
-// are equal, the first entry in log order wins, matching Iceberg's snapshot
-// time-travel resolution. It returns false if no entry is eligible.
-func VersionLogEntryAsOf(history []VersionLogEntry, timestampMs int64, inclusive bool) (VersionLogEntry, bool) {
-	var (
-		best  VersionLogEntry
-		found bool
-	)
-
-	for _, entry := range history {
-		if entry.TimestampMS > timestampMs || (!inclusive && entry.TimestampMS == timestampMs) {
-			continue
-		}
-
-		if !found || entry.TimestampMS > best.TimestampMS {
-			best = entry
-			found = true
-		}
-	}
-
-	return best, found
+	return v.metadata.VersionLog()
 }
 
 // VersionAsOf returns the version that was current at or before timestampMs,
@@ -74,13 +40,16 @@ func VersionLogEntryAsOf(history []VersionLogEntry, timestampMs int64, inclusive
 // rather than version creation timestamps, including when a view is rolled
 // back to a previous version.
 //
+// When timestamps are equal or out of order, the last eligible log entry wins.
 // It returns nil when no history entry is eligible or the selected version
 // has expired from metadata. It does not substitute another retained version.
 func (v View) VersionAsOf(timestampMs int64) *Version {
-	entry, found := VersionLogEntryAsOf(v.metadata.VersionLog(), timestampMs, true)
-	if !found {
-		return nil
+	history := v.metadata.VersionLog()
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].TimestampMS <= timestampMs {
+			return v.VersionByID(history[i].VersionID)
+		}
 	}
 
-	return v.VersionByID(entry.VersionID)
+	return nil
 }
