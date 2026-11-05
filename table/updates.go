@@ -698,7 +698,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 	retainedManifests := make(map[string]struct{})
 	retainedSnapshotManifests := make([]iceberg.ManifestFile, 0, len(retainedSnapshots))
 	for _, snap := range retainedSnapshots {
-		mans, err := snap.Manifests(prefs)
+		mans, err := snap.Manifests(ctx, prefs)
 		if err != nil {
 			return err
 		}
@@ -717,7 +717,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 	visitedManifests := make(map[string]struct{})
 
 	for _, snap := range expired {
-		mans, err := snap.Manifests(prefs)
+		mans, err := snap.Manifests(ctx, prefs)
 		if err != nil {
 			return err
 		}
@@ -735,7 +735,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 
 			filesToDelete[manPath] = struct{}{}
 
-			for entry, err := range man.Entries(prefs, false) {
+			for entry, err := range man.Entries(ctx, prefs, false) {
 				if err != nil {
 					return err
 				}
@@ -748,7 +748,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 	// including data files carried forward as EXISTING by manifest merges.
 	if len(filesToDelete) > 0 {
 		for _, man := range retainedSnapshotManifests {
-			for entry, err := range man.Entries(prefs, false) {
+			for entry, err := range man.Entries(ctx, prefs, false) {
 				if err != nil {
 					return err
 				}
