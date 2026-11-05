@@ -956,8 +956,14 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 
 	// Rows that existing position deletes already removed must not be deleted
 	// again, so each task carries its file's position delete files from scan
-	// planning, which matches them by sequence number, partition and path.
-	scan, err := t.Scan(WithRowFilter(filter), WithCaseSensitive(caseSensitive))
+	// planning, which matches them by sequence number, partition and path. The
+	// scan is pinned to the snapshot files came from, so a branch transaction
+	// doesn't apply main's deletes.
+	scanOpts := []ScanOption{WithRowFilter(filter), WithCaseSensitive(caseSensitive)}
+	if snap := t.planningSnapshot(meta); snap != nil {
+		scanOpts = append(scanOpts, WithSnapshotID(snap.SnapshotID))
+	}
+	scan, err := t.Scan(scanOpts...)
 	if err != nil {
 		return nil, err
 	}
