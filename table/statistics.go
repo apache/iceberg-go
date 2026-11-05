@@ -40,7 +40,7 @@ type BlobMetadata struct {
 	SnapshotID     int64             `json:"snapshot-id"`
 	SequenceNumber int64             `json:"sequence-number"`
 	Fields         []int32           `json:"fields"`
-	Properties     map[string]string `json:"properties"`
+	Properties     map[string]string `json:"properties,omitempty"`
 }
 
 // PartitionStatisticsFile represents a partition statistics file that can be used to read table data more efficiently.

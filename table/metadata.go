@@ -2009,10 +2009,13 @@ func (b *MetadataBuilder) SetStatistics(stats StatisticsFile) error {
 // RemoveStatistics removes the statistics file associated with the given snapshot ID.
 // It is not an error if no such file exists.
 func (b *MetadataBuilder) RemoveStatistics(snapshotID int64) error {
+	previousLen := len(b.statisticsList)
 	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(s StatisticsFile) bool {
 		return s.SnapshotID == snapshotID
 	})
-	b.updates = append(b.updates, NewRemoveStatisticsUpdate(snapshotID))
+	if len(b.statisticsList) != previousLen {
+		b.updates = append(b.updates, NewRemoveStatisticsUpdate(snapshotID))
+	}
 
 	return nil
 }

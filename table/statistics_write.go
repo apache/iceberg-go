@@ -28,8 +28,7 @@ import (
 // reference. This only stages a metadata update; Commit publishes it, and
 // the caller is responsible for writing a valid Puffin file beforehand.
 func (t *Transaction) SetStatistics(stats StatisticsFile) error {
-	meta, err := t.txnMeta()
-	if err != nil {
+	if _, err := t.txnMeta(); err != nil {
 		return err
 	}
 	if stats.StatisticsPath == "" || stats.FileSizeInBytes <= 0 ||
@@ -46,10 +45,6 @@ func (t *Transaction) SetStatistics(stats StatisticsFile) error {
 				iceberg.ErrInvalidArgument, idx)
 		}
 	}
-	if _, err := meta.SnapshotByID(stats.SnapshotID); err != nil {
-		return fmt.Errorf("set statistics: %w", err)
-	}
-
 	// A transaction may be committed after the caller has reused its buffers.
 	// Keep the staged update independent of the caller's maps and slices.
 	registered := cloneStatisticsFiles([]StatisticsFile{stats})[0]

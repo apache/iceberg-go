@@ -69,8 +69,10 @@ func TestTransactionStatisticsRegistration(t *testing.T) {
 	require.Empty(t, slices.Collect(meta.Statistics()))
 
 	// Java's removeStatistics is idempotent if no reference exists.
+	updateCount := len(tx.meta.updates)
 	require.NoError(t, tx.RemoveStatistics(stats.SnapshotID))
 	require.NoError(t, tx.RemoveStatistics(999))
+	require.Len(t, tx.meta.updates, updateCount)
 }
 
 func TestTransactionStatisticsMetadataRoundTrip(t *testing.T) {
@@ -142,13 +144,76 @@ func TestTransactionSetStatisticsRejectsInvalidFiles(t *testing.T) {
 		})
 	}
 
-	tx := tbl.NewTransaction()
-	stats := testStatisticsRegistrationFile()
-	stats.SnapshotID = 999
-	require.ErrorIs(t, tx.SetStatistics(stats), ErrSnapshotNotFound)
-	require.Empty(t, tx.meta.updates)
-
 	var nilTx *Transaction
 	require.Error(t, nilTx.SetStatistics(testStatisticsRegistrationFile()))
 	require.Error(t, nilTx.RemoveStatistics(103))
+}
+
+func TestTransactionRemoveStatisticsNoOp(t *testing.T) {
+	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
+	})
+	tx := tbl.NewTransaction()
+
+	require.NoError(t, tx.RemoveStatistics(103))
+	require.NoError(t, tx.RemoveStatistics(999))
+	require.Empty(t, tx.meta.updates)
+
+	commit, err := tx.TableCommit()
+	require.NoError(t, err)
+	require.Empty(t, commit.Updates)
+
+	// A no-op must not try to write a new metadata file through a catalog.
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Same(t, tbl, committed)
+	require.ErrorContains(t, tx.RemoveStatistics(103), "already been committed")
+}
+
+func TestTransactionSetStatisticsAllowsUnretainedSnapshot(t *testing.T) {
+	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
+	})
+	tx := tbl.NewTransaction()
+	stats := testStatisticsRegistrationFile()
+	stats.SnapshotID = 999
+
+	// Java's TableMetadata.Builder.setStatistics does not require the
+	// statistics snapshot to be present in the current metadata.
+	require.NoError(t, tx.SetStatistics(stats))
+	meta, err := tx.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, []StatisticsFile{stats}, slices.Collect(meta.Statistics()))
+}
+
+func TestTransactionSetStatisticsOmitsUnsetBlobProperties(t *testing.T) {
+	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
+	})
+	tx := tbl.NewTransaction()
+	stats := testStatisticsRegistrationFile()
+	stats.BlobMetadata[0].Type = "vendor-stats-v1"
+	stats.BlobMetadata[0].Fields = []int32{}
+	stats.BlobMetadata[0].Properties = nil
+
+	require.NoError(t, tx.SetStatistics(stats))
+	meta, err := tx.meta.Build()
+	require.NoError(t, err)
+	encoded, err := json.Marshal(meta)
+	require.NoError(t, err)
+
+	var payload struct {
+		Statistics []struct {
+			Blobs []map[string]json.RawMessage `json:"blob-metadata"`
+		} `json:"statistics"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &payload))
+	require.Len(t, payload.Statistics, 1)
+	require.Len(t, payload.Statistics[0].Blobs, 1)
+	require.NotContains(t, payload.Statistics[0].Blobs[0], "properties",
+		"optional properties must be omitted, not encoded as null")
+
+	parsed, err := ParseMetadataBytes(encoded)
+	require.NoError(t, err)
+	require.Equal(t, []StatisticsFile{stats}, slices.Collect(parsed.Statistics()))
 }
