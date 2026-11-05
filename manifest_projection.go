@@ -69,23 +69,24 @@ var manifestEntryProjectionCache = func() *lru.Cache[manifestEntryProjectionCach
 // projection may omit statistics that would be lost on rewrite.
 // ManifestWriter and the DataFile Avro codec reject them with ErrInvalidArgument.
 func EntriesWithProjection(
+	ctx context.Context,
 	fs iceio.IO,
 	m ManifestFile,
 	discardDeleted bool,
 	projection ManifestEntryProjection,
 ) iter.Seq2[ManifestEntry, error] {
-	return manifestEntries(fs, m, discardDeleted, &projection)
+	return manifestEntries(ctx, fs, m, discardDeleted, &projection)
 }
 
 func manifestEntries(
+	ctx context.Context,
 	fs iceio.IO,
 	m ManifestFile,
 	discardDeleted bool,
 	projection *ManifestEntryProjection,
 ) iter.Seq2[ManifestEntry, error] {
 	return func(yield func(ManifestEntry, error) bool) {
-		// No caller context to thread here.
-		f, err := fs.Open(context.Background(), m.FilePath())
+		f, err := fs.Open(ctx, m.FilePath())
 		if err != nil {
 			yield(nil, err)
 

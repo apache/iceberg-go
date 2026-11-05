@@ -157,12 +157,12 @@ func (fa *fastAppendFiles) processManifests(_ context.Context, manifests []icebe
 	return manifests, nil
 }
 
-func (fa *fastAppendFiles) parentDependentManifests(_ context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
+func (fa *fastAppendFiles) parentDependentManifests(ctx context.Context, parent *Snapshot) ([]iceberg.ManifestFile, error) {
 	if parent == nil {
 		return nil, nil
 	}
 
-	return parent.Manifests(fa.base.io)
+	return parent.Manifests(ctx, fa.base.io)
 }
 
 // validate is a no-op for fastAppendFiles: appends are commutative
@@ -291,7 +291,7 @@ func (of *overwriteFiles) scanManifest(ctx context.Context, m iceberg.ManifestFi
 	scan := overwriteManifestScan{
 		notDeleted: make([]iceberg.ManifestEntry, 0, max(0, capacity)),
 	}
-	for entry, err := range of.base.iterManifestEntries(m, true) {
+	for entry, err := range of.base.iterManifestEntries(ctx, m, true) {
 		if err != nil {
 			return overwriteManifestScan{}, err
 		}
@@ -415,7 +415,7 @@ func (of *overwriteFiles) filterAndRewriteParentManifests(
 		return result, nil
 	}
 
-	manifestList, err := parent.Manifests(of.base.io)
+	manifestList, err := parent.Manifests(ctx, of.base.io)
 	if err != nil {
 		return result, err
 	}
@@ -595,7 +595,7 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 	}
 
 	for _, manifest := range bin {
-		for entry, iterErr := range m.snap.iterManifestEntries(manifest, false) {
+		for entry, iterErr := range m.snap.iterManifestEntries(m.operationContext(), manifest, false) {
 			if iterErr != nil {
 				return nil, iterErr
 			}
@@ -964,8 +964,8 @@ func (sp *snapshotProducer) newManifestOutput(ctx context.Context) (io.WriteClos
 	return f, filepath, nil
 }
 
-func (sp *snapshotProducer) iterManifestEntries(m iceberg.ManifestFile, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
-	return m.Entries(sp.io, discardDeleted)
+func (sp *snapshotProducer) iterManifestEntries(ctx context.Context, m iceberg.ManifestFile, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
+	return m.Entries(ctx, sp.io, discardDeleted)
 }
 
 // writtenPaths returns the manifests this producer wrote, the ones carrying its
@@ -1488,7 +1488,7 @@ func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
 // the retry summary does not double-subtract a peer's prior removal. A DV
 // superseded by a peer (same referenced data file, new path) counts as absent:
 // the replacement is inherited untouched and our removal is a no-op.
-func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePresence, error) {
+func (sp *snapshotProducer) checkRemovedFiles(ctx context.Context, parent *Snapshot) (*removedFilePresence, error) {
 	present := &removedFilePresence{
 		deleteFiles: map[string]struct{}{},
 		dvRefs:      map[string]struct{}{},
@@ -1510,12 +1510,12 @@ func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePre
 		return sp.missingDataError(present, missingData)
 	}
 
-	manifests, err := parent.Manifests(sp.io)
+	manifests, err := parent.Manifests(ctx, sp.io)
 	if err != nil {
 		return nil, err
 	}
 	for _, m := range manifests {
-		for entry, err := range sp.iterManifestEntries(m, true) {
+		for entry, err := range sp.iterManifestEntries(ctx, m, true) {
 			if err != nil {
 				return nil, err
 			}
@@ -1746,7 +1746,7 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 		// parent would duplicate rows, so abort terminally. The scan also
 		// reports which removed delete files / DVs survive on the fresh parent
 		// so the summary below does not double-subtract a peer's prior removal.
-		present, err := sp.checkRemovedFiles(freshParent)
+		present, err := sp.checkRemovedFiles(rebuildCtx, freshParent)
 		if err != nil {
 			return nil, err
 		}

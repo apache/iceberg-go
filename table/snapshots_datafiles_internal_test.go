@@ -132,7 +132,7 @@ func TestSnapshotDataFilesSkipsDeletedEntries(t *testing.T) {
 	}
 
 	var got []string
-	for df, err := range snap.dataFiles(fs, nil) {
+	for df, err := range snap.dataFiles(t.Context(), fs, nil) {
 		require.NoError(t, err)
 		got = append(got, df.FilePath())
 	}
