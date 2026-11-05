@@ -27,7 +27,10 @@ import (
 // RenameBranch atomically renames an existing branch without creating a snapshot.
 // The renamed branch retains its snapshot ID and retention settings. The main
 // branch cannot be renamed or replaced, and an existing ref cannot be overwritten.
-// Concurrent changes to the source or creation of the destination fail the commit.
+// Concurrent source snapshot moves and destination creation fail the commit.
+// Standard Iceberg ref requirements assert snapshot IDs only. Concurrent edits
+// to source retention settings or ref type with an unchanged snapshot ID cannot
+// be detected by these requirements.
 func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
