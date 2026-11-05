@@ -70,7 +70,7 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 
 | Group | Options |
 |---|---|
-| Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
+| Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `NewOauth2AuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
 | AWS SigV4 | `WithSigV4`, `WithSigV4RegionSvc`, `WithSigner` |
 | HTTP | `WithHeaders`, `WithTLSConfig`, `WithOAuthTLSConfig`, `WithCustomTransport` |
 | Catalog routing | `WithPrefix`, `WithWarehouseLocation`, `WithMetadataLocation` |
@@ -98,6 +98,31 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 > that loads a REST catalog with `rest.sigv4-enabled=true` now fails at startup
 > until the `catalog/rest/sigv4` backend is blank-imported; the error names the
 > import to add.
+
+#### Custom token sources (Google BigLake)
+
+`WithCredential` uses the OAuth2 client-credentials flow against the catalog's
+token endpoint. For other identity providers, wrap any `oauth2.TokenSource` with
+`NewOauth2AuthManager` and pass it to `WithAuthManager`. Google's BigLake Iceberg
+REST catalog, for example, takes Application Default Credentials:
+
+```go
+ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+if err != nil {
+	return err
+}
+cat, err := rest.NewCatalog(ctx, "biglake", "https://biglake.googleapis.com/iceberg/v1/restcatalog",
+	rest.WithAuthManager(rest.NewOauth2AuthManager(ts)),
+	rest.WithWarehouseLocation("gs://lakehouse-public-data"),
+	rest.WithHeaders(map[string]string{"x-goog-user-project": "my-project"}))
+```
+
+The manager reuses a token until it expires, then asks the source for a new one.
+That refresh runs on the HTTP client the source was built with. For
+`google.DefaultTokenSource` that is the client in the context's
+`oauth2.HTTPClient` value, or `http.DefaultClient`, which has no timeout.
+Unlike Java's `rest.auth.type=google`, this is configured in code; iceberg-go
+has no `rest.auth.type` property.
 
 #### Metrics reporting
 

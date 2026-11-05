@@ -77,7 +77,14 @@ func NewSchema(id int, fields ...NestedField) *Schema {
 // NewSchemaWithIdentifiers constructs a new schema with the provided ID
 // and fields, along with a slice of field IDs to be listed as identifier
 // fields.
+//
+// The defaults of binary and fixed fields, including fields nested in structs,
+// lists and maps, are stored as hex strings when given as []byte,
+// [BinaryLiteral] or [FixedLiteral], the form they take in metadata JSON.
+// Byte slices inside other defaults are left as they are. The provided fields
+// and types are not modified.
 func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
+	fields, _ = normalizeDefaults(fields)
 	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
 	s.init()
 
