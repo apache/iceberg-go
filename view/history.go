@@ -17,6 +17,8 @@
 
 package view
 
+import "slices"
+
 // VersionByID returns a retained view version by ID, or nil if the version
 // is not available in this view's metadata. The returned version is a copy.
 func (v View) VersionByID(versionID int64) *Version {
@@ -45,9 +47,9 @@ func (v View) History() []VersionLogEntry {
 // has expired from metadata. It does not substitute another retained version.
 func (v View) VersionAsOf(timestampMs int64) *Version {
 	history := v.metadata.VersionLog()
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].TimestampMS <= timestampMs {
-			return v.VersionByID(history[i].VersionID)
+	for _, entry := range slices.Backward(history) {
+		if entry.TimestampMS <= timestampMs {
+			return v.VersionByID(entry.VersionID)
 		}
 	}
 
