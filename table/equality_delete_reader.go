@@ -1327,6 +1327,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 			buf.WriteByte(1)
 			buf.Write(a.Value(row))
 		})
+	case *array.Dictionary:
+		valueEncoder := makeColEncoder(a.Dictionary())
+
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
+			valueEncoder(buf, a.GetValueIndex(row))
+		})
 	default:
 		return withNullGuard(arr, func(buf *bytes.Buffer, row int) {
 			encodeArrowValue(buf, arr, row)

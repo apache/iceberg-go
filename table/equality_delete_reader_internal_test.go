@@ -160,6 +160,112 @@ func TestMakeArrowFieldEncoderHonorsNullStructParents(t *testing.T) {
 	assert.Equal(t, want.Bytes(), got.Bytes())
 }
 
+// buildEqualityDictionaryTestRecord returns id [1..5], a dictionary value
+// column [apple, bob, null index, apple, null dictionary value] and k [7, 7, 7, 8, 7].
+func buildEqualityDictionaryTestRecord(t *testing.T, mem memory.Allocator, indexType, valueType arrow.DataType) arrow.RecordBatch {
+	t.Helper()
+
+	valueBuilder := array.NewBuilder(mem, valueType)
+	defer valueBuilder.Release()
+	appendEqualityBytesTestValue(t, valueBuilder, "apple", true)
+	appendEqualityBytesTestValue(t, valueBuilder, "bob", true)
+	appendEqualityBytesTestValue(t, valueBuilder, "", false)
+	appendEqualityBytesTestValue(t, valueBuilder, "unused", true)
+	dictionary := valueBuilder.NewArray()
+	defer dictionary.Release()
+
+	indices, _, err := array.FromJSON(mem, indexType, strings.NewReader("[0, 1, null, 0, 2]"))
+	require.NoError(t, err)
+	defer indices.Release()
+
+	dictType := &arrow.DictionaryType{IndexType: indexType, ValueType: valueType}
+	values := array.NewDictionaryArray(dictType, indices, dictionary)
+	defer values.Release()
+
+	ids, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int64, strings.NewReader("[1, 2, 3, 4, 5]"))
+	require.NoError(t, err)
+	defer ids.Release()
+	ks, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int32, strings.NewReader("[7, 7, 7, 8, 7]"))
+	require.NoError(t, err)
+	defer ks.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "value", Type: dictType, Nullable: true},
+		{Name: "k", Type: arrow.PrimitiveTypes.Int32},
+	}, nil)
+
+	return array.NewRecordBatch(schema, []arrow.Array{ids, values, ks}, 5)
+}
+
+func TestProcessEqualityDeletesDictionary(t *testing.T) {
+	shapes := []struct {
+		name      string
+		indexType arrow.DataType
+		valueType arrow.DataType
+		iceType   iceberg.Type
+	}{
+		{"int8/binary", arrow.PrimitiveTypes.Int8, arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary},
+		{"uint16/large_binary", arrow.PrimitiveTypes.Uint16, arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary},
+		{"int32/binary", arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary},
+		{"int64/string", arrow.PrimitiveTypes.Int64, arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String},
+		{"int32/large_string", arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String},
+	}
+	cases := []struct {
+		name     string
+		fieldIDs []int
+		colNames []string
+		keys     set[string]
+		wantIDs  []int64
+	}{
+		{
+			name: "value", fieldIDs: []int{2}, colNames: []string{"value"},
+			keys:    set[string]{"\x01\x00\x00\x00\x05apple": {}},
+			wantIDs: []int64{2, 3, 5},
+		},
+		{
+			name: "null", fieldIDs: []int{2}, colNames: []string{"value"},
+			keys:    set[string]{"\x00": {}},
+			wantIDs: []int64{1, 2, 4},
+		},
+		{
+			name: "multi_column", fieldIDs: []int{2, 3}, colNames: []string{"value", "k"},
+			keys: set[string]{
+				"\x01\x00\x00\x00\x05apple\x01\x00\x00\x00\x07": {},
+				"\x00\x01\x00\x00\x00\x07":                      {},
+			},
+			wantIDs: []int64{2, 4},
+		},
+	}
+	for _, shape := range shapes {
+		fileSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "value", Type: shape.iceType},
+			iceberg.NestedField{ID: 3, Name: "k", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		)
+		for _, tc := range cases {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+				ctx := compute.WithAllocator(t.Context(), mem)
+				record := buildEqualityDictionaryTestRecord(t, mem, shape.indexType, shape.valueType)
+				defer record.Release()
+
+				deleteSet := &equalityDeleteSet{keys: tc.keys, fieldIDs: tc.fieldIDs, colNames: tc.colNames}
+				process, err := processEqualityDeletesColumnarForFile(ctx,
+					[]*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")
+				require.NoError(t, err)
+
+				record.Retain()
+				got, err := process(record)
+				require.NoError(t, err)
+				defer got.Release()
+				assert.Equal(t, tc.wantIDs, got.Column(0).(*array.Int64).Int64Values())
+			})
+		}
+	}
+}
+
 type encoderArrayShape int
 
 const (

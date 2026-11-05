@@ -223,7 +223,7 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 	}
 
 	filePath := w.loc.NewDataLocation(
-		task.GenerateDataFileName(w.invariants.extension))
+		task.GenerateDataFileName(w.invariants.extension), "")
 
 	return w.format.WriteDataFile(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
