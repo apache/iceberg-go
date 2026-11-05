@@ -28,9 +28,9 @@ import (
 // The renamed branch retains its snapshot ID and retention settings. The main
 // branch cannot be renamed or replaced, and an existing ref cannot be overwritten.
 // Concurrent source snapshot moves and destination creation fail the commit.
-// Standard Iceberg ref requirements assert snapshot IDs only. Concurrent edits
-// to source retention settings or ref type with an unchanged snapshot ID cannot
-// be detected by these requirements.
+// For catalogs that validate requirements locally, source ref type changes also
+// fail. The standard REST requirement checks snapshot IDs only, so concurrent
+// retention or type changes with the same snapshot ID are not fully protected.
 func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -86,7 +86,7 @@ func (t Table) RenameBranch(ctx context.Context, from, to string) (*Table, error
 	// which would otherwise drop the destination-absence assertion.
 	requirements := []Requirement{
 		AssertTableUUID(t.metadata.TableUUID()),
-		AssertRefSnapshotID(from, &source.SnapshotID),
+		assertBranchRefSnapshotID(from, &source.SnapshotID),
 		AssertRefSnapshotID(to, nil),
 	}
 	updates := []Update{
