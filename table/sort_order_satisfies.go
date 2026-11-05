@@ -24,10 +24,12 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-// Satisfies reports whether this sort field guarantees the ordering required
-// by another field. Source IDs, direction, and null ordering must match.
+// Satisfies checks whether this sort field satisfies another using Iceberg
+// Java's transform ordering rules. Source IDs, direction, and null ordering
+// must match. This is a metadata compatibility check, not a type-aware proof
+// of physical row ordering (notably for numeric truncation).
 func (s SortField) Satisfies(required SortField) bool {
-	if !slices.Equal(s.SourceIDs, required.SourceIDs) ||
+	if len(s.SourceIDs) == 0 || !slices.Equal(s.SourceIDs, required.SourceIDs) ||
 		s.Direction != required.Direction || s.NullOrder != required.NullOrder ||
 		isNilSatisfactionTransform(s.Transform) || isNilSatisfactionTransform(required.Transform) {
 		return false
@@ -54,9 +56,9 @@ func (s SortField) Satisfies(required SortField) bool {
 	return actualGranularity != 0 && requiredGranularity != 0 && actualGranularity >= requiredGranularity
 }
 
-// Satisfies reports whether this sort order guarantees another sort order.
-// The required fields must be a compatible prefix of this order. The order IDs
-// are deliberately ignored, and every order satisfies the unsorted order.
+// Satisfies checks whether this sort order satisfies another using Iceberg
+// Java's field-by-field prefix rules. Order IDs are ignored, and every order
+// satisfies the unsorted order. It does not inspect the sorted data.
 func (s SortOrder) Satisfies(required SortOrder) bool {
 	if len(s.fields) < len(required.fields) {
 		return false
