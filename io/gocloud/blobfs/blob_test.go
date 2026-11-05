@@ -18,6 +18,7 @@
 package blobfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1168,4 +1169,95 @@ func TestBlobFileIORemoveFallsBackToDirectoryMarker(t *testing.T) {
 	exists, err := bucket.Exists(ctx, "ns/tbl/")
 	require.NoError(t, err)
 	assert.False(t, exists)
+}
+
+// countingFileIO returns a FileIO over bucket that counts the GETs it issues.
+func countingFileIO(ctx context.Context, bucket *blob.Bucket, gets *int) *FileIO {
+	return &FileIO{
+		Bucket:        bucket,
+		extractObject: identityObjectLocation,
+		ctx:           ctx,
+		newRangeReader: func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+			*gets++
+
+			return bucket.NewRangeReader(ctx, key, offset, length, nil)
+		},
+	}
+}
+
+func TestOpenReadAtGets(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	small := []byte("0123456789")
+	large := bytes.Repeat([]byte{7}, wholeObjectReadMaxSize+1)
+	require.NoError(t, bucket.WriteAll(ctx, "small", small, nil))
+	require.NoError(t, bucket.WriteAll(ctx, "large", large, nil))
+
+	tests := []struct {
+		key      string
+		content  []byte
+		wantGets int
+	}{
+		{"small", small, 1},
+		{"large", large, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			var gets int
+			f, err := countingFileIO(ctx, bucket, &gets).Open(ctx, tt.key)
+			require.NoError(t, err)
+			defer f.Close()
+
+			info, err := f.Stat()
+			require.NoError(t, err)
+			assert.Equal(t, int64(len(tt.content)), info.Size())
+			assert.Zero(t, gets, "Open must not read the object")
+
+			for _, off := range []int64{int64(len(tt.content)) - 4, 0, 3} {
+				buf := make([]byte, 4)
+				_, err := f.ReadAt(buf, off)
+				require.NoError(t, err)
+				assert.Equal(t, tt.content[off:off+4], buf)
+			}
+			assert.Equal(t, tt.wantGets, gets)
+		})
+	}
+}
+
+func TestOpenReadSeek(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	content := []byte("0123456789")
+	require.NoError(t, bucket.WriteAll(ctx, "f", content, nil))
+
+	var gets int
+	f, err := countingFileIO(ctx, bucket, &gets).Open(ctx, "f")
+	require.NoError(t, err)
+	defer f.Close()
+
+	end, err := f.Seek(0, io.SeekEnd)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(content)), end)
+	assert.Zero(t, gets, "seeking must not read the object")
+
+	_, err = f.Seek(6, io.SeekStart)
+	require.NoError(t, err)
+	got, err := io.ReadAll(f)
+	require.NoError(t, err)
+	assert.Equal(t, content[6:], got)
+
+	_, err = f.Seek(-8, io.SeekCurrent)
+	require.NoError(t, err)
+	buf := make([]byte, 3)
+	_, err = io.ReadFull(f, buf)
+	require.NoError(t, err)
+	assert.Equal(t, content[2:5], buf)
+	assert.Equal(t, 2, gets, "one GET per stream started")
+
+	_, err = f.Seek(-1, io.SeekStart)
+	assert.Error(t, err)
 }
