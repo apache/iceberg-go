@@ -2046,10 +2046,13 @@ func (b *MetadataBuilder) SetPartitionStatistics(stats PartitionStatisticsFile) 
 // RemovePartitionStatistics removes the partition statistics file associated with the given
 // snapshot ID. It is not an error if no such file exists.
 func (b *MetadataBuilder) RemovePartitionStatistics(snapshotID int64) error {
+	previousLen := len(b.partitionStatsList)
 	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(s PartitionStatisticsFile) bool {
 		return s.SnapshotID == snapshotID
 	})
-	b.updates = append(b.updates, NewRemovePartitionStatisticsUpdate(snapshotID))
+	if len(b.partitionStatsList) != previousLen {
+		b.updates = append(b.updates, NewRemovePartitionStatisticsUpdate(snapshotID))
+	}
 
 	return nil
 }

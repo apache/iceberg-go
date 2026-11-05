@@ -18,6 +18,8 @@
 package puffin
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"testing"
@@ -80,5 +82,41 @@ func TestWriterStateGuardErrors(t *testing.T) {
 				t.Fatalf("finalized and failed: got %v, want %q", got, wantFinalized)
 			}
 		})
+	}
+}
+
+func TestWriterReportsCompletedSizes(t *testing.T) {
+	var output bytes.Buffer
+	writer, err := NewWriter(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer.FileSizeInBytes() != 0 || writer.FileFooterSizeInBytes() != 0 {
+		t.Fatal("file sizes must be unavailable before Finish")
+	}
+
+	_, err = writer.AddBlob(BlobMetadataInput{
+		Type:   BlobTypeDataSketchesTheta,
+		Fields: []int32{1},
+	}, []byte("blob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer.FileSizeInBytes() != 0 || writer.FileFooterSizeInBytes() != 0 {
+		t.Fatal("file sizes must be unavailable until Finish")
+	}
+	if err := writer.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	data := output.Bytes()
+	trailer := data[len(data)-footerTrailerSize:]
+	payloadSize := int64(binary.LittleEndian.Uint32(trailer[:4]))
+	wantFooterSize := int64(MagicSize+footerTrailerSize) + payloadSize
+	if got := writer.FileFooterSizeInBytes(); got != wantFooterSize {
+		t.Fatalf("footer size = %d, want %d", got, wantFooterSize)
+	}
+	if got := writer.FileSizeInBytes(); got != int64(len(data)) {
+		t.Fatalf("file size = %d, want %d", got, len(data))
 	}
 }

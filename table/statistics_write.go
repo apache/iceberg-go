@@ -28,8 +28,8 @@ import (
 // reference. This only stages a metadata update; Commit publishes it, and
 // the caller is responsible for writing a valid Puffin file beforehand.
 func (t *Transaction) SetStatistics(stats StatisticsFile) error {
-	if _, err := t.txnMeta(); err != nil {
-		return err
+	if stats.SnapshotID <= 0 {
+		return fmt.Errorf("%w: statistics snapshot ID must be positive", iceberg.ErrInvalidArgument)
 	}
 	if stats.StatisticsPath == "" || stats.FileSizeInBytes <= 0 ||
 		stats.FileFooterSizeInBytes <= 0 || stats.FileFooterSizeInBytes > stats.FileSizeInBytes {
@@ -52,9 +52,5 @@ func (t *Transaction) SetStatistics(stats StatisticsFile) error {
 // RemoveStatistics removes the statistics file reference for snapshotID. An
 // absent reference is not an error. The physical Puffin file is not deleted.
 func (t *Transaction) RemoveStatistics(snapshotID int64) error {
-	if _, err := t.txnMeta(); err != nil {
-		return err
-	}
-
 	return t.apply([]Update{NewRemoveStatisticsUpdate(snapshotID)}, nil)
 }

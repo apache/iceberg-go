@@ -18,11 +18,13 @@
 package table
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/require"
 )
@@ -104,6 +106,45 @@ func TestTransactionStatisticsMetadataRoundTrip(t *testing.T) {
 	require.Equal(t, []StatisticsFile{stats}, slices.Collect(parsed.Statistics()))
 }
 
+func TestTransactionStatisticsCatalogCommit(t *testing.T) {
+	base, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.NotEmpty(t, base.Snapshots())
+
+	cat := &sequentialCatalog{metadata: base}
+	ident := Identifier{"db", "stats"}
+	fs := iceio.NewMemFS()
+	tbl := New(ident, base, "mem://stats/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, cat)
+	tx := tbl.NewTransaction()
+
+	stats := testStatisticsRegistrationFile()
+	stats.SnapshotID = base.Snapshots()[0].SnapshotID
+	stats.BlobMetadata[0].SnapshotID = stats.SnapshotID
+	stats.BlobMetadata[0].SequenceNumber = base.Snapshots()[0].SequenceNumber
+	require.NoError(t, tx.SetStatistics(stats))
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, committed)
+
+	reloaded, err := cat.LoadTable(t.Context(), ident)
+	require.NoError(t, err)
+	require.Equal(t, []StatisticsFile{stats}, slices.Collect(reloaded.Metadata().Statistics()))
+	require.Equal(t, base.Snapshots(), reloaded.Metadata().Snapshots())
+	require.Equal(t, base.CurrentSnapshot(), reloaded.Metadata().CurrentSnapshot())
+
+	removeTx := reloaded.NewTransaction()
+	require.NoError(t, removeTx.RemoveStatistics(stats.SnapshotID))
+	_, err = removeTx.Commit(t.Context())
+	require.NoError(t, err)
+
+	reloaded, err = cat.LoadTable(t.Context(), ident)
+	require.NoError(t, err)
+	require.Empty(t, slices.Collect(reloaded.Metadata().Statistics()))
+	require.Equal(t, base.Snapshots(), reloaded.Metadata().Snapshots())
+	require.Equal(t, base.CurrentSnapshot(), reloaded.Metadata().CurrentSnapshot())
+}
+
 func TestTransactionSetStatisticsClonesCallerData(t *testing.T) {
 	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, Type: BranchRef},
@@ -134,18 +175,29 @@ func TestTransactionSetStatisticsRejectsInvalidFiles(t *testing.T) {
 		name   string
 		change func(*StatisticsFile)
 	}{
+		{"missing snapshot ID", func(s *StatisticsFile) { s.SnapshotID = 0 }},
+		{"negative snapshot ID", func(s *StatisticsFile) { s.SnapshotID = -1 }},
 		{"missing path", func(s *StatisticsFile) { s.StatisticsPath = "" }},
 		{"nonpositive file size", func(s *StatisticsFile) { s.FileSizeInBytes = 0 }},
+		{"negative file size", func(s *StatisticsFile) { s.FileSizeInBytes = -1 }},
 		{"nonpositive footer size", func(s *StatisticsFile) { s.FileFooterSizeInBytes = 0 }},
+		{"negative footer size", func(s *StatisticsFile) { s.FileFooterSizeInBytes = -1 }},
 		{"footer exceeds file", func(s *StatisticsFile) { s.FileFooterSizeInBytes = 1025 }},
 		{"empty blob type", func(s *StatisticsFile) { s.BlobMetadata[0].Type = "" }},
+		{"empty second blob type", func(s *StatisticsFile) {
+			s.BlobMetadata = append(s.BlobMetadata, BlobMetadata{})
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := tbl.NewTransaction()
 			stats := testStatisticsRegistrationFile()
 			tc.change(&stats)
-			require.ErrorIs(t, tx.SetStatistics(stats), iceberg.ErrInvalidArgument)
+			err := tx.SetStatistics(stats)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			if stats.SnapshotID <= 0 {
+				require.ErrorContains(t, err, "snapshot ID")
+			}
 			require.Empty(t, tx.meta.updates)
 		})
 	}
