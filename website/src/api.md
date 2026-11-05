@@ -383,7 +383,39 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
-`ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
+`ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` performs an
+**overwrite** of existing files. It is suitable when the logical table data
+changes. `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)`
+is the corresponding data-file metadata API.
+
+### Stage externally rewritten Parquet files
+
+When another engine has **already written** replacement Parquet files with the
+same live rows and physical record count, use
+`StageRewrittenDataFilesByPath`. This stages an Iceberg `replace` snapshot
+instead of an `overwrite`, but it does not read or rewrite the row data:
+
+```go
+txn := tbl.NewTransaction()
+err := txn.StageRewrittenDataFilesByPath(ctx, oldFilePaths, newFilePaths, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+```
+
+This path-only helper supports unpartitioned format v1 and v2 tables. It rejects
+a source file with any applicable position or equality deletes, as well as
+deletion vectors. It requires the same total physical record count and checks
+column value, null, and NaN counts when available for every file on both sides.
+Missing optional statistics are unknown, not zero. A source column with known
+value counts cannot disappear when replacement metrics collection is enabled.
+Footer metadata cannot prove row-level equivalence, so callers must preserve
+every live row. Format v3 and partitioned tables are not supported, including
+older partitioned specs that are no longer current.
+
+For compaction that must **apply deletes**, remove delete files, or rewrite
+partitioned data, use `RewriteDataFiles`. An external writer that needs to
+supply data-file metadata, a sequence number, or related delete-file changes
+can use `NewRewrite` with `FileToDataFile` instead.
 
 ### Transactions
 
