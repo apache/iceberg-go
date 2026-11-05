@@ -73,3 +73,24 @@ func TestEqualityDeletePositionBufferConcurrent(t *testing.T) {
 		}
 	}
 }
+
+func TestEqualityDeletePositionBufferRejectsNegativePositions(t *testing.T) {
+	var buffer equalityDeletePositionBuffer
+	buffer.addPositions([]int64{1})
+	buffer.addPositions([]int64{2, -1})
+
+	if got := buffer.invalidPosition; got != -1 {
+		t.Fatalf("invalid position: got %d, want -1", got)
+	}
+	if got := buffer.bitmap.Cardinality(); got != 1 {
+		t.Fatalf("rejected batch changed bitmap cardinality: got %d, want 1", got)
+	}
+	if !buffer.bitmap.Contains(1) || buffer.bitmap.Contains(2) {
+		t.Fatal("rejected batch must not modify existing positions")
+	}
+
+	buffer.addPositions([]int64{3})
+	if got := buffer.bitmap.Cardinality(); got != 1 {
+		t.Fatalf("invalid buffer accepted more positions: got %d, want 1", got)
+	}
+}
