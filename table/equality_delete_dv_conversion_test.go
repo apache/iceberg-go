@@ -171,6 +171,48 @@ func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
 	require.Equal(t, []int64{4}, idsInTable(t, tbl))
 }
 
+// A legacy v2 position-delete file can be file-scoped through equal file_path
+// bounds without an explicit referenced_data_file value.
+func TestConvertEqualityDeletesRemovesBoundsScopedPositionDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "2"),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	dataPath := tasks[0].File.FilePath()
+
+	deletePath := filepath.ToSlash(filepath.Join(tbl.Location(), "data", "bounds-position-delete.parquet"))
+	writeParquetFile(t, deletePath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path":%q,"pos":1}]`, dataPath))
+	info, err := os.Stat(deletePath)
+	require.NoError(t, err)
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, deletePath, iceberg.ParquetFile, nil, nil, nil, 1, info.Size())
+	require.NoError(t, err)
+	bounds := map[int][]byte{iceberg.DeleteFilePathFieldID: []byte(dataPath)}
+	builder.LowerBoundValues(bounds).UpperBoundValues(bounds)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(builder.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 3, 4}, idsInTable(t, tbl))
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":3}]`)
+
+	result, err := tbl.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.RemovedPositionDeleteFiles)
+	require.Zero(t, liveDeleteFileCount(t, result.Table, iceberg.EntryContentPosDeletes))
+	require.Equal(t, 1, liveDVCount(t, result.Table))
+	require.Equal(t, []int64{1, 4}, idsInTable(t, result.Table))
+}
+
 func TestConvertEqualityDeletesMergesExistingDeletionVector(t *testing.T) {
 	ctx := t.Context()
 	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
