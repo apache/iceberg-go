@@ -41,7 +41,7 @@ func newEmptyConflictContext(t *testing.T) *conflictContext {
 	t.Helper()
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	cc, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	cc, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	return cc
