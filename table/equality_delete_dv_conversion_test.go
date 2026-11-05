@@ -169,6 +169,18 @@ func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
 	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
 	require.Zero(t, liveDVCount(t, tbl))
 	require.Equal(t, []int64{4}, idsInTable(t, tbl))
+
+	// A failed conversion must not leave the transaction pinned: callers
+	// can still stage unrelated metadata changes and retry on a newer head.
+	tx = tbl.NewTransaction()
+	_, err = tx.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	peer := appendRows(t, tbl, `[{"id":5,"data":"e"}]`)
+	require.NoError(t, tx.SetProperties(iceberg.Properties{"conversion-retry": "allowed"}))
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{4, 5}, idsInTable(t, committed))
+	require.Equal(t, []int64{4, 5}, idsInTable(t, peer))
 }
 
 // A legacy v2 position-delete file can be file-scoped through equal file_path
