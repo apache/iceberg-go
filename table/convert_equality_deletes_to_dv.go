@@ -51,6 +51,7 @@ func (b *equalityDeletePositionBuffer) addPositions(positions []int64) {
 	for _, position := range positions {
 		if position < 0 {
 			b.invalidPosition = position
+
 			return
 		}
 	}
