@@ -20,6 +20,7 @@ package table
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 )
@@ -116,6 +117,24 @@ func (u *UpdateSortOrder) buildOrder(meta Metadata) (SortOrder, error) {
 	}
 
 	schema := meta.CurrentSchema()
+	var lowerNameToID map[string]int
+	if !u.caseSensitive {
+		// Java's case-insensitive schema index rejects names that differ only
+		// in case. The generic Go lookup currently overwrites such entries in
+		// map iteration order, so do not use it for a metadata-changing API.
+		byName, err := iceberg.IndexByName(schema)
+		if err != nil {
+			return SortOrder{}, err
+		}
+		lowerNameToID = make(map[string]int, len(byName))
+		for name, id := range byName {
+			lower := strings.ToLower(name)
+			if previous, exists := lowerNameToID[lower]; exists && previous != id {
+				return SortOrder{}, fmt.Errorf("%w: ambiguous case-insensitive sort column %q", iceberg.ErrInvalidSchema, lower)
+			}
+			lowerNameToID[lower] = id
+		}
+	}
 	fields := make([]SortField, 0, len(u.fields))
 	for _, col := range u.fields {
 		if isNilSortTransform(col.transform) {
@@ -132,8 +151,8 @@ func (u *UpdateSortOrder) buildOrder(meta Metadata) (SortOrder, error) {
 		var found bool
 		if u.caseSensitive {
 			field, found = schema.FindFieldByName(col.name)
-		} else {
-			field, found = schema.FindFieldByNameCaseInsensitive(col.name)
+		} else if id, ok := lowerNameToID[strings.ToLower(col.name)]; ok {
+			field, found = schema.FindFieldByID(id)
 		}
 		if !found {
 			return SortOrder{}, fmt.Errorf("cannot bind sort field %q: %w", col.name, iceberg.ErrInvalidSchema)
