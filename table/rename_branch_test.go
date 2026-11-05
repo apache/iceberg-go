@@ -195,6 +195,34 @@ func TestRenameBranchRejectsConcurrentSourceMove(t *testing.T) {
 	require.NotContains(t, refs, "review")
 }
 
+func TestRenameBranchRejectsConcurrentSourceTypeChange(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	setRenameBranchTestRef(t, cat, "dev", 42, TagRef)
+
+	_, err := tbl.RenameBranch(t.Context(), "dev", "review")
+	require.Error(t, err)
+	require.Equal(t, 1, cat.commits)
+	refs := maps.Collect(cat.metadata.Refs())
+	require.Equal(t, TagRef, refs["dev"].Type)
+	require.NotContains(t, refs, "review")
+}
+
+func TestRenameBranchRejectsConcurrentSourceDeletion(t *testing.T) {
+	tbl, cat := newRenameBranchTestTable(t)
+	builder, err := MetadataBuilderFromBase(cat.metadata, "/metadata/current.json")
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshotRef("dev"))
+	cat.metadata, err = builder.Build()
+	require.NoError(t, err)
+
+	_, err = tbl.RenameBranch(t.Context(), "dev", "review")
+	require.Error(t, err)
+	require.Equal(t, 1, cat.commits)
+	refs := maps.Collect(cat.metadata.Refs())
+	require.NotContains(t, refs, "dev")
+	require.NotContains(t, refs, "review")
+}
+
 func TestRenameBranchRejectsConcurrentDestinationCreation(t *testing.T) {
 	tbl, cat := newRenameBranchTestTable(t)
 	setRenameBranchTestRef(t, cat, "review", 42, TagRef)
