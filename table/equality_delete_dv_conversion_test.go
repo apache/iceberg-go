@@ -59,8 +59,6 @@ func TestConvertEqualityDeletesToDeletionVectors(t *testing.T) {
 	require.Empty(t, conversionRows)
 }
 
-// A conversion staged after write.data.path changes must use the transaction's
-// updated output location, not the base table's data directory.
 // Equality deletes may use different key sets. Each must resolve against the
 // same data file before their positions are merged into a single DV.
 func TestConvertEqualityDeletesWithDifferentEqualityFields(t *testing.T) {
@@ -80,6 +78,8 @@ func TestConvertEqualityDeletesWithDifferentEqualityFields(t *testing.T) {
 	require.Equal(t, []int64{1, 4}, idsInTable(t, result.Table))
 }
 
+// A conversion staged after write.data.path changes must use the transaction's
+// updated output location, not the base table's data directory.
 func TestConvertEqualityDeletesUsesStagedDataPath(t *testing.T) {
 	ctx := t.Context()
 	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
