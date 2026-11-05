@@ -380,7 +380,8 @@ func TestConvertEqualityDeletesGlobalDeleteAcrossPartitions(t *testing.T) {
 	var err error
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
-	require.Zero(t, tbl.Spec().NumFields())
+	spec := tbl.Spec()
+	require.Zero(t, spec.NumFields())
 
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
 	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
@@ -397,7 +398,8 @@ func TestConvertEqualityDeletesGlobalDeleteAcrossPartitions(t *testing.T) {
 func TestConvertEqualityDeletesUnpartitionedSpec(t *testing.T) {
 	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`)
-	require.Zero(t, tbl.Spec().NumFields())
+	spec := tbl.Spec()
+	require.Zero(t, spec.NumFields())
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
 
 	result, err := tbl.ConvertEqualityDeletesToDeletionVectors(t.Context())
