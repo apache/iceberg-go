@@ -37,22 +37,43 @@ func (v View) History() []VersionLogEntry {
 	return slices.Clone(v.metadata.VersionLog())
 }
 
-// VersionAsOf returns the version that was current at the given timestamp in
-// milliseconds since the Unix epoch. When inclusive is false, changes at the
-// exact timestamp are excluded. The version log, not the version creation
-// timestamp, determines which version was current, including after rollbacks.
-//
-// If multiple changes have the same timestamp, the last log entry wins.
-// It returns nil when the requested time precedes the retained history or the
-// selected version is no longer retained. It never substitutes an older entry
-// for a version that is missing from metadata.
-func (v View) VersionAsOf(timestampMs int64, inclusive bool) *Version {
-	history := v.metadata.VersionLog()
-	for _, entry := range slices.Backward(history) {
-		if entry.TimestampMS < timestampMs || (inclusive && entry.TimestampMS == timestampMs) {
-			return v.VersionByID(entry.VersionID)
+// VersionLogEntryAsOf returns the entry with the greatest timestamp at or
+// before timestampMs, or strictly before it when inclusive is false.
+// Entries may be out of chronological order due to clock skew. If timestamps
+// are equal, the first entry in log order wins, matching Iceberg's snapshot
+// time-travel resolution. It returns false if no entry is eligible.
+func VersionLogEntryAsOf(history []VersionLogEntry, timestampMs int64, inclusive bool) (VersionLogEntry, bool) {
+	var (
+		best  VersionLogEntry
+		found bool
+	)
+
+	for _, entry := range history {
+		if entry.TimestampMS > timestampMs || (!inclusive && entry.TimestampMS == timestampMs) {
+			continue
+		}
+
+		if !found || entry.TimestampMS > best.TimestampMS {
+			best = entry
+			found = true
 		}
 	}
 
-	return nil
+	return best, found
+}
+
+// VersionAsOf returns the version that was current at or before timestampMs,
+// measured in milliseconds since the Unix epoch. It uses the version log
+// rather than version creation timestamps, including when a view is rolled
+// back to a previous version.
+//
+// It returns nil when no history entry is eligible or the selected version
+// has expired from metadata. It does not substitute another retained version.
+func (v View) VersionAsOf(timestampMs int64) *Version {
+	entry, found := VersionLogEntryAsOf(v.metadata.VersionLog(), timestampMs, true)
+	if !found {
+		return nil
+	}
+
+	return v.VersionByID(entry.VersionID)
 }
