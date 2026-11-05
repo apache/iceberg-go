@@ -48,8 +48,9 @@ func TestTransactionSetLocationStagesMetadataUpdate(t *testing.T) {
 	updateJSON, err := json.Marshal(commit.Updates[0])
 	require.NoError(t, err)
 	assert.JSONEq(t, "{\"action\":\"set-location\",\"location\":\"s3://bucket/new-location///\"}", string(updateJSON))
-	require.Len(t, commit.Requirements, 1)
-	assert.Equal(t, "assert-table-uuid", commit.Requirements[0].GetType())
+	require.Len(t, commit.Requirements, 2)
+	assert.Equal(t, "assert-ref-snapshot-id", commit.Requirements[0].GetType())
+	assert.Equal(t, "assert-table-uuid", commit.Requirements[1].GetType())
 }
 
 func TestTransactionSetLocationNoOp(t *testing.T) {
