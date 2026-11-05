@@ -245,6 +245,7 @@ func newDynamicOverwriteV3MoRTable(t *testing.T) (*table.Table, *concurrentTestC
 	tasks, err := tbl.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
 	require.Len(t, tasks, 2, "each partition needs its own data file")
+
 	return tbl, cat
 }
 
@@ -319,6 +320,7 @@ func TestDynamicPartitionOverwriteConcurrentDeletionVectors(t *testing.T) {
 				require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
 				require.Equal(t, attemptsBefore+1, cat.attempts.Load())
 				require.ElementsMatch(t, []int64{2, 3, 4}, idsOnRef(t, peer, table.MainBranch))
+
 				return
 			}
 			require.NoError(t, err)
@@ -342,10 +344,12 @@ func dynamicOverwriteDataPaths(t *testing.T, tbl *table.Table) []string {
 		if !entry.IsDir() {
 			paths = append(paths, filepath.ToSlash(path))
 		}
+
 		return nil
 	})
 	require.NoError(t, err)
 	slices.Sort(paths)
+
 	return paths
 }
 
