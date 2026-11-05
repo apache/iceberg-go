@@ -405,8 +405,11 @@ A direct-child source fast-forwards without copying data and ignores
 `snapshotProps`. A divergent v1/v2 append is replayed with fresh snapshot
 metadata; user-supplied WAP publication markers are not trusted. Divergent v3
 appends and dynamic overwrites are not yet supported. Cherry-picks pin the
-original target branch head, and new branches also pin main. A concurrent
-move fails instead of rebasing the operation.
+original target branch head. Divergent replays onto new branches also pin main,
+because they inherit its files. Fast-forwards to new branches point directly to
+the source and do not pin main. Fast-forward commits do not retry CAS conflicts;
+following a failed CAS, their errors match both `ErrCommitFailed` and
+`ErrTransactionUnusable`.
 
 `Commit` can retry on conflict (`ErrCommitFailed`) when `commit.retry.num-retries` is set. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 

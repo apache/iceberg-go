@@ -53,7 +53,8 @@ import (
 // catalog implementations should wrap it so callers can detect conflicts
 // with errors.Is(err, table.ErrCommitFailed). Calling Transaction.Commit
 // again retries the conflict unless the error also matches
-// ErrTransactionUnusable.
+// ErrTransactionUnusable. A cherry-pick fast-forward that loses a CAS race
+// returns both errors and must be rebuilt in a new transaction.
 //
 // After a refresh, a stale requirement, a validator conflict and a deleted
 // commit branch match ErrCommitFailed. A commit branch that became a tag, a
@@ -71,8 +72,8 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 // non-replayable commit whose branch has moved), a validator conflict with a
 // concurrent commit, a diverged base snapshot, files to rewrite that a
 // concurrent commit removed, a commit branch that became a tag or was
-// deleted, and a replaced table. Only the commit branch's head assertion is
-// rebased.
+// deleted, a failed cherry-pick fast-forward, and a replaced table. Only
+// the commit branch's head assertion is rebased.
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -583,8 +584,8 @@ type commitOpts struct {
 
 	// noReplay makes a CAS conflict terminal: doCommit returns the
 	// ErrCommitFailed error instead of entering refresh-and-replay.
-	// Set for commits carrying delete-file removals; see the flag site
-	// in snapshotProducer.commitManifests for the rationale.
+	// Set for commits carrying delete-file removals or cherry-pick
+	// fast-forwards, whose later staged writes cannot safely be replayed.
 	noReplay bool
 
 	// noResume denotes a cherry-pick fast-forward. It selects a helpful
@@ -1610,6 +1611,17 @@ func WithSnapshotHistoryLimitedToRefs(refsOnly bool) Option {
 	return func(t *Table) {
 		t.snapshotHistoryRefsOnly = refsOnly
 	}
+}
+
+// WithSnapshotHistoryLimitedToRefsFrom preserves src's REST snapshot load mode
+// when rebuilding a table without reloading metadata, such as after refreshing
+// storage credentials. A nil source leaves the mode unchanged.
+func WithSnapshotHistoryLimitedToRefsFrom(src *Table) Option {
+	if src == nil {
+		return noopTableOption
+	}
+
+	return WithSnapshotHistoryLimitedToRefs(src.snapshotHistoryRefsOnly)
 }
 
 // WithSavedConfig supplies a set of properties used to create a *Table

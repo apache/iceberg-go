@@ -81,11 +81,12 @@ re-submitted only if it is still valid. `RollbackToSnapshot`, `ExpireSnapshots`
 and `AssertRefSnapshotID`, as well as `CherryPickSnapshot`, pin the refs
 they guard, so a retry does not rebase those assertions. If a guarded ref has moved, the commit fails with
 `ErrCommitFailed` instead of retrying. An `ExpireSnapshots` that removes nothing
-adds no guards. A replayed cherry-pick pins its target branch; a new target
-also pins main because it forks from main. A fast-forwarded cherry-pick is
-non-replayable if another writer changes the table, even when the target branch
-does not move, because later snapshots in the same transaction must retain
-the fast-forwarded files. Rebuild the transaction from a fresh table on conflict.
+adds no guards. A replayed cherry-pick pins its target branch; a replay onto a new target
+also pins main because its append forks from main. A fast-forward pins only its
+target, even if that branch does not exist yet. However, fast-forward commits
+do not retry a CAS conflict, including one caused by another branch moving.
+A failed CAS fast-forward returns both `ErrCommitFailed` and
+`ErrTransactionUnusable`; rebuild the transaction from a fresh table.
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
 setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
