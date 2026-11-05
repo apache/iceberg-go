@@ -108,6 +108,29 @@ func TestDynamicPartitionOverwriteAllowsConcurrentOtherPartition(t *testing.T) {
 	assert.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, peer, table.MainBranch))
 }
 
+// Overwriting an existing branch must plan against that branch's files,
+// rather than replacing files that only main references.
+func TestDynamicPartitionOverwriteExistingBranchKeepsMainUnchanged(t *testing.T) {
+	base, _ := newDynamicOverwriteTable(t)
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 1, 3)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 4)
+
+	require.ElementsMatch(t, []int64{1, 1, 2, 3}, idsOnRef(t, tbl, branchPlanningRef))
+	require.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, tbl, table.MainBranch))
+
+	txn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	reader := idRecordReader(t, tbl, 1, 5)
+	require.NoError(t, txn.DynamicPartitionOverwrite(t.Context(), reader, nil))
+	reader.Release()
+	updated, err := txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	require.ElementsMatch(t, []int64{1, 2, 3, 5}, idsOnRef(t, updated, branchPlanningRef))
+	require.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, updated, table.MainBranch))
+}
+
 func TestDynamicPartitionOverwriteMissingBranchPinsMain(t *testing.T) {
 	base, _ := newDynamicOverwriteTable(t)
 	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
