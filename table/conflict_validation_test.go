@@ -210,11 +210,18 @@ func TestRetryableConflictErrors_WrapCommitFailed(t *testing.T) {
 	retryable := []error{
 		ErrConflictingDataFiles,
 		ErrConflictingDeleteFiles,
-		ErrDataFilesMissing,
 	}
 	for _, s := range retryable {
 		assert.ErrorIsf(t, s, ErrCommitFailed, "%v should wrap ErrCommitFailed", s)
 	}
+}
+
+func TestErrDataFilesMissing_IsTerminal(t *testing.T) {
+	// A delete whose target data file is gone can never apply, so retrying
+	// the same delete fails identically. It therefore MUST NOT wrap
+	// ErrCommitFailed, which is the retry machinery's trigger.
+	assert.False(t, errors.Is(ErrDataFilesMissing, ErrCommitFailed),
+		"ErrDataFilesMissing must not wrap ErrCommitFailed — it is a terminal error")
 }
 
 func TestErrCommitDiverged_IsTerminal(t *testing.T) {

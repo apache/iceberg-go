@@ -2081,6 +2081,8 @@ func TestRowDeltaRejectsDeleteForDataFileNotLiveWhenStaged(t *testing.T) {
 			tt.stage(t, tx, headBefore, dataB, dvB, dvUnknown)
 			_, err := tx.Commit(t.Context())
 			require.ErrorIs(t, err, table.ErrDataFilesMissing)
+			require.NotErrorIs(t, err, table.ErrCommitFailed)
+			require.ErrorIs(t, err, table.ErrTransactionUnusable)
 			assert.ErrorContains(t, err, "1 files missing")
 			assert.ErrorContains(t, err, location+"/data/"+tt.wantMissing)
 			assert.Equal(t, attemptsBefore, cat.attempts.Load())
@@ -2232,6 +2234,7 @@ func TestRowDeltaDeleteForDataFileRemovedInSameTransaction(t *testing.T) {
 
 				err := tx.NewRowDelta(nil).AddDeletes(otherDV, dv).Commit(t.Context())
 				require.ErrorIs(t, err, table.ErrDataFilesMissing)
+				require.NotErrorIs(t, err, table.ErrCommitFailed)
 				assert.ErrorContains(t, err, "1 files removed earlier in this transaction")
 				assert.ErrorContains(t, err, target.FilePath())
 				assert.Equal(t, staged, metadataFileCount(t, tbl), "the rejected row delta must write nothing")

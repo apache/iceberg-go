@@ -64,7 +64,8 @@ import (
 // removed.
 // For transactions with snapshot expiry, disabled GC or a staged update that
 // cannot apply after refresh also do not match. An ErrCommitFailed retry loop
-// stops on these failures.
+// stops on these failures. ErrDataFilesMissing, returned on any attempt when a
+// delete references data files that are missing, does not match either.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrCommitRejected means the catalog rejected a commit without writing
@@ -91,7 +92,9 @@ var ErrCommitRejected = errors.New("commit rejected")
 // deleted, or a replaced table. With snapshot expiry, they also include
 // disabled GC, replanning that changes whether a non-main commit branch is
 // removed, and a staged update that cannot apply after refresh. Only the
-// commit branch's head assertion is rebased.
+// commit branch's head assertion is rebased. Transaction.Commit also returns
+// it, on any attempt, when a delete references data files that are missing
+// (ErrDataFilesMissing).
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -916,11 +919,15 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
-					// Conflicts with a concurrent commit end the transaction.
-					// Other validator errors, such as read failures, stay
+					// Conflicts with a concurrent commit end the transaction, as
+					// do missing referenced data files, which no retry brings
+					// back. Other validator errors, such as read failures, stay
 					// resumable.
 					if errors.Is(vErr, ErrCommitFailed) {
 						return nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
+					}
+					if errors.Is(vErr, ErrDataFilesMissing) {
+						return nil, fmt.Errorf("%w: validation failed: %w", ErrTransactionUnusable, vErr)
 					}
 
 					return nil, vErr
