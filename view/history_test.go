@@ -74,25 +74,21 @@ func TestVersionAsOf(t *testing.T) {
 	tests := []struct {
 		name      string
 		timestamp int64
-		inclusive bool
 		wantID    int64
 	}{
 		{name: "before history", timestamp: 999},
-		{name: "at first, exclusive", timestamp: 1000},
-		{name: "at first, inclusive", timestamp: 1000, inclusive: true, wantID: 1},
-		{name: "between changes", timestamp: 1500, inclusive: true, wantID: 1},
-		{name: "at second, exclusive", timestamp: 2000, wantID: 1},
-		{name: "at second, inclusive", timestamp: 2000, inclusive: true, wantID: 2},
-		{name: "rolled back", timestamp: 3000, inclusive: true, wantID: 1},
-		{name: "after rollback", timestamp: 3500, inclusive: true, wantID: 1},
-		{name: "at fourth, exclusive", timestamp: 4000, wantID: 1},
-		{name: "at fourth, inclusive", timestamp: 4000, inclusive: true, wantID: 2},
-		{name: "after last", timestamp: 9000, inclusive: true, wantID: 2},
+		{name: "at first", timestamp: 1000, wantID: 1},
+		{name: "between changes", timestamp: 1500, wantID: 1},
+		{name: "at second", timestamp: 2000, wantID: 2},
+		{name: "rolled back", timestamp: 3000, wantID: 1},
+		{name: "after rollback", timestamp: 3500, wantID: 1},
+		{name: "at fourth", timestamp: 4000, wantID: 2},
+		{name: "after last", timestamp: 9000, wantID: 2},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			version := vw.VersionAsOf(tt.timestamp, tt.inclusive)
+			version := vw.VersionAsOf(tt.timestamp)
 			if tt.wantID == 0 {
 				require.Nil(t, version)
 			} else {
@@ -101,6 +97,92 @@ func TestVersionAsOf(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVersionLogEntryAsOf(t *testing.T) {
+	tests := []struct {
+		name      string
+		history   []VersionLogEntry
+		timestamp int64
+		inclusive bool
+		wantID    int64
+		wantFound bool
+	}{
+		{name: "empty", timestamp: 1000, inclusive: true},
+		{
+			name:      "before first",
+			history:   []VersionLogEntry{{TimestampMS: 2000, VersionID: 1}},
+			timestamp: 1000, inclusive: true,
+		},
+		{
+			name:      "exact inclusive",
+			history:   []VersionLogEntry{{TimestampMS: 1000, VersionID: 1}},
+			timestamp: 1000, inclusive: true, wantID: 1, wantFound: true,
+		},
+		{
+			name:      "exact exclusive",
+			history:   []VersionLogEntry{{TimestampMS: 1000, VersionID: 1}},
+			timestamp: 1000,
+		},
+		{
+			name: "strict before",
+			history: []VersionLogEntry{
+				{TimestampMS: 1000, VersionID: 1},
+				{TimestampMS: 2000, VersionID: 2},
+			},
+			timestamp: 2000, wantID: 1, wantFound: true,
+		},
+		{
+			name: "out of order selects greatest timestamp",
+			history: []VersionLogEntry{
+				{TimestampMS: 1000, VersionID: 1},
+				{TimestampMS: 3000, VersionID: 2},
+				{TimestampMS: 2000, VersionID: 3},
+			},
+			timestamp: 3500, inclusive: true, wantID: 2, wantFound: true,
+		},
+		{
+			name: "equal timestamps select first",
+			history: []VersionLogEntry{
+				{TimestampMS: 1000, VersionID: 1},
+				{TimestampMS: 2000, VersionID: 2},
+				{TimestampMS: 2000, VersionID: 3},
+			},
+			timestamp: 2000, inclusive: true, wantID: 2, wantFound: true,
+		},
+		{
+			name:      "negative epoch timestamp",
+			history:   []VersionLogEntry{{TimestampMS: -2000, VersionID: 1}},
+			timestamp: -1000, inclusive: true, wantID: 1, wantFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, found := VersionLogEntryAsOf(tt.history, tt.timestamp, tt.inclusive)
+			require.Equal(t, tt.wantFound, found)
+			if found {
+				require.Equal(t, tt.wantID, entry.VersionID)
+			}
+		})
+	}
+}
+
+func TestVersionAsOfOutOfOrderTimestamps(t *testing.T) {
+	vw := viewWithVersionHistory(t)
+	md := vw.Metadata().(*metadata)
+	md.VersionLogList = []VersionLogEntry{
+		{TimestampMS: 1000, VersionID: 1},
+		{TimestampMS: 3000, VersionID: 2},
+		{TimestampMS: 2000, VersionID: 1},
+	}
+	md.CurrentVersionIDValue = 1
+	require.NoError(t, md.validate())
+
+	// Use the greatest eligible timestamp even when a later log entry
+	// has an older wall-clock timestamp.
+	require.EqualValues(t, 1, vw.VersionAsOf(2500).VersionID)
+	require.EqualValues(t, 2, vw.VersionAsOf(3500).VersionID)
 }
 
 func TestVersionByIDAndHistoryAreDefensive(t *testing.T) {
@@ -123,9 +205,9 @@ func TestVersionByIDAndHistoryAreDefensive(t *testing.T) {
 	history[0].VersionID = 99
 	require.EqualValues(t, 1, vw.History()[0].VersionID)
 
-	asOf := vw.VersionAsOf(3000, true)
+	asOf := vw.VersionAsOf(3000)
 	asOf.Summary["operation"] = "changed"
-	require.Equal(t, "create", vw.VersionAsOf(3000, true).Summary["operation"])
+	require.Equal(t, "create", vw.VersionAsOf(3000).Summary["operation"])
 }
 
 func TestVersionAsOfTruncatedHistory(t *testing.T) {
@@ -133,14 +215,14 @@ func TestVersionAsOfTruncatedHistory(t *testing.T) {
 	md := vw.Metadata().(*metadata)
 
 	md.VersionLogList = md.VersionLogList[1:]
-	require.Nil(t, vw.VersionAsOf(1500, true))
-	require.EqualValues(t, 2, vw.VersionAsOf(2000, true).VersionID)
+	require.Nil(t, vw.VersionAsOf(1500))
+	require.EqualValues(t, 2, vw.VersionAsOf(2000).VersionID)
 
 	// If a log entry refers to a version that has been expired, do not
 	// incorrectly return an older or newer version in its place.
 	md.VersionList = md.VersionList[1:]
-	require.Nil(t, vw.VersionAsOf(3000, true))
-	require.EqualValues(t, 2, vw.VersionAsOf(4000, true).VersionID)
+	require.Nil(t, vw.VersionAsOf(3000))
+	require.EqualValues(t, 2, vw.VersionAsOf(4000).VersionID)
 }
 
 func TestVersionAsOfRepeatedTimestamps(t *testing.T) {
@@ -160,10 +242,10 @@ func TestVersionAsOfRepeatedTimestamps(t *testing.T) {
 	md.init()
 	require.NoError(t, md.validate())
 
-	// Two updates in the same millisecond must use log order to break ties.
-	require.EqualValues(t, 1, vw.VersionAsOf(2000, false).VersionID)
-	require.EqualValues(t, 3, vw.VersionAsOf(2000, true).VersionID)
-	require.EqualValues(t, 3, vw.VersionAsOf(2001, false).VersionID)
+	// Match Iceberg's snapshot time travel: the first equal timestamp wins.
+	require.EqualValues(t, 1, vw.VersionAsOf(1999).VersionID)
+	require.EqualValues(t, 2, vw.VersionAsOf(2000).VersionID)
+	require.EqualValues(t, 2, vw.VersionAsOf(2001).VersionID)
 }
 
 func TestVersionAsOfAfterHistoryExpiration(t *testing.T) {
@@ -184,6 +266,6 @@ func TestVersionAsOfAfterHistoryExpiration(t *testing.T) {
 		{TimestampMS: 4000, VersionID: 2},
 	}, retained.History())
 	require.Nil(t, retained.VersionByID(1))
-	require.Nil(t, retained.VersionAsOf(3999, true))
-	require.EqualValues(t, 2, retained.VersionAsOf(4000, true).VersionID)
+	require.Nil(t, retained.VersionAsOf(3999))
+	require.EqualValues(t, 2, retained.VersionAsOf(4000).VersionID)
 }
