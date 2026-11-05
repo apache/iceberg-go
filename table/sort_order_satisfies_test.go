@@ -240,8 +240,10 @@ func TestSortOrderSatisfiesMultiSourceField(t *testing.T) {
 		return satisfyingSortField(ids, transform, table.SortASC, table.NullsLast)
 	}
 
-	actual := satisfyingSortOrder(t, 1, field([]int{1, 2}),
-		satisfyingSortField([]int{3}, iceberg.IdentityTransform{}, table.SortASC, table.NullsLast))
+	actual := satisfyingSortOrder(t, 1,
+		field([]int{1, 2}),
+		satisfyingSortField([]int{3}, iceberg.IdentityTransform{}, table.SortASC, table.NullsLast),
+	)
 	compatible := satisfyingSortOrder(t, 2, field([]int{1, 2}))
 	reversed := satisfyingSortOrder(t, 3, field([]int{2, 1}))
 	shorterSourceList := satisfyingSortOrder(t, 4, field([]int{1}))
