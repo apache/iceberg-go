@@ -66,3 +66,31 @@ func TestBlobMetadataRejectsNullAndEmptyType(t *testing.T) {
 		})
 	}
 }
+
+func TestStatisticsJSONMatchesJava(t *testing.T) {
+	for _, tt := range []struct {
+		value any
+		want  string
+	}{
+		{
+			value: BlobMetadata{Type: puffin.BlobTypeDataSketchesTheta, SnapshotID: 1, SequenceNumber: 2, Fields: []int32{1}},
+			want:  `{"type":"apache-datasketches-theta-v1","snapshot-id":1,"sequence-number":2,"fields":[1]}`,
+		},
+		{
+			value: BlobMetadata{Type: puffin.BlobTypeDataSketchesTheta, SnapshotID: 1, SequenceNumber: 2, Fields: []int32{1}, Properties: map[string]string{}},
+			want:  `{"type":"apache-datasketches-theta-v1","snapshot-id":1,"sequence-number":2,"fields":[1]}`,
+		},
+		{
+			value: BlobMetadata{Type: "vendor-sketch-v1", SnapshotID: 1, SequenceNumber: 2, Properties: map[string]string{"k": "v"}},
+			want:  `{"type":"vendor-sketch-v1","snapshot-id":1,"sequence-number":2,"fields":[],"properties":{"k":"v"}}`,
+		},
+		{
+			value: StatisticsFile{SnapshotID: 1, StatisticsPath: "s3://bucket/stats.puffin", FileSizeInBytes: 10, FileFooterSizeInBytes: 2},
+			want:  `{"snapshot-id":1,"statistics-path":"s3://bucket/stats.puffin","file-size-in-bytes":10,"file-footer-size-in-bytes":2,"blob-metadata":[]}`,
+		},
+	} {
+		data, err := json.Marshal(tt.value)
+		require.NoError(t, err)
+		assert.JSONEq(t, tt.want, string(data))
+	}
+}

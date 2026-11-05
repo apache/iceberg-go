@@ -149,7 +149,7 @@ func (t Table) planDanglingDeleteFiles(ctx context.Context, snap *Snapshot, scan
 	if err != nil {
 		return nil, err
 	}
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(ctx, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +163,7 @@ func (t Table) planDanglingDeleteFiles(ctx context.Context, snap *Snapshot, scan
 		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, true) {
+		for entry, err := range manifest.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, err
 			}
