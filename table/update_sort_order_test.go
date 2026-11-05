@@ -252,3 +252,80 @@ func TestUpdateSortOrderRejectsInvalidFieldsWithoutStaging(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateSortOrderRejectsUnknownTransform(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("future-sort-transform")
+	require.NoError(t, err)
+
+	txn := testNonPartitionedTable.NewTransaction()
+	builder := txn.UpdateSortOrder(true).AddField("id", unknown, table.SortASC, table.NullsFirst)
+	_, err = builder.Apply()
+	require.ErrorIs(t, err, table.ErrInvalidTransform)
+	require.ErrorContains(t, err, "unknown transform")
+	require.ErrorIs(t, builder.Commit(), table.ErrInvalidTransform)
+
+	commit, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.Empty(t, commit.Updates)
+}
+
+func TestUpdateSortOrderRejectsTypedNilTransform(t *testing.T) {
+	var transform *iceberg.BucketTransform
+
+	txn := testNonPartitionedTable.NewTransaction()
+	builder := txn.UpdateSortOrder(true).AddField("id", transform, table.SortASC, table.NullsFirst)
+	_, err := builder.Apply()
+	require.ErrorIs(t, err, table.ErrInvalidTransform)
+	require.ErrorContains(t, err, "has no transform")
+	require.ErrorIs(t, builder.Commit(), table.ErrInvalidTransform)
+
+	commit, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.Empty(t, commit.Updates)
+}
+
+func TestUpdateSortOrderCopiesPointerTransform(t *testing.T) {
+	bucket := &iceberg.BucketTransform{NumBuckets: 8}
+	txn := testNonPartitionedTable.NewTransaction()
+	builder := txn.UpdateSortOrder(true).AddField("id", bucket, table.SortASC, table.NullsLast)
+
+	bucket.NumBuckets = 16
+	preview, err := builder.Apply()
+	require.NoError(t, err)
+	require.Equal(t, "bucket[8]", preview.Field(0).Transform.String())
+
+	require.NoError(t, builder.Commit())
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	require.Equal(t, "bucket[8]", staged.Metadata().SortOrder().Field(0).Transform.String())
+}
+
+func TestUpdateSortOrderWithStagedSchema(t *testing.T) {
+	txn := testNonPartitionedTable.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"priority"}, iceberg.PrimitiveTypes.Int64, "", false, nil).Commit())
+	require.NoError(t, txn.UpdateSortOrder(true).Desc("priority", table.NullsLast).Commit())
+
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	field, found := staged.Metadata().CurrentSchema().FindFieldByName("priority")
+	require.True(t, found)
+	require.Equal(t, field.ID, staged.Metadata().SortOrder().Field(0).FirstSourceID())
+
+	commit, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.NotEmpty(t, commit.Updates)
+}
+
+func TestUpdateSortOrderNilTransaction(t *testing.T) {
+	builder := table.NewUpdateSortOrder(nil, true).Asc("id", table.NullsFirst)
+	_, err := builder.Apply()
+	require.ErrorIs(t, err, table.ErrInvalidMetadata)
+	_, _, err = builder.BuildUpdates()
+	require.ErrorIs(t, err, table.ErrInvalidMetadata)
+	require.ErrorIs(t, builder.Commit(), table.ErrInvalidMetadata)
+
+	var nilBuilder *table.UpdateSortOrder
+	_, err = nilBuilder.Apply()
+	require.ErrorIs(t, err, table.ErrInvalidMetadata)
+}

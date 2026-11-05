@@ -19,7 +19,7 @@ package table
 
 import (
 	"fmt"
-	"slices"
+	"reflect"
 
 	"github.com/apache/iceberg-go"
 )
@@ -66,8 +66,10 @@ func (u *UpdateSortOrder) Desc(column string, nullOrder NullOrder) *UpdateSortOr
 // AddField adds a transformed sort field. A nil or incompatible transform is
 // rejected when the replacement is applied or committed.
 func (u *UpdateSortOrder) AddField(column string, transform iceberg.Transform, direction SortDirection, nullOrder NullOrder) *UpdateSortOrder {
+	// Copy pointer-backed transforms so callers cannot mutate a pending sort order.
 	u.fields = append(u.fields, sortOrderColumn{
-		name: column, transform: transform, direction: direction, nullOrder: nullOrder,
+		name: column, transform: cloneSortField(SortField{Transform: transform}).Transform,
+		direction: direction, nullOrder: nullOrder,
 	})
 
 	return u
@@ -77,12 +79,34 @@ func (u *UpdateSortOrder) AddField(column string, transform iceberg.Transform, d
 // without modifying the transaction. An equivalent historical order reuses
 // its existing ID.
 func (u *UpdateSortOrder) Apply() (SortOrder, error) {
-	meta, err := u.txn.meta.Build()
+	meta, err := u.stagedMetadata()
 	if err != nil {
 		return SortOrder{}, err
 	}
 
 	return u.buildOrder(meta)
+}
+
+func (u *UpdateSortOrder) stagedMetadata() (Metadata, error) {
+	if u == nil {
+		return nil, fmt.Errorf("%w: sort order update is nil", ErrInvalidMetadata)
+	}
+
+	builder, err := u.txn.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
+	return builder.Build()
+}
+
+func isNilSortTransform(transform iceberg.Transform) bool {
+	if transform == nil {
+		return true
+	}
+
+	value := reflect.ValueOf(transform)
+	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
 func (u *UpdateSortOrder) buildOrder(meta Metadata) (SortOrder, error) {
@@ -93,8 +117,14 @@ func (u *UpdateSortOrder) buildOrder(meta Metadata) (SortOrder, error) {
 	schema := meta.CurrentSchema()
 	fields := make([]SortField, 0, len(u.fields))
 	for _, col := range u.fields {
-		if col.transform == nil {
+		if isNilSortTransform(col.transform) {
 			return SortOrder{}, fmt.Errorf("%w: sort field %q has no transform", ErrInvalidTransform, col.name)
+		}
+
+		switch col.transform.(type) {
+		case iceberg.UnknownTransform, *iceberg.UnknownTransform:
+			return SortOrder{}, fmt.Errorf("%w: cannot add sort field %q with unknown transform %s",
+				ErrInvalidTransform, col.name, col.transform)
 		}
 
 		var field iceberg.NestedField
@@ -133,9 +163,7 @@ func (u *UpdateSortOrder) buildOrder(meta Metadata) (SortOrder, error) {
 
 	nextID := InitialSortOrderID
 	for _, previous := range meta.SortOrders() {
-		if slices.EqualFunc(previous.fields, proposed.fields, func(a, b SortField) bool {
-			return a.Equals(b)
-		}) {
+		if sameSortFields(previous, proposed) {
 			return previous, nil
 		}
 		nextID = max(nextID, previous.OrderID()+1)
@@ -148,7 +176,7 @@ func (u *UpdateSortOrder) buildOrder(meta Metadata) (SortOrder, error) {
 // requirements. Reusing an order only changes the default order ID; a new
 // order is added before it becomes the default.
 func (u *UpdateSortOrder) BuildUpdates() ([]Update, []Requirement, error) {
-	meta, err := u.txn.meta.Build()
+	meta, err := u.stagedMetadata()
 	if err != nil {
 		return nil, nil, err
 	}
