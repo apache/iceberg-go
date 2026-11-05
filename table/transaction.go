@@ -973,14 +973,8 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // ReplaceDataFilesByPath replaces data files identified by their storage paths.
 // Unlike ReplaceDataFiles, it loads file metadata as needed.
 //
-// It is actually an overwrite operation with multiple
-// files deleted and added.
-//
-// TODO: technically, this could be a REPLACE operation but we aren't performing
-// any validation here that there are no changes to the underlying data. A REPLACE
-// operation is only valid if the data is exactly the same as the previous snapshot.
-//
-// For now, we'll keep using an overwrite operation.
+// This stages an overwrite operation that may change logical table data.
+// For pre-written, data-preserving files, use StageRewrittenDataFilesByPath.
 //
 // On v3 a removed data file's live deletion vector is removed with it.
 func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
