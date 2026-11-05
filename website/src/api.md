@@ -637,11 +637,14 @@ v, err := view.CreateView(
 )
 
 // Inspect
-v.CurrentVersion()      // *view.Version
-v.CurrentSchema()       // *iceberg.Schema
-v.Versions()            // []*view.Version
-v.Schemas()             // map[int]*iceberg.Schema
-v.Properties()          // iceberg.Properties
+v.CurrentVersion()        // *view.Version
+v.CurrentSchema()         // *iceberg.Schema
+v.Versions()              // []*view.Version
+v.VersionByID(1)          // *view.Version, or nil
+v.VersionAsOf(timestampMs) // *view.Version, or nil (Unix milliseconds)
+v.History()               // []view.VersionLogEntry
+v.Schemas()               // map[int]*iceberg.Schema
+v.Properties()            // iceberg.Properties
 ```
 
 `view.New(ident, meta, metadataLocation)` constructs a view from already-loaded metadata; `view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)` loads metadata from disk or object storage.
