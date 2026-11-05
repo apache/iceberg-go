@@ -120,6 +120,12 @@ func TestCherryPickRefsModePersistsAcrossRESTTableLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	check("loadTableWithMode", loaded)
 
+	// StagedTable constructs another table over the same partial metadata.
+	// It must not make an incomplete-ancestry cherry-pick appear safe.
+	staged, err := loaded.NewTransaction().StagedTable()
+	require.NoError(t, err)
+	check("Transaction.StagedTable", staged.Table)
+
 	require.NoError(t, loaded.Refresh(t.Context()))
 	check("Table.Refresh", loaded)
 
