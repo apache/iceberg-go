@@ -65,6 +65,9 @@ func (f *contextReadRecordingFS) Open(name string) (fs.File, error) {
 func (f *contextReadRecordingFS) ReadFile(ctx context.Context, name string) ([]byte, error) {
 	f.readCtx = ctx
 	f.read = name
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	return f.files.ReadFile(name)
 }
@@ -157,4 +160,23 @@ func TestFSContextReadFilePassesOperationContext(t *testing.T) {
 	require.NotNil(t, underlying.readCtx)
 	require.Equal(t, "caller", underlying.readCtx.Value(key{}))
 	require.Equal(t, "rewritten/file.txt", underlying.read)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = reader.ReadFile(canceledCtx, "file://bucket/original.txt")
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, underlying.readCtx.Err(), context.Canceled)
+}
+
+func TestFSPlainReadFileIgnoresCancellation(t *testing.T) {
+	underlying := &recordingFS{files: fstest.MapFS{
+		"plain.txt": &fstest.MapFile{Data: []byte("data")},
+	}}
+	reader := iceio.FS(underlying).(iceio.ReadFileIO)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	data, err := reader.ReadFile(ctx, "plain.txt")
+	require.NoError(t, err)
+	require.Equal(t, []byte("data"), data)
 }
