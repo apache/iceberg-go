@@ -141,6 +141,13 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			cancelOperation()
 			_, err = cat.CheckNamespaceExists(canceledOperationCtx, table.Identifier{"ns"})
 			require.ErrorIs(t, err, context.Canceled)
+			_, err = cat.ListNamespaces(canceledOperationCtx, table.Identifier{"ns"})
+			require.ErrorIs(t, err, context.Canceled)
+			err = cat.CreateNamespace(canceledOperationCtx, table.Identifier{"canceled"}, nil)
+			require.ErrorIs(t, err, context.Canceled)
+			exists, err := cat.CheckNamespaceExists(context.Background(), table.Identifier{"canceled"})
+			require.NoError(t, err)
+			require.False(t, exists)
 
 			fs := cat.(*Catalog).filesystem
 			location := warehouse + "/ns/after-cancel.txt"

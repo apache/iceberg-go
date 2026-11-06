@@ -745,7 +745,7 @@ func (bfs *FileIO) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
 	}
 
 	iter := bfs.List(&blob.ListOptions{Prefix: prefix})
-	if obj, listErr := iter.Next(bfs.ctx); listErr == nil {
+	if obj, listErr := iter.Next(ctx); listErr == nil {
 		return blobFileInfo{
 			name: directoryName(key),
 			mode: fs.ModeDir,

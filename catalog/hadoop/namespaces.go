@@ -140,6 +140,9 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(parent, "."))
 		}
+		if err != nil {
+			return nil, fmt.Errorf("hadoop catalog: failed to stat namespace: %w", err)
+		}
 	}
 
 	result := []table.Identifier{}
@@ -232,10 +235,12 @@ func (c *Catalog) checkedMkdirAll(ctx context.Context, id table.Identifier) erro
 		}
 	}
 	// Check the final element in the path
-	if _, err := c.filesystem.Stat(ctx, path); err == nil {
-		// If there is no error and stat returns successfully,
-		// it means that it must already exist
+	_, err := c.filesystem.Stat(ctx, path)
+	if err == nil {
 		return fs.ErrExist
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 
 	return c.filesystem.MkdirAll(path)

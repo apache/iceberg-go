@@ -265,6 +265,50 @@ func TestBlobFileIOStatUsesOperationContext(t *testing.T) {
 	assert.Equal(t, "operation", gotCtx.Value(statContextKey{}))
 }
 
+type statListContextBucket struct {
+	driver.Bucket
+	listCtx context.Context
+}
+
+func (*statListContextBucket) ErrorCode(err error) gcerrors.ErrorCode {
+	if errors.Is(err, fs.ErrNotExist) {
+		return gcerrors.NotFound
+	}
+
+	return gcerrors.Unknown
+}
+
+func (*statListContextBucket) Attributes(context.Context, string) (*driver.Attributes, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (b *statListContextBucket) ListPaged(ctx context.Context, _ *driver.ListOptions) (*driver.ListPage, error) {
+	b.listCtx = ctx
+
+	return &driver.ListPage{
+		Objects: []*driver.ListObject{{Key: "data/child.parquet"}},
+	}, nil
+}
+
+func (*statListContextBucket) Close() error { return nil }
+
+func TestBlobFileIOStatDirectoryListingUsesOperationContext(t *testing.T) {
+	driverBucket := &statListContextBucket{}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.WithValue(context.Background(), statContextKey{}, "lifetime"))
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	cancelLifetime()
+	operationCtx := context.WithValue(context.Background(), statContextKey{}, "operation")
+
+	info, err := fileIO.Stat(operationCtx, "s3://my-bucket/data")
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	require.NotNil(t, driverBucket.listCtx)
+	assert.Equal(t, "operation", driverBucket.listCtx.Value(statContextKey{}))
+}
+
 func TestBlobFileIOWriteFileHonorsOperationCancellation(t *testing.T) {
 	t.Parallel()
 
