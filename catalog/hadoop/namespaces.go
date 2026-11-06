@@ -32,7 +32,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 )
 
-func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {
+func (c *Catalog) CreateNamespace(ctx context.Context, ns table.Identifier, props iceberg.Properties) error {
 	if err := validateIdentifier(ns); err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	}
 
 	// Raise an error if the namespace already exists
-	if err := c.checkedMkdirAll(ns); err != nil {
+	if err := c.checkedMkdirAll(ctx, ns); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
 		}
@@ -221,7 +221,7 @@ func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifie
 // all subdirectories of a given identifier path exist before creating the full path.
 // This function is not atomic and may not return ErrNamespaceAlreadyExists if
 // called concurrently with other calls that change the same identifier
-func (c *Catalog) checkedMkdirAll(id table.Identifier) error {
+func (c *Catalog) checkedMkdirAll(ctx context.Context, id table.Identifier) error {
 	path := c.namespaceToPath(id)
 	// Start at index 1 to skip the root warehouse directory
 	for pathIndex := 1; pathIndex < len(id); pathIndex++ {
@@ -238,5 +238,5 @@ func (c *Catalog) checkedMkdirAll(id table.Identifier) error {
 		return fs.ErrExist
 	}
 
-	return c.filesystem.MkdirAll(path)
+	return c.filesystem.MkdirAll(ctx, path)
 }
