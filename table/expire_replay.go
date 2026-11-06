@@ -127,13 +127,15 @@ func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFi
 }
 
 func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Update, []string, error) {
-	if err := validateGCEnabledForSnapshotExpiration(b.props); err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", ErrTransactionUnusable, err)
-	}
-
 	updates, walked, err := planExpiration(b, rec.cfg, rec.nowMs)
 	if err != nil {
 		return nil, nil, err
+	}
+	// A no-op expiry must not block other updates solely because GC is disabled.
+	if len(updates) > 0 {
+		if err := validateGCEnabledForSnapshotExpiration(b.props); err != nil {
+			return nil, nil, fmt.Errorf("%w: %w", ErrTransactionUnusable, err)
+		}
 	}
 
 	// Later updates depend on whether the staged plan removed the branch.

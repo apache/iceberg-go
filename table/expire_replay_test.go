@@ -639,6 +639,29 @@ func TestExpireReplayFailsWhenPeerDisablesGC(t *testing.T) {
 	})
 }
 
+func TestExpireReplayNoOpExpiryIgnoresDisabledGC(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, cat, tbl := newExpireReplayTable(t, nil)
+		tbl, s1 := appendOnBranch(t, tbl, MainBranch, "s1")
+		time.Sleep(time.Millisecond)
+
+		tx := tbl.NewTransaction()
+		stageFiles(t, tx, "a")
+		require.NoError(t, tx.ExpireSnapshots(WithOlderThan(0), WithRetainLast(10)))
+		a := stagedHead(t, tx, MainBranch)
+
+		peerUpdate(t, cat, NewSetPropertiesUpdate(iceberg.Properties{GCEnabledKey: "false"}))
+		p := peerAppend(t, fs, cat, MainBranch, "p")
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		meta := committed.Metadata()
+		assert.Equal(t, sortedIDs(s1, p, a), survivors(meta))
+		assert.Equal(t, []string{"a", "p", "s1"}, branchFiles(t, fs, meta, MainBranch))
+	})
+}
+
 // The expiry enables replay of the staged rollback on retry.
 func TestExpireReplayFailsWhenStagedUpdateDoesNotApply(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
