@@ -201,20 +201,24 @@ func (r *avroRecordReader) Next() bool {
 				break
 			}
 			r.readErr = fmt.Errorf("decode Avro record: %w", err)
+
 			return false
 		}
 		if err := r.ctx.Err(); err != nil {
 			r.readErr = err
+
 			return false
 		}
 		for i, field := range r.schema.Fields() {
 			value, present := row[field.Name]
 			if (!present || value == nil) && !field.Nullable {
 				r.readErr = fmt.Errorf("%w: Avro field %q is required", iceberg.ErrInvalidSchema, field.Name)
+
 				return false
 			}
 			if err := appendAvroValue(builder.Field(i), value); err != nil {
 				r.readErr = fmt.Errorf("avro field %q: %w", field.Name, err)
+
 				return false
 			}
 		}
