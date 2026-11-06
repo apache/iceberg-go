@@ -1005,6 +1005,10 @@ func TestBlobFileIORenameUsesOperationContext(t *testing.T) {
 	cancel()
 	err := bfs.Rename(opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet")
 	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "Rename", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/data/source.parquet", pathErr.Path)
 	exists, err := bucket.Exists(ctx, "data/source.parquet")
 	require.NoError(t, err)
 	assert.True(t, exists)
@@ -1099,6 +1103,10 @@ func TestBlobFileIORenameNoReplaceUsesOperationContext(t *testing.T) {
 	cancel()
 	err := bfs.RenameNoReplace(opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet")
 	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "RenameNoReplace", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/data/destination.parquet", pathErr.Path)
 	sourceExists, err := bucket.Exists(ctx, "data/source.parquet")
 	require.NoError(t, err)
 	assert.True(t, sourceExists)

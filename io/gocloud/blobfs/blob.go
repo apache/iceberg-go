@@ -687,6 +687,11 @@ func (bfs *FileIO) ReadFile(path string) ([]byte, error) {
 // Stat interprets the input path as a directory or file and returns the corresponding FileInfo.
 // If the path does not exist, it returns fs.ErrNotExist
 func (bfs *FileIO) Stat(path string) (fs.FileInfo, error) {
+	return bfs.stat(bfs.ctx, path)
+}
+
+// stat uses the supplied context for each object-store lookup.
+func (bfs *FileIO) stat(ctx context.Context, path string) (fs.FileInfo, error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "Stat", Path: path, Err: err}
@@ -696,7 +701,7 @@ func (bfs *FileIO) Stat(path string) (fs.FileInfo, error) {
 	// check for a directory immediately and skip needing to check it as both an object
 	// or a directory marker.
 	if strings.HasSuffix(key, "/") {
-		if attrs, markerErr := bfs.Attributes(bfs.ctx, key); markerErr == nil {
+		if attrs, markerErr := bfs.Attributes(ctx, key); markerErr == nil {
 			return blobFileInfo{
 				name:    directoryName(key),
 				mode:    fs.ModeDir,
@@ -708,7 +713,7 @@ func (bfs *FileIO) Stat(path string) (fs.FileInfo, error) {
 		}
 	}
 
-	attrs, err := bfs.Attributes(bfs.ctx, key)
+	attrs, err := bfs.Attributes(ctx, key)
 	// if there is no error and we have attributes, we can return a FileInfo for object
 	if err == nil {
 		return blobFileInfo{
@@ -727,7 +732,7 @@ func (bfs *FileIO) Stat(path string) (fs.FileInfo, error) {
 	marker := directoryMarker(key)
 	// if the marker exists, we can return a FileInfo for the directory
 	if marker != "" {
-		if attrs, markerErr := bfs.Attributes(bfs.ctx, marker); markerErr == nil {
+		if attrs, markerErr := bfs.Attributes(ctx, marker); markerErr == nil {
 			return blobFileInfo{
 				name:    directoryName(key),
 				mode:    fs.ModeDir,
@@ -745,7 +750,7 @@ func (bfs *FileIO) Stat(path string) (fs.FileInfo, error) {
 	}
 
 	iter := bfs.List(&blob.ListOptions{Prefix: prefix})
-	if obj, listErr := iter.Next(bfs.ctx); listErr == nil {
+	if obj, listErr := iter.Next(ctx); listErr == nil {
 		return blobFileInfo{
 			name: directoryName(key),
 			mode: fs.ModeDir,
@@ -760,6 +765,10 @@ func (bfs *FileIO) Stat(path string) (fs.FileInfo, error) {
 
 // Rename renames one file from oldpath to newpath, replacing newpath if it already exists.
 func (bfs *FileIO) Rename(ctx context.Context, oldpath, newpath string) error {
+	if err := ctx.Err(); err != nil {
+		return &fs.PathError{Op: "Rename", Path: oldpath, Err: err}
+	}
+
 	oldKey, err := bfs.preprocess(oldpath)
 	if err != nil {
 		return &fs.PathError{Op: "Rename", Path: oldpath, Err: err}
@@ -773,6 +782,9 @@ func (bfs *FileIO) Rename(ctx context.Context, oldpath, newpath string) error {
 	if err := bfs.Copy(ctx, newKey, oldKey, nil); err != nil {
 		return blobErrToFsErr("Rename", oldpath, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return &fs.PathError{Op: "Rename", Path: oldpath, Err: err}
+	}
 
 	if err := bfs.Delete(ctx, oldKey); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
 		return blobErrToFsErr("Rename", oldpath, err)
@@ -781,59 +793,16 @@ func (bfs *FileIO) Rename(ctx context.Context, oldpath, newpath string) error {
 	return nil
 }
 
-// pathExists reports whether path exists as a file or directory using ctx for
-// every object-store request. It mirrors Stat's path checks without creating a
-// FileInfo, so RenameNoReplace can honor its operation context.
-func (bfs *FileIO) pathExists(ctx context.Context, path string) (bool, error) {
-	key, err := bfs.preprocess(path)
-	if err != nil {
-		return false, &fs.PathError{Op: "Stat", Path: path, Err: err}
-	}
-
-	if strings.HasSuffix(key, "/") {
-		if _, markerErr := bfs.Attributes(ctx, key); markerErr == nil {
-			return true, nil
-		} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
-			return false, blobErrToFsErr("Stat", path, markerErr)
-		}
-	}
-
-	if _, err := bfs.Attributes(ctx, key); err == nil {
-		return true, nil
-	} else if gcerrors.Code(err) != gcerrors.NotFound {
-		return false, blobErrToFsErr("Stat", path, err)
-	}
-
-	marker := directoryMarker(key)
-	if marker != "" {
-		if _, markerErr := bfs.Attributes(ctx, marker); markerErr == nil {
-			return true, nil
-		} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
-			return false, blobErrToFsErr("Stat", path, markerErr)
-		}
-	}
-
-	prefix := marker
-	if prefix == "" {
-		prefix = key
-	}
-
-	iter := bfs.List(&blob.ListOptions{Prefix: prefix})
-	if _, err := iter.Next(ctx); err == nil {
-		return true, nil
-	} else if err != io.EOF {
-		return false, blobErrToFsErr("Stat", path, err)
-	}
-
-	return false, nil
-}
-
 // RenameNoReplace renames one file/object (non-recursive) from oldpath to newpath, returning an error if newpath already exists.
 func (bfs *FileIO) RenameNoReplace(ctx context.Context, oldpath, newpath string) error {
-	if exists, err := bfs.pathExists(ctx, newpath); err != nil {
-		return err
-	} else if exists {
+	if err := ctx.Err(); err != nil {
+		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: err}
+	}
+
+	if _, err := bfs.stat(ctx, newpath); err == nil {
 		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: fs.ErrExist}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 
 	return bfs.Rename(ctx, oldpath, newpath)
