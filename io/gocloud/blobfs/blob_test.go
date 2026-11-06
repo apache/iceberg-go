@@ -1002,6 +1002,10 @@ func TestBlobFileIOMkdirAllUsesOperationContext(t *testing.T) {
 	cancel()
 	err := bfs.MkdirAll(opCtx, "s3://test-bucket/canceled/nested")
 	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "mkdir", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/canceled/nested", pathErr.Path)
 	for _, key := range []string{"canceled/", "canceled/nested/"} {
 		exists, err := bucket.Exists(ctx, key)
 		require.NoError(t, err)
@@ -1154,6 +1158,10 @@ func TestBlobFileIORemoveAllUsesOperationContext(t *testing.T) {
 	cancel()
 	err := bfs.RemoveAll(opCtx, "s3://test-bucket/data")
 	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "RemoveAll", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/data", pathErr.Path)
 	exists, err := bucket.Exists(ctx, "data/file.parquet")
 	require.NoError(t, err)
 	assert.True(t, exists)
