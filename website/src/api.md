@@ -359,6 +359,41 @@ newTbl, err = tbl.Overwrite(ctx, recordReader, nil,
 
 `OverwriteTable` is the `arrow.Table` variant.
 
+### Dynamic partition overwrite
+
+Replace only the partitions present in the incoming data. Unlike a filtered
+row-level overwrite, this removes **all existing data files** in those partitions
+while retaining files in other partitions.
+
+```go
+// Write Arrow record batches, replacing only partitions receiving new rows.
+newTbl, err := tbl.DynamicPartitionOverwrite(ctx, recordReader, nil)
+
+// In-memory Arrow tables work too.
+newTbl, err = tbl.DynamicPartitionOverwriteTable(ctx, arrowTbl, 1024, nil)
+
+// Or commit already-written Iceberg DataFile metadata through a transaction.
+txn := tbl.NewTransaction()
+err = txn.DynamicPartitionOverwriteDataFiles(ctx, newDataFiles, nil)
+if err == nil {
+    newTbl, err = txn.Commit(ctx)
+}
+```
+
+This supports Iceberg format v1-v3. Incoming files must use the current
+partition spec. On partitioned tables, files under older specs are preserved;
+only matching current-spec partitions are replaced. If the current spec is
+unpartitioned, non-empty input replaces all live files, including files under
+older specs. For v3, replacement also removes deletion vectors tied to
+replaced data files. Empty input leaves the table untouched.
+
+A concurrent add or removal in a replaced partition fails validation, while
+independent changes to other partitions can be retried after a catalog refresh.
+A new target branch also pins the source branch to prevent missing concurrent
+writes. Default partition-spec and sort-order changes fail validation. Written
+data files are not automatically cleaned up if staging or commit fails, so
+callers must handle those files before retrying with a new transaction.
+
 ### Delete
 
 ```go
