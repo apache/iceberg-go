@@ -433,7 +433,9 @@ func TestDynamicPartitionOverwriteKeepsDeleteForSurvivingOldSpecData(t *testing.
 	var dataPaths []string
 	for df, err := range updated.CurrentSnapshot().dataFiles(ctx, fs, nil) {
 		require.NoError(t, err)
-		dataPaths = append(dataPaths, df.FilePath())
+		if df.ContentType() == iceberg.EntryContentData {
+			dataPaths = append(dataPaths, df.FilePath())
+		}
 	}
 	require.ElementsMatch(t, []string{oldData.FilePath(), replacement.FilePath()}, dataPaths)
 
