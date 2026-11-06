@@ -449,6 +449,33 @@ if err := us.Commit(); err != nil { /* ... */ }
 
 Available transforms (root `iceberg` package): `IdentityTransform{}`, `YearTransform{}`, `MonthTransform{}`, `DayTransform{}`, `HourTransform{}`, `BucketTransform{NumBuckets: N}`, `TruncateTransform{Width: W}`.
 
+### Sort order evolution
+
+Use the transaction builder to replace the full default sort order. It binds column names against the transaction's staged schema. An empty builder resets the order to unsorted:
+
+~~~go
+txn := tbl.NewTransaction()
+builder := txn.NewReplaceSortOrder(true).
+    Asc("event_time", table.NullsLast).
+    AddField("user_id", iceberg.BucketTransform{NumBuckets: 16}, table.SortASC, table.NullsFirst)
+if err := builder.Commit(); err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+~~~
+
+Call `Transaction.ReplaceSortOrder` directly when you already have a `table.SortOrder`, such as one built from field IDs:
+
+~~~go
+order, err := table.NewSortOrder(1, []table.SortField{{
+    SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
+    Direction: table.SortASC, NullOrder: table.NullsFirst,
+}})
+if err != nil { /* ... */ }
+if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
+~~~
+
+The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.
+
 ## Snapshots and refs
 
 ### Inspecting

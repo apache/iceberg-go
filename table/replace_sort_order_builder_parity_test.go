@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -53,6 +54,16 @@ func TestReplaceSortOrderBuilderMatchesDirectReplacement(t *testing.T) {
 				return txn.NewReplaceSortOrder(true).Asc("id", table.NullsFirst)
 			},
 			wantOrderID: 1, wantOrderCount: 2, wantUpdates: 2,
+		},
+		{
+			name: "second new order",
+			prepare: func(t *testing.T, txn *table.Transaction) {
+				require.NoError(t, txn.ReplaceSortOrder(sortOrderOf(t, byID)))
+			},
+			build: func(txn *table.Transaction) *table.ReplaceSortOrderBuilder {
+				return txn.NewReplaceSortOrder(true).Desc("id", table.NullsLast)
+			},
+			wantOrderID: 2, wantOrderCount: 3, wantUpdates: 4,
 		},
 		{
 			name: "current order is a no-op",
@@ -130,7 +141,11 @@ func TestReplaceSortOrderBuilderMatchesDirectReplacement(t *testing.T) {
 			require.NoError(t, err)
 			builderCommit, err := withBuilder.TableCommit()
 			require.NoError(t, err)
-			require.Equal(t, directCommit.Updates, builderCommit.Updates)
+			directUpdates, err := json.Marshal(directCommit.Updates)
+			require.NoError(t, err)
+			builderUpdates, err := json.Marshal(builderCommit.Updates)
+			require.NoError(t, err)
+			require.JSONEq(t, string(directUpdates), string(builderUpdates))
 			require.Equal(t, directCommit.Requirements, builderCommit.Requirements)
 			if tc.wantUpdates > 0 {
 				require.Len(t, builderCommit.Updates, tc.wantUpdates)

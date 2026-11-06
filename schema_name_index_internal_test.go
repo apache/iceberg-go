@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"errors"
 	"reflect"
 	"strconv"
 	"strings"
@@ -115,6 +116,21 @@ func TestIndexByNameDeepSiblingRestoration(t *testing.T) {
 	}
 	if got := byID[34]; got != "sibling" {
 		t.Errorf("sibling name = %q, want sibling", got)
+	}
+}
+
+func TestLazyNameToIDLowerRejectsCaseInsensitiveCollisions(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "ID", Type: PrimitiveTypes.Int64},
+		NestedField{ID: 2, Name: "id", Type: PrimitiveTypes.Int64},
+	)
+
+	_, err := schema.lazyNameToIDLower()
+	if !errors.Is(err, ErrInvalidSchema) {
+		t.Fatalf("lazyNameToIDLower() error = %v, want ErrInvalidSchema", err)
+	}
+	if _, ok := schema.FindFieldByNameCaseInsensitive("id"); ok {
+		t.Fatal("FindFieldByNameCaseInsensitive() resolved an ambiguous name")
 	}
 }
 

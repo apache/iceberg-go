@@ -19,7 +19,6 @@ package table
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/apache/iceberg-go"
 )
@@ -54,17 +53,23 @@ func NewReplaceSortOrderBuilder(t *Transaction, caseSensitive bool) *ReplaceSort
 }
 
 // Asc adds a column sorted in ascending order with the requested null ordering.
+// Go writers currently support only top-level sort columns; appending data with
+// a nested-field sort order fails until the order is replaced.
 func (u *ReplaceSortOrderBuilder) Asc(column string, nullOrder NullOrder) *ReplaceSortOrderBuilder {
 	return u.AddField(column, iceberg.IdentityTransform{}, SortASC, nullOrder)
 }
 
 // Desc adds a column sorted in descending order with the requested null ordering.
+// Go writers currently support only top-level sort columns; appending data with
+// a nested-field sort order fails until the order is replaced.
 func (u *ReplaceSortOrderBuilder) Desc(column string, nullOrder NullOrder) *ReplaceSortOrderBuilder {
 	return u.AddField(column, iceberg.IdentityTransform{}, SortDESC, nullOrder)
 }
 
 // AddField adds a transformed sort field. A nil or incompatible transform is
-// rejected when the replacement is applied or committed.
+// rejected when the replacement is applied or committed. Go writers currently
+// support only top-level sort columns; appending data with a nested-field sort
+// order fails until the order is replaced.
 func (u *ReplaceSortOrderBuilder) AddField(column string, transform iceberg.Transform, direction SortDirection, nullOrder NullOrder) *ReplaceSortOrderBuilder {
 	u.fields = append(u.fields, sortOrderColumn{
 		name: column, transform: transform,
@@ -78,7 +83,11 @@ func (u *ReplaceSortOrderBuilder) AddField(column string, transform iceberg.Tran
 // without modifying the transaction. An equivalent historical order reuses
 // its existing ID.
 func (u *ReplaceSortOrderBuilder) Apply() (SortOrder, error) {
-	meta, err := u.stagedMetadata()
+	if u == nil {
+		return SortOrder{}, fmt.Errorf("%w: sort order replacement builder is nil", ErrInvalidMetadata)
+	}
+
+	meta, err := u.txn.txnMeta()
 	if err != nil {
 		return SortOrder{}, err
 	}
@@ -86,43 +95,12 @@ func (u *ReplaceSortOrderBuilder) Apply() (SortOrder, error) {
 	return u.buildOrder(meta)
 }
 
-func (u *ReplaceSortOrderBuilder) stagedMetadata() (Metadata, error) {
-	if u == nil {
-		return nil, fmt.Errorf("%w: sort order replacement builder is nil", ErrInvalidMetadata)
-	}
-
-	builder, err := u.txn.txnMeta()
-	if err != nil {
-		return nil, err
-	}
-
-	return builder.Build()
-}
-
-func (u *ReplaceSortOrderBuilder) buildOrder(meta Metadata) (SortOrder, error) {
+func (u *ReplaceSortOrderBuilder) buildOrder(meta *MetadataBuilder) (SortOrder, error) {
 	if len(u.fields) == 0 {
 		return UnsortedSortOrder, nil
 	}
 
 	schema := meta.CurrentSchema()
-	var lowerNameToID map[string]int
-	if !u.caseSensitive {
-		// Java's case-insensitive schema index rejects names that differ only
-		// in case. The generic Go lookup currently overwrites such entries in
-		// map iteration order, so do not use it for a metadata-changing API.
-		byName, err := iceberg.IndexByName(schema)
-		if err != nil {
-			return SortOrder{}, err
-		}
-		lowerNameToID = make(map[string]int, len(byName))
-		for name, id := range byName {
-			lower := strings.ToLower(name)
-			if previous, exists := lowerNameToID[lower]; exists && previous != id {
-				return SortOrder{}, fmt.Errorf("%w: ambiguous case-insensitive sort column %q", iceberg.ErrInvalidSchema, lower)
-			}
-			lowerNameToID[lower] = id
-		}
-	}
 	fields := make([]SortField, 0, len(u.fields))
 	for _, col := range u.fields {
 		if col.transform == nil {
@@ -139,8 +117,8 @@ func (u *ReplaceSortOrderBuilder) buildOrder(meta Metadata) (SortOrder, error) {
 		var found bool
 		if u.caseSensitive {
 			field, found = schema.FindFieldByName(col.name)
-		} else if id, ok := lowerNameToID[strings.ToLower(col.name)]; ok {
-			field, found = schema.FindFieldByID(id)
+		} else {
+			field, found = schema.FindFieldByNameCaseInsensitive(col.name)
 		}
 		if !found {
 			return SortOrder{}, fmt.Errorf("cannot bind sort field %q: %w", col.name, iceberg.ErrInvalidSchema)
@@ -169,15 +147,9 @@ func (u *ReplaceSortOrderBuilder) buildOrder(meta Metadata) (SortOrder, error) {
 		return SortOrder{}, err
 	}
 
-	nextID := InitialSortOrderID
-	for _, previous := range meta.SortOrders() {
-		if sameSortFields(previous, proposed) {
-			return previous, nil
-		}
-		nextID = max(nextID, previous.OrderID()+1)
-	}
+	proposed.orderID = meta.reuseOrCreateNewSortOrderID(&proposed)
 
-	return NewSortOrder(nextID, fields)
+	return proposed, nil
 }
 
 // Commit stages this replacement in the transaction. It is a no-op if the

@@ -240,7 +240,11 @@ func TestReplaceSortOrderBuilderRejectsInvalidFieldsWithoutStaging(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			txn := testNonPartitionedTable.NewTransaction()
-			err := tt.build(txn).Commit()
+			builder := tt.build(txn)
+			_, err := builder.Apply()
+			require.ErrorContains(t, err, tt.errorText)
+
+			err = builder.Commit()
 			require.ErrorContains(t, err, tt.errorText)
 			commit, err := txn.TableCommit()
 			require.NoError(t, err)
@@ -285,8 +289,8 @@ func TestReplaceSortOrderBuilderWithStagedSchema(t *testing.T) {
 	require.NotEmpty(t, commit.Updates)
 }
 
-// Java rejects a case-insensitive name index if two distinct field IDs differ
-// only in case. Do not silently select either field based on Go map iteration.
+// Case-insensitive lookups reject a name index if distinct field IDs differ
+// only in case, instead of selecting one based on Go map iteration.
 func TestReplaceSortOrderBuilderRejectsAmbiguousCaseInsensitiveNames(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ID", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -304,7 +308,7 @@ func TestReplaceSortOrderBuilderRejectsAmbiguousCaseInsensitiveNames(t *testing.
 			builder := txn.NewReplaceSortOrder(false).Asc(name, table.NullsFirst)
 			_, err := builder.Apply()
 			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-			require.ErrorContains(t, err, "ambiguous case-insensitive sort column")
+			require.ErrorContains(t, err, "cannot bind sort field")
 			require.ErrorIs(t, builder.Commit(), iceberg.ErrInvalidSchema)
 
 			commit, err := txn.TableCommit()

@@ -120,3 +120,34 @@ func TestReplaceSortOrderReusesHistoricalOrderInTransaction(t *testing.T) {
 	require.Equal(t, 1, staged.Metadata().DefaultSortOrder())
 	require.Len(t, staged.Metadata().SortOrders(), 3)
 }
+
+func TestReplaceSortOrderRejectsIncompatibleHistoricalOrder(t *testing.T) {
+	byID := table.SortField{
+		SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
+		Direction: table.SortASC, NullOrder: table.NullsFirst,
+	}
+	byName := table.SortField{
+		SourceIDs: []int{2}, Transform: iceberg.IdentityTransform{},
+		Direction: table.SortDESC, NullOrder: table.NullsLast,
+	}
+	txn := testNonPartitionedTable.NewTransaction()
+	require.NoError(t, txn.ReplaceSortOrder(sortOrderOf(t, byID)))
+	require.NoError(t, txn.ReplaceSortOrder(sortOrderOf(t, byName)))
+	require.NoError(t, txn.UpdateSchema(true, false).DeleteColumn([]string{"id"}).Commit())
+
+	before, err := txn.TableCommit()
+	require.NoError(t, err)
+	err = txn.ReplaceSortOrder(sortOrderOf(t, byID))
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+	after, err := txn.TableCommit()
+	require.NoError(t, err)
+	beforeUpdates, err := json.Marshal(before.Updates)
+	require.NoError(t, err)
+	afterUpdates, err := json.Marshal(after.Updates)
+	require.NoError(t, err)
+	require.JSONEq(t, string(beforeUpdates), string(afterUpdates))
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	require.Equal(t, 2, staged.Metadata().DefaultSortOrder())
+}

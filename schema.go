@@ -245,7 +245,11 @@ func (s *Schema) lazyNameToIDLower() (map[string]int, error) {
 
 	out := make(map[string]int)
 	for k, v := range idx {
-		out[strings.ToLower(k)] = v
+		lower := strings.ToLower(k)
+		if previous, exists := out[lower]; exists && previous != v {
+			return nil, fmt.Errorf("%w: ambiguous case-insensitive field name %q", ErrInvalidSchema, lower)
+		}
+		out[lower] = v
 	}
 
 	s.nameToIDLower.Store(&out)

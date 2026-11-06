@@ -641,16 +641,15 @@ func (t *Transaction) ReplaceSortOrder(order SortOrder) error {
 	}
 
 	reqs := []Requirement{AssertDefaultSortOrderID(t.tbl.Metadata().DefaultSortOrder())}
-	for _, previous := range meta.sortOrderList {
-		if sameSortFields(previous, order) {
-			if err := order.CheckCompatibility(meta.CurrentSchema()); err != nil {
-				return err
-			}
-
-			// Reuse a concrete ID: -1 could refer to a different order added
-			// earlier in this transaction.
-			return t.apply([]Update{NewSetDefaultSortOrderUpdate(previous.OrderID())}, reqs)
+	orderID := meta.reuseOrCreateNewSortOrderID(&order)
+	if previous, err := meta.GetSortOrderByID(orderID); err == nil {
+		if err := order.CheckCompatibility(meta.CurrentSchema()); err != nil {
+			return err
 		}
+
+		// Reuse a concrete ID: -1 could refer to a different order added
+		// earlier in this transaction.
+		return t.apply([]Update{NewSetDefaultSortOrderUpdate(previous.OrderID())}, reqs)
 	}
 
 	return t.apply([]Update{NewAddSortOrderUpdate(&order), NewSetDefaultSortOrderUpdate(-1)}, reqs)
