@@ -72,7 +72,7 @@ func (t *Transaction) dynamicOverwriteSpec() (*iceberg.PartitionSpec, error) {
 // transformed and null partitions cannot become false-negative row predicates.
 // It rejects concurrent additions and removals in touched partitions while
 // allowing unrelated partition appends during refresh-and-replay.
-func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, touched map[string]struct{}) error {
+func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, unpartitioned bool, touched map[string]struct{}) error {
 	if cc == nil || len(cc.concurrent) == 0 {
 		return nil
 	}
@@ -94,7 +94,7 @@ func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, touched 
 				if file.ContentType() != iceberg.EntryContentData {
 					conflict = ErrConflictingDeleteFiles
 				}
-				if int(file.SpecID()) != specID {
+				if !unpartitioned && int(file.SpecID()) != specID {
 					continue
 				}
 				key, err := canonicalPartitionKey(file.SpecID(), dataFilePartition(file))
@@ -117,7 +117,8 @@ func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, touched 
 // unpartitioned table has one partition. New partitions still use OpOverwrite.
 //
 // Added files must use the table's current partition spec; existing live files
-// under older specs are preserved. Supports v1-v3, including v3 row lineage
+// under older specs are preserved unless the current spec is unpartitioned,
+// in which case all existing files are replaced. Supports v1-v3, including v3 row lineage
 // and associated deletion vectors. On v3, a new data file may omit first_row_id
 // and inherit it from its manifest.
 // Concurrent writes to touched partitions fail while independent appends to
@@ -178,6 +179,9 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 		return err
 	}
 	var toDelete, deleteFilesToRemove []iceberg.DataFile
+	unpartitioned := spec.IsUnpartitioned()
+	survivingDataPaths := make(map[string]struct{})
+	var hasSurvivingOldSpecData bool
 	validationPlan := newPartitionValidationPlan(spec)
 	if snapshot := t.planningSnapshot(t.meta); snapshot != nil {
 		for df, err := range snapshot.dataFiles(ctx, fs, nil) {
@@ -194,24 +198,40 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 				continue
 			}
 			if int(df.SpecID()) != spec.ID() {
-				continue
-			}
-			if err := validationPlan.validate(df); err != nil {
+				if !unpartitioned {
+					survivingDataPaths[df.FilePath()] = struct{}{}
+					hasSurvivingOldSpecData = true
+
+					continue
+				}
+			} else if err := validationPlan.validate(df); err != nil {
 				return fmt.Errorf("%w: invalid live partition in file %q: %w",
 					ErrInvalidOperation, df.FilePath(), err)
 			}
+
+			// A current unpartitioned spec represents the whole table, even
+			// when existing files were written under older partition specs.
+			if unpartitioned {
+				toDelete = append(toDelete, df)
+
+				continue
+			}
+
 			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
 				return fmt.Errorf("dynamic partition overwrite live file %q: %w", df.FilePath(), err)
 			}
 			if _, touched := keys[key]; touched {
 				toDelete = append(toDelete, df)
+			} else {
+				survivingDataPaths[df.FilePath()] = struct{}{}
 			}
 		}
 
-		// A replaced partition has no surviving data that its old equality
-		// or position deletes should affect. Deletion vectors are tied to a
-		// particular data file and are removed separately with that file.
+		// A replaced partition has no surviving current-spec data that
+		// its old deletes should affect. Preserve deletes that can still
+		// target surviving files under an older spec. Deletion vectors are
+		// removed separately with their referenced data files.
 		for entry, err := range snapshot.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 			if err != nil {
 				return fmt.Errorf("dynamic partition overwrite: read delete files: %w", err)
@@ -224,6 +244,21 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 				return fmt.Errorf("%w: added file %q already exists as a delete file", ErrInvalidOperation, df.FilePath())
 			}
 			if IsDeletionVector(df) {
+				continue
+			}
+			if unpartitioned {
+				deleteFilesToRemove = append(deleteFilesToRemove, df)
+
+				continue
+			}
+			if ref := df.ReferencedDataFile(); ref != nil && *ref != "" {
+				if _, survives := survivingDataPaths[*ref]; survives {
+					continue
+				}
+			} else if df.ContentType() == iceberg.EntryContentPosDeletes && hasSurvivingOldSpecData {
+				// V2 manifests do not carry referenced_data_file. A position
+				// delete may still target an old-spec file, so do not discard
+				// it while any such data file survives.
 				continue
 			}
 			if int(df.SpecID()) != spec.ID() {
@@ -304,7 +339,7 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 		return err
 	}
 	t.validators = append(t.validators, func(cc *conflictContext) error {
-		return validateDynamicOverwriteConflicts(cc, spec.ID(), keys)
+		return validateDynamicOverwriteConflicts(cc, spec.ID(), unpartitioned, keys)
 	})
 
 	return nil

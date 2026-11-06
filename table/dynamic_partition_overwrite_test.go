@@ -336,6 +336,117 @@ func TestDynamicPartitionOverwriteKeepsLiveOldSpec(t *testing.T) {
 	require.Equal(t, []string{"file://old-spec-delete.parquet"}, liveDeletes)
 }
 
+
+func TestDynamicPartitionOverwriteUnpartitionedAfterSpecEvolution(t *testing.T) {
+	ctx := t.Context()
+	oldSpec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, oldSpec)
+	oldData := newTestDataFile(t, oldSpec, "file://old-spec.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, seed.AddDataFiles(ctx, []iceberg.DataFile{oldData}, nil))
+	base, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	fsF := func(context.Context) (iceio.IO, error) { return fs, nil }
+	evolve := New(Identifier{"db", "tbl"}, base, "metadata.json", fsF, nil).NewTransaction()
+	emptySpec := iceberg.NewPartitionSpec()
+	require.NoError(t, evolve.meta.AddPartitionSpec(&emptySpec, false))
+	require.NoError(t, evolve.meta.SetDefaultSpecID(-1))
+	evolved, err := evolve.meta.Build()
+	require.NoError(t, err)
+	currentSpec := evolved.PartitionSpec()
+	require.True(t, currentSpec.IsUnpartitioned())
+
+	// Equality deletes written with an unpartitioned spec are global.
+	builder, err := iceberg.NewDataFileBuilder(currentSpec, iceberg.EntryContentEqDeletes,
+		"file://global-delete.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 1)
+	require.NoError(t, err)
+	eqDelete := builder.EqualityFieldIDs([]int{1}).Build()
+	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
+	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(eqDelete).Commit(ctx))
+	withDelete, err := addDelete.meta.Build()
+	require.NoError(t, err)
+
+	overwrite := New(Identifier{"db", "tbl"}, withDelete, "metadata.json", fsF, nil).NewTransaction()
+	replacement := newTestDataFile(t, currentSpec, "file://replacement.parquet", nil)
+	require.NoError(t, overwrite.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil))
+	updated, err := overwrite.meta.Build()
+	require.NoError(t, err)
+
+	var dataPaths []string
+	for df, err := range updated.CurrentSnapshot().dataFiles(ctx, fs, nil) {
+		require.NoError(t, err)
+		dataPaths = append(dataPaths, df.FilePath())
+	}
+	require.Equal(t, []string{"file://replacement.parquet"}, dataPaths,
+		"unpartitioned overwrite must replace data under old specs too")
+
+	var deletePaths []string
+	for entry, err := range updated.CurrentSnapshot().entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
+		require.NoError(t, err)
+		deletePaths = append(deletePaths, entry.DataFile().FilePath())
+	}
+	require.Empty(t, deletePaths, "no global delete may survive a full-table replacement")
+}
+
+func TestDynamicPartitionOverwriteKeepsDeleteForSurvivingOldSpecData(t *testing.T) {
+	ctx := t.Context()
+	oldSpec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, oldSpec)
+	oldData := newTestDataFile(t, oldSpec, "file://old-spec.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, seed.AddDataFiles(ctx, []iceberg.DataFile{oldData}, nil))
+	base, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	fsF := func(context.Context) (iceio.IO, error) { return fs, nil }
+	evolve := New(Identifier{"db", "tbl"}, base, "metadata.json", fsF, nil).NewTransaction()
+	newSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1001, Name: "id_bucket", Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	require.NoError(t, evolve.meta.AddPartitionSpec(&newSpec, false))
+	require.NoError(t, evolve.meta.SetDefaultSpecID(-1))
+	evolved, err := evolve.meta.Build()
+	require.NoError(t, err)
+	currentSpec := evolved.PartitionSpec()
+	var fieldID int
+	for _, field := range currentSpec.Fields() {
+		fieldID = field.FieldID
+
+		break
+	}
+	require.NotZero(t, fieldID)
+	nullPartition := map[int]any{fieldID: nil}
+
+	// A v2 position delete can target an old-spec data file even if its
+	// manifest stores it under a new partition tuple with a null value.
+	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
+		nullPartition, oldData.FilePath())
+	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
+	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
+	withDelete, err := addDelete.meta.Build()
+	require.NoError(t, err)
+
+	overwrite := New(Identifier{"db", "tbl"}, withDelete, "metadata.json", fsF, nil).NewTransaction()
+	replacement := newTestDataFile(t, currentSpec, "file://new-spec.parquet", nullPartition)
+	require.NoError(t, overwrite.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil))
+	updated, err := overwrite.meta.Build()
+	require.NoError(t, err)
+
+	var dataPaths []string
+	for df, err := range updated.CurrentSnapshot().dataFiles(ctx, fs, nil) {
+		require.NoError(t, err)
+		dataPaths = append(dataPaths, df.FilePath())
+	}
+	require.ElementsMatch(t, []string{oldData.FilePath(), replacement.FilePath()}, dataPaths)
+
+	var deletePaths []string
+	for entry, err := range updated.CurrentSnapshot().entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
+		require.NoError(t, err)
+		deletePaths = append(deletePaths, entry.DataFile().FilePath())
+	}
+	require.Equal(t, []string{posDelete.FilePath()}, deletePaths,
+		"deletes for surviving old-spec data must not be dropped")
+}
+
 func TestDynamicPartitionOverwriteWithoutAutoNameMapping(t *testing.T) {
 	ctx := t.Context()
 	spec := partitionedSpec()
