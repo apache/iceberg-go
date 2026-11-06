@@ -975,6 +975,138 @@ func TestBlobFileIOStat(t *testing.T) {
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
+func TestBlobFileIORename(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/destination.parquet", []byte("old destination"), nil))
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	require.NoError(t, bfs.Rename(ctx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet"))
+
+	data, err := bucket.ReadAll(ctx, "data/destination.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("source"), data)
+	exists, err := bucket.Exists(ctx, "data/source.parquet")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestBlobFileIORenameUsesOperationContext(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+	require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	opCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err := bfs.Rename(opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet")
+	require.ErrorIs(t, err, context.Canceled)
+	exists, err := bucket.Exists(ctx, "data/source.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists)
+}
+
+func TestBlobFileIORenameNoReplace(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		targetKey    string
+		targetPath   string
+		existingKey  string
+		existingData []byte
+		moved        bool
+		wantErr      error
+	}{
+		{
+			name:       "moves when destination is missing",
+			targetKey:  "data/destination.parquet",
+			targetPath: "s3://test-bucket/data/destination.parquet",
+			moved:      true,
+		},
+		{
+			name:         "keeps existing destination file",
+			targetKey:    "data/destination.parquet",
+			targetPath:   "s3://test-bucket/data/destination.parquet",
+			existingKey:  "data/destination.parquet",
+			existingData: []byte("existing"),
+			wantErr:      fs.ErrExist,
+		},
+		{
+			name:         "treats implicit directory as existing",
+			targetKey:    "data/destination/child.parquet",
+			targetPath:   "s3://test-bucket/data/destination",
+			existingKey:  "data/destination/child.parquet",
+			existingData: []byte("child"),
+			wantErr:      fs.ErrExist,
+		},
+		{
+			name:        "treats directory marker as existing",
+			targetKey:   "data/destination/",
+			targetPath:  "s3://test-bucket/data/destination",
+			existingKey: "data/destination/",
+			wantErr:     fs.ErrExist,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			bucket := memblob.OpenBucket(nil)
+			defer bucket.Close()
+			require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+			if tt.existingKey != "" {
+				require.NoError(t, bucket.WriteAll(ctx, tt.existingKey, tt.existingData, nil))
+			}
+			bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+			err := bfs.RenameNoReplace(ctx, "s3://test-bucket/data/source.parquet", tt.targetPath)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			sourceExists, err := bucket.Exists(ctx, "data/source.parquet")
+			require.NoError(t, err)
+			assert.Equal(t, !tt.moved, sourceExists)
+			if tt.moved {
+				data, err := bucket.ReadAll(ctx, tt.targetKey)
+				require.NoError(t, err)
+				assert.Equal(t, []byte("source"), data)
+			} else if tt.existingData != nil {
+				data, err := bucket.ReadAll(ctx, tt.existingKey)
+				require.NoError(t, err)
+				assert.Equal(t, tt.existingData, data)
+			} else {
+				exists, err := bucket.Exists(ctx, tt.existingKey)
+				require.NoError(t, err)
+				assert.True(t, exists)
+			}
+		})
+	}
+}
+
+func TestBlobFileIORenameNoReplaceUsesOperationContext(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+	require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/destination.parquet", []byte("existing"), nil))
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	opCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err := bfs.RenameNoReplace(opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet")
+	require.ErrorIs(t, err, context.Canceled)
+	sourceExists, err := bucket.Exists(ctx, "data/source.parquet")
+	require.NoError(t, err)
+	assert.True(t, sourceExists)
+	destination, err := bucket.ReadAll(ctx, "data/destination.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("existing"), destination)
+}
+
 func TestBlobFileIOMkdirAll(t *testing.T) {
 	ctx := context.Background()
 	bucket := memblob.OpenBucket(nil)

@@ -192,7 +192,9 @@ type StatIO interface {
 type RenameIO interface {
 	IO
 
-	Rename(oldpath, newpath string) error
+	// Rename moves one file or object from oldpath to newpath. The context
+	// controls the operation where the implementation supports cancellation.
+	Rename(ctx context.Context, oldpath, newpath string) error
 }
 
 // RenameNoReplaceIO is an extension of IO interface that includes the
@@ -203,7 +205,9 @@ type RenameIO interface {
 type RenameNoReplaceIO interface {
 	IO
 
-	RenameNoReplace(oldpath, newpath string) error
+	// RenameNoReplace moves one file or object only if newpath does not exist.
+	// The context controls the operation where the implementation supports cancellation.
+	RenameNoReplace(ctx context.Context, oldpath, newpath string) error
 }
 
 // RemoveAllIO is an extension of IO interface that includes the RemoveAll

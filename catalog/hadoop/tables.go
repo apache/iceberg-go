@@ -266,7 +266,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 	cleanupCtx := context.WithoutCancel(ctx)
 	claimPath := c.metadataVersionClaimPath(ident, version)
 	for {
-		if err := c.filesystem.RenameNoReplace(tempPath, claimPath); err != nil {
+		if err := c.filesystem.RenameNoReplace(ctx, tempPath, claimPath); err != nil {
 			if !errors.Is(err, fs.ErrExist) {
 				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
@@ -333,7 +333,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 			conflictErr, strings.Join(ident, "."), existingPath)
 	}
 
-	if err := c.filesystem.RenameNoReplace(claimPath, metaPath); err != nil {
+	if err := c.filesystem.RenameNoReplace(ctx, claimPath, metaPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 				conflictErr, strings.Join(ident, "."), metaPath)
