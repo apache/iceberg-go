@@ -474,6 +474,8 @@ if err != nil { /* ... */ }
 if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
 ~~~
 
+Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.
+
 The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.
 
 ## Snapshots and refs
