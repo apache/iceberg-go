@@ -18,6 +18,7 @@
 package internal
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"slices"
@@ -267,9 +268,12 @@ func appendLiteralToVariant(b *variant.Builder, it iceberg.PrimitiveType, lit ic
 	case iceberg.BooleanType:
 		return b.AppendBool(lit.Any().(bool))
 	case iceberg.Int32Type:
-		return b.AppendInt(int64(lit.Any().(int32)))
+		// AppendInt picks the smallest width; bounds must keep the column's width.
+		return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint32(
+			[]byte{byte(variant.PrimitiveInt32) << 2}, uint32(lit.Any().(int32))))
 	case iceberg.Int64Type:
-		return b.AppendInt(lit.Any().(int64))
+		return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint64(
+			[]byte{byte(variant.PrimitiveInt64) << 2}, uint64(lit.Any().(int64))))
 	case iceberg.Float32Type:
 		return b.AppendFloat32(lit.Any().(float32))
 	case iceberg.Float64Type:
