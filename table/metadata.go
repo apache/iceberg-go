@@ -1851,8 +1851,8 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 // lastEmittedSortOrderIDIs reports whether the latest add-sort-order
 // update added orderID. A reused order may not be the last serialized add.
 func (b *MetadataBuilder) lastEmittedSortOrderIDIs(orderID int) bool {
-	for i := len(b.updates) - 1; i >= 0; i-- {
-		if add, ok := b.updates[i].(*addSortOrderUpdate); ok {
+	for _, update := range slices.Backward(b.updates) {
+		if add, ok := update.(*addSortOrderUpdate); ok {
 			return add.SortOrder.OrderID() == orderID
 		}
 	}
