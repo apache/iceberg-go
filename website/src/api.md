@@ -465,6 +465,31 @@ for _, s := range tbl.Metadata().Snapshots() {
 }
 ```
 
+### Comparing physical files between snapshots (v1-v3)
+
+Use `tbl.Inspect().DiffSnapshotFiles` to compare the live content files
+referenced by two snapshot IDs, including snapshots on different branches:
+
+```go
+diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+if err != nil {
+    return err
+}
+for _, file := range diff.AddedDataFiles {
+    fmt.Println("added:", file.FilePath())
+}
+```
+
+The result also includes removed data files and added/removed delete files,
+including positional deletes, equality deletes, and v3 deletion vectors.
+Shared immutable manifests are skipped. Entries are read with a minimal
+projection, so returned files do not contain complete column statistics and
+must **not** be passed to a `ManifestWriter`. This compares **physical files**,
+not logical row changes.
+
+See the [Iceberg snapshot specification](https://iceberg.apache.org/spec/#snapshots)
+and [manifest specification](https://iceberg.apache.org/spec/#manifests).
+
 ### Branches and tags
 
 The CLI's `branch create` and `tag create` commands ([CLI](./cli.md)) are the most ergonomic surface today. Programmatically, ref creation goes through `Catalog.CommitTable` with a `SetSnapshotRef` update:
