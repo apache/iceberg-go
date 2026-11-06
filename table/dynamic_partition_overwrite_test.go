@@ -336,7 +336,6 @@ func TestDynamicPartitionOverwriteKeepsLiveOldSpec(t *testing.T) {
 	require.Equal(t, []string{"file://old-spec-delete.parquet"}, liveDeletes)
 }
 
-
 func TestDynamicPartitionOverwriteUnpartitionedAfterSpecEvolution(t *testing.T) {
 	ctx := t.Context()
 	oldSpec := partitionedSpec()
