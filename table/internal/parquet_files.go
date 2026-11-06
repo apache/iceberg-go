@@ -517,6 +517,8 @@ type ParquetFileWriter struct {
 	geoCols          []geoColumn
 	geoNormalizeCols []int
 	geoAccs          map[int]*geoBoundsAccumulator
+	nanCols          []nanColumn
+	nanCounts        map[int]int64
 	arrowSchema      *arrow.Schema
 	rowGroupBytes    int64
 }
@@ -671,6 +673,12 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		geoAccs[gc.fieldID] = newGeoBoundsAccumulator(isGeog)
 	}
 
+	nanCols := collectNaNColumns(arrowSchema, colMapping, info.StatsCols)
+	nanCounts := make(map[int]int64, len(nanCols))
+	for _, nc := range nanCols {
+		nanCounts[nc.fieldID] = 0
+	}
+
 	return &ParquetFileWriter{
 		pqWriter:         writer,
 		counter:          counter,
@@ -685,6 +693,8 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		geoCols:          geoCols,
 		geoNormalizeCols: geoNormalizeCols,
 		geoAccs:          geoAccs,
+		nanCols:          nanCols,
+		nanCounts:        nanCounts,
 		arrowSchema:      arrowSchema,
 		rowGroupBytes:    rowGroupTargetSizeBytes,
 	}, nil
@@ -853,6 +863,10 @@ func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
 	}
 
 	if err := w.accumulateGeoBounds(writeBatch); err != nil {
+		return err
+	}
+
+	if err := w.countNaNs(writeBatch); err != nil {
 		return err
 	}
 
@@ -1306,6 +1320,118 @@ func accumulateWKBValues(acc *geoBoundsAccumulator, arr arrow.Array, lo, hi int)
 	return nil
 }
 
+// nanColumn locates a float or double leaf whose NaN values are counted during
+// the write: the position of its top-level column in the Arrow record batch,
+// the struct child index taken at each struct on the way down, and the Iceberg
+// field ID the count is recorded under.
+type nanColumn struct {
+	colIdx  int
+	path    []int
+	fieldID int
+}
+
+// collectNaNColumns finds the float and double leaves that get a NaN value
+// count. Parquet column statistics carry no NaN count, so it comes from the
+// written values. Like Java's MetricsUtil.createNanValueCounts, this skips
+// leaves inside a list or map and columns whose metrics mode is none.
+func collectNaNColumns(sc *arrow.Schema, colMapping map[string]int, statsCols map[int]StatisticsCollector) []nanColumn {
+	var result []nanColumn
+	for i, f := range sc.Fields() {
+		result = appendNaNColumns(result, f.Type, f.Name, i, nil, colMapping, statsCols)
+	}
+
+	return result
+}
+
+// appendNaNColumns walks dt through structs only and appends a nanColumn for
+// each float or double leaf. name is the Parquet column path used as the
+// colMapping key.
+func appendNaNColumns(result []nanColumn, dt arrow.DataType, name string, colIdx int, path []int, colMapping map[string]int, statsCols map[int]StatisticsCollector) []nanColumn {
+	switch t := dt.(type) {
+	case *arrow.Float32Type, *arrow.Float64Type:
+		fieldID, ok := colMapping[name]
+		if !ok {
+			return result
+		}
+		if sc, ok := statsCols[fieldID]; !ok || sc.Mode.Typ == MetricModeNone {
+			return result
+		}
+		result = append(result, nanColumn{colIdx: colIdx, path: slices.Clone(path), fieldID: fieldID})
+	case *arrow.StructType:
+		for i, f := range t.Fields() {
+			result = appendNaNColumns(result, f.Type, name+"."+f.Name, colIdx, append(path, i), colMapping, statsCols)
+		}
+	}
+
+	return result
+}
+
+// countNaNs adds the NaN values in this batch to the per-field counts. A value
+// under a null struct is not counted, since the row has no value there.
+func (w *ParquetFileWriter) countNaNs(batch arrow.RecordBatch) error {
+	for _, nc := range w.nanCols {
+		if nc.colIdx >= int(batch.NumCols()) {
+			return fmt.Errorf("float field %d: column %d missing from batch with %d columns",
+				nc.fieldID, nc.colIdx, batch.NumCols())
+		}
+
+		col := batch.Column(nc.colIdx)
+		n, err := countNaNValues(col, nc.path, 0, col.Len())
+		if err != nil {
+			return fmt.Errorf("float field %d: %w", nc.fieldID, err)
+		}
+		w.nanCounts[nc.fieldID] += n
+	}
+
+	return nil
+}
+
+func countNaNValues(arr arrow.Array, path []int, lo, hi int) (int64, error) {
+	var n int64
+	switch arr := arr.(type) {
+	case *array.Struct:
+		if len(path) == 0 || path[0] >= arr.NumField() {
+			return 0, fmt.Errorf("struct array %s does not match the float column path", arr.DataType())
+		}
+		child := arr.Field(path[0])
+		if arr.NullN() == 0 {
+			return countNaNValues(child, path[1:], lo, hi)
+		}
+		for i := lo; i < hi; i++ {
+			if arr.IsNull(i) {
+				continue
+			}
+			c, err := countNaNValues(child, path[1:], i, i+1)
+			if err != nil {
+				return 0, err
+			}
+			n += c
+		}
+	case *array.Float32:
+		if len(path) != 0 {
+			return 0, fmt.Errorf("%s array does not match the float column path", arr.DataType())
+		}
+		for i := lo; i < hi; i++ {
+			if arr.IsValid(i) && math.IsNaN(float64(arr.Value(i))) {
+				n++
+			}
+		}
+	case *array.Float64:
+		if len(path) != 0 {
+			return 0, fmt.Errorf("%s array does not match the float column path", arr.DataType())
+		}
+		for i := lo; i < hi; i++ {
+			if arr.IsValid(i) && math.IsNaN(arr.Value(i)) {
+				n++
+			}
+		}
+	default:
+		return 0, fmt.Errorf("unexpected %s array for a float column", arr.DataType())
+	}
+
+	return n, nil
+}
+
 // BytesWritten returns the number of bytes flushed to the output so far.
 func (w *ParquetFileWriter) BytesWritten() int64 {
 	return w.counter.Count
@@ -1331,6 +1457,8 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 	if err = w.applyGeoBounds(stats); err != nil {
 		return nil, err
 	}
+
+	maps.Copy(stats.NanValueCounts, w.nanCounts)
 
 	opts := DataFileOpts{
 		Schema:          w.info.FileSchema,

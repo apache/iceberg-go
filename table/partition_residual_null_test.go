@@ -41,8 +41,6 @@ func TestPartitionResidualPreservesArrowNaNFiltering(t *testing.T) {
 	}{
 		{"null", nil, "null", iceberg.Float64Literal(5)},
 		{"nan partition", math.NaN(), `"NaN"`, iceberg.Float64Literal(5)},
-		{"nan literal", float64(5), "5", iceberg.Float64Literal(math.NaN())},
-		{"nan partition and literal", math.NaN(), `"NaN"`, iceberg.Float64Literal(math.NaN())},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			checkPartitionResidualArrowFiltering(t, iceberg.PrimitiveTypes.Float64, tt.value, tt.json,

@@ -59,6 +59,8 @@ func TestBuildCommitReport(t *testing.T) {
 				totalFileSizeKey:       "5000000",
 				addedPosDeletesKey:     "2",
 				addedPosDeleteFilesKey: "1",
+				addedDVsKey:            "7",
+				removedDVsKey:          "8",
 				addedEqDeletesKey:      "3",
 				addedEqDeleteFilesKey:  "1",
 				manifestsCreatedKey:    "6",
@@ -91,6 +93,10 @@ func TestBuildCommitReport(t *testing.T) {
 	assert.Equal(t, int64(12345), m.AddedRecords.Value)
 	require.NotNil(t, m.TotalRecords)
 	assert.Equal(t, int64(20000), m.TotalRecords.Value)
+	require.NotNil(t, m.AddedDVs)
+	assert.Equal(t, int64(7), m.AddedDVs.Value)
+	require.NotNil(t, m.RemovedDVs)
+	assert.Equal(t, int64(8), m.RemovedDVs.Value)
 
 	// Name-translated mappings (iceberg-go summary key -> Java report name).
 	require.NotNil(t, m.RemovedDataFiles, "deleted-data-files -> removed-data-files")
@@ -123,10 +129,8 @@ func TestBuildCommitReport(t *testing.T) {
 	require.NotNil(t, m.ManifestEntriesProcessed, "entries-processed -> manifest-entries-processed")
 	assert.Equal(t, int64(9), m.ManifestEntriesProcessed.Value)
 
-	// Keys absent from the summary are omitted, not zeroed; metrics with no
-	// iceberg-go summary key (DVs) stay unset.
+	// Keys absent from the summary are omitted, not zeroed.
 	assert.Nil(t, m.RemovedDeleteFiles)
-	assert.Nil(t, m.AddedDVs)
 }
 
 func TestBuildCommitReportIncludesEnvironmentContext(t *testing.T) {

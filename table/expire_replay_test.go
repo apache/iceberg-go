@@ -123,12 +123,12 @@ func branchFiles(t *testing.T, fs *memIO, meta Metadata, branch string) []string
 	t.Helper()
 	head := meta.SnapshotByName(branch)
 	require.NotNil(t, head)
-	manifests, err := head.Manifests(fs)
+	manifests, err := head.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	var names []string
 	for _, m := range manifests {
-		for entry, err := range m.Entries(fs, true) {
+		for entry, err := range m.Entries(t.Context(), fs, true) {
 			require.NoError(t, err)
 			names = append(names, strings.TrimSuffix(path.Base(entry.DataFile().FilePath()), ".parquet"))
 		}

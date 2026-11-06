@@ -307,7 +307,7 @@ func readSnapshotManifestSet(
 	if err != nil {
 		return snapshotManifestSet{}, fmt.Errorf("get file IO: %w", err)
 	}
-	manifests, err := snapshot.Manifests(fio)
+	manifests, err := snapshot.Manifests(ctx, fio)
 	if err != nil {
 		return snapshotManifestSet{}, err
 	}
@@ -359,6 +359,17 @@ func (p ManifestProvider) Manifests(ctx context.Context, snapshot Snapshot) (ite
 	}
 
 	return slices.Values(set.borrowAllManifests()), nil
+}
+
+// uniqueManifests yields the distinct manifest descriptors referenced by the
+// given snapshots, in first-seen order. It reads manifest lists but not the
+// manifest Avro files themselves. The caller must not modify snapshots during
+// iteration. It shares this provider's bounded cache and FileIO, with bounded
+// concurrent prefetch of historical lists. An error ends the sequence.
+func (p ManifestProvider) uniqueManifests(ctx context.Context, snapshots []Snapshot) iter.Seq2[iceberg.ManifestFile, error] {
+	return func(yield func(iceberg.ManifestFile, error) bool) {
+		streamSnapshotManifests(ctx, snapshots, p.cachedSet, p.set, yield)
+	}
 }
 
 func (p ManifestProvider) set(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {

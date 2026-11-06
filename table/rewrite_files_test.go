@@ -48,11 +48,15 @@ import (
 // whose AssertRefSnapshotID points at a stale snapshot fails its
 // first attempt and triggers refresh-and-replay. attempts counts
 // CommitTable invocations so tests can prove the retry boundary.
+// beforeCommit, when set, runs once at the start of the next
+// CommitTable, so a test can land a peer commit inside an operation
+// that commits more than once.
 type concurrentTestCatalog struct {
-	metadata table.Metadata
-	location string
-	fsF      table.FSysF
-	attempts atomic.Int32
+	metadata     table.Metadata
+	location     string
+	fsF          table.FSysF
+	attempts     atomic.Int32
+	beforeCommit func()
 }
 
 func (c *concurrentTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
@@ -61,6 +65,10 @@ func (c *concurrentTestCatalog) LoadTable(_ context.Context, ident table.Identif
 
 func (c *concurrentTestCatalog) CommitTable(_ context.Context, _ table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	c.attempts.Add(1)
+	if hook := c.beforeCommit; hook != nil {
+		c.beforeCommit = nil
+		hook()
+	}
 	for _, req := range reqs {
 		if err := req.Validate(c.metadata); err != nil {
 			return nil, "", fmt.Errorf("%w: %w", table.ErrCommitFailed, err)

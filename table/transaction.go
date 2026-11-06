@@ -1087,7 +1087,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	}
 
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(fs, nil) {
+	for df, err := range s.dataFiles(ctx, fs, nil) {
 		if err != nil {
 			return err
 		}
@@ -1109,7 +1109,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	// DVs only exist from v3, so v2 skips the read.
 	var dvs liveDeletionVectors
 	if meta.formatVersion >= 3 && len(markedForDeletion) > 0 {
-		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+		if dvs, err = t.readLiveDeletionVectors(ctx, fs); err != nil {
 			return err
 		}
 	}
@@ -1139,7 +1139,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	if err != nil {
 		return err
 	}
-	dataFiles, err := filesToDataFiles(ctx, fs, meta, filesToAdd, 1)
+	dataFiles, err := filesToDataFiles(ctx, fs, meta, filesToAdd, 1, nil)
 	if err != nil {
 		return err
 	}
@@ -1718,7 +1718,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	if !cfg.skipDuplicateCheck {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
-			for df, err := range s.dataFiles(fs, nil) {
+			for df, err := range s.dataFiles(ctx, fs, nil) {
 				if err != nil {
 					return err
 				}
@@ -1826,7 +1826,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(fs, nil) {
+	for df, err := range s.dataFiles(ctx, fs, nil) {
 		if err != nil {
 			return err
 		}
@@ -1848,7 +1848,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	// DVs only exist from v3, so v2 skips the read.
 	var dvs liveDeletionVectors
 	if meta.formatVersion >= 3 {
-		if dvs, err = t.readLiveDeletionVectors(fs); err != nil {
+		if dvs, err = t.readLiveDeletionVectors(ctx, fs); err != nil {
 			return err
 		}
 	}
@@ -2038,7 +2038,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
 	liveDataFiles := make(map[string]rewriteFileState)
 	survivingPositionDeletes := make([]rewriteFileState, 0)
-	for entry, err := range s.entries(fs, -1, false) {
+	for entry, err := range s.entries(ctx, fs, -1, false) {
 		if err != nil {
 			return err
 		}
@@ -2234,7 +2234,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			referencedDataFilePaths = append(referencedDataFilePaths, ref)
 		}
 		slices.Sort(referencedDataFilePaths)
-		if referencedDataFilePaths, err = t.headDataFiles(fs, referencedDataFilePaths, nil); err != nil {
+		if referencedDataFilePaths, err = t.headDataFiles(ctx, fs, referencedDataFilePaths, nil); err != nil {
 			return err
 		}
 	}
@@ -2303,7 +2303,12 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 type AddDataFilesByPathOption func(addFilesOp *addFilesOperation)
 
 type addFilesOperation struct {
-	concurrency int
+	concurrency     int
+	partitionValues *addFilesPartitionValues
+}
+
+type addFilesPartitionValues struct {
+	byPath map[string]map[int]any
 }
 
 // WithAddDataFilesByPathConcurrency overrides the concurrency used by AddDataFilesByPath.
@@ -2316,8 +2321,28 @@ func WithAddDataFilesByPathConcurrency(concurrency int) AddDataFilesByPathOption
 	}
 }
 
+// WithAddDataFilesByPathPartitionValues supplies the partition tuple for each
+// existing data file, indexed first by file path and then by partition field ID.
+// Bucket partitions cannot be inferred from Parquet min/max statistics, so the
+// caller must provide all non-void partition fields for bucket specs. For other
+// specs, unlisted fields are inferred when their transforms preserve order.
+// Void fields are set to null.
+// All supplied values must be correct for every row of their file.
+func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDataFilesByPathOption {
+	partitionValues := make(map[string]map[int]any, len(values))
+	for path, tuple := range values {
+		partitionValues[path] = cloneFilePartitionTuple(tuple)
+	}
+
+	return func(op *addFilesOperation) {
+		op.partitionValues = &addFilesPartitionValues{byPath: partitionValues}
+	}
+}
+
 // AddDataFilesByPath adds data files at the provided paths to the table.
 // Unlike AddDataFiles, it opens each file to read its schema and statistics.
+// Use WithAddDataFilesByPathPartitionValues for partition transforms whose
+// values cannot be inferred from column statistics (for example, bucket[N]).
 func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddDataFilesByPathOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -2337,6 +2362,15 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		}
 		set[filePath] = struct{}{}
 	}
+	var partitionValues map[string]map[int]any
+	if addFilesOp.partitionValues != nil {
+		partitionValues = addFilesOp.partitionValues.byPath
+	}
+	for filePath := range partitionValues {
+		if _, ok := set[filePath]; !ok {
+			return fmt.Errorf("%w: partition values supplied for path %q not present in AddDataFilesByPath", iceberg.ErrInvalidArgument, filePath)
+		}
+	}
 
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
@@ -2350,7 +2384,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 	if !ignoreDuplicates {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
-			for df, err := range s.dataFiles(fs, nil) {
+			for df, err := range s.dataFiles(ctx, fs, nil) {
 				if err != nil {
 					return err
 				}
@@ -2386,7 +2420,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 
-	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency)
+	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)
 	if err != nil {
 		return err
 	}

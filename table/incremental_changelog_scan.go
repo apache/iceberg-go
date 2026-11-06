@@ -203,7 +203,7 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		manifests, err := snapshot.Manifests(fs)
+		manifests, err := snapshot.Manifests(ctx, fs)
 		if err != nil {
 			return nil, err
 		}
@@ -270,6 +270,7 @@ func (s *IncrementalChangelogScan) PlanFiles(ctx context.Context) ([]ChangelogSc
 		if err != nil {
 			return nil, err
 		}
+		acc.skippedDataFiles += entries.metrics.skippedDataFiles
 		dataEntries = entries.dataEntries
 	}
 

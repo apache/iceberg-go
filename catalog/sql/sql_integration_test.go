@@ -238,7 +238,7 @@ func (s *SQLIntegrationSuite) TestCreateView() {
 	// Create a view
 	viewSQL := fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table")
 
-	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, view.Representation{SQL: viewSQL, Dialect: "spark"}, iceberg.Properties{"foobar": "baz"})
+	err = createTestView(s.ctx, s.cat, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, view.Representation{SQL: viewSQL, Dialect: "spark"}, iceberg.Properties{"foobar": "baz"})
 	s.Require().NoError(err)
 
 	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
@@ -315,7 +315,7 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 
 	entries := make([]iceberg.ManifestEntry, 0, 1)
-	for entry, err := range mf[0].Entries(updatedFS, false) {
+	for entry, err := range mf[0].Entries(s.T().Context(), updatedFS, false) {
 		s.Require().NoError(err)
 		entries = append(entries, entry)
 	}
