@@ -211,7 +211,9 @@ type RenameNoReplaceIO interface {
 type RemoveAllIO interface {
 	IO
 
-	RemoveAll(name string) error
+	// RemoveAll removes the named path and any children recursively. The context
+	// controls the operation where the implementation supports cancellation.
+	RemoveAll(ctx context.Context, name string) error
 }
 
 // MkdirAllIO is an extension of IO interface that includes the MkdirAll
@@ -221,8 +223,9 @@ type MkdirAllIO interface {
 
 	// MkdirAll should not raise an error if the directory already exists,
 	// and should create any parent directories in the path if they
-	// do not already exist.
-	MkdirAll(path string) error
+	// do not already exist. The context controls the operation where the
+	// implementation supports cancellation.
+	MkdirAll(ctx context.Context, path string) error
 }
 
 // FS wraps an io/fs.FS as an IO interface. It implements ReadFileIO only
