@@ -27,49 +27,63 @@ import (
 var dynamicOverwriteCandidateCount int
 
 func BenchmarkDynamicOverwriteManifestCandidates(b *testing.B) {
-	const manifestCount = 256
-	const targetPartition = int32(1123)
+	tests := []struct {
+		manifests  int
+		partitions int
+	}{
+		{manifests: 256, partitions: 1},
+		{manifests: 1024, partitions: 4},
+		{manifests: 4096, partitions: 16},
+	}
 
 	schema := simpleSchema()
 	spec := iceberg.NewPartitionSpecID(4, iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
 	})
-	manifests := make([]iceberg.ManifestFile, manifestCount)
-	for i := range manifestCount {
-		value := int32(1000 + i)
-		if i == 123 {
-			value = targetPartition
-		}
-		bound, err := iceberg.Int32Literal(value).MarshalBinary()
-		if err != nil {
-			b.Fatal(err)
-		}
-		manifests[i] = iceberg.NewManifestBuilder(2, fmt.Sprintf("manifest-%03d.avro", i), 1,
-			int32(spec.ID()), 1).
-			Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
-			Build()
-	}
-	partitions := []map[int]any{{1000: targetPartition}}
 	ctx := context.Background()
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for b.Loop() {
-		candidates, err := dynamicOverwriteManifestCandidates(ctx, manifests, spec, schema, partitions)
-		if err != nil {
-			b.Fatal(err)
-		}
-		count := 0
-		for _, candidate := range candidates {
-			if candidate {
-				count++
+	for _, tc := range tests {
+		b.Run(fmt.Sprintf("manifests=%d/partitions=%d", tc.manifests, tc.partitions), func(b *testing.B) {
+			manifests := make([]iceberg.ManifestFile, tc.manifests)
+			for i := range tc.manifests {
+				value := int32(i)
+				bound, err := iceberg.Int32Literal(value).MarshalBinary()
+				if err != nil {
+					b.Fatal(err)
+				}
+				manifests[i] = iceberg.NewManifestBuilder(2, fmt.Sprintf("manifest-%05d.avro", i), 1,
+					int32(spec.ID()), 1).
+					Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
+					Build()
 			}
-		}
-		if count != 1 {
-			b.Fatalf("selected %d manifests, want 1", count)
-		}
-		dynamicOverwriteCandidateCount = count
+
+			partitions := make([]map[int]any, tc.partitions)
+			manifestStep := tc.manifests / tc.partitions
+			for i := range tc.partitions {
+				partitions[i] = map[int]any{1000: int32(i * manifestStep)}
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				candidates, err := dynamicOverwriteManifestCandidates(ctx, manifests, spec, schema, partitions)
+				if err != nil {
+					b.Fatal(err)
+				}
+				count := 0
+				for _, candidate := range candidates {
+					if candidate {
+						count++
+					}
+				}
+				if count != tc.partitions {
+					b.Fatalf("selected %d manifests, want %d", count, tc.partitions)
+				}
+				dynamicOverwriteCandidateCount = count
+			}
+			b.ReportMetric(float64(tc.manifests), "manifests/op")
+			b.ReportMetric(float64(tc.partitions), "partitions/op")
+			b.ReportMetric(float64(dynamicOverwriteCandidateCount), "candidate-manifests/op")
+		})
 	}
-	b.ReportMetric(float64(manifestCount), "manifests/op")
-	b.ReportMetric(float64(dynamicOverwriteCandidateCount), "candidate-manifests/op")
 }
