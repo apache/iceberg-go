@@ -1867,17 +1867,16 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 				if int64Set != nil && mask.applySingleInt64(column, int64Set, mem) {
 					continue
 				}
-				if dictColumn, ok := column.(*array.Dictionary); ok && bytesSet != nil &&
-					dictColumn.Dictionary().Len() > dictColumn.Len() {
+				if bytesSet != nil && mask.applySingleBytes(column, bytesSet, mem) {
+					continue
+				}
+				if dictColumn, ok := column.(*array.Dictionary); ok && bytesSet != nil {
 					if dictMemos == nil {
 						dictMemos = make([]dictionaryEntryMemo, len(eqDeleteSets))
 					}
 					if dictMemos[setIdx].apply(&mask, dictColumn, bytesSet, mem) {
 						continue
 					}
-				}
-				if bytesSet != nil && mask.applySingleBytes(column, bytesSet, mem) {
-					continue
 				}
 			}
 

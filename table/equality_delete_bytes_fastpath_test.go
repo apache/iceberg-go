@@ -543,8 +543,11 @@ func buildBenchStringDictionaryBatches(mem memory.Allocator, numEntries, numRows
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
 		{Name: "name", Type: dictType},
 	}, nil)
-	dictionary := newDictionary()
-	defer dictionary.Release()
+	var sharedDictionary arrow.Array
+	if shared {
+		sharedDictionary = newDictionary()
+		defer sharedDictionary.Release()
+	}
 
 	batches := make([]arrow.RecordBatch, numBatches)
 	for i := range batches {
@@ -557,13 +560,13 @@ func buildBenchStringDictionaryBatches(mem memory.Allocator, numEntries, numRows
 		ids, indices := idBldr.NewArray(), indexBldr.NewArray()
 		idBldr.Release()
 		indexBldr.Release()
-		batchDictionary := dictionary
+		dictionary := sharedDictionary
 		if !shared {
-			batchDictionary = newDictionary()
+			dictionary = newDictionary()
 		}
-		names := array.NewDictionaryArray(dictType, indices, batchDictionary)
+		names := array.NewDictionaryArray(dictType, indices, dictionary)
 		if !shared {
-			batchDictionary.Release()
+			dictionary.Release()
 		}
 		batches[i] = array.NewRecordBatch(schema, []arrow.Array{ids, names}, int64(numRows))
 		ids.Release()
