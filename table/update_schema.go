@@ -174,6 +174,15 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 	// referenced by historical schemas.
 	u.lastColumnID = meta.LastColumnID()
 
+	// A last-column-id below an ID already in use would hand out a
+	// duplicate field ID. Fail with an error rather than letting
+	// iceberg.NewSchema panic later in Apply.
+	if err := meta.validateLastColumnID(); err != nil {
+		u.err = err
+
+		return u
+	}
+
 	for _, opt := range opts {
 		opt(u)
 	}

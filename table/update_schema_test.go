@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -56,6 +57,34 @@ func TestNewUpdateSchemaWithNilTransactionReturnsError(t *testing.T) {
 	err := NewUpdateSchema(nil, true, false).Commit()
 	require.ErrorIs(t, err, ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "transaction is nil")
+}
+
+func TestUpdateSchemaLastColumnIDBelowHighestFieldIDReturnsError(t *testing.T) {
+	// Field "z" has ID 3, but the counter says 2, so the next new
+	// column would reuse ID 3.
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-column-id": 3`, `"last-column-id": 2`, 1)
+	meta, err := ParseMetadataString(data)
+	require.NoError(t, err)
+	require.Equal(t, 2, meta.LastColumnID())
+
+	tbl := New([]string{"id"}, meta, "", nil, nil)
+
+	var applyErr, commitErr error
+	require.NotPanics(t, func() {
+		_, applyErr = tbl.NewTransaction().UpdateSchema(true, false).
+			AddColumn([]string{"w"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+			Apply()
+	})
+	require.ErrorIs(t, applyErr, ErrInvalidMetadata)
+	assert.ErrorContains(t, applyErr, "last-column-id 2 is less than the highest field ID 3")
+
+	require.NotPanics(t, func() {
+		commitErr = tbl.NewTransaction().UpdateSchema(true, false).
+			AddColumn([]string{"w"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+			Commit()
+	})
+	require.ErrorIs(t, commitErr, ErrInvalidMetadata)
 }
 
 func TestAddColumn(t *testing.T) {
