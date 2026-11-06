@@ -265,13 +265,23 @@ func TestBlobFileIOReadFileUsesOperationContext(t *testing.T) {
 	driverBucket := &contextAwareRangeReaderBucket{readerCtx: make(chan context.Context, 2)}
 	bucket := blob.NewBucket(driverBucket)
 	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
-	fileIO := New(context.Background(), bucket, DefaultObjectLocationExtractor("my-bucket"))
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	cancelLifetime()
 
 	ctx := context.WithValue(context.Background(), readFileContextKey{}, "operation")
+	ctx, cancelOperation := context.WithTimeout(ctx, time.Hour)
+	defer cancelOperation()
 	content, err := fileIO.ReadFile(ctx, "s3://my-bucket/data/file.parquet")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("metadata"), content)
-	assert.Equal(t, "operation", (<-driverBucket.readerCtx).Value(readFileContextKey{}))
+	readCtx := <-driverBucket.readerCtx
+	assert.Equal(t, "operation", readCtx.Value(readFileContextKey{}))
+	wantDeadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	gotDeadline, ok := readCtx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, wantDeadline, gotDeadline)
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
