@@ -24,7 +24,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
 
@@ -323,8 +322,7 @@ func (t *Transaction) DynamicPartitionOverwrite(
 	if rdr == nil {
 		return fmt.Errorf("%w: nil record reader for dynamic partition overwrite", ErrInvalidOperation)
 	}
-	spec, err := t.dynamicOverwriteSpec()
-	if err != nil {
+	if _, err := t.dynamicOverwriteSpec(); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
