@@ -278,12 +278,15 @@ func TestDynamicPartitionOverwriteV1(t *testing.T) {
 	require.ElementsMatch(t, []string{"file://v1-new-a.parquet", "file://v1-old-b.parquet"}, paths)
 }
 
-func TestDynamicPartitionOverwriteRejectsLiveOldSpec(t *testing.T) {
+func TestDynamicPartitionOverwriteKeepsLiveOldSpec(t *testing.T) {
 	ctx := t.Context()
 	oldSpec := partitionedSpec()
 	seed, fs := createTestTransactionWithMemIO(t, oldSpec)
 	old := newTestDataFile(t, oldSpec, "file://old-spec.parquet", map[int]any{1000: int32(1)})
 	require.NoError(t, seed.AddDataFiles(ctx, []iceberg.DataFile{old}, nil))
+	oldDelete := newTestPosDeleteFileForSpec(t, oldSpec, "file://old-spec-delete.parquet",
+		map[int]any{1000: int32(1)}, old.FilePath())
+	require.NoError(t, seed.NewRowDelta(nil).AddDeletes(oldDelete).Commit(ctx))
 	base, err := seed.meta.Build()
 	require.NoError(t, err)
 
@@ -310,10 +313,27 @@ func TestDynamicPartitionOverwriteRejectsLiveOldSpec(t *testing.T) {
 	require.NotZero(t, partitionFieldID)
 	replacement := newTestDataFile(t, currentSpec, "file://new-spec.parquet",
 		map[int]any{partitionFieldID: int32(1)})
-	err = txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil)
-	require.ErrorIs(t, err, ErrInvalidOperation)
-	require.ErrorContains(t, err, "under partition spec")
-	require.Empty(t, txn.meta.updates)
+	require.NoError(t, txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil))
+	updated, err := txn.meta.Build()
+	require.NoError(t, err)
+	snapshot := updated.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+
+	var liveData []string
+	for file, err := range snapshot.dataFiles(ctx, fs, nil) {
+		require.NoError(t, err)
+		if file.ContentType() == iceberg.EntryContentData {
+			liveData = append(liveData, file.FilePath())
+		}
+	}
+	require.ElementsMatch(t, []string{"file://old-spec.parquet", "file://new-spec.parquet"}, liveData)
+
+	var liveDeletes []string
+	for entry, err := range snapshot.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
+		require.NoError(t, err)
+		liveDeletes = append(liveDeletes, entry.DataFile().FilePath())
+	}
+	require.Equal(t, []string{"file://old-spec-delete.parquet"}, liveDeletes)
 }
 
 func TestDynamicPartitionOverwriteWithoutAutoNameMapping(t *testing.T) {

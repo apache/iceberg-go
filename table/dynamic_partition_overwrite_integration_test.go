@@ -377,9 +377,9 @@ func dynamicOverwriteDataPaths(t *testing.T, tbl *table.Table) []string {
 	return paths
 }
 
-// A table with an old-spec manifest must be rejected before the Arrow writer
-// creates any new files, because those paths would otherwise be orphaned.
-func TestDynamicPartitionOverwriteArrowRejectsOldSpecBeforeWriting(t *testing.T) {
+// Existing files use their own spec ID in the partition key, so an Arrow
+// overwrite with the current spec leaves old-spec rows untouched.
+func TestDynamicPartitionOverwriteArrowKeepsOldSpecFiles(t *testing.T) {
 	base, _ := newDynamicOverwriteTable(t)
 	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
 	evolve := tbl.NewTransaction()
@@ -393,11 +393,9 @@ func TestDynamicPartitionOverwriteArrowRejectsOldSpecBeforeWriting(t *testing.T)
 	before := dynamicOverwriteDataPaths(t, tbl)
 	require.NotEmpty(t, before, "test requires already-written data files")
 	replacement := idRecordReader(t, tbl, 3)
-	_, err = tbl.DynamicPartitionOverwrite(t.Context(), replacement, nil)
+	updated, err := tbl.DynamicPartitionOverwrite(t.Context(), replacement, nil)
 	replacement.Release()
-	require.ErrorIs(t, err, table.ErrInvalidOperation)
-	require.ErrorContains(t, err, "under partition spec")
-	require.Equal(t, before, dynamicOverwriteDataPaths(t, tbl),
-		"rejecting an old-spec table must not leave new data files behind")
-	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, tbl, table.MainBranch))
+	require.NoError(t, err)
+	require.Len(t, dynamicOverwriteDataPaths(t, updated), len(before)+1)
+	require.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
 }
