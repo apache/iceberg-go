@@ -380,11 +380,12 @@ if err == nil {
 }
 ```
 
-This supports Iceberg format v1-v3. Incoming files and all live files must
-use the current partition spec; tables with live older-spec files are rejected
-before Arrow data is written. For v3, replacement also removes deletion
-vectors tied to replaced data files. Unpartitioned tables are treated as one
-partition, and empty input leaves the table untouched.
+This supports Iceberg format v1-v3. Incoming files must use the current
+partition spec. On partitioned tables, files under older specs are preserved;
+only matching current-spec partitions are replaced. If the current spec is
+unpartitioned, non-empty input replaces all live files, including files under
+older specs. For v3, replacement also removes deletion vectors tied to
+replaced data files. Empty input leaves the table untouched.
 
 A concurrent add or removal in a replaced partition fails validation, while
 independent changes to other partitions can be retried after a catalog refresh.
