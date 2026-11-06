@@ -29,10 +29,10 @@ import (
 )
 
 // BuildPartitionMatchPredicate constructs a BooleanExpression matching all rows
-// that belong to any of the given partitions. It is the core of dynamic
-// partition overwrite (see https://github.com/apache/iceberg-go/issues/1216):
-// the returned expression selects the existing data to delete before the new
-// data is appended.
+// that belong to any of the given partitions. It can be used by row-filter
+// operations involving partition transforms (issue #1216), but dynamic
+// partition overwrite now matches stored partition tuples directly.
+// Partial-file rewrites still need strict partition matching (issue #1215).
 //
 // partitions holds partition tuples as returned by DataFile.Partition(), each
 // keyed by partition-field ID and carrying the field's (transformed) value. The
@@ -46,7 +46,7 @@ import (
 //
 // Duplicate tuples collapse to a single clause, and an empty input yields
 // AlwaysFalse (matching nothing). Callers are expected to pass a partitioned
-// spec; dynamic partition overwrite rejects unpartitioned tables upstream.
+// spec; unpartitioned dynamic overwrites do not need a row predicate.
 // Void fields are also accepted when their source column has been dropped (the
 // spec represents those tombstones with source ID 0), because void always
 // produces a null partition value and does not need a source column.
