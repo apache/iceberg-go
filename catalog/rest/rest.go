@@ -1487,6 +1487,7 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 		// Credential refresh does not return table config, so carry the
 		// existing scan-planning directive over verbatim.
 		table.WithScanPlanningDirectiveFrom(tbl),
+		table.WithSnapshotHistoryLimitedToRefsFrom(tbl),
 	}
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.
@@ -2026,7 +2027,9 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
 	mergeVendedCredentials(config, vended, ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved), table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved),
+		table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)),
+		table.WithSnapshotHistoryLimitedToRefs(mode == SnapshotModeRefs))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {

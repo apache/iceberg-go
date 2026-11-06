@@ -90,13 +90,20 @@ type Transaction struct {
 
 	// noReplay marks the commit as non-replayable: on a CAS conflict
 	// doCommit fails instead of refreshing and replaying. Set by
-	// snapshot producers whose staged snapshot carries delete-file
-	// removals; see the flag site in commitManifests.
+	// snapshot producers whose staged snapshot carries delete-file removals
+	// and by cherry-pick fast-forwards, which may precede later staged writes.
 	noReplay bool
 
+	// noResume is set for staged cherry-pick fast-forwards. An automatic
+	// retry is already disabled by noReplay, but resuming a failed Commit
+	// could rebuild later snapshots against the head before the ref move.
+	// Such a transaction must be reconstructed after any failed commit.
+	// TODO(#2415): remove this restriction after safe ref-move replay (#2384).
+	noResume bool
+
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
-	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot, and
-	// ExpireSnapshots. doCommit's refresh-and-replay must not rewrite
+	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot,
+	// ExpireSnapshots, and CherryPickSnapshot. doCommit's refresh-and-replay must not rewrite
 	// their assertions to the fresh head between retries, so a ref that
 	// has changed fails the commit.
 	pinnedRefs map[string]struct{}
@@ -482,6 +489,17 @@ func (t *Transaction) AssertRefSnapshotID(branch string) error {
 // hold of t.mx, so a concurrent Commit sees both or neither, and a failed
 // apply publishes no pins.
 func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []string) error {
+	return t.applyPinnedWithReplayPolicy(updates, reqs, refs, false)
+}
+
+// applyPinnedNoReplay atomically stages a ref move and forbids any CAS replay.
+// A later snapshot in the same transaction must not be rebuilt against the
+// pre-move head if another branch changed concurrently.
+func (t *Transaction) applyPinnedNoReplay(updates []Update, reqs []Requirement, refs []string) error {
+	return t.applyPinnedWithReplayPolicy(updates, reqs, refs, true)
+}
+
+func (t *Transaction) applyPinnedWithReplayPolicy(updates []Update, reqs []Requirement, refs []string, noReplay bool) error {
 	if err := t.checkNotNil(); err != nil {
 		return err
 	}
@@ -496,6 +514,10 @@ func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []s
 	}
 	for _, ref := range refs {
 		t.pinnedRefs[ref] = struct{}{}
+	}
+	if noReplay {
+		t.noReplay = true
+		t.noResume = true
 	}
 
 	return nil
@@ -2605,6 +2627,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			WithScanPlanningDirective(t.tbl.scanPlanningDirective, t.tbl.hasScanPlanningDirective),
 			WithLabels(t.tbl.labels),
 			WithSavedConfig(t.tbl.savedConfig),
+			WithSnapshotHistoryLimitedToRefsFrom(t.tbl),
 		),
 	}, nil
 }
@@ -2614,8 +2637,10 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 // The staged metadata is validated when a later transaction operation needs an
 // immutable metadata view, or while the catalog applies the commit.
 //
-// After a failed commit, calling Commit again refreshes the table and replays
-// the staged changes like the next retry attempt, with a fresh retry budget.
+// After a failed commit, calling Commit again normally refreshes the table
+// and replays the staged changes with a fresh retry budget. A cherry-pick
+// fast-forward that fails without an unknown commit state is not resumable:
+// its error wraps ErrTransactionUnusable as well as the original cause.
 // The staged files are kept until a commit lands, so an abandoned transaction
 // leaves them, and for a rewrite the manifests later attempts merged, for
 // orphan file removal. TableCommit refuses a transaction whose commit failed,
@@ -2642,6 +2667,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 			withCommitNoReplay(t.noReplay),
+			withCommitNoResume(t.noResume),
 			withCommitPinnedRefs(t.pinnedRefs),
 			withCommitResume(t.failedCommits),
 		)
@@ -2657,7 +2683,14 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			case errors.As(err, &unknown):
 				t.committed = true
 			default:
-				t.failedCommits++
+				if t.noResume {
+					// A resumed cherry-pick fast-forward could lose the
+					// moved snapshot's files when rebuilding later appends.
+					t.unusable = true
+					err = fmt.Errorf("%w: cherry-pick fast-forward cannot resume after a failed commit: %w", ErrTransactionUnusable, err)
+				} else {
+					t.failedCommits++
+				}
 			}
 
 			return tbl, err
