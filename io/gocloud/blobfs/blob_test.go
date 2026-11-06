@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -226,6 +227,67 @@ func TestBlobFileIOWriteOperationsUseOperationContext(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, content, got)
 	}
+}
+
+type readFileContextKey struct{}
+
+type contextAwareRangeReaderBucket struct {
+	driver.Bucket
+	readerCtx chan context.Context
+}
+
+func (b *contextAwareRangeReaderBucket) ErrorCode(error) gcerrors.ErrorCode { return gcerrors.Unknown }
+
+func (b *contextAwareRangeReaderBucket) NewRangeReader(
+	ctx context.Context,
+	_ string,
+	_, _ int64,
+	_ *driver.ReaderOptions,
+) (driver.Reader, error) {
+	b.readerCtx <- ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return contextAwareBlobReader{ReadCloser: io.NopCloser(strings.NewReader("metadata"))}, nil
+}
+
+func (b *contextAwareRangeReaderBucket) Close() error { return nil }
+
+type contextAwareBlobReader struct{ io.ReadCloser }
+
+func (contextAwareBlobReader) Attributes() *driver.ReaderAttributes {
+	return &driver.ReaderAttributes{}
+}
+func (contextAwareBlobReader) As(any) bool { return false }
+
+func TestBlobFileIOReadFileUsesOperationContext(t *testing.T) {
+	driverBucket := &contextAwareRangeReaderBucket{readerCtx: make(chan context.Context, 2)}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	cancelLifetime()
+
+	ctx := context.WithValue(context.Background(), readFileContextKey{}, "operation")
+	ctx, cancelOperation := context.WithTimeout(ctx, time.Hour)
+	defer cancelOperation()
+	content, err := fileIO.ReadFile(ctx, "s3://my-bucket/data/file.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("metadata"), content)
+	readCtx := <-driverBucket.readerCtx
+	assert.Equal(t, "operation", readCtx.Value(readFileContextKey{}))
+	wantDeadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	gotDeadline, ok := readCtx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, wantDeadline, gotDeadline)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = fileIO.ReadFile(canceledCtx, "s3://my-bucket/data/file.parquet")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.ErrorIs(t, (<-driverBucket.readerCtx).Err(), context.Canceled)
 }
 
 func TestBlobFileIOWriteFileHonorsOperationCancellation(t *testing.T) {

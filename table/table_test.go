@@ -138,14 +138,16 @@ func (t *TableTestSuite) SetupSuite() {
 }
 
 func (t *TableTestSuite) TestNewTableFromReadFile() {
+	type key struct{}
 	var mockfsReadFile iomock.MockFSReadFile
 	mockfsReadFile.Test(t.T())
 	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.metadata.json").
 		Return([]byte(table.ExampleTableMetadataV2), nil)
 	defer mockfsReadFile.AssertExpectations(t.T())
 
+	ctx := context.WithValue(t.T().Context(), key{}, "caller")
 	tbl2, err := table.NewFromLocation(
-		t.T().Context(),
+		ctx,
 		[]string{"foo"},
 		"s3://bucket/test/location/uuid.metadata.json",
 		func(ctx context.Context) (iceio.IO, error) {
@@ -155,6 +157,8 @@ func (t *TableTestSuite) TestNewTableFromReadFile() {
 	)
 	t.Require().NoError(err)
 	t.Require().NotNil(tbl2)
+	t.Require().NotNil(mockfsReadFile.ReadFileCtx)
+	t.Equal("caller", mockfsReadFile.ReadFileCtx.Value(key{}))
 
 	t.True(t.tbl.Equals(*tbl2))
 }
