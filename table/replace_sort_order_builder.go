@@ -121,6 +121,12 @@ func (u *ReplaceSortOrderBuilder) buildOrder(meta *MetadataBuilder) (SortOrder, 
 			field, found = schema.FindFieldByNameCaseInsensitive(col.name)
 		}
 		if !found {
+			if !u.caseSensitive {
+				if _, err := iceberg.Reference(col.name).Bind(schema, false); err != nil {
+					return SortOrder{}, fmt.Errorf("cannot bind sort field %q: %w", col.name, err)
+				}
+			}
+
 			return SortOrder{}, fmt.Errorf("cannot bind sort field %q: %w", col.name, iceberg.ErrInvalidSchema)
 		}
 		// Expression binding panics on complex fields. Reject them before

@@ -129,8 +129,25 @@ func TestLazyNameToIDLowerRejectsCaseInsensitiveCollisions(t *testing.T) {
 	if !errors.Is(err, ErrInvalidSchema) {
 		t.Fatalf("lazyNameToIDLower() error = %v, want ErrInvalidSchema", err)
 	}
+	if !strings.Contains(err.Error(), `"ID" and "id"`) {
+		t.Fatalf("lazyNameToIDLower() error = %v, want both conflicting names", err)
+	}
 	if _, ok := schema.FindFieldByNameCaseInsensitive("id"); ok {
 		t.Fatal("FindFieldByNameCaseInsensitive() resolved an ambiguous name")
+	}
+
+	_, err = Reference("unique").Bind(schema, false)
+	if !errors.Is(err, ErrInvalidSchema) || !strings.Contains(err.Error(), `"ID" and "id"`) {
+		t.Fatalf("Reference.Bind() error = %v, want named case-insensitive collision", err)
+	}
+
+	_, err = schema.Select(false, "unique")
+	if !errors.Is(err, ErrInvalidSchema) || !strings.Contains(err.Error(), `"ID" and "id"`) {
+		t.Fatalf("Select() error = %v, want named case-insensitive collision", err)
+	}
+
+	if _, err = Reference("ID").Bind(schema, true); err != nil {
+		t.Fatalf("case-sensitive Reference.Bind() error = %v, want success", err)
 	}
 }
 

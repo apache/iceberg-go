@@ -325,6 +325,7 @@ func TestReplaceSortOrderBuilderRejectsAmbiguousCaseInsensitiveNames(t *testing.
 			_, err := builder.Apply()
 			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			require.ErrorContains(t, err, "cannot bind sort field")
+			require.ErrorContains(t, err, `ambiguous case-insensitive field names "ID" and "id"`)
 			require.ErrorIs(t, builder.Commit(), iceberg.ErrInvalidSchema)
 
 			commit, err := txn.TableCommit()
