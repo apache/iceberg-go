@@ -289,6 +289,22 @@ func TestReplaceSortOrderBuilderWithStagedSchema(t *testing.T) {
 	require.NotEmpty(t, commit.Updates)
 }
 
+func TestReplaceSortOrderBuilderAcceptsNestedSortSource(t *testing.T) {
+	txn := testNonPartitionedTable.NewTransaction()
+	builder := txn.NewReplaceSortOrder(true).Asc("address.city", table.NullsFirst)
+
+	// The builder accepts nested fields like Java; Go writers currently cannot
+	// append data while the default order uses a nested source.
+	order, err := builder.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 6, order.Field(0).FirstSourceID())
+	require.NoError(t, builder.Commit())
+
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	require.Equal(t, 6, staged.SortOrder().Field(0).FirstSourceID())
+}
+
 // Case-insensitive lookups reject a name index if distinct field IDs differ
 // only in case, instead of selecting one based on Go map iteration.
 func TestReplaceSortOrderBuilderRejectsAmbiguousCaseInsensitiveNames(t *testing.T) {
