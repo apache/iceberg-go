@@ -553,6 +553,30 @@ func TestExpirationAssertionsCoverPlansWithUpdates(t *testing.T) {
 	})
 }
 
+func TestExpirationAssertionsSkipCreatedCommitBranch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, cat, tbl := newExpireReplayTable(t, nil)
+		tbl, _ = appendOnBranch(t, tbl, MainBranch, "s0")
+		_, s1 := appendOnBranch(t, tbl, MainBranch, "s1")
+		base := cat.metadata
+		time.Sleep(time.Millisecond)
+
+		tx, err := newOCCTable(t, base, fs, cat).NewTransactionOnBranch("audit")
+		require.NoError(t, err)
+		stageFiles(t, tx, "a")
+		require.NoError(t, tx.ExpireSnapshots(WithOlderThan(0), WithRetainLast(1)))
+		require.Contains(t, stagedWalkedRefs(tx.expirations), "audit", "the expiry must stage updates and walk the new branch")
+
+		commit, err := tx.TableCommit()
+		require.NoError(t, err)
+		assert.Equal(t, []Requirement{
+			assertBranchRefSnapshotID("audit", nil),
+			AssertTableUUID(base.TableUUID()),
+			AssertRefSnapshotID(MainBranch, &s1),
+		}, commit.Requirements)
+	})
+}
+
 func TestExpireReplayAssertsWalkedRefFromAttemptBase(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, inner, tbl := newExpireReplayTable(t, nil)
