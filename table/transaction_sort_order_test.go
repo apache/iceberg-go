@@ -138,7 +138,7 @@ func TestReplaceSortOrderRejectsIncompatibleHistoricalOrder(t *testing.T) {
 	before, err := txn.TableCommit()
 	require.NoError(t, err)
 	err = txn.ReplaceSortOrder(sortOrderOf(t, byID))
-	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, "not found in schema")
 
 	after, err := txn.TableCommit()
 	require.NoError(t, err)
