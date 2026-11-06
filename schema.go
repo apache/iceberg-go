@@ -243,9 +243,22 @@ func (s *Schema) lazyNameToIDLower() (map[string]int, error) {
 		return nil, err
 	}
 
-	out := make(map[string]int)
-	for k, v := range idx {
-		out[strings.ToLower(k)] = v
+	names := make([]string, 0, len(idx))
+	for name := range idx {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	out := make(map[string]int, len(idx))
+	originalNames := make(map[string]string, len(idx))
+	for _, name := range names {
+		id := idx[name]
+		lower := strings.ToLower(name)
+		if previous, exists := out[lower]; exists && previous != id {
+			return nil, fmt.Errorf("%w: ambiguous case-insensitive field names %q and %q",
+				ErrInvalidSchema, originalNames[lower], name)
+		}
+		out[lower] = id
+		originalNames[lower] = name
 	}
 
 	s.nameToIDLower.Store(&out)
@@ -454,17 +467,25 @@ func (s *Schema) FindFieldByName(name string) (NestedField, bool) {
 // FindFieldByNameCaseInsensitive is like [*Schema.FindFieldByName],
 // but performs a case insensitive search.
 func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool) {
+	field, found, _ := s.findFieldByNameCaseInsensitive(name)
+
+	return field, found
+}
+
+func (s *Schema) findFieldByNameCaseInsensitive(name string) (NestedField, bool, error) {
 	idx, err := s.lazyNameToIDLower()
 	if err != nil {
-		return NestedField{}, false
+		return NestedField{}, false, err
 	}
 
 	id, ok := idx[strings.ToLower(name)]
 	if !ok {
-		return NestedField{}, false
+		return NestedField{}, false, nil
 	}
 
-	return s.FindFieldByID(id)
+	field, found := s.FindFieldByID(id)
+
+	return field, found, nil
 }
 
 // FindFieldByID is like [*Schema.FindColumnName], but returns the whole
