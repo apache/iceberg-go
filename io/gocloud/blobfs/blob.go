@@ -648,6 +648,10 @@ func (bfs *FileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, e
 
 // MkdirAll mimics creating a directory by creating a zero-length object for each component of the path
 func (bfs *FileIO) MkdirAll(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return &fs.PathError{Op: "mkdir", Path: path, Err: err}
+	}
+
 	key, err := bfs.preprocess(path)
 	if err != nil {
 		return &fs.PathError{Op: "mkdir", Path: path, Err: err}
@@ -660,6 +664,10 @@ func (bfs *FileIO) MkdirAll(ctx context.Context, path string) error {
 
 	parts := strings.Split(key, "/")
 	for idx := range parts {
+		if err := ctx.Err(); err != nil {
+			return &fs.PathError{Op: "mkdir", Path: path, Err: err}
+		}
+
 		marker := strings.Join(parts[:idx+1], "/") + "/"
 		if err := bfs.WriteAll(ctx, marker, nil, nil); err != nil {
 			return &fs.PathError{Op: "mkdir", Path: path, Err: err}
@@ -805,6 +813,10 @@ func (bfs *FileIO) RenameNoReplace(ctx context.Context, oldpath, newpath string)
 // RemoveAll removes either a single file or interprets the path as and removes both
 // it and and all its children.
 func (bfs *FileIO) RemoveAll(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
+	}
+
 	key, err := bfs.preprocess(name)
 	if err != nil {
 		return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
@@ -821,6 +833,10 @@ func (bfs *FileIO) RemoveAll(ctx context.Context, name string) error {
 
 	iter := bfs.List(&blob.ListOptions{Prefix: prefix})
 	for {
+		if err := ctx.Err(); err != nil {
+			return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
+		}
+
 		obj, err := iter.Next(ctx)
 		if err == io.EOF {
 			break
