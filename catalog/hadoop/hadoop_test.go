@@ -63,9 +63,9 @@ func newBarrierRenameNoReplaceFS(targetNames ...string) *barrierRenameNoReplaceF
 	}
 }
 
-func (f *barrierRenameNoReplaceFS) RenameNoReplace(oldpath, newpath string) error {
+func (f *barrierRenameNoReplaceFS) RenameNoReplace(ctx context.Context, oldpath, newpath string) error {
 	if _, ok := f.targetNames[filepath.Base(newpath)]; !ok {
-		return f.LocalFS.RenameNoReplace(oldpath, newpath)
+		return f.LocalFS.RenameNoReplace(ctx, oldpath, newpath)
 	}
 
 	f.mu.Lock()
@@ -82,7 +82,7 @@ func (f *barrierRenameNoReplaceFS) RenameNoReplace(oldpath, newpath string) erro
 		return errors.New("timed out waiting for concurrent metadata publish")
 	}
 
-	return f.LocalFS.RenameNoReplace(oldpath, newpath)
+	return f.LocalFS.RenameNoReplace(ctx, oldpath, newpath)
 }
 
 type versionConflictOnCreateFS struct {

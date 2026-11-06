@@ -192,7 +192,7 @@ func (LocalFS) Stat(name string) (fs.FileInfo, error) {
 	return os.Stat(path)
 }
 
-func (LocalFS) Rename(oldpath, newpath string) error {
+func (LocalFS) Rename(_ context.Context, oldpath, newpath string) error {
 	src, err := localPath(oldpath)
 	if err != nil {
 		return err
@@ -205,7 +205,7 @@ func (LocalFS) Rename(oldpath, newpath string) error {
 	return os.Rename(src, dst)
 }
 
-func (LocalFS) RenameNoReplace(oldpath, newpath string) error {
+func (LocalFS) RenameNoReplace(_ context.Context, oldpath, newpath string) error {
 	src, err := localPath(oldpath)
 	if err != nil {
 		return err
