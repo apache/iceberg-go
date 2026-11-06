@@ -170,7 +170,7 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 	// Manifests are immutable. An entry added by the source snapshot can
 	// only appear in a manifest created by that snapshot. Skip inherited
 	// manifests rather than scanning the entire table history.
-	manifests, err := source.Manifests(fs)
+	manifests, err := source.Manifests(ctx, fs)
 	if err != nil {
 		return fmt.Errorf("read cherry-pick source snapshot %d: %w", snapshotID, err)
 	}
@@ -181,7 +181,7 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 		if manifest.SnapshotID() != snapshotID {
 			continue
 		}
-		for entry, err := range manifest.Entries(fs, false) {
+		for entry, err := range manifest.Entries(ctx, fs, false) {
 			if err != nil {
 				return fmt.Errorf("read cherry-pick source snapshot %d: %w", snapshotID, err)
 			}
