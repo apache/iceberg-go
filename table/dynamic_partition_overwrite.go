@@ -94,7 +94,13 @@ func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, unpartit
 				if file.ContentType() != iceberg.EntryContentData {
 					conflict = ErrConflictingDeleteFiles
 				}
-				if !unpartitioned && int(file.SpecID()) != specID {
+				// No partition scope exists for an unpartitioned overwrite.
+				// Every concurrent change matters, including older spec IDs.
+				if unpartitioned {
+					return fmt.Errorf("%w: concurrent snapshot %d changed file %q during an unpartitioned overwrite",
+						conflict, snapshot.SnapshotID, file.FilePath())
+				}
+				if int(file.SpecID()) != specID {
 					continue
 				}
 				key, err := canonicalPartitionKey(file.SpecID(), dataFilePartition(file))
