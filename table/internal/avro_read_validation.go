@@ -31,6 +31,7 @@ func validateAvroReadSchema(schemaJSON string) error {
 	if err != nil {
 		return fmt.Errorf("%w: parse Avro writer schema: %v", iceberg.ErrInvalidSchema, err)
 	}
+
 	return validateAvroReadNode(*schema.Root().ExpandReferences(), false, false)
 }
 
@@ -73,5 +74,6 @@ func validateAvroReadNodeDepth(node avro.SchemaNode, depth int) error {
 			return validateAvroReadNodeDepth(*node.Values, depth+1)
 		}
 	}
+
 	return nil
 }

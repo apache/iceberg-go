@@ -264,6 +264,7 @@ func (r *avroFileReader) Close() error {
 		return nil
 	}
 	r.closed = true
+
 	return errors.Join(r.records.Close(), r.file.Close())
 }
 
