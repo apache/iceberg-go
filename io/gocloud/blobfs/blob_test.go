@@ -228,6 +228,43 @@ func TestBlobFileIOWriteOperationsUseOperationContext(t *testing.T) {
 	}
 }
 
+type statContextKey struct{}
+
+type contextAwareAttributesBucket struct {
+	driver.Bucket
+	attributesCtx chan context.Context
+}
+
+func (b *contextAwareAttributesBucket) ErrorCode(error) gcerrors.ErrorCode { return gcerrors.Unknown }
+
+func (b *contextAwareAttributesBucket) Attributes(ctx context.Context, _ string) (*driver.Attributes, error) {
+	b.attributesCtx <- ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return &driver.Attributes{Size: 1}, nil
+}
+
+func (b *contextAwareAttributesBucket) Close() error { return nil }
+
+func TestBlobFileIOStatUsesOperationContext(t *testing.T) {
+	driverBucket := &contextAwareAttributesBucket{attributesCtx: make(chan context.Context, 1)}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx := context.WithValue(context.Background(), statContextKey{}, "lifetime")
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), statContextKey{}, "operation"))
+	cancel()
+
+	_, err := fileIO.Stat(ctx, "s3://my-bucket/data/file.parquet")
+	assert.ErrorIs(t, err, context.Canceled)
+
+	gotCtx := <-driverBucket.attributesCtx
+	assert.Equal(t, "operation", gotCtx.Value(statContextKey{}))
+}
+
 func TestBlobFileIOWriteFileHonorsOperationCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -948,22 +985,22 @@ func TestBlobFileIOStat(t *testing.T) {
 
 	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
-	fileInfo, err := bfs.Stat("s3://test-bucket/data/file.parquet")
+	fileInfo, err := bfs.Stat(ctx, "s3://test-bucket/data/file.parquet")
 	require.NoError(t, err)
 	assert.Equal(t, "file.parquet", fileInfo.Name())
 	assert.Equal(t, int64(len("content")), fileInfo.Size())
 	assert.False(t, fileInfo.IsDir())
 
-	dirInfo, err := bfs.Stat("s3://test-bucket/data")
+	dirInfo, err := bfs.Stat(ctx, "s3://test-bucket/data")
 	require.NoError(t, err)
 	assert.Equal(t, "data", dirInfo.Name())
 	assert.True(t, dirInfo.IsDir())
 
 	require.NoError(t, bfs.MkdirAll("s3://test-bucket/foo"))
-	markerInfoWithSlash, err := bfs.Stat("s3://test-bucket/foo/")
+	markerInfoWithSlash, err := bfs.Stat(ctx, "s3://test-bucket/foo/")
 	require.NoError(t, err)
 	assert.Equal(t, "foo", markerInfoWithSlash.Name())
-	markerInfoWithoutSlash, err := bfs.Stat("s3://test-bucket/foo")
+	markerInfoWithoutSlash, err := bfs.Stat(ctx, "s3://test-bucket/foo")
 	require.NoError(t, err)
 	assert.Equal(t, "foo", markerInfoWithoutSlash.Name())
 	// The trailing slash in the path should not affect the
@@ -971,7 +1008,7 @@ func TestBlobFileIOStat(t *testing.T) {
 	assert.True(t, markerInfoWithSlash.IsDir())
 	assert.True(t, markerInfoWithoutSlash.IsDir())
 
-	_, err = bfs.Stat("s3://test-bucket/missing")
+	_, err = bfs.Stat(ctx, "s3://test-bucket/missing")
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 

@@ -53,12 +53,12 @@ func (f *contextBoundHadoopFS) localPath(name string) string {
 	return filepath.Join(f.root, parsed.Host, filepath.FromSlash(strings.TrimPrefix(parsed.Path, "/")))
 }
 
-func (f *contextBoundHadoopFS) Stat(name string) (fs.FileInfo, error) {
-	if err := f.ctx.Err(); err != nil {
+func (f *contextBoundHadoopFS) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	return f.LocalFS.Stat(f.localPath(name))
+	return f.LocalFS.Stat(ctx, f.localPath(name))
 }
 
 func (f *contextBoundHadoopFS) MkdirAll(name string) error {
@@ -137,6 +137,10 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			require.ErrorIs(t, ctx.Err(), context.Canceled)
 			require.NoError(t, factoryContext.Err())
 			require.NoError(t, cat.CreateNamespace(context.Background(), table.Identifier{"ns"}, nil))
+			canceledOperationCtx, cancelOperation := context.WithCancel(context.Background())
+			cancelOperation()
+			_, err = cat.CheckNamespaceExists(canceledOperationCtx, table.Identifier{"ns"})
+			require.ErrorIs(t, err, context.Canceled)
 
 			fs := cat.(*Catalog).filesystem
 			location := warehouse + "/ns/after-cancel.txt"
