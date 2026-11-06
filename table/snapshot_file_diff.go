@@ -231,7 +231,7 @@ func snapshotDiffLiveFiles(ctx context.Context, fs iceio.IO, manifests []iceberg
 		}
 
 		group.Go(func() error {
-			for entry, err := range iceberg.EntriesWithProjection(fs, manifest, true, iceberg.ManifestEntryProjection{}) {
+			for entry, err := range iceberg.EntriesWithProjection(groupCtx, fs, manifest, true, iceberg.ManifestEntryProjection{}) {
 				if err != nil {
 					return fmt.Errorf("manifest %q: %w", manifest.FilePath(), err)
 				}
