@@ -69,12 +69,12 @@ func (f *contextBoundHadoopFS) MkdirAll(name string) error {
 	return f.LocalFS.MkdirAll(f.localPath(name))
 }
 
-func (f *contextBoundHadoopFS) ReadFile(name string) ([]byte, error) {
-	if err := f.ctx.Err(); err != nil {
+func (f *contextBoundHadoopFS) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	return f.LocalFS.ReadFile(f.localPath(name))
+	return f.LocalFS.ReadFile(ctx, f.localPath(name))
 }
 
 func (f *contextBoundHadoopFS) WriteFile(ctx context.Context, name string, content []byte) error {
@@ -142,7 +142,7 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			location := warehouse + "/ns/after-cancel.txt"
 			content := []byte("still writable")
 			require.NoError(t, fs.WriteFile(context.Background(), location, content))
-			readBack, err := fs.ReadFile(location)
+			readBack, err := fs.ReadFile(context.Background(), location)
 			require.NoError(t, err)
 			require.Equal(t, content, readBack)
 		})

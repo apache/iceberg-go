@@ -1682,7 +1682,7 @@ func NewFromLocation(
 		return nil, err
 	}
 	if rf, ok := fsys.(icebergio.ReadFileIO); ok {
-		data, err := rf.ReadFile(metalocation)
+		data, err := rf.ReadFile(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}

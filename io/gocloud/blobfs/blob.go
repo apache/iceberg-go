@@ -670,13 +670,13 @@ func (bfs *FileIO) MkdirAll(path string) error {
 }
 
 // ReadFile reads the contents of the file at the given path and returns it as a byte slice.
-func (bfs *FileIO) ReadFile(path string) ([]byte, error) {
+func (bfs *FileIO) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "ReadFile", Path: path, Err: err}
 	}
 
-	data, err := bfs.ReadAll(bfs.ctx, key)
+	data, err := bfs.ReadAll(ctx, key)
 	if err != nil {
 		return nil, blobErrToFsErr("ReadFile", path, err)
 	}

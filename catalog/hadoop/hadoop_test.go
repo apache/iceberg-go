@@ -697,11 +697,11 @@ func (s *HadoopCatalogTestSuite) TestReadWriteVersionHint() {
 	ident := []string{"ns", "tbl"}
 	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
 	s.cat.writeVersionHint(context.Background(), ident, 42)
-	s.Equal(42, s.cat.readVersionHint(ident))
+	s.Equal(42, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestReadVersionHintMissing() {
-	s.Equal(0, s.cat.readVersionHint([]string{"ns", "tbl"}))
+	s.Equal(0, s.cat.readVersionHint(context.Background(), []string{"ns", "tbl"}))
 }
 
 func (s *HadoopCatalogTestSuite) TestReadVersionHintCorrupt() {
@@ -709,7 +709,7 @@ func (s *HadoopCatalogTestSuite) TestReadVersionHintCorrupt() {
 	dir := s.cat.metadataDir(ident)
 	s.Require().NoError(os.MkdirAll(dir, 0o755))
 	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("garbage"), 0o644))
-	s.Equal(0, s.cat.readVersionHint(ident))
+	s.Equal(0, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestWriteVersionHintCreatesFile() {
@@ -800,14 +800,14 @@ func (s *HadoopCatalogTestSuite) TestReadVersionHintZeroValue() {
 	ident := []string{"ns", "tbl"}
 	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
 	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("0"), 0o644))
-	s.Equal(0, s.cat.readVersionHint(ident))
+	s.Equal(0, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestReadVersionHintWithWhitespace() {
 	ident := []string{"ns", "tbl"}
 	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
 	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("  42\n"), 0o644))
-	s.Equal(42, s.cat.readVersionHint(ident))
+	s.Equal(42, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestWriteVersionHintNoMetadataDir() {
@@ -2568,7 +2568,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
 
 	// Version hint should reflect the latest version.
 	_ = tbl // suppress unused
-	s.Equal(4, s.cat.readVersionHint(ident))
+	s.Equal(4, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
@@ -2667,7 +2667,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMetadataPublishConflic
 	metaPath, err := s.cat.metadataFilePathForCompression(ident, 2, table.MetadataCompressionCodecNone)
 	s.Require().NoError(err)
 	s.FileExists(metaPath)
-	s.Equal(2, s.cat.readVersionHint(ident))
+	s.Equal(2, s.cat.readVersionHint(context.Background(), ident))
 	s.NoFileExists(s.cat.metadataVersionClaimPath(ident, 2))
 }
 
@@ -2738,7 +2738,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMixedCodecVersionClaim
 	}
 
 	s.Equal(1, existing)
-	s.Equal(2, s.cat.readVersionHint(ident))
+	s.Equal(2, s.cat.readVersionHint(context.Background(), ident))
 	s.NoFileExists(s.cat.metadataVersionClaimPath(ident, 2))
 
 	loaded, err := s.cat.LoadTable(ctx, ident)
@@ -2917,7 +2917,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableVersionHintUpdated() {
 	)
 	s.Require().NoError(err)
 
-	s.Equal(2, s.cat.readVersionHint(ident))
+	s.Equal(2, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
