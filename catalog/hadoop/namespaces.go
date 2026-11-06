@@ -243,5 +243,5 @@ func (c *Catalog) checkedMkdirAll(ctx context.Context, id table.Identifier) erro
 		return err
 	}
 
-	return c.filesystem.MkdirAll(path)
+	return c.filesystem.MkdirAll(ctx, path)
 }

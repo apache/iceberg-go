@@ -36,8 +36,8 @@ import (
 type hadoopContextKey struct{}
 
 // contextBoundHadoopFS models cloud filesystems that retain their construction
-// context and use it for later operations. LocalFS provides the other
-// methods; the overridden operations check the retained context.
+// context. MkdirAll also observes its per-operation context. LocalFS provides
+// the remaining methods.
 type contextBoundHadoopFS struct {
 	icebergio.LocalFS
 	ctx  context.Context
@@ -61,12 +61,15 @@ func (f *contextBoundHadoopFS) Stat(ctx context.Context, name string) (fs.FileIn
 	return f.LocalFS.Stat(ctx, f.localPath(name))
 }
 
-func (f *contextBoundHadoopFS) MkdirAll(name string) error {
+func (f *contextBoundHadoopFS) MkdirAll(ctx context.Context, name string) error {
 	if err := f.ctx.Err(); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	return f.LocalFS.MkdirAll(f.localPath(name))
+	return f.LocalFS.MkdirAll(ctx, f.localPath(name))
 }
 
 func (f *contextBoundHadoopFS) ReadFile(ctx context.Context, name string) ([]byte, error) {
