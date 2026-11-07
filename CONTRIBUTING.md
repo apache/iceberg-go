@@ -62,7 +62,18 @@ Integration tests require Docker and are gated behind a build tag:
 
 ```bash
 docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
+eval "$(make integration-env)"
 go test -tags integration ./...
+```
+
+`make integration-env` prints the environment the tests need, including `AWS_S3_ENDPOINT` (the local object store) and `AWS_REGION`, so run it after the containers are up. Without `AWS_S3_ENDPOINT`, the S3-backed tests send requests to real AWS S3 and fail (for example with a `301 PermanentRedirect`).
+
+Some integration tests need services that this command does not start (Hive, Azure, GCS and Spark). To run the suites CI runs, start everything and use the make target instead:
+
+```bash
+make integration-setup
+eval "$(make integration-env)"
+make integration-test
 ```
 
 #### External REST Catalog Conformance
