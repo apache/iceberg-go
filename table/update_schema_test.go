@@ -59,9 +59,9 @@ func TestNewUpdateSchemaWithNilTransactionReturnsError(t *testing.T) {
 	assert.ErrorContains(t, err, "transaction is nil")
 }
 
-func TestUpdateSchemaLastColumnIDBelowHighestFieldIDReturnsError(t *testing.T) {
-	// Field "z" has ID 3, but the counter says 2, so the next new
-	// column would reuse ID 3.
+func TestUpdateSchemaStaleLastColumnIDAssignsFreshID(t *testing.T) {
+	// Field "z" has ID 3, but the stale counter says 2. The new column
+	// must get an ID above every existing one (4), not reuse ID 3.
 	data := strings.Replace(ExampleTableMetadataV2,
 		`"last-column-id": 3`, `"last-column-id": 2`, 1)
 	meta, err := ParseMetadataString(data)
@@ -69,22 +69,50 @@ func TestUpdateSchemaLastColumnIDBelowHighestFieldIDReturnsError(t *testing.T) {
 	require.Equal(t, 2, meta.LastColumnID())
 
 	tbl := New([]string{"id"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
 
-	var applyErr, commitErr error
-	require.NotPanics(t, func() {
-		_, applyErr = tbl.NewTransaction().UpdateSchema(true, false).
-			AddColumn([]string{"w"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
-			Apply()
-	})
-	require.ErrorIs(t, applyErr, ErrInvalidMetadata)
-	assert.ErrorContains(t, applyErr, "last-column-id 2 is less than the highest field ID 3")
+	newSchema, err := txn.UpdateSchema(true, false).
+		AddColumn([]string{"w"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+		Apply()
+	require.NoError(t, err)
 
-	require.NotPanics(t, func() {
-		commitErr = tbl.NewTransaction().UpdateSchema(true, false).
-			AddColumn([]string{"w"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
-			Commit()
-	})
-	require.ErrorIs(t, commitErr, ErrInvalidMetadata)
+	w, ok := newSchema.FindFieldByName("w")
+	require.True(t, ok)
+	assert.Equal(t, 4, w.ID)
+}
+
+func TestUpdateSchemaAssignsIDAboveHistoricalSchemas(t *testing.T) {
+	// Field "old" (ID 5) exists only in the older schema 0, as if it was
+	// dropped, and last-column-id is still 3. The new column must not reuse
+	// the dropped column's ID.
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]`,
+		`"schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}, {"id": 5, "name": "old", "required": false, "type": "long"}]`,
+		1)
+	require.NotEqual(t, ExampleTableMetadataV2, data)
+	meta, err := ParseMetadataString(data)
+	require.NoError(t, err)
+	require.Equal(t, 3, meta.LastColumnID())
+
+	tbl := New([]string{"id"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+
+	newSchema, err := txn.UpdateSchema(true, false).
+		AddColumn([]string{"w"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+		Apply()
+	require.NoError(t, err)
+
+	w, ok := newSchema.FindFieldByName("w")
+	require.True(t, ok)
+	assert.Equal(t, 6, w.ID)
+
+	// Even a rename should fix the stored counter (3 -> 5).
+	require.NoError(t, txn.UpdateSchema(true, false).
+		RenameColumn([]string{"y"}, "y2").
+		Commit())
+	written, err := txn.txnMeta()
+	require.NoError(t, err)
+	assert.Equal(t, 5, written.LastColumnID())
 }
 
 func TestAddColumn(t *testing.T) {
