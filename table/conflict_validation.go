@@ -159,10 +159,10 @@ var (
 
 // ErrDataFilesMissing is returned when data files the committer
 // explicitly references (e.g. the target of a position delete) are
-// not live: a concurrent commit removed them, or an operation staged
-// earlier in the same transaction did. The same delete can never
-// apply, so retrying it cannot succeed: the caller must rebuild the
-// delete against the current table.
+// not live, for example because a concurrent commit removed them or an
+// operation staged earlier in the same transaction did. The same delete
+// can never apply, so retrying it cannot succeed: the caller must
+// rebuild the delete against the current table.
 //
 // Like ErrCommitDiverged, it does NOT wrap ErrCommitFailed, and when
 // Transaction.Commit fails with it the error also matches

@@ -266,7 +266,7 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 		want                error
 		message             string
 		matchesCommitFailed bool
-		// mentionsRetry marks validator causes, whose text includes
+		// mentionsRetry marks validator causes whose text includes
 		// ErrCommitFailed's.
 		mentionsRetry bool
 	}{

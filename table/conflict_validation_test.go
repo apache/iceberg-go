@@ -217,7 +217,7 @@ func TestRetryableConflictErrors_WrapCommitFailed(t *testing.T) {
 }
 
 func TestErrDataFilesMissing_IsTerminal(t *testing.T) {
-	// A delete whose target data file is gone can never apply, so retrying
+	// A delete whose target data file is missing can never apply, so retrying
 	// the same delete fails identically. It therefore MUST NOT wrap
 	// ErrCommitFailed, which is the retry machinery's trigger.
 	assert.False(t, errors.Is(ErrDataFilesMissing, ErrCommitFailed),
