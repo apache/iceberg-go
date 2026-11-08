@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -417,8 +418,8 @@ func (m *manifestFile) FirstRowID() *int64 {
 func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
 
-func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
-	return manifestEntries(fs, m, discardDeleted, nil)
+func (m *manifestFile) Entries(ctx context.Context, fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
+	return manifestEntries(ctx, fs, m, discardDeleted, nil)
 }
 
 func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
@@ -594,7 +595,7 @@ type ManifestFile interface {
 	//     that path is yielded — the caller has already signalled it is no
 	//     longer interested in further values, so an extra synthetic
 	//     (nil, closeErr) tail would be discarded anyway.
-	Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
+	Entries(ctx context.Context, fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
 	// // WriteEntries writes a list of manifest entries to a provided
 	// // io.Writer. The version of the manifest file is used to determine the
 	// // schema to use for writing the entries.

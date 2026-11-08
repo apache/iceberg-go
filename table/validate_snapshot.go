@@ -191,7 +191,7 @@ func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*
 		validateSnapshotManifestDescriptor(report, manifest, version)
 
 		var added, existing, deleted int64
-		for entry, entryErr := range iceberg.EntriesWithProjection(fs, manifest, false, iceberg.ManifestEntryProjection{}) {
+		for entry, entryErr := range iceberg.EntriesWithProjection(ctx, fs, manifest, false, iceberg.ManifestEntryProjection{}) {
 			if err := ctx.Err(); err != nil {
 				return report, err
 			}
