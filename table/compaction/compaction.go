@@ -242,20 +242,22 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	// selecting, or packing them. Keep the first task's delete and lineage
 	// metadata while replacing its range with the complete file range.
 	wholeFileTasks := make([]table.FileScanTask, 0, len(tasks))
-	seenFiles := make(map[string]table.FileScanTask, len(tasks))
+	// Store indexes rather than task copies: a FileScanTask contains several
+	// interfaces and slices, so a map value copy is expensive at scale.
+	seenFiles := make(map[string]int, len(tasks))
 	for _, task := range tasks {
 		if task.File == nil {
 			return Plan{}, fmt.Errorf("%w: compaction task has no data file", table.ErrInvalidOperation)
 		}
 		path := task.File.FilePath()
-		if first, ok := seenFiles[path]; ok {
-			if !sameCompactionMetadata(first, task) {
+		if index, ok := seenFiles[path]; ok {
+			if !sameCompactionMetadata(wholeFileTasks[index], task) {
 				return Plan{}, fmt.Errorf("%w: split tasks for %q have different delete or lineage metadata", table.ErrInvalidOperation, path)
 			}
 
 			continue
 		}
-		seenFiles[path] = task
+		seenFiles[path] = len(wholeFileTasks)
 		task.Start = 0
 		task.Length = task.File.FileSizeBytes()
 		task.Residual = nil
@@ -344,15 +346,37 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	return plan, nil
 }
 
+// sameCompactionOptionalInt64 compares the values, not pointer identities:
+// independently decoded scan tasks may have distinct pointers.
+func sameCompactionOptionalInt64(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return *a == *b
+}
+
 func sameCompactionMetadata(a, b table.FileScanTask) bool {
 	equalDataFiles := func(a, b []iceberg.DataFile) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		// Scan planning commonly reuses immutable delete-file slices across
+		// splits. The same backing array and length prove identical elements,
+		// regardless of capacity, without a deep comparison.
+		if len(a) == 0 || &a[0] == &b[0] {
+			return true
+		}
+
+		// Keep deep value equality for independently decoded delete lists.
+		// DataFile is an interface and may contain an uncomparable value.
 		return slices.EqualFunc(a, b, func(a, b iceberg.DataFile) bool {
 			return reflect.DeepEqual(a, b)
 		})
 	}
 
-	return reflect.DeepEqual(a.FirstRowID, b.FirstRowID) &&
-		reflect.DeepEqual(a.DataSequenceNumber, b.DataSequenceNumber) &&
+	return sameCompactionOptionalInt64(a.FirstRowID, b.FirstRowID) &&
+		sameCompactionOptionalInt64(a.DataSequenceNumber, b.DataSequenceNumber) &&
 		equalDataFiles(a.DeleteFiles, b.DeleteFiles) &&
 		equalDataFiles(a.EqualityDeleteFiles, b.EqualityDeleteFiles) &&
 		equalDataFiles(a.DeletionVectorFiles, b.DeletionVectorFiles)
