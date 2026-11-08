@@ -669,7 +669,7 @@ func TestManifestMergeKeepsCurrentSnapshotDeletedEntries(t *testing.T) {
 	require.NotNil(t, created)
 
 	var entries []iceberg.ManifestEntry
-	for entry, err := range created.Entries(wfs, false) {
+	for entry, err := range created.Entries(t.Context(), wfs, false) {
 		require.NoError(t, err)
 		entries = append(entries, entry)
 	}
@@ -763,12 +763,12 @@ func TestMergeAppendCommitSkipsHistoricalDeleteOnlyBin(t *testing.T) {
 	meta, err = mergeTxn.meta.Build()
 	require.NoError(t, err)
 
-	outputManifests, err := meta.CurrentSnapshot().Manifests(wfs)
+	outputManifests, err := meta.CurrentSnapshot().Manifests(t.Context(), wfs)
 	require.NoError(t, err)
 	require.Len(t, outputManifests, 1)
 	require.Equal(t, int32(1), outputManifests[0].AddedDataFiles())
 	var outputEntries []iceberg.ManifestEntry
-	for entry, entryErr := range outputManifests[0].Entries(wfs, false) {
+	for entry, entryErr := range outputManifests[0].Entries(t.Context(), wfs, false) {
 		require.NoError(t, entryErr)
 		outputEntries = append(outputEntries, entry)
 	}
@@ -1254,7 +1254,7 @@ func TestAddedDeleteManifestsUseDeleteFileSpecID(t *testing.T) {
 		}
 
 		deleteManifestSpecIDs = append(deleteManifestSpecIDs, manifest.PartitionSpecID())
-		for entry, err := range manifest.Entries(wfs, false) {
+		for entry, err := range manifest.Entries(t.Context(), wfs, false) {
 			require.NoError(t, err)
 			require.Equal(t, manifest.PartitionSpecID(), entry.DataFile().SpecID())
 		}
@@ -1543,7 +1543,7 @@ func TestOverwriteParentDependentManifestsLimitsConcurrencyAndPreservesOrder(t *
 		require.Len(t, result.manifests, manifestCount+1)
 		require.Equal(t, iceberg.ManifestContentData, result.manifests[0].ManifestContent())
 		tombstones := make([]iceberg.ManifestEntry, 0, manifestCount)
-		for entry, err := range result.manifests[0].Entries(blockingIO, false) {
+		for entry, err := range result.manifests[0].Entries(t.Context(), blockingIO, false) {
 			require.NoError(t, err)
 			tombstones = append(tombstones, entry)
 		}
@@ -1555,7 +1555,7 @@ func TestOverwriteParentDependentManifestsLimitsConcurrencyAndPreservesOrder(t *
 			manifestIndex := i - 1
 			require.NotEqual(t, manifests[manifestIndex].FilePath(), manifest.FilePath(), "manifest %d should be rewritten", manifestIndex)
 			entries := make([]iceberg.ManifestEntry, 0, 1)
-			for entry, err := range manifest.Entries(blockingIO, false) {
+			for entry, err := range manifest.Entries(t.Context(), blockingIO, false) {
 				require.NoError(t, err)
 				entries = append(entries, entry)
 			}
@@ -2139,7 +2139,7 @@ func TestSummaryOnRetry_SkipsAlreadyRemovedDeleteFile(t *testing.T) {
 		}},
 	}
 
-	present, err := sp.checkRemovedFiles(freshParent)
+	present, err := sp.checkRemovedFiles(t.Context(), freshParent)
 	require.NoError(t, err)
 	require.NotContains(t, present.deleteFiles, posDel.FilePath(),
 		"a pos-delete absent from the fresh parent must not be marked present")
@@ -2231,7 +2231,7 @@ func TestCheckRemovedFiles_AbortsWhenRewriteTargetMissing(t *testing.T) {
 
 	freshParent := &Snapshot{SnapshotID: 99, ManifestList: parentManifestList}
 
-	present, err := sp.checkRemovedFiles(freshParent)
+	present, err := sp.checkRemovedFiles(t.Context(), freshParent)
 	require.ErrorIs(t, err, ErrCommitDiverged)
 	require.ErrorContains(t, err, target.FilePath())
 	require.Nil(t, present, "no presence set is returned on a diverged abort")
@@ -2246,7 +2246,7 @@ func TestCheckRemovedFiles_ShortCircuitsWithNothingToRemove(t *testing.T) {
 	txn, wfs := createTestTransactionWithMemIO(t, spec)
 	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
 
-	present, err := sp.checkRemovedFiles(nil)
+	present, err := sp.checkRemovedFiles(t.Context(), nil)
 	require.NoError(t, err)
 	require.Empty(t, present.deleteFiles)
 	require.Empty(t, present.dvRefs)
@@ -2294,7 +2294,7 @@ func TestCheckRemovedFiles_SupersededDVReadsAsAbsent(t *testing.T) {
 	peerDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
 	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 91, "superseded", peerDV)
 
-	present, err := sp.checkRemovedFiles(parent)
+	present, err := sp.checkRemovedFiles(t.Context(), parent)
 	require.NoError(t, err)
 	require.Empty(t, present.dvRefs,
 		"a superseded DV (same ref, different path) must not read as present")
@@ -2321,7 +2321,7 @@ func TestCheckRemovedFiles_ExactDVPresentAndSubtracted(t *testing.T) {
 
 	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 92, "exact", staleDV)
 
-	present, err := sp.checkRemovedFiles(parent)
+	present, err := sp.checkRemovedFiles(t.Context(), parent)
 	require.NoError(t, err)
 	require.Contains(t, present.dvRefs, dataPath, "the exact DV is still live on parent")
 
@@ -2348,7 +2348,7 @@ func TestParentDependentManifests_SupersededDVSurvivesRetry(t *testing.T) {
 	peerDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
 	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 93, "survives", peerDV)
 
-	parentManifests, err := parent.Manifests(wfs)
+	parentManifests, err := parent.Manifests(t.Context(), wfs)
 	require.NoError(t, err)
 	require.Len(t, parentManifests, 1)
 
@@ -2372,7 +2372,7 @@ func TestParentDependentManifests_ExactDVStillExpunged(t *testing.T) {
 	sp.removeDeletionVector(staleDV)
 
 	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 94, "expunged", staleDV)
-	parentManifests, err := parent.Manifests(wfs)
+	parentManifests, err := parent.Manifests(t.Context(), wfs)
 	require.NoError(t, err)
 	require.Len(t, parentManifests, 1)
 
@@ -2382,7 +2382,7 @@ func TestParentDependentManifests_ExactDVStillExpunged(t *testing.T) {
 	require.NotEqual(t, parentManifests[0].FilePath(), got[0].FilePath())
 
 	var tombstones []iceberg.ManifestEntry
-	for entry, err := range got[0].Entries(wfs, false) {
+	for entry, err := range got[0].Entries(t.Context(), wfs, false) {
 		require.NoError(t, err)
 		tombstones = append(tombstones, entry)
 	}
@@ -2456,7 +2456,7 @@ func TestOverwriteParentDependentManifestsUsesProductionPath(t *testing.T) {
 
 	readEntries := func(manifest iceberg.ManifestFile) []iceberg.ManifestEntry {
 		entries := make([]iceberg.ManifestEntry, 0, 2)
-		for entry, err := range manifest.Entries(wfs, false) {
+		for entry, err := range manifest.Entries(t.Context(), wfs, false) {
 			require.NoError(t, err)
 			entries = append(entries, entry)
 		}
