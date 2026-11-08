@@ -2229,9 +2229,9 @@ func (scan *Scan) readFileTasks(ctx context.Context, tasks []FileScanTask, added
 }
 
 // readFileTasksWithAddedDeletes reads tasks while retaining rows matched by the
-// corresponding added-delete task for each data file. positionSinks, when set,
-// receives the original file positions of those retained rows before they are
-// returned to the caller.
+// corresponding added-delete task for each data file. When positionSinks is
+// set, it records the original file positions and consumes the matched rows
+// internally instead of returning them to the caller.
 func (scan *Scan) readFileTasksWithAddedDeletes(
 	ctx context.Context,
 	tasks []FileScanTask,

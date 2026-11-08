@@ -133,6 +133,34 @@ func TestMergeOnReadDeleteConflict_ConcurrentFirstDeletionVector(t *testing.T) {
 	require.Equal(t, 1, liveDVCount(t, peer))
 
 	_, err = pending.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	require.ErrorContains(t, err, "concurrent snapshot")
+	require.Equal(t, 1, liveDVCount(t, peer))
+	require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, peer))
+}
+
+// A replacement snapshot can add a first DV just like a merge-on-read delete.
+// A staged delete must see that DV during replay and reject a second live one.
+func TestMergeOnReadDeleteConflict_ConcurrentFirstDeletionVectorFromConversion(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendTenRows(t, newV3MoRConflictTestTable(t))
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+
+	pending := tbl.NewTransaction()
+	require.NoError(t, pending.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(7)), nil))
+
+	conversion := tbl.NewTransaction()
+	result, err := conversion.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.AddedDeletionVectors)
+	peer, err := conversion.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, table.OpReplace, peer.CurrentSnapshot().Summary.Operation)
+	require.Equal(t, 1, liveDVCount(t, peer))
+	require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, peer))
+
+	_, err = pending.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
 	require.ErrorContains(t, err, "concurrent snapshot")
 	require.Equal(t, 1, liveDVCount(t, peer))
 	require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, peer))

@@ -224,8 +224,8 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 						return nil
 					}
 					if _, ok := dvTargets[ref]; ok {
-						return fmt.Errorf("cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and retry the delete",
-							ref, snap.SnapshotID, file.FilePath())
+						return fmt.Errorf("%w: cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and retry the delete",
+							ErrConflictingDeleteFiles, ref, snap.SnapshotID, file.FilePath())
 					}
 
 					return nil

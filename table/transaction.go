@@ -1885,36 +1885,6 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if err != nil {
 		return err
 	}
-	if cfg.equalityDeleteToDVConversion {
-		if !cfg.rewriteSemantics || len(dataFilesToDelete) > 0 || len(dataFilesToAdd) > 0 ||
-			len(autoDeleteFilesToRemove) > 0 || len(deleteFilesToRemove) == 0 {
-			return fmt.Errorf("%w: invalid equality-delete to deletion-vector rewrite", ErrInvalidOperation)
-		}
-		hasEqualityDelete := false
-		for _, file := range deleteFilesToRemove {
-			switch file.ContentType() {
-			case iceberg.EntryContentEqDeletes:
-				hasEqualityDelete = true
-			case iceberg.EntryContentPosDeletes:
-			default:
-				return fmt.Errorf("%w: equality-delete conversion cannot remove %s files",
-					ErrInvalidOperation, file.ContentType())
-			}
-		}
-		if !hasEqualityDelete {
-			return fmt.Errorf("%w: equality-delete conversion must remove at least one equality delete file", ErrInvalidOperation)
-		}
-		for _, addition := range deleteFilesToAdd {
-			if !IsDeletionVector(addition.file) {
-				return fmt.Errorf("%w: equality-delete conversion can only add deletion vectors",
-					ErrInvalidOperation)
-			}
-			if addition.dataSequenceNumber != nil && *addition.dataSequenceNumber > nextSequenceNumber {
-				return fmt.Errorf("%w: deletion vector data sequence number %d exceeds new snapshot sequence number %d",
-					ErrInvalidOperation, *addition.dataSequenceNumber, nextSequenceNumber)
-			}
-		}
-	}
 	for path := range setDeleteFilesToAdd.paths {
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("data and delete file paths must be unique for ReplaceFiles: %s", path)
@@ -2181,11 +2151,6 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		}
 		for _, addition := range deleteFilesToAdd {
 			if conversion {
-				if !IsDeletionVector(addition.file) {
-					return fmt.Errorf("%w: equality deletes can only be converted to deletion vectors",
-						ErrInvalidOperation)
-				}
-
 				continue
 			}
 			if addition.file.ContentType() != sourceContent {
@@ -2206,8 +2171,8 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		}
 	}
 	// Every new DV must replace all applicable legacy position-delete files.
-	// A conversion that leaves an unscoped position-delete file behind is
-	// unsafe, even if its positions were already merged into the new vector.
+	// Leaving an applicable position-delete file live is not supported, even if
+	// its positions were already merged into the new vector.
 	if err := validateAddedDeletionVectorTargets(setDeleteFilesToAdd.dvsByRef, liveDataFiles,
 		survivingPositionDeletes, deleteSequenceNumber); err != nil {
 		return err

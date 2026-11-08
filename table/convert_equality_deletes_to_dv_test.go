@@ -188,6 +188,23 @@ func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
 
 	beforeSnapshot := tbl.CurrentSnapshot().SnapshotID
 	require.Equal(t, []int64{4}, idsInTable(t, tbl))
+	puffinFiles := func() []string {
+		var paths []string
+		err := filepath.WalkDir(tbl.Location(), func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() && filepath.Ext(path) == ".puffin" {
+				paths = append(paths, path)
+			}
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		return paths
+	}
+	puffinFilesBefore := puffinFiles()
 
 	_, err = tbl.ConvertEqualityDeletesToDeletionVectors(ctx)
 	require.ErrorIs(t, err, table.ErrInvalidOperation)
@@ -196,6 +213,7 @@ func TestConvertEqualityDeletesRejectsSharedPositionDeletes(t *testing.T) {
 	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
 	require.Zero(t, liveDVCount(t, tbl))
 	require.Equal(t, []int64{4}, idsInTable(t, tbl))
+	require.Equal(t, puffinFilesBefore, puffinFiles(), "a rejected conversion must remove its staged Puffin file")
 
 	// A failed conversion must not leave the transaction pinned: callers
 	// can still stage unrelated metadata changes and retry on a newer head.

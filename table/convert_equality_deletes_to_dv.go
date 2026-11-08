@@ -66,8 +66,8 @@ func (b *equalityDeletePositionBuffer) addPositions(positions []int64) {
 
 // EqualityDeleteToDVResult summarizes an equality-delete conversion.
 type EqualityDeleteToDVResult struct {
-	// Table is the table returned by the table-level action. It is nil when the
-	// action is staged on a Transaction and set after that transaction commits.
+	// Table is the table returned by the table-level action. It is nil for
+	// transaction callers, including after the transaction commits.
 	Table *Table
 
 	// ConvertedEqualityDeleteFiles is the number of live equality delete files
@@ -87,7 +87,8 @@ type EqualityDeleteToDVResult struct {
 // ConvertEqualityDeletesToDeletionVectors converts live equality deletes on
 // the main branch of a v3 table to file-specific deletion vectors. The rewrite
 // commits as one replace snapshot so changelog readers do not see a second
-// logical deletion event.
+// logical deletion event. See [Transaction.ConvertEqualityDeletesToDeletionVectors]
+// for its limitations.
 func (t Table) ConvertEqualityDeletesToDeletionVectors(ctx context.Context) (*EqualityDeleteToDVResult, error) {
 	txn, err := t.NewTransactionOnBranch(MainBranch)
 	if err != nil {
@@ -115,6 +116,14 @@ func (t Table) ConvertEqualityDeletesToDeletionVectors(ctx context.Context) (*Eq
 // ConvertEqualityDeletesToDeletionVectors stages an equality-delete to
 // deletion-vector conversion on the transaction's branch. Commit the
 // transaction to publish the replace snapshot.
+//
+// The conversion reads every data file targeted by an applicable equality
+// delete. It merges file-scoped position deletes and existing vectors, but is
+// not supported when an applicable unscoped or partition-scoped position
+// delete would remain live. A concurrent commit is not replayed against a
+// refreshed conversion plan and may make Commit return [ErrCommitFailed]. If a
+// transaction is abandoned after staging, its Puffin file may remain for
+// orphan cleanup.
 func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Context) (*EqualityDeleteToDVResult, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -363,10 +372,9 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		}
 		sequenceNumber := meta.nextSequenceNumber()
 		for _, file := range deletionVectors {
-			sequence := sequenceNumber
 			additions = append(additions, rewriteDeleteFileAddition{
 				file:               file,
-				dataSequenceNumber: &sequence,
+				dataSequenceNumber: &sequenceNumber,
 			})
 		}
 		result.AddedDeletionVectors = len(deletionVectors)
