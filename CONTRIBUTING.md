@@ -68,7 +68,7 @@ go test -tags integration ./catalog/rest/... ./catalog/sql/... ./table/maintenan
 
 Without `AWS_S3_ENDPOINT`, the S3-backed tests send requests to real AWS S3 and fail (for example with a `301 PermanentRedirect`).
 
-This starts only the REST catalog and object store, so it runs only the packages they serve. To run the full suite CI runs (Hive, Azure, GCS and Spark), see [Integration tests](README.md#integration-tests) in the README.
+This starts only the REST catalog and object store, so it runs only the packages they serve. To run the full suite CI runs (Hive, Azure, GCS and Spark), see [Integration tests](https://github.com/apache/iceberg-go/blob/main/README.md#integration-tests) in the README.
 
 #### External REST Catalog Conformance
 
