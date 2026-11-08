@@ -953,12 +953,35 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, err
 	}
 
+	// Rows that existing position deletes already removed must not be deleted
+	// again, so each task carries its file's position delete files from scan
+	// planning, which matches them by sequence number, partition and path. The
+	// scan is pinned to the snapshot files came from, so a branch transaction
+	// doesn't apply main's deletes.
+	scanOpts := []ScanOption{WithRowFilter(filter), WithCaseSensitive(caseSensitive)}
+	if snap := t.planningSnapshot(meta); snap != nil {
+		scanOpts = append(scanOpts, WithSnapshotID(snap.SnapshotID))
+	}
+	scan, err := t.Scan(scanOpts...)
+	if err != nil {
+		return nil, err
+	}
+	planned, err := scan.PlanFiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	existingDeletes := make(map[string][]iceberg.DataFile, len(planned))
+	for _, task := range planned {
+		existingDeletes[task.File.FilePath()] = task.DeleteFiles
+	}
+
 	tasks := make([]FileScanTask, 0, len(files))
 	for _, f := range files {
 		tasks = append(tasks, FileScanTask{
-			File:   f,
-			Start:  0,
-			Length: f.FileSizeBytes(),
+			File:        f,
+			DeleteFiles: existingDeletes[f.FilePath()],
+			Start:       0,
+			Length:      f.FileSizeBytes(),
 		})
 	}
 
