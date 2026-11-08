@@ -2746,6 +2746,10 @@ func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 		return nil, err
 	}
 
+	// The spec's rename 404 covers both a missing source view and a missing
+	// destination namespace; split it by error.type so a missing namespace is
+	// not reported as a missing view. LoadView and DropView need no override
+	// because the spec documents only NoSuchViewException for their 404s.
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchView,
