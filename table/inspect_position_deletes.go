@@ -543,7 +543,7 @@ func (i InspectTable) positionDeleteRecordReader(
 				continue
 			}
 
-			for entry, err := range manifest.Entries(fs, true) {
+			for entry, err := range manifest.Entries(ctx, fs, true) {
 				if err != nil {
 					yieldError(fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err))
 
@@ -611,7 +611,7 @@ func appendDeletionVectorRows(
 		return false, fmt.Errorf("%w: deletion vector is missing content_offset/content_size_in_bytes",
 			iceberg.ErrInvalidSchema)
 	}
-	bitmap, err := dv.ReadDV(fs, file)
+	bitmap, err := dv.ReadDV(ctx, fs, file)
 	if err != nil {
 		return false, err
 	}

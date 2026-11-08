@@ -1044,7 +1044,7 @@ func TestDataFileFromMetadata_EndToEndAddDataFiles(t *testing.T) {
 	assert.Equal(t, "1", snap.Summary.Properties["added-data-files"])
 	assert.Equal(t, "3", snap.Summary.Properties["added-records"])
 
-	manifests, err := snap.Manifests(iceio.LocalFS{})
+	manifests, err := snap.Manifests(t.Context(), iceio.LocalFS{})
 	require.NoError(t, err)
 
 	var checked bool
@@ -1052,7 +1052,7 @@ func TestDataFileFromMetadata_EndToEndAddDataFiles(t *testing.T) {
 		if m.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		for e, err := range m.Entries(iceio.LocalFS{}, true) {
+		for e, err := range m.Entries(t.Context(), iceio.LocalFS{}, true) {
 			require.NoError(t, err)
 			committed := e.DataFile()
 
@@ -1277,7 +1277,7 @@ func TestDataFileFromMetadata_EndToEndRowDelta(t *testing.T) {
 	assert.Equal(t, "1", snap.Summary.Properties["added-delete-files"])
 	assert.Equal(t, "2", snap.Summary.Properties["added-records"])
 
-	manifests, err := snap.Manifests(iceio.LocalFS{})
+	manifests, err := snap.Manifests(t.Context(), iceio.LocalFS{})
 	require.NoError(t, err)
 
 	var sawPosDelete bool
@@ -1285,7 +1285,7 @@ func TestDataFileFromMetadata_EndToEndRowDelta(t *testing.T) {
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		for e, err := range m.Entries(iceio.LocalFS{}, true) {
+		for e, err := range m.Entries(t.Context(), iceio.LocalFS{}, true) {
 			require.NoError(t, err)
 			require.Equal(t, iceberg.EntryContentPosDeletes, e.DataFile().ContentType())
 			sawPosDelete = true
