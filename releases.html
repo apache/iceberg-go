@@ -309,6 +309,9 @@
 <p><strong>Branch transactions return initialization errors.</strong> <code>Table.NewTransactionOnBranch(branch)</code> now returns <code>(*Transaction, error)</code>, and <code>Table.NewTransactionOnBranchWithError</code> is removed. Use <code>NewTransactionOnBranch</code> and handle its error.</p>
 </li>
 <li>
+<p><strong>Snapshot expiration now tolerates concurrent ref changes.</strong> If a concurrent commit moves a ref that the expiry read, a retry or later <code>Commit</code> replans instead of failing with <code>table.ErrCommitFailed</code>. The committed expiry can differ from <code>Transaction.StagedTable</code>. See <a href="./concurrent-writes.html#snapshot-expiration">Snapshot expiration</a> for cases that now fail with <code>table.ErrTransactionUnusable</code>.</p>
+</li>
+<li>
 <p><strong>Schema JSON constructor uses the Go initialism.</strong> Replace <code>iceberg.NewSchemaFromJsonFields</code> with <code>iceberg.NewSchemaFromJSONFields</code>.</p>
 </li>
 <li>
