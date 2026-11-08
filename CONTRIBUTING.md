@@ -80,3 +80,5 @@ To test another catalog, override the Polaris defaults with `REST_CATALOG_URI`, 
 REST_CATALOG_URI=http://localhost:8181 REST_CATALOG_CREDENTIAL= REST_CATALOG_SCOPE= REST_CATALOG_WAREHOUSE= \
   make integration-external-rest
 ```
+
+The nested namespace tests are off by default. Set `REST_CATALOG_NESTED_NAMESPACES=true` to run them against a catalog that lists only direct children and refuses to drop a namespace with children; CI sets it for Polaris.

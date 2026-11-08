@@ -22,6 +22,7 @@ package rest_test
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -48,6 +49,10 @@ const (
 	// externalWarehouseEnv selects the warehouse, or the catalog for servers
 	// such as Polaris that host several.
 	externalWarehouseEnv = "REST_CATALOG_WAREHOUSE"
+	// externalNestedNamespacesEnv is a boolean that turns on the nested
+	// namespace tests. It is off by default because not every server follows
+	// Java's nested namespace behavior; CI sets it for Polaris.
+	externalNestedNamespacesEnv = "REST_CATALOG_NESTED_NAMESPACES"
 )
 
 // TestExternalRestCatalogConformance runs the catalog conformance suite against
@@ -71,9 +76,17 @@ func TestExternalRestCatalogConformance(t *testing.T) {
 		props["warehouse"] = warehouse
 	}
 
+	nestedNamespaces := false
+	if v := os.Getenv(externalNestedNamespacesEnv); v != "" {
+		var err error
+		nestedNamespaces, err = strconv.ParseBool(v)
+		require.NoError(t, err, "%s must be a boolean", externalNestedNamespacesEnv)
+	}
+
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		SupportsNamespaceProperties: true,
 		SupportsRenameTable:         true,
+		SupportsNestedNamespaces:    nestedNamespaces,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := catalog.Load(context.Background(), "external", props)
 			require.NoError(t, err)
