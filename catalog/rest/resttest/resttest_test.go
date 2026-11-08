@@ -212,6 +212,103 @@ func TestRegisterTable(t *testing.T) {
 	require.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
 }
 
+// The server's own compressed metadata files must be registrable.
+func TestRegisterCompressedMetadata(t *testing.T) {
+	ctx := context.Background()
+	cat := newCatalog(t, resttest.NewServer(t).URL)
+	_, tbl := createTable(t, cat, iceberg.Properties{
+		table.MetadataCompressionKey: table.MetadataCompressionCodecGzip,
+	})
+	require.True(t, strings.HasSuffix(tbl.MetadataLocation(), ".gz.metadata.json"), tbl.MetadataLocation())
+
+	got, err := cat.RegisterTable(ctx, table.Identifier{"db", "registered_gzip"}, tbl.MetadataLocation())
+	require.NoError(t, err)
+	assert.Equal(t, tbl.Metadata().TableUUID(), got.Metadata().TableUUID())
+}
+
+// catalogtest does not cover nested namespaces yet, so check listing by
+// parent and that a namespace with children cannot be dropped.
+func TestNestedNamespaces(t *testing.T) {
+	ctx := context.Background()
+	cat := newCatalog(t, resttest.NewServer(t).URL)
+
+	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"a"}, nil))
+	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"a", "b"}, nil))
+	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"a", "c"}, nil))
+	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"a", "b", "d"}, nil))
+
+	err := cat.CreateNamespace(ctx, table.Identifier{"missing", "child"}, nil)
+	require.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
+
+	top, err := cat.ListNamespaces(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []table.Identifier{{"a"}}, top)
+
+	children, err := cat.ListNamespaces(ctx, table.Identifier{"a"})
+	require.NoError(t, err)
+	assert.Equal(t, []table.Identifier{{"a", "b"}, {"a", "c"}}, children)
+
+	_, err = cat.ListNamespaces(ctx, table.Identifier{"missing"})
+	require.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
+
+	require.ErrorIs(t, cat.DropNamespace(ctx, table.Identifier{"a"}), catalog.ErrNamespaceNotEmpty)
+	require.ErrorIs(t, cat.DropNamespace(ctx, table.Identifier{"a", "b"}), catalog.ErrNamespaceNotEmpty)
+
+	require.NoError(t, cat.DropNamespace(ctx, table.Identifier{"a", "b", "d"}))
+	require.NoError(t, cat.DropNamespace(ctx, table.Identifier{"a", "b"}))
+	require.NoError(t, cat.DropNamespace(ctx, table.Identifier{"a", "c"}))
+	require.NoError(t, cat.DropNamespace(ctx, table.Identifier{"a"}))
+}
+
+// A create with staged updates sends stage-create, which registers nothing,
+// and then finishes with an assert-create commit.
+func TestStagedCreate(t *testing.T) {
+	var commits atomic.Int64
+	h := resttest.NewHandler(resttest.WithWarehouse("file://" + t.TempDir()))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tables/staged") {
+			commits.Add(1)
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	cat := newCatalog(t, srv.URL)
+	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"db"}, nil))
+
+	ident := table.Identifier{"db", "staged"}
+	tbl, err := cat.CreateTable(ctx, ident, catalogtest.Schema,
+		catalog.WithStagedUpdates(table.NewSetPropertiesUpdate(iceberg.Properties{"staged": "yes"})))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), commits.Load(), "the create must finish with one commit")
+	assert.Equal(t, "yes", tbl.Properties()["staged"])
+
+	loaded, err := cat.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	assert.Equal(t, "yes", loaded.Properties()["staged"])
+	assert.Equal(t, tbl.MetadataLocation(), loaded.MetadataLocation())
+
+	// A second staged create of the same table is rejected by assert-create.
+	_, err = cat.CreateTable(ctx, ident, catalogtest.Schema,
+		catalog.WithStagedUpdates(table.NewSetPropertiesUpdate(iceberg.Properties{"staged": "again"})))
+	require.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+}
+
+func TestWithPropertiesRejectsRoutingKeys(t *testing.T) {
+	for _, key := range []string{"prefix", "namespace-separator"} {
+		assert.PanicsWithError(t, `resttest: WithProperties does not support "`+key+`"`, func() {
+			resttest.NewHandler(resttest.WithProperties(nil, iceberg.Properties{key: "x"}))
+		}, key)
+		assert.Panics(t, func() {
+			resttest.NewHandler(resttest.WithProperties(iceberg.Properties{key: "x"}, nil))
+		}, key)
+	}
+	assert.NotPanics(t, func() {
+		resttest.NewHandler(resttest.WithProperties(iceberg.Properties{"some-default": "1"}, nil))
+	})
+}
+
 func TestUnsupportedRoutesReturnNotImplemented(t *testing.T) {
 	srv := resttest.NewServer(t)
 

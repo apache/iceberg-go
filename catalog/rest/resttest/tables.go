@@ -20,7 +20,6 @@ package resttest
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -176,8 +175,10 @@ func (s *server) tableExists(w http.ResponseWriter, r *http.Request, ns []string
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// dropTable removes the table pointer. purgeRequested is accepted but files
-// are left in place.
+// dropTable removes the table pointer. A purge request (purgeRequested=true)
+// is answered 204 like a plain drop but leaves the table's files in place:
+// the table is gone from the catalog either way, so test code that drops
+// with purge keeps working, while file deletion is out of scope.
 func (s *server) dropTable(w http.ResponseWriter, r *http.Request, ns []string, name string) {
 	key := tableKey(ns, name)
 	if _, ok := s.tables[key]; !ok {
@@ -256,7 +257,10 @@ func (s *server) registerTable(w http.ResponseWriter, r *http.Request, ns []stri
 		return
 	}
 
-	md, err := readMetadata(r.Context(), s.catalogProps(), req.MetadataLocation)
+	// NewFromLocation decompresses gzip and zstd metadata files, as the Glue
+	// and Hive register paths rely on.
+	tbl, err := table.NewFromLocation(r.Context(), ident(ns, req.Name), req.MetadataLocation,
+		icebergio.LoadFSFunc(s.catalogProps(), req.MetadataLocation), nil)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, typeBadRequest, "read table metadata: "+err.Error())
 
@@ -267,30 +271,11 @@ func (s *server) registerTable(w http.ResponseWriter, r *http.Request, ns []stri
 		namespace:   slices.Clone(ns),
 		name:        req.Name,
 		metadataLoc: req.MetadataLocation,
-		metadata:    md,
+		metadata:    tbl.Metadata(),
 	}
 	s.tables[tableKey(ns, req.Name)] = entry
 
 	writeJSON(w, http.StatusOK, entry.loadResponse())
-}
-
-func readMetadata(ctx context.Context, props iceberg.Properties, loc string) (md table.Metadata, err error) {
-	fs, err := icebergio.LoadFS(ctx, props, loc)
-	if err != nil {
-		return nil, err
-	}
-	f, err := fs.Open(ctx, loc)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { err = errors.Join(err, f.Close()) }()
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-
-	return table.ParseMetadataBytes(data)
 }
 
 // commitTable applies a commit under the server lock: it validates the

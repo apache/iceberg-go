@@ -20,6 +20,7 @@ package resttest
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,7 @@ type config struct {
 	prefix    string
 	defaults  iceberg.Properties
 	overrides iceberg.Properties
+	errs      []error
 }
 
 // WithWarehouse sets the warehouse location, such as "file://"+t.TempDir().
@@ -61,14 +63,30 @@ func WithPrefix(prefix string) Option {
 
 // WithProperties sets the defaults and overrides the config endpoint returns.
 // The server always sets the "prefix" override itself when WithPrefix is used.
+//
+// The "prefix" and "namespace-separator" keys change the paths the client
+// sends, which the server does not follow, so NewHandler panics if either
+// appears. Use WithPrefix to serve under a prefix.
 func WithProperties(defaults, overrides iceberg.Properties) Option {
 	return func(c *config) {
+		for _, props := range []iceberg.Properties{defaults, overrides} {
+			for _, key := range unsupportedConfigKeys {
+				if _, ok := props[key]; ok {
+					c.errs = append(c.errs, fmt.Errorf("resttest: WithProperties does not support %q", key))
+				}
+			}
+		}
 		c.defaults = maps.Clone(defaults)
 		c.overrides = maps.Clone(overrides)
 	}
 }
 
+// unsupportedConfigKeys are config properties that change client routing in
+// ways the server does not follow.
+var unsupportedConfigKeys = []string{"prefix", "namespace-separator"}
+
 // NewHandler returns an in-memory REST catalog. It is safe for concurrent use.
+// It panics if an option is invalid.
 func NewHandler(opts ...Option) http.Handler {
 	s := &server{
 		namespaces: map[string]iceberg.Properties{},
@@ -76,6 +94,9 @@ func NewHandler(opts ...Option) http.Handler {
 	}
 	for _, opt := range opts {
 		opt(&s.cfg)
+	}
+	if err := errors.Join(s.cfg.errs...); err != nil {
+		panic(err)
 	}
 	if s.cfg.prefix != "" {
 		s.prefixSegments = strings.Split(s.cfg.prefix, "/")

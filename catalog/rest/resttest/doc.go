@@ -34,4 +34,12 @@
 // and authentication are not implemented. They are not advertised in the
 // config response, and requests for them return 501. Listing returns a single
 // page, and dropping a table with purge does not delete its files.
+//
+// The server decodes commit requirements and updates into the same
+// table.Requirement and table.Update types the client encodes and checks
+// them with the same Validate method, so a passing run shows that client
+// and server agree with each other, not that those JSON shapes or the
+// validation logic match the spec. Apart from a conflict (409) or a missing
+// table (404), a rejected commit returns 400, so 5xx responses and unknown
+// commit state are not exercised.
 package resttest
