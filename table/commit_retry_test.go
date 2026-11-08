@@ -704,9 +704,7 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 	assertOnlyManifestList(t, wfs, originalManifestList)
 }
 
-// assertOnlyManifestList checks that want is the only manifest list left in
-// wfs: a failed commit keeps the staged list and removes every rebuilt one.
-func assertOnlyManifestList(t *testing.T, wfs *memIO, want string) {
+func assertOnlyManifestList(t *testing.T, wfs *memIO, want ...string) {
 	t.Helper()
 	var lists []string
 	for path := range wfs.files {
@@ -714,7 +712,8 @@ func assertOnlyManifestList(t *testing.T, wfs *memIO, want string) {
 			lists = append(lists, path)
 		}
 	}
-	assert.Equal(t, []string{want}, lists)
+	slices.Sort(lists)
+	assert.Equal(t, slices.Sorted(slices.Values(want)), lists)
 }
 
 // TestDoCommit_OrphanCleanedOnRetriesExhausted verifies that when every retry
