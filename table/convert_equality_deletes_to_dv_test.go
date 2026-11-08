@@ -557,6 +557,28 @@ func TestConvertEqualityDeletesTransactionStagesOneReplace(t *testing.T) {
 	require.Equal(t, []int64{1}, idsInTable(t, committed))
 }
 
+func TestConvertEqualityDeletesMergesTransactionStagedDeletionVector(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil))
+
+	result, err := tx.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.ReplacedDeletionVectors)
+	require.Equal(t, 1, result.AddedDeletionVectors)
+
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDVCount(t, committed), "the staged and converted positions must share one live DV")
+	require.Zero(t, liveDeleteFileCount(t, committed, iceberg.EntryContentEqDeletes))
+	require.Equal(t, []int64{1, 4}, idsInTable(t, committed),
+		"conversion must preserve both the staged delete and equality-delete matches")
+}
+
 func TestConvertEqualityDeletesRejectsStaleTransactionAtCommit(t *testing.T) {
 	ctx := t.Context()
 	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
