@@ -74,6 +74,24 @@ func TestPlanCompactionCountsWholeFiles(t *testing.T) {
 	require.Equal(t, original, tasks, "normalization must not mutate caller tasks")
 }
 
+func TestPlanCompactionAcceptsSharedSplitDeleteFiles(t *testing.T) {
+	file := newDataFile("shared.parquet", 10)
+	first := makeTask(file, 0, 0)
+	first.DeleteFiles = []iceberg.DataFile{newDeleteFile("a.pos"), newDeleteFile("b.pos")}
+	first.Length = file.size / 2
+	second := first
+	second.Start, second.Length = first.Length, file.size-first.Length
+
+	cfg := compaction.DefaultConfig()
+	cfg.MinInputFiles = 1
+	plan, err := cfg.PlanCompaction([]table.FileScanTask{first, second})
+	require.NoError(t, err)
+	require.Equal(t, 1, plan.TotalInputFiles)
+	require.Len(t, plan.Groups, 1)
+	require.Len(t, plan.Groups[0].Tasks, 1)
+	require.Equal(t, 2, plan.Groups[0].DeleteFileCount)
+}
+
 func TestPlanCompactionRejectsConflictingSplitMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
