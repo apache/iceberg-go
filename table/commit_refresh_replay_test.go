@@ -229,7 +229,7 @@ func TestDoCommit_ValidatorRejectsOnRefresh(t *testing.T) {
 // validator that fails to read must stay resumable.
 func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 	head := int64(100)
-	noRetries := iceberg.Properties{}
+	noRetries := iceberg.Properties{CommitNumRetriesKey: "0"}
 	// Rejections formatted like the validators in conflict_validation.go.
 	rejectConcurrent := func(sentinel error) conflictValidatorFunc {
 		return func(cc *conflictContext) error {

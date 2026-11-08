@@ -480,7 +480,7 @@ txn, err := tbl.NewTransactionOnBranch("staging")
 if err != nil { /* ... */ }
 ```
 
-`Commit` can retry on conflict (`ErrCommitFailed`) when `commit.retry.num-retries` is set. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
+`Commit` retries a conflict (`ErrCommitFailed`) up to `commit.retry.num-retries` times, 4 by default. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 
 ## Schema and partition evolution
 
