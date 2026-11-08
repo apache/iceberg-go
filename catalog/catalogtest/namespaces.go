@@ -169,15 +169,17 @@ func testListNamespaces(t *testing.T, cfg Config) {
 	assert.Contains(t, namespaces, second, "remaining namespace should still be listed")
 }
 
-// testListNestedNamespaces asserts that listing a namespace returns its direct
-// children as full identifiers, that the children stay out of the top-level
-// listing, and that a dropped child disappears from its parent's listing.
+// testListNestedNamespaces asserts that listing a namespace returns only its
+// direct children as full identifiers, never deeper descendants, that the
+// children stay out of the top-level listing, and that a dropped child
+// disappears from its parent's listing.
 func testListNestedNamespaces(t *testing.T, cfg Config) {
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 	parent, _ := newIdentifiers()
 	child1 := append(slices.Clone(parent), "child1")
 	child2 := append(slices.Clone(parent), "child2")
+	grandchild := append(slices.Clone(child1), "grandchild")
 
 	require.NoError(t, cat.CreateNamespace(ctx, parent, nil))
 	t.Cleanup(func() { _ = cat.DropNamespace(ctx, parent) })
@@ -200,12 +202,25 @@ func testListNestedNamespaces(t *testing.T, cfg Config) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []table.Identifier{child1, child2}, children, "listing the parent should return both children")
 
+	require.NoError(t, cat.CreateNamespace(ctx, grandchild, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, grandchild) })
+
+	children, err = cat.ListNamespaces(ctx, parent)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []table.Identifier{child1, child2}, children, "listing the parent should return only its direct children, not the grandchild")
+
+	children, err = cat.ListNamespaces(ctx, child1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []table.Identifier{grandchild}, children, "listing child1 should return the grandchild")
+
 	top, err := cat.ListNamespaces(ctx, nil)
 	require.NoError(t, err)
 	assert.Contains(t, top, parent, "the parent should be listed at the top level")
 	assert.NotContains(t, top, child1, "a child should not be listed at the top level")
 	assert.NotContains(t, top, child2, "a child should not be listed at the top level")
+	assert.NotContains(t, top, grandchild, "a grandchild should not be listed at the top level")
 
+	require.NoError(t, cat.DropNamespace(ctx, grandchild))
 	require.NoError(t, cat.DropNamespace(ctx, child1))
 
 	children, err = cat.ListNamespaces(ctx, parent)

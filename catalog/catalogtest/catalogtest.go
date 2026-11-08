@@ -97,13 +97,13 @@ type Config struct {
 	// iceberg.ErrNotImplemented and leaves the source table in place.
 	SupportsRenameTable bool
 
-	// SupportsNestedNamespaces reports whether the catalog can create a
-	// namespace inside another one. When it is true, the suite also checks
-	// listing a namespace's children and refusing to drop a namespace that
-	// still has children. It mirrors Java's supportsNestedNamespaces, which
-	// is false by default. Unlike the other flags it has no not-supported
-	// test: Hive and Glue reject nested namespaces with their own error, not
-	// iceberg.ErrNotImplemented.
+	// SupportsNestedNamespaces reports whether the catalog follows Java's
+	// nested namespace behavior: listing a namespace returns only its direct
+	// children, and a namespace that still has children cannot be dropped.
+	// When it is true, the suite checks both. It mirrors Java's
+	// supportsNestedNamespaces, which is false by default. Unlike the other
+	// flags it has no not-supported test: Hive and Glue reject nested
+	// namespaces with their own error, not iceberg.ErrNotImplemented.
 	SupportsNestedNamespaces bool
 }
 
