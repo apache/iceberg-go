@@ -817,7 +817,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 
 	nsIdent := catalog.NamespaceFromIdent(ident)
 	tblIdent := catalog.ObjectNameFromIdent(ident)
-	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
+	ns, exists, err := c.resolveListableNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return nil, err
 	}
@@ -837,7 +837,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	err = withSerializableWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		exists, err := c.namespaceExistsInTx(ctx, tx, ns)
+		exists, err := c.listableNamespaceExistsInTx(ctx, tx, nsIdent, ns)
 		if err != nil {
 			return err
 		}
@@ -1122,7 +1122,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	}
 	fromTbl := catalog.ObjectNameFromIdent(from)
 
-	toNs, exists, err := c.resolveNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
+	toNs, exists, err := c.resolveListableNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
 	if err != nil {
 		return nil, err
 	}
@@ -1157,7 +1157,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, fromNs)
 		}
 
-		destinationNamespaceExists, err := c.namespaceExistsInTx(ctx, tx, toNs)
+		destinationNamespaceExists, err := c.listableNamespaceExistsInTx(ctx, tx, catalog.NamespaceFromIdent(to), toNs)
 		if err != nil {
 			return err
 		}
@@ -1496,10 +1496,11 @@ func (c *Catalog) childNamespacesInTx(ctx context.Context, tx bun.Tx, parent tab
 	return ret, nil
 }
 
-// resolveListableNamespaceKey is resolveNamespaceKey for read operations,
-// where a namespace also exists while it has child namespaces, even without
-// a row of its own. CreateNamespace and UpdateNamespaceProperties keep the
-// exact check, so CreateNamespace is how such a namespace gets a row.
+// resolveListableNamespaceKey is resolveNamespaceKey for read operations and
+// for creating tables and views in a namespace, where a namespace also exists
+// while it has child namespaces, even without a row of its own. CreateNamespace
+// and UpdateNamespaceProperties keep the exact check, so CreateNamespace is
+// how such a namespace gets a row.
 func (c *Catalog) resolveListableNamespaceKey(ctx context.Context, namespace table.Identifier) (string, bool, error) {
 	key, exists, err := c.resolveNamespaceKey(ctx, namespace)
 	if err != nil || exists || len(namespace) == 0 {
@@ -1514,6 +1515,22 @@ func (c *Catalog) resolveListableNamespaceKey(ctx context.Context, namespace tab
 	}
 
 	return key, len(children) > 0, nil
+}
+
+// listableNamespaceExistsInTx is the in-transaction counterpart of
+// resolveListableNamespaceKey for a storage key it already resolved.
+func (c *Catalog) listableNamespaceExistsInTx(ctx context.Context, tx bun.Tx, namespace table.Identifier, key string) (bool, error) {
+	exists, err := c.namespaceExistsInTx(ctx, tx, key)
+	if err != nil || exists || len(namespace) == 0 {
+		return exists, err
+	}
+
+	children, err := c.childNamespacesInTx(ctx, tx, namespace)
+	if err != nil {
+		return false, err
+	}
+
+	return len(children) > 0, nil
 }
 
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
@@ -1624,7 +1641,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 
 	nsIdent := catalog.NamespaceFromIdent(identifier)
 	viewIdent := catalog.ObjectNameFromIdent(identifier)
-	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
+	ns, exists, err := c.resolveListableNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return nil, err
 	}
@@ -1661,7 +1678,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	metadataLocation := createdView.MetadataLocation()
 
 	err = withSerializableWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		exists, err := c.namespaceExistsInTx(ctx, tx, ns)
+		exists, err := c.listableNamespaceExistsInTx(ctx, tx, nsIdent, ns)
 		if err != nil {
 			return err
 		}

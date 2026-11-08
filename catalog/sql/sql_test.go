@@ -1237,6 +1237,50 @@ func (s *SqliteCatalogTestSuite) TestListNamespaces() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		ctx := context.Background()
+		implied := table.Identifier{databaseName()}
+		s.Require().NoError(cat.CreateNamespace(ctx, append(slices.Clone(implied), "child"), nil))
+
+		exists, err := cat.CheckNamespaceExists(ctx, implied)
+		s.Require().NoError(err)
+		s.Require().True(exists)
+
+		// CheckNamespaceExists is true, so tables and views can be created
+		// there, and a table can be renamed into it.
+		tblName := tableName()
+		_, err = cat.CreateTable(ctx, append(slices.Clone(implied), tblName), tableSchemaNested)
+		s.Require().NoError(err)
+
+		other := table.Identifier{databaseName()}
+		s.Require().NoError(cat.CreateNamespace(ctx, other, nil))
+		moved := append(slices.Clone(implied), tableName())
+		_, err = cat.CreateTable(ctx, append(slices.Clone(other), tableName()), tableSchemaNested)
+		s.Require().NoError(err)
+		for id, err := range cat.ListTables(ctx, other) {
+			s.Require().NoError(err)
+			_, err = cat.RenameTable(ctx, id, moved)
+			s.Require().NoError(err)
+		}
+
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		})
+		s.Require().NoError(createTestView(ctx, cat, append(slices.Clone(implied), tableName()), schema,
+			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil))
+
+		// A namespace with neither a row nor children still does not exist.
+		missing := table.Identifier{databaseName()}
+		_, err = cat.CreateTable(ctx, append(slices.Clone(missing), tableName()), tableSchemaNested)
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.RenameTable(ctx, moved, append(slices.Clone(missing), tableName()))
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		s.ErrorIs(createTestView(ctx, cat, append(slices.Clone(missing), tableName()), schema,
+			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil), catalog.ErrNoSuchNamespace)
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestDropNamespaceWithChildOnlyInTableRow() {
 	cat := s.getCatalogSqlite()
 	ctx := context.Background()
