@@ -91,6 +91,41 @@ func TestDynamicPartitionOverwriteArrowAndConcurrentCommit(t *testing.T) {
 	assert.ElementsMatch(t, []int64{1, 1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
 }
 
+// An append staged in the same transaction must be visible to dynamic
+// overwrite planning: touched rows are replaced, and other rows survive.
+func TestDynamicPartitionOverwriteAfterAppendInSameTransaction(t *testing.T) {
+	base, _ := newDynamicOverwriteTable(t)
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+	txn := tbl.NewTransaction()
+
+	appended := idRecordReader(t, tbl, 1, 3)
+	require.NoError(t, txn.Append(t.Context(), appended, nil))
+	appended.Release()
+
+	replacement := idRecordReader(t, tbl, 1)
+	require.NoError(t, txn.DynamicPartitionOverwrite(t.Context(), replacement, nil))
+	replacement.Release()
+
+	updated, err := txn.Commit(t.Context())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
+}
+
+func TestDynamicPartitionOverwriteTable(t *testing.T) {
+	base, _ := newDynamicOverwriteTable(t)
+	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema,
+		[]string{`[{"id":1},{"id":3}]`})
+	require.NoError(t, err)
+	defer data.Release()
+
+	updated, err := tbl.DynamicPartitionOverwriteTable(t.Context(), data, 1, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
+}
+
 func TestDynamicPartitionOverwriteAllowsConcurrentOtherPartition(t *testing.T) {
 	base, cat := newDynamicOverwriteTable(t)
 	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)

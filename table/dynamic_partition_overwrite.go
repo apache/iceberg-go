@@ -192,7 +192,7 @@ func (t *Transaction) DynamicPartitionOverwriteDataFiles(
 	if snapshot := t.planningSnapshot(t.meta); snapshot != nil {
 		for df, err := range snapshot.dataFiles(ctx, fs, nil) {
 			if err != nil {
-				return err
+				return fmt.Errorf("dynamic partition overwrite: read data files: %w", err)
 			}
 			if err := ctx.Err(); err != nil {
 				return err

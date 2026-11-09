@@ -207,23 +207,24 @@ func TestDynamicPartitionOverwriteRespectsCanceledContext(t *testing.T) {
 	require.Empty(t, txn.pinnedRefs)
 }
 
+func TestDynamicPartitionOverwriteV3RowLineage(t *testing.T) {
+	ctx := context.Background()
+	spec := partitionedSpec()
+	txn, _ := createTestTransactionWithMemIO(t, spec)
+	require.NoError(t, txn.meta.SetFormatVersion(3))
+	file := newTestDataFile(t, spec, "file://v3.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{file}, nil))
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	snapshot := meta.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
+	require.NotNil(t, snapshot.FirstRowID)
+	require.NotNil(t, snapshot.AddedRows)
+}
+
 func TestDynamicPartitionOverwriteRejectsUnsupportedLayouts(t *testing.T) {
 	ctx := context.Background()
-	t.Run("format v3 row lineage", func(t *testing.T) {
-		spec := partitionedSpec()
-		txn, _ := createTestTransactionWithMemIO(t, spec)
-		require.NoError(t, txn.meta.SetFormatVersion(3))
-		file := newTestDataFile(t, spec, "file://v3.parquet", map[int]any{1000: int32(1)})
-		require.NoError(t, txn.DynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{file}, nil))
-		meta, err := txn.meta.Build()
-		require.NoError(t, err)
-		snapshot := meta.CurrentSnapshot()
-		require.NotNil(t, snapshot)
-		require.Equal(t, OpOverwrite, snapshot.Summary.Operation)
-		require.NotNil(t, snapshot.FirstRowID)
-		require.NotNil(t, snapshot.AddedRows)
-	})
-
 	t.Run("wrong incoming spec", func(t *testing.T) {
 		spec := partitionedSpec()
 		txn, _ := createTestTransactionWithMemIO(t, spec)
