@@ -702,11 +702,14 @@ v, err := view.CreateView(
 )
 
 // Inspect
-v.CurrentVersion()      // *view.Version
-v.CurrentSchema()       // *iceberg.Schema
-v.Versions()            // []*view.Version
-v.Schemas()             // map[int]*iceberg.Schema
-v.Properties()          // iceberg.Properties
+v.CurrentVersion()        // *view.Version
+v.CurrentSchema()         // *iceberg.Schema
+v.Versions()              // []*view.Version
+v.VersionByID(1)          // *view.Version, or nil
+v.VersionAsOf(timestampMs) // *view.Version, or nil (Unix milliseconds)
+v.History()               // []view.VersionLogEntry
+v.Schemas()               // map[int]*iceberg.Schema
+v.Properties()            // iceberg.Properties
 </code></pre>
 <p><code>view.New(ident, meta, metadataLocation)</code> constructs a view from already-loaded metadata; <code>view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)</code> loads metadata from disk or object storage.</p>
 <h2 id="iceberg--arrow-types"><a class="header" href="#iceberg--arrow-types">Iceberg ↔ Arrow types</a></h2>
