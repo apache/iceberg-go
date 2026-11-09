@@ -490,6 +490,35 @@ newTbl, err = tbl.Overwrite(ctx, recordReader, nil,
 )
 </code></pre>
 <p><code>OverwriteTable</code> is the <code>arrow.Table</code> variant.</p>
+<h3 id="dynamic-partition-overwrite"><a class="header" href="#dynamic-partition-overwrite">Dynamic partition overwrite</a></h3>
+<p>Replace only the partitions present in the incoming data. Unlike a filtered
+row-level overwrite, this removes <strong>all existing data files</strong> in those partitions
+while retaining files in other partitions.</p>
+<pre><code class="language-go">// Write Arrow record batches, replacing only partitions receiving new rows.
+newTbl, err := tbl.DynamicPartitionOverwrite(ctx, recordReader, nil)
+
+// In-memory Arrow tables work too.
+newTbl, err = tbl.DynamicPartitionOverwriteTable(ctx, arrowTbl, 1024, nil)
+
+// Or commit already-written Iceberg DataFile metadata through a transaction.
+txn := tbl.NewTransaction()
+err = txn.DynamicPartitionOverwriteDataFiles(ctx, newDataFiles, nil)
+if err == nil {
+    newTbl, err = txn.Commit(ctx)
+}
+</code></pre>
+<p>This supports Iceberg format v1-v3. Incoming files must use the current
+partition spec. On partitioned tables, files under older specs are preserved;
+only matching current-spec partitions are replaced. If the current spec is
+unpartitioned, non-empty input replaces all live files, including files under
+older specs. For v3, replacement also removes deletion vectors tied to
+replaced data files. Empty input leaves the table untouched.</p>
+<p>A concurrent add or removal in a replaced partition fails validation, while
+independent changes to other partitions can be retried after a catalog refresh.
+A new target branch also pins the source branch to prevent missing concurrent
+writes. Default partition-spec and sort-order changes fail validation. Written
+data files are not automatically cleaned up if staging or commit fails, so
+callers must handle those files before retrying with a new transaction.</p>
 <h3 id="delete"><a class="header" href="#delete">Delete</a></h3>
 <pre><code class="language-go">newTbl, err := tbl.Delete(ctx,
     iceberg.LessThan(iceberg.Reference(&quot;id&quot;), int64(100)),
@@ -507,7 +536,33 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
-<p><code>ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)</code> and <code>ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code> are also available on <code>*Transaction</code> for swapping files atomically.</p>
+<p><code>ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)</code> performs an
+<strong>overwrite</strong> of existing files. It is suitable when the logical table data
+changes. <code>ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code>
+is the corresponding data-file metadata API.</p>
+<h3 id="stage-externally-rewritten-parquet-files"><a class="header" href="#stage-externally-rewritten-parquet-files">Stage externally rewritten Parquet files</a></h3>
+<p>When another engine has <strong>already written</strong> replacement Parquet files with the
+same live rows and physical record count, use
+<code>StageRewrittenDataFilesByPath</code>. This stages an Iceberg <code>replace</code> snapshot
+instead of an <code>overwrite</code>, but it does not read or rewrite the row data:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+err := txn.StageRewrittenDataFilesByPath(ctx, oldFilePaths, newFilePaths, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>This path-only helper supports unpartitioned format v1 and v2 tables. It rejects
+a source file with any applicable position or equality deletes, as well as
+deletion vectors. It requires the same total physical record count and checks
+column value, null, and NaN counts when available for every file on both sides.
+Missing optional statistics are unknown, not zero. A source column with known
+value counts cannot disappear when replacement metrics collection is enabled.
+Footer metadata cannot prove row-level equivalence, so callers must preserve
+every live row. Format v3 and partitioned tables are not supported, including
+older partitioned specs that are no longer current.</p>
+<p>For compaction that must <strong>apply deletes</strong>, remove delete files, or rewrite
+partitioned data, use <code>RewriteDataFiles</code>. An external writer that needs to
+supply data-file metadata, a sequence number, or related delete-file changes
+can use <code>NewRewrite</code> with <code>FileToDataFile</code> instead.</p>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Group writes and metadata changes into one atomic snapshot:</p>
 <pre><code class="language-go">txn := tbl.NewTransaction()
