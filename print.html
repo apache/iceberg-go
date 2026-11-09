@@ -2812,6 +2812,9 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong><code>StructType.Fields()</code> returns a copy.</strong> Changing the returned slice no longer changes the struct, matching <code>ListType.Fields()</code> and <code>MapType.Fields()</code>. Build a new type with <code>NewStructType</code> instead. <code>NumFields()</code> and <code>Field(i)</code> read fields without copying, and <code>NewListType</code> and <code>NewMapType</code> are the constructors for the other nested types. The exported fields are unchanged for now; they become unexported before v1.0.0 (see <a href="https://github.com/apache/iceberg-go/issues/2062">#2062</a>).</p>
+</li>
+<li>
 <p><strong><code>io.StatIO.Stat</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>StatIO</code> implementations and callers must pass the operation context.</p>
 </li>
 <li>
