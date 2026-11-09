@@ -135,6 +135,20 @@ type Version struct {
 	DefaultCatalog string `json:"default-catalog,omitempty"`
 }
 
+// MarshalJSON keeps required collection fields non-null, including on hand-built versions.
+func (v Version) MarshalJSON() ([]byte, error) {
+	type alias Version
+
+	if v.Summary == nil {
+		v.Summary = VersionSummary{}
+	}
+	if v.DefaultNamespace == nil {
+		v.DefaultNamespace = table.Identifier{}
+	}
+
+	return json.Marshal(alias(v))
+}
+
 type VersionOpt func(*Version)
 
 func WithVersionSummary(summary VersionSummary) VersionOpt {
@@ -658,11 +672,16 @@ func validateRequiredJSONFields(data []byte) error {
 			"version-id",
 			"schema-id",
 			"timestamp-ms",
-			"summary",
 			"representations",
-			"default-namespace",
 		); err != nil {
 			return err
+		}
+		// Older iceberg-go versions wrote null for nil summary and namespace.
+		// Accept those values for compatibility, but still require both keys.
+		for _, field := range []string{"summary", "default-namespace"} {
+			if _, ok := versionFields[field]; !ok {
+				return fmt.Errorf("%w: %s %s is required", ErrInvalidViewMetadata, versionName, field)
+			}
 		}
 
 		var representations []json.RawMessage
@@ -685,6 +704,11 @@ func validateRequiredJSONFields(data []byte) error {
 			}
 			if strings.TrimSpace(representationType) == "" {
 				return fmt.Errorf("%w: %s type is required", ErrInvalidViewMetadata, representationName)
+			}
+			if representationType == "sql" {
+				if err := requireJSONFields(representationFields, representationName, "sql", "dialect"); err != nil {
+					return err
+				}
 			}
 		}
 	}
