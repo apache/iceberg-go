@@ -126,6 +126,31 @@ func TestTransactionSetLocationRejectsCrossStorageBoundary(t *testing.T) {
 	}
 }
 
+
+func TestTransactionSetLocationRejectsCrossAzureContainers(t *testing.T) {
+	const location = "abfss://container-one@account.dfs.core.windows.net/source"
+
+	meta, err := table.NewMetadata(newCommitTestTable(t).Schema(), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location, iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	tbl := table.New(table.Identifier{"db", "azure_location_test"},
+		meta, location+"/metadata/v1.metadata.json", nil, nil)
+
+	tx := tbl.NewTransaction()
+	require.ErrorIs(t, tx.SetLocation("abfss://container-two@account.dfs.core.windows.net/target"),
+		iceberg.ErrNotImplemented)
+	commit, err := tx.TableCommit()
+	require.NoError(t, err)
+	require.Empty(t, commit.Updates)
+
+	sameContainer := tbl.NewTransaction()
+	const newLocation = "abfss://container-one@account.dfs.core.windows.net/target"
+	require.NoError(t, sameContainer.SetLocation(newLocation))
+	staged, err := sameContainer.StagedTable()
+	require.NoError(t, err)
+	require.Equal(t, newLocation, staged.Location())
+}
+
 func TestTransactionSetLocationPreservesOtherUpdates(t *testing.T) {
 	tx := newCommitTestTable(t).NewTransaction()
 	require.NoError(t, tx.SetProperties(iceberg.Properties{"test.property": "value"}))
@@ -251,6 +276,86 @@ func TestTransactionSetLocationWritesEqualityDeletesToStagedPath(t *testing.T) {
 			require.Len(t, files, 1)
 			require.True(t, strings.HasPrefix(files[0].FilePath(), dataPath+"/"),
 				"equality deletes must use the staged data directory: %s", files[0].FilePath())
+		})
+	}
+}
+
+
+func TestTransactionSetLocationOverwriteAndDeletesWriteToStagedPaths(t *testing.T) {
+	cases := []struct {
+		name        string
+		version     string
+		operation   string
+		wantContent iceberg.ManifestContent
+		wantIDs     []int64
+	}{
+		{name: "overwrite", version: "2", operation: "overwrite", wantContent: iceberg.ManifestContentData, wantIDs: []int64{2, 3}},
+		{name: "copy-on-write rewrite", version: "2", operation: "cow", wantContent: iceberg.ManifestContentData, wantIDs: []int64{2}},
+		{name: "position delete v2", version: "2", operation: "mor", wantContent: iceberg.ManifestContentDeletes, wantIDs: []int64{2}},
+		{name: "deletion vector v3", version: "3", operation: "mor", wantContent: iceberg.ManifestContentDeletes, wantIDs: []int64{2}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := newMergeOnReadTestTableVersion(t, tc.version)
+			tbl = appendRows(t, tbl, `[{"id":1,"data":"one"},{"id":2,"data":"two"}]`)
+			originalLocation := tbl.Location()
+			newLocation := filepath.ToSlash(filepath.Join(t.TempDir(), "relocated"))
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.SetLocation(newLocation))
+			filter := iceberg.EqualTo(iceberg.Reference("id"), int64(1))
+			switch tc.operation {
+			case "overwrite":
+				rdr := rowsReader(t, tbl, `[{"id":3,"data":"new"}]`)
+				defer rdr.Release()
+				require.NoError(t, tx.Overwrite(t.Context(), rdr, nil, table.WithOverwriteFilter(filter)))
+			case "cow":
+				require.NoError(t, tx.SetProperties(iceberg.Properties{
+					table.WriteDeleteModeKey: table.WriteModeCopyOnWrite,
+				}))
+				require.NoError(t, tx.Delete(t.Context(), filter, nil))
+			case "mor":
+				require.NoError(t, tx.Delete(t.Context(), filter, nil))
+			}
+
+			staged, err := tx.StagedTable()
+			require.NoError(t, err)
+			require.Equal(t, newLocation, staged.Location())
+			fs, err := staged.FS(t.Context())
+			require.NoError(t, err)
+			manifests, err := staged.CurrentSnapshot().Manifests(t.Context(), fs)
+			require.NoError(t, err)
+
+			var newFiles int
+			for _, manifest := range manifests {
+				if manifest.ManifestContent() != tc.wantContent {
+					continue
+				}
+				for entry, err := range manifest.Entries(t.Context(), fs, true) {
+					require.NoError(t, err)
+					file := entry.DataFile()
+					if !strings.HasPrefix(file.FilePath(), newLocation+"/data/") {
+						continue
+					}
+					newFiles++
+					if tc.operation == "mor" {
+						require.Equal(t, iceberg.EntryContentPosDeletes, file.ContentType())
+						if tc.version == "3" {
+							require.Equal(t, iceberg.PuffinFile, file.FileFormat())
+						} else {
+							require.Equal(t, iceberg.ParquetFile, file.FileFormat())
+						}
+					}
+				}
+			}
+			require.NotZero(t, newFiles, "the operation must write at least one file in the staged location")
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, originalLocation, tbl.Location())
+			require.Equal(t, newLocation, committed.Location())
+			require.Equal(t, tc.wantIDs, idsInTable(t, committed))
 		})
 	}
 }
