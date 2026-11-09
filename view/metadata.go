@@ -361,7 +361,8 @@ func (m *metadata) Equals(other Metadata) bool {
 		iceinternal.SliceEqualHelper(m.Schemas(), other.Schemas()) &&
 		iceinternal.SliceEqualHelper(m.Versions(), other.Versions()) &&
 		m.CurrentVersionIDValue == other.CurrentVersionID() &&
-		slices.Equal(m.VersionLogList, other.VersionLog())
+		slices.Equal(m.VersionLogList, other.VersionLog()) &&
+		maps.Equal(m.Props, other.Properties())
 }
 
 func (m *metadata) FormatVersion() int         { return m.FormatVersionValue }
