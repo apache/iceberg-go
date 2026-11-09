@@ -1424,6 +1424,9 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	if err := ref.validate(); err != nil {
 		return fmt.Errorf("%w: invalid snapshot ref: %w", iceberg.ErrInvalidArgument, err)
 	}
+	if name == MainBranch && ref.Type != BranchRef {
+		return fmt.Errorf("%w: main snapshot ref must be a branch", iceberg.ErrInvalidArgument)
+	}
 
 	var maxRefAgeMs, maxSnapshotAgeMs int64
 	var minSnapshotsToKeep int
@@ -3149,6 +3152,10 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 }
 
 func (c *commonMetadata) checkMainRefMatchesCurrentSnapshot() error {
+	if ref, ok := c.SnapshotRefs[MainBranch]; ok && ref.Type != BranchRef {
+		return fmt.Errorf("%w: main snapshot ref must be a branch", ErrInvalidMetadata)
+	}
+
 	if c.CurrentSnapshotID != nil {
 		if ref, ok := c.SnapshotRefs[MainBranch]; ok {
 			if ref.SnapshotID != *c.CurrentSnapshotID {
