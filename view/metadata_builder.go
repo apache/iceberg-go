@@ -419,7 +419,7 @@ func (b *MetadataBuilder) buildMetadata(retainedVersions []*Version, retainedHis
 		VersionList:           retainedVersions,
 		VersionLogList:        retainedHistory,
 		SchemaList:            b.schemaList,
-		Props:                 b.props,
+		Props:                 maps.Clone(b.props),
 	}
 	md.init()
 

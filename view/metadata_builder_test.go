@@ -110,6 +110,27 @@ func TestBuild_DoesNotGrowVersionLog(t *testing.T) {
 	}
 }
 
+func TestBuildSnapshotsProperties(t *testing.T) {
+	initialProperties := iceberg.Properties{"comment": "daily report", "owner": "analytics"}
+	builder := newTestBuilder().
+		SetLoc("location").
+		SetProperties(initialProperties).
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersion(1, LastAddedID)).
+		SetCurrentVersionID(LastAddedID)
+
+	first, err := builder.Build()
+	require.NoError(t, err)
+
+	builder.SetProperties(iceberg.Properties{"comment": "weekly report"}).
+		RemoveProperties([]string{"owner"})
+	second, err := builder.Build()
+	require.NoError(t, err)
+
+	assert.Equal(t, initialProperties, first.Properties())
+	assert.Equal(t, iceberg.Properties{"comment": "weekly report"}, second.Properties())
+}
+
 func TestBuild_RepeatedBuildsWithVersionExpiry(t *testing.T) {
 	// With a history size of 1, versions 1 and 2 are expired. The only history entry is
 	// the one for version 3, which is retained, so updateHistory keeps it; its clear
