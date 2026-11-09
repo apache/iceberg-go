@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"testing"
 
@@ -599,4 +600,26 @@ func TestSnapshotManifestsPassContextToOpen(t *testing.T) {
 			require.Equal(t, "caller", probe.Ctx.Value(key{}))
 		})
 	}
+}
+
+type contextStatProbe struct {
+	iomock.ContextProbe
+}
+
+func (p *contextStatProbe) Stat(ctx context.Context, _ string) (fs.FileInfo, error) {
+	p.Ctx = ctx
+
+	return nil, iomock.ErrContextProbe
+}
+
+func TestSnapshotEmbeddedManifestStatPassesContext(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "caller")
+	probe := &contextStatProbe{}
+	snapshot := table.Snapshot{SnapshotID: 1, ManifestLocations: []string{"s3://bucket/m1.avro"}}
+
+	_, err := snapshot.Manifests(ctx, probe)
+	require.ErrorIs(t, err, iomock.ErrContextProbe)
+	require.NotNil(t, probe.Ctx)
+	assert.Equal(t, "caller", probe.Ctx.Value(key{}))
 }
