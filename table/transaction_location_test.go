@@ -126,7 +126,6 @@ func TestTransactionSetLocationRejectsCrossStorageBoundary(t *testing.T) {
 	}
 }
 
-
 func TestTransactionSetLocationRejectsCrossAzureContainers(t *testing.T) {
 	const location = "abfss://container-one@account.dfs.core.windows.net/source"
 
@@ -279,7 +278,6 @@ func TestTransactionSetLocationWritesEqualityDeletesToStagedPath(t *testing.T) {
 		})
 	}
 }
-
 
 func TestTransactionSetLocationOverwriteAndDeletesWriteToStagedPaths(t *testing.T) {
 	cases := []struct {
