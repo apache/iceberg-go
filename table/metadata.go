@@ -3696,6 +3696,12 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
+	// reassignIDs looks up partition and sort columns by ID, so each ID must
+	// point to one field (#2393).
+	if err := iceberg.ValidateUniqueFieldIDs(sc); err != nil {
+		return nil, err
+	}
+
 	reassignedIds, err := reassignIDs(sc, partitions, sortOrder)
 	if err != nil {
 		return nil, err

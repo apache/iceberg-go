@@ -1976,6 +1976,92 @@ func TestNewSchemaPanicsOnDuplicateFieldIDs(t *testing.T) {
 	)
 }
 
+// Unlike NewSchema, this also rejects duplicate 0 and negative IDs (#2393).
+// A single 0 stays valid (#761).
+func TestValidateUniqueFieldIDs(t *testing.T) {
+	typ := iceberg.PrimitiveTypes.Int32
+
+	tests := []struct {
+		name    string
+		fields  []iceberg.NestedField
+		wantErr string
+	}{
+		{
+			name: "unique positive ids",
+			fields: []iceberg.NestedField{
+				{ID: 1, Name: "a", Type: typ},
+				{ID: 2, Name: "b", Type: typ},
+			},
+		},
+		{
+			name: "single zero id",
+			fields: []iceberg.NestedField{
+				{ID: 0, Name: "a", Type: typ},
+				{ID: 1, Name: "b", Type: typ},
+			},
+		},
+		{
+			name: "duplicate zero ids",
+			fields: []iceberg.NestedField{
+				{Name: "created_at", Type: iceberg.PrimitiveTypes.TimestampTz},
+				{Name: "event", Type: iceberg.PrimitiveTypes.String},
+			},
+			wantErr: "multiple fields for id 0: created_at and event",
+		},
+		{
+			name: "duplicate negative ids",
+			fields: []iceberg.NestedField{
+				{ID: -1, Name: "a", Type: typ},
+				{ID: -1, Name: "b", Type: typ},
+			},
+			wantErr: "multiple fields for id -1: a and b",
+		},
+		{
+			name: "duplicate zero inside a struct",
+			fields: []iceberg.NestedField{
+				{ID: 1, Name: "s", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{Name: "x", Type: typ},
+					{Name: "y", Type: typ},
+				}}},
+			},
+			wantErr: "multiple fields for id 0: x and y",
+		},
+		{
+			name: "list element shares zero with a field",
+			fields: []iceberg.NestedField{
+				{Name: "a", Type: typ},
+				{ID: 1, Name: "items", Type: &iceberg.ListType{ElementID: 0, Element: typ}},
+			},
+			wantErr: "multiple fields for id 0: a and element",
+		},
+		{
+			name: "map value shares zero with a field",
+			fields: []iceberg.NestedField{
+				{Name: "a", Type: typ},
+				{ID: 1, Name: "m", Type: &iceberg.MapType{KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 0, ValueType: typ}},
+			},
+			wantErr: "multiple fields for id 0: a and value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := iceberg.ValidateUniqueFieldIDs(iceberg.NewSchema(0, tt.fields...))
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+
+				return
+			}
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+
+	t.Run("nil schema", func(t *testing.T) {
+		require.ErrorIs(t, iceberg.ValidateUniqueFieldIDs(nil), iceberg.ErrInvalidArgument)
+	})
+}
+
 func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
 	sc := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "", Type: iceberg.PrimitiveTypes.String, Required: false},

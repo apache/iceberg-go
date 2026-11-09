@@ -3213,6 +3213,74 @@ func TestNewMetadataRejectsReservedFieldIDsBeforeReassignment(t *testing.T) {
 	}
 }
 
+// With two fields at ID 0, day(created_at) could randomly become
+// day(event) (#2393).
+func TestNewMetadataRejectsDuplicateFieldIDs(t *testing.T) {
+	newInput := func(createdAtID, eventID int) (*iceberg.Schema, iceberg.PartitionSpec) {
+		sc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: createdAtID, Name: "created_at", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+			iceberg.NestedField{ID: eventID, Name: "event", Type: iceberg.PrimitiveTypes.String, Required: true},
+		)
+		spec, err := iceberg.NewPartitionSpecOpts(
+			iceberg.AddPartitionFieldByName("created_at", "created_day", iceberg.DayTransform{}, sc, nil))
+		require.NoError(t, err)
+
+		return sc, spec
+	}
+
+	t.Run("partitioned, both ids unset", func(t *testing.T) {
+		sc, spec := newInput(0, 0)
+		_, err := NewMetadata(sc, &spec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.ErrorContains(t, err, "multiple fields for id 0: created_at and event")
+	})
+
+	t.Run("unpartitioned, both ids unset", func(t *testing.T) {
+		sc, _ := newInput(0, 0)
+		_, err := NewMetadata(sc, iceberg.UnpartitionedSpec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	})
+
+	t.Run("single zero id keeps the partition on its column", func(t *testing.T) {
+		sc, spec := newInput(0, 1)
+		meta, err := NewMetadata(sc, &spec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.NoError(t, err)
+
+		gotSpec := meta.PartitionSpec()
+		col, ok := meta.CurrentSchema().FindColumnName(gotSpec.Field(0).FirstSourceID())
+		require.True(t, ok)
+		assert.Equal(t, "created_at", col)
+	})
+
+	// Sort source IDs go through the same lookup. A REST create-table request
+	// can carry source-id 0 (e.g. Spark numbers new columns from zero), so the
+	// order is decoded unbound.
+	sortOnFirstColumn := func(t *testing.T) SortOrder {
+		var order UnboundSortOrder
+		require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [
+			{"transform": "identity", "source-id": 0, "direction": "asc", "null-order": "nulls-first"}]}`), &order))
+
+		return order.SortOrder
+	}
+
+	t.Run("sorted, both ids unset", func(t *testing.T) {
+		sc, _ := newInput(0, 0)
+		_, err := NewMetadata(sc, iceberg.UnpartitionedSpec, sortOnFirstColumn(t), "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.ErrorContains(t, err, "multiple fields for id 0: created_at and event")
+	})
+
+	t.Run("single zero id keeps the sort on its column", func(t *testing.T) {
+		sc, _ := newInput(0, 1)
+		meta, err := NewMetadata(sc, iceberg.UnpartitionedSpec, sortOnFirstColumn(t), "s3://bucket/table", nil)
+		require.NoError(t, err)
+
+		col, ok := meta.CurrentSchema().FindColumnName(meta.SortOrder().Field(0).SourceIDs[0])
+		require.True(t, ok)
+		assert.Equal(t, "created_at", col)
+	})
+}
+
 // TestCheckSchemaCompatibilityReservedIDs locks in the deliberate asymmetry of
 // the AddSchema gate: it rejects row-lineage metadata columns, but must permit
 // the position-delete reserved IDs (file_path/pos), which internal writers add

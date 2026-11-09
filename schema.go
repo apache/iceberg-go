@@ -157,17 +157,34 @@ func (s *Schema) ValidateIdentifierFields() error {
 }
 
 // checkDuplicateFieldIDs recursively walks a list of fields and returns an
-// error if any field ID appears more than once anywhere in the tree. The
-// seen map is lazily created on the first call so the top-level caller can
-// pass nil.
+// error if any positive field ID appears more than once anywhere in the tree.
+// The seen map is lazily created on the first call so the top-level caller
+// can pass nil.
 func checkDuplicateFieldIDs(seen map[int]string, fields []NestedField) error {
+	return checkFieldIDs(seen, fields, false)
+}
+
+// ValidateUniqueFieldIDs returns an error if two fields share an ID,
+// including 0 and negative IDs (NewSchema only checks positive ones).
+// A single field with ID 0 is fine.
+func ValidateUniqueFieldIDs(sc *Schema) error {
+	if sc == nil {
+		return fmt.Errorf("%w: cannot validate nil schema", ErrInvalidArgument)
+	}
+
+	return checkFieldIDs(nil, sc.fields, true)
+}
+
+// checkFieldIDs walks the fields for both checks above. IDs <= 0 are
+// skipped unless includeNonPositive is true.
+func checkFieldIDs(seen map[int]string, fields []NestedField, includeNonPositive bool) error {
 	if seen == nil {
 		seen = make(map[int]string)
 	}
 	for _, f := range fields {
-		// Negative IDs (e.g. -1) are used as unassigned placeholders during
-		// schema construction; only positive IDs must be unique per the spec.
-		if f.ID > 0 {
+		// IDs <= 0 are placeholders while a schema is built, so NewSchema skips
+		// them; ValidateUniqueFieldIDs checks them too.
+		if f.ID > 0 || includeNonPositive {
 			if prev, ok := seen[f.ID]; ok {
 				return fmt.Errorf("%w: multiple fields for id %d: %s and %s",
 					ErrInvalidSchema, f.ID, prev, f.Name)
@@ -180,20 +197,20 @@ func checkDuplicateFieldIDs(seen map[int]string, fields []NestedField) error {
 		switch t := f.Type.(type) {
 		case *StructType:
 			if t != nil {
-				if err := checkDuplicateFieldIDs(seen, t.FieldList); err != nil {
+				if err := checkFieldIDs(seen, t.FieldList, includeNonPositive); err != nil {
 					return err
 				}
 			}
 		case *ListType:
 			if t != nil {
 				elem := t.ElementField()
-				if err := checkDuplicateFieldIDs(seen, []NestedField{elem}); err != nil {
+				if err := checkFieldIDs(seen, []NestedField{elem}, includeNonPositive); err != nil {
 					return err
 				}
 			}
 		case *MapType:
 			if t != nil {
-				if err := checkDuplicateFieldIDs(seen, []NestedField{t.KeyField(), t.ValueField()}); err != nil {
+				if err := checkFieldIDs(seen, []NestedField{t.KeyField(), t.ValueField()}, includeNonPositive); err != nil {
 					return err
 				}
 			}
