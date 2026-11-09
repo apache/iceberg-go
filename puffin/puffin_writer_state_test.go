@@ -18,6 +18,8 @@
 package puffin
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"testing"
@@ -78,6 +80,103 @@ func TestWriterStateGuardErrors(t *testing.T) {
 			failed.done = true
 			if got := op.call(failed); got == nil || got.Error() != wantFinalized {
 				t.Fatalf("finalized and failed: got %v, want %q", got, wantFinalized)
+			}
+		})
+	}
+}
+
+func TestWriterReportsCompletedSizes(t *testing.T) {
+	var output bytes.Buffer
+	writer, err := NewWriter(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer.FileSizeInBytes() != 0 || writer.FileFooterSizeInBytes() != 0 {
+		t.Fatal("file sizes must be unavailable before Finish")
+	}
+
+	_, err = writer.AddBlob(BlobMetadataInput{
+		Type:   BlobTypeDataSketchesTheta,
+		Fields: []int32{1},
+	}, []byte("blob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer.FileSizeInBytes() != 0 || writer.FileFooterSizeInBytes() != 0 {
+		t.Fatal("file sizes must be unavailable until Finish")
+	}
+	if err := writer.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	data := output.Bytes()
+	trailer := data[len(data)-footerTrailerSize:]
+	payloadSize := int64(binary.LittleEndian.Uint32(trailer[:4]))
+	wantFooterSize := int64(MagicSize+footerTrailerSize) + payloadSize
+	if got := writer.FileFooterSizeInBytes(); got != wantFooterSize {
+		t.Fatalf("footer size = %d, want %d", got, wantFooterSize)
+	}
+	if got := writer.FileSizeInBytes(); got != int64(len(data)) {
+		t.Fatalf("file size = %d, want %d", got, len(data))
+	}
+}
+
+func TestWriterSizeAccessorsRoundTrip(t *testing.T) {
+	cases := []struct {
+		name  string
+		codec string
+		blob  bool
+	}{
+		{name: "no blobs"},
+		{name: "lz4", codec: CompressionCodecLZ4, blob: true},
+		{name: "zstd", codec: CompressionCodecZstd, blob: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			writer, err := NewWriter(&output)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			input := bytes.Repeat([]byte("iceberg-puffin"), 64)
+			if tc.blob {
+				_, err := writer.AddBlob(BlobMetadataInput{
+					Type:             BlobTypeDataSketchesTheta,
+					Fields:           []int32{1},
+					CompressionCodec: tc.codec,
+				}, input)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := writer.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			reader, err := NewReader(bytes.NewReader(output.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got, want := writer.FileSizeInBytes(), int64(output.Len()); got != want {
+				t.Fatalf("file size = %d, want %d", got, want)
+			}
+			if got, want := writer.FileFooterSizeInBytes(), int64(output.Len())-reader.footerStart; got != want {
+				t.Fatalf("footer size = %d, want %d", got, want)
+			}
+
+			if tc.blob {
+				result, err := reader.ReadBlob(0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(result.Data, input) {
+					t.Fatal("Puffin round trip changed blob contents")
+				}
+			} else if len(reader.Blobs()) != 0 {
+				t.Fatal("empty Puffin file unexpectedly contains blobs")
 			}
 		})
 	}
