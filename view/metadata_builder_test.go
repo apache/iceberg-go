@@ -800,7 +800,7 @@ func TestUnknownRepresentationSurvivesBuilderRoundTrip(t *testing.T) {
 		"format-version": 1,
 		"location": "s3://bucket/warehouse/default.db/event_agg",
 		"current-version-id": 1,
-		"versions": [{"version-id": 1, "schema-id": 0, "timestamp-ms": 1234567890, "representations": [
+		"versions": [{"version-id": 1, "schema-id": 0, "timestamp-ms": 1234567890, "summary": {}, "default-namespace": [], "representations": [
 			{"type": "hive", "sql": "SELECT 1", "dialect": "hive"},
 			{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}
 		]}],
