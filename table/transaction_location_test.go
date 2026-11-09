@@ -172,13 +172,17 @@ func TestTransactionSetLocationAfterCommitIsRejected(t *testing.T) {
 
 func TestTransactionSetLocationWritesToStagedPaths(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		formatVersion int
-		overridePaths bool
+		name             string
+		formatVersion    int
+		overridePaths    bool
+		dynamicOverwrite bool
 	}{
 		{name: "v2", formatVersion: 2},
 		{name: "v3", formatVersion: 3},
 		{name: "staged_write_properties", formatVersion: 2, overridePaths: true},
+		{name: "dynamic_overwrite_v2", formatVersion: 2, dynamicOverwrite: true},
+		{name: "dynamic_overwrite_v3", formatVersion: 3, dynamicOverwrite: true},
+		{name: "dynamic_overwrite_staged_write_properties", formatVersion: 2, overridePaths: true, dynamicOverwrite: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tbl, _ := newConcurrentRewriteTestTableVersion(t, tc.formatVersion)
@@ -205,7 +209,13 @@ func TestTransactionSetLocationWritesToStagedPaths(t *testing.T) {
 			require.NoError(t, err)
 			defer records.Release()
 
-			require.NoError(t, tx.AppendTable(t.Context(), records, 1, nil))
+			if tc.dynamicOverwrite {
+				rdr := array.NewTableReader(records, 1)
+				defer rdr.Release()
+				require.NoError(t, tx.DynamicPartitionOverwrite(t.Context(), rdr, nil))
+			} else {
+				require.NoError(t, tx.AppendTable(t.Context(), records, 1, nil))
+			}
 			staged, err := tx.StagedTable()
 			require.NoError(t, err)
 			require.Equal(t, newLocation, staged.Location())
@@ -223,14 +233,18 @@ func TestTransactionSetLocationWritesToStagedPaths(t *testing.T) {
 			require.True(t, strings.HasPrefix(manifests[0].FilePath(), metadataPath+"/"),
 				manifests[0].FilePath())
 
-			var dataFiles int
-			for entry, err := range manifests[0].Entries(t.Context(), fsys, false) {
+			var addedFiles int
+			for entry, err := range manifests[0].Entries(t.Context(), fsys, true) {
 				require.NoError(t, err)
+				if entry.Status() != iceberg.EntryStatusADDED || entry.SnapshotID() != snapshot.SnapshotID {
+					continue
+				}
 				require.True(t, strings.HasPrefix(entry.DataFile().FilePath(), dataPath+"/"),
-					entry.DataFile().FilePath())
-				dataFiles++
+					"file added by snapshot %d must use the staged data directory: %s",
+					snapshot.SnapshotID, entry.DataFile().FilePath())
+				addedFiles++
 			}
-			require.Equal(t, 1, dataFiles)
+			require.Equal(t, 1, addedFiles)
 
 			committed, err := tx.Commit(t.Context())
 			require.NoError(t, err)
@@ -288,6 +302,8 @@ func TestTransactionSetLocationOverwriteAndDeletesWriteToStagedPaths(t *testing.
 		wantIDs     []int64
 	}{
 		{name: "overwrite", version: "2", operation: "overwrite", wantContent: iceberg.ManifestContentData, wantIDs: []int64{2, 3}},
+		{name: "dynamic overwrite v2", version: "2", operation: "dynamic", wantContent: iceberg.ManifestContentData, wantIDs: []int64{3}},
+		{name: "dynamic overwrite v3", version: "3", operation: "dynamic", wantContent: iceberg.ManifestContentData, wantIDs: []int64{3}},
 		{name: "copy-on-write rewrite", version: "2", operation: "cow", wantContent: iceberg.ManifestContentData, wantIDs: []int64{2}},
 		{name: "position delete v2", version: "2", operation: "mor", wantContent: iceberg.ManifestContentDeletes, wantIDs: []int64{2}},
 		{name: "deletion vector v3", version: "3", operation: "mor", wantContent: iceberg.ManifestContentDeletes, wantIDs: []int64{2}},
@@ -308,6 +324,10 @@ func TestTransactionSetLocationOverwriteAndDeletesWriteToStagedPaths(t *testing.
 				rdr := rowsReader(t, tbl, `[{"id":3,"data":"new"}]`)
 				defer rdr.Release()
 				require.NoError(t, tx.Overwrite(t.Context(), rdr, nil, table.WithOverwriteFilter(filter)))
+			case "dynamic":
+				rdr := rowsReader(t, tbl, `[{"id":3,"data":"new"}]`)
+				defer rdr.Release()
+				require.NoError(t, tx.DynamicPartitionOverwrite(t.Context(), rdr, nil))
 			case "cow":
 				require.NoError(t, tx.SetProperties(iceberg.Properties{
 					table.WriteDeleteModeKey: table.WriteModeCopyOnWrite,
