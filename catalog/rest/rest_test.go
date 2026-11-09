@@ -3896,6 +3896,26 @@ func (r *RestCatalogSuite) TestRenameView404() {
 	r.ErrorContains(err, "The given view does not exist")
 }
 
+func (r *RestCatalogSuite) TestRenameView404MissingNamespace() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "Namespace does not exist: missing",
+			Type:    "NoSuchNamespaceException",
+			Code:    404,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("missing", "destination"))
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrNoSuchView)
+}
+
 func (r *RestCatalogSuite) TestRenameView409() {
 	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
 		if !r.Equal(http.MethodPost, req.Method) {
@@ -4383,6 +4403,73 @@ func (r *RestCatalogSuite) TestCommitTableErrorBodyKeepsCommitStateUnknown() {
 					"%s %d should return ErrCommitStateUnknown, got: %v", tc.name, code, err)
 				if tc.wantDecode {
 					r.ErrorContains(err, "failed to decode error response")
+				}
+			})
+		}
+	}
+}
+
+func (r *RestCatalogSuite) TestCommitTableClassifiesRejections() {
+	var statusCode int
+	var body []byte
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/namespaces/db/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		w.Write(body)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	for _, tc := range []struct {
+		status   int
+		errType  string
+		want     []error
+		rejected bool
+	}{
+		{http.StatusBadRequest, "BadRequestException", []error{rest.ErrBadRequest, rest.ErrRESTError}, true},
+		{http.StatusUnauthorized, "NotAuthorizedException", []error{rest.ErrUnauthorized, rest.ErrRESTError}, true},
+		{http.StatusForbidden, "ForbiddenException", []error{rest.ErrForbidden, rest.ErrRESTError}, true},
+		{http.StatusNotFound, "NoSuchTableException", []error{catalog.ErrNoSuchTable}, true},
+		{http.StatusConflict, "CommitFailedException", []error{table.ErrCommitFailed, rest.ErrRESTError}, false},
+		{http.StatusInternalServerError, "CommitStateUnknownException", []error{rest.ErrCommitStateUnknown}, false},
+	} {
+		jsonBody, err := json.Marshal(map[string]any{
+			"error": map[string]any{"message": http.StatusText(tc.status), "type": tc.errType, "code": tc.status},
+		})
+		r.Require().NoError(err)
+
+		for _, b := range []struct {
+			name string
+			body []byte
+		}{
+			{"JSON body", jsonBody},
+			{"undecodable body", []byte(`{"error":{"message":"boom`)},
+		} {
+			statusCode, body = tc.status, b.body
+			r.Run(strconv.Itoa(tc.status)+"/"+b.name, func() {
+				_, _, err := cat.CommitTable(context.Background(),
+					table.Identifier{"db", "tbl"},
+					[]table.Requirement{},
+					[]table.Update{},
+				)
+				r.Require().Error(err)
+				for _, want := range tc.want {
+					r.ErrorIs(err, want)
+				}
+				if tc.rejected {
+					r.ErrorIs(err, table.ErrCommitRejected)
+				} else {
+					r.NotErrorIs(err, table.ErrCommitRejected)
 				}
 			})
 		}

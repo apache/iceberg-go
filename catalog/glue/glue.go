@@ -98,13 +98,13 @@ var (
 )
 
 func init() {
-	catalog.MustRegister("glue", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.MustRegister("glue", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
 		awsConfig, err := toAwsConfig(ctx, props)
 		if err != nil {
 			return nil, err
 		}
 
-		return NewCatalog(WithAWSConfig(awsConfig), WithAWSProperties(AWSProperties(props)))
+		return NewCatalog(WithName(name), WithAWSConfig(awsConfig), WithAWSProperties(AWSProperties(props)))
 	}))
 }
 
@@ -160,6 +160,7 @@ type glueAPI interface {
 var _ catalog.Catalog = (*Catalog)(nil)
 
 type Catalog struct {
+	name      string
 	glueSvc   glueAPI
 	catalogId *string
 	awsCfg    *aws.Config
@@ -182,7 +183,7 @@ type Catalog struct {
 // catalog, err := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 
 func NewCatalog(opts ...Option) (*Catalog, error) {
-	glueOps := &options{}
+	glueOps := &options{name: string(catalog.Glue)}
 
 	for _, o := range opts {
 		o(glueOps)
@@ -200,6 +201,7 @@ func NewCatalog(opts ...Option) (*Catalog, error) {
 	}
 
 	cat := &Catalog{
+		name:      glueOps.name,
 		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
 		catalogId: catalogId,
 		awsCfg:    &glueOps.awsConfig,
@@ -269,6 +271,8 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 
 	return c.convertGlueToIceberg(ctx, glueTable)
 }
+
+func (c *Catalog) Name() string { return c.name }
 
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Glue

@@ -410,6 +410,8 @@ type panicCatalog struct {
 
 func (p *panicCatalog) Close() error { return nil }
 
+func (p *panicCatalog) Name() string { return "panic" }
+
 func (p *panicCatalog) CatalogType() catalog.Type { return "panic" }
 func (p *panicCatalog) CreateTable(context.Context, table.Identifier, *iceberg.Schema, ...catalog.CreateTableOpt) (*table.Table, error) {
 	panic("CreateTable must not be called")
@@ -511,6 +513,22 @@ func TestRunUpgradeDryRunAlreadyAtVersion(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "[DRY RUN]")
 	assert.Contains(t, output, "format version 1 to 1")
+}
+
+func TestRunUpgradeDryRunRejectsUnsupportedVersion(t *testing.T) {
+	cat := &panicCatalog{tbl: upgradeRollbackTestTable(t)}
+	var output errCapture
+
+	exitCode := captureExit(func() {
+		runUpgrade(context.Background(), &output, cat, &UpgradeCmd{
+			TableID:       "db.events",
+			FormatVersion: 999,
+			DryRun:        true,
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.ErrorIs(t, output.lastErr, iceberg.ErrInvalidFormatVersion)
 }
 
 func TestConfirmActionNonTTYWithoutYes(t *testing.T) {

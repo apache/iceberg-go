@@ -832,3 +832,31 @@ func TestTableResponseLayersPartialS3Credential(t *testing.T) {
 		assert.Equal(t, "vended-token", props[iceio.S3SessionToken], name)
 	}
 }
+
+// TestTableResponseDropsStaleS3SessionTokenForVendedKeyPair covers the
+// table-wide merge sites: a session token from table config only works with
+// the key pair it was issued with, so a vended key pair without one drops it.
+func TestTableResponseDropsStaleS3SessionTokenForVendedKeyPair(t *testing.T) {
+	const scheme = "restcreds-table-s3-stale"
+
+	expiresAt := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
+	got := tableResponseFSProps(t, scheme,
+		scheme+"://warehouse/database/table/metadata/00000-a.metadata.json",
+		map[string]string{
+			iceio.S3AccessKeyID:              "config-key",
+			iceio.S3SecretAccessKey:          "config-secret",
+			iceio.S3SessionToken:             "config-token",
+			"s3.session-token-expires-at-ms": expiresAt,
+		},
+		map[string]string{
+			iceio.S3AccessKeyID:     "vended-key",
+			iceio.S3SecretAccessKey: "vended-secret",
+		})
+
+	for name, props := range got {
+		assert.Equal(t, "vended-key", props[iceio.S3AccessKeyID], name)
+		assert.Equal(t, "vended-secret", props[iceio.S3SecretAccessKey], name)
+		assert.NotContains(t, props, iceio.S3SessionToken, name)
+		assert.NotContains(t, props, "s3.session-token-expires-at-ms", name)
+	}
+}

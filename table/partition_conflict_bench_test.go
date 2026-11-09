@@ -35,9 +35,12 @@ func BenchmarkEqDeletePartitionsToFilter(b *testing.B) {
 			fileCount      int
 			partitionCount int
 		}{
+			{fileCount: 1, partitionCount: 1},
+			{fileCount: 16, partitionCount: 16},
 			{fileCount: 1_000, partitionCount: 100},
 			{fileCount: 10_000, partitionCount: 100},
 			{fileCount: 1_000, partitionCount: 1_000},
+			{fileCount: 4_096, partitionCount: 4_096},
 		} {
 			name := fmt.Sprintf(
 				"fields=%d/files=%d/partitions=%d",
@@ -54,6 +57,9 @@ func BenchmarkEqDeletePartitionsToFilter(b *testing.B) {
 				})
 				b.Run("after", func(b *testing.B) {
 					benchmarkEqDeletePartitionFilter(b, files, meta, eqDeletePartitionsToFilter)
+				})
+				b.Run("after_bind", func(b *testing.B) {
+					benchmarkEqDeletePartitionFilterAndBind(b, files, meta)
 				})
 			})
 		}
@@ -80,6 +86,27 @@ func benchmarkEqDeletePartitionFilter(
 			b.Fatal(err)
 		}
 		equalityDeleteConflictFilterBenchmarkSink = filter
+	}
+}
+
+// benchmarkEqDeletePartitionFilterAndBind includes schema binding in the
+// measured work without performing manifest reads or commit IO.
+func benchmarkEqDeletePartitionFilterAndBind(b *testing.B, files []iceberg.DataFile, meta Metadata) {
+	b.Helper()
+	b.ReportAllocs()
+	schema := meta.CurrentSchema()
+	b.ResetTimer()
+
+	for range b.N {
+		filter, err := eqDeletePartitionsToFilter(files, meta)
+		if err != nil {
+			b.Fatal(err)
+		}
+		bound, err := iceberg.BindExpr(schema, filter, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		equalityDeleteConflictFilterBenchmarkSink = bound
 	}
 }
 

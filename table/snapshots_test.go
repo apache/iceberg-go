@@ -21,10 +21,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -149,7 +151,7 @@ func TestDeserializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
 	require.NoError(t, fs.WriteFile(context.Background(), paths[0], []byte("manifest-one")))
 	require.NoError(t, fs.WriteFile(context.Background(), paths[1], []byte("manifest-two-longer")))
 
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 	require.Len(t, manifests, 2)
 	assert.Equal(t, paths[0], manifests[0].FilePath())
@@ -580,4 +582,44 @@ func TestParseMetadataRejectsSnapshotMissingRequiredFields(t *testing.T) {
 			assert.EqualError(t, err, tt.wantErr)
 		})
 	}
+}
+
+func TestSnapshotManifestsPassContextToOpen(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "caller")
+
+	for name, snap := range map[string]table.Snapshot{
+		"manifest list":      {SnapshotID: 1, ManifestList: "s3://bucket/snap-1.avro"},
+		"embedded manifests": {SnapshotID: 1, ManifestLocations: []string{"s3://bucket/m1.avro"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := &iomock.ContextProbe{}
+			_, err := snap.Manifests(ctx, probe)
+			require.ErrorIs(t, err, iomock.ErrContextProbe)
+			require.NotNil(t, probe.Ctx)
+			require.Equal(t, "caller", probe.Ctx.Value(key{}))
+		})
+	}
+}
+
+type contextStatProbe struct {
+	iomock.ContextProbe
+}
+
+func (p *contextStatProbe) Stat(ctx context.Context, _ string) (fs.FileInfo, error) {
+	p.Ctx = ctx
+
+	return nil, iomock.ErrContextProbe
+}
+
+func TestSnapshotEmbeddedManifestStatPassesContext(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "caller")
+	probe := &contextStatProbe{}
+	snapshot := table.Snapshot{SnapshotID: 1, ManifestLocations: []string{"s3://bucket/m1.avro"}}
+
+	_, err := snapshot.Manifests(ctx, probe)
+	require.ErrorIs(t, err, iomock.ErrContextProbe)
+	require.NotNil(t, probe.Ctx)
+	assert.Equal(t, "caller", probe.Ctx.Value(key{}))
 }

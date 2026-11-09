@@ -18,14 +18,17 @@
 package maintenance
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
 )
 
 var orphanCleanupBenchmarkSink string
@@ -66,6 +69,48 @@ func BenchmarkApplyURIEquivalence(b *testing.B) {
 			b.StopTimer()
 			// Keep the result observable without including the sink in the benchmark.
 			orphanCleanupBenchmarkSink = result
+		})
+	}
+}
+
+func referenceManifestFixture(t testing.TB, n int) (*table.Table, *trackingIO) {
+	t.Helper()
+	fs := newTrackingIO()
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true})
+	spec := iceberg.NewPartitionSpec()
+	snapshotID := int64(1)
+	entries := make([]iceberg.ManifestEntry, n)
+	for i := range entries {
+		df, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, fmt.Sprintf("s3://bucket/data/%d.parquet", i), iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+		require.NoError(t, err)
+		entries[i] = iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df.Build()).DataSequenceNumber(1).Build()
+	}
+	manifestPath := "s3://bucket/meta/manifest.avro"
+	listPath := "s3://bucket/meta/snap.avro"
+	var buf bytes.Buffer
+	_, err := iceberg.WriteManifest(manifestPath, &buf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(context.Background(), manifestPath, buf.Bytes()))
+	mf := iceberg.NewManifestBuilder(2, manifestPath, int64(buf.Len()), 0, snapshotID).SequenceNumber(1, 1).AddedFiles(int32(n)).AddedRows(int64(n)).Build()
+	writeManifestList(t, fs, snapshotID, listPath, []iceberg.ManifestFile{mf})
+	meta, err := table.ParseMetadataString(buildMetaJSON(metaJSONOpts{snapshots: fmt.Sprintf(`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q}`, listPath)}))
+	require.NoError(t, err)
+
+	return table.New(table.Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(fs), nil), fs
+}
+
+func BenchmarkGetReferencedFilesManifestEntries(b *testing.B) {
+	for _, n := range []int{1, 16384} {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			tbl, fs := referenceManifestFixture(b, n)
+			b.ReportAllocs()
+			for b.Loop() {
+				refs, err := getReferencedFiles(context.Background(), tbl, fs, 1, true)
+				// Four non-data references: metadata.json, version hint, manifest list, and manifest.
+				if err != nil || len(refs) != n+4 {
+					b.Fatalf("references=%d error=%v", len(refs), err)
+				}
+			}
 		})
 	}
 }

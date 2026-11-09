@@ -50,6 +50,8 @@ import (
 
 var (
 	_ catalog.Catalog                      = (*Catalog)(nil)
+	_ catalog.ViewCatalog                  = (*Catalog)(nil)
+	_ catalog.UpdatableViewCatalog         = (*Catalog)(nil)
 	_ catalog.TransactionalCatalog         = (*Catalog)(nil)
 	_ catalog.RefreshableCredentialCatalog = (*Catalog)(nil)
 	_ catalog.RegisterableCatalog          = (*Catalog)(nil)
@@ -113,6 +115,12 @@ var (
 	ErrCommitFailed       = fmt.Errorf("%w: %w", ErrRESTError, table.ErrCommitFailed)
 	ErrCommitStateUnknown = fmt.Errorf("%w: commit failed due to unknown reason", ErrRESTError)
 	ErrOAuthError         = fmt.Errorf("%w: oauth error", ErrRESTError)
+
+	// These statuses mean the catalog did not change the table.
+	errCommitBadRequest   = fmt.Errorf("%w: %w", ErrBadRequest, table.ErrCommitRejected)
+	errCommitUnauthorized = fmt.Errorf("%w: %w", ErrUnauthorized, table.ErrCommitRejected)
+	errCommitForbidden    = fmt.Errorf("%w: %w", ErrForbidden, table.ErrCommitRejected)
+	errCommitNoSuchTable  = fmt.Errorf("%w: %w", catalog.ErrNoSuchTable, table.ErrCommitRejected)
 
 	// errNotModified reports a 304 to a request sent with withIfNoneMatch.
 	errNotModified = errors.New("not modified")
@@ -898,11 +906,10 @@ func toProps(o *options) iceberg.Properties {
 	return props
 }
 
-var _ catalog.Catalog = (*Catalog)(nil)
-
 type Catalog struct {
-	baseURI *url.URL
-	cl      *http.Client
+	ioRegistry *iceio.Registry
+	baseURI    *url.URL
+	cl         *http.Client
 	// closeSession releases transports owned by the catalog. Caller-provided
 	// transports are excluded when the session is constructed.
 	closeSession     func()
@@ -1067,6 +1074,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
+	r.ioRegistry = ops.ioRegistry
 	baseuri, err := url.Parse(uri)
 	if err != nil {
 		return err
@@ -1334,6 +1342,7 @@ func (r *Catalog) tableFromResponse(
 		refresher := &vendedCredentialRefresher{
 			mu:         semaphore.NewWeighted(1),
 			identifier: identifier,
+			ioRegistry: r.ioRegistry,
 			location:   loc,
 			props:      config,
 			vended:     vended,
@@ -1343,7 +1352,7 @@ func (r *Catalog) tableFromResponse(
 		}
 		fsF = refresher.loadFS
 	} else {
-		fsF = iceio.LoadFSFunc(config, loc)
+		fsF = loadRegistryFSFunc(r.ioRegistry, config, loc)
 	}
 
 	// Resolve the reporter from the client-supplied properties only (see the
@@ -1803,7 +1812,10 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, path,
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{
-			http.StatusNotFound:            catalog.ErrNoSuchTable,
+			http.StatusBadRequest:          errCommitBadRequest,
+			http.StatusUnauthorized:        errCommitUnauthorized,
+			http.StatusForbidden:           errCommitForbidden,
+			http.StatusNotFound:            errCommitNoSuchTable,
 			http.StatusConflict:            ErrCommitFailed,
 			http.StatusInternalServerError: ErrCommitStateUnknown,
 			http.StatusBadGateway:          ErrCommitStateUnknown,
@@ -2734,11 +2746,15 @@ func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 		return nil, err
 	}
 
+	// The spec's rename 404 covers both a missing source view and a missing
+	// destination namespace; split it by error.type so a missing namespace is
+	// not reported as a missing view. LoadView and DropView need no override
+	// because the spec documents only NoSuchViewException for their 404s.
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchView,
 			http.StatusConflict: catalog.ErrViewAlreadyExists,
-		}, allowNoContent())
+		}, allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}))
 	if err != nil {
 		return nil, err
 	}

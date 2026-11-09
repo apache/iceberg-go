@@ -201,12 +201,12 @@ func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
 // against the manifest record_count and accepted with a slog warning rather
 // than rejected — the Go writer always emits the property, but third-party
 // writers may not, and the per-byte CRC check in DeserializeDV still applies.
-func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error) {
+func ReadDV(ctx context.Context, fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error) {
 	if err := validateDVFile(dvFile); err != nil {
 		return nil, err
 	}
 
-	reader, f, err := openDVReader(fs, dvFile.FilePath())
+	reader, f, err := openDVReader(ctx, fs, dvFile.FilePath())
 	if err != nil {
 		return nil, err
 	}
@@ -233,12 +233,12 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 // ReadDVs reads multiple deletion vectors stored in the same Puffin file.
 // The returned bitmaps have the same order as dvFiles. The Puffin file is
 // opened and its footer is decoded once for the complete batch.
-func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap, error) {
+func ReadDVs(ctx context.Context, fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap, error) {
 	if len(dvFiles) == 0 {
 		return nil, nil
 	}
 	if len(dvFiles) == 1 {
-		bitmap, err := ReadDV(fs, dvFiles[0])
+		bitmap, err := ReadDV(ctx, fs, dvFiles[0])
 		if err != nil {
 			return nil, err
 		}
@@ -257,7 +257,7 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 		}
 	}
 
-	reader, f, err := openDVReader(fs, filePath)
+	reader, f, err := openDVReader(ctx, fs, filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -427,9 +427,8 @@ func validateDVFile(dvFile iceberg.DataFile) error {
 // a Puffin container (puffin.ErrNotPuffinFile) it returns a nil reader and
 // the still-open file, so the caller can read bare blobs without a second
 // Open round-trip; the caller owns closing f whenever err is nil.
-func openDVReader(fs iceio.IO, filePath string) (*puffin.Reader, iceio.File, error) {
-	// No caller context to thread here.
-	f, err := fs.Open(context.Background(), filePath)
+func openDVReader(ctx context.Context, fs iceio.IO, filePath string) (*puffin.Reader, iceio.File, error) {
+	f, err := fs.Open(ctx, filePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open DV file %s: %w", filePath, err)
 	}

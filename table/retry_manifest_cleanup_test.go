@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -205,11 +206,11 @@ func (f retryCleanupFixture) assertOnlyCommittedFilesAdded(t *testing.T, committ
 		}
 		added++
 		want[s.ManifestList] = struct{}{}
-		manifests, err := s.Manifests(f.wfs)
+		manifests, err := s.Manifests(t.Context(), f.wfs)
 		require.NoError(t, err, "committed manifest list %s must be readable", s.ManifestList)
 		for _, m := range manifests {
 			want[m.FilePath()] = struct{}{}
-			for _, err := range m.Entries(f.wfs, false) {
+			for _, err := range m.Entries(t.Context(), f.wfs, false) {
 				require.NoError(t, err, "committed manifest %s must be readable", m.FilePath())
 			}
 		}
@@ -223,7 +224,7 @@ func headManifests(t *testing.T, tbl *Table, fs *memIO) (*Snapshot, []iceberg.Ma
 	t.Helper()
 	head := tbl.CurrentSnapshot()
 	require.NotNil(t, head)
-	manifests, err := head.Manifests(fs)
+	manifests, err := head.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	return head, manifests
@@ -327,6 +328,63 @@ func TestFailedCommitKeepsOnlyStagedFilesUntilResumeLands(t *testing.T) {
 	}
 }
 
+func TestRejectedCommitDeletesItsRebuildsAndStaysResumable(t *testing.T) {
+	for _, p := range retryCleanupProducers {
+		t.Run(p.name, func(t *testing.T) {
+			f := newRetryCleanupFixture(t, "2", p.props)
+			fs := &unreadableListIO{memIO: f.wfs}
+			rejected := fmt.Errorf("%w: simulated metadata update failure", ErrCommitRejected)
+			cat := &peerHeadsCatalog{current: f.h0, heads: []Metadata{f.h1, f.h2}, errs: []error{ErrCommitFailed, rejected}}
+			tx := newOCCTable(t, f.h0, fs, cat).NewTransaction()
+			p.stage(t, tx)
+			staged := f.newFiles()
+
+			_, err := tx.Commit(t.Context())
+			require.ErrorIs(t, err, ErrCommitRejected)
+			require.NotErrorIs(t, err, ErrTransactionUnusable)
+			var unknown *commitStateUnknownError
+			require.NotErrorAs(t, err, &unknown)
+			require.Equal(t, 2, cat.attempts, "a rejection must not be retried")
+			assert.Equal(t, staged, f.newFiles(), "only the staged files may remain, and all of them")
+			var lists, manifests int
+			for _, path := range fs.removed {
+				if strings.HasPrefix(filepath.Base(path), "snap-") {
+					lists++
+				} else {
+					manifests++
+				}
+			}
+			assert.NotZero(t, lists, "the rebuilt manifest list must be deleted")
+			assert.NotZero(t, manifests, "the rebuilt manifests must be deleted")
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 3, cat.attempts)
+			head, headManifestFiles := headManifests(t, committed, f.wfs)
+			p.checkHead(t, head, headManifestFiles)
+			f.assertOnlyCommittedFilesAdded(t, committed)
+		})
+	}
+}
+
+func TestRejectedExpiryDeletesNothing(t *testing.T) {
+	f := newRetryCleanupFixture(t, "2", nil)
+	rejected := fmt.Errorf("%w: simulated metadata update failure", ErrCommitRejected)
+	cat := &peerHeadsCatalog{current: f.h2, heads: []Metadata{f.h2}, errs: []error{rejected}}
+	tx := newOCCTable(t, f.h2, f.wfs, cat).NewTransaction()
+	expired := f.h0.CurrentSnapshot()
+	require.NoError(t, tx.apply([]Update{NewRemoveSnapshotsUpdate([]int64{expired.SnapshotID}, true)}, nil))
+	before := slices.Sorted(maps.Keys(f.wfs.files))
+
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitRejected)
+	assert.Equal(t, before, slices.Sorted(maps.Keys(f.wfs.files)), "a rejected expiry must not run its post-commit deletion")
+
+	_, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.NotContains(t, f.wfs.files, expired.ManifestList, "the expiry deletes once its commit lands")
+}
+
 // Cleanup must not guess which files a landed commit references when it
 // cannot read a committed manifest list.
 func TestCommitCleanupSkippedWhenCommittedListUnreadable(t *testing.T) {
@@ -423,7 +481,7 @@ func TestChainedSnapshotsKeepEveryCommittedManifest(t *testing.T) {
 	require.NotNil(t, head.ParentSnapshotID)
 	first := committed.Metadata().SnapshotByID(*head.ParentSnapshotID)
 	require.NotNil(t, first)
-	firstManifests, err := first.Manifests(f.wfs)
+	firstManifests, err := first.Manifests(t.Context(), f.wfs)
 	require.NoError(t, err)
 	var firstAdded int
 	for _, m := range firstManifests {

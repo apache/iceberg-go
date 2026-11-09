@@ -303,6 +303,26 @@ if err != nil { /* ... */ }
 arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 ```
 
+### Incremental changelog scans
+
+`NewIncrementalChangelogScan` returns rows added or deleted between snapshots. `PlanFiles` returns the tasks. `Read` reads a planned task list, and `ToArrowRecords` plans and reads. Remote planning is not supported.
+
+```go
+schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields("id", "name"),
+).FromSnapshotExclusive(startSnapshotID).ToArrowRecords(ctx)
+```
+
+`FromSnapshotInclusive`, `FromSnapshotExclusive`, and `ToSnapshot` bound the snapshot range. Projection, row filters, and limits apply while the rows are read. If the start snapshot has been expired, changes in expired snapshots before the oldest retained one are not reported. Each snapshot that adds deletes is planned against every live data file, narrowed only by the partition filter, so the cost follows the table size rather than the size of the snapshot range.
+
+Each batch is the scan projection followed by three columns:
+
+- `_change_type` — `INSERT` or `DELETE`
+- `_change_ordinal` — int32 ordinal of the snapshot that produced the change
+- `_commit_snapshot_id` — snapshot ID that committed the change
+
+Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. `UPDATE` rows are not produced. Delete-file handling is iceberg-go behavior.
+
 ## Writing data
 
 The shortcut methods on `Table` open a transaction, perform the write, and commit. Use `NewTransaction` directly when you need to combine multiple operations.
@@ -339,6 +359,41 @@ newTbl, err = tbl.Overwrite(ctx, recordReader, nil,
 
 `OverwriteTable` is the `arrow.Table` variant.
 
+### Dynamic partition overwrite
+
+Replace only the partitions present in the incoming data. Unlike a filtered
+row-level overwrite, this removes **all existing data files** in those partitions
+while retaining files in other partitions.
+
+```go
+// Write Arrow record batches, replacing only partitions receiving new rows.
+newTbl, err := tbl.DynamicPartitionOverwrite(ctx, recordReader, nil)
+
+// In-memory Arrow tables work too.
+newTbl, err = tbl.DynamicPartitionOverwriteTable(ctx, arrowTbl, 1024, nil)
+
+// Or commit already-written Iceberg DataFile metadata through a transaction.
+txn := tbl.NewTransaction()
+err = txn.DynamicPartitionOverwriteDataFiles(ctx, newDataFiles, nil)
+if err == nil {
+    newTbl, err = txn.Commit(ctx)
+}
+```
+
+This supports Iceberg format v1-v3. Incoming files must use the current
+partition spec. On partitioned tables, files under older specs are preserved;
+only matching current-spec partitions are replaced. If the current spec is
+unpartitioned, non-empty input replaces all live files, including files under
+older specs. For v3, replacement also removes deletion vectors tied to
+replaced data files. Empty input leaves the table untouched.
+
+A concurrent add or removal in a replaced partition fails validation, while
+independent changes to other partitions can be retried after a catalog refresh.
+A new target branch also pins the source branch to prevent missing concurrent
+writes. Default partition-spec and sort-order changes fail validation. Written
+data files are not automatically cleaned up if staging or commit fails, so
+callers must handle those files before retrying with a new transaction.
+
 ### Delete
 
 ```go
@@ -363,7 +418,39 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
-`ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` and `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)` are also available on `*Transaction` for swapping files atomically.
+`ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` performs an
+**overwrite** of existing files. It is suitable when the logical table data
+changes. `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)`
+is the corresponding data-file metadata API.
+
+### Stage externally rewritten Parquet files
+
+When another engine has **already written** replacement Parquet files with the
+same live rows and physical record count, use
+`StageRewrittenDataFilesByPath`. This stages an Iceberg `replace` snapshot
+instead of an `overwrite`, but it does not read or rewrite the row data:
+
+```go
+txn := tbl.NewTransaction()
+err := txn.StageRewrittenDataFilesByPath(ctx, oldFilePaths, newFilePaths, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+```
+
+This path-only helper supports unpartitioned format v1 and v2 tables. It rejects
+a source file with any applicable position or equality deletes, as well as
+deletion vectors. It requires the same total physical record count and checks
+column value, null, and NaN counts when available for every file on both sides.
+Missing optional statistics are unknown, not zero. A source column with known
+value counts cannot disappear when replacement metrics collection is enabled.
+Footer metadata cannot prove row-level equivalence, so callers must preserve
+every live row. Format v3 and partitioned tables are not supported, including
+older partitioned specs that are no longer current.
+
+For compaction that must **apply deletes**, remove delete files, or rewrite
+partitioned data, use `RewriteDataFiles`. An external writer that needs to
+supply data-file metadata, a sequence number, or related delete-file changes
+can use `NewRewrite` with `FileToDataFile` instead.
 
 ### Transactions
 
@@ -483,6 +570,43 @@ err = txn.RollbackToSnapshot(targetSnapshotID)
 
 Tune retention with the `history.expire.min-snapshots-to-keep`, `history.expire.max-snapshot-age-ms`, and `history.expire.max-ref-age-ms` table properties (see [Configuration](./configuration.md)).
 
+### Snapshot integrity audit (v1 and later)
+
+Use `ValidateSnapshot` to inspect a snapshot's manifest list and entries without
+changing table data. This is especially useful for checking imported v1 tables
+before allowing them into production.
+
+```go
+report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+if err != nil {
+    return err // I/O failed or the scan was canceled; report may be incomplete.
+}
+if !report.Valid() {
+    for _, issue := range report.Issues {
+        fmt.Printf("%s: %s (%s)\n", issue.Code, issue.FilePath, issue.ManifestPath)
+    }
+}
+```
+
+The report checks manifest versions, partition spec references, content types,
+manifest entry counts, duplicate manifest paths, and duplicate live content files
+across **all** manifests in a snapshot. It also checks that live deletion vectors
+have a target path, that their blob ranges fit within the recorded file size,
+and that no two distinct vectors target the same data file.
+Deleted entries do not count as live.
+A report is valid only when `Complete` is true and `Issues` is empty.
+This is a metadata-only audit: it does not check data-file contents or whether
+data-file objects still exist. The audit works with both v1 manifest lists and
+older v1 snapshots containing embedded `manifests` paths. For embedded
+manifests, the partition spec ID is checked against table metadata when the
+optional header provides it, or inferred when the partition fields match exactly
+one historical spec. Missing, ambiguous, or mismatched partition specs are
+reported as issues rather than silently accepted.
+
+The file uniqueness and manifest requirements come from the
+[Iceberg spec](https://iceberg.apache.org/spec/#content-file-uniqueness)
+and [manifest list spec](https://iceberg.apache.org/spec/#manifest-lists).
+
 ## Maintenance
 
 ### Orphan file cleanup
@@ -580,11 +704,14 @@ v, err := view.CreateView(
 )
 
 // Inspect
-v.CurrentVersion()      // *view.Version
-v.CurrentSchema()       // *iceberg.Schema
-v.Versions()            // []*view.Version
-v.Schemas()             // map[int]*iceberg.Schema
-v.Properties()          // iceberg.Properties
+v.CurrentVersion()        // *view.Version
+v.CurrentSchema()         // *iceberg.Schema
+v.Versions()              // []*view.Version
+v.VersionByID(1)          // *view.Version, or nil
+v.VersionAsOf(timestampMs) // *view.Version, or nil (Unix milliseconds)
+v.History()               // []view.VersionLogEntry
+v.Schemas()               // map[int]*iceberg.Schema
+v.Properties()            // iceberg.Properties
 ```
 
 `view.New(ident, meta, metadataLocation)` constructs a view from already-loaded metadata; `view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)` loads metadata from disk or object storage.

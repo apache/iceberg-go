@@ -44,24 +44,9 @@ func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *Up
 		SpecURL:         specURL(cmd.FormatVersion),
 	}
 
-	if cmd.DryRun {
-		output.UpgradeResult(result)
-
-		return
-	}
-
-	if cmd.FormatVersion <= currentVersion {
+	if !cmd.DryRun && cmd.FormatVersion <= currentVersion {
 		output.Error(fmt.Errorf("target format version %d must be greater than current version %d",
 			cmd.FormatVersion, currentVersion))
-		osExit(1)
-
-		return
-	}
-
-	prompt := fmt.Sprintf("Upgrade %s from format version %d to %d?",
-		tableIDString(tbl), currentVersion, cmd.FormatVersion)
-	if err := confirmAction(prompt, cmd.Yes); err != nil {
-		output.Error(err)
 		osExit(1)
 
 		return
@@ -70,6 +55,21 @@ func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *Up
 	tx := tbl.NewTransaction()
 	if err := tx.UpgradeFormatVersion(cmd.FormatVersion); err != nil {
 		output.Error(fmt.Errorf("upgrade failed: %w", err))
+		osExit(1)
+
+		return
+	}
+
+	if cmd.DryRun {
+		output.UpgradeResult(result)
+
+		return
+	}
+
+	prompt := fmt.Sprintf("Upgrade %s from format version %d to %d?",
+		tableIDString(tbl), currentVersion, cmd.FormatVersion)
+	if err := confirmAction(prompt, cmd.Yes); err != nil {
+		output.Error(err)
 		osExit(1)
 
 		return

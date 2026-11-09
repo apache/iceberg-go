@@ -1327,6 +1327,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 			buf.WriteByte(1)
 			buf.Write(a.Value(row))
 		})
+	case *array.Dictionary:
+		valueEncoder := makeColEncoder(a.Dictionary())
+
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
+			valueEncoder(buf, a.GetValueIndex(row))
+		})
 	default:
 		return withNullGuard(arr, func(buf *bytes.Buffer, row int) {
 			encodeArrowValue(buf, arr, row)
@@ -1586,8 +1592,8 @@ func applySingleBytesValues[Offset ~int32 | ~int64](
 	}
 }
 
-// applySingleBytes avoids length-prefix serialization for flat string/binary
-// columns, including their large-offset Arrow variants.
+// applySingleBytes avoids length-prefix serialization for string/binary
+// columns, including their large-offset and dictionary Arrow variants.
 func (m *equalityDeleteMask) applySingleBytes(
 	column arrow.Array,
 	deleteSet *singleBytesEqualityDeleteSet,
@@ -1602,8 +1608,50 @@ func (m *equalityDeleteMask) applySingleBytes(
 		applySingleBytesValues(m, column, values.ValueOffsets(), values.ValueBytes(), deleteSet, mem)
 	case *array.LargeBinary:
 		applySingleBytesValues(m, column, values.ValueOffsets(), values.ValueBytes(), deleteSet, mem)
+	case *array.Dictionary:
+		return m.applySingleBytesDictionary(values, deleteSet, mem)
 	default:
 		return false
+	}
+
+	return true
+}
+
+// applySingleBytesDictionary returns false when the dictionary is larger than
+// the batch to avoid checking more dictionary entries than rows.
+func (m *equalityDeleteMask) applySingleBytesDictionary(
+	column *array.Dictionary,
+	deleteSet *singleBytesEqualityDeleteSet,
+	mem memory.Allocator,
+) bool {
+	dict := column.Dictionary()
+	numRows := column.Len()
+	if dict.Len() > numRows {
+		return false
+	}
+
+	var entryMask equalityDeleteMask
+	defer entryMask.release()
+	if !entryMask.applySingleBytes(dict, deleteSet, mem) {
+		return false
+	}
+	if entryMask.bits == nil && (!deleteSet.hasNull || column.NullN() == 0) {
+		return true
+	}
+
+	for row := range numRows {
+		if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+			continue
+		}
+		if column.IsNull(row) {
+			if !deleteSet.hasNull {
+				continue
+			}
+		} else if entryMask.bits == nil || bitutil.BitIsSet(entryMask.bits, column.GetValueIndex(row)) {
+			continue
+		}
+		m.ensure(mem, numRows)
+		bitutil.ClearBit(m.bits, row)
 	}
 
 	return true

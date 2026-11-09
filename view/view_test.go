@@ -23,8 +23,10 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -144,6 +146,67 @@ func TestCreateViewReturnsMetadataCloseError(t *testing.T) {
 	)
 	require.EqualError(t, err, "error on close")
 	require.Nil(t, createdView)
+}
+
+func TestCreateViewFromVersionKeepsVersion(t *testing.T) {
+	version, err := NewVersion(7, 3, []Representation{
+		NewRepresentation(Representation{SQL: "SELECT * FROM t", Dialect: "trino"}),
+		NewRepresentation(Representation{SQL: "SELECT * FROM t", Dialect: "spark"}),
+	}, table.Identifier{"other_ns"},
+		WithDefaultViewCatalog("prod"),
+		WithVersionSummary(VersionSummary{"engine-version": "467"}),
+		WithTimestampMS(1234),
+	)
+	require.NoError(t, err)
+
+	created, err := CreateViewFromVersion(t.Context(), table.Identifier{"ns", "v"}, newTestSchema(0), version,
+		"mem://view-from-version/v", nil, iceberg.Properties{"comment": "kept"})
+	require.NoError(t, err)
+
+	fs, err := iceio.LoadFS(t.Context(), nil, created.MetadataLocation())
+	require.NoError(t, err)
+	f, err := fs.Open(t.Context(), created.MetadataLocation())
+	require.NoError(t, err)
+	defer f.Close()
+	md, err := ParseMetadata(f)
+	require.NoError(t, err)
+
+	got := md.CurrentVersion()
+	require.Equal(t, int64(InitialVersionID), got.VersionID)
+	require.Equal(t, md.CurrentSchemaID(), got.SchemaID)
+	require.Equal(t, version.Representations, got.Representations)
+	require.Equal(t, table.Identifier{"other_ns"}, got.DefaultNamespace)
+	require.Equal(t, "prod", got.DefaultCatalog)
+	require.Equal(t, VersionSummary{"engine-name": "iceberg-go", "engine-version": "467"}, got.Summary)
+	require.Equal(t, int64(1234), got.TimestampMS)
+	require.Equal(t, "kept", md.Properties()["comment"])
+	require.Equal(t, int64(7), version.VersionID, "the caller's version is not modified")
+}
+
+func TestCreateViewFromVersionFillsUnsetFields(t *testing.T) {
+	version := &Version{
+		VersionID:       1,
+		Representations: []Representation{NewRepresentation(Representation{SQL: "select 1", Dialect: "spark"})},
+	}
+
+	created, err := CreateViewFromVersion(t.Context(), table.Identifier{"ns", "v"}, newTestSchema(0), version,
+		"mem://view-from-version-defaults/v", nil, nil)
+	require.NoError(t, err)
+
+	got := created.CurrentVersion()
+	require.Equal(t, table.Identifier{"ns"}, got.DefaultNamespace)
+	require.Equal(t, VersionSummary{"engine-name": "iceberg-go"}, got.Summary)
+	require.Positive(t, got.TimestampMS)
+	require.Empty(t, got.DefaultCatalog)
+	require.Nil(t, version.Summary, "the caller's version is not modified")
+	require.Nil(t, version.DefaultNamespace)
+}
+
+func TestCreateViewFromVersionRejectsNilVersion(t *testing.T) {
+	created, err := CreateViewFromVersion(t.Context(), table.Identifier{"ns", "v"}, newTestSchema(0), nil,
+		"mem://view-from-version-nil/v", nil, nil)
+	require.ErrorIs(t, err, ErrInvalidViewMetadata)
+	require.Nil(t, created)
 }
 
 func (t *ViewTestSuite) TestIdentifierReturnsDefensiveCopy() {
