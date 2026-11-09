@@ -720,6 +720,39 @@ func TestUpdateSpecRenameField(t *testing.T) {
 	})
 }
 
+func TestUpdateSpecRenameFieldIntoVoidTombstoneName(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   iceberg.PartitionDataIDStart,
+			Name:      "region",
+			Transform: iceberg.IdentityTransform{},
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2},
+			FieldID:   iceberg.PartitionDataIDStart + 1,
+			Name:      "country",
+			Transform: iceberg.VoidTransform{},
+		},
+	)
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "",
+		iceberg.Properties{table.PropertyFormatVersion: "1"})
+	require.NoError(t, err)
+	tbl := table.New([]string{"v1_void_rename"}, meta, "", nil, nil)
+
+	update := table.NewUpdateSpec(tbl.NewTransaction(), false).RenameField("region", "country")
+	_, _, err = update.BuildUpdates()
+	require.NoError(t, err)
+
+	newSpec, err := update.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 2, newSpec.NumFields())
+	assert.Equal(t, "country", newSpec.Field(0).Name)
+	assert.Equal(t, iceberg.IdentityTransform{}, newSpec.Field(0).Transform)
+	assert.Equal(t, "country_1001", newSpec.Field(1).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(1).Transform)
+}
+
 func TestUpdateSpecRemoveField(t *testing.T) {
 	var txn *table.Transaction
 
