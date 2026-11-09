@@ -159,6 +159,19 @@ func TestLocalFSParsesFileURIs(t *testing.T) {
 	}
 }
 
+func TestLocalFSStatIgnoresContext(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	require.NoError(t, os.WriteFile(path, []byte("metadata"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	info, err := (LocalFS{}).Stat(ctx, path)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len("metadata")), info.Size())
+}
+
 func TestLocalFSParsesEscapedFileURIsConsistently(t *testing.T) {
 	t.Parallel()
 

@@ -973,7 +973,7 @@ type statFailingFS struct {
 	statCalls int
 }
 
-func (f *statFailingFS) Stat(string) (fs.FileInfo, error) {
+func (f *statFailingFS) Stat(context.Context, string) (fs.FileInfo, error) {
 	f.statCalls++
 
 	return nil, errors.New("stat should not be called")
