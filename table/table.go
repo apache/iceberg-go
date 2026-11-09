@@ -580,7 +580,8 @@ func yieldAllManifests(
 // conflictValidatorFunc runs a single producer's client-side conflict
 // check against a pre-built conflictContext. Validators return a wrapped
 // ErrCommit* sentinel on retryable conflict, ErrCommitDiverged on
-// terminal divergence, or nil on success.
+// terminal divergence, ErrDataFilesMissing when referenced data files
+// are missing, or nil on success.
 type conflictValidatorFunc func(cc *conflictContext) error
 
 // commitOpts controls optional behavior of doCommit beyond the core

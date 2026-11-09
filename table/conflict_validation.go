@@ -142,20 +142,16 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 // the SnapshotProducer retry machinery does not catch.
 var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer on the branch")
 
-// Conflict sentinels. Both wrap ErrCommitFailed: a concurrent commit
-// caused the conflict, so a new transaction built from a reloaded table
-// may succeed. Callers that need to distinguish which kind of conflict
-// occurred can match on the specific sentinel via errors.Is.
-var (
-	// ErrConflictingDataFiles is returned when a concurrent commit
-	// added data files that satisfy the committer's filter.
-	ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
+// ErrConflictingDataFiles is returned when a concurrent commit added data
+// files that satisfy the committer's filter. It wraps ErrCommitFailed: a
+// new transaction built from a reloaded table may succeed.
+var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
 
-	// ErrConflictingDeleteFiles is returned when a concurrent commit
-	// added delete files that could mask rows the committer is
-	// writing or replacing.
-	ErrConflictingDeleteFiles = fmt.Errorf("%w: concurrent delete files added", ErrCommitFailed)
-)
+// ErrConflictingDeleteFiles is returned when a concurrent commit added
+// delete files that could mask rows the committer is writing or replacing.
+// It wraps ErrCommitFailed: a new transaction built from a reloaded table
+// may succeed.
+var ErrConflictingDeleteFiles = fmt.Errorf("%w: concurrent delete files added", ErrCommitFailed)
 
 // ErrDataFilesMissing is returned when data files the committer
 // explicitly references (e.g. the target of a position delete) are
