@@ -456,6 +456,58 @@ func TestCherryPickSnapshotRejectsWAPIDOnAncestor(t *testing.T) {
 	require.ErrorContains(t, err, "already been published")
 }
 
+// A direct-child fast-forward must still reject a WAP ID already present on
+// the target, while a distinct WAP ID keeps the source snapshot unchanged.
+func TestCherryPickSnapshotFastForwardWAP(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sourceWAP string
+		duplicate bool
+	}{
+		{name: "duplicate", sourceWAP: "batch-1", duplicate: true},
+		{name: "distinct", sourceWAP: "batch-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := newBranchPlanningTable(t, nil)
+			mainTxn := tbl.NewTransaction()
+			reader := idRecordReader(t, tbl, 1)
+			require.NoError(t, mainTxn.Append(t.Context(), reader, iceberg.Properties{"wap.id": "batch-1"}))
+			reader.Release()
+			tbl, err := mainTxn.Commit(t.Context())
+			require.NoError(t, err)
+
+			branchTxn, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+			require.NoError(t, err)
+			reader = idRecordReader(t, tbl, 2)
+			require.NoError(t, branchTxn.Append(t.Context(), reader, iceberg.Properties{"wap.id": tc.sourceWAP}))
+			reader.Release()
+			tbl, err = branchTxn.Commit(t.Context())
+			require.NoError(t, err)
+			source := tbl.SnapshotByName(branchPlanningRef)
+			require.NotNil(t, source)
+			require.NotNil(t, source.ParentSnapshotID)
+			require.Equal(t, tbl.CurrentSnapshot().SnapshotID, *source.ParentSnapshotID)
+
+			pick := tbl.NewTransaction()
+			err = pick.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
+			if tc.duplicate {
+				require.ErrorIs(t, err, table.ErrInvalidOperation)
+				require.ErrorContains(t, err, "already been published")
+				assert.ElementsMatch(t, []int64{1}, idsOnRef(t, tbl, table.MainBranch))
+
+				return
+			}
+			require.NoError(t, err)
+			result, err := pick.Commit(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, source.SnapshotID, result.CurrentSnapshot().SnapshotID)
+			assert.Equal(t, tc.sourceWAP, result.CurrentSnapshot().Summary.Properties["wap.id"])
+			assert.NotContains(t, result.CurrentSnapshot().Summary.Properties, "published-wap-id")
+			assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result, table.MainBranch))
+		})
+	}
+}
+
 func TestCherryPickSnapshotMergeAppendUsesOnlySourceAdditions(t *testing.T) {
 	tbl := newBranchPlanningTable(t, iceberg.Properties{
 		table.ManifestMergeEnabledKey:  "true",
