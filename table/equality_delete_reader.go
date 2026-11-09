@@ -356,9 +356,13 @@ func makeArrowFieldEncoderWithTypes(
 
 	var release func()
 	if sourceType != nil && targetType != nil && !sourceType.Equals(targetType) {
-		if _, err := iceberg.PromoteType(sourceType, targetType); err != nil {
-			return nil, nil, fmt.Errorf("cannot promote equality delete field %d (%s) from %s to %s: %w",
-				fieldID, fieldName, sourceType, targetType, err)
+		// Iceberg v3 permits date-to-timestamp promotions, which PromoteType
+		// does not handle; use the same exception as schema projection.
+		if !canPromoteDateToTimestamp(sourceType, targetType) {
+			if _, err := iceberg.PromoteType(sourceType, targetType); err != nil {
+				return nil, nil, fmt.Errorf("cannot promote equality delete field %d (%s) from %s to %s: %w",
+					fieldID, fieldName, sourceType, targetType, err)
+			}
 		}
 
 		targetArrowType, err := TypeToArrowType(targetType, false, false)
@@ -436,6 +440,7 @@ func makeArrowFieldEncodersWithTypes(
 			ctx, record, fieldRefs[i], fieldID, colNames[i], filePath, sourceType, targetType)
 		if err != nil {
 			release()
+
 			return nil, nil, err
 		}
 		encoders[i] = encoder
