@@ -1513,6 +1513,11 @@ func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
 	if isTransformedTerm(pred.Term()) {
 		return rowsMightNotMatch
 	}
+	// A nested field's metrics count values in present parents, not table
+	// rows. They cannot prove that every row matches a predicate.
+	if len(pred.Term().Ref().PosPath()) > 1 {
+		return rowsMightNotMatch
+	}
 
 	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
