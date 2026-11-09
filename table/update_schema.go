@@ -167,12 +167,13 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 		return u
 	}
 
-	// Seed from metadata's last-column-id rather than the current schema's
-	// highest field id. Per the Iceberg spec, last-column-id is a monotonic
-	// counter that preserves ids across schema evolution (including
-	// deletions) so that newly-allocated ids never collide with ids still
-	// referenced by historical schemas.
-	u.lastColumnID = meta.LastColumnID()
+	// Seed from the larger of metadata's last-column-id and the highest
+	// field id in any schema, including historical ones. Per the Iceberg
+	// spec, last-column-id is a monotonic counter that preserves ids across
+	// schema evolution (including deletions), but it may be stale in
+	// metadata written by other tools. Taking the max ensures newly-allocated
+	// ids never collide with ids in the current or historical schemas.
+	u.lastColumnID = columnIDFloor(meta.LastColumnID(), meta.schemaList)
 
 	for _, opt := range opts {
 		opt(u)
