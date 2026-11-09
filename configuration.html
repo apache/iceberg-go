@@ -590,7 +590,7 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>commit.manifest-merge.enabled</code></td><td>Merge small manifests during commit.</td></tr>
 <tr><td><code>commit.manifest.target-size-bytes</code></td><td>Target size for merged manifests.</td></tr>
 <tr><td><code>commit.manifest.min-count-to-merge</code></td><td>Minimum manifest count that triggers a merge.</td></tr>
-<tr><td><code>commit.retry.num-retries</code></td><td>Retries for <code>ErrCommitFailed</code>.</td></tr>
+<tr><td><code>commit.retry.num-retries</code></td><td>Retries for <code>ErrCommitFailed</code>. Default <code>4</code>; <code>0</code> fails on the first conflict.</td></tr>
 <tr><td><code>commit.retry.min-wait-ms</code> / <code>commit.retry.max-wait-ms</code> / <code>commit.retry.total-timeout-ms</code></td><td>Backoff bounds.</td></tr>
 </tbody></table>
 </div>

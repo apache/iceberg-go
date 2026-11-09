@@ -297,13 +297,14 @@ attempt that commits it, not staging time.</p>
 moved, the commit fails with <code>ErrCommitFailed</code> instead of retrying.
 <code>ExpireSnapshots</code> does not pin refs. Retries replan it as described in
 <a href="#snapshot-expiration">Snapshot expiration</a>.</p>
-<p>Retry is <strong>off by default</strong> (<code>commit.retry.num-retries</code> is <code>0</code>). Opt in by
-setting the retry properties — see <a href="./configuration.html#manifest-and-commit">Manifest and commit</a>
-in the configuration reference for the full list:</p>
-<pre><code class="language-go">// Opt in to retries (e.g. 4 attempts after the first) for a contended table.
+<p><code>Commit</code> retries a conflict up to 4 times by default (<code>commit.retry.num-retries</code>
+is <code>4</code>, as in Java and PyIceberg). Set it to <code>0</code> to fail on the first conflict;
+see <a href="./configuration.html#manifest-and-commit">Manifest and commit</a> in the
+configuration reference for the other retry properties:</p>
+<pre><code class="language-go">// Fail on the first conflict instead of retrying.
 _, err := cat.CreateTable(ctx, ident, schema,
     catalog.WithProperties(iceberg.Properties{
-        &quot;commit.retry.num-retries&quot;: &quot;4&quot;,
+        &quot;commit.retry.num-retries&quot;: &quot;0&quot;,
     }),
 )
 </code></pre>

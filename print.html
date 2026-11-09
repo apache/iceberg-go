@@ -880,7 +880,7 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>commit.manifest-merge.enabled</code></td><td>Merge small manifests during commit.</td></tr>
 <tr><td><code>commit.manifest.target-size-bytes</code></td><td>Target size for merged manifests.</td></tr>
 <tr><td><code>commit.manifest.min-count-to-merge</code></td><td>Minimum manifest count that triggers a merge.</td></tr>
-<tr><td><code>commit.retry.num-retries</code></td><td>Retries for <code>ErrCommitFailed</code>.</td></tr>
+<tr><td><code>commit.retry.num-retries</code></td><td>Retries for <code>ErrCommitFailed</code>. Default <code>4</code>; <code>0</code> fails on the first conflict.</td></tr>
 <tr><td><code>commit.retry.min-wait-ms</code> / <code>commit.retry.max-wait-ms</code> / <code>commit.retry.total-timeout-ms</code></td><td>Backoff bounds.</td></tr>
 </tbody></table>
 </div>
@@ -1566,7 +1566,7 @@ newTbl, err := txn.Commit(ctx)
 <pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;staging&quot;)
 if err != nil { /* ... */ }
 </code></pre>
-<p><code>Commit</code> can retry on conflict (<code>ErrCommitFailed</code>) when <code>commit.retry.num-retries</code> is set. See <a href="./concurrent-writes.html#automatic-retry">Automatic retry</a> for the <code>commit.retry.*</code> table properties.</p>
+<p><code>Commit</code> retries a conflict (<code>ErrCommitFailed</code>) up to <code>commit.retry.num-retries</code> times, 4 by default. See <a href="./concurrent-writes.html#automatic-retry">Automatic retry</a> for the <code>commit.retry.*</code> table properties.</p>
 <h2 id="schema-and-partition-evolution"><a class="header" href="#schema-and-partition-evolution">Schema and partition evolution</a></h2>
 <h3 id="schema-evolution"><a class="header" href="#schema-evolution">Schema evolution</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
@@ -2172,13 +2172,14 @@ attempt that commits it, not staging time.</p>
 moved, the commit fails with <code>ErrCommitFailed</code> instead of retrying.
 <code>ExpireSnapshots</code> does not pin refs. Retries replan it as described in
 <a href="concurrent-writes.html#snapshot-expiration">Snapshot expiration</a>.</p>
-<p>Retry is <strong>off by default</strong> (<code>commit.retry.num-retries</code> is <code>0</code>). Opt in by
-setting the retry properties — see <a href="./configuration.html#manifest-and-commit">Manifest and commit</a>
-in the configuration reference for the full list:</p>
-<pre><code class="language-go">// Opt in to retries (e.g. 4 attempts after the first) for a contended table.
+<p><code>Commit</code> retries a conflict up to 4 times by default (<code>commit.retry.num-retries</code>
+is <code>4</code>, as in Java and PyIceberg). Set it to <code>0</code> to fail on the first conflict;
+see <a href="./configuration.html#manifest-and-commit">Manifest and commit</a> in the
+configuration reference for the other retry properties:</p>
+<pre><code class="language-go">// Fail on the first conflict instead of retrying.
 _, err := cat.CreateTable(ctx, ident, schema,
     catalog.WithProperties(iceberg.Properties{
-        &quot;commit.retry.num-retries&quot;: &quot;4&quot;,
+        &quot;commit.retry.num-retries&quot;: &quot;0&quot;,
     }),
 )
 </code></pre>
@@ -2816,6 +2817,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong><code>io.StatIO.Stat</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>StatIO</code> implementations and callers must pass the operation context.</p>
+</li>
+<li>
+<p><strong>Commits retry conflicts by default.</strong> <code>commit.retry.num-retries</code> now defaults to <code>4</code>, as in Java and PyIceberg, so <code>Commit</code> refreshes and replays a conflicting commit up to four times before returning <code>ErrCommitFailed</code>. Set it to <code>0</code> to keep failing on the first conflict. <code>table.CommitNumRetriesDefault</code> changes from <code>0</code> to <code>4</code>.</p>
 </li>
 <li>
 <p><strong>Schemas store binary and fixed defaults as hex strings.</strong> <code>NewSchema</code>, <code>NewSchemaWithIdentifiers</code> and <code>UpdateSchema.AddColumn</code> (through <code>Apply()</code>) convert <code>[]byte</code>, <code>BinaryLiteral</code> and <code>FixedLiteral</code> defaults of binary and fixed fields, including fields nested in structs, lists and maps, to the lowercase hex string iceberg-go writes to metadata JSON, so a field read back from a schema holds a <code>string</code> such as <code>&quot;0aff&quot;</code>. Code that type-asserts these defaults to <code>[]byte</code> must decode the string instead, for example with <code>hex.DecodeString</code>. A schema built in process now equals the same schema read from metadata with lowercase hex. <code>Equals</code> compares the strings case-sensitively, and Java writes uppercase hex (see <a href="https://github.com/apache/iceberg/issues/18352">apache/iceberg#18352</a>). The fields and types passed in are not modified.</p>
