@@ -58,7 +58,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	ns := catalog.NamespaceFromIdent(ident)
 	nsPath := c.namespaceToPath(ns)
 
-	info, err := c.filesystem.Stat(nsPath)
+	info, err := c.filesystem.Stat(ctx, nsPath)
 	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 	}
@@ -287,7 +287,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 					conflictErr, strings.Join(ident, "."), existingPath)
 			}
 
-			claimInfo, err := c.filesystem.Stat(claimPath)
+			claimInfo, err := c.filesystem.Stat(ctx, claimPath)
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
 					continue
@@ -371,7 +371,7 @@ func (c *Catalog) ListTables(ctx context.Context, ns table.Identifier) iter.Seq2
 
 		nsPath := c.namespaceToPath(ns)
 
-		info, err := c.filesystem.Stat(nsPath)
+		info, err := c.filesystem.Stat(ctx, nsPath)
 		if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 			yield(nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, ".")))
 

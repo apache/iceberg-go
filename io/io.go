@@ -181,9 +181,11 @@ type ReadDirFile interface {
 type StatIO interface {
 	IO
 
-	// The Stat method returns a FileInfo describing the named file or directory,
-	// or an error satisfying errors.Is(err, fs.ErrNotExist) if the file does not exist
-	Stat(path string) (fs.FileInfo, error)
+	// Stat returns a FileInfo describing the named file or directory, or an error
+	// satisfying errors.Is(err, fs.ErrNotExist) if the file does not exist. The
+	// context bounds remote stat operations; local filesystem implementations may
+	// ignore it.
+	Stat(ctx context.Context, path string) (fs.FileInfo, error)
 }
 
 // RenameIO is an extension of IO interface that includes the Rename

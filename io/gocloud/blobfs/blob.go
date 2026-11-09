@@ -686,7 +686,7 @@ func (bfs *FileIO) ReadFile(path string) ([]byte, error) {
 
 // Stat interprets the input path as a directory or file and returns the corresponding FileInfo.
 // If the path does not exist, it returns fs.ErrNotExist
-func (bfs *FileIO) Stat(path string) (fs.FileInfo, error) {
+func (bfs *FileIO) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
 	return bfs.stat(bfs.ctx, path)
 }
 
