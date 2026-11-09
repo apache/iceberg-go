@@ -322,21 +322,26 @@ func TestTransactionSetLocationOverwriteAndDeletesWriteToStagedPaths(t *testing.
 			require.Equal(t, newLocation, staged.Location())
 			fs, err := staged.FS(t.Context())
 			require.NoError(t, err)
-			manifests, err := staged.CurrentSnapshot().Manifests(t.Context(), fs)
+			snapshot := staged.CurrentSnapshot()
+			require.NotNil(t, snapshot)
+			manifests, err := snapshot.Manifests(t.Context(), fs)
 			require.NoError(t, err)
 
-			var newFiles int
+			var addedFiles int
 			for _, manifest := range manifests {
 				if manifest.ManifestContent() != tc.wantContent {
 					continue
 				}
 				for entry, err := range manifest.Entries(t.Context(), fs, true) {
 					require.NoError(t, err)
-					file := entry.DataFile()
-					if !strings.HasPrefix(file.FilePath(), newLocation+"/data/") {
+					if entry.Status() != iceberg.EntryStatusADDED || entry.SnapshotID() != snapshot.SnapshotID {
 						continue
 					}
-					newFiles++
+					file := entry.DataFile()
+					require.True(t, strings.HasPrefix(file.FilePath(), newLocation+"/data/"),
+						"file added by snapshot %d must use the staged data directory: %s",
+						snapshot.SnapshotID, file.FilePath())
+					addedFiles++
 					if tc.operation == "mor" {
 						require.Equal(t, iceberg.EntryContentPosDeletes, file.ContentType())
 						if tc.version == "3" {
@@ -347,7 +352,7 @@ func TestTransactionSetLocationOverwriteAndDeletesWriteToStagedPaths(t *testing.
 					}
 				}
 			}
-			require.NotZero(t, newFiles, "the operation must write at least one file in the staged location")
+			require.NotZero(t, addedFiles, "the operation must add at least one file")
 
 			committed, err := tx.Commit(t.Context())
 			require.NoError(t, err)
