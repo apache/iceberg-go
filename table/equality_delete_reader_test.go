@@ -193,6 +193,8 @@ func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
 	tbl, err = txn.Commit(t.Context())
 	require.NoError(t, err)
 
+	assertRowCount(t, tbl, 3)
+
 	deleteBeforePromotionPath := tbl.Location() + "/data/equality-delete-before-promotion.parquet"
 	deleteBeforePromotionSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
 	require.NoError(t, err)
@@ -210,12 +212,16 @@ func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
 	tbl, err = deleteBeforePromotionTxn.Commit(t.Context())
 	require.NoError(t, err)
 
+	assertRowCount(t, tbl, 2)
+
 	promoteTxn := tbl.NewTransaction()
 	require.NoError(t, promoteTxn.UpdateSchema(true, false).UpdateColumn([]string{"id"}, table.ColumnUpdate{
 		FieldType: iceberg.Optional[iceberg.Type]{Valid: true, Val: iceberg.PrimitiveTypes.Int64},
 	}).Commit())
 	tbl, err = promoteTxn.Commit(t.Context())
 	require.NoError(t, err)
+
+	assertRowCount(t, tbl, 2)
 
 	deletePath := tbl.Location() + "/data/equality-delete-after-promotion.parquet"
 	deleteArrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
