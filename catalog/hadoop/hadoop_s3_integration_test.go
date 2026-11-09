@@ -197,11 +197,11 @@ func (s *HadoopS3IntegrationSuite) TestPurgeTableRemovesTableRoot() {
 
 	s.Require().NoError(s.cat.PurgeTable(s.ctx, ident))
 
-	_, err = statFS.Stat(tbl.MetadataLocation())
+	_, err = statFS.Stat(s.ctx, tbl.MetadataLocation())
 	s.ErrorIs(err, fs.ErrNotExist)
-	_, err = statFS.Stat(dataPath)
+	_, err = statFS.Stat(s.ctx, dataPath)
 	s.ErrorIs(err, fs.ErrNotExist)
-	_, err = statFS.Stat(tbl.Location())
+	_, err = statFS.Stat(s.ctx, tbl.Location())
 	s.ErrorIs(err, fs.ErrNotExist)
 
 	exists, err := s.cat.CheckTableExists(s.ctx, ident)

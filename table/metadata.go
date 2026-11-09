@@ -823,7 +823,7 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 		return nil
 	}
 
-	b.lastColumnId = max(b.lastColumnId, schema.HighestFieldID())
+	b.lastColumnId = max(columnIDFloor(b.lastColumnId, b.schemaList), schema.HighestFieldID())
 
 	schema.ID = newSchemaID
 
@@ -847,6 +847,18 @@ func partitionFieldIDFloor(lastPartitionID *int, specs []iceberg.PartitionSpec) 
 	}
 	for _, spec := range specs {
 		floor = max(floor, spec.LastAssignedFieldID())
+	}
+
+	return floor
+}
+
+// columnIDFloor returns an allocation floor for new field IDs that accounts
+// for the persisted last-column-id and every field ID in schema history, so
+// a stale counter can never cause an ID to be reused.
+func columnIDFloor(lastColumnID int, schemas []*iceberg.Schema) int {
+	floor := lastColumnID
+	for _, schema := range schemas {
+		floor = max(floor, schema.HighestFieldID())
 	}
 
 	return floor

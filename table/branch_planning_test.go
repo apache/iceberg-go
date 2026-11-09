@@ -162,11 +162,11 @@ func liveFilesOnRef(t *testing.T, tbl *table.Table, ref string) (dataPaths, dele
 	snapshot := tbl.SnapshotByName(ref)
 	require.NotNil(t, snapshot, "ref %q must have a head", ref)
 
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	for _, m := range manifests {
-		for entry, err := range m.Entries(fs, false) {
+		for entry, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if entry.Status() == iceberg.EntryStatusDELETED {
 				continue
@@ -193,12 +193,12 @@ func liveDVCountOnRef(t *testing.T, tbl *table.Table, ref string) int {
 	snapshot := tbl.SnapshotByName(ref)
 	require.NotNil(t, snapshot)
 
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	count := 0
 	for _, m := range manifests {
-		for entry, err := range m.Entries(fs, false) {
+		for entry, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if entry.Status() == iceberg.EntryStatusDELETED {
 				continue

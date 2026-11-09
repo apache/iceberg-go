@@ -149,7 +149,7 @@ func TestAddFilesRespectsMergeEnabled(t *testing.T) {
 	snap := tbl.CurrentSnapshot()
 	require.NotNil(t, snap, "table should have a current snapshot after commits")
 
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(ctx, fs)
 	require.NoError(t, err, "reading manifests from HEAD snapshot failed")
 
 	// After fix: merge fires on commit 3 (accumulated 3 > minCount 2) → 1 merged manifest.
