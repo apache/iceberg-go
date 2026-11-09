@@ -60,7 +60,7 @@ All V1 features are supported. V1 is the format-version baseline.
 | Geography: read, write, and schema | Supported (bounds/pruning intentionally omitted for geodesic safety) |
 | Geometry / Geography: nested-geo null counts | Supported (like other nested fields, no bounds are written) |
 | Multi-argument transforms | Infrastructure present; no concrete implementations exercised yet |
-| Statistics files (read / round-trip) | Supported |
+| Statistics files (read / round-trip / register / remove) | Supported |
 | NDV (Theta-sketch) statistics computation | Roadmap ([#1929](https://github.com/apache/iceberg-go/issues/1929)) |
 
 ## FileSystem support

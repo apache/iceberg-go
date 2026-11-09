@@ -973,7 +973,7 @@ type statFailingFS struct {
 	statCalls int
 }
 
-func (f *statFailingFS) Stat(string) (fs.FileInfo, error) {
+func (f *statFailingFS) Stat(context.Context, string) (fs.FileInfo, error) {
 	f.statCalls++
 
 	return nil, errors.New("stat should not be called")
@@ -2188,7 +2188,7 @@ func (s *HadoopCatalogTestSuite) TestLoadTableEnablesCatalogManifestContentCache
 
 	fs, err := loaded.FS(ctx)
 	s.Require().NoError(err)
-	manifests, err := loaded.CurrentSnapshot().Manifests(fs)
+	manifests, err := loaded.CurrentSnapshot().Manifests(ctx, fs)
 	s.Require().NoError(err)
 	s.Require().Len(manifests, 1)
 

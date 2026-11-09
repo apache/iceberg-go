@@ -75,10 +75,6 @@ func (t *Transaction) SetPartitionStatistics(stats PartitionStatisticsFile) erro
 // RemovePartitionStatistics removes the partition statistics file reference
 // associated with snapshotID. It does not delete the physical statistics file.
 func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
-	if _, err := t.txnMeta(); err != nil {
-		return err
-	}
-
 	return t.apply([]Update{NewRemovePartitionStatisticsUpdate(snapshotID)}, nil)
 }
 
@@ -274,7 +270,7 @@ func collectPartitionStatistics(
 	for _, spec := range specs {
 		specByID[int32(spec.ID())] = spec
 	}
-	manifests, err := snapshot.Manifests(fs)
+	manifests, err := snapshot.Manifests(ctx, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +299,7 @@ func collectPartitionStatistics(
 			trees[specID] = tree
 		}
 
-		for entry, err := range manifest.Entries(fs, true) {
+		for entry, err := range manifest.Entries(ctx, fs, true) {
 			if err != nil {
 				return nil, fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err)
 			}

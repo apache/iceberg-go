@@ -90,6 +90,19 @@ func (t *ViewTestSuite) TestNewViewFromReadFile() {
 	t.True(t.view.Equals(*vw2))
 }
 
+func (t *ViewTestSuite) TestEqualsIncludesMetadataProperties() {
+	originalMetadata := t.view.metadata.(*metadata)
+	otherMetadata := *originalMetadata
+	otherMetadata.Props = originalMetadata.Properties()
+	otherMetadata.Props["comment"] = "different comment"
+	otherMetadata.init()
+
+	otherView := *t.view
+	otherView.metadata = &otherMetadata
+
+	t.False(t.view.Equals(otherView))
+}
+
 func (t *ViewTestSuite) TestCreateViewJoinsTrailingSlashMetadataLocation() {
 	createdView, err := CreateView(
 		t.T().Context(),

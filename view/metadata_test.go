@@ -69,6 +69,56 @@ func TestVersionEquals(t *testing.T) {
 	assert.True(t, v1.Equals(v2), fmt.Sprintf("Expected the same SchemaID, Summary, Representation for %v, got %v", v1, v2))
 }
 
+func TestMetadataEqualsIncludesProperties(t *testing.T) {
+	parsed, err := ParseMetadataString(exampleViewJSON)
+	require.NoError(t, err)
+
+	base := parsed.(*metadata)
+	base.Props = iceberg.Properties{
+		"comment":             "daily report",
+		VersionHistorySizeKey: "10",
+	}
+	base.init()
+
+	tests := []struct {
+		name      string
+		props     iceberg.Properties
+		wantEqual bool
+	}{
+		{
+			name:      "same properties",
+			props:     iceberg.Properties{"comment": "daily report", VersionHistorySizeKey: "10"},
+			wantEqual: true,
+		},
+		{
+			name:  "added property",
+			props: iceberg.Properties{"comment": "daily report", VersionHistorySizeKey: "10", "owner": "analytics"},
+		},
+		{
+			name:  "removed property",
+			props: iceberg.Properties{"comment": "daily report"},
+		},
+		{
+			name:  "changed property",
+			props: iceberg.Properties{"comment": "weekly report", VersionHistorySizeKey: "10"},
+		},
+		{
+			name:  "changed version history size",
+			props: iceberg.Properties{"comment": "daily report", VersionHistorySizeKey: "20"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			other := *base
+			other.Props = tt.props
+			other.init()
+
+			assert.Equal(t, tt.wantEqual, base.Equals(&other))
+		})
+	}
+}
+
 func TestNewRepresentationSetsTypeWithoutMutatingInput(t *testing.T) {
 	input := Representation{SQL: "SELECT 1", Dialect: "spark"}
 	repr := NewRepresentation(input)

@@ -515,6 +515,22 @@ func TestRunUpgradeDryRunAlreadyAtVersion(t *testing.T) {
 	assert.Contains(t, output, "format version 1 to 1")
 }
 
+func TestRunUpgradeDryRunRejectsUnsupportedVersion(t *testing.T) {
+	cat := &panicCatalog{tbl: upgradeRollbackTestTable(t)}
+	var output errCapture
+
+	exitCode := captureExit(func() {
+		runUpgrade(context.Background(), &output, cat, &UpgradeCmd{
+			TableID:       "db.events",
+			FormatVersion: 999,
+			DryRun:        true,
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.ErrorIs(t, output.lastErr, iceberg.ErrInvalidFormatVersion)
+}
+
 func TestConfirmActionNonTTYWithoutYes(t *testing.T) {
 	err := confirmAction("do something?", false)
 	require.Error(t, err)
