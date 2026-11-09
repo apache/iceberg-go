@@ -447,3 +447,47 @@ func TestTransactionSetLocationDoesNotMoveExistingFiles(t *testing.T) {
 	defer rows.Release()
 	require.EqualValues(t, 1, rows.NumRows())
 }
+
+func TestTransactionSetLocationReadsOldAndNewFilesAfterReload(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	originalLocation := tbl.Location()
+
+	initial := rowsReader(t, tbl, `[{"id":1,"data":"old"}]`)
+	defer initial.Release()
+	seed := tbl.NewTransaction()
+	require.NoError(t, seed.Append(t.Context(), initial, nil))
+	tbl, err := seed.Commit(t.Context())
+	require.NoError(t, err)
+
+	newLocation := filepath.ToSlash(filepath.Join(t.TempDir(), "relocated"))
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetLocation(newLocation))
+	added := rowsReader(t, tbl, `[{"id":2,"data":"new"}]`)
+	defer added.Release()
+	require.NoError(t, tx.Append(t.Context(), added, nil))
+	_, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	reloaded, err := cat.LoadTable(t.Context(), tbl.Identifier())
+	require.NoError(t, err)
+	require.Equal(t, newLocation, reloaded.Location())
+
+	tasks, err := reloaded.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	var oldFiles, newFiles int
+	for _, task := range tasks {
+		switch {
+		case strings.HasPrefix(task.File.FilePath(), originalLocation+"/data/"):
+			oldFiles++
+		case strings.HasPrefix(task.File.FilePath(), newLocation+"/data/"):
+			newFiles++
+		default:
+			t.Fatalf("unexpected data file location: %s", task.File.FilePath())
+		}
+	}
+	require.Equal(t, 1, oldFiles)
+	require.Equal(t, 1, newFiles)
+	require.Equal(t, []int64{1, 2}, idsInTable(t, reloaded))
+}
