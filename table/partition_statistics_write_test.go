@@ -361,6 +361,29 @@ func TestTransactionPartitionStatisticsRegistration(t *testing.T) {
 	require.Error(t, nilTx.SetPartitionStatistics(stats))
 }
 
+func TestTransactionRemovePartitionStatisticsNoOp(t *testing.T) {
+	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, Type: BranchRef},
+	})
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.RemovePartitionStatistics(103))
+	require.NoError(t, tx.RemovePartitionStatistics(999))
+	require.Empty(t, tx.meta.updates)
+
+	stats := PartitionStatisticsFile{
+		SnapshotID: 103, StatisticsPath: "s3://warehouse/db/stats/metadata/stats.parquet", FileSizeInBytes: 512,
+	}
+	require.NoError(t, tx.SetPartitionStatistics(stats))
+	updateCount := len(tx.meta.updates)
+	require.NoError(t, tx.RemovePartitionStatistics(999))
+	require.Len(t, tx.meta.updates, updateCount)
+
+	require.NoError(t, tx.RemovePartitionStatistics(stats.SnapshotID))
+	updateCount = len(tx.meta.updates)
+	require.NoError(t, tx.RemovePartitionStatistics(stats.SnapshotID))
+	require.Len(t, tx.meta.updates, updateCount)
+}
+
 func TestComputePartitionStatisticsRejectsNonV1AndMissingSnapshot(t *testing.T) {
 	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, Type: BranchRef},
