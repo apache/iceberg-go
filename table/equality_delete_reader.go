@@ -57,9 +57,10 @@ var ErrConflictingEqualityDeleteMetadata = errors.New("conflicting equality dele
 // of the set. Merged groups can hold their own indexes on top of per-file ones.
 // Do not copy the set after the first use of an index.
 type equalityDeleteSet struct {
-	keys     set[string]
-	fieldIDs []int
-	colNames []string
+	keys       set[string]
+	fieldIDs   []int
+	colNames   []string
+	fieldTypes []iceberg.Type // Logical types used to encode keys across schema promotions.
 
 	singleInt64Once sync.Once
 	singleInt64     *singleInt64EqualityDeleteSet
@@ -82,6 +83,45 @@ func equalityFieldLocation(filePath string) string {
 	}
 
 	return location
+}
+
+func equalityFieldTypes(schema *iceberg.Schema, fieldIDs []int) ([]iceberg.Type, error) {
+	fieldTypes := make([]iceberg.Type, len(fieldIDs))
+	for i, fieldID := range fieldIDs {
+		field, ok := schema.FindFieldByID(fieldID)
+		if !ok {
+			return nil, fmt.Errorf("equality field ID %d not found in schema", fieldID)
+		}
+		fieldTypes[i] = field.Type
+	}
+
+	return fieldTypes, nil
+}
+
+func equalityArrowFieldTypes(schema *arrow.Schema, refs []arrowFieldRef, fieldIDs []int) ([]iceberg.Type, error) {
+	fieldTypes := make([]iceberg.Type, len(refs))
+	for i, ref := range refs {
+		if len(ref.path) == 0 {
+			return nil, fmt.Errorf("equality field ID %d has an empty Arrow path", fieldIDs[i])
+		}
+
+		field := schema.Field(ref.path[0])
+		for _, index := range ref.path[1:] {
+			structType, ok := field.Type.(*arrow.StructType)
+			if !ok {
+				return nil, fmt.Errorf("equality field ID %d has a non-struct parent in its Arrow path", fieldIDs[i])
+			}
+			field = structType.Field(index)
+		}
+
+		typ, err := ArrowTypeToIceberg(field.Type, false)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Arrow type for equality field ID %d: %w", fieldIDs[i], err)
+		}
+		fieldTypes[i] = typ
+	}
+
+	return fieldTypes, nil
 }
 
 // indexArrowFields derives Arrow child paths from the structurally aligned,
@@ -299,6 +339,112 @@ func makeArrowFieldEncoder(record arrow.RecordBatch, ref arrowFieldRef, fieldID 
 
 		encoder(buf, row)
 	}, nil
+}
+
+func makeArrowFieldEncoderWithTypes(
+	ctx context.Context,
+	record arrow.RecordBatch,
+	ref arrowFieldRef,
+	fieldID int,
+	fieldName, filePath string,
+	sourceType, targetType iceberg.Type,
+) (colEncoder, func(), error) {
+	column, parents, err := arrowArraysAtField(record, ref, fieldID, fieldName, filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var release func()
+	if sourceType != nil && targetType != nil && !sourceType.Equals(targetType) {
+		if _, err := iceberg.PromoteType(sourceType, targetType); err != nil {
+			return nil, nil, fmt.Errorf("cannot promote equality delete field %d (%s) from %s to %s: %w",
+				fieldID, fieldName, sourceType, targetType, err)
+		}
+
+		targetArrowType, err := TypeToArrowType(targetType, false, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !arrow.TypeEqual(column.DataType(), targetArrowType) {
+			promoted, err := compute.CastArray(ctx, column, compute.SafeCastOptions(targetArrowType))
+			if err != nil {
+				return nil, nil, fmt.Errorf("cast equality delete field %d (%s) from %s to %s: %w",
+					fieldID, fieldName, column.DataType(), targetArrowType, err)
+			}
+			column = promoted
+			release = promoted.Release
+		}
+	}
+
+	encoder := makeColEncoder(column)
+	if len(parents) == 0 {
+		return encoder, release, nil
+	}
+
+	return func(buf *bytes.Buffer, row int) {
+		for _, parent := range parents {
+			if parent.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+		}
+
+		encoder(buf, row)
+	}, release, nil
+}
+
+func makeArrowFieldEncodersWithTypes(
+	ctx context.Context,
+	record arrow.RecordBatch,
+	fieldRefs []arrowFieldRef,
+	fieldIDs []int,
+	colNames []string,
+	sourceTypes []iceberg.Type,
+	fieldTypes []iceberg.Type,
+	filePath string,
+) ([]colEncoder, func(), error) {
+	if len(fieldRefs) != len(fieldIDs) || len(fieldIDs) != len(colNames) {
+		return nil, nil, fmt.Errorf("%w: mismatched equality delete field metadata", iceberg.ErrInvalidArgument)
+	}
+	if len(fieldTypes) != 0 && len(fieldTypes) != len(fieldIDs) {
+		return nil, nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d field types",
+			iceberg.ErrInvalidArgument, len(fieldIDs), len(fieldTypes))
+	}
+	if len(sourceTypes) != 0 && len(sourceTypes) != len(fieldIDs) {
+		return nil, nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d source types",
+			iceberg.ErrInvalidArgument, len(fieldIDs), len(sourceTypes))
+	}
+
+	encoders := make([]colEncoder, len(fieldIDs))
+	var releases []func()
+	release := func() {
+		for _, cleanup := range releases {
+			cleanup()
+		}
+	}
+	for i, fieldID := range fieldIDs {
+		var sourceType iceberg.Type
+		var targetType iceberg.Type
+		if len(sourceTypes) > 0 {
+			sourceType = sourceTypes[i]
+		}
+		if len(fieldTypes) > 0 {
+			targetType = fieldTypes[i]
+		}
+		encoder, cleanup, err := makeArrowFieldEncoderWithTypes(
+			ctx, record, fieldRefs[i], fieldID, colNames[i], filePath, sourceType, targetType)
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+		encoders[i] = encoder
+		if cleanup != nil {
+			releases = append(releases, cleanup)
+		}
+	}
+
+	return encoders, release, nil
 }
 
 type equalityDeleteFileSet struct {
@@ -553,11 +699,18 @@ func (l *lazyEqualityDeleteLoader) loadFile(ctx context.Context, file *lazyEqual
 
 			return
 		}
+		fieldTypes, err := equalityFieldTypes(deleteSchema, file.fieldIDs)
+		if err != nil {
+			file.err = err
+
+			return
+		}
 
 		file.set = newEqualityDeleteFileSet(file.id, &equalityDeleteSet{
-			fieldIDs: file.fieldIDs,
-			colNames: colNames,
-			keys:     keys,
+			fieldIDs:   file.fieldIDs,
+			colNames:   colNames,
+			fieldTypes: fieldTypes,
+			keys:       keys,
 		})
 	})
 
@@ -691,11 +844,12 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 	}
 
 	type deleteFileResult struct {
-		id       int
-		path     string
-		fieldIDs []int
-		colNames []string
-		keys     set[string]
+		id         int
+		path       string
+		fieldIDs   []int
+		colNames   []string
+		fieldTypes []iceberg.Type
+		keys       set[string]
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
@@ -712,13 +866,18 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				if err != nil {
 					return err
 				}
+				fieldTypes, err := equalityFieldTypes(schema, info.fieldIDs)
+				if err != nil {
+					return err
+				}
 
 				resultCh <- deleteFileResult{
-					id:       info.id,
-					path:     info.file.FilePath(),
-					fieldIDs: info.fieldIDs,
-					colNames: colNames,
-					keys:     keys,
+					id:         info.id,
+					path:       info.file.FilePath(),
+					fieldIDs:   info.fieldIDs,
+					colNames:   colNames,
+					fieldTypes: fieldTypes,
+					keys:       keys,
 				}
 
 				return nil
@@ -731,9 +890,10 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 	perFile := make(map[string]*equalityDeleteFileSet)
 	for result := range resultCh {
 		perFile[result.path] = newEqualityDeleteFileSet(result.id, &equalityDeleteSet{
-			fieldIDs: result.fieldIDs,
-			colNames: result.colNames,
-			keys:     result.keys,
+			fieldIDs:   result.fieldIDs,
+			colNames:   result.colNames,
+			fieldTypes: result.fieldTypes,
+			keys:       result.keys,
 		})
 	}
 
@@ -929,9 +1089,10 @@ func mergeEqualityDeleteSets(files []*equalityDeleteFileSet) *equalityDeleteSet 
 	}
 
 	deleteSet := &equalityDeleteSet{
-		keys:     maps.Clone(files[largest].keys),
-		fieldIDs: files[0].fieldIDs,
-		colNames: files[0].colNames,
+		keys:       maps.Clone(files[largest].keys),
+		fieldIDs:   files[0].fieldIDs,
+		colNames:   files[0].colNames,
+		fieldTypes: slices.Clone(files[0].fieldTypes),
 	}
 	for i, file := range files {
 		if i == largest {
@@ -980,7 +1141,10 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	}
 
 	var fileSchema *iceberg.Schema
-	if !hasFieldIDs {
+	var fieldRefsByID arrowFieldRefsByID
+	if hasFieldIDs {
+		fieldRefsByID = resolveArrowFieldsByMetadata(projectedSchema, fieldIDs)
+	} else {
 		fileSchema, err = ArrowSchemaToIcebergWithOptions(projectedSchema, ArrowToIcebergOptions{
 			NameMapping: nameMapping,
 			TableSchema: tableSchema,
@@ -988,12 +1152,6 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		if err != nil {
 			return nil, nil, err
 		}
-	}
-
-	var fieldRefsByID arrowFieldRefsByID
-	if hasFieldIDs {
-		fieldRefsByID = resolveArrowFieldsByMetadata(projectedSchema, fieldIDs)
-	} else {
 		fieldRefsByID = resolveArrowFieldsByID(fileSchema, fieldIDs)
 	}
 
@@ -1015,6 +1173,19 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		colNames[i] = name
 		fieldRefs[i] = ref
 	}
+	fieldTypes, err := equalityFieldTypes(tableSchema, fieldIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	var sourceTypes []iceberg.Type
+	if hasFieldIDs {
+		sourceTypes, err = equalityArrowFieldTypes(projectedSchema, fieldRefs, fieldIDs)
+	} else {
+		sourceTypes, err = equalityFieldTypes(fileSchema, fieldIDs)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Stream projected batches directly into the encoded key set. The reader
 	// owns the current record and releases it before producing the next one.
@@ -1033,28 +1204,34 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		}
 
 		rec := recRdr.RecordBatch()
-		encoders := make([]colEncoder, len(fieldRefs))
-		for i, ref := range fieldRefs {
-			encoders[i], err = makeArrowFieldEncoder(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
+		processErr := func() error {
+			encoders, release, err := makeArrowFieldEncodersWithTypes(
+				ctx, rec, fieldRefs, fieldIDs, colNames, sourceTypes, fieldTypes, dataFile.FilePath())
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
-		}
+			defer release()
 
-		numRows := int(rec.NumRows())
-		for row := range numRows {
-			if row&1023 == 0 {
-				if err := ctx.Err(); err != nil {
-					return nil, nil, err
+			numRows := int(rec.NumRows())
+			for row := range numRows {
+				if row&1023 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 				}
+
+				keyBuf.Reset()
+				for _, enc := range encoders {
+					enc(&keyBuf, row)
+				}
+
+				keys[keyBuf.String()] = struct{}{}
 			}
 
-			keyBuf.Reset()
-			for _, enc := range encoders {
-				enc(&keyBuf, row)
-			}
-
-			keys[keyBuf.String()] = struct{}{}
+			return nil
+		}()
+		if processErr != nil {
+			return nil, nil, processErr
 		}
 	}
 	if err := recRdr.Err(); err != nil {
@@ -1708,10 +1885,20 @@ func (m *equalityDeleteMask) applySingleInt32(
 func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*equalityDeleteSet, fileSchema *iceberg.Schema, dataFilePath string) (recProcessFn, error) {
 	requestedFieldIDs := make([]int, 0)
 	requestedFieldIDSet := make(map[int]struct{})
-	for _, eqDel := range eqDeleteSets {
+	sourceFieldTypes := make([][]iceberg.Type, len(eqDeleteSets))
+	for i, eqDel := range eqDeleteSets {
 		if len(eqDel.fieldIDs) != len(eqDel.colNames) {
 			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d column names",
 				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.colNames))
+		}
+		if len(eqDel.fieldTypes) != 0 && len(eqDel.fieldTypes) != len(eqDel.fieldIDs) {
+			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d field types",
+				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.fieldTypes))
+		}
+		var err error
+		sourceFieldTypes[i], err = equalityFieldTypes(fileSchema, eqDel.fieldIDs)
+		if err != nil {
+			return nil, err
 		}
 
 		for _, fieldID := range eqDel.fieldIDs {
@@ -1779,13 +1966,11 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 				}
 			}
 
-			encoders := make([]colEncoder, len(eqDel.colNames))
-			for i, name := range eqDel.colNames {
-				var err error
-				encoders[i], err = makeArrowFieldEncoder(r, fieldRefs[setIdx][i], eqDel.fieldIDs[i], name, dataFilePath)
-				if err != nil {
-					return nil, err
-				}
+			encoders, release, err := makeArrowFieldEncodersWithTypes(
+				ctx, r, fieldRefs[setIdx], eqDel.fieldIDs, eqDel.colNames,
+				sourceFieldTypes[setIdx], eqDel.fieldTypes, dataFilePath)
+			if err != nil {
+				return nil, err
 			}
 
 			for row := range numRows {
@@ -1806,6 +1991,7 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 				mask.ensure(mem, numRows)
 				bitutil.ClearBit(mask.bits, row)
 			}
+			release()
 		}
 
 		if mask.buffer == nil {

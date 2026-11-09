@@ -177,6 +177,79 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 		"expected equality deletes to apply when the equality field exists only in schema history")
 }
 
+func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	tbl := newEqDeleteReadTestTableWithSchema(t, iceSchema, nil)
+
+	dataArrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/data-before-promotion.parquet"
+	writeParquetFile(t, dataPath, dataArrowSchema, `[{"id": 42}, {"id": 7}, {"id": -2147483648}]`)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteBeforePromotionPath := tbl.Location() + "/data/equality-delete-before-promotion.parquet"
+	deleteBeforePromotionSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, deleteBeforePromotionPath, deleteBeforePromotionSchema, `[{"id": 7}]`)
+
+	deleteBeforePromotionBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deleteBeforePromotionPath, iceberg.ParquetFile, nil, nil, nil, 1, 256)
+	require.NoError(t, err)
+	deleteBeforePromotionBuilder.EqualityFieldIDs([]int{1})
+	deleteBeforePromotionTxn := tbl.NewTransaction()
+	deleteBeforePromotionDelta := deleteBeforePromotionTxn.NewRowDelta(nil)
+	deleteBeforePromotionDelta.AddDeletes(deleteBeforePromotionBuilder.Build())
+	require.NoError(t, deleteBeforePromotionDelta.Commit(t.Context()))
+	tbl, err = deleteBeforePromotionTxn.Commit(t.Context())
+	require.NoError(t, err)
+
+	promoteTxn := tbl.NewTransaction()
+	require.NoError(t, promoteTxn.UpdateSchema(true, false).UpdateColumn([]string{"id"}, table.ColumnUpdate{
+		FieldType: iceberg.Optional[iceberg.Type]{Valid: true, Val: iceberg.PrimitiveTypes.Int64},
+	}).Commit())
+	tbl, err = promoteTxn.Commit(t.Context())
+	require.NoError(t, err)
+
+	deletePath := tbl.Location() + "/data/equality-delete-after-promotion.parquet"
+	deleteArrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, deletePath, deleteArrowSchema, `[{"id": 42}, {"id": -2147483648}]`)
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 256)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{1})
+	deleteFile := deleteBuilder.Build()
+
+	deleteTxn := tbl.NewTransaction()
+	rowDelta := deleteTxn.NewRowDelta(nil)
+	rowDelta.AddDeletes(deleteFile)
+	require.NoError(t, rowDelta.Commit(t.Context()))
+	tbl, err = deleteTxn.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, records, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(t.Context())
+	require.NoError(t, err)
+	var got []int64
+	for rec, err := range records {
+		require.NoError(t, err)
+		col := rec.Column(0).(*array.Int64)
+		for i := range col.Len() {
+			got = append(got, col.Value(i))
+		}
+		rec.Release()
+	}
+	assert.Empty(t, got)
+}
+
 func TestEqualityDeleteReadPrunesNonOverlappingDeleteFiles(t *testing.T) {
 	ctx := t.Context()
 	tbl := newEqDeleteReadTestTable(t)

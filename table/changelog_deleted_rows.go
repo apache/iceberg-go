@@ -239,7 +239,7 @@ func keepAddedDeleteRows(
 		}
 
 		if len(eqSets) > 0 {
-			matched, err := equalityRowsMatched(r, eqSets, fileSchema, dataFilePath)
+			matched, err := equalityRowsMatched(ctx, r, eqSets, fileSchema, dataFilePath)
 			if err != nil {
 				return nil, err
 			}
@@ -262,13 +262,17 @@ func keepAddedDeleteRows(
 
 // equalityRowsMatched reports rows that match an added equality delete. Keys use
 // the same encoding as the scan filter that drops equality-deleted rows.
-func equalityRowsMatched(r arrow.RecordBatch, eqDeleteSets []*equalityDeleteSet, fileSchema *iceberg.Schema, dataFilePath string) ([]bool, error) {
+func equalityRowsMatched(ctx context.Context, r arrow.RecordBatch, eqDeleteSets []*equalityDeleteSet, fileSchema *iceberg.Schema, dataFilePath string) ([]bool, error) {
 	requestedFieldIDs := make([]int, 0)
 	requestedFieldIDSet := make(map[int]struct{})
 	for _, eqDel := range eqDeleteSets {
 		if len(eqDel.fieldIDs) != len(eqDel.colNames) {
 			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d column names",
 				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.colNames))
+		}
+		if len(eqDel.fieldTypes) != 0 && len(eqDel.fieldTypes) != len(eqDel.fieldIDs) {
+			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d field types",
+				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.fieldTypes))
 		}
 		for _, fieldID := range eqDel.fieldIDs {
 			if _, ok := requestedFieldIDSet[fieldID]; !ok {
@@ -294,13 +298,14 @@ func equalityRowsMatched(r arrow.RecordBatch, eqDeleteSets []*equalityDeleteSet,
 	matched := make([]bool, r.NumRows())
 	var keyBuf bytes.Buffer
 	for setIdx, eqDel := range eqDeleteSets {
-		encoders := make([]colEncoder, len(eqDel.colNames))
-		for i, name := range eqDel.colNames {
-			enc, err := makeArrowFieldEncoder(r, fieldRefs[setIdx][i], eqDel.fieldIDs[i], name, dataFilePath)
-			if err != nil {
-				return nil, err
-			}
-			encoders[i] = enc
+		sourceTypes, err := equalityFieldTypes(fileSchema, eqDel.fieldIDs)
+		if err != nil {
+			return nil, err
+		}
+		encoders, release, err := makeArrowFieldEncodersWithTypes(
+			ctx, r, fieldRefs[setIdx], eqDel.fieldIDs, eqDel.colNames, sourceTypes, eqDel.fieldTypes, dataFilePath)
+		if err != nil {
+			return nil, err
 		}
 
 		for row := range int(r.NumRows()) {
@@ -315,6 +320,7 @@ func equalityRowsMatched(r arrow.RecordBatch, eqDeleteSets []*equalityDeleteSet,
 				matched[row] = true
 			}
 		}
+		release()
 	}
 
 	return matched, nil
