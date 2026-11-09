@@ -3531,7 +3531,7 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	r.True(expectedViewMD.Equals(createdView.Metadata()))
 }
 
-func (r *RestCatalogSuite) TestCreateViewDefaultsMissingNamespace() {
+func (r *RestCatalogSuite) TestCreateViewMarshalsMissingNamespaceAsEmpty() {
 	const namespace = "ns"
 	identifier := table.Identifier{namespace, "view"}
 	version, err := view.NewVersion(
@@ -3545,7 +3545,7 @@ func (r *RestCatalogSuite) TestCreateViewDefaultsMissingNamespace() {
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
 		var payload createViewRequest
 		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
-		r.Equal([]string{namespace}, payload.ViewVersion.DefaultNamespace)
+		r.Equal([]string{}, payload.ViewVersion.DefaultNamespace)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
