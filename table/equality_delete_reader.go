@@ -584,6 +584,7 @@ func mergeEqualityProjectionFields(
 			}
 
 			merged = true
+
 			break
 		}
 
