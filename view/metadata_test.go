@@ -391,6 +391,8 @@ func TestMetadataRejectsMissingRequiredJSONFields(t *testing.T) {
 		{path: "representations", object: "version", field: "representations"},
 		{path: "default namespace", object: "version", field: "default-namespace"},
 		{path: "representation type", object: "representation", field: "type"},
+		{path: "representation sql", object: "representation", field: "sql"},
+		{path: "representation dialect", object: "representation", field: "dialect"},
 	}
 
 	for _, tt := range tests {
@@ -401,6 +403,9 @@ func TestMetadataRejectsMissingRequiredJSONFields(t *testing.T) {
 			{name: "missing"},
 			{name: "null", setNull: true},
 		} {
+			if state.setNull && (tt.field == "summary" || tt.field == "default-namespace") {
+				continue
+			}
 			t.Run(tt.path+"/"+state.name, func(t *testing.T) {
 				encoded := metadataJSONWithMutation(t, func(doc map[string]any) {
 					var object map[string]any
@@ -443,6 +448,69 @@ func TestMetadataAcceptsEmptyRequiredJSONCollections(t *testing.T) {
 	})
 
 	_, err := ParseMetadataBytes(encoded)
+	require.NoError(t, err)
+}
+
+func TestMetadataRoundTripsNilNamespaceAndSummary(t *testing.T) {
+	constructed, err := NewVersionFromSQL(1, 0, Representation{SQL: "select 1", Dialect: "spark"}, nil)
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name    string
+		version *Version
+	}{
+		{name: "new version", version: constructed},
+		{
+			name: "hand-built version",
+			version: &Version{
+				VersionID:       1,
+				SchemaID:        0,
+				TimestampMS:     1000,
+				Representations: []Representation{NewRepresentation(Representation{SQL: "select 1", Dialect: "spark"})},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Nil(t, tt.version.DefaultNamespace)
+			md, err := NewMetadata(tt.version, newTestSchema(0), "location", nil)
+			require.NoError(t, err)
+
+			encoded, err := json.Marshal(md)
+			require.NoError(t, err)
+
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal(encoded, &doc))
+			version := doc["versions"].([]any)[0].(map[string]any)
+			assert.Equal(t, []any{}, version["default-namespace"])
+			if tt.version.Summary == nil {
+				assert.Equal(t, map[string]any{}, version["summary"])
+			}
+
+			parsed, err := ParseMetadataBytes(encoded)
+			require.NoError(t, err)
+			assert.Empty(t, parsed.CurrentVersion().DefaultNamespace)
+		})
+	}
+}
+
+func TestMetadataReadsLegacyNullVersionFields(t *testing.T) {
+	encoded := metadataJSONWithMutation(t, func(doc map[string]any) {
+		version := doc["versions"].([]any)[0].(map[string]any)
+		version["summary"] = nil
+		version["default-namespace"] = nil
+	})
+
+	parsed, err := ParseMetadataBytes(encoded)
+	require.NoError(t, err)
+	canonical, err := json.Marshal(parsed)
+	require.NoError(t, err)
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(canonical, &doc))
+	version := doc["versions"].([]any)[0].(map[string]any)
+	assert.Equal(t, map[string]any{}, version["summary"])
+	assert.Equal(t, []any{}, version["default-namespace"])
+	_, err = ParseMetadataBytes(canonical)
 	require.NoError(t, err)
 }
 
