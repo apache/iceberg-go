@@ -1911,6 +1911,42 @@ func literalToPhysBytes(lit iceberg.Literal) ([]byte, bool) {
 	return b, true
 }
 
+// literalToPruningPhysBytes returns all physical byte representations that
+// could satisfy an Iceberg equality predicate. Parquet Bloom filters hash raw
+// physical bytes, so +0 and -0 need both encodings even though they compare
+// equal. Non-canonical NaNs cannot be covered by one hash: leave those to
+// row filtering rather than risking a false-negative pruning decision.
+func literalToPruningPhysBytes(lit iceberg.Literal) ([][]byte, bool) {
+	switch v := lit.(type) {
+	case iceberg.Float32Literal:
+		value := float32(v)
+		if math.IsNaN(float64(value)) {
+			return nil, false
+		}
+		if value == 0 {
+			positive, _ := iceberg.Float32Literal(0).MarshalBinary()
+			negative, _ := iceberg.Float32Literal(math.Float32frombits(1 << 31)).MarshalBinary()
+			return [][]byte{positive, negative}, true
+		}
+	case iceberg.Float64Literal:
+		value := float64(v)
+		if math.IsNaN(value) {
+			return nil, false
+		}
+		if value == 0 {
+			positive, _ := iceberg.Float64Literal(0).MarshalBinary()
+			negative, _ := iceberg.Float64Literal(math.Float64frombits(uint64(1) << 63)).MarshalBinary()
+			return [][]byte{positive, negative}, true
+		}
+	}
+
+	b, ok := literalToPhysBytes(lit)
+	if !ok {
+		return nil, false
+	}
+	return [][]byte{b}, true
+}
+
 // bloomPredicateCollector walks a bound expression and collects EqualTo/In
 // predicates as RowGroupBloomPred values. Only conjuncts (And chains) are
 // collected; Or suppresses collection because a row group can only be skipped
@@ -1949,12 +1985,12 @@ func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Li
 		return nil
 	}
 
-	b, ok := literalToPhysBytes(lit)
+	physBytes, ok := literalToPruningPhysBytes(lit)
 	if !ok {
 		return nil
 	}
 
-	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: [][]byte{b}}}
+	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: physBytes}}
 }
 
 func (c *bloomPredicateCollector) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) []internal.RowGroupBloomPred {
@@ -1969,12 +2005,12 @@ func (c *bloomPredicateCollector) VisitIn(t iceberg.BoundTerm, s iceberg.Set[ice
 
 	physBytes := make([][]byte, 0, s.Len())
 	for _, lit := range s.Members() {
-		b, ok := literalToPhysBytes(lit)
+		candidates, ok := literalToPruningPhysBytes(lit)
 		if !ok {
 			return nil
 		}
 
-		physBytes = append(physBytes, b)
+		physBytes = append(physBytes, candidates...)
 	}
 
 	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: physBytes}}
