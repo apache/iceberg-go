@@ -35,6 +35,11 @@ state. A failed validation surfaces as one of:
   retried after refreshing (see below).
 - `table.ErrCommitDiverged` — terminal. The base snapshot is no longer on the
   branch at all, so a retry cannot reconcile the change.
+- `table.ErrDataFilesMissing` — terminal. Data files that the operation
+  references, such as the target of a position delete or deletion vector, are
+  not live, so retrying the same delete cannot succeed. Rebuild the delete
+  against the current table. When `Transaction.Commit` returns it, the error
+  also matches `ErrTransactionUnusable`.
 - `table.ErrTransactionUnusable` — this transaction can't be committed again.
   If the error also matches `ErrCommitFailed`, retry in a new transaction from a
   reloaded table.
