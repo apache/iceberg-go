@@ -1221,9 +1221,14 @@ func TestTransactionCommitRejectsSameIDTagRace(t *testing.T) {
 	require.NotNil(t, head)
 	tagBuilder, err := MetadataBuilderFromBase(baseMeta, "")
 	require.NoError(t, err)
-	require.NoError(t, tagBuilder.SetSnapshotRef(MainBranch, head.SnapshotID, TagRef))
-	tagMeta, err := tagBuilder.Build()
+	tagCommon, err := tagBuilder.buildCommonMetadata()
 	require.NoError(t, err)
+	tagCommon.SnapshotRefs = cloneSnapshotRefs(tagCommon.SnapshotRefs)
+	tagCommon.SnapshotRefs[MainBranch] = SnapshotRef{SnapshotID: head.SnapshotID, Type: TagRef}
+	tagMeta := &metadataV2{
+		LastSeqNum:     baseMeta.LastSequenceNumber(),
+		commonMetadata: *tagCommon,
+	}
 
 	cat := &headTrackingCatalog{metadata: tagMeta}
 	tbl := New(Identifier{"db", "tag-race"}, baseMeta, "metadata.json",

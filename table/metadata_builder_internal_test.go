@@ -906,25 +906,32 @@ func TestSetSnapshotRefBranchToTagDropsAllRetention(t *testing.T) {
 		SchemaID:         &schemaID,
 	}
 	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
 	require.NoError(t, builder.SetSnapshotRef(
-		MainBranch, 1, BranchRef,
+		"release", 1, BranchRef,
 		WithMinSnapshotsToKeep(5),
 		WithMaxSnapshotAgeMs(int64(172800000)),
 		WithMaxRefAgeMs(int64(604800000)),
 	))
 
 	// The retaining helper must not carry retention across a type change.
-	upd := builder.NewRetainingSnapshotRefUpdate(MainBranch, 1, TagRef)
+	upd := builder.NewRetainingSnapshotRefUpdate("release", 1, TagRef)
 	require.Zero(t, upd.MinSnapshotsToKeep)
 	require.Zero(t, upd.MaxSnapshotAgeMs)
 	require.Zero(t, upd.MaxRefAgeMs)
 
-	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, TagRef))
-	ref := builder.refs[MainBranch]
+	require.NoError(t, builder.SetSnapshotRef("release", 1, TagRef))
+	ref := builder.refs["release"]
 	require.Equal(t, TagRef, ref.Type)
 	require.Nil(t, ref.MinSnapshotsToKeep)
 	require.Nil(t, ref.MaxSnapshotAgeMs)
 	require.Nil(t, ref.MaxRefAgeMs)
+
+	err := builder.SetSnapshotRef(MainBranch, 1, TagRef)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.Equal(t, BranchRef, builder.refs[MainBranch].Type)
+	_, err = builder.Build()
+	require.NoError(t, err)
 }
 
 func TestNewRetainingSnapshotRefUpdateTagPreservesMaxRefAge(t *testing.T) {
