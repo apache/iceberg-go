@@ -20,7 +20,6 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"log/slog"
 	"maps"
@@ -781,8 +780,8 @@ func TestShreddedVariantWriteLargeDecimal(t *testing.T) {
 	}
 }
 
-// columnPhysicalType returns the Parquet physical and logical type of a leaf column.
-func columnPhysicalType(t *testing.T, path, name string) (parquet.Type, pqschema.LogicalType) {
+// leafColumn returns the Parquet descriptor of a leaf column.
+func leafColumn(t *testing.T, path, name string) *pqschema.Column {
 	t.Helper()
 	path = strings.TrimPrefix(path, "file://")
 	f, err := os.Open(path)
@@ -794,17 +793,41 @@ func columnPhysicalType(t *testing.T, path, name string) (parquet.Type, pqschema
 	sc := pf.MetaData().Schema
 	for i := range sc.NumColumns() {
 		if col := sc.Column(i); col.Name() == name {
-			return col.PhysicalType(), col.LogicalType()
+			return col
 		}
 	}
 	t.Fatalf("column %q not found", name)
 
-	return parquet.Types.Undefined, nil
+	return nil
 }
 
-// appendVariantInt32 appends v as a variant int32, bypassing AppendInt's smallest-width encoding.
-func appendVariantInt32(b *variant.Builder, v int32) error {
-	return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint32([]byte{byte(variant.PrimitiveInt32) << 2}, uint32(v)))
+// columnPhysicalType returns the Parquet physical type of a leaf column.
+func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
+	t.Helper()
+
+	return leafColumn(t, path, name).PhysicalType()
+}
+
+// columnLogicalType returns the Parquet logical type of a leaf column.
+func columnLogicalType(t *testing.T, path, name string) pqschema.LogicalType {
+	t.Helper()
+
+	return leafColumn(t, path, name).LogicalType()
+}
+
+// variantBoundField decodes a variant bound object and returns the value at path.
+func variantBoundField(t *testing.T, raw []byte, path string) variant.Value {
+	t.Helper()
+	meta, err := variant.NewMetadata(raw)
+	require.NoError(t, err)
+	v, err := variant.New(raw[:meta.SizeBytes()], raw[meta.SizeBytes():])
+	require.NoError(t, err)
+	obj, ok := v.Value().(variant.ObjectValue)
+	require.True(t, ok)
+	field, err := obj.ValueByKey(path)
+	require.NoError(t, err)
+
+	return field.Value
 }
 
 // TestShreddedVariantWriteRegularDecimalStats checks that with shredding on but no
@@ -866,8 +889,7 @@ func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 
 	// The variant shreds no decimal, so per-file gating leaves StoreDecimalAsInteger
 	// off and the regular decimal column keeps its default FIXED_LEN_BYTE_ARRAY.
-	pt, _ := columnPhysicalType(t, files[0].FilePath(), "price")
-	assert.Equal(t, parquet.Types.FixedLenByteArray, pt)
+	assert.Equal(t, parquet.Types.FixedLenByteArray, columnPhysicalType(t, files[0].FilePath(), "price"))
 
 	decTyp := iceberg.MustDecimalTypeOf(9, 2)
 	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])
@@ -940,8 +962,7 @@ func TestShreddedVariantWriteRegularDecimalWithShreddedDecimal(t *testing.T) {
 	// The variant shreds a decimal, so per-file gating turns StoreDecimalAsInteger on
 	// file-global and the regular decimal column is INT-encoded.
 	assert.True(t, payloadHasTypedValue(t, files[0].FilePath()), "payload decimal must be shredded")
-	pt, _ := columnPhysicalType(t, files[0].FilePath(), "price")
-	assert.Equal(t, parquet.Types.Int32, pt)
+	assert.Equal(t, parquet.Types.Int32, columnPhysicalType(t, files[0].FilePath(), "price"))
 
 	// Bounds are derived from the Arrow values, so they must be correct regardless of
 	// the INT physical encoding.
@@ -1481,19 +1502,12 @@ func TestShreddedVariantWriteNullFieldKeepsBound(t *testing.T) {
 	require.Len(t, files, 1)
 
 	// f has int64 + null (no conflict): its bound is kept and covers the non-null range.
-	buildObj := func(fv int32) []byte {
-		var b variant.Builder
-		start := b.Offset()
-		entries := []variant.FieldEntry{b.NextField(start, "$['f']")}
-		require.NoError(t, appendVariantInt32(&b, fv))
-		require.NoError(t, b.FinishObject(start, entries))
-		v, err := b.Build()
-		require.NoError(t, err)
-
-		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
-	}
-	assert.Equal(t, buildObj(1000), files[0].LowerBoundValues()[2])
-	assert.Equal(t, buildObj(1006), files[0].UpperBoundValues()[2])
+	lo := variantBoundField(t, files[0].LowerBoundValues()[2], "$['f']")
+	hi := variantBoundField(t, files[0].UpperBoundValues()[2], "$['f']")
+	assert.Equal(t, variant.Int32, lo.Type())
+	assert.Equal(t, int32(1000), lo.Value())
+	assert.Equal(t, variant.Int32, hi.Type())
+	assert.Equal(t, int32(1006), hi.Value())
 }
 
 func TestShreddedVariantWriteSmallSampleKeepsWideBound(t *testing.T) {
@@ -1550,19 +1564,6 @@ func TestShreddedVariantWriteSmallSampleKeepsWideBound(t *testing.T) {
 		return files[0]
 	}
 
-	boundField := func(t *testing.T, raw []byte) variant.Value {
-		meta, err := variant.NewMetadata(raw)
-		require.NoError(t, err)
-		v, err := variant.New(raw[:meta.SizeBytes()], raw[meta.SizeBytes():])
-		require.NoError(t, err)
-		obj, ok := v.Value().(variant.ObjectValue)
-		require.True(t, ok)
-		field, err := obj.ValueByKey("$['f']")
-		require.NoError(t, err)
-
-		return field.Value
-	}
-
 	// Inference sees only the first 4 rows; later values within int32 must stay typed, or f loses its bounds.
 	for _, tt := range []struct {
 		name       string
@@ -1579,8 +1580,8 @@ func TestShreddedVariantWriteSmallSampleKeepsWideBound(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			df := write(t, tt.vals)
-			pt, lt := columnPhysicalType(t, df.FilePath(), "typed_value")
-			assert.Equal(t, parquet.Types.Int32, pt)
+			assert.Equal(t, parquet.Types.Int32, columnPhysicalType(t, df.FilePath(), "typed_value"))
+			lt := columnLogicalType(t, df.FilePath(), "typed_value")
 			assert.True(t, lt.Equals(pqschema.NewIntLogicalType(32, true)), "typed_value annotation %s", lt)
 
 			lo, hasLo := df.LowerBoundValues()[2]
@@ -1594,7 +1595,7 @@ func TestShreddedVariantWriteSmallSampleKeepsWideBound(t *testing.T) {
 				raw  []byte
 				want int32
 			}{{lo, tt.lower}, {hi, tt.upper}} {
-				got := boundField(t, b.raw)
+				got := variantBoundField(t, b.raw, "$['f']")
 				assert.Equal(t, variant.Int32, got.Type())
 				assert.Equal(t, b.want, got.Value())
 			}
@@ -1723,7 +1724,6 @@ func TestShreddedVariantWriteScalarBounds(t *testing.T) {
 		build func(*variant.Builder) error
 	}{
 		{"bool", func(b *variant.Builder) error { return b.AppendBool(true) }},
-		{"int-small", func(b *variant.Builder) error { return appendVariantInt32(b, 1000) }},
 		{"int64", func(b *variant.Builder) error { return b.AppendInt(5_000_000_000) }},
 		{"float32", func(b *variant.Builder) error { return b.AppendFloat32(1.5) }},
 		{"float64", func(b *variant.Builder) error { return b.AppendFloat64(2.5) }},

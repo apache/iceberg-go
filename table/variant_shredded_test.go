@@ -573,6 +573,21 @@ func writeFullyShreddedVariantFile(t *testing.T, path string, fieldID, nRows int
 	writeVariantColumnParquet(t, path, fieldID, shreddedType, bldr)
 }
 
+// variantBoundField decodes a variant bound object and returns the value at path.
+func variantBoundField(t *testing.T, raw []byte, path string) variant.Value {
+	t.Helper()
+	meta, err := variant.NewMetadata(raw)
+	require.NoError(t, err)
+	v, err := variant.New(raw[:meta.SizeBytes()], raw[meta.SizeBytes():])
+	require.NoError(t, err)
+	obj, ok := v.Value().(variant.ObjectValue)
+	require.True(t, ok)
+	f, err := obj.ValueByKey(path)
+	require.NoError(t, err)
+
+	return f.Value
+}
+
 // TestShreddedVariantAddFilesBounds pins that AddDataFilesByPath (which opens the file and
 // recomputes) emits correct shredded variant child bounds under the parent field id.
 func TestShreddedVariantAddFilesBounds(t *testing.T) {
@@ -600,22 +615,67 @@ func TestShreddedVariantAddFilesBounds(t *testing.T) {
 	require.Len(t, tasks, 1)
 
 	// bound object keyed by normalized JSON path: min/max of a (0..4) and b (row-A..row-E).
-	buildObj := func(a int64, b string) []byte {
-		var bld variant.Builder
-		start := bld.Offset()
-		entries := []variant.FieldEntry{bld.NextField(start, "$['a']")}
-		require.NoError(t, bld.UnsafeAppendEncoded(binary.LittleEndian.AppendUint64([]byte{byte(variant.PrimitiveInt64) << 2}, uint64(a))))
-		entries = append(entries, bld.NextField(start, "$['b']"))
-		require.NoError(t, bld.AppendString(b))
-		require.NoError(t, bld.FinishObject(start, entries))
-		v, err := bld.Build()
-		require.NoError(t, err)
-
-		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	for _, b := range []struct {
+		raw  []byte
+		a    int64
+		bStr string
+	}{{tasks[0].File.LowerBoundValues()[1], 0, "row-A"}, {tasks[0].File.UpperBoundValues()[1], nData - 1, "row-E"}} {
+		a := variantBoundField(t, b.raw, "$['a']")
+		assert.Equal(t, variant.Int64, a.Type())
+		assert.Equal(t, b.a, a.Value())
+		assert.Equal(t, b.bStr, variantBoundField(t, b.raw, "$['b']").Value())
 	}
+}
 
-	assert.Equal(t, buildObj(0, "row-A"), tasks[0].File.LowerBoundValues()[1], "AddDataFilesByPath lower bound")
-	assert.Equal(t, buildObj(nData-1, "row-E"), tasks[0].File.UpperBoundValues()[1], "AddDataFilesByPath upper bound")
+// TestShreddedVariantAddFilesNarrowIntBounds pins that an imported INT(8)/INT(16) typed_value keeps
+// its annotation width in both bounds, as Java's ParquetVariantUtil does.
+func TestShreddedVariantAddFilesNarrowIntBounds(t *testing.T) {
+	location := filepath.ToSlash(t.TempDir())
+	dataDir := filepath.Join(location, "data")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	dataPath := filepath.Join(dataDir, "shredded.parquet")
+	shreddedType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "i8", Type: arrow.PrimitiveTypes.Int8},
+		arrow.Field{Name: "i16", Type: arrow.PrimitiveTypes.Int16},
+	))
+	bldr := extensions.NewVariantBuilder(memory.DefaultAllocator, shreddedType)
+	defer bldr.Release()
+	for i := range 5 {
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"i8": int8(i), "i16": int16(i)}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		bldr.Append(v)
+	}
+	writeVariantColumnParquet(t, dataPath, 1, shreddedType, bldr)
+
+	iceSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false})
+	meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	tbl := table.New(table.Identifier{"db", "shredded_addfiles_narrow_int_bounds"}, meta, location+"/metadata/v1.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, &rowDeltaCatalog{metadata: meta})
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	for _, b := range []struct {
+		raw  []byte
+		want int
+	}{{tasks[0].File.LowerBoundValues()[1], 0}, {tasks[0].File.UpperBoundValues()[1], 4}} {
+		i8 := variantBoundField(t, b.raw, "$['i8']")
+		assert.Equal(t, variant.Int8, i8.Type())
+		assert.Equal(t, int8(b.want), i8.Value())
+		i16 := variantBoundField(t, b.raw, "$['i16']")
+		assert.Equal(t, variant.Int16, i16.Type())
+		assert.Equal(t, int16(b.want), i16.Value())
+	}
 }
 
 // setupVariantScanTable writes a shredded variant table from rows and returns a closure reading the "id" column of a filtered scan.

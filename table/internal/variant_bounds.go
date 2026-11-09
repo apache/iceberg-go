@@ -50,6 +50,7 @@ type variantLeaf struct {
 	typedPath   string
 	ownResidual string
 	icebergType iceberg.PrimitiveType
+	intWidth    int // INT(8)/INT(16) annotation width of an Int32 leaf; 0 means 32
 }
 
 // enumerateVariantLeaves returns a shredded variant's bound-bearing primitive leaves.
@@ -89,11 +90,19 @@ func walkVariantTyped(typedPath []string, ownResidual string, fields []string, d
 		if !ok {
 			return
 		}
+		intWidth := 0
+		switch dt.(type) {
+		case *arrow.Int8Type:
+			intWidth = 8
+		case *arrow.Int16Type:
+			intWidth = 16
+		}
 		*out = append(*out, variantLeaf{
 			jsonPath:    iceberg.NormalizeVariantPath(fields),
 			typedPath:   joinPath(typedPath),
 			ownResidual: ownResidual,
 			icebergType: it,
+			intWidth:    intWidth,
 		})
 	}
 }
@@ -160,6 +169,7 @@ func joinPath(s []string) string { return strings.Join(s, ".") }
 type variantFieldBound struct {
 	jsonPath     string
 	icebergType  iceberg.PrimitiveType
+	intWidth     int
 	lower, upper iceberg.Literal
 }
 
@@ -236,7 +246,7 @@ func boundsObjectValue(fields []variantFieldBound, useLower bool) (v variant.Val
 			continue
 		}
 		entries = append(entries, b.NextField(start, f.jsonPath))
-		if err := appendLiteralToVariant(&b, f.icebergType, lit); err != nil {
+		if err := appendLiteralToVariant(&b, f.icebergType, f.intWidth, lit); err != nil {
 			return variant.Value{}, err
 		}
 	}
@@ -262,18 +272,51 @@ func boundsObjectBytes(fields []variantFieldBound, useLower bool) ([]byte, error
 	return out, nil
 }
 
-// appendLiteralToVariant appends a bound, reading the literal by physical type.
-func appendLiteralToVariant(b *variant.Builder, it iceberg.PrimitiveType, lit iceberg.Literal) error {
+// AppendVariantInt8 appends v as a variant int8.
+func AppendVariantInt8(b *variant.Builder, v int8) error {
+	return b.UnsafeAppendEncoded([]byte{byte(variant.PrimitiveInt8) << 2, byte(v)})
+}
+
+// AppendVariantInt16 appends v as a variant int16; AppendInt would pick the smallest width.
+func AppendVariantInt16(b *variant.Builder, v int16) error {
+	return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint16([]byte{byte(variant.PrimitiveInt16) << 2}, uint16(v)))
+}
+
+// AppendVariantInt32 appends v as a variant int32; AppendInt would pick the smallest width.
+func AppendVariantInt32(b *variant.Builder, v int32) error {
+	return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint32([]byte{byte(variant.PrimitiveInt32) << 2}, uint32(v)))
+}
+
+// AppendVariantInt64 appends v as a variant int64; AppendInt would pick the smallest width.
+func AppendVariantInt64(b *variant.Builder, v int64) error {
+	return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint64([]byte{byte(variant.PrimitiveInt64) << 2}, uint64(v)))
+}
+
+// appendLiteralToVariant appends a bound, reading the literal by physical type; intWidth narrows Int32 to INT(8)/INT(16).
+func appendLiteralToVariant(b *variant.Builder, it iceberg.PrimitiveType, intWidth int, lit iceberg.Literal) error {
 	switch t := it.(type) {
 	case iceberg.BooleanType:
 		return b.AppendBool(lit.Any().(bool))
 	case iceberg.Int32Type:
-		// AppendInt picks the smallest width; bounds must keep the column's width.
-		return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint32(
-			[]byte{byte(variant.PrimitiveInt32) << 2}, uint32(lit.Any().(int32))))
+		v := lit.Any().(int32)
+		switch intWidth {
+		case 8:
+			if v < math.MinInt8 || v > math.MaxInt8 {
+				return fmt.Errorf("variant bounds: %d out of range for INT(8)", v)
+			}
+
+			return AppendVariantInt8(b, int8(v))
+		case 16:
+			if v < math.MinInt16 || v > math.MaxInt16 {
+				return fmt.Errorf("variant bounds: %d out of range for INT(16)", v)
+			}
+
+			return AppendVariantInt16(b, int16(v))
+		}
+
+		return AppendVariantInt32(b, v)
 	case iceberg.Int64Type:
-		return b.UnsafeAppendEncoded(binary.LittleEndian.AppendUint64(
-			[]byte{byte(variant.PrimitiveInt64) << 2}, uint64(lit.Any().(int64))))
+		return AppendVariantInt64(b, lit.Any().(int64))
 	case iceberg.Float32Type:
 		return b.AppendFloat32(lit.Any().(float32))
 	case iceberg.Float64Type:
