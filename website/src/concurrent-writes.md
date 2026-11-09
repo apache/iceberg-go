@@ -86,6 +86,10 @@ in order and runs the producer's validators against the fresh snapshot. It
 submits the commit only if it is still valid. An append staged after a rollback
 is rebuilt on the rollback target.
 
+Each replayed snapshot from a staged write gets the current timestamp, or one
+millisecond after its parent if that is later. Its timestamp reflects the
+attempt that commits it, not staging time.
+
 `RollbackToSnapshot` and `AssertRefSnapshotID` pin their refs. If a pinned ref
 moved, the commit fails with `ErrCommitFailed` instead of retrying.
 `ExpireSnapshots` does not pin refs. Retries replan it as described in
@@ -154,6 +158,8 @@ the ref.
 
 - Retries replan an expiry even if staging or an earlier attempt produced no
   expiry updates.
+- A retry stamps snapshots staged earlier in the transaction after the expiry's
+  cutoff, so the retry keeps them even if the staged plan expired them.
 - If no updates remain, for example because a concurrent commit already expired
   the same snapshots, `Commit` returns the refreshed table without committing.
 - A transaction containing only expiries with no updates makes no commit attempt

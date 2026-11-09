@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -741,4 +743,60 @@ func TestRefreshReplayApplyFailureKeepsConflictCause(t *testing.T) {
 	require.ErrorIs(t, err, ErrTransactionUnusable)
 	require.ErrorIs(t, err, ErrCommitFailed)
 	assert.ErrorContains(t, err, "apply add-snapshot")
+}
+
+// A peer append to main more than a minute after staging moves the table's
+// last update past the staged timestamps without moving the feature branch.
+func TestRefreshReplayRenewsTimestampsOnRebuild(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, cat, tbl := newExpireReplayTable(t, nil)
+		tbl, _ = appendOnBranch(t, tbl, MainBranch, "s1")
+		tbl, _ = appendOnBranch(t, tbl, "feature", "f1")
+		tx, err := tbl.NewTransactionOnBranch("feature")
+		require.NoError(t, err)
+		stageFiles(t, tx, "a")
+		a := stagedHead(t, tx, "feature")
+		stageFiles(t, tx, "b")
+		b := stagedHead(t, tx, "feature")
+
+		time.Sleep(61 * time.Second)
+		peerAppend(t, fs, cat, MainBranch, "p")
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		meta := committed.Metadata()
+		snapA, snapB := meta.SnapshotByID(a), meta.SnapshotByID(b)
+		require.NotNil(t, snapA)
+		require.NotNil(t, snapB)
+		assert.Equal(t, time.Now().UnixMilli(), snapA.TimestampMs)
+		assert.Equal(t, snapA.TimestampMs+1, snapB.TimestampMs, "a child is stamped after its parent")
+		assert.Equal(t, []string{"a", "b", "f1", "s1"}, branchFiles(t, fs, meta, "feature"))
+	})
+}
+
+// A peer update to properties can make the staged timestamp too old without
+// invalidating the manifest list.
+func TestRefreshReplayRenewsTimestampOnReuse(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		_, cat, tbl := newExpireReplayTable(t, nil)
+		tbl, _ = appendOnBranch(t, tbl, MainBranch, "s1")
+		tx := tbl.NewTransaction()
+		stageFiles(t, tx, "a")
+		staged, err := tx.StagedTable()
+		require.NoError(t, err)
+		stagedSnap := staged.Metadata().SnapshotByName(MainBranch)
+
+		time.Sleep(61 * time.Second)
+		peerUpdate(t, cat, NewSetPropertiesUpdate(iceberg.Properties{"peer": "property"}))
+		cat.failFirst = cat.attempts.Load() + 1
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		snap := committed.Metadata().SnapshotByID(stagedSnap.SnapshotID)
+		require.NotNil(t, snap)
+		assert.Equal(t, stagedSnap.ManifestList, snap.ManifestList, "the staged list is reused")
+		assert.Equal(t, time.Now().UnixMilli(), snap.TimestampMs)
+	})
 }

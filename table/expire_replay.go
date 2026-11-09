@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/apache/iceberg-go/io"
 )
@@ -105,15 +106,16 @@ func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFi
 			if err != nil {
 				return out, orphaned, err
 			}
-			next, err := rebuildStagedSnapshot(ctx, su, state, b.currentSnapshotForRef(r.branch), fs, attempt, chainRebuilt)
+			head := b.currentSnapshotForRef(r.branch)
+			next, err := rebuildStagedSnapshot(ctx, su, state, head, fs, attempt, chainRebuilt)
 			if err != nil {
 				return out, orphaned, err
 			}
 			if next != su {
-				r.updates[i] = next
 				orphaned = append(orphaned, su.Snapshot.ManifestList)
 				chainRebuilt = true
 			}
+			r.updates[i] = renewSnapshotTimestamp(next, head)
 		}
 		if err := apply(r.updates[i]); err != nil {
 			return append(out, r.updates[i]), orphaned, fmt.Errorf("%w: staged update does not apply after refresh: %w", ErrTransactionUnusable, err)
@@ -124,6 +126,22 @@ func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFi
 	r.landed, r.ran = out, true
 
 	return out, orphaned, nil
+}
+
+// renewSnapshotTimestamp stamps a replayed snapshot with the current time, at
+// least one millisecond after its parent. AddSnapshot rejects a timestamp more
+// than a minute behind the refreshed table.
+func renewSnapshotTimestamp(su *addSnapshotUpdate, parent *Snapshot) *addSnapshotUpdate {
+	ts := time.Now().UnixMilli()
+	if parent != nil {
+		ts = max(ts, parent.TimestampMs+1)
+	}
+	snap := *su.Snapshot
+	snap.TimestampMs = ts
+	renewed := *su
+	renewed.Snapshot = &snap
+
+	return &renewed
 }
 
 func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Update, []string, error) {
