@@ -1578,3 +1578,91 @@ func TestResolveRequestedArrowFieldsPreservesDeepAndSiblingPaths(t *testing.T) {
 	assert.Empty(t, resolveArrowFieldsByID(schema, nil))
 	assert.Empty(t, resolveArrowFieldsByMetadata(arrowSchema, nil))
 }
+
+func TestEqualityDeletePromotedKeyEncoding(t *testing.T) {
+	tests := []struct {
+		name       string
+		sourceType iceberg.Type
+		targetType iceberg.Type
+		source     func(memory.Allocator, encoderArrayShape) arrow.Array
+		target     func(memory.Allocator, encoderArrayShape) arrow.Array
+	}{
+		{
+			name:       "int-to-long",
+			sourceType: iceberg.PrimitiveTypes.Int32,
+			targetType: iceberg.PrimitiveTypes.Int64,
+			source:     buildInt32Array,
+			target:     buildInt64Array,
+		},
+		{
+			name:       "float-to-double",
+			sourceType: iceberg.PrimitiveTypes.Float32,
+			targetType: iceberg.PrimitiveTypes.Float64,
+			source:     buildFloat32Array,
+			target:     buildFloat64Array,
+		},
+		{
+			name:       "date-to-timestamp",
+			sourceType: iceberg.PrimitiveTypes.Date,
+			targetType: iceberg.PrimitiveTypes.Timestamp,
+			source:     buildDate32Array,
+			target: func(mem memory.Allocator, shape encoderArrayShape) arrow.Array {
+				return buildFastPathArray(
+					array.NewTimestampBuilder(mem, arrow.FixedWidthTypes.Timestamp_us.(*arrow.TimestampType)),
+					shape,
+					arrow.Timestamp(7*86_400_000_000), arrow.Timestamp(-3*86_400_000_000),
+					arrow.Timestamp(0), arrow.Timestamp(4*86_400_000_000))
+			},
+		},
+		{
+			name:       "date-to-timestamp-ns",
+			sourceType: iceberg.PrimitiveTypes.Date,
+			targetType: iceberg.PrimitiveTypes.TimestampNs,
+			source:     buildDate32Array,
+			target: func(mem memory.Allocator, shape encoderArrayShape) arrow.Array {
+				return buildFastPathArray(
+					array.NewTimestampBuilder(mem, arrow.FixedWidthTypes.Timestamp_ns.(*arrow.TimestampType)),
+					shape,
+					arrow.Timestamp(7*86_400_000_000_000), arrow.Timestamp(-3*86_400_000_000_000),
+					arrow.Timestamp(0), arrow.Timestamp(4*86_400_000_000_000))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		for _, shape := range encoderArrayShapes {
+			t.Run(tc.name+"/"+shape.name, func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+				ctx := compute.WithAllocator(t.Context(), mem)
+
+				source := tc.source(mem, shape.shape)
+				rec := array.NewRecordBatch(
+					arrow.NewSchema([]arrow.Field{{Name: "key", Type: source.DataType(), Nullable: true}}, nil),
+					[]arrow.Array{source}, int64(source.Len()))
+				source.Release()
+				defer rec.Release()
+
+				target := tc.target(mem, shape.shape)
+				defer target.Release()
+				encoder, release, err := makeArrowFieldEncoderWithTypes(
+					ctx, rec, arrowFieldRef{path: []int{0}}, 1, "key", "data.parquet",
+					tc.sourceType, tc.targetType)
+				require.NoError(t, err)
+				if release != nil {
+					defer release()
+				}
+
+				wantEncoder := makeColEncoder(target)
+				var got, want bytes.Buffer
+				for row := range target.Len() {
+					got.Reset()
+					want.Reset()
+					encoder(&got, row)
+					wantEncoder(&want, row)
+					assert.Equal(t, want.Bytes(), got.Bytes(), "row %d", row)
+				}
+			})
+		}
+	}
+}
