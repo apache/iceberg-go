@@ -969,7 +969,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 			ErrCommitFailed, snapshot.SequenceNumber, lastSeqNum)
 	}
 
-	// A rebuild keeps the timestamp, so these checks are not retryable.
+	// Not retryable: replay renews only producer snapshots' timestamps.
 	if len(b.snapshotLog) > 0 {
 		last := b.snapshotLog[len(b.snapshotLog)-1]
 		if (snapshot.TimestampMs - last.TimestampMs) < -oneMinuteInMs {
