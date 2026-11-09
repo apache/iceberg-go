@@ -2161,13 +2161,16 @@ operation through table properties:</p>
 matching the operation's filter. <code>snapshot</code> is more permissive — it only
 rejects when concurrent deletes touch the same files.</p>
 <h2 id="automatic-retry"><a class="header" href="#automatic-retry">Automatic retry</a></h2>
-<p>iceberg-go can refresh the table and replay the operation against the latest
-snapshot between attempts. On each retry the table metadata is reloaded, the
-producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid. <code>RollbackToSnapshot</code> and
-<code>AssertRefSnapshotID</code> pin their refs, so retries do not rebase those assertions.
-If a pinned ref moved, the commit fails with <code>ErrCommitFailed</code> instead of
-retrying. <code>ExpireSnapshots</code> does not pin refs. Retries replan it as described in
+<p>On each retry, iceberg-go reloads the table metadata, applies staged changes
+in order and runs the producer's validators against the fresh snapshot. It
+submits the commit only if it is still valid. An append staged after a rollback
+is rebuilt on the rollback target.</p>
+<p>Each replayed snapshot from a staged write gets the current timestamp, or one
+millisecond after its parent if that is later. Its timestamp reflects the
+attempt that commits it, not staging time.</p>
+<p><code>RollbackToSnapshot</code> and <code>AssertRefSnapshotID</code> pin their refs. If a pinned ref
+moved, the commit fails with <code>ErrCommitFailed</code> instead of retrying.
+<code>ExpireSnapshots</code> does not pin refs. Retries replan it as described in
 <a href="concurrent-writes.html#snapshot-expiration">Snapshot expiration</a>.</p>
 <p>Retry is <strong>off by default</strong> (<code>commit.retry.num-retries</code> is <code>0</code>). Opt in by
 setting the retry properties — see <a href="./configuration.html#manifest-and-commit">Manifest and commit</a>
@@ -2190,13 +2193,16 @@ first-row-id is a conflict too, and the retry renumbers the snapshot.</p>
 refresh. Other requirements, including the schema, spec, sort order, and pinned
 refs, must still hold. Otherwise, the commit fails without another attempt and
 the transaction is unusable.</p>
-<p>After a conflict, calling <code>Commit</code> again on the same transaction refreshes the
-table and replays the staged changes like the next retry attempt, so it can
-rebase onto a peer's commit even with retries disabled. Each call gets the
-configured retry budget. A commit carrying delete-file removals that cannot be
-replayed resubmits only if its branch has not moved. The rejections after a
-refresh that make the transaction unusable are listed on
-<code>ErrTransactionUnusable</code>.</p>
+<p>After a conflict, calling <code>Commit</code> again refreshes the table and replays staged
+changes even with retries disabled. Each call gets the configured retry
+budget. A commit that removes delete files and cannot be replayed resubmits
+only if its branch has not moved.</p>
+<p>A staged change that cannot apply to the refreshed table makes the transaction
+unusable. For example, a staged format upgrade cannot apply if a peer has
+already committed a higher format version. The error keeps its cause, so it
+also matches <code>ErrCommitFailed</code> when the cause is a conflict. See
+<code>ErrTransactionUnusable</code> for all conditions that end the transaction after
+refresh.</p>
 <p>A failed commit keeps the files it staged until a later commit lands. A
 transaction you abandon leaves them for orphan file removal, as one with
 retries disabled always has. An abandoned manifest rewrite also leaves the
@@ -2221,6 +2227,8 @@ the ref.</p>
 <ul>
 <li>Retries replan an expiry even if staging or an earlier attempt produced no
 expiry updates.</li>
+<li>A retry stamps snapshots staged earlier in the transaction after the expiry's
+cutoff, so the retry keeps them even if the staged plan expired them.</li>
 <li>If no updates remain, for example because a concurrent commit already expired
 the same snapshots, <code>Commit</code> returns the refreshed table without committing.</li>
 <li>A transaction containing only expiries with no updates makes no commit attempt
@@ -2865,6 +2873,12 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Branch transactions return initialization errors.</strong> <code>Table.NewTransactionOnBranch(branch)</code> now returns <code>(*Transaction, error)</code>, and <code>Table.NewTransactionOnBranchWithError</code> is removed. Use <code>NewTransactionOnBranch</code> and handle its error.</p>
+</li>
+<li>
+<p><strong>Retries preserve staged update order.</strong> An append staged after <code>RollbackToSnapshot</code> stays on the rollback target after a retry or resumed <code>Commit</code>. If a staged update cannot apply after refresh, the transaction ends with <code>table.ErrTransactionUnusable</code>. For example, <code>UpgradeFormatVersion</code> cannot apply if a peer has committed a higher format version. The error preserves its cause and also matches <code>table.ErrCommitFailed</code> if that cause is a conflict. Previously, for transactions without a staged expiry, these failures returned <code>table.ErrCommitRejected</code> and left the transaction resumable. A catalog rejection on the first attempt still returns <code>table.ErrCommitRejected</code> and leaves the transaction resumable.</p>
+</li>
+<li>
+<p><strong>Retries renew snapshot timestamps.</strong> A retry or resumed <code>Commit</code> stamps each snapshot it replays from a staged write with the current time, at least one millisecond after its parent, as Java's <code>SnapshotProducer</code> does. A snapshot staged more than a minute before a peer's commit no longer fails the retry. The committed timestamp is the time of the attempt that lands, so an <code>ExpireSnapshots</code> staged after the write in the same transaction keeps that snapshot when the commit retries.</p>
 </li>
 <li>
 <p><strong>Snapshot expiration now tolerates concurrent ref changes.</strong> If a concurrent commit moves a ref that the expiry read, a retry or later <code>Commit</code> replans instead of failing with <code>table.ErrCommitFailed</code>. The committed expiry can differ from <code>Transaction.StagedTable</code>. See <a href="./concurrent-writes.html#snapshot-expiration">Snapshot expiration</a> for cases that now fail with <code>table.ErrTransactionUnusable</code>.</p>

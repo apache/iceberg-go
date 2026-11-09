@@ -312,6 +312,12 @@
 <p><strong>Branch transactions return initialization errors.</strong> <code>Table.NewTransactionOnBranch(branch)</code> now returns <code>(*Transaction, error)</code>, and <code>Table.NewTransactionOnBranchWithError</code> is removed. Use <code>NewTransactionOnBranch</code> and handle its error.</p>
 </li>
 <li>
+<p><strong>Retries preserve staged update order.</strong> An append staged after <code>RollbackToSnapshot</code> stays on the rollback target after a retry or resumed <code>Commit</code>. If a staged update cannot apply after refresh, the transaction ends with <code>table.ErrTransactionUnusable</code>. For example, <code>UpgradeFormatVersion</code> cannot apply if a peer has committed a higher format version. The error preserves its cause and also matches <code>table.ErrCommitFailed</code> if that cause is a conflict. Previously, for transactions without a staged expiry, these failures returned <code>table.ErrCommitRejected</code> and left the transaction resumable. A catalog rejection on the first attempt still returns <code>table.ErrCommitRejected</code> and leaves the transaction resumable.</p>
+</li>
+<li>
+<p><strong>Retries renew snapshot timestamps.</strong> A retry or resumed <code>Commit</code> stamps each snapshot it replays from a staged write with the current time, at least one millisecond after its parent, as Java's <code>SnapshotProducer</code> does. A snapshot staged more than a minute before a peer's commit no longer fails the retry. The committed timestamp is the time of the attempt that lands, so an <code>ExpireSnapshots</code> staged after the write in the same transaction keeps that snapshot when the commit retries.</p>
+</li>
+<li>
 <p><strong>Snapshot expiration now tolerates concurrent ref changes.</strong> If a concurrent commit moves a ref that the expiry read, a retry or later <code>Commit</code> replans instead of failing with <code>table.ErrCommitFailed</code>. The committed expiry can differ from <code>Transaction.StagedTable</code>. See <a href="./concurrent-writes.html#snapshot-expiration">Snapshot expiration</a> for cases that now fail with <code>table.ErrTransactionUnusable</code>.</p>
 </li>
 <li>
