@@ -2498,8 +2498,11 @@ make test-race # runs all unit tests with race detector
 <h3 id="integration-tests"><a class="header" href="#integration-tests">Integration Tests</a></h3>
 <p>Integration tests require Docker and are gated behind a build tag:</p>
 <pre><code class="language-bash">docker compose -f internal/recipe/docker-compose.yml up -d rest object-store create-bucket --wait
-go test -tags integration ./...
+export AWS_S3_ENDPOINT=http://localhost:9000 AWS_REGION=us-east-1
+go test -tags integration ./catalog/rest/... ./catalog/sql/... ./table/maintenance/... ./io/gocloud/s3/...
 </code></pre>
+<p>Without <code>AWS_S3_ENDPOINT</code>, the S3-backed tests send requests to real AWS S3 and fail (for example with a <code>301 PermanentRedirect</code>).</p>
+<p>This starts only the REST catalog and object store, so it runs only the packages they serve. To run the full suite CI runs (Hive, Azure, GCS and Spark), see <a href="https://github.com/apache/iceberg-go/blob/main/README.md#integration-tests">Integration tests</a> in the README.</p>
 <h4 id="external-rest-catalog-conformance"><a class="header" href="#external-rest-catalog-conformance">External REST Catalog Conformance</a></h4>
 <p><code>TestExternalRestCatalogConformance</code> runs the catalog conformance suite against any REST catalog server. It is skipped unless <code>REST_CATALOG_URI</code> is set. CI runs it against <a href="https://polaris.apache.org/">Apache Polaris</a>; to do the same locally (requires <code>jq</code>):</p>
 <pre><code class="language-bash">make integration-setup-polaris
