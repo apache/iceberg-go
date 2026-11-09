@@ -28,7 +28,7 @@ import (
 // SetLocation stages a change to the table's base location. Subsequent
 // writes in the transaction use the new location; existing files are not moved.
 // Trailing slashes are stripped so generated paths have no double separators.
-// Changes across storage schemes or buckets require multi-location FileIO support.
+// Changes across storage schemes, buckets, or containers require multi-location FileIO support.
 // Call Commit to persist the change.
 func (t *Transaction) SetLocation(location string) error {
 	location = strings.TrimRight(location, "/")
@@ -47,8 +47,8 @@ func (t *Transaction) SetLocation(location string) error {
 	if err != nil {
 		return fmt.Errorf("%w: invalid table location: %v", iceberg.ErrInvalidArgument, err)
 	}
-	if current.Scheme != next.Scheme || current.Host != next.Host {
-		return fmt.Errorf("%w: moving a table between storage schemes or buckets requires multi-location FileIO",
+	if current.Scheme != next.Scheme || current.Host != next.Host || current.User.String() != next.User.String() {
+		return fmt.Errorf("%w: moving a table between storage schemes, buckets, or containers requires multi-location FileIO",
 			iceberg.ErrNotImplemented)
 	}
 
