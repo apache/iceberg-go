@@ -1531,13 +1531,13 @@ func TestDoCommit_PartialRebuildFailureRemovesWrittenList(t *testing.T) {
 	first := &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   &Snapshot{SnapshotID: 101, ParentSnapshotID: &head, SequenceNumber: 2, ManifestList: loc + "staged-1.avro"},
-		rebuildManifestList: func(ctx context.Context, _ Metadata, parent *Snapshot, fio iceio.WriteFileIO, _ int) (*Snapshot, error) {
+		rebuildManifestList: func(ctx context.Context, fresh Metadata, parent *Snapshot, fio iceio.WriteFileIO, _ int) (*Snapshot, error) {
 			if err := fio.WriteFile(ctx, loc+"rebuilt-1.avro", []byte("list")); err != nil {
 				return nil, err
 			}
 			parentID := parent.SnapshotID
 
-			return &Snapshot{SnapshotID: 101, ParentSnapshotID: &parentID, SequenceNumber: 3, ManifestList: loc + "rebuilt-1.avro"}, nil
+			return &Snapshot{SnapshotID: 101, ParentSnapshotID: &parentID, SequenceNumber: 3, TimestampMs: fresh.LastUpdatedMillis(), ManifestList: loc + "rebuilt-1.avro"}, nil
 		},
 	}
 	firstID := int64(101)

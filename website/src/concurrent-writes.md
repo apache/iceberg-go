@@ -81,13 +81,14 @@ rejects when concurrent deletes touch the same files.
 
 ## Automatic retry
 
-iceberg-go can refresh the table and replay the operation against the latest
-snapshot between attempts. On each retry the table metadata is reloaded, the
-producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid. `RollbackToSnapshot` and
-`AssertRefSnapshotID` pin their refs, so retries do not rebase those assertions.
-If a pinned ref moved, the commit fails with `ErrCommitFailed` instead of
-retrying. `ExpireSnapshots` does not pin refs. Retries replan it as described in
+On each retry, iceberg-go reloads the table metadata, applies staged changes
+in order and runs the producer's validators against the fresh snapshot. It
+submits the commit only if it is still valid. An append staged after a rollback
+is rebuilt on the rollback target.
+
+`RollbackToSnapshot` and `AssertRefSnapshotID` pin their refs. If a pinned ref
+moved, the commit fails with `ErrCommitFailed` instead of retrying.
+`ExpireSnapshots` does not pin refs. Retries replan it as described in
 [Snapshot expiration](#snapshot-expiration).
 
 Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
@@ -114,13 +115,17 @@ refresh. Other requirements, including the schema, spec, sort order, and pinned
 refs, must still hold. Otherwise, the commit fails without another attempt and
 the transaction is unusable.
 
-After a conflict, calling `Commit` again on the same transaction refreshes the
-table and replays the staged changes like the next retry attempt, so it can
-rebase onto a peer's commit even with retries disabled. Each call gets the
-configured retry budget. A commit carrying delete-file removals that cannot be
-replayed resubmits only if its branch has not moved. The rejections after a
-refresh that make the transaction unusable are listed on
-`ErrTransactionUnusable`.
+After a conflict, calling `Commit` again refreshes the table and replays staged
+changes even with retries disabled. Each call gets the configured retry
+budget. A commit that removes delete files and cannot be replayed resubmits
+only if its branch has not moved.
+
+A staged change that cannot apply to the refreshed table makes the transaction
+unusable. For example, a staged format upgrade cannot apply if a peer has
+already committed a higher format version. The error keeps its cause, so it
+also matches `ErrCommitFailed` when the cause is a conflict. See
+`ErrTransactionUnusable` for all conditions that end the transaction after
+refresh.
 
 A failed commit keeps the files it staged until a later commit lands. A
 transaction you abandon leaves them for orphan file removal, as one with

@@ -652,3 +652,93 @@ func TestRewriteRefSnapshotRequirements(t *testing.T) {
 	missingBranchOut := rewriteRefSnapshotRequirements(reqs, "non-existent", fresh, nil)
 	assert.Equal(t, reqs, missingBranchOut)
 }
+
+// A conflict on another branch must not override a staged rollback of main.
+func TestRefreshReplayKeepsRollbackBeforeAppend(t *testing.T) {
+	fs, cat, tbl := newExpireReplayTable(t, nil)
+	tbl, s1 := appendOnBranch(t, tbl, MainBranch, "s1")
+	tbl, _ = appendOnBranch(t, tbl, MainBranch, "s2")
+	peerUpdate(t, cat, NewSetSnapshotRefUpdate("other", s1, BranchRef, 0, 0, 0))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.RollbackToSnapshot(s1))
+	stageFiles(t, tx, "a")
+	peerAppend(t, fs, cat, "other", "p")
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	meta := committed.Metadata()
+	head := meta.SnapshotByName(MainBranch)
+	require.NotNil(t, head)
+	assert.Equal(t, s1, parentOf(t, meta, head.SnapshotID))
+	assert.Equal(t, []string{"a", "s1"}, branchFiles(t, fs, meta, MainBranch))
+}
+
+// Sequence numbers and row IDs must advance across a staged rollback.
+func TestRefreshReplayKeepsCountersAcrossStagedRollback(t *testing.T) {
+	fs, cat, tbl := newExpireReplayTable(t, iceberg.Properties{PropertyFormatVersion: "3"})
+	stage := func(tx *Transaction, name string) {
+		builder, err := iceberg.NewDataFileBuilder(iceberg.NewPartitionSpec(), iceberg.EntryContentData,
+			retryCleanupLocation+"/data/"+name+".parquet", iceberg.ParquetFile, nil, nil, nil, 1, 1)
+		require.NoError(t, err)
+		require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{builder.FirstRowID(0).Build()}, nil))
+	}
+	commit := func(tbl *Table, branch, name string) *Table {
+		tx, err := tbl.NewTransactionOnBranch(branch)
+		require.NoError(t, err)
+		stage(tx, name)
+		out, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		return out
+	}
+	tbl = commit(tbl, MainBranch, "s1")
+	s1 := tbl.CurrentSnapshot().SnapshotID
+	tbl = commit(tbl, MainBranch, "s2")
+	peerUpdate(t, cat, NewSetSnapshotRefUpdate("other", s1, BranchRef, 0, 0, 0))
+
+	tx := tbl.NewTransaction()
+	stage(tx, "a")
+	a := stagedHead(t, tx, MainBranch)
+	require.NoError(t, tx.RollbackToSnapshot(s1))
+	stage(tx, "b")
+	b := stagedHead(t, tx, MainBranch)
+	commit(newOCCTable(t, cat.metadata, fs, cat), "other", "p")
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	meta := committed.Metadata()
+	snapA, snapB := meta.SnapshotByID(a), meta.SnapshotByID(b)
+	peer := meta.SnapshotByName("other")
+	require.NotNil(t, snapA)
+	require.NotNil(t, snapB)
+	assert.Equal(t, peer.SequenceNumber+1, snapA.SequenceNumber)
+	assert.Equal(t, snapA.SequenceNumber+1, snapB.SequenceNumber)
+	require.NotNil(t, peer.FirstRowID)
+	require.NotNil(t, peer.AddedRows)
+	require.NotNil(t, snapA.FirstRowID)
+	require.NotNil(t, snapA.AddedRows)
+	require.NotNil(t, snapB.FirstRowID)
+	assert.Equal(t, *peer.FirstRowID+*peer.AddedRows, *snapA.FirstRowID)
+	assert.Equal(t, *snapA.FirstRowID+*snapA.AddedRows, *snapB.FirstRowID)
+	assert.Equal(t, *snapB.FirstRowID+1, meta.NextRowID())
+	assert.Equal(t, s1, parentOf(t, meta, b))
+	assert.Equal(t, []string{"b", "s1"}, branchFiles(t, fs, meta, MainBranch))
+}
+
+// A v1 snapshot has no sequence number, so replay onto a v2 table reports
+// a conflict.
+func TestRefreshReplayApplyFailureKeepsConflictCause(t *testing.T) {
+	_, cat, tbl := newExpireReplayTable(t, iceberg.Properties{PropertyFormatVersion: "1"})
+	tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+	tx := tbl.NewTransaction()
+	stageFiles(t, tx, "a")
+	peerUpdate(t, cat, NewUpgradeFormatVersionUpdate(2))
+
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrTransactionUnusable)
+	require.ErrorIs(t, err, ErrCommitFailed)
+	assert.ErrorContains(t, err, "apply add-snapshot")
+}

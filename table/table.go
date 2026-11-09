@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -60,11 +61,10 @@ import (
 // changes whether a non-main commit branch is removed.
 //
 // These failures do not: a commit branch that became a tag, a replaced table,
-// a diverged base snapshot, or files to rewrite that a concurrent commit
-// removed.
-// For transactions with snapshot expiry, disabled GC or a staged update that
-// cannot apply after refresh also do not match. An ErrCommitFailed retry loop
-// stops on these failures.
+// a diverged base snapshot, files to rewrite that a concurrent commit removed,
+// disabled GC for snapshot expiry, or a staged update that cannot apply after
+// refresh without a conflict reported by the metadata builder.
+// An ErrCommitFailed retry loop stops on these failures.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrCommitRejected means the catalog rejected a commit without writing
@@ -73,7 +73,9 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 // rejection, including one with error type IllegalArgumentException, since the
 // server rejected the request either way.
 //
-// Transaction.Commit does not retry it, but a later Commit can try again.
+// Transaction.Commit does not retry it. A later Commit refreshes and tries
+// again, returning ErrTransactionUnusable if a staged update cannot apply
+// to the refreshed table.
 // Staged files are retained. Files created during retries are deleted unless
 // the transaction can reuse them. Errors that also match ErrCommitFailed
 // are treated as conflicts.
@@ -88,10 +90,11 @@ var ErrCommitRejected = errors.New("commit rejected")
 // non-replayable commit whose branch has moved), a validator conflict with a
 // concurrent commit, a diverged base snapshot, files to rewrite that a
 // concurrent commit removed, a commit branch that became a tag or was
-// deleted, or a replaced table. With snapshot expiry, they also include
-// disabled GC, replanning that changes whether a non-main commit branch is
-// removed, and a staged update that cannot apply after refresh. Only the
-// commit branch's head assertion is rebased.
+// deleted, a replaced table, or a staged update that cannot apply after
+// refresh. With snapshot expiry, they also include disabled GC and replanning
+// that changes whether a commit branch other than main is removed. Only the
+// commit branch's head assertion is rebased. A staged update that cannot
+// apply keeps the builder's error as its cause.
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -656,6 +659,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	for _, apply := range opts {
 		apply(&co)
 	}
+	if co.replay == nil {
+		co.replay = newStagedReplay(cmp.Or(co.branch, MainBranch), updates, nil)
+	}
 
 	cfg, err := readRetryConfig(t.metadata.Properties())
 	if err != nil {
@@ -844,18 +850,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// submit an older snapshot whose manifests it now counts as
 			// superseded and deletes on success.
 			forceRebuild := co.resumes > 0 && attempt == 0 && !co.noReplay
-			var (
-				rebuiltUpdates []Update
-				orphaned       []string
-				rebuildErr     error
-				step           = "rebuild manifest list"
-			)
-			if co.replay != nil {
-				step = "replay staged updates"
-				rebuiltUpdates, orphaned, rebuildErr = co.replay.replay(retryCtx, current, wfs, attemptBase+int(attempt), forceRebuild)
-			} else {
-				rebuiltUpdates, orphaned, rebuildErr = rebuildSnapshotUpdates(retryCtx, updates, current, co.branch, wfs, attemptBase+int(attempt), forceRebuild)
-			}
+			rebuiltUpdates, orphaned, rebuildErr := co.replay.replay(retryCtx, current, wfs, attemptBase+int(attempt), forceRebuild)
 			// A failed rebuild still owns the lists it wrote before failing.
 			for list := range stagedManifestLists(rebuiltUpdates) {
 				if _, ok := staged[list]; !ok {
@@ -872,13 +867,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 					return nil, fmt.Errorf("%w: files to rewrite were removed: %w", ErrTransactionUnusable, rebuildErr)
 				}
 
-				return nil, fmt.Errorf("%s for retry attempt %d: %w", step, attempt, rebuildErr)
+				return nil, fmt.Errorf("replay staged updates for retry attempt %d: %w", attempt, rebuildErr)
 			}
 			orphanedManifests = append(orphanedManifests, orphaned...)
 			updates = rebuiltUpdates
 
-			// A peer may have already expired the snapshots in the staged plan.
-			if co.replay != nil && len(updates) == 0 {
+			// Replay dropped every staged update, so nothing is left to commit.
+			if len(updates) == 0 && len(co.replay.updates) > 0 {
 				committed = true
 
 				return t.withMetadata(current, currentLoc), nil
@@ -932,12 +927,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			return nil, context.Cause(retryCtx)
 		}
 
-		// Keep per-attempt expiry assertions out of reqs so refresh does not
-		// treat them as fixed staged requirements.
-		submitReqs := reqs
-		if co.replay != nil {
-			submitReqs = append(slices.Clone(reqs), expirationAssertions(current, co.replay.branch, co.replay.walkedRefs, reqs)...)
-		}
+		// Keep replay assertions out of reqs so refresh does not treat them as
+		// fixed staged requirements.
+		submitReqs := append(slices.Clone(reqs), co.replay.requirements(current, reqs)...)
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), submitReqs, updates)
 		if err == nil {
@@ -1146,12 +1138,10 @@ func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata)
 	return nil
 }
 
-// latestSnapshotForBranch returns the head a write targeting branch is parented
-// on: a branch that does not exist yet resolves to nil here and falls back to
-// main's head so the first write to a new branch forks from main. It is the
-// Metadata-side twin of currentSnapshotForRef, which the retry path cannot use
-// because it has no builder; the two must resolve a ref identically, or a
-// retried snapshot is reparented somewhere its first attempt never pointed.
+// latestSnapshotForBranch returns the branch's head, falling back to main for a
+// new branch. Resolve refs exactly as MetadataBuilder.currentSnapshotForRef
+// does so partial rewrites collect dead position deletes from the snapshot
+// that their producer uses as parent.
 func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 	if branch == "" || branch == MainBranch {
 		return meta.CurrentSnapshot()
@@ -1183,69 +1173,6 @@ func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
 	}
 
 	return true
-}
-
-// rebuildSnapshotUpdates returns a new slice of updates where any
-// addSnapshotUpdate that carries a rebuildManifestList closure has its
-// snapshot regenerated to inherit all data files committed to the branch
-// since the original snapshot was built. Updates without a rebuild closure
-// pass through unchanged.
-//
-// It also returns the manifest-list file paths that were superseded by
-// the rebuild (i.e., the paths from the input updates that were replaced).
-// These become orphaned objects in object storage and should be removed
-// by the caller after a successful commit. On error the updates rebuilt so
-// far are still returned, so the caller can delete the lists they wrote.
-//
-// This is the manifest-layer "refresh-and-replay" step: the data files
-// (already written to object storage) are reused as-is; only the manifest
-// list is rewritten to include the fresh parent's manifests so that the
-// rebuilt snapshot contains every committed file.
-func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int, force bool) (rebuilt []Update, orphanedPaths []string, err error) {
-	// Must mirror createSnapshotProducer's attempt-0 fallback, or a retried new
-	// branch rebuilds with a nil parent and silently drops main's data.
-	var freshHead *Snapshot
-	if freshMeta != nil {
-		freshHead = latestSnapshotForBranch(freshMeta, branch)
-	}
-
-	result := make([]Update, len(updates))
-	copy(result, updates)
-
-	// A single transaction can stage several snapshots on the same branch (an
-	// append followed by a delete, say). They were chained at build time so
-	// snapshot[n].parent == snapshot[n-1]; on retry they must be replayed as a
-	// chain, each rebuilt snapshot becoming the parent of the next. Feeding
-	// every staged snapshot the same fresh branch head would turn the chain
-	// into siblings — the branch ref advances only to the last one, silently
-	// dropping the earlier snapshots' data. chainRebuilt forces every snapshot
-	// after the first rebuild to rebuild too: its recorded parent is an earlier
-	// staged snapshot that has itself just been reparented onto the fresh head.
-	// force rebuilds every snapshot from the start.
-	chainRebuilt := force
-	for i, u := range result {
-		su, ok := u.(*addSnapshotUpdate)
-		if !ok || su.rebuildManifestList == nil {
-			continue
-		}
-
-		next, rebuildErr := rebuildStagedSnapshot(ctx, su, freshMeta, freshHead, fs, attempt, chainRebuilt)
-		if rebuildErr != nil {
-			return result, orphanedPaths, rebuildErr
-		}
-
-		freshHead = next.Snapshot
-		if next == su {
-			continue
-		}
-
-		result[i] = next
-
-		orphanedPaths = append(orphanedPaths, su.Snapshot.ManifestList)
-		chainRebuilt = true
-	}
-
-	return result, orphanedPaths, nil
 }
 
 // Reuse requires an unchanged parent, no earlier rebuild in the chain, and

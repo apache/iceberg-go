@@ -152,6 +152,10 @@ func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Updat
 	return updates, walked, nil
 }
 
+func (r *stagedReplay) requirements(base Metadata, reqs []Requirement) []Requirement {
+	return expirationAssertions(base, r.branch, r.walkedRefs, reqs)
+}
+
 func stagedWalkedRefs(records []expirationRecord) []string {
 	var refs []string
 	for _, rec := range records {

@@ -2695,10 +2695,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(meta.updates) > 0 {
 		reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
-		var replay *stagedReplay
-		if len(t.expirations) > 0 {
-			replay = newStagedReplay(cmp.Or(t.branch, MainBranch), meta.updates, t.expirations)
-		}
+		replay := newStagedReplay(cmp.Or(t.branch, MainBranch), meta.updates, t.expirations)
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
@@ -2731,7 +2728,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		t.committed = true
 
 		landed := meta.updates
-		if replay != nil && replay.ran {
+		if replay.ran {
 			landed = replay.landed
 		}
 		var removals []*removeSnapshotsUpdate
