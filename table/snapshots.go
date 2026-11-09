@@ -469,7 +469,7 @@ func embeddedManifestLength(ctx context.Context, fio iceio.IO, path string) (_ i
 	}
 
 	if statIO, ok := fio.(iceio.StatIO); ok {
-		info, err := statIO.Stat(path)
+		info, err := statIO.Stat(ctx, path)
 		if err != nil {
 			return 0, fmt.Errorf("could not stat embedded manifest %q: %w", path, err)
 		}

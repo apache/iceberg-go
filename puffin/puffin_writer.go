@@ -51,13 +51,14 @@ import (
 // Writer cannot be reused after a physical write fails. Once poisoned, all
 // subsequent operations return the original write error without changing state.
 type Writer struct {
-	w         io.Writer
-	offset    int64
-	blobs     []BlobMetadata
-	props     map[string]string
-	done      bool
-	failed    error
-	createdBy string
+	w          io.Writer
+	offset     int64
+	footerSize int64
+	blobs      []BlobMetadata
+	props      map[string]string
+	done       bool
+	failed     error
+	createdBy  string
 }
 
 // BlobMetadataInput contains fields the caller provides when adding a blob.
@@ -92,6 +93,26 @@ func NewWriter(w io.Writer) (*Writer, error) {
 		props:     make(map[string]string),
 		createdBy: "iceberg-go " + iceberg.Version(),
 	}, nil
+}
+
+// FileSizeInBytes returns the total completed file size, including the header,
+// blobs and footer. It returns zero until Finish succeeds.
+func (w *Writer) FileSizeInBytes() int64 {
+	if !w.done {
+		return 0
+	}
+
+	return w.offset
+}
+
+// FileFooterSizeInBytes returns the complete footer size, including the
+// leading magic, payload and trailer. It returns zero until Finish succeeds.
+func (w *Writer) FileFooterSizeInBytes() int64 {
+	if !w.done {
+		return 0
+	}
+
+	return w.footerSize
 }
 
 // checkState keeps the writer's finalized and failed-state checks consistent
@@ -291,6 +312,8 @@ func (w *Writer) Finish() error {
 		return fmt.Errorf("puffin: write footer trailer: %w", err)
 	}
 
+	w.footerSize = int64(MagicSize + len(payload) + footerTrailerSize)
+	w.offset += w.footerSize
 	w.done = true
 
 	return nil
