@@ -2657,6 +2657,42 @@ func pruningFilterHasMissingInitialDefault(
 // batches. Full schema projection still handles nested types, schema evolution,
 // promotions, defaults, and changed column ordering. A matching Arrow type alone
 // is not enough: the file field ID and Iceberg type must also agree.
+// identityPartitionConstants returns the data file's identity partition
+// values keyed by source field ID. A writer may leave an identity partition
+// column out of its data files, as Delta and Hive-style layouts do; the spec's
+// column projection rule 1 reads such a field from the partition value.
+func identityPartitionConstants(meta Metadata, file iceberg.DataFile) map[int]any {
+	if meta == nil || file == nil {
+		return nil
+	}
+	spec := meta.PartitionSpecByID(int(file.SpecID()))
+	if spec == nil {
+		return nil
+	}
+	partition := file.Partition()
+	var constants map[int]any
+	for _, field := range spec.FieldsRef(iceinternal.PartitionSpecRef{}) {
+		switch field.Transform.(type) {
+		case iceberg.IdentityTransform, *iceberg.IdentityTransform:
+		default:
+			continue
+		}
+		if len(field.SourceIDs) != 1 {
+			continue
+		}
+		value, ok := partition[field.FieldID]
+		if !ok {
+			continue
+		}
+		if constants == nil {
+			constants = make(map[int]any)
+		}
+		constants[field.SourceIDs[0]] = value
+	}
+
+	return constants
+}
+
 func canReuseFlatProjection(requested, fileSchema *iceberg.Schema, input, output *arrow.Schema) bool {
 	if requested == nil || fileSchema == nil || input == nil || output == nil {
 		return false
@@ -2840,6 +2876,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		pipeline = append(pipeline, filterFunc)
 	}
 
+	partitionConstants := identityPartitionConstants(as.metadata, task.Value.File)
 	var lastInputSchema *arrow.Schema
 	var reuseFlatProjection bool
 	pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
@@ -2856,10 +2893,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 			return array.NewRecordBatch(invariants.outputArrowSchema, r.Columns(), r.NumRows()), nil
 		}
 
-		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
+		return projectToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
 			UseLargeTypes:   as.useLargeTypes,
 			TableProperties: invariants.tableProperties,
-		})
+		}, nil, partitionConstants)
 	})
 
 	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)

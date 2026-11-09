@@ -1058,6 +1058,10 @@ type arrowProjectionVisitor struct {
 	useLargeTypes        bool
 	useWriteDefault      bool
 	allowMissingRequired bool
+	// partitionConstants maps a field ID to the value of an identity partition
+	// on it, for the data file being read. A field the file does not store is
+	// filled from here first, per the spec's column projection rule 1.
+	partitionConstants map[int]any
 }
 
 func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType {
@@ -1286,7 +1290,12 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			dt := a.typeToArrowType(field.Type)
 			alloc := compute.GetAllocator(a.ctx)
 
+			constant, hasConstant := a.partitionConstants[field.ID]
 			switch {
+			case hasConstant && constant != nil:
+				arr = defaultToArray(constant, field.Type, dt, structArr.Len(), alloc)
+			case hasConstant:
+				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
 			case field.WriteDefault != nil && a.useWriteDefault:
 				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), alloc)
 			case field.InitialDefault != nil && !a.useWriteDefault:
@@ -1466,6 +1475,13 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 // When targetArrowSchema is provided, an exact Arrow schema match can reuse the
 // input batch without walking the Iceberg schema or rebuilding any arrays.
 func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions, targetArrowSchema *arrow.Schema) (arrow.RecordBatch, error) {
+	return projectToRequestedSchema(ctx, requested, fileSchema, batch, opts, targetArrowSchema, nil)
+}
+
+// projectToRequestedSchema is toRequestedSchema with the identity partition
+// values of the data file being read, keyed by source field ID. A requested
+// field the file does not store takes its partition value before any default.
+func projectToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions, targetArrowSchema *arrow.Schema, partitionConstants map[int]any) (arrow.RecordBatch, error) {
 	if targetArrowSchema != nil && arrowSchemaEqual(batch.Schema(), targetArrowSchema) {
 		batch.Retain()
 
@@ -1486,6 +1502,7 @@ func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 			useLargeTypes:        opts.UseLargeTypes,
 			useWriteDefault:      opts.UseWriteDefault,
 			allowMissingRequired: opts.AllowMissingRequired,
+			partitionConstants:   partitionConstants,
 		}, arrowAccessor{fileSchema: fileSchema})
 	if err != nil {
 		return nil, err
