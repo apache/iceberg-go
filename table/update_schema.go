@@ -1208,7 +1208,7 @@ func (a *applyChanges) Struct(structType iceberg.StructType, fieldResults []iceb
 			continue
 		}
 
-		field := structType.Fields()[i]
+		field := structType.Field(i)
 
 		name := field.Name
 		doc := field.Doc
