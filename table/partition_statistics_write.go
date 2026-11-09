@@ -75,10 +75,6 @@ func (t *Transaction) SetPartitionStatistics(stats PartitionStatisticsFile) erro
 // RemovePartitionStatistics removes the partition statistics file reference
 // associated with snapshotID. It does not delete the physical statistics file.
 func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
-	if _, err := t.txnMeta(); err != nil {
-		return err
-	}
-
 	return t.apply([]Update{NewRemovePartitionStatisticsUpdate(snapshotID)}, nil)
 }
 

@@ -1429,6 +1429,48 @@ func TestBadStringLiteralCasts(t *testing.T) {
 	}
 }
 
+func TestStringLiteralToDecimalScale(t *testing.T) {
+	dec92 := iceberg.MustDecimalTypeOf(9, 2)
+
+	// Values the type's scale represents exactly convert, trailing zeros included.
+	exact := []struct {
+		str      string
+		unscaled int64
+	}{
+		{"12.34", 1234},
+		{"-12.34", -1234},
+		{"12.3", 1230},
+		{"12", 1200},
+		{"12.340", 1234},
+		{"1234e-2", 1234},
+		{"1.2e1", 1200},
+		{"0.000", 0},
+		{"0e-5", 0},
+	}
+	for _, tt := range exact {
+		t.Run(tt.str, func(t *testing.T) {
+			got, err := iceberg.NewLiteral(tt.str).To(dec92)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.DecimalLiteral{Val: decimal128.FromI64(tt.unscaled), Scale: 2}, got)
+		})
+	}
+
+	// Digits beyond the scale would be rounded away, so these must not convert.
+	for _, str := range []string{"12.345", "-12.345", "12.341", "0.001", "1.2345e1", "1e-3"} {
+		t.Run(str, func(t *testing.T) {
+			_, err := iceberg.NewLiteral(str).To(dec92)
+			assert.ErrorIs(t, err, iceberg.ErrBadCast)
+		})
+	}
+
+	// Rounding the bound would change the predicate: price > 12.345 must not
+	// bind as price > 12.35, which wrongly excludes 12.35.
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "price", Type: dec92, Required: true})
+	_, err := iceberg.BindExpr(sc, iceberg.GreaterThan(iceberg.Reference("price"), "12.345"), true)
+	assert.ErrorIs(t, err, iceberg.ErrBadCast)
+}
+
 func TestStringLiteralToIntMaxMinValue(t *testing.T) {
 	above, err := iceberg.NewLiteral(strconv.FormatInt(math.MaxInt32+1, 10)).
 		To(iceberg.PrimitiveTypes.Int32)
