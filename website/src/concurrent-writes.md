@@ -95,15 +95,16 @@ moved, the commit fails with `ErrCommitFailed` instead of retrying.
 `ExpireSnapshots` does not pin refs. Retries replan it as described in
 [Snapshot expiration](#snapshot-expiration).
 
-Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
-setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
-in the configuration reference for the full list:
+`Commit` retries a conflict up to 4 times by default (`commit.retry.num-retries`
+is `4`, as in Java and PyIceberg). Set it to `0` to fail on the first conflict;
+see [Manifest and commit](./configuration.md#manifest-and-commit) in the
+configuration reference for the other retry properties:
 
 ```go
-// Opt in to retries (e.g. 4 attempts after the first) for a contended table.
+// Fail on the first conflict instead of retrying.
 _, err := cat.CreateTable(ctx, ident, schema,
     catalog.WithProperties(iceberg.Properties{
-        "commit.retry.num-retries": "4",
+        "commit.retry.num-retries": "0",
     }),
 )
 ```
