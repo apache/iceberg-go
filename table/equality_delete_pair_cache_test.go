@@ -20,13 +20,15 @@ package table
 import (
 	"sync"
 	"testing"
+	"github.com/apache/iceberg-go"
 )
 
 func combinationTestFile(id int, key string) *equalityDeleteFileSet {
 	return newEqualityDeleteFileSet(id, &equalityDeleteSet{
-		keys:     set[string]{key: {}},
-		fieldIDs: []int{1},
-		colNames: []string{"id"},
+		keys:       set[string]{key: {}},
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	})
 }
 
