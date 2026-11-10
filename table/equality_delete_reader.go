@@ -1514,7 +1514,14 @@ func (e *equalityDeleteSet) singleInt64Set(fileSchema *iceberg.Schema) *singleIn
 	if !ok {
 		return nil
 	}
-	if _, ok := field.Type.(iceberg.Int64Type); !ok {
+	switch field.Type.(type) {
+	case iceberg.Int64Type:
+	case iceberg.Int32Type:
+		// Widen older int data with the long delete-key index, without a cast.
+		if len(e.fieldTypes) != 1 || !e.fieldTypes[0].Equals(iceberg.PrimitiveTypes.Int64) {
+			return nil
+		}
+	default:
 		return nil
 	}
 
@@ -1567,6 +1574,9 @@ func (e *equalityDeleteSet) singleInt32Set(fileSchema *iceberg.Schema) *singleIn
 		return nil
 	}
 	if _, ok := field.Type.(iceberg.Int32Type); !ok {
+		return nil
+	}
+	if len(e.fieldTypes) != 1 || !e.fieldTypes[0].Equals(iceberg.PrimitiveTypes.Int32) {
 		return nil
 	}
 
@@ -1697,6 +1707,50 @@ func (m *equalityDeleteMask) applySingleInt64(
 					continue
 				}
 			} else if _, deleted := deleteSet.keys[uint64(rawValues[row])]; !deleted {
+				continue
+			}
+			m.ensure(mem, numRows)
+			bitutil.ClearBit(m.bits, row)
+		}
+	}
+
+	return true
+}
+
+// applyWidenedInt32 compares int32 data files with normalized int64 delete keys.
+// Convert through int64 before uint64 so negative values are sign-extended.
+func (m *equalityDeleteMask) applyWidenedInt32(
+	column arrow.Array,
+	deleteSet *singleInt64EqualityDeleteSet,
+	mem memory.Allocator,
+) bool {
+	values, ok := column.(*array.Int32)
+	if !ok {
+		return false
+	}
+
+	rawValues := values.Int32Values()
+	numRows := values.Len()
+	if values.NullN() == 0 {
+		for row := range numRows {
+			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+				continue
+			}
+			if _, deleted := deleteSet.keys[uint64(int64(rawValues[row]))]; deleted {
+				m.ensure(mem, numRows)
+				bitutil.ClearBit(m.bits, row)
+			}
+		}
+	} else {
+		for row := range numRows {
+			if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+				continue
+			}
+			if values.IsNull(row) {
+				if !deleteSet.hasNull {
+					continue
+				}
+			} else if _, deleted := deleteSet.keys[uint64(int64(rawValues[row]))]; !deleted {
 				continue
 			}
 			m.ensure(mem, numRows)
@@ -1938,6 +1992,9 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 					continue
 				}
 				if int64Set != nil && mask.applySingleInt64(column, int64Set, mem) {
+					continue
+				}
+				if int64Set != nil && mask.applyWidenedInt32(column, int64Set, mem) {
 					continue
 				}
 				if bytesSet != nil && mask.applySingleBytes(column, bytesSet, mem) {
