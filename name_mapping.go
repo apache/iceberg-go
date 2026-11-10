@@ -331,18 +331,20 @@ type indexedNameMappingAccessor struct {
 	fieldsByName map[*MappedField]map[string]*MappedField
 }
 
-func newIndexedNameMappingAccessor(root *MappedField) indexedNameMappingAccessor {
+func newIndexedNameMappingAccessor(root *MappedField) (indexedNameMappingAccessor, error) {
 	accessor := indexedNameMappingAccessor{
 		fieldsByName: make(map[*MappedField]map[string]*MappedField),
 	}
-	accessor.indexFields(root)
+	if err := accessor.indexFields(root); err != nil {
+		return indexedNameMappingAccessor{}, err
+	}
 
-	return accessor
+	return accessor, nil
 }
 
-func (n indexedNameMappingAccessor) indexFields(field *MappedField) {
+func (n indexedNameMappingAccessor) indexFields(field *MappedField) error {
 	if field == nil || len(field.Fields) == 0 {
-		return
+		return nil
 	}
 
 	fieldsByName := make(map[string]*MappedField, len(field.Fields))
@@ -351,13 +353,18 @@ func (n indexedNameMappingAccessor) indexFields(field *MappedField) {
 	for i := range field.Fields {
 		mappedField := &field.Fields[i]
 		for _, name := range mappedField.Names {
-			if _, exists := fieldsByName[name]; !exists {
-				fieldsByName[name] = mappedField
+			if existing, ok := fieldsByName[name]; ok && existing != mappedField {
+				return fmt.Errorf("%w: duplicate name mapping %q", ErrInvalidSchema, name)
 			}
+			fieldsByName[name] = mappedField
 		}
 
-		n.indexFields(mappedField)
+		if err := n.indexFields(mappedField); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
 func (n indexedNameMappingAccessor) getField(partnerStruct *MappedField, fieldName string) *MappedField {
@@ -528,7 +535,11 @@ func (n *nameMapProjectVisitor) Variant(v VariantType, variantPartner *MappedFie
 
 func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schema, error) {
 	partner := &MappedField{Fields: nameMapping}
-	accessor := newIndexedNameMappingAccessor(partner)
+	accessor, err := newIndexedNameMappingAccessor(partner)
+	if err != nil {
+		return nil, err
+	}
+
 	top, err := VisitSchemaWithPartner(schemaWithoutIDs,
 		partner,
 		&nameMapProjectVisitor{
