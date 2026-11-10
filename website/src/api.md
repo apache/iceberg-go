@@ -626,8 +626,9 @@ concurrent append to `main` can reject an otherwise independent promotion.
 
 Existing branch retention settings are preserved. Both the target and source
 snapshot IDs are pinned when promoting from a ref, and the target is pinned
-when replacing by ID. A pinned ref that moves prevents the normal retry of
-a co-staged append. A retention-only change with the same snapshot ID cannot
+when replacing by ID. If the source snapshot was staged in the same transaction,
+the commit branch is pinned too, preventing retry from changing its ancestry.
+A pinned ref that moves prevents the normal retry of a co-staged append. A retention-only change with the same snapshot ID cannot
 be detected by snapshot-ID requirements in any catalog. REST catalogs also
 cannot detect ref type changes with the same ID.
 
