@@ -548,6 +548,18 @@ func NewSetSnapshotRefUpdate(
 	maxRefAgeMs, maxSnapshotAgeMs int64,
 	minSnapshotsToKeep int,
 ) *setSnapshotRefUpdate {
+	// Negative values are supported as omitted options by existing callers.
+	// Normalize them so JSON omitempty does not write invalid retention values.
+	if maxRefAgeMs < 0 {
+		maxRefAgeMs = 0
+	}
+	if maxSnapshotAgeMs < 0 {
+		maxSnapshotAgeMs = 0
+	}
+	if minSnapshotsToKeep < 0 {
+		minSnapshotsToKeep = 0
+	}
+
 	return &setSnapshotRefUpdate{
 		baseUpdate:         baseUpdate{ActionName: UpdateSetSnapshotRef},
 		RefName:            name,
