@@ -27,6 +27,68 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// A source snapshot staged by this transaction must not be rebuilt onto a
+// different commit-branch history after fast-forward ancestry was checked.
+func TestBranchPromotionPinsCommitBranchForStagedSource(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(*Transaction) error
+	}{
+		{"fast-forward", func(tx *Transaction) error {
+			return tx.FastForwardBranch("qa", "audit")
+		}},
+		{"replace-from-ref", func(tx *Transaction) error {
+			return tx.ReplaceBranchFromRef("qa", "audit")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := manageSnapshotRefsRetryFixture(t)
+			peer, err := MetadataBuilderFromBase(base, "")
+			require.NoError(t, err)
+			// Another writer rolls main back to a divergent snapshot.
+			require.NoError(t, peer.SetSnapshotRef(MainBranch, 900, BranchRef))
+			current, err := peer.Build()
+			require.NoError(t, err)
+
+			tbl, cat := newAssertRefTestTable(t, base, current)
+			tx := tbl.NewTransaction()
+			parent := int64(100)
+			snap := &Snapshot{
+				SnapshotID:       1001,
+				ParentSnapshotID: &parent,
+				SequenceNumber:   base.LastSequenceNumber() + 1,
+				TimestampMs:      base.LastUpdatedMillis() + 2000,
+				ManifestList:     "staged-source.avro",
+				Summary:          &Summary{Operation: OpAppend},
+			}
+			add := NewAddSnapshotUpdate(snap)
+			add.rebuildManifestList = func(_ context.Context, fresh Metadata, head *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
+				require.NotNil(t, head)
+				rebuilt := *snap
+				id := head.SnapshotID
+				rebuilt.ParentSnapshotID = &id
+				rebuilt.SequenceNumber = fresh.LastSequenceNumber() + 1
+				rebuilt.ManifestList = "rebuilt-staged-source.avro"
+
+				return &rebuilt, nil
+			}
+			require.NoError(t, tx.apply([]Update{
+				add,
+				tx.meta.NewRetainingSnapshotRefUpdate(MainBranch, snap.SnapshotID, BranchRef),
+			}, nil))
+			require.NoError(t, tx.ReplaceBranch("audit", snap.SnapshotID))
+			require.NoError(t, tc.stage(tx))
+
+			_, err = tx.Commit(t.Context())
+			require.ErrorIs(t, err, ErrTransactionUnusable)
+			require.NotErrorIs(t, err, ErrCommitFailed)
+			assert.Equal(t, int32(1), cat.attempts.Load())
+			assert.Equal(t, int64(900), cat.metadata.CurrentSnapshot().SnapshotID)
+			assert.Equal(t, int64(100), cat.metadata.SnapshotByName("qa").SnapshotID)
+		})
+	}
+}
+
 // A retry caused by a write to an unrelated branch must preserve the staged
 // promotion before rebuilding the append. Otherwise the append inherits main's
 // old files instead of the audited branch's files.
