@@ -453,7 +453,7 @@ func (n *nameMapProjectVisitor) Field(field NestedField, fieldPartner *MappedFie
 	}
 
 	return NestedField{
-		ID:             *fieldPartner.FieldID,
+		ID:             fieldPartner.ID(),
 		Name:           field.Name,
 		Type:           fieldResult.Type,
 		Required:       field.Required,
