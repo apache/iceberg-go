@@ -186,14 +186,14 @@ func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
 	dataArrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
 	require.NoError(t, err)
 	dataPath := tbl.Location() + "/data/data-before-promotion.parquet"
-	writeParquetFile(t, dataPath, dataArrowSchema, `[{"id": 42}, {"id": 7}, {"id": -2147483648}]`)
+	writeParquetFile(t, dataPath, dataArrowSchema, `[{"id": 42}, {"id": 7}, {"id": -2147483648}, {"id": 99}]`)
 
 	txn := tbl.NewTransaction()
 	require.NoError(t, txn.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
 	tbl, err = txn.Commit(t.Context())
 	require.NoError(t, err)
 
-	assertRowCount(t, tbl, 3)
+	assertRowCount(t, tbl, 4)
 
 	deleteBeforePromotionPath := tbl.Location() + "/data/equality-delete-before-promotion.parquet"
 	deleteBeforePromotionSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
@@ -212,7 +212,7 @@ func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
 	tbl, err = deleteBeforePromotionTxn.Commit(t.Context())
 	require.NoError(t, err)
 
-	assertRowCount(t, tbl, 2)
+	assertRowCount(t, tbl, 3)
 
 	promoteTxn := tbl.NewTransaction()
 	require.NoError(t, promoteTxn.UpdateSchema(true, false).UpdateColumn([]string{"id"}, table.ColumnUpdate{
@@ -221,7 +221,7 @@ func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
 	tbl, err = promoteTxn.Commit(t.Context())
 	require.NoError(t, err)
 
-	assertRowCount(t, tbl, 2)
+	assertRowCount(t, tbl, 3)
 
 	deletePath := tbl.Location() + "/data/equality-delete-after-promotion.parquet"
 	deleteArrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
@@ -253,7 +253,7 @@ func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
 		}
 		rec.Release()
 	}
-	assert.Empty(t, got)
+	require.Equal(t, []int64{99}, got)
 }
 
 func TestEqualityDeleteReadPrunesNonOverlappingDeleteFiles(t *testing.T) {
