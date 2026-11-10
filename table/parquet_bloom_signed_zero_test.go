@@ -30,18 +30,34 @@ import (
 // stored as -0 when the Bloom filter is otherwise conclusive.
 func TestBloomPhysicalCandidatesIncludeBothSignedZeros(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		lit iceberg.Literal
+		name               string
+		lit                iceberg.Literal
 		positive, negative []byte
 	}{
-		{"float32 positive zero", iceberg.Float32Literal(0),
-			[]byte{0, 0, 0, 0}, []byte{0, 0, 0, 0x80}},
-		{"float32 negative zero", iceberg.Float32Literal(math.Float32frombits(1 << 31)),
-			[]byte{0, 0, 0, 0}, []byte{0, 0, 0, 0x80}},
-		{"float64 positive zero", iceberg.Float64Literal(0),
-			[]byte{0, 0, 0, 0, 0, 0, 0, 0}, []byte{0, 0, 0, 0, 0, 0, 0, 0x80}},
-		{"float64 negative zero", iceberg.Float64Literal(math.Float64frombits(uint64(1) << 63)),
-			[]byte{0, 0, 0, 0, 0, 0, 0, 0}, []byte{0, 0, 0, 0, 0, 0, 0, 0x80}},
+		{
+			name:     "float32 positive zero",
+			lit:      iceberg.Float32Literal(0),
+			positive: []byte{0, 0, 0, 0},
+			negative: []byte{0, 0, 0, 0x80},
+		},
+		{
+			name:     "float32 negative zero",
+			lit:      iceberg.Float32Literal(math.Float32frombits(1 << 31)),
+			positive: []byte{0, 0, 0, 0},
+			negative: []byte{0, 0, 0, 0x80},
+		},
+		{
+			name:     "float64 positive zero",
+			lit:      iceberg.Float64Literal(0),
+			positive: []byte{0, 0, 0, 0, 0, 0, 0, 0},
+			negative: []byte{0, 0, 0, 0, 0, 0, 0, 0x80},
+		},
+		{
+			name:     "float64 negative zero",
+			lit:      iceberg.Float64Literal(math.Float64frombits(uint64(1) << 63)),
+			positive: []byte{0, 0, 0, 0, 0, 0, 0, 0},
+			negative: []byte{0, 0, 0, 0, 0, 0, 0, 0x80},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			candidates, ok := literalToPruningPhysBytes(tt.lit)
