@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 
@@ -1297,5 +1298,55 @@ func TestDecimalTypeOfReturnsError(t *testing.T) {
 		typ, err := iceberg.DecimalTypeOf(tc.precision, tc.scale)
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		assert.Equal(t, iceberg.DecimalType{}, typ)
+	}
+}
+
+func TestTimestampToNanosChecksRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		micros    iceberg.Timestamp
+		want      iceberg.TimestampNano
+		overflows bool
+	}{
+		{
+			name:   "zero",
+			micros: 0,
+			want:   0,
+		},
+		{
+			name:   "maximum valid microseconds",
+			micros: iceberg.Timestamp(math.MaxInt64 / 1000),
+			want:   iceberg.TimestampNano((math.MaxInt64 / 1000) * 1000),
+		},
+		{
+			name:   "minimum valid microseconds",
+			micros: iceberg.Timestamp(math.MinInt64 / 1000),
+			want:   iceberg.TimestampNano((math.MinInt64 / 1000) * 1000),
+		},
+		{
+			name:      "positive overflow",
+			micros:    iceberg.Timestamp(math.MaxInt64/1000 + 1),
+			overflows: true,
+		},
+		{
+			name:      "negative overflow",
+			micros:    iceberg.Timestamp(math.MinInt64/1000 - 1),
+			overflows: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.overflows {
+				require.PanicsWithError(t,
+					fmt.Sprintf("%s: timestamp %d is outside the nanosecond range", iceberg.ErrBadCast, tt.micros),
+					func() { _ = tt.micros.ToNanos() },
+				)
+
+				return
+			}
+
+			assert.Equal(t, tt.want, tt.micros.ToNanos())
+		})
 	}
 }

@@ -20,6 +20,7 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -908,6 +909,12 @@ func (t Timestamp) ToDate() Date {
 }
 
 func (t Timestamp) ToNanos() TimestampNano {
+	// Both timestamp units use signed 64-bit values. The nanosecond value
+	// must fit before scaling, otherwise multiplication silently wraps.
+	if t < Timestamp(math.MinInt64/1000) || t > Timestamp(math.MaxInt64/1000) {
+		panic(fmt.Errorf("%w: timestamp %d is outside the nanosecond range", ErrBadCast, t))
+	}
+
 	return TimestampNano(int64(t) * 1000)
 }
 
