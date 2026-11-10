@@ -32,7 +32,9 @@ import (
 //
 // Both refs are pinned to their snapshot IDs in the transaction's base
 // metadata. A concurrent change to either ID fails Commit. This also stops
-// the normal retry of a co-staged append if a pinned ref moves. No catalog's
+// the normal retry of a co-staged append if a pinned ref moves. When the
+// source names a snapshot staged in this transaction, the commit branch is
+// pinned too, so retry cannot change the source snapshot's ancestry. No catalog's
 // snapshot-ID requirement detects retention-only changes, and REST catalogs
 // also cannot detect a ref type change with the same snapshot ID.
 // Fast-forward needs the full ancestor chain. With a REST catalog configured
@@ -57,6 +59,8 @@ func (t *Transaction) FastForwardBranch(target, source string) error {
 //
 // Both ref heads are pinned to their base snapshot IDs, so concurrent head
 // moves fail the commit and prevent the normal retry of a co-staged append.
+// A source snapshot staged in this transaction also pins the commit branch,
+// preventing retry from rebuilding that snapshot on a different lineage.
 // No catalog's snapshot-ID requirement detects retention-only changes, and
 // REST catalogs also cannot detect ref type changes with the same snapshot ID.
 func (t *Transaction) ReplaceBranchFromRef(target, source string) error {
@@ -85,11 +89,22 @@ func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) e
 	if source != target {
 		requirements = append(requirements, AssertRefSnapshotID(source, t.baseRefSnapshotID(source)))
 	}
+	refsToPin := []string{target, source}
+	for _, staged := range meta.updates {
+		if added, ok := staged.(*addSnapshotUpdate); ok && added.Snapshot != nil &&
+			added.Snapshot.SnapshotID == sourceRef.SnapshotID {
+			// Retry can rebuild this source on a different commit-branch head,
+			// invalidating the ancestry check performed at staging time.
+			refsToPin = append(refsToPin, t.branch)
+
+			break
+		}
+	}
 	if exists {
 		if targetRef.SnapshotID == sourceRef.SnapshotID {
 			// No metadata update is needed, but pin both refs so that a
 			// staged metadata-only commit cannot miss a concurrent move.
-			return t.applyPinned(nil, requirements, []string{target, source})
+			return t.applyPinned(nil, requirements, refsToPin)
 		}
 		lookup := func(id int64) *Snapshot {
 			snap, _ := meta.SnapshotByID(id)
@@ -104,7 +119,7 @@ func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) e
 
 	update := meta.NewRetainingSnapshotRefUpdate(target, sourceRef.SnapshotID, BranchRef)
 
-	return t.applyPinned([]Update{update}, requirements, []string{target, source})
+	return t.applyPinned([]Update{update}, requirements, refsToPin)
 }
 
 // ReplaceBranch sets the named branch to an existing snapshot without an
