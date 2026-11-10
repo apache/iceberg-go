@@ -841,18 +841,18 @@ func TestReaderRejectsMissingBlobTypes(t *testing.T) {
 		wantErr  string
 	}{
 		{name: "empty", typeJSON: `"type":""`, wantErr: "invalid blob type"},
-		{name: "null", typeJSON: `"type":null`, wantErr: "invalid blob type"},
-		{name: "absent", wantErr: "puffin: blob 1: type is required"},
+		{name: "null", typeJSON: `"type":null`, wantErr: "missing required field type"},
+		{name: "absent", wantErr: "missing required field type"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			second := `{"fields":[],"offset":4,"length":0}`
+			second := `{"fields":[],"snapshot-id":1,"sequence-number":1,"offset":4,"length":0}`
 			if tt.typeJSON != "" {
-				second = `{` + tt.typeJSON + `,"fields":[],"offset":4,"length":0}`
+				second = `{` + tt.typeJSON + `,"fields":[],"snapshot-id":1,"sequence-number":1,"offset":4,"length":0}`
 			}
-			footer := `{"blobs":[{"type":"vendor-sketch-v1","fields":[],"offset":4,"length":0},` + second + `]}`
+			footer := `{"blobs":[{"type":"vendor-sketch-v1","fields":[],"snapshot-id":1,"sequence-number":1,"offset":4,"length":0},` + second + `]}`
 			_, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload([]byte(footer))))
 			require.ErrorContains(t, err, tt.wantErr)
 		})

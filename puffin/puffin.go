@@ -30,6 +30,7 @@ package puffin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -77,6 +78,69 @@ type BlobMetadata struct {
 type Footer struct {
 	Blobs      []BlobMetadata    `json:"blobs"`
 	Properties map[string]string `json:"properties,omitempty"`
+}
+
+// UnmarshalJSON rejects missing or null required Puffin blob metadata fields.
+// Without this check, encoding/json silently substitutes zero values.
+func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Type             *BlobType         `json:"type"`
+		Fields           *[]int32          `json:"fields"`
+		SnapshotID       *int64            `json:"snapshot-id"`
+		SequenceNumber   *int64            `json:"sequence-number"`
+		Offset           *int64            `json:"offset"`
+		Length           *int64            `json:"length"`
+		CompressionCodec *string           `json:"compression-codec"`
+		Properties       map[string]string `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	switch {
+	case wire.Type == nil:
+		return errors.New("puffin: blob metadata missing required field type")
+	case wire.Fields == nil:
+		return errors.New("puffin: blob metadata missing required field fields")
+	case wire.SnapshotID == nil:
+		return errors.New("puffin: blob metadata missing required field snapshot-id")
+	case wire.SequenceNumber == nil:
+		return errors.New("puffin: blob metadata missing required field sequence-number")
+	case wire.Offset == nil:
+		return errors.New("puffin: blob metadata missing required field offset")
+	case wire.Length == nil:
+		return errors.New("puffin: blob metadata missing required field length")
+	}
+
+	*b = BlobMetadata{
+		Type:             *wire.Type,
+		Fields:           *wire.Fields,
+		SnapshotID:       *wire.SnapshotID,
+		SequenceNumber:   *wire.SequenceNumber,
+		Offset:           *wire.Offset,
+		Length:           *wire.Length,
+		CompressionCodec: wire.CompressionCodec,
+		Properties:       wire.Properties,
+	}
+
+	return nil
+}
+
+// UnmarshalJSON requires the blobs list, even when it is empty.
+func (f *Footer) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Blobs      *[]BlobMetadata   `json:"blobs"`
+		Properties map[string]string `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Blobs == nil {
+		return errors.New("puffin: footer missing required field blobs")
+	}
+
+	*f = Footer{Blobs: *wire.Blobs, Properties: wire.Properties}
+
+	return nil
 }
 
 // BlobType identifies the format of a Puffin blob. Unknown non-empty names
