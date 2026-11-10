@@ -64,6 +64,10 @@ func TestBranchPromotionPinsCommitBranchForStagedSource(t *testing.T) {
 
 			tbl, cat := newAssertRefTestTable(t, base, current)
 			tx := tbl.NewTransaction()
+			// Register base-head assertions before staging the refs. Otherwise
+			// the later promotion would reject its own staged ref changes.
+			require.NoError(t, tx.AssertRefSnapshotID("audit"))
+			require.NoError(t, tx.AssertRefSnapshotID("qa"))
 			parent := int64(100)
 			snap := &Snapshot{
 				SnapshotID:       1001,
