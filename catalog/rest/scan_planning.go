@@ -696,9 +696,8 @@ func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifie
 
 // CancelPlanning cancels a server-side plan. Callers should cancel on context
 // cancellation using a detached context with a short timeout. The spec supports
-// idempotency and access-delegation headers on cancel; this low-level method
-// deliberately defers those until a cancel options type is added, and suppresses
-// the session-default access-delegation header (cancel vends no credentials). A
+// an access-delegation header on cancel; this method suppresses the
+// session-default access-delegation header (cancel vends no credentials). A
 // 404 (already-expired or unknown plan) is not special-cased: cancel is
 // best-effort, so the generic REST error is acceptable.
 func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) (err error) {
@@ -715,7 +714,7 @@ func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, pl
 
 	_, err = doDelete[struct{}](
 		ctx, r.baseURI, path, r.cl, nil,
-		withSuppressedHeaders(headerIcebergAccessDelegation))
+		withSuppressedHeaders(headerIcebergAccessDelegation), r.mutationHeaders())
 
 	return err
 }
