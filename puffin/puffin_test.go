@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"maps"
 	"math"
 	"os"
 	"path"
@@ -840,9 +841,9 @@ func TestReaderRejectsMissingBlobTypes(t *testing.T) {
 		typeJSON string
 		wantErr  string
 	}{
-		{name: "empty", typeJSON: `"type":""`, wantErr: "invalid blob type"},
-		{name: "null", typeJSON: `"type":null`, wantErr: "missing required field type"},
-		{name: "absent", wantErr: "missing required field type"},
+		{name: "empty", typeJSON: `"type":""`, wantErr: "blob 1: invalid blob type"},
+		{name: "null", typeJSON: `"type":null`, wantErr: "blob 1: blob metadata missing required field type"},
+		{name: "absent", wantErr: "blob 1: blob metadata missing required field type"},
 	}
 
 	for _, tt := range tests {
@@ -857,6 +858,70 @@ func TestReaderRejectsMissingBlobTypes(t *testing.T) {
 			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
+}
+
+func TestReaderRejectsMissingRequiredPuffinFields(t *testing.T) {
+	t.Parallel()
+
+	validBlob := map[string]any{
+		"type":            "vendor-stats-v1",
+		"fields":          []int{1},
+		"snapshot-id":     int64(10),
+		"sequence-number": int64(3),
+		"offset":          int64(4),
+		"length":          int64(0),
+	}
+
+	for _, field := range []string{"type", "fields", "snapshot-id", "sequence-number", "offset", "length"} {
+		for _, invalidValue := range []string{"missing", "null"} {
+			t.Run(invalidValue+"/"+field, func(t *testing.T) {
+				t.Parallel()
+
+				blob := make(map[string]any, len(validBlob))
+				maps.Copy(blob, validBlob)
+				if invalidValue == "missing" {
+					delete(blob, field)
+				} else {
+					blob[field] = nil
+				}
+				payload, err := json.Marshal(map[string]any{"blobs": []any{validBlob, blob}})
+				require.NoError(t, err)
+
+				_, err = puffin.NewReader(bytes.NewReader(fileWithFooterPayload(payload)))
+				require.ErrorContains(t, err, "puffin: decode footer JSON: blob 1: blob metadata missing required field "+field)
+			})
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "missing blobs", payload: `{}`},
+		{name: "null blobs", payload: `{"blobs":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload([]byte(tc.payload))))
+			require.ErrorContains(t, err, "puffin: decode footer JSON: footer missing required field blobs")
+		})
+	}
+}
+
+func TestReaderAcceptsExplicitZeroAndEmptyPuffinFields(t *testing.T) {
+	payload := []byte(`{"blobs":[{"type":"vendor-stats-v1","fields":[],"snapshot-id":0,"sequence-number":0,"offset":4,"length":0}],"properties":{"source":"test"}}`)
+	reader, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload(payload)))
+	require.NoError(t, err)
+
+	blobs := reader.Blobs()
+	require.Len(t, blobs, 1)
+	require.NotNil(t, blobs[0].Fields)
+	require.Empty(t, blobs[0].Fields)
+	require.Zero(t, blobs[0].SnapshotID)
+	require.Zero(t, blobs[0].SequenceNumber)
+	require.Zero(t, blobs[0].Length)
+	require.Equal(t, "test", reader.Properties()["source"])
 }
 
 func TestReaderReadsLZ4CompressedFooter(t *testing.T) {

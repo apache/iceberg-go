@@ -98,17 +98,17 @@ func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
 	}
 	switch {
 	case wire.Type == nil:
-		return errors.New("puffin: blob metadata missing required field type")
+		return errors.New("blob metadata missing required field type")
 	case wire.Fields == nil:
-		return errors.New("puffin: blob metadata missing required field fields")
+		return errors.New("blob metadata missing required field fields")
 	case wire.SnapshotID == nil:
-		return errors.New("puffin: blob metadata missing required field snapshot-id")
+		return errors.New("blob metadata missing required field snapshot-id")
 	case wire.SequenceNumber == nil:
-		return errors.New("puffin: blob metadata missing required field sequence-number")
+		return errors.New("blob metadata missing required field sequence-number")
 	case wire.Offset == nil:
-		return errors.New("puffin: blob metadata missing required field offset")
+		return errors.New("blob metadata missing required field offset")
 	case wire.Length == nil:
-		return errors.New("puffin: blob metadata missing required field length")
+		return errors.New("blob metadata missing required field length")
 	}
 
 	*b = BlobMetadata{
@@ -128,17 +128,24 @@ func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
 // UnmarshalJSON requires the blobs list, even when it is empty.
 func (f *Footer) UnmarshalJSON(data []byte) error {
 	var wire struct {
-		Blobs      *[]BlobMetadata   `json:"blobs"`
-		Properties map[string]string `json:"properties"`
+		Blobs      *[]json.RawMessage `json:"blobs"`
+		Properties map[string]string  `json:"properties"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
 	if wire.Blobs == nil {
-		return errors.New("puffin: footer missing required field blobs")
+		return errors.New("footer missing required field blobs")
 	}
 
-	*f = Footer{Blobs: *wire.Blobs, Properties: wire.Properties}
+	blobs := make([]BlobMetadata, len(*wire.Blobs))
+	for i, raw := range *wire.Blobs {
+		if err := json.Unmarshal(raw, &blobs[i]); err != nil {
+			return fmt.Errorf("blob %d: %w", i, err)
+		}
+	}
+
+	*f = Footer{Blobs: blobs, Properties: wire.Properties}
 
 	return nil
 }
