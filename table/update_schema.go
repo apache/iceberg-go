@@ -478,11 +478,16 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 			return fmt.Errorf("cannot update field type for non-primitive type: %s", fullName)
 		}
 		if !update.FieldType.Val.Equals(field.Type) && !u.allowIncompatibleChanges {
-			fieldType, err := iceberg.PromoteType(field.Type, update.FieldType.Val)
-			if err != nil {
-				return err
+			from := field.Type.(iceberg.PrimitiveType)
+			_, fromUnknown := from.(iceberg.UnknownType)
+			to, toPrimitive := update.FieldType.Val.(iceberg.PrimitiveType)
+			// PromoteType also allows read-time casts (e.g. string to binary)
+			// that are not legal schema evolution. Keep the v3 unknown
+			// promotion, which can target any type.
+			if !fromUnknown && (!toPrimitive || !iceberg.IsPromotionAllowed(from, to)) {
+				return fmt.Errorf("%w: cannot promote %s to %s",
+					iceberg.ErrResolve, field.Type, update.FieldType.Val)
 			}
-			update.FieldType.Val = fieldType
 		}
 	}
 
