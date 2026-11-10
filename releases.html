@@ -393,6 +393,9 @@
 <p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> is removed. Replace <code>cat.(catalog.Closer)</code> checks with <code>defer cat.Close()</code>; <code>catalog.Catalog</code> already implements <code>io.Closer</code>, so no type assertion is needed.</p>
 </li>
 <li>
+<p><strong><code>table.ErrDataFilesMissing</code> no longer matches <code>table.ErrCommitFailed</code>.</strong> An operation that adds delete files referencing data files that are not live, for example because a concurrent commit removed them, fails with <code>ErrDataFilesMissing</code>. The error is now terminal, like <code>table.ErrCommitDiverged</code>, matching Java's <code>ValidationException</code>, so code that retries when <code>errors.Is(err, table.ErrCommitFailed)</code> no longer retries it. When <code>Transaction.Commit</code> returns it, the error also matches <code>table.ErrTransactionUnusable</code>. Rebuild the delete against the current table instead.</p>
+</li>
+<li>
 <p><strong>Puffin writer property setter renamed.</strong> <code>puffin.Writer.AddProperties</code> is now <code>puffin.Writer.SetProperties</code>. Repeated calls still merge keys; use <code>ClearProperties</code> to clear custom properties before finishing.</p>
 </li>
 <li>
