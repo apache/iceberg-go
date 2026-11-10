@@ -1334,12 +1334,20 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 			return v1.Val.Cmp(v2.Val)
 		}
 
-		rescaled, err := v2.Val.Rescale(int32(v2.Scale), int32(v1.Scale))
-		if err != nil {
-			return -1
+		// Rescale can fail when it would discard fractional digits or
+		// overflow decimal128. Compare the exact values at a common scale.
+		left, right := v1.Val.BigInt(), v2.Val.BigInt()
+		scale := max(v1.Scale, v2.Scale)
+		if v1.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v1.Scale)), nil)
+			left.Mul(left, factor)
+		}
+		if v2.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v2.Scale)), nil)
+			right.Mul(right, factor)
 		}
 
-		return v1.Val.Cmp(rescaled)
+		return left.Cmp(right)
 	}
 }
 
