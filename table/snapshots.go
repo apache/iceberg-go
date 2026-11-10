@@ -469,7 +469,7 @@ func embeddedManifestLength(ctx context.Context, fio iceio.IO, path string) (_ i
 	}
 
 	if statIO, ok := fio.(iceio.StatIO); ok {
-		info, err := statIO.Stat(path)
+		info, err := statIO.Stat(ctx, path)
 		if err != nil {
 			return 0, fmt.Errorf("could not stat embedded manifest %q: %w", path, err)
 		}
@@ -760,8 +760,21 @@ func updateSnapshotSummaries(sum Summary, previous iceberg.Properties) (Summary,
 		}
 	}
 
+	// A total is carried forward only when the previous snapshot reports it
+	// as a valid non-negative number. A missing or unparseable total is
+	// unknown and is left out rather than restarted from 0, matching Java's
+	// SnapshotProducer.updateTotal.
 	updateTotals := func(totalProp, addedProp, removedProp string) {
-		newTotal := previous.GetInt64(totalProp, 0)
+		prevTotal, ok := previous[totalProp]
+		if !ok {
+			return
+		}
+
+		newTotal, err := strconv.ParseInt(prevTotal, 10, 64)
+		if err != nil || newTotal < 0 {
+			return
+		}
+
 		newTotal += sum.Properties.GetInt64(addedProp, 0)
 		newTotal -= sum.Properties.GetInt64(removedProp, 0)
 

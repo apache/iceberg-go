@@ -432,14 +432,6 @@ func (us *UpdateSpec) historicalPartitionFields(key transformKey) []iceberg.Part
 
 func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 	return func() error {
-		existingField, exists := us.nameToField[newName]
-		_, isVoidTransform := existingField.Transform.(iceberg.VoidTransform)
-		if exists && isVoidTransform {
-			return us.renameField(
-				name,
-				fmt.Sprintf("%s_%d", name, existingField.FieldID),
-			)()
-		}
 		if _, added := us.nameToAddedField[name]; added {
 			return errors.New("cannot rename recently added partitions")
 		}
@@ -451,6 +443,20 @@ func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 		if _, deleted := us.deletes[field.FieldID]; deleted {
 			return fmt.Errorf("cannot delete and rename partition field: %s", name)
 		}
+
+		existingField, exists := us.nameToField[newName]
+		_, isVoidTransform := existingField.Transform.(iceberg.VoidTransform)
+		if exists && isVoidTransform {
+			// Move the old v1 tombstone out of the way before assigning its
+			// name to the field being renamed.
+			if err := us.renameField(
+				existingField.Name,
+				fmt.Sprintf("%s_%d", existingField.Name, existingField.FieldID),
+			)(); err != nil {
+				return err
+			}
+		}
+
 		us.renames[name] = newName
 
 		return nil

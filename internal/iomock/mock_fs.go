@@ -54,10 +54,12 @@ func (m *MockFS) Remove(_ context.Context, name string) error {
 
 type MockFSReadFile struct {
 	MockFS
-	ErrOnClose bool
+	ErrOnClose  bool
+	ReadFileCtx context.Context
 }
 
-func (m *MockFSReadFile) ReadFile(name string) ([]byte, error) {
+func (m *MockFSReadFile) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	m.ReadFileCtx = ctx
 	args := m.Called(name)
 
 	return args.Get(0).([]byte), args.Error(1)

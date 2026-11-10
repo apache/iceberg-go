@@ -1487,6 +1487,7 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 		// Credential refresh does not return table config, so carry the
 		// existing scan-planning directive over verbatim.
 		table.WithScanPlanningDirectiveFrom(tbl),
+		table.WithSnapshotHistoryLimitedToRefsFrom(tbl),
 	}
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.
@@ -2026,7 +2027,9 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
 	mergeVendedCredentials(config, vended, ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved), table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved),
+		table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)),
+		table.WithSnapshotHistoryLimitedToRefs(mode == SnapshotModeRefs))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -2746,11 +2749,15 @@ func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 		return nil, err
 	}
 
+	// The spec's rename 404 covers both a missing source view and a missing
+	// destination namespace; split it by error.type so a missing namespace is
+	// not reported as a missing view. LoadView and DropView need no override
+	// because the spec documents only NoSuchViewException for their 404s.
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchView,
 			http.StatusConflict: catalog.ErrViewAlreadyExists,
-		}, allowNoContent())
+		}, allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}))
 	if err != nil {
 		return nil, err
 	}

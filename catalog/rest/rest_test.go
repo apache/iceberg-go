@@ -3896,6 +3896,26 @@ func (r *RestCatalogSuite) TestRenameView404() {
 	r.ErrorContains(err, "The given view does not exist")
 }
 
+func (r *RestCatalogSuite) TestRenameView404MissingNamespace() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "Namespace does not exist: missing",
+			Type:    "NoSuchNamespaceException",
+			Code:    404,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("missing", "destination"))
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrNoSuchView)
+}
+
 func (r *RestCatalogSuite) TestRenameView409() {
 	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
 		if !r.Equal(http.MethodPost, req.Method) {
@@ -4721,6 +4741,12 @@ func TestEndpointNegotiation(t *testing.T) {
 	_, err = cat.CreateTable(context.Background(), table.Identifier{"ns", "tbl"}, tableSchemaSimple)
 	assert.ErrorIs(t, err, rest.ErrEndpointNotSupported)
 	assert.NotErrorIs(t, err, rest.ErrRESTError)
+	// It is also iceberg.ErrNotImplemented, as a 501 for the same op is, so
+	// catalogtest's "not supported" cases hold for a REST server that leaves an
+	// optional endpoint out.
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"ns", "a"}, table.Identifier{"ns", "b"})
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 
 	// An advertised op works.
 	nss, err := cat.ListNamespaces(context.Background(), nil)

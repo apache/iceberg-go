@@ -90,15 +90,15 @@ type Transaction struct {
 
 	// noReplay marks the commit as non-replayable: on a CAS conflict
 	// doCommit fails instead of refreshing and replaying. Set by
-	// snapshot producers whose staged snapshot carries delete-file
-	// removals; see the flag site in commitManifests.
+	// snapshot producers whose staged snapshot carries delete-file removals;
+	// see the flag site in commitManifests.
 	noReplay bool
 
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
-	// the commit: those from AssertRefSnapshotID and RollbackToSnapshot.
-	// doCommit's refresh-and-replay must not rewrite their assertions to
-	// the fresh head between retries, so a ref that has changed fails the
-	// commit.
+	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot,
+	// and CherryPickSnapshot. doCommit's refresh-and-replay must not rewrite
+	// their assertions to the fresh head between retries, so a ref that has
+	// changed fails the commit.
 	pinnedRefs map[string]struct{}
 
 	expirations []expirationRecord
@@ -1005,7 +1005,7 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 		return err
 	}
 	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
+	itr := recordsToDataFiles(ctx, meta.loc, meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
 		fs:        wfs,
@@ -1030,14 +1030,8 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // ReplaceDataFilesByPath replaces data files identified by their storage paths.
 // Unlike ReplaceDataFiles, it loads file metadata as needed.
 //
-// It is actually an overwrite operation with multiple
-// files deleted and added.
-//
-// TODO: technically, this could be a REPLACE operation but we aren't performing
-// any validation here that there are no changes to the underlying data. A REPLACE
-// operation is only valid if the data is exactly the same as the previous snapshot.
-//
-// For now, we'll keep using an overwrite operation.
+// This stages an overwrite operation that may change logical table data.
+// For pre-written, data-preserving files, use StageRewrittenDataFilesByPath.
 //
 // On v3 a removed data file's live deletion vector is removed with it.
 func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
@@ -1580,10 +1574,11 @@ func validateAddedDeletionVectorTargets(
 type WriteOption func(*dataFileCfg)
 
 type dataFileCfg struct {
-	skipAutoNameMapping bool
-	skipDuplicateCheck  bool
-	rewriteSemantics    bool
-	dataSequenceNumber  *int64
+	skipAutoNameMapping          bool
+	skipDuplicateCheck           bool
+	rewriteSemantics             bool
+	equalityDeleteToDVConversion bool
+	dataSequenceNumber           *int64
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -1599,6 +1594,16 @@ type dataFileCfg struct {
 func withRewriteSemantics() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.rewriteSemantics = true
+	}
+}
+
+// withEqualityDeleteToDVConversion marks a rewrite that replaces equality
+// deletes with file-scoped deletion vectors. The caller has resolved each
+// equality delete against the data files in the pinned snapshot and merged any
+// existing positional deletes into each new vector.
+func withEqualityDeleteToDVConversion() WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.equalityDeleteToDVConversion = true
 	}
 }
 
@@ -2171,7 +2176,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			return fmt.Errorf("%w: added delete files must replace existing delete files",
 				ErrInvalidOperation)
 		}
-		if len(removedDeleteContents) != 1 {
+		_, hasEqualityDeletes := removedDeleteContents[iceberg.EntryContentEqDeletes]
+		conversion := cfg.equalityDeleteToDVConversion && hasEqualityDeletes
+		if len(removedDeleteContents) != 1 && !conversion {
 			return fmt.Errorf("%w: delete-file rewrites cannot combine position and equality delete files",
 				ErrInvalidOperation)
 		}
@@ -2189,11 +2196,14 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		for _, seq := range removedDeleteSequenceNumbers {
 			removedDeleteSeqs[seq] = struct{}{}
 		}
-		if sourceContent == iceberg.EntryContentEqDeletes && len(removedDeleteSeqs) != 1 {
+		if sourceContent == iceberg.EntryContentEqDeletes && len(removedDeleteSeqs) != 1 && !conversion {
 			return fmt.Errorf("%w: equality delete files with different data sequence numbers cannot be merged",
 				ErrInvalidOperation)
 		}
 		for _, addition := range deleteFilesToAdd {
+			if conversion {
+				continue
+			}
 			if addition.file.ContentType() != sourceContent {
 				return fmt.Errorf("%w: cannot rewrite %s delete files as %s delete files",
 					ErrInvalidOperation, sourceContent, addition.file.ContentType())
@@ -2211,6 +2221,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			}
 		}
 	}
+	// Every new DV must replace all applicable legacy position-delete files.
+	// Leaving an applicable position-delete file live is not supported, even if
+	// its positions were already merged into the new vector.
 	if err := validateAddedDeletionVectorTargets(setDeleteFilesToAdd.dvsByRef, liveDataFiles,
 		survivingPositionDeletes, deleteSequenceNumber); err != nil {
 		return err
@@ -2557,7 +2570,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		return err
 	}
 
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
+	itr := recordsToDataFiles(ctx, meta.loc, meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
 		fs:        wfs,
@@ -2662,6 +2675,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			WithScanPlanningDirective(t.tbl.scanPlanningDirective, t.tbl.hasScanPlanningDirective),
 			WithLabels(t.tbl.labels),
 			WithSavedConfig(t.tbl.savedConfig),
+			WithSnapshotHistoryLimitedToRefsFrom(t.tbl),
 		),
 	}, nil
 }
@@ -2671,9 +2685,10 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 // The staged metadata is validated when a later transaction operation needs an
 // immutable metadata view, or while the catalog applies the commit.
 //
-// After a failed commit, calling Commit again refreshes the table and replays
-// the staged changes like the next retry attempt, with a fresh retry budget.
-// The staged files are kept until a commit lands, so an abandoned transaction
+// After a failed commit, calling Commit again normally refreshes the table
+// and replays the staged changes with a fresh retry budget. A cherry-pick
+// fast-forward can resume through the same ordered replay path. The staged
+// files are kept until a commit lands, so an abandoned transaction
 // leaves them, and for a rewrite the manifests later attempts merged, for
 // orphan file removal. TableCommit refuses a transaction whose commit failed,
 // since it does not refresh.
@@ -2695,10 +2710,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(meta.updates) > 0 {
 		reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
-		var replay *stagedReplay
-		if len(t.expirations) > 0 {
-			replay = newStagedReplay(cmp.Or(t.branch, MainBranch), meta.updates, t.expirations)
-		}
+		replay := newStagedReplay(cmp.Or(t.branch, MainBranch), meta.updates, t.expirations)
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
@@ -2731,7 +2743,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		t.committed = true
 
 		landed := meta.updates
-		if replay != nil && replay.ran {
+		if replay.ran {
 			landed = replay.landed
 		}
 		var removals []*removeSnapshotsUpdate

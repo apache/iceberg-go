@@ -32,7 +32,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 )
 
-func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {
+func (c *Catalog) CreateNamespace(ctx context.Context, ns table.Identifier, props iceberg.Properties) error {
 	if err := validateIdentifier(ns); err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	}
 
 	// Raise an error if the namespace already exists
-	if err := c.checkedMkdirAll(ns); err != nil {
+	if err := c.checkedMkdirAll(ctx, ns); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
 		}
@@ -103,14 +103,14 @@ func (c *Catalog) DropNamespace(ctx context.Context, ns table.Identifier) error 
 	return c.filesystem.Remove(ctx, path)
 }
 
-func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (bool, error) {
+func (c *Catalog) CheckNamespaceExists(ctx context.Context, ns table.Identifier) (bool, error) {
 	if err := validateIdentifier(ns); err != nil {
 		return false, err
 	}
 
 	path := c.namespaceToPath(ns)
 
-	info, err := c.filesystem.Stat(path)
+	info, err := c.filesystem.Stat(ctx, path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
@@ -136,9 +136,12 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 	} else {
 		path = c.namespaceToPath(parent)
 
-		info, err := c.filesystem.Stat(path)
+		info, err := c.filesystem.Stat(ctx, path)
 		if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(parent, "."))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("hadoop catalog: failed to stat namespace: %w", err)
 		}
 	}
 
@@ -184,14 +187,14 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 // LoadNamespaceProperties returns a synthetic "location" property for the
 // namespace. This is a Go-only convenience — the Hadoop catalog does not
 // persist user-defined namespace properties.
-func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier) (iceberg.Properties, error) {
+func (c *Catalog) LoadNamespaceProperties(ctx context.Context, ns table.Identifier) (iceberg.Properties, error) {
 	if err := validateIdentifier(ns); err != nil {
 		return nil, err
 	}
 
 	path := c.namespaceToPath(ns)
 
-	info, err := c.filesystem.Stat(path)
+	info, err := c.filesystem.Stat(ctx, path)
 	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 	}
@@ -221,21 +224,23 @@ func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifie
 // all subdirectories of a given identifier path exist before creating the full path.
 // This function is not atomic and may not return ErrNamespaceAlreadyExists if
 // called concurrently with other calls that change the same identifier
-func (c *Catalog) checkedMkdirAll(id table.Identifier) error {
+func (c *Catalog) checkedMkdirAll(ctx context.Context, id table.Identifier) error {
 	path := c.namespaceToPath(id)
 	// Start at index 1 to skip the root warehouse directory
 	for pathIndex := 1; pathIndex < len(id); pathIndex++ {
 		subPath := id[:pathIndex]
 		parentPath := c.namespaceToPath(subPath)
-		if _, err := c.filesystem.Stat(parentPath); err != nil {
+		if _, err := c.filesystem.Stat(ctx, parentPath); err != nil {
 			return err
 		}
 	}
 	// Check the final element in the path
-	if _, err := c.filesystem.Stat(path); err == nil {
-		// If there is no error and stat returns successfully,
-		// it means that it must already exist
+	_, err := c.filesystem.Stat(ctx, path)
+	if err == nil {
 		return fs.ErrExist
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 
 	return c.filesystem.MkdirAll(path)

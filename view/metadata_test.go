@@ -69,6 +69,56 @@ func TestVersionEquals(t *testing.T) {
 	assert.True(t, v1.Equals(v2), fmt.Sprintf("Expected the same SchemaID, Summary, Representation for %v, got %v", v1, v2))
 }
 
+func TestMetadataEqualsIncludesProperties(t *testing.T) {
+	parsed, err := ParseMetadataString(exampleViewJSON)
+	require.NoError(t, err)
+
+	base := parsed.(*metadata)
+	base.Props = iceberg.Properties{
+		"comment":             "daily report",
+		VersionHistorySizeKey: "10",
+	}
+	base.init()
+
+	tests := []struct {
+		name      string
+		props     iceberg.Properties
+		wantEqual bool
+	}{
+		{
+			name:      "same properties",
+			props:     iceberg.Properties{"comment": "daily report", VersionHistorySizeKey: "10"},
+			wantEqual: true,
+		},
+		{
+			name:  "added property",
+			props: iceberg.Properties{"comment": "daily report", VersionHistorySizeKey: "10", "owner": "analytics"},
+		},
+		{
+			name:  "removed property",
+			props: iceberg.Properties{"comment": "daily report"},
+		},
+		{
+			name:  "changed property",
+			props: iceberg.Properties{"comment": "weekly report", VersionHistorySizeKey: "10"},
+		},
+		{
+			name:  "changed version history size",
+			props: iceberg.Properties{"comment": "daily report", VersionHistorySizeKey: "20"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			other := *base
+			other.Props = tt.props
+			other.init()
+
+			assert.Equal(t, tt.wantEqual, base.Equals(&other))
+		})
+	}
+}
+
 func TestNewRepresentationSetsTypeWithoutMutatingInput(t *testing.T) {
 	input := Representation{SQL: "SELECT 1", Dialect: "spark"}
 	repr := NewRepresentation(input)
@@ -173,7 +223,7 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 	var reduced map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &reduced))
 	delete(reduced, "properties")
-	delete(reduced, "version-log")
+	reduced["version-log"] = json.RawMessage(`[]`)
 	reducedData, err := json.Marshal(reduced)
 	require.NoError(t, err)
 
@@ -360,6 +410,180 @@ func TestParseMetadataRejectsNullAndDuplicateEntries(t *testing.T) {
 			assert.ErrorContains(t, parseErr, tt.errMessage)
 		})
 	}
+}
+
+func metadataJSONWithMutation(t *testing.T, mutate func(map[string]any)) []byte {
+	t.Helper()
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &doc))
+	mutate(doc)
+
+	encoded, err := json.Marshal(doc)
+	require.NoError(t, err)
+
+	return encoded
+}
+
+func TestMetadataRejectsMissingRequiredJSONFields(t *testing.T) {
+	tests := []struct {
+		path   string
+		object string
+		field  string
+	}{
+		{path: "version-log", object: "metadata", field: "version-log"},
+		{path: "version-log timestamp", object: "version-log", field: "timestamp-ms"},
+		{path: "version-log version ID", object: "version-log", field: "version-id"},
+		{path: "version ID", object: "version", field: "version-id"},
+		{path: "schema ID", object: "version", field: "schema-id"},
+		{path: "timestamp", object: "version", field: "timestamp-ms"},
+		{path: "summary", object: "version", field: "summary"},
+		{path: "representations", object: "version", field: "representations"},
+		{path: "default namespace", object: "version", field: "default-namespace"},
+		{path: "representation type", object: "representation", field: "type"},
+		{path: "representation sql", object: "representation", field: "sql"},
+		{path: "representation dialect", object: "representation", field: "dialect"},
+	}
+
+	for _, tt := range tests {
+		for _, state := range []struct {
+			name    string
+			setNull bool
+		}{
+			{name: "missing"},
+			{name: "null", setNull: true},
+		} {
+			if state.setNull && (tt.field == "summary" || tt.field == "default-namespace") {
+				continue
+			}
+			t.Run(tt.path+"/"+state.name, func(t *testing.T) {
+				encoded := metadataJSONWithMutation(t, func(doc map[string]any) {
+					var object map[string]any
+					switch tt.object {
+					case "metadata":
+						object = doc
+					case "version":
+						object = doc["versions"].([]any)[0].(map[string]any)
+					case "version-log":
+						object = doc["version-log"].([]any)[0].(map[string]any)
+					case "representation":
+						version := doc["versions"].([]any)[0].(map[string]any)
+						object = version["representations"].([]any)[0].(map[string]any)
+					}
+
+					if tt.object == "version" && tt.field == "version-id" {
+						// Match the decoded zero value so the existing reference check passes.
+						doc["current-version-id"] = float64(0)
+					}
+					if state.setNull {
+						object[tt.field] = nil
+					} else {
+						delete(object, tt.field)
+					}
+				})
+
+				_, err := ParseMetadataBytes(encoded)
+				require.ErrorIs(t, err, ErrInvalidViewMetadata)
+			})
+		}
+	}
+}
+
+func TestMetadataAcceptsEmptyRequiredJSONCollections(t *testing.T) {
+	encoded := metadataJSONWithMutation(t, func(doc map[string]any) {
+		doc["version-log"] = []any{}
+		version := doc["versions"].([]any)[0].(map[string]any)
+		version["summary"] = map[string]any{}
+		version["default-namespace"] = []any{}
+	})
+
+	_, err := ParseMetadataBytes(encoded)
+	require.NoError(t, err)
+}
+
+func TestMetadataRoundTripsNilNamespaceAndSummary(t *testing.T) {
+	constructed, err := NewVersionFromSQL(1, 0, Representation{SQL: "select 1", Dialect: "spark"}, nil)
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name    string
+		version *Version
+	}{
+		{name: "new version", version: constructed},
+		{
+			name: "hand-built version",
+			version: &Version{
+				VersionID:       1,
+				SchemaID:        0,
+				TimestampMS:     1000,
+				Representations: []Representation{NewRepresentation(Representation{SQL: "select 1", Dialect: "spark"})},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Nil(t, tt.version.DefaultNamespace)
+			md, err := NewMetadata(tt.version, newTestSchema(0), "location", nil)
+			require.NoError(t, err)
+
+			encoded, err := json.Marshal(md)
+			require.NoError(t, err)
+
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal(encoded, &doc))
+			version := doc["versions"].([]any)[0].(map[string]any)
+			assert.Equal(t, []any{}, version["default-namespace"])
+			if tt.version.Summary == nil {
+				assert.Equal(t, map[string]any{}, version["summary"])
+			}
+
+			parsed, err := ParseMetadataBytes(encoded)
+			require.NoError(t, err)
+			assert.Empty(t, parsed.CurrentVersion().DefaultNamespace)
+		})
+	}
+}
+
+func TestMetadataReadsLegacyNullVersionFields(t *testing.T) {
+	encoded := metadataJSONWithMutation(t, func(doc map[string]any) {
+		version := doc["versions"].([]any)[0].(map[string]any)
+		version["summary"] = nil
+		version["default-namespace"] = nil
+	})
+
+	parsed, err := ParseMetadataBytes(encoded)
+	require.NoError(t, err)
+	canonical, err := json.Marshal(parsed)
+	require.NoError(t, err)
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(canonical, &doc))
+	version := doc["versions"].([]any)[0].(map[string]any)
+	assert.Equal(t, map[string]any{}, version["summary"])
+	assert.Equal(t, []any{}, version["default-namespace"])
+	_, err = ParseMetadataBytes(canonical)
+	require.NoError(t, err)
+}
+
+func TestMetadataRejectsNullCurrentVersionID(t *testing.T) {
+	encoded := metadataJSONWithMutation(t, func(doc map[string]any) {
+		doc["current-version-id"] = nil
+		version := doc["versions"].([]any)[0].(map[string]any)
+		version["version-id"] = float64(0)
+	})
+
+	_, err := ParseMetadataBytes(encoded)
+	require.ErrorIs(t, err, ErrInvalidViewMetadata)
+}
+
+func TestMetadataRejectsEmptyRepresentationType(t *testing.T) {
+	encoded := metadataJSONWithMutation(t, func(doc map[string]any) {
+		version := doc["versions"].([]any)[0].(map[string]any)
+		representation := version["representations"].([]any)[0].(map[string]any)
+		representation["type"] = " "
+	})
+
+	_, err := ParseMetadataBytes(encoded)
+	require.ErrorIs(t, err, ErrInvalidViewMetadata)
 }
 
 func TestMissingViewUUID(t *testing.T) {
@@ -602,8 +826,8 @@ func TestUnknownRepresentationTypeInJSON(t *testing.T) {
 		"format-version": 1,
 		"location": "s3://bucket/warehouse/default.db/event_agg",
 		"current-version-id": 1,
-		"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [
-			{"type": "hive", "sql": "SELECT 1", "dialect": "spark"},
+		"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "summary": {}, "default-namespace": [], "representations": [
+			{"type": "hive"},
 			{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}
 		]}],
 		"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
@@ -623,7 +847,7 @@ func TestNilFieldsInJSON(t *testing.T) {
 		"format-version": 1,
 		"location": "s3://bucket/warehouse/default.db/event_agg",
 		"current-version-id": 1,
-		"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}]}],
+		"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "summary": {}, "default-namespace": [], "representations": [{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}]}],
 		"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
 		"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
 	}`
@@ -660,8 +884,8 @@ func TestMultipleVersionsValidation(t *testing.T) {
 		"location": "s3://bucket/warehouse/default.db/event_agg",
 		"current-version-id": 2,
 		"versions": [
-			{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}]},
-			{"version-id": 2, "schema-id": 2, "timestamp-ms": 1234567900, "representations": [{"type": "sql", "sql": "SELECT 2", "dialect": "trino"}]}
+			{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "summary": {}, "default-namespace": [], "representations": [{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}]},
+			{"version-id": 2, "schema-id": 2, "timestamp-ms": 1234567900, "summary": {}, "default-namespace": [], "representations": [{"type": "sql", "sql": "SELECT 2", "dialect": "trino"}]}
 		],
 		"schemas": [
 			{"schema-id": 1, "type": "struct", "fields": [{"id": 1, "name": "x", "required": false, "type": "long"}]},

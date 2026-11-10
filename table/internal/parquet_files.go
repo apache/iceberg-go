@@ -2118,6 +2118,7 @@ func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaDa
 		perParent[e.parentID] = append(perParent[e.parentID], variantFieldBound{
 			jsonPath:    e.leaf.jsonPath,
 			icebergType: e.leaf.icebergType,
+			intWidth:    e.leaf.intWidth,
 			lower:       lo,
 			upper:       hi,
 		})

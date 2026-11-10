@@ -251,7 +251,7 @@ func (c *conflictManifestIO) Open(ctx context.Context, name string) (iceio.File,
 	info, statErr := f.Stat()
 	if statErr != nil || info == nil || info.Size() < 0 {
 		if statIO, ok := c.base.(iceio.StatIO); ok {
-			info, statErr = statIO.Stat(name)
+			info, statErr = statIO.Stat(ctx, name)
 		}
 	}
 	if statErr != nil || info == nil || info.Size() < 0 {
@@ -273,16 +273,16 @@ func (c *conflictManifestIO) Remove(context.Context, string) error {
 	return errConflictManifestIOReadOnly
 }
 
-func (c *conflictManifestIO) Stat(name string) (fs.FileInfo, error) {
+func (c *conflictManifestIO) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
 	if data, ok := c.files[name]; ok {
 		return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
 	}
 
 	if statIO, ok := c.base.(iceio.StatIO); ok {
-		return statIO.Stat(name)
+		return statIO.Stat(ctx, name)
 	}
 
-	f, err := c.Open(context.Background(), name)
+	f, err := c.Open(ctx, name)
 	if err != nil {
 		return nil, err
 	}

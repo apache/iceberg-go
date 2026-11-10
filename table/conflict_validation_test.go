@@ -871,15 +871,31 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 
 type conflictValidationStatIO struct {
 	*trackingCallsIO
+	statCtx context.Context
 }
 
-func (c *conflictValidationStatIO) Stat(name string) (fs.FileInfo, error) {
+func (c *conflictValidationStatIO) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
+	c.statCtx = ctx
 	data, ok := c.files[name]
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
 
 	return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
+}
+
+func TestConflictManifestIOStatPassesContext(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "caller")
+	tio := newTrackingCallsIO()
+	tio.files["manifest.avro"] = []byte("manifest")
+	base := &conflictValidationStatIO{trackingCallsIO: tio}
+	cache := newConflictManifestIO(base)
+
+	_, err := cache.Stat(ctx, "manifest.avro")
+	require.NoError(t, err)
+	require.NotNil(t, base.statCtx)
+	assert.Equal(t, "caller", base.statCtx.Value(key{}))
 }
 
 func TestConflictValidationReusesSharedManifestReads(t *testing.T) {

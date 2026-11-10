@@ -53,12 +53,12 @@ func (f *contextBoundHadoopFS) localPath(name string) string {
 	return filepath.Join(f.root, parsed.Host, filepath.FromSlash(strings.TrimPrefix(parsed.Path, "/")))
 }
 
-func (f *contextBoundHadoopFS) Stat(name string) (fs.FileInfo, error) {
-	if err := f.ctx.Err(); err != nil {
+func (f *contextBoundHadoopFS) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	return f.LocalFS.Stat(f.localPath(name))
+	return f.LocalFS.Stat(ctx, f.localPath(name))
 }
 
 func (f *contextBoundHadoopFS) MkdirAll(name string) error {
@@ -69,12 +69,12 @@ func (f *contextBoundHadoopFS) MkdirAll(name string) error {
 	return f.LocalFS.MkdirAll(f.localPath(name))
 }
 
-func (f *contextBoundHadoopFS) ReadFile(name string) ([]byte, error) {
-	if err := f.ctx.Err(); err != nil {
+func (f *contextBoundHadoopFS) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	return f.LocalFS.ReadFile(f.localPath(name))
+	return f.LocalFS.ReadFile(ctx, f.localPath(name))
 }
 
 func (f *contextBoundHadoopFS) WriteFile(ctx context.Context, name string, content []byte) error {
@@ -137,12 +137,23 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			require.ErrorIs(t, ctx.Err(), context.Canceled)
 			require.NoError(t, factoryContext.Err())
 			require.NoError(t, cat.CreateNamespace(context.Background(), table.Identifier{"ns"}, nil))
+			canceledOperationCtx, cancelOperation := context.WithCancel(context.Background())
+			cancelOperation()
+			_, err = cat.CheckNamespaceExists(canceledOperationCtx, table.Identifier{"ns"})
+			require.ErrorIs(t, err, context.Canceled)
+			_, err = cat.ListNamespaces(canceledOperationCtx, table.Identifier{"ns"})
+			require.ErrorIs(t, err, context.Canceled)
+			err = cat.CreateNamespace(canceledOperationCtx, table.Identifier{"canceled"}, nil)
+			require.ErrorIs(t, err, context.Canceled)
+			exists, err := cat.CheckNamespaceExists(context.Background(), table.Identifier{"canceled"})
+			require.NoError(t, err)
+			require.False(t, exists)
 
 			fs := cat.(*Catalog).filesystem
 			location := warehouse + "/ns/after-cancel.txt"
 			content := []byte("still writable")
 			require.NoError(t, fs.WriteFile(context.Background(), location, content))
-			readBack, err := fs.ReadFile(location)
+			readBack, err := fs.ReadFile(context.Background(), location)
 			require.NoError(t, err)
 			require.Equal(t, content, readBack)
 		})
