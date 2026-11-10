@@ -782,11 +782,10 @@ func (bfs *FileIO) Rename(ctx context.Context, oldpath, newpath string) error {
 	if err := bfs.Copy(ctx, newKey, oldKey, nil); err != nil {
 		return blobErrToFsErr("Rename", oldpath, err)
 	}
-	if err := ctx.Err(); err != nil {
-		return &fs.PathError{Op: "Rename", Path: oldpath, Err: err}
-	}
 
-	if err := bfs.Delete(ctx, oldKey); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+	// The destination is already published. Finish source cleanup even if the
+	// caller cancels, so a committed rename is not reported as failed.
+	if err := bfs.Delete(context.WithoutCancel(ctx), oldKey); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
 		return blobErrToFsErr("Rename", oldpath, err)
 	}
 

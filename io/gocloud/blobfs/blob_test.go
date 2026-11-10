@@ -1095,6 +1095,84 @@ func TestBlobFileIORenameUsesOperationContext(t *testing.T) {
 	assert.True(t, exists)
 }
 
+type cancelAfterCopyBucket struct {
+	driver.Bucket
+	cancel                     context.CancelFunc
+	copyCtx                    context.Context
+	deleteCtx                  context.Context
+	srcKey, dstKey, deletedKey string
+}
+
+func (b *cancelAfterCopyBucket) ErrorCode(err error) gcerrors.ErrorCode {
+	if errors.Is(err, fs.ErrNotExist) {
+		return gcerrors.NotFound
+	}
+	return gcerrors.Unknown
+}
+
+func (b *cancelAfterCopyBucket) Attributes(context.Context, string) (*driver.Attributes, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (b *cancelAfterCopyBucket) ListPaged(context.Context, *driver.ListOptions) (*driver.ListPage, error) {
+	return &driver.ListPage{}, nil
+}
+
+func (b *cancelAfterCopyBucket) Copy(ctx context.Context, dstKey, srcKey string, _ *driver.CopyOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.copyCtx = ctx
+	b.srcKey, b.dstKey = srcKey, dstKey
+	b.cancel()
+	return nil
+}
+
+func (b *cancelAfterCopyBucket) Delete(ctx context.Context, key string, _ *driver.DeleteOptions) error {
+	b.deleteCtx = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.deletedKey = key
+	return nil
+}
+
+func (b *cancelAfterCopyBucket) Close() error { return nil }
+
+func TestBlobFileIORenameFinishesAfterCopyWhenCanceled(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		rename func(*FileIO, context.Context, string, string) error
+	}{
+		{name: "Rename", rename: (*FileIO).Rename},
+		{name: "RenameNoReplace", rename: (*FileIO).RenameNoReplace},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			type renameContextKey struct{}
+			const contextValue = "rename operation"
+			opCtx, cancel := context.WithCancel(context.WithValue(context.Background(), renameContextKey{}, contextValue))
+			defer cancel()
+
+			testDriver := &cancelAfterCopyBucket{cancel: cancel}
+			bucket := blob.NewBucket(testDriver)
+			t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+			bfs := testBlobFileIO(context.Background(), "test-bucket", bucket)
+
+			require.NoError(t, tt.rename(bfs, opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet"))
+			require.ErrorIs(t, opCtx.Err(), context.Canceled)
+			assert.Equal(t, "data/source.parquet", testDriver.srcKey)
+			assert.Equal(t, "data/destination.parquet", testDriver.dstKey)
+			assert.Equal(t, "data/source.parquet", testDriver.deletedKey)
+			require.NotNil(t, testDriver.copyCtx)
+			require.NotNil(t, testDriver.deleteCtx)
+			assert.ErrorIs(t, testDriver.copyCtx.Err(), context.Canceled)
+			assert.NoError(t, testDriver.deleteCtx.Err())
+			assert.Nil(t, testDriver.deleteCtx.Done())
+			assert.Equal(t, contextValue, testDriver.deleteCtx.Value(renameContextKey{}))
+		})
+	}
+}
+
 func TestBlobFileIORenameNoReplace(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
