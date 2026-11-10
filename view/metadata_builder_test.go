@@ -608,6 +608,36 @@ func TestAddVersion_DeduplicationCustomSummary(t *testing.T) {
 	assert.Equal(t, []*Version{v1, expectedV2, expectedUpdatedV2}, md.Versions())
 }
 
+func TestAddVersion_ReuseVersionFromBase(t *testing.T) {
+	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
+	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
+	base, err := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(0)).
+		AddVersion(v1).
+		AddVersion(v2).
+		SetCurrentVersionID(2).
+		Build()
+	require.NoError(t, err)
+
+	// Replace the view with its first definition again. The new version has
+	// a different ID and timestamp, but the same content as v1, so v1 is
+	// reused instead of being added a second time.
+	builder, err := MetadataBuilderFromBase(base.Metadata)
+	require.NoError(t, err)
+	md, err := builder.
+		SetCurrentVersion(
+			newTestVersionWithSQL(3, 0, "select * from ns.tbl", WithTimestampMS(1000)),
+			newTestSchema(0),
+		).
+		Build()
+	require.NoError(t, err)
+
+	assert.Equal(t, []*Version{v1, v2}, md.Versions())
+	assert.Equal(t, v1, md.CurrentVersion())
+	assert.Equal(t, Updates{NewSetCurrentVersionUpdate(1)}, md.Changes)
+}
+
 func TestSchemaIDReassignment(t *testing.T) {
 	s1 := newTestSchema(3, "x")
 	s2 := newTestSchema(6, "y")
