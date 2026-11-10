@@ -4741,6 +4741,12 @@ func TestEndpointNegotiation(t *testing.T) {
 	_, err = cat.CreateTable(context.Background(), table.Identifier{"ns", "tbl"}, tableSchemaSimple)
 	assert.ErrorIs(t, err, rest.ErrEndpointNotSupported)
 	assert.NotErrorIs(t, err, rest.ErrRESTError)
+	// It is also iceberg.ErrNotImplemented, as a 501 for the same op is, so
+	// catalogtest's "not supported" cases hold for a REST server that leaves an
+	// optional endpoint out.
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"ns", "a"}, table.Identifier{"ns", "b"})
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 
 	// An advertised op works.
 	nss, err := cat.ListNamespaces(context.Background(), nil)

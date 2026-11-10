@@ -2476,6 +2476,14 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
+	// Avro's OCF reader currently reads the whole file. A remote planner may
+	// produce partial file ranges; reading each as a full OCF would duplicate rows.
+	if task.Value.File.FileFormat() == iceberg.AvroFile &&
+		(task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes())) {
+		return fmt.Errorf("%w: partial Avro scan task ranges are not supported", iceberg.ErrNotImplemented)
+	}
+
 	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position

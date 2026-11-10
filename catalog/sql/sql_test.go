@@ -1726,7 +1726,7 @@ func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateIsRefusedOnRecommit() {
 	s.Equal(peerMeta.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
 }
 
-func (s *SqliteCatalogTestSuite) TestRejectedUpdateLeavesTransactionResumable() {
+func (s *SqliteCatalogTestSuite) TestRejectedUpdateResumesThenEndsWhenReplayCannotApply() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()
 	defer cat.Close()
@@ -1758,9 +1758,19 @@ func (s *SqliteCatalogTestSuite) TestRejectedUpdateLeavesTransactionResumable() 
 	s.Require().NoError(err)
 	s.Equal(peerTbl.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
 
+	// The resume replays the upgrade against the peer's v3 table, where it
+	// can never apply.
 	_, err = tx.Commit(ctx)
-	s.Require().ErrorIs(err, table.ErrCommitRejected)
-	s.Require().NotErrorIs(err, table.ErrTransactionUnusable)
+	s.Require().ErrorIs(err, table.ErrTransactionUnusable)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidArgument)
+	s.Require().NotErrorIs(err, table.ErrCommitFailed)
+
+	current, err = cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Equal(peerTbl.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
+
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrTransactionUnusable)
 }
 
 func (s *SqliteCatalogTestSuite) TestCatalogUpdateFailureAfterMetadataWriteEndsTransaction() {

@@ -237,7 +237,7 @@ func TestRewritePositionDeleteFilesAcrossSequences(t *testing.T) {
 		"stale positions must not gain applicability from the replacement sequence")
 }
 
-func TestRewritePositionDeleteFilesPreservesCrossSpecPathScopedDeletes(t *testing.T) {
+func TestRewritePositionDeleteFilesPreservesPathScopedDeletesOnOldSpec(t *testing.T) {
 	ctx := t.Context()
 	tbl, _ := newConcurrentRewriteTestTable(t)
 	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
@@ -250,24 +250,20 @@ func TestRewritePositionDeleteFilesPreservesCrossSpecPathScopedDeletes(t *testin
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 
-	// The data remains on the old unpartitioned spec, while the new delete
-	// files refer to its path from the evolved partition spec.
+	// The data and path-scoped deletes keep using the old unpartitioned spec
+	// after the table's default spec evolves.
 	tx = tbl.NewTransaction()
 	require.NoError(t, tx.UpdateSpec(false).
 		AddField("id", iceberg.IdentityTransform{}, "id_identity").Commit())
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
-	spec := tbl.Spec()
-	require.Equal(t, 1, spec.NumFields())
-	partition := map[int]any{spec.Field(0).FieldID: int64(1)}
-
 	var deletes []iceberg.DataFile
 	for i := range 2 {
 		path := fmt.Sprintf("%s/data/cross-spec-delete-%d.parquet", tbl.Location(), i)
 		writeParquetFile(t, path, table.PositionalDeleteArrowSchema,
 			fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, dataPath))
-		builder, buildErr := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
-			path, iceberg.ParquetFile, partition, nil, nil, 1, 128)
+		builder, buildErr := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentPosDeletes, path, iceberg.ParquetFile, nil, nil, nil, 1, 128)
 		require.NoError(t, buildErr)
 		deletes = append(deletes, builder.ReferencedDataFile(dataPath).Build())
 	}

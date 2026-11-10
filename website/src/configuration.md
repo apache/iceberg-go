@@ -452,7 +452,7 @@ but are reserved for future task-group planning and are not currently read.
 | `commit.manifest-merge.enabled` | Merge small manifests during commit. |
 | `commit.manifest.target-size-bytes` | Target size for merged manifests. |
 | `commit.manifest.min-count-to-merge` | Minimum manifest count that triggers a merge. |
-| `commit.retry.num-retries` | Retries for `ErrCommitFailed`. |
+| `commit.retry.num-retries` | Retries for `ErrCommitFailed`. Default `4`; `0` fails on the first conflict. |
 | `commit.retry.min-wait-ms` / `commit.retry.max-wait-ms` / `commit.retry.total-timeout-ms` | Backoff bounds. |
 
 ### Snapshot retention

@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -106,10 +105,7 @@ func rebuildUpdate(snap *Snapshot, newManifestList string, gotParent **Snapshot)
 	}
 }
 
-// TestRebuildSnapshotUpdates_CallsClosureWithFreshParent verifies that
-// rebuildSnapshotUpdates invokes the rebuild closure and passes the fresh
-// branch head as freshParent.
-func TestRebuildSnapshotUpdates_CallsClosureWithFreshParent(t *testing.T) {
+func TestRebuildStagedSnapshot_RebuildsWhenParentChanged(t *testing.T) {
 	const oldManifest = "s3://bucket/old-manifest-list.avro"
 	const newManifest = "s3://bucket/new-manifest-list.avro"
 
@@ -130,30 +126,15 @@ func TestRebuildSnapshotUpdates_CallsClosureWithFreshParent(t *testing.T) {
 	var receivedParent *Snapshot
 	upd := rebuildUpdate(snap, newManifest, &receivedParent)
 
-	rebuilt, orphaned, err := rebuildSnapshotUpdates(
-		t.Context(),
-		[]Update{upd},
-		freshMeta,
-		MainBranch,
-		iceio.LocalFS{},
-		1,
-		false,
-	)
+	next, err := rebuildStagedSnapshot(t.Context(), upd, freshMeta, freshMeta.SnapshotByName(MainBranch), iceio.LocalFS{}, 1, false)
 	require.NoError(t, err)
-	require.Len(t, rebuilt, 1)
-	require.Len(t, orphaned, 1, "old manifest list must be recorded as orphaned")
+	require.NotSame(t, upd, next, "the rebuild must replace the staged update")
 
-	// The closure should have been called with the branch's current head.
 	require.NotNil(t, receivedParent)
 	assert.Equal(t, freshHead, receivedParent.SnapshotID)
 
 	// The rebuilt update must carry the new manifest list.
-	addUpd, ok := rebuilt[0].(*addSnapshotUpdate)
-	require.True(t, ok)
-	assert.Equal(t, newManifest, addUpd.Snapshot.ManifestList)
-
-	// The superseded manifest list becomes an orphan.
-	assert.Equal(t, oldManifest, orphaned[0])
+	assert.Equal(t, newManifest, next.Snapshot.ManifestList)
 }
 
 func TestStagedSnapshotStillValid(t *testing.T) {
@@ -188,10 +169,7 @@ func TestStagedSnapshotStillValid(t *testing.T) {
 	}
 }
 
-// TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged verifies that
-// rebuildSnapshotUpdates skips the rebuild when the update's snapshot
-// already has the fresh branch head as its parent (no-op retry).
-func TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged(t *testing.T) {
+func TestRebuildStagedSnapshot_SkipsWhenParentUnchanged(t *testing.T) {
 	const manifest = "s3://bucket/manifest-list.avro"
 
 	freshHead := int64(42)
@@ -219,24 +197,15 @@ func TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged(t *testing.T) {
 		},
 	}
 
-	rebuilt, orphaned, err := rebuildSnapshotUpdates(
-		t.Context(),
-		[]Update{upd},
-		freshMeta,
-		MainBranch,
-		iceio.LocalFS{},
-		1,
-		false,
-	)
+	next, err := rebuildStagedSnapshot(t.Context(), upd, freshMeta, freshMeta.SnapshotByName(MainBranch), iceio.LocalFS{}, 1, false)
 	require.NoError(t, err)
 	assert.False(t, called, "rebuild closure must not be called when parent is already up-to-date")
-	assert.Empty(t, orphaned, "no orphans when rebuild is skipped")
-	assert.Same(t, upd, rebuilt[0].(*addSnapshotUpdate), "original update must pass through unchanged")
+	assert.Same(t, upd, next, "original update must pass through unchanged")
 }
 
 // The parent is unchanged but table-wide state moved, so the staged snapshot is
 // one AddSnapshot now rejects: skipping its rebuild fails the commit terminally.
-func TestRebuildSnapshotUpdates_RebuildsWhenTableStateMoved(t *testing.T) {
+func TestRebuildStagedSnapshot_RebuildsWhenTableStateMoved(t *testing.T) {
 	const oldManifest = "s3://bucket/manifest-list.avro"
 	const newManifest = "s3://bucket/rebuilt-manifest-list.avro"
 
@@ -254,73 +223,12 @@ func TestRebuildSnapshotUpdates_RebuildsWhenTableStateMoved(t *testing.T) {
 	var receivedParent *Snapshot
 	upd := rebuildUpdate(snap, newManifest, &receivedParent)
 
-	rebuilt, orphaned, err := rebuildSnapshotUpdates(
-		t.Context(),
-		[]Update{upd},
-		freshMeta,
-		MainBranch,
-		iceio.LocalFS{},
-		1,
-		false,
-	)
+	next, err := rebuildStagedSnapshot(t.Context(), upd, freshMeta, freshMeta.SnapshotByName(MainBranch), iceio.LocalFS{}, 1, false)
 	require.NoError(t, err)
 	require.NotNil(t, receivedParent, "the rebuild must run even though the parent is unchanged")
 	assert.Equal(t, freshHead, receivedParent.SnapshotID, "the rebuild must keep the branch head as parent")
 
-	addUpd, ok := rebuilt[0].(*addSnapshotUpdate)
-	require.True(t, ok)
-	assert.Equal(t, newManifest, addUpd.Snapshot.ManifestList)
-	assert.Equal(t, []string{oldManifest}, orphaned)
-}
-
-// TestRebuildSnapshotUpdates_PassesThroughNonRebuildUpdates verifies that
-// updates without a rebuildManifestList closure are returned unmodified.
-func TestRebuildSnapshotUpdates_PassesThroughNonRebuildUpdates(t *testing.T) {
-	plainUpd := NewAddSnapshotUpdate(&Snapshot{
-		SnapshotID:   1,
-		ManifestList: "s3://bucket/no-rebuild.avro",
-		Summary:      &Summary{Operation: OpAppend},
-	})
-
-	// freshMeta may be nil — the plain update must not be touched.
-	rebuilt, orphaned, err := rebuildSnapshotUpdates(
-		t.Context(),
-		[]Update{plainUpd},
-		nil,
-		MainBranch,
-		iceio.LocalFS{},
-		0,
-		false,
-	)
-	require.NoError(t, err)
-	assert.Empty(t, orphaned)
-	assert.Same(t, plainUpd, rebuilt[0].(*addSnapshotUpdate))
-}
-
-// TestRebuildSnapshotUpdates_PropagatesClosureError verifies that an error
-// returned by the rebuild closure surfaces as the function's return error.
-func TestRebuildSnapshotUpdates_PropagatesClosureError(t *testing.T) {
-	freshHead := int64(5)
-	freshMeta := newConflictTestMetadata(t, &freshHead)
-
-	parent := int64(1)
-	snap := &Snapshot{
-		SnapshotID:       10,
-		ParentSnapshotID: &parent,
-		ManifestList:     "s3://bucket/old.avro",
-		Summary:          &Summary{Operation: OpAppend},
-	}
-	wantErr := errors.New("simulated S3 write failure")
-	upd := &addSnapshotUpdate{
-		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
-		Snapshot:   snap,
-		rebuildManifestList: func(_ context.Context, _ Metadata, _ *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
-			return nil, wantErr
-		},
-	}
-
-	_, _, err := rebuildSnapshotUpdates(t.Context(), []Update{upd}, freshMeta, MainBranch, iceio.LocalFS{}, 1, false)
-	assert.ErrorIs(t, err, wantErr)
+	assert.Equal(t, newManifest, next.Snapshot.ManifestList)
 }
 
 // ---------------------------------------------------------------------------
