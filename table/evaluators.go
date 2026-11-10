@@ -993,9 +993,9 @@ func (m *inclusiveMetricsEval) mayContainNull(fieldID int) bool {
 		return true
 	}
 
-	_, ok := m.nullCounts[fieldID]
+	count, ok := m.nullCounts[fieldID]
 
-	return ok
+	return !ok || count != 0
 }
 
 func (m *inclusiveMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
