@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -366,28 +367,15 @@ func defaultValueToJSON(typ Type, value any) any {
 	return value
 }
 
-// decodeNestedFieldDefault preserves the full precision of long defaults.
-// Decoding a JSON number into any first would round values beyond 2^53 to float64.
+// decodeNestedFieldDefault preserves long values without converting them to float64.
+// Nested JSON defaults may contain long literals even for other field types.
 func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression bool) (any, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 
-	if _, ok := typ.(Int64Type); ok {
-		// V4 write-default expressions are JSON objects. Preserve their numeric
-		// literals as json.Number so values beyond 2^53 are not rounded.
-		if allowExpression && strings.HasPrefix(strings.TrimSpace(string(raw)), "{") {
-			decoder := json.NewDecoder(strings.NewReader(string(raw)))
-			decoder.UseNumber()
-
-			var expression any
-			if err := decoder.Decode(&expression); err != nil {
-				return nil, fmt.Errorf("%w: invalid long write-default expression: %w", ErrInvalidSchema, err)
-			}
-
-			return expression, nil
-		}
-
+	trimmed := bytes.TrimSpace(raw)
+	if _, isLong := typ.(Int64Type); isLong && !(allowExpression && len(trimmed) > 0 && trimmed[0] == '{') {
 		var value *int64
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return nil, fmt.Errorf("%w: invalid long default: %w", ErrInvalidSchema, err)
@@ -399,6 +387,20 @@ func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression boo
 		return *value, nil
 	}
 
+	// Preserve numbers in object and list defaults, including v4 expressions.
+	// Other scalar defaults retain their existing Go representations.
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("%w: invalid JSON default: %w", ErrInvalidSchema, err)
+		}
+
+		return value, nil
+	}
+
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return nil, err
@@ -406,7 +408,6 @@ func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression boo
 
 	return value, nil
 }
-
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	aux := struct {
 		ID             *int            `json:"id"`
