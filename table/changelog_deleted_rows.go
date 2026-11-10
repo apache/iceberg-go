@@ -270,10 +270,6 @@ func equalityRowsMatched(ctx context.Context, r arrow.RecordBatch, eqDeleteSets 
 			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d column names",
 				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.colNames))
 		}
-		if len(eqDel.fieldTypes) != 0 && len(eqDel.fieldTypes) != len(eqDel.fieldIDs) {
-			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d field types",
-				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.fieldTypes))
-		}
 		for _, fieldID := range eqDel.fieldIDs {
 			if _, ok := requestedFieldIDSet[fieldID]; !ok {
 				requestedFieldIDSet[fieldID] = struct{}{}
