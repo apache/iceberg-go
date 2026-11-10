@@ -1566,6 +1566,19 @@ newTbl, err := txn.Commit(ctx)
 <pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;staging&quot;)
 if err != nil { /* ... */ }
 </code></pre>
+<p>Cherry-pick an existing snapshot onto the transaction's target branch:</p>
+<pre><code class="language-go">err := txn.CherryPickSnapshot(ctx, sourceSnapshotID, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>A direct-child source fast-forwards without copying data and ignores
+<code>snapshotProps</code>. A divergent v1/v2 append is replayed with fresh snapshot
+metadata; user-supplied WAP publication markers are not trusted. Divergent v3
+appends and divergent replace-partitions overwrites are tracked in
+<a href="https://github.com/apache/iceberg-go/issues/2415">issue #2415</a>. Cherry-picks
+pin the refs they rely on. Divergent replays onto new branches also pin main;
+fast-forwards onto new branches do not. A moved pinned ref fails the commit;
+other conflicts can be retried under the normal commit retry policy.</p>
 <p><code>Commit</code> retries a conflict (<code>ErrCommitFailed</code>) up to <code>commit.retry.num-retries</code> times, 4 by default. See <a href="./concurrent-writes.html#automatic-retry">Automatic retry</a> for the <code>commit.retry.*</code> table properties.</p>
 <h2 id="schema-and-partition-evolution"><a class="header" href="#schema-and-partition-evolution">Schema and partition evolution</a></h2>
 <h3 id="schema-evolution"><a class="header" href="#schema-evolution">Schema evolution</a></h3>
@@ -1603,6 +1616,25 @@ for _, s := range tbl.Metadata().Snapshots() {
     fmt.Println(s.SnapshotID, s.Summary)
 }
 </code></pre>
+<h3 id="comparing-physical-files-between-snapshots-v1-v3"><a class="header" href="#comparing-physical-files-between-snapshots-v1-v3">Comparing physical files between snapshots (v1-v3)</a></h3>
+<p>Use <code>tbl.Inspect().DiffSnapshotFiles</code> to compare the live content files
+referenced by two snapshot IDs, including snapshots on different branches:</p>
+<pre><code class="language-go">diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+if err != nil {
+    return err
+}
+for _, file := range diff.AddedDataFiles {
+    fmt.Println(&quot;added:&quot;, file.FilePath())
+}
+</code></pre>
+<p>The result also includes removed data files and added/removed delete files,
+including positional deletes, equality deletes, and v3 deletion vectors.
+Shared immutable manifests are skipped. Entries are read with a minimal
+projection, so returned files do not contain complete column statistics and
+must <strong>not</strong> be passed to a <code>ManifestWriter</code>. This compares <strong>physical files</strong>,
+not logical row changes.</p>
+<p>See the <a href="https://iceberg.apache.org/spec/#snapshots">Iceberg snapshot specification</a>
+and <a href="https://iceberg.apache.org/spec/#manifests">manifest specification</a>.</p>
 <h3 id="branches-and-tags-1"><a class="header" href="#branches-and-tags-1">Branches and tags</a></h3>
 <p>The CLI's <code>branch create</code> and <code>tag create</code> commands (<a href="./cli.html">CLI</a>) are the most ergonomic surface today. Programmatically, ref creation goes through <code>Catalog.CommitTable</code> with a <code>SetSnapshotRef</code> update:</p>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
@@ -2165,6 +2197,12 @@ rejects when concurrent deletes touch the same files.</p>
 in order and runs the producer's validators against the fresh snapshot. It
 submits the commit only if it is still valid. An append staged after a rollback
 is rebuilt on the rollback target.</p>
+<p><code>RollbackToSnapshot</code>, <code>AssertRefSnapshotID</code>, and <code>CherryPickSnapshot</code> pin the
+refs they guard. If a pinned ref moves, the commit fails instead of rewriting
+that assertion to the new head. Cherry-picks can retry table-level conflicts
+when their pinned refs stay unchanged. A divergent replay onto a new branch
+also pins main; a fast-forward onto a missing branch points directly to the
+source snapshot and does not depend on main.</p>
 <p>Each replayed snapshot from a staged write gets the current timestamp, or one
 millisecond after its parent if that is later. Its timestamp reflects the
 attempt that commits it, not staging time.</p>
@@ -2453,6 +2491,7 @@ instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</
 <tr><td style="text-align: left">Create New Manifests</td><td style="text-align: center">X</td></tr>
 <tr><td style="text-align: left">Plan Scan</td><td style="text-align: center">X</td></tr>
 <tr><td style="text-align: left">Plan Scan for Snapshot</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Diff Snapshot Files</td><td style="text-align: center">X</td></tr>
 </tbody></table>
 </div>
 <h2 id="catalog-support"><a class="header" href="#catalog-support">Catalog support</a></h2>
@@ -2853,6 +2892,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Manifest sequence APIs use explicit names.</strong> <code>ManifestBuilder.SequenceNum</code> and <code>ManifestFile.SequenceNum</code> become <code>SequenceNumber</code>, and <code>ManifestFile.MinSequenceNum</code> becomes <code>MinSequenceNumber</code>. <code>ManifestEntryBuilder.SequenceNum</code> and <code>ManifestEntry.SequenceNum</code> become <code>DataSequenceNumber</code>. <code>FileSequenceNum</code> becomes <code>FileSequenceNumber</code> for entries and their builder. Avro and JSON field names are unchanged.</p>
+</li>
+<li>
+<p><strong><code>io.ReadFileIO.ReadFile</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>ReadFileIO</code> implementations and callers must pass the operation context.</p>
 </li>
 <li>
 <p><strong>View and UDF metadata builder constructors are infallible.</strong> <code>view.NewMetadataBuilder</code> and <code>udf.NewMetadataBuilder</code> now return only a builder instead of <code>(builder, error)</code>; remove error handling at call sites.</p>

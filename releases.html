@@ -291,6 +291,9 @@
 <p><strong>Manifest sequence APIs use explicit names.</strong> <code>ManifestBuilder.SequenceNum</code> and <code>ManifestFile.SequenceNum</code> become <code>SequenceNumber</code>, and <code>ManifestFile.MinSequenceNum</code> becomes <code>MinSequenceNumber</code>. <code>ManifestEntryBuilder.SequenceNum</code> and <code>ManifestEntry.SequenceNum</code> become <code>DataSequenceNumber</code>. <code>FileSequenceNum</code> becomes <code>FileSequenceNumber</code> for entries and their builder. Avro and JSON field names are unchanged.</p>
 </li>
 <li>
+<p><strong><code>io.ReadFileIO.ReadFile</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>ReadFileIO</code> implementations and callers must pass the operation context.</p>
+</li>
+<li>
 <p><strong>View and UDF metadata builder constructors are infallible.</strong> <code>view.NewMetadataBuilder</code> and <code>udf.NewMetadataBuilder</code> now return only a builder instead of <code>(builder, error)</code>; remove error handling at call sites.</p>
 </li>
 <li>
