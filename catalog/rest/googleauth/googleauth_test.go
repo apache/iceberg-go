@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -39,6 +40,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 // tokenServer is a fake Google OAuth token endpoint for service-account JWT
@@ -239,6 +241,30 @@ func TestTokenSourceOutlivesContext(t *testing.T) {
 	tok, err := ts.Token()
 	require.NoError(t, err, "a refresh after the constructor's context is canceled must still work")
 	assert.Equal(t, "late-token", tok.AccessToken)
+}
+
+type countingTransport struct{ calls atomic.Int32 }
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.calls.Add(1)
+
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestTokenSourceUsesContextHTTPClient(t *testing.T) {
+	tokens := newTokenServer(t, "ctx-client-token")
+	transport := &countingTransport{}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: transport})
+
+	ts, err := googleauth.TokenSource(ctx, iceberg.Properties{
+		googleauth.CredentialsJSONKey: serviceAccountJSON(t, tokens.URL),
+	})
+	require.NoError(t, err)
+
+	tok, err := ts.Token()
+	require.NoError(t, err)
+	assert.Equal(t, "ctx-client-token", tok.AccessToken)
+	assert.Equal(t, int32(1), transport.calls.Load(), "the token request goes through the context's client")
 }
 
 func TestTokenSourceRejectsBadCredentials(t *testing.T) {

@@ -49,6 +49,15 @@
 // credentials JSON may be of any type the Google auth library accepts,
 // including external account configurations that fetch tokens from other
 // hosts, so it must come from a source you control.
+//
+// Token requests don't go through the catalog's HTTP client, so a transport,
+// TLS config or proxy configured on the catalog doesn't apply to them, as in
+// Java. They use a client with the default transport and a 60-second timeout.
+// To use a specific client, put it in the context's oauth2.HTTPClient value
+// when loading the catalog, or build the source with TokenSource and pass
+// rest.NewOauth2AuthManager(ts) to rest.WithAuthManager. One exception: on
+// Google Cloud compute, Application Default Credentials come from the metadata
+// server, which the Google library always reaches through its own client.
 package googleauth
 
 import (

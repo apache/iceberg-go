@@ -133,6 +133,16 @@ Java's `GoogleAuthManager`:
 Without either credentials property, Application Default Credentials are used.
 Like `rest.auth.type`, these are read only from the client's properties.
 
+Token requests don't go through the catalog's HTTP client, so a transport, TLS
+config or proxy set with `WithCustomTransport`, `WithTLSConfig` or
+`WithTransportFactory` doesn't apply to them, as in Java. They use a client with
+the default transport and a 60-second timeout. To use a specific client, put it
+in the context's `oauth2.HTTPClient` value when loading the catalog, or build
+the token source yourself (for example with `googleauth.TokenSource`) and pass
+`NewOauth2AuthManager(ts)` to `WithAuthManager`. One exception: on Google Cloud
+compute, Application Default Credentials come from the metadata server, which
+the Google library always reaches through its own client.
+
 ```go
 import (
 	"github.com/apache/iceberg-go"
