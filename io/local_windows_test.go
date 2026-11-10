@@ -20,6 +20,7 @@
 package io
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +39,7 @@ func TestLocalFSParsesWindowsDriveFileURIs(t *testing.T) {
 		"file:/" + pathSlash,
 		"file://localhost/" + pathSlash,
 	} {
-		content, err := (LocalFS{}).ReadFile(name)
+		content, err := (LocalFS{}).ReadFile(context.Background(), name)
 		require.NoError(t, err, name)
 		require.Equal(t, []byte("metadata"), content)
 	}

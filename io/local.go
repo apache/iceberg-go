@@ -78,7 +78,7 @@ func (LocalFS) Open(_ context.Context, name string) (File, error) {
 	return os.Open(path)
 }
 
-func (LocalFS) ReadFile(name string) ([]byte, error) {
+func (LocalFS) ReadFile(_ context.Context, name string) ([]byte, error) {
 	path, err := localPath(name)
 	if err != nil {
 		return nil, err

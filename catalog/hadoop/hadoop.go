@@ -407,8 +407,8 @@ func isTableDirForListing(ctx context.Context, filesystem HadoopCatalogFS, isLoc
 	return isTable, err
 }
 
-func (c *Catalog) readVersionHint(ident table.Identifier) int {
-	data, err := c.filesystem.ReadFile(c.versionHintPath(ident))
+func (c *Catalog) readVersionHint(ctx context.Context, ident table.Identifier) int {
+	data, err := c.filesystem.ReadFile(ctx, c.versionHintPath(ident))
 	if err != nil {
 		return 0
 	}
