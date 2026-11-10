@@ -2770,7 +2770,11 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	// An added deletion vector supersedes added position deletes, matching the
 	// rule used for the deletes already on the task.
 	addedHasPos := addedPos != nil && !addedPos.IsEmpty() && !addedHasDV
-	stampPos := addedHasPos || addedHasDV
+	var positionSink func([]int64)
+	if as.added != nil && task.Value.File != nil {
+		positionSink = as.added.positionSinks[task.Value.File.FilePath()]
+	}
+	stampPos := addedHasPos || addedHasDV || positionSink != nil
 	var posSource *rowPositionSource
 	if synthesizeRowID || applyPosDeletes || hasDV || stampPos {
 		posSource = &rowPositionSource{}
@@ -2816,7 +2820,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if as.added != nil {
-		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos))
+		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos, positionSink))
 		if stampPos {
 			pipeline = append(pipeline, dropChangelogFilePos)
 		}

@@ -1574,10 +1574,11 @@ func validateAddedDeletionVectorTargets(
 type WriteOption func(*dataFileCfg)
 
 type dataFileCfg struct {
-	skipAutoNameMapping bool
-	skipDuplicateCheck  bool
-	rewriteSemantics    bool
-	dataSequenceNumber  *int64
+	skipAutoNameMapping          bool
+	skipDuplicateCheck           bool
+	rewriteSemantics             bool
+	equalityDeleteToDVConversion bool
+	dataSequenceNumber           *int64
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -1593,6 +1594,16 @@ type dataFileCfg struct {
 func withRewriteSemantics() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.rewriteSemantics = true
+	}
+}
+
+// withEqualityDeleteToDVConversion marks a rewrite that replaces equality
+// deletes with file-scoped deletion vectors. The caller has resolved each
+// equality delete against the data files in the pinned snapshot and merged any
+// existing positional deletes into each new vector.
+func withEqualityDeleteToDVConversion() WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.equalityDeleteToDVConversion = true
 	}
 }
 
@@ -2165,7 +2176,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			return fmt.Errorf("%w: added delete files must replace existing delete files",
 				ErrInvalidOperation)
 		}
-		if len(removedDeleteContents) != 1 {
+		_, hasEqualityDeletes := removedDeleteContents[iceberg.EntryContentEqDeletes]
+		conversion := cfg.equalityDeleteToDVConversion && hasEqualityDeletes
+		if len(removedDeleteContents) != 1 && !conversion {
 			return fmt.Errorf("%w: delete-file rewrites cannot combine position and equality delete files",
 				ErrInvalidOperation)
 		}
@@ -2183,11 +2196,14 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		for _, seq := range removedDeleteSequenceNumbers {
 			removedDeleteSeqs[seq] = struct{}{}
 		}
-		if sourceContent == iceberg.EntryContentEqDeletes && len(removedDeleteSeqs) != 1 {
+		if sourceContent == iceberg.EntryContentEqDeletes && len(removedDeleteSeqs) != 1 && !conversion {
 			return fmt.Errorf("%w: equality delete files with different data sequence numbers cannot be merged",
 				ErrInvalidOperation)
 		}
 		for _, addition := range deleteFilesToAdd {
+			if conversion {
+				continue
+			}
 			if addition.file.ContentType() != sourceContent {
 				return fmt.Errorf("%w: cannot rewrite %s delete files as %s delete files",
 					ErrInvalidOperation, sourceContent, addition.file.ContentType())
@@ -2205,6 +2221,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			}
 		}
 	}
+	// Every new DV must replace all applicable legacy position-delete files.
+	// Leaving an applicable position-delete file live is not supported, even if
+	// its positions were already merged into the new vector.
 	if err := validateAddedDeletionVectorTargets(setDeleteFilesToAdd.dvsByRef, liveDataFiles,
 		survivingPositionDeletes, deleteSequenceNumber); err != nil {
 		return err
