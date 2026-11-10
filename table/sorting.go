@@ -553,17 +553,27 @@ func AssignFreshSortOrderIDsWithID(sortOrder SortOrder, old, fresh *iceberg.Sche
 
 	fields := make([]SortField, 0, len(sortOrder.fields))
 	for _, field := range sortOrder.fields {
-		originalField, ok := old.FindColumnName(field.FirstSourceID())
-		if !ok {
-			return SortOrder{}, fmt.Errorf("cannot find source column id %s in old schema", field.String())
+		if len(field.SourceIDs) == 0 {
+			return SortOrder{}, fmt.Errorf("%w: sort field has no source IDs", ErrInvalidSortSourceID)
 		}
-		freshField, ok := fresh.FindFieldByName(originalField)
-		if !ok {
-			return SortOrder{}, fmt.Errorf("cannot find field %s in fresh schema", originalField)
+
+		sourceIDs := make([]int, len(field.SourceIDs))
+		for i, sourceID := range field.SourceIDs {
+			originalName, ok := old.FindColumnName(sourceID)
+			if !ok {
+				return SortOrder{}, fmt.Errorf("%w: cannot find source column id %d in old schema",
+					iceberg.ErrInvalidSchema, sourceID)
+			}
+			freshField, ok := fresh.FindFieldByName(originalName)
+			if !ok {
+				return SortOrder{}, fmt.Errorf("%w: cannot find field %s in fresh schema",
+					iceberg.ErrInvalidSchema, originalName)
+			}
+			sourceIDs[i] = freshField.ID
 		}
 
 		fields = append(fields, SortField{
-			SourceIDs: []int{freshField.ID},
+			SourceIDs: sourceIDs,
 			Transform: field.Transform,
 			Direction: field.Direction,
 			NullOrder: field.NullOrder,
