@@ -292,6 +292,7 @@ type Snapshot struct {
 	SchemaID          *int     `json:"schema-id,omitempty"`
 	FirstRowID        *int64   `json:"first-row-id,omitempty"` // V3: Starting row ID for this snapshot
 	AddedRows         *int64   `json:"added-rows,omitempty"`   // V3: Number of rows added by this snapshot
+	KeyID             *string  `json:"key-id,omitempty"`       // V3: Manifest list encryption key ID
 }
 
 func (s *Snapshot) UnmarshalJSON(data []byte) error {
@@ -400,6 +401,10 @@ func (s Snapshot) Equals(other Snapshot) bool {
 	case s.AddedRows == nil && other.AddedRows != nil:
 		fallthrough
 	case s.AddedRows != nil && other.AddedRows == nil:
+		fallthrough
+	case s.KeyID == nil && other.KeyID != nil:
+		fallthrough
+	case s.KeyID != nil && other.KeyID == nil:
 		return false
 	}
 
@@ -408,6 +413,7 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		((s.SchemaID == other.SchemaID) || (*s.SchemaID == *other.SchemaID)) &&
 		((s.FirstRowID == other.FirstRowID) || (*s.FirstRowID == *other.FirstRowID)) &&
 		((s.AddedRows == other.AddedRows) || (*s.AddedRows == *other.AddedRows)) &&
+		((s.KeyID == other.KeyID) || (*s.KeyID == *other.KeyID)) &&
 		s.SequenceNumber == other.SequenceNumber &&
 		s.TimestampMs == other.TimestampMs &&
 		s.ManifestList == other.ManifestList &&
