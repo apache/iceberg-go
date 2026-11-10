@@ -21,6 +21,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"iter"
 	"slices"
 
 	"golang.org/x/sync/errgroup"
@@ -79,43 +80,37 @@ func (i InspectTable) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toS
 	if err := ctx.Err(); err != nil {
 		return diff, err
 	}
-	if t.metadata == nil {
-		return diff, fmt.Errorf("%w: table metadata is not available", ErrInvalidMetadata)
-	}
-
-	from := t.metadata.SnapshotByID(fromSnapshotID)
+	metadata := t.Metadata()
+	from := metadata.SnapshotByID(fromSnapshotID)
 	if from == nil {
 		return diff, fmt.Errorf("%w: from snapshot %d", ErrSnapshotNotFound, fromSnapshotID)
 	}
-	to := t.metadata.SnapshotByID(toSnapshotID)
+	to := metadata.SnapshotByID(toSnapshotID)
 	if to == nil {
 		return diff, fmt.Errorf("%w: to snapshot %d", ErrSnapshotNotFound, toSnapshotID)
 	}
 	if fromSnapshotID == toSnapshotID {
 		return diff, nil
 	}
-	fsF := sharedSnapshotManifestFSF(t.fsF)
-	fs, err := fsF(ctx)
-	if err != nil {
-		return diff, fmt.Errorf("resolve table file IO: %w", err)
-	}
-	if fs == nil {
-		return diff, fmt.Errorf("%w: table file IO is nil", ErrInvalidOperation)
-	}
-	fromSet, err := t.manifestSetWithFSF(ctx, *from, fsF)
+	provider := t.ManifestProvider()
+	fromManifests, err := provider.Manifests(ctx, *from)
 	if err != nil {
 		return diff, fmt.Errorf("read from snapshot %d manifests: %w", fromSnapshotID, err)
 	}
-	toSet, err := t.manifestSetWithFSF(ctx, *to, fsF)
+	toManifests, err := provider.Manifests(ctx, *to)
 	if err != nil {
 		return diff, fmt.Errorf("read to snapshot %d manifests: %w", toSnapshotID, err)
 	}
 
-	fromOnly, toOnly := uniqueSnapshotManifests(fromSet.borrowAllManifests(), toSet.borrowAllManifests())
+	fromOnly, toOnly := uniqueSnapshotManifests(fromManifests, toManifests)
 	if len(fromOnly) == 0 && len(toOnly) == 0 {
 		return diff, nil
 	}
 
+	fs, err := provider.FS(ctx)
+	if err != nil {
+		return diff, fmt.Errorf("resolve table file IO: %w", err)
+	}
 	fromFiles, err := snapshotDiffLiveFiles(ctx, fs, fromOnly)
 	if err != nil {
 		return diff, fmt.Errorf("read from snapshot %d entries: %w", fromSnapshotID, err)
@@ -165,19 +160,19 @@ func (i InspectTable) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toS
 
 // uniqueSnapshotManifests skips immutable manifests that are present in both
 // snapshots. No ancestry walk is needed, and different branches work.
-func uniqueSnapshotManifests(from, to []iceberg.ManifestFile) (fromOnly, toOnly []iceberg.ManifestFile) {
+func uniqueSnapshotManifests(from, to iter.Seq[iceberg.ManifestFile]) (fromOnly, toOnly []iceberg.ManifestFile) {
 	fromPaths := make(map[string]struct{}, len(from))
 	toPaths := make(map[string]struct{}, len(to))
-	for _, manifest := range from {
+	for manifest := range from {
 		fromPaths[manifest.FilePath()] = struct{}{}
 	}
-	for _, manifest := range to {
+	for manifest := range to {
 		toPaths[manifest.FilePath()] = struct{}{}
 		if _, shared := fromPaths[manifest.FilePath()]; !shared {
 			toOnly = append(toOnly, manifest)
 		}
 	}
-	for _, manifest := range from {
+	for manifest := range from {
 		if _, shared := toPaths[manifest.FilePath()]; !shared {
 			fromOnly = append(fromOnly, manifest)
 		}
