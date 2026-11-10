@@ -1926,6 +1926,7 @@ func literalToPruningPhysBytes(lit iceberg.Literal) ([][]byte, bool) {
 		if value == 0 {
 			positive, _ := iceberg.Float32Literal(0).MarshalBinary()
 			negative, _ := iceberg.Float32Literal(math.Float32frombits(1 << 31)).MarshalBinary()
+
 			return [][]byte{positive, negative}, true
 		}
 	case iceberg.Float64Literal:
@@ -1936,6 +1937,7 @@ func literalToPruningPhysBytes(lit iceberg.Literal) ([][]byte, bool) {
 		if value == 0 {
 			positive, _ := iceberg.Float64Literal(0).MarshalBinary()
 			negative, _ := iceberg.Float64Literal(math.Float64frombits(uint64(1) << 63)).MarshalBinary()
+
 			return [][]byte{positive, negative}, true
 		}
 	}
@@ -1944,6 +1946,7 @@ func literalToPruningPhysBytes(lit iceberg.Literal) ([][]byte, bool) {
 	if !ok {
 		return nil, false
 	}
+
 	return [][]byte{b}, true
 }
 
