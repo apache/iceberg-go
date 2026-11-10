@@ -59,7 +59,7 @@ import (
 )
 
 var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
-	[]int{1},
+	[]int{2},
 	iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false,
 	},

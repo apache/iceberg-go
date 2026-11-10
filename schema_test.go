@@ -1118,12 +1118,15 @@ func TestUnmarshalSchemaAllowsZeroCollectionFieldIDs(t *testing.T) {
 }
 
 func TestUnmarshalSchemaRoundTripsCollectionFieldIDs(t *testing.T) {
-	data, err := json.Marshal(tableSchemaNested)
+	// Preserve the collection ID fixture, but use a valid identifier when
+	// testing the metadata round trip.
+	validSchema := iceberg.NewSchemaWithIdentifiers(tableSchemaNested.ID, []int{2}, tableSchemaNested.Fields()...)
+	data, err := json.Marshal(validSchema)
 	require.NoError(t, err)
 
 	var schema iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &schema))
-	assert.True(t, tableSchemaNested.Equals(&schema))
+	assert.True(t, validSchema.Equals(&schema))
 }
 
 func TestPruneColumnsString(t *testing.T) {
@@ -1629,13 +1632,16 @@ func TestAssignFreshSchemaIDsWithNilBase(t *testing.T) {
 }
 
 func TestSchemaRoundTrip(t *testing.T) {
-	data, err := json.Marshal(tableSchemaNested)
+	// The shared fixture has an optional identifier field. Use a valid
+	// identifier for this metadata round trip, as required by the spec.
+	schema := iceberg.NewSchemaWithIdentifiers(tableSchemaNested.ID, []int{2}, tableSchemaNested.Fields()...)
+	data, err := json.Marshal(schema)
 	require.NoError(t, err)
 
 	assert.JSONEq(t, `{
 		"type": "struct",
 		"schema-id": 1,
-		"identifier-field-ids": [1],
+		"identifier-field-ids": [2],
 		"fields": [
 			{
 				"type": "string",
@@ -1765,7 +1771,7 @@ func TestSchemaRoundTrip(t *testing.T) {
 	var sc iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &sc))
 
-	assert.Truef(t, tableSchemaNested.Equals(&sc), "expected: %s\ngot: %s", tableSchemaNested, &sc)
+	assert.Truef(t, schema.Equals(&sc), "expected: %s\ngot: %s", schema, &sc)
 }
 
 type highestFieldIDUnsupportedType struct{}

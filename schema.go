@@ -99,6 +99,63 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 	return s
 }
 
+// ValidateIdentifierFields enforces the identifier-field rules in the Iceberg
+// spec. Identifiers must be required primitive fields, excluding floats, and
+// may only be nested in required structs. Callers that construct temporary
+// schemas can defer this validation until reading or writing metadata.
+func (s *Schema) ValidateIdentifierFields() error {
+	if len(s.IdentifierFieldIDs) == 0 {
+		return nil
+	}
+
+	fieldsByID, err := IndexByID(s)
+	if err != nil {
+		return err
+	}
+	parents, err := IndexParents(s)
+	if err != nil {
+		return err
+	}
+
+	seen := make(map[int]struct{}, len(s.IdentifierFieldIDs))
+	for _, id := range s.IdentifierFieldIDs {
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("%w: duplicate identifier field id %d", ErrInvalidSchema, id)
+		}
+		seen[id] = struct{}{}
+
+		field, ok := fieldsByID[id]
+		if !ok {
+			return fmt.Errorf("%w: identifier field id %d does not exist", ErrInvalidSchema, id)
+		}
+		if _, primitive := field.Type.(PrimitiveType); !primitive {
+			return fmt.Errorf("%w: identifier field %q must be primitive", ErrInvalidSchema, field.Name)
+		}
+		if !field.Required {
+			return fmt.Errorf("%w: identifier field %q must be required", ErrInvalidSchema, field.Name)
+		}
+		switch field.Type.(type) {
+		case Float32Type, Float64Type:
+			return fmt.Errorf("%w: identifier field %q cannot be float or double", ErrInvalidSchema, field.Name)
+		}
+
+		for parentID, exists := parents[id]; exists; parentID, exists = parents[parentID] {
+			parent, ok := fieldsByID[parentID]
+			if !ok {
+				return fmt.Errorf("%w: identifier field %q has unknown parent %d", ErrInvalidSchema, field.Name, parentID)
+			}
+			if _, isStruct := parent.Type.(*StructType); !isStruct {
+				return fmt.Errorf("%w: identifier field %q cannot be nested in %q", ErrInvalidSchema, field.Name, parent.Name)
+			}
+			if !parent.Required {
+				return fmt.Errorf("%w: identifier field %q cannot be nested in optional field %q", ErrInvalidSchema, field.Name, parent.Name)
+			}
+		}
+	}
+
+	return nil
+}
+
 // checkDuplicateFieldIDs recursively walks a list of fields and returns an
 // error if any field ID appears more than once anywhere in the tree. The
 // seen map is lazily created on the first call so the top-level caller can
@@ -332,9 +389,19 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	ids := aux.IdentifierFieldIDs
-	if ids == nil {
-		ids = []int{}
+	// Java reads identifier IDs into a set. Ignore repeated IDs while
+	// preserving the order of their first occurrence in the JSON array.
+	ids := make([]int, 0, len(aux.IdentifierFieldIDs))
+	seenIDs := make(map[int]struct{}, len(aux.IdentifierFieldIDs))
+	for _, id := range aux.IdentifierFieldIDs {
+		if _, exists := seenIDs[id]; exists {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if err := (&Schema{fields: fields, IdentifierFieldIDs: ids}).ValidateIdentifierFields(); err != nil {
+		return err
 	}
 
 	s.ID = aux.ID
