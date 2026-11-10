@@ -38,6 +38,7 @@ func TestUniqueSnapshotManifestsSingleUse(t *testing.T) {
 	// An iter.Seq is not guaranteed to support a second iteration.
 	oneShot := func(manifests ...iceberg.ManifestFile) (iter.Seq[iceberg.ManifestFile], *int) {
 		runs := new(int)
+
 		return func(yield func(iceberg.ManifestFile) bool) {
 			*runs = *runs + 1
 			if *runs != 1 {
