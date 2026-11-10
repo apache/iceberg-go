@@ -74,6 +74,12 @@ func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) 
 	if len(parts) == 0 {
 		return rowsMightMatch, nil
 	}
+	for _, part := range parts {
+		if (part.LowerBound == nil) != (part.UpperBound == nil) {
+			// One bound without the other cannot prove the manifest has no matches.
+			return rowsMightMatch, nil
+		}
+	}
 
 	// Use a per-call visitor so concurrent callers of the same cached Eval
 	// closure (e.g. the errgroup in classifyFilesForFilteredDeletions and

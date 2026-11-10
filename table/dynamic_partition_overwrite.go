@@ -135,9 +135,8 @@ func dynamicOverwriteManifestCandidates(
 			}
 			inconclusive := false
 			for _, summary := range summaries {
-				if (summary.LowerBound == nil) != (summary.UpperBound == nil) ||
-					(summary.LowerBound == nil && !summary.ContainsNull &&
-						(summary.ContainsNaN == nil || !*summary.ContainsNaN)) {
+				if summary.LowerBound == nil && !summary.ContainsNull &&
+					(summary.ContainsNaN == nil || !*summary.ContainsNaN) {
 					inconclusive = true
 
 					break
