@@ -687,11 +687,6 @@ func (bfs *FileIO) ReadFile(path string) ([]byte, error) {
 // Stat interprets the input path as a directory or file and returns the corresponding FileInfo.
 // If the path does not exist, it returns fs.ErrNotExist
 func (bfs *FileIO) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
-	return bfs.stat(ctx, path)
-}
-
-// stat uses the supplied context for each object-store lookup.
-func (bfs *FileIO) stat(ctx context.Context, path string) (fs.FileInfo, error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "Stat", Path: path, Err: err}
@@ -798,7 +793,7 @@ func (bfs *FileIO) RenameNoReplace(ctx context.Context, oldpath, newpath string)
 		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: err}
 	}
 
-	if _, err := bfs.stat(ctx, newpath); err == nil {
+	if _, err := bfs.Stat(ctx, newpath); err == nil {
 		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: fs.ErrExist}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
