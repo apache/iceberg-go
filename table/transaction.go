@@ -1005,7 +1005,7 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 		return err
 	}
 	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
+	itr := recordsToDataFiles(ctx, meta.loc, meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
 		fs:        wfs,
@@ -2551,7 +2551,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		return err
 	}
 
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
+	itr := recordsToDataFiles(ctx, meta.loc, meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
 		fs:        wfs,

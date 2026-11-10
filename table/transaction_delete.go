@@ -850,7 +850,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	}
 
 	var result []iceberg.DataFile
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
+	itr := recordsToDataFiles(ctx, meta.loc, meta, recordWritingArgs{
 		sc:          arrowSchema,
 		itr:         releaseIter,
 		fs:          wfs,
@@ -915,7 +915,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		existingDVBitmaps[df.FilePath()] = bitmap
 	}
 
-	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), meta, partitionContextByFilePath, recordWritingArgs{
+	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
 		sc:          PositionalDeleteArrowSchema,
 		itr:         posDeleteRecIter,
 		writeUUID:   &commitUUID,
