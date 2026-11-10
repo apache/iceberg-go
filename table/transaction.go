@@ -484,17 +484,6 @@ func (t *Transaction) AssertRefSnapshotID(branch string) error {
 // hold of t.mx, so a concurrent Commit sees both or neither, and a failed
 // apply publishes no pins.
 func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []string) error {
-	return t.applyPinnedWithReplayPolicy(updates, reqs, refs, false)
-}
-
-// applyPinnedNoReplay atomically stages a ref move and forbids any CAS replay.
-// A later snapshot in the same transaction must not be rebuilt against the
-// pre-move head if another branch changed concurrently.
-func (t *Transaction) applyPinnedNoReplay(updates []Update, reqs []Requirement, refs []string) error {
-	return t.applyPinnedWithReplayPolicy(updates, reqs, refs, true)
-}
-
-func (t *Transaction) applyPinnedWithReplayPolicy(updates []Update, reqs []Requirement, refs []string, noReplay bool) error {
 	if err := t.checkNotNil(); err != nil {
 		return err
 	}
@@ -509,9 +498,6 @@ func (t *Transaction) applyPinnedWithReplayPolicy(updates []Update, reqs []Requi
 	}
 	for _, ref := range refs {
 		t.pinnedRefs[ref] = struct{}{}
-	}
-	if noReplay {
-		t.noReplay = true
 	}
 
 	return nil
@@ -2682,9 +2668,8 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 //
 // After a failed commit, calling Commit again normally refreshes the table
 // and replays the staged changes with a fresh retry budget. A cherry-pick
-// fast-forward that fails without an unknown commit state is not resumable:
-// its error wraps ErrTransactionUnusable as well as the original cause.
-// The staged files are kept until a commit lands, so an abandoned transaction
+// fast-forward can resume through the same ordered replay path. The staged
+// files are kept until a commit lands, so an abandoned transaction
 // leaves them, and for a rewrite the manifests later attempts merged, for
 // orphan file removal. TableCommit refuses a transaction whose commit failed,
 // since it does not refresh.

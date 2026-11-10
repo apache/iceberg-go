@@ -121,6 +121,12 @@ func TestCherryPickRefsModePersistsAcrossRESTTableLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	check("loadTableWithMode", loaded)
 
+	// A caller can construct a table without the refs-only option. Refresh
+	// must copy the catalog's history mode onto that existing table handle.
+	unflagged := table.New(loaded.Identifier(), loaded.Metadata(), loaded.MetadataLocation(), loaded.FS, cat)
+	require.NoError(t, unflagged.Refresh(t.Context()))
+	check("Table.Refresh from table.New", unflagged)
+
 	// StagedTable constructs another table over the same partial metadata.
 	// It must not make an incomplete-ancestry cherry-pick appear safe.
 	staged, err := loaded.NewTransaction().StagedTable()

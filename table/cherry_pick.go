@@ -53,9 +53,8 @@ import (
 // The target branch is pinned to its base head. Divergent replay onto a new
 // target also pins main because its append inherits main's files. A fast-forward
 // onto a new target points directly to the source, so does not pin main.
-// Moving a pinned ref fails rather than rebasing. Fast-forward transactions
-// do not retry any CAS conflict because later staged writes must not lose the
-// fast-forwarded files during manifest-list reconstruction.
+// A commit fails if a pinned ref moves; other table-level conflicts can retry
+// by replaying staged updates in order.
 //
 // Duplicate-publication checks need complete ancestry when REST loaded only
 // referenced snapshots (snapshot-loading-mode=refs). Reload in mode=all before
@@ -128,7 +127,7 @@ func (t *Transaction) CherryPickSnapshot(ctx context.Context, snapshotID int64, 
 		}
 		// A fast-forward to a missing branch references source directly;
 		// unlike a replay, it does not fork from main.
-		return t.applyPinnedNoReplay([]Update{update}, []Requirement{req}, []string{target})
+		return t.applyPinned([]Update{update}, []Requirement{req}, []string{target})
 	}
 
 	if source.Summary == nil || source.Summary.Operation != OpAppend {

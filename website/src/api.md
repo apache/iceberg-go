@@ -493,8 +493,6 @@ A direct-child source fast-forwards without copying data and ignores
 metadata; user-supplied WAP publication markers are not trusted. Divergent v3
 appends and divergent replace-partitions overwrites are tracked in
 [issue #2415](https://github.com/apache/iceberg-go/issues/2415). Cherry-picks
-appends and divergent replace-partitions overwrites are tracked in
-[issue #2415](https://github.com/apache/iceberg-go/issues/2415). Cherry-picks
 pin the refs they rely on. Divergent replays onto new branches also pin main;
 fast-forwards onto new branches do not. A moved pinned ref fails the commit;
 other conflicts can be retried under the normal commit retry policy.

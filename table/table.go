@@ -54,8 +54,7 @@ import (
 // catalog implementations should wrap it so callers can detect conflicts
 // with errors.Is(err, table.ErrCommitFailed). Calling Transaction.Commit
 // again retries the conflict unless the error also matches
-// ErrTransactionUnusable. A cherry-pick fast-forward that loses a CAS race
-// returns both errors and must be rebuilt in a new transaction.
+// ErrTransactionUnusable.
 //
 // After refresh, these failures match ErrCommitFailed: a stale requirement,
 // a validator conflict, a deleted commit branch, or a replanned expiry that
@@ -91,19 +90,11 @@ var ErrCommitRejected = errors.New("commit rejected")
 // non-replayable commit whose branch has moved), a validator conflict with a
 // concurrent commit, a diverged base snapshot, files to rewrite that a
 // concurrent commit removed, a commit branch that became a tag or was
-<<<<<<< HEAD
 // deleted, a replaced table, or a staged update that cannot apply after
 // refresh. With snapshot expiry, they also include disabled GC and replanning
 // that changes whether a commit branch other than main is removed. Only the
 // commit branch's head assertion is rebased. A staged update that cannot
 // apply keeps the builder's error as its cause.
-=======
-// deleted, a replaced table, or a staged update that cannot apply after
-// refresh. With snapshot expiry, they also include disabled GC and replanning
-// that changes whether a commit branch other than main is removed. Only the
-// commit branch's head assertion is rebased. A staged update that cannot
-// apply keeps the builder's error as its cause.
->>>>>>> eb35d1e7 (fix(table): address cherry-pick concurrency and REST history review)
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -1095,7 +1086,7 @@ func validateNonRebasedRequirements(reqs []Requirement, branch string, pinned ma
 	return nil
 }
 
-const noReplayHint = "commit carries snapshot-relative delete-file removals or a cherry-pick fast-forward and cannot be replayed; reload the table and rebuild the operation"
+const noReplayHint = "commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals"
 
 // commitStateUnknownError marks a CommitTable failure after which the catalog
 // may have accepted the commit. Every other doCommit failure committed

@@ -259,9 +259,9 @@ func TestCherryPickSnapshotRejectsConcurrentTargetMove(t *testing.T) {
 	assert.ElementsMatch(t, []int64{1, 3}, idsOnRef(t, tbl, table.MainBranch))
 }
 
-// A fast-forward followed by another append must never rebuild on the old
-// main head when an unrelated branch takes the next table-wide sequence number.
-func TestCherryPickSnapshotFastForwardThenAppendDoesNotLoseFilesOnRetry(t *testing.T) {
+// A fast-forward followed by another append must replay in order when an
+// unrelated branch takes the next table-wide sequence number.
+func TestCherryPickSnapshotFastForwardThenAppendRetriesWithoutLosingFiles(t *testing.T) {
 	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
 	source := tbl.SnapshotByName(branchPlanningRef)
@@ -275,10 +275,9 @@ func TestCherryPickSnapshotFastForwardThenAppendDoesNotLoseFilesOnRetry(t *testi
 
 	// The competing writer changes another branch, not main.
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 4)
-	_, err := stale.Commit(t.Context())
-	require.ErrorIs(t, err, table.ErrCommitFailed)
-	require.ErrorIs(t, err, table.ErrTransactionUnusable)
-	assert.ElementsMatch(t, []int64{1}, idsOnRef(t, tbl, table.MainBranch))
+	committed, err := stale.Commit(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, committed, table.MainBranch))
 	assert.ElementsMatch(t, []int64{1, 2, 4}, idsOnRef(t, tbl, branchPlanningRef))
 }
 
@@ -296,7 +295,31 @@ func TestCherryPickSnapshotRejectsConcurrentReplayTargetMoveWithRetries(t *testi
 	assert.ElementsMatch(t, []int64{1, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
 }
 
-func TestCherryPickSnapshotRejectsConcurrentMainMoveForNewBranch(t *testing.T) {
+func TestCherryPickSnapshotFastForwardToNewBranchAllowsMainMove(t *testing.T) {
+	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
+	source := tbl.SnapshotByName(branchPlanningRef)
+	require.NotNil(t, source)
+	require.Equal(t, tbl.CurrentSnapshot().SnapshotID, *source.ParentSnapshotID)
+
+	const newTarget = "cherry-target"
+	stale, err := tbl.NewTransactionOnBranch(newTarget)
+	require.NoError(t, err)
+	require.NoError(t, stale.CherryPickSnapshot(t.Context(), source.SnapshotID, nil))
+
+	// A fast-forward points the new branch directly at the source snapshot.
+	// Advancing main does not change that branch's files or require a main pin.
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+	committed, err := stale.Commit(t.Context())
+	require.NoError(t, err)
+	targetHead := committed.SnapshotByName(newTarget)
+	require.NotNil(t, targetHead)
+	require.Equal(t, source.SnapshotID, targetHead.SnapshotID)
+	assert.ElementsMatch(t, []int64{1, 3}, idsOnRef(t, committed, table.MainBranch))
+	assert.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, committed, newTarget))
+}
+
+func TestCherryPickSnapshotRejectsConcurrentMainMoveForDivergentReplayToNewBranch(t *testing.T) {
 	tbl := appendRowsOnRef(t, newBranchPlanningTable(t, cherryPickRetryProps()), table.MainBranch, 1)
 	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 2)
 	source := tbl.SnapshotByName(branchPlanningRef)
