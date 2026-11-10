@@ -415,6 +415,9 @@
 <p><strong>Snapshot summaries report deletion vectors separately.</strong> On v3 tables, DVs are counted under <code>added-dvs</code> and <code>removed-dvs</code> instead of <code>added-position-delete-files</code> and <code>removed-position-delete-files</code>. <code>added-files-size</code> and <code>removed-files-size</code> use each DV's <code>content_size_in_bytes</code> instead of its whole Puffin file, so they go down for commits with DVs. <code>total-files-size</code> is updated from these values. Partition summaries, commit reports and OTel metrics change the same way. Existing snapshots are not rewritten.</p>
 </li>
 <li>
+<p><strong>Deletion vectors identify row positions.</strong> New Puffin blobs list <code>_pos</code> field ID <code>2147483645</code> in <code>fields</code>, matching Iceberg Java. Existing files are unchanged.</p>
+</li>
+<li>
 <p><strong>Partition and sort source accessors renamed.</strong> Replace <code>PartitionField.SourceID()</code> and <code>SortField.SourceID()</code> with <code>FirstSourceID()</code>. Their behavior and serialized fields are unchanged.</p>
 </li>
 <li>
