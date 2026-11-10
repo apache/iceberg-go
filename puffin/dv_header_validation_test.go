@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,9 +39,10 @@ const placeholderBlobType puffin.BlobType = "filler-blob-type01"
 // non-negative" build error if the lengths ever diverge.
 var _ = [len(puffin.BlobTypeDeletionVector) - len(placeholderBlobType)]byte{}
 
-// rowPositionFieldID is the reserved Iceberg field ID for _pos, the row-position
-// metadata column. Java's BaseDVFileWriter writes it in DV blob fields.
-const rowPositionFieldID int32 = iceberg.RowPositionFieldID
+// rowPositionFieldID is the reserved Iceberg field ID for the row-position
+// metadata column that a deletion vector covers. Spec-compliant DV blobs
+// list this in `fields`; Java's BaseDVFileWriter always emits it.
+const rowPositionFieldID int32 = 2147483546
 
 // writeWithPatchedType writes a blob whose type is placeholderBlobType and
 // carries the requested snapshot-id / sequence-number, then byte-rewrites the

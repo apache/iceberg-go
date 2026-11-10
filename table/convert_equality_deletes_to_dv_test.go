@@ -585,8 +585,15 @@ func TestConvertEqualityDeletesRejectsStaleTransactionAtCommit(t *testing.T) {
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
 
+	// Retry a concurrent commit to verify that the staged conversion is not replayed.
+	retryConfig := tbl.NewTransaction()
+	require.NoError(t, retryConfig.SetProperties(iceberg.Properties{table.CommitNumRetriesKey: "2"}))
+	var err error
+	tbl, err = retryConfig.Commit(ctx)
+	require.NoError(t, err)
+
 	tx := tbl.NewTransaction()
-	_, err := tx.ConvertEqualityDeletesToDeletionVectors(ctx)
+	_, err = tx.ConvertEqualityDeletesToDeletionVectors(ctx)
 	require.NoError(t, err)
 
 	concurrent := appendRows(t, tbl, `[{"id":3,"data":"concurrent"}]`)

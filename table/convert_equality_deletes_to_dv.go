@@ -173,6 +173,11 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 	if len(equalityDeleteFiles) == 0 {
 		return &EqualityDeleteToDVResult{}, nil
 	}
+	writeFS, err := requireWriteFileIO(fs)
+	if err != nil {
+		return nil, err
+	}
+
 	// Only projected equality keys are needed to resolve their matching row
 	// positions. Missing (dropped) keys are handled by the delete loader.
 	keyNames := make(map[string]struct{})
@@ -188,7 +193,7 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		selectedFields = append(selectedFields, name)
 	}
 	slices.Sort(selectedFields)
-	scanOpts := []ScanOption{WithScanPlanningMode(ScanPlanningLocal)}
+	var scanOpts []ScanOption
 	// WithSelectedFields with no names selects every column. Keep that
 	// fallback when all equality keys were dropped from the current schema.
 	if len(selectedFields) > 0 {
@@ -268,10 +273,6 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		}
 	}
 
-	writeFS, err := requireWriteFileIO(fs)
-	if err != nil {
-		return nil, err
-	}
 	metadata, err := meta.Build()
 	if err != nil {
 		return nil, err

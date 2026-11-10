@@ -35,7 +35,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/puffin"
 )
 
@@ -69,7 +68,7 @@ func main() {
 		Type:           puffin.BlobTypeDeletionVector,
 		SnapshotID:     -1,
 		SequenceNumber: -1,
-		Fields:         []int32{iceberg.RowPositionFieldID},
+		Fields:         []int32{},
 		Properties: map[string]string{
 			"referenced-data-file": referencedDataFile,
 			"cardinality":          cardinality,

@@ -141,7 +141,7 @@ func writePuffinWithDVBlobs(t *testing.T, dir string, blobs ...testPuffinBlobInp
 			Type:           puffin.BlobTypeDeletionVector,
 			SnapshotID:     -1,
 			SequenceNumber: -1,
-			Fields:         []int32{iceberg.RowPositionFieldID},
+			Fields:         []int32{2147483546},
 			Properties:     blob.props,
 		}, blob.data)
 		require.NoError(t, err)
@@ -174,7 +174,7 @@ func writeRawPuffinBlob(t *testing.T, dir, name string, blobBytes []byte, blobTy
 	}
 	meta := puffin.BlobMetadata{
 		Type:             blobType,
-		Fields:           []int32{iceberg.RowPositionFieldID},
+		Fields:           []int32{2147483546},
 		SnapshotID:       -1,
 		SequenceNumber:   -1,
 		Offset:           int64(puffin.MagicSize),
@@ -221,7 +221,7 @@ func writeRawPuffinWithDVBlobs(t *testing.T, dir string, gap int, blobs ...testP
 			Type:           puffin.BlobTypeDeletionVector,
 			SnapshotID:     -1,
 			SequenceNumber: -1,
-			Fields:         []int32{iceberg.RowPositionFieldID},
+			Fields:         []int32{2147483546},
 			Offset:         int64(buf.Len()),
 			Length:         int64(len(blob.data)),
 			Properties:     blob.props,

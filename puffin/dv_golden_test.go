@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,9 +37,14 @@ import (
 // https://github.com/apache/iceberg/blob/main/core/src/test/resources/org/apache/iceberg/deletes/small-alternating-values-position-index.bin
 const dvFixturePayloadName = "deletion-vector-v1-payload.bin"
 
-// dvFixturePuffinName is the Go-written Puffin envelope around a Java-produced
-// DV payload. It pins the Go writer's bytes and checks the Java row-position
-// field metadata. Regenerate via `go generate ./puffin/...`.
+// dvFixturePuffinName is the complete puffin file wrapping the Java-produced
+// DV payload. The envelope is what puffin.Writer emits today; this is a
+// Go-writer wire-format pin, not a strong Java cross-impl pin. (The basic
+// puffin envelope shape is cross-checked by TestWriterBitIdenticalWithJava,
+// but that test does not exercise empty Fields arrays or multi-key blob
+// Properties, both of which this fixture relies on. JSON key ordering of
+// blob Properties is also encoder-defined.) Regenerate via
+// `go generate ./puffin/...` (driven by gen_dv_fixture.go).
 const dvFixturePuffinName = "deletion-vector-v1.puffin"
 
 // dvFixtureReferencedDataFile is the placeholder data-file path stored in
@@ -72,7 +76,7 @@ func buildDVFixture(t *testing.T, payload []byte) []byte {
 		Type:           puffin.BlobTypeDeletionVector,
 		SnapshotID:     -1,
 		SequenceNumber: -1,
-		Fields:         []int32{iceberg.RowPositionFieldID},
+		Fields:         []int32{},
 		Properties: map[string]string{
 			"referenced-data-file": dvFixtureReferencedDataFile,
 			"cardinality":          dvFixtureCardinality,
@@ -140,8 +144,11 @@ func TestDeletionVectorPuffinWireFormat(t *testing.T) {
 		"deletion-vector-v1 spec requires snapshot-id=-1")
 	assert.Equal(t, int64(-1), blob.SequenceNumber,
 		"deletion-vector-v1 spec requires sequence-number=-1")
-	assert.Equal(t, []int32{iceberg.RowPositionFieldID}, blob.Fields,
-		"DV blob fields must identify the row-position metadata column, as Java does")
+	// Strict empty (not nil): Java's parser rejects "fields": null. Asserting
+	// the concrete []int32{} value catches a future regression that would
+	// emit null instead of [].
+	assert.Equal(t, []int32{}, blob.Fields,
+		"DV blob fields must be an explicit empty array per spec")
 	assert.Nil(t, blob.CompressionCodec,
 		"this fixture is uncompressed (per fixture choice, not spec)")
 	assert.Len(t, blob.Properties, 2,

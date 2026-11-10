@@ -99,7 +99,6 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 - `maintenance.PurgeFiles` (previously `Table.PurgeFiles`) now calls `IO.Remove` concurrently, with up to 32 calls in flight, when the filesystem does not implement `BulkRemovableIO`. Custom IO implementations, including those registered with `io.Register`, must make `Remove` safe for concurrent use and synchronize any shared mutable state. The bulk deletion path is unchanged.
 - **Snapshot summaries report deletion vectors separately.** On v3 tables, DVs are counted under `added-dvs` and `removed-dvs` instead of `added-position-delete-files` and `removed-position-delete-files`. `added-files-size` and `removed-files-size` use each DV's `content_size_in_bytes` instead of its whole Puffin file, so they go down for commits with DVs. `total-files-size` is updated from these values. Partition summaries, commit reports and OTel metrics change the same way. Existing snapshots are not rewritten.
-- **Deletion-vector Puffin blobs now identify the `_pos` field.** Newly written deletion vectors list the reserved row-position field ID `2147483546` in Puffin blob `fields` metadata instead of an empty list, matching Iceberg Java. This affects all deletion-vector writes, not just equality-delete conversion; existing Puffin files are unchanged.
 
 - **Partition and sort source accessors renamed.** Replace `PartitionField.SourceID()` and `SortField.SourceID()` with `FirstSourceID()`. Their behavior and serialized fields are unchanged.
 
