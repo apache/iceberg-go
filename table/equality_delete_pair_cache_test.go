@@ -20,6 +20,7 @@ package table
 import (
 	"sync"
 	"testing"
+
 	"github.com/apache/iceberg-go"
 )
 
