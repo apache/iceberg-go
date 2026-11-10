@@ -153,6 +153,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Int64Type:
+		// Old int bounds retain their 4-byte encoding after promotion to long.
+		if len(data) == 4 {
+			return Int64Literal(int32(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Int64Literal
 		err := v.UnmarshalBinary(data)
 
@@ -163,6 +168,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Float64Type:
+		// Old float bounds retain their 4-byte encoding after promotion to double.
+		if len(data) == 4 {
+			return Float64Literal(math.Float32frombits(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Float64Literal
 		err := v.UnmarshalBinary(data)
 
