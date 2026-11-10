@@ -366,15 +366,56 @@ func defaultValueToJSON(typ Type, value any) any {
 	return value
 }
 
+// decodeNestedFieldDefault preserves the full precision of long defaults.
+// Decoding a JSON number into any first would round values beyond 2^53 to float64.
+func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression bool) (any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	if _, ok := typ.(Int64Type); ok {
+		// V4 write-default expressions are JSON objects. Preserve their numeric
+		// literals as json.Number so values beyond 2^53 are not rounded.
+		if allowExpression && strings.HasPrefix(strings.TrimSpace(string(raw)), "{") {
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			decoder.UseNumber()
+
+			var expression any
+			if err := decoder.Decode(&expression); err != nil {
+				return nil, fmt.Errorf("%w: invalid long write-default expression: %w", ErrInvalidSchema, err)
+			}
+
+			return expression, nil
+		}
+
+		var value *int64
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, fmt.Errorf("%w: invalid long default: %w", ErrInvalidSchema, err)
+		}
+		if value == nil {
+			return nil, nil
+		}
+
+		return *value, nil
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		ID             *int      `json:"id"`
-		Name           string    `json:"name"`
-		Required       *bool     `json:"required"`
-		Type           typeIFace `json:"type"`
-		Doc            string    `json:"doc"`
-		InitialDefault any       `json:"initial-default"`
-		WriteDefault   any       `json:"write-default"`
+		ID             *int            `json:"id"`
+		Name           string          `json:"name"`
+		Required       *bool           `json:"required"`
+		Type           typeIFace       `json:"type"`
+		Doc            string          `json:"doc"`
+		InitialDefault json.RawMessage `json:"initial-default"`
+		WriteDefault   json.RawMessage `json:"write-default"`
 	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
@@ -397,10 +438,19 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
 	}
 
+	initialDefault, err := decodeNestedFieldDefault(aux.InitialDefault, aux.Type.Type, false)
+	if err != nil {
+		return fmt.Errorf("invalid initial-default for field %q: %w", aux.Name, err)
+	}
+	writeDefault, err := decodeNestedFieldDefault(aux.WriteDefault, aux.Type.Type, true)
+	if err != nil {
+		return fmt.Errorf("invalid write-default for field %q: %w", aux.Name, err)
+	}
+
 	*n = NestedField{
 		Type: aux.Type.Type,
 		ID:   *aux.ID, Name: aux.Name, Required: *aux.Required, Doc: aux.Doc,
-		InitialDefault: aux.InitialDefault, WriteDefault: aux.WriteDefault,
+		InitialDefault: initialDefault, WriteDefault: writeDefault,
 	}
 
 	return nil
