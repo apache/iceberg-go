@@ -823,7 +823,11 @@ func (u *removeSnapshotsUpdate) expiredSnapshots(preTable, postTable *Table, fil
 		if !ok {
 			return nil, fmt.Errorf("missing snapshot %d", id)
 		}
-		files[snap.ManifestList] = struct{}{}
+		// V1 snapshots may embed manifests and have no manifest list.
+		// Never pass an empty path to the FileIO removal callback.
+		if snap.ManifestList != "" {
+			files[snap.ManifestList] = struct{}{}
+		}
 		for _, path := range snap.statisticsPaths {
 			files[path] = struct{}{}
 		}
