@@ -309,7 +309,7 @@ func TestCherryPickSnapshotFastForwardToNewBranchAllowsMainMove(t *testing.T) {
 
 	// A fast-forward points the new branch directly at the source snapshot.
 	// Advancing main does not change that branch's files or require a main pin.
-	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 3)
+	appendRowsOnRef(t, tbl, table.MainBranch, 3)
 	committed, err := stale.Commit(t.Context())
 	require.NoError(t, err)
 	targetHead := committed.SnapshotByName(newTarget)
