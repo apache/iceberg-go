@@ -939,9 +939,16 @@ func TestBranchPromotionCLIAllowsUnrelatedMainMove(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cat := newBranchPromotionTestCatalog(t)
+			// Disable retries to prove the CLI does not fence unrelated main.
+			settings, err := table.MetadataBuilderFromBase(cat.meta, "")
+			require.NoError(t, err)
+			require.NoError(t, settings.SetProperties(iceberg.Properties{table.CommitNumRetriesKey: "0"}))
+			cat.meta, err = settings.Build()
+			require.NoError(t, err)
 			cat.moveMainOnCommit = true
 			out := &branchPromotionOutput{}
-			tc.run(out, cat)
+			code := captureBranchTagExit(func() { tc.run(out, cat) })
+			require.Zero(t, code, "CLI error: %v", out.lastErr)
 			require.NoError(t, out.lastErr)
 			assert.Equal(t, int64(6000), cat.meta.SnapshotByName("feature-branch").SnapshotID)
 			assert.Equal(t, int64(6000), cat.meta.CurrentSnapshot().SnapshotID)
