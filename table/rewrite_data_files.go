@@ -241,6 +241,7 @@ type compactionGroupConfig struct {
 	recordBatchBufferSize int
 	parquetRowGroupLimit  int
 	sortOrder             *SortOrder
+	hilbert               *hilbertSpec
 }
 
 // WithCompactionTargetFileSize sets the size target for output files
@@ -363,6 +364,43 @@ func WithCompactionSortOrder(order SortOrder) CompactionGroupOption {
 	}
 }
 
+type hilbertSpec struct {
+	column string
+	opts   []HilbertOption
+}
+
+// WithCompactionHilbertOrder switches the group rewrite from bin-pack to
+// spatial clustering: the rows of the group are ordered by the Hilbert
+// curve index of a top-level geometry or geography column, so
+// rows close in space land tend to more often share the same file and row group.
+//
+// Each geometry is represented by the center of its planar XY bounding
+// box and snapped to a grid of 2^bits cells per axis ([WithHilbertBits])
+// over the extent of the data ([WithHilbertBounds] fixes the extent).
+// Geometries are decoded as the writer's statistics decode them: ISO
+// WKB and EWKB (with or without an SRID) are accepted, nested geometry
+// collections are walked, and empty members are ignored. Rows with a
+// null or empty geometry, or one made only of empty members, have no
+// location and go last. Coordinates are treated as planar x/y, so
+// geography across the antimeridian is not wrapped.
+//
+// Rows are split by the table's current partition spec first and each
+// partition is ordered on its own. The whole group is held in memory
+// decoded until its files are written, so plan groups with
+// [compaction.Config.MaxGroupSizeBytes] large enough to cover a
+// partition and small enough to fit in memory. Rows are ordered only
+// within a group.
+//
+// Hilbert order is not an Iceberg sort order: output files record no
+// sort_order_id. The option cannot be combined with
+// [WithCompactionSortOrder]; [ExecuteCompactionGroup] rejects that, and
+// a column that is not a geometry or geography column.
+func WithCompactionHilbertOrder(column string, opts ...HilbertOption) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		c.hilbert = &hilbertSpec{column: column, opts: opts}
+	}
+}
+
 // rewriteStrategy decides how a compaction group's rows are arranged
 // before they are written: which rows are read in what order, and what
 // the writer may assume about that order.
@@ -375,15 +413,23 @@ type rewriteStrategy interface {
 }
 
 // rewriteStrategy returns the strategy the options select: sort when a
-// sort order is set, bin-pack otherwise.
+// sort order is set, hilbert when a hilbert column is set, bin-pack
+// otherwise.
 func (c compactionGroupConfig) rewriteStrategy(tbl *Table) (rewriteStrategy, error) {
-	if c.sortOrder == nil {
+	if c.sortOrder == nil && c.hilbert == nil {
 		return binPackStrategy{}, nil
+	}
+	if c.sortOrder != nil && c.hilbert != nil {
+		return nil, fmt.Errorf("%w: compaction cannot combine a sort order with hilbert order", ErrInvalidOperation)
 	}
 
 	batchRows := int64(c.arrowBatchSize)
 	if batchRows <= 0 {
 		batchRows = int64(tbl.Properties().GetInt(tblutils.ParquetBatchSizeKey, tblutils.ParquetBatchSizeDefault))
+	}
+
+	if c.hilbert != nil {
+		return newHilbertStrategy(tbl, c.hilbert.column, c.hilbert.opts, max(batchRows, 1))
 	}
 
 	return newSortStrategy(tbl, *c.sortOrder, max(batchRows, 1))

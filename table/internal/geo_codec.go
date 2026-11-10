@@ -126,6 +126,44 @@ func decodeWKB(data []byte) (geom.T, error) {
 	return wkb.Unmarshal(data, wkbEmptyPointOption)
 }
 
+// WKBCenterXY returns the center of the planar XY bounding box of one WKB
+// geometry: the midpoint of the finite X and Y coordinates of its leaf
+// geometries, recursing into geometry collections. Both ISO WKB and EWKB
+// are accepted (see decodeWKB), and ISO empty points decode to NaN
+// coordinates, which are skipped like any other NaN. ok is false when the
+// geometry has no finite X and Y coordinate at all - an empty geometry, a
+// collection of empty members, or coordinates that are infinite - so the
+// geometry has no usable location. err reports a value that does not
+// decode.
+func WKBCenterXY(data []byte) (x, y float64, ok bool, err error) {
+	g, err := decodeWKB(data)
+	if err != nil {
+		return 0, 0, false, err
+	}
+
+	// extend walks collections recursively and skips NaN coordinates, so a
+	// nested collection cannot panic (geom.T.Bounds does on nested
+	// collections) and an empty member cannot poison the finite bounds.
+	var acc geoBoundsAccumulator
+	acc.extend(g)
+	if !acc.has[geoDimX] || !acc.has[geoDimY] {
+		return 0, 0, false, nil
+	}
+
+	// Halve before adding, rather than computing (min+max)/2, so extreme
+	// coordinates cannot overflow: min+max can exceed MaxFloat64 and turn
+	// into +/-Inf, but two halves never can. Halving a float only lowers
+	// its exponent, so it is exact except for subnormals, and the only
+	// rounding is the final addition, the same one (min+max)/2 makes.
+	x = acc.min[geoDimX]/2 + acc.max[geoDimX]/2
+	y = acc.min[geoDimY]/2 + acc.max[geoDimY]/2
+	if math.IsInf(x, 0) || math.IsInf(y, 0) || math.IsNaN(x) || math.IsNaN(y) {
+		return 0, 0, false, nil
+	}
+
+	return x, y, true, nil
+}
+
 func normalizeWKB(data []byte) ([]byte, error) {
 	if !isEWKB(data) {
 		return data, nil

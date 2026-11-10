@@ -542,25 +542,56 @@ func yieldSortedPartition(
 		return true
 	}
 
+	total, err := checkCompactionBatches(batches)
+	if err != nil {
+		yield(nil, err)
+
+		return false
+	}
+
+	refs := naturalRowRefs(batches, total)
+	slices.SortStableFunc(refs, rows.bind(batches))
+
+	return yieldOrderedRows(ctx, batches, refs, batchRows, yield)
+}
+
+// checkCompactionBatches verifies batches share one schema and returns
+// their total row count.
+func checkCompactionBatches(batches []arrow.RecordBatch) (int64, error) {
 	sc := batches[0].Schema()
 	var total int64
 	for _, b := range batches {
 		if !b.Schema().Equal(sc) {
-			yield(nil, errors.New("sort compaction: scan produced batches with differing schemas"))
-
-			return false
+			return 0, errors.New("sort compaction: scan produced batches with differing schemas")
 		}
 		total += b.NumRows()
 	}
 
+	return total, nil
+}
+
+// naturalRowRefs returns a reference to every row of batches in scan order.
+func naturalRowRefs(batches []arrow.RecordBatch, total int64) []rowRef {
 	refs := make([]rowRef, 0, total)
 	for b, rec := range batches {
 		for r := range int(rec.NumRows()) {
 			refs = append(refs, newRowRef(b, r))
 		}
 	}
-	slices.SortStableFunc(refs, rows.bind(batches))
 
+	return refs
+}
+
+// yieldOrderedRows yields the rows of batches in the order refs lists
+// them, in batches of at most batchRows rows. Ownership of each yielded
+// batch passes to the consumer. It returns false when iteration must stop.
+func yieldOrderedRows(
+	ctx context.Context,
+	batches []arrow.RecordBatch,
+	refs []rowRef,
+	batchRows int64,
+	yield func(arrow.RecordBatch, error) bool,
+) bool {
 	if sortedRefsAreIdentity(refs, batches) {
 		// Keep the scan's natural order. Every output owns its reference to
 		// the original batch; no Arrow Take arrays are needed.
