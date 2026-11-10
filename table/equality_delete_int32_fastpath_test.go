@@ -42,7 +42,7 @@ func singleInt32EqualityDeleteTestSet(values ...int32) *equalityDeleteSet {
 		keys[buf.String()] = struct{}{}
 	}
 
-	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}}
+	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int32}}
 }
 
 func TestProcessEqualityDeletesSingleInt32MatchesGeneric(t *testing.T) {
@@ -91,7 +91,7 @@ func TestProcessEqualityDeletesSingleInt32MatchesGeneric(t *testing.T) {
 				}
 
 				genericSet := &equalityDeleteSet{
-					keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs, colNames: deleteSet.colNames,
+					keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs, colNames: deleteSet.colNames, fieldTypes: deleteSet.fieldTypes,
 				}
 				genericSet.singleInt32Once.Do(func() {})
 				generic, err := processEqualityDeletesColumnarForFile(ctx,
@@ -242,7 +242,7 @@ func buildBenchDeleteSetSingleInt32(numDeletes int) *equalityDeleteSet {
 		keys[buf.String()] = struct{}{}
 	}
 
-	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}}
+	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int32}}
 }
 
 func BenchmarkProcessEqualityDeletesSingleInt32(b *testing.B) {
