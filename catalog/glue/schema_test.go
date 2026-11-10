@@ -105,12 +105,8 @@ func TestIcebergTypeToGlueType(t *testing.T) {
 			expected: "binary",
 		},
 		{
-			name: "nested fixed type",
-			input: &iceberg.ListType{
-				ElementID:       1,
-				Element:         iceberg.MustFixedTypeOf(16),
-				ElementRequired: true,
-			},
+			name:     "nested fixed type",
+			input:    iceberg.NewListType(1, iceberg.MustFixedTypeOf(16), true),
 			expected: "array<binary>",
 		},
 	}
@@ -198,28 +194,26 @@ func TestFieldToGlueColumn(t *testing.T) {
 }
 
 func TestNestedStructType(t *testing.T) {
-	addressStruct := &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{
-				ID:       1,
-				Name:     "street",
-				Type:     iceberg.StringType{},
-				Required: true,
-			},
-			{
-				ID:       2,
-				Name:     "city",
-				Type:     iceberg.StringType{},
-				Required: true,
-			},
-			{
-				ID:       3,
-				Name:     "zip",
-				Type:     iceberg.Int32Type{},
-				Required: true,
-			},
+	addressStruct := iceberg.NewStructType(
+		iceberg.NestedField{
+			ID:       1,
+			Name:     "street",
+			Type:     iceberg.StringType{},
+			Required: true,
 		},
-	}
+		iceberg.NestedField{
+			ID:       2,
+			Name:     "city",
+			Type:     iceberg.StringType{},
+			Required: true,
+		},
+		iceberg.NestedField{
+			ID:       3,
+			Name:     "zip",
+			Type:     iceberg.Int32Type{},
+			Required: true,
+		},
+	)
 	structType := icebergTypeToGlueType(addressStruct)
 	expected := "struct<street:string,city:string,zip:int>"
 	assert.Equal(t, expected, structType)
@@ -237,11 +231,7 @@ func TestNestedStructType(t *testing.T) {
 }
 
 func TestNestedListType(t *testing.T) {
-	stringList := &iceberg.ListType{
-		ElementID:       1,
-		Element:         iceberg.StringType{},
-		ElementRequired: true,
-	}
+	stringList := iceberg.NewListType(1, iceberg.StringType{}, true)
 	listType := icebergTypeToGlueType(stringList)
 	assert.Equal(t, "array<string>", listType)
 	field := iceberg.NestedField{
@@ -258,13 +248,7 @@ func TestNestedListType(t *testing.T) {
 }
 
 func TestNestedMapType(t *testing.T) {
-	stringIntMap := &iceberg.MapType{
-		KeyID:         1,
-		KeyType:       iceberg.StringType{},
-		ValueID:       2,
-		ValueType:     iceberg.Int32Type{},
-		ValueRequired: true,
-	}
+	stringIntMap := iceberg.NewMapType(1, iceberg.StringType{}, 2, iceberg.Int32Type{}, true)
 	mapType := icebergTypeToGlueType(stringIntMap)
 	assert.Equal(t, "map<string,int>", mapType)
 	field := iceberg.NestedField{
@@ -281,35 +265,23 @@ func TestNestedMapType(t *testing.T) {
 }
 
 func TestComplexNestedTypes(t *testing.T) {
-	stringIntMap := &iceberg.MapType{
-		KeyID:         1,
-		KeyType:       iceberg.StringType{},
-		ValueID:       2,
-		ValueType:     iceberg.Int32Type{},
-		ValueRequired: true,
-	}
-	mapList := &iceberg.ListType{
-		ElementID:       3,
-		Element:         stringIntMap,
-		ElementRequired: true,
-	}
-	complexStruct := &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{
-				ID:       4,
-				Name:     "name",
-				Type:     iceberg.StringType{},
-				Required: true,
-			},
-			{
-				ID:       5,
-				Name:     "attributes",
-				Type:     mapList,
-				Required: false,
-				Doc:      "List of attribute maps",
-			},
+	stringIntMap := iceberg.NewMapType(1, iceberg.StringType{}, 2, iceberg.Int32Type{}, true)
+	mapList := iceberg.NewListType(3, stringIntMap, true)
+	complexStruct := iceberg.NewStructType(
+		iceberg.NestedField{
+			ID:       4,
+			Name:     "name",
+			Type:     iceberg.StringType{},
+			Required: true,
 		},
-	}
+		iceberg.NestedField{
+			ID:       5,
+			Name:     "attributes",
+			Type:     mapList,
+			Required: false,
+			Doc:      "List of attribute maps",
+		},
+	)
 	complexType := icebergTypeToGlueType(complexStruct)
 	expected := "struct<name:string,attributes:array<map<string,int>>>"
 	assert.Equal(t, expected, complexType)
@@ -327,27 +299,21 @@ func TestComplexNestedTypes(t *testing.T) {
 }
 
 func TestSchemaToGlueColumns(t *testing.T) {
-	addressStruct := &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{
-				ID:       7,
-				Name:     "street",
-				Type:     iceberg.StringType{},
-				Required: true,
-			},
-			{
-				ID:       6,
-				Name:     "city",
-				Type:     iceberg.StringType{},
-				Required: true,
-			},
+	addressStruct := iceberg.NewStructType(
+		iceberg.NestedField{
+			ID:       7,
+			Name:     "street",
+			Type:     iceberg.StringType{},
+			Required: true,
 		},
-	}
-	stringList := &iceberg.ListType{
-		ElementID:       5,
-		Element:         iceberg.StringType{},
-		ElementRequired: true,
-	}
+		iceberg.NestedField{
+			ID:       6,
+			Name:     "city",
+			Type:     iceberg.StringType{},
+			Required: true,
+		},
+	)
+	stringList := iceberg.NewListType(5, iceberg.StringType{}, true)
 	fields := []iceberg.NestedField{
 		{
 			ID:       1,

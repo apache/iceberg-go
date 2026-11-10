@@ -958,25 +958,20 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 func TestCloneSchemaCopiesNestedValues(t *testing.T) {
 	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
 		iceberg.NestedField{
-			ID: 1, Name: "struct", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{{
+			ID: 1, Name: "struct", Type: iceberg.NewStructType(iceberg.NestedField{
 				ID: 2, Name: "nested", Type: iceberg.PrimitiveTypes.Binary,
 				InitialDefault: []byte{1}, WriteDefault: iceberg.BinaryLiteral{2},
-			}}},
+			}),
 		},
 		iceberg.NestedField{
-			ID: 3, Name: "list", Type: &iceberg.ListType{
-				ElementID: 4, Element: &iceberg.StructType{FieldList: []iceberg.NestedField{{
-					ID: 5, Name: "element", Type: iceberg.PrimitiveTypes.String,
-				}}},
-			},
+			ID: 3, Name: "list", Type: iceberg.NewListType(4, iceberg.NewStructType(iceberg.NestedField{
+				ID: 5, Name: "element", Type: iceberg.PrimitiveTypes.String,
+			}), false),
 		},
 		iceberg.NestedField{
-			ID: 6, Name: "map", Type: &iceberg.MapType{
-				KeyID: 7, KeyType: iceberg.PrimitiveTypes.String, ValueID: 8,
-				ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{{
-					ID: 9, Name: "value", Type: iceberg.PrimitiveTypes.String,
-				}}},
-			},
+			ID: 6, Name: "map", Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.NewStructType(iceberg.NestedField{
+				ID: 9, Name: "value", Type: iceberg.PrimitiveTypes.String,
+			}), false),
 		},
 	)
 
@@ -992,11 +987,11 @@ func TestCloneSchemaCopiesNestedValues(t *testing.T) {
 
 	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
 	originalStruct := schema.Field(0).Type.(*iceberg.StructType)
-	assert.Equal(t, "nested", originalStruct.FieldList[0].Name)
-	assert.Equal(t, "01", originalStruct.FieldList[0].InitialDefault)
-	assert.Equal(t, "02", originalStruct.FieldList[0].WriteDefault)
-	assert.Equal(t, "element", schema.Field(1).Type.(*iceberg.ListType).Element.(*iceberg.StructType).FieldList[0].Name)
-	assert.Equal(t, "value", schema.Field(2).Type.(*iceberg.MapType).ValueType.(*iceberg.StructType).FieldList[0].Name)
+	assert.Equal(t, "nested", originalStruct.Field(0).Name)
+	assert.Equal(t, "01", originalStruct.Field(0).InitialDefault)
+	assert.Equal(t, "02", originalStruct.Field(0).WriteDefault)
+	assert.Equal(t, "element", schema.Field(1).Type.(*iceberg.ListType).Element.(*iceberg.StructType).Field(0).Name)
+	assert.Equal(t, "value", schema.Field(2).Type.(*iceberg.MapType).ValueType.(*iceberg.StructType).Field(0).Name)
 }
 
 var exampleViewJSON = `{
