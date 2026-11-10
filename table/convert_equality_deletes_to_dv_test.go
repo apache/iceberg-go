@@ -314,9 +314,13 @@ func TestConvertEqualityDeletesAcrossDataFileSplits(t *testing.T) {
 	ctx := t.Context()
 	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
 		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"},{"id":6,"data":"f"},{"id":7,"data":"g"},{"id":8,"data":"h"},{"id":9,"data":"i"},{"id":10,"data":"j"}]`)
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(4)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDVCount(t, tbl))
+
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.SetProperties(iceberg.Properties{table.ReadSplitTargetSizeKey: "1"}))
-	tbl, err := tx.Commit(ctx)
+	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2},{"id":7}]`)
 
@@ -328,8 +332,9 @@ func TestConvertEqualityDeletesAcrossDataFileSplits(t *testing.T) {
 	result, err := tbl.ConvertEqualityDeletesToDeletionVectors(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, result.AddedDeletionVectors, "all split positions must form one vector for the data file")
+	require.Equal(t, 1, result.ReplacedDeletionVectors, "the existing vector must be removed only once across the splits")
 	require.Equal(t, 1, liveDVCount(t, result.Table))
-	require.Equal(t, []int64{1, 3, 4, 5, 6, 8, 9, 10}, idsInTable(t, result.Table))
+	require.Equal(t, []int64{1, 3, 5, 6, 8, 9, 10}, idsInTable(t, result.Table))
 }
 
 func TestConvertEqualityDeletesRemovesDeletesWithNoMatches(t *testing.T) {
