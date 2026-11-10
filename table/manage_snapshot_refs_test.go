@@ -151,10 +151,11 @@ func TestFastForwardBranch(t *testing.T) {
 
 func TestBranchPromotionPinsBothRefs(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		stage   func(*Transaction) error
-		move    func(*MetadataBuilder) error
-		wantErr error
+		name        string
+		startMainAt int64
+		stage       func(*Transaction) error
+		move        func(*MetadataBuilder) error
+		wantErr     error
 	}{
 		{
 			name:  "target moved",
@@ -198,9 +199,16 @@ func TestBranchPromotionPinsBothRefs(t *testing.T) {
 			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
 		},
 		{
-			name:  "main source moved",
-			stage: func(tx *Transaction) error { return tx.FastForwardBranch("qa", MainBranch) },
-			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
+			name:        "main source moved",
+			startMainAt: 200,
+			stage:       func(tx *Transaction) error { return tx.FastForwardBranch("qa", MainBranch) },
+			move:        func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 300, BranchRef) },
+		},
+		{
+			name:        "no-op replace main moved",
+			startMainAt: 200,
+			stage:       func(tx *Transaction) error { return tx.ReplaceBranch(MainBranch, 200) },
+			move:        func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 300, BranchRef) },
 		},
 		{
 			name:  "no-op main target moved",
@@ -215,6 +223,13 @@ func TestBranchPromotionPinsBothRefs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := manageSnapshotRefsRetryFixture(t)
+			if tc.startMainAt != 0 {
+				initial, err := MetadataBuilderFromBase(base, "")
+				require.NoError(t, err)
+				require.NoError(t, initial.SetSnapshotRef(MainBranch, tc.startMainAt, BranchRef))
+				base, err = initial.Build()
+				require.NoError(t, err)
+			}
 			builder, err := MetadataBuilderFromBase(base, "")
 			require.NoError(t, err)
 			require.NoError(t, tc.move(builder))
@@ -383,19 +398,24 @@ func TestReplaceBranch(t *testing.T) {
 		require.NoError(t, peer.SetSnapshotRef("qa", 100, TagRef))
 		current, err := peer.Build()
 		require.NoError(t, err)
-		tbl, _ := newAssertRefTestTable(t, base, current)
+		tbl, cat := newAssertRefTestTable(t, base, current)
 		tx := tbl.NewTransaction()
 		require.NoError(t, tx.ReplaceBranch("qa", 200))
 		_, err = tx.Commit(t.Context())
-		require.ErrorIs(t, err, ErrCommitFailed)
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		require.NotErrorIs(t, err, ErrCommitFailed)
+		qa, ok := cat.metadata.Refs()["qa"]
+		require.True(t, ok)
+		assert.Equal(t, TagRef, qa.Type)
 	})
 }
 
 func TestNoOpBranchRefOperationsFenceMixedTransactions(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		stage func(*Transaction) error
-		move  func(*MetadataBuilder) error
+		name        string
+		startMainAt int64
+		stage       func(*Transaction) error
+		move        func(*MetadataBuilder) error
 	}{
 		{
 			name:  "fast-forward target changes",
@@ -423,6 +443,18 @@ func TestNoOpBranchRefOperationsFenceMixedTransactions(t *testing.T) {
 			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 200, BranchRef) },
 		},
 		{
+			name:        "fast-forward source main real move changes",
+			startMainAt: 200,
+			stage:       func(tx *Transaction) error { return tx.FastForwardBranch("qa", MainBranch) },
+			move:        func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 300, BranchRef) },
+		},
+		{
+			name:        "no-op replace main changes",
+			startMainAt: 200,
+			stage:       func(tx *Transaction) error { return tx.ReplaceBranch(MainBranch, 200) },
+			move:        func(b *MetadataBuilder) error { return b.SetSnapshotRef(MainBranch, 300, BranchRef) },
+		},
+		{
 			name:  "no-op ref replacement target changes",
 			stage: func(tx *Transaction) error { return tx.ReplaceBranchFromRef("audit", "release") },
 			move:  func(b *MetadataBuilder) error { return b.SetSnapshotRef("audit", 200, BranchRef) },
@@ -440,6 +472,13 @@ func TestNoOpBranchRefOperationsFenceMixedTransactions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := manageSnapshotRefsRetryFixture(t)
+			if tc.startMainAt != 0 {
+				initial, err := MetadataBuilderFromBase(base, "")
+				require.NoError(t, err)
+				require.NoError(t, initial.SetSnapshotRef(MainBranch, tc.startMainAt, BranchRef))
+				base, err = initial.Build()
+				require.NoError(t, err)
+			}
 			peer, err := MetadataBuilderFromBase(base, "")
 			require.NoError(t, err)
 			require.NoError(t, tc.move(peer))
