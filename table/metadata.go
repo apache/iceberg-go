@@ -2847,6 +2847,10 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		value := *snapshot.AddedRows
 		clone.AddedRows = &value
 	}
+	if snapshot.KeyID != nil {
+		value := *snapshot.KeyID
+		clone.KeyID = &value
+	}
 	if snapshot.Summary != nil {
 		clone.Summary = &Summary{
 			Operation:  snapshot.Summary.Operation,
