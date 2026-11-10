@@ -1107,6 +1107,7 @@ func (b *cancelAfterCopyBucket) ErrorCode(err error) gcerrors.ErrorCode {
 	if errors.Is(err, fs.ErrNotExist) {
 		return gcerrors.NotFound
 	}
+
 	return gcerrors.Unknown
 }
 
@@ -1125,6 +1126,7 @@ func (b *cancelAfterCopyBucket) Copy(ctx context.Context, dstKey, srcKey string,
 	b.copyCtx = ctx
 	b.srcKey, b.dstKey = srcKey, dstKey
 	b.cancel()
+
 	return nil
 }
 
@@ -1134,6 +1136,7 @@ func (b *cancelAfterCopyBucket) Delete(ctx context.Context, key string, _ *drive
 		return err
 	}
 	b.deletedKey = key
+
 	return nil
 }
 
