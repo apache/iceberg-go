@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -86,9 +87,7 @@ func (rec *authRecorder) authHeaders(t *testing.T, props iceberg.Properties, opt
 	)
 	if len(opts) == 0 {
 		loadProps := iceberg.Properties{"type": "rest", "uri": rec.URL}
-		for k, v := range props {
-			loadProps[k] = v
-		}
+		maps.Copy(loadProps, props)
 		cat, err = catalog.Load(context.Background(), "test", loadProps)
 	} else {
 		cat, err = rest.NewCatalog(context.Background(), "test", rec.URL, append(opts, rest.WithAdditionalProps(props))...)
