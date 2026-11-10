@@ -40,3 +40,12 @@ func TestSchemaCompatibilityRejectsInvalidIdentifierFields(t *testing.T) {
 		}
 	}
 }
+
+func TestSchemaCompatibilityRejectsFloatIdentifierFields(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Float64, Required: true},
+	)
+	err := checkSchemaCompatibility(schema, 2)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, "cannot be float or double")
+}

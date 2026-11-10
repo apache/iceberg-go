@@ -77,19 +77,52 @@ func TestValidateIdentifierFields(t *testing.T) {
 			err := schema.ValidateIdentifierFields()
 			if tc.error == "" {
 				require.NoError(t, err)
-				data, err := json.Marshal(schema)
-				require.NoError(t, err)
-				var read Schema
-				require.NoError(t, json.Unmarshal(data, &read))
-				require.Equal(t, tc.ids, read.IdentifierFieldIDs)
 			} else {
 				require.ErrorIs(t, err, ErrInvalidSchema)
 				require.ErrorContains(t, err, tc.error)
-				_, err = json.Marshal(schema)
+			}
+
+			// Serialization alone is not a validation boundary. Parsing and
+			// committing table metadata must still reject invalid identifiers.
+			data, err := json.Marshal(schema)
+			require.NoError(t, err)
+			var read Schema
+			err = json.Unmarshal(data, &read)
+			switch {
+			case tc.error == "":
+				require.NoError(t, err)
+				require.Equal(t, tc.ids, read.IdentifierFieldIDs)
+			case tc.name == "duplicate identifier":
+				require.NoError(t, err)
+				require.Equal(t, []int{1}, read.IdentifierFieldIDs)
+			default:
 				require.ErrorIs(t, err, ErrInvalidSchema)
+				require.ErrorContains(t, err, tc.error)
 			}
 		})
 	}
+}
+
+func TestUnmarshalSchemaDeduplicatesIdentifierIDs(t *testing.T) {
+	var schema Schema
+	err := json.Unmarshal([]byte(`{
+		"type": "struct",
+		"schema-id": 3,
+		"identifier-field-ids": [2, 1, 2, 1, 2],
+		"fields": [
+			{"id": 1, "name": "id", "type": "long", "required": true},
+			{"id": 2, "name": "tenant", "type": "string", "required": true}
+		]
+	}`), &schema)
+	require.NoError(t, err)
+	require.Equal(t, []int{2, 1}, schema.IdentifierFieldIDs)
+
+	data, err := json.Marshal(&schema)
+	require.NoError(t, err)
+	var roundTrip Schema
+	require.NoError(t, json.Unmarshal(data, &roundTrip))
+	require.Equal(t, []int{2, 1}, roundTrip.IdentifierFieldIDs)
+	require.True(t, schema.Equals(&roundTrip))
 }
 
 func TestUnmarshalSchemaRejectsInvalidIdentifierAndKeepsOldState(t *testing.T) {

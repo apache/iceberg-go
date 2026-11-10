@@ -389,9 +389,16 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	ids := aux.IdentifierFieldIDs
-	if ids == nil {
-		ids = []int{}
+	// Java reads identifier IDs into a set. Ignore repeated IDs while
+	// preserving the order of their first occurrence in the JSON array.
+	ids := make([]int, 0, len(aux.IdentifierFieldIDs))
+	seenIDs := make(map[int]struct{}, len(aux.IdentifierFieldIDs))
+	for _, id := range aux.IdentifierFieldIDs {
+		if _, exists := seenIDs[id]; exists {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		ids = append(ids, id)
 	}
 	if err := (&Schema{fields: fields, IdentifierFieldIDs: ids}).ValidateIdentifierFields(); err != nil {
 		return err
@@ -411,10 +418,6 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 }
 
 func (s *Schema) MarshalJSON() ([]byte, error) {
-	if err := s.ValidateIdentifierFields(); err != nil {
-		return nil, err
-	}
-
 	ids := s.IdentifierFieldIDs
 	if ids == nil {
 		ids = []int{}

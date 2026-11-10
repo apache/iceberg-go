@@ -1173,12 +1173,15 @@ func TestUnmarshalSchemaAllowsZeroCollectionFieldIDs(t *testing.T) {
 }
 
 func TestUnmarshalSchemaRoundTripsCollectionFieldIDs(t *testing.T) {
-	data, err := json.Marshal(tableSchemaNested)
+	// Preserve the collection ID fixture, but use a valid identifier when
+	// testing the metadata round trip.
+	validSchema := iceberg.NewSchemaWithIdentifiers(tableSchemaNested.ID, []int{2}, tableSchemaNested.Fields()...)
+	data, err := json.Marshal(validSchema)
 	require.NoError(t, err)
 
 	var schema iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &schema))
-	assert.True(t, tableSchemaNested.Equals(&schema))
+	assert.True(t, validSchema.Equals(&schema))
 }
 
 func TestPruneColumnsString(t *testing.T) {
