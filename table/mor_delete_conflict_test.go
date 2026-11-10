@@ -115,6 +115,8 @@ func TestMergeOnReadDeleteConflict_ReferencedDataFileRemoved(t *testing.T) {
 	_, err = txn.Commit(ctx)
 	require.Error(t, err)
 	require.ErrorIs(t, err, table.ErrDataFilesMissing)
+	require.NotErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
 }
 
 // A first deletion vector is replayable until another writer commits a
