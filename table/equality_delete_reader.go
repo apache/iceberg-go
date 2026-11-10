@@ -524,17 +524,14 @@ func schemaForEqualityFields(current *iceberg.Schema, schemas []*iceberg.Schema,
 	return current
 }
 
-// equalityDeleteReadSchema adds missing equality fields to the schema used to
-// project data rows. Older files may not physically contain a field that was
-// added later, but Iceberg still requires that field to be read using its
-// initial default or null value when applying equality deletes.
-func equalityDeleteReadSchema(
+// missingEqualityProjectionFields resolves fields absent from the file schema
+// once for both the physical read projection and the logical equality schema.
+func missingEqualityProjectionFields(
 	fileSchema, currentSchema *iceberg.Schema,
 	schemas []*iceberg.Schema,
 	deleteSets []*equalityDeleteSet,
-) (*iceberg.Schema, error) {
-	fields := fileSchema.Fields()
-	changed := false
+) ([]iceberg.NestedField, error) {
+	var missing []iceberg.NestedField
 
 	for _, deleteSet := range deleteSets {
 		for _, fieldID := range deleteSet.fieldIDs {
@@ -552,14 +549,31 @@ func equalityDeleteReadSchema(
 				return nil, err
 			}
 
-			fields = mergeEqualityProjectionFields(fields, projected.Fields())
-			changed = true
+			missing = mergeEqualityProjectionFields(missing, projected.Fields())
 		}
 	}
 
-	if !changed {
+	return missing, nil
+}
+
+// equalityDeleteReadSchema adds missing equality fields to the schema used to
+// project data rows. Older files may not physically contain a field that was
+// added later, but Iceberg still requires that field to be read using its
+// initial default or null value when applying equality deletes.
+func equalityDeleteReadSchema(
+	fileSchema, currentSchema *iceberg.Schema,
+	schemas []*iceberg.Schema,
+	deleteSets []*equalityDeleteSet,
+) (*iceberg.Schema, error) {
+	missing, err := missingEqualityProjectionFields(fileSchema, currentSchema, schemas, deleteSets)
+	if err != nil {
+		return nil, err
+	}
+	if len(missing) == 0 {
 		return fileSchema, nil
 	}
+
+	fields := mergeEqualityProjectionFields(fileSchema.Fields(), missing)
 
 	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs, fields...), nil
 }

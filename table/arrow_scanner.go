@@ -1947,12 +1947,12 @@ func (as *arrowScan) prepareToRead(
 		}
 	}(rdr)
 
-	projectedIDs := invariants.projectedIDs
-	readPrunedSchema := func() (*iceberg.Schema, []int, error) {
+	readPrunedSchemaForIDs := func(projectedIDs map[int]struct{}) (*iceberg.Schema, []int, error) {
 		fileSchema, colIndices, err := rdr.PrunedSchema(projectedIDs, invariants.nameMapping)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
 			NameMapping:     invariants.nameMapping,
 			TableSchema:     invariants.tableSchema,
@@ -1962,29 +1962,27 @@ func (as *arrowScan) prepareToRead(
 			return nil, nil, err
 		}
 
-		if len(deleteSets) > 0 {
-			expandedIDs, err := as.projectEqualityDeleteFields(rdr, iceSchema, invariants, deleteSets)
-			if err != nil {
-				return nil, nil, err
-			}
-			if !maps.Equal(projectedIDs, expandedIDs) {
-				projectedIDs = expandedIDs
-				fileSchema, colIndices, err = rdr.PrunedSchema(projectedIDs, invariants.nameMapping)
-				if err != nil {
-					return nil, nil, err
-				}
-				iceSchema, err = ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
-					NameMapping:     invariants.nameMapping,
-					TableSchema:     invariants.tableSchema,
-					TableProperties: invariants.tableProperties,
-				})
-				if err != nil {
-					return nil, nil, err
-				}
-			}
+		return iceSchema, colIndices, nil
+	}
+
+	readPrunedSchema := func() (*iceberg.Schema, []int, error) {
+		iceSchema, colIndices, err := readPrunedSchemaForIDs(invariants.projectedIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(deleteSets) == 0 {
+			return iceSchema, colIndices, nil
 		}
 
-		return iceSchema, colIndices, nil
+		expandedIDs, err := as.projectEqualityDeleteFields(rdr, iceSchema, invariants, deleteSets)
+		if err != nil {
+			return nil, nil, err
+		}
+		if maps.Equal(invariants.projectedIDs, expandedIDs) {
+			return iceSchema, colIndices, nil
+		}
+
+		return readPrunedSchemaForIDs(expandedIDs)
 	}
 
 	if !as.cacheFileReadPlan {
@@ -2025,50 +2023,41 @@ func (as *arrowScan) projectEqualityDeleteFields(
 	invariants *arrowScanInvariants,
 	deleteSets []*equalityDeleteSet,
 ) (map[int]struct{}, error) {
+	missingFields, err := missingEqualityProjectionFields(
+		fileSchema, invariants.tableSchema, as.metadata.Schemas(), deleteSets)
+	if err != nil {
+		return nil, err
+	}
+
 	projectedIDs := maps.Clone(invariants.projectedIDs)
 	var physicalSchema *iceberg.Schema
 
-	for _, deleteSet := range deleteSets {
-		for _, fieldID := range deleteSet.fieldIDs {
-			if _, found := fileSchema.FindFieldByID(fieldID); found {
-				continue
-			}
+	for _, projectedField := range missingFields {
+		projectedIDs[projectedField.ID] = struct{}{}
+		if _, isStruct := projectedField.Type.(*iceberg.StructType); !isStruct {
+			continue
+		}
 
-			fieldSchema := schemaForEqualityFields(
-				invariants.tableSchema, as.metadata.Schemas(), []int{fieldID})
-			selected, err := iceberg.PruneColumns(fieldSchema, map[int]iceberg.Void{fieldID: {}}, true)
+		if physicalSchema == nil {
+			fileArrowSchema, err := rdr.Schema()
 			if err != nil {
 				return nil, err
 			}
-
-			for _, projectedField := range selected.Fields() {
-				projectedIDs[projectedField.ID] = struct{}{}
-				if _, isStruct := projectedField.Type.(*iceberg.StructType); !isStruct {
-					continue
-				}
-
-				if physicalSchema == nil {
-					fileArrowSchema, err := rdr.Schema()
-					if err != nil {
-						return nil, err
-					}
-					physicalSchema, err = ArrowSchemaToIcebergWithOptions(fileArrowSchema, ArrowToIcebergOptions{
-						NameMapping:     invariants.nameMapping,
-						TableSchema:     invariants.tableSchema,
-						TableProperties: invariants.tableProperties,
-					})
-					if err != nil {
-						return nil, err
-					}
-				}
-
-				// Keep the existing physical children of an optional parent
-				// struct so its null state remains visible when the equality
-				// field itself is new.
-				if physicalField, found := physicalSchema.FindFieldByID(projectedField.ID); found {
-					collectLeafIDs(physicalField.Type, physicalField.ID, projectedIDs)
-				}
+			physicalSchema, err = ArrowSchemaToIcebergWithOptions(fileArrowSchema, ArrowToIcebergOptions{
+				NameMapping:     invariants.nameMapping,
+				TableSchema:     invariants.tableSchema,
+				TableProperties: invariants.tableProperties,
+			})
+			if err != nil {
+				return nil, err
 			}
+		}
+
+		// Keep the existing physical children of an optional parent
+		// struct so its null state remains visible when the equality
+		// field itself is new.
+		if physicalField, found := physicalSchema.FindFieldByID(projectedField.ID); found {
+			collectLeafIDs(physicalField.Type, physicalField.ID, projectedIDs)
 		}
 	}
 
@@ -2913,7 +2902,6 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 			})
 			readSchema = equalitySchema
 		}
-
 	}
 
 	if len(eqDeleteSets) > 0 {
