@@ -317,15 +317,12 @@ func arrowArraysAtField(record arrow.RecordBatch, ref arrowFieldRef, fieldID int
 	return result, parents, nil
 }
 
-func makeArrowFieldEncoder(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (colEncoder, error) {
-	column, parents, err := arrowArraysAtField(record, ref, fieldID, fieldName, filePath)
-	if err != nil {
-		return nil, err
-	}
-
+// makeArrowFieldEncoderFromArray preserves nulls in struct parents before
+// encoding the logical leaf value.
+func makeArrowFieldEncoderFromArray(column arrow.Array, parents []arrow.Array) colEncoder {
 	encoder := makeColEncoder(column)
 	if len(parents) == 0 {
-		return encoder, nil
+		return encoder
 	}
 
 	return func(buf *bytes.Buffer, row int) {
@@ -338,7 +335,7 @@ func makeArrowFieldEncoder(record arrow.RecordBatch, ref arrowFieldRef, fieldID 
 		}
 
 		encoder(buf, row)
-	}, nil
+	}
 }
 
 func makeArrowFieldEncoderWithTypes(
@@ -349,13 +346,17 @@ func makeArrowFieldEncoderWithTypes(
 	fieldName, filePath string,
 	sourceType, targetType iceberg.Type,
 ) (colEncoder, func(), error) {
+	if sourceType == nil || targetType == nil {
+		return nil, nil, fmt.Errorf("%w: missing equality delete type for field %d (%s)",
+			iceberg.ErrInvalidArgument, fieldID, fieldName)
+	}
 	column, parents, err := arrowArraysAtField(record, ref, fieldID, fieldName, filePath)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var release func()
-	if sourceType != nil && targetType != nil && !sourceType.Equals(targetType) {
+	if !sourceType.Equals(targetType) {
 		// Iceberg v3 permits date-to-timestamp promotions, which PromoteType
 		// does not handle; use the same exception as schema projection.
 		if !canPromoteDateToTimestamp(sourceType, targetType) {
@@ -380,22 +381,7 @@ func makeArrowFieldEncoderWithTypes(
 		}
 	}
 
-	encoder := makeColEncoder(column)
-	if len(parents) == 0 {
-		return encoder, release, nil
-	}
-
-	return func(buf *bytes.Buffer, row int) {
-		for _, parent := range parents {
-			if parent.IsNull(row) {
-				buf.WriteByte(0)
-
-				return
-			}
-		}
-
-		encoder(buf, row)
-	}, release, nil
+	return makeArrowFieldEncoderFromArray(column, parents), release, nil
 }
 
 func makeArrowFieldEncodersWithTypes(
@@ -411,11 +397,11 @@ func makeArrowFieldEncodersWithTypes(
 	if len(fieldRefs) != len(fieldIDs) || len(fieldIDs) != len(colNames) {
 		return nil, nil, fmt.Errorf("%w: mismatched equality delete field metadata", iceberg.ErrInvalidArgument)
 	}
-	if len(fieldTypes) != 0 && len(fieldTypes) != len(fieldIDs) {
+	if len(fieldTypes) != len(fieldIDs) {
 		return nil, nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d field types",
 			iceberg.ErrInvalidArgument, len(fieldIDs), len(fieldTypes))
 	}
-	if len(sourceTypes) != 0 && len(sourceTypes) != len(fieldIDs) {
+	if len(sourceTypes) != len(fieldIDs) {
 		return nil, nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d source types",
 			iceberg.ErrInvalidArgument, len(fieldIDs), len(sourceTypes))
 	}
@@ -428,16 +414,8 @@ func makeArrowFieldEncodersWithTypes(
 		}
 	}
 	for i, fieldID := range fieldIDs {
-		var sourceType iceberg.Type
-		var targetType iceberg.Type
-		if len(sourceTypes) > 0 {
-			sourceType = sourceTypes[i]
-		}
-		if len(fieldTypes) > 0 {
-			targetType = fieldTypes[i]
-		}
 		encoder, cleanup, err := makeArrowFieldEncoderWithTypes(
-			ctx, record, fieldRefs[i], fieldID, colNames[i], filePath, sourceType, targetType)
+			ctx, record, fieldRefs[i], fieldID, colNames[i], filePath, sourceTypes[i], fieldTypes[i])
 		if err != nil {
 			release()
 
@@ -1895,10 +1873,6 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		if len(eqDel.fieldIDs) != len(eqDel.colNames) {
 			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d column names",
 				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.colNames))
-		}
-		if len(eqDel.fieldTypes) != 0 && len(eqDel.fieldTypes) != len(eqDel.fieldIDs) {
-			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d field types",
-				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.fieldTypes))
 		}
 		var err error
 		sourceFieldTypes[i], err = equalityFieldTypes(fileSchema, eqDel.fieldIDs)
