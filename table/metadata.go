@@ -3760,12 +3760,20 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 	}
 	opts := make([]iceberg.PartitionOption, 0)
 	for _, f := range partitions.Fields() {
-		var s string
-		var ok bool
-		if s, ok = previousMapFn(f.FirstSourceID()); !ok {
-			return nil, fmt.Errorf("%w: partition source field %d not found in schema", ErrInvalidMetadata, f.FirstSourceID())
+		sourceIDs := make([]int, len(f.SourceIDs))
+		for i, sourceID := range f.SourceIDs {
+			sourceName, ok := previousMapFn(sourceID)
+			if !ok {
+				return nil, fmt.Errorf("%w: partition source field %d not found in schema", ErrInvalidMetadata, sourceID)
+			}
+			freshField, ok := freshSc.FindFieldByName(sourceName)
+			if !ok {
+				return nil, fmt.Errorf("%w: partition source field %d (%s) not found in reassigned schema",
+					ErrInvalidMetadata, sourceID, sourceName)
+			}
+			sourceIDs[i] = freshField.ID
 		}
-		opts = append(opts, iceberg.AddPartitionFieldByName(s, f.Name, f.Transform, freshSc, nil))
+		opts = append(opts, iceberg.AddPartitionFieldBySourceIDs(sourceIDs, f.Name, f.Transform, freshSc, nil))
 	}
 	freshPartitions, err := iceberg.NewPartitionSpecOpts(opts...)
 	if err != nil {
