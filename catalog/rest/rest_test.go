@@ -3531,11 +3531,11 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	r.True(expectedViewMD.Equals(createdView.Metadata()))
 }
 
-func (r *RestCatalogSuite) TestCreateViewMarshalsMissingNamespaceAsEmpty() {
+func (r *RestCatalogSuite) TestCreateViewDefaultsMissingNamespace() {
 	const namespace = "ns"
 	identifier := table.Identifier{namespace, "view"}
 	version, err := view.NewVersion(
-		1,
+		99,
 		0,
 		[]view.Representation{view.NewRepresentation(view.Representation{SQL: exampleViewSQL, Dialect: "default"})},
 		nil,
@@ -3545,7 +3545,8 @@ func (r *RestCatalogSuite) TestCreateViewMarshalsMissingNamespaceAsEmpty() {
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
 		var payload createViewRequest
 		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
-		r.Equal([]string{}, payload.ViewVersion.DefaultNamespace)
+		r.Equal(1, payload.ViewVersion.VersionID)
+		r.Equal([]string{namespace}, payload.ViewVersion.DefaultNamespace)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -3559,6 +3560,7 @@ func (r *RestCatalogSuite) TestCreateViewMarshalsMissingNamespaceAsEmpty() {
 	_, err = ctlg.CreateView(context.Background(), identifier, version, iceberg.NewSchema(0))
 	r.Require().NoError(err)
 	r.Nil(version.DefaultNamespace)
+	r.Equal(int64(99), version.VersionID)
 }
 
 func (r *RestCatalogSuite) TestCreateViewRejectsNilVersion() {
