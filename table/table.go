@@ -1045,8 +1045,9 @@ func (t Table) withMetadata(meta Metadata, loc string) *Table {
 // branch check that follows rejects the commit.
 //
 // Assertions on refs in pinned guard the commit (an explicit
-// Transaction.AssertRefSnapshotID, a rollback, or CherryPickSnapshot) and
-// are never rewritten: a ref that has changed must fail the commit, not be
+// Transaction.AssertRefSnapshotID, a rollback, CherryPickSnapshot, or a
+// branch fast-forward/replacement) and are never rewritten: a ref that has
+// changed must fail the commit, not be
 // replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
