@@ -158,6 +158,7 @@ func TestManifestEvaluatorExcludedSingleValue(t *testing.T) {
 				}
 				b, err := lit.MarshalBinary()
 				require.NoError(t, err)
+
 				return &b
 			}
 			manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).
