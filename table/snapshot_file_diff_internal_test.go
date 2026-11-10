@@ -525,3 +525,143 @@ func TestSnapshotDiffLiveFilesCanceledBeforeReading(t *testing.T) {
 	_, err := snapshotDiffLiveFiles(ctx, fs, []iceberg.ManifestFile{manifest})
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestSnapshotDiffReadsV1ManifestsWithUnknownLiveCounts(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://diff/v1-unknown-counts/"
+	file := diffTestFile(t, prefix+"data.parquet", iceberg.EntryContentData)
+	written := writeDiffTestManifest(t, fs, 1, prefix+"manifest.avro",
+		iceberg.ManifestContentData, 1, []iceberg.DataFile{file}, nil, nil)
+
+	for _, tt := range []struct {
+		name            string
+		added, existing int32
+	}{
+		{name: "both unknown", added: -1, existing: -1},
+		{name: "added unknown", added: -1, existing: 0},
+		{name: "existing unknown", added: 0, existing: -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := iceberg.NewManifestBuilder(1, written.FilePath(), written.Length(),
+				written.PartitionSpecID(), written.SnapshotID()).
+				AddedFiles(tt.added).ExistingFiles(tt.existing).Build()
+
+			files, err := snapshotDiffLiveFiles(t.Context(), fs, []iceberg.ManifestFile{manifest})
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			for _, got := range files {
+				require.Equal(t, file.FilePath(), got.FilePath())
+			}
+		})
+	}
+}
+
+func TestSnapshotDiffLiveFilesOmitsColumnStats(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://diff/projected-stats/"
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData, prefix+"data.parquet", iceberg.ParquetFile,
+		nil, nil, nil, 10, 1024)
+	require.NoError(t, err)
+	original := builder.
+		ColumnSizes(map[int]int64{1: 80}).
+		ValueCounts(map[int]int64{1: 10}).
+		NullValueCounts(map[int]int64{1: 0}).
+		NaNValueCounts(map[int]int64{1: 0}).
+		LowerBoundValues(map[int][]byte{1: {0x01}}).
+		UpperBoundValues(map[int][]byte{1: {0x0a}}).
+		SplitOffsets([]int64{4, 64}).Build()
+	require.NotEmpty(t, original.ColumnSizes())
+	manifest := writeDiffTestManifest(t, fs, 2, prefix+"manifest.avro",
+		iceberg.ManifestContentData, 1, []iceberg.DataFile{original}, nil, nil)
+
+	files, err := snapshotDiffLiveFiles(t.Context(), fs, []iceberg.ManifestFile{manifest})
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	for _, got := range files {
+		require.Equal(t, original.FilePath(), got.FilePath())
+		require.Equal(t, original.Count(), got.Count())
+		require.Equal(t, original.FileSizeBytes(), got.FileSizeBytes())
+		require.Equal(t, []int64{4, 64}, got.SplitOffsets())
+		require.Empty(t, got.ColumnSizes())
+		require.Empty(t, got.ValueCounts())
+		require.Empty(t, got.NullValueCounts())
+		require.Empty(t, got.NaNValueCounts())
+		require.Empty(t, got.LowerBoundValues())
+		require.Empty(t, got.UpperBoundValues())
+	}
+}
+
+func TestSnapshotDiffDuplicateErrorsFollowManifestOrder(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://diff/parallel-duplicates/"
+	first := diffTestFile(t, prefix+"duplicate-a.parquet", iceberg.EntryContentData)
+	second := diffTestFile(t, prefix+"duplicate-b.parquet", iceberg.EntryContentData)
+	manifests := make([]iceberg.ManifestFile, 0, 10)
+	for index := range 10 {
+		var file iceberg.DataFile
+		switch index {
+		case 0, 4:
+			file = first
+		case 1, 9:
+			file = second
+		default:
+			file = diffTestFile(t, fmt.Sprintf("%sunique-%02d.parquet", prefix, index),
+				iceberg.EntryContentData)
+		}
+		manifests = append(manifests, writeDiffTestManifest(t, fs, 2,
+			fmt.Sprintf("%smanifest-%02d.avro", prefix, index),
+			iceberg.ManifestContentData, 1, []iceberg.DataFile{file}, nil, nil))
+	}
+
+	// Ten manifests exceed the eight-reader limit. Regardless of completion
+	// order, the first duplicate in manifest order must be reported.
+	for range 10 {
+		_, err := snapshotDiffLiveFiles(t.Context(), fs, manifests)
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+		require.ErrorContains(t, err, "duplicate-a.parquet")
+		require.ErrorContains(t, err, "manifest-04.avro")
+	}
+}
+
+func TestDiffSnapshotFilesV3DeletionVectorLengthChange(t *testing.T) {
+	fs := iceio.NewMemFS()
+	const prefix = "mem://diff/v3-length/"
+	puffin, dataPath := prefix+"deletes.puffin", prefix+"data.parquet"
+	before := diffTestDeletionVector(t, puffin, dataPath, 100)
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, puffin, iceberg.PuffinFile,
+		nil, nil, nil, 10, 1024)
+	require.NoError(t, err)
+	after := builder.ReferencedDataFile(dataPath).ContentOffset(100).ContentSizeInBytes(48).Build()
+
+	oldManifest := writeDiffTestManifest(t, fs, 3, prefix+"old.avro",
+		iceberg.ManifestContentDeletes, 1, []iceberg.DataFile{before}, nil, nil)
+	newManifest := writeDiffTestManifest(t, fs, 3, prefix+"new.avro",
+		iceberg.ManifestContentDeletes, 2, []iceberg.DataFile{after}, nil, nil)
+	fromList := writeDiffTestManifestList(t, fs, 3, prefix+"from-list.avro", 1, 1,
+		[]iceberg.ManifestFile{oldManifest})
+	toList := writeDiffTestManifestList(t, fs, 3, prefix+"to-list.avro", 2, 2,
+		[]iceberg.ManifestFile{newManifest})
+	now := time.Now().UnixMilli()
+	parent, zero := int64(1), int64(0)
+	tbl := diffTestTable(t, 3, fs,
+		Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: now,
+			ManifestList: fromList, FirstRowID: &zero, AddedRows: &zero},
+		Snapshot{SnapshotID: 2, SequenceNumber: 2, TimestampMs: now + 1,
+			ParentSnapshotID: &parent, ManifestList: toList, FirstRowID: &zero, AddedRows: &zero})
+
+	diff, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), 1, 2)
+	require.NoError(t, err)
+	require.True(t, diff.HasChanges())
+	require.Empty(t, diff.AddedDataFiles)
+	require.Empty(t, diff.RemovedDataFiles)
+	require.Len(t, diff.AddedDeleteFiles, 1)
+	require.Len(t, diff.RemovedDeleteFiles, 1)
+	require.Equal(t, puffin, diff.AddedDeleteFiles[0].FilePath())
+	require.Equal(t, puffin, diff.RemovedDeleteFiles[0].FilePath())
+	require.Equal(t, int64(100), *diff.AddedDeleteFiles[0].ContentOffset())
+	require.Equal(t, int64(100), *diff.RemovedDeleteFiles[0].ContentOffset())
+	require.Equal(t, int64(48), *diff.AddedDeleteFiles[0].ContentSizeInBytes())
+	require.Equal(t, int64(32), *diff.RemovedDeleteFiles[0].ContentSizeInBytes())
+}
