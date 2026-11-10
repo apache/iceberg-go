@@ -104,8 +104,10 @@ attempt that commits it, not staging time.
 
 `RollbackToSnapshot`, `AssertRefSnapshotID`, `FastForwardBranch`,
 `ReplaceBranchFromRef`, and `ReplaceBranch` pin the refs they guard.
-Promoting from a ref pins both the source and target. If a pinned ref moves,
-the commit fails instead of rebasing a co-staged append.
+Promoting from a ref pins both the source and target. If the source points to
+a snapshot staged in the same transaction, promotion also pins the commit
+branch, preventing retry from rebuilding that source on a different history.
+If a pinned ref moves, the commit fails instead of rebasing a co-staged append.
 `ExpireSnapshots` does not pin refs. Retries replan it as described in
 [Snapshot expiration](#snapshot-expiration).
 
