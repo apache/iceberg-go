@@ -119,7 +119,7 @@ Tests requiring Spark 4 (currently the variant and unknown-type tests) automatic
 | Create New Manifests     |     X     |
 | Plan Scan                | Local + Remote |
 | Plan Scan for Snapshot   | Local + Remote |
-| Diff Snapshot Files      | X              |
+| Diff Snapshot Files      |       X        |
 
 ### REST Scan Planning
 
