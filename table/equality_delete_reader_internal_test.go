@@ -1169,7 +1169,7 @@ func TestProcessEqualityDeletesReleasesMaskAfterLaterSetError(t *testing.T) {
 	)
 	process, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{
 		int64EqualityDeleteSet(1),
-		{fieldIDs: []int{2}, colNames: []string{"missing"}},
+		{fieldIDs: []int{2}, colNames: []string{"missing"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String}},
 	}, fileSchema, "data.parquet")
 	require.NoError(t, err)
 
@@ -1291,9 +1291,10 @@ func TestProcessEqualityDeletesAppliesMultipleDeleteSetsLazily(t *testing.T) {
 
 func TestProcessEqualityDeletesRejectsMismatchedFieldMetadata(t *testing.T) {
 	process, err := processEqualityDeletesColumnarForFile(t.Context(), []*equalityDeleteSet{{
-		keys:     make(set[string]),
-		fieldIDs: []int{1},
-		colNames: []string{"id", "other"},
+		keys:       make(set[string]),
+		fieldIDs:   []int{1},
+		colNames:   []string{"id", "other"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}}, iceberg.NewSchema(0), "data.parquet")
 
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
