@@ -646,10 +646,14 @@ func TestDiffSnapshotFilesV3DeletionVectorLengthChange(t *testing.T) {
 	now := time.Now().UnixMilli()
 	parent, zero := int64(1), int64(0)
 	tbl := diffTestTable(t, 3, fs,
-		Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: now,
-			ManifestList: fromList, FirstRowID: &zero, AddedRows: &zero},
-		Snapshot{SnapshotID: 2, SequenceNumber: 2, TimestampMs: now + 1,
-			ParentSnapshotID: &parent, ManifestList: toList, FirstRowID: &zero, AddedRows: &zero})
+		Snapshot{
+			SnapshotID: 1, SequenceNumber: 1, TimestampMs: now, ManifestList: fromList,
+			FirstRowID: &zero, AddedRows: &zero,
+		},
+		Snapshot{
+			SnapshotID: 2, SequenceNumber: 2, TimestampMs: now + 1,
+			ParentSnapshotID: &parent, ManifestList: toList, FirstRowID: &zero, AddedRows: &zero,
+		})
 
 	diff, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), 1, 2)
 	require.NoError(t, err)
