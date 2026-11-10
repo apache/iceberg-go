@@ -86,6 +86,7 @@ S3, GCS, and Azure each require a blank import of their backend package, for exa
 | Create New Manifests     |     X     |
 | Plan Scan                |     X     |
 | Plan Scan for Snapshot   |     X     |
+| Diff Snapshot Files      |     X     |
 
 ## Catalog support
 
