@@ -19,7 +19,6 @@ package table
 import (
 	"context"
 	"fmt"
-	"iter"
 	"maps"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -311,8 +310,8 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 	var hasSurvivingOldSpecData bool
 	validationPlan := newPartitionValidationPlan(spec)
 	if snapshot := t.planningSnapshot(t.meta); snapshot != nil {
-		var dataFiles iter.Seq2[iceberg.DataFile, error] = snapshot.dataFiles(ctx, fs, nil)
-		var deleteEntries iter.Seq2[iceberg.ManifestEntry, error] = snapshot.entries(ctx, fs, iceberg.ManifestContentDeletes, true)
+		dataFiles := snapshot.dataFiles(ctx, fs, nil)
+		deleteEntries := snapshot.entries(ctx, fs, iceberg.ManifestContentDeletes, true)
 		if !checkExistingPaths {
 			manifests, err := snapshot.Manifests(ctx, fs)
 			if err != nil {
