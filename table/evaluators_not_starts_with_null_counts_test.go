@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInclusiveMetricsNotStartsWithUnknownNullCounts(t *testing.T) {
@@ -29,9 +31,7 @@ func TestInclusiveMetricsNotStartsWithUnknownNullCounts(t *testing.T) {
 	})
 	filter, err := iceberg.BindExpr(schema,
 		iceberg.NotStartsWith(iceberg.Reference("value"), "ab"), true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	tests := []struct {
 		name       string
@@ -58,13 +58,8 @@ func TestInclusiveMetricsNotStartsWithUnknownNullCounts(t *testing.T) {
 			}
 
 			shouldRead, err := iceberg.VisitExpr(filter, evaluator)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if shouldRead != tt.wantRead {
-				t.Errorf("shouldRead = %t, want %t (null counts: %v)",
-					shouldRead, tt.wantRead, tt.nullCounts)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantRead, shouldRead, "null counts: %v", tt.nullCounts)
 		})
 	}
 }
