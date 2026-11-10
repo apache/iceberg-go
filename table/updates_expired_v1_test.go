@@ -18,28 +18,28 @@
 package table
 
 import (
-    "context"
-    "testing"
+	"context"
+	"testing"
 
-    "github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/require"
 )
 
 // V1 snapshots store embedded manifests rather than a manifest list. They
 // must not cause cleanup to call FileIO.Remove with an empty file path.
 func TestRemoveSnapshotsPostCommitSkipsV1MissingManifestList(t *testing.T) {
-    const snapshots = `{"snapshot-id":1,"timestamp-ms":1000,"manifests":[]}`
-    before, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{snapshots: snapshots}))
-    require.NoError(t, err)
-    after, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{}))
-    require.NoError(t, err)
+	const snapshots = `{"snapshot-id":1,"timestamp-ms":1000,"manifests":[]}`
+	before, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{snapshots: snapshots}))
+	require.NoError(t, err)
+	after, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{}))
+	require.NoError(t, err)
 
-    fs := newTrackingCallsIO()
-    fs.files[""] = []byte("sentinel")
-    beforeTable := New(Identifier{"ns", "tbl"}, before, "metadata.json", testFSF(fs), nil)
-    afterTable := New(Identifier{"ns", "tbl"}, after, "metadata.json", testFSF(fs), nil)
+	fs := newTrackingCallsIO()
+	fs.files[""] = []byte("sentinel")
+	beforeTable := New(Identifier{"ns", "tbl"}, before, "metadata.json", testFSF(fs), nil)
+	afterTable := New(Identifier{"ns", "tbl"}, after, "metadata.json", testFSF(fs), nil)
 
-    update := NewRemoveSnapshotsUpdate([]int64{1}, true)
-    require.NoError(t, update.PostCommit(context.Background(), beforeTable, afterTable))
-    require.Zero(t, fs.removeCount[""], "must not attempt to remove an empty path")
-    require.Contains(t, fs.files, "", "the empty-path sentinel must not be deleted")
+	update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+	require.NoError(t, update.PostCommit(context.Background(), beforeTable, afterTable))
+	require.Zero(t, fs.removeCount[""], "must not attempt to remove an empty path")
+	require.Contains(t, fs.files, "", "the empty-path sentinel must not be deleted")
 }
