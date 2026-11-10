@@ -285,6 +285,33 @@ iceberg branch create \
   my_db.events audit-2026-q2
 ```
 
+### `branch fast-forward`
+
+```shell
+iceberg branch fast-forward my_db.events main audit
+```
+
+Advance the target branch to the source branch or tag. The command checks
+ancestry and fails if histories have diverged. If the target does not exist,
+it creates a branch at the source snapshot. The confirmation prompt shows the
+previous and next snapshot IDs, or explicitly says a new branch will be created.
+Use `--yes` to skip confirmation.
+
+### `branch replace`
+
+```shell
+iceberg branch replace my_db.events main 7234981023498
+```
+
+Move an existing branch to any known snapshot, without an ancestry check.
+This can discard the branch's current history from the branch head. The prompt
+shows both the previous and next snapshot IDs. Retention settings are preserved.
+Use `--yes` to skip confirmation.
+
+For both commands, REST catalogs using `snapshot-loading-mode=refs` may omit
+historical snapshots needed for ancestry checks or replacement. Use
+`snapshot-loading-mode=all` for these operations.
+
 ### `tag create`
 
 ```shell

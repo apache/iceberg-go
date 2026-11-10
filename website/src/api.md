@@ -600,6 +600,43 @@ _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}
 
 Constants `table.MainBranch`, `table.BranchRef`, `table.TagRef` live in [`table/refs.go`](https://github.com/apache/iceberg-go/blob/main/table/refs.go). A higher-level builder is on the roadmap.
 
+### Branch promotion and replacement
+
+Use a transaction to advance a branch to another branch or tag, or to move it
+to an existing snapshot. Fast-forward checks that the target's current snapshot
+is an ancestor of the source. It creates the target when missing, while
+`ReplaceBranch` requires an existing target branch.
+
+```go
+txn, err := tbl.NewTransactionOnBranch("main")
+if err != nil { /* ... */ }
+if err := txn.FastForwardBranch("main", "audit"); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+
+// Without ancestry checks (can move a branch backwards or across histories):
+txn, err = updated.NewTransactionOnBranch("main")
+if err != nil { /* ... */ }
+err = txn.ReplaceBranch("main", snapshotID)
+// Or use ReplaceBranchFromRef("main", "audit"), which can create a missing target.
+```
+
+For a non-main target, call `tbl.NewTransactionOnBranch(target)` rather than
+`tbl.NewTransaction()`. The latter uses `main` as its commit branch, so a
+concurrent append to `main` can reject an otherwise independent promotion.
+
+Existing branch retention settings are preserved. Both the target and source
+snapshot IDs are pinned when promoting from a ref, and the target is pinned
+when replacing by ID. A pinned ref that moves prevents the normal retry of
+a co-staged append. A retention-only change with the same snapshot ID cannot
+be detected by snapshot-ID requirements in any catalog. REST catalogs also
+cannot detect ref type changes with the same ID.
+
+Fast-forward needs the complete snapshot ancestry. REST catalogs using
+`snapshot-loading-mode=refs` can omit intermediate ancestors, causing valid
+fast-forwards to fail. Load with `snapshot-loading-mode=all` instead.
+Replacing by snapshot ID can also fail if the requested historical snapshot
+was omitted. See [Concurrent Writes](./concurrent-writes.md).
+
 ### Expiration and rollback
 
 ```go
