@@ -171,7 +171,6 @@ func TestDVWriterFlushWritesRowPositionFieldID(t *testing.T) {
 	blobs := reader.Blobs()
 	require.Len(t, blobs, 1)
 	assert.Equal(t, []int32{iceberg.RowPositionFieldID}, blobs[0].Fields)
-	require.NoError(t, file.Close())
 }
 
 func TestDVWriterMultipleDataFiles(t *testing.T) {
