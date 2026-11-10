@@ -40,6 +40,18 @@ func TestBranchPromotionPinsCommitBranchForStagedSource(t *testing.T) {
 		{"replace-from-ref", func(tx *Transaction) error {
 			return tx.ReplaceBranchFromRef("qa", "audit")
 		}},
+		{"replace-by-id", func(tx *Transaction) error {
+			return tx.ReplaceBranch("qa", 1001)
+		}},
+		{"no-op replace-by-id", func(tx *Transaction) error {
+			if err := tx.apply([]Update{
+				tx.meta.NewRetainingSnapshotRefUpdate("qa", 1001, BranchRef),
+			}, nil); err != nil {
+				return err
+			}
+
+			return tx.ReplaceBranch("qa", 1001)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := manageSnapshotRefsRetryFixture(t)
@@ -76,15 +88,58 @@ func TestBranchPromotionPinsCommitBranchForStagedSource(t *testing.T) {
 				add,
 				tx.meta.NewRetainingSnapshotRefUpdate(MainBranch, snap.SnapshotID, BranchRef),
 			}, nil))
-			require.NoError(t, tx.ReplaceBranch("audit", snap.SnapshotID))
+			// Stage the source head without invoking another promotion API,
+			// so only the operation under test can pin the commit branch.
+			require.NoError(t, tx.apply([]Update{
+				tx.meta.NewRetainingSnapshotRefUpdate("audit", snap.SnapshotID, BranchRef),
+			}, nil))
 			require.NoError(t, tc.stage(tx))
 
 			_, err = tx.Commit(t.Context())
 			require.ErrorIs(t, err, ErrTransactionUnusable)
-			require.NotErrorIs(t, err, ErrCommitFailed)
+			require.ErrorIs(t, err, ErrCommitFailed)
 			assert.Equal(t, int32(1), cat.attempts.Load())
 			assert.Equal(t, int64(900), cat.metadata.CurrentSnapshot().SnapshotID)
 			assert.Equal(t, int64(100), cat.metadata.SnapshotByName("qa").SnapshotID)
+		})
+	}
+}
+
+// Promoting an existing snapshot should not pin the unrelated commit branch.
+// If a peer moves main, the transaction must refresh and retry the promotion.
+func TestBranchPromotionUnstagedSourceRetriesAfterMainMove(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(*Transaction) error
+	}{
+		{"fast-forward", func(tx *Transaction) error {
+			return tx.FastForwardBranch("qa", "audit")
+		}},
+		{"replace-from-ref", func(tx *Transaction) error {
+			return tx.ReplaceBranchFromRef("qa", "audit")
+		}},
+		{"replace-by-id", func(tx *Transaction) error {
+			return tx.ReplaceBranch("qa", 300)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := manageSnapshotRefsRetryFixture(t)
+			peer, err := MetadataBuilderFromBase(base, "")
+			require.NoError(t, err)
+			require.NoError(t, peer.SetSnapshotRef(MainBranch, 200, BranchRef))
+			current, err := peer.Build()
+			require.NoError(t, err)
+
+			tbl, cat := newAssertRefTestTable(t, base, current)
+			tx := tbl.NewTransaction()
+			require.NoError(t, tc.stage(tx))
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, int32(2), cat.attempts.Load())
+			assert.Equal(t, int64(300), committed.SnapshotByName("qa").SnapshotID)
+			assert.Equal(t, int64(300), committed.SnapshotByName("audit").SnapshotID)
+			assert.Equal(t, int64(200), committed.CurrentSnapshot().SnapshotID)
 		})
 	}
 }

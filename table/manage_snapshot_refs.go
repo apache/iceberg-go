@@ -89,17 +89,7 @@ func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) e
 	if source != target {
 		requirements = append(requirements, AssertRefSnapshotID(source, t.baseRefSnapshotID(source)))
 	}
-	refsToPin := []string{target, source}
-	for _, staged := range meta.updates {
-		if added, ok := staged.(*addSnapshotUpdate); ok && added.Snapshot != nil &&
-			added.Snapshot.SnapshotID == sourceRef.SnapshotID {
-			// Retry can rebuild this source on a different commit-branch head,
-			// invalidating the ancestry check performed at staging time.
-			refsToPin = append(refsToPin, t.branch)
-
-			break
-		}
-	}
+	refsToPin := t.refsToPinForSnapshot(sourceRef.SnapshotID, target, source)
 	if exists {
 		if targetRef.SnapshotID == sourceRef.SnapshotID {
 			// No metadata update is needed, but pin both refs so that a
@@ -122,6 +112,21 @@ func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) e
 	return t.applyPinned([]Update{update}, requirements, refsToPin)
 }
 
+// refsToPinForSnapshot also pins the commit branch when a promotion uses a
+// snapshot staged in this transaction. Retrying on a different commit-branch
+// head could rebuild the snapshot with different ancestry. For an existing
+// snapshot, keep normal retries of unrelated branch moves available.
+func (t *Transaction) refsToPinForSnapshot(snapshotID int64, refs ...string) []string {
+	for _, staged := range t.meta.updates {
+		if added, ok := staged.(*addSnapshotUpdate); ok && added.Snapshot != nil &&
+			added.Snapshot.SnapshotID == snapshotID {
+			return append(refs, t.branch)
+		}
+	}
+
+	return refs
+}
+
 // ReplaceBranch sets the named branch to an existing snapshot without an
 // ancestry restriction. Unlike FastForwardBranch, this can move a branch
 // backwards or onto a different lineage. The branch must already exist; its
@@ -130,10 +135,12 @@ func (t *Transaction) moveBranchToRef(target, source string, fastForward bool) e
 // requiring main to remain unchanged during the commit.
 //
 // Commit pins the target's snapshot ID, preventing the normal retry of a
-// co-staged append when the branch moves. No catalog's snapshot-ID requirement
-// detects retention-only changes, and REST catalogs also miss ref type changes
-// with the same ID. A REST catalog using snapshot-loading-mode=refs may omit a
-// requested historical snapshot; reload with snapshot-loading-mode=all.
+// co-staged append when the branch moves. A snapshot staged in this transaction
+// also pins the commit branch, preventing a retry from changing its ancestry.
+// No catalog's snapshot-ID requirement detects retention-only changes, and REST
+// catalogs also miss ref type changes with the same ID. A REST catalog using
+// snapshot-loading-mode=refs may omit a requested historical snapshot; reload
+// with snapshot-loading-mode=all.
 func (t *Transaction) ReplaceBranch(name string, snapshotID int64) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -149,18 +156,16 @@ func (t *Transaction) ReplaceBranch(name string, snapshotID int64) error {
 	if existing.Type != BranchRef {
 		return fmt.Errorf("%w: ref %q is a %s, not a branch", iceberg.ErrInvalidArgument, name, existing.Type)
 	}
+	requirements := []Requirement{assertBranchRefSnapshotID(name, t.baseRefSnapshotID(name))}
+	refsToPin := t.refsToPinForSnapshot(snapshotID, name)
 	if existing.SnapshotID == snapshotID {
 		// A no-op still fences a co-staged metadata update.
-		return t.applyPinned(nil,
-			[]Requirement{assertBranchRefSnapshotID(name, t.baseRefSnapshotID(name))},
-			[]string{name})
+		return t.applyPinned(nil, requirements, refsToPin)
 	}
 
 	update := meta.NewRetainingSnapshotRefUpdate(name, snapshotID, BranchRef)
 
-	err = t.applyPinned([]Update{update},
-		[]Requirement{assertBranchRefSnapshotID(name, t.baseRefSnapshotID(name))},
-		[]string{name})
+	err = t.applyPinned([]Update{update}, requirements, refsToPin)
 	if errors.Is(err, ErrSnapshotNotFound) {
 		return fmt.Errorf("cannot replace branch %q with snapshot %d (REST snapshot-loading-mode=refs may omit historical snapshots; reload with snapshot-loading-mode=all): %w",
 			name, snapshotID, err)
