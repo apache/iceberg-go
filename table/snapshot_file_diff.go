@@ -161,8 +161,8 @@ func (i InspectTable) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toS
 // uniqueSnapshotManifests skips immutable manifests that are present in both
 // snapshots. No ancestry walk is needed, and different branches work.
 func uniqueSnapshotManifests(from, to iter.Seq[iceberg.ManifestFile]) (fromOnly, toOnly []iceberg.ManifestFile) {
-	fromPaths := make(map[string]struct{}, len(from))
-	toPaths := make(map[string]struct{}, len(to))
+	fromPaths := make(map[string]struct{})
+	toPaths := make(map[string]struct{})
 	for manifest := range from {
 		fromPaths[manifest.FilePath()] = struct{}{}
 	}
