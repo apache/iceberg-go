@@ -232,9 +232,42 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	return rowsMightMatch
 }
 
+// uniqueValue returns a partition value only when the manifest summary proves
+// that every partition has that value. Unknown NaN information is not sufficient
+// for floating-point fields because NaNs are excluded from the bounds.
+func (m *manifestEvalVisitor) uniqueValue(term iceberg.BoundTerm) iceberg.Literal {
+	field := m.partitionFields[term.Ref().Pos()]
+	if field.ContainsNull || field.LowerBound == nil || field.UpperBound == nil {
+		return nil
+	}
+
+	switch term.Ref().Type().(type) {
+	case iceberg.Float32Type, iceberg.Float64Type:
+		if field.ContainsNaN == nil || *field.ContainsNaN {
+			return nil
+		}
+	}
+
+	lower, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.LowerBound)
+	if err != nil {
+		return nil
+	}
+	upper, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.UpperBound)
+	if err != nil {
+		return nil
+	}
+	if getCmpLiteral(lower)(lower, upper) != 0 {
+		return nil
+	}
+
+	return lower
+}
+
 func (m *manifestEvalVisitor) VisitNotIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) bool {
-	// because the bounds are not necessarily a min or max value, this cannot be answered using them
-	// notIn(col, {X, ...}) with (X, Y) doesn't guarantee that X is a value in col
+	if value := m.uniqueValue(term); value != nil && literals.Contains(value) {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 
@@ -418,8 +451,10 @@ func (m *manifestEvalVisitor) VisitEqual(term iceberg.BoundTerm, lit iceberg.Lit
 }
 
 func (m *manifestEvalVisitor) VisitNotEqual(term iceberg.BoundTerm, lit iceberg.Literal) bool {
-	// because bounds are not necessarily a min or max, this cannot be answered
-	// using them. notEq(col, X) with (X, Y) doesn't guarantee X is a value in col
+	if value := m.uniqueValue(term); value != nil && getCmpLiteral(value)(value, lit) == 0 {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 
