@@ -18,16 +18,19 @@
 package rest
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/apache/iceberg-go"
 )
 
 // ErrEndpointNotSupported means the server did not advertise an endpoint the
-// operation needs.
-var ErrEndpointNotSupported = errors.New("endpoint not supported by server")
+// operation needs. It wraps iceberg.ErrNotImplemented, which a server that
+// answers 501 for the same operation already produces, so callers can treat
+// both alike.
+var ErrEndpointNotSupported = fmt.Errorf("%w: endpoint not supported by server", iceberg.ErrNotImplemented)
 
 const pathPrefix = "/v1/{prefix}"
 
