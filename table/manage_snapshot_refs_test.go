@@ -404,9 +404,14 @@ func TestReplaceBranch(t *testing.T) {
 		_, err = tx.Commit(t.Context())
 		require.ErrorIs(t, err, ErrTransactionUnusable)
 		require.NotErrorIs(t, err, ErrCommitFailed)
-		qa, ok := cat.metadata.Refs()["qa"]
-		require.True(t, ok)
-		assert.Equal(t, TagRef, qa.Type)
+		var found bool
+		for name, ref := range cat.metadata.Refs() {
+			if name == "qa" {
+				found = true
+				assert.Equal(t, TagRef, ref.Type)
+			}
+		}
+		require.True(t, found)
 	})
 }
 
