@@ -60,6 +60,7 @@ type writerFactory struct {
 	locProvider      LocationProvider
 	tableProps       iceberg.Properties
 	fileSchema       *iceberg.Schema
+	propertySchema   *iceberg.Schema
 	arrowSchema      *arrow.Schema
 	writeProps       any
 	rowGroupBytes    int64
@@ -215,6 +216,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		locProvider:      locProvider,
 		tableProps:       meta.props,
 		fileSchema:       fileSchema,
+		propertySchema:   meta.CurrentSchema(),
 		arrowSchema:      arrowSchema,
 		writeProps:       format.GetWriteProperties(meta.props),
 		rowGroupBytes:    rowGroupTargetSizeBytes,
@@ -302,6 +304,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 	// FileSchema stays logical; only arrowSchema carries the shredded layout.
 	return w.format.NewFileWriter(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
+		PropertySchema:   w.propertySchema,
 		FileName:         filePath,
 		StatsCols:        w.statsCols,
 		ColMapping:       w.colMapping,
