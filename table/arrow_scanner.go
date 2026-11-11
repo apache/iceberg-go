@@ -1984,6 +1984,17 @@ func (as *arrowScan) prepareToRead(
 			return nil, nil, err
 		}
 
+		// A projection containing only missing fields has no physical leaves.
+		// Read the file schema to retain row counts and nested validity; final
+		// logical projection removes these carrier columns again.
+		if colIndices != nil && len(colIndices) == 0 {
+			fileSchema, err = rdr.Schema()
+			if err != nil {
+				return nil, nil, err
+			}
+			colIndices = nil
+		}
+
 		iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
 			NameMapping:     invariants.nameMapping,
 			TableSchema:     invariants.tableSchema,
@@ -2900,19 +2911,6 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	}
 
-	if stampPos {
-		pipeline = append(pipeline, stampChangelogFilePos(ctx, posSource.cursor()))
-	}
-
-	if applyPosDeletes {
-		pipeline = append(pipeline,
-			processPositionalDeleteBitmap(ctx, positionalDeleteBitmap, posSource.cursor()))
-	}
-
-	if hasDV {
-		pipeline = append(pipeline, filterByDeletionVector(ctx, dvBitmap, task.Value.File.Count(), posSource.cursor()))
-	}
-
 	if len(projectionEqSets) > 0 {
 		equalitySchema, schemaErr := equalityDeleteReadSchema(
 			readSchema, invariants.tableSchema, as.metadata.Schemas(), projectionEqSets)
@@ -2933,6 +2931,19 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 			})
 			readSchema = equalitySchema
 		}
+	}
+
+	if stampPos {
+		pipeline = append(pipeline, stampChangelogFilePos(ctx, posSource.cursor()))
+	}
+
+	if applyPosDeletes {
+		pipeline = append(pipeline,
+			processPositionalDeleteBitmap(ctx, positionalDeleteBitmap, posSource.cursor()))
+	}
+
+	if hasDV {
+		pipeline = append(pipeline, filterByDeletionVector(ctx, dvBitmap, task.Value.File.Count(), posSource.cursor()))
 	}
 
 	if len(eqDeleteSets) > 0 {
