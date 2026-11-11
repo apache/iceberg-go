@@ -64,7 +64,9 @@ import (
 // a diverged base snapshot, files to rewrite that a concurrent commit removed,
 // disabled GC for snapshot expiry, or a staged update that cannot apply after
 // refresh without a conflict reported by the metadata builder.
-// An ErrCommitFailed retry loop stops on these failures.
+// An ErrCommitFailed retry loop stops on these failures. ErrDataFilesMissing,
+// returned on any attempt when a delete references data files that are
+// missing, does not match either.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrCommitRejected means the catalog rejected a commit without writing
@@ -94,7 +96,9 @@ var ErrCommitRejected = errors.New("commit rejected")
 // refresh. With snapshot expiry, they also include disabled GC and replanning
 // that changes whether a commit branch other than main is removed. Only the
 // commit branch's head assertion is rebased. A staged update that cannot
-// apply keeps the builder's error as its cause.
+// apply keeps the builder's error as its cause. Transaction.Commit also
+// returns it, on any attempt, when a delete references data files that are
+// missing (ErrDataFilesMissing).
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -582,7 +586,8 @@ func yieldAllManifests(
 // conflictValidatorFunc runs a single producer's client-side conflict
 // check against a pre-built conflictContext. Validators return a wrapped
 // ErrCommit* sentinel on retryable conflict, ErrCommitDiverged on
-// terminal divergence, or nil on success.
+// terminal divergence, ErrDataFilesMissing when referenced data files
+// are missing, or nil on success.
 type conflictValidatorFunc func(cc *conflictContext) error
 
 // commitOpts controls optional behavior of doCommit beyond the core
@@ -913,11 +918,15 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
-					// Conflicts with a concurrent commit end the transaction.
-					// Other validator errors, such as read failures, stay
+					// Conflicts with a concurrent commit end the transaction, as
+					// do missing referenced data files, which no retry brings
+					// back. Other validator errors, such as read failures, stay
 					// resumable.
 					if errors.Is(vErr, ErrCommitFailed) {
 						return nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
+					}
+					if errors.Is(vErr, ErrDataFilesMissing) {
+						return nil, fmt.Errorf("%w: validation failed: %w", ErrTransactionUnusable, vErr)
 					}
 
 					return nil, vErr
@@ -1036,9 +1045,9 @@ func (t Table) withMetadata(meta Metadata, loc string) *Table {
 // branch check that follows rejects the commit.
 //
 // Assertions on refs in pinned guard the commit (an explicit
-// Transaction.AssertRefSnapshotID, a rollback, or CherryPickSnapshot) and
-// are never rewritten: a ref that has changed must fail the commit, not be
-// replayed against the new head.
+// Transaction.AssertRefSnapshotID, a rollback, CherryPickSnapshot, or a
+// branch fast-forward/replacement) and are never rewritten: a ref that has
+// changed must fail the commit, not be replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs

@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 
@@ -1297,5 +1298,208 @@ func TestDecimalTypeOfReturnsError(t *testing.T) {
 		typ, err := iceberg.DecimalTypeOf(tc.precision, tc.scale)
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		assert.Equal(t, iceberg.DecimalType{}, typ)
+	}
+}
+
+func TestTimestampToNanosChecksRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		micros    iceberg.Timestamp
+		want      iceberg.TimestampNano
+		overflows bool
+	}{
+		{
+			name:   "zero",
+			micros: 0,
+			want:   0,
+		},
+		{
+			name:   "maximum valid microseconds",
+			micros: iceberg.Timestamp(math.MaxInt64 / 1000),
+			want:   iceberg.TimestampNano((math.MaxInt64 / 1000) * 1000),
+		},
+		{
+			name:   "minimum valid microseconds",
+			micros: iceberg.Timestamp(math.MinInt64 / 1000),
+			want:   iceberg.TimestampNano((math.MinInt64 / 1000) * 1000),
+		},
+		{
+			name:      "positive overflow",
+			micros:    iceberg.Timestamp(math.MaxInt64/1000 + 1),
+			overflows: true,
+		},
+		{
+			name:      "negative overflow",
+			micros:    iceberg.Timestamp(math.MinInt64/1000 - 1),
+			overflows: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.overflows {
+				require.PanicsWithError(t,
+					fmt.Sprintf("%s: timestamp %d is outside the nanosecond range", iceberg.ErrBadCast, tt.micros),
+					func() { _ = tt.micros.ToNanos() },
+				)
+
+				return
+			}
+
+			assert.Equal(t, tt.want, tt.micros.ToNanos())
+		})
+	}
+}
+
+func TestLongDefaultsPreserveJSONPrecision(t *testing.T) {
+	const input = `{"id":1,"name":"value","type":"long","required":true,"initial-default":9007199254740993,"write-default":-9007199254740993}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	assert.Equal(t, int64(9007199254740993), field.InitialDefault)
+	assert.Equal(t, int64(-9007199254740993), field.WriteDefault)
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.JSONEq(t, input, string(encoded))
+	assert.Contains(t, string(encoded), `"initial-default":9007199254740993`)
+	assert.Contains(t, string(encoded), `"write-default":-9007199254740993`)
+}
+
+func TestLongDefaultsSurviveSchemaJSONRoundTrip(t *testing.T) {
+	original := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "max", Type: iceberg.PrimitiveTypes.Int64,
+			InitialDefault: int64(math.MaxInt64),
+			WriteDefault:   int64(math.MinInt64),
+		},
+		iceberg.NestedField{
+			ID: 2, Name: "small", Type: iceberg.PrimitiveTypes.Int64,
+			InitialDefault: int64(7),
+			WriteDefault:   int64(-7),
+		},
+	)
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, int64(math.MaxInt64), decoded.Field(0).InitialDefault)
+	assert.Equal(t, int64(math.MinInt64), decoded.Field(0).WriteDefault)
+	assert.Equal(t, int64(7), decoded.Field(1).InitialDefault)
+	assert.Equal(t, int64(-7), decoded.Field(1).WriteDefault)
+	assert.True(t, original.Equals(&decoded))
+}
+
+func TestLongDefaultsRejectNonIntegralAndOutOfRangeJSON(t *testing.T) {
+	invalid := []string{
+		`1.5`,
+		`1e2`,
+		`9223372036854775808`,
+		`-9223372036854775809`,
+		`"42"`,
+		`true`,
+	}
+
+	for _, value := range invalid {
+		t.Run(value, func(t *testing.T) {
+			for _, key := range []string{"initial-default", "write-default"} {
+				input := `{"id":1,"name":"value","type":"long","required":false,"` + key + `":` + value + `}`
+				var field iceberg.NestedField
+				err := json.Unmarshal([]byte(input), &field)
+				assert.ErrorIs(t, err, iceberg.ErrInvalidSchema, key)
+			}
+		})
+	}
+}
+
+func TestLongDefaultsKeepNullAndMissingValues(t *testing.T) {
+	for _, input := range []string{
+		`{"id":1,"name":"value","type":"long","required":false}`,
+		`{"id":1,"name":"value","type":"long","required":false,"initial-default":null,"write-default":null}`,
+	} {
+		var field iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(input), &field))
+		assert.Nil(t, field.InitialDefault)
+		assert.Nil(t, field.WriteDefault)
+	}
+}
+
+func TestLongWriteDefaultExpressionPreservesJSONNumbers(t *testing.T) {
+	const input = `{"id":1,"name":"value","type":"long","required":false,"write-default":{"type":"literal","value":9007199254740993,"data-type":"long"}}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+
+	expression, ok := field.WriteDefault.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, json.Number("9007199254740993"), expression["value"])
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.JSONEq(t, input, string(encoded))
+	assert.Contains(t, string(encoded), `"value":9007199254740993`)
+}
+
+func TestNonLongExpressionDefaultPreservesLongLiterals(t *testing.T) {
+	const input = `{"id":1,"name":"value","type":"string","required":false,"write-default":{"type":"apply","function":"to_string","arguments":[{"type":"literal","value":9007199254740993,"data-type":"long"},{"type":"literal","value":-9223372036854775808,"data-type":"long"}]}}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	defaultExpression, ok := field.WriteDefault.(map[string]any)
+	require.True(t, ok)
+	arguments, ok := defaultExpression["arguments"].([]any)
+	require.True(t, ok)
+	require.Len(t, arguments, 2)
+	first, ok := arguments[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, json.Number("9007199254740993"), first["value"])
+	second, ok := arguments[1].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, json.Number("-9223372036854775808"), second["value"])
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"value":9007199254740993`)
+	assert.Contains(t, string(encoded), `"value":-9223372036854775808`)
+}
+
+func TestMapInitialDefaultPreservesLongValues(t *testing.T) {
+	const input = `{"id":1,"name":"lookup","type":{"type":"map","key-id":2,"key":"string","value-id":3,"value":"long","value-required":false},"required":false,"initial-default":{"keys":["k"],"values":[-9223372036854775808]}}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	defaultValue, ok := field.InitialDefault.(map[string]any)
+	require.True(t, ok)
+	values, ok := defaultValue["values"].([]any)
+	require.True(t, ok)
+	assert.Equal(t, []any{json.Number("-9223372036854775808")}, values)
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"values":[-9223372036854775808]`)
+}
+
+func TestListInitialDefaultPreservesLongValues(t *testing.T) {
+	const input = `{"id":1,"name":"numbers","type":{"type":"list","element-id":2,"element":"long","element-required":false},"required":false,"initial-default":[9007199254740993,9223372036854775807]}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	assert.Equal(t, []any{json.Number("9007199254740993"), json.Number("9223372036854775807")}, field.InitialDefault)
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"initial-default":[9007199254740993,9223372036854775807]`)
+}
+
+func TestNonLongScalarDefaultKeepsExistingNumericType(t *testing.T) {
+	for _, input := range []string{
+		`{"id":1,"name":"integer","type":"int","required":false,"initial-default":42}`,
+		`{"id":1,"name":"double","type":"double","required":false,"initial-default":1.25}`,
+	} {
+		var field iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(input), &field))
+		assert.IsType(t, float64(0), field.InitialDefault)
 	}
 }

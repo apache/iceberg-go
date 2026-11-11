@@ -1307,6 +1307,44 @@ func TestUnboundPartitionSpecBindToSchema(t *testing.T) {
 	assert.ErrorContains(t, err, "partition name floats matches schema column with field ID 2, but the field is sourced from 1")
 }
 
+func TestBindToSchemaPreservesMultipleSourceIDs(t *testing.T) {
+	transform, err := iceberg.ParseTransform("custom_two_arg")
+	require.NoError(t, err)
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 11, Name: "left", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 22, Name: "right", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{22, 11}, FieldID: 1000, Name: "combined", Transform: transform,
+	})
+
+	bound, err := spec.BindToSchema(schema, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{22, 11}, bound.Field(0).SourceIDs)
+	require.Equal(t, 1000, bound.Field(0).FieldID)
+}
+
+func TestAddPartitionFieldBySourceIDs(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 11, Name: "left", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 22, Name: "right", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	transform, err := iceberg.ParseTransform("custom_two_arg")
+	require.NoError(t, err)
+	sourceIDs := []int{22, 11}
+	option := iceberg.AddPartitionFieldBySourceIDs(sourceIDs, "combined", transform, schema, nil)
+	sourceIDs[0] = 11
+
+	spec, err := iceberg.NewPartitionSpecOpts(option)
+	require.NoError(t, err)
+	require.Equal(t, []int{22, 11}, spec.Field(0).SourceIDs)
+
+	encoded, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"source-ids":[22,11]`)
+	require.NotContains(t, string(encoded), `"source-id":`)
+}
+
 // NewPartitionSpecOpts used to accept a redundant field and emit a spec that
 // UnmarshalJSON then rejected, so the builder could write table metadata this
 // library could not read back.

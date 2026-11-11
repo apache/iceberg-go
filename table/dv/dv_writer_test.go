@@ -24,6 +24,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -149,6 +150,27 @@ func TestDVWriterSingleDataFile(t *testing.T) {
 		"unpartitioned spec has id 0")
 
 	verifyDVReadBack(t, fs, df)
+}
+
+func TestDVWriterFlushWritesRowPositionFieldID(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs, unpartitionedResolver())
+	location := "mem://test/row-position-field.puffin"
+
+	require.NoError(t, w.Add("s3://bucket/data/file-001.parquet", []int64{1, 3}, 0, nil))
+	dataFiles, err := w.Flush(context.Background(), location)
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+
+	file, err := fs.Open(t.Context(), location)
+	require.NoError(t, err)
+	reader, err := puffin.NewReader(file)
+	closeErr := file.Close()
+	require.NoError(t, err)
+	require.NoError(t, closeErr)
+	blobs := reader.Blobs()
+	require.Len(t, blobs, 1)
+	assert.Equal(t, []int32{iceberg.RowPositionFieldID}, blobs[0].Fields)
 }
 
 func TestDVWriterMultipleDataFiles(t *testing.T) {

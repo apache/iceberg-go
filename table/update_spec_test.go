@@ -90,6 +90,35 @@ func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 	assert.ErrorContains(t, err, "transaction is nil")
 }
 
+func TestUpdateSpecRejectsAmbiguousCaseInsensitiveSourceName(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ID", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 3, Name: "unique", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"ambiguous-partition-name"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+
+	updates, _, err := txn.UpdateSpec(false).
+		AddIdentity("id").
+		BuildUpdates()
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.Empty(t, updates)
+
+	commit, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.Empty(t, commit.Updates)
+
+	txn = tbl.NewTransaction()
+	updates, _, err = txn.UpdateSpec(false).
+		AddIdentity("UNIQUE").
+		BuildUpdates()
+	require.NoError(t, err)
+	require.NotEmpty(t, updates)
+}
+
 func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id",

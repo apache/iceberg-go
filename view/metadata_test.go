@@ -1037,8 +1037,8 @@ var exampleViewJSON = `{
 			"type": "long",
 			"required": true,
 			"doc": "",
-			"initial-default": true,
-			"write-default": true
+			"initial-default": 1,
+			"write-default": 1
 		  }
 		],
 		"schema-id": 0,

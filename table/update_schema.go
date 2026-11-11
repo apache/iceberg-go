@@ -1090,9 +1090,67 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 				DefaultNameMappingKey: string(mappingJSON),
 			}))
 		}
+
+		updates = append(updates, columnPropertyUpdates(meta.props, u.schema, newSchema, []string{
+			MetricsModeColumnConfPrefix,
+			ParquetBloomFilterColumnEnabledKeyPrefix,
+			ParquetCompressionColumnCodecKeyPrefix,
+			ParquetCompressionColumnLevelKeyPrefix,
+		})...)
 	}
 
 	return updates, requirements, nil
+}
+
+// columnPropertyUpdates follows field IDs across schema changes for supported
+// per-column properties. A deleted field's settings must not attach to a new
+// field with the same name. Remove old keys before setting renamed keys,
+// because a rename may reuse the name of a deleted field.
+func columnPropertyUpdates(props iceberg.Properties, oldSchema, newSchema *iceberg.Schema, prefixes []string) []Update {
+	var removals []string
+	set := make(iceberg.Properties)
+	for key, value := range props {
+		prefix, name, ok := columnPropertyField(key, prefixes)
+		if !ok {
+			continue
+		}
+		field, found := oldSchema.FindFieldByName(name)
+		if !found {
+			continue
+		}
+		oldName, _ := oldSchema.FindColumnName(field.ID)
+		if name != oldName {
+			continue
+		}
+		newName, exists := newSchema.FindColumnName(field.ID)
+		if !exists || oldName != newName {
+			removals = append(removals, key)
+			if exists {
+				set[prefix+newName] = value
+			}
+		}
+	}
+	var updates []Update
+	if len(removals) > 0 {
+		slices.Sort(removals)
+		updates = append(updates, NewRemovePropertiesUpdate(removals))
+	}
+	if len(set) > 0 {
+		updates = append(updates, NewSetPropertiesUpdate(set))
+	}
+
+	return updates
+}
+
+func columnPropertyField(key string, prefixes []string) (prefix, name string, ok bool) {
+	for _, base := range prefixes {
+		prefix := base + "."
+		if name, ok := strings.CutPrefix(key, prefix); ok && name != "" {
+			return prefix, name, true
+		}
+	}
+
+	return "", "", false
 }
 
 func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {

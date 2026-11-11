@@ -26,7 +26,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -50,7 +52,7 @@ const (
 var (
 	TestHeaders = http.Header{
 		"X-Client-Version": {"0.14.1"},
-		"User-Agent":       {"GoIceberg/(unknown version)"},
+		"User-Agent":       {"iceberg-go/unknown (go " + strings.TrimPrefix(runtime.Version(), "go") + ")"},
 		"Authorization":    {"Bearer " + TestToken},
 	}
 	OAuthTestHeaders = http.Header{
