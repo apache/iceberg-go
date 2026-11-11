@@ -108,6 +108,11 @@ const (
 type parquetFormat struct{}
 
 func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ FileReader, err error) {
+	alloc := compute.GetAllocator(ctx)
+	readProps, err := newParquetReaderProperties(ctx, alloc)
+	if err != nil {
+		return nil, err
+	}
 	inputfile, err := fs.Open(ctx, path)
 	if err != nil {
 		return nil, err
@@ -121,21 +126,21 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 		}
 	}()
 
-	rdr, err := file.NewParquetReader(inputfile)
+	rdr, err := file.NewParquetReader(inputfile, file.WithReadProps(readProps))
 	if err != nil {
 		return nil, err
 	}
 
-	alloc := compute.GetAllocator(ctx)
 	arrRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, alloc)
 	if err != nil {
 		return nil, err
 	}
 
 	return wrapPqArrowReader{
-		FileReader:       arrRdr,
-		dictionarySource: inputfile,
-		dictionaryMem:    alloc,
+		FileReader:          arrRdr,
+		dictionarySource:    inputfile,
+		dictionaryMem:       alloc,
+		dictionaryReadProps: readProps,
 	}, nil
 }
 
@@ -2265,8 +2270,9 @@ type wrapPqArrowReader struct {
 	rowGroupInfos []parquetRowGroupInfo
 	// dictionarySource is shared with FileReader. The temporary reader created
 	// from it wraps the source so it cannot close the main reader's input.
-	dictionarySource parquet.ReaderAtSeeker
-	dictionaryMem    memory.Allocator
+	dictionarySource    parquet.ReaderAtSeeker
+	dictionaryMem       memory.Allocator
+	dictionaryReadProps *parquet.ReaderProperties
 }
 
 func (w wrapPqArrowReader) Metadata() Metadata {
@@ -2403,7 +2409,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				// section-read reader cannot be created, use the main reader and
 				// keep the existing conservative behaviour.
 				dictionaryReader, _ = newParquetDictionaryReader(
-					w.dictionarySource, fileMeta, w.dictionaryMem)
+					w.dictionarySource, fileMeta, w.dictionaryMem, w.dictionaryReadProps)
 				if dictionaryReader != nil {
 					// The temporary reader owns only its buffers. Its source is
 					// wrapped so this cannot close the main reader's input.
@@ -2513,9 +2519,13 @@ func (nonClosingReaderAtSeeker) Close() error {
 }
 
 func newParquetDictionaryReader(
-	source parquet.ReaderAtSeeker, fileMeta *metadata.FileMetaData, mem memory.Allocator,
+	source parquet.ReaderAtSeeker, fileMeta *metadata.FileMetaData, mem memory.Allocator, configured *parquet.ReaderProperties,
 ) (*file.Reader, error) {
 	readProps := parquet.NewReaderProperties(mem)
+	if configured != nil {
+		props := *configured
+		readProps = &props
+	}
 	readProps.BufferedStreamEnabled = true
 
 	return file.NewParquetReader(nonClosingReaderAtSeeker{ReaderAtSeeker: source},
@@ -2948,6 +2958,10 @@ func checkRowGroupBloomFilters(
 }
 
 func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader, err error) {
+	readProps, err := newParquetReaderProperties(ctx, pfs.mem)
+	if err != nil {
+		return nil, err
+	}
 	pf, err := pfs.fs.Open(ctx, pfs.file.FilePath())
 	if err != nil {
 		return nil, err
@@ -2961,7 +2975,6 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		}
 	}()
 
-	readProps := parquet.NewReaderProperties(pfs.mem)
 	var rdr *file.Reader
 	var rowGroupInfos []parquetRowGroupInfo
 	if cache := parquetMetadataCacheFromContext(ctx); cache != nil {
@@ -3016,10 +3029,11 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 	}
 
 	result = wrapPqArrowReader{
-		FileReader:       fr,
-		rowGroupInfos:    rowGroupInfos,
-		dictionarySource: pf,
-		dictionaryMem:    pfs.mem,
+		FileReader:          fr,
+		rowGroupInfos:       rowGroupInfos,
+		dictionarySource:    pf,
+		dictionaryMem:       pfs.mem,
+		dictionaryReadProps: readProps,
 	}
 
 	return result, nil
@@ -3187,19 +3201,20 @@ func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.
 	selected, fields := []arrow.Field{}, field.Children
 	sameType := true
 
-	for i, t := range children {
-		field := fields[i]
-		if arrow.TypeEqual(field.Field.Type, t.Type) {
-			selected = append(selected, *field.Field)
-		} else if t.Type == nil {
+	for i, child := range children {
+		original := fields[i].Field
+		if child.Type == nil {
 			sameType = false
-			// type has changed, create a new field with the projected type
-			selected = append(selected, arrow.Field{
-				Name:     field.Field.Name,
-				Type:     field.Field.Type,
-				Nullable: field.Field.Nullable,
-				Metadata: field.Field.Metadata,
-			})
+
+			continue
+		}
+		if arrow.TypeEqual(original.Type, child.Type) {
+			selected = append(selected, *original)
+		} else {
+			sameType = false
+			projected := *original
+			projected.Type = child.Type
+			selected = append(selected, projected)
 		}
 	}
 

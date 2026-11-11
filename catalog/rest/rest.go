@@ -53,6 +53,7 @@ var (
 	_ catalog.Catalog                      = (*Catalog)(nil)
 	_ catalog.ViewCatalog                  = (*Catalog)(nil)
 	_ catalog.UpdatableViewCatalog         = (*Catalog)(nil)
+	_ catalog.RenamableViewCatalog         = (*Catalog)(nil)
 	_ catalog.TransactionalCatalog         = (*Catalog)(nil)
 	_ catalog.RefreshableCredentialCatalog = (*Catalog)(nil)
 	_ catalog.RegisterableCatalog          = (*Catalog)(nil)
