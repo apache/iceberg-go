@@ -153,6 +153,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Int64Type:
+		// Old int bounds retain their 4-byte encoding after promotion to long.
+		if len(data) == 4 {
+			return Int64Literal(int32(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Int64Literal
 		err := v.UnmarshalBinary(data)
 
@@ -163,6 +168,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Float64Type:
+		// Old float bounds retain their 4-byte encoding after promotion to double.
+		if len(data) == 4 {
+			return Float64Literal(math.Float32frombits(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Float64Literal
 		err := v.UnmarshalBinary(data)
 
@@ -621,9 +631,30 @@ func (i *Int64Literal) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// Java Float.compare distinguishes signed zeros and places NaNs after all
+// non-NaN values. Go's cmp.Compare does not, which is unsafe for Iceberg bounds.
+func compareFloat32Literal(left, right float32) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	}
+
+	leftBits, rightBits := math.Float32bits(left), math.Float32bits(right)
+	if math.IsNaN(float64(left)) {
+		leftBits = 0x7fc00000
+	}
+	if math.IsNaN(float64(right)) {
+		rightBits = 0x7fc00000
+	}
+
+	return cmp.Compare(int32(leftBits), int32(rightBits))
+}
+
 type Float32Literal float32
 
-func (Float32Literal) Comparator() Comparator[float32] { return cmp.Compare[float32] }
+func (Float32Literal) Comparator() Comparator[float32] { return compareFloat32Literal }
 func (f Float32Literal) Type() Type                    { return PrimitiveTypes.Float32 }
 func (f Float32Literal) Value() float32                { return float32(f) }
 func (f Float32Literal) Any() any                      { return f.Value() }
@@ -670,9 +701,29 @@ func (f *Float32Literal) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// Match Java Double.compare for signed zeros and canonical NaN ordering.
+func compareFloat64Literal(left, right float64) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	}
+
+	leftBits, rightBits := math.Float64bits(left), math.Float64bits(right)
+	if math.IsNaN(left) {
+		leftBits = 0x7ff8000000000000
+	}
+	if math.IsNaN(right) {
+		rightBits = 0x7ff8000000000000
+	}
+
+	return cmp.Compare(int64(leftBits), int64(rightBits))
+}
+
 type Float64Literal float64
 
-func (Float64Literal) Comparator() Comparator[float64] { return cmp.Compare[float64] }
+func (Float64Literal) Comparator() Comparator[float64] { return compareFloat64Literal }
 func (f Float64Literal) Type() Type                    { return PrimitiveTypes.Float64 }
 func (f Float64Literal) Value() float64                { return float64(f) }
 func (f Float64Literal) Any() any                      { return f.Value() }
@@ -1324,12 +1375,20 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 			return v1.Val.Cmp(v2.Val)
 		}
 
-		rescaled, err := v2.Val.Rescale(int32(v2.Scale), int32(v1.Scale))
-		if err != nil {
-			return -1
+		// Rescale can fail when it would discard fractional digits or
+		// overflow decimal128. Compare the exact values at a common scale.
+		left, right := v1.Val.BigInt(), v2.Val.BigInt()
+		scale := max(v1.Scale, v2.Scale)
+		if v1.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v1.Scale)), nil)
+			left.Mul(left, factor)
+		}
+		if v2.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v2.Scale)), nil)
+			right.Mul(right, factor)
 		}
 
-		return v1.Val.Cmp(rescaled)
+		return left.Cmp(right)
 	}
 }
 

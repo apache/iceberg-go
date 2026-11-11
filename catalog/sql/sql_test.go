@@ -59,7 +59,7 @@ import (
 )
 
 var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
-	[]int{1},
+	[]int{2},
 	iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false,
 	},
@@ -70,48 +70,27 @@ var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 		ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false,
 	},
 	iceberg.NestedField{
-		ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-			ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
-		},
+		ID: 4, Name: "qux", Required: true, Type: iceberg.NewListType(5, iceberg.PrimitiveTypes.String, true),
 	},
 	iceberg.NestedField{
 		ID: 6, Name: "quux",
-		Type: &iceberg.MapType{
-			KeyID:   7,
-			KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 8,
-			ValueType: &iceberg.MapType{
-				KeyID:         9,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       10,
-				ValueType:     iceberg.PrimitiveTypes.Int32,
-				ValueRequired: true,
-			},
-			ValueRequired: true,
-		},
+		Type:     iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.NewMapType(9, iceberg.PrimitiveTypes.String, 10, iceberg.PrimitiveTypes.Int32, true), true),
 		Required: true,
 	},
 	iceberg.NestedField{
-		ID: 11, Name: "location", Type: &iceberg.ListType{
-			ElementID: 12, Element: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-					{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-				},
-			},
-			ElementRequired: true,
-		},
+		ID: 11, Name: "location", Type: iceberg.NewListType(12, iceberg.NewStructType(
+			iceberg.NestedField{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+			iceberg.NestedField{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		), true),
 		Required: true,
 	},
 	iceberg.NestedField{
 		ID:   15,
 		Name: "person",
-		Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
-				{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-			},
-		},
+		Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+			iceberg.NestedField{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		),
 		Required: false,
 	},
 )

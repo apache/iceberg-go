@@ -26,7 +26,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -50,7 +52,7 @@ const (
 var (
 	TestHeaders = http.Header{
 		"X-Client-Version": {"0.14.1"},
-		"User-Agent":       {"GoIceberg/(unknown version)"},
+		"User-Agent":       {"iceberg-go/unknown (go " + strings.TrimPrefix(runtime.Version(), "go") + ")"},
 		"Authorization":    {"Bearer " + TestToken},
 	}
 	OAuthTestHeaders = http.Header{
@@ -4773,6 +4775,12 @@ func TestEndpointNegotiation(t *testing.T) {
 	_, err = cat.CreateTable(context.Background(), table.Identifier{"ns", "tbl"}, tableSchemaSimple)
 	assert.ErrorIs(t, err, rest.ErrEndpointNotSupported)
 	assert.NotErrorIs(t, err, rest.ErrRESTError)
+	// It is also iceberg.ErrNotImplemented, as a 501 for the same op is, so
+	// catalogtest's "not supported" cases hold for a REST server that leaves an
+	// optional endpoint out.
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"ns", "a"}, table.Identifier{"ns", "b"})
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 
 	// An advertised op works.
 	nss, err := cat.ListNamespaces(context.Background(), nil)
