@@ -71,36 +71,13 @@ func columnCompressionWriteProperties(props iceberg.Properties, base []parquet.W
 	return parquetColumnCompressionConfig{base: base, columns: columns}
 }
 
-func parquetCompressionCodec(value string) (compress.Compression, bool) {
-	switch strings.ToLower(value) {
-	case "snappy":
-		return compress.Codecs.Snappy, true
-	case "zstd":
-		return compress.Codecs.Zstd, true
-	case "uncompressed":
-		return compress.Codecs.Uncompressed, true
-	case "gzip":
-		return compress.Codecs.Gzip, true
-	case "brotli":
-		return compress.Codecs.Brotli, true
-	case "lz4":
-		return compress.Codecs.Lz4, true
-	case "lz4raw", "lz4_raw":
-		return compress.Codecs.Lz4Raw, true
-	case "lzo":
-		return compress.Codecs.Lzo, true
-	default:
-		return compress.Codecs.Uncompressed, false
-	}
-}
-
 func (override parquetColumnCompressionOverride) appendWriterProperties(
 	opts []parquet.WriterProperty, path, name string, defaultCodec compress.Compression,
 ) ([]parquet.WriterProperty, error) {
 	codec := defaultCodec
 	if override.hasCodec {
 		var valid bool
-		codec, valid = parquetCompressionCodec(override.codec)
+		codec, valid = ParquetCompressionCodec(override.codec)
 		if !valid {
 			return nil, fmt.Errorf("%w: unsupported Parquet compression codec %q for column %q",
 				iceberg.ErrInvalidArgument, override.codec, name)
