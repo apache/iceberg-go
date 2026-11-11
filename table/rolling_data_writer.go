@@ -228,10 +228,6 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 			return nil, err
 		}
-	}
-	f.writeProps = f.format.GetWriteProperties(writeProps)
-
-	if f.fileFormat == iceberg.ParquetFile {
 		f.colMapping, err = f.format.PathToIDMapping(f.fileSchema)
 		if err != nil {
 			stopCount()
@@ -239,7 +235,9 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 			return nil, err
 		}
 		f.variantFieldIDs = tblutils.VariantFieldIDsFromSchema(f.fileSchema)
+		writeProps = tblutils.ResolveParquetStatsColumnPaths(writeProps, meta.CurrentSchema(), f.fileSchema, f.colMapping, f.content)
 	}
+	f.writeProps = f.format.GetWriteProperties(writeProps)
 
 	f.statsCols, err = computeStatsPlan(f.fileSchema, metricsPropsFor(f.content, meta.props))
 	if err != nil {

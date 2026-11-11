@@ -560,12 +560,13 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.compression-level.column.<name>` | Global level, or the column codec's default if the codecs differ |
 | `write.parquet.bloom-filter-max-bytes` | 1 MB |
 | `write.parquet.bloom-filter-enabled.column.<name>` | (per-column toggle, prefix-matched) |
+| `write.parquet.stats-enabled.column.<name>` | `true` (per-column Parquet statistics toggle) |
 | `parquet.enable.dictionary` | `true` (global dictionary encoding switch; same key as Iceberg Java) |
 | `write.parquet.dict-encoding-enabled.column.<name>` | (per-column toggle, prefix-matched; overrides the global switch) |
 | `write.parquet.shred-variants` | `false` (opt-in shredding of top-level variant columns) |
 | `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
-The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`.
+The bloom filter, statistics, and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`. Statistics settings apply to data files and use Iceberg field names, including nested paths such as `items.element`. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other metadata may still be recorded.
 
 Column compression keys use case-sensitive Iceberg leaf paths, such as
 `items.element` or `attributes.value.name`. They apply to data files and use
