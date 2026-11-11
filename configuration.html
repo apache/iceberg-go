@@ -255,12 +255,12 @@ catalog:
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
 <tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>. <code>dynamodb</code> is recognized by the CLI but not implemented yet.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>, <code>dynamodb</code>.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for Glue and DynamoDB catalogs. When unset, the AWS SDK default credential chain is used.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. Maps to the <code>sql.driver</code> property. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-dialect</code></td><td>SQL dialect for the SQL catalog (<code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, <code>oracle</code>). Maps to the <code>sql.dialect</code> property. The default CLI binary only ships <code>sqlite</code> via <code>sqliteshim</code>; other dialects need a custom build with their drivers.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST. When enabled, requests are signed with the <code>s3.*</code> credential properties if set (<code>s3.access-key-id</code> / <code>s3.secret-access-key</code> / <code>s3.session-token</code>), otherwise with the AWS default credential chain. The Java-client names (<code>rest.access-key-id</code> / <code>rest.secret-access-key</code> / <code>rest.session-token</code>) are accepted as aliases, resolved per field with the <code>s3.*</code> keys taking precedence.</td></tr>
@@ -312,13 +312,13 @@ Java. It is read only from the properties the client supplies; a server's
 <div class="table-wrapper"><table><thead><tr><th>Value</th><th>Behavior</th></tr></thead><tbody>
 <tr><td>unset or <code>oauth2</code></td><td>Use <code>token</code>, or the client-credentials flow with <code>credential</code>. With neither, send no authorization header.</td></tr>
 <tr><td><code>none</code></td><td>Send no authorization header, even if <code>token</code> or <code>credential</code> is set.</td></tr>
+<tr><td><code>basic</code></td><td>HTTP Basic authentication with <code>rest.auth.basic.username</code> and <code>rest.auth.basic.password</code>, both required. Like <code>rest.auth.type</code>, they are read only from the client's properties.</td></tr>
 <tr><td><code>google</code></td><td>Google credentials, for catalogs such as BigLake. Requires a blank import of <code>catalog/rest/googleauth</code>.</td></tr>
 </tbody></table>
 </div>
 <p>Other values select an auth manager registered with <code>rest.RegisterAuthManager</code>.
-An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>. The Java values
-<code>basic</code> and <code>sigv4</code> are not supported; enable SigV4 with <code>rest.sigv4-enabled</code>
-instead.</p>
+An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>. The Java value
+<code>sigv4</code> is not supported; enable SigV4 with <code>rest.sigv4-enabled</code> instead.</p>
 <h4 id="google-biglake"><a class="header" href="#google-biglake">Google BigLake</a></h4>
 <p>With <code>rest.auth.type=google</code>, the
 <a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go"><code>catalog/rest/googleauth</code></a>
@@ -589,7 +589,8 @@ func init() {
 <h3 id="format-and-file-sizing"><a class="header" href="#format-and-file-sizing">Format and file sizing</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>write.format.default</code></td><td><code>parquet</code></td><td>File format used when writing data files. Read in <code>table/writer.go</code> and <code>table/rolling_data_writer.go</code>.</td></tr>
-<tr><td><code>write.target-file-size-bytes</code></td><td>(set by writer)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code> and <code>table/equality_delete_writer.go</code>.</td></tr>
+<tr><td><code>write.target-file-size-bytes</code></td><td><code>536870912</code> (512 MB)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code>.</td></tr>
+<tr><td><code>write.delete.target-file-size-bytes</code></td><td><code>67108864</code> (64 MB)</td><td>Target size for equality-delete and v2 position-delete files where file rolling applies. Read in <code>table/equality_delete_writer.go</code> and <code>table/arrow_utils.go</code>.</td></tr>
 </tbody></table>
 </div>
 <h3 id="scan-reads"><a class="header" href="#scan-reads">Scan reads</a></h3>

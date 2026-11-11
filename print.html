@@ -545,12 +545,12 @@ catalog:
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
 <tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>. <code>dynamodb</code> is recognized by the CLI but not implemented yet.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>, <code>dynamodb</code>.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for Glue and DynamoDB catalogs. When unset, the AWS SDK default credential chain is used.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. Maps to the <code>sql.driver</code> property. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.sql-dialect</code></td><td>SQL dialect for the SQL catalog (<code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, <code>oracle</code>). Maps to the <code>sql.dialect</code> property. The default CLI binary only ships <code>sqlite</code> via <code>sqliteshim</code>; other dialects need a custom build with their drivers.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST. When enabled, requests are signed with the <code>s3.*</code> credential properties if set (<code>s3.access-key-id</code> / <code>s3.secret-access-key</code> / <code>s3.session-token</code>), otherwise with the AWS default credential chain. The Java-client names (<code>rest.access-key-id</code> / <code>rest.secret-access-key</code> / <code>rest.session-token</code>) are accepted as aliases, resolved per field with the <code>s3.*</code> keys taking precedence.</td></tr>
@@ -602,13 +602,13 @@ Java. It is read only from the properties the client supplies; a server's
 <div class="table-wrapper"><table><thead><tr><th>Value</th><th>Behavior</th></tr></thead><tbody>
 <tr><td>unset or <code>oauth2</code></td><td>Use <code>token</code>, or the client-credentials flow with <code>credential</code>. With neither, send no authorization header.</td></tr>
 <tr><td><code>none</code></td><td>Send no authorization header, even if <code>token</code> or <code>credential</code> is set.</td></tr>
+<tr><td><code>basic</code></td><td>HTTP Basic authentication with <code>rest.auth.basic.username</code> and <code>rest.auth.basic.password</code>, both required. Like <code>rest.auth.type</code>, they are read only from the client's properties.</td></tr>
 <tr><td><code>google</code></td><td>Google credentials, for catalogs such as BigLake. Requires a blank import of <code>catalog/rest/googleauth</code>.</td></tr>
 </tbody></table>
 </div>
 <p>Other values select an auth manager registered with <code>rest.RegisterAuthManager</code>.
-An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>. The Java values
-<code>basic</code> and <code>sigv4</code> are not supported; enable SigV4 with <code>rest.sigv4-enabled</code>
-instead.</p>
+An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>. The Java value
+<code>sigv4</code> is not supported; enable SigV4 with <code>rest.sigv4-enabled</code> instead.</p>
 <h4 id="google-biglake"><a class="header" href="#google-biglake">Google BigLake</a></h4>
 <p>With <code>rest.auth.type=google</code>, the
 <a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go"><code>catalog/rest/googleauth</code></a>
@@ -879,7 +879,8 @@ func init() {
 <h3 id="format-and-file-sizing"><a class="header" href="#format-and-file-sizing">Format and file sizing</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>write.format.default</code></td><td><code>parquet</code></td><td>File format used when writing data files. Read in <code>table/writer.go</code> and <code>table/rolling_data_writer.go</code>.</td></tr>
-<tr><td><code>write.target-file-size-bytes</code></td><td>(set by writer)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code> and <code>table/equality_delete_writer.go</code>.</td></tr>
+<tr><td><code>write.target-file-size-bytes</code></td><td><code>536870912</code> (512 MB)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code>.</td></tr>
+<tr><td><code>write.delete.target-file-size-bytes</code></td><td><code>67108864</code> (64 MB)</td><td>Target size for equality-delete and v2 position-delete files where file rolling applies. Read in <code>table/equality_delete_writer.go</code> and <code>table/arrow_utils.go</code>.</td></tr>
 </tbody></table>
 </div>
 <h3 id="scan-reads"><a class="header" href="#scan-reads">Scan reads</a></h3>
@@ -1017,15 +1018,16 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 </code></pre>
 <p>Catalog connection flags are global and apply to every subcommand:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>. <code>dynamodb</code> is recognized but not implemented yet.</td></tr>
-<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive) or SQL DSN</td></tr>
+<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>, <code>dynamodb</code>.</td></tr>
+<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive), SQL DSN, or DynamoDB endpoint override</td></tr>
 <tr><td><code>--warehouse</code></td><td>Warehouse location</td></tr>
+<tr><td><code>--dynamodb-table-name</code></td><td>DynamoDB backing table name (default <code>iceberg</code>)</td></tr>
 <tr><td><code>--credential</code></td><td>Credentials for the catalog</td></tr>
 <tr><td><code>--token</code></td><td>OAuth token (skips OAuth flow)</td></tr>
 <tr><td><code>--scope</code></td><td>OAuth scope (default <code>catalog</code>)</td></tr>
 <tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
 <tr><td><code>--config</code></td><td>Path to a config file</td></tr>
-<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue catalog); overrides <code>aws-profile</code> in the config file</td></tr>
+<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue/DynamoDB catalogs); overrides <code>aws-profile</code> in the config file</td></tr>
 <tr><td><code>--sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
 <tr><td><code>--sql-dialect</code></td><td>SQL dialect for the SQL catalog. The SQL catalog library supports <code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, and <code>oracle</code>, but the default CLI binary only ships the <code>sqlite</code> dialect via <code>sqliteshim</code>. Other dialects need a custom build that blank-imports their <code>database/sql</code> drivers.</td></tr>
 </tbody></table>
@@ -2984,10 +2986,16 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Table creation rejects duplicate field IDs.</strong> <code>NewMetadata</code>, and <code>CreateTable</code> on catalogs that build metadata through it (not REST), now return <code>ErrInvalidSchema</code> when two fields in the schema share an ID, including unset <code>0</code> or <code>-1</code> IDs, even for unpartitioned, unsorted tables. Before, the partition spec or sort order could bind to the wrong column. Callers should assign unique IDs (or let the schema be built with fresh IDs). This matches Java, whose <code>Schema</code> constructor rejects duplicate IDs.</p>
+</li>
+<li>
 <p><strong>Sort order replacements reuse orders staged earlier in the same transaction.</strong> If a transaction replaces order A with B and then returns to A, A becomes the default again instead of B. The final update reuses A's ID instead of adding another definition. Reuse of orders from earlier commits was already supported.</p>
 </li>
 <li>
 <p><strong>Case-insensitive field binding rejects only ambiguous names.</strong> <code>Reference.Bind</code> and <code>Schema.Select</code> return <code>ErrInvalidSchema</code> when the requested case-insensitive name matches different field IDs, and the error includes both names. Unrelated names remain available to scans, writes, and schema, partition, and sort order updates.</p>
+</li>
+<li>
+<p><strong>Delete files now have a separate 64 MiB target.</strong> Equality-delete and v2 position-delete files previously used <code>write.target-file-size-bytes</code> (512 MiB by default, or the table's override) as their file-size target. They now use <code>write.delete.target-file-size-bytes</code>, which defaults to 64 MiB. After upgrading, tables may produce more, smaller delete files unless this new property is set. To preserve the previous delete-file size target, set <code>write.delete.target-file-size-bytes</code> to the table's former effective <code>write.target-file-size-bytes</code> value (<code>536870912</code> when the data-file target was unset). The data-file target itself is unchanged.</p>
 </li>
 <li>
 <p><strong>Schema reads now reject invalid identifier fields.</strong> Table and view metadata with <code>identifier-field-ids</code> referring to an optional, float/double, missing, non-primitive, or improperly nested field now fails to load with <code>invalid schema</code> (for example, <code>invalid schema: identifier field &quot;foo&quot; must be required</code> or <code>invalid schema: identifier field &quot;foo&quot; cannot be float or double</code>). Older iceberg-go releases could load such metadata, but Java Iceberg already rejects it. To recover an affected table, back up its metadata and use an atomic catalog metadata repair to remove the invalid identifier IDs or replace them with IDs of existing, required, non-floating primitive fields nested only in required structs. Do not edit the currently referenced metadata file in place. Repeated identifier IDs are deduplicated on read.</p>
