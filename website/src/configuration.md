@@ -583,4 +583,4 @@ these keys. Arrow does not register legacy `lz4` or `lzo` codecs by default;
 | `read.parquet.max-compressed-page-size-bytes` | Maximum compressed page body. Default: 64 MiB. |
 | `read.parquet.max-uncompressed-page-size-bytes` | Maximum uncompressed page body. Default: 256 MiB. |
 
-The page limits are Go-specific reader settings. Explicit values must be integers from `1` to `2147483647`, the largest size representable in a Parquet page header. Table properties apply to scans, deletes, delete-file inspection and maintenance. A scan can override them through `table.WithOptions` without changing saved metadata. Compressed and uncompressed limits are independent; raising one does not raise the other.
+The page limits are Go-specific reader settings; Iceberg Java ignores them. Explicit values must be integers from `1` to `2147483647`, the largest size representable in a Parquet page header. Table properties apply to scans, deletes, delete-file inspection and maintenance. A scan can override them through `table.WithOptions` without changing saved metadata. Compressed and uncompressed limits are independent; raising one does not raise the other.

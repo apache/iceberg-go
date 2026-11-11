@@ -2453,8 +2453,8 @@ func newParquetDictionaryReader(
 ) (*file.Reader, error) {
 	readProps := parquet.NewReaderProperties(mem)
 	if configured != nil {
-		copy := *configured
-		readProps = &copy
+		props := *configured
+		readProps = &props
 	}
 	readProps.BufferedStreamEnabled = true
 
