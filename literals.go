@@ -1148,7 +1148,8 @@ func (s StringLiteral) Equals(other Literal) bool {
 }
 
 func (s StringLiteral) MarshalBinary() ([]byte, error) {
-	// Return independent bytes so callers cannot modify the string's storage.
+	// Stored as UTF-8 bytes without length. Copy so callers cannot change the
+	// string, and so "" stays non-nil: a nil partition bound is written as null (#2407).
 	return []byte(s), nil
 }
 
