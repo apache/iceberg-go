@@ -240,6 +240,10 @@ func (m *manifestEvalVisitor) uniqueValue(term iceberg.BoundTerm) iceberg.Litera
 	if field.ContainsNull || field.LowerBound == nil || field.UpperBound == nil {
 		return nil
 	}
+	// Different encodings may still compare equal, so keep those manifests.
+	if !slices.Equal(*field.LowerBound, *field.UpperBound) {
+		return nil
+	}
 
 	switch term.Ref().Type().(type) {
 	case iceberg.Float32Type, iceberg.Float64Type:
@@ -248,16 +252,23 @@ func (m *manifestEvalVisitor) uniqueValue(term iceberg.BoundTerm) iceberg.Litera
 		}
 	}
 
+	// Bounds are only an optimization here. If decoding fails, do not prune.
 	lower, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.LowerBound)
 	if err != nil {
 		return nil
 	}
-	upper, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.UpperBound)
-	if err != nil {
-		return nil
-	}
-	if getCmpLiteral(lower)(lower, upper) != 0 {
-		return nil
+	// Go's literal set treats signed zeros as equal, but Arrow's is_in row
+	// filter can distinguish them. Keep zero-valued float partitions for the
+	// row filter to evaluate.
+	switch value := lower.(type) {
+	case iceberg.Float32Literal:
+		if value == 0 {
+			return nil
+		}
+	case iceberg.Float64Literal:
+		if value == 0 {
+			return nil
+		}
 	}
 
 	return lower
