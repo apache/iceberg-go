@@ -603,12 +603,16 @@ Java. It is read only from the properties the client supplies; a server's
 <tr><td>unset or <code>oauth2</code></td><td>Use <code>token</code>, or the client-credentials flow with <code>credential</code>. With neither, send no authorization header.</td></tr>
 <tr><td><code>none</code></td><td>Send no authorization header, even if <code>token</code> or <code>credential</code> is set.</td></tr>
 <tr><td><code>basic</code></td><td>HTTP Basic authentication with <code>rest.auth.basic.username</code> and <code>rest.auth.basic.password</code>, both required. Like <code>rest.auth.type</code>, they are read only from the client's properties.</td></tr>
+<tr><td><code>sigv4</code></td><td>Sign every request with AWS SigV4 and authenticate with the type in <code>rest.auth.sigv4.delegate-auth-type</code> (default <code>oauth2</code>; <code>sigv4</code> is rejected). Requires a blank import of <code>catalog/rest/sigv4</code>. Unlike <code>rest.sigv4-enabled</code>, a server override can't turn this signing off.</td></tr>
 <tr><td><code>google</code></td><td>Google credentials, for catalogs such as BigLake. Requires a blank import of <code>catalog/rest/googleauth</code>.</td></tr>
 </tbody></table>
 </div>
 <p>Other values select an auth manager registered with <code>rest.RegisterAuthManager</code>.
-An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>. The Java value
-<code>sigv4</code> is not supported; enable SigV4 with <code>rest.sigv4-enabled</code> instead.</p>
+An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>.</p>
+<p>When SigV4 signs a request that already carries an <code>Authorization</code> header, such
+as the <code>oauth2</code> or <code>basic</code> header of the delegate auth type, the header moves to
+<code>Original-Authorization</code> and is signed with the request, as in Java. This also
+applies to <code>rest.sigv4-enabled</code>.</p>
 <h4 id="google-biglake"><a class="header" href="#google-biglake">Google BigLake</a></h4>
 <p>With <code>rest.auth.type=google</code>, the
 <a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go"><code>catalog/rest/googleauth</code></a>
@@ -973,13 +977,14 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.compression-level.column.&lt;name&gt;</code></td><td>Global level, or the column codec's default if the codecs differ</td></tr>
 <tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
 <tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+<tr><td><code>write.parquet.stats-enabled.column.&lt;name&gt;</code></td><td><code>true</code> (per-column Parquet statistics toggle)</td></tr>
 <tr><td><code>parquet.enable.dictionary</code></td><td><code>true</code> (global dictionary encoding switch; same key as Iceberg Java)</td></tr>
 <tr><td><code>write.parquet.dict-encoding-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched; overrides the global switch)</td></tr>
 <tr><td><code>write.parquet.shred-variants</code></td><td><code>false</code> (opt-in shredding of top-level variant columns)</td></tr>
 <tr><td><code>write.parquet.variant-inference-buffer-size</code></td><td>100 rows (buffered per file to infer the shredding schema)</td></tr>
 </tbody></table>
 </div>
-<p>The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>.</p>
+<p>The bloom filter, statistics, and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>. Statistics settings apply to data files and use Iceberg field names, including nested paths such as <code>items.element</code>. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other metadata may still be recorded.</p>
 <p>Column compression keys use case-sensitive Iceberg leaf paths, such as
 <code>items.element</code> or <code>attributes.value.name</code>. They apply to data files and use
 the global settings for columns without overrides. An explicit column level
@@ -3025,6 +3030,9 @@ make integration-external-rest
 <p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
+<li>
+<p><strong>SigV4 keeps the token or credential as <code>Original-Authorization</code>.</strong> With <code>rest.sigv4-enabled=true</code> (or <code>rest.auth.type=sigv4</code>) and a <code>token</code> or <code>credential</code>, requests used to be signed with the token silently dropped, because the SigV4 signature replaced the <code>Authorization</code> header. They now carry it as <code>Original-Authorization</code>, included in the signed headers, as Iceberg Java does. A server behind SigV4 that ignores the header is unaffected.</p>
+</li>
 <li>
 <p><strong>Float and double literal comparators use Iceberg ordering.</strong> <code>TypedLiteral.Comparator()</code> now orders <code>-0.0</code> before <code>+0.0</code> and NaN after all other values; NaN compares equal to NaN. Callers that use these public comparators may see a different order or equality result.</p>
 </li>
