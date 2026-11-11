@@ -104,6 +104,8 @@ const (
 	ParquetCompressionDefault                = internal.ParquetCompressionDefault
 	ParquetCompressionLevelKey               = internal.ParquetCompressionLevelKey
 	ParquetCompressionLevelDefault           = internal.ParquetCompressionLevelDefault
+	ParquetCompressionColumnCodecKeyPrefix   = internal.ParquetCompressionColumnCodecKeyPrefix
+	ParquetCompressionColumnLevelKeyPrefix   = internal.ParquetCompressionColumnLevelKeyPrefix
 	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
@@ -141,8 +143,10 @@ const (
 	WriteFormatDefaultKey     = "write.format.default"
 	WriteFormatDefaultDefault = "parquet"
 
-	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
-	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
+	WriteTargetFileSizeBytesKey           = "write.target-file-size-bytes"
+	WriteTargetFileSizeBytesDefault       = 512 * 1024 * 1024 // 512 MB
+	WriteDeleteTargetFileSizeBytesKey     = "write.delete.target-file-size-bytes"
+	WriteDeleteTargetFileSizeBytesDefault = 64 * 1024 * 1024 // 64 MB
 
 	ParquetShredVariantsKey         = internal.ParquetShredVariantsKey
 	ParquetShredVariantsDefault     = internal.ParquetShredVariantsDefault

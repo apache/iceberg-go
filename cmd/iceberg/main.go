@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	dynamocat "github.com/apache/iceberg-go/catalog/dynamodb"
 	"github.com/apache/iceberg-go/catalog/glue"
 	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/catalog/hive"
@@ -215,7 +216,7 @@ type Args struct {
 	Upgrade          *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
 	Rollback         *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
-	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type (rest, glue, hive, hadoop, sql; dynamodb recognized but not implemented)"`
+	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type (rest, glue, hive, hadoop, sql, dynamodb)"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
 	URI         string `arg:"--uri" help:"catalog URI"`
 	Output      string `arg:"--output" default:"text" help:"output type (json/text)"`
@@ -224,9 +225,11 @@ type Args struct {
 	Warehouse   string `arg:"--warehouse" help:"warehouse to use"`
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
-	AWSProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
+	AWSProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue/DynamoDB catalogs)"`
 	SQLDriver   string `arg:"--sql-driver" help:"database/sql driver name (SQL catalog; default binary includes sqliteshim only)"`
 	SQLDialect  string `arg:"--sql-dialect" help:"SQL dialect (SQL catalog; default binary includes sqlite via sqliteshim; other dialects need a custom build with their drivers)"`
+
+	DynamoDBTableName string `arg:"--dynamodb-table-name" help:"DynamoDB backing table name (default iceberg)"`
 
 	RestOptions *config.RestOptions `arg:"-"`
 }
@@ -305,13 +308,6 @@ func main() {
 			output.Error(err)
 			osExit(1)
 		}
-	}
-
-	// Reject known-but-unimplemented catalog types through the same output path
-	// as other user-facing errors (respects --output).
-	if catalog.Type(strings.ToLower(args.Catalog)) == catalog.DynamoDB {
-		output.Error(errors.New("dynamodb catalog is not implemented"))
-		osExit(1)
 	}
 
 	cat := initCatalog(ctx, args)
@@ -430,6 +426,26 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			glue.WithAWSConfig(awscfg),
 		}
 		if cat, err = glue.NewCatalog(opts...); err != nil {
+			logFatal(err)
+		}
+	case catalog.DynamoDB:
+		var loadOptions []func(*awsconfig.LoadOptions) error
+		if args.AWSProfile != "" {
+			loadOptions = append(loadOptions, awsconfig.WithSharedConfigProfile(args.AWSProfile))
+		}
+		cfg, loadErr := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
+		if loadErr != nil {
+			logFatal(loadErr)
+		}
+		props := iceberg.Properties{"warehouse": args.Warehouse}
+		if args.URI != "" {
+			props[dynamocat.EndpointKey] = args.URI
+		}
+		if args.DynamoDBTableName != "" {
+			props[dynamocat.TableNameKey] = args.DynamoDBTableName
+		}
+		cat, err = dynamocat.NewCatalog(ctx, args.CatalogName, cfg, props)
+		if err != nil {
 			logFatal(err)
 		}
 	case catalog.Hive:
