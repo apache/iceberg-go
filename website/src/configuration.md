@@ -111,11 +111,16 @@ Java. It is read only from the properties the client supplies; a server's
 | unset or `oauth2` | Use `token`, or the client-credentials flow with `credential`. With neither, send no authorization header. |
 | `none` | Send no authorization header, even if `token` or `credential` is set. |
 | `basic` | HTTP Basic authentication with `rest.auth.basic.username` and `rest.auth.basic.password`, both required. Like `rest.auth.type`, they are read only from the client's properties. |
+| `sigv4` | Sign every request with AWS SigV4 and authenticate with the type in `rest.auth.sigv4.delegate-auth-type` (default `oauth2`; `sigv4` is rejected). Requires a blank import of `catalog/rest/sigv4`. Unlike `rest.sigv4-enabled`, a server override can't turn this signing off. |
 | `google` | Google credentials, for catalogs such as BigLake. Requires a blank import of `catalog/rest/googleauth`. |
 
 Other values select an auth manager registered with `rest.RegisterAuthManager`.
-An unregistered value fails `NewCatalog` / `catalog.Load`. The Java value
-`sigv4` is not supported; enable SigV4 with `rest.sigv4-enabled` instead.
+An unregistered value fails `NewCatalog` / `catalog.Load`.
+
+When SigV4 signs a request that already carries an `Authorization` header, such
+as the `oauth2` or `basic` header of the delegate auth type, the header moves to
+`Original-Authorization` and is signed with the request, as in Java. This also
+applies to `rest.sigv4-enabled`.
 
 #### Google BigLake
 
