@@ -304,3 +304,58 @@ func TestParquetColumnStatisticsSettingsDoNotAffectDeleteFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestParquetColumnStatisticsAcrossRowGroups(t *testing.T) {
+	prefix := ParquetColumnStatsEnabledKeyPrefix + "."
+	for _, mode := range []string{"task", "rolling"} {
+		t.Run(mode, func(t *testing.T) {
+			props := iceberg.Properties{ParquetRowGroupLimitKey: "1"}
+			props[prefix+"id"] = "false"
+			props[prefix+"parent.child"] = "false"
+			schema, dataFile := writeStatsSettingsFile(t, mode, props)
+			reader, err := file.OpenParquetFile(dataFile.FilePath(), false)
+			require.NoError(t, err)
+			defer reader.Close()
+
+			meta := reader.MetaData()
+			require.Equal(t, 2, meta.NumRowGroups())
+			want := map[string]bool{}
+			want["id"] = false
+			want["kept"] = true
+			want["display_x20name"] = true
+			want["parent.child"] = false
+			want["parent.other"] = true
+			want["items.list.element"] = true
+			want["properties.key_value.key"] = true
+			want["properties.key_value.value"] = true
+
+			pred := iceberg.EqualTo(iceberg.Reference("id"), int32(999))
+			bound, err := iceberg.BindExpr(schema, pred, true)
+			require.NoError(t, err)
+			rowEval := &inclusiveMetricsEval{expr: bound}
+			for group := range meta.NumRowGroups() {
+				rowGroup := meta.RowGroup(group)
+				require.EqualValues(t, 1, rowGroup.NumRows())
+				require.Equal(t, len(want), rowGroup.NumColumns())
+				for col := range rowGroup.NumColumns() {
+					path := meta.Schema.Column(col).Path()
+					expected, ok := want[path]
+					require.True(t, ok, "unexpected column %s", path)
+					chunk, err := rowGroup.ColumnChunk(col)
+					require.NoError(t, err)
+					statsSet, err := chunk.StatsSet()
+					require.NoError(t, err)
+					assert.Equal(t, expected, statsSet, "row group %d, column %s", group, path)
+				}
+				mayMatch, err := rowEval.TestRowGroup(rowGroup, []int{0})
+				require.NoError(t, err)
+				assert.True(t, mayMatch, "row group %d must not be pruned without id stats", group)
+			}
+			assert.Len(t, dataFile.SplitOffsets(), 2)
+			assert.NotContains(t, dataFile.LowerBoundValues(), 1)
+			assert.NotContains(t, dataFile.UpperBoundValues(), 1)
+			assert.Contains(t, dataFile.LowerBoundValues(), 2)
+			assert.Equal(t, int64(2), dataFile.ValueCounts()[1])
+		})
+	}
+}

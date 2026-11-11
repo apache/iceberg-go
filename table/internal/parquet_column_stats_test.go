@@ -166,3 +166,104 @@ func BenchmarkResolveParquetStatsColumnPaths(b *testing.B) {
 }
 
 var benchmarkMappedStatsProps iceberg.Properties
+
+func TestGetWritePropertiesColumnStatisticsBooleanParsing(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	prefix := internal.ParquetColumnStatsEnabledKeyPrefix
+	cases := []struct {
+		name string
+		value string
+		enabled bool
+	}{
+		{"lowercase-true", "true", true},
+		{"uppercase-true", "TRUE", true},
+		{"mixed-case-true", "tRuE", true},
+		{"false", "false", false},
+		{"numeric-one", "1", false},
+		{"yes", "yes", false},
+		{"leading-space", " true", false},
+		{"trailing-space", "true ", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			props := iceberg.Properties{}
+			props[prefix+".chosen"] = tc.value
+			props[prefix+".chosen.child"] = "false"
+			props[prefix+"."] = "false"
+			props[prefix] = "false"
+			wp := parquet.NewWriterProperties(format.GetWriteProperties(props).([]parquet.WriterProperty)...)
+			assert.True(t, wp.StatisticsEnabled(), "column settings cannot change the default")
+			assert.Equal(t, tc.enabled, wp.StatisticsEnabledFor("chosen"))
+			assert.False(t, wp.StatisticsEnabledFor("chosen.child"))
+			assert.True(t, wp.StatisticsEnabledFor("unmentioned"))
+		})
+	}
+}
+
+func TestResolveParquetStatsColumnPathsRenamedProjection(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "renamed", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "only in table", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "parent", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 5, Name: "renamed child", Type: iceberg.PrimitiveTypes.Int32},
+		}}},
+	)
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "old_name", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "file_only", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "parent", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 5, Name: "original_child", Type: iceberg.PrimitiveTypes.Int32},
+		}}},
+	)
+	mapping, err := internal.GetFileFormat(iceberg.ParquetFile).PathToIDMapping(fileSchema)
+	require.NoError(t, err)
+	prefix := internal.ParquetColumnStatsEnabledKeyPrefix + "."
+	props := iceberg.Properties{"custom": "kept"}
+	props[prefix+"renamed"] = "false"
+	props[prefix+"old_name"] = "true"
+	props[prefix+"only in table"] = "false"
+	props[prefix+"file_only"] = "FALSE"
+	props[prefix+"parent.renamed child"] = "false"
+	props[prefix+"parent.original_child"] = "true"
+	props[prefix+"unknown"] = "false"
+	original := maps.Clone(props)
+
+	mapped := internal.ResolveParquetStatsColumnPaths(props, tableSchema, fileSchema, mapping, iceberg.EntryContentData)
+	assert.Equal(t, original, props)
+	expected := iceberg.Properties{"custom": "kept"}
+	expected[prefix+"old_name"] = "false"
+	expected[prefix+"file_only"] = "FALSE"
+	expected[prefix+"parent.original_child"] = "false"
+	require.Equal(t, expected, mapped)
+
+	wp := parquet.NewWriterProperties(internal.GetFileFormat(iceberg.ParquetFile).
+		GetWriteProperties(mapped).([]parquet.WriterProperty)...)
+	for _, name := range []string{"old_name", "file_only", "parent.original_child"} {
+		assert.False(t, wp.StatisticsEnabledFor(name), name)
+	}
+	assert.True(t, wp.StatisticsEnabledFor("unmentioned"))
+}
+
+func TestResolveParquetStatsColumnPathsPreservesOtherProperties(t *testing.T) {
+	prefix := internal.ParquetColumnStatsEnabledKeyPrefix + "."
+	other := iceberg.Properties{"custom": "kept"}
+	other[internal.ParquetColumnStatsEnabledKeyPrefix] = "false"
+	other[internal.ParquetBloomFilterColumnEnabledKeyPrefix+".id"] = "false"
+	other["write.parquet.dict-encoding-enabled.column.id"] = "false"
+	assert.Nil(t, internal.ResolveParquetStatsColumnPaths(nil, nil, nil, nil, iceberg.EntryContentData))
+	assert.Equal(t, other, internal.ResolveParquetStatsColumnPaths(other, nil, nil, nil, iceberg.EntryContentData))
+
+	props := maps.Clone(other)
+	props[prefix+"id"] = "false"
+	props[prefix] = "false"
+	props[prefix+"missing"] = "true"
+	for _, content := range []iceberg.ManifestEntryContent{
+		iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes,
+	} {
+		assert.Equal(t, other, internal.ResolveParquetStatsColumnPaths(props, nil, nil, nil, content))
+	}
+	assert.Equal(t, other, internal.ResolveParquetStatsColumnPaths(props, nil, nil,
+		map[string]int{"id": 1}, iceberg.EntryContentData))
+	assert.Equal(t, "false", props[prefix+"id"], "resolving properties must not modify the input")
+}
