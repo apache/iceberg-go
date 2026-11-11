@@ -50,7 +50,7 @@ type Schema struct {
 	idToName      atomic.Pointer[map[int]string]
 	idToField     atomic.Pointer[map[int]NestedField]
 	nameToID      atomic.Pointer[map[string]int]
-	nameToIDLower atomic.Pointer[map[string]int]
+	nameToIDLower atomic.Pointer[map[string]caseInsensitiveNameEntry]
 	idToAccessor  atomic.Pointer[map[int]accessor]
 
 	lazyIDToParent  func() (map[int]int, error)
@@ -289,7 +289,24 @@ func (s *Schema) lazyIDToName() (map[int]string, error) {
 	return idx, nil
 }
 
-func (s *Schema) lazyNameToIDLower() (map[string]int, error) {
+// caseInsensitiveNameEntry stores a collision alongside its lowercase name.
+// Only lookups for that name fail; unrelated columns stay accessible.
+type caseInsensitiveNameEntry struct {
+	id              int
+	name            string
+	conflictingName string
+}
+
+func (e caseInsensitiveNameEntry) ambiguityError() error {
+	if e.conflictingName == "" {
+		return nil
+	}
+
+	return fmt.Errorf("%w: ambiguous case-insensitive field names %q and %q",
+		ErrInvalidSchema, e.name, e.conflictingName)
+}
+
+func (s *Schema) lazyNameToIDLower() (map[string]caseInsensitiveNameEntry, error) {
 	index := s.nameToIDLower.Load()
 	if index != nil {
 		return *index, nil
@@ -300,9 +317,26 @@ func (s *Schema) lazyNameToIDLower() (map[string]int, error) {
 		return nil, err
 	}
 
-	out := make(map[string]int)
-	for k, v := range idx {
-		out[strings.ToLower(k)] = v
+	names := make([]string, 0, len(idx))
+	for name := range idx {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	out := make(map[string]caseInsensitiveNameEntry, len(idx))
+	for _, name := range names {
+		id := idx[name]
+		lower := strings.ToLower(name)
+		if previous, exists := out[lower]; exists {
+			if previous.id != id && previous.conflictingName == "" {
+				previous.conflictingName = name
+				out[lower] = previous
+			}
+
+			continue
+		}
+
+		out[lower] = caseInsensitiveNameEntry{id: id, name: name}
 	}
 
 	s.nameToIDLower.Store(&out)
@@ -521,17 +555,28 @@ func (s *Schema) FindFieldByName(name string) (NestedField, bool) {
 // FindFieldByNameCaseInsensitive is like [*Schema.FindFieldByName],
 // but performs a case insensitive search.
 func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool) {
+	field, found, _ := s.findFieldByNameCaseInsensitive(name)
+
+	return field, found
+}
+
+func (s *Schema) findFieldByNameCaseInsensitive(name string) (NestedField, bool, error) {
 	idx, err := s.lazyNameToIDLower()
 	if err != nil {
-		return NestedField{}, false
+		return NestedField{}, false, err
 	}
 
-	id, ok := idx[strings.ToLower(name)]
+	entry, ok := idx[strings.ToLower(name)]
 	if !ok {
-		return NestedField{}, false
+		return NestedField{}, false, nil
+	}
+	if err := entry.ambiguityError(); err != nil {
+		return NestedField{}, false, err
 	}
 
-	return s.FindFieldByID(id)
+	field, found := s.FindFieldByID(entry.id)
+
+	return field, found, nil
 }
 
 // FindFieldByID is like [*Schema.FindColumnName], but returns the whole
@@ -727,11 +772,14 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 		}
 
 		for _, n := range names {
-			id, ok := nameMap[strings.ToLower(n)]
+			entry, ok := nameMap[strings.ToLower(n)]
 			if !ok {
 				return nil, fmt.Errorf("%w: could not find column %s", ErrInvalidSchema, n)
 			}
-			ids[id] = void
+			if err := entry.ambiguityError(); err != nil {
+				return nil, err
+			}
+			ids[entry.id] = void
 		}
 	}
 
