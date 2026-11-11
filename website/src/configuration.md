@@ -110,12 +110,12 @@ Java. It is read only from the properties the client supplies; a server's
 |---|---|
 | unset or `oauth2` | Use `token`, or the client-credentials flow with `credential`. With neither, send no authorization header. |
 | `none` | Send no authorization header, even if `token` or `credential` is set. |
+| `basic` | HTTP Basic authentication with `rest.auth.basic.username` and `rest.auth.basic.password`, both required. Like `rest.auth.type`, they are read only from the client's properties. |
 | `google` | Google credentials, for catalogs such as BigLake. Requires a blank import of `catalog/rest/googleauth`. |
 
 Other values select an auth manager registered with `rest.RegisterAuthManager`.
-An unregistered value fails `NewCatalog` / `catalog.Load`. The Java values
-`basic` and `sigv4` are not supported; enable SigV4 with `rest.sigv4-enabled`
-instead.
+An unregistered value fails `NewCatalog` / `catalog.Load`. The Java value
+`sigv4` is not supported; enable SigV4 with `rest.sigv4-enabled` instead.
 
 #### Google BigLake
 
