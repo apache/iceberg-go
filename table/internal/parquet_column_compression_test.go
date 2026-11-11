@@ -490,7 +490,7 @@ func TestParquetColumnCompressionCodecAliases(t *testing.T) {
 		{"invalid", compress.Codecs.Uncompressed, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			codec, ok := parquetCompressionCodec(tc.name)
+			codec, ok := ParquetCompressionCodec(tc.name)
 			require.Equal(t, tc.valid, ok)
 			if ok {
 				require.Equal(t, tc.codec, codec)

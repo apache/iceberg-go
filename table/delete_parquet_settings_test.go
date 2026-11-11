@@ -253,7 +253,11 @@ func TestDeleteParquetCompressionLevelInheritance(t *testing.T) {
 func TestDeleteParquetCodecOverrideWithoutLevelWrites(t *testing.T) {
 	for _, content := range []iceberg.ManifestEntryContent{iceberg.EntryContentEqDeletes, iceberg.EntryContentPosDeletes} {
 		t.Run(fmt.Sprint(content), func(t *testing.T) {
-			props := iceberg.Properties{ParquetCompressionKey: "zstd", ParquetCompressionLevelKey: "19", DeleteParquetCompressionKey: "gzip"}
+			props := iceberg.Properties{
+				ParquetCompressionKey: "zstd", ParquetCompressionLevelKey: "19", DeleteParquetCompressionKey: "gzip",
+				ParquetCompressionColumnCodecKeyPrefix + ".value":     "brotli",
+				ParquetCompressionColumnCodecKeyPrefix + ".file_path": "brotli",
+			}
 			meta := deleteParquetTestMetadata(t, props)
 			schema := meta.CurrentSchema()
 			var equalityIDs []int
