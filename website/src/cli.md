@@ -44,15 +44,16 @@ Catalog connection flags are global and apply to every subcommand:
 
 | Flag | Description |
 | ---- | ----------- |
-| `--catalog` | Catalog type: `rest` (default), `glue`, `hive`, `hadoop`, `sql`. `dynamodb` is recognized but not implemented yet. |
-| `--uri` | Catalog URI (REST/Hive) or SQL DSN |
+| `--catalog` | Catalog type: `rest` (default), `glue`, `hive`, `hadoop`, `sql`, `dynamodb`. |
+| `--uri` | Catalog URI (REST/Hive), SQL DSN, or DynamoDB endpoint override |
 | `--warehouse` | Warehouse location |
+| `--dynamodb-table-name` | DynamoDB backing table name (default `iceberg`) |
 | `--credential` | Credentials for the catalog |
 | `--token` | OAuth token (skips OAuth flow) |
 | `--scope` | OAuth scope (default `catalog`) |
 | `--catalog-name` | Catalog name to load from config file (default `default`) |
 | `--config` | Path to a config file |
-| `--aws-profile` | AWS named profile to use (Glue catalog); overrides `aws-profile` in the config file |
+| `--aws-profile` | AWS named profile to use (Glue/DynamoDB catalogs); overrides `aws-profile` in the config file |
 | `--sql-driver` | `database/sql` driver name for the SQL catalog. The default CLI binary only compiles in `sqliteshim`; other drivers require a custom build. |
 | `--sql-dialect` | SQL dialect for the SQL catalog. The SQL catalog library supports `postgres`, `mysql`, `sqlite`, `mssql`, and `oracle`, but the default CLI binary only ships the `sqlite` dialect via `sqliteshim`. Other dialects need a custom build that blank-imports their `database/sql` drivers. |
 
@@ -284,6 +285,33 @@ iceberg branch create \
   --min-snapshots-to-keep 10 \
   my_db.events audit-2026-q2
 ```
+
+### `branch fast-forward`
+
+```shell
+iceberg branch fast-forward my_db.events main audit
+```
+
+Advance the target branch to the source branch or tag. The command checks
+ancestry and fails if histories have diverged. If the target does not exist,
+it creates a branch at the source snapshot. The confirmation prompt shows the
+previous and next snapshot IDs, or explicitly says a new branch will be created.
+Use `--yes` to skip confirmation.
+
+### `branch replace`
+
+```shell
+iceberg branch replace my_db.events main 7234981023498
+```
+
+Move an existing branch to any known snapshot, without an ancestry check.
+This can discard the branch's current history from the branch head. The prompt
+shows both the previous and next snapshot IDs. Retention settings are preserved.
+Use `--yes` to skip confirmation.
+
+For both commands, REST catalogs using `snapshot-loading-mode=refs` may omit
+historical snapshots needed for ancestry checks or replacement. Use
+`snapshot-loading-mode=all` for these operations.
 
 ### `tag create`
 
