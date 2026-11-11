@@ -573,16 +573,19 @@ func finishPartitionStatistics(ctx context.Context, rows []*inspectPartitionAggr
 			if found {
 				data.row.totalRecordCount = nil
 			}
+
 			continue
 		}
 		vector := targetVectors[0]
 		if vector.row != data.row {
 			vector.row.totalRecordCount = nil
 			data.row.totalRecordCount = nil
+
 			continue
 		}
 		if vector.count > data.count || (data.sequence >= 0 && vector.sequence >= 0 && data.sequence > vector.sequence) {
 			data.row.totalRecordCount = nil
+
 			continue
 		}
 		if data.sequence < 0 || vector.sequence < 0 {

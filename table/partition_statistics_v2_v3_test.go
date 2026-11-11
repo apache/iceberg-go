@@ -258,10 +258,12 @@ func TestPartitionStatisticsLastUpdated(t *testing.T) {
 			spec := partitionedSpec()
 			existing := func(path string, partition int32, snapshot int64) iceberg.ManifestEntry {
 				file := partitionStatsFile(t, spec, iceberg.EntryContentData, path, map[int]any{1000: partition}, 1).Build()
+
 				return iceberg.NewManifestEntry(iceberg.EntryStatusEXISTING, new(snapshot), new(int64(1)), new(int64(1)), file)
 			}
 			deleted := func(path string, partition int32) iceberg.ManifestEntry {
 				file := partitionStatsFile(t, spec, iceberg.EntryContentData, path, map[int]any{1000: partition}, 1).Build()
+
 				return partitionStatsEntry(file, iceberg.EntryStatusDELETED, 1)
 			}
 			deleteFile := partitionStatsFile(t, spec, iceberg.EntryContentPosDeletes, "pos.parquet", map[int]any{1000: int32(5)}, 2).Build()
@@ -600,11 +602,13 @@ func TestPartitionStatisticsInvalidVectorOnlyAffectsRelatedPartitions(t *testing
 	spec := partitionedSpec()
 	data := func(path string, part int32, count int64) iceberg.ManifestEntry {
 		file := partitionStatsFile(t, spec, iceberg.EntryContentData, path, map[int]any{1000: part}, count).Build()
+
 		return partitionStatsEntry(file, iceberg.EntryStatusADDED, 1)
 	}
 	vector := func(path, target string, part int32) iceberg.ManifestEntry {
 		file := partitionStatsFile(t, spec, iceberg.EntryContentPosDeletes, path, map[int]any{1000: part}, 3).
 			ReferencedDataFile(target).ContentOffset(4).ContentSizeInBytes(20).Build()
+
 		return partitionStatsEntry(file, iceberg.EntryStatusADDED, 2)
 	}
 	tbl := partitionStatisticsTestTable(t, 3,
