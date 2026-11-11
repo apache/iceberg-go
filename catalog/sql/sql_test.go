@@ -1240,22 +1240,33 @@ func (s *SqliteCatalogTestSuite) TestListNamespaces() {
 func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
 	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
 		ctx := context.Background()
-		implied := table.Identifier{databaseName()}
-		s.Require().NoError(cat.CreateNamespace(ctx, append(slices.Clone(implied), "child"), nil))
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		})
 
-		exists, err := cat.CheckNamespaceExists(ctx, implied)
-		s.Require().NoError(err)
-		s.Require().True(exists)
+		// Each operation gets its own namespace that has only a child and no
+		// row of its own, so one operation's table row cannot satisfy another
+		// operation's existence check.
+		childrenOnly := func() table.Identifier {
+			ns := table.Identifier{databaseName()}
+			s.Require().NoError(cat.CreateNamespace(ctx, append(slices.Clone(ns), "child"), nil))
+
+			exists, err := cat.CheckNamespaceExists(ctx, ns)
+			s.Require().NoError(err)
+			s.Require().True(exists)
+			return ns
+		}
 
 		// CheckNamespaceExists is true, so tables and views can be created
 		// there, and a table can be renamed into it.
-		tblName := tableName()
-		_, err = cat.CreateTable(ctx, append(slices.Clone(implied), tblName), tableSchemaNested)
+		createNS := childrenOnly()
+		_, err := cat.CreateTable(ctx, append(slices.Clone(createNS), tableName()), tableSchemaNested)
 		s.Require().NoError(err)
 
+		renameNS := childrenOnly()
 		other := table.Identifier{databaseName()}
 		s.Require().NoError(cat.CreateNamespace(ctx, other, nil))
-		moved := append(slices.Clone(implied), tableName())
+		moved := append(slices.Clone(renameNS), tableName())
 		_, err = cat.CreateTable(ctx, append(slices.Clone(other), tableName()), tableSchemaNested)
 		s.Require().NoError(err)
 		for id, err := range cat.ListTables(ctx, other) {
@@ -1264,11 +1275,16 @@ func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
 			s.Require().NoError(err)
 		}
 
-		schema := iceberg.NewSchema(1, iceberg.NestedField{
-			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
-		})
-		s.Require().NoError(createTestView(ctx, cat, append(slices.Clone(implied), tableName()), schema,
+		viewNS := childrenOnly()
+		s.Require().NoError(createTestView(ctx, cat, append(slices.Clone(viewNS), tableName()), schema,
 			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil))
+
+		commitNS := childrenOnly()
+		_, _, err = cat.CommitTable(ctx, append(slices.Clone(commitNS), tableName()),
+			[]table.Requirement{table.AssertCreate()}, []table.Update{
+				table.NewSetLocationUpdate("file:///tmp/warehouse/" + strings.Join(commitNS, "/")),
+			})
+		s.Require().NoError(err)
 
 		// A namespace with neither a row nor children still does not exist.
 		missing := table.Identifier{databaseName()}
@@ -1278,6 +1294,11 @@ func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 		s.ErrorIs(createTestView(ctx, cat, append(slices.Clone(missing), tableName()), schema,
 			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil), catalog.ErrNoSuchNamespace)
+		_, _, err = cat.CommitTable(ctx, append(slices.Clone(missing), tableName()),
+			[]table.Requirement{table.AssertCreate()}, []table.Update{
+				table.NewSetLocationUpdate("file:///tmp/warehouse/" + strings.Join(missing, "/")),
+			})
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	}
 }
 

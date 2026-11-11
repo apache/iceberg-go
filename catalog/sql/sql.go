@@ -957,7 +957,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 			return nil
 		}
 
-		exists, err := c.namespaceExistsInTx(ctx, tx, nsKey)
+		exists, err := c.listableNamespaceExistsInTx(ctx, tx, ns, nsKey)
 		if err != nil {
 			return err
 		}
