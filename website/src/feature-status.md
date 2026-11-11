@@ -29,7 +29,7 @@ Apache Iceberg Go reads and writes table format versions 1, 2, and 3. The maximu
 
 All V1 features are supported. V1 is the format-version baseline.
 
-Data-file reads support Parquet and a subset of ORC files. The ORC reader
+Data-file reads support Parquet, Avro, and a subset of ORC files. The ORC reader
 preserves Iceberg field IDs from ORC type attributes and streams Arrow batches
 for supported primitive types, nested structs, and lists. It currently supports ORC
 NONE, ZLIB, and SNAPPY compression. Timestamp values without a timezone support
@@ -98,6 +98,7 @@ S3, GCS, and Azure each require a blank import of their backend package, for exa
 | Create New Manifests     |     X     |
 | Plan Scan                |     X     |
 | Plan Scan for Snapshot   |     X     |
+| Diff Snapshot Files      |     X     |
 
 ## Catalog support
 

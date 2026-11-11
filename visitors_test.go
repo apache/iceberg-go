@@ -578,22 +578,18 @@ func TestTranslateColumnNamesRejectsWrappedInitialDefault(t *testing.T) {
 
 func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *testing.T) {
 	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
-				{
-					ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
-					InitialDefault: "US",
-				},
+		ID: 1, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{
+				ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
+				InitialDefault: "US",
 			},
-		},
+		),
 	})
 	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 1, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
-			},
-		},
+		ID: 1, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+		),
 	})
 
 	for _, expr := range []struct {
@@ -843,37 +839,25 @@ var testSchema = iceberg.NewSchema(1,
 	},
 	iceberg.NestedField{
 		ID: 16, Name: "s1",
-		Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{
-				ID: 17, Name: "s2", Required: true,
-				Type: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{{
-						ID: 18, Name: "s3", Required: true,
-						Type: &iceberg.StructType{
-							FieldList: []iceberg.NestedField{{
-								ID: 19, Name: "s4", Required: true,
-								Type: &iceberg.StructType{
-									FieldList: []iceberg.NestedField{{
-										ID: 20, Name: "i", Required: true,
-										Type: iceberg.PrimitiveTypes.Int32,
-									}},
-								},
-							}},
-						},
-					}},
-				},
-			}},
-		},
+		Type: iceberg.NewStructType(iceberg.NestedField{
+			ID: 17, Name: "s2", Required: true,
+			Type: iceberg.NewStructType(iceberg.NestedField{
+				ID: 18, Name: "s3", Required: true,
+				Type: iceberg.NewStructType(iceberg.NestedField{
+					ID: 19, Name: "s4", Required: true,
+					Type: iceberg.NewStructType(iceberg.NestedField{
+						ID: 20, Name: "i", Required: true,
+						Type: iceberg.PrimitiveTypes.Int32,
+					}),
+				}),
+			}),
+		}),
 	},
-	iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{{
-			ID: 22, Name: "s6", Required: true, Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{{
-					ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
-				}},
-			},
-		}},
-	}},
+	iceberg.NestedField{ID: 21, Name: "s5", Type: iceberg.NewStructType(iceberg.NestedField{
+		ID: 22, Name: "s6", Required: true, Type: iceberg.NewStructType(iceberg.NestedField{
+			ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
+		}),
+	})},
 	iceberg.NestedField{ID: 24, Name: "s", Type: iceberg.PrimitiveTypes.String})
 
 func TestExprEvaluator(t *testing.T) {

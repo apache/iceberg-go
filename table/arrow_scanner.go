@@ -2484,6 +2484,14 @@ func (as *arrowScan) processRecordsWithPlans(
 		return fmt.Errorf("%w: partial ORC scan task ranges are not supported", iceberg.ErrNotImplemented)
 	}
 
+	// Avro's OCF reader currently reads the whole file. A remote planner may
+	// produce partial file ranges; reading each as a full OCF would duplicate rows.
+	if task.Value.File.FileFormat() == iceberg.AvroFile &&
+		(task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes())) {
+		return fmt.Errorf("%w: partial Avro scan task ranges are not supported", iceberg.ErrNotImplemented)
+	}
+
 	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position
@@ -2770,7 +2778,11 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	// An added deletion vector supersedes added position deletes, matching the
 	// rule used for the deletes already on the task.
 	addedHasPos := addedPos != nil && !addedPos.IsEmpty() && !addedHasDV
-	stampPos := addedHasPos || addedHasDV
+	var positionSink func([]int64)
+	if as.added != nil && task.Value.File != nil {
+		positionSink = as.added.positionSinks[task.Value.File.FilePath()]
+	}
+	stampPos := addedHasPos || addedHasDV || positionSink != nil
 	var posSource *rowPositionSource
 	if synthesizeRowID || applyPosDeletes || hasDV || stampPos {
 		posSource = &rowPositionSource{}
@@ -2816,7 +2828,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if as.added != nil {
-		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos))
+		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos, positionSink))
 		if stampPos {
 			pipeline = append(pipeline, dropChangelogFilePos)
 		}

@@ -770,7 +770,9 @@ func TestExpireReplayCleansUpReplannedRemoval(t *testing.T) {
 	})
 }
 
-func TestExpireReplayCleansUpRebuiltSnapshotItExpires(t *testing.T) {
+// Timestamp renewal moves the snapshot past the staged expiry's cutoff,
+// so it must survive replay.
+func TestExpireReplayKeepsRebuiltSnapshotStagedBeforeIt(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, cat, tbl := newExpireReplayTable(t, nil)
 		tbl, _ = appendOnBranch(t, tbl, MainBranch, "b1")
@@ -787,38 +789,62 @@ func TestExpireReplayCleansUpRebuiltSnapshotItExpires(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, staged.Metadata().SnapshotByID(a1), "the staged plan expires a1")
 
-		peerAppend(t, fs, cat, MainBranch, "p")
+		p := peerAppend(t, fs, cat, MainBranch, "p")
 
 		committed, err := tx.Commit(t.Context())
 		require.NoError(t, err)
 
 		meta := committed.Metadata()
-		assert.Equal(t, []int64{a2}, survivors(meta))
+		assert.Equal(t, sortedIDs(a1, a2, p), survivors(meta))
 		assert.Equal(t, a1, parentOf(t, meta, a2))
+		assert.Equal(t, p, parentOf(t, meta, a1))
 		assert.Equal(t, []string{"a1", "a2", "b1", "b2", "p"}, branchFiles(t, fs, meta, MainBranch))
-		assertOnlyManifestList(t, fs, manifestListsOf(meta, a2)...)
+		assertOnlyManifestList(t, fs, manifestListsOf(meta, a1, a2, p)...)
 	})
 }
 
-// The retry rebuilds a on the peer's head, but a keeps its staging timestamp,
-// which is more than a minute before the peer's snapshot.
+// The peer's v3 table requires first-row-id, which the staged v2 snapshot
+// lacks.
 func TestExpireReplayRemovesRebuiltListWhenApplyFails(t *testing.T) {
+	fs, cat, tbl := newExpireReplayTable(t, nil)
+	tbl, _ = appendOnBranch(t, tbl, MainBranch, "b1")
+
+	tx := tbl.NewTransaction()
+	stageFiles(t, tx, "a")
+	require.NoError(t, tx.ExpireSnapshots(WithOlderThan(time.Hour)))
+
+	peerAppend(t, fs, cat, MainBranch, "p")
+	peerUpdate(t, cat, NewUpgradeFormatVersionUpdate(3))
+	files := slices.Sorted(maps.Keys(fs.files))
+
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrTransactionUnusable)
+	require.NotErrorIs(t, err, ErrCommitFailed)
+	assert.ErrorContains(t, err, "apply add-snapshot: invalid row lineage: first-row-id is required")
+	assert.Equal(t, files, slices.Sorted(maps.Keys(fs.files)), "the staged files are kept and rebuilt files are removed")
+}
+
+// A peer append more than a minute after staging makes the staged timestamp
+// too old for the refreshed table.
+func TestExpireReplayRenewsStagedSnapshotTimestamp(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, cat, tbl := newExpireReplayTable(t, nil)
 		tbl, _ = appendOnBranch(t, tbl, MainBranch, "b1")
 
 		tx := tbl.NewTransaction()
 		stageFiles(t, tx, "a")
+		a := stagedHead(t, tx, MainBranch)
 		require.NoError(t, tx.ExpireSnapshots(WithOlderThan(time.Hour)))
 
 		time.Sleep(2 * time.Minute)
-		peerAppend(t, fs, cat, MainBranch, "p")
-		files := slices.Sorted(maps.Keys(fs.files))
+		p := peerAppend(t, fs, cat, MainBranch, "p")
 
-		_, err := tx.Commit(t.Context())
-		require.ErrorIs(t, err, ErrTransactionUnusable)
-		require.NotErrorIs(t, err, ErrCommitFailed)
-		assert.ErrorContains(t, err, "apply add-snapshot: invalid snapshot timestamp")
-		assert.Equal(t, files, slices.Sorted(maps.Keys(fs.files)), "the staged files are kept and rebuilt files are removed")
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		meta := committed.Metadata()
+		assert.Equal(t, p, parentOf(t, meta, a))
+		assert.Equal(t, time.Now().UnixMilli(), meta.SnapshotByID(a).TimestampMs)
+		assert.Equal(t, []string{"a", "b1", "p"}, branchFiles(t, fs, meta, MainBranch))
 	})
 }

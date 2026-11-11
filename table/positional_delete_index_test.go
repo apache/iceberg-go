@@ -215,11 +215,11 @@ func TestPositionalDeleteIndexMatchesReferenceApplicability(t *testing.T) {
 			"partition-us-after.parquet", 1, usPartition, 8, nil,
 			"data-x.parquet", "data-z.parquet"),
 		newPositionalDeleteIndexTestEntry(
-			"path-explicit-a-same-sequence.parquet", 99, euPartition, 5, &dataA, ""),
+			"path-explicit-a-same-sequence.parquet", 1, usPartition, 5, &dataA, ""),
 		newPositionalDeleteIndexTestEntry(
 			"partition-eu-newer.parquet", 1, euPartition, 6, nil, ""),
 		newPositionalDeleteIndexTestEntry(
-			"path-inferred-b-newer.parquet", 2, euPartition, 7, nil, dataB),
+			"path-inferred-b-newer.parquet", 1, usPartition, 7, nil, dataB),
 		newPositionalDeleteIndexTestEntry(
 			"partition-us-older.parquet", 1, usPartition, 4, nil, ""),
 		newPositionalDeleteIndexTestEntryWithBounds(
@@ -234,7 +234,7 @@ func TestPositionalDeleteIndexMatchesReferenceApplicability(t *testing.T) {
 			"partition-us-before.parquet", 1, usPartition, 8, nil,
 			"data-0.parquet", "data-9.parquet"),
 		newPositionalDeleteIndexTestEntry(
-			"path-inferred-a-newer.parquet", 2, euPartition, 7, nil, dataA),
+			"path-inferred-a-newer.parquet", 1, usPartition, 7, nil, dataA),
 		newPositionalDeleteIndexTestEntry(
 			"partition-us-same-sequence.parquet", 1, usPartition, 5, nil, ""),
 		newPositionalDeleteIndexTestEntry(
@@ -286,6 +286,10 @@ func referencePositionalDeleteApplies(
 
 	dataFile := dataEntry.DataFile()
 	deleteFile := deleteEntry.DataFile()
+	if deleteFile.SpecID() != dataFile.SpecID() ||
+		!referencePartitionsEqual(deleteFile.Partition(), dataFile.Partition()) {
+		return false
+	}
 	if referencedPath := deleteFile.ReferencedDataFile(); referencedPath != nil {
 		return *referencedPath == dataFile.FilePath()
 	}
@@ -294,11 +298,6 @@ func referencePositionalDeleteApplies(
 	upper, hasUpper := deleteFile.UpperBoundValues()[pathFieldID]
 	if hasLower && len(lower) > 0 && bytes.Equal(lower, upper) {
 		return string(lower) == dataFile.FilePath()
-	}
-
-	if deleteFile.SpecID() != dataFile.SpecID() ||
-		!referencePartitionsEqual(deleteFile.Partition(), dataFile.Partition()) {
-		return false
 	}
 
 	path := []byte(dataFile.FilePath())
@@ -521,19 +520,59 @@ func TestPositionalDeleteIndexHandlesUnknownSequenceNumbers(t *testing.T) {
 		positionalDeletePaths(matched))
 }
 
-func TestPositionalDeleteIndexSkipsPartitionKeyForPathOnlyDeletes(t *testing.T) {
+func TestPositionalDeleteIndexRejectsPathDeletePartitionMismatch(t *testing.T) {
 	dataPath := "data.parquet"
-	deleteEntry := newPositionalDeleteIndexTestEntry(
-		"delete.parquet", 1, nil, 2, &dataPath, "")
+	partition := map[int]any{1000: "us"}
 
-	idx, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{deleteEntry})
-	require.NoError(t, err)
+	for _, tc := range []struct {
+		name            string
+		deleteSpecID    int32
+		deletePartition map[int]any
+		dataSequence    int64
+		boundsScoped    bool
+		wantErr         bool
+	}{
+		{
+			name: "different spec ID", deleteSpecID: 2,
+			deletePartition: partition, dataSequence: 1, wantErr: true,
+		},
+		{
+			name: "different partition values", deleteSpecID: 1,
+			deletePartition: map[int]any{1000: "eu"}, dataSequence: 1, wantErr: true,
+		},
+		{
+			name: "different partition values with inferred path scope", deleteSpecID: 1,
+			deletePartition: map[int]any{1000: "eu"}, dataSequence: 1,
+			boundsScoped: true, wantErr: true,
+		},
+		{
+			name: "older mismatched delete is not applicable", deleteSpecID: 1,
+			deletePartition: map[int]any{1000: "eu"}, dataSequence: 3,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var deleteEntry iceberg.ManifestEntry
+			if tc.boundsScoped {
+				deleteEntry = newPositionalDeleteIndexTestEntryWithBounds(
+					"delete.parquet", tc.deleteSpecID, tc.deletePartition, 2, nil, dataPath, dataPath)
+			} else {
+				deleteEntry = newPositionalDeleteIndexTestEntry(
+					"delete.parquet", tc.deleteSpecID, tc.deletePartition, 2, &dataPath, "")
+			}
+			idx, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{deleteEntry})
+			require.NoError(t, err)
 
-	dataEntry := newPositionalDeleteIndexDataEntry(
-		dataPath, 1, map[int]any{1000: struct{}{}}, 1)
-	matched, err := idx.forDataFile(dataEntry)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"delete.parquet"}, positionalDeletePaths(matched))
+			dataEntry := newPositionalDeleteIndexDataEntry(dataPath, 1, partition, tc.dataSequence)
+			matched, err := idx.forDataFile(dataEntry)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrInvalidMetadata)
+				require.Nil(t, matched)
+			} else {
+				require.NoError(t, err)
+				require.Empty(t, matched)
+			}
+		})
+	}
 }
 
 func TestPositionalDeleteIndexRejectsUnsupportedPartitionValue(t *testing.T) {

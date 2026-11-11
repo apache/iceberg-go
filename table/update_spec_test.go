@@ -90,6 +90,35 @@ func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 	assert.ErrorContains(t, err, "transaction is nil")
 }
 
+func TestUpdateSpecRejectsAmbiguousCaseInsensitiveSourceName(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ID", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 3, Name: "unique", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"ambiguous-partition-name"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+
+	updates, _, err := txn.UpdateSpec(false).
+		AddIdentity("id").
+		BuildUpdates()
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.Empty(t, updates)
+
+	commit, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.Empty(t, commit.Updates)
+
+	txn = tbl.NewTransaction()
+	updates, _, err = txn.UpdateSpec(false).
+		AddIdentity("UNIQUE").
+		BuildUpdates()
+	require.NoError(t, err)
+	require.NotEmpty(t, updates)
+}
+
 func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id",
@@ -718,6 +747,39 @@ func TestUpdateSpecRenameField(t *testing.T) {
 		assert.Nil(t, updates)
 		assert.Nil(t, reqs)
 	})
+}
+
+func TestUpdateSpecRenameFieldIntoVoidTombstoneName(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   iceberg.PartitionDataIDStart,
+			Name:      "region",
+			Transform: iceberg.IdentityTransform{},
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2},
+			FieldID:   iceberg.PartitionDataIDStart + 1,
+			Name:      "country",
+			Transform: iceberg.VoidTransform{},
+		},
+	)
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "",
+		iceberg.Properties{table.PropertyFormatVersion: "1"})
+	require.NoError(t, err)
+	tbl := table.New([]string{"v1_void_rename"}, meta, "", nil, nil)
+
+	update := table.NewUpdateSpec(tbl.NewTransaction(), false).RenameField("region", "country")
+	_, _, err = update.BuildUpdates()
+	require.NoError(t, err)
+
+	newSpec, err := update.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 2, newSpec.NumFields())
+	assert.Equal(t, "country", newSpec.Field(0).Name)
+	assert.Equal(t, iceberg.IdentityTransform{}, newSpec.Field(0).Transform)
+	assert.Equal(t, "country_1001", newSpec.Field(1).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(1).Transform)
 }
 
 func TestUpdateSpecRemoveField(t *testing.T) {

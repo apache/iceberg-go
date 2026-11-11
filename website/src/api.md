@@ -480,7 +480,24 @@ txn, err := tbl.NewTransactionOnBranch("staging")
 if err != nil { /* ... */ }
 ```
 
-`Commit` can retry on conflict (`ErrCommitFailed`) when `commit.retry.num-retries` is set. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
+Cherry-pick an existing snapshot onto the transaction's target branch:
+
+```go
+err := txn.CherryPickSnapshot(ctx, sourceSnapshotID, nil)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+```
+
+A direct-child source fast-forwards without copying data and ignores
+`snapshotProps`. A divergent v1/v2 append is replayed with fresh snapshot
+metadata; user-supplied WAP publication markers are not trusted. Divergent v3
+appends and divergent replace-partitions overwrites are tracked in
+[issue #2415](https://github.com/apache/iceberg-go/issues/2415). Cherry-picks
+pin the refs they rely on. Divergent replays onto new branches also pin main;
+fast-forwards onto new branches do not. A moved pinned ref fails the commit;
+other conflicts can be retried under the normal commit retry policy.
+
+`Commit` retries a conflict (`ErrCommitFailed`) up to `commit.retry.num-retries` times, 4 by default. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 
 ## Schema and partition evolution
 
@@ -516,6 +533,35 @@ if err := us.Commit(); err != nil { /* ... */ }
 
 Available transforms (root `iceberg` package): `IdentityTransform{}`, `YearTransform{}`, `MonthTransform{}`, `DayTransform{}`, `HourTransform{}`, `BucketTransform{NumBuckets: N}`, `TruncateTransform{Width: W}`.
 
+### Sort order evolution
+
+Use the transaction builder to replace the full default sort order. It binds column names against the transaction's staged schema. An empty builder resets the order to unsorted:
+
+~~~go
+txn := tbl.NewTransaction()
+builder := txn.NewReplaceSortOrder(true).
+    Asc("event_time", table.NullsLast).
+    AddField("user_id", iceberg.BucketTransform{NumBuckets: 16}, table.SortASC, table.NullsFirst)
+if err := builder.Commit(); err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+~~~
+
+Call `Transaction.ReplaceSortOrder` directly when you already have a `table.SortOrder`, such as one built from field IDs:
+
+~~~go
+order, err := table.NewSortOrder(1, []table.SortField{{
+    SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
+    Direction: table.SortASC, NullOrder: table.NullsFirst,
+}})
+if err != nil { /* ... */ }
+if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
+~~~
+
+Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.
+
+The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.
+
 ## Snapshots and refs
 
 ### Inspecting
@@ -531,6 +577,31 @@ for _, s := range tbl.Metadata().Snapshots() {
     fmt.Println(s.SnapshotID, s.Summary)
 }
 ```
+
+### Comparing physical files between snapshots (v1-v3)
+
+Use `tbl.Inspect().DiffSnapshotFiles` to compare the live content files
+referenced by two snapshot IDs, including snapshots on different branches:
+
+```go
+diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+if err != nil {
+    return err
+}
+for _, file := range diff.AddedDataFiles {
+    fmt.Println("added:", file.FilePath())
+}
+```
+
+The result also includes removed data files and added/removed delete files,
+including positional deletes, equality deletes, and v3 deletion vectors.
+Shared immutable manifests are skipped. Entries are read with a minimal
+projection, so returned files do not contain complete column statistics and
+must **not** be passed to a `ManifestWriter`. This compares **physical files**,
+not logical row changes.
+
+See the [Iceberg snapshot specification](https://iceberg.apache.org/spec/#snapshots)
+and [manifest specification](https://iceberg.apache.org/spec/#manifests).
 
 ### Branches and tags
 
@@ -557,6 +628,44 @@ _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}
 ```
 
 Constants `table.MainBranch`, `table.BranchRef`, `table.TagRef` live in [`table/refs.go`](https://github.com/apache/iceberg-go/blob/main/table/refs.go). A higher-level builder is on the roadmap.
+
+### Branch promotion and replacement
+
+Use a transaction to advance a branch to another branch or tag, or to move it
+to an existing snapshot. Fast-forward checks that the target's current snapshot
+is an ancestor of the source. It creates the target when missing, while
+`ReplaceBranch` requires an existing target branch.
+
+```go
+txn, err := tbl.NewTransactionOnBranch("main")
+if err != nil { /* ... */ }
+if err := txn.FastForwardBranch("main", "audit"); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+
+// Without ancestry checks (can move a branch backwards or across histories):
+txn, err = updated.NewTransactionOnBranch("main")
+if err != nil { /* ... */ }
+err = txn.ReplaceBranch("main", snapshotID)
+// Or use ReplaceBranchFromRef("main", "audit"), which can create a missing target.
+```
+
+For a non-main target, call `tbl.NewTransactionOnBranch(target)` rather than
+`tbl.NewTransaction()`. The latter uses `main` as its commit branch, so a
+concurrent append to `main` can reject an otherwise independent promotion.
+
+Existing branch retention settings are preserved. Both the target and source
+snapshot IDs are pinned when promoting from a ref, and the target is pinned
+when replacing by ID. If the source snapshot was staged in the same transaction,
+the commit branch is pinned too, preventing retry from changing its ancestry.
+A pinned ref that moves prevents the normal retry of a co-staged append. A retention-only change with the same snapshot ID cannot
+be detected by snapshot-ID requirements in any catalog. REST catalogs also
+cannot detect ref type changes with the same ID.
+
+Fast-forward needs the complete snapshot ancestry. REST catalogs using
+`snapshot-loading-mode=refs` can omit intermediate ancestors, causing valid
+fast-forwards to fail. Load with `snapshot-loading-mode=all` instead.
+Replacing by snapshot ID can also fail if the requested historical snapshot
+was omitted. See [Concurrent Writes](./concurrent-writes.md).
 
 ### Expiration and rollback
 

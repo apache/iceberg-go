@@ -18,113 +18,9 @@
 package table
 
 import (
-	"context"
 	"fmt"
 	"slices"
-
-	"github.com/apache/iceberg-go/io"
 )
-
-type stagedReplay struct {
-	branch  string
-	records []expirationRecord
-
-	// Record positions stay fixed even when replanning changes the update count.
-	// Snapshots use their most recent rebuild.
-	updates []Update
-
-	// Refs walked by expiries that produced updates.
-	walkedRefs []string
-
-	// Updates from the last successful replay.
-	// ran distinguishes an empty replay from no replay.
-	landed []Update
-	ran    bool
-}
-
-func newStagedReplay(branch string, updates []Update, records []expirationRecord) *stagedReplay {
-	return &stagedReplay{
-		branch:     branch,
-		records:    records,
-		updates:    slices.Clone(updates),
-		walkedRefs: stagedWalkedRefs(records),
-	}
-}
-
-// On error, replay returns partial updates and replaced lists for cleanup.
-// The partial updates include a rebuilt snapshot that failed to apply.
-func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFileIO, attempt int, force bool) ([]Update, []string, error) {
-	b, err := MetadataBuilderFromBase(fresh, "")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var (
-		out          []Update
-		orphaned     []string
-		walkedRefs   []string
-		records      = r.records
-		chainRebuilt = force
-	)
-	apply := func(updates ...Update) error {
-		for _, u := range updates {
-			if err := u.Apply(b); err != nil {
-				return fmt.Errorf("apply %s: %w", u.Action(), err)
-			}
-			out = append(out, u)
-		}
-
-		return nil
-	}
-
-	for i := 0; i <= len(r.updates); {
-		if len(records) > 0 && records[0].pos == i {
-			rec := records[0]
-			records = records[1:]
-			updates, walked, err := r.replan(b, rec)
-			if err != nil {
-				return out, orphaned, err
-			}
-			if err := apply(updates...); err != nil {
-				return out, orphaned, err
-			}
-			if len(updates) > 0 {
-				walkedRefs = append(walkedRefs, walked...)
-			}
-			i += rec.count
-
-			continue
-		}
-		if i == len(r.updates) {
-			break
-		}
-
-		if su, ok := r.updates[i].(*addSnapshotUpdate); ok && su.rebuildManifestList != nil {
-			// Sequence numbers and row IDs must include earlier replayed updates.
-			state, err := b.clone().Build()
-			if err != nil {
-				return out, orphaned, err
-			}
-			next, err := rebuildStagedSnapshot(ctx, su, state, b.currentSnapshotForRef(r.branch), fs, attempt, chainRebuilt)
-			if err != nil {
-				return out, orphaned, err
-			}
-			if next != su {
-				r.updates[i] = next
-				orphaned = append(orphaned, su.Snapshot.ManifestList)
-				chainRebuilt = true
-			}
-		}
-		if err := apply(r.updates[i]); err != nil {
-			return append(out, r.updates[i]), orphaned, fmt.Errorf("%w: staged update does not apply after refresh: %w", ErrTransactionUnusable, err)
-		}
-		i++
-	}
-	r.walkedRefs = walkedRefs
-	r.landed, r.ran = out, true
-
-	return out, orphaned, nil
-}
 
 func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Update, []string, error) {
 	updates, walked, err := planExpiration(b, rec.cfg, rec.nowMs)
@@ -150,6 +46,10 @@ func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Updat
 	}
 
 	return updates, walked, nil
+}
+
+func (r *stagedReplay) requirements(base Metadata, reqs []Requirement) []Requirement {
+	return expirationAssertions(base, r.branch, r.walkedRefs, reqs)
 }
 
 func stagedWalkedRefs(records []expirationRecord) []string {

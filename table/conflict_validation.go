@@ -136,33 +136,35 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 // concurrent snapshots. The committer must refresh and rebuild their
 // commit from the new base — naive retry would fail identically.
 //
-// Unlike the other conflict sentinels in this file, ErrCommitDiverged
-// does NOT wrap ErrCommitFailed: it is terminal for the current
-// attempt. This mirrors Java's ValidationException, which the
-// SnapshotProducer retry machinery does not catch.
+// Unlike ErrConflictingDataFiles and ErrConflictingDeleteFiles,
+// ErrCommitDiverged does NOT wrap ErrCommitFailed: it is terminal for
+// the current attempt. This mirrors Java's ValidationException, which
+// the SnapshotProducer retry machinery does not catch.
 var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer on the branch")
 
-// Retryable conflict sentinels. All wrap ErrCommitFailed so the retry
-// loop in doCommit treats them as retryable. Callers that need to
-// distinguish which kind of conflict occurred can match on the
-// specific sentinel via errors.Is.
-var (
-	// ErrConflictingDataFiles is returned when a concurrent commit
-	// added data files that satisfy the committer's filter.
-	ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
+// ErrConflictingDataFiles is returned when a concurrent commit added data
+// files that satisfy the committer's filter. It wraps ErrCommitFailed: a
+// new transaction built from a reloaded table may succeed.
+var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
 
-	// ErrConflictingDeleteFiles is returned when a concurrent commit
-	// added delete files that could mask rows the committer is
-	// writing or replacing.
-	ErrConflictingDeleteFiles = fmt.Errorf("%w: concurrent delete files added", ErrCommitFailed)
+// ErrConflictingDeleteFiles is returned when a concurrent commit added
+// delete files that could mask rows the committer is writing or replacing.
+// It wraps ErrCommitFailed: a new transaction built from a reloaded table
+// may succeed.
+var ErrConflictingDeleteFiles = fmt.Errorf("%w: concurrent delete files added", ErrCommitFailed)
 
-	// ErrDataFilesMissing is returned when data files the committer
-	// explicitly references (e.g. the target of a position delete) are
-	// not live: a concurrent commit removed them, or, when RowDelta.Commit
-	// stages the delete, an operation staged earlier in the same
-	// transaction did. A refresh does not help in the second case.
-	ErrDataFilesMissing = fmt.Errorf("%w: referenced data files missing", ErrCommitFailed)
-)
+// ErrDataFilesMissing is returned when data files the committer
+// explicitly references (e.g. the target of a position delete) are
+// not live, for example because a concurrent commit removed them or an
+// operation staged earlier in the same transaction did. The same delete
+// can never apply, so retrying it cannot succeed: the caller must
+// rebuild the delete against the current table.
+//
+// Like ErrCommitDiverged, it does NOT wrap ErrCommitFailed, and when
+// Transaction.Commit fails with it the error also matches
+// ErrTransactionUnusable. This mirrors Java's ValidationException,
+// which the SnapshotProducer retry machinery does not catch.
+var ErrDataFilesMissing = errors.New("referenced data files missing")
 
 // conflictContext carries the inputs every validator needs: the
 // latest catalog state (current) and the filesystem used to read
@@ -535,8 +537,8 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 // a referenced path as a conflict.
 //
 // Returns ErrDataFilesMissing listing the first few missing paths.
-// The committer should treat this as unrecoverable for the current
-// commit attempt and rebuild the delete against the current
+// It is unrecoverable: the transaction cannot be committed again, and
+// the committer must rebuild the delete against the current
 // snapshot's data files.
 //
 // Cost is O(all data manifests × all entries) regardless of

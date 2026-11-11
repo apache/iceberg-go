@@ -44,6 +44,8 @@ func GetFile(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile, isPosD
 		}, nil
 	case iceberg.OrcFile:
 		return &ORCFileSource{fs: fs, file: dataFile}, nil
+	case iceberg.AvroFile:
+		return &AvroFileSource{fs: fs, file: dataFile}, nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported data file format %s",
 			iceberg.ErrNotImplemented, dataFile.FileFormat())

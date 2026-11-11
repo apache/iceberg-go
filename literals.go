@@ -153,6 +153,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Int64Type:
+		// Old int bounds retain their 4-byte encoding after promotion to long.
+		if len(data) == 4 {
+			return Int64Literal(int32(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Int64Literal
 		err := v.UnmarshalBinary(data)
 
@@ -163,6 +168,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Float64Type:
+		// Old float bounds retain their 4-byte encoding after promotion to double.
+		if len(data) == 4 {
+			return Float64Literal(math.Float32frombits(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Float64Literal
 		err := v.UnmarshalBinary(data)
 
@@ -1324,12 +1334,20 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 			return v1.Val.Cmp(v2.Val)
 		}
 
-		rescaled, err := v2.Val.Rescale(int32(v2.Scale), int32(v1.Scale))
-		if err != nil {
-			return -1
+		// Rescale can fail when it would discard fractional digits or
+		// overflow decimal128. Compare the exact values at a common scale.
+		left, right := v1.Val.BigInt(), v2.Val.BigInt()
+		scale := max(v1.Scale, v2.Scale)
+		if v1.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v1.Scale)), nil)
+			left.Mul(left, factor)
+		}
+		if v2.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v2.Scale)), nil)
+			right.Mul(right, factor)
 		}
 
-		return v1.Val.Cmp(rescaled)
+		return left.Cmp(right)
 	}
 }
 

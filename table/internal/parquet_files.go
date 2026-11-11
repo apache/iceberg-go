@@ -700,37 +700,6 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}, nil
 }
 
-// arrowSchemaHasShreddedDecimal reports whether any top-level shredded variant's
-// typed_value carries a Decimal128 leaf (recursively).
-func arrowSchemaHasShreddedDecimal(sc *arrow.Schema) bool {
-	for _, f := range sc.Fields() {
-		if vt, ok := f.Type.(*extensions.VariantType); ok {
-			if tv := vt.TypedValue().Type; tv != nil && typeHasDecimal128(tv) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-func typeHasDecimal128(dt arrow.DataType) bool {
-	switch t := dt.(type) {
-	case *arrow.Decimal128Type:
-		return true
-	case *arrow.StructType:
-		for _, f := range t.Fields() {
-			if typeHasDecimal128(f.Type) {
-				return true
-			}
-		}
-	case *arrow.ListType:
-		return typeHasDecimal128(t.Elem())
-	}
-
-	return false
-}
-
 func writeArrowProps(mem memory.Allocator) pqarrow.ArrowWriterProperties {
 	return pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema())
 }
@@ -749,11 +718,9 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema, arrProps pqar
 
 	// Clone: WriteProps is shared across concurrent partition writers; appending in place races.
 	wp := slices.Clone(writerProperties)
-	// Shredded decimals need the spec's INT32/INT64/FLBA-by-precision types; arrow-go
-	// emits those only with StoreDecimalAsInteger, so gate it per file on one being present.
-	if arrowSchemaHasShreddedDecimal(arrowSchema) {
-		wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
-	}
+	// Iceberg stores decimals as INT32 through precision 9, INT64 through 18,
+	// and fixed-length byte arrays above 18, including nested and shredded leaves.
+	wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
 
 	// Match Iceberg Java: apply parquet-mr's cost-based dictionary fallback to every leaf
 	// column so high-cardinality columns fall back to PLAIN rather than keeping a dictionary.
@@ -2118,6 +2085,7 @@ func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaDa
 		perParent[e.parentID] = append(perParent[e.parentID], variantFieldBound{
 			jsonPath:    e.leaf.jsonPath,
 			icebergType: e.leaf.icebergType,
+			intWidth:    e.leaf.intWidth,
 			lower:       lo,
 			upper:       hi,
 		})

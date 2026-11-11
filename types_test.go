@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 
@@ -194,21 +195,17 @@ func TestDecimalTypeInvalidParse(t *testing.T) {
 }
 
 func TestStructType(t *testing.T) {
-	typ := &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 1, Name: "required_field", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-			{ID: 2, Name: "optional_field", Type: iceberg.MustFixedTypeOf(5), Required: false},
-			{ID: 3, Name: "required_field", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 4, Name: "optional_field", Type: iceberg.MustDecimalTypeOf(8, 2), Required: false},
-					{ID: 5, Name: "required_field", Type: iceberg.PrimitiveTypes.Int64, Required: false},
-				},
-			}, Required: false},
-		},
-	}
+	typ := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1, Name: "required_field", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "optional_field", Type: iceberg.MustFixedTypeOf(5), Required: false},
+		iceberg.NestedField{ID: 3, Name: "required_field", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "optional_field", Type: iceberg.MustDecimalTypeOf(8, 2), Required: false},
+			iceberg.NestedField{ID: 5, Name: "required_field", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		), Required: false},
+	)
 
-	assert.Len(t, typ.FieldList, 3)
-	assert.False(t, typ.Equals(&iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1, Name: "optional_field", Type: iceberg.PrimitiveTypes.Int32, Required: true}}}))
+	assert.Len(t, typ.Fields(), 3)
+	assert.False(t, typ.Equals(iceberg.NewStructType(iceberg.NestedField{ID: 1, Name: "optional_field", Type: iceberg.PrimitiveTypes.Int32, Required: true})))
 	out, err := json.Marshal(typ)
 	require.NoError(t, err)
 
@@ -218,29 +215,17 @@ func TestStructType(t *testing.T) {
 }
 
 func TestListType(t *testing.T) {
-	typ := &iceberg.ListType{
-		ElementID:       1,
-		ElementRequired: false,
-		Element: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "required_field", Type: iceberg.MustDecimalTypeOf(8, 2), Required: true},
-				{ID: 3, Name: "optional_field", Type: iceberg.PrimitiveTypes.Int64, Required: false},
-			},
-		},
-	}
+	typ := iceberg.NewListType(1, iceberg.NewStructType(
+		iceberg.NestedField{ID: 2, Name: "required_field", Type: iceberg.MustDecimalTypeOf(8, 2), Required: true},
+		iceberg.NestedField{ID: 3, Name: "optional_field", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+	), false)
 
 	assert.IsType(t, (*iceberg.StructType)(nil), typ.ElementField().Type)
 	assert.Len(t, typ.ElementField().Type.(iceberg.NestedType).Fields(), 2)
 	assert.Equal(t, 1, typ.ElementField().ID)
-	assert.False(t, typ.Equals(&iceberg.ListType{
-		ElementID:       1,
-		ElementRequired: true,
-		Element: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "required_field", Type: iceberg.MustDecimalTypeOf(8, 2), Required: true},
-			},
-		},
-	}))
+	assert.False(t, typ.Equals(iceberg.NewListType(1, iceberg.NewStructType(
+		iceberg.NestedField{ID: 2, Name: "required_field", Type: iceberg.MustDecimalTypeOf(8, 2), Required: true},
+	), true)))
 
 	out, err := json.Marshal(typ)
 	require.NoError(t, err)
@@ -259,26 +244,14 @@ func TestListTypeUnmarshalRequiresElement(t *testing.T) {
 }
 
 func TestMapType(t *testing.T) {
-	typ := &iceberg.MapType{
-		KeyID:         1,
-		KeyType:       iceberg.PrimitiveTypes.Float64,
-		ValueID:       2,
-		ValueType:     iceberg.PrimitiveTypes.UUID,
-		ValueRequired: false,
-	}
+	typ := iceberg.NewMapType(1, iceberg.PrimitiveTypes.Float64, 2, iceberg.PrimitiveTypes.UUID, false)
 
 	assert.IsType(t, iceberg.PrimitiveTypes.Float64, typ.KeyField().Type)
 	assert.Equal(t, 1, typ.KeyField().ID)
 	assert.IsType(t, iceberg.PrimitiveTypes.UUID, typ.ValueField().Type)
 	assert.Equal(t, 2, typ.ValueField().ID)
-	assert.False(t, typ.Equals(&iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.Int64,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.UUID, ValueRequired: false,
-	}))
-	assert.False(t, typ.Equals(&iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.Float64,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: true,
-	}))
+	assert.False(t, typ.Equals(iceberg.NewMapType(1, iceberg.PrimitiveTypes.Int64, 2, iceberg.PrimitiveTypes.UUID, false)))
+	assert.False(t, typ.Equals(iceberg.NewMapType(1, iceberg.PrimitiveTypes.Float64, 2, iceberg.PrimitiveTypes.String, true)))
 
 	out, err := json.Marshal(typ)
 	require.NoError(t, err)
@@ -307,34 +280,20 @@ func TestMapTypeUnmarshalRequiresValue(t *testing.T) {
 // nestedTypeWireFixture nests every composite type inside the others, with
 // required and optional children, docs and defaults on nested fields.
 func nestedTypeWireFixture() *iceberg.StructType {
-	return &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		{ID: 2, Name: "tags", Doc: "labels", Type: &iceberg.ListType{
-			ElementID: 3, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
-		}},
-		{ID: 4, Name: "attrs", Required: true, Type: &iceberg.MapType{
-			KeyID: 5, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 6, ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 7, Name: "score", Type: iceberg.PrimitiveTypes.Float64, Required: true},
-				{ID: 8, Name: "note", Type: iceberg.PrimitiveTypes.String, InitialDefault: "n/a", WriteDefault: "none"},
-			}},
-			ValueRequired: true,
-		}},
-		{ID: 9, Name: "points", Type: &iceberg.ListType{
-			ElementID: 10, ElementRequired: true, Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 11, Name: "x", Type: iceberg.PrimitiveTypes.Float32, Required: true},
-				{ID: 12, Name: "y", Type: iceberg.PrimitiveTypes.Float32, Required: true},
-			}},
-		}},
-		{ID: 13, Name: "flags", Type: &iceberg.MapType{
-			KeyID: 14, KeyType: iceberg.PrimitiveTypes.Int32,
-			ValueID: 15, ValueType: &iceberg.ListType{
-				ElementID: 16, Element: iceberg.PrimitiveTypes.Bool, ElementRequired: false,
-			},
-			ValueRequired: false,
-		}},
-		{ID: 17, Name: "active", Type: iceberg.PrimitiveTypes.Bool, InitialDefault: true},
-	}}
+	return iceberg.NewStructType(
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "tags", Doc: "labels", Type: iceberg.NewListType(3, iceberg.PrimitiveTypes.String, false)},
+		iceberg.NestedField{ID: 4, Name: "attrs", Required: true, Type: iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.NewStructType(
+			iceberg.NestedField{ID: 7, Name: "score", Type: iceberg.PrimitiveTypes.Float64, Required: true},
+			iceberg.NestedField{ID: 8, Name: "note", Type: iceberg.PrimitiveTypes.String, InitialDefault: "n/a", WriteDefault: "none"},
+		), true)},
+		iceberg.NestedField{ID: 9, Name: "points", Type: iceberg.NewListType(10, iceberg.NewStructType(
+			iceberg.NestedField{ID: 11, Name: "x", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+			iceberg.NestedField{ID: 12, Name: "y", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+		), true)},
+		iceberg.NestedField{ID: 13, Name: "flags", Type: iceberg.NewMapType(14, iceberg.PrimitiveTypes.Int32, 15, iceberg.NewListType(16, iceberg.PrimitiveTypes.Bool, false), false)},
+		iceberg.NestedField{ID: 17, Name: "active", Type: iceberg.PrimitiveTypes.Bool, InitialDefault: true},
+	)
 }
 
 const nestedTypeWireJSON = `{"type":"struct","fields":[` +
@@ -374,7 +333,7 @@ func TestNestedTypeJSONWireFormat(t *testing.T) {
 	assert.Equal(t, nestedTypeWireJSON, string(again))
 
 	t.Run("in schema", func(t *testing.T) {
-		sc := iceberg.NewSchema(0, typ.FieldList...)
+		sc := iceberg.NewSchema(0, typ.Fields()...)
 		out, err := json.Marshal(sc)
 		require.NoError(t, err)
 
@@ -387,18 +346,18 @@ func TestNestedTypeJSONWireFormat(t *testing.T) {
 // TestStructTypeUnmarshalMissingFieldsIsEmpty decodes into a populated type:
 // like the other nested types, a decode replaces the whole value.
 func TestStructTypeUnmarshalMissingFieldsIsEmpty(t *testing.T) {
-	typ := iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1, Name: "stale", Type: iceberg.PrimitiveTypes.String},
-	}}
+	typ := *iceberg.NewStructType(
+		iceberg.NestedField{ID: 1, Name: "stale", Type: iceberg.PrimitiveTypes.String},
+	)
 	require.NoError(t, json.Unmarshal([]byte(`{"type":"struct"}`), &typ))
-	assert.Empty(t, typ.FieldList)
+	assert.Empty(t, typ.Fields())
 }
 
 func TestStructTypeUnmarshalErrorLeavesTypeUnchanged(t *testing.T) {
 	kept := func() iceberg.StructType {
-		return iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1, Name: "kept", Type: iceberg.PrimitiveTypes.String},
-		}}
+		return *iceberg.NewStructType(
+			iceberg.NestedField{ID: 1, Name: "kept", Type: iceberg.PrimitiveTypes.String},
+		)
 	}
 	typ := kept()
 
@@ -407,6 +366,83 @@ func TestStructTypeUnmarshalErrorLeavesTypeUnchanged(t *testing.T) {
 		`{"id":3,"name":"bad","required":false}]}`), &typ)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Equal(t, kept(), typ)
+}
+
+// TestNestedTypeConstructorsMatchLiterals pins that each constructor builds the
+// same value, with the same JSON, as the composite literal it replaces.
+func TestNestedTypeConstructorsMatchLiterals(t *testing.T) {
+	fields := []iceberg.NestedField{
+		{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String},
+	}
+
+	tests := []struct {
+		name        string
+		constructed iceberg.Type
+		literal     iceberg.Type
+	}{
+		{"struct", iceberg.NewStructType(fields...), &iceberg.StructType{FieldList: fields}},
+		{"empty struct", iceberg.NewStructType(), &iceberg.StructType{}},
+		{"empty non-nil struct", iceberg.NewStructType([]iceberg.NestedField{}...), &iceberg.StructType{FieldList: []iceberg.NestedField{}}},
+		{"list", iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, true), &iceberg.ListType{ElementID: 3, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: true}},
+		{
+			"map",
+			iceberg.NewMapType(4, iceberg.PrimitiveTypes.String, 5, iceberg.PrimitiveTypes.Float64, false),
+			&iceberg.MapType{KeyID: 4, KeyType: iceberg.PrimitiveTypes.String, ValueID: 5, ValueType: iceberg.PrimitiveTypes.Float64, ValueRequired: false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.literal, tt.constructed)
+			assert.True(t, tt.constructed.Equals(tt.literal))
+
+			want, err := json.Marshal(tt.literal)
+			require.NoError(t, err)
+			got, err := json.Marshal(tt.constructed)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(want), string(got))
+		})
+	}
+}
+
+func TestNewStructTypeCopiesFields(t *testing.T) {
+	fields := []iceberg.NestedField{
+		{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+	}
+	st := iceberg.NewStructType(fields...)
+
+	fields[0].Name = "changed"
+
+	assert.Equal(t, "a", st.Field(0).Name)
+}
+
+func TestStructTypeFieldsReturnsCopy(t *testing.T) {
+	st := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	got := st.Fields()
+	got[0].Name = "changed"
+	got[1].Type = iceberg.PrimitiveTypes.Bool
+
+	assert.Equal(t, "a", st.Field(0).Name)
+	assert.Equal(t, iceberg.PrimitiveTypes.String, st.Field(1).Type)
+}
+
+func TestStructTypeFieldAccessors(t *testing.T) {
+	st := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	require.Equal(t, 2, st.NumFields())
+	assert.Equal(t, "a", st.Field(0).Name)
+	assert.Equal(t, 2, st.Field(1).ID)
+	assert.Equal(t, st.FieldList, st.Fields())
+	assert.Zero(t, iceberg.NewStructType().NumFields())
+	assert.Panics(t, func() { st.Field(2) })
 }
 
 var NonParameterizedTypes = []iceberg.Type{
@@ -463,17 +499,13 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.VariantType{}, "variant"},
 		{iceberg.MustFixedTypeOf(22), "fixed[22]"},
 		{iceberg.MustDecimalTypeOf(19, 18), "decimal(19, 18)"},
-		{&iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 1, Name: "required_field", Type: iceberg.PrimitiveTypes.String, Required: true, Doc: "this is a doc"},
-				{ID: 2, Name: "optional_field", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-			},
-		}, "struct<1: required_field: required string (this is a doc), 2: optional_field: required int>"},
-		{&iceberg.ListType{
-			ElementID: 22, Element: iceberg.PrimitiveTypes.String,
-		}, "list<string>"},
+		{iceberg.NewStructType(
+			iceberg.NestedField{ID: 1, Name: "required_field", Type: iceberg.PrimitiveTypes.String, Required: true, Doc: "this is a doc"},
+			iceberg.NestedField{ID: 2, Name: "optional_field", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		), "struct<1: required_field: required string (this is a doc), 2: optional_field: required int>"},
+		{iceberg.NewListType(22, iceberg.PrimitiveTypes.String, false), "list<string>"},
 		{
-			&iceberg.MapType{KeyID: 19, KeyType: iceberg.PrimitiveTypes.String, ValueID: 25, ValueType: iceberg.PrimitiveTypes.Float64},
+			iceberg.NewMapType(19, iceberg.PrimitiveTypes.String, 25, iceberg.PrimitiveTypes.Float64, false),
 			"map<string, double>",
 		},
 	}
@@ -485,39 +517,22 @@ func TestTypeStrings(t *testing.T) {
 
 func TestUnknownTypeInNestedStructs(t *testing.T) {
 	// Test UnknownType in all nested positions: top-level, struct fields, list elements, and map values
-	listType := &iceberg.ListType{
-		ElementID:       4,
-		ElementRequired: false,
-		Element:         iceberg.UnknownType{},
-	}
+	listType := iceberg.NewListType(4, iceberg.UnknownType{}, false)
 
-	standaloneMapType := &iceberg.MapType{
-		KeyID:         12,
-		KeyType:       iceberg.StringType{},
-		ValueID:       13,
-		ValueType:     iceberg.UnknownType{},
-		ValueRequired: false,
-	}
+	standaloneMapType := iceberg.NewMapType(12, iceberg.StringType{}, 13, iceberg.UnknownType{}, false)
 
 	schema := iceberg.NewSchema(
 		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
 		iceberg.NestedField{ID: 2, Name: "top", Type: iceberg.UnknownType{}, Required: false},
 		iceberg.NestedField{ID: 3, Name: "arr", Type: listType, Required: false},
-		iceberg.NestedField{ID: 5, Name: "struct", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 6, Name: "inner_op", Type: iceberg.UnknownType{}, Required: false},
-				{ID: 7, Name: "inner_map", Type: &iceberg.MapType{
-					KeyID: 8, KeyType: iceberg.StringType{},
-					ValueID: 9, ValueType: iceberg.UnknownType{}, ValueRequired: false,
-				}, Required: false},
-				{ID: 10, Name: "struct_arr", Type: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 11, Name: "deep", Type: iceberg.UnknownType{}, Required: false},
-					},
-				}, Required: false},
-			},
-		}, Required: true},
+		iceberg.NestedField{ID: 5, Name: "struct", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 6, Name: "inner_op", Type: iceberg.UnknownType{}, Required: false},
+			iceberg.NestedField{ID: 7, Name: "inner_map", Type: iceberg.NewMapType(8, iceberg.StringType{}, 9, iceberg.UnknownType{}, false), Required: false},
+			iceberg.NestedField{ID: 10, Name: "struct_arr", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 11, Name: "deep", Type: iceberg.UnknownType{}, Required: false},
+			), Required: false},
+		), Required: true},
 		iceberg.NestedField{ID: 14, Name: "standalone_map", Type: standaloneMapType, Required: false},
 	)
 
@@ -556,7 +571,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 	require.True(t, ok)
 
 	var innerOp iceberg.NestedField
-	for _, f := range structType.FieldList {
+	for _, f := range structType.Fields() {
 		if f.ID == 6 {
 			innerOp = f
 
@@ -569,7 +584,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 
 	// Test UnknownType as map value within struct
 	var innerMap iceberg.NestedField
-	for _, f := range structType.FieldList {
+	for _, f := range structType.Fields() {
 		if f.ID == 7 {
 			innerMap = f
 
@@ -584,7 +599,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 
 	// Test deep nesting: UnknownType in struct within struct
 	var structArr iceberg.NestedField
-	for _, f := range structType.FieldList {
+	for _, f := range structType.Fields() {
 		if f.ID == 10 {
 			structArr = f
 
@@ -595,7 +610,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 	nestedStruct, ok := structArr.Type.(*iceberg.StructType)
 	require.True(t, ok)
 	var deep iceberg.NestedField
-	for _, f := range nestedStruct.FieldList {
+	for _, f := range nestedStruct.Fields() {
 		if f.ID == 11 {
 			deep = f
 
@@ -671,18 +686,8 @@ func TestVariantInSchema(t *testing.T) {
 func TestVariantInNestedTypes(t *testing.T) {
 	sc := iceberg.NewSchema(
 		0,
-		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
-			ElementID:       2,
-			Element:         iceberg.VariantType{},
-			ElementRequired: false,
-		}},
-		iceberg.NestedField{ID: 3, Name: "metadata", Type: &iceberg.MapType{
-			KeyID:         4,
-			KeyType:       iceberg.PrimitiveTypes.String,
-			ValueID:       5,
-			ValueType:     iceberg.VariantType{},
-			ValueRequired: false,
-		}},
+		iceberg.NestedField{ID: 1, Name: "events", Type: iceberg.NewListType(2, iceberg.VariantType{}, false)},
+		iceberg.NestedField{ID: 3, Name: "metadata", Type: iceberg.NewMapType(4, iceberg.PrimitiveTypes.String, 5, iceberg.VariantType{}, false)},
 	)
 
 	data, err := json.Marshal(sc)
@@ -706,12 +711,10 @@ func TestVariantInStructField(t *testing.T) {
 	sc := iceberg.NewSchema(
 		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
-				{ID: 4, Name: "payload", Type: iceberg.VariantType{}},
-			},
-		}},
+		iceberg.NestedField{ID: 2, Name: "nested", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 4, Name: "payload", Type: iceberg.VariantType{}},
+		)},
 	)
 
 	data, err := json.Marshal(sc)
@@ -722,8 +725,8 @@ func TestVariantInStructField(t *testing.T) {
 
 	nested, ok := out.Field(1).Type.(*iceberg.StructType)
 	require.True(t, ok)
-	assert.True(t, nested.FieldList[0].Type.Equals(iceberg.PrimitiveTypes.String))
-	assert.True(t, nested.FieldList[1].Type.Equals(iceberg.VariantType{}))
+	assert.True(t, nested.Field(0).Type.Equals(iceberg.PrimitiveTypes.String))
+	assert.True(t, nested.Field(1).Type.Equals(iceberg.VariantType{}))
 }
 
 func TestNestedFieldUnmarshalMissingID(t *testing.T) {
@@ -1295,5 +1298,208 @@ func TestDecimalTypeOfReturnsError(t *testing.T) {
 		typ, err := iceberg.DecimalTypeOf(tc.precision, tc.scale)
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		assert.Equal(t, iceberg.DecimalType{}, typ)
+	}
+}
+
+func TestTimestampToNanosChecksRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		micros    iceberg.Timestamp
+		want      iceberg.TimestampNano
+		overflows bool
+	}{
+		{
+			name:   "zero",
+			micros: 0,
+			want:   0,
+		},
+		{
+			name:   "maximum valid microseconds",
+			micros: iceberg.Timestamp(math.MaxInt64 / 1000),
+			want:   iceberg.TimestampNano((math.MaxInt64 / 1000) * 1000),
+		},
+		{
+			name:   "minimum valid microseconds",
+			micros: iceberg.Timestamp(math.MinInt64 / 1000),
+			want:   iceberg.TimestampNano((math.MinInt64 / 1000) * 1000),
+		},
+		{
+			name:      "positive overflow",
+			micros:    iceberg.Timestamp(math.MaxInt64/1000 + 1),
+			overflows: true,
+		},
+		{
+			name:      "negative overflow",
+			micros:    iceberg.Timestamp(math.MinInt64/1000 - 1),
+			overflows: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.overflows {
+				require.PanicsWithError(t,
+					fmt.Sprintf("%s: timestamp %d is outside the nanosecond range", iceberg.ErrBadCast, tt.micros),
+					func() { _ = tt.micros.ToNanos() },
+				)
+
+				return
+			}
+
+			assert.Equal(t, tt.want, tt.micros.ToNanos())
+		})
+	}
+}
+
+func TestLongDefaultsPreserveJSONPrecision(t *testing.T) {
+	const input = `{"id":1,"name":"value","type":"long","required":true,"initial-default":9007199254740993,"write-default":-9007199254740993}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	assert.Equal(t, int64(9007199254740993), field.InitialDefault)
+	assert.Equal(t, int64(-9007199254740993), field.WriteDefault)
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.JSONEq(t, input, string(encoded))
+	assert.Contains(t, string(encoded), `"initial-default":9007199254740993`)
+	assert.Contains(t, string(encoded), `"write-default":-9007199254740993`)
+}
+
+func TestLongDefaultsSurviveSchemaJSONRoundTrip(t *testing.T) {
+	original := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "max", Type: iceberg.PrimitiveTypes.Int64,
+			InitialDefault: int64(math.MaxInt64),
+			WriteDefault:   int64(math.MinInt64),
+		},
+		iceberg.NestedField{
+			ID: 2, Name: "small", Type: iceberg.PrimitiveTypes.Int64,
+			InitialDefault: int64(7),
+			WriteDefault:   int64(-7),
+		},
+	)
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, int64(math.MaxInt64), decoded.Field(0).InitialDefault)
+	assert.Equal(t, int64(math.MinInt64), decoded.Field(0).WriteDefault)
+	assert.Equal(t, int64(7), decoded.Field(1).InitialDefault)
+	assert.Equal(t, int64(-7), decoded.Field(1).WriteDefault)
+	assert.True(t, original.Equals(&decoded))
+}
+
+func TestLongDefaultsRejectNonIntegralAndOutOfRangeJSON(t *testing.T) {
+	invalid := []string{
+		`1.5`,
+		`1e2`,
+		`9223372036854775808`,
+		`-9223372036854775809`,
+		`"42"`,
+		`true`,
+	}
+
+	for _, value := range invalid {
+		t.Run(value, func(t *testing.T) {
+			for _, key := range []string{"initial-default", "write-default"} {
+				input := `{"id":1,"name":"value","type":"long","required":false,"` + key + `":` + value + `}`
+				var field iceberg.NestedField
+				err := json.Unmarshal([]byte(input), &field)
+				assert.ErrorIs(t, err, iceberg.ErrInvalidSchema, key)
+			}
+		})
+	}
+}
+
+func TestLongDefaultsKeepNullAndMissingValues(t *testing.T) {
+	for _, input := range []string{
+		`{"id":1,"name":"value","type":"long","required":false}`,
+		`{"id":1,"name":"value","type":"long","required":false,"initial-default":null,"write-default":null}`,
+	} {
+		var field iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(input), &field))
+		assert.Nil(t, field.InitialDefault)
+		assert.Nil(t, field.WriteDefault)
+	}
+}
+
+func TestLongWriteDefaultExpressionPreservesJSONNumbers(t *testing.T) {
+	const input = `{"id":1,"name":"value","type":"long","required":false,"write-default":{"type":"literal","value":9007199254740993,"data-type":"long"}}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+
+	expression, ok := field.WriteDefault.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, json.Number("9007199254740993"), expression["value"])
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.JSONEq(t, input, string(encoded))
+	assert.Contains(t, string(encoded), `"value":9007199254740993`)
+}
+
+func TestNonLongExpressionDefaultPreservesLongLiterals(t *testing.T) {
+	const input = `{"id":1,"name":"value","type":"string","required":false,"write-default":{"type":"apply","function":"to_string","arguments":[{"type":"literal","value":9007199254740993,"data-type":"long"},{"type":"literal","value":-9223372036854775808,"data-type":"long"}]}}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	defaultExpression, ok := field.WriteDefault.(map[string]any)
+	require.True(t, ok)
+	arguments, ok := defaultExpression["arguments"].([]any)
+	require.True(t, ok)
+	require.Len(t, arguments, 2)
+	first, ok := arguments[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, json.Number("9007199254740993"), first["value"])
+	second, ok := arguments[1].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, json.Number("-9223372036854775808"), second["value"])
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"value":9007199254740993`)
+	assert.Contains(t, string(encoded), `"value":-9223372036854775808`)
+}
+
+func TestMapInitialDefaultPreservesLongValues(t *testing.T) {
+	const input = `{"id":1,"name":"lookup","type":{"type":"map","key-id":2,"key":"string","value-id":3,"value":"long","value-required":false},"required":false,"initial-default":{"keys":["k"],"values":[-9223372036854775808]}}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	defaultValue, ok := field.InitialDefault.(map[string]any)
+	require.True(t, ok)
+	values, ok := defaultValue["values"].([]any)
+	require.True(t, ok)
+	assert.Equal(t, []any{json.Number("-9223372036854775808")}, values)
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"values":[-9223372036854775808]`)
+}
+
+func TestListInitialDefaultPreservesLongValues(t *testing.T) {
+	const input = `{"id":1,"name":"numbers","type":{"type":"list","element-id":2,"element":"long","element-required":false},"required":false,"initial-default":[9007199254740993,9223372036854775807]}`
+
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(input), &field))
+	assert.Equal(t, []any{json.Number("9007199254740993"), json.Number("9223372036854775807")}, field.InitialDefault)
+
+	encoded, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"initial-default":[9007199254740993,9223372036854775807]`)
+}
+
+func TestNonLongScalarDefaultKeepsExistingNumericType(t *testing.T) {
+	for _, input := range []string{
+		`{"id":1,"name":"integer","type":"int","required":false,"initial-default":42}`,
+		`{"id":1,"name":"double","type":"double","required":false,"initial-default":1.25}`,
+	} {
+		var field iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(input), &field))
+		assert.IsType(t, float64(0), field.InitialDefault)
 	}
 }
