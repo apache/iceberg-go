@@ -82,3 +82,91 @@ func TestScanImportedSignedZeroBounds(t *testing.T) {
 	require.Len(t, files, 1)
 	require.EqualValues(t, 1, result.NumRows())
 }
+
+func TestDeleteImportedSignedZerosWithIn(t *testing.T) {
+	floatNeg := math.Float32frombits(1 << 31)
+	doubleNeg := math.Float64frombits(1 << 63)
+	for _, tc := range []struct {
+		name                string
+		typ                 iceberg.Type
+		value, query, other iceberg.Literal
+		matches             bool
+	}{
+		{"float same positive", iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(0), iceberg.Float32Literal(0), iceberg.Float32Literal(1), true},
+		{"float same negative", iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(floatNeg), iceberg.Float32Literal(floatNeg), iceberg.Float32Literal(1), true},
+		{"float opposite positive", iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(0), iceberg.Float32Literal(floatNeg), iceberg.Float32Literal(1), false},
+		{"float opposite negative", iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(floatNeg), iceberg.Float32Literal(0), iceberg.Float32Literal(1), false},
+		{"double same positive", iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(0), iceberg.Float64Literal(0), iceberg.Float64Literal(1), true},
+		{"double same negative", iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(doubleNeg), iceberg.Float64Literal(doubleNeg), iceberg.Float64Literal(1), true},
+		{"double opposite positive", iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(0), iceberg.Float64Literal(doubleNeg), iceberg.Float64Literal(1), false},
+		{"double opposite negative", iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(doubleNeg), iceberg.Float64Literal(0), iceberg.Float64Literal(1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			cat, err := hadoop.NewCatalog(ctx, "local", t.TempDir(), nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
+			require.NoError(t, cat.CreateNamespace(ctx, catalog.ToIdentifier("db"), nil))
+			schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: tc.typ})
+			source, err := cat.CreateTable(ctx, catalog.ToIdentifier("db", "source"), schema)
+			require.NoError(t, err)
+			arrowSchema, err := table.SchemaToArrowSchema(schema, nil, false, false)
+			require.NoError(t, err)
+			builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+			defer builder.Release()
+			switch value := tc.value.(type) {
+			case iceberg.Float32Literal:
+				builder.Field(0).(*array.Float32Builder).Append(value.Value())
+			case iceberg.Float64Literal:
+				builder.Field(0).(*array.Float64Builder).Append(value.Value())
+			}
+			record := builder.NewRecordBatch()
+			defer record.Release()
+			reader, err := array.NewRecordReader(arrowSchema, []arrow.RecordBatch{record})
+			require.NoError(t, err)
+			defer reader.Release()
+			source, err = source.Append(ctx, reader, nil)
+			require.NoError(t, err)
+			files, err := source.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			file := files[0].File
+			bound, err := tc.value.MarshalBinary()
+			require.NoError(t, err)
+			fileBuilder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+				file.FilePath(), iceberg.ParquetFile, nil, nil, nil, 1, file.FileSizeBytes())
+			require.NoError(t, err)
+			importedFile := fileBuilder.ValueCounts(map[int]int64{1: 1}).NullValueCounts(map[int]int64{1: 0}).
+				NaNValueCounts(map[int]int64{1: 0}).LowerBoundValues(map[int][]byte{1: bound}).
+				UpperBoundValues(map[int][]byte{1: bound}).Build()
+			imported, err := cat.CreateTable(ctx, catalog.ToIdentifier("db", "imported"), schema)
+			require.NoError(t, err)
+			tx := imported.NewTransaction()
+			require.NoError(t, tx.NewRowDelta(nil).AddRows(importedFile).Commit(ctx))
+			imported, err = tx.Commit(ctx)
+			require.NoError(t, err)
+			filter := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), []iceberg.Literal{tc.query, tc.other})
+			planned, err := imported.Scan(table.WithRowFilter(filter)).PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, planned, 1)
+			before, err := imported.Scan(table.WithRowFilter(filter)).ToArrowTable(ctx)
+			require.NoError(t, err)
+			if tc.matches {
+				require.EqualValues(t, 1, before.NumRows())
+			} else {
+				require.Zero(t, before.NumRows())
+			}
+			before.Release()
+			imported, err = imported.Delete(ctx, filter, nil)
+			require.NoError(t, err)
+			after, err := imported.Scan().ToArrowTable(ctx)
+			require.NoError(t, err)
+			defer after.Release()
+			if tc.matches {
+				require.Zero(t, after.NumRows())
+			} else {
+				require.EqualValues(t, 1, after.NumRows())
+			}
+		})
+	}
+}

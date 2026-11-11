@@ -94,10 +94,10 @@ func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) 
 
 func removeBoundCmp[T iceberg.LiteralType](bound iceberg.Literal, vals []iceberg.Literal, cmpToDelete int) []iceberg.Literal {
 	val := bound.(iceberg.TypedLiteral[T])
-	cmp := val.Comparator()
+	cmp := getPredicateCmpLiteral(val)
 
 	return slices.DeleteFunc(vals, func(v iceberg.Literal) bool {
-		return cmp(val.Value(), v.(iceberg.TypedLiteral[T]).Value()) == cmpToDelete
+		return cmp(val, v) == cmpToDelete
 	})
 }
 
@@ -135,10 +135,10 @@ func removeBoundCheck(bound iceberg.Literal, vals []iceberg.Literal, toDelete in
 
 func allBoundCmp[T iceberg.LiteralType](bound iceberg.Literal, set iceberg.Set[iceberg.Literal], want int) bool {
 	val := bound.(iceberg.TypedLiteral[T])
-	cmp := val.Comparator()
+	cmp := getPredicateCmpLiteral(val)
 
 	return set.All(func(e iceberg.Literal) bool {
-		return cmp(val.Value(), e.(iceberg.TypedLiteral[T]).Value()) == want
+		return cmp(val, e) == want
 	})
 }
 
@@ -299,8 +299,8 @@ func getCmp[T iceberg.LiteralType](b iceberg.TypedLiteral[T]) func(iceberg.Liter
 	}
 }
 
-// Predicate comparisons follow Arrow's IEEE equality for signed zeros. The
-// total-order comparator remains in use for bounds, sorting, and IN/NOT IN.
+// Predicate comparisons follow Arrow's IEEE equality for signed zeros. Bounds
+// and sorting still use the literal's total-order comparator.
 func getFloatPredicateCmp[T float32 | float64](boundary iceberg.TypedLiteral[T]) func(iceberg.Literal, iceberg.Literal) int {
 	compare := boundary.Comparator()
 
@@ -373,8 +373,9 @@ func compareLiteralValues[T iceberg.LiteralType](left, right iceberg.Literal) in
 	return leftValue.Comparator()(leftValue.Value(), rightValue.Value())
 }
 
-// Keep this dispatch aligned with getCmpLiteral, removeBoundCheck, and
-// allBoundCheck when adding a new literal type.
+// compareBoundLiterals compares a file or manifest bound with an IN predicate
+// extremum. Treating opposite signed zeros as equal keeps pruning conservative.
+// Keep this dispatch aligned with getCmpLiteral when adding a literal type.
 func compareBoundLiterals(left, right iceberg.Literal) int {
 	switch left.(type) {
 	case iceberg.TypedLiteral[bool]:
@@ -383,10 +384,8 @@ func compareBoundLiterals(left, right iceberg.Literal) int {
 		return compareLiteralValues[int32](left, right)
 	case iceberg.TypedLiteral[int64]:
 		return compareLiteralValues[int64](left, right)
-	case iceberg.TypedLiteral[float32]:
-		return compareLiteralValues[float32](left, right)
-	case iceberg.TypedLiteral[float64]:
-		return compareLiteralValues[float64](left, right)
+	case iceberg.TypedLiteral[float32], iceberg.TypedLiteral[float64]:
+		return getPredicateCmpLiteral(left)(left, right)
 	case iceberg.TypedLiteral[iceberg.Date]:
 		return compareLiteralValues[iceberg.Date](left, right)
 	case iceberg.TypedLiteral[iceberg.Time]:
@@ -1778,6 +1777,11 @@ func (m *strictMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.L
 		if err != nil {
 			panic(err)
 		}
+		if isFloatZero(lowerBound) {
+			// Literal sets use Go equality, but Arrow's IN kernel distinguishes
+			// signed zeros. Do not use set membership to prove every row matches.
+			return rowsMightNotMatch
+		}
 		if !s.Contains(lowerBound) {
 			return rowsMightNotMatch
 		}
@@ -1785,6 +1789,9 @@ func (m *strictMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.L
 		upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBytes)
 		if err != nil {
 			panic(err)
+		}
+		if isFloatZero(upperBound) {
+			return rowsMightNotMatch
 		}
 		if !s.Contains(upperBound) {
 			return rowsMightNotMatch
@@ -1798,6 +1805,17 @@ func (m *strictMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.L
 	}
 
 	return rowsMightNotMatch
+}
+
+func isFloatZero(lit iceberg.Literal) bool {
+	switch v := lit.(type) {
+	case iceberg.TypedLiteral[float32]:
+		return v.Value() == 0
+	case iceberg.TypedLiteral[float64]:
+		return v.Value() == 0
+	default:
+		return false
+	}
 }
 
 func (m *strictMetricsEval) VisitNotIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) bool {

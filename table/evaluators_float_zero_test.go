@@ -113,3 +113,56 @@ func TestSignedZeroBoundsDoNotPruneMatchingRows(t *testing.T) {
 		})
 	}
 }
+
+func TestSignedZeroSetPruningIsConservative(t *testing.T) {
+	tests := []struct {
+		name            string
+		typ             iceberg.Type
+		bound, min, max iceberg.Literal
+	}{
+		{"float positive bound", iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(0), iceberg.Float32Literal(-1), iceberg.Float32Literal(math.Float32frombits(1 << 31))},
+		{"float negative bound", iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(math.Float32frombits(1 << 31)), iceberg.Float32Literal(0), iceberg.Float32Literal(1)},
+		{"double positive bound", iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(0), iceberg.Float64Literal(-1), iceberg.Float64Literal(math.Float64frombits(1 << 63))},
+		{"double negative bound", iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(math.Float64frombits(1 << 63)), iceberg.Float64Literal(0), iceberg.Float64Literal(1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "x", Type: tt.typ, Required: true})
+			expr := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("x"), []iceberg.Literal{tt.min, tt.max})
+			boundExpr, err := iceberg.BindExpr(schema, expr, true)
+			require.NoError(t, err)
+			pred, ok := boundExpr.(iceberg.BoundSetPredicate)
+			require.True(t, ok)
+			bound, err := tt.bound.MarshalBinary()
+			require.NoError(t, err)
+
+			newMetricsVisitor := func() *inclusiveMetricsEval {
+				return &inclusiveMetricsEval{metricsEvaluator: metricsEvaluator{
+					valueCounts: map[int]int64{1: 1}, nullCounts: map[int]int64{1: 0}, nanCounts: map[int]int64{1: 0},
+					lowerBounds: map[int][]byte{1: bound}, upperBounds: map[int][]byte{1: bound},
+				}}
+			}
+			require.True(t, newMetricsVisitor().VisitIn(pred.Term(), pred.Literals()), "slow metrics path")
+			require.True(t, newMetricsVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), tt.min, tt.max), "extrema metrics path")
+
+			newManifestVisitor := func() *manifestEvalVisitor {
+				return &manifestEvalVisitor{partitionFields: []iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}}
+			}
+			require.True(t, newManifestVisitor().VisitIn(pred.Term(), pred.Literals()), "slow manifest path")
+			require.True(t, newManifestVisitor().VisitInWithExtrema(pred.Term(), pred.Literals(), tt.min, tt.max), "extrema manifest path")
+
+			builder, err := iceberg.NewDataFileBuilder(iceberg.NewPartitionSpec(), iceberg.EntryContentData,
+				"s3://bucket/zero.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 100)
+			require.NoError(t, err)
+			file := builder.ValueCounts(map[int]int64{1: 1}).NullValueCounts(map[int]int64{1: 0}).
+				NaNValueCounts(map[int]int64{1: 0}).LowerBoundValues(map[int][]byte{1: bound}).
+				UpperBoundValues(map[int][]byte{1: bound}).Build()
+			notIn := iceberg.SetPredicate(iceberg.OpNotIn, iceberg.Reference("x"), []iceberg.Literal{tt.min, tt.max})
+			strict, err := newStrictMetricsEvaluator(schema, notIn, true, false)
+			require.NoError(t, err)
+			allMatch, err := strict(file)
+			require.NoError(t, err)
+			require.False(t, allMatch, "NOT IN must remain conservative around signed zero")
+		})
+	}
+}

@@ -512,8 +512,7 @@ func (e *exprEvaluator) VisitNotEqual(term BoundTerm, lit Literal) bool {
 }
 
 // The ordering comparisons are false for a NaN value, following IEEE 754 as
-// the Arrow row filter does. doCmp can't decide them alone, because
-// cmp.Compare orders NaN below every number.
+// the Arrow row filter does. doCmp alone uses a total order for floating point.
 
 func (e *exprEvaluator) VisitGreater(term BoundTerm, lit Literal) bool {
 	return !e.VisitIsNan(term) && doCmp(e.st, term, lit) > 0
@@ -586,9 +585,7 @@ var _ BoundGeospatialExprVisitor[bool] = (*exprEvaluator)(nil)
 // comparison also matches NaN, so NOT(x < 5) becomes x >= 5 OR is_nan(x): NaN
 // fails both x < 5 and x >= 5, and the result must hold for the same rows as
 // the NOT it replaces. That follows IEEE 754 comparison, as a scan's row
-// filter does. ExpressionEvaluator orders NaN below every number instead, so on
-// a NaN value it can disagree with the expression it evaluates before rewriting;
-// see https://github.com/apache/iceberg-go/issues/2359.
+// filter and ExpressionEvaluator do.
 func RewriteNotExpr(expr BooleanExpression) (BooleanExpression, error) {
 	return VisitExpr(expr, rewriteNotVisitor{})
 }
