@@ -969,6 +969,8 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.page-version</code></td><td><code>2</code></td></tr>
 <tr><td><code>write.parquet.compression-codec</code></td><td><code>zstd</code></td></tr>
 <tr><td><code>write.parquet.compression-level</code></td><td><code>-1</code> (codec default)</td></tr>
+<tr><td><code>write.parquet.compression-codec.column.&lt;name&gt;</code></td><td>Global codec</td></tr>
+<tr><td><code>write.parquet.compression-level.column.&lt;name&gt;</code></td><td>Global level, or the column codec's default if the codecs differ</td></tr>
 <tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
 <tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
 <tr><td><code>parquet.enable.dictionary</code></td><td><code>true</code> (global dictionary encoding switch; same key as Iceberg Java)</td></tr>
@@ -978,6 +980,13 @@ but are reserved for future task-group planning and are not currently read.</p>
 </tbody></table>
 </div>
 <p>The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>.</p>
+<p>Column compression keys use case-sensitive Iceberg leaf paths, such as
+<code>items.element</code> or <code>attributes.value.name</code>. They apply to data files and use
+the global settings for columns without overrides. An explicit column level
+must be an integer valid for its effective codec. Missing fields are ignored.
+Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
+these keys. Arrow does not register legacy <code>lz4</code> or <code>lzo</code> codecs by default;
+<code>lz4_raw</code> is supported.</p>
 <h3 id="parquet-reader"><a class="header" href="#parquet-reader">Parquet reader</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>read.parquet.batch-size</code></td><td>Arrow record-batch size used by the Parquet reader.</td></tr>
