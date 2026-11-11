@@ -375,7 +375,7 @@ func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression boo
 	}
 
 	trimmed := bytes.TrimSpace(raw)
-	if _, isLong := typ.(Int64Type); isLong && !(allowExpression && len(trimmed) > 0 && trimmed[0] == '{') {
+	if _, isLong := typ.(Int64Type); isLong && (!allowExpression || len(trimmed) == 0 || trimmed[0] != '{') {
 		var value *int64
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return nil, fmt.Errorf("%w: invalid long default: %w", ErrInvalidSchema, err)
@@ -408,6 +408,7 @@ func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression boo
 
 	return value, nil
 }
+
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	aux := struct {
 		ID             *int            `json:"id"`
