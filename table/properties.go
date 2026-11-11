@@ -106,6 +106,13 @@ const (
 	ParquetCompressionLevelDefault           = internal.ParquetCompressionLevelDefault
 	ParquetCompressionColumnCodecKeyPrefix   = internal.ParquetCompressionColumnCodecKeyPrefix
 	ParquetCompressionColumnLevelKeyPrefix   = internal.ParquetCompressionColumnLevelKeyPrefix
+	DeleteParquetRowGroupSizeBytesKey        = "write.delete.parquet.row-group-size-bytes"
+	DeleteParquetPageSizeBytesKey            = "write.delete.parquet.page-size-bytes"
+	DeleteParquetPageRowLimitKey             = "write.delete.parquet.page-row-limit"
+	DeleteParquetDictSizeBytesKey            = "write.delete.parquet.dict-size-bytes"
+	DeleteParquetPageVersionKey              = "write.delete.parquet.page-version"
+	DeleteParquetCompressionKey              = "write.delete.parquet.compression-codec"
+	DeleteParquetCompressionLevelKey         = "write.delete.parquet.compression-level"
 	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
 	ParquetBloomFilterAdaptiveEnabledKey     = internal.ParquetBloomFilterAdaptiveEnabledKey

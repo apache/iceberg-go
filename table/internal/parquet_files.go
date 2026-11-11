@@ -281,10 +281,10 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	pageVersion := props.Get(ParquetPageVersionKey, ParquetPageVersionDefault)
 
 	var dpVersion parquet.DataPageVersion
-	switch pageVersion {
-	case "1":
+	switch strings.ToLower(pageVersion) {
+	case "1", "v1":
 		dpVersion = parquet.DataPageV1
-	case "2":
+	case "2", "v2":
 		dpVersion = parquet.DataPageV2
 	default:
 		slog.Warn("unrecognized data page version, falling back to v2", "version", pageVersion)
@@ -307,25 +307,8 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	compressionLevel := props.GetInt(ParquetCompressionLevelKey,
 		ParquetCompressionLevelDefault)
 
-	var codec compress.Compression
-	switch compression {
-	case "snappy":
-		codec = compress.Codecs.Snappy
-	case "zstd":
-		codec = compress.Codecs.Zstd
-	case "uncompressed":
-		codec = compress.Codecs.Uncompressed
-	case "gzip":
-		codec = compress.Codecs.Gzip
-	case "brotli":
-		codec = compress.Codecs.Brotli
-	case "lz4":
-		codec = compress.Codecs.Lz4
-	case "lz4raw":
-		codec = compress.Codecs.Lz4Raw
-	case "lzo":
-		codec = compress.Codecs.Lzo
-	default:
+	codec, validCodec := ParquetCompressionCodec(compression)
+	if !validCodec {
 		slog.Warn("unrecognized compression codec, falling back to uncompressed", "codec", compression)
 	}
 
@@ -391,6 +374,30 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	}
 
 	return columnCompressionWriteProperties(props, writerProps)
+}
+
+// ParquetCompressionCodec resolves the names accepted by the Parquet writer.
+func ParquetCompressionCodec(value string) (compress.Compression, bool) {
+	switch strings.ToLower(value) {
+	case "snappy":
+		return compress.Codecs.Snappy, true
+	case "zstd":
+		return compress.Codecs.Zstd, true
+	case "uncompressed":
+		return compress.Codecs.Uncompressed, true
+	case "gzip":
+		return compress.Codecs.Gzip, true
+	case "brotli":
+		return compress.Codecs.Brotli, true
+	case "lz4":
+		return compress.Codecs.Lz4, true
+	case "lz4raw", "lz4_raw":
+		return compress.Codecs.Lz4Raw, true
+	case "lzo":
+		return compress.Codecs.Lzo, true
+	default:
+		return compress.Codecs.Uncompressed, false
+	}
 }
 
 // javaBool matches Java's Boolean.parseBoolean, which Iceberg's Java writer uses
@@ -487,7 +494,7 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 
 func validateParquetCompressionLevel(key, compression string, level int) error {
 	min, max := 0, 0
-	switch compression {
+	switch strings.ToLower(compression) {
 	case "gzip":
 		min, max = parquetGzipCompressionLevelMin, parquetGzipCompressionLevelMax
 	case "zstd":

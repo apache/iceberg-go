@@ -227,6 +227,11 @@ func TestParquetBloomResolvedAdaptiveValidation(t *testing.T) {
 		{"legacy enabled", iceberg.Properties{enabled + "items.list.element": "true", fpp + "items.element": "0.9999999999999999"}, true},
 		{"legacy fpp", iceberg.Properties{enabled + "items.element": "true", fpp + "items.list.element": "0.9999999999999999"}, true},
 		{"explicit ndv", iceberg.Properties{enabled + "items.element": "true", fpp + "items.element": "0.9999999999999999", ndv + "items.list.element": "1"}, false},
+		{"missing field settings", iceberg.Properties{enabled + "items.element": "true", fpp + "missing": "invalid", ndv + "missing": "invalid"}, false},
+		{"shadowed physical settings", iceberg.Properties{
+			enabled + "items.element": "true", fpp + "items.element": "0.01", ndv + "items.element": "10",
+			fpp + "items.list.element": "invalid", ndv + "items.list.element": "invalid",
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.props[ParquetBloomFilterAdaptiveEnabledKey] = "true"
