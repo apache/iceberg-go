@@ -1091,21 +1091,26 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 			}))
 		}
 
-		updates = append(updates, compressionPropertyUpdates(meta.props, u.schema, newSchema)...)
+		updates = append(updates, columnPropertyUpdates(meta.props, u.schema, newSchema, []string{
+			MetricsModeColumnConfPrefix,
+			ParquetBloomFilterColumnEnabledKeyPrefix,
+			ParquetCompressionColumnCodecKeyPrefix,
+			ParquetCompressionColumnLevelKeyPrefix,
+		})...)
 	}
 
 	return updates, requirements, nil
 }
 
-// compressionPropertyUpdates follows field IDs across schema changes so that
-// renames retain overrides and a deleted field's settings do not attach to a
-// new field with the same name. Collect removals before additions because a
-// renamed field may reuse the name of a deleted field.
-func compressionPropertyUpdates(props iceberg.Properties, oldSchema, newSchema *iceberg.Schema) []Update {
+// columnPropertyUpdates follows field IDs across schema changes for supported
+// per-column properties. A deleted field's settings must not attach to a new
+// field with the same name. Remove old keys before setting renamed keys,
+// because a rename may reuse the name of a deleted field.
+func columnPropertyUpdates(props iceberg.Properties, oldSchema, newSchema *iceberg.Schema, prefixes []string) []Update {
 	var removals []string
 	set := make(iceberg.Properties)
 	for key, value := range props {
-		prefix, name, ok := compressionPropertyField(key)
+		prefix, name, ok := columnPropertyField(key, prefixes)
 		if !ok {
 			continue
 		}
@@ -1137,8 +1142,9 @@ func compressionPropertyUpdates(props iceberg.Properties, oldSchema, newSchema *
 	return updates
 }
 
-func compressionPropertyField(key string) (prefix, name string, ok bool) {
-	for _, prefix := range []string{ParquetCompressionColumnCodecKeyPrefix + ".", ParquetCompressionColumnLevelKeyPrefix + "."} {
+func columnPropertyField(key string, prefixes []string) (prefix, name string, ok bool) {
+	for _, base := range prefixes {
+		prefix := base + "."
 		if name, ok := strings.CutPrefix(key, prefix); ok && name != "" {
 			return prefix, name, true
 		}
