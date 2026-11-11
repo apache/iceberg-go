@@ -524,6 +524,92 @@ func schemaForEqualityFields(current *iceberg.Schema, schemas []*iceberg.Schema,
 	return current
 }
 
+// missingEqualityProjectionFields resolves fields absent from the file schema
+// once for both the physical read projection and the logical equality schema.
+func missingEqualityProjectionFields(
+	fileSchema, currentSchema *iceberg.Schema,
+	schemas []*iceberg.Schema,
+	deleteSets []*equalityDeleteSet,
+) ([]iceberg.NestedField, error) {
+	var missing []iceberg.NestedField
+
+	for _, deleteSet := range deleteSets {
+		for _, fieldID := range deleteSet.fieldIDs {
+			if _, ok := fileSchema.FindFieldByID(fieldID); ok {
+				continue
+			}
+
+			fieldSchema := schemaForEqualityFields(currentSchema, schemas, []int{fieldID})
+			if _, ok := fieldSchema.FindFieldByID(fieldID); !ok {
+				return nil, fmt.Errorf("equality field ID %d not found in current or historical schema", fieldID)
+			}
+
+			projected, err := iceberg.PruneColumns(fieldSchema, map[int]iceberg.Void{fieldID: {}}, true)
+			if err != nil {
+				return nil, err
+			}
+
+			missing = mergeEqualityProjectionFields(missing, projected.Fields())
+		}
+	}
+
+	return missing, nil
+}
+
+// equalityDeleteReadSchema adds missing equality fields to the schema used to
+// project data rows. Older files may not physically contain a field that was
+// added later, but Iceberg still requires that field to be read using its
+// initial default or null value when applying equality deletes.
+func equalityDeleteReadSchema(
+	fileSchema, currentSchema *iceberg.Schema,
+	schemas []*iceberg.Schema,
+	deleteSets []*equalityDeleteSet,
+) (*iceberg.Schema, error) {
+	missing, err := missingEqualityProjectionFields(fileSchema, currentSchema, schemas, deleteSets)
+	if err != nil {
+		return nil, err
+	}
+	if len(missing) == 0 {
+		return fileSchema, nil
+	}
+
+	fields := mergeEqualityProjectionFields(fileSchema.Fields(), missing)
+
+	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs, fields...), nil
+}
+
+func mergeEqualityProjectionFields(
+	existing, projected []iceberg.NestedField,
+) []iceberg.NestedField {
+	fields := append([]iceberg.NestedField(nil), existing...)
+	for _, projectedField := range projected {
+		merged := false
+		for i := range fields {
+			if fields[i].ID != projectedField.ID {
+				continue
+			}
+
+			existingStruct, existingIsStruct := fields[i].Type.(*iceberg.StructType)
+			projectedStruct, projectedIsStruct := projectedField.Type.(*iceberg.StructType)
+			if existingIsStruct && projectedIsStruct {
+				fields[i].Type = &iceberg.StructType{
+					FieldList: mergeEqualityProjectionFields(existingStruct.FieldList, projectedStruct.FieldList),
+				}
+			}
+
+			merged = true
+
+			break
+		}
+
+		if !merged {
+			fields = append(fields, projectedField)
+		}
+	}
+
+	return fields
+}
+
 type lazyEqualityDeleteLoader struct {
 	fs           iceio.IO
 	tableSchema  *iceberg.Schema

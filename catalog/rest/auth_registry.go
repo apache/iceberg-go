@@ -19,6 +19,7 @@ package rest
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"maps"
 	"strings"
@@ -31,18 +32,27 @@ import (
 // AuthProperties.AUTH_TYPE.
 const keyAuthType = "rest.auth.type"
 
-// Values of the rest.auth.type property. AuthTypeNone and AuthTypeOAuth2 are
-// built in; other values name an auth manager registered with
-// RegisterAuthManager.
+// Values of the rest.auth.type property. AuthTypeNone, AuthTypeBasic and
+// AuthTypeOAuth2 are built in; other values name an auth manager registered
+// with RegisterAuthManager.
 const (
 	// AuthTypeNone sends no authorization header, even when token or
 	// credential is set.
 	AuthTypeNone = "none"
+	// AuthTypeBasic sends HTTP Basic authentication built from
+	// rest.auth.basic.username and rest.auth.basic.password.
+	AuthTypeBasic = "basic"
 	// AuthTypeOAuth2 uses the token or credential properties. It is the
 	// default when rest.auth.type is unset.
 	AuthTypeOAuth2 = "oauth2"
 	// AuthTypeGoogle is the name the googleauth backend registers under.
 	AuthTypeGoogle = "google"
+)
+
+// Properties of rest.auth.type=basic, as in Iceberg Java's AuthProperties.
+const (
+	keyBasicUsername = "rest.auth.basic.username"
+	keyBasicPassword = "rest.auth.basic.password"
 )
 
 // AuthManagerConfig carries what an auth manager backend may configure itself
@@ -69,7 +79,7 @@ var (
 // It is intended to be called from a backend package's init function, so a
 // blank import of the backend is enough to enable it. Registering a name again
 // replaces the previous factory. It panics if factory is nil or if name is
-// empty or one of the built-in types, none and oauth2.
+// empty or one of the built-in types: none, basic and oauth2.
 func RegisterAuthManager(name string, factory AuthManagerFactory) {
 	if factory == nil {
 		panic(fmt.Sprintf("rest: RegisterAuthManager: nil factory for %q", name))
@@ -77,7 +87,7 @@ func RegisterAuthManager(name string, factory AuthManagerFactory) {
 
 	key := strings.ToLower(name)
 	switch key {
-	case "", AuthTypeNone, AuthTypeOAuth2:
+	case "", AuthTypeNone, AuthTypeBasic, AuthTypeOAuth2:
 		panic(fmt.Sprintf("rest: RegisterAuthManager: %q is reserved", name))
 	}
 
@@ -105,9 +115,10 @@ var authTypeImportHints = map[string]string{
 // configure the client's authentication. An AuthManager passed with
 // WithAuthManager takes precedence over the property.
 //
-// Unset and oauth2 keep the token / credential flow. none disables it. Any
-// other value builds the manager registered under that name, which is then
-// used for both the /v1/config request and the catalog session.
+// Unset and oauth2 keep the token / credential flow. none disables it, and
+// basic sends the rest.auth.basic.* credentials. Any other value builds the
+// manager registered under that name. The chosen manager serves both the
+// /v1/config request and the catalog session.
 func resolveAuthType(ctx context.Context, ops *options, clientProps iceberg.Properties) error {
 	raw, ok := clientProps[keyAuthType]
 	if !ok || ops.authManager != nil {
@@ -120,6 +131,14 @@ func resolveAuthType(ctx context.Context, ops *options, clientProps iceberg.Prop
 		return nil
 	case AuthTypeNone:
 		ops.disableAuth = true
+
+		return nil
+	case AuthTypeBasic:
+		am, err := newBasicAuthManager(clientProps)
+		if err != nil {
+			return fmt.Errorf("rest: %s=%s: %w", keyAuthType, raw, err)
+		}
+		ops.authManager = am
 
 		return nil
 	}
@@ -149,4 +168,27 @@ func resolveAuthType(ctx context.Context, ops *options, clientProps iceberg.Prop
 	ops.authManager = am
 
 	return nil
+}
+
+// basicAuthManager sends a fixed HTTP Basic authorization header, like Iceberg
+// Java's BasicAuthManager.
+type basicAuthManager struct{ header string }
+
+func newBasicAuthManager(props iceberg.Properties) (basicAuthManager, error) {
+	username, ok := props[keyBasicUsername]
+	if !ok {
+		return basicAuthManager{}, fmt.Errorf("missing required property %s", keyBasicUsername)
+	}
+	password, ok := props[keyBasicPassword]
+	if !ok {
+		return basicAuthManager{}, fmt.Errorf("missing required property %s", keyBasicPassword)
+	}
+
+	credentials := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+
+	return basicAuthManager{header: "Basic " + credentials}, nil
+}
+
+func (b basicAuthManager) AuthHeader() (string, string, error) {
+	return authorizationHeader, b.header, nil
 }

@@ -237,8 +237,8 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		args.writeUUID = &u
 	}
 
-	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
-		WriteTargetFileSizeBytesDefault))
+	targetFileSize := int64(meta.props.GetInt(WriteDeleteTargetFileSizeBytesKey,
+		WriteDeleteTargetFileSizeBytesDefault))
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
