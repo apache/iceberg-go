@@ -19,6 +19,7 @@ package rest_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -138,6 +139,10 @@ func TestAuthTypeSelectsAuthentication(t *testing.T) {
 		{"none ignores token", iceberg.Properties{"token": "tok", "rest.auth.type": "none"}, ""},
 		{"none matches case-insensitively", iceberg.Properties{"token": "tok", "rest.auth.type": " NONE "}, ""},
 		{"registered type", iceberg.Properties{"token": "tok", "rest.auth.type": "Test-Registry-Custom", "x": "y"}, "Custom abc"},
+		{"basic ignores token", iceberg.Properties{
+			"token": "tok", "rest.auth.type": "Basic",
+			"rest.auth.basic.username": "user", "rest.auth.basic.password": "p@ss:word",
+		}, "Basic " + base64.StdEncoding.EncodeToString([]byte("user:p@ss:word"))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,6 +170,22 @@ func TestAuthTypeIgnoresServerOverrides(t *testing.T) {
 	assert.Zero(t, calls.Load(), "a server override must not build an auth manager")
 }
 
+func TestBasicAuthIgnoresServerOverrides(t *testing.T) {
+	rec := newAuthRecorder(t, map[string]string{
+		"rest.auth.basic.username": "server-user",
+		"rest.auth.basic.password": "server-password",
+	})
+	config, cat := rec.authHeaders(t, iceberg.Properties{
+		"rest.auth.type":           "basic",
+		"rest.auth.basic.username": "user",
+		"rest.auth.basic.password": "password",
+	})
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:password"))
+	assert.Equal(t, want, config)
+	assert.Equal(t, want, cat, "server overrides must not replace the client's basic credentials")
+}
+
 func TestWithAuthManagerTakesPrecedenceOverAuthType(t *testing.T) {
 	calls, _ := registerCounting(t, "test-registry-precedence", "Registered")
 
@@ -185,22 +206,35 @@ func TestAuthTypeErrors(t *testing.T) {
 	})
 
 	cases := []struct {
+		name     string
 		authType string
+		props    iceberg.Properties
 		wantErr  string
 	}{
-		{"made-up", `unknown rest.auth.type "made-up"`},
-		{"google", `import _ "github.com/apache/iceberg-go/catalog/rest/googleauth"`},
-		{"sigv4", "set rest.sigv4-enabled=true"},
-		{"test-registry-failing", "rest.auth.type=test-registry-failing: no credentials"},
-		{"test-registry-nil", "factory returned nil"},
+		{"unknown", "made-up", nil, `unknown rest.auth.type "made-up"`},
+		{"google without import", "google", nil, `import _ "github.com/apache/iceberg-go/catalog/rest/googleauth"`},
+		{"sigv4", "sigv4", nil, "set rest.sigv4-enabled=true"},
+		{"factory error", "test-registry-failing", nil, "rest.auth.type=test-registry-failing: no credentials"},
+		{"nil manager", "test-registry-nil", nil, "factory returned nil"},
+		{
+			"basic without username", "basic",
+			iceberg.Properties{"rest.auth.basic.password": "hunter2"},
+			"rest.auth.type=basic: missing required property rest.auth.basic.username",
+		},
+		{
+			"basic without password", "basic",
+			iceberg.Properties{"rest.auth.basic.username": "user"},
+			"rest.auth.type=basic: missing required property rest.auth.basic.password",
+		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.authType, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			rec := newAuthRecorder(t, nil)
-			_, err := catalog.Load(context.Background(), "test", iceberg.Properties{
-				"type": "rest", "uri": rec.URL, "rest.auth.type": tc.authType,
-			})
+			props := iceberg.Properties{"type": "rest", "uri": rec.URL, "rest.auth.type": tc.authType}
+			maps.Copy(props, tc.props)
+			_, err := catalog.Load(context.Background(), "test", props)
 			require.ErrorContains(t, err, tc.wantErr)
+			assert.NotContains(t, err.Error(), "hunter2", "errors must not include the password")
 
 			rec.mu.Lock()
 			defer rec.mu.Unlock()
@@ -213,7 +247,7 @@ func TestRegisterAuthManagerRejectsReservedNames(t *testing.T) {
 	factory := func(context.Context, rest.AuthManagerConfig) (rest.AuthManager, error) {
 		return staticAuthManager{}, nil
 	}
-	for _, name := range []string{"", "none", "OAuth2"} {
+	for _, name := range []string{"", "none", "Basic", "OAuth2"} {
 		assert.Panics(t, func() { rest.RegisterAuthManager(name, factory) }, name)
 	}
 	assert.Panics(t, func() { rest.RegisterAuthManager("test-registry-nil-factory", nil) })

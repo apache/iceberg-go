@@ -226,6 +226,45 @@ func validateNoReservedFieldIDs(sc *iceberg.Schema) error {
 	return nil
 }
 
+// validateUniqueFieldIDs returns an error if two fields share an ID. Unlike
+// NewSchema, it also checks 0 and negative IDs, because reassignIDs looks up
+// partition and sort columns by ID (#2393). A single field with ID 0 is fine.
+func validateUniqueFieldIDs(sc *iceberg.Schema) error {
+	return checkUniqueFieldIDs(make(map[int]string), sc.Fields())
+}
+
+func checkUniqueFieldIDs(seen map[int]string, fields []iceberg.NestedField) error {
+	for _, f := range fields {
+		if prev, ok := seen[f.ID]; ok {
+			return fmt.Errorf("%w: multiple fields for id %d: %s and %s",
+				iceberg.ErrInvalidSchema, f.ID, prev, f.Name)
+		}
+		seen[f.ID] = f.Name
+
+		var children []iceberg.NestedField
+		switch t := f.Type.(type) {
+		case *iceberg.StructType:
+			if t != nil {
+				children = t.Fields()
+			}
+		case *iceberg.ListType:
+			if t != nil {
+				children = []iceberg.NestedField{t.ElementField()}
+			}
+		case *iceberg.MapType:
+			if t != nil {
+				children = []iceberg.NestedField{t.KeyField(), t.ValueField()}
+			}
+		}
+
+		if err := checkUniqueFieldIDs(seen, children); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // minFormatVersionForType returns the minimum table format version required
 // for the given type. Returns 1 for types supported in all versions, or a higher
 // version number for types that require newer format versions.

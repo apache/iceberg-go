@@ -117,7 +117,10 @@ func FormatFromFileName(fileName string) FileFormat {
 }
 
 type WriteFileInfo struct {
-	FileSchema       *iceberg.Schema
+	FileSchema *iceberg.Schema
+	// PropertySchema retains the table's original field names when FileSchema
+	// has been sanitized for a file format. Field IDs are shared by both.
+	PropertySchema   *iceberg.Schema
 	Spec             iceberg.PartitionSpec
 	FileName         string
 	StatsCols        map[int]StatisticsCollector

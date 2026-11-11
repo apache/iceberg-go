@@ -94,7 +94,7 @@ func TestWriteRecordsRecoversExactProjJSONCRSOnRead(t *testing.T) {
 	}
 	invariants, err := scanner.scanInvariants(tbl.Metadata().Properties())
 	require.NoError(t, err)
-	readSchema, _, rdr, err := scanner.prepareToRead(ctx, dataFiles[0], invariants)
+	readSchema, _, rdr, err := scanner.prepareToRead(ctx, dataFiles[0], invariants, nil)
 	require.NoError(t, err)
 	defer rdr.Close()
 
