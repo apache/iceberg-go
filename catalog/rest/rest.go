@@ -39,6 +39,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/internal/remotesigning"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
@@ -197,12 +198,13 @@ type StorageCredential struct {
 }
 
 type loadTableResponse struct {
-	MetadataLoc        string              `json:"metadata-location"`
-	RawMetadata        json.RawMessage     `json:"metadata"`
-	Config             iceberg.Properties  `json:"config"`
-	StorageCredentials []StorageCredential `json:"storage-credentials"`
-	Labels             *iceberg.Labels     `json:"labels,omitempty"`
-	Metadata           table.Metadata      `json:"-"`
+	RemoteSigningConfig json.RawMessage     `json:"remote-signing-config,omitempty"`
+	MetadataLoc         string              `json:"metadata-location"`
+	RawMetadata         json.RawMessage     `json:"metadata"`
+	Config              iceberg.Properties  `json:"config"`
+	StorageCredentials  []StorageCredential `json:"storage-credentials"`
+	Labels              *iceberg.Labels     `json:"labels,omitempty"`
+	Metadata            table.Metadata      `json:"-"`
 }
 
 type loadCredentialsResponse struct {
@@ -910,6 +912,7 @@ func toProps(o *options) iceberg.Properties {
 type Catalog struct {
 	ioRegistry *iceio.Registry
 	baseURI    *url.URL
+	catalogURI *url.URL
 	cl         *http.Client
 	// closeSession releases transports owned by the catalog. Caller-provided
 	// transports are excluded when the session is constructed.
@@ -1081,6 +1084,7 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 		return err
 	}
 
+	r.catalogURI = baseuri
 	r.baseURI = baseuri.JoinPath("v1")
 
 	// Capture the client-supplied properties before fetchConfig folds in the
@@ -1295,6 +1299,7 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 		if err != nil {
 			return nil, err
 		}
+		r.catalogURI = r.baseURI
 		r.baseURI = r.baseURI.JoinPath("v1")
 	}
 
@@ -1356,6 +1361,10 @@ func (r *Catalog) tableFromResponse(
 	labels *iceberg.Labels,
 	opts ...table.Option,
 ) (*table.Table, error) {
+	signingSession, err := r.remoteSigningSession(identifier)
+	if err != nil {
+		return nil, err
+	}
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
 		refresher := &vendedCredentialRefresher{
@@ -1372,6 +1381,11 @@ func (r *Catalog) tableFromResponse(
 		fsF = refresher.loadFS
 	} else {
 		fsF = loadRegistryFSFunc(r.ioRegistry, config, loc)
+	}
+
+	loadFS := fsF
+	fsF = func(ctx context.Context) (iceio.IO, error) {
+		return loadFS(remotesigning.WithSession(ctx, signingSession))
 	}
 
 	// Resolve the reporter from the client-supplied properties only (see the
@@ -1740,12 +1754,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		ret.MetadataLoc = metaLoc
 	}
 
-	config := maps.Clone(r.props)
-	maps.Copy(config, ret.Metadata.Properties())
-	// Save only the per-table configs.
-	saved := maps.Clone(ret.Metadata.Properties())
-	maps.Copy(config, ret.Config)
-	maps.Copy(saved, ret.Config)
+	config, saved := ret.fileIOProperties(r.props)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
@@ -1973,11 +1982,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	config := maps.Clone(r.props)
-	maps.Copy(config, ret.Metadata.Properties())
-	saved := maps.Clone(ret.Metadata.Properties())
-	maps.Copy(config, ret.Config)
-	maps.Copy(saved, ret.Config)
+	config, saved := ret.fileIOProperties(r.props)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
@@ -2035,12 +2040,7 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 		r.tables.put(identifier, mode, etag, ret)
 	}
 
-	config := maps.Clone(r.props)
-	maps.Copy(config, ret.Metadata.Properties())
-	// Save only the per-table configs, not r.props.
-	saved := maps.Clone(ret.Metadata.Properties())
-	maps.Copy(config, ret.Config)
-	maps.Copy(saved, ret.Config)
+	config, saved := ret.fileIOProperties(r.props)
 	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
