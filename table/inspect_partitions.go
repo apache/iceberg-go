@@ -46,6 +46,10 @@ type inspectPartitionAggregate struct {
 	lastUpdatedAt       *int64
 	lastUpdatedSnapshot *int64
 	orderingKey         string
+	// Persisted partition statistics distinguish DVs from classic delete files
+	// and expose an exact live-row total only when metadata proves it.
+	deletionVectorCount int32
+	totalRecordCount    *int64
 }
 
 type inspectPartitionAggregateTree struct {

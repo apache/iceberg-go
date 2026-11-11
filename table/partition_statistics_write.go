@@ -52,6 +52,44 @@ func PartitionStatisticsSchemaV1(partitionType *iceberg.StructType) *iceberg.Sch
 	)
 }
 
+// PartitionStatisticsSchema returns the partition statistics file schema for
+// format v1, v2, or v3. partitionType is the unified type across all specs.
+// V2 includes optional delete metrics; V3 requires them and adds dv_count.
+// The optional last-updated fields are not populated by ComputePartitionStatistics.
+func PartitionStatisticsSchema(partitionType *iceberg.StructType, formatVersion int) (*iceberg.Schema, error) {
+	if formatVersion < 1 || formatVersion > 3 {
+		return nil, fmt.Errorf("%w: partition statistics schema requires format version 1, 2, or 3", iceberg.ErrInvalidArgument)
+	}
+	if partitionType == nil || partitionType.NumFields() == 0 {
+		return nil, fmt.Errorf("%w: partition statistics require a nonempty partition type", iceberg.ErrInvalidArgument)
+	}
+	base := PartitionStatisticsSchemaV1(partitionType)
+	if formatVersion == 1 {
+		return base, nil
+	}
+	fields := base.Fields()[:5]
+	required := formatVersion == 3
+	fields = append(fields,
+		iceberg.NestedField{ID: 6, Name: "position_delete_record_count", Type: iceberg.PrimitiveTypes.Int64, Required: required},
+		iceberg.NestedField{ID: 7, Name: "position_delete_file_count", Type: iceberg.PrimitiveTypes.Int32, Required: required},
+		iceberg.NestedField{ID: 8, Name: "equality_delete_record_count", Type: iceberg.PrimitiveTypes.Int64, Required: required},
+		iceberg.NestedField{ID: 9, Name: "equality_delete_file_count", Type: iceberg.PrimitiveTypes.Int32, Required: required},
+		base.Field(5),
+		iceberg.NestedField{ID: 11, Name: "last_updated_at", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 12, Name: "last_updated_snapshot_id", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	if formatVersion == 3 {
+		// Append the V3 field after the V2 fields, as Java does. Its default
+		// lets V3 readers project statistics previously written by V2.
+		fields = append(fields, iceberg.NestedField{
+			ID: 13, Name: "dv_count", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+			InitialDefault: int32(0), WriteDefault: int32(0),
+		})
+	}
+
+	return iceberg.NewSchema(0, fields...), nil
+}
+
 // SetPartitionStatistics registers a previously written partition statistics
 // file with a snapshot. Files must follow the Iceberg partition statistics
 // file spec. This stages a metadata update; Commit publishes the reference.
@@ -79,7 +117,7 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 }
 
 // ComputePartitionStatistics computes and writes a Parquet partition statistics
-// file for the transaction's current v1 branch head, and stages its metadata
+// file for the transaction's current v1, v2, or v3 branch head, and stages its metadata
 // reference. The caller must Commit to publish the reference. It does not
 // rewrite any data files or create a new table snapshot.
 //
@@ -88,6 +126,12 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // the unified partition tuple (ascending, null first), then by spec ID for
 // deterministic ties. Only tables with at least one partition field are
 // currently supported.
+// Delete metrics include every live delete file and deletion vector. Exact
+// total_record_count is derived from manifests for tables without deletes or
+// with only validated deletion vectors. Any live classic position or equality
+// delete makes exact totals unknown for all partitions, including other specs.
+// Statistics are recomputed in full; data files and delete-file contents are
+// not read. Optional last-updated fields are left NULL.
 // Partition fields whose source was dropped or whose result type changed are
 // not yet supported. Embedded manifests may omit the v1 partition spec ID when the header
 // fields identify exactly one historical spec.
@@ -98,6 +142,9 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // The returned file may become orphaned if Commit fails; orphan-file cleanup
 // can remove it once it is no longer needed.
 func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*PartitionStatisticsFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
@@ -105,8 +152,8 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 	if t.tbl == nil || t.tbl.Metadata() == nil {
 		return nil, fmt.Errorf("%w: partition statistics require a table", iceberg.ErrInvalidArgument)
 	}
-	if meta.formatVersion != 1 {
-		return nil, fmt.Errorf("%w: partition statistics computation currently supports format v1 only",
+	if meta.formatVersion < 1 || meta.formatVersion > 3 {
+		return nil, fmt.Errorf("%w: partition statistics computation supports format v1, v2, and v3",
 			iceberg.ErrNotImplemented)
 	}
 	if meta.HasChanges() {
@@ -152,7 +199,7 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 	if err != nil {
 		return nil, err
 	}
-	rows, err := collectPartitionStatistics(ctx, fs, *snapshot, partitionType, t.tbl.Metadata().PartitionSpecs())
+	rows, err := collectPartitionStatistics(ctx, fs, *snapshot, partitionType, t.tbl.Metadata().PartitionSpecs(), meta.formatVersion)
 	if err != nil {
 		return nil, fmt.Errorf("partition statistics: %w", err)
 	}
@@ -165,7 +212,7 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 		return nil, err
 	}
 	path := locationProvider.NewMetadataLocation(uuid.NewString() + "-partition-stats.parquet")
-	size, err := writePartitionStatisticsParquet(ctx, wfs, path, partitionType, rows)
+	size, err := writePartitionStatisticsParquet(ctx, wfs, path, partitionType, rows, meta.formatVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +312,7 @@ func collectPartitionStatistics(
 	snapshot Snapshot,
 	partitionType *iceberg.StructType,
 	specs []iceberg.PartitionSpec,
+	formatVersion int,
 ) ([]*inspectPartitionAggregate, error) {
 	specByID := make(map[int32]iceberg.PartitionSpec, len(specs))
 	for _, spec := range specs {
@@ -276,7 +324,13 @@ func collectPartitionStatistics(
 	}
 
 	trees := make(map[int32]*inspectPartitionAggregateTree)
-	seenPaths := make(map[string]string)
+	files := partitionStatisticsFileIndex{paths: make(map[string]string)}
+	var dataFiles map[string]partitionStatisticsDataFile
+	if formatVersion == 3 {
+		dataFiles = make(map[string]partitionStatisticsDataFile)
+	}
+	vectors := make(map[string]partitionStatisticsVector)
+	exactTotals := true
 	rows := make([]*inspectPartitionAggregate, 0)
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
@@ -317,18 +371,17 @@ func collectPartitionStatistics(
 				return nil, fmt.Errorf("%w: manifest %q contains an empty data file path",
 					iceberg.ErrInvalidArgument, manifest.FilePath())
 			}
-			if previous, duplicate := seenPaths[path]; duplicate {
-				return nil, fmt.Errorf("%w: duplicate live data file %q in manifests %q and %q",
-					iceberg.ErrInvalidArgument, path, previous, manifest.FilePath())
-			}
-			seenPaths[path] = manifest.FilePath()
-			if file.ContentType() != iceberg.EntryContentData {
+			if formatVersion == 1 && file.ContentType() != iceberg.EntryContentData {
 				return nil, fmt.Errorf("%w: v1 manifest %s contains a delete file",
 					iceberg.ErrInvalidArgument, manifest.FilePath())
 			}
 			if file.Count() < 0 || file.FileSizeBytes() < 0 {
 				return nil, fmt.Errorf("%w: file %s has a negative count or size",
 					iceberg.ErrInvalidArgument, file.FilePath())
+			}
+			vector, err := files.add(file, manifest.FilePath(), formatVersion)
+			if err != nil {
+				return nil, err
 			}
 			values := dataFilePartition(file)
 			if err := validatePartitionStatisticsTuple(spec, file.FilePath(), values); err != nil {
@@ -363,19 +416,155 @@ func collectPartitionStatistics(
 				rows = append(rows, row)
 				tree.insert(newPartitionRecord(partition, partitionType), row)
 			}
-			if row.dataFileCount == math.MaxInt32 ||
-				row.dataRecordCount > math.MaxInt64-file.Count() ||
-				row.dataFileSize > math.MaxInt64-file.FileSizeBytes() {
-				return nil, fmt.Errorf("%w: partition statistics count overflow",
-					iceberg.ErrInvalidArgument)
+			if err := accumulatePartitionStatistics(row, file); err != nil {
+				return nil, err
 			}
-			row.dataFileCount++
-			row.dataRecordCount += file.Count()
-			row.dataFileSize += file.FileSizeBytes()
+			switch file.ContentType() {
+			case iceberg.EntryContentData:
+				if formatVersion == 3 {
+					dataFiles[path] = partitionStatisticsDataFile{row: row, count: file.Count(), sequence: entry.DataSequenceNumber()}
+				}
+			case iceberg.EntryContentPosDeletes:
+				if vector {
+					target := *file.ReferencedDataFile()
+					if _, duplicate := vectors[target]; duplicate {
+						return nil, fmt.Errorf("%w: multiple deletion vectors reference data file %q", iceberg.ErrInvalidArgument, target)
+					}
+					vectors[target] = partitionStatisticsVector{row: row, count: file.Count(), sequence: entry.DataSequenceNumber()}
+				} else {
+					exactTotals = false
+				}
+			case iceberg.EntryContentEqDeletes:
+				exactTotals = false
+			}
 		}
 	}
 
+	if err := finishPartitionStatistics(ctx, rows, dataFiles, vectors, exactTotals); err != nil {
+		return nil, err
+	}
+
 	return rows, nil
+}
+
+type partitionStatisticsDataFile struct {
+	row      *inspectPartitionAggregate
+	count    int64
+	sequence int64
+}
+
+type partitionStatisticsVector = partitionStatisticsDataFile
+
+// Keep regular-file identity as a path. Only V3 vectors need blob keys and
+// container sizes, so V1/V2 collection does not retain a second file index.
+type partitionStatisticsFileIndex struct {
+	paths      map[string]string
+	blobs      map[deletionVectorBlobKey]string
+	containers map[string]int64
+}
+
+func (i *partitionStatisticsFileIndex) add(file iceberg.DataFile, manifest string, formatVersion int) (bool, error) {
+	path := file.FilePath()
+	vector := IsDeletionVector(file)
+	if vector {
+		if formatVersion < 3 {
+			return false, fmt.Errorf("%w: deletion vector %q requires format v3", iceberg.ErrInvalidArgument, path)
+		}
+		key, err := snapshotFileDiffKey(file)
+		if err != nil {
+			return false, fmt.Errorf("%w: invalid statistics deletion vector: %v", iceberg.ErrInvalidArgument, err)
+		}
+		if key.offset > file.FileSizeBytes()-key.length {
+			return false, fmt.Errorf("%w: deletion vector %q is outside its Puffin file", iceberg.ErrInvalidArgument, path)
+		}
+		if previous, found := i.blobs[key]; found {
+			return false, fmt.Errorf("%w: duplicate live deletion vector %q in manifests %q and %q", iceberg.ErrInvalidArgument, path, previous, manifest)
+		}
+		if _, found := i.paths[path]; found {
+			return false, fmt.Errorf("%w: incompatible live references to file %q", iceberg.ErrInvalidArgument, path)
+		}
+		if size, found := i.containers[path]; found && size != file.FileSizeBytes() {
+			return false, fmt.Errorf("%w: inconsistent Puffin container size for %q", iceberg.ErrInvalidArgument, path)
+		}
+		if i.blobs == nil {
+			i.blobs = make(map[deletionVectorBlobKey]string)
+			i.containers = make(map[string]int64)
+		}
+		i.blobs[key] = manifest
+		i.containers[path] = file.FileSizeBytes()
+	} else {
+		if previous, found := i.paths[path]; found {
+			kind := "delete file"
+			if file.ContentType() == iceberg.EntryContentData {
+				kind = "data file"
+			}
+
+			return false, fmt.Errorf("%w: duplicate live %s %q in manifests %q and %q", iceberg.ErrInvalidArgument, kind, path, previous, manifest)
+		}
+		if _, found := i.containers[path]; found {
+			return false, fmt.Errorf("%w: incompatible live references to file %q", iceberg.ErrInvalidArgument, path)
+		}
+		i.paths[path] = manifest
+	}
+
+	return vector, nil
+}
+
+func accumulatePartitionStatistics(row *inspectPartitionAggregate, file iceberg.DataFile) error {
+	var records *int64
+	var files *int32
+	switch file.ContentType() {
+	case iceberg.EntryContentData:
+		records, files = &row.dataRecordCount, &row.dataFileCount
+		if row.dataFileSize > math.MaxInt64-file.FileSizeBytes() {
+			return fmt.Errorf("%w: partition statistics size overflow", iceberg.ErrInvalidArgument)
+		}
+		row.dataFileSize += file.FileSizeBytes()
+	case iceberg.EntryContentPosDeletes:
+		records, files = &row.positionDeleteCount, &row.positionDeleteFiles
+		if IsDeletionVector(file) {
+			files = &row.deletionVectorCount
+		}
+	case iceberg.EntryContentEqDeletes:
+		records, files = &row.equalityDeleteCount, &row.equalityDeleteFiles
+	default:
+		return fmt.Errorf("%w: unsupported statistics file content %d", iceberg.ErrInvalidArgument, file.ContentType())
+	}
+	if *files == math.MaxInt32 || *records > math.MaxInt64-file.Count() {
+		return fmt.Errorf("%w: partition statistics count overflow", iceberg.ErrInvalidArgument)
+	}
+	*files++
+	*records += file.Count()
+
+	return nil
+}
+
+func finishPartitionStatistics(ctx context.Context, rows []*inspectPartitionAggregate, dataFiles map[string]partitionStatisticsDataFile, vectors map[string]partitionStatisticsVector, exactTotals bool) error {
+	for _, row := range rows {
+		row.totalRecordCount = nil
+		if exactTotals {
+			row.totalRecordCount = new(row.dataRecordCount)
+		}
+	}
+	for target, vector := range vectors {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, found := dataFiles[target]
+		if !found || vector.row != data.row {
+			return fmt.Errorf("%w: deletion vector target %q must be live with the same spec and partition", iceberg.ErrInvalidArgument, target)
+		}
+		if vector.count > data.count || (data.sequence >= 0 && vector.sequence >= 0 && data.sequence > vector.sequence) {
+			return fmt.Errorf("%w: invalid deletion vector count or sequence for %q", iceberg.ErrInvalidArgument, target)
+		}
+		if data.sequence < 0 || vector.sequence < 0 {
+			data.row.totalRecordCount = nil
+		} else if data.row.totalRecordCount != nil {
+			*data.row.totalRecordCount -= vector.count
+		}
+	}
+
+	return ctx.Err()
 }
 
 func validatePartitionStatisticsTuple(spec iceberg.PartitionSpec, path string, values map[int]any) error {
@@ -569,8 +758,13 @@ func writePartitionStatisticsParquet(
 	path string,
 	partitionType *iceberg.StructType,
 	rows []*inspectPartitionAggregate,
+	formatVersion int,
 ) (_ int64, err error) {
-	sc, err := SchemaToArrowSchema(PartitionStatisticsSchemaV1(partitionType), nil, true, false)
+	statsSchema, err := PartitionStatisticsSchema(partitionType, formatVersion)
+	if err != nil {
+		return 0, err
+	}
+	sc, err := SchemaToArrowSchema(statsSchema, nil, true, false)
 	if err != nil {
 		return 0, err
 	}
@@ -620,9 +814,25 @@ func writePartitionStatisticsParquet(
 			bldr.Field(2).(*array.Int64Builder).Append(row.dataRecordCount)
 			bldr.Field(3).(*array.Int32Builder).Append(row.dataFileCount)
 			bldr.Field(4).(*array.Int64Builder).Append(row.dataFileSize)
-			// v1 has no delete files, so the exact live record count equals
-			// the sum of data-file record counts.
-			bldr.Field(5).(*array.Int64Builder).Append(row.dataRecordCount)
+			if formatVersion == 1 {
+				bldr.Field(5).(*array.Int64Builder).Append(row.dataRecordCount)
+			} else {
+				bldr.Field(5).(*array.Int64Builder).Append(row.positionDeleteCount)
+				bldr.Field(6).(*array.Int32Builder).Append(row.positionDeleteFiles)
+				bldr.Field(7).(*array.Int64Builder).Append(row.equalityDeleteCount)
+				bldr.Field(8).(*array.Int32Builder).Append(row.equalityDeleteFiles)
+				total := bldr.Field(9).(*array.Int64Builder)
+				if row.totalRecordCount == nil {
+					total.AppendNull()
+				} else {
+					total.Append(*row.totalRecordCount)
+				}
+				bldr.Field(10).(*array.Int64Builder).AppendNull()
+				bldr.Field(11).(*array.Int64Builder).AppendNull()
+				if formatVersion == 3 {
+					bldr.Field(12).(*array.Int32Builder).Append(row.deletionVectorCount)
+				}
+			}
 		}
 
 		rec := bldr.NewRecordBatch()
