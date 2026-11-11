@@ -105,7 +105,7 @@ func readORCFileSchema(file iceio.File) (*arrow.Schema, int64, error) {
 	if err = proto.Unmarshal(payload, protoadapt.MessageV2Of(&footer)); err != nil {
 		return nil, 0, fmt.Errorf("parse ORC footer: %w", err)
 	}
-	if err := validateORCDateStreams(file, size, ps.GetCompression(), &footer); err != nil {
+	if err := validateORCStripeStreams(file, size, ps.GetCompression(), &footer); err != nil {
 		return nil, 0, err
 	}
 	types := footer.GetTypes()
@@ -205,7 +205,7 @@ func orcSchemaField(types []*orcpb.Type, column uint32, name string, seen map[in
 	field.Name = name
 	if idText, ok := attrs["iceberg.id"]; ok {
 		id, err := strconv.Atoi(idText)
-		if err != nil || id <= 0 || int64(id) > math.MaxInt32-200 {
+		if err != nil || id <= 0 || (int64(id) > math.MaxInt32-200 && !iceberg.IsRowLineageColumn(id)) {
 			return field, fmt.Errorf("%w: invalid iceberg.id %q", iceberg.ErrInvalidSchema, idText)
 		}
 		if _, exists := seen[id]; exists {

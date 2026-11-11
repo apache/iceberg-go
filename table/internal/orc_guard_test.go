@@ -167,3 +167,16 @@ func TestORCSourceRejectsCanceledContextBeforeIO(t *testing.T) {
 	_, err := (&ORCFileSource{}).GetReader(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestORCRejectsNonUTCWriterTimezones(t *testing.T) {
+	for _, name := range []string{"timestamp_los_angeles.orc", "timestamp_kathmandu.orc", "timestamp_nested_los_angeles.orc"} {
+		t.Run(name, func(t *testing.T) {
+			input, err := (iceio.LocalFS{}).Open(t.Context(), "testdata/orc/"+name)
+			require.NoError(t, err)
+			defer input.Close()
+			_, _, err = readORCFileSchema(input)
+			require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+			require.ErrorContains(t, err, "writer timezone")
+		})
+	}
+}

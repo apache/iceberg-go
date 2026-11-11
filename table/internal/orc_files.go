@@ -327,7 +327,17 @@ func appendORCValue(builder array.Builder, dataType arrow.DataType, value any) e
 		}
 		switch ts.Unit {
 		case arrow.Microsecond:
-			b.Append(arrow.Timestamp(v.UnixMicro()))
+			micros := v.UnixMicro()
+			// UnixMicro can wrap outside int64. Reconstruct the whole seconds
+			// (using floor division) to check the conversion before appending.
+			seconds := micros / 1_000_000
+			if micros%1_000_000 < 0 {
+				seconds--
+			}
+			if seconds != v.Unix() {
+				return badType()
+			}
+			b.Append(arrow.Timestamp(micros))
 		case arrow.Nanosecond:
 			// Do not use UnixNano without a range check: it overflows for
 			// dates outside the range supported by int64 nanoseconds.

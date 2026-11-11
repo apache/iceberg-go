@@ -242,6 +242,58 @@ func TestORCRejectsReservedFieldIDs(t *testing.T) {
 	}
 }
 
+func TestORCReadRowLineageFields(t *testing.T) {
+	path := writeORCFixture(t, "struct<_row_id:bigint,_last_updated_sequence_number:bigint>",
+		map[int]map[string]string{
+			1: {"iceberg.id": strconv.Itoa(iceberg.RowIDFieldID)},
+			2: {"iceberg.id": strconv.Itoa(iceberg.LastUpdatedSequenceNumberFieldID)},
+		}, []any{int64(42), int64(7)})
+	reader := openORCFixture(t, path, 1)
+	schema, err := reader.Schema()
+	require.NoError(t, err)
+	for i, id := range []int{iceberg.RowIDFieldID, iceberg.LastUpdatedSequenceNumberFieldID} {
+		encoded, ok := schema.Field(i).Metadata.GetValue("PARQUET:field_id")
+		require.True(t, ok)
+		require.Equal(t, strconv.Itoa(id), encoded)
+	}
+	data, err := reader.ReadTable(t.Context())
+	require.NoError(t, err)
+	defer data.Release()
+	require.Equal(t, int64(42), data.Column(0).Data().Chunk(0).(*array.Int64).Value(0))
+	require.Equal(t, int64(7), data.Column(1).Data().Chunk(0).(*array.Int64).Value(0))
+}
+
+func TestORCMicrosecondTimestampLimits(t *testing.T) {
+	timestampType := &arrow.TimestampType{Unit: arrow.Microsecond}
+	minValue := time.UnixMicro(-1 << 63)
+	maxValue := time.UnixMicro(1<<63 - 1)
+	for _, tc := range []struct {
+		name    string
+		value   time.Time
+		invalid bool
+	}{
+		{"minimum", minValue, false},
+		{"maximum", maxValue, false},
+		{"below minimum", minValue.Add(-time.Microsecond), true},
+		{"above maximum", maxValue.Add(time.Microsecond), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := array.NewBuilder(memory.DefaultAllocator, timestampType)
+			defer builder.Release()
+			err := appendORCValue(builder, timestampType, tc.value)
+			if tc.invalid {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				require.Zero(t, builder.Len())
+			} else {
+				require.NoError(t, err)
+				values := builder.NewArray().(*array.Timestamp)
+				defer values.Release()
+				require.Equal(t, arrow.Timestamp(tc.value.UnixMicro()), values.Value(0))
+			}
+		})
+	}
+}
+
 func TestORCAttributesRejectMalformedFields(t *testing.T) {
 	attrs, err := orcTypeAttributes(&orcpb.Type{
 		XXX_unrecognized: append(encodeORCAttribute("iceberg.id", "42"),

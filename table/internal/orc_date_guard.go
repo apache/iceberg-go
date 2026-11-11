@@ -28,16 +28,20 @@ import (
 	"google.golang.org/protobuf/protoadapt"
 )
 
-// The decoder loses date nulls. A missing PRESENT stream means every date
-// value in that stripe is non-null and may be read safely.
-func validateORCDateStreams(file iceio.File, fileSize int64, codec orcpb.CompressionKind, footer *orcpb.Footer) error {
+// Reject stripe features the legacy decoder cannot interpret correctly:
+// date presence streams and non-UTC timestamp writer timezones.
+func validateORCStripeStreams(file iceio.File, fileSize int64, codec orcpb.CompressionKind, footer *orcpb.Footer) error {
 	dateIDs := make(map[uint32]struct{})
+	hasTimestamp := false
 	for id, typ := range footer.GetTypes() {
-		if typ.GetKind() == orcpb.Type_DATE {
+		switch typ.GetKind() {
+		case orcpb.Type_DATE:
 			dateIDs[uint32(id)] = struct{}{}
+		case orcpb.Type_TIMESTAMP:
+			hasTimestamp = true
 		}
 	}
-	if len(dateIDs) == 0 {
+	if len(dateIDs) == 0 && !hasTimestamp {
 		return nil
 	}
 	for _, stripe := range footer.GetStripes() {
@@ -70,9 +74,20 @@ func validateORCDateStreams(file iceio.File, fileSize int64, codec orcpb.Compres
 		if err := proto.Unmarshal(payload, protoadapt.MessageV2Of(&stripeFooter)); err != nil {
 			return fmt.Errorf("decode ORC stripe footer: %w", err)
 		}
+		if hasTimestamp {
+			// The decoder assumes a UTC base and never applies the writer's
+			// DST or historical offset changes. Missing zones retain its
+			// legacy UTC interpretation; only fixed UTC aliases are supported.
+			switch zone := stripeFooter.GetWriterTimezone(); zone {
+			case "", "UTC", "GMT", "Etc/UTC", "Etc/GMT":
+			default:
+				return fmt.Errorf("%w: ORC timestamp writer timezone %q", iceberg.ErrNotImplemented, zone)
+			}
+		}
 		for _, stream := range stripeFooter.GetStreams() {
 			if stream.GetKind() == orcpb.Stream_PRESENT {
 				if _, ok := dateIDs[stream.GetColumn()]; ok {
+					// The decoder loses nulls for date columns with a presence stream.
 					return fmt.Errorf("%w: ORC dates with a presence stream", iceberg.ErrNotImplemented)
 				}
 			}
