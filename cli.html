@@ -433,6 +433,24 @@ iceberg upgrade my_db.events 2
   --min-snapshots-to-keep 10 \
   my_db.events audit-2026-q2
 </code></pre>
+<h3 id="branch-fast-forward"><a class="header" href="#branch-fast-forward"><code>branch fast-forward</code></a></h3>
+<pre><code class="language-shell">iceberg branch fast-forward my_db.events main audit
+</code></pre>
+<p>Advance the target branch to the source branch or tag. The command checks
+ancestry and fails if histories have diverged. If the target does not exist,
+it creates a branch at the source snapshot. The confirmation prompt shows the
+previous and next snapshot IDs, or explicitly says a new branch will be created.
+Use <code>--yes</code> to skip confirmation.</p>
+<h3 id="branch-replace"><a class="header" href="#branch-replace"><code>branch replace</code></a></h3>
+<pre><code class="language-shell">iceberg branch replace my_db.events main 7234981023498
+</code></pre>
+<p>Move an existing branch to any known snapshot, without an ancestry check.
+This can discard the branch's current history from the branch head. The prompt
+shows both the previous and next snapshot IDs. Retention settings are preserved.
+Use <code>--yes</code> to skip confirmation.</p>
+<p>For both commands, REST catalogs using <code>snapshot-loading-mode=refs</code> may omit
+historical snapshots needed for ancestry checks or replacement. Use
+<code>snapshot-loading-mode=all</code> for these operations.</p>
 <h3 id="tag-create"><a class="header" href="#tag-create"><code>tag create</code></a></h3>
 <pre><code class="language-shell">iceberg tag create my_db.events pre-migration-v4
 </code></pre>

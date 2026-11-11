@@ -674,6 +674,37 @@ reqs := []table.Requirement{
 _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update})
 </code></pre>
 <p>Constants <code>table.MainBranch</code>, <code>table.BranchRef</code>, <code>table.TagRef</code> live in <a href="https://github.com/apache/iceberg-go/blob/main/table/refs.go"><code>table/refs.go</code></a>. A higher-level builder is on the roadmap.</p>
+<h3 id="branch-promotion-and-replacement"><a class="header" href="#branch-promotion-and-replacement">Branch promotion and replacement</a></h3>
+<p>Use a transaction to advance a branch to another branch or tag, or to move it
+to an existing snapshot. Fast-forward checks that the target's current snapshot
+is an ancestor of the source. It creates the target when missing, while
+<code>ReplaceBranch</code> requires an existing target branch.</p>
+<pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;main&quot;)
+if err != nil { /* ... */ }
+if err := txn.FastForwardBranch(&quot;main&quot;, &quot;audit&quot;); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+
+// Without ancestry checks (can move a branch backwards or across histories):
+txn, err = updated.NewTransactionOnBranch(&quot;main&quot;)
+if err != nil { /* ... */ }
+err = txn.ReplaceBranch(&quot;main&quot;, snapshotID)
+// Or use ReplaceBranchFromRef(&quot;main&quot;, &quot;audit&quot;), which can create a missing target.
+</code></pre>
+<p>For a non-main target, call <code>tbl.NewTransactionOnBranch(target)</code> rather than
+<code>tbl.NewTransaction()</code>. The latter uses <code>main</code> as its commit branch, so a
+concurrent append to <code>main</code> can reject an otherwise independent promotion.</p>
+<p>Existing branch retention settings are preserved. Both the target and source
+snapshot IDs are pinned when promoting from a ref, and the target is pinned
+when replacing by ID. If the source snapshot was staged in the same transaction,
+the commit branch is pinned too, preventing retry from changing its ancestry.
+A pinned ref that moves prevents the normal retry of a co-staged append. A retention-only change with the same snapshot ID cannot
+be detected by snapshot-ID requirements in any catalog. REST catalogs also
+cannot detect ref type changes with the same ID.</p>
+<p>Fast-forward needs the complete snapshot ancestry. REST catalogs using
+<code>snapshot-loading-mode=refs</code> can omit intermediate ancestors, causing valid
+fast-forwards to fail. Load with <code>snapshot-loading-mode=all</code> instead.
+Replacing by snapshot ID can also fail if the requested historical snapshot
+was omitted. See <a href="./concurrent-writes.html">Concurrent Writes</a>.</p>
 <h3 id="expiration-and-rollback"><a class="header" href="#expiration-and-rollback">Expiration and rollback</a></h3>
 <pre><code class="language-go">// Expire snapshots older than the table's retention properties
 err := txn.ExpireSnapshots(/* options */)
