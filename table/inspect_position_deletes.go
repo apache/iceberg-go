@@ -50,6 +50,12 @@ const (
 // by the current snapshot. Parquet position-delete files and V3 deletion
 // vectors are exposed through the same schema.
 func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, error) {
+	props := i.tbl.Metadata().Properties()
+	if err := tblutils.ValidateParquetReadProperties(props); err != nil {
+		return nil, err
+	}
+	ctx = tblutils.WithTableProperties(ctx, props)
+
 	partitionType, partitionIDs, err := positionDeletesPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: %w", err)

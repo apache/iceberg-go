@@ -118,6 +118,13 @@ const (
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
 	ParquetColumnStatsEnabledKeyPrefix       = internal.ParquetColumnStatsEnabledKeyPrefix
 
+	// Parquet read page limits are Go-specific bounds on page body sizes.
+	// Table properties provide defaults; WithOptions overrides them per scan.
+	ParquetMaxCompressedPageSizeBytesKey       = internal.ParquetMaxCompressedPageSizeBytesKey
+	ParquetMaxCompressedPageSizeBytesDefault   = internal.ParquetMaxCompressedPageSizeBytesDefault
+	ParquetMaxUncompressedPageSizeBytesKey     = internal.ParquetMaxUncompressedPageSizeBytesKey
+	ParquetMaxUncompressedPageSizeBytesDefault = internal.ParquetMaxUncompressedPageSizeBytesDefault
+
 	ParquetBatchSizeKey     = internal.ParquetBatchSizeKey
 	ParquetBatchSizeDefault = internal.ParquetBatchSizeDefault
 
