@@ -98,6 +98,31 @@ func TestParquetStatisticsRenameIntoDeletedName(t *testing.T) {
 	require.Equal(t, "false", staged.props[prefix+"age"])
 }
 
+func TestParquetStatisticsAndOtherColumnPropertiesRenameIntoDeletedName(t *testing.T) {
+	settings := []struct{ prefix, renamed, deleted string }{
+		{MetricsModeColumnConfPrefix, "full", "none"},
+		{ParquetBloomFilterColumnEnabledKeyPrefix, "true", "false"},
+		{ParquetColumnStatsEnabledKeyPrefix, "false", "true"},
+		{ParquetCompressionColumnCodecKeyPrefix, "gzip", "zstd"},
+		{ParquetCompressionColumnLevelKeyPrefix, "4", "2"},
+	}
+	props := iceberg.Properties{}
+	for _, setting := range settings {
+		props[setting.prefix+".name"] = setting.renamed
+		props[setting.prefix+".age"] = setting.deleted
+	}
+	meta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", props)
+	require.NoError(t, err)
+	tx := New([]string{"table"}, meta, "", nil, nil).NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, true).DeleteColumn([]string{"age"}).RenameColumn([]string{"name"}, "age").Commit())
+	staged, err := tx.txnMeta()
+	require.NoError(t, err)
+	for _, setting := range settings {
+		require.NotContains(t, staged.props, setting.prefix+".name")
+		require.Equal(t, setting.renamed, staged.props[setting.prefix+".age"], setting.prefix)
+	}
+}
+
 func TestParquetStatisticsRenameUsesStagedProperties(t *testing.T) {
 	const prefix = ParquetColumnStatsEnabledKeyPrefix + "."
 	meta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
