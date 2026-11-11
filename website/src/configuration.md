@@ -111,11 +111,16 @@ Java. It is read only from the properties the client supplies; a server's
 | unset or `oauth2` | Use `token`, or the client-credentials flow with `credential`. With neither, send no authorization header. |
 | `none` | Send no authorization header, even if `token` or `credential` is set. |
 | `basic` | HTTP Basic authentication with `rest.auth.basic.username` and `rest.auth.basic.password`, both required. Like `rest.auth.type`, they are read only from the client's properties. |
+| `sigv4` | Sign every request with AWS SigV4 and authenticate with the type in `rest.auth.sigv4.delegate-auth-type` (default `oauth2`; `sigv4` is rejected). Requires a blank import of `catalog/rest/sigv4`. Unlike `rest.sigv4-enabled`, a server override can't turn this signing off. |
 | `google` | Google credentials, for catalogs such as BigLake. Requires a blank import of `catalog/rest/googleauth`. |
 
 Other values select an auth manager registered with `rest.RegisterAuthManager`.
-An unregistered value fails `NewCatalog` / `catalog.Load`. The Java value
-`sigv4` is not supported; enable SigV4 with `rest.sigv4-enabled` instead.
+An unregistered value fails `NewCatalog` / `catalog.Load`.
+
+When SigV4 signs a request that already carries an `Authorization` header, such
+as the `oauth2` or `basic` header of the delegate auth type, the header moves to
+`Original-Authorization` and is signed with the request, as in Java. This also
+applies to `rest.sigv4-enabled`.
 
 #### Google BigLake
 
@@ -560,12 +565,13 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.compression-level.column.<name>` | Global level, or the column codec's default if the codecs differ |
 | `write.parquet.bloom-filter-max-bytes` | 1 MB |
 | `write.parquet.bloom-filter-enabled.column.<name>` | (per-column toggle, prefix-matched) |
+| `write.parquet.stats-enabled.column.<name>` | `true` (per-column Parquet statistics toggle) |
 | `parquet.enable.dictionary` | `true` (global dictionary encoding switch; same key as Iceberg Java) |
 | `write.parquet.dict-encoding-enabled.column.<name>` | (per-column toggle, prefix-matched; overrides the global switch) |
 | `write.parquet.shred-variants` | `false` (opt-in shredding of top-level variant columns) |
 | `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
-The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`.
+The bloom filter, statistics, and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`. Statistics settings apply to data files and use Iceberg field names, including nested paths such as `items.element`. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other metadata may still be recorded.
 
 Column compression keys use case-sensitive Iceberg leaf paths, such as
 `items.element` or `attributes.value.name`. They apply to data files and use
