@@ -34,6 +34,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1247,6 +1249,14 @@ func TestOAuthTLSConfig(t *testing.T) {
 	})
 }
 
+func TestDefaultUserAgent(t *testing.T) {
+	t.Parallel()
+
+	goVersion := " (go " + strings.TrimPrefix(runtime.Version(), "go") + ")"
+	assert.Equal(t, "iceberg-go/0.4.0"+goVersion, defaultUserAgent("v0.4.0"))
+	assert.Equal(t, "iceberg-go/unknown"+goVersion, defaultUserAgent("(unknown version)"))
+}
+
 func TestAuthHeader(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
@@ -1296,7 +1306,7 @@ func TestAuthHeader(t *testing.T) {
 	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
 	assert.Equal(t, http.Header{
 		"Content-Type":                {"application/json"},
-		"User-Agent":                  {"GoIceberg/(unknown version)"},
+		"User-Agent":                  {defaultUserAgent(iceberg.Version())},
 		"X-Client-Version":            {icebergRestSpecVersion},
 		"X-Iceberg-Access-Delegation": {"vended-credentials"},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
@@ -1357,7 +1367,7 @@ func TestAuthUriHeader(t *testing.T) {
 	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
 	assert.Equal(t, http.Header{
 		"Content-Type":                {"application/json"},
-		"User-Agent":                  {"GoIceberg/(unknown version)"},
+		"User-Agent":                  {defaultUserAgent(iceberg.Version())},
 		"X-Client-Version":            {icebergRestSpecVersion},
 		"X-Iceberg-Access-Delegation": {"vended-credentials"},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)

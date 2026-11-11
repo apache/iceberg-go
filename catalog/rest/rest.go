@@ -30,6 +30,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1129,9 +1130,21 @@ func builtinHeaderDefaults() []struct{ key, value string } {
 	return []struct{ key, value string }{
 		{"X-Client-Version", icebergRestSpecVersion},
 		{"Content-Type", "application/json"},
-		{"User-Agent", "GoIceberg/" + iceberg.Version()},
+		{"User-Agent", defaultUserAgent(iceberg.Version())},
 		{headerIcebergAccessDelegation, defaultAccessDelegation},
 	}
+}
+
+// defaultUserAgent returns the User-Agent recommended by the REST spec: the
+// library token followed by the Go version. iceberg.Version() returns
+// "(unknown version)" when the build has no module version.
+func defaultUserAgent(version string) string {
+	if version == "" || strings.ContainsAny(version, " ()") {
+		version = "unknown"
+	}
+
+	return "iceberg-go/" + strings.TrimPrefix(version, "v") +
+		" (go " + strings.TrimPrefix(runtime.Version(), "go") + ")"
 }
 
 // createSession returns a cleanup that closes only transports created by this
