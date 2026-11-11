@@ -126,10 +126,10 @@ func TestAdaptiveParquetBloomFilterRowGroupIsolation(t *testing.T) {
 	const rowsPerGroup = 4096
 	cardinalities := []int{16, 2048}
 	props := iceberg.Properties{
-		internal.ParquetBloomFilterMaxBytesKey:                     "16384",
-		internal.ParquetBloomFilterAdaptiveEnabledKey:              "true",
+		internal.ParquetBloomFilterMaxBytesKey:                    "16384",
+		internal.ParquetBloomFilterAdaptiveEnabledKey:             "true",
 		internal.ParquetBloomFilterColumnEnabledKeyPrefix + ".id": "true",
-		internal.ParquetDictEnabledKey:                              "false",
+		internal.ParquetDictEnabledKey:                            "false",
 	}
 	require.NoError(t, internal.ValidateParquetWriteProperties(props))
 	format := internal.GetFileFormat(iceberg.ParquetFile)
