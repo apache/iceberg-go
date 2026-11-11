@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Float and double literal comparators use Iceberg ordering.</strong> <code>TypedLiteral.Comparator()</code> now orders <code>-0.0</code> before <code>+0.0</code> and NaN after all other values; NaN compares equal to NaN. Callers that use these public comparators may see a different order or equality result.</p>
+</li>
+<li>
 <p><strong>Table creation rejects duplicate field IDs.</strong> <code>NewMetadata</code>, and <code>CreateTable</code> on catalogs that build metadata through it (not REST), now return <code>ErrInvalidSchema</code> when two fields in the schema share an ID, including unset <code>0</code> or <code>-1</code> IDs, even for unpartitioned, unsorted tables. Before, the partition spec or sort order could bind to the wrong column. Callers should assign unique IDs (or let the schema be built with fresh IDs). This matches Java, whose <code>Schema</code> constructor rejects duplicate IDs.</p>
 </li>
 <li>

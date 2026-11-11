@@ -987,6 +987,25 @@ must be an integer valid for its effective codec. Missing fields are ignored.
 Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
 these keys. Arrow does not register legacy <code>lz4</code> or <code>lzo</code> codecs by default;
 <code>lz4_raw</code> is supported.</p>
+<p>Equality-delete and v2 position-delete Parquet writers also support these
+overrides, defined in <code>table/properties.go</code>. Unset overrides inherit the
+corresponding <code>write.parquet.*</code> setting and its default. If the delete codec
+differs from the data codec and no delete level is set, the delete writer uses
+the codec's default level instead of inheriting the data codec's level.</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Overrides</th></tr></thead><tbody>
+<tr><td><code>write.delete.parquet.row-group-size-bytes</code></td><td>Row-group size target</td></tr>
+<tr><td><code>write.delete.parquet.page-size-bytes</code></td><td>Data page size</td></tr>
+<tr><td><code>write.delete.parquet.page-row-limit</code></td><td>Page write batch size</td></tr>
+<tr><td><code>write.delete.parquet.dict-size-bytes</code></td><td>Dictionary page size</td></tr>
+<tr><td><code>write.delete.parquet.page-version</code></td><td>Data page version: <code>v1</code> or <code>v2</code> (<code>1</code> and <code>2</code> also accepted)</td></tr>
+<tr><td><code>write.delete.parquet.compression-codec</code></td><td>Compression codec</td></tr>
+<tr><td><code>write.delete.parquet.compression-level</code></td><td>Compression level</td></tr>
+</tbody></table>
+</div>
+<p>As in Java, data-column Bloom filter and dictionary overrides do not apply to
+delete files. The global <code>parquet.enable.dictionary</code> switch still applies.
+Metrics configuration is independent: equality deletes use the table metrics
+settings, while position deletes always retain full <code>file_path</code> and <code>pos</code> bounds.</p>
 <h3 id="parquet-reader"><a class="header" href="#parquet-reader">Parquet reader</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>read.parquet.batch-size</code></td><td>Arrow record-batch size used by the Parquet reader.</td></tr>
@@ -3006,6 +3025,9 @@ make integration-external-rest
 <p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
+<li>
+<p><strong>Float and double literal comparators use Iceberg ordering.</strong> <code>TypedLiteral.Comparator()</code> now orders <code>-0.0</code> before <code>+0.0</code> and NaN after all other values; NaN compares equal to NaN. Callers that use these public comparators may see a different order or equality result.</p>
+</li>
 <li>
 <p><strong>Table creation rejects duplicate field IDs.</strong> <code>NewMetadata</code>, and <code>CreateTable</code> on catalogs that build metadata through it (not REST), now return <code>ErrInvalidSchema</code> when two fields in the schema share an ID, including unset <code>0</code> or <code>-1</code> IDs, even for unpartitioned, unsorted tables. Before, the partition spec or sort order could bind to the wrong column. Callers should assign unique IDs (or let the schema be built with fresh IDs). This matches Java, whose <code>Schema</code> constructor rejects duplicate IDs.</p>
 </li>
