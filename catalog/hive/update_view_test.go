@@ -58,6 +58,7 @@ func newHiveViewUpdateTest(t *testing.T) (*Catalog, *mockHiveClient, *hive_metas
 
 func TestHiveUpdateViewMetadataAndRollback(t *testing.T) {
 	cat, client, old, created := newHiveViewUpdateTest(t)
+	metadataDir := t.TempDir()
 	expectImmediateTableLock(client, 1)
 	get := client.On("GetTable", mock.Anything, "db", "view").Return(old, nil).Once()
 	get.NotBefore(client.ExpectedCalls[0])
@@ -71,7 +72,9 @@ func TestHiveUpdateViewMetadataAndRollback(t *testing.T) {
 	next.Representations[1].SQL = "SELECT 2 AS hive"
 	updated, err := cat.UpdateView(t.Context(), created.Identifier(), []view.Requirement{view.AssertViewUUID(created.Metadata().ViewUUID())}, []view.Update{
 		view.NewAddSchemaUpdate(schema), view.NewAddViewVersionUpdate(next), view.NewSetCurrentVersionUpdate(view.LastAddedID),
-		view.NewSetPropertiesUpdate(iceberg.Properties{"comment": "new", "added": "value"}),
+		view.NewSetPropertiesUpdate(iceberg.Properties{
+			"comment": "new", "added": "value", table.WriteMetadataPathKey: "file://" + filepath.ToSlash(metadataDir),
+		}),
 		view.NewRemovePropertiesUpdate([]string{"removed"}),
 	})
 	require.NoError(t, err)
@@ -90,6 +93,7 @@ func TestHiveUpdateViewMetadataAndRollback(t *testing.T) {
 	require.Equal(t, schemaToHiveColumns(updated.CurrentSchema()), altered.Sd.Cols)
 	require.Equal(t, "old", old.Parameters["comment"])
 	require.Equal(t, created.MetadataLocation(), old.Parameters[MetadataLocationKey])
+	require.Equal(t, metadataDir, filepath.Dir(strings.TrimPrefix(updated.MetadataLocation(), "file://")))
 
 	loaded, err := view.NewFromLocation(t.Context(), created.Identifier(), updated.MetadataLocation(),
 		func(context.Context) (icebergio.IO, error) { return icebergio.LocalFS{}, nil })
@@ -209,6 +213,7 @@ func (c *viewRenewalTestClient) CheckLock(ctx context.Context, id int64) (*hive_
 
 func TestHiveUpdateViewRejectsLostLeaseBeforeAlter(t *testing.T) {
 	cat, client, old, created := newHiveViewUpdateTest(t)
+	metadataDir := t.TempDir()
 	expectImmediateTableLock(client, 1)
 	client.On("GetTable", mock.Anything, "db", "view").Return(old, nil).Once()
 	checks := 0
@@ -221,12 +226,17 @@ func TestHiveUpdateViewRejectsLostLeaseBeforeAlter(t *testing.T) {
 		return &hive_metastore.LockResponse{State: hive_metastore.LockState_ACQUIRED}, nil
 	}}
 	_, err := cat.UpdateView(t.Context(), created.Identifier(), nil,
-		[]view.Update{view.NewSetPropertiesUpdate(iceberg.Properties{"comment": "changed"})})
+		[]view.Update{view.NewSetPropertiesUpdate(iceberg.Properties{
+			"comment": "changed", table.WriteMetadataPathKey: "file://" + filepath.ToSlash(metadataDir),
+		})})
 	require.ErrorIs(t, err, table.ErrCommitFailed)
 	client.AssertNotCalled(t, "AlterTable", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	files, err := os.ReadDir(filepath.Join(strings.TrimPrefix(created.Location(), "file://"), "metadata"))
 	require.NoError(t, err)
 	require.Len(t, files, 1)
+	uncommitted, err := os.ReadDir(metadataDir)
+	require.NoError(t, err)
+	require.Empty(t, uncommitted)
 	client.AssertExpectations(t)
 }
 

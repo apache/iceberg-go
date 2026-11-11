@@ -19,19 +19,15 @@ package hive
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"maps"
-	"net/url"
 
 	"github.com/apache/iceberg-go/catalog"
-	iceinternal "github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
-	"github.com/google/uuid"
 )
 
 var _ catalog.UpdatableViewCatalog = (*Catalog)(nil)
@@ -123,31 +119,13 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 	if err != nil {
 		return nil, err
 	}
-	metadataDir := metadata.Properties().Get("write.metadata.path", "")
-	if metadataDir == "" {
-		metadataDir, err = url.JoinPath(metadata.Location(), "metadata")
-		if err != nil {
-			return nil, err
-		}
-	}
-	metadataLocation, err := url.JoinPath(metadataDir, "view-"+uuid.NewString()+".metadata.json")
-	if err != nil {
-		return nil, err
-	}
 	ioProps := maps.Clone(c.opts.props)
 	if ioProps == nil {
 		ioProps = make(map[string]string)
 	}
 	maps.Copy(ioProps, metadata.Properties())
-	fs, err := icebergio.LoadFS(ctx, ioProps, metadataLocation)
+	metadataLocation, fs, err := view.WriteMetadata(ctx, metadata.Metadata, ioProps)
 	if err != nil {
-		return nil, err
-	}
-	wfs, ok := fs.(icebergio.WriteFileIO)
-	if !ok {
-		return nil, errors.New("filesystem IO does not support writing")
-	}
-	if err := writeUpdatedViewMetadata(ctx, wfs, metadataLocation, metadata); err != nil {
 		return nil, err
 	}
 
@@ -181,19 +159,4 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 	}
 
 	return view.New(ident, metadata.Metadata, metadataLocation), nil
-}
-
-func writeUpdatedViewMetadata(ctx context.Context, fs icebergio.WriteFileIO, location string, metadata view.Metadata) (err error) {
-	writer, err := fs.Create(ctx, location)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, fs.Remove(context.WithoutCancel(ctx), location))
-		}
-	}()
-	defer iceinternal.CheckedClose(writer, &err)
-
-	return json.NewEncoder(writer).Encode(metadata)
 }
