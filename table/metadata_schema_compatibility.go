@@ -105,6 +105,10 @@ func formatDefaultValue(value any) any {
 // metadata directly and does not call this check. We intentionally validate
 // both default fields here, including write-default for pre-v3 schemas.
 func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
+	if err := sc.ValidateIdentifierFields(); err != nil {
+		return fmt.Errorf("invalid identifier fields: %w", err)
+	}
+
 	const defaultValuesMinFormatVersion = 3
 	problems := make([]IncompatibleField, 0)
 

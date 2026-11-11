@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -121,9 +122,12 @@ func TestSQLViewUsesCatalogIOPropertiesWithIsolatedRegistry(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	err = cat.CreateView(t.Context(), ident, schema, view.Representation{
-		SQL: "SELECT 1", Dialect: "spark",
-	}, iceberg.Properties{"view-prop": "persisted"})
+	version := &view.Version{Representations: []view.Representation{
+		view.NewRepresentation(view.Representation{SQL: "SELECT 1", Dialect: "spark"}),
+		view.NewRepresentation(view.Representation{SQL: "SELECT 1", Dialect: "trino"}),
+	}}
+	_, err = cat.CreateView(t.Context(), ident, version, schema,
+		catalog.WithViewProperties(iceberg.Properties{"view-prop": "persisted"}))
 	require.NoError(t, err)
 	require.Equal(t, "catalog-only", seen["storage-secret"])
 
@@ -131,6 +135,9 @@ func TestSQLViewUsesCatalogIOPropertiesWithIsolatedRegistry(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "persisted", loaded.Properties()["view-prop"])
 	require.NotContains(t, loaded.Properties(), "storage-secret")
+	require.Equal(t, version.Representations, loaded.Metadata().CurrentVersion().Representations)
+	require.Equal(t, "isolated", loaded.Metadata().CurrentVersion().DefaultCatalog)
+	require.Empty(t, version.DefaultCatalog, "catalog defaults must not modify the caller's version")
 	require.NoError(t, cat.DropView(t.Context(), ident))
 }
 
@@ -166,10 +173,14 @@ func TestSQLViewCollisionCleanupUsesViewIOProperties(t *testing.T) {
 	require.NoError(t, cat.CreateNamespace(t.Context(), []string{"db"}, nil))
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 	ident := []string{"db", "view"}
-	representation := view.Representation{SQL: "SELECT 1", Dialect: "spark"}
-	require.NoError(t, cat.CreateView(t.Context(), ident, schema, representation, iceberg.Properties{"storage-token": "view"}))
+	version := &view.Version{Representations: []view.Representation{
+		view.NewRepresentation(view.Representation{SQL: "SELECT 1", Dialect: "spark"}),
+	}}
+	props := catalog.WithViewProperties(iceberg.Properties{"storage-token": "view"})
+	_, err = cat.CreateView(t.Context(), ident, version, schema, props)
+	require.NoError(t, err)
 	seen = nil
-	err = cat.CreateView(t.Context(), ident, schema, representation, iceberg.Properties{"storage-token": "view"})
+	_, err = cat.CreateView(t.Context(), ident, version, schema, props)
 	require.Error(t, err)
 	require.Equal(t, []string{"view", "view"}, seen)
 	require.Len(t, fs.removed, 1)

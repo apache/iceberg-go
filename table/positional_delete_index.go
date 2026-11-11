@@ -187,9 +187,10 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 	return idx, nil
 }
 
-// forDataFile returns positional deletes with a greater than or equal sequence
-// number. Partition-scoped candidates are pruned using file_path metrics and
-// returned before path-scoped deletes, matching Java's ordering.
+// forDataFile returns applicable positional deletes and validates partition
+// metadata for path-scoped deletes. Partition-scoped candidates are pruned
+// using file_path metrics and returned before path-scoped deletes, matching
+// Java's ordering.
 func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]iceberg.DataFile, error) {
 	if len(idx.byPath) == 0 && len(idx.byPartition) == 0 && len(idx.byIntegerPartition) == 0 {
 		return nil, nil
@@ -216,8 +217,10 @@ func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) (
 	if err != nil {
 		return nil, err
 	}
-	out = appendPositionalDeletesFromSequence(
-		out, idx.byPath[dataFile.FilePath()], dataSeqNum)
+	out, err = appendPositionalDeletesFromSequence(out, idx.byPath[dataFile.FilePath()], dataEntry)
+	if err != nil {
+		return nil, err
+	}
 
 	return out, nil
 }
@@ -255,14 +258,30 @@ func filePathMayMatch(deleteFile iceberg.DataFile, dataFilePath string) bool {
 func appendPositionalDeletesFromSequence(
 	out []iceberg.DataFile,
 	entries []iceberg.ManifestEntry,
-	dataSeqNum int64,
-) []iceberg.DataFile {
+	dataEntry iceberg.ManifestEntry,
+) ([]iceberg.DataFile, error) {
+	if len(entries) == 0 {
+		return out, nil
+	}
+
+	dataFile := dataEntry.DataFile()
+	dataPartition := dataFilePartition(dataFile)
+	dataSeqNum := dataEntry.DataSequenceNumber()
 	start := sort.Search(len(entries), func(i int) bool {
 		return entries[i].DataSequenceNumber() >= dataSeqNum
 	})
 	for _, entry := range entries[start:] {
-		out = append(out, entry.DataFile())
+		deleteFile := entry.DataFile()
+		if deleteFile.SpecID() != dataFile.SpecID() {
+			return nil, fmt.Errorf("%w: position delete file %s uses partition spec %d, but data file %s uses partition spec %d",
+				ErrInvalidMetadata, deleteFile.FilePath(), deleteFile.SpecID(), dataFile.FilePath(), dataFile.SpecID())
+		}
+		if !partitionsMatch(dataPartition, dataFilePartition(deleteFile)) {
+			return nil, fmt.Errorf("%w: position delete file %s partition does not match data file %s",
+				ErrInvalidMetadata, deleteFile.FilePath(), dataFile.FilePath())
+		}
+		out = append(out, deleteFile)
 	}
 
-	return out
+	return out, nil
 }

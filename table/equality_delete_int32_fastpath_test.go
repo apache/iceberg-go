@@ -42,7 +42,68 @@ func singleInt32EqualityDeleteTestSet(values ...int32) *equalityDeleteSet {
 		keys[buf.String()] = struct{}{}
 	}
 
-	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}}
+	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int32}}
+}
+
+func TestProcessEqualityDeletesWidenedInt32UsesInt64Index(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	for _, withNullDelete := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete-null=%t", withNullDelete), func(t *testing.T) {
+			values := array.NewInt32Builder(mem)
+			values.AppendValues([]int32{math.MinInt32, math.MaxInt32, -1, 0, 42, 99},
+				[]bool{true, true, true, false, true, true})
+			column := values.NewArray()
+			values.Release()
+			record := array.NewRecordBatch(
+				arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true}}, nil),
+				[]arrow.Array{column}, int64(column.Len()))
+			column.Release()
+			defer record.Release()
+
+			fileSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+			deleteSet := int64EqualityDeleteSet(math.MinInt32, -1, 42)
+			if withNullDelete {
+				deleteSet.keys["\x00"] = struct{}{}
+			}
+			genericSet := &equalityDeleteSet{
+				keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs,
+				colNames: deleteSet.colNames, fieldTypes: deleteSet.fieldTypes,
+			}
+			genericSet.singleInt64Once.Do(func() {})
+
+			fast, err := processEqualityDeletesColumnarForFile(ctx,
+				[]*equalityDeleteSet{deleteSet}, fileSchema, "before-promotion.parquet")
+			require.NoError(t, err)
+			require.NotNil(t, deleteSet.singleInt64, "widened int32 data must use the int64 index")
+			require.Nil(t, deleteSet.singleInt32)
+			generic, err := processEqualityDeletesColumnarForFile(ctx,
+				[]*equalityDeleteSet{genericSet}, fileSchema, "before-promotion.parquet")
+			require.NoError(t, err)
+
+			record.Retain()
+			got, err := fast(record)
+			require.NoError(t, err)
+			defer got.Release()
+			record.Retain()
+			want, err := generic(record)
+			require.NoError(t, err)
+			defer want.Release()
+
+			assert.True(t, array.RecordEqual(want, got), "widened fast path must match generic encoding")
+			if withNullDelete {
+				assert.Equal(t, []int32{math.MaxInt32, 99}, got.Column(0).(*array.Int32).Int32Values())
+			} else {
+				assert.Equal(t, int64(3), got.NumRows())
+				assert.Equal(t, 1, got.Column(0).NullN())
+				assert.Equal(t, int32(math.MaxInt32), got.Column(0).(*array.Int32).Value(0))
+				assert.Equal(t, int32(99), got.Column(0).(*array.Int32).Value(2))
+			}
+		})
+	}
 }
 
 func TestProcessEqualityDeletesSingleInt32MatchesGeneric(t *testing.T) {
@@ -91,7 +152,7 @@ func TestProcessEqualityDeletesSingleInt32MatchesGeneric(t *testing.T) {
 				}
 
 				genericSet := &equalityDeleteSet{
-					keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs, colNames: deleteSet.colNames,
+					keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs, colNames: deleteSet.colNames, fieldTypes: deleteSet.fieldTypes,
 				}
 				genericSet.singleInt32Once.Do(func() {})
 				generic, err := processEqualityDeletesColumnarForFile(ctx,
@@ -242,7 +303,7 @@ func buildBenchDeleteSetSingleInt32(numDeletes int) *equalityDeleteSet {
 		keys[buf.String()] = struct{}{}
 	}
 
-	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}}
+	return &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"id"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int32}}
 }
 
 func BenchmarkProcessEqualityDeletesSingleInt32(b *testing.B) {

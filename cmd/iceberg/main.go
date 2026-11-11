@@ -280,7 +280,7 @@ func main() {
 	case args.Compact != nil && args.Compact.Analyze == nil && args.Compact.Run == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "compact")
 		osExit(1)
-	case args.Branch != nil && args.Branch.Create == nil && args.Branch.Delete == nil:
+	case args.Branch != nil && args.Branch.Create == nil && args.Branch.Delete == nil && args.Branch.FastForward == nil && args.Branch.Replace == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "branch")
 		osExit(1)
 	case args.Tag != nil && args.Tag.Create == nil && args.Tag.Delete == nil:
@@ -850,8 +850,10 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 	}
 
 	if !isNS && !isTbl {
-		output.Error(fmt.Errorf("%w: table or namespace does not exist: %s",
-			catalog.ErrNoSuchNamespace, ident))
+		// Only reachable for "any" with a multi-part identifier, so the
+		// table lookup is the last one that failed.
+		output.Error(fmt.Errorf("%w: no table or namespace named %s",
+			catalog.ErrNoSuchTable, strings.Join(ident, ".")))
 		osExit(1)
 	}
 }

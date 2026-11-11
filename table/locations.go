@@ -19,7 +19,6 @@ package table
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -38,7 +37,9 @@ const (
 )
 
 type LocationProvider interface {
-	NewDataLocation(dataFileName string) string
+	// NewDataLocation returns the location for a data file. partitionPath is the
+	// file's partition path, such as "a=1/b=2", or empty for an unpartitioned file.
+	NewDataLocation(dataFileName, partitionPath string) string
 	NewTableMetadataFileLocation(newVersion int) (string, error)
 	NewMetadataLocation(metadataFileName string) string
 }
@@ -79,8 +80,12 @@ func joinLocationPath(location string, elem ...string) string {
 	return b.String()
 }
 
-func (slp *simpleLocationProvider) NewDataLocation(dataFileName string) string {
-	return joinLocationPath(slp.dataPath, dataFileName)
+func (slp *simpleLocationProvider) NewDataLocation(dataFileName, partitionPath string) string {
+	if partitionPath == "" {
+		return joinLocationPath(slp.dataPath, dataFileName)
+	}
+
+	return joinLocationPath(slp.dataPath, partitionPath, dataFileName)
 }
 
 func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) (string, error) {
@@ -128,6 +133,7 @@ type objectStoreLocationProvider struct {
 	*simpleLocationProvider
 
 	includePartitionPaths bool
+	context               string
 }
 
 func computeHash(dataFileName string) string {
@@ -151,22 +157,72 @@ func computeHash(dataFileName string) string {
 	return string(hashPath[:])
 }
 
-func (p *objectStoreLocationProvider) NewDataLocation(dataFileName string) string {
-	if path.Dir(dataFileName) != "." {
-		return p.simpleLocationProvider.NewDataLocation(dataFileName)
+// NewDataLocation places the entropy hash right under the data path, like the
+// Java implementation. External data paths also include the database/table
+// context, so two tables sharing a storage prefix do not share file locations.
+func (p *objectStoreLocationProvider) NewDataLocation(dataFileName, partitionPath string) string {
+	if !p.includePartitionPaths {
+		hash := computeHash(dataFileName)
+		if p.context != "" {
+			return joinLocationPath(p.dataPath, hash, p.context, dataFileName)
+		}
+
+		return joinLocationPath(p.dataPath, hash+"-"+dataFileName)
 	}
 
-	hashedPath := computeHash(dataFileName)
-	if p.includePartitionPaths {
-		return joinLocationPath(p.dataPath, hashedPath, dataFileName)
-	} else {
-		return joinLocationPath(p.dataPath, hashedPath+"-"+dataFileName)
+	if partitionPath != "" {
+		dataFileName = partitionPath + "/" + dataFileName
 	}
+
+	if p.context != "" {
+		return joinLocationPath(p.dataPath, computeHash(dataFileName), p.context, dataFileName)
+	}
+
+	return joinLocationPath(p.dataPath, computeHash(dataFileName), dataFileName)
+}
+
+// objectStorePathContext matches the database/table suffix Java adds when
+// write.data.path is outside the table location. Skip URI scheme and authority
+// without interpreting percent escapes, queries, or fragments in path names.
+func objectStorePathContext(tableLoc string) string {
+	location := strings.TrimRight(tableLoc, "/")
+	if scheme := strings.Index(location, "://"); scheme >= 0 {
+		_, path, ok := strings.Cut(location[scheme+3:], "/")
+		if !ok {
+			return ""
+		}
+		location = path
+	}
+
+	location = strings.Trim(location, "/")
+	lastSlash := strings.LastIndexByte(location, '/')
+	if lastSlash < 0 {
+		return location
+	}
+
+	parent := location[:lastSlash]
+	parentSlash := strings.LastIndexByte(parent, '/')
+
+	return parent[parentSlash+1:] + "/" + location[lastSlash+1:]
+}
+
+func locationIsWithinTable(location, tableLoc string) bool {
+	location = strings.TrimRight(location, "/")
+	tableLoc = strings.TrimRight(tableLoc, "/")
+
+	return location == tableLoc || strings.HasPrefix(location, tableLoc+"/")
 }
 
 func newObjectStoreLocationProvider(tableLoc string, tableProps iceberg.Properties) *objectStoreLocationProvider {
+	simple := newSimpleLocationProvider(tableLoc, tableProps)
+	var context string
+	if !locationIsWithinTable(simple.dataPath, tableLoc) {
+		context = objectStorePathContext(tableLoc)
+	}
+
 	return &objectStoreLocationProvider{
-		simpleLocationProvider: newSimpleLocationProvider(tableLoc, tableProps),
+		simpleLocationProvider: simple,
+		context:                context,
 		includePartitionPaths: tableProps.GetBool(WriteObjectStorePartitionedPathsKey,
 			WriteObjectStorePartitionedPathsDefault),
 	}

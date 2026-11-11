@@ -823,7 +823,7 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 		return nil
 	}
 
-	b.lastColumnId = max(b.lastColumnId, schema.HighestFieldID())
+	b.lastColumnId = max(columnIDFloor(b.lastColumnId, b.schemaList), schema.HighestFieldID())
 
 	schema.ID = newSchemaID
 
@@ -847,6 +847,18 @@ func partitionFieldIDFloor(lastPartitionID *int, specs []iceberg.PartitionSpec) 
 	}
 	for _, spec := range specs {
 		floor = max(floor, spec.LastAssignedFieldID())
+	}
+
+	return floor
+}
+
+// columnIDFloor returns an allocation floor for new field IDs that accounts
+// for the persisted last-column-id and every field ID in schema history, so
+// a stale counter can never cause an ID to be reused.
+func columnIDFloor(lastColumnID int, schemas []*iceberg.Schema) int {
+	floor := lastColumnID
+	for _, schema := range schemas {
+		floor = max(floor, schema.HighestFieldID())
 	}
 
 	return floor
@@ -957,7 +969,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 			ErrCommitFailed, snapshot.SequenceNumber, lastSeqNum)
 	}
 
-	// A rebuild keeps the timestamp, so these checks are not retryable.
+	// Not retryable: replay renews only producer snapshots' timestamps.
 	if len(b.snapshotLog) > 0 {
 		last := b.snapshotLog[len(b.snapshotLog)-1]
 		if (snapshot.TimestampMs - last.TimestampMs) < -oneMinuteInMs {
@@ -1138,8 +1150,8 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 		// do NOT emit an add-sort-order update (REST catalogs reject
 		// adding a sort order under an existing ID). Record it as
 		// last-added so a following SetDefaultSortOrderID(-1) resolves
-		// to the reused ID; SetDefaultSortOrderID encodes the concrete
-		// ID in that case because no add update precedes it.
+		// to the reused ID. The set-default update uses a concrete ID
+		// if the last serialized add was for a different order.
 		sortOrder.orderID = newOrderID
 		b.lastAddedSortOrderID = &newOrderID
 
@@ -1225,11 +1237,10 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) error {
 		return fmt.Errorf("%w: can't set default sort order to sort order with id %d: %w", iceberg.ErrInvalidArgument, defaultSortOrderID, err)
 	}
 
-	// Encode -1 ("last added") only when this builder actually emitted
-	// an add-sort-order update for that ID; when the last AddSortOrder
-	// reused an existing order no add update precedes this one, so the
-	// payload must carry the concrete ID to stay self-contained.
-	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID && b.hasAddSortOrderUpdate(defaultSortOrderID) {
+	// -1 refers to the most recently emitted add-sort-order update, not
+	// the most recent call to AddSortOrder. Reusing an older order after
+	// adding another one must use its concrete ID in the commit payload.
+	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID && b.lastEmittedSortOrderIDIs(defaultSortOrderID) {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(-1))
 	} else {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(defaultSortOrderID))
@@ -1411,6 +1422,9 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	}
 	if err := ref.validate(); err != nil {
 		return fmt.Errorf("%w: invalid snapshot ref: %w", iceberg.ErrInvalidArgument, err)
+	}
+	if name == MainBranch && ref.Type != BranchRef {
+		return fmt.Errorf("%w: main snapshot ref must be a branch", iceberg.ErrInvalidArgument)
 	}
 
 	var maxRefAgeMs, maxSnapshotAgeMs int64
@@ -1849,12 +1863,12 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	}
 }
 
-// hasAddSortOrderUpdate reports whether this builder has emitted an
-// add-sort-order update for the given order ID.
-func (b *MetadataBuilder) hasAddSortOrderUpdate(orderID int) bool {
-	for _, u := range b.updates {
-		if a, ok := u.(*addSortOrderUpdate); ok && a.SortOrder.OrderID() == orderID {
-			return true
+// lastEmittedSortOrderIDIs reports whether the latest add-sort-order
+// update added orderID. A reused order may not be the last serialized add.
+func (b *MetadataBuilder) lastEmittedSortOrderIDIs(orderID int) bool {
+	for _, update := range slices.Backward(b.updates) {
+		if add, ok := update.(*addSortOrderUpdate); ok {
+			return add.SortOrder.OrderID() == orderID
 		}
 	}
 
@@ -2009,10 +2023,13 @@ func (b *MetadataBuilder) SetStatistics(stats StatisticsFile) error {
 // RemoveStatistics removes the statistics file associated with the given snapshot ID.
 // It is not an error if no such file exists.
 func (b *MetadataBuilder) RemoveStatistics(snapshotID int64) error {
+	previousLen := len(b.statisticsList)
 	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(s StatisticsFile) bool {
 		return s.SnapshotID == snapshotID
 	})
-	b.updates = append(b.updates, NewRemoveStatisticsUpdate(snapshotID))
+	if len(b.statisticsList) != previousLen {
+		b.updates = append(b.updates, NewRemoveStatisticsUpdate(snapshotID))
+	}
 
 	return nil
 }
@@ -2043,10 +2060,13 @@ func (b *MetadataBuilder) SetPartitionStatistics(stats PartitionStatisticsFile) 
 // RemovePartitionStatistics removes the partition statistics file associated with the given
 // snapshot ID. It is not an error if no such file exists.
 func (b *MetadataBuilder) RemovePartitionStatistics(snapshotID int64) error {
+	previousLen := len(b.partitionStatsList)
 	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(s PartitionStatisticsFile) bool {
 		return s.SnapshotID == snapshotID
 	})
-	b.updates = append(b.updates, NewRemovePartitionStatisticsUpdate(snapshotID))
+	if len(b.partitionStatsList) != previousLen {
+		b.updates = append(b.updates, NewRemovePartitionStatisticsUpdate(snapshotID))
+	}
 
 	return nil
 }
@@ -2826,6 +2846,10 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		value := *snapshot.AddedRows
 		clone.AddedRows = &value
 	}
+	if snapshot.KeyID != nil {
+		value := *snapshot.KeyID
+		clone.KeyID = &value
+	}
 	if snapshot.Summary != nil {
 		clone.Summary = &Summary{
 			Operation:  snapshot.Summary.Operation,
@@ -3131,6 +3155,10 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 }
 
 func (c *commonMetadata) checkMainRefMatchesCurrentSnapshot() error {
+	if ref, ok := c.SnapshotRefs[MainBranch]; ok && ref.Type != BranchRef {
+		return fmt.Errorf("%w: main snapshot ref must be a branch", ErrInvalidMetadata)
+	}
+
 	if c.CurrentSnapshotID != nil {
 		if ref, ok := c.SnapshotRefs[MainBranch]; ok {
 			if ref.SnapshotID != *c.CurrentSnapshotID {
@@ -3735,12 +3763,20 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 	}
 	opts := make([]iceberg.PartitionOption, 0)
 	for _, f := range partitions.Fields() {
-		var s string
-		var ok bool
-		if s, ok = previousMapFn(f.FirstSourceID()); !ok {
-			return nil, fmt.Errorf("%w: partition source field %d not found in schema", ErrInvalidMetadata, f.FirstSourceID())
+		sourceIDs := make([]int, len(f.SourceIDs))
+		for i, sourceID := range f.SourceIDs {
+			sourceName, ok := previousMapFn(sourceID)
+			if !ok {
+				return nil, fmt.Errorf("%w: partition source field %d not found in schema", ErrInvalidMetadata, sourceID)
+			}
+			freshField, ok := freshSc.FindFieldByName(sourceName)
+			if !ok {
+				return nil, fmt.Errorf("%w: partition source field %d (%s) not found in reassigned schema",
+					ErrInvalidMetadata, sourceID, sourceName)
+			}
+			sourceIDs[i] = freshField.ID
 		}
-		opts = append(opts, iceberg.AddPartitionFieldByName(s, f.Name, f.Transform, freshSc, nil))
+		opts = append(opts, iceberg.AddPartitionFieldBySourceIDs(sourceIDs, f.Name, f.Transform, freshSc, nil))
 	}
 	freshPartitions, err := iceberg.NewPartitionSpecOpts(opts...)
 	if err != nil {

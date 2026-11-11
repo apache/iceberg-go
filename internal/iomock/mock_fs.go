@@ -54,10 +54,12 @@ func (m *MockFS) Remove(_ context.Context, name string) error {
 
 type MockFSReadFile struct {
 	MockFS
-	ErrOnClose bool
+	ErrOnClose  bool
+	ReadFileCtx context.Context
 }
 
-func (m *MockFSReadFile) ReadFile(name string) ([]byte, error) {
+func (m *MockFSReadFile) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	m.ReadFileCtx = ctx
 	args := m.Called(name)
 
 	return args.Get(0).([]byte), args.Error(1)
@@ -113,3 +115,20 @@ func (m *MockFile) Seek(offset int64, whence int) (n int64, err error) {
 
 	return m.Contents.Seek(offset, whence)
 }
+
+// ErrContextProbe is the error ContextProbe returns from Open.
+var ErrContextProbe = errors.New("iomock: context probe refuses opens")
+
+// ContextProbe is an IO that records the context passed to Open and then
+// fails with ErrContextProbe, so tests can check which context reaches it.
+type ContextProbe struct {
+	Ctx context.Context
+}
+
+func (p *ContextProbe) Open(ctx context.Context, _ string) (io.File, error) {
+	p.Ctx = ctx
+
+	return nil, ErrContextProbe
+}
+
+func (p *ContextProbe) Remove(context.Context, string) error { return nil }

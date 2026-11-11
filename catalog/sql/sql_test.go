@@ -36,6 +36,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -58,7 +59,7 @@ import (
 )
 
 var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
-	[]int{1},
+	[]int{2},
 	iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false,
 	},
@@ -69,48 +70,27 @@ var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 		ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false,
 	},
 	iceberg.NestedField{
-		ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-			ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
-		},
+		ID: 4, Name: "qux", Required: true, Type: iceberg.NewListType(5, iceberg.PrimitiveTypes.String, true),
 	},
 	iceberg.NestedField{
 		ID: 6, Name: "quux",
-		Type: &iceberg.MapType{
-			KeyID:   7,
-			KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 8,
-			ValueType: &iceberg.MapType{
-				KeyID:         9,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       10,
-				ValueType:     iceberg.PrimitiveTypes.Int32,
-				ValueRequired: true,
-			},
-			ValueRequired: true,
-		},
+		Type:     iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.NewMapType(9, iceberg.PrimitiveTypes.String, 10, iceberg.PrimitiveTypes.Int32, true), true),
 		Required: true,
 	},
 	iceberg.NestedField{
-		ID: 11, Name: "location", Type: &iceberg.ListType{
-			ElementID: 12, Element: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-					{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-				},
-			},
-			ElementRequired: true,
-		},
+		ID: 11, Name: "location", Type: iceberg.NewListType(12, iceberg.NewStructType(
+			iceberg.NestedField{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+			iceberg.NestedField{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		), true),
 		Required: true,
 	},
 	iceberg.NestedField{
 		ID:   15,
 		Name: "person",
-		Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
-				{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-			},
-		},
+		Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+			iceberg.NestedField{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		),
 		Required: false,
 	},
 )
@@ -640,7 +620,7 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaViewOperationsUnsupported() {
 	})
 	viewID := []string{nsName, tableName()}
 
-	err := cat.CreateView(ctx, viewID, schema, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+	err := createTestView(ctx, cat, viewID, schema, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
 	s.ErrorContains(err, "V0", "CreateView must be rejected on a V0 catalog")
 
 	_, err = cat.LoadView(ctx, viewID)
@@ -1320,7 +1300,7 @@ func (s *SqliteCatalogTestSuite) TestDottedNamespaceUsesOwnLocationProperties() 
 		s.Equal(location+"/orders", createdTable.Location())
 
 		viewIdent := append(slices.Clone(namespace), "orders_view")
-		s.Require().NoError(cat.CreateView(ctx, viewIdent, tableSchemaNested, view.Representation{SQL: "SELECT * FROM orders", Dialect: "spark"}, nil))
+		s.Require().NoError(createTestView(ctx, cat, viewIdent, tableSchemaNested, view.Representation{SQL: "SELECT * FROM orders", Dialect: "spark"}, nil))
 		createdView, err := cat.LoadView(ctx, viewIdent)
 		s.Require().NoError(err)
 		s.Equal(location+"/orders_view", createdView.Location())
@@ -1526,33 +1506,26 @@ func (s *SqliteCatalogTestSuite) appendStringRow(ctx context.Context, tbl *table
 	return out
 }
 
-// waitPastSnapshots blocks until the wall clock in milliseconds is past
-// every snapshot timestamp of meta, so an expiry with WithOlderThan(0)
-// treats them all as old enough.
-func (s *SqliteCatalogTestSuite) waitPastSnapshots(meta table.Metadata) {
-	var newest int64
-	for _, snap := range meta.Snapshots() {
-		newest = max(newest, snap.TimestampMs)
-	}
-	s.Require().Eventually(func() bool { return time.Now().UnixMilli() > newest },
-		time.Second, time.Millisecond)
-}
-
 // createRetryingStringTable creates a single-column string table that
 // retries conflicting commits numRetries times with millisecond waits,
 // then appends one row per value.
 func (s *SqliteCatalogTestSuite) createRetryingStringTable(ctx context.Context, cat *sqlcat.Catalog, numRetries string, values ...string) table.Identifier {
+	return s.createStringTable(ctx, cat, iceberg.Properties{table.CommitNumRetriesKey: numRetries}, values...)
+}
+
+func (s *SqliteCatalogTestSuite) createStringTable(ctx context.Context, cat *sqlcat.Catalog, props iceberg.Properties, values ...string) table.Identifier {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
 	})
 	tblID := s.randomTableIdentifier()
 	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
 
-	tbl, err := cat.CreateTable(ctx, tblID, schema, catalog.WithProperties(iceberg.Properties{
-		table.CommitNumRetriesKey:     numRetries,
+	all := iceberg.Properties{
 		table.CommitMinRetryWaitMsKey: "1",
 		table.CommitMaxRetryWaitMsKey: "2",
-	}))
+	}
+	maps.Copy(all, props)
+	tbl, err := cat.CreateTable(ctx, tblID, schema, catalog.WithProperties(all))
 	s.Require().NoError(err)
 	for _, v := range values {
 		tbl = s.appendStringRow(ctx, tbl, table.MainBranch, v)
@@ -1730,6 +1703,84 @@ func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateIsRefusedOnRecommit() {
 	current, err := cat.LoadTable(ctx, tblID)
 	s.Require().NoError(err)
 	s.Equal(peerMeta.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
+}
+
+func (s *SqliteCatalogTestSuite) TestRejectedUpdateResumesThenEndsWhenReplayCannotApply() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.randomTableIdentifier()
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+	})
+	stale, err := cat.CreateTable(ctx, tblID, schema, catalog.WithProperties(iceberg.Properties{
+		table.PropertyFormatVersion: "1",
+	}))
+	s.Require().NoError(err)
+
+	tx := stale.NewTransaction()
+	s.Require().NoError(tx.UpgradeFormatVersion(2))
+
+	peer := stale.NewTransaction()
+	s.Require().NoError(peer.UpgradeFormatVersion(3))
+	peerTbl, err := peer.Commit(ctx)
+	s.Require().NoError(err)
+
+	// The catalog's metadata builder refuses to downgrade the peer's table.
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrCommitRejected)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidArgument)
+	s.Require().NotErrorIs(err, table.ErrTransactionUnusable)
+
+	current, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Equal(peerTbl.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
+
+	// The resume replays the upgrade against the peer's v3 table, where it
+	// can never apply.
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrTransactionUnusable)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidArgument)
+	s.Require().NotErrorIs(err, table.ErrCommitFailed)
+
+	current, err = cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Equal(peerTbl.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
+
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrTransactionUnusable)
+}
+
+func (s *SqliteCatalogTestSuite) TestCatalogUpdateFailureAfterMetadataWriteEndsTransaction() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.randomTableIdentifier()
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+	tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+	s.Require().NoError(err)
+
+	sqlDB := s.getDB()
+	defer sqlDB.Close()
+	_, err = sqlDB.Exec(`
+		CREATE TRIGGER fail_catalog_update
+		BEFORE UPDATE ON iceberg_tables
+		BEGIN
+			SELECT RAISE(FAIL, 'forced update failure');
+		END
+	`)
+	s.Require().NoError(err)
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.SetProperties(iceberg.Properties{"key": "value"}))
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorContains(err, "forced update failure")
+	s.Require().NotErrorIs(err, table.ErrCommitRejected)
+	s.Require().NotErrorIs(err, table.ErrCommitFailed)
+
+	_, err = tx.Commit(ctx)
+	s.Require().EqualError(err, "transaction has already been committed")
 }
 
 func (s *SqliteCatalogTestSuite) TestConflictClearedBeforeRecommitLands() {
@@ -1965,49 +2016,37 @@ func (s *SqliteCatalogTestSuite) TestStaleRollbackFailsAfterPeerAppend() {
 	s.Len(current.Metadata().Snapshots(), 3)
 }
 
-// Snapshot expiry staged before a peer rolled the branch back must not
-// be replayed against the new head: its retention window was computed
-// from the old head, so it would expire snapshots the rolled-back
-// branch still retains.
-func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsFailsAfterPeerRollback() {
-	ctx := context.Background()
-	cat := s.getCatalogSqlite()
-	defer cat.Close()
-	tblID := s.createRetryingStringTable(ctx, cat, "2", "s1", "s2", "s3", "s4")
+func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsReplansAfterPeerRollback() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3", "s4")
 
-	stale, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	snaps := slices.Clone(stale.Metadata().Snapshots())
-	s.Require().Len(snaps, 4)
-	slices.SortFunc(snaps, func(a, b table.Snapshot) int { return cmp.Compare(a.SequenceNumber, b.SequenceNumber) })
-	ids := make([]int64, len(snaps))
-	for i, snap := range snaps {
-		ids[i] = snap.SnapshotID
-	}
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		ids := snapshotIDsBySequence(stale.Metadata())
+		s.Require().Len(ids, 4)
 
-	peer, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	peerTx := peer.NewTransaction()
-	s.Require().NoError(peerTx.RollbackToSnapshot(ids[1]))
-	_, err = peerTx.Commit(ctx)
-	s.Require().NoError(err)
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peerTx := peer.NewTransaction()
+		s.Require().NoError(peerTx.RollbackToSnapshot(ids[1]))
+		_, err = peerTx.Commit(ctx)
+		s.Require().NoError(err)
+		time.Sleep(time.Millisecond)
 
-	s.waitPastSnapshots(stale.Metadata())
+		tx := stale.NewTransaction()
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(3), table.WithOlderThan(0), table.WithPostCommit(false)))
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
 
-	tx := stale.NewTransaction()
-	s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(3), table.WithOlderThan(0), table.WithPostCommit(false)))
-	_, err = tx.Commit(ctx)
-	s.Require().Error(err)
-	s.ErrorIs(err, table.ErrCommitFailed)
-
-	current, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	s.Equal(ids[1], current.Metadata().CurrentSnapshot().SnapshotID)
-	var remaining []int64
-	for _, snap := range current.Metadata().Snapshots() {
-		remaining = append(remaining, snap.SnapshotID)
-	}
-	s.ElementsMatch(ids, remaining)
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		s.Equal(ids[1], current.Metadata().CurrentSnapshot().SnapshotID)
+		s.Equal(ids[:2], snapshotIDsBySequence(current.Metadata()))
+		s.ElementsMatch([]string{"s1", "s2"}, s.storedStringValues(ctx, current))
+	})
 }
 
 // A rollback of a branch the transaction staged must not be replayed
@@ -2044,44 +2083,149 @@ func (s *SqliteCatalogTestSuite) TestStaleRollbackOfStagedBranchFailsAfterPeerCr
 	s.Len(current.Metadata().Snapshots(), 3)
 }
 
-// Snapshot expiry in a transaction that staged a new branch must not be
-// replayed against a branch a peer created meanwhile: its retention was
-// computed without the peer's branch.
-func (s *SqliteCatalogTestSuite) TestStaleExpireWithStagedBranchFailsAfterPeerCreatesIt() {
-	ctx := context.Background()
-	cat := s.getCatalogSqlite()
-	defer cat.Close()
-	tblID := s.createRetryingStringTable(ctx, cat, "2", "seed", "second")
+func (s *SqliteCatalogTestSuite) TestStaleExpireWithStagedBranchReplansAfterPeerCreatesIt() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "seed", "second")
 
-	stale, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		mainHead := stale.Metadata().CurrentSnapshot().SnapshotID
 
-	peer, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	peer = s.appendStringRow(ctx, peer, "feature", "peer")
-	peerHead := peer.Metadata().SnapshotByName("feature").SnapshotID
-	s.waitPastSnapshots(peer.Metadata())
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peer = s.appendStringRow(ctx, peer, "feature", "peer")
+		peerHead := peer.Metadata().SnapshotByName("feature").SnapshotID
+		time.Sleep(time.Millisecond)
 
-	tx, err := stale.NewTransactionOnBranch("feature")
-	s.Require().NoError(err)
-	s.stageStringRow(ctx, tx, "stale")
-	s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(1), table.WithOlderThan(0), table.WithPostCommit(false)))
-	_, err = tx.Commit(ctx)
-	s.Require().Error(err)
-	s.ErrorIs(err, table.ErrCommitFailed)
+		tx, err := stale.NewTransactionOnBranch("feature")
+		s.Require().NoError(err)
+		s.stageStringRow(ctx, tx, "stale")
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(1), table.WithOlderThan(0), table.WithPostCommit(false)))
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
 
-	current, err := cat.LoadTable(ctx, tblID)
-	s.Require().NoError(err)
-	s.Equal(peerHead, current.Metadata().SnapshotByName("feature").SnapshotID)
-	var remaining []int64
-	for _, snap := range current.Metadata().Snapshots() {
-		remaining = append(remaining, snap.SnapshotID)
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		feature := current.Metadata().SnapshotByName("feature")
+		s.Require().NotNil(feature)
+		s.Require().NotNil(feature.ParentSnapshotID)
+		s.Equal(peerHead, *feature.ParentSnapshotID)
+		s.Equal([]int64{mainHead, feature.SnapshotID}, snapshotIDsBySequence(current.Metadata()))
+		s.ElementsMatch([]string{"seed", "second", "peer", "stale"},
+			s.storedStringValues(ctx, current, table.WithSnapshotID(feature.SnapshotID)))
+		s.ElementsMatch([]string{"seed", "second"}, s.storedStringValues(ctx, current))
+	})
+}
+
+// A millisecond sleep makes earlier snapshots older than the expiry cutoff.
+// Use bubbleTableProps for tables created inside the bubble.
+func (s *SqliteCatalogTestSuite) inBubble(f func()) {
+	outer := s.T()
+	synctest.Test(outer, func(t *testing.T) {
+		s.SetT(t)
+		defer s.SetT(outer)
+		f()
+	})
+}
+
+// bubbleTableProps avoid zstd, whose shared decoder in arrow-go belongs to
+// the first bubble that uses it.
+var bubbleTableProps = iceberg.Properties{
+	table.CommitNumRetriesKey:   "2",
+	table.ParquetCompressionKey: "snappy",
+}
+
+func snapshotIDsBySequence(meta table.Metadata) []int64 {
+	snaps := slices.SortedFunc(slices.Values(meta.Snapshots()), func(a, b table.Snapshot) int {
+		return cmp.Compare(a.SequenceNumber, b.SequenceNumber)
+	})
+	ids := make([]int64, len(snaps))
+	for i, snap := range snaps {
+		ids[i] = snap.SnapshotID
 	}
-	var expected []int64
-	for _, snap := range peer.Metadata().Snapshots() {
-		expected = append(expected, snap.SnapshotID)
-	}
-	s.ElementsMatch(expected, remaining)
+
+	return ids
+}
+
+func (s *SqliteCatalogTestSuite) TestStaleAppendAndExpireReplansAfterPeerRollback() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3", "s4")
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		ids := snapshotIDsBySequence(stale.Metadata())
+		time.Sleep(time.Millisecond)
+
+		tx := stale.NewTransaction()
+		s.stageStringRow(ctx, tx, "a")
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(3), table.WithOlderThan(0)))
+
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peerTx := peer.NewTransaction()
+		s.Require().NoError(peerTx.RollbackToSnapshot(ids[1]))
+		_, err = peerTx.Commit(ctx)
+		s.Require().NoError(err)
+
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
+
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		got := snapshotIDsBySequence(current.Metadata())
+		s.Require().Len(got, 3)
+		s.Equal(ids[:2], got[:2])
+		head := current.Metadata().CurrentSnapshot()
+		s.Equal(got[2], head.SnapshotID)
+		s.Require().NotNil(head.ParentSnapshotID)
+		s.Equal(ids[1], *head.ParentSnapshotID)
+		s.ElementsMatch([]string{"s1", "s2", "a"}, s.storedStringValues(ctx, current))
+		s.ElementsMatch([]string{"s1", "s2"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[1])))
+		s.ElementsMatch([]string{"s1"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[0])))
+	})
+}
+
+func (s *SqliteCatalogTestSuite) TestStaleExpireSnapshotsKeepsBranchPeerCreated() {
+	s.inBubble(func() {
+		ctx := context.Background()
+		cat := s.getCatalogSqlite()
+		defer cat.Close()
+		tblID := s.createStringTable(ctx, cat, bubbleTableProps, "s1", "s2", "s3")
+		stale, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		ids := snapshotIDsBySequence(stale.Metadata())
+		time.Sleep(time.Millisecond)
+
+		tx := stale.NewTransaction()
+		s.Require().NoError(tx.ExpireSnapshots(table.WithRetainLast(1), table.WithOlderThan(0)))
+
+		// Creating an unread ref causes no conflict, so append to force a retry.
+		_, _, err = cat.CommitTable(ctx, tblID, nil, []table.Update{
+			table.NewSetSnapshotRefUpdate("keep", ids[0], table.BranchRef, 0, 0, 0),
+		})
+		s.Require().NoError(err)
+		peer, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		peer = s.appendStringRow(ctx, peer, table.MainBranch, "p")
+		p := peer.Metadata().CurrentSnapshot().SnapshotID
+
+		_, err = tx.Commit(ctx)
+		s.Require().NoError(err)
+
+		current, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		s.Equal([]int64{ids[0], p}, snapshotIDsBySequence(current.Metadata()))
+		keep := current.Metadata().SnapshotByName("keep")
+		s.Require().NotNil(keep)
+		s.Equal(ids[0], keep.SnapshotID)
+		s.ElementsMatch([]string{"s1", "s2", "s3", "p"}, s.storedStringValues(ctx, current))
+		s.ElementsMatch([]string{"s1"}, s.storedStringValues(ctx, current, table.WithSnapshotID(ids[0])))
+	})
 }
 
 func (s *SqliteCatalogTestSuite) TestPurgeTable() {
@@ -2462,7 +2606,7 @@ func (s *SqliteCatalogTestSuite) TestDropNamespaceRejectsViewOnlyNamespace() {
 	})
 
 	s.Require().NoError(cat.CreateNamespace(ctx, namespace, nil))
-	s.Require().NoError(cat.CreateView(ctx, viewID, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
+	s.Require().NoError(createTestView(ctx, cat, viewID, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
 
 	err := cat.DropNamespace(ctx, namespace)
 	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
@@ -3199,8 +3343,8 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
-	s.Require().NoError(db.CreateView(context.Background(), append(nestedNamespace, viewName), schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
+	s.Require().NoError(createTestView(context.Background(), db, []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
+	s.Require().NoError(createTestView(context.Background(), db, append(nestedNamespace, viewName), schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
@@ -3246,7 +3390,7 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
-			err := cat.CreateView(context.Background(), test.identifier, nil, view.Representation{SQL: "", Dialect: "spark"}, nil)
+			err := createTestView(context.Background(), cat, test.identifier, nil, view.Representation{SQL: "", Dialect: "spark"}, nil)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
 			_, err = cat.CheckViewExists(context.Background(), test.identifier)
@@ -3277,7 +3421,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableConflictsWithView() {
 	db := s.getCatalogSqlite()
 	identifier := s.randomTableIdentifier()
 	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
-	s.Require().NoError(db.CreateView(ctx, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil))
+	s.Require().NoError(createTestView(ctx, db, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil))
 
 	metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
 	before, err := os.ReadDir(metadataDir)
@@ -3303,7 +3447,7 @@ func (s *SqliteCatalogTestSuite) TestCreateViewConflictsWithTable() {
 	before, err := os.ReadDir(metadataDir)
 	s.Require().NoError(err)
 
-	err = db.CreateView(ctx, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+	err = createTestView(ctx, db, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
 	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
 
 	after, err := os.ReadDir(metadataDir)
@@ -3335,7 +3479,7 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionReturnsCatalogS
 	}()
 	go func() {
 		<-start
-		err := db.CreateView(ctx, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+		err := createTestView(ctx, db, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
 		results <- createResult{objectType: sqlcat.ViewType, err: err}
 	}()
 	close(start)
@@ -3406,7 +3550,7 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionUnderLockConten
 	}()
 	go func() {
 		<-start
-		err := db.CreateView(ctx, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+		err := createTestView(ctx, db, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
 		results <- createResult{objectType: sqlcat.ViewType, err: err}
 	}()
 	close(start)
@@ -3457,7 +3601,7 @@ func (s *SqliteCatalogTestSuite) TestCreateRemovesMetadataIfCatalogInsertFails()
 		{
 			name: "view",
 			create: func(identifier table.Identifier) error {
-				return db.CreateView(ctx, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+				return createTestView(ctx, db, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
 			},
 		},
 	}
@@ -3488,7 +3632,7 @@ func (s *SqliteCatalogTestSuite) TestDropView() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
+	s.Require().NoError(createTestView(context.Background(), db, []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
@@ -3547,7 +3691,7 @@ func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
+	s.Require().NoError(createTestView(context.Background(), db, []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
 
 	// Manually update the metadata location to a URL with an unsupported scheme
 	// This will cause io.LoadFS to fail with "IO for file '...' not implemented"
@@ -3583,7 +3727,7 @@ func (s *SqliteCatalogTestSuite) TestCheckViewExists() {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
+	s.Require().NoError(createTestView(context.Background(), db, []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
 
 	exists, err = db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
@@ -3603,7 +3747,7 @@ func (s *SqliteCatalogTestSuite) TestListViews() {
 		schema := iceberg.NewSchema(1, iceberg.NestedField{
 			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 		})
-		s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
+		s.Require().NoError(createTestView(context.Background(), db, []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, nil))
 	}
 
 	var foundViews []table.Identifier
@@ -3657,12 +3801,12 @@ func (s *SqliteCatalogTestSuite) TestLoadView() {
 		"comment": "Test view",
 		"owner":   "test-user",
 	}
-	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, props))
+	s.Require().NoError(createTestView(context.Background(), db, []string{nsName, viewName}, schema, view.Representation{SQL: viewSQL, Dialect: "spark"}, props))
 
 	viewInfo, err := db.LoadView(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
 
-	s.Equal(1, viewInfo.FormatVersion())
+	s.Equal(1, viewInfo.Metadata().FormatVersion())
 	s.Contains(viewInfo.Properties(), "comment")
 	s.Equal("Test view", viewInfo.Properties()["comment"])
 
@@ -3673,4 +3817,65 @@ func (s *SqliteCatalogTestSuite) TestLoadView() {
 
 func TestSqlCatalog(t *testing.T) {
 	suite.Run(t, new(SqliteCatalogTestSuite))
+}
+
+func createTestView(ctx context.Context, cat *sqlcat.Catalog, identifier table.Identifier, schema *iceberg.Schema, representation view.Representation, props iceberg.Properties) error {
+	version := &view.Version{Representations: []view.Representation{view.NewRepresentation(representation)}}
+	_, err := cat.CreateView(ctx, identifier, version, schema, catalog.WithViewProperties(props))
+
+	return err
+}
+
+func (s *SqliteCatalogTestSuite) TestViewCatalogVersionAndOptions() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	id := table.Identifier{databaseName(), "view"}
+	s.Require().NoError(cat.CreateNamespace(ctx, id[:1], nil))
+	version, err := view.NewVersion(7, 1, []view.Representation{
+		view.NewRepresentation(view.Representation{SQL: "SELECT 1", Dialect: "spark"}),
+		view.NewRepresentation(view.Representation{SQL: "SELECT 2", Dialect: "trino"}),
+	}, table.Identifier{"other"}, view.WithDefaultViewCatalog("prod"), view.WithVersionSummary(view.VersionSummary{"engine-version": "1"}), view.WithTimestampMS(123456))
+	s.Require().NoError(err)
+	location := "file://" + filepath.Join(s.warehouse, "custom-view")
+	props := iceberg.Properties{"comment": "hello"}
+	var views catalog.ViewCatalog = cat
+	created, err := views.CreateView(ctx, id, version, tableSchemaNested, catalog.WithViewLocation(location+"/"), catalog.WithViewProperties(props))
+	s.Require().NoError(err)
+	s.Equal(location, created.Location())
+	s.Equal(id, created.Identifier())
+	loaded, err := views.LoadView(ctx, id)
+	s.Require().NoError(err)
+	s.Equal(created.MetadataLocation(), loaded.MetadataLocation())
+	s.Equal(props, loaded.Properties())
+	got := loaded.CurrentVersion()
+	s.Equal(version.Representations, got.Representations)
+	s.Equal(version.DefaultNamespace, got.DefaultNamespace)
+	s.Equal(version.DefaultCatalog, got.DefaultCatalog)
+	s.Equal(version.Summary, got.Summary)
+	s.Equal(version.TimestampMS, got.TimestampMS)
+	s.Equal(int64(7), version.VersionID)
+	s.Equal(int64(view.InitialVersionID), got.VersionID)
+	_, err = views.CreateView(ctx, table.Identifier{id[0], "nil_version"}, nil, tableSchemaNested)
+	s.ErrorIs(err, view.ErrInvalidViewMetadata)
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateViewDefaultsCatalogWithoutMutatingVersion() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	identifier := table.Identifier{databaseName(), "view"}
+	s.Require().NoError(cat.CreateNamespace(ctx, identifier[:1], nil))
+
+	version := &view.Version{
+		Representations: []view.Representation{
+			view.NewRepresentation(view.Representation{SQL: "SELECT 1", Dialect: "spark"}),
+		},
+	}
+	created, err := cat.CreateView(ctx, identifier, version, tableSchemaNested)
+	s.Require().NoError(err)
+	s.Equal(cat.Name(), created.CurrentVersion().DefaultCatalog)
+	s.Empty(version.DefaultCatalog)
+
+	loaded, err := cat.LoadView(ctx, identifier)
+	s.Require().NoError(err)
+	s.Equal(cat.Name(), loaded.CurrentVersion().DefaultCatalog)
 }

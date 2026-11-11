@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -226,6 +227,148 @@ func TestBlobFileIOWriteOperationsUseOperationContext(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, content, got)
 	}
+}
+
+type statContextKey struct{}
+
+type contextAwareAttributesBucket struct {
+	driver.Bucket
+	attributesCtx chan context.Context
+}
+
+func (b *contextAwareAttributesBucket) ErrorCode(error) gcerrors.ErrorCode { return gcerrors.Unknown }
+
+func (b *contextAwareAttributesBucket) Attributes(ctx context.Context, _ string) (*driver.Attributes, error) {
+	b.attributesCtx <- ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return &driver.Attributes{Size: 1}, nil
+}
+
+func (b *contextAwareAttributesBucket) Close() error { return nil }
+
+func TestBlobFileIOStatUsesOperationContext(t *testing.T) {
+	driverBucket := &contextAwareAttributesBucket{attributesCtx: make(chan context.Context, 1)}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx := context.WithValue(context.Background(), statContextKey{}, "lifetime")
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), statContextKey{}, "operation"))
+	cancel()
+
+	_, err := fileIO.Stat(ctx, "s3://my-bucket/data/file.parquet")
+	assert.ErrorIs(t, err, context.Canceled)
+
+	gotCtx := <-driverBucket.attributesCtx
+	assert.Equal(t, "operation", gotCtx.Value(statContextKey{}))
+}
+
+type statListContextBucket struct {
+	driver.Bucket
+	listCtx context.Context
+}
+
+func (*statListContextBucket) ErrorCode(err error) gcerrors.ErrorCode {
+	if errors.Is(err, fs.ErrNotExist) {
+		return gcerrors.NotFound
+	}
+
+	return gcerrors.Unknown
+}
+
+func (*statListContextBucket) Attributes(context.Context, string) (*driver.Attributes, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (b *statListContextBucket) ListPaged(ctx context.Context, _ *driver.ListOptions) (*driver.ListPage, error) {
+	b.listCtx = ctx
+
+	return &driver.ListPage{
+		Objects: []*driver.ListObject{{Key: "data/child.parquet"}},
+	}, nil
+}
+
+func (*statListContextBucket) Close() error { return nil }
+
+func TestBlobFileIOStatDirectoryListingUsesOperationContext(t *testing.T) {
+	driverBucket := &statListContextBucket{}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.WithValue(context.Background(), statContextKey{}, "lifetime"))
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	cancelLifetime()
+	operationCtx := context.WithValue(context.Background(), statContextKey{}, "operation")
+
+	info, err := fileIO.Stat(operationCtx, "s3://my-bucket/data")
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	require.NotNil(t, driverBucket.listCtx)
+	assert.Equal(t, "operation", driverBucket.listCtx.Value(statContextKey{}))
+}
+
+type readFileContextKey struct{}
+
+type contextAwareRangeReaderBucket struct {
+	driver.Bucket
+	readerCtx chan context.Context
+}
+
+func (b *contextAwareRangeReaderBucket) ErrorCode(error) gcerrors.ErrorCode { return gcerrors.Unknown }
+
+func (b *contextAwareRangeReaderBucket) NewRangeReader(
+	ctx context.Context,
+	_ string,
+	_, _ int64,
+	_ *driver.ReaderOptions,
+) (driver.Reader, error) {
+	b.readerCtx <- ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return contextAwareBlobReader{ReadCloser: io.NopCloser(strings.NewReader("metadata"))}, nil
+}
+
+func (b *contextAwareRangeReaderBucket) Close() error { return nil }
+
+type contextAwareBlobReader struct{ io.ReadCloser }
+
+func (contextAwareBlobReader) Attributes() *driver.ReaderAttributes {
+	return &driver.ReaderAttributes{}
+}
+func (contextAwareBlobReader) As(any) bool { return false }
+
+func TestBlobFileIOReadFileUsesOperationContext(t *testing.T) {
+	driverBucket := &contextAwareRangeReaderBucket{readerCtx: make(chan context.Context, 2)}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	cancelLifetime()
+
+	ctx := context.WithValue(context.Background(), readFileContextKey{}, "operation")
+	ctx, cancelOperation := context.WithTimeout(ctx, time.Hour)
+	defer cancelOperation()
+	content, err := fileIO.ReadFile(ctx, "s3://my-bucket/data/file.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("metadata"), content)
+	readCtx := <-driverBucket.readerCtx
+	assert.Equal(t, "operation", readCtx.Value(readFileContextKey{}))
+	wantDeadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	gotDeadline, ok := readCtx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, wantDeadline, gotDeadline)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = fileIO.ReadFile(canceledCtx, "s3://my-bucket/data/file.parquet")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.ErrorIs(t, (<-driverBucket.readerCtx).Err(), context.Canceled)
 }
 
 func TestBlobFileIOWriteFileHonorsOperationCancellation(t *testing.T) {
@@ -948,22 +1091,22 @@ func TestBlobFileIOStat(t *testing.T) {
 
 	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
-	fileInfo, err := bfs.Stat("s3://test-bucket/data/file.parquet")
+	fileInfo, err := bfs.Stat(ctx, "s3://test-bucket/data/file.parquet")
 	require.NoError(t, err)
 	assert.Equal(t, "file.parquet", fileInfo.Name())
 	assert.Equal(t, int64(len("content")), fileInfo.Size())
 	assert.False(t, fileInfo.IsDir())
 
-	dirInfo, err := bfs.Stat("s3://test-bucket/data")
+	dirInfo, err := bfs.Stat(ctx, "s3://test-bucket/data")
 	require.NoError(t, err)
 	assert.Equal(t, "data", dirInfo.Name())
 	assert.True(t, dirInfo.IsDir())
 
 	require.NoError(t, bfs.MkdirAll("s3://test-bucket/foo"))
-	markerInfoWithSlash, err := bfs.Stat("s3://test-bucket/foo/")
+	markerInfoWithSlash, err := bfs.Stat(ctx, "s3://test-bucket/foo/")
 	require.NoError(t, err)
 	assert.Equal(t, "foo", markerInfoWithSlash.Name())
-	markerInfoWithoutSlash, err := bfs.Stat("s3://test-bucket/foo")
+	markerInfoWithoutSlash, err := bfs.Stat(ctx, "s3://test-bucket/foo")
 	require.NoError(t, err)
 	assert.Equal(t, "foo", markerInfoWithoutSlash.Name())
 	// The trailing slash in the path should not affect the
@@ -971,8 +1114,229 @@ func TestBlobFileIOStat(t *testing.T) {
 	assert.True(t, markerInfoWithSlash.IsDir())
 	assert.True(t, markerInfoWithoutSlash.IsDir())
 
-	_, err = bfs.Stat("s3://test-bucket/missing")
+	_, err = bfs.Stat(ctx, "s3://test-bucket/missing")
 	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+func TestBlobFileIORename(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/destination.parquet", []byte("old destination"), nil))
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	require.NoError(t, bfs.Rename(ctx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet"))
+
+	data, err := bucket.ReadAll(ctx, "data/destination.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("source"), data)
+	exists, err := bucket.Exists(ctx, "data/source.parquet")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestBlobFileIORenameUsesOperationContext(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+	require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	opCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err := bfs.Rename(opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet")
+	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "Rename", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/data/source.parquet", pathErr.Path)
+	exists, err := bucket.Exists(ctx, "data/source.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists)
+}
+
+type cancelAfterCopyBucket struct {
+	driver.Bucket
+	cancel                     context.CancelFunc
+	copyCtx                    context.Context
+	deleteCtx                  context.Context
+	srcKey, dstKey, deletedKey string
+}
+
+func (b *cancelAfterCopyBucket) ErrorCode(err error) gcerrors.ErrorCode {
+	if errors.Is(err, fs.ErrNotExist) {
+		return gcerrors.NotFound
+	}
+
+	return gcerrors.Unknown
+}
+
+func (b *cancelAfterCopyBucket) Attributes(context.Context, string) (*driver.Attributes, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (b *cancelAfterCopyBucket) ListPaged(context.Context, *driver.ListOptions) (*driver.ListPage, error) {
+	return &driver.ListPage{}, nil
+}
+
+func (b *cancelAfterCopyBucket) Copy(ctx context.Context, dstKey, srcKey string, _ *driver.CopyOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.copyCtx = ctx
+	b.srcKey, b.dstKey = srcKey, dstKey
+	b.cancel()
+
+	return nil
+}
+
+func (b *cancelAfterCopyBucket) Delete(ctx context.Context, key string, _ *driver.DeleteOptions) error {
+	b.deleteCtx = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.deletedKey = key
+
+	return nil
+}
+
+func (b *cancelAfterCopyBucket) Close() error { return nil }
+
+func TestBlobFileIORenameFinishesAfterCopyWhenCanceled(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		rename func(*FileIO, context.Context, string, string) error
+	}{
+		{name: "Rename", rename: (*FileIO).Rename},
+		{name: "RenameNoReplace", rename: (*FileIO).RenameNoReplace},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			type renameContextKey struct{}
+			const contextValue = "rename operation"
+			opCtx, cancel := context.WithCancel(context.WithValue(context.Background(), renameContextKey{}, contextValue))
+			defer cancel()
+
+			testDriver := &cancelAfterCopyBucket{cancel: cancel}
+			bucket := blob.NewBucket(testDriver)
+			t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+			bfs := testBlobFileIO(context.Background(), "test-bucket", bucket)
+
+			require.NoError(t, tt.rename(bfs, opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet"))
+			require.ErrorIs(t, opCtx.Err(), context.Canceled)
+			assert.Equal(t, "data/source.parquet", testDriver.srcKey)
+			assert.Equal(t, "data/destination.parquet", testDriver.dstKey)
+			assert.Equal(t, "data/source.parquet", testDriver.deletedKey)
+			require.NotNil(t, testDriver.copyCtx)
+			require.NotNil(t, testDriver.deleteCtx)
+			assert.ErrorIs(t, testDriver.copyCtx.Err(), context.Canceled)
+			assert.NoError(t, testDriver.deleteCtx.Err())
+			assert.Nil(t, testDriver.deleteCtx.Done())
+			assert.Equal(t, contextValue, testDriver.deleteCtx.Value(renameContextKey{}))
+		})
+	}
+}
+
+func TestBlobFileIORenameNoReplace(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		targetKey    string
+		targetPath   string
+		existingKey  string
+		existingData []byte
+		moved        bool
+		wantErr      error
+	}{
+		{
+			name:       "moves when destination is missing",
+			targetKey:  "data/destination.parquet",
+			targetPath: "s3://test-bucket/data/destination.parquet",
+			moved:      true,
+		},
+		{
+			name:         "keeps existing destination file",
+			targetKey:    "data/destination.parquet",
+			targetPath:   "s3://test-bucket/data/destination.parquet",
+			existingKey:  "data/destination.parquet",
+			existingData: []byte("existing"),
+			wantErr:      fs.ErrExist,
+		},
+		{
+			name:         "treats implicit directory as existing",
+			targetKey:    "data/destination/child.parquet",
+			targetPath:   "s3://test-bucket/data/destination",
+			existingKey:  "data/destination/child.parquet",
+			existingData: []byte("child"),
+			wantErr:      fs.ErrExist,
+		},
+		{
+			name:        "treats directory marker as existing",
+			targetKey:   "data/destination/",
+			targetPath:  "s3://test-bucket/data/destination",
+			existingKey: "data/destination/",
+			wantErr:     fs.ErrExist,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			bucket := memblob.OpenBucket(nil)
+			defer bucket.Close()
+			require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+			if tt.existingKey != "" {
+				require.NoError(t, bucket.WriteAll(ctx, tt.existingKey, tt.existingData, nil))
+			}
+			bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+			err := bfs.RenameNoReplace(ctx, "s3://test-bucket/data/source.parquet", tt.targetPath)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			sourceExists, err := bucket.Exists(ctx, "data/source.parquet")
+			require.NoError(t, err)
+			assert.Equal(t, !tt.moved, sourceExists)
+			if tt.moved {
+				data, err := bucket.ReadAll(ctx, tt.targetKey)
+				require.NoError(t, err)
+				assert.Equal(t, []byte("source"), data)
+			} else if tt.existingData != nil {
+				data, err := bucket.ReadAll(ctx, tt.existingKey)
+				require.NoError(t, err)
+				assert.Equal(t, tt.existingData, data)
+			} else {
+				exists, err := bucket.Exists(ctx, tt.existingKey)
+				require.NoError(t, err)
+				assert.True(t, exists)
+			}
+		})
+	}
+}
+
+func TestBlobFileIORenameNoReplaceUsesOperationContext(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+	require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", []byte("source"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/destination.parquet", []byte("existing"), nil))
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	opCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err := bfs.RenameNoReplace(opCtx, "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/destination.parquet")
+	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "RenameNoReplace", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/data/destination.parquet", pathErr.Path)
+	sourceExists, err := bucket.Exists(ctx, "data/source.parquet")
+	require.NoError(t, err)
+	assert.True(t, sourceExists)
+	destination, err := bucket.ReadAll(ctx, "data/destination.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("existing"), destination)
 }
 
 func TestBlobFileIOMkdirAll(t *testing.T) {

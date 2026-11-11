@@ -511,7 +511,7 @@ func (l *lazyDeletionVectorLoader) load(ctx context.Context, dataFilePath string
 	}
 
 	group.once.Do(func() {
-		bitmaps, err := dv.ReadDVs(l.fs, group.files)
+		bitmaps, err := dv.ReadDVs(ctx, l.fs, group.files)
 		if err != nil {
 			group.err = fmt.Errorf("read deletion vectors from %s: %w", group.puffinPath, err)
 
@@ -1695,6 +1695,10 @@ type arrowScan struct {
 	// arrowBatchSize, when positive, overrides the table's
 	// read.parquet.batch-size property for this scan's reads.
 	arrowBatchSize int
+
+	// added is nil for a normal scan. A changelog deleted-row read sets it so
+	// rows matched by that snapshot's new deletes are kept.
+	added *addedDeleteState
 }
 
 // preparedFileRead contains the physical schema projection shared by all
@@ -2472,6 +2476,14 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
+	// Avro's OCF reader currently reads the whole file. A remote planner may
+	// produce partial file ranges; reading each as a full OCF would duplicate rows.
+	if task.Value.File.FileFormat() == iceberg.AvroFile &&
+		(task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes())) {
+		return fmt.Errorf("%w: partial Avro scan task ranges are not supported", iceberg.ErrNotImplemented)
+	}
+
 	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position
@@ -2750,8 +2762,21 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	// row-dropping position step in the pipeline so cursors never run over a
 	// sequence an earlier step already shortened.
 	applyPosDeletes := positionalDeleteBitmap != nil && !positionalDeleteBitmap.IsEmpty() && !hasDV
+	addedPos, addedBitmap, addedEq, err := as.loadAddedDeletes(ctx, task.Value)
+	if err != nil {
+		return err
+	}
+	addedHasDV := addedBitmap != nil && !addedBitmap.IsEmpty()
+	// An added deletion vector supersedes added position deletes, matching the
+	// rule used for the deletes already on the task.
+	addedHasPos := addedPos != nil && !addedPos.IsEmpty() && !addedHasDV
+	var positionSink func([]int64)
+	if as.added != nil && task.Value.File != nil {
+		positionSink = as.added.positionSinks[task.Value.File.FilePath()]
+	}
+	stampPos := addedHasPos || addedHasDV || positionSink != nil
 	var posSource *rowPositionSource
-	if synthesizeRowID || applyPosDeletes || hasDV {
+	if synthesizeRowID || applyPosDeletes || hasDV || stampPos {
 		posSource = &rowPositionSource{}
 	}
 
@@ -2772,6 +2797,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	}
 
+	if stampPos {
+		pipeline = append(pipeline, stampChangelogFilePos(ctx, posSource.cursor()))
+	}
+
 	if applyPosDeletes {
 		pipeline = append(pipeline,
 			processPositionalDeleteBitmap(ctx, positionalDeleteBitmap, posSource.cursor()))
@@ -2788,6 +2817,13 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		}
 
 		pipeline = append(pipeline, eqFn)
+	}
+
+	if as.added != nil {
+		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos, positionSink))
+		if stampPos {
+			pipeline = append(pipeline, dropChangelogFilePos)
+		}
 	}
 
 	if filterPlans != nil {
@@ -3046,9 +3082,13 @@ func newScanTaskChannel(taskCount, numWorkers int) chan tblutils.Enumerated[File
 }
 
 func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, positionDeleteLoader *lazyPositionDeleteLoader, dvLoader *lazyDeletionVectorLoader, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
-	var cleanup func()
-	if positionDeleteLoader != nil {
-		cleanup = positionDeleteLoader.release
+	cleanup := func() {
+		if positionDeleteLoader != nil {
+			positionDeleteLoader.release()
+		}
+		if as.added != nil && as.added.posLoader != nil {
+			as.added.posLoader.release()
+		}
 	}
 
 	return as.recordBatchesWithCleanup(ctx, tasks, 0, positionDeleteLoader, dvLoader, equalityDeleteLoader, invariants, cleanup)
@@ -3176,6 +3216,11 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 // read concurrently and in any order. release frees the shared position
 // deletes and must be called once, after the last stream is done.
 func (as *arrowScan) GetRecordsPerTask(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, []iter.Seq2[arrow.RecordBatch, error], func(), error) {
+	// Added-delete reads go through GetRecords only. This path does not
+	// release the added position-delete loader.
+	if as.added != nil {
+		return nil, nil, nil, fmt.Errorf("%w: added-delete reads go through GetRecords only", ErrInvalidOperation)
+	}
 	resultSchema, reads, err := as.prepareTaskReads(ctx, tasks)
 	if err != nil {
 		return nil, nil, nil, err
@@ -3277,10 +3322,19 @@ func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask)
 	}
 	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 
+	positionDeleteLoader := newLazyPositionDeleteLoader(as.fs, tasks)
+	if as.added != nil {
+		if err := as.prepareAddedDeleteLoaders(invariants); err != nil {
+			positionDeleteLoader.release()
+
+			return nil, nil, err
+		}
+	}
+
 	return resultSchema, &taskReads{
 		ctx:             ctx,
 		invariants:      invariants,
-		positionDeletes: newLazyPositionDeleteLoader(as.fs, tasks),
+		positionDeletes: positionDeleteLoader,
 		deletionVectors: dvLoader,
 		equalityDeletes: equalityDeleteLoader,
 	}, nil

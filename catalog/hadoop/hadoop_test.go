@@ -63,9 +63,9 @@ func newBarrierRenameNoReplaceFS(targetNames ...string) *barrierRenameNoReplaceF
 	}
 }
 
-func (f *barrierRenameNoReplaceFS) RenameNoReplace(oldpath, newpath string) error {
+func (f *barrierRenameNoReplaceFS) RenameNoReplace(ctx context.Context, oldpath, newpath string) error {
 	if _, ok := f.targetNames[filepath.Base(newpath)]; !ok {
-		return f.LocalFS.RenameNoReplace(oldpath, newpath)
+		return f.LocalFS.RenameNoReplace(ctx, oldpath, newpath)
 	}
 
 	f.mu.Lock()
@@ -82,7 +82,7 @@ func (f *barrierRenameNoReplaceFS) RenameNoReplace(oldpath, newpath string) erro
 		return errors.New("timed out waiting for concurrent metadata publish")
 	}
 
-	return f.LocalFS.RenameNoReplace(oldpath, newpath)
+	return f.LocalFS.RenameNoReplace(ctx, oldpath, newpath)
 }
 
 type versionConflictOnCreateFS struct {
@@ -697,11 +697,11 @@ func (s *HadoopCatalogTestSuite) TestReadWriteVersionHint() {
 	ident := []string{"ns", "tbl"}
 	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
 	s.cat.writeVersionHint(context.Background(), ident, 42)
-	s.Equal(42, s.cat.readVersionHint(ident))
+	s.Equal(42, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestReadVersionHintMissing() {
-	s.Equal(0, s.cat.readVersionHint([]string{"ns", "tbl"}))
+	s.Equal(0, s.cat.readVersionHint(context.Background(), []string{"ns", "tbl"}))
 }
 
 func (s *HadoopCatalogTestSuite) TestReadVersionHintCorrupt() {
@@ -709,7 +709,7 @@ func (s *HadoopCatalogTestSuite) TestReadVersionHintCorrupt() {
 	dir := s.cat.metadataDir(ident)
 	s.Require().NoError(os.MkdirAll(dir, 0o755))
 	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("garbage"), 0o644))
-	s.Equal(0, s.cat.readVersionHint(ident))
+	s.Equal(0, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestWriteVersionHintCreatesFile() {
@@ -800,14 +800,14 @@ func (s *HadoopCatalogTestSuite) TestReadVersionHintZeroValue() {
 	ident := []string{"ns", "tbl"}
 	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
 	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("0"), 0o644))
-	s.Equal(0, s.cat.readVersionHint(ident))
+	s.Equal(0, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestReadVersionHintWithWhitespace() {
 	ident := []string{"ns", "tbl"}
 	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
 	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("  42\n"), 0o644))
-	s.Equal(42, s.cat.readVersionHint(ident))
+	s.Equal(42, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestWriteVersionHintNoMetadataDir() {
@@ -973,7 +973,7 @@ type statFailingFS struct {
 	statCalls int
 }
 
-func (f *statFailingFS) Stat(string) (fs.FileInfo, error) {
+func (f *statFailingFS) Stat(context.Context, string) (fs.FileInfo, error) {
 	f.statCalls++
 
 	return nil, errors.New("stat should not be called")
@@ -2188,7 +2188,7 @@ func (s *HadoopCatalogTestSuite) TestLoadTableEnablesCatalogManifestContentCache
 
 	fs, err := loaded.FS(ctx)
 	s.Require().NoError(err)
-	manifests, err := loaded.CurrentSnapshot().Manifests(fs)
+	manifests, err := loaded.CurrentSnapshot().Manifests(ctx, fs)
 	s.Require().NoError(err)
 	s.Require().Len(manifests, 1)
 
@@ -2568,7 +2568,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
 
 	// Version hint should reflect the latest version.
 	_ = tbl // suppress unused
-	s.Equal(4, s.cat.readVersionHint(ident))
+	s.Equal(4, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
@@ -2667,7 +2667,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMetadataPublishConflic
 	metaPath, err := s.cat.metadataFilePathForCompression(ident, 2, table.MetadataCompressionCodecNone)
 	s.Require().NoError(err)
 	s.FileExists(metaPath)
-	s.Equal(2, s.cat.readVersionHint(ident))
+	s.Equal(2, s.cat.readVersionHint(context.Background(), ident))
 	s.NoFileExists(s.cat.metadataVersionClaimPath(ident, 2))
 }
 
@@ -2738,7 +2738,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMixedCodecVersionClaim
 	}
 
 	s.Equal(1, existing)
-	s.Equal(2, s.cat.readVersionHint(ident))
+	s.Equal(2, s.cat.readVersionHint(context.Background(), ident))
 	s.NoFileExists(s.cat.metadataVersionClaimPath(ident, 2))
 
 	loaded, err := s.cat.LoadTable(ctx, ident)
@@ -2822,12 +2822,25 @@ func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {
 	s.Contains(err.Error(), "UUID")
 }
 
+func (s *HadoopCatalogTestSuite) metadataDirEntries(ident table.Identifier) []string {
+	entries, err := os.ReadDir(s.cat.metadataDir(ident))
+	s.Require().NoError(err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+
+	return names
+}
+
 func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+	before := s.metadataDirEntries(ident)
 
 	_, _, err := s.cat.CommitTable(
-		ctx, []string{"ns", "tbl"},
+		ctx, ident,
 		nil,
 		[]table.Update{
 			table.NewSetLocationUpdate("/some/other/location"),
@@ -2835,14 +2848,18 @@ func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
 	)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "location cannot be changed")
+	s.ErrorIs(err, table.ErrCommitRejected)
+	s.Equal(before, s.metadataDirEntries(ident), "a rejected commit must not write metadata")
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+	before := s.metadataDirEntries(ident)
 
 	_, _, err := s.cat.CommitTable(
-		ctx, []string{"ns", "tbl"},
+		ctx, ident,
 		nil,
 		[]table.Update{
 			table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -2852,6 +2869,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
 	)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "write.metadata.location")
+	s.ErrorIs(err, table.ErrCommitRejected)
+	s.Equal(before, s.metadataDirEntries(ident), "a rejected commit must not write metadata")
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableNoOrphanedTempFiles() {
@@ -2898,7 +2917,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableVersionHintUpdated() {
 	)
 	s.Require().NoError(err)
 
-	s.Equal(2, s.cat.readVersionHint(ident))
+	s.Equal(2, s.cat.readVersionHint(context.Background(), ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {

@@ -578,22 +578,18 @@ func TestTranslateColumnNamesRejectsWrappedInitialDefault(t *testing.T) {
 
 func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *testing.T) {
 	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
-				{
-					ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
-					InitialDefault: "US",
-				},
+		ID: 1, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{
+				ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
+				InitialDefault: "US",
 			},
-		},
+		),
 	})
 	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 1, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
-			},
-		},
+		ID: 1, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+		),
 	})
 
 	for _, expr := range []struct {
@@ -843,37 +839,25 @@ var testSchema = iceberg.NewSchema(1,
 	},
 	iceberg.NestedField{
 		ID: 16, Name: "s1",
-		Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{
-				ID: 17, Name: "s2", Required: true,
-				Type: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{{
-						ID: 18, Name: "s3", Required: true,
-						Type: &iceberg.StructType{
-							FieldList: []iceberg.NestedField{{
-								ID: 19, Name: "s4", Required: true,
-								Type: &iceberg.StructType{
-									FieldList: []iceberg.NestedField{{
-										ID: 20, Name: "i", Required: true,
-										Type: iceberg.PrimitiveTypes.Int32,
-									}},
-								},
-							}},
-						},
-					}},
-				},
-			}},
-		},
+		Type: iceberg.NewStructType(iceberg.NestedField{
+			ID: 17, Name: "s2", Required: true,
+			Type: iceberg.NewStructType(iceberg.NestedField{
+				ID: 18, Name: "s3", Required: true,
+				Type: iceberg.NewStructType(iceberg.NestedField{
+					ID: 19, Name: "s4", Required: true,
+					Type: iceberg.NewStructType(iceberg.NestedField{
+						ID: 20, Name: "i", Required: true,
+						Type: iceberg.PrimitiveTypes.Int32,
+					}),
+				}),
+			}),
+		}),
 	},
-	iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{{
-			ID: 22, Name: "s6", Required: true, Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{{
-					ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
-				}},
-			},
-		}},
-	}},
+	iceberg.NestedField{ID: 21, Name: "s5", Type: iceberg.NewStructType(iceberg.NestedField{
+		ID: 22, Name: "s6", Required: true, Type: iceberg.NewStructType(iceberg.NestedField{
+			ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
+		}),
+	})},
 	iceberg.NestedField{ID: 24, Name: "s", Type: iceberg.PrimitiveTypes.String})
 
 func TestExprEvaluator(t *testing.T) {
@@ -1239,6 +1223,65 @@ func TestRewriteNot(t *testing.T) {
 			out, err := iceberg.RewriteNotExpr(tt.expr)
 			require.NoError(t, err)
 			assert.True(t, out.Equals(tt.expected))
+		})
+	}
+}
+
+// NaN fails both x < 5 and x >= 5, so a negated ordering comparison must keep
+// matching NaN: https://github.com/apache/iceberg-go/issues/2131
+func TestRewriteNotKeepsNaN(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 2, Name: "f", Type: iceberg.PrimitiveTypes.Float32},
+		iceberg.NestedField{ID: 3, Name: "i", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	x, f, i := iceberg.Reference("x"), iceberg.Reference("f"), iceberg.Reference("i")
+
+	tests := []struct {
+		name           string
+		expr, expected iceberg.BooleanExpression
+	}{
+		{"less than", iceberg.NewNot(iceberg.LessThan(x, 5.0)), iceberg.NewOr(iceberg.GreaterThanEqual(x, 5.0), iceberg.IsNaN(x))},
+		{"less than or equal", iceberg.NewNot(iceberg.LessThanEqual(x, 5.0)), iceberg.NewOr(iceberg.GreaterThan(x, 5.0), iceberg.IsNaN(x))},
+		{"greater than", iceberg.NewNot(iceberg.GreaterThan(f, float32(5))), iceberg.NewOr(iceberg.LessThanEqual(f, float32(5)), iceberg.IsNaN(f))},
+		{"greater than or equal", iceberg.NewNot(iceberg.GreaterThanEqual(x, 5.0)), iceberg.NewOr(iceberg.LessThan(x, 5.0), iceberg.IsNaN(x))},
+		{"equal", iceberg.NewNot(iceberg.EqualTo(x, 5.0)), iceberg.NotEqualTo(x, 5.0)},
+		{"is nan", iceberg.NewNot(iceberg.IsNaN(x)), iceberg.NotNaN(x)},
+		{"integer", iceberg.NewNot(iceberg.LessThan(i, int32(5))), iceberg.GreaterThanEqual(i, int32(5))},
+		{
+			"not and",
+			iceberg.NewNot(iceberg.NewAnd(iceberg.GreaterThan(x, 0.0), iceberg.LessThan(i, int32(5)))),
+			iceberg.NewOr(iceberg.NewOr(iceberg.LessThanEqual(x, 0.0), iceberg.IsNaN(x)), iceberg.GreaterThanEqual(i, int32(5))),
+		},
+		{
+			"not or",
+			iceberg.NewNot(iceberg.NewOr(iceberg.LessThan(x, 0.0), iceberg.GreaterThan(x, 5.0))),
+			iceberg.NewAnd(
+				iceberg.NewOr(iceberg.GreaterThanEqual(x, 0.0), iceberg.IsNaN(x)),
+				iceberg.NewOr(iceberg.LessThanEqual(x, 5.0), iceberg.IsNaN(x))),
+		},
+	}
+
+	for _, tt := range tests {
+		expected, err := iceberg.BindExpr(schema, tt.expected, true)
+		require.NoError(t, err)
+
+		t.Run("unbound/"+tt.name, func(t *testing.T) {
+			// the unbound rewrite has no type, so an integer term gets an
+			// is_nan branch that binding then drops
+			out, err := iceberg.RewriteNotExpr(tt.expr)
+			require.NoError(t, err)
+			bound, err := iceberg.BindExpr(schema, out, true)
+			require.NoError(t, err)
+			assert.True(t, bound.Equals(expected), "got %s", bound)
+		})
+
+		t.Run("bound/"+tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(schema, tt.expr, true)
+			require.NoError(t, err)
+			out, err := iceberg.RewriteNotExpr(bound)
+			require.NoError(t, err)
+			assert.True(t, out.Equals(expected), "got %s", out)
 		})
 	}
 }

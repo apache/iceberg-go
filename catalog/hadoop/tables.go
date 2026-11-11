@@ -57,7 +57,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	ns := catalog.NamespaceFromIdent(ident)
 	nsPath := c.namespaceToPath(ns)
 
-	info, err := c.filesystem.Stat(nsPath)
+	info, err := c.filesystem.Stat(ctx, nsPath)
 	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 	}
@@ -194,7 +194,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		currentMetadata = current.Metadata()
 	}
 	if err := internal.ValidateRequirements(ident, currentMetadata, reqs); err != nil {
-		return nil, "", err
+		return nil, "", internal.RejectUnlessConflict(fmt.Errorf("hadoop catalog: %w", err))
 	}
 
 	// Step 3: Apply updates to produce new metadata.
@@ -207,23 +207,23 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	} else {
 		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
 		if err != nil {
-			return nil, "", fmt.Errorf("hadoop catalog: failed to create base metadata: %w", err)
+			return nil, "", internal.RejectUnlessConflict(fmt.Errorf("hadoop catalog: failed to create base metadata: %w", err))
 		}
 	}
 
 	updated, err := internal.UpdateTableMetadata(baseMeta, updates, currentMetadataLoc)
 	if err != nil {
-		return nil, "", fmt.Errorf("hadoop catalog: failed to apply updates: %w", err)
+		return nil, "", internal.RejectUnlessConflict(fmt.Errorf("hadoop catalog: failed to apply updates: %w", err))
 	}
 
 	// Step 4: Validate table location has not changed.
 	if current != nil && updated.Location() != current.Location() {
-		return nil, "", errors.New("hadoop catalog: table location cannot be changed")
+		return nil, "", internal.RejectUnlessConflict(errors.New("hadoop catalog: table location cannot be changed"))
 	}
 
 	// Step 5: Reject write.metadata.location property.
 	if v := updated.Properties().Get(table.WriteMetadataLocationKey, ""); v != "" {
-		return nil, "", fmt.Errorf("hadoop catalog: %s property is not supported", table.WriteMetadataLocationKey)
+		return nil, "", internal.RejectUnlessConflict(fmt.Errorf("hadoop catalog: %s property is not supported", table.WriteMetadataLocationKey))
 	}
 
 	// Step 6: Determine next version number.
@@ -265,7 +265,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 	cleanupCtx := context.WithoutCancel(ctx)
 	claimPath := c.metadataVersionClaimPath(ident, version)
 	for {
-		if err := c.filesystem.RenameNoReplace(tempPath, claimPath); err != nil {
+		if err := c.filesystem.RenameNoReplace(ctx, tempPath, claimPath); err != nil {
 			if !errors.Is(err, fs.ErrExist) {
 				_ = c.filesystem.Remove(cleanupCtx, tempPath)
 
@@ -286,7 +286,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 					conflictErr, strings.Join(ident, "."), existingPath)
 			}
 
-			claimInfo, err := c.filesystem.Stat(claimPath)
+			claimInfo, err := c.filesystem.Stat(ctx, claimPath)
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
 					continue
@@ -332,7 +332,7 @@ func (c *Catalog) commitMetadataFile(ctx context.Context, ident table.Identifier
 			conflictErr, strings.Join(ident, "."), existingPath)
 	}
 
-	if err := c.filesystem.RenameNoReplace(claimPath, metaPath); err != nil {
+	if err := c.filesystem.RenameNoReplace(ctx, claimPath, metaPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 				conflictErr, strings.Join(ident, "."), metaPath)
@@ -370,7 +370,7 @@ func (c *Catalog) ListTables(ctx context.Context, ns table.Identifier) iter.Seq2
 
 		nsPath := c.namespaceToPath(ns)
 
-		info, err := c.filesystem.Stat(nsPath)
+		info, err := c.filesystem.Stat(ctx, nsPath)
 		if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 			yield(nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, ".")))
 

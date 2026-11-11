@@ -168,9 +168,7 @@ func (i InspectTable) allManifestEntryReader(
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
-		func(yield func(iceberg.ManifestFile, error) bool) {
-			streamSnapshotManifests(ctx, snapshots, provider.cachedSet, provider.set, yield)
-		}), nil
+		provider.uniqueManifests(ctx, snapshots)), nil
 }
 
 func (i InspectTable) manifestEntryReaderFromManifestSource(
@@ -223,7 +221,7 @@ func (i InspectTable) manifestEntryReaderFromManifestSource(
 				continue
 			}
 
-			for entry, err := range manifest.Entries(fs, discardDeleted) {
+			for entry, err := range manifest.Entries(ctx, fs, discardDeleted) {
 				if err != nil {
 					yieldError(fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err))
 

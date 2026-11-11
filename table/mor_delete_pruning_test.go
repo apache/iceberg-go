@@ -80,7 +80,7 @@ func newMergeOnReadTestTable(t *testing.T) *table.Table {
 
 // newMergeOnReadTestTableVersion builds a merge-on-read table at the given
 // format version, capping row groups at 5 rows so a 10-row append spans two.
-func newMergeOnReadTestTableVersion(t *testing.T, formatVersion string) *table.Table {
+func newMergeOnReadTestTableVersion(t testing.TB, formatVersion string) *table.Table {
 	t.Helper()
 
 	location := filepath.ToSlash(t.TempDir())
@@ -290,4 +290,78 @@ func idsInTable(t *testing.T, tbl *table.Table) []int64 {
 	slices.Sort(ids)
 
 	return ids
+}
+
+// TestMergeOnReadDeleteSkipsRowsAlreadyDeleted checks that a v2 merge-on-read
+// delete doesn't write position deletes for rows an earlier delete removed.
+// Such deletes change nothing, but they grow the delete files on every update
+// and make the snapshot's total-position-deletes overcount.
+func TestMergeOnReadDeleteSkipsRowsAlreadyDeleted(t *testing.T) {
+	ctx := context.Background()
+	tbl := newMergeOnReadTestTable(t)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+
+	tbl, err = tbl.Delete(ctx, iceberg.IsIn(iceberg.Reference("id"), int64(1), int64(2)), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, []int64{3}, idsInTable(t, tbl))
+	summary := tbl.CurrentSnapshot().Summary.Properties
+	assert.Equal(t, "1", summary["added-position-deletes"], "id=1 was already deleted")
+	assert.Equal(t, "2", summary["total-position-deletes"])
+
+	t.Run("branch", func(t *testing.T) {
+		const branch = "audit"
+		tbl := newMergeOnReadTestTable(t)
+		tbl, err := tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+		require.NoError(t, err)
+
+		// The branch forks from main here, before main deletes id=1.
+		extra, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{`[{"id":4,"data":"d"}]`})
+		require.NoError(t, err)
+		defer extra.Release()
+		txn, err := tbl.NewTransactionOnBranch(branch)
+		require.NoError(t, err)
+		require.NoError(t, txn.Append(ctx, array.NewTableReader(extra, -1), nil))
+		tbl, err = txn.Commit(ctx)
+		require.NoError(t, err)
+
+		tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+		require.NoError(t, err)
+
+		txn, err = tbl.NewTransactionOnBranch(branch)
+		require.NoError(t, err)
+		require.NoError(t, txn.Delete(ctx, iceberg.IsIn(iceberg.Reference("id"), int64(1), int64(2)), nil))
+		tbl, err = txn.Commit(ctx)
+		require.NoError(t, err)
+
+		assert.Equal(t, []int64{2, 3}, idsInTable(t, tbl), "main only deleted id=1")
+		scan, err := tbl.Scan().UseRef(branch)
+		require.NoError(t, err)
+		_, itr, err := scan.ToArrowRecords(ctx)
+		require.NoError(t, err)
+		var ids []int64
+		for rec, err := range itr {
+			require.NoError(t, err)
+			col := rec.Column(rec.Schema().FieldIndices("id")[0]).(*array.Int64)
+			ids = append(ids, col.Int64Values()...)
+			rec.Release()
+		}
+		slices.Sort(ids)
+		assert.Equal(t, []int64{3, 4}, ids, "main's delete of id=1 doesn't count on the branch")
+	})
 }

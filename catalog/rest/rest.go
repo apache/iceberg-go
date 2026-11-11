@@ -30,6 +30,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -115,6 +116,12 @@ var (
 	ErrCommitFailed       = fmt.Errorf("%w: %w", ErrRESTError, table.ErrCommitFailed)
 	ErrCommitStateUnknown = fmt.Errorf("%w: commit failed due to unknown reason", ErrRESTError)
 	ErrOAuthError         = fmt.Errorf("%w: oauth error", ErrRESTError)
+
+	// These statuses mean the catalog did not change the table.
+	errCommitBadRequest   = fmt.Errorf("%w: %w", ErrBadRequest, table.ErrCommitRejected)
+	errCommitUnauthorized = fmt.Errorf("%w: %w", ErrUnauthorized, table.ErrCommitRejected)
+	errCommitForbidden    = fmt.Errorf("%w: %w", ErrForbidden, table.ErrCommitRejected)
+	errCommitNoSuchTable  = fmt.Errorf("%w: %w", catalog.ErrNoSuchTable, table.ErrCommitRejected)
 
 	// errNotModified reports a 304 to a request sent with withIfNoneMatch.
 	errNotModified = errors.New("not modified")
@@ -901,8 +908,9 @@ func toProps(o *options) iceberg.Properties {
 }
 
 type Catalog struct {
-	baseURI *url.URL
-	cl      *http.Client
+	ioRegistry *iceio.Registry
+	baseURI    *url.URL
+	cl         *http.Client
 	// closeSession releases transports owned by the catalog. Caller-provided
 	// transports are excluded when the session is constructed.
 	closeSession     func()
@@ -1067,6 +1075,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
+	r.ioRegistry = ops.ioRegistry
 	baseuri, err := url.Parse(uri)
 	if err != nil {
 		return err
@@ -1078,6 +1087,12 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	// server's /v1/config defaults and overrides, so the metrics reporter is
 	// resolved from the client's choice alone (see the reporterProps field).
 	r.reporterProps = toProps(ops)
+
+	// rest.auth.type is read from the same client-only properties, before the
+	// /v1/config request that it may need to authenticate.
+	if err = resolveAuthType(ctx, ops, r.reporterProps); err != nil {
+		return err
+	}
 
 	if ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
@@ -1121,9 +1136,21 @@ func builtinHeaderDefaults() []struct{ key, value string } {
 	return []struct{ key, value string }{
 		{"X-Client-Version", icebergRestSpecVersion},
 		{"Content-Type", "application/json"},
-		{"User-Agent", "GoIceberg/" + iceberg.Version()},
+		{"User-Agent", defaultUserAgent(iceberg.Version())},
 		{headerIcebergAccessDelegation, defaultAccessDelegation},
 	}
+}
+
+// defaultUserAgent returns the User-Agent recommended by the REST spec: the
+// library token followed by the Go version. iceberg.Version() returns
+// "(unknown version)" when the build has no module version.
+func defaultUserAgent(version string) string {
+	if version == "" || strings.ContainsAny(version, " ()") {
+		version = "unknown"
+	}
+
+	return "iceberg-go/" + strings.TrimPrefix(version, "v") +
+		" (go " + strings.TrimPrefix(runtime.Version(), "go") + ")"
 }
 
 // createSession returns a cleanup that closes only transports created by this
@@ -1162,7 +1189,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	// without storing it in opts. Bootstrap authentication must not leak into
 	// the final session after server configuration has been applied.
 	authManager := opts.authManager
-	if authManager == nil {
+	if authManager == nil && !opts.disableAuth {
 		var cleanupOAuth func()
 		authManager, cleanupOAuth = setupOAuthManager(r, cl, opts)
 		if cleanupOAuth != nil {
@@ -1334,6 +1361,7 @@ func (r *Catalog) tableFromResponse(
 		refresher := &vendedCredentialRefresher{
 			mu:         semaphore.NewWeighted(1),
 			identifier: identifier,
+			ioRegistry: r.ioRegistry,
 			location:   loc,
 			props:      config,
 			vended:     vended,
@@ -1343,7 +1371,7 @@ func (r *Catalog) tableFromResponse(
 		}
 		fsF = refresher.loadFS
 	} else {
-		fsF = iceio.LoadFSFunc(config, loc)
+		fsF = loadRegistryFSFunc(r.ioRegistry, config, loc)
 	}
 
 	// Resolve the reporter from the client-supplied properties only (see the
@@ -1478,6 +1506,7 @@ func (r *Catalog) RefreshTableCredentials(ctx context.Context, tbl *table.Table)
 		// Credential refresh does not return table config, so carry the
 		// existing scan-planning directive over verbatim.
 		table.WithScanPlanningDirectiveFrom(tbl),
+		table.WithSnapshotHistoryLimitedToRefsFrom(tbl),
 	}
 	// Keep a reporter the caller set on the table rather than reverting it to
 	// the catalog default, as Refresh does.
@@ -1803,7 +1832,10 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, path,
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{
-			http.StatusNotFound:            catalog.ErrNoSuchTable,
+			http.StatusBadRequest:          errCommitBadRequest,
+			http.StatusUnauthorized:        errCommitUnauthorized,
+			http.StatusForbidden:           errCommitForbidden,
+			http.StatusNotFound:            errCommitNoSuchTable,
 			http.StatusConflict:            ErrCommitFailed,
 			http.StatusInternalServerError: ErrCommitStateUnknown,
 			http.StatusBadGateway:          ErrCommitStateUnknown,
@@ -2014,7 +2046,9 @@ func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identi
 	vended := resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc)
 	mergeVendedCredentials(config, vended, ret.MetadataLoc)
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved), table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)))
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended, vended, ret.Labels, table.WithSavedConfig(saved),
+		table.WithScanPlanningDirective(r.scanPlanningDirective(ctx, identifier, ret.Config)),
+		table.WithSnapshotHistoryLimitedToRefs(mode == SnapshotModeRefs))
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -2734,11 +2768,15 @@ func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 		return nil, err
 	}
 
+	// The spec's rename 404 covers both a missing source view and a missing
+	// destination namespace; split it by error.type so a missing namespace is
+	// not reported as a missing view. LoadView and DropView need no override
+	// because the spec documents only NoSuchViewException for their 404s.
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchView,
 			http.StatusConflict: catalog.ErrViewAlreadyExists,
-		}, allowNoContent())
+		}, allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}))
 	if err != nil {
 		return nil, err
 	}

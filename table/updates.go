@@ -548,6 +548,18 @@ func NewSetSnapshotRefUpdate(
 	maxRefAgeMs, maxSnapshotAgeMs int64,
 	minSnapshotsToKeep int,
 ) *setSnapshotRefUpdate {
+	// Negative values are supported as omitted options by existing callers.
+	// Normalize them so JSON omitempty does not write invalid retention values.
+	if maxRefAgeMs < 0 {
+		maxRefAgeMs = 0
+	}
+	if maxSnapshotAgeMs < 0 {
+		maxSnapshotAgeMs = 0
+	}
+	if minSnapshotsToKeep < 0 {
+		minSnapshotsToKeep = 0
+	}
+
 	return &setSnapshotRefUpdate{
 		baseUpdate:         baseUpdate{ActionName: UpdateSetSnapshotRef},
 		RefName:            name,
@@ -698,7 +710,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 	retainedManifests := make(map[string]struct{})
 	retainedSnapshotManifests := make([]iceberg.ManifestFile, 0, len(retainedSnapshots))
 	for _, snap := range retainedSnapshots {
-		mans, err := snap.Manifests(prefs)
+		mans, err := snap.Manifests(ctx, prefs)
 		if err != nil {
 			return err
 		}
@@ -717,7 +729,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 	visitedManifests := make(map[string]struct{})
 
 	for _, snap := range expired {
-		mans, err := snap.Manifests(prefs)
+		mans, err := snap.Manifests(ctx, prefs)
 		if err != nil {
 			return err
 		}
@@ -735,7 +747,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 
 			filesToDelete[manPath] = struct{}{}
 
-			for entry, err := range man.Entries(prefs, false) {
+			for entry, err := range man.Entries(ctx, prefs, false) {
 				if err != nil {
 					return err
 				}
@@ -748,7 +760,7 @@ func deleteExpiredFiles(ctx context.Context, preTable, postTable *Table, removal
 	// including data files carried forward as EXISTING by manifest merges.
 	if len(filesToDelete) > 0 {
 		for _, man := range retainedSnapshotManifests {
-			for entry, err := range man.Entries(prefs, false) {
+			for entry, err := range man.Entries(ctx, prefs, false) {
 				if err != nil {
 					return err
 				}
@@ -823,7 +835,11 @@ func (u *removeSnapshotsUpdate) expiredSnapshots(preTable, postTable *Table, fil
 		if !ok {
 			return nil, fmt.Errorf("missing snapshot %d", id)
 		}
-		files[snap.ManifestList] = struct{}{}
+		// V1 snapshots may embed manifests and have no manifest list.
+		// Never pass an empty path to the FileIO removal callback.
+		if snap.ManifestList != "" {
+			files[snap.ManifestList] = struct{}{}
+		}
 		for _, path := range snap.statisticsPaths {
 			files[path] = struct{}{}
 		}

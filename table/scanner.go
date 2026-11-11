@@ -157,6 +157,10 @@ type manifestEntries struct {
 	equalityDeleteEntries   []iceberg.ManifestEntry
 	dvEntries               []iceberg.ManifestEntry
 	mu                      sync.Mutex
+
+	// metrics carries only the skipped data and delete file counts from
+	// collection, for callers that merge them into a scan report.
+	metrics scanMetricsAccumulator
 }
 
 type classifiedManifestEntries struct {
@@ -371,31 +375,33 @@ func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.Struct
 	return newPartitionRecord(dataFilePartition(dataFile), partitionType)
 }
 
-func openManifest(io io.IO, manifest iceberg.ManifestFile,
+func openManifest(ctx context.Context, io io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 ) ([]iceberg.ManifestEntry, error) {
-	return openManifestWithProjection(io, manifest, partitionFilter, metricsEval, nil, false)
+	return openManifestWithProjection(ctx, io, manifest, partitionFilter, metricsEval, nil, false)
 }
 
 func openManifestWithProjection(
+	ctx context.Context,
 	io io.IO,
 	manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 	projection *iceberg.ManifestEntryProjection,
 	dropColumnStats bool,
 ) ([]iceberg.ManifestEntry, error) {
-	return openManifestWithReadOptions(
+	return openManifestWithReadOptions(ctx,
 		io, manifest, partitionFilter, metricsEval, projection, dropColumnStats, true, false)
 }
 
-func openManifestWithOptions(io io.IO, manifest iceberg.ManifestFile,
+func openManifestWithOptions(ctx context.Context, io io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error), discardDeleted, discardExisting bool,
 ) ([]iceberg.ManifestEntry, error) {
-	return openManifestWithReadOptions(
+	return openManifestWithReadOptions(ctx,
 		io, manifest, partitionFilter, metricsEval, nil, false, discardDeleted, discardExisting)
 }
 
 func openManifestWithReadOptions(
+	ctx context.Context,
 	io io.IO,
 	manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
@@ -418,7 +424,7 @@ func openManifestWithReadOptions(
 		}
 	}
 	out := make([]iceberg.ManifestEntry, 0, capacity)
-	if err := streamManifestWithReadOptions(
+	if err := streamManifestWithReadOptions(ctx,
 		io, manifest, partitionFilter, metricsEval, projection, dropColumnStats,
 		discardDeleted, discardExisting, func(entry iceberg.ManifestEntry) error {
 			out = append(out, entry)
@@ -435,35 +441,35 @@ func openManifestWithReadOptions(
 // metrics filters before passing each match to visit. It deliberately does not
 // retain the entries, so callers can choose the smallest representation needed
 // for the next planning step.
-func streamManifest(manifestIO io.IO, manifest iceberg.ManifestFile,
+func streamManifest(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 	projection *iceberg.ManifestEntryProjection,
 	dropColumnStats bool,
 	visit func(iceberg.ManifestEntry) error,
 ) error {
-	return streamManifestWithReadOptions(
+	return streamManifestWithReadOptions(ctx,
 		manifestIO, manifest, partitionFilter, metricsEval, projection, dropColumnStats,
 		true, false, visit)
 }
 
-func streamManifestWithOptions(manifestIO io.IO, manifest iceberg.ManifestFile,
+func streamManifestWithOptions(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error), discardDeleted, discardExisting bool,
 	visit func(iceberg.ManifestEntry) error,
 ) error {
-	return streamManifestWithReadOptions(
+	return streamManifestWithReadOptions(ctx,
 		manifestIO, manifest, partitionFilter, metricsEval, nil, false,
 		discardDeleted, discardExisting, visit)
 }
 
-func streamManifestWithReadOptions(manifestIO io.IO, manifest iceberg.ManifestFile,
+func streamManifestWithReadOptions(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 	projection *iceberg.ManifestEntryProjection,
 	dropColumnStats, discardDeleted, discardExisting bool,
 	visit func(iceberg.ManifestEntry) error,
 ) error {
-	entries := manifest.Entries(manifestIO, discardDeleted)
+	entries := manifest.Entries(ctx, manifestIO, discardDeleted)
 	if projection != nil {
-		entries = iceberg.EntriesWithProjection(manifestIO, manifest, discardDeleted, *projection)
+		entries = iceberg.EntriesWithProjection(ctx, manifestIO, manifest, discardDeleted, *projection)
 	}
 	for entry, err := range entries {
 		if err != nil {
@@ -1282,6 +1288,7 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 
 	manifestResults := make([]classifiedManifestEntries, len(manifestList))
+	skippedFiles := make([]int64, len(manifestList))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
@@ -1310,11 +1317,14 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 				// Keep pruning stats until equality and positional deletes are indexed.
 				projection = &iceberg.ManifestEntryProjection{IncludePruningStats: true}
 			}
-			manifestEntries, err := openManifestWithReadOptions(
-				fs, mf, partEval, metricsEval, projection, false, discardDeleted, discardExisting)
+			var skipped int64
+			manifestEntries, err := openManifestWithReadOptions(ctx,
+				fs, mf, countRejections(partEval, &skipped), countRejections(metricsEval, &skipped),
+				projection, false, discardDeleted, discardExisting)
 			if err != nil {
 				return err
 			}
+			skippedFiles[manifestIndex] = skipped
 			classified, err := classifyManifestEntries(manifestEntries)
 			if err != nil {
 				return err
@@ -1329,7 +1339,12 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptionsAndMinSequenceNum(
 		return nil, err
 	}
 
-	return flattenClassifiedManifestEntries(manifestResults), nil
+	entries := flattenClassifiedManifestEntries(manifestResults)
+	for i, mf := range manifestList {
+		entries.metrics.addSkippedFiles(mf, skippedFiles[i])
+	}
+
+	return entries, nil
 }
 
 func (scan *Scan) dataManifestProjection(retainDataFileStats bool) (iceberg.ManifestEntryProjection, bool) {
@@ -1383,13 +1398,16 @@ func (scan *Scan) planDataManifestTasks(
 	eqDeleteIndex *equalityDeleteIndex,
 ) ([]FileScanTask, error) {
 	return scan.planDataManifestTasksWithOptions(
-		ctx, manifestList, schema, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex, false, false)
+		ctx, manifestList, schema, &scanMetricsAccumulator{}, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex, false, false)
 }
 
+// planDataManifestTasksWithOptions merges the data entries its manifest
+// workers reject into acc.skippedDataFiles once all workers finish.
 func (scan *Scan) planDataManifestTasksWithOptions(
 	ctx context.Context,
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
 	minSeqNum int64,
 	posDeleteIndex *positionalDeleteIndex,
 	dvIndex map[string]iceberg.ManifestEntry,
@@ -1408,6 +1426,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 	}
 
 	taskBatches := make([][]FileScanTask, len(manifestList))
+	skippedFiles := make([]int64, len(manifestList))
 	taskCapacities := make([]int, len(manifestList))
 	taskOffsets := make([]int, len(manifestList))
 	directBuffer := scan.rowFilter == nil || scan.rowFilter.Equals(iceberg.AlwaysTrue{})
@@ -1480,7 +1499,10 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 				stripTaskColumnStats = p.IncludePruningStats && !dropColumnStats
 				projection = &p
 			}
-			err = streamManifest(fs, manifest, partEval, metricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
+			var skipped int64
+			countedPartEval := countRejections(partEval, &skipped)
+			countedMetricsEval := countRejections(metricsEval, &skipped)
+			err = streamManifest(ctx, fs, manifest, countedPartEval, countedMetricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
 				dataFile := entry.DataFile()
 				if dataFile.ContentType() != iceberg.EntryContentData {
 					return fmt.Errorf("%w: data manifest contains %s file %q",
@@ -1505,6 +1527,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 			}
 
 			taskBatches[index] = tasks
+			skippedFiles[index] = skipped
 
 			return nil
 		})
@@ -1512,6 +1535,9 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+	for index, manifest := range manifestList {
+		acc.addSkippedFiles(manifest, skippedFiles[index])
 	}
 
 	var results []FileScanTask
@@ -1761,6 +1787,7 @@ func (scan *Scan) planFilesLocal(
 		if err != nil {
 			return nil, err
 		}
+		acc.skippedDeleteFiles += deleteEntries.metrics.skippedDeleteFiles
 	}
 	// Equality-delete pruning is the only data-manifest consumer of column
 	// metrics after the delete entries have been indexed. Positional deletes and
@@ -1785,7 +1812,7 @@ func (scan *Scan) planFilesLocal(
 	// Step 4: Stream data entries into per-manifest task batches, then flatten
 	// them in manifest order.
 	plannedTasks, err := scan.planDataManifestTasksWithOptions(
-		ctx, dataManifests, schema, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex,
+		ctx, dataManifests, schema, acc, minSeqNum, posDeleteIndex, dvIndex, eqDeleteIndex,
 		projectScanColumns, retainDataFileStats)
 	if err != nil {
 		return nil, err
@@ -2186,9 +2213,60 @@ func bindReadTasksResiduals(
 // therefore still hold its whole decoded contents while it waits. The bound for
 // a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	return scan.readFileTasks(ctx, tasks, nil)
+}
+
+// readFileTasks reads tasks. addedDeletes, when non-nil, is paired with the
+// single data file in tasks: rows that survive that task's own deletes are
+// kept only when they match addedDeletes. Normal scans pass nil.
+func (scan *Scan) readFileTasks(ctx context.Context, tasks []FileScanTask, addedDeletes *FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	var added []FileScanTask
+	if addedDeletes != nil {
+		added = []FileScanTask{*addedDeletes}
+	}
+
+	return scan.readFileTasksWithAddedDeletes(ctx, tasks, added, nil)
+}
+
+// readFileTasksWithAddedDeletes reads tasks while retaining rows matched by the
+// corresponding added-delete task for each data file. When positionSinks is
+// set, it records the original file positions and consumes the matched rows
+// internally instead of returning them to the caller.
+func (scan *Scan) readFileTasksWithAddedDeletes(
+	ctx context.Context,
+	tasks []FileScanTask,
+	addedDeletes []FileScanTask,
+	positionSinks map[string]func([]int64),
+) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	as, readTasks, releasePlanIO, err := scan.arrowScanForTasks(ctx, tasks)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(addedDeletes) > 0 {
+		byPath := make(map[string]int, len(addedDeletes))
+		for i, task := range addedDeletes {
+			if task.File == nil || task.File.FilePath() == "" {
+				if releasePlanIO != nil {
+					releasePlanIO()
+				}
+
+				return nil, nil, fmt.Errorf("%w: added delete task %d has no data file", ErrInvalidOperation, i)
+			}
+			path := task.File.FilePath()
+			if _, ok := byPath[path]; ok {
+				if releasePlanIO != nil {
+					releasePlanIO()
+				}
+
+				return nil, nil, fmt.Errorf("%w: duplicate added delete task for data file %s", ErrInvalidOperation, path)
+			}
+			byPath[path] = i
+		}
+		as.added = &addedDeleteState{
+			deletes:          addedDeletes,
+			deleteTaskByPath: byPath,
+			positionSinks:    positionSinks,
+		}
 	}
 
 	readRecords := scan.readRecords

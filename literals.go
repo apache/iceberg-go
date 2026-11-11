@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -152,6 +153,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Int64Type:
+		// Old int bounds retain their 4-byte encoding after promotion to long.
+		if len(data) == 4 {
+			return Int64Literal(int32(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Int64Literal
 		err := v.UnmarshalBinary(data)
 
@@ -162,6 +168,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return v, err
 	case Float64Type:
+		// Old float bounds retain their 4-byte encoding after promotion to double.
+		if len(data) == 4 {
+			return Float64Literal(math.Float32frombits(binary.LittleEndian.Uint32(data))), nil
+		}
+
 		var v Float64Literal
 		err := v.UnmarshalBinary(data)
 
@@ -680,9 +691,14 @@ func (f Float64Literal) String() string                { return strconv.FormatFl
 func (f Float64Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
-		if math.MaxFloat32 < f {
+		switch {
+		case math.IsInf(float64(f), 0):
+			// infinity is a float32 value, unlike a finite value beyond
+			// the float32 range, and x <= +Inf holds for +Inf
+			return Float32Literal(f), nil
+		case math.MaxFloat32 < f:
 			return Float32AboveMaxLiteral(), nil
-		} else if -math.MaxFloat32 > f {
+		case -math.MaxFloat32 > f:
 			return Float32BelowMinLiteral(), nil
 		}
 
@@ -1044,6 +1060,14 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 				ErrBadCast, s, typ, err.Error())
 		}
 
+		// FromString rounds to the scale. A rounded bound changes which rows
+		// a predicate matches (price > 12.345 is not price > 12.35), so
+		// reject values with more fractional digits than the scale.
+		if decimalStringScale(string(s)) > int64(t.scale) {
+			return nil, fmt.Errorf("%w: casting '%s' to %s - value has more fractional digits than the scale",
+				ErrBadCast, s, typ)
+		}
+
 		return DecimalLiteral{Val: n, Scale: t.scale}, nil
 	case BooleanType:
 		val, err := strconv.ParseBool(string(s))
@@ -1310,12 +1334,20 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 			return v1.Val.Cmp(v2.Val)
 		}
 
-		rescaled, err := v2.Val.Rescale(int32(v2.Scale), int32(v1.Scale))
-		if err != nil {
-			return -1
+		// Rescale can fail when it would discard fractional digits or
+		// overflow decimal128. Compare the exact values at a common scale.
+		left, right := v1.Val.BigInt(), v2.Val.BigInt()
+		scale := max(v1.Scale, v2.Scale)
+		if v1.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v1.Scale)), nil)
+			left.Mul(left, factor)
+		}
+		if v2.Scale < scale {
+			factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale-v2.Scale)), nil)
+			right.Mul(right, factor)
 		}
 
-		return v1.Val.Cmp(rescaled)
+		return left.Cmp(right)
 	}
 }
 
@@ -1431,6 +1463,30 @@ func (d DecimalLiteral) integral(t Type) (*big.Int, error) {
 
 func pow10Big(n int) *big.Int {
 	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
+}
+
+// decimalStringScale returns the smallest scale that represents the decimal
+// string s exactly: its fractional digits less its exponent, not counting
+// trailing zeros. s must already parse as a number. An exponent outside the
+// int32 range returns math.MaxInt64, so the value is rejected.
+func decimalStringScale(s string) int64 {
+	mantissa, exp := s, int64(0)
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		var err error
+		if exp, err = strconv.ParseInt(s[i+1:], 10, 32); err != nil {
+			return math.MaxInt64
+		}
+		mantissa = s[:i]
+	}
+
+	whole, frac, _ := strings.Cut(mantissa, ".")
+	digits := strings.TrimLeft(whole, "+-") + frac
+	significant := strings.TrimRight(digits, "0")
+	if significant == "" {
+		return 0
+	}
+
+	return int64(len(frac)) - exp - int64(len(digits)-len(significant))
 }
 
 func (d DecimalLiteral) Equals(other Literal) bool {

@@ -294,3 +294,94 @@ func TestUpdateSnapshotSummariesPreservesLargeTotals(t *testing.T) {
 	assert.Equal(t, "4000000000", result.Properties[totalRecordsKey])
 	assert.Equal(t, "9000000000", result.Properties[totalFileSizeKey])
 }
+
+// A total that the previous snapshot does not carry is unknown, so the new
+// snapshot must not report one (Java SnapshotProducer.updateTotal). Treating
+// it as 0 records a wrong total.
+func TestUpdateSnapshotSummariesOmitsUnknownTotals(t *testing.T) {
+	t.Parallel()
+
+	result, err := updateSnapshotSummaries(Summary{Operation: OpAppend, Properties: iceberg.Properties{
+		addedDataFilesKey: "1",
+		addedRecordsKey:   "5",
+		addedFileSizeKey:  "100",
+	}}, iceberg.Properties{
+		// The parent only tracked the record total; the other totals are unknown.
+		totalRecordsKey: "1000",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "1005", result.Properties[totalRecordsKey])
+	for _, key := range []string{
+		totalDataFilesKey, totalFileSizeKey, totalDeleteFilesKey,
+		totalPosDeletesKey, totalEqDeletesKey,
+	} {
+		assert.NotContains(t, result.Properties, key, "unknown previous total must not be reported")
+	}
+}
+
+// An unparseable or negative previous total is also unknown, not 0.
+func TestUpdateSnapshotSummariesOmitsInvalidTotals(t *testing.T) {
+	t.Parallel()
+
+	result, err := updateSnapshotSummaries(Summary{Operation: OpAppend, Properties: iceberg.Properties{
+		addedRecordsKey:  "5",
+		addedFileSizeKey: "100",
+	}}, iceberg.Properties{
+		totalRecordsKey:  "not-a-number",
+		totalFileSizeKey: "-1",
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, result.Properties, totalRecordsKey)
+	assert.NotContains(t, result.Properties, totalFileSizeKey)
+}
+
+func TestSnapshotSummaryCollectorDeletionVectors(t *testing.T) {
+	var ssc SnapshotSummaryCollector
+	spec := *iceberg.UnpartitionedSpec
+
+	// Two DVs that share one Puffin file, as DVWriter writes them.
+	newDV := func(ref string, count, offset, size int64) iceberg.DataFile {
+		return must(iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+			"/path/to/batch.puffin", iceberg.PuffinFile, nil, nil, nil, count, 1000)).
+			ReferencedDataFile(ref).
+			ContentOffset(offset).
+			ContentSizeInBytes(size).
+			Build()
+	}
+	dvA := newDV("/path/to/data-a.parquet", 2, 4, 300)
+	dvB := newDV("/path/to/data-b.parquet", 4, 304, 400)
+
+	oldDV := must(iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+		"/path/to/old.puffin", iceberg.PuffinFile, nil, nil, nil, 1, 600)).
+		ReferencedDataFile("/path/to/data-a.parquet").
+		ContentOffset(4).
+		ContentSizeInBytes(250).
+		Build()
+
+	posDelete := must(iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+		"/path/to/pos-delete.parquet", iceberg.ParquetFile, nil, nil, nil, 3, 800)).Build()
+
+	require.NoError(t, ssc.addFile(dvA, tableSchemaSimple, spec))
+	require.NoError(t, ssc.addFile(dvB, tableSchemaSimple, spec))
+	require.NoError(t, ssc.addFile(posDelete, tableSchemaSimple, spec))
+	require.NoError(t, ssc.removeFile(oldDV, tableSchemaSimple, spec))
+
+	props := ssc.build()
+
+	// DVs are counted on their own...
+	assert.Equal(t, "2", props["added-dvs"])
+	assert.Equal(t, "1", props["removed-dvs"])
+	// ...and are not counted as position delete files.
+	assert.Equal(t, "1", props["added-position-delete-files"])
+	assert.NotContains(t, props, "removed-position-delete-files")
+	// DVs still count as delete files and as position deletes.
+	assert.Equal(t, "3", props["added-delete-files"])
+	assert.Equal(t, "1", props["removed-delete-files"])
+	assert.Equal(t, "9", props["added-position-deletes"]) // 2 + 4 + 3
+	assert.Equal(t, "1", props["removed-position-deletes"])
+	// A DV counts only its own blob, not the whole shared Puffin file.
+	assert.Equal(t, "1500", props["added-files-size"]) // 300 + 400 + 800
+	assert.Equal(t, "250", props["removed-files-size"])
+}

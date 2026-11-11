@@ -231,6 +231,23 @@ func TestDoCommit_DoesNotRetryUnrelatedError(t *testing.T) {
 	assert.Equal(t, int32(1), cat.attempts.Load())
 }
 
+func TestDoCommit_RetriesConflictThatIsAlsoRejected(t *testing.T) {
+	cat := &flakyCatalog{
+		failUntilAttempt: 1,
+		failWith:         fmt.Errorf("%w: %w", ErrCommitFailed, ErrCommitRejected),
+	}
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	})
+	cat.metadata = tbl.Metadata()
+
+	_, err := tbl.doCommit(t.Context(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), cat.attempts.Load(), "a rejection that is also a conflict must be retried")
+}
+
 func TestDoCommit_RespectsContextCancellation(t *testing.T) {
 	cat := &flakyCatalog{
 		failUntilAttempt: 100,
@@ -687,9 +704,7 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 	assertOnlyManifestList(t, wfs, originalManifestList)
 }
 
-// assertOnlyManifestList checks that want is the only manifest list left in
-// wfs: a failed commit keeps the staged list and removes every rebuilt one.
-func assertOnlyManifestList(t *testing.T, wfs *memIO, want string) {
+func assertOnlyManifestList(t *testing.T, wfs *memIO, want ...string) {
 	t.Helper()
 	var lists []string
 	for path := range wfs.files {
@@ -697,7 +712,8 @@ func assertOnlyManifestList(t *testing.T, wfs *memIO, want string) {
 			lists = append(lists, path)
 		}
 	}
-	assert.Equal(t, []string{want}, lists)
+	slices.Sort(lists)
+	assert.Equal(t, slices.Sorted(slices.Values(want)), lists)
 }
 
 // TestDoCommit_OrphanCleanedOnRetriesExhausted verifies that when every retry
@@ -1109,13 +1125,29 @@ func countAssertTableUUID(reqs []Requirement) int {
 	return n
 }
 
-func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
-	// Default retry config (numRetries == 0): each Commit is a single
-	// CommitTable attempt. The first fails with a clean conflict, the second succeeds.
+func TestTransactionCommit_RetriesConflictsByDefault(t *testing.T) {
 	cat := &sequentialCatalog{
 		errs: []error{ErrCommitFailed},
 	}
 	tbl := newRetryTestTable(t, cat, nil)
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "value", committed.Properties()["key"])
+	assert.Equal(t, int32(2), cat.attempts.Load(), "the conflict must be retried within one Commit")
+}
+
+func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
+	// With retries disabled, each Commit is a single CommitTable attempt.
+	// The first fails with a clean conflict, the second succeeds.
+	cat := &sequentialCatalog{
+		errs: []error{ErrCommitFailed},
+	}
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{CommitNumRetriesKey: "0"})
 	cat.metadata = tbl.Metadata()
 
 	tx := tbl.NewTransaction()
@@ -1148,7 +1180,7 @@ func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
 
 func TestTransactionCommit_ResumedConflictStaysResumable(t *testing.T) {
 	cat := &sequentialCatalog{errs: []error{ErrCommitFailed, ErrCommitFailed}}
-	tbl := newRetryTestTable(t, cat, nil)
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{CommitNumRetriesKey: "0"})
 	cat.metadata = tbl.Metadata()
 
 	tx := tbl.NewTransaction()
@@ -1170,7 +1202,7 @@ func TestTransactionCommit_ResumeRebuildsAfterPeerSnapshotOnAnotherBranch(t *tes
 	spec := iceberg.NewPartitionSpec()
 	wfs := newMemIO(1<<20, nil)
 	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location",
-		iceberg.Properties{PropertyFormatVersion: "2"})
+		iceberg.Properties{PropertyFormatVersion: "2", CommitNumRetriesKey: "0"})
 	require.NoError(t, err)
 	cat := &sequentialCatalog{metadata: meta}
 	tbl := newOCCTable(t, meta, wfs, cat)
@@ -1265,6 +1297,46 @@ func TestTransactionCommit_ResumeOfNonReplayableCommit(t *testing.T) {
 		require.ErrorIs(t, err, ErrTransactionUnusable)
 		require.ErrorIs(t, err, ErrCommitFailed)
 		assert.EqualError(t, err, "transaction cannot be committed again: requirement no longer holds after refresh ("+hint+"): "+
+			`requirement failed: branch "main" has changed: expected id 100, found 200`)
+		assert.Equal(t, int32(1), cat.attempts.Load(), "the resume must stop before the catalog")
+	})
+}
+
+func TestTransactionCommit_ResumeOfRejectedNonReplayableCommit(t *testing.T) {
+	head := int64(100)
+	rejected := fmt.Errorf("%w: simulated metadata update failure", ErrCommitRejected)
+	newRejectedTx := func(t *testing.T) (*Transaction, *sequentialCatalog, Metadata) {
+		base := newConflictTestMetadataWithProps(t, &head, nil)
+		cat := &sequentialCatalog{metadata: base, errs: []error{rejected}}
+		tbl := New(Identifier{"db", "no-replay"}, base, "metadata.json",
+			func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"k": "v"}))
+		tx.noReplay = true
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitRejected)
+		require.NotErrorIs(t, err, ErrTransactionUnusable)
+
+		return tx, cat, base
+	}
+
+	t.Run("branch unchanged lands", func(t *testing.T) {
+		tx, cat, _ := newRejectedTx(t)
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, "v", committed.Properties()["k"])
+		assert.Equal(t, int32(2), cat.attempts.Load())
+	})
+
+	t.Run("branch moved is unusable", func(t *testing.T) {
+		tx, cat, base := newRejectedTx(t)
+		cat.loadMeta = graftSnapshotOnto(t, base, MainBranch, 200)
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		assert.EqualError(t, err, "transaction cannot be committed again: requirement no longer holds after refresh ("+noReplayHint+"): "+
 			`requirement failed: branch "main" has changed: expected id 100, found 200`)
 		assert.Equal(t, int32(1), cat.attempts.Load(), "the resume must stop before the catalog")
 	})
@@ -1370,7 +1442,8 @@ func TestTransactionCommit_CommittableAfterTransientFailureFollowingRebuild(t *t
 func TestTransactionCommit_BusyTableWithRetriesDisabledResumesUntilItLands(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	wfs := newMemIO(1<<20, nil)
-	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location",
+		iceberg.Properties{CommitNumRetriesKey: "0"})
 	require.NoError(t, err)
 	// Each failed submission grafts a peer commit, so every resume must
 	// rebuild onto a head that moves again before the next submission.
@@ -1437,7 +1510,7 @@ func TestTransactionCommit_AbandonedAfterFailureLeavesOnlyStagedFiles(t *testing
 
 func TestTransactionTableCommitRefusedAfterFailedCommit(t *testing.T) {
 	cat := &sequentialCatalog{errs: []error{ErrCommitFailed}}
-	tbl := newRetryTestTable(t, cat, nil)
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{CommitNumRetriesKey: "0"})
 	cat.metadata = tbl.Metadata()
 
 	tx := tbl.NewTransaction()
@@ -1475,13 +1548,13 @@ func TestDoCommit_PartialRebuildFailureRemovesWrittenList(t *testing.T) {
 	first := &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   &Snapshot{SnapshotID: 101, ParentSnapshotID: &head, SequenceNumber: 2, ManifestList: loc + "staged-1.avro"},
-		rebuildManifestList: func(ctx context.Context, _ Metadata, parent *Snapshot, fio iceio.WriteFileIO, _ int) (*Snapshot, error) {
+		rebuildManifestList: func(ctx context.Context, fresh Metadata, parent *Snapshot, fio iceio.WriteFileIO, _ int) (*Snapshot, error) {
 			if err := fio.WriteFile(ctx, loc+"rebuilt-1.avro", []byte("list")); err != nil {
 				return nil, err
 			}
 			parentID := parent.SnapshotID
 
-			return &Snapshot{SnapshotID: 101, ParentSnapshotID: &parentID, SequenceNumber: 3, ManifestList: loc + "rebuilt-1.avro"}, nil
+			return &Snapshot{SnapshotID: 101, ParentSnapshotID: &parentID, SequenceNumber: 3, TimestampMs: fresh.LastUpdatedMillis(), ManifestList: loc + "rebuilt-1.avro"}, nil
 		},
 	}
 	firstID := int64(101)

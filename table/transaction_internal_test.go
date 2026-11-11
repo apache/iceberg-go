@@ -191,7 +191,7 @@ func liveDataFilePathsForSnapshot(t *testing.T, snap *Snapshot, fs iceio.IO) []s
 	t.Helper()
 	require.NotNil(t, snap)
 	var paths []string
-	for e, err := range snap.entries(fs, iceberg.ManifestContentData, true) {
+	for e, err := range snap.entries(t.Context(), fs, iceberg.ManifestContentData, true) {
 		require.NoError(t, err)
 		if e.DataFile().ContentType() == iceberg.EntryContentData {
 			paths = append(paths, e.DataFile().FilePath())
@@ -266,7 +266,6 @@ func TestBranchCreateForksFromMainHeadAcrossRetry(t *testing.T) {
 	require.NoError(t, err)
 	mainHead := mainMeta.CurrentSnapshot().SnapshotID
 
-	// Fail attempt 0 (forcing a retry through rebuildSnapshotUpdates), apply on 1.
 	cat := &flakyCatalog{metadata: mainMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
 	tbl := New(ident, mainMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
 
@@ -292,12 +291,8 @@ func TestBranchCreateForksFromMainHeadAcrossRetry(t *testing.T) {
 		"a new branch must inherit main's data even when the commit retries and rebuilds")
 }
 
-// TestBranchRetryParentsOnPeerAdvancedBranchHead covers the retry path that
-// TestBranchCreateForksFromMainHeadAcrossRetry does not: the target branch
-// already exists and a concurrent peer advances THAT branch (not main)
-// between attempts. On retry latestSnapshotForBranch must resolve the branch's
-// own fresh head via SnapshotByName and reparent the staged snapshot onto it,
-// rather than falling back to main's head.
+// If a peer advances the target branch, replay must use that branch's fresh
+// head rather than main.
 func TestBranchRetryParentsOnPeerAdvancedBranchHead(t *testing.T) {
 	ctx := context.Background()
 	spec := iceberg.NewPartitionSpec()
@@ -1221,9 +1216,14 @@ func TestTransactionCommitRejectsSameIDTagRace(t *testing.T) {
 	require.NotNil(t, head)
 	tagBuilder, err := MetadataBuilderFromBase(baseMeta, "")
 	require.NoError(t, err)
-	require.NoError(t, tagBuilder.SetSnapshotRef(MainBranch, head.SnapshotID, TagRef))
-	tagMeta, err := tagBuilder.Build()
+	tagCommon, err := tagBuilder.buildCommonMetadata()
 	require.NoError(t, err)
+	tagCommon.SnapshotRefs = cloneSnapshotRefs(tagCommon.SnapshotRefs)
+	tagCommon.SnapshotRefs[MainBranch] = SnapshotRef{SnapshotID: head.SnapshotID, Type: TagRef}
+	tagMeta := &metadataV2{
+		LastSeqNum:     baseMeta.LastSequenceNumber(),
+		commonMetadata: *tagCommon,
+	}
 
 	cat := &headTrackingCatalog{metadata: tagMeta}
 	tbl := New(Identifier{"db", "tag-race"}, baseMeta, "metadata.json",

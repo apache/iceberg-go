@@ -50,7 +50,7 @@ type Schema struct {
 	idToName      atomic.Pointer[map[int]string]
 	idToField     atomic.Pointer[map[int]NestedField]
 	nameToID      atomic.Pointer[map[string]int]
-	nameToIDLower atomic.Pointer[map[string]int]
+	nameToIDLower atomic.Pointer[map[string]caseInsensitiveNameEntry]
 	idToAccessor  atomic.Pointer[map[int]accessor]
 
 	lazyIDToParent  func() (map[int]int, error)
@@ -77,7 +77,14 @@ func NewSchema(id int, fields ...NestedField) *Schema {
 // NewSchemaWithIdentifiers constructs a new schema with the provided ID
 // and fields, along with a slice of field IDs to be listed as identifier
 // fields.
+//
+// The defaults of binary and fixed fields, including fields nested in structs,
+// lists and maps, are stored as hex strings when given as []byte,
+// [BinaryLiteral] or [FixedLiteral], the form they take in metadata JSON.
+// Byte slices inside other defaults are left as they are. The provided fields
+// and types are not modified.
 func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
+	fields, _ = normalizeDefaults(fields)
 	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
 	s.init()
 
@@ -90,6 +97,63 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 	}
 
 	return s
+}
+
+// ValidateIdentifierFields enforces the identifier-field rules in the Iceberg
+// spec. Identifiers must be required primitive fields, excluding floats, and
+// may only be nested in required structs. Callers that construct temporary
+// schemas can defer this validation until reading or writing metadata.
+func (s *Schema) ValidateIdentifierFields() error {
+	if len(s.IdentifierFieldIDs) == 0 {
+		return nil
+	}
+
+	fieldsByID, err := IndexByID(s)
+	if err != nil {
+		return err
+	}
+	parents, err := IndexParents(s)
+	if err != nil {
+		return err
+	}
+
+	seen := make(map[int]struct{}, len(s.IdentifierFieldIDs))
+	for _, id := range s.IdentifierFieldIDs {
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("%w: duplicate identifier field id %d", ErrInvalidSchema, id)
+		}
+		seen[id] = struct{}{}
+
+		field, ok := fieldsByID[id]
+		if !ok {
+			return fmt.Errorf("%w: identifier field id %d does not exist", ErrInvalidSchema, id)
+		}
+		if _, primitive := field.Type.(PrimitiveType); !primitive {
+			return fmt.Errorf("%w: identifier field %q must be primitive", ErrInvalidSchema, field.Name)
+		}
+		if !field.Required {
+			return fmt.Errorf("%w: identifier field %q must be required", ErrInvalidSchema, field.Name)
+		}
+		switch field.Type.(type) {
+		case Float32Type, Float64Type:
+			return fmt.Errorf("%w: identifier field %q cannot be float or double", ErrInvalidSchema, field.Name)
+		}
+
+		for parentID, exists := parents[id]; exists; parentID, exists = parents[parentID] {
+			parent, ok := fieldsByID[parentID]
+			if !ok {
+				return fmt.Errorf("%w: identifier field %q has unknown parent %d", ErrInvalidSchema, field.Name, parentID)
+			}
+			if _, isStruct := parent.Type.(*StructType); !isStruct {
+				return fmt.Errorf("%w: identifier field %q cannot be nested in %q", ErrInvalidSchema, field.Name, parent.Name)
+			}
+			if !parent.Required {
+				return fmt.Errorf("%w: identifier field %q cannot be nested in optional field %q", ErrInvalidSchema, field.Name, parent.Name)
+			}
+		}
+	}
+
+	return nil
 }
 
 // checkDuplicateFieldIDs recursively walks a list of fields and returns an
@@ -225,7 +289,24 @@ func (s *Schema) lazyIDToName() (map[int]string, error) {
 	return idx, nil
 }
 
-func (s *Schema) lazyNameToIDLower() (map[string]int, error) {
+// caseInsensitiveNameEntry stores a collision alongside its lowercase name.
+// Only lookups for that name fail; unrelated columns stay accessible.
+type caseInsensitiveNameEntry struct {
+	id              int
+	name            string
+	conflictingName string
+}
+
+func (e caseInsensitiveNameEntry) ambiguityError() error {
+	if e.conflictingName == "" {
+		return nil
+	}
+
+	return fmt.Errorf("%w: ambiguous case-insensitive field names %q and %q",
+		ErrInvalidSchema, e.name, e.conflictingName)
+}
+
+func (s *Schema) lazyNameToIDLower() (map[string]caseInsensitiveNameEntry, error) {
 	index := s.nameToIDLower.Load()
 	if index != nil {
 		return *index, nil
@@ -236,9 +317,26 @@ func (s *Schema) lazyNameToIDLower() (map[string]int, error) {
 		return nil, err
 	}
 
-	out := make(map[string]int)
-	for k, v := range idx {
-		out[strings.ToLower(k)] = v
+	names := make([]string, 0, len(idx))
+	for name := range idx {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	out := make(map[string]caseInsensitiveNameEntry, len(idx))
+	for _, name := range names {
+		id := idx[name]
+		lower := strings.ToLower(name)
+		if previous, exists := out[lower]; exists {
+			if previous.id != id && previous.conflictingName == "" {
+				previous.conflictingName = name
+				out[lower] = previous
+			}
+
+			continue
+		}
+
+		out[lower] = caseInsensitiveNameEntry{id: id, name: name}
 	}
 
 	s.nameToIDLower.Store(&out)
@@ -295,13 +393,12 @@ func (s *Schema) FieldIDs() []int {
 }
 
 func (s *Schema) UnmarshalJSON(b []byte) error {
-	type Alias Schema
-	var decoded Schema
 	aux := struct {
-		Type   *string         `json:"type"`
-		Fields json.RawMessage `json:"fields"`
-		*Alias
-	}{Alias: (*Alias)(&decoded)}
+		Type               *string         `json:"type"`
+		Fields             json.RawMessage `json:"fields"`
+		ID                 int             `json:"schema-id"`
+		IdentifierFieldIDs []int           `json:"identifier-field-ids"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -326,14 +423,24 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	decoded.fields = fields
-	if decoded.IdentifierFieldIDs == nil {
-		decoded.IdentifierFieldIDs = []int{}
+	// Java reads identifier IDs into a set. Ignore repeated IDs while
+	// preserving the order of their first occurrence in the JSON array.
+	ids := make([]int, 0, len(aux.IdentifierFieldIDs))
+	seenIDs := make(map[int]struct{}, len(aux.IdentifierFieldIDs))
+	for _, id := range aux.IdentifierFieldIDs {
+		if _, exists := seenIDs[id]; exists {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if err := (&Schema{fields: fields, IdentifierFieldIDs: ids}).ValidateIdentifierFields(); err != nil {
+		return err
 	}
 
-	s.ID = decoded.ID
-	s.IdentifierFieldIDs = decoded.IdentifierFieldIDs
-	s.fields = decoded.fields
+	s.ID = aux.ID
+	s.IdentifierFieldIDs = ids
+	s.fields = fields
 	s.idToName.Store(nil)
 	s.idToField.Store(nil)
 	s.nameToID.Store(nil)
@@ -354,17 +461,14 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 		fields = []NestedField{}
 	}
 
-	type Alias Schema
-
-	// Keep this literal in sync with every JSON-marshaled Schema field. Copying
-	// the whole Schema would also copy its lazy atomic caches after they are used.
-	aliasCopy := Alias{ID: s.ID, IdentifierFieldIDs: ids}
-
+	// Name every serialized field instead of encoding through an alias of
+	// Schema, so the wire format does not depend on which fields are exported.
 	return json.Marshal(struct {
-		Type   string        `json:"type"`
-		Fields []NestedField `json:"fields"`
-		*Alias
-	}{Type: "struct", Fields: fields, Alias: &aliasCopy})
+		Type               string        `json:"type"`
+		Fields             []NestedField `json:"fields"`
+		ID                 int           `json:"schema-id"`
+		IdentifierFieldIDs []int         `json:"identifier-field-ids"`
+	}{Type: "struct", Fields: fields, ID: s.ID, IdentifierFieldIDs: ids})
 }
 
 func cloneFields(fields []NestedField) []NestedField {
@@ -451,17 +555,28 @@ func (s *Schema) FindFieldByName(name string) (NestedField, bool) {
 // FindFieldByNameCaseInsensitive is like [*Schema.FindFieldByName],
 // but performs a case insensitive search.
 func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool) {
+	field, found, _ := s.findFieldByNameCaseInsensitive(name)
+
+	return field, found
+}
+
+func (s *Schema) findFieldByNameCaseInsensitive(name string) (NestedField, bool, error) {
 	idx, err := s.lazyNameToIDLower()
 	if err != nil {
-		return NestedField{}, false
+		return NestedField{}, false, err
 	}
 
-	id, ok := idx[strings.ToLower(name)]
+	entry, ok := idx[strings.ToLower(name)]
 	if !ok {
-		return NestedField{}, false
+		return NestedField{}, false, nil
+	}
+	if err := entry.ambiguityError(); err != nil {
+		return NestedField{}, false, err
 	}
 
-	return s.FindFieldByID(id)
+	field, found := s.FindFieldByID(entry.id)
+
+	return field, found, nil
 }
 
 // FindFieldByID is like [*Schema.FindColumnName], but returns the whole
@@ -657,11 +772,14 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 		}
 
 		for _, n := range names {
-			id, ok := nameMap[strings.ToLower(n)]
+			entry, ok := nameMap[strings.ToLower(n)]
 			if !ok {
 				return nil, fmt.Errorf("%w: could not find column %s", ErrInvalidSchema, n)
 			}
-			ids[id] = void
+			if err := entry.ambiguityError(); err != nil {
+				return nil, err
+			}
+			ids[entry.id] = void
 		}
 	}
 

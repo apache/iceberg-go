@@ -77,7 +77,8 @@ type ReaderOption func(*Reader)
 
 // WithMaxBlobSize sets the maximum blob size allowed when reading.
 // This prevents OOM attacks from malicious files with huge blob lengths.
-// Default is DefaultMaxBlobSize (256 MB).
+// Default is DefaultMaxBlobSize (256 MB). Zstd frames also have a window
+// limit equal to the larger of this size and 8 MiB.
 func WithMaxBlobSize(size int64) ReaderOption {
 	return func(r *Reader) {
 		r.maxBlobSize = size
@@ -365,10 +366,18 @@ func (r *Reader) readBlobData(meta BlobMetadata) ([]byte, error) {
 	if meta.Type == "" {
 		return nil, errors.New("puffin: cannot read blob: type is required")
 	}
+	if meta.Type == BlobTypeDeletionVector && meta.CompressionCodec != nil {
+		return nil, errors.New("puffin: deletion-vector-v1 must not be compressed")
+	}
 
-	// Check for compressed blob (unsupported)
-	if meta.CompressionCodec != nil && *meta.CompressionCodec != "" {
-		return nil, fmt.Errorf("puffin: cannot read blob: compression %q not supported", *meta.CompressionCodec)
+	// Reject unknown codecs before issuing range reads. An omitted codec
+	// means uncompressed; an explicitly empty codec is invalid.
+	codec := ""
+	if meta.CompressionCodec != nil {
+		codec = *meta.CompressionCodec
+		if codec != CompressionCodecLZ4 && codec != CompressionCodecZstd {
+			return nil, fmt.Errorf("puffin: cannot read blob: compression %q not supported", codec)
+		}
 	}
 
 	// Validate offset/length
@@ -380,6 +389,9 @@ func (r *Reader) readBlobData(meta BlobMetadata) ([]byte, error) {
 	data := make([]byte, meta.Length)
 	if _, err := r.r.ReadAt(data, meta.Offset); err != nil {
 		return nil, fmt.Errorf("puffin: read blob data: %w", err)
+	}
+	if codec != "" {
+		return readCompressedBlob(data, codec, r.maxBlobSize)
 	}
 
 	return data, nil
@@ -467,11 +479,6 @@ func (r *Reader) validateRange(offset, length int64) error {
 // validateBlobs validates all blob metadata entries.
 func (r *Reader) validateBlobs(blobs []BlobMetadata, footerStart int64) error {
 	for i, blob := range blobs {
-		// Type is required
-		if blob.Type == "" {
-			return fmt.Errorf("puffin: blob %d: type is required", i)
-		}
-
 		// Length must be non-negative
 		if blob.Length < 0 {
 			return fmt.Errorf("puffin: blob %d: invalid length %d", i, blob.Length)
@@ -502,6 +509,8 @@ func (r *Reader) validateBlobs(blobs []BlobMetadata, footerStart int64) error {
 		// "<type> requires X to be -1, got N" so both sides share a
 		// grep-able canonical message.
 		if blob.Type == BlobTypeDeletionVector {
+			// Leave compression validation to ReadBlob and the deletion-vector
+			// reader, which reports ErrInvalidDeletionVector to its callers.
 			if blob.SnapshotID != -1 {
 				return fmt.Errorf("puffin: blob %d: %s requires snapshot-id to be -1, got %d",
 					i, BlobTypeDeletionVector, blob.SnapshotID)

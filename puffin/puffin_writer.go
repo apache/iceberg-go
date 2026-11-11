@@ -51,23 +51,28 @@ import (
 // Writer cannot be reused after a physical write fails. Once poisoned, all
 // subsequent operations return the original write error without changing state.
 type Writer struct {
-	w         io.Writer
-	offset    int64
-	blobs     []BlobMetadata
-	props     map[string]string
-	done      bool
-	failed    error
-	createdBy string
+	w          io.Writer
+	offset     int64
+	footerSize int64
+	blobs      []BlobMetadata
+	props      map[string]string
+	done       bool
+	failed     error
+	createdBy  string
 }
 
 // BlobMetadataInput contains fields the caller provides when adding a blob.
-// Offset, Length, and CompressionCodec are set by the writer.
+// Offset and Length are computed by the writer. CompressionCodec selects the
+// blob's compression and is omitted from footer metadata when empty.
 type BlobMetadataInput struct {
 	Type           BlobType
 	SnapshotID     int64
 	SequenceNumber int64
 	Fields         []int32
 	Properties     map[string]string
+	// CompressionCodec selects CompressionCodecLZ4 or CompressionCodecZstd.
+	// An empty value writes raw bytes. Deletion vectors must not be compressed.
+	CompressionCodec string
 }
 
 // NewWriter creates a new Writer and writes the file header magic.
@@ -88,6 +93,26 @@ func NewWriter(w io.Writer) (*Writer, error) {
 		props:     make(map[string]string),
 		createdBy: "iceberg-go " + iceberg.Version(),
 	}, nil
+}
+
+// FileSizeInBytes returns the total completed file size, including the header,
+// blobs and footer. It returns zero until Finish succeeds.
+func (w *Writer) FileSizeInBytes() int64 {
+	if !w.done {
+		return 0
+	}
+
+	return w.offset
+}
+
+// FileFooterSizeInBytes returns the complete footer size, including the
+// leading magic, payload and trailer. It returns zero until Finish succeeds.
+func (w *Writer) FileFooterSizeInBytes() int64 {
+	if !w.done {
+		return 0
+	}
+
+	return w.footerSize
 }
 
 // checkState keeps the writer's finalized and failed-state checks consistent
@@ -155,6 +180,10 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 	fields := slices.Clone(input.Fields)
 	properties := maps.Clone(input.Properties)
 
+	if input.Type == BlobTypeDeletionVector && input.CompressionCodec != "" {
+		return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 must not be compressed")
+	}
+
 	// Deletion vectors have special requirements per spec. Format matches
 	// the reader-side validateBlobs check so both sides surface the same
 	// "<type> requires X to be -1, got N" phrasing for log grep.
@@ -190,17 +219,28 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		}
 	}
 
+	// Validate metadata before compressing potentially large blobs. Encode before
+	// writing any bytes so compression failures cannot leave partial output.
+	encoded, err := compressBlob(input.CompressionCodec, data)
+	if err != nil {
+		return BlobMetadata{}, err
+	}
+
 	meta := BlobMetadata{
 		Type:           input.Type,
 		SnapshotID:     input.SnapshotID,
 		SequenceNumber: input.SequenceNumber,
 		Fields:         fields,
 		Offset:         w.offset,
-		Length:         int64(len(data)),
+		Length:         int64(len(encoded)),
 		Properties:     properties,
 	}
+	if input.CompressionCodec != "" {
+		codec := input.CompressionCodec
+		meta.CompressionCodec = &codec
+	}
 
-	if err := w.write(data); err != nil {
+	if err := w.write(encoded); err != nil {
 		return BlobMetadata{}, fmt.Errorf("puffin: write blob: %w", err)
 	}
 
@@ -272,6 +312,8 @@ func (w *Writer) Finish() error {
 		return fmt.Errorf("puffin: write footer trailer: %w", err)
 	}
 
+	w.footerSize = int64(MagicSize + len(payload) + footerTrailerSize)
+	w.offset += w.footerSize
 	w.done = true
 
 	return nil

@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"maps"
 	"math"
 	"os"
 	"path"
@@ -840,23 +841,87 @@ func TestReaderRejectsMissingBlobTypes(t *testing.T) {
 		typeJSON string
 		wantErr  string
 	}{
-		{name: "empty", typeJSON: `"type":""`, wantErr: "invalid blob type"},
-		{name: "null", typeJSON: `"type":null`, wantErr: "invalid blob type"},
-		{name: "absent", wantErr: "puffin: blob 1: type is required"},
+		{name: "empty", typeJSON: `"type":""`, wantErr: "blob 1: invalid blob type"},
+		{name: "null", typeJSON: `"type":null`, wantErr: "blob 1: blob metadata missing required field type"},
+		{name: "absent", wantErr: "blob 1: blob metadata missing required field type"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			second := `{"fields":[],"offset":4,"length":0}`
+			second := `{"fields":[],"snapshot-id":1,"sequence-number":1,"offset":4,"length":0}`
 			if tt.typeJSON != "" {
-				second = `{` + tt.typeJSON + `,"fields":[],"offset":4,"length":0}`
+				second = `{` + tt.typeJSON + `,"fields":[],"snapshot-id":1,"sequence-number":1,"offset":4,"length":0}`
 			}
-			footer := `{"blobs":[{"type":"vendor-sketch-v1","fields":[],"offset":4,"length":0},` + second + `]}`
+			footer := `{"blobs":[{"type":"vendor-sketch-v1","fields":[],"snapshot-id":1,"sequence-number":1,"offset":4,"length":0},` + second + `]}`
 			_, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload([]byte(footer))))
 			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
+}
+
+func TestReaderRejectsMissingRequiredPuffinFields(t *testing.T) {
+	t.Parallel()
+
+	validBlob := map[string]any{
+		"type":            "vendor-stats-v1",
+		"fields":          []int{1},
+		"snapshot-id":     int64(10),
+		"sequence-number": int64(3),
+		"offset":          int64(4),
+		"length":          int64(0),
+	}
+
+	for _, field := range []string{"type", "fields", "snapshot-id", "sequence-number", "offset", "length"} {
+		for _, invalidValue := range []string{"missing", "null"} {
+			t.Run(invalidValue+"/"+field, func(t *testing.T) {
+				t.Parallel()
+
+				blob := make(map[string]any, len(validBlob))
+				maps.Copy(blob, validBlob)
+				if invalidValue == "missing" {
+					delete(blob, field)
+				} else {
+					blob[field] = nil
+				}
+				payload, err := json.Marshal(map[string]any{"blobs": []any{validBlob, blob}})
+				require.NoError(t, err)
+
+				_, err = puffin.NewReader(bytes.NewReader(fileWithFooterPayload(payload)))
+				require.ErrorContains(t, err, "puffin: decode footer JSON: blob 1: blob metadata missing required field "+field)
+			})
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "missing blobs", payload: `{}`},
+		{name: "null blobs", payload: `{"blobs":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload([]byte(tc.payload))))
+			require.ErrorContains(t, err, "puffin: decode footer JSON: footer missing required field blobs")
+		})
+	}
+}
+
+func TestReaderAcceptsExplicitZeroAndEmptyPuffinFields(t *testing.T) {
+	payload := []byte(`{"blobs":[{"type":"vendor-stats-v1","fields":[],"snapshot-id":0,"sequence-number":0,"offset":4,"length":0}],"properties":{"source":"test"}}`)
+	reader, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload(payload)))
+	require.NoError(t, err)
+
+	blobs := reader.Blobs()
+	require.Len(t, blobs, 1)
+	require.NotNil(t, blobs[0].Fields)
+	require.Empty(t, blobs[0].Fields)
+	require.Zero(t, blobs[0].SnapshotID)
+	require.Zero(t, blobs[0].SequenceNumber)
+	require.Zero(t, blobs[0].Length)
+	require.Equal(t, "test", reader.Properties()["source"])
 }
 
 func TestReaderReadsLZ4CompressedFooter(t *testing.T) {
@@ -1247,20 +1312,29 @@ func TestReadJavaUncompressedMetricData(t *testing.T) {
 	assert.Len(t, blob1.Data, 83)
 }
 
-// TestReadJavaCompressedMetricData verifies our reader correctly rejects
-// the zstd-compressed fixture since compression is not yet supported.
+// TestReadJavaCompressedMetricData verifies that Java-produced zstd blobs
+// decode to the same bytes as the canonical uncompressed Puffin fixture.
 func TestReadJavaCompressedMetricData(t *testing.T) {
-	data := readFixture(t, "sample-metric-data-compressed-zstd.bin")
-	r, err := puffin.NewReader(bytes.NewReader(data))
+	compressed := readFixture(t, "sample-metric-data-compressed-zstd.bin")
+	r, err := puffin.NewReader(bytes.NewReader(compressed))
 	require.NoError(t, err)
 
-	// Metadata should be readable (compression is per-blob, not footer)
+	plain := readFixture(t, "sample-metric-data-uncompressed.bin")
+	uncompressed, err := puffin.NewReader(bytes.NewReader(plain))
+	require.NoError(t, err)
+
 	blobs := r.Blobs()
 	require.Len(t, blobs, 2)
+	for i, meta := range blobs {
+		require.NotNil(t, meta.CompressionCodec)
+		assert.Equal(t, "zstd", *meta.CompressionCodec)
 
-	// But reading blob data should fail due to compression
-	_, err = r.ReadBlob(0)
-	assert.ErrorContains(t, err, "compression")
+		got, err := r.ReadBlob(i)
+		require.NoError(t, err)
+		want, err := uncompressed.ReadBlob(i)
+		require.NoError(t, err)
+		assert.Equal(t, want.Data, got.Data)
+	}
 }
 
 // TestWriterBitIdenticalWithJava verifies that our writer produces

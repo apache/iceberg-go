@@ -110,6 +110,27 @@ func TestBuild_DoesNotGrowVersionLog(t *testing.T) {
 	}
 }
 
+func TestBuildSnapshotsProperties(t *testing.T) {
+	initialProperties := iceberg.Properties{"comment": "daily report", "owner": "analytics"}
+	builder := newTestBuilder().
+		SetLoc("location").
+		SetProperties(initialProperties).
+		AddSchema(newTestSchema(1)).
+		AddVersion(newTestVersion(1, LastAddedID)).
+		SetCurrentVersionID(LastAddedID)
+
+	first, err := builder.Build()
+	require.NoError(t, err)
+
+	builder.SetProperties(iceberg.Properties{"comment": "weekly report"}).
+		RemoveProperties([]string{"owner"})
+	second, err := builder.Build()
+	require.NoError(t, err)
+
+	assert.Equal(t, initialProperties, first.Properties())
+	assert.Equal(t, iceberg.Properties{"comment": "weekly report"}, second.Properties())
+}
+
 func TestBuild_RepeatedBuildsWithVersionExpiry(t *testing.T) {
 	// With a history size of 1, versions 1 and 2 are expired. The only history entry is
 	// the one for version 3, which is retained, so updateHistory keeps it; its clear
@@ -587,6 +608,36 @@ func TestAddVersion_DeduplicationCustomSummary(t *testing.T) {
 	assert.Equal(t, []*Version{v1, expectedV2, expectedUpdatedV2}, md.Versions())
 }
 
+func TestAddVersion_ReuseVersionFromBase(t *testing.T) {
+	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
+	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
+	base, err := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(0)).
+		AddVersion(v1).
+		AddVersion(v2).
+		SetCurrentVersionID(2).
+		Build()
+	require.NoError(t, err)
+
+	// Replace the view with its first definition again. The new version has
+	// a different ID and timestamp, but the same content as v1, so v1 is
+	// reused instead of being added a second time.
+	builder, err := MetadataBuilderFromBase(base.Metadata)
+	require.NoError(t, err)
+	md, err := builder.
+		SetCurrentVersion(
+			newTestVersionWithSQL(3, 0, "select * from ns.tbl", WithTimestampMS(1000)),
+			newTestSchema(0),
+		).
+		Build()
+	require.NoError(t, err)
+
+	assert.Equal(t, []*Version{v1, v2}, md.Versions())
+	assert.Equal(t, v1, md.CurrentVersion())
+	assert.Equal(t, Updates{NewSetCurrentVersionUpdate(1)}, md.Changes)
+}
+
 func TestSchemaIDReassignment(t *testing.T) {
 	s1 := newTestSchema(3, "x")
 	s2 := newTestSchema(6, "y")
@@ -800,7 +851,7 @@ func TestUnknownRepresentationSurvivesBuilderRoundTrip(t *testing.T) {
 		"format-version": 1,
 		"location": "s3://bucket/warehouse/default.db/event_agg",
 		"current-version-id": 1,
-		"versions": [{"version-id": 1, "schema-id": 0, "timestamp-ms": 1234567890, "representations": [
+		"versions": [{"version-id": 1, "schema-id": 0, "timestamp-ms": 1234567890, "summary": {}, "default-namespace": [], "representations": [
 			{"type": "hive", "sql": "SELECT 1", "dialect": "hive"},
 			{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}
 		]}],

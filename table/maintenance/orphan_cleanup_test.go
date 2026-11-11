@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2442,12 +2443,12 @@ func dataFilePathsFromSnapshot(
 	wantStatus iceberg.ManifestEntryStatus,
 ) []string {
 	t.Helper()
-	manifests, err := snap.Manifests(fs)
+	manifests, err := snap.Manifests(t.Context(), fs)
 	require.NoError(t, err)
 
 	var paths []string
 	for _, m := range manifests {
-		for e, err := range m.Entries(fs, false) {
+		for e, err := range m.Entries(t.Context(), fs, false) {
 			require.NoError(t, err)
 			if e.Status() == wantStatus {
 				paths = append(paths, e.DataFile().FilePath())
@@ -2605,4 +2606,53 @@ func TestGetReferencedFilesFetchesManifestListsConcurrently(t *testing.T) {
 	trackingFS.mu.Unlock()
 	assert.Greater(t, maxOpen, 1, "manifest lists should be fetched concurrently")
 	assert.LessOrEqual(t, maxOpen, maxWorkers, "manifest-list reads must respect the configured limit")
+}
+
+func TestReferencePathBatch(t *testing.T) {
+	for _, n := range []int{0, 1, 511, 512, 513, 1024, 1031} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			refs := map[string]bool{"existing": false}
+			var mu sync.Mutex
+			batch := referencePathBatch{referenced: refs, mu: &mu}
+			for i := range n {
+				batch.add(strconv.Itoa(i))
+			}
+			batch.flush()
+			batch.flush()
+			require.Len(t, refs, n+1)
+			require.False(t, refs["existing"])
+			for i := range n {
+				require.True(t, refs[strconv.Itoa(i)])
+			}
+			require.Empty(t, batch.paths)
+		})
+	}
+}
+
+func TestReferencePathBatchConcurrent(t *testing.T) {
+	const workers = 4
+	const perWorker = referencePathBatchSize + 1
+	refs := make(map[string]bool)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Go(func() {
+			batch := referencePathBatch{referenced: refs, mu: &mu}
+			for i := range perWorker {
+				batch.add(fmt.Sprintf("%d-%d", worker, i))
+			}
+			batch.flush()
+		})
+	}
+	wg.Wait()
+	require.Len(t, refs, workers*perWorker)
+}
+
+func TestGetReferencedFilesAcrossBatchBoundary(t *testing.T) {
+	tbl, fs := referenceManifestFixture(t, 1025)
+	refs, err := getReferencedFiles(context.Background(), tbl, fs, 2, true)
+	require.NoError(t, err)
+	for i := range 1025 {
+		require.True(t, refs[fmt.Sprintf("s3://bucket/data/%d.parquet", i)])
+	}
 }

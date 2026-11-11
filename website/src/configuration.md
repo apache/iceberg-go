@@ -70,7 +70,7 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 
 | Group | Options |
 |---|---|
-| Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
+| Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `NewOauth2AuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
 | AWS SigV4 | `WithSigV4`, `WithSigV4RegionSvc`, `WithSigner` |
 | HTTP | `WithHeaders`, `WithTLSConfig`, `WithOAuthTLSConfig`, `WithCustomTransport` |
 | Catalog routing | `WithPrefix`, `WithWarehouseLocation`, `WithMetadataLocation` |
@@ -98,6 +98,91 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 > that loads a REST catalog with `rest.sigv4-enabled=true` now fails at startup
 > until the `catalog/rest/sigv4` backend is blank-imported; the error names the
 > import to add.
+
+#### Authentication type
+
+The `rest.auth.type` property selects how the client authenticates, as in Iceberg
+Java. It is read only from the properties the client supplies; a server's
+`/v1/config` defaults and overrides can't change it. An `AuthManager` passed with
+`WithAuthManager` takes precedence over it.
+
+| Value | Behavior |
+|---|---|
+| unset or `oauth2` | Use `token`, or the client-credentials flow with `credential`. With neither, send no authorization header. |
+| `none` | Send no authorization header, even if `token` or `credential` is set. |
+| `google` | Google credentials, for catalogs such as BigLake. Requires a blank import of `catalog/rest/googleauth`. |
+
+Other values select an auth manager registered with `rest.RegisterAuthManager`.
+An unregistered value fails `NewCatalog` / `catalog.Load`. The Java values
+`basic` and `sigv4` are not supported; enable SigV4 with `rest.sigv4-enabled`
+instead.
+
+#### Google BigLake
+
+With `rest.auth.type=google`, the
+[`catalog/rest/googleauth`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go)
+backend authenticates with Google credentials, using the same properties as
+Java's `GoogleAuthManager`:
+
+| Property | Description |
+|---|---|
+| `gcp.auth.credentials-path` | Path to a credentials JSON file, such as a service account key. |
+| `gcp.auth.credentials-json` | The same JSON, inline. Setting both is an error. |
+| `gcp.auth.scopes` | Comma-separated OAuth scopes. Default `https://www.googleapis.com/auth/cloud-platform`. |
+
+Without either credentials property, Application Default Credentials are used.
+Like `rest.auth.type`, these are read only from the client's properties.
+
+Token requests don't go through the catalog's HTTP client, so a transport, TLS
+config or proxy set with `WithCustomTransport`, `WithTLSConfig` or
+`WithTransportFactory` doesn't apply to them, as in Java. They use a client with
+the default transport and a 60-second timeout. To use a specific client, put it
+in the context's `oauth2.HTTPClient` value when loading the catalog, or build
+the token source yourself (for example with `googleauth.TokenSource`) and pass
+`NewOauth2AuthManager(ts)` to `WithAuthManager`. One exception: on Google Cloud
+compute, Application Default Credentials come from the metadata server, which
+the Google library always reaches through its own client.
+
+```go
+import (
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	_ "github.com/apache/iceberg-go/catalog/rest/googleauth"
+)
+
+cat, err := catalog.Load(ctx, "biglake", iceberg.Properties{
+	"type":                       "rest",
+	"uri":                        "https://biglake.googleapis.com/iceberg/v1/restcatalog",
+	"warehouse":                  "gs://lakehouse-public-data",
+	"rest.auth.type":             "google",
+	"header.x-goog-user-project": "my-project",
+})
+```
+
+#### Custom token sources
+
+`WithCredential` uses the OAuth2 client-credentials flow against the catalog's
+token endpoint. For other identity providers, wrap any `oauth2.TokenSource` with
+`NewOauth2AuthManager` and pass it to `WithAuthManager`. The Google setup above
+can also be written this way:
+
+```go
+ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+if err != nil {
+	return err
+}
+cat, err := rest.NewCatalog(ctx, "biglake", "https://biglake.googleapis.com/iceberg/v1/restcatalog",
+	rest.WithAuthManager(rest.NewOauth2AuthManager(ts)),
+	rest.WithWarehouseLocation("gs://lakehouse-public-data"),
+	rest.WithHeaders(map[string]string{"x-goog-user-project": "my-project"}))
+```
+
+The manager reuses a token until it expires, then asks the source for a new one.
+That refresh runs on the HTTP client the source was built with. For
+`google.DefaultTokenSource` that is the client in the context's
+`oauth2.HTTPClient` value, or `http.DefaultClient`, which has no timeout. With
+`rest.auth.type=google`, the backend sets a client with a 60-second timeout
+unless the context already carries one.
 
 #### Metrics reporting
 
@@ -431,7 +516,7 @@ but are reserved for future task-group planning and are not currently read.
 | `commit.manifest-merge.enabled` | Merge small manifests during commit. |
 | `commit.manifest.target-size-bytes` | Target size for merged manifests. |
 | `commit.manifest.min-count-to-merge` | Minimum manifest count that triggers a merge. |
-| `commit.retry.num-retries` | Retries for `ErrCommitFailed`. |
+| `commit.retry.num-retries` | Retries for `ErrCommitFailed`. Default `4`; `0` fails on the first conflict. |
 | `commit.retry.min-wait-ms` / `commit.retry.max-wait-ms` / `commit.retry.total-timeout-ms` | Backoff bounds. |
 
 ### Snapshot retention

@@ -146,8 +146,11 @@ func TestMakeArrowFieldEncoderHonorsNullStructParents(t *testing.T) {
 
 	assert.False(t, record.Column(0).(*array.Struct).Field(0).IsNull(0), "child storage must remain valid under the null parent")
 
-	encoder, err := makeArrowFieldEncoder(record, arrowFieldRef{path: []int{0, 0}}, 1, "person.id", "")
+	encoder, release, err := makeArrowFieldEncoderWithTypes(t.Context(), record,
+		arrowFieldRef{path: []int{0, 0}}, 1, "person.id", "",
+		iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64)
 	require.NoError(t, err)
+	assert.Nil(t, release)
 
 	var got bytes.Buffer
 	encoder(&got, 0)
@@ -158,6 +161,114 @@ func TestMakeArrowFieldEncoderHonorsNullStructParents(t *testing.T) {
 	var want bytes.Buffer
 	encodeArrowValue(&want, record.Column(0).(*array.Struct).Field(0), 1)
 	assert.Equal(t, want.Bytes(), got.Bytes())
+}
+
+// buildEqualityDictionaryTestRecord returns id [1..5], a dictionary value
+// column [apple, bob, null index, apple, null dictionary value] and k [7, 7, 7, 8, 7].
+func buildEqualityDictionaryTestRecord(t *testing.T, mem memory.Allocator, indexType, valueType arrow.DataType) arrow.RecordBatch {
+	t.Helper()
+
+	valueBuilder := array.NewBuilder(mem, valueType)
+	defer valueBuilder.Release()
+	appendEqualityBytesTestValue(t, valueBuilder, "apple", true)
+	appendEqualityBytesTestValue(t, valueBuilder, "bob", true)
+	appendEqualityBytesTestValue(t, valueBuilder, "", false)
+	appendEqualityBytesTestValue(t, valueBuilder, "unused", true)
+	dictionary := valueBuilder.NewArray()
+	defer dictionary.Release()
+
+	indices, _, err := array.FromJSON(mem, indexType, strings.NewReader("[0, 1, null, 0, 2]"))
+	require.NoError(t, err)
+	defer indices.Release()
+
+	dictType := &arrow.DictionaryType{IndexType: indexType, ValueType: valueType}
+	values := array.NewDictionaryArray(dictType, indices, dictionary)
+	defer values.Release()
+
+	ids, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int64, strings.NewReader("[1, 2, 3, 4, 5]"))
+	require.NoError(t, err)
+	defer ids.Release()
+	ks, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int32, strings.NewReader("[7, 7, 7, 8, 7]"))
+	require.NoError(t, err)
+	defer ks.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "value", Type: dictType, Nullable: true},
+		{Name: "k", Type: arrow.PrimitiveTypes.Int32},
+	}, nil)
+
+	return array.NewRecordBatch(schema, []arrow.Array{ids, values, ks}, 5)
+}
+
+func TestProcessEqualityDeletesDictionary(t *testing.T) {
+	shapes := []struct {
+		name      string
+		indexType arrow.DataType
+		valueType arrow.DataType
+		iceType   iceberg.Type
+	}{
+		{"int8/binary", arrow.PrimitiveTypes.Int8, arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary},
+		{"uint16/large_binary", arrow.PrimitiveTypes.Uint16, arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary},
+		{"int32/binary", arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary},
+		{"int64/string", arrow.PrimitiveTypes.Int64, arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String},
+		{"int32/large_string", arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String},
+	}
+	cases := []struct {
+		name     string
+		fieldIDs []int
+		colNames []string
+		keys     set[string]
+		wantIDs  []int64
+	}{
+		{
+			name: "value", fieldIDs: []int{2}, colNames: []string{"value"},
+			keys:    set[string]{"\x01\x00\x00\x00\x05apple": {}},
+			wantIDs: []int64{2, 3, 5},
+		},
+		{
+			name: "null", fieldIDs: []int{2}, colNames: []string{"value"},
+			keys:    set[string]{"\x00": {}},
+			wantIDs: []int64{1, 2, 4},
+		},
+		{
+			name: "multi_column", fieldIDs: []int{2, 3}, colNames: []string{"value", "k"},
+			keys: set[string]{
+				"\x01\x00\x00\x00\x05apple\x01\x00\x00\x00\x07": {},
+				"\x00\x01\x00\x00\x00\x07":                      {},
+			},
+			wantIDs: []int64{2, 4},
+		},
+	}
+	for _, shape := range shapes {
+		fileSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "value", Type: shape.iceType},
+			iceberg.NestedField{ID: 3, Name: "k", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		)
+		for _, tc := range cases {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+				ctx := compute.WithAllocator(t.Context(), mem)
+				record := buildEqualityDictionaryTestRecord(t, mem, shape.indexType, shape.valueType)
+				defer record.Release()
+
+				fieldTypes, err := equalityFieldTypes(fileSchema, tc.fieldIDs)
+				require.NoError(t, err)
+				deleteSet := &equalityDeleteSet{keys: tc.keys, fieldIDs: tc.fieldIDs, colNames: tc.colNames, fieldTypes: fieldTypes}
+				process, err := processEqualityDeletesColumnarForFile(ctx,
+					[]*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")
+				require.NoError(t, err)
+
+				record.Retain()
+				got, err := process(record)
+				require.NoError(t, err)
+				defer got.Release()
+				assert.Equal(t, tc.wantIDs, got.Column(0).(*array.Int64).Int64Values())
+			})
+		}
+	}
 }
 
 type encoderArrayShape int
@@ -782,10 +893,11 @@ func readEqualityDeleteFileMaterialized(
 		rec := tr.RecordBatch()
 		encoders := make([]colEncoder, len(fieldRefs))
 		for i, ref := range fieldRefs {
-			encoders[i], err = makeArrowFieldEncoder(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
+			column, parents, err := arrowArraysAtField(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
 			if err != nil {
 				return nil, nil, err
 			}
+			encoders[i] = makeArrowFieldEncoderFromArray(column, parents)
 		}
 
 		for row := range int(rec.NumRows()) {
@@ -823,9 +935,10 @@ func TestProcessEqualityDeletesUsesStructuralFieldPaths(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "right", Type: iceberg.PrimitiveTypes.Int64},
 	)
 	process, err := processEqualityDeletesColumnarForFile(t.Context(), []*equalityDeleteSet{{
-		keys:     set[string]{key.String(): {}},
-		fieldIDs: []int{1},
-		colNames: []string{"id"},
+		keys:       set[string]{key.String(): {}},
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}}, fileSchema, "data.parquet")
 	require.NoError(t, err)
 
@@ -912,7 +1025,7 @@ func TestProcessEqualityDeletesSingleInt64MatchesGeneric(t *testing.T) {
 					deleteSet.keys[string([]byte{0})] = struct{}{}
 				}
 				genericSet := &equalityDeleteSet{
-					keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs, colNames: deleteSet.colNames,
+					keys: deleteSet.keys, fieldIDs: deleteSet.fieldIDs, colNames: deleteSet.colNames, fieldTypes: deleteSet.fieldTypes,
 				}
 				// Disable only the optional index, keeping the same schema and keys.
 				genericSet.singleInt64Once.Do(func() {})
@@ -978,7 +1091,7 @@ func TestProcessEqualityDeletesCombinesFastAndGenericSets(t *testing.T) {
 				var key bytes.Buffer
 				encodeArrowValue(&key, record.Column(1), 1)
 				genericSet := &equalityDeleteSet{
-					keys: set[string]{key.String(): {}}, fieldIDs: []int{2}, colNames: []string{"category"},
+					keys: set[string]{key.String(): {}}, fieldIDs: []int{2}, colNames: []string{"category"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String},
 				}
 				deleteSets := []*equalityDeleteSet{fastSet, genericSet}
 				if genericFirst {
@@ -1056,7 +1169,7 @@ func TestProcessEqualityDeletesReleasesMaskAfterLaterSetError(t *testing.T) {
 	)
 	process, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{
 		int64EqualityDeleteSet(1),
-		{fieldIDs: []int{2}, colNames: []string{"missing"}},
+		{fieldIDs: []int{2}, colNames: []string{"missing"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String}},
 	}, fileSchema, "data.parquet")
 	require.NoError(t, err)
 
@@ -1118,9 +1231,10 @@ func int64EqualityDeleteSet(values ...int64) *equalityDeleteSet {
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{1},
-		colNames: []string{"id"},
+		keys:       keys,
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}
 }
 
@@ -1177,9 +1291,10 @@ func TestProcessEqualityDeletesAppliesMultipleDeleteSetsLazily(t *testing.T) {
 
 func TestProcessEqualityDeletesRejectsMismatchedFieldMetadata(t *testing.T) {
 	process, err := processEqualityDeletesColumnarForFile(t.Context(), []*equalityDeleteSet{{
-		keys:     make(set[string]),
-		fieldIDs: []int{1},
-		colNames: []string{"id", "other"},
+		keys:       make(set[string]),
+		fieldIDs:   []int{1},
+		colNames:   []string{"id", "other"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}}, iceberg.NewSchema(0), "data.parquet")
 
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
@@ -1312,19 +1427,22 @@ func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
 
 	perFile := map[string]*equalityDeleteFileSet{
 		deleteA.FilePath(): newEqualityDeleteFileSet(0, &equalityDeleteSet{
-			keys:     set[string]{"a": {}},
-			fieldIDs: []int{1},
-			colNames: []string{"id"},
+			keys:       set[string]{"a": {}},
+			fieldIDs:   []int{1},
+			colNames:   []string{"id"},
+			fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 		}),
 		deleteB.FilePath(): newEqualityDeleteFileSet(1, &equalityDeleteSet{
-			keys:     set[string]{"b": {}},
-			fieldIDs: []int{1},
-			colNames: []string{"id"},
+			keys:       set[string]{"b": {}},
+			fieldIDs:   []int{1},
+			colNames:   []string{"id"},
+			fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 		}),
 		deleteC.FilePath(): newEqualityDeleteFileSet(2, &equalityDeleteSet{
-			keys:     set[string]{"c": {}},
-			fieldIDs: []int{1},
-			colNames: []string{"id"},
+			keys:       set[string]{"c": {}},
+			fieldIDs:   []int{1},
+			colNames:   []string{"id"},
+			fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 		}),
 	}
 
@@ -1351,14 +1469,16 @@ func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
 
 func TestMergeEqualityDeleteSetsClonesLargestInput(t *testing.T) {
 	largest := &equalityDeleteFileSet{equalityDeleteSet: &equalityDeleteSet{
-		keys:     set[string]{"a": {}, "b": {}, "c": {}},
-		fieldIDs: []int{1},
-		colNames: []string{"id"},
+		keys:       set[string]{"a": {}, "b": {}, "c": {}},
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}}
 	smaller := &equalityDeleteFileSet{equalityDeleteSet: &equalityDeleteSet{
-		keys:     set[string]{"d": {}},
-		fieldIDs: []int{1},
-		colNames: []string{"id"},
+		keys:       set[string]{"d": {}},
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}}
 
 	merged := mergeEqualityDeleteSets([]*equalityDeleteFileSet{smaller, largest})
@@ -1375,19 +1495,22 @@ func TestBuildEqualityDeleteSetsPerTaskKeepsFieldGroupsSeparate(t *testing.T) {
 
 	perFile := map[string]*equalityDeleteFileSet{
 		deleteID.FilePath(): newEqualityDeleteFileSet(0, &equalityDeleteSet{
-			keys:     set[string]{"id": {}},
-			fieldIDs: []int{1},
-			colNames: []string{"id"},
+			keys:       set[string]{"id": {}},
+			fieldIDs:   []int{1},
+			colNames:   []string{"id"},
+			fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 		}),
 		deleteIDAgain.FilePath(): newEqualityDeleteFileSet(1, &equalityDeleteSet{
-			keys:     set[string]{"id-again": {}},
-			fieldIDs: []int{1},
-			colNames: []string{"id"},
+			keys:       set[string]{"id-again": {}},
+			fieldIDs:   []int{1},
+			colNames:   []string{"id"},
+			fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 		}),
 		deleteCategory.FilePath(): newEqualityDeleteFileSet(2, &equalityDeleteSet{
-			keys:     set[string]{"category": {}},
-			fieldIDs: []int{2},
-			colNames: []string{"category"},
+			keys:       set[string]{"category": {}},
+			fieldIDs:   []int{2},
+			colNames:   []string{"category"},
+			fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String},
 		}),
 	}
 
@@ -1471,4 +1594,150 @@ func TestResolveRequestedArrowFieldsPreservesDeepAndSiblingPaths(t *testing.T) {
 	assert.Empty(t, resolveArrowFieldsByMetadata(nil, []int{100}))
 	assert.Empty(t, resolveArrowFieldsByID(schema, nil))
 	assert.Empty(t, resolveArrowFieldsByMetadata(arrowSchema, nil))
+}
+
+func TestEqualityDeleteEncodersRequireTypeMetadata(t *testing.T) {
+	refs := []arrowFieldRef{{path: []int{0}}}
+	ids := []int{1}
+	names := []string{"id"}
+	_, release, err := makeArrowFieldEncodersWithTypes(t.Context(), nil, refs, ids, names,
+		[]iceberg.Type{iceberg.PrimitiveTypes.Int32}, nil, "data.parquet")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Nil(t, release)
+
+	_, release, err = makeArrowFieldEncodersWithTypes(t.Context(), nil, refs, ids, names,
+		nil, []iceberg.Type{iceberg.PrimitiveTypes.Int64}, "data.parquet")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Nil(t, release)
+}
+
+func TestEqualityRowsMatchedAfterIntToLongPromotion(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	dataBuilder := array.NewInt32Builder(mem)
+	dataBuilder.AppendValues([]int32{42, 7, math.MinInt32}, nil)
+	data := dataBuilder.NewArray()
+	dataBuilder.Release()
+	record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil),
+		[]arrow.Array{data}, 3)
+	data.Release()
+	defer record.Release()
+
+	deleteBuilder := array.NewInt64Builder(mem)
+	deleteBuilder.AppendValues([]int64{42, math.MinInt32}, nil)
+	deletes := deleteBuilder.NewArray()
+	deleteBuilder.Release()
+	defer deletes.Release()
+
+	keys := make(set[string])
+	var key bytes.Buffer
+	encode := makeColEncoder(deletes)
+	for row := range deletes.Len() {
+		key.Reset()
+		encode(&key, row)
+		keys[key.String()] = struct{}{}
+	}
+
+	deleteSet := &equalityDeleteSet{
+		keys:       keys,
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
+	}
+	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32,
+	})
+	got, err := equalityRowsMatched(ctx, record, []*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []bool{true, false, true}, got)
+}
+
+func TestEqualityDeletePromotedKeyEncoding(t *testing.T) {
+	tests := []struct {
+		name       string
+		sourceType iceberg.Type
+		targetType iceberg.Type
+		source     func(memory.Allocator, encoderArrayShape) arrow.Array
+		target     func(memory.Allocator, encoderArrayShape) arrow.Array
+	}{
+		{
+			name:       "int-to-long",
+			sourceType: iceberg.PrimitiveTypes.Int32,
+			targetType: iceberg.PrimitiveTypes.Int64,
+			source:     buildInt32Array,
+			target:     buildInt64Array,
+		},
+		{
+			name:       "float-to-double",
+			sourceType: iceberg.PrimitiveTypes.Float32,
+			targetType: iceberg.PrimitiveTypes.Float64,
+			source:     buildFloat32Array,
+			target:     buildFloat64Array,
+		},
+		{
+			name:       "date-to-timestamp",
+			sourceType: iceberg.PrimitiveTypes.Date,
+			targetType: iceberg.PrimitiveTypes.Timestamp,
+			source:     buildDate32Array,
+			target: func(mem memory.Allocator, shape encoderArrayShape) arrow.Array {
+				return buildFastPathArray(
+					array.NewTimestampBuilder(mem, arrow.FixedWidthTypes.Timestamp_us.(*arrow.TimestampType)),
+					shape,
+					arrow.Timestamp(7*86_400_000_000), arrow.Timestamp(-3*86_400_000_000),
+					arrow.Timestamp(0), arrow.Timestamp(4*86_400_000_000))
+			},
+		},
+		{
+			name:       "date-to-timestamp-ns",
+			sourceType: iceberg.PrimitiveTypes.Date,
+			targetType: iceberg.PrimitiveTypes.TimestampNs,
+			source:     buildDate32Array,
+			target: func(mem memory.Allocator, shape encoderArrayShape) arrow.Array {
+				return buildFastPathArray(
+					array.NewTimestampBuilder(mem, arrow.FixedWidthTypes.Timestamp_ns.(*arrow.TimestampType)),
+					shape,
+					arrow.Timestamp(7*86_400_000_000_000), arrow.Timestamp(-3*86_400_000_000_000),
+					arrow.Timestamp(0), arrow.Timestamp(4*86_400_000_000_000))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		for _, shape := range encoderArrayShapes {
+			t.Run(tc.name+"/"+shape.name, func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+				ctx := compute.WithAllocator(t.Context(), mem)
+
+				source := tc.source(mem, shape.shape)
+				rec := array.NewRecordBatch(
+					arrow.NewSchema([]arrow.Field{{Name: "key", Type: source.DataType(), Nullable: true}}, nil),
+					[]arrow.Array{source}, int64(source.Len()))
+				source.Release()
+				defer rec.Release()
+
+				target := tc.target(mem, shape.shape)
+				defer target.Release()
+				encoder, release, err := makeArrowFieldEncoderWithTypes(
+					ctx, rec, arrowFieldRef{path: []int{0}}, 1, "key", "data.parquet",
+					tc.sourceType, tc.targetType)
+				require.NoError(t, err)
+				if release != nil {
+					defer release()
+				}
+
+				wantEncoder := makeColEncoder(target)
+				var got, want bytes.Buffer
+				for row := range target.Len() {
+					got.Reset()
+					want.Reset()
+					encoder(&got, row)
+					wantEncoder(&want, row)
+					assert.Equal(t, want.Bytes(), got.Bytes(), "row %d", row)
+				}
+			})
+		}
+	}
 }

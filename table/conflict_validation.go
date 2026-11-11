@@ -53,6 +53,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -135,33 +136,35 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 // concurrent snapshots. The committer must refresh and rebuild their
 // commit from the new base — naive retry would fail identically.
 //
-// Unlike the other conflict sentinels in this file, ErrCommitDiverged
-// does NOT wrap ErrCommitFailed: it is terminal for the current
-// attempt. This mirrors Java's ValidationException, which the
-// SnapshotProducer retry machinery does not catch.
+// Unlike ErrConflictingDataFiles and ErrConflictingDeleteFiles,
+// ErrCommitDiverged does NOT wrap ErrCommitFailed: it is terminal for
+// the current attempt. This mirrors Java's ValidationException, which
+// the SnapshotProducer retry machinery does not catch.
 var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer on the branch")
 
-// Retryable conflict sentinels. All wrap ErrCommitFailed so the retry
-// loop in doCommit treats them as retryable. Callers that need to
-// distinguish which kind of conflict occurred can match on the
-// specific sentinel via errors.Is.
-var (
-	// ErrConflictingDataFiles is returned when a concurrent commit
-	// added data files that satisfy the committer's filter.
-	ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
+// ErrConflictingDataFiles is returned when a concurrent commit added data
+// files that satisfy the committer's filter. It wraps ErrCommitFailed: a
+// new transaction built from a reloaded table may succeed.
+var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
 
-	// ErrConflictingDeleteFiles is returned when a concurrent commit
-	// added delete files that could mask rows the committer is
-	// writing or replacing.
-	ErrConflictingDeleteFiles = fmt.Errorf("%w: concurrent delete files added", ErrCommitFailed)
+// ErrConflictingDeleteFiles is returned when a concurrent commit added
+// delete files that could mask rows the committer is writing or replacing.
+// It wraps ErrCommitFailed: a new transaction built from a reloaded table
+// may succeed.
+var ErrConflictingDeleteFiles = fmt.Errorf("%w: concurrent delete files added", ErrCommitFailed)
 
-	// ErrDataFilesMissing is returned when data files the committer
-	// explicitly references (e.g. the target of a position delete) are
-	// not live: a concurrent commit removed them, or, when RowDelta.Commit
-	// stages the delete, an operation staged earlier in the same
-	// transaction did. A refresh does not help in the second case.
-	ErrDataFilesMissing = fmt.Errorf("%w: referenced data files missing", ErrCommitFailed)
-)
+// ErrDataFilesMissing is returned when data files the committer
+// explicitly references (e.g. the target of a position delete) are
+// not live, for example because a concurrent commit removed them or an
+// operation staged earlier in the same transaction did. The same delete
+// can never apply, so retrying it cannot succeed: the caller must
+// rebuild the delete against the current table.
+//
+// Like ErrCommitDiverged, it does NOT wrap ErrCommitFailed, and when
+// Transaction.Commit fails with it the error also matches
+// ErrTransactionUnusable. This mirrors Java's ValidationException,
+// which the SnapshotProducer retry machinery does not catch.
+var ErrDataFilesMissing = errors.New("referenced data files missing")
 
 // conflictContext carries the inputs every validator needs: the
 // latest catalog state (current) and the filesystem used to read
@@ -179,6 +182,7 @@ var (
 // is deliberately no Refresh or mutator method; a refresh must flow as a
 // fresh call to newConflictContext(newBase, newCurrent, ...).
 type conflictContext struct {
+	ctx           context.Context
 	current       Metadata
 	branch        string
 	fs            iceio.IO
@@ -247,7 +251,7 @@ func (c *conflictManifestIO) Open(ctx context.Context, name string) (iceio.File,
 	info, statErr := f.Stat()
 	if statErr != nil || info == nil || info.Size() < 0 {
 		if statIO, ok := c.base.(iceio.StatIO); ok {
-			info, statErr = statIO.Stat(name)
+			info, statErr = statIO.Stat(ctx, name)
 		}
 	}
 	if statErr != nil || info == nil || info.Size() < 0 {
@@ -269,16 +273,16 @@ func (c *conflictManifestIO) Remove(context.Context, string) error {
 	return errConflictManifestIOReadOnly
 }
 
-func (c *conflictManifestIO) Stat(name string) (fs.FileInfo, error) {
+func (c *conflictManifestIO) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
 	if data, ok := c.files[name]; ok {
 		return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
 	}
 
 	if statIO, ok := c.base.(iceio.StatIO); ok {
-		return statIO.Stat(name)
+		return statIO.Stat(ctx, name)
 	}
 
-	f, err := c.Open(context.Background(), name)
+	f, err := c.Open(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +403,7 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 		return cached.manifests, cached.err
 	}
 
-	manifests, err := snap.Manifests(c.fs)
+	manifests, err := snap.Manifests(c.ctx, c.fs)
 	c.manifestLists[snap.SnapshotID] = conflictManifestList{manifests: manifests, err: err}
 
 	return manifests, err
@@ -420,7 +424,7 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // branch (divergent commit, expired base), newConflictContext returns
 // ErrCommitDiverged; the commit cannot be safely revalidated without
 // a refresh-and-rebuild.
-func newConflictContext(base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
+func newConflictContext(ctx context.Context, base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
 	currentHead := current.SnapshotByName(branch)
 	if currentHead == nil {
 		// Branch does not exist on the current side — either it was
@@ -445,6 +449,7 @@ func newConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 		}
 
 		return &conflictContext{
+			ctx:           ctx,
 			current:       current,
 			branch:        branch,
 			fs:            fs,
@@ -460,6 +465,7 @@ func newConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 	}
 
 	return &conflictContext{
+		ctx:           ctx,
 		current:       current,
 		branch:        branch,
 		fs:            fs,
@@ -491,7 +497,7 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 				continue
 			}
 
-			for entry, err := range mf.Entries(c.manifestReadIO(), false) {
+			for entry, err := range mf.Entries(c.ctx, c.manifestReadIO(), false) {
 				if err != nil {
 					return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
 				}
@@ -531,14 +537,14 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 // a referenced path as a conflict.
 //
 // Returns ErrDataFilesMissing listing the first few missing paths.
-// The committer should treat this as unrecoverable for the current
-// commit attempt and rebuild the delete against the current
+// It is unrecoverable: the transaction cannot be committed again, and
+// the committer must rebuild the delete against the current
 // snapshot's data files.
 //
 // Cost is O(all data manifests × all entries) regardless of
 // len(referencedPaths); callers MUST batch referenced paths into a
 // single call rather than calling once per path.
-func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) error {
+func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error {
 	if len(referencedPaths) == 0 {
 		return nil
 	}
@@ -547,12 +553,12 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 		needed[p] = struct{}{}
 	}
 
-	head := ctx.current.SnapshotByName(ctx.branch)
+	head := cc.current.SnapshotByName(cc.branch)
 	if head == nil {
-		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, ctx.branch)
+		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, cc.branch)
 	}
 
-	manifests, err := ctx.manifestsFor(*head)
+	manifests, err := cc.manifestsFor(*head)
 	if err != nil {
 		return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
 	}
@@ -560,7 +566,7 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 		if mf.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		for entry, err := range mf.Entries(ctx.manifestReadIO(), false) {
+		for entry, err := range mf.Entries(cc.ctx, cc.manifestReadIO(), false) {
 			if err != nil {
 				return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
 			}
@@ -604,7 +610,7 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 //
 // A retry sees the same changes: it reuses the staged snapshots' added manifests and
 // fails if a file one of them removes is gone from the fresh parent (checkRemovedFiles).
-func (t *Transaction) headDataFiles(fs iceio.IO, referenced []string, added []iceberg.DataFile) ([]string, error) {
+func (t *Transaction) headDataFiles(ctx context.Context, fs iceio.IO, referenced []string, added []iceberg.DataFile) ([]string, error) {
 	if len(referenced) == 0 {
 		return nil, nil
 	}
@@ -637,7 +643,7 @@ func (t *Transaction) headDataFiles(fs iceio.IO, referenced []string, added []ic
 	removed := make(map[string]struct{})
 	for _, su := range chain {
 		id := su.Snapshot.SnapshotID
-		manifests, err := su.Snapshot.Manifests(fs)
+		manifests, err := su.Snapshot.Manifests(ctx, fs)
 		if err != nil {
 			return nil, fmt.Errorf("iterating data files removed by staged snapshot %d: %w", id, err)
 		}
@@ -647,7 +653,7 @@ func (t *Transaction) headDataFiles(fs iceio.IO, referenced []string, added []ic
 			if mf.ManifestContent() != iceberg.ManifestContentData || mf.SnapshotID() != id || mf.DeletedDataFiles() == 0 {
 				continue
 			}
-			for entry, err := range mf.Entries(fs, false) {
+			for entry, err := range mf.Entries(ctx, fs, false) {
 				if err != nil {
 					return nil, fmt.Errorf("iterating data files removed by staged snapshot %d: %w", id, err)
 				}
@@ -663,7 +669,7 @@ func (t *Transaction) headDataFiles(fs iceio.IO, referenced []string, added []ic
 			if mf.ManifestContent() != iceberg.ManifestContentData {
 				continue
 			}
-			for entry, err := range mf.Entries(fs, true) {
+			for entry, err := range mf.Entries(ctx, fs, true) {
 				if err != nil {
 					return nil, fmt.Errorf("iterating data files added by staged snapshot %d: %w", id, err)
 				}
@@ -725,8 +731,8 @@ func dataFilesMissingError(missing []string, state string) error {
 //     one actual added file's partition value satisfies the filter.
 //  3. The surviving files are evaluated against their column metrics so
 //     files whose bounds cannot match the filter are ignored.
-func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.BooleanExpression) error {
-	if len(ctx.concurrent) == 0 {
+func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.BooleanExpression) error {
+	if len(cc.concurrent) == 0 {
 		return nil
 	}
 	if filter == nil {
@@ -741,25 +747,25 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 	// buildPartitionEvaluator) so there is one code path that pruning
 	// semantics flow through.
 	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
-		return buildPartitionProjection(specID, ctx.current, ctx.current.CurrentSchema(), filter, ctx.caseSensitive)
+		return buildPartitionProjection(specID, cc.current, cc.current.CurrentSchema(), filter, cc.caseSensitive)
 	})
 	manifestEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-		return buildManifestEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
+		return buildManifestEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
 	})
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
-		return buildPartitionEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
+		return buildPartitionEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
 	})
 	// Eval copies each file's metrics into fresh evaluator state, so this
 	// evaluator can be reused across concurrent manifests.
 	// includeEmptyFiles=false is intentional: an empty file has no rows that
 	// can match the filter and must not create a conflict.
-	metricsEval, err := newInclusiveMetricsEvaluator(ctx.current.CurrentSchema(), filter, ctx.caseSensitive, false)
+	metricsEval, err := newInclusiveMetricsEvaluator(cc.current.CurrentSchema(), filter, cc.caseSensitive, false)
 	if err != nil {
 		return fmt.Errorf("failed to build metrics evaluator: %w", err)
 	}
 
-	for _, snap := range ctx.concurrent {
-		manifests, err := ctx.manifestsFor(snap)
+	for _, snap := range cc.concurrent {
+		manifests, err := cc.manifestsFor(snap)
 		if err != nil {
 			return fmt.Errorf("loading manifests for concurrent snapshot %d: %w", snap.SnapshotID, err)
 		}
@@ -784,7 +790,7 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
 			}
-			for e, err := range mf.Entries(ctx.manifestReadIO(), false) {
+			for e, err := range mf.Entries(cc.ctx, cc.manifestReadIO(), false) {
 				if err != nil {
 					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
 				}
@@ -823,12 +829,12 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 // Under IsolationSnapshot this validator is a no-op: concurrent
 // appends are allowed and will simply land in the same partition
 // alongside the new deletes.
-func validateNoConflictingDataFiles(ctx *conflictContext, filter iceberg.BooleanExpression, level IsolationLevel) error {
+func validateNoConflictingDataFiles(cc *conflictContext, filter iceberg.BooleanExpression, level IsolationLevel) error {
 	if level != IsolationSerializable {
 		return nil
 	}
 
-	return validateAddedDataFilesMatchingFilter(ctx, filter)
+	return validateAddedDataFilesMatchingFilter(cc, filter)
 }
 
 // validateNoConflictingDataFilesInPartitions is like
@@ -849,21 +855,21 @@ func validateNoConflictingDataFiles(ctx *conflictContext, filter iceberg.Boolean
 // directly.
 //
 // Under IsolationSnapshot this validator is a no-op.
-func validateNoConflictingDataFilesInPartitions(ctx *conflictContext, eqDeleteFiles []iceberg.DataFile, level IsolationLevel) error {
+func validateNoConflictingDataFilesInPartitions(cc *conflictContext, eqDeleteFiles []iceberg.DataFile, level IsolationLevel) error {
 	if level != IsolationSerializable {
 		return nil
 	}
 
-	if len(ctx.concurrent) == 0 || len(eqDeleteFiles) == 0 {
+	if len(cc.concurrent) == 0 || len(eqDeleteFiles) == 0 {
 		return nil
 	}
 
-	filter, err := eqDeletePartitionsToFilter(eqDeleteFiles, ctx.current)
+	filter, err := eqDeletePartitionsToFilter(eqDeleteFiles, cc.current)
 	if err != nil {
 		return fmt.Errorf("building partition conflict filter: %w", err)
 	}
 
-	return validateNoConflictingDataFiles(ctx, filter, level)
+	return validateNoConflictingDataFiles(cc, filter, level)
 }
 
 type equalityDeletePartitionSpecInfo struct {
@@ -872,8 +878,66 @@ type equalityDeletePartitionSpecInfo struct {
 }
 
 type equalityDeleteSourceFieldInfo struct {
-	name  string
-	found bool
+	name      string
+	fieldType iceberg.Type
+	found     bool
+}
+
+// NaNs are not equal to themselves as Go map keys, while the existing
+// equality evaluator compares two NaNs as equal. Binary sets use hash keys,
+// which can collide, so retain individual predicates for those values too.
+// Keep literals that require a cast on the equality path.
+func equalityDeleteLiteralCanUseSet(lit iceberg.Literal, fieldType iceberg.Type) bool {
+	switch value := lit.(type) {
+	case iceberg.Float32Literal:
+		return !math.IsNaN(float64(value)) && lit.Type().Equals(fieldType)
+	case iceberg.Float64Literal:
+		return !math.IsNaN(float64(value)) && lit.Type().Equals(fieldType)
+	case iceberg.DecimalLiteral:
+		// DecimalLiteral.Type reports a placeholder precision of 9.
+		// Equal scales bind without conversion for any declared precision.
+		decimalType, ok := fieldType.(iceberg.DecimalType)
+
+		return ok && value.Scale == decimalType.Scale()
+	case iceberg.BoolLiteral, iceberg.Int32Literal, iceberg.Int64Literal,
+		iceberg.DateLiteral, iceberg.TimeLiteral, iceberg.TimestampLiteral,
+		iceberg.TimestampNsLiteral, iceberg.StringLiteral, iceberg.UUIDLiteral:
+		return lit.Type().Equals(fieldType)
+	default:
+		return false
+	}
+}
+
+type equalityDeleteIdentityGroupKey struct {
+	specID  int
+	fieldID int
+}
+
+type equalityDeleteIdentityGroup struct {
+	fieldName string
+	index     int
+	literals  []iceberg.Literal
+}
+
+// balancedConflictDisjunction combines partition terms pairwise so the OR
+// expression tree has logarithmic depth while preserving term order.
+func balancedConflictDisjunction(terms []iceberg.BooleanExpression) iceberg.BooleanExpression {
+	if len(terms) == 0 {
+		return iceberg.AlwaysTrue{}
+	}
+	for len(terms) > 1 {
+		next := terms[:0]
+		for i := 0; i < len(terms); i += 2 {
+			if i+1 == len(terms) {
+				next = append(next, terms[i])
+			} else {
+				next = append(next, iceberg.NewOr(terms[i], terms[i+1]))
+			}
+		}
+		terms = next
+	}
+
+	return terms[0]
 }
 
 // eqDeletePartitionsToFilter converts equality-delete data files into an
@@ -896,6 +960,8 @@ type equalityDeleteSourceFieldInfo struct {
 func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceberg.BooleanExpression, error) {
 	terms := make([]iceberg.BooleanExpression, 0, len(files))
 	specInfoByID := make(map[int]*equalityDeletePartitionSpecInfo)
+	var identityGroups map[equalityDeleteIdentityGroupKey]*equalityDeleteIdentityGroup
+	var groups []*equalityDeleteIdentityGroup
 	seen := make(map[string]struct{}, len(files))
 	var currentSchema *iceberg.Schema
 
@@ -962,6 +1028,7 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 		}
 
 		conjuncts := make([]iceberg.BooleanExpression, 0, len(p))
+		grouped := false
 		for _, partFieldID := range fieldIDs {
 			pf, ok := specInfo.fields[partFieldID]
 			if !ok {
@@ -976,7 +1043,7 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 					currentSchema = meta.CurrentSchema()
 				}
 				field, found := currentSchema.FindFieldByID(pf.FirstSourceID())
-				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, found: found}
+				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, fieldType: field.Type, found: found}
 				specInfo.sourceFields[partFieldID] = sourceField
 			}
 			if !sourceField.found {
@@ -995,25 +1062,67 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				return nil, fmt.Errorf("partition field %q: %w", sourceField.name, err)
 			}
 
-			conjuncts = append(conjuncts, iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.name), lit))
+			// x = NaN is never true and Bind rejects a NaN literal, so a NaN
+			// partition value matches through IsNaN, as in
+			// internal.BuildPartitionMatchPredicate. The value is checked after
+			// conversion to the source type, which also catches a string that
+			// casts to NaN.
+			if isNaNPartitionLiteral(lit, sourceField.fieldType) {
+				conjuncts = append(conjuncts, iceberg.IsNaN(iceberg.Reference(sourceField.name)))
+
+				continue
+			}
+
+			// Keep values needing a cast on the equality path.
+			if len(fieldIDs) == 1 && equalityDeleteLiteralCanUseSet(lit, sourceField.fieldType) {
+				key := equalityDeleteIdentityGroupKey{specID: specID, fieldID: partFieldID}
+				group := identityGroups[key]
+				if group == nil {
+					if identityGroups == nil {
+						identityGroups = make(map[equalityDeleteIdentityGroupKey]*equalityDeleteIdentityGroup)
+					}
+					group = &equalityDeleteIdentityGroup{fieldName: sourceField.name, index: len(terms)}
+					identityGroups[key] = group
+					groups = append(groups, group)
+					terms = append(terms, nil)
+				}
+				group.literals = append(group.literals, lit)
+				grouped = true
+
+				break
+			}
+
+			conjuncts = append(conjuncts,
+				iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.name), lit))
+		}
+		if grouped {
+			continue
 		}
 
+		var term iceberg.BooleanExpression
 		if len(conjuncts) == 1 {
-			terms = append(terms, conjuncts[0])
+			term = conjuncts[0]
 		} else {
-			terms = append(terms, iceberg.NewAnd(conjuncts[0], conjuncts[1], conjuncts[2:]...))
+			term = iceberg.NewAnd(conjuncts[0], conjuncts[1], conjuncts[2:]...)
+		}
+		terms = append(terms, term)
+	}
+
+	for _, group := range groups {
+		// SetPredicate keeps singleton groups as ordinary equality predicates.
+		// Keep larger IN sets within the metrics evaluator's per-value limit.
+		for start := 0; start < len(group.literals); start += inPredicateLimit {
+			end := min(start+inPredicateLimit, len(group.literals))
+			term := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference(group.fieldName), group.literals[start:end])
+			if start == 0 {
+				terms[group.index] = term
+			} else {
+				terms = append(terms, term)
+			}
 		}
 	}
 
-	if len(terms) == 0 {
-		return iceberg.AlwaysTrue{}, nil
-	}
-
-	if len(terms) == 1 {
-		return terms[0], nil
-	}
-
-	return iceberg.NewOr(terms[0], terms[1], terms[2:]...), nil
+	return balancedConflictDisjunction(terms), nil
 }
 
 // validateNoNewDeletesForRewrittenFiles rejects the commit if any
@@ -1039,59 +1148,120 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 //     Java's approach for RewriteFiles and avoids silently losing
 //     deletes. A follow-up PR will accept optional partition-overlap
 //     hints to narrow this check.
-func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles []iceberg.DataFile) error {
-	if len(rewrittenFiles) == 0 || len(ctx.concurrent) == 0 {
+func validateNoNewDeletesForRewrittenFiles(cc *conflictContext, rewrittenFiles []iceberg.DataFile) error {
+	if len(rewrittenFiles) == 0 || len(cc.concurrent) == 0 {
 		return nil
 	}
 
-	rewrittenPaths := make(map[string]struct{}, len(rewrittenFiles))
-	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
-	for _, df := range rewrittenFiles {
-		rewrittenPaths[df.FilePath()] = struct{}{}
-		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
-		if err != nil {
-			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
-				df.FilePath(), df.SpecID(), err)
-		}
-		rewrittenPartitions[key] = struct{}{}
+	rewritten, err := newRewrittenFileSet(rewrittenFiles)
+	if err != nil {
+		return err
 	}
 
-	return ctx.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
-		df := e.DataFile()
-		switch df.ContentType() {
-		case iceberg.EntryContentPosDeletes:
-			if path := referencedDataFilePath(df); path != "" {
-				if _, overlap := rewrittenPaths[path]; overlap {
-					return fmt.Errorf("%w: snapshot %d added pos-delete %s referencing rewritten file %s",
-						ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), path)
-				}
+	return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
+		added, err := newAddedDelete(snap, e.DataFile())
+		if err != nil {
+			return err
+		}
 
-				return nil
-			}
+		return rewritten.conflict(added)
+	})
+}
 
-			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
-			if err != nil {
-				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
-					df.FilePath(), df.SpecID(), err)
-			}
-			if _, overlap := rewrittenPartitions[key]; overlap {
-				return fmt.Errorf("%w: snapshot %d added partition-scoped pos-delete %s overlapping rewritten partition (spec %d)",
-					ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), df.SpecID())
+// addedDelete is a delete file added by a concurrent snapshot, reduced to
+// what rewrittenFileSet.conflict needs, so callers can keep it without
+// holding on to manifest entries.
+type addedDelete struct {
+	snapshotID int64
+	path       string
+	specID     int32
+	content    iceberg.ManifestEntryContent
+	// refPath is the data file a position delete targets, or "" when the
+	// delete is partition-scoped.
+	refPath string
+	// partitionKey is set only for partition-scoped position deletes.
+	partitionKey string
+}
+
+func newAddedDelete(snap Snapshot, df iceberg.DataFile) (addedDelete, error) {
+	added := addedDelete{
+		snapshotID: snap.SnapshotID,
+		path:       df.FilePath(),
+		specID:     df.SpecID(),
+		content:    df.ContentType(),
+	}
+	if added.content != iceberg.EntryContentPosDeletes {
+		return added, nil
+	}
+
+	if added.refPath = referencedDataFilePath(df); added.refPath != "" {
+		return added, nil
+	}
+
+	key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
+	if err != nil {
+		return added, fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
+			df.FilePath(), df.SpecID(), err)
+	}
+	added.partitionKey = key
+
+	return added, nil
+}
+
+// rewrittenFileSet indexes the data files a rewrite replaces by path and by
+// (spec, partition).
+type rewrittenFileSet struct {
+	paths      map[string]struct{}
+	partitions map[string]struct{}
+}
+
+func newRewrittenFileSet(files []iceberg.DataFile) (rewrittenFileSet, error) {
+	set := rewrittenFileSet{
+		paths:      make(map[string]struct{}, len(files)),
+		partitions: make(map[string]struct{}, len(files)),
+	}
+	for _, df := range files {
+		set.paths[df.FilePath()] = struct{}{}
+		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
+		if err != nil {
+			return set, fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
+				df.FilePath(), df.SpecID(), err)
+		}
+		set.partitions[key] = struct{}{}
+	}
+
+	return set, nil
+}
+
+// conflict returns ErrConflictingDeleteFiles when d could apply to a file in
+// the set.
+func (s rewrittenFileSet) conflict(d addedDelete) error {
+	switch d.content {
+	case iceberg.EntryContentPosDeletes:
+		if d.refPath != "" {
+			if _, overlap := s.paths[d.refPath]; overlap {
+				return fmt.Errorf("%w: snapshot %d added pos-delete %s referencing rewritten file %s",
+					ErrConflictingDeleteFiles, d.snapshotID, d.path, d.refPath)
 			}
 
 			return nil
-
-		case iceberg.EntryContentEqDeletes:
-			// Conservative: any concurrent eq-delete is a conflict
-			// for a rewrite, because the predicate could cover a
-			// rewritten file. Follow-up: accept partition-overlap
-			// hints to narrow this.
-			return fmt.Errorf("%w: snapshot %d added equality delete %s during rewrite",
-				ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath())
 		}
 
-		return nil
-	})
+		if _, overlap := s.partitions[d.partitionKey]; overlap {
+			return fmt.Errorf("%w: snapshot %d added partition-scoped pos-delete %s overlapping rewritten partition (spec %d)",
+				ErrConflictingDeleteFiles, d.snapshotID, d.path, d.specID)
+		}
+
+	case iceberg.EntryContentEqDeletes:
+		// Conservative: any concurrent eq-delete is a conflict
+		// for a rewrite, because the predicate could cover a
+		// rewritten file. Follow-up: accept partition-overlap
+		// hints to narrow this.
+		return fmt.Errorf("%w: snapshot %d added equality delete %s during rewrite",
+			ErrConflictingDeleteFiles, d.snapshotID, d.path)
+	}
+
+	return nil
 }
 
 // referencedDataFilePath resolves the single data file a pos-delete
@@ -1131,6 +1301,24 @@ var filePathFieldID = func() int {
 
 	return f.ID
 }()
+
+// isNaNPartitionLiteral reports whether a partition literal is a floating-point
+// NaN once converted to the source field's type. A literal that cannot be
+// converted is left for Bind to reject.
+func isNaNPartitionLiteral(lit iceberg.Literal, fieldType iceberg.Type) bool {
+	converted, err := lit.To(fieldType)
+	if err != nil {
+		return false
+	}
+	switch v := converted.(type) {
+	case iceberg.Float32Literal:
+		return math.IsNaN(float64(v))
+	case iceberg.Float64Literal:
+		return math.IsNaN(float64(v))
+	}
+
+	return false
+}
 
 // canonicalPartitionKey returns a deterministic, injective string key for a
 // (specID, partition) tuple. Partition values are compared post-transform

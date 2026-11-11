@@ -18,8 +18,10 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -358,64 +360,113 @@ func (n NestedField) MarshalJSON() ([]byte, error) {
 }
 
 func defaultValueToJSON(typ Type, value any) any {
-	switch typ.(type) {
-	case BinaryType, FixedType:
-		switch value := value.(type) {
-		case []byte:
-			return internal.EncodeDefaultBytes(value)
-		case BinaryLiteral:
-			return internal.EncodeDefaultBytes(value)
-		case FixedLiteral:
-			return internal.EncodeDefaultBytes(value)
-		}
+	if encoded, ok := hexDefault(typ, value); ok {
+		return encoded
 	}
 
 	return value
 }
 
-func (n *NestedField) UnmarshalJSON(b []byte) error {
-	type Alias NestedField
-	var next NestedField
-	aux := struct {
-		ID       *int      `json:"id"`
-		Required *bool     `json:"required"`
-		Type     typeIFace `json:"type"`
-		*Alias
-	}{
-		Alias: (*Alias)(&next),
+// decodeNestedFieldDefault preserves long values without converting them to float64.
+// Nested JSON defaults may contain long literals even for other field types.
+func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression bool) (any, error) {
+	if len(raw) == 0 {
+		return nil, nil
 	}
+
+	trimmed := bytes.TrimSpace(raw)
+	if _, isLong := typ.(Int64Type); isLong && (!allowExpression || len(trimmed) == 0 || trimmed[0] != '{') {
+		var value *int64
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, fmt.Errorf("%w: invalid long default: %w", ErrInvalidSchema, err)
+		}
+		if value == nil {
+			return nil, nil
+		}
+
+		return *value, nil
+	}
+
+	// Preserve numbers in object and list defaults, including v4 expressions.
+	// Other scalar defaults retain their existing Go representations.
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("%w: invalid JSON default: %w", ErrInvalidSchema, err)
+		}
+
+		return value, nil
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
+func (n *NestedField) UnmarshalJSON(b []byte) error {
+	aux := struct {
+		ID             *int            `json:"id"`
+		Name           string          `json:"name"`
+		Required       *bool           `json:"required"`
+		Type           typeIFace       `json:"type"`
+		Doc            string          `json:"doc"`
+		InitialDefault json.RawMessage `json:"initial-default"`
+		WriteDefault   json.RawMessage `json:"write-default"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	next.Type = aux.Type.Type
-
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
 	}
-	next.ID = *aux.ID
 
-	if next.Name == "" {
+	if aux.Name == "" {
 		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
 	}
 
-	if next.Type == nil {
-		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, next.Name)
+	if aux.Type.Type == nil {
+		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, aux.Name)
 	}
 
 	if aux.Required == nil {
 		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
 	}
-	next.Required = *aux.Required
 
-	*n = next
+	initialDefault, err := decodeNestedFieldDefault(aux.InitialDefault, aux.Type.Type, false)
+	if err != nil {
+		return fmt.Errorf("invalid initial-default for field %q: %w", aux.Name, err)
+	}
+	writeDefault, err := decodeNestedFieldDefault(aux.WriteDefault, aux.Type.Type, true)
+	if err != nil {
+		return fmt.Errorf("invalid write-default for field %q: %w", aux.Name, err)
+	}
+
+	*n = NestedField{
+		Type: aux.Type.Type,
+		ID:   *aux.ID, Name: aux.Name, Required: *aux.Required, Doc: aux.Doc,
+		InitialDefault: initialDefault, WriteDefault: writeDefault,
+	}
 
 	return nil
 }
 
 type StructType struct {
 	FieldList []NestedField `json:"fields"`
+}
+
+// NewStructType returns a struct type with the given fields. The fields are
+// copied, so later changes to a slice passed with fields... do not affect the
+// returned type.
+func NewStructType(fields ...NestedField) *StructType {
+	return &StructType{FieldList: slices.Clone(fields)}
 }
 
 func (s *StructType) Equals(other Type) bool {
@@ -429,15 +480,39 @@ func (s *StructType) Equals(other Type) bool {
 	})
 }
 
-func (s *StructType) Fields() []NestedField { return s.FieldList }
+// NumFields returns the number of fields in the struct.
+func (s *StructType) NumFields() int { return len(s.FieldList) }
+
+// Field returns the i-th field of the struct. It panics if i is out of range.
+func (s *StructType) Field(i int) NestedField { return s.FieldList[i] }
+
+// Fields returns a copy of the struct's fields. Changing the returned slice
+// does not change the struct. Use NumFields and Field to read the fields
+// without copying them.
+func (s *StructType) Fields() []NestedField { return slices.Clone(s.FieldList) }
+
+// The JSON methods of the nested types name every serialized field instead of
+// encoding through an alias of the type, so the wire format does not depend on
+// which Go fields are exported.
 
 func (s *StructType) MarshalJSON() ([]byte, error) {
-	type Alias StructType
-
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-	}{Type: s.Type(), Alias: (*Alias)(s)})
+		Type   string        `json:"type"`
+		Fields []NestedField `json:"fields"`
+	}{Type: s.Type(), Fields: s.FieldList})
+}
+
+func (s *StructType) UnmarshalJSON(b []byte) error {
+	aux := struct {
+		Fields []NestedField `json:"fields"`
+	}{}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+
+	s.FieldList = aux.Fields
+
+	return nil
 }
 
 func (*StructType) Type() string { return "struct" }
@@ -473,14 +548,22 @@ type ListType struct {
 	ElementRequired bool `json:"element-required"`
 }
 
-func (l *ListType) MarshalJSON() ([]byte, error) {
-	type Alias ListType
+// NewListType returns a list type whose element field has the given ID, type
+// and required flag.
+func NewListType(elementID int, element Type, required bool) *ListType {
+	return &ListType{ElementID: elementID, Element: element, ElementRequired: required}
+}
 
+func (l *ListType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-		Element *typeIFace `json:"element"`
-	}{Type: l.Type(), Alias: (*Alias)(l), Element: &typeIFace{l.Element}})
+		Type            string     `json:"type"`
+		ElementID       int        `json:"element-id"`
+		ElementRequired bool       `json:"element-required"`
+		Element         *typeIFace `json:"element"`
+	}{
+		Type: l.Type(), ElementID: l.ElementID, ElementRequired: l.ElementRequired,
+		Element: &typeIFace{l.Element},
+	})
 }
 
 func (l *ListType) Equals(other Type) bool {
@@ -545,16 +628,25 @@ type MapType struct {
 	ValueRequired bool `json:"value-required"`
 }
 
-func (m *MapType) MarshalJSON() ([]byte, error) {
-	type Alias MapType
+// NewMapType returns a map type with the given key and value fields. Map keys
+// are always required.
+func NewMapType(keyID int, key Type, valueID int, value Type, valueRequired bool) *MapType {
+	return &MapType{
+		KeyID: keyID, KeyType: key,
+		ValueID: valueID, ValueType: value, ValueRequired: valueRequired,
+	}
+}
 
+func (m *MapType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		*Alias
-		KeyType   *typeIFace `json:"key"`
-		ValueType *typeIFace `json:"value"`
+		Type          string     `json:"type"`
+		KeyID         int        `json:"key-id"`
+		ValueID       int        `json:"value-id"`
+		ValueRequired bool       `json:"value-required"`
+		KeyType       *typeIFace `json:"key"`
+		ValueType     *typeIFace `json:"value"`
 	}{
-		Type: m.Type(), Alias: (*Alias)(m),
+		Type: m.Type(), KeyID: m.KeyID, ValueID: m.ValueID, ValueRequired: m.ValueRequired,
 		KeyType:   &typeIFace{m.KeyType},
 		ValueType: &typeIFace{m.ValueType},
 	})
@@ -869,6 +961,12 @@ func (t Timestamp) ToDate() Date {
 }
 
 func (t Timestamp) ToNanos() TimestampNano {
+	// Both timestamp units use signed 64-bit values. The nanosecond value
+	// must fit before scaling, otherwise multiplication silently wraps.
+	if t < Timestamp(math.MinInt64/1000) || t > Timestamp(math.MaxInt64/1000) {
+		panic(fmt.Errorf("%w: timestamp %d is outside the nanosecond range", ErrBadCast, t))
+	}
+
 	return TimestampNano(int64(t) * 1000)
 }
 

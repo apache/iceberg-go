@@ -24,6 +24,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/puffin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -151,6 +152,27 @@ func TestDVWriterSingleDataFile(t *testing.T) {
 	verifyDVReadBack(t, fs, df)
 }
 
+func TestDVWriterFlushWritesRowPositionFieldID(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs, unpartitionedResolver())
+	location := "mem://test/row-position-field.puffin"
+
+	require.NoError(t, w.Add("s3://bucket/data/file-001.parquet", []int64{1, 3}, 0, nil))
+	dataFiles, err := w.Flush(context.Background(), location)
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+
+	file, err := fs.Open(t.Context(), location)
+	require.NoError(t, err)
+	reader, err := puffin.NewReader(file)
+	closeErr := file.Close()
+	require.NoError(t, err)
+	require.NoError(t, closeErr)
+	blobs := reader.Blobs()
+	require.Len(t, blobs, 1)
+	assert.Equal(t, []int32{iceberg.RowPositionFieldID}, blobs[0].Fields)
+}
+
 func TestDVWriterMultipleDataFiles(t *testing.T) {
 	fs := newTestFS()
 	w := NewDVWriter(fs, unpartitionedResolver())
@@ -234,7 +256,7 @@ func TestDVWriterAddRejectsNegativePositions(t *testing.T) {
 	require.Len(t, dataFiles, 1)
 	assert.Equal(t, int64(2), dataFiles[0].Count(), "negative Add should be rejected without mutating prior valid state")
 
-	bm, err := ReadDV(fs, dataFiles[0])
+	bm, err := ReadDV(t.Context(), fs, dataFiles[0])
 	require.NoError(t, err)
 	assert.True(t, bm.Contains(1))
 	assert.True(t, bm.Contains(3))
@@ -271,7 +293,7 @@ func TestDVWriterAddPositionRejectsNegativeAfterValidPosition(t *testing.T) {
 	assert.Equal(t, int64(1), dataFiles[0].Count(),
 		"negative AddPosition should not mutate prior valid state")
 
-	bm, err := ReadDV(fs, dataFiles[0])
+	bm, err := ReadDV(t.Context(), fs, dataFiles[0])
 	require.NoError(t, err)
 	assert.True(t, bm.Contains(1))
 	assert.Equal(t, dataFiles[0].Count(), bm.Cardinality())
@@ -527,7 +549,7 @@ func TestDVWriterFlushUnknownSpecID(t *testing.T) {
 func verifyDVReadBack(t *testing.T, fs iceio.IO, df iceberg.DataFile) {
 	t.Helper()
 
-	bm, err := ReadDV(fs, df)
+	bm, err := ReadDV(t.Context(), fs, df)
 	require.NoError(t, err)
 	assert.Equal(t, df.Count(), bm.Cardinality())
 }

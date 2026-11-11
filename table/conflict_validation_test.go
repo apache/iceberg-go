@@ -210,20 +210,23 @@ func TestRetryableConflictErrors_WrapCommitFailed(t *testing.T) {
 	retryable := []error{
 		ErrConflictingDataFiles,
 		ErrConflictingDeleteFiles,
-		ErrDataFilesMissing,
 	}
 	for _, s := range retryable {
 		assert.ErrorIsf(t, s, ErrCommitFailed, "%v should wrap ErrCommitFailed", s)
 	}
 }
 
-func TestErrCommitDiverged_IsTerminal(t *testing.T) {
-	// Divergence is terminal for the current attempt — retrying the
-	// same updates will produce the same divergence. It therefore
-	// MUST NOT wrap ErrCommitFailed, which is the retry machinery's
+func TestTerminalErrors_DoNotWrapCommitFailed(t *testing.T) {
+	// Retrying the same commit fails identically for these sentinels, so
+	// they MUST NOT wrap ErrCommitFailed, which is the retry machinery's
 	// trigger.
-	assert.False(t, errors.Is(ErrCommitDiverged, ErrCommitFailed),
-		"ErrCommitDiverged must not wrap ErrCommitFailed — it is a terminal error")
+	terminal := []error{
+		ErrCommitDiverged,
+		ErrDataFilesMissing,
+	}
+	for _, s := range terminal {
+		assert.NotErrorIsf(t, s, ErrCommitFailed, "%v must not wrap ErrCommitFailed", s)
+	}
 }
 
 func newConflictTestMetadata(t *testing.T, branchHead *int64) Metadata {
@@ -311,7 +314,7 @@ func TestNewConflictContext_NoConcurrentCommits(t *testing.T) {
 	head := int64(42)
 	meta := newConflictTestMetadata(t, &head)
 
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 	assert.Empty(t, ctx.concurrent)
 }
@@ -326,7 +329,7 @@ func TestNewConflictContext_WriterHasNoBranchView(t *testing.T) {
 	head := int64(7)
 	current := newConflictTestMetadata(t, &head)
 
-	ctx, err := newConflictContext(base, current, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.NoError(t, err)
 	require.Len(t, ctx.concurrent, 1)
 	assert.Equal(t, int64(7), ctx.concurrent[0].SnapshotID)
@@ -340,7 +343,7 @@ func TestNewConflictContext_EmptyBaseEnumeratesFullAncestry(t *testing.T) {
 	base := newConflictTestMetadata(t, nil)
 	current := newConflictTestMetadataWithChain(t, []int64{10, 11, 12})
 
-	ctx, err := newConflictContext(base, current, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.NoError(t, err)
 	require.Len(t, ctx.concurrent, 3)
 	assert.Equal(t, int64(12), ctx.concurrent[0].SnapshotID)
@@ -355,7 +358,7 @@ func TestNewConflictContext_MissingCurrentBranch(t *testing.T) {
 	base := newConflictTestMetadata(t, &head)
 	current := newConflictTestMetadata(t, nil)
 
-	_, err := newConflictContext(base, current, MainBranch, nil, true)
+	_, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommitDiverged)
 	assert.False(t, errors.Is(err, ErrCommitFailed),
@@ -371,7 +374,7 @@ func TestNewConflictContext_BaseNotInCurrentAncestry(t *testing.T) {
 	base := newConflictTestMetadata(t, &baseHead)
 	current := newConflictTestMetadata(t, &currentHead)
 
-	_, err := newConflictContext(base, current, MainBranch, nil, true)
+	_, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommitDiverged)
 	assert.False(t, errors.Is(err, ErrCommitFailed),
@@ -384,7 +387,7 @@ func TestValidateDataFilesExist_EmptyInput(t *testing.T) {
 	// touching metadata or the filesystem.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	require.NoError(t, validateDataFilesExist(ctx, nil))
@@ -396,7 +399,7 @@ func TestValidateNoNewDeletesForRewrittenFiles_EmptyInputs(t *testing.T) {
 	// short-circuit to nil.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	// Empty rewrittenFiles.
@@ -744,7 +747,7 @@ func TestValidateAddedDataFilesMatchingFilter_NoConcurrent(t *testing.T) {
 	// regardless of filter.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}))
@@ -860,7 +863,7 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 	// even attempt to enumerate concurrent snapshots.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	require.NoError(t, validateNoConflictingDataFiles(ctx, iceberg.AlwaysTrue{}, IsolationSnapshot))
@@ -868,15 +871,31 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 
 type conflictValidationStatIO struct {
 	*trackingCallsIO
+	statCtx context.Context
 }
 
-func (c *conflictValidationStatIO) Stat(name string) (fs.FileInfo, error) {
+func (c *conflictValidationStatIO) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
+	c.statCtx = ctx
 	data, ok := c.files[name]
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
 
 	return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
+}
+
+func TestConflictManifestIOStatPassesContext(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "caller")
+	tio := newTrackingCallsIO()
+	tio.files["manifest.avro"] = []byte("manifest")
+	base := &conflictValidationStatIO{trackingCallsIO: tio}
+	cache := newConflictManifestIO(base)
+
+	_, err := cache.Stat(ctx, "manifest.avro")
+	require.NoError(t, err)
+	require.NotNil(t, base.statCtx)
+	assert.Equal(t, "caller", base.statCtx.Value(key{}))
 }
 
 func TestConflictValidationReusesSharedManifestReads(t *testing.T) {
@@ -970,7 +989,7 @@ func TestConflictValidationSharesManifestAfterDataFileEarlyExit(t *testing.T) {
 	current, err := builder.Build()
 	require.NoError(t, err)
 
-	ctx, err := newConflictContext(
+	ctx, err := newConflictContext(t.Context(),
 		base,
 		current,
 		MainBranch,
