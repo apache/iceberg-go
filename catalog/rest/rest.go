@@ -879,7 +879,7 @@ func toProps(o *options) iceberg.Properties {
 	setIf(keyOauthCredential, o.credential)
 	setIf(keyWarehouseLocation, o.warehouseLocation)
 	setIf(keyMetadataLocation, o.metadataLocation)
-	if o.enableSigv4 {
+	if o.enableSigv4 || o.authTypeSigV4 {
 		props[keyRestSigV4] = "true"
 		setIf(keyRestSigV4Region, o.sigv4Region)
 		setIf(keyRestSigV4Service, o.sigv4Service)
