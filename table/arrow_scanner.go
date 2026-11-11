@@ -2135,16 +2135,10 @@ func positionDeleteFallbackProjection(rdr tblutils.FileReader, invariants *arrow
 	if physicalSchema.NumFields() == 0 {
 		return nil, nil, fmt.Errorf("%w: cannot read row positions from a parquet file without physical fields", iceberg.ErrInvalidSchema)
 	}
-	field := physicalSchema.Field(0)
-	for _, candidate := range physicalSchema.Fields() {
-		switch candidate.Type.(type) {
-		case iceberg.BooleanType, iceberg.Int32Type, iceberg.Int64Type, iceberg.Float32Type, iceberg.Float64Type:
-			field = candidate
-
-			goto selected
-		}
+	field, found := positionDeleteFallbackNumericField(physicalSchema.Fields())
+	if !found {
+		field = physicalSchema.Field(0)
 	}
-selected:
 	fallbackIDs := set[int]{}
 	collectLeafIDs(field.Type, field.ID, fallbackIDs)
 	physical, indices, err = rdr.PrunedSchema(fallbackIDs, invariants.nameMapping)
@@ -2154,6 +2148,23 @@ selected:
 	schema, err := ArrowSchemaToIcebergWithOptions(physical, opts)
 
 	return schema, indices, err
+}
+
+// Prefer a small primitive field, including one inside a struct. A single
+// leaf preserves row counts without reading its unselected siblings.
+func positionDeleteFallbackNumericField(fields []iceberg.NestedField) (iceberg.NestedField, bool) {
+	for _, field := range fields {
+		switch typ := field.Type.(type) {
+		case iceberg.BooleanType, iceberg.Int32Type, iceberg.Int64Type, iceberg.Float32Type, iceberg.Float64Type:
+			return field, true
+		case *iceberg.StructType:
+			if nested, found := positionDeleteFallbackNumericField(typ.Fields()); found {
+				return nested, true
+			}
+		}
+	}
+
+	return iceberg.NestedField{}, false
 }
 
 func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema, rowFilter iceberg.BooleanExpression) (recProcessFn, bool, error) {

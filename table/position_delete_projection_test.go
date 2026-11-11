@@ -139,6 +139,40 @@ func TestMergeOnReadDeleteDoesNotReadUnusedColumn(t *testing.T) {
 	require.Zero(t, blocked.reads.Load())
 }
 
+func TestScanProjectsNestedFieldWithoutReadingSibling(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "details", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "unused", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 4, Name: "target", Type: iceberg.PrimitiveTypes.Int64},
+		)})
+	tbl := newProjectedDeleteTable(t, schema, nil)
+	tbl = appendProjectedDeleteRows(t, tbl, `[{"id":1,"details":{"unused":"a","target":10}},{"id":2,"details":{"unused":"b","target":20}},{"id":3,"details":null}]`)
+	tbl, blocked := blockDeleteProjectionColumn(t, tbl, "", 1)
+	_, records, err := tbl.Scan(table.WithSelectedFields("details.target")).ToArrowRecords(t.Context())
+	require.NoError(t, err)
+	var values []int64
+	var nulls int
+	for record, err := range records {
+		require.NoError(t, err)
+		require.EqualValues(t, 1, record.NumCols())
+		details := record.Column(0).(*array.Struct)
+		require.Equal(t, 1, details.NumField())
+		target := details.Field(0).(*array.Int64)
+		for row := range details.Len() {
+			if details.IsNull(row) {
+				nulls++
+			} else {
+				values = append(values, target.Value(row))
+			}
+		}
+		record.Release()
+	}
+	require.Equal(t, []int64{10, 20}, values)
+	require.Equal(t, 1, nulls)
+	require.Zero(t, blocked.reads.Load())
+}
+
 func projectedDeleteIDs(t testing.TB, tbl *table.Table) []int64 {
 	t.Helper()
 	_, records, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(t.Context())
@@ -254,5 +288,36 @@ func TestMergeOnReadDeleteDoesNotReadDroppedFirstColumn(t *testing.T) {
 	tbl, err = tbl.Delete(t.Context(), iceberg.IsNull(iceberg.Reference("extra")), nil)
 	require.NoError(t, err)
 	require.Equal(t, []int64{3}, projectedDeleteIDs(t, tbl))
+	require.Zero(t, blocked.reads.Load())
+}
+
+func TestMergeOnReadDeleteMissingPredicateUsesNestedLeaf(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "details", Type: iceberg.NewStructType(
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "target", Type: iceberg.PrimitiveTypes.Int64},
+	)})
+	tbl := newProjectedDeleteTable(t, schema, nil)
+	tbl = appendProjectedDeleteRows(t, tbl, `[{"details":{"payload":"a","target":1}},{"details":null}]`)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	oldPath := tasks[0].File.FilePath()
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).AddColumn([]string{"extra"}, iceberg.PrimitiveTypes.String, "", false, nil).Commit())
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+	tbl = appendProjectedDeleteRows(t, tbl, `[{"details":{"payload":"c","target":3},"extra":"new"}]`)
+	tbl, blocked := blockDeleteProjectionColumn(t, tbl, oldPath, 0)
+	tbl, err = tbl.Delete(t.Context(), iceberg.IsNull(iceberg.Reference("extra")), nil)
+	require.NoError(t, err)
+	tasks, err = tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	var deleted int64
+	for _, task := range tasks {
+		for _, file := range task.DeleteFiles {
+			deleted += file.Count()
+		}
+	}
+	require.Equal(t, int64(2), deleted)
 	require.Zero(t, blocked.reads.Load())
 }
