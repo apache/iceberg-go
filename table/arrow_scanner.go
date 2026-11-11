@@ -1701,10 +1701,10 @@ type arrowScan struct {
 	added *addedDeleteState
 }
 
-// preparedFileRead contains the physical schema projection shared by all
-// tasks reading the same data file during one scan. The actual FileReader is
-// intentionally not shared: split tasks may run concurrently and each reader
-// owns its column readers and input handle.
+// preparedFileRead contains the physical schema projection shared by tasks
+// reading the same data file with the same equality-delete field IDs. The
+// actual FileReader is intentionally not shared: split tasks may run
+// concurrently and each reader owns its column readers and input handle.
 type preparedFileRead struct {
 	schema     *iceberg.Schema
 	colIndices []int
@@ -1716,24 +1716,55 @@ type preparedFileReadEntry struct {
 	err  error
 }
 
-type preparedFileReadPlanCache struct {
-	mu      sync.Mutex
-	entries map[string]*preparedFileReadEntry
+type preparedFileReadPlanKey struct {
+	path             string
+	equalityFieldIDs string
 }
 
-func (c *preparedFileReadPlanCache) entry(path string) *preparedFileReadEntry {
+type preparedFileReadPlanCache struct {
+	mu      sync.Mutex
+	entries map[preparedFileReadPlanKey]*preparedFileReadEntry
+}
+
+// equalityDeleteProjectionFieldsKey returns a stable key for the union of
+// equality fields that can expand a file's physical projection.
+func equalityDeleteProjectionFieldsKey(deleteSets []*equalityDeleteSet) string {
+	var fieldIDs []int
+	for _, deleteSet := range deleteSets {
+		if deleteSet != nil {
+			fieldIDs = append(fieldIDs, deleteSet.fieldIDs...)
+		}
+	}
+	if len(fieldIDs) == 0 {
+		return ""
+	}
+
+	slices.Sort(fieldIDs)
+	fieldIDs = slices.Compact(fieldIDs)
+
+	var key strings.Builder
+	for _, fieldID := range fieldIDs {
+		key.WriteString(strconv.Itoa(fieldID))
+		key.WriteByte(',')
+	}
+
+	return key.String()
+}
+
+func (c *preparedFileReadPlanCache) entry(path, equalityFieldIDs string) *preparedFileReadEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.entries == nil {
-		c.entries = make(map[string]*preparedFileReadEntry)
+		c.entries = make(map[preparedFileReadPlanKey]*preparedFileReadEntry)
 	}
-	if entry, ok := c.entries[path]; ok {
+	key := preparedFileReadPlanKey{path: path, equalityFieldIDs: equalityFieldIDs}
+	if entry, ok := c.entries[key]; ok {
 		return entry
 	}
 
 	entry := &preparedFileReadEntry{}
-	c.entries[path] = entry
+	c.entries[key] = entry
 
 	return entry
 }
@@ -1996,7 +2027,7 @@ func (as *arrowScan) prepareToRead(
 		return iceSchema, colIndices, rdr, nil
 	}
 
-	entry := as.fileReadPlanCache.entry(file.FilePath())
+	entry := as.fileReadPlanCache.entry(file.FilePath(), equalityDeleteProjectionFieldsKey(deleteSets))
 	entry.once.Do(func() {
 		var iceSchema *iceberg.Schema
 		var colIndices []int
@@ -2914,7 +2945,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if as.added != nil {
-		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos, positionSink))
+		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, readSchema, task.Value.File.FilePath(), stampPos, positionSink))
 		if stampPos {
 			pipeline = append(pipeline, dropChangelogFilePos)
 		}

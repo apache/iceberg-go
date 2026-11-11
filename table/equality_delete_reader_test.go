@@ -54,7 +54,9 @@ func newEqDeleteReadTestTableWithSchema(t *testing.T, iceSchema *iceberg.Schema,
 	if properties == nil {
 		properties = iceberg.Properties{}
 	}
-	properties[table.PropertyFormatVersion] = "2"
+	if _, ok := properties[table.PropertyFormatVersion]; !ok {
+		properties[table.PropertyFormatVersion] = "2"
+	}
 
 	meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, location,
@@ -341,6 +343,84 @@ func TestEqualityDeleteReadProjectsNestedInitialDefaultForOlderDataFiles(t *test
 	defer result.Release()
 	require.Equal(t, int64(1), result.NumRows(), "the default should match only rows with a present parent struct")
 	assert.Equal(t, int64(2), result.Column(0).Data().Chunk(0).(*array.Int64).Value(0))
+}
+
+func TestEqualityDeleteReadTaskCacheUsesDeleteFieldProjection(t *testing.T) {
+	ctx := t.Context()
+	properties := iceberg.Properties{table.PropertyFormatVersion: "3"}
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "loc", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
+		}}},
+	)
+	tbl := newEqDeleteReadTestTableWithSchema(t, iceSchema, properties)
+
+	dataPath := tbl.Location() + "/data/shared-data.parquet"
+	dataArrowSchema, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+	writeParquetFile(t, dataPath, dataArrowSchema,
+		`[{"id":1,"loc":{"city":"Berlin"}},{"id":2,"loc":null}]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(ctx, []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, false).
+		AddColumn([]string{"loc", "country"}, iceberg.PrimitiveTypes.String, "", false,
+			iceberg.StringLiteral("US")).
+		Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	deletePath := tbl.Location() + "/data/delete-country.parquet"
+	deleteSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 2, Name: "loc", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 4, Name: "country", Type: iceberg.PrimitiveTypes.String},
+		}},
+	})
+	deleteArrowSchema, err := table.SchemaToArrowSchema(deleteSchema, nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, deletePath, deleteArrowSchema, `[{"loc":{"country":"US"}}]`)
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 256)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{4})
+
+	planned, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	deleteTask := planned[0]
+	deleteTask.EqualityDeleteFiles = []iceberg.DataFile{deleteBuilder.Build()}
+	noDeleteTask := planned[0]
+
+	for _, tc := range []struct {
+		name  string
+		tasks []table.FileScanTask
+	}{
+		{name: "plain task first", tasks: []table.FileScanTask{noDeleteTask, deleteTask}},
+		{name: "delete task first", tasks: []table.FileScanTask{deleteTask, noDeleteTask}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, records, err := tbl.Scan(table.WithSelectedFields("id"), table.WithMaxConcurrency(1)).ReadTasks(ctx, tc.tasks)
+			require.NoError(t, err)
+
+			var got []int64
+			for record, err := range records {
+				require.NoError(t, err)
+				column := record.Column(0).(*array.Int64)
+				for i := range column.Len() {
+					got = append(got, column.Value(i))
+				}
+				record.Release()
+			}
+
+			assert.ElementsMatch(t, []int64{1, 2, 2}, got)
+		})
+	}
 }
 
 func TestEqualityDeleteReadAfterIntToLongPromotion(t *testing.T) {
