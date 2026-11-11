@@ -1090,9 +1090,55 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 				DefaultNameMappingKey: string(mappingJSON),
 			}))
 		}
+
+		updates = append(updates, compressionPropertyUpdates(meta.props, u.schema, newSchema)...)
 	}
 
 	return updates, requirements, nil
+}
+
+// compressionPropertyUpdates follows field IDs across schema changes so that
+// renames retain overrides and a deleted field's settings do not attach to a
+// new field with the same name. Collect removals before additions because a
+// renamed field may reuse the name of a deleted field.
+func compressionPropertyUpdates(props iceberg.Properties, oldSchema, newSchema *iceberg.Schema) []Update {
+	var removals []string
+	set := make(iceberg.Properties)
+	for key, value := range props {
+		for _, prefix := range []string{ParquetCompressionColumnCodecKeyPrefix + ".", ParquetCompressionColumnLevelKeyPrefix + "."} {
+			name, ok := strings.CutPrefix(key, prefix)
+			if !ok {
+				continue
+			}
+			field, found := oldSchema.FindFieldByName(name)
+			if !found {
+				break
+			}
+			oldName, _ := oldSchema.FindColumnName(field.ID)
+			if name != oldName {
+				break
+			}
+			newName, exists := newSchema.FindColumnName(field.ID)
+			if !exists || oldName != newName {
+				removals = append(removals, key)
+				if exists {
+					set[prefix+newName] = value
+				}
+			}
+
+			break
+		}
+	}
+	var updates []Update
+	if len(removals) > 0 {
+		slices.Sort(removals)
+		updates = append(updates, NewRemovePropertiesUpdate(removals))
+	}
+	if len(set) > 0 {
+		updates = append(updates, NewSetPropertiesUpdate(set))
+	}
+
+	return updates
 }
 
 func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {

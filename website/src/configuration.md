@@ -495,6 +495,8 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.page-version` | `2` |
 | `write.parquet.compression-codec` | `zstd` |
 | `write.parquet.compression-level` | `-1` (codec default) |
+| `write.parquet.compression-codec.column.<name>` | Global codec |
+| `write.parquet.compression-level.column.<name>` | Global level, or the column codec's default if the codecs differ |
 | `write.parquet.bloom-filter-max-bytes` | 1 MB |
 | `write.parquet.bloom-filter-enabled.column.<name>` | (per-column toggle, prefix-matched) |
 | `parquet.enable.dictionary` | `true` (global dictionary encoding switch; same key as Iceberg Java) |
@@ -503,6 +505,14 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
 The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`.
+
+Column compression keys use case-sensitive Iceberg leaf paths, such as
+`items.element` or `attributes.value.name`. They apply to data files and use
+the global settings for columns without overrides. An explicit column level
+must be an integer valid for its effective codec. Missing fields are ignored.
+Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
+these keys. Arrow does not register legacy `lz4` or `lzo` codecs by default;
+`lz4_raw` is supported.
 
 ### Parquet reader
 

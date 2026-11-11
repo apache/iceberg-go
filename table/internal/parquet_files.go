@@ -53,24 +53,26 @@ import (
 )
 
 const (
-	ParquetRowGroupSizeBytesKey       = "write.parquet.row-group-size-bytes"
-	ParquetRowGroupSizeBytesDefault   = 128 * 1024 * 1024 // 128 MB
-	ParquetRowGroupLimitKey           = "write.parquet.row-group-limit"
-	ParquetRowGroupLimitDefault       = 1048576
-	ParquetPageSizeBytesKey           = "write.parquet.page-size-bytes"
-	ParquetPageSizeBytesDefault       = 1024 * 1024 // 1 MB
-	ParquetPageRowLimitKey            = "write.parquet.page-row-limit"
-	ParquetPageRowLimitDefault        = 20000
-	ParquetDictSizeBytesKey           = "write.parquet.dict-size-bytes"
-	ParquetDictSizeBytesDefault       = 2 * 1024 * 1024 // 2 MB
-	ParquetPageVersionKey             = "write.parquet.page-version"
-	ParquetPageVersionDefault         = "2"
-	ParquetCompressionKey             = "write.parquet.compression-codec"
-	ParquetCompressionDefault         = "zstd"
-	ParquetCompressionLevelKey        = "write.parquet.compression-level"
-	ParquetCompressionLevelDefault    = -1
-	ParquetBloomFilterMaxBytesKey     = "write.parquet.bloom-filter-max-bytes"
-	ParquetBloomFilterMaxBytesDefault = 1024 * 1024
+	ParquetRowGroupSizeBytesKey            = "write.parquet.row-group-size-bytes"
+	ParquetRowGroupSizeBytesDefault        = 128 * 1024 * 1024 // 128 MB
+	ParquetRowGroupLimitKey                = "write.parquet.row-group-limit"
+	ParquetRowGroupLimitDefault            = 1048576
+	ParquetPageSizeBytesKey                = "write.parquet.page-size-bytes"
+	ParquetPageSizeBytesDefault            = 1024 * 1024 // 1 MB
+	ParquetPageRowLimitKey                 = "write.parquet.page-row-limit"
+	ParquetPageRowLimitDefault             = 20000
+	ParquetDictSizeBytesKey                = "write.parquet.dict-size-bytes"
+	ParquetDictSizeBytesDefault            = 2 * 1024 * 1024 // 2 MB
+	ParquetPageVersionKey                  = "write.parquet.page-version"
+	ParquetPageVersionDefault              = "2"
+	ParquetCompressionKey                  = "write.parquet.compression-codec"
+	ParquetCompressionDefault              = "zstd"
+	ParquetCompressionLevelKey             = "write.parquet.compression-level"
+	ParquetCompressionLevelDefault         = -1
+	ParquetCompressionColumnCodecKeyPrefix = "write.parquet.compression-codec.column"
+	ParquetCompressionColumnLevelKeyPrefix = "write.parquet.compression-level.column"
+	ParquetBloomFilterMaxBytesKey          = "write.parquet.bloom-filter-max-bytes"
+	ParquetBloomFilterMaxBytesDefault      = 1024 * 1024
 	// These bounds mirror Arrow's public bloom-filter writer-property constraint.
 	parquetBloomFilterMaxBytesMin            = 32
 	parquetBloomFilterMaxBytesMax            = 128 * 1024 * 1024
@@ -363,6 +365,27 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		writerProps = append(writerProps, parquet.WithDictionaryFor(colName, javaBool(val)))
 	}
 
+	config := parquetColumnCompressionConfig{}
+	for key, value := range props {
+		if column, ok := strings.CutPrefix(key, ParquetCompressionColumnCodecKeyPrefix+"."); ok && column != "" {
+			if config.codecs == nil {
+				config.codecs = make(map[string]string)
+			}
+			config.codecs[column] = value
+		}
+		if column, ok := strings.CutPrefix(key, ParquetCompressionColumnLevelKeyPrefix+"."); ok && column != "" {
+			if config.levels == nil {
+				config.levels = make(map[string]string)
+			}
+			config.levels[column] = value
+		}
+	}
+	if len(config.codecs) > 0 || len(config.levels) > 0 {
+		config.base = writerProps
+
+		return config
+	}
+
 	return writerProps
 }
 
@@ -418,7 +441,7 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 		}
 
 		compression := props.Get(ParquetCompressionKey, ParquetCompressionDefault)
-		if err := validateParquetCompressionLevel(compression, level); err != nil {
+		if err := validateParquetCompressionLevel(ParquetCompressionLevelKey, compression, level); err != nil {
 			return err
 		}
 	}
@@ -426,7 +449,7 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 	return nil
 }
 
-func validateParquetCompressionLevel(compression string, level int) error {
+func validateParquetCompressionLevel(key, compression string, level int) error {
 	min, max := 0, 0
 	switch compression {
 	case "gzip":
@@ -448,7 +471,7 @@ func validateParquetCompressionLevel(compression string, level int) error {
 
 	if level < min || level > max {
 		return fmt.Errorf("%w: invalid %s value %d for %s; supported range is %d..%d (or %d for the default)",
-			iceberg.ErrInvalidArgument, ParquetCompressionLevelKey, level, compression, min, max,
+			iceberg.ErrInvalidArgument, key, level, compression, min, max,
 			ParquetCompressionLevelDefault)
 	}
 
@@ -623,17 +646,11 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 			iceberg.ErrInvalidArgument, rowGroupTargetSizeBytes)
 	}
 
-	fw, err := fs.Create(ctx, info.FileName)
-	if err != nil {
-		return nil, err
-	}
-
 	colMapping := info.ColMapping
 	if colMapping == nil {
+		var err error
 		colMapping, err = p.PathToIDMapping(info.FileSchema)
 		if err != nil {
-			fw.Close()
-
 			return nil, err
 		}
 	}
@@ -643,16 +660,34 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		variantFieldIDs = VariantFieldIDsFromSchema(info.FileSchema)
 	}
 
-	counter := &internal.CountingWriter{W: fw}
 	mem := compute.GetAllocator(ctx)
 	arrProps := writeArrowProps(mem)
-	writerProps, err := getWriteProperties(info.WriteProps, arrowSchema, arrProps)
+	writeProps := info.WriteProps
+	if config, ok := writeProps.(parquetColumnCompressionConfig); ok {
+		if info.Content == iceberg.EntryContentData {
+			propertySchema := info.FileSchema
+			if info.PropertySchema != nil {
+				propertySchema = info.PropertySchema
+			}
+			var err error
+			writeProps, err = config.forSchema(propertySchema, arrowSchema, arrProps)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			writeProps = config.base
+		}
+	}
+	writerProps, err := getWriteProperties(writeProps, arrowSchema, arrProps)
 	if err != nil {
-		fw.Close()
-
 		return nil, err
 	}
 
+	fw, err := fs.Create(ctx, info.FileName)
+	if err != nil {
+		return nil, err
+	}
+	counter := &internal.CountingWriter{W: fw}
 	writer, err := pqarrow.NewFileWriter(arrowSchema, counter, writerProps, arrProps)
 	if err != nil {
 		fw.Close()

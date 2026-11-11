@@ -60,6 +60,7 @@ type defaultDataFileWriter struct {
 	loc              LocationProvider
 	fs               io.WriteFileIO
 	fileSchema       *iceberg.Schema
+	propertySchema   *iceberg.Schema
 	fileFormat       iceberg.FileFormat
 	format           tblutils.FileFormat
 	props            iceberg.Properties
@@ -126,13 +127,14 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	}
 
 	w := defaultDataFileWriter{
-		loc:        locProvider,
-		fs:         fs,
-		fileSchema: meta.CurrentSchema(),
-		fileFormat: fileFormat,
-		format:     tblutils.GetFileFormat(fileFormat),
-		content:    iceberg.EntryContentData,
-		props:      props,
+		loc:            locProvider,
+		fs:             fs,
+		fileSchema:     meta.CurrentSchema(),
+		propertySchema: meta.CurrentSchema(),
+		fileFormat:     fileFormat,
+		format:         tblutils.GetFileFormat(fileFormat),
+		content:        iceberg.EntryContentData,
+		props:          props,
 	}
 	for _, apply := range opts {
 		apply(&w)
@@ -222,6 +224,7 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 
 	return w.format.WriteDataFile(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
+		PropertySchema:   w.propertySchema,
 		Content:          w.content,
 		FileName:         filePath,
 		StatsCols:        w.invariants.statsCols,

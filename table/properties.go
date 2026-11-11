@@ -104,6 +104,8 @@ const (
 	ParquetCompressionDefault                = internal.ParquetCompressionDefault
 	ParquetCompressionLevelKey               = internal.ParquetCompressionLevelKey
 	ParquetCompressionLevelDefault           = internal.ParquetCompressionLevelDefault
+	ParquetCompressionColumnCodecKeyPrefix   = internal.ParquetCompressionColumnCodecKeyPrefix
+	ParquetCompressionColumnLevelKeyPrefix   = internal.ParquetCompressionColumnLevelKeyPrefix
 	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
