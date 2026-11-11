@@ -494,7 +494,7 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 		for idx, sourceID := range field.SourceIDs {
 			f, ok := schema.FindFieldByID(sourceID)
 			if !ok {
-				return fmt.Errorf("sort field with source id %d not found in schema", sourceID)
+				return fmt.Errorf("sort field with source id %d not found in schema: %w", sourceID, iceberg.ErrInvalidSchema)
 			}
 
 			if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
