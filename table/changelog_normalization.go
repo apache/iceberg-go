@@ -28,7 +28,6 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 )
 
@@ -118,7 +117,7 @@ func (s *IncrementalChangelogScan) ToNormalizedArrowRecords(ctx context.Context,
 	if err != nil {
 		return nil, nil, err
 	}
-	fullSchema, _, err := changelogArrowSchema(&readScan)
+	_, _, err = changelogArrowSchema(&readScan)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,12 +191,15 @@ func (s *IncrementalChangelogScan) ToNormalizedArrowRecords(ctx context.Context,
 				if err := buffer.computeUpdates(ctx, identifiers); err != nil {
 					return false, err
 				}
-				builder := array.NewRecordBuilder(allocatorFrom(ctx), fullSchema)
-				defer builder.Release()
-				var rows int
+				refs := make([]rowRef, 0, min(batchSize, len(buffer.rows)))
+				operations := make([]ChangelogOperation, 0, cap(refs))
 				emit := func() (bool, error) {
-					rec := builder.NewRecordBatch()
-					rows = 0
+					rec, err := gatherNormalizedChangelogRows(ctx, buffer.batches, refs, operations)
+					if err != nil {
+						return false, err
+					}
+					refs = refs[:0]
+					operations = operations[:0]
 					if filter != nil {
 						rec, err = filter(rec) // record processors consume their input
 						if err != nil {
@@ -228,11 +230,9 @@ func (s *IncrementalChangelogScan) ToNormalizedArrowRecords(ctx context.Context,
 					if err := ctx.Err(); err != nil {
 						return false, err
 					}
-					if err := appendNormalizedChangelogRow(ctx, builder, buffer.batches[row.batch], row); err != nil {
-						return false, err
-					}
-					rows++
-					if rows == batchSize {
+					refs = append(refs, newRowRef(row.batch, row.row))
+					operations = append(operations, row.operation)
+					if len(refs) == batchSize {
 						return emit()
 					}
 
@@ -251,7 +251,7 @@ func (s *IncrementalChangelogScan) ToNormalizedArrowRecords(ctx context.Context,
 						}
 					}
 				}
-				if rows > 0 {
+				if len(refs) > 0 {
 					return emit()
 				}
 
@@ -353,6 +353,9 @@ func (b *changelogSnapshotBuffer) reserve(n int64) error {
 }
 
 func (b *changelogSnapshotBuffer) add(ctx context.Context, rec arrow.RecordBatch, columns []int) error {
+	if uint64(len(b.batches)) > math.MaxUint32 || rec.NumRows() > int64(math.MaxUint32)+1 {
+		return fmt.Errorf("%w: snapshot contains too many batches or rows in a batch", ErrChangelogBufferLimit)
+	}
 	if rec.NumRows() > b.opts.MaxBufferedRows-int64(len(b.rows)) {
 		return fmt.Errorf("%w: snapshot exceeds MaxBufferedRows (%d)", ErrChangelogBufferLimit, b.opts.MaxBufferedRows)
 	}
@@ -480,89 +483,69 @@ func (b *changelogSnapshotBuffer) computeUpdates(ctx context.Context, identifier
 	return ctx.Err()
 }
 
-func appendNormalizedChangelogRow(ctx context.Context, builder *array.RecordBuilder, rec arrow.RecordBatch, row bufferedChangelogRow) error {
-	for i, column := range rec.Columns() {
-		if i == int(rec.NumCols())-3 {
-			switch change := builder.Field(i).(type) {
-			case *array.StringBuilder:
-				change.Append(string(row.operation))
-			case *array.LargeStringBuilder:
-				change.Append(string(row.operation))
+func gatherNormalizedChangelogRows(ctx context.Context, batches []arrow.RecordBatch, refs []rowRef, operations []ChangelogOperation) (arrow.RecordBatch, error) {
+	if len(refs) == 0 || len(refs) != len(operations) {
+		return nil, fmt.Errorf("%w: invalid normalized changelog rows", iceberg.ErrInvalidArgument)
+	}
+	// Only pass referenced batches to gatherSortedRows. Its scratch space is
+	// proportional to the batch slice, and small output batches may otherwise
+	// repeatedly scan every input batch in the snapshot.
+	batchIndices := make(map[int]int, min(len(batches), len(refs)))
+	selected := make([]arrow.RecordBatch, 0, min(len(batches), len(refs)))
+	localRefs := make([]rowRef, len(refs))
+	for i, ref := range refs {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-
-			continue
 		}
-		if err := appendChangelogArrayValue(ctx, builder.Field(i), column, row.row); err != nil {
-			return err
+		batch := ref.batch()
+		if batch >= len(batches) || batches[batch] == nil || int64(ref.row()) >= batches[batch].NumRows() {
+			return nil, fmt.Errorf("%w: invalid normalized changelog row reference", iceberg.ErrInvalidArgument)
 		}
-	}
-
-	return nil
-}
-
-func appendChangelogArrayValue(ctx context.Context, builder array.Builder, column arrow.Array, row int) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// VariantArray.IsNull also reports an encoded Variant null. Preserve its
-	// present storage, which is distinct from a physically NULL Variant value.
-	if extension, ok := column.(array.ExtensionArray); ok {
-		storage, ok := builder.(interface{ StorageBuilder() array.Builder })
+		local, ok := batchIndices[batch]
 		if !ok {
-			return fmt.Errorf("%w: extension output builder %T", iceberg.ErrNotImplemented, builder)
+			local = len(selected)
+			batchIndices[batch] = local
+			selected = append(selected, batches[batch])
 		}
-
-		return appendChangelogArrayValue(ctx, storage.StorageBuilder(), extension.Storage(), row)
+		localRefs[i] = newRowRef(local, ref.row())
 	}
-	if column.IsNull(row) {
-		builder.AppendNull()
-
-		return nil
+	rec, err := gatherSortedRows(allocatorFrom(ctx), partitionBatchByKey(ctx), selected, localRefs)
+	if err != nil {
+		return nil, err
 	}
-	switch column := column.(type) {
-	case *array.Struct:
-		b := builder.(*array.StructBuilder)
-		b.Append(true)
-		for i := range column.NumField() {
-			if err := appendChangelogArrayValue(ctx, b.FieldBuilder(i), column.Field(i), row); err != nil {
-				return err
+	defer rec.Release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	changeIndex := int(rec.NumCols()) - 3
+	builder := array.NewBuilder(allocatorFrom(ctx), rec.Schema().Field(changeIndex).Type)
+	defer builder.Release()
+	for i, op := range operations {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 		}
-	case *array.Map:
-		b := builder.(*array.MapBuilder)
-		b.Append(true)
-		start, end := column.ValueOffsets(row)
-		for i := start; i < end; i++ {
-			if err := appendChangelogArrayValue(ctx, b.KeyBuilder(), column.Keys(), int(i)); err != nil {
-				return err
-			}
-			if err := appendChangelogArrayValue(ctx, b.ItemBuilder(), column.Items(), int(i)); err != nil {
-				return err
-			}
+		switch b := builder.(type) {
+		case *array.StringBuilder:
+			b.Append(string(op))
+		case *array.LargeStringBuilder:
+			b.Append(string(op))
+		default:
+			return nil, fmt.Errorf("%w: unexpected changelog operation type %s", iceberg.ErrInvalidArgument, rec.Schema().Field(changeIndex).Type)
 		}
-	case array.ListLike:
-		b := builder.(array.ListLikeBuilder)
-		b.Append(true)
-		start, end := column.ValueOffsets(row)
-		for i := start; i < end; i++ {
-			if err := appendChangelogArrayValue(ctx, b.ValueBuilder(), column.ListValues(), int(i)); err != nil {
-				return err
-			}
-		}
-	default:
-		value, err := scalar.GetScalar(column, row)
-		if err != nil {
-			return err
-		}
-		err = scalar.Append(builder, value)
-		if release, ok := value.(scalar.Releasable); ok {
-			release.Release()
-		}
-
-		return err
+	}
+	change := builder.NewArray()
+	defer change.Release()
+	cols := slices.Clone(rec.Columns())
+	cols[changeIndex] = change
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	return nil
+	return array.NewRecordBatch(rec.Schema(), cols, rec.NumRows()), nil
 }
 
 func projectNormalizedChangelog(ctx context.Context, rec arrow.RecordBatch, out *arrow.Schema, requested, full *iceberg.Schema, opts SchemaOptions) (arrow.RecordBatch, error) {

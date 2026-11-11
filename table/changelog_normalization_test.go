@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/variant"
@@ -268,17 +269,77 @@ func TestChangelogNormalizationPreservesVariantNullStorage(t *testing.T) {
 	require.NoError(t, encodeChangelogValue(t.Context(), &physical, values, 0, 1<<20))
 	require.NoError(t, encodeChangelogValue(t.Context(), &present, values, 1, 1<<20))
 	require.NotEqual(t, physical.String(), present.String())
-	outBuilder := array.NewStructBuilder(mem, arrow.StructOf(arrow.Field{Name: "payload", Type: values.DataType(), Nullable: true}))
-	defer outBuilder.Release()
-	for row := range 2 {
-		outBuilder.Append(true)
-		require.NoError(t, appendChangelogArrayValue(t.Context(), outBuilder.FieldBuilder(0), values, row))
-	}
-	out := outBuilder.NewStructArray()
+	changeBuilder := array.NewStringBuilder(mem)
+	defer changeBuilder.Release()
+	changeBuilder.AppendValues([]string{"DELETE", "INSERT"}, nil)
+	change := changeBuilder.NewStringArray()
+	defer change.Release()
+	ordinalBuilder := array.NewInt32Builder(mem)
+	defer ordinalBuilder.Release()
+	ordinalBuilder.AppendValues([]int32{0, 0}, nil)
+	ordinal := ordinalBuilder.NewInt32Array()
+	defer ordinal.Release()
+	snapshotBuilder := array.NewInt64Builder(mem)
+	defer snapshotBuilder.Release()
+	snapshotBuilder.AppendValues([]int64{7, 7}, nil)
+	snapshot := snapshotBuilder.NewInt64Array()
+	defer snapshot.Release()
+	schema := arrow.NewSchema(append([]arrow.Field{{Name: "payload", Type: values.DataType(), Nullable: true}}, changelogArrowFields(false)...), nil)
+	input := array.NewRecordBatch(schema, []arrow.Array{values, change, ordinal, snapshot}, 2)
+	defer input.Release()
+	ctx := compute.WithAllocator(t.Context(), mem)
+	out, err := gatherNormalizedChangelogRows(ctx, []arrow.RecordBatch{input}, []rowRef{newRowRef(0, 1), newRowRef(0, 0)},
+		[]ChangelogOperation{ChangelogOpUpdateAfter, ChangelogOpUpdateBefore})
+	require.NoError(t, err)
 	defer out.Release()
-	storage := out.Field(0).(array.ExtensionArray).Storage()
-	require.True(t, storage.IsNull(0))
-	require.False(t, storage.IsNull(1), "present Variant null must not become physical NULL")
+	storage := out.Column(0).(array.ExtensionArray).Storage()
+	require.False(t, storage.IsNull(0), "present Variant null must not become physical NULL")
+	require.True(t, storage.IsNull(1))
+	require.Equal(t, string(ChangelogOpUpdateAfter), out.Column(1).(*array.String).Value(0))
+	require.Equal(t, string(ChangelogOpUpdateBefore), out.Column(1).(*array.String).Value(1))
+
+	multi, err := gatherNormalizedChangelogRows(ctx, []arrow.RecordBatch{input, input},
+		[]rowRef{newRowRef(0, 1), newRowRef(1, 0), newRowRef(0, 0)},
+		[]ChangelogOperation{ChangelogOpUpdateBefore, ChangelogOpUpdateAfter, ChangelogOpDelete})
+	require.NoError(t, err)
+	defer multi.Release()
+	multiStorage := multi.Column(0).(array.ExtensionArray).Storage()
+	require.False(t, multiStorage.IsNull(0))
+	require.True(t, multiStorage.IsNull(1))
+	require.True(t, multiStorage.IsNull(2))
+	require.Equal(t, string(ChangelogOpUpdateBefore), multi.Column(1).(*array.String).Value(0))
+	require.Equal(t, string(ChangelogOpUpdateAfter), multi.Column(1).(*array.String).Value(1))
+	require.Equal(t, string(ChangelogOpDelete), multi.Column(1).(*array.String).Value(2))
+}
+
+func TestGatherNormalizedChangelogRows(t *testing.T) {
+	fields := []arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}
+	first := normalizationRecord(t, fields, `[{"id":1},{"id":2}]`, ChangelogOpDelete)
+	second := normalizationRecord(t, fields, `[{"id":3}]`, ChangelogOpInsert)
+	batches := make([]arrow.RecordBatch, 10000)
+	batches[12], batches[9999] = first, second
+	refs := []rowRef{newRowRef(9999, 0), newRowRef(12, 1), newRowRef(12, 0)}
+	ops := []ChangelogOperation{ChangelogOpUpdateAfter, ChangelogOpUpdateBefore, ChangelogOpDelete}
+	out, err := gatherNormalizedChangelogRows(t.Context(), batches, refs, ops)
+	require.NoError(t, err)
+	defer out.Release()
+	require.Equal(t, []int64{3, 2, 1}, out.Column(0).(*array.Int64).Int64Values())
+	change := out.Column(1).(*array.String)
+	for i, op := range ops {
+		require.Equal(t, string(op), change.Value(i))
+	}
+	_, err = gatherNormalizedChangelogRows(t.Context(), batches, nil, nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = gatherNormalizedChangelogRows(t.Context(), batches, refs, ops[:1])
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = gatherNormalizedChangelogRows(t.Context(), batches, []rowRef{newRowRef(0, 0)}, ops[:1])
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	_, err = gatherNormalizedChangelogRows(t.Context(), batches, []rowRef{newRowRef(12, 2)}, ops[:1])
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = gatherNormalizedChangelogRows(ctx, batches, refs, ops)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestChangelogNormalizationReusesByteBudgetForIdentifierMatching(t *testing.T) {
