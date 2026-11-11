@@ -61,17 +61,23 @@ func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, pa
 		return nil, err
 	}
 
-	return (&manifestEvalVisitor{partitionFilter: boundFilter}).Eval, nil
+	return (&manifestEvalVisitor{
+		partitionFilter:     boundFilter,
+		partitionFieldCount: spec.NumFields(),
+	}).Eval, nil
 }
 
 type manifestEvalVisitor struct {
-	partitionFields []iceberg.FieldSummary
-	partitionFilter iceberg.BooleanExpression
+	partitionFields     []iceberg.FieldSummary
+	partitionFilter     iceberg.BooleanExpression
+	partitionFieldCount int
 }
 
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
 	parts := manifestFilePartitions(manifest)
-	if len(parts) == 0 {
+	if len(parts) == 0 || len(parts) != m.partitionFieldCount {
+		// Summaries are positional. An incomplete or oversized list cannot
+		// safely exclude a data or delete manifest.
 		return rowsMightMatch, nil
 	}
 	for _, part := range parts {

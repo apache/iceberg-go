@@ -124,14 +124,6 @@ func dynamicOverwriteManifestCandidates(
 			continue
 		}
 
-		// The evaluator indexes summaries by partition field position.
-		// Imported manifests with incomplete summary lists cannot be pruned.
-		if summaries := manifest.Partitions(); len(summaries) != 0 && len(summaries) != spec.NumFields() {
-			candidates[idx] = true
-
-			continue
-		}
-
 		use, err := eval(manifest)
 		if err != nil {
 			return nil, fmt.Errorf("dynamic partition overwrite: evaluate manifest %s: %w", manifest.FilePath(), err)

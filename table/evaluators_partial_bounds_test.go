@@ -166,6 +166,49 @@ func TestManifestEvaluatorPartialBoundsOnSecondPartitionField(t *testing.T) {
 	}
 }
 
+func TestManifestEvaluatorMismatchedPartitionSummaryCount(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "second", Transform: iceberg.IdentityTransform{}},
+	)
+	lower, upper := []byte("m"), []byte("t")
+	summary := iceberg.FieldSummary{LowerBound: &lower, UpperBound: &upper}
+	for _, field := range []string{"first", "second"} {
+		t.Run(field, func(t *testing.T) {
+			eval, err := newManifestEvaluator(spec, schema,
+				iceberg.EqualTo(iceberg.Reference(field), "a"), true)
+			require.NoError(t, err)
+
+			for _, content := range []iceberg.ManifestContent{iceberg.ManifestContentData, iceberg.ManifestContentDeletes} {
+				t.Run(content.String(), func(t *testing.T) {
+					for _, tc := range []struct {
+						name      string
+						summaries []iceberg.FieldSummary
+						keep      bool
+					}{
+						{"absent", nil, true},
+						{"short", []iceberg.FieldSummary{summary}, true},
+						{"complete", []iceberg.FieldSummary{summary, summary}, false},
+						{"extra", []iceberg.FieldSummary{summary, summary, summary}, true},
+					} {
+						t.Run(tc.name, func(t *testing.T) {
+							manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).
+								Content(content).AddedFiles(1).Partitions(tc.summaries).Build()
+							matches, err := eval(manifest)
+							require.NoError(t, err)
+							require.Equal(t, tc.keep, matches)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestManifestEvaluatorMissingBoundsPruneNullOnlyPartition(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.String,
