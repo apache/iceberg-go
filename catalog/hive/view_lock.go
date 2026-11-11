@@ -26,8 +26,6 @@ import (
 	"github.com/beltran/gohive/hive_metastore"
 )
 
-const viewLockRenewInterval = time.Second
-
 // CheckLock renews the HMS lock heartbeat. Use a dedicated connection because
 // Thrift clients cannot safely send overlapping RPCs on one connection.
 type viewLockLease struct {
@@ -39,12 +37,15 @@ type viewLockLease struct {
 	done    chan struct{}
 }
 
-func newViewLockLease(ctx context.Context, client HiveClient, id int64) *viewLockLease {
+func newViewLockLease(ctx context.Context, client HiveClient, id int64, interval time.Duration) *viewLockLease {
+	if interval <= 0 {
+		interval = DefaultLockHeartbeatInterval
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	lease := &viewLockLease{client: client, id: id, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(lease.done)
-		ticker := time.NewTicker(viewLockRenewInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {

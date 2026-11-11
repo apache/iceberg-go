@@ -60,7 +60,7 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 	if err != nil {
 		return nil, err
 	}
-	lease := newViewLockLease(ctx, lockClient, lock.lockId)
+	lease := newViewLockLease(ctx, lockClient, lock.lockId, c.opts.viewLockHeartbeatInterval())
 	defer func() {
 		lease.stop()
 		if closeErr := lockClient.Close(); closeErr != nil {

@@ -21,8 +21,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/beltran/gohive"
@@ -57,37 +60,60 @@ type LockClientProvider interface {
 }
 
 type thriftClient struct {
-	*gohive.HiveMetastoreClient
-	uri  string
-	opts *HiveOptions
+	Client         *hive_metastore.ThriftHiveMetastoreClient
+	closeTransport func() error
+	uri            string
+	opts           *HiveOptions
+	dialContext    func(context.Context, string, string) (net.Conn, error)
 }
 
 func (c *thriftClient) NewLockClient(ctx context.Context) (HiveClient, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	client, err := newHiveClient(c.uri, c.opts)
+	host, port, err := parseHiveURI(c.uri)
 	if err != nil {
 		return nil, err
 	}
-	connected := client.(*thriftClient).HiveMetastoreClient
-	connected.Client = hive_metastore.NewThriftHiveMetastoreClient(&cancelableLockRPC{
-		client: connected.Client.Client_(), close: connected.Close,
+	dial := c.dialContext
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := dial(dialCtx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+
+		return nil, fmt.Errorf("failed to connect to metastore: %w", err)
+	}
+	if err := dialCtx.Err(); err != nil {
+		_ = conn.Close()
+
+		return nil, err
+	}
+	transport := thrift.NewTBufferedTransport(thrift.NewTSocketFromConnConf(conn, nil), 4096)
+	closeTransport := closeOnce(transport.Close)
+	protocols := thrift.NewTBinaryProtocolFactoryConf(nil)
+	client := thrift.NewTStandardClient(protocols.GetProtocol(transport), protocols.GetProtocol(transport))
+	generated := hive_metastore.NewThriftHiveMetastoreClient(&cancelableLockRPC{
+		client: client, close: func() { _ = closeTransport() },
 	})
 
-	return client, nil
+	return &thriftClient{Client: generated, closeTransport: closeTransport, uri: c.uri, opts: c.opts, dialContext: c.dialContext}, nil
 }
 
-func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
+func parseHiveURI(uri string) (string, int, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return nil, fmt.Errorf("invalid URI: %w", err)
+		return "", 0, fmt.Errorf("invalid URI: %w", err)
 	}
 
 	host := parsed.Hostname()
 	if host == "" {
-		return nil, errors.New("invalid URI: host is required")
+		return "", 0, errors.New("invalid URI: host is required")
 	}
 	portStr := parsed.Port()
 	if portStr == "" {
@@ -95,12 +121,20 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid port: %w", err)
+		return "", 0, fmt.Errorf("invalid port: %w", err)
 	}
 	if port < 1 || port > 65535 {
-		return nil, fmt.Errorf("invalid port: %d", port)
+		return "", 0, fmt.Errorf("invalid port: %d", port)
 	}
 
+	return host, port, nil
+}
+
+func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
+	host, port, err := parseHiveURI(uri)
+	if err != nil {
+		return nil, err
+	}
 	config := gohive.NewMetastoreConnectConfiguration()
 	config.TransportMode = "binary"
 
@@ -109,16 +143,33 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 		return nil, fmt.Errorf("failed to connect to metastore: %w", err)
 	}
 
-	return &thriftClient{HiveMetastoreClient: client, uri: uri, opts: opts}, nil
+	return &thriftClient{
+		Client: client.Client, uri: uri, opts: opts,
+		closeTransport: closeOnce(func() error {
+			client.Close()
+
+			return nil
+		}),
+	}, nil
 }
 
 func (c *thriftClient) Close() error {
-	if c.HiveMetastoreClient != nil {
-		c.HiveMetastoreClient.Close()
-		c.HiveMetastoreClient = nil
+	if c.closeTransport != nil {
+		return c.closeTransport()
 	}
 
 	return nil
+}
+
+func closeOnce(closeFn func() error) func() error {
+	var once sync.Once
+	var err error
+
+	return func() error {
+		once.Do(func() { err = closeFn() })
+
+		return err
+	}
 }
 
 func (c *thriftClient) GetDatabase(ctx context.Context, name string) (*hive_metastore.Database, error) {

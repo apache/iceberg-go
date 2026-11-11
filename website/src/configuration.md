@@ -238,6 +238,7 @@ Lock-check catalog properties (passed via `WithProperties` / `catalog.Load` prop
 |---|---|---|
 | `iceberg.hive.lock-check-min-wait-ms` | `50` | Minimum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key. |
 | `iceberg.hive.lock-check-max-wait-ms` | `5000` | Maximum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key. |
+| `iceberg.hive.lock-heartbeat-interval-ms` | `240000` | Interval between view lock renewals, in milliseconds. Set it below the metastore lock timeout. |
 | `lock-check-min-wait-time` / `lock-check-max-wait-time` | same defaults | Legacy Go aliases that accept Go duration strings (e.g. `100ms`, `5s`). Ignored when the corresponding Java key is set. |
 | `lock-check-retries` | `4` | Go-specific upper bound on check attempts. Java instead uses `iceberg.hive.lock-timeout-ms` (not wired in Go yet). |
 
