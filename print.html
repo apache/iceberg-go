@@ -1525,6 +1525,18 @@ arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
 <li><code>_commit_snapshot_id</code> — snapshot ID that committed the change</li>
 </ul>
 <p>Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. <code>UPDATE</code> rows are not produced. Delete-file handling is iceberg-go behavior.</p>
+<p>Use <code>ToNormalizedArrowRecords</code> to remove matching DELETE/INSERT occurrences of unchanged rows within each snapshot. Set <code>ComputeUpdates</code> to label remaining rows with the same identifier as <code>UPDATE_BEFORE</code> and <code>UPDATE_AFTER</code>:</p>
+<pre><code class="language-go">schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields(&quot;id&quot;, &quot;name&quot;),
+).FromSnapshotExclusive(startSnapshotID).ToNormalizedArrowRecords(ctx,
+    table.ChangelogNormalizationOptions{
+        ComputeUpdates:   true,
+        IdentifierFields: []string{&quot;id&quot;},
+    })
+</code></pre>
+<p>The zero options value only removes carryovers. Update images use <code>IdentifierFields</code>, or the effective schema's identifier fields when the list is empty. Explicit identifiers may be nullable primitive columns, including paths through structs, and follow the scan's case sensitivity. After removing carryovers, an identifier must have at most one DELETE and one INSERT per snapshot. Duplicate identifiers return an error instead of selecting an ambiguous update image.</p>
+<p>Normalization compares complete rows before applying row filters, projection, and the output limit. Row-lineage columns do not affect matching. Variant values are compared by their encoded metadata/value bytes, with physical NULL distinct from an encoded Variant null. Changes from different snapshots are kept separate. Output follows snapshot and source-task order, with each UPDATE_AFTER immediately following its UPDATE_BEFORE. A batch boundary or row limit may split the pair. Callers release each returned batch.</p>
+<p>The reader buffers one snapshot at a time. <code>MaxBufferedBytes</code> defaults to 64 MiB of retained Arrow buffers and encoded matching keys, and <code>MaxBufferedRows</code> defaults to 1,000,000 input rows per snapshot. Exceeding either limit returns <code>ErrChangelogBufferLimit</code> through the iterator before emitting that snapshot. Decoding, temporary key encoding, output batches, and per-row indexes need additional memory. Temporary keys are individually capped at <code>MaxBufferedBytes</code>. <code>WithArrowBatchSize</code> also caps output batch rows; the default output batch size is 4096.</p>
 <h2 id="writing-data"><a class="header" href="#writing-data">Writing data</a></h2>
 <p>The shortcut methods on <code>Table</code> open a transaction, perform the write, and commit. Use <code>NewTransaction</code> directly when you need to combine multiple operations.</p>
 <h3 id="append"><a class="header" href="#append">Append</a></h3>
