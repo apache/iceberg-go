@@ -1978,11 +1978,15 @@ func recordNBytes(rec arrow.RecordBatch) (total int64) {
 	return total
 }
 
-func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.RecordBatch] {
+// binPackRecords stops at the first error from itr and stores it in errp.
+// Callers must report *errp after the write finishes (see withReadErr).
+func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64, errp *error) iter.Seq[[]arrow.RecordBatch] {
 	return internal.PackingIterator(func(yield func(arrow.RecordBatch) bool) {
 		for rec, err := range itr {
 			if err != nil {
-				panic(err)
+				*errp = err
+
+				return
 			}
 
 			rec.Retain()
@@ -1991,6 +1995,21 @@ func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int,
 			}
 		}
 	}, targetFileSize, recordLookback, recordNBytes, false)
+}
+
+// withReadErr yields *errp after files, so a read error fails the write instead of being dropped.
+// files must close only after the task iterator that sets *errp has returned.
+func withReadErr(files iter.Seq2[iceberg.DataFile, error], errp *error) iter.Seq2[iceberg.DataFile, error] {
+	return func(yield func(iceberg.DataFile, error) bool) {
+		for f, err := range files {
+			if !yield(f, err) {
+				return
+			}
+		}
+		if *errp != nil {
+			yield(nil, *errp)
+		}
+	}
 }
 
 type recordWritingArgs struct {
@@ -2236,11 +2255,12 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 			return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
 		}, withSchemaSanitization(false))
 		nextCount, stopCount := iter.Pull(args.counter)
+		var readErr error
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
 
 			fileCount := 0
-			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
+			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize, &readErr) {
 				cnt, _ := nextCount()
 				fileCount++
 				t := WriteTask{
@@ -2257,7 +2277,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 			}
 		}
 
-		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
+		return withReadErr(cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks), &readErr)
 	}
 	factory, err := newWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
 		withContentType(iceberg.EntryContentPosDeletes),

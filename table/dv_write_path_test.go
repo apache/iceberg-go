@@ -379,3 +379,33 @@ func TestDVWritePathMergesMultiBatchSameFile(t *testing.T) {
 		assert.True(t, bm.Contains(pos), "merged bitmap should contain pos %d", pos)
 	}
 }
+
+// A read error from the source records must come back as an error, not a panic.
+// A panic here runs on a writer goroutine, so callers can't recover it and the process dies.
+func TestPositionDeleteWriteReturnsReadError(t *testing.T) {
+	mb := newPositionDeleteUnpartitionedMetadata(t, 2)
+	batch := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[
+		{"file_path": "s3://bucket/data/file-001.parquet", "pos": 1}
+	]`)
+	readErr := errors.New("parquet: compressed page size 104618171 exceeds configured limit 67108864")
+	itr := func(yield func(arrow.RecordBatch, error) bool) {
+		batch.Retain()
+		if !yield(batch, nil) {
+			return
+		}
+		yield(nil, readErr)
+	}
+
+	seq := positionDeleteRecordsToDataFiles(context.Background(), t.TempDir(), mb, nil,
+		recordWritingArgs{sc: PositionalDeleteArrowSchema, itr: itr, fs: iceio.LocalFS{}})
+
+	var gotErr error
+	require.NotPanics(t, func() {
+		for _, err := range seq {
+			if err != nil {
+				gotErr = err
+			}
+		}
+	})
+	assert.ErrorIs(t, gotErr, readErr)
+}

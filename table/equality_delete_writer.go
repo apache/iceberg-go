@@ -273,11 +273,12 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		withSchemaSanitization(false))
 
 	nextCount, stopCount := iter.Pull(args.counter)
+	var readErr error
 	tasks := func(yield func(WriteTask) bool) {
 		defer stopCount()
 
 		fileCount := 0
-		for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
+		for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize, &readErr) {
 			cnt, _ := nextCount()
 			fileCount++
 			t := WriteTask{
@@ -294,7 +295,7 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 	}
 
-	return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks), nil
+	return withReadErr(cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks), &readErr), nil
 }
 
 // equalityDeleteWriteSchema returns a schema containing the union of equality
