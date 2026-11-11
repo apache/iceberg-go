@@ -106,11 +106,12 @@ func TestAdaptiveParquetBloomFilterColumnIsolation(t *testing.T) {
 			}
 			sizes[i] = bf.Size()
 			hasher := bf.Hasher()
-			for value := 0; value < col.distinct; value++ {
+			for value := range col.distinct {
 				if !bf.CheckHash(hasher.Sum64(int32PhysBytes(int32(value)))) {
 					return fmt.Errorf("bloom filter for %s omitted inserted value %d", col.name, value)
 				}
 			}
+
 			return nil
 		})
 		require.NoError(t, err)
@@ -172,12 +173,13 @@ func TestAdaptiveParquetBloomFilterRowGroupIsolation(t *testing.T) {
 			}
 			sizes[group] = bf.Size()
 			hasher := bf.Hasher()
-			for value := 0; value < distinct; value++ {
+			for value := range distinct {
 				written := int32(group*10000 + value)
 				if !bf.CheckHash(hasher.Sum64(int32PhysBytes(written))) {
 					return fmt.Errorf("row group %d omitted inserted value %d", group, written)
 				}
 			}
+
 			return nil
 		})
 		require.NoError(t, err)
