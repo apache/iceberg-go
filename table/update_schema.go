@@ -1094,6 +1094,7 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 		updates = append(updates, columnPropertyUpdates(meta.props, u.schema, newSchema, []string{
 			MetricsModeColumnConfPrefix,
 			ParquetBloomFilterColumnEnabledKeyPrefix,
+			ParquetColumnStatsEnabledKeyPrefix,
 			ParquetCompressionColumnCodecKeyPrefix,
 			ParquetCompressionColumnLevelKeyPrefix,
 		})...)
