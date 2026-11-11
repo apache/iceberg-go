@@ -2184,21 +2184,6 @@ func recordNBytes(rec arrow.RecordBatch) (total int64) {
 	return total
 }
 
-func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.RecordBatch] {
-	return internal.PackingIterator(func(yield func(arrow.RecordBatch) bool) {
-		for rec, err := range itr {
-			if err != nil {
-				panic(err)
-			}
-
-			rec.Retain()
-			if !yield(rec) {
-				return
-			}
-		}
-	}, targetFileSize, recordLookback, recordNBytes, false)
-}
-
 type recordWritingArgs struct {
 	sc              *arrow.Schema
 	itr             iter.Seq2[arrow.RecordBatch, error]
@@ -2441,29 +2426,8 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
 			return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
 		}, withSchemaSanitization(false))
-		nextCount, stopCount := iter.Pull(args.counter)
-		tasks := func(yield func(WriteTask) bool) {
-			defer stopCount()
 
-			fileCount := 0
-			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
-				cnt, _ := nextCount()
-				fileCount++
-				t := WriteTask{
-					Uuid:        *args.writeUUID,
-					ID:          cnt,
-					PartitionID: iceberg.UnpartitionedSpec.ID(),
-					FileCount:   fileCount,
-					Schema:      iceberg.PositionalDeleteSchema,
-					Batches:     batch,
-				}
-				if !yield(t) {
-					return
-				}
-			}
-		}
-
-		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
+		return cw.writeDeleteRecords(ctx, rootLocation, meta, iceberg.PositionalDeleteSchema, args, targetFileSize)
 	}
 	factory, err := newWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
 		withContentType(iceberg.EntryContentPosDeletes),
