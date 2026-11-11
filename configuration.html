@@ -304,11 +304,62 @@ that loads a REST catalog with <code>rest.sigv4-enabled=true</code> now fails at
 until the <code>catalog/rest/sigv4</code> backend is blank-imported; the error names the
 import to add.</p>
 </blockquote>
-<h4 id="custom-token-sources-google-biglake"><a class="header" href="#custom-token-sources-google-biglake">Custom token sources (Google BigLake)</a></h4>
+<h4 id="authentication-type"><a class="header" href="#authentication-type">Authentication type</a></h4>
+<p>The <code>rest.auth.type</code> property selects how the client authenticates, as in Iceberg
+Java. It is read only from the properties the client supplies; a server's
+<code>/v1/config</code> defaults and overrides can't change it. An <code>AuthManager</code> passed with
+<code>WithAuthManager</code> takes precedence over it.</p>
+<div class="table-wrapper"><table><thead><tr><th>Value</th><th>Behavior</th></tr></thead><tbody>
+<tr><td>unset or <code>oauth2</code></td><td>Use <code>token</code>, or the client-credentials flow with <code>credential</code>. With neither, send no authorization header.</td></tr>
+<tr><td><code>none</code></td><td>Send no authorization header, even if <code>token</code> or <code>credential</code> is set.</td></tr>
+<tr><td><code>google</code></td><td>Google credentials, for catalogs such as BigLake. Requires a blank import of <code>catalog/rest/googleauth</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Other values select an auth manager registered with <code>rest.RegisterAuthManager</code>.
+An unregistered value fails <code>NewCatalog</code> / <code>catalog.Load</code>. The Java values
+<code>basic</code> and <code>sigv4</code> are not supported; enable SigV4 with <code>rest.sigv4-enabled</code>
+instead.</p>
+<h4 id="google-biglake"><a class="header" href="#google-biglake">Google BigLake</a></h4>
+<p>With <code>rest.auth.type=google</code>, the
+<a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go"><code>catalog/rest/googleauth</code></a>
+backend authenticates with Google credentials, using the same properties as
+Java's <code>GoogleAuthManager</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Property</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>gcp.auth.credentials-path</code></td><td>Path to a credentials JSON file, such as a service account key.</td></tr>
+<tr><td><code>gcp.auth.credentials-json</code></td><td>The same JSON, inline. Setting both is an error.</td></tr>
+<tr><td><code>gcp.auth.scopes</code></td><td>Comma-separated OAuth scopes. Default <code>https://www.googleapis.com/auth/cloud-platform</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Without either credentials property, Application Default Credentials are used.
+Like <code>rest.auth.type</code>, these are read only from the client's properties.</p>
+<p>Token requests don't go through the catalog's HTTP client, so a transport, TLS
+config or proxy set with <code>WithCustomTransport</code>, <code>WithTLSConfig</code> or
+<code>WithTransportFactory</code> doesn't apply to them, as in Java. They use a client with
+the default transport and a 60-second timeout. To use a specific client, put it
+in the context's <code>oauth2.HTTPClient</code> value when loading the catalog, or build
+the token source yourself (for example with <code>googleauth.TokenSource</code>) and pass
+<code>NewOauth2AuthManager(ts)</code> to <code>WithAuthManager</code>. One exception: on Google Cloud
+compute, Application Default Credentials come from the metadata server, which
+the Google library always reaches through its own client.</p>
+<pre><code class="language-go">import (
+	&quot;github.com/apache/iceberg-go&quot;
+	&quot;github.com/apache/iceberg-go/catalog&quot;
+	_ &quot;github.com/apache/iceberg-go/catalog/rest/googleauth&quot;
+)
+
+cat, err := catalog.Load(ctx, &quot;biglake&quot;, iceberg.Properties{
+	&quot;type&quot;:                       &quot;rest&quot;,
+	&quot;uri&quot;:                        &quot;https://biglake.googleapis.com/iceberg/v1/restcatalog&quot;,
+	&quot;warehouse&quot;:                  &quot;gs://lakehouse-public-data&quot;,
+	&quot;rest.auth.type&quot;:             &quot;google&quot;,
+	&quot;header.x-goog-user-project&quot;: &quot;my-project&quot;,
+})
+</code></pre>
+<h4 id="custom-token-sources"><a class="header" href="#custom-token-sources">Custom token sources</a></h4>
 <p><code>WithCredential</code> uses the OAuth2 client-credentials flow against the catalog's
 token endpoint. For other identity providers, wrap any <code>oauth2.TokenSource</code> with
-<code>NewOauth2AuthManager</code> and pass it to <code>WithAuthManager</code>. Google's BigLake Iceberg
-REST catalog, for example, takes Application Default Credentials:</p>
+<code>NewOauth2AuthManager</code> and pass it to <code>WithAuthManager</code>. The Google setup above
+can also be written this way:</p>
 <pre><code class="language-go">ts, err := google.DefaultTokenSource(ctx, &quot;https://www.googleapis.com/auth/cloud-platform&quot;)
 if err != nil {
 	return err
@@ -321,9 +372,9 @@ cat, err := rest.NewCatalog(ctx, &quot;biglake&quot;, &quot;https://biglake.goog
 <p>The manager reuses a token until it expires, then asks the source for a new one.
 That refresh runs on the HTTP client the source was built with. For
 <code>google.DefaultTokenSource</code> that is the client in the context's
-<code>oauth2.HTTPClient</code> value, or <code>http.DefaultClient</code>, which has no timeout.
-Unlike Java's <code>rest.auth.type=google</code>, this is configured in code; iceberg-go
-has no <code>rest.auth.type</code> property.</p>
+<code>oauth2.HTTPClient</code> value, or <code>http.DefaultClient</code>, which has no timeout. With
+<code>rest.auth.type=google</code>, the backend sets a client with a 60-second timeout
+unless the context already carries one.</p>
 <h4 id="metrics-reporting"><a class="header" href="#metrics-reporting">Metrics reporting</a></h4>
 <p>The REST catalog can POST scan and commit metrics to the catalog's
 <code>.../tables/{table}/metrics</code> endpoint. These properties are passed as
