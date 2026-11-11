@@ -75,8 +75,11 @@ func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) 
 		return rowsMightMatch, nil
 	}
 	for _, part := range parts {
-		if (part.LowerBound == nil) != (part.UpperBound == nil) {
-			// One bound without the other cannot prove the manifest has no matches.
+		missingNonNullBounds := part.LowerBound == nil && !part.ContainsNull &&
+			(part.ContainsNaN == nil || !*part.ContainsNaN)
+		if missingNonNullBounds || (part.LowerBound == nil) != (part.UpperBound == nil) {
+			// Legacy empty-string partitions can have missing bounds (#2407).
+			// Keep both data and delete manifests when the summary is inconclusive.
 			return rowsMightMatch, nil
 		}
 	}

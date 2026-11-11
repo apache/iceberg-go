@@ -80,6 +80,60 @@ func TestManifestEvaluatorPartialPartitionBounds(t *testing.T) {
 	}
 }
 
+func TestManifestEvaluatorMissingBoundsWithoutNullsOrNaNs(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.String,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "value", Transform: iceberg.IdentityTransform{},
+	})
+	ref := iceberg.Reference("value")
+	filters := []struct {
+		name string
+		expr iceberg.BooleanExpression
+	}{
+		{"equal empty string", iceberg.EqualTo(ref, "")},
+		{"equal", iceberg.EqualTo(ref, "o")},
+		{"not equal", iceberg.NotEqualTo(ref, "o")},
+		{"less than", iceberg.LessThan(ref, "o")},
+		{"less than equal", iceberg.LessThanEqual(ref, "o")},
+		{"greater than", iceberg.GreaterThan(ref, "o")},
+		{"greater than equal", iceberg.GreaterThanEqual(ref, "o")},
+		{"in", iceberg.IsIn(ref, "", "o")},
+		{"not in", iceberg.NotIn(ref, "o", "p")},
+		{"not null", iceberg.NotNull(ref)},
+		{"starts with", iceberg.StartsWith(ref, "o")},
+	}
+	for _, content := range []iceberg.ManifestContent{iceberg.ManifestContentData, iceberg.ManifestContentDeletes} {
+		t.Run(content.String(), func(t *testing.T) {
+			for _, tc := range []struct {
+				name        string
+				containsNaN *bool
+			}{
+				{"unknown NaNs", nil},
+				{"no NaNs", new(false)},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					manifest := iceberg.NewManifestBuilder(2, "legacy.avro", 1, 0, 1).
+						Content(content).AddedFiles(1).
+						Partitions([]iceberg.FieldSummary{{ContainsNaN: tc.containsNaN}}).Build()
+
+					for _, filter := range filters {
+						t.Run(filter.name, func(t *testing.T) {
+							eval, err := newManifestEvaluator(spec, schema, filter.expr, true)
+							require.NoError(t, err)
+
+							matches, err := eval(manifest)
+							require.NoError(t, err)
+							require.True(t, matches, "legacy empty-string bounds cannot exclude data or delete manifests")
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestManifestEvaluatorPartialBoundsOnSecondPartitionField(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.String},
@@ -91,20 +145,25 @@ func TestManifestEvaluatorPartialBoundsOnSecondPartitionField(t *testing.T) {
 	)
 	firstLower, firstUpper := []byte("a"), []byte("z")
 	secondLower := []byte("m")
-	manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).
-		AddedFiles(1).
-		Partitions([]iceberg.FieldSummary{
-			{LowerBound: &firstLower, UpperBound: &firstUpper},
-			{ContainsNull: true, LowerBound: &secondLower},
-		}).Build()
-
 	eval, err := newManifestEvaluator(spec, schema,
 		iceberg.EqualTo(iceberg.Reference("second"), "o"), true)
 	require.NoError(t, err)
 
-	matches, err := eval(manifest)
-	require.NoError(t, err)
-	require.True(t, matches, "a one-bound summary on the second field cannot exclude the manifest")
+	for _, summary := range []iceberg.FieldSummary{
+		{ContainsNull: true, LowerBound: &secondLower},
+		{},
+	} {
+		manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 1, 0, 1).
+			AddedFiles(1).
+			Partitions([]iceberg.FieldSummary{
+				{LowerBound: &firstLower, UpperBound: &firstUpper},
+				summary,
+			}).Build()
+
+		matches, err := eval(manifest)
+		require.NoError(t, err)
+		require.True(t, matches, "inconclusive bounds on the second field cannot exclude the manifest")
+	}
 }
 
 func TestManifestEvaluatorMissingBoundsPruneNullOnlyPartition(t *testing.T) {
@@ -170,4 +229,40 @@ func TestManifestEvaluatorPartialBoundsDoNotProveAllNaN(t *testing.T) {
 	matches, err := eval(manifest)
 	require.NoError(t, err)
 	require.True(t, matches, "an upper bound proves that at least one partition value is not NaN")
+}
+
+func TestManifestEvaluatorMissingBoundsPruneNaNOnlyPartition(t *testing.T) {
+	for _, typ := range []iceberg.Type{iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64} {
+		t.Run(typ.String(), func(t *testing.T) {
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: typ})
+			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1000, Name: "value", Transform: iceberg.IdentityTransform{},
+			})
+			manifest := iceberg.NewManifestBuilder(2, "nan-only.avro", 1, 0, 1).
+				AddedFiles(1).
+				Partitions([]iceberg.FieldSummary{{ContainsNaN: new(true)}}).Build()
+			ref := iceberg.Reference("value")
+			for _, tc := range []struct {
+				name string
+				expr iceberg.BooleanExpression
+				want bool
+			}{
+				{"equal", iceberg.EqualTo(ref, float64(20)), false},
+				{"less than", iceberg.LessThan(ref, float64(20)), false},
+				{"greater than", iceberg.GreaterThan(ref, float64(20)), false},
+				{"in", iceberg.IsIn(ref, float64(20), float64(30)), false},
+				{"not NaN", iceberg.NotNaN(ref), false},
+				{"is NaN", iceberg.IsNaN(ref), true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					eval, err := newManifestEvaluator(spec, schema, tc.expr, true)
+					require.NoError(t, err)
+
+					matches, err := eval(manifest)
+					require.NoError(t, err)
+					require.Equal(t, tc.want, matches)
+				})
+			}
+		})
+	}
 }
