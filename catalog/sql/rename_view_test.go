@@ -50,6 +50,27 @@ func createRenameTestView(t *testing.T, cat *Catalog, ident table.Identifier) *v
 	return created
 }
 
+type wrappedRenameCatalog struct{ catalog.Catalog }
+
+func (w wrappedRenameCatalog) Unwrap() catalog.Catalog { return w.Catalog }
+
+func TestRenameViewCapability(t *testing.T) {
+	cat := newNamespaceRaceCatalog(t)
+	require.NoError(t, cat.CreateNamespace(t.Context(), table.Identifier{"db"}, nil))
+	from := table.Identifier{"db", "old"}
+	to := table.Identifier{"db", "new"}
+	createRenameTestView(t, cat, from)
+
+	wrapped := wrappedRenameCatalog{wrappedRenameCatalog{cat}}
+	renamer, ok := catalog.As[catalog.RenamableViewCatalog](wrapped)
+	require.True(t, ok)
+	renamed, err := renamer.RenameView(t.Context(), from, to)
+	require.NoError(t, err)
+	require.Equal(t, to, renamed.Identifier())
+	_, err = cat.LoadView(t.Context(), from)
+	require.ErrorIs(t, err, catalog.ErrNoSuchView)
+}
+
 func TestRenameView(t *testing.T) {
 	for _, namespace := range []table.Identifier{{"db"}, {"other"}, {"db", "child"}, {"db.child"}} {
 		t.Run(strings.Join(namespace, "."), func(t *testing.T) {
