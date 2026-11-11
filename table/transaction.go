@@ -95,10 +95,12 @@ type Transaction struct {
 	noReplay bool
 
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
-	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot,
-	// and CherryPickSnapshot. doCommit's refresh-and-replay must not rewrite
-	// their assertions to the fresh head between retries, so a ref that has
-	// changed fails the commit.
+	// the commit. These include refs from AssertRefSnapshotID,
+	// RollbackToSnapshot, CherryPickSnapshot, FastForwardBranch,
+	// ReplaceBranchFromRef, and ReplaceBranch. A promotion of a staged source
+	// snapshot also pins the commit branch. On retry, these assertions are not
+	// rewritten, so a changed ref fails the commit. ExpireSnapshots instead
+	// replans against refreshed metadata.
 	pinnedRefs map[string]struct{}
 
 	expirations []expirationRecord
