@@ -277,10 +277,10 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	pageVersion := props.Get(ParquetPageVersionKey, ParquetPageVersionDefault)
 
 	var dpVersion parquet.DataPageVersion
-	switch pageVersion {
-	case "1":
+	switch strings.ToLower(pageVersion) {
+	case "1", "v1":
 		dpVersion = parquet.DataPageV1
-	case "2":
+	case "2", "v2":
 		dpVersion = parquet.DataPageV2
 	default:
 		slog.Warn("unrecognized data page version, falling back to v2", "version", pageVersion)
@@ -304,7 +304,7 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		ParquetCompressionLevelDefault)
 
 	var codec compress.Compression
-	switch compression {
+	switch strings.ToLower(compression) {
 	case "snappy":
 		codec = compress.Codecs.Snappy
 	case "zstd":
@@ -317,7 +317,7 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		codec = compress.Codecs.Brotli
 	case "lz4":
 		codec = compress.Codecs.Lz4
-	case "lz4raw":
+	case "lz4raw", "lz4_raw":
 		codec = compress.Codecs.Lz4Raw
 	case "lzo":
 		codec = compress.Codecs.Lzo
@@ -430,7 +430,7 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 
 func validateParquetCompressionLevel(key, compression string, level int) error {
 	min, max := 0, 0
-	switch compression {
+	switch strings.ToLower(compression) {
 	case "gzip":
 		min, max = parquetGzipCompressionLevelMin, parquetGzipCompressionLevelMax
 	case "zstd":

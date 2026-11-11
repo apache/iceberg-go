@@ -585,7 +585,7 @@ corresponding `write.parquet.*` setting and its default.
 | `write.delete.parquet.page-size-bytes` | Data page size |
 | `write.delete.parquet.page-row-limit` | Page write batch size |
 | `write.delete.parquet.dict-size-bytes` | Dictionary page size |
-| `write.delete.parquet.page-version` | Data page version |
+| `write.delete.parquet.page-version` | Data page version: `v1` or `v2` (`1` and `2` also accepted) |
 | `write.delete.parquet.compression-codec` | Compression codec |
 | `write.delete.parquet.compression-level` | Compression level |
 

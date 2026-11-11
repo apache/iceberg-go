@@ -294,6 +294,20 @@ func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 			effective[dataKey] = value
 		}
 	}
+	if codec, overridden := props[DeleteParquetCompressionKey]; overridden {
+		switch strings.ToLower(codec) {
+		case "snappy", "zstd", "uncompressed", "gzip", "brotli", "lz4", "lz4raw", "lz4_raw", "lzo":
+		default:
+			return nil, fmt.Errorf("%w: unsupported %s value %q", iceberg.ErrInvalidArgument, DeleteParquetCompressionKey, codec)
+		}
+	}
+	if version, overridden := props[DeleteParquetPageVersionKey]; overridden {
+		switch strings.ToLower(version) {
+		case "1", "2", "v1", "v2":
+		default:
+			return nil, fmt.Errorf("%w: unsupported %s value %q", iceberg.ErrInvalidArgument, DeleteParquetPageVersionKey, version)
+		}
+	}
 	// Java does not apply data-column Bloom filters or dictionary overrides to
 	// delete files, whose schema may differ from the data schema.
 	maps.DeleteFunc(effective, func(key, _ string) bool {

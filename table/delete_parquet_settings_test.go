@@ -64,10 +64,10 @@ func TestDeleteParquetSettingsOnDisk(t *testing.T) {
 					ParquetRowGroupSizeBytesKey: "1048576", ParquetPageSizeBytesKey: "1048576",
 					ParquetPageRowLimitKey: "20000", ParquetDictSizeBytesKey: "2097152",
 					ParquetPageVersionKey: "2", tblutils.ParquetDictEnabledKey: "false",
-					DeleteParquetCompressionKey: "gzip", DeleteParquetCompressionLevelKey: "9",
+					DeleteParquetCompressionKey: "GZIP", DeleteParquetCompressionLevelKey: "9",
 					DeleteParquetRowGroupSizeBytesKey: "1", DeleteParquetPageSizeBytesKey: "64",
 					DeleteParquetPageRowLimitKey: "1", DeleteParquetDictSizeBytesKey: "64",
-					DeleteParquetPageVersionKey: "1", DefaultWriteMetricsModeKey: "none",
+					DeleteParquetPageVersionKey: "v1", DefaultWriteMetricsModeKey: "none",
 					ParquetBloomFilterColumnEnabledKeyPrefix + ".value":     "true",
 					ParquetBloomFilterColumnEnabledKeyPrefix + ".file_path": "true",
 				}
@@ -236,9 +236,13 @@ func TestDeleteParquetSettingsValidation(t *testing.T) {
 		{DeleteParquetDictSizeBytesKey, "0"},
 		{DeleteParquetCompressionLevelKey, "bad"},
 		{DeleteParquetCompressionLevelKey, "10"},
+		{DeleteParquetCompressionKey, "unknown"},
+		{DeleteParquetCompressionKey, ""},
+		{DeleteParquetPageVersionKey, "v3"},
 	} {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
-			props := iceberg.Properties{DeleteParquetCompressionKey: "gzip", tt.key: tt.value}
+			props := iceberg.Properties{DeleteParquetCompressionKey: "GZIP"}
+			props[tt.key] = tt.value
 			meta := deleteParquetTestMetadata(t, props)
 			fs := iceio.NewMemFS()
 			_, err := newDataFileWriter("mem://delete-settings", fs, meta, props, withContent(iceberg.EntryContentEqDeletes))
