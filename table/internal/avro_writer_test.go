@@ -679,3 +679,35 @@ func TestAvroWriterRejectsNilBatches(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorIs(t, writer.failed, iceberg.ErrInvalidArgument)
 }
+
+func TestAvroWriterRespectsMetricsPlan(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}})
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 0}, []bool{true, false})
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+	for _, mode := range []MetricModeType{MetricModeNone, MetricModeCounts, MetricModeFull} {
+		t.Run(string(mode), func(t *testing.T) {
+			plan := map[int]StatisticsCollector{1: {FieldID: 1, Mode: MetricsMode{Typ: mode}, IcebergTyp: iceberg.Int64Type{}}}
+			format := avroFormat{}
+			writer, err := format.NewFileWriter(t.Context(), iceio.NewMemFS(), nil, WriteFileInfo{
+				FileSchema: schema, Spec: *iceberg.UnpartitionedSpec, FileName: "metrics.avro", Content: iceberg.EntryContentData,
+				WriteProps: format.GetWriteProperties(nil), StatsCols: plan,
+			}, arrowSchema)
+			require.NoError(t, err)
+			require.NoError(t, writer.Write(batch))
+			data, err := writer.Close()
+			require.NoError(t, err)
+			require.EqualValues(t, 2, data.Count())
+			if mode == MetricModeNone {
+				require.Empty(t, data.ValueCounts())
+				require.Empty(t, data.NullValueCounts())
+			} else {
+				require.EqualValues(t, 2, data.ValueCounts()[1])
+				require.EqualValues(t, 1, data.NullValueCounts()[1])
+			}
+		})
+	}
+}

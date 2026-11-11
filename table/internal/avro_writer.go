@@ -69,10 +69,25 @@ func (avroFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
 	return mapping, nil
 }
 
-func (avroFormat) DataFileStatsFromMeta(meta Metadata, _ map[int]StatisticsCollector, _ map[string]int, _ map[int]struct{}, _ *arrow.Schema) *DataFileStatistics {
+func (avroFormat) DataFileStatsFromMeta(meta Metadata, plans map[int]StatisticsCollector, _ map[string]int, _ map[int]struct{}, _ *arrow.Schema) *DataFileStatistics {
 	s := meta.(*avroWriteSummary)
+	values, nulls := s.values, s.nulls
+	if plans != nil {
+		values, nulls = make(map[int]int64), make(map[int]int64)
+		for id, plan := range plans {
+			if plan.Mode.Typ == MetricModeNone {
+				continue
+			}
+			if count, ok := s.values[id]; ok {
+				values[id] = count
+			}
+			if count, ok := s.nulls[id]; ok {
+				nulls[id] = count
+			}
+		}
+	}
 
-	return &DataFileStatistics{RecordCount: s.rows, NullValueCounts: s.nulls, ValueCounts: s.values}
+	return &DataFileStatistics{RecordCount: s.rows, NullValueCounts: nulls, ValueCounts: values}
 }
 
 func (avroFormat) GetWriteProperties(props iceberg.Properties) any {
@@ -143,7 +158,8 @@ func (avroFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, parti
 	case "snappy":
 		opts = append(opts, ocf.WithCodec(ocf.SnappyCodec()))
 	case "deflate", "gzip":
-		opts = append(opts, ocf.WithCodec(ocf.DeflateCodec(-1)))
+		// Iceberg's gzip alias uses raw DEFLATE at level 9, as in Java.
+		opts = append(opts, ocf.WithCodec(ocf.DeflateCodec(9)))
 	case "zstd":
 		opts = append(opts, ocf.WithCodec(ocf.MustZstdCodec(nil, nil)))
 	default:
@@ -364,7 +380,9 @@ func (w *avroFileWriter) Close() (_ iceberg.DataFile, err error) {
 
 		return nil, errors.Join(err, removeErr)
 	}
-	stats := &DataFileStatistics{RecordCount: w.rows, ValueCounts: w.values, NullValueCounts: w.nulls}
+	stats := (avroFormat{}).DataFileStatsFromMeta(&avroWriteSummary{
+		rows: w.rows, values: w.values, nulls: w.nulls,
+	}, w.info.StatsCols, nil, nil, nil)
 
 	return stats.ToDataFile(DataFileOpts{
 		Schema: w.info.FileSchema, Spec: w.info.Spec, Path: w.info.FileName,
