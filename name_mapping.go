@@ -354,7 +354,8 @@ func (n indexedNameMappingAccessor) indexFields(field *MappedField) error {
 		mappedField := &field.Fields[i]
 		for _, name := range mappedField.Names {
 			if existing, ok := fieldsByName[name]; ok && existing != mappedField {
-				return fmt.Errorf("%w: duplicate name mapping %q", ErrInvalidSchema, name)
+				return fmt.Errorf("%w: duplicate name mapping %q (field IDs %d and %d)",
+					ErrInvalidSchema, name, existing.ID(), mappedField.ID())
 			}
 			fieldsByName[name] = mappedField
 		}
@@ -551,8 +552,12 @@ func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schem
 		return nil, err
 	}
 
-	return NewSchema(schemaWithoutIDs.ID,
-		top.Type.(*StructType).FieldList...), nil
+	fields := top.Type.(*StructType).FieldList
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
+		return nil, err
+	}
+
+	return NewSchema(schemaWithoutIDs.ID, fields...), nil
 }
 
 type createMapping struct{}
