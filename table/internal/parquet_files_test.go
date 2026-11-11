@@ -3271,3 +3271,43 @@ func geoBoundBytes(coords ...float64) []byte {
 
 	return buf
 }
+
+func TestParquetGetReaderReadsPageLargerThanArrowDefault(t *testing.T) {
+	// One uncompressed value bigger than arrow-go's 64 MiB page limit, so the file has a single large page.
+	big := bytes.Repeat([]byte{'x'}, 70*1024*1024)
+
+	sc := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: arrow.BinaryTypes.Binary}}, nil)
+	bldr := array.NewBinaryBuilder(memory.DefaultAllocator, arrow.BinaryTypes.Binary)
+	bldr.Append(big)
+	col := bldr.NewArray()
+	defer col.Release()
+	rec := array.NewRecordBatch(sc, []arrow.Array{col}, 1)
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	w, err := pqarrow.NewFileWriter(sc, &buf, parquet.NewWriterProperties(
+		parquet.WithDictionaryDefault(false),
+		parquet.WithDataPageSize(256*1024*1024),
+	), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, w.Write(rec))
+	require.NoError(t, w.Close())
+	data := buf.Bytes()
+
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		"big.parquet", iceberg.ParquetFile, nil, nil, nil, 1, int64(len(data)))
+	require.NoError(t, err)
+
+	mockIO := &trackingFileSystem{file: &trackingOpenFile{Reader: bytes.NewReader(data)}}
+	fileSource, err := internal.GetFile(context.Background(), mockIO, builder.Build(), false)
+	require.NoError(t, err)
+	rdr, err := fileSource.GetReader(context.Background())
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	records, err := rdr.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next(), "read failed: %v", records.Err())
+	assert.Len(t, records.RecordBatch().Column(0).(*array.Binary).Value(0), len(big))
+}

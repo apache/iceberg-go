@@ -118,12 +118,12 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 		}
 	}()
 
-	rdr, err := file.NewParquetReader(inputfile)
+	alloc := compute.GetAllocator(ctx)
+	rdr, err := file.NewParquetReader(inputfile, file.WithReadProps(newReaderProperties(alloc)))
 	if err != nil {
 		return nil, err
 	}
 
-	alloc := compute.GetAllocator(ctx)
 	arrRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, alloc)
 	if err != nil {
 		return nil, err
@@ -2183,10 +2183,24 @@ func (nonClosingReaderAtSeeker) Close() error {
 	return nil
 }
 
+// Spark can write pages larger than arrow-go's 64 MiB default, so raise the read limits.
+const (
+	maxCompressedPageSize   = 250 * 1024 * 1024
+	maxUncompressedPageSize = 1024 * 1024 * 1024
+)
+
+func newReaderProperties(mem memory.Allocator) *parquet.ReaderProperties {
+	props := parquet.NewReaderProperties(mem)
+	props.MaxCompressedPageSize = maxCompressedPageSize
+	props.MaxUncompressedPageSize = maxUncompressedPageSize
+
+	return props
+}
+
 func newParquetDictionaryReader(
 	source parquet.ReaderAtSeeker, fileMeta *metadata.FileMetaData, mem memory.Allocator,
 ) (*file.Reader, error) {
-	readProps := parquet.NewReaderProperties(mem)
+	readProps := newReaderProperties(mem)
 	readProps.BufferedStreamEnabled = true
 
 	return file.NewParquetReader(nonClosingReaderAtSeeker{ReaderAtSeeker: source},
@@ -2632,7 +2646,7 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		}
 	}()
 
-	readProps := parquet.NewReaderProperties(pfs.mem)
+	readProps := newReaderProperties(pfs.mem)
 	var rdr *file.Reader
 	var rowGroupInfos []parquetRowGroupInfo
 	if cache := parquetMetadataCacheFromContext(ctx); cache != nil {
