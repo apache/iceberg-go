@@ -65,9 +65,6 @@ func (f *contextBoundHadoopFS) MkdirAll(ctx context.Context, name string) error 
 	if err := f.ctx.Err(); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 
 	return f.LocalFS.MkdirAll(ctx, f.localPath(name))
 }
@@ -86,6 +83,30 @@ func (f *contextBoundHadoopFS) WriteFile(ctx context.Context, name string, conte
 	}
 
 	return f.LocalFS.WriteFile(ctx, f.localPath(name), content)
+}
+
+type directoryContextHadoopFS struct {
+	HadoopCatalogFS
+	mkdirAllValues  []any
+	removeAllValues []any
+}
+
+func (f *directoryContextHadoopFS) MkdirAll(ctx context.Context, name string) error {
+	f.mkdirAllValues = append(f.mkdirAllValues, ctx.Value(hadoopContextKey{}))
+
+	return f.HadoopCatalogFS.MkdirAll(ctx, name)
+}
+
+func (f *directoryContextHadoopFS) RemoveAll(ctx context.Context, name string) error {
+	f.removeAllValues = append(f.removeAllValues, ctx.Value(hadoopContextKey{}))
+
+	return f.HadoopCatalogFS.RemoveAll(ctx, name)
+}
+
+func requireLastDirectoryContextValue(t *testing.T, values []any, want string) {
+	t.Helper()
+	require.NotEmpty(t, values)
+	require.Equal(t, want, values[len(values)-1])
 }
 
 func registerHadoopContextFS(t *testing.T, scheme string, factory icebergio.SchemeFactory) {
@@ -161,6 +182,43 @@ func TestNewCatalogFilesystemContextLifetime(t *testing.T) {
 			require.Equal(t, content, readBack)
 		})
 	}
+}
+
+func TestHadoopCatalogDirectoryOperationsUseOperationContext(t *testing.T) {
+	cat, err := NewCatalog(context.Background(), "test", filepath.Join(t.TempDir(), "warehouse"), nil)
+	require.NoError(t, err)
+
+	filesystem := &directoryContextHadoopFS{HadoopCatalogFS: cat.filesystem}
+	cat.filesystem = filesystem
+	operationContext := func(value string) context.Context {
+		return context.WithValue(context.Background(), hadoopContextKey{}, value)
+	}
+
+	require.NoError(t, cat.CreateNamespace(operationContext("CreateNamespace"), table.Identifier{"ns"}, nil))
+	requireLastDirectoryContextValue(t, filesystem.mkdirAllValues, "CreateNamespace")
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	dropIdent := table.Identifier{"ns", "drop"}
+	dropTable, err := cat.CreateTable(operationContext("CreateTable"), dropIdent, schema)
+	require.NoError(t, err)
+	requireLastDirectoryContextValue(t, filesystem.mkdirAllValues, "CreateTable")
+
+	_, _, err = cat.CommitTable(operationContext("CommitTable"), dropIdent,
+		[]table.Requirement{table.AssertTableUUID(dropTable.Metadata().TableUUID())},
+		[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"context-test": "committed"})})
+	require.NoError(t, err)
+	requireLastDirectoryContextValue(t, filesystem.mkdirAllValues, "CommitTable")
+
+	require.NoError(t, cat.DropTable(operationContext("DropTable"), dropIdent))
+	requireLastDirectoryContextValue(t, filesystem.removeAllValues, "DropTable")
+
+	purgeIdent := table.Identifier{"ns", "purge"}
+	_, err = cat.CreateTable(operationContext("CreateTable for PurgeTable"), purgeIdent, schema)
+	require.NoError(t, err)
+	require.NoError(t, cat.PurgeTable(operationContext("PurgeTable"), purgeIdent))
+	requireLastDirectoryContextValue(t, filesystem.removeAllValues, "PurgeTable")
 }
 
 func TestNewCatalogHonorsContextCancellation(t *testing.T) {
