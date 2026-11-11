@@ -166,11 +166,11 @@ func TestParquetCompressionDeleteNestedCollectionsRemovesOverrides(t *testing.T)
 	const codec = ParquetCompressionColumnCodecKeyPrefix + "."
 	const level = ParquetCompressionColumnLevelKeyPrefix + "."
 	meta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", iceberg.Properties{
-		codec + "tags.element":    "gzip",
-		level + "tags.element":    "3",
-		codec + "properties.key":  "snappy",
+		codec + "tags.element":     "gzip",
+		level + "tags.element":     "3",
+		codec + "properties.key":   "snappy",
 		level + "properties.value": "4",
-		codec + "name":            "zstd",
+		codec + "name":             "zstd",
 	})
 	require.NoError(t, err)
 	txn := New([]string{"table"}, meta, "", nil, nil).NewTransaction()

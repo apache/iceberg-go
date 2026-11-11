@@ -432,9 +432,9 @@ func TestParquetColumnCompressionConfigReusableAcrossPhysicalSchemas(t *testing.
 		ID: 1, Name: "customer name", Type: iceberg.PrimitiveTypes.String,
 	})
 	props := iceberg.Properties{
-		ParquetCompressionKey:                                          "zstd",
-		ParquetCompressionColumnCodecKeyPrefix + ".customer name":       "gzip",
-		ParquetCompressionColumnLevelKeyPrefix + ".customer name":       "6",
+		ParquetCompressionKey: "zstd",
+		ParquetCompressionColumnCodecKeyPrefix + ".customer name": "gzip",
+		ParquetCompressionColumnLevelKeyPrefix + ".customer name": "6",
 	}
 	config := (parquetFormat{}).GetWriteProperties(props).(parquetColumnCompressionConfig)
 	for _, name := range []string{"first", "second", "first"} {

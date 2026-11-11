@@ -42,10 +42,10 @@ type parquetColumnCompressionConfig struct {
 // Keep presence separate from value: an explicitly empty codec or level must
 // fail validation instead of being treated as an absent override.
 type parquetColumnCompressionOverride struct {
-	codec     string
-	level     string
-	hasCodec  bool
-	hasLevel  bool
+	codec    string
+	level    string
+	hasCodec bool
+	hasLevel bool
 }
 
 func columnCompressionWriteProperties(props iceberg.Properties, base []parquet.WriterProperty) any {
