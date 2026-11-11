@@ -1028,11 +1028,24 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, fmt.Errorf("failed to build metadata: %w", err)
 	}
 
+	filterIDs, err := iceberg.ExtractFieldIDs(boundFilter)
+	if err != nil {
+		return nil, err
+	}
+	selected := make(map[int]iceberg.Void, len(filterIDs))
+	for _, id := range filterIDs {
+		selected[id] = iceberg.Void{}
+	}
+	projection, err := iceberg.PruneColumns(meta.CurrentSchema(), selected, false)
+	if err != nil {
+		return nil, err
+	}
+
 	scanner := &arrowScan{
 		metadata:        builtMeta,
 		fs:              fs,
 		scanSchema:      meta.CurrentSchema(),
-		projectedSchema: meta.CurrentSchema(),
+		projectedSchema: projection,
 		boundRowFilter:  boundFilter,
 		caseSensitive:   caseSensitive,
 		rowLimit:        -1, // No limit
