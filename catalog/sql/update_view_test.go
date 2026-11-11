@@ -19,8 +19,6 @@ package sql
 
 import (
 	"context"
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +27,6 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
@@ -153,7 +150,7 @@ func TestUpdateViewRetentionAndMetadataLocation(t *testing.T) {
 		version.Representations[i].SQL = "SELECT 2"
 	}
 	updated, err := cat.UpdateView(t.Context(), created.Identifier(), nil, []view.Update{
-		view.NewSetPropertiesUpdate(iceberg.Properties{view.VersionHistorySizeKey: "1", "write.metadata.path": dir}),
+		view.NewSetPropertiesUpdate(iceberg.Properties{view.VersionHistorySizeKey: "1", table.WriteMetadataPathKey: dir}),
 		view.NewAddViewVersionUpdate(version), view.NewSetCurrentVersionUpdate(view.LastAddedID),
 	})
 	require.NoError(t, err)
@@ -217,72 +214,6 @@ func TestUpdateViewRejectsV0(t *testing.T) {
 	cat.schemaVersion = schemaV0
 	_, err := cat.UpdateView(t.Context(), table.Identifier{"db", "view"}, nil, nil)
 	require.ErrorIs(t, err, errViewsUnsupportedOnV0)
-}
-
-type failingViewWriter struct {
-	icebergio.FileWriter
-	failure   error
-	failClose bool
-}
-
-func (w *failingViewWriter) Write(p []byte) (int, error) {
-	if !w.failClose {
-		return 0, w.failure
-	}
-
-	return w.FileWriter.Write(p)
-}
-
-func (w *failingViewWriter) Close() error {
-	err := w.FileWriter.Close()
-	if w.failClose {
-		return errors.Join(err, w.failure)
-	}
-
-	return err
-}
-
-type failingViewFS struct {
-	icebergio.LocalFS
-	failure        error
-	failClose      bool
-	cleanupContext error
-	cancel         context.CancelFunc
-}
-
-func (fs *failingViewFS) Create(ctx context.Context, name string) (icebergio.FileWriter, error) {
-	writer, err := fs.LocalFS.Create(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-
-	fs.cancel()
-
-	return &failingViewWriter{FileWriter: writer, failure: fs.failure, failClose: fs.failClose}, nil
-}
-
-func (fs *failingViewFS) Remove(ctx context.Context, name string) error {
-	fs.cleanupContext = ctx.Err()
-
-	return fs.LocalFS.Remove(ctx, name)
-}
-
-func TestUpdateViewCleansFailedMetadataWrites(t *testing.T) {
-	for _, failClose := range []bool{false, true} {
-		t.Run(map[bool]string{false: "write", true: "close"}[failClose], func(t *testing.T) {
-			cat := newNamespaceRaceCatalog(t)
-			created := createUpdateTestView(t, cat)
-			location := filepath.Join(t.TempDir(), "failed.metadata.json")
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			fs := &failingViewFS{failure: io.ErrClosedPipe, failClose: failClose, cancel: cancel}
-			err := writeUpdatedViewMetadata(ctx, fs, location, created.Metadata())
-			require.ErrorIs(t, err, io.ErrClosedPipe)
-			require.NoError(t, fs.cleanupContext)
-			_, err = os.Stat(location)
-			require.ErrorIs(t, err, os.ErrNotExist)
-		})
-	}
 }
 
 func TestUpdateViewSchemaReplacement(t *testing.T) {

@@ -19,18 +19,14 @@ package sql
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"net/url"
 
 	"github.com/apache/iceberg-go/catalog"
-	iceinternal "github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
-	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
 
@@ -68,32 +64,13 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 	if err != nil {
 		return nil, err
 	}
-	metadataDir := metadata.Properties().Get("write.metadata.path", "")
-	if metadataDir == "" {
-		metadataDir, err = url.JoinPath(metadata.Location(), "metadata")
-		if err != nil {
-			return nil, err
-		}
-	}
-	metadataLocation, err := url.JoinPath(metadataDir, "view-"+uuid.NewString()+".metadata.json")
-	if err != nil {
-		return nil, err
-	}
 	ioProps := maps.Clone(c.props)
 	if ioProps == nil {
 		ioProps = make(map[string]string)
 	}
 	maps.Copy(ioProps, metadata.Properties())
-	loadFS := icebergio.LoadFSFunc(ioProps, metadataLocation)
-	fs, err := loadFS(ctx)
+	metadataLocation, fs, err := view.WriteMetadata(ctx, metadata.Metadata, ioProps)
 	if err != nil {
-		return nil, err
-	}
-	wfs, ok := fs.(icebergio.WriteFileIO)
-	if !ok {
-		return nil, errors.New("filesystem IO does not support writing")
-	}
-	if err := writeUpdatedViewMetadata(ctx, wfs, metadataLocation, metadata); err != nil {
 		return nil, err
 	}
 
@@ -123,26 +100,11 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		// A failed comparison proves that this file was not committed. Other
 		// SQL failures may have an unknown outcome, so retain the metadata.
 		if errors.Is(err, table.ErrCommitFailed) {
-			err = errors.Join(err, removeUncommittedMetadata(ctx, metadataLocation, loadFS))
+			err = errors.Join(err, removeUncommittedMetadata(ctx, metadataLocation, func(context.Context) (icebergio.IO, error) { return fs, nil }))
 		}
 
 		return nil, err
 	}
 
 	return view.New(ident, metadata.Metadata, metadataLocation), nil
-}
-
-func writeUpdatedViewMetadata(ctx context.Context, fs icebergio.WriteFileIO, location string, metadata view.Metadata) (err error) {
-	writer, err := fs.Create(ctx, location)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, fs.Remove(context.WithoutCancel(ctx), location))
-		}
-	}()
-	defer iceinternal.CheckedClose(writer, &err)
-
-	return json.NewEncoder(writer).Encode(metadata)
 }
