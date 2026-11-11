@@ -622,6 +622,26 @@ if err := us.Commit(); err != nil { /* ... */ }
 </code></pre>
 <p><code>AddField</code> chains; <code>AddIdentity(sourceCol)</code> is a shortcut for an identity transform; <code>RenameField(name, newName)</code> renames an existing partition field.</p>
 <p>Available transforms (root <code>iceberg</code> package): <code>IdentityTransform{}</code>, <code>YearTransform{}</code>, <code>MonthTransform{}</code>, <code>DayTransform{}</code>, <code>HourTransform{}</code>, <code>BucketTransform{NumBuckets: N}</code>, <code>TruncateTransform{Width: W}</code>.</p>
+<h3 id="sort-order-evolution"><a class="header" href="#sort-order-evolution">Sort order evolution</a></h3>
+<p>Use the transaction builder to replace the full default sort order. It binds column names against the transaction's staged schema. An empty builder resets the order to unsorted:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+builder := txn.NewReplaceSortOrder(true).
+    Asc(&quot;event_time&quot;, table.NullsLast).
+    AddField(&quot;user_id&quot;, iceberg.BucketTransform{NumBuckets: 16}, table.SortASC, table.NullsFirst)
+if err := builder.Commit(); err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>Call <code>Transaction.ReplaceSortOrder</code> directly when you already have a <code>table.SortOrder</code>, such as one built from field IDs:</p>
+<pre><code class="language-go">order, err := table.NewSortOrder(1, []table.SortField{{
+    SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
+    Direction: table.SortASC, NullOrder: table.NullsFirst,
+}})
+if err != nil { /* ... */ }
+if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
+</code></pre>
+<p>Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.</p>
+<p>The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.</p>
 <h2 id="snapshots-and-refs"><a class="header" href="#snapshots-and-refs">Snapshots and refs</a></h2>
 <h3 id="inspecting"><a class="header" href="#inspecting">Inspecting</a></h3>
 <pre><code class="language-go">if snap := tbl.CurrentSnapshot(); snap != nil {
