@@ -109,6 +109,7 @@ const (
 	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
+	ParquetColumnStatsEnabledKeyPrefix       = internal.ParquetColumnStatsEnabledKeyPrefix
 
 	ParquetBatchSizeKey     = internal.ParquetBatchSizeKey
 	ParquetBatchSizeDefault = internal.ParquetBatchSizeDefault

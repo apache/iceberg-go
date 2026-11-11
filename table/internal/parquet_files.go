@@ -77,6 +77,7 @@ const (
 	parquetBloomFilterMaxBytesMin            = 32
 	parquetBloomFilterMaxBytesMax            = 128 * 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+	ParquetColumnStatsEnabledKeyPrefix       = "write.parquet.stats-enabled.column"
 
 	// These bounds mirror the compression libraries used by Arrow's Parquet
 	// writers. -1 is the shared default level and is included in each range.
@@ -273,6 +274,48 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 	}
 }
 
+// ResolveParquetStatsColumnPaths maps Iceberg field names to the physical
+// Parquet paths in a data file. The schema used for writing may have sanitized
+// names or be a projection of the table schema. Java ignores these settings for
+// delete files, which also protects position-delete file_path and pos bounds.
+func ResolveParquetStatsColumnPaths(props iceberg.Properties, tableSchema, fileSchema *iceberg.Schema, pathToID map[string]int, content iceberg.ManifestEntryContent) iceberg.Properties {
+	prefix := ParquetColumnStatsEnabledKeyPrefix + "."
+	var mapped iceberg.Properties
+	for key := range props {
+		if strings.HasPrefix(key, prefix) {
+			if mapped == nil {
+				mapped = maps.Clone(props)
+			}
+			delete(mapped, key)
+		}
+	}
+	if mapped == nil {
+		return props
+	}
+	if content != iceberg.EntryContentData {
+		return mapped
+	}
+
+	for path, fieldID := range pathToID {
+		var name string
+		var ok bool
+		if tableSchema != nil {
+			name, ok = tableSchema.FindColumnName(fieldID)
+		}
+		if !ok && fileSchema != nil {
+			name, ok = fileSchema.FindColumnName(fieldID)
+		}
+		if !ok {
+			continue
+		}
+		if value, found := props[prefix+name]; found {
+			mapped[prefix+path] = value
+		}
+	}
+
+	return mapped
+}
+
 func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	pageVersion := props.Get(ParquetPageVersionKey, ParquetPageVersionDefault)
 
@@ -342,6 +385,16 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 			continue
 		}
 		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, javaBool(val)))
+	}
+
+	// Column statistics are on by default; override only the named columns.
+	prefix = ParquetColumnStatsEnabledKeyPrefix + "."
+	for key, val := range props {
+		colName, ok := strings.CutPrefix(key, prefix)
+		if !ok || colName == "" {
+			continue
+		}
+		writerProps = append(writerProps, parquet.WithStatsFor(colName, javaBool(val)))
 	}
 
 	// Dictionary encoding is on unless parquet.enable.dictionary disables it;
