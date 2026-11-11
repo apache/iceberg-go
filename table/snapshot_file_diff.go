@@ -162,17 +162,22 @@ func (i InspectTable) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toS
 // snapshots. No ancestry walk is needed, and different branches work.
 func uniqueSnapshotManifests(from, to iter.Seq[iceberg.ManifestFile]) (fromOnly, toOnly []iceberg.ManifestFile) {
 	fromPaths := make(map[string]struct{})
-	toPaths := make(map[string]struct{})
+	fromManifests := make([]iceberg.ManifestFile, 0)
 	for manifest := range from {
 		fromPaths[manifest.FilePath()] = struct{}{}
+		fromManifests = append(fromManifests, manifest)
 	}
+
+	toPaths := make(map[string]struct{})
 	for manifest := range to {
 		toPaths[manifest.FilePath()] = struct{}{}
 		if _, shared := fromPaths[manifest.FilePath()]; !shared {
 			toOnly = append(toOnly, manifest)
 		}
 	}
-	for manifest := range from {
+	// A manifest iterator may be single-use. Retain the descriptors in the
+	// first pass so removals do not depend on replaying the input sequence.
+	for _, manifest := range fromManifests {
 		if _, shared := toPaths[manifest.FilePath()]; !shared {
 			fromOnly = append(fromOnly, manifest)
 		}

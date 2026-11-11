@@ -102,8 +102,12 @@ Each replayed snapshot from a staged write gets the current timestamp, or one
 millisecond after its parent if that is later. Its timestamp reflects the
 attempt that commits it, not staging time.
 
-`RollbackToSnapshot` and `AssertRefSnapshotID` pin their refs. If a pinned ref
-moved, the commit fails with `ErrCommitFailed` instead of retrying.
+`RollbackToSnapshot`, `AssertRefSnapshotID`, `FastForwardBranch`,
+`ReplaceBranchFromRef`, and `ReplaceBranch` pin the refs they guard.
+Promoting from a ref pins both the source and target. If the source points to
+a snapshot staged in the same transaction, promotion also pins the commit
+branch, preventing retry from rebuilding that source on a different history.
+If a pinned ref moves, the commit fails instead of rebasing a co-staged append.
 `ExpireSnapshots` does not pin refs. Retries replan it as described in
 [Snapshot expiration](#snapshot-expiration).
 
@@ -126,6 +130,10 @@ _, err := cat.CreateTable(ctx, ident, schema,
 > change, as `ErrCommitFailed`, so the retry loop engages on all of them. A
 > commit on another branch that takes the staged snapshot's sequence number or
 > first-row-id is a conflict too, and the retry renumbers the snapshot.
+
+Snapshot-ID assertions cannot detect concurrent retention-only edits.
+REST catalogs also cannot detect a ref type change that leaves its snapshot ID
+unchanged. Avoid editing ref retention concurrently with branch promotion.
 
 Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including the schema, spec, sort order, and pinned

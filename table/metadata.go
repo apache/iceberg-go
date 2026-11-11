@@ -1150,8 +1150,8 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 		// do NOT emit an add-sort-order update (REST catalogs reject
 		// adding a sort order under an existing ID). Record it as
 		// last-added so a following SetDefaultSortOrderID(-1) resolves
-		// to the reused ID; SetDefaultSortOrderID encodes the concrete
-		// ID in that case because no add update precedes it.
+		// to the reused ID. The set-default update uses a concrete ID
+		// if the last serialized add was for a different order.
 		sortOrder.orderID = newOrderID
 		b.lastAddedSortOrderID = &newOrderID
 
@@ -1237,11 +1237,10 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) error {
 		return fmt.Errorf("%w: can't set default sort order to sort order with id %d: %w", iceberg.ErrInvalidArgument, defaultSortOrderID, err)
 	}
 
-	// Encode -1 ("last added") only when this builder actually emitted
-	// an add-sort-order update for that ID; when the last AddSortOrder
-	// reused an existing order no add update precedes this one, so the
-	// payload must carry the concrete ID to stay self-contained.
-	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID && b.hasAddSortOrderUpdate(defaultSortOrderID) {
+	// -1 refers to the most recently emitted add-sort-order update, not
+	// the most recent call to AddSortOrder. Reusing an older order after
+	// adding another one must use its concrete ID in the commit payload.
+	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID && b.lastEmittedSortOrderIDIs(defaultSortOrderID) {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(-1))
 	} else {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(defaultSortOrderID))
@@ -1864,12 +1863,12 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	}
 }
 
-// hasAddSortOrderUpdate reports whether this builder has emitted an
-// add-sort-order update for the given order ID.
-func (b *MetadataBuilder) hasAddSortOrderUpdate(orderID int) bool {
-	for _, u := range b.updates {
-		if a, ok := u.(*addSortOrderUpdate); ok && a.SortOrder.OrderID() == orderID {
-			return true
+// lastEmittedSortOrderIDIs reports whether the latest add-sort-order
+// update added orderID. A reused order may not be the last serialized add.
+func (b *MetadataBuilder) lastEmittedSortOrderIDIs(orderID int) bool {
+	for _, update := range slices.Backward(b.updates) {
+		if add, ok := update.(*addSortOrderUpdate); ok {
+			return add.SortOrder.OrderID() == orderID
 		}
 	}
 
@@ -3694,6 +3693,12 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	// Java-written files (see #1107). This is stricter than Java, which relies
 	// on assignFreshIds to remap them; rejecting is the safer contract here.
 	if err := validateNoReservedFieldIDs(sc); err != nil {
+		return nil, err
+	}
+
+	// reassignIDs looks up partition and sort columns by ID, so each ID must
+	// point to one field (#2393).
+	if err := validateUniqueFieldIDs(sc); err != nil {
 		return nil, err
 	}
 
