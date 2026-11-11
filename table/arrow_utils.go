@@ -1406,7 +1406,7 @@ func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, val
 	keyField := a.constructField(m.KeyField(), keys.DataType())
 	valField := a.constructField(m.ValueField(), vals.DataType())
 
-	mapType := arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata, valField.Type, valField.Metadata)
+	mapType := arrow.MapOfFields(keyField, valField)
 	childData := array.NewData(mapType.Elem(), arr.Data().Children()[0].Len(), []*memory.Buffer{nil},
 		[]arrow.ArrayData{keys.Data(), vals.Data()}, 0, 0)
 	defer childData.Release()

@@ -21,9 +21,12 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/io"
@@ -120,12 +123,6 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	if err != nil {
 		return nil, err
 	}
-	if fileFormat == iceberg.ParquetFile {
-		if err := tblutils.ValidateParquetWriteProperties(props); err != nil {
-			return nil, err
-		}
-	}
-
 	w := defaultDataFileWriter{
 		loc:            locProvider,
 		fs:             fs,
@@ -138,6 +135,12 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	}
 	for _, apply := range opts {
 		apply(&w)
+	}
+	if w.fileFormat == iceberg.ParquetFile {
+		w.props, err = parquetPropsFor(w.content, w.props)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	statsCols, err := computeStatsPlan(w.fileSchema, metricsPropsFor(w.content, meta.props))
@@ -270,6 +273,77 @@ func metricsPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 	}
 
 	return props
+}
+
+// parquetPropsFor mirrors Java's deleteContext: delete settings override the
+// corresponding data settings. Absent overrides inherit the data values, except
+// that a different delete codec uses its own default compression level.
+// Metrics use the original table properties independently of this writer config.
+func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Properties) (iceberg.Properties, error) {
+	if content == iceberg.EntryContentData {
+		return props, tblutils.ValidateParquetWriteProperties(props)
+	}
+
+	effective := maps.Clone(props)
+	overrides := map[string]string{
+		DeleteParquetRowGroupSizeBytesKey: ParquetRowGroupSizeBytesKey,
+		DeleteParquetPageSizeBytesKey:     ParquetPageSizeBytesKey,
+		DeleteParquetPageRowLimitKey:      ParquetPageRowLimitKey,
+		DeleteParquetDictSizeBytesKey:     ParquetDictSizeBytesKey,
+		DeleteParquetPageVersionKey:       ParquetPageVersionKey,
+		DeleteParquetCompressionKey:       ParquetCompressionKey,
+		DeleteParquetCompressionLevelKey:  ParquetCompressionLevelKey,
+	}
+	for deleteKey, dataKey := range overrides {
+		if value, ok := props[deleteKey]; ok {
+			effective[dataKey] = value
+		}
+	}
+	if value, overridden := props[DeleteParquetCompressionKey]; overridden {
+		codec, ok := tblutils.ParquetCompressionCodec(value)
+		if !ok {
+			return nil, fmt.Errorf("%w: unsupported %s value %q", iceberg.ErrInvalidArgument, DeleteParquetCompressionKey, value)
+		}
+		if _, err := compress.GetCodec(codec); err != nil {
+			return nil, fmt.Errorf("%w: unsupported %s value %q: %v", iceberg.ErrInvalidArgument, DeleteParquetCompressionKey, value, err)
+		}
+		dataCodec, _ := tblutils.ParquetCompressionCodec(props.Get(ParquetCompressionKey, ParquetCompressionDefault))
+		if _, hasLevel := props[DeleteParquetCompressionLevelKey]; !hasLevel && codec != dataCodec {
+			effective[ParquetCompressionLevelKey] = strconv.Itoa(ParquetCompressionLevelDefault)
+		}
+	}
+	if version, overridden := props[DeleteParquetPageVersionKey]; overridden {
+		switch strings.ToLower(version) {
+		case "1", "2", "v1", "v2":
+		default:
+			return nil, fmt.Errorf("%w: unsupported %s value %q", iceberg.ErrInvalidArgument, DeleteParquetPageVersionKey, version)
+		}
+	}
+	// Java does not apply data-column Bloom filters or dictionary overrides to
+	// delete files, whose schema may differ from the data schema. Drop Bloom
+	// settings before validation, including settings supported by other writers.
+	maps.DeleteFunc(effective, func(key, _ string) bool {
+		return strings.HasPrefix(key, "write.parquet.bloom-filter-") ||
+			strings.HasPrefix(key, tblutils.ParquetDictEncodingColumnEnabledKeyPrefix+".")
+	})
+	for deleteKey, dataKey := range overrides {
+		value, overridden := props[deleteKey]
+		if !overridden || dataKey == ParquetCompressionKey || dataKey == ParquetPageVersionKey {
+			continue
+		}
+		setting := iceberg.Properties{dataKey: value}
+		if dataKey == ParquetCompressionLevelKey {
+			setting[ParquetCompressionKey] = effective.Get(ParquetCompressionKey, ParquetCompressionDefault)
+		}
+		if err := tblutils.ValidateParquetWriteProperties(setting); err != nil {
+			return nil, fmt.Errorf("%s: %w", deleteKey, err)
+		}
+	}
+	if err := tblutils.ValidateParquetWriteProperties(effective); err != nil {
+		return nil, err
+	}
+
+	return effective, nil
 }
 
 func newPositionDeleteWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (*defaultDataFileWriter, error) {

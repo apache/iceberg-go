@@ -576,6 +576,27 @@ Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
 these keys. Arrow does not register legacy `lz4` or `lzo` codecs by default;
 `lz4_raw` is supported.
 
+Equality-delete and v2 position-delete Parquet writers also support these
+overrides, defined in `table/properties.go`. Unset overrides inherit the
+corresponding `write.parquet.*` setting and its default. If the delete codec
+differs from the data codec and no delete level is set, the delete writer uses
+the codec's default level instead of inheriting the data codec's level.
+
+| Key | Overrides |
+|---|---|
+| `write.delete.parquet.row-group-size-bytes` | Row-group size target |
+| `write.delete.parquet.page-size-bytes` | Data page size |
+| `write.delete.parquet.page-row-limit` | Page write batch size |
+| `write.delete.parquet.dict-size-bytes` | Dictionary page size |
+| `write.delete.parquet.page-version` | Data page version: `v1` or `v2` (`1` and `2` also accepted) |
+| `write.delete.parquet.compression-codec` | Compression codec |
+| `write.delete.parquet.compression-level` | Compression level |
+
+As in Java, data-column Bloom filter and dictionary overrides do not apply to
+delete files. The global `parquet.enable.dictionary` switch still applies.
+Metrics configuration is independent: equality deletes use the table metrics
+settings, while position deletes always retain full `file_path` and `pos` bounds.
+
 ### Parquet reader
 
 | Key | Description |
