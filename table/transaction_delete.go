@@ -122,6 +122,10 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	}
 	if len(removed) > 0 {
 		t.addValidator(rewriteValidator(removed))
+		// Every deletion vector this path removes leaves with a file in
+		// removed, which the validator above covers, so the commit may
+		// replay on a CAS conflict.
+		updater.markRemovedDVsValidated()
 	}
 
 	return updater, wfs, nil
@@ -175,6 +179,28 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 
 	for _, df := range filesToDelete {
 		dvs.removeDataFile(updater, df)
+	}
+
+	// A whole-file drop takes the file's deletion vector with it. Reject any
+	// delete a concurrent commit adds against those files, so the drop can
+	// replay on a CAS conflict without stranding a peer's DV. The validator
+	// treats any concurrent equality delete as a conflict, so it covers only
+	// files that carry a DV: drops of other files keep replaying as before.
+	//
+	// Only a delete that drops whole files and nothing else may replay. A
+	// partial delete adds a DV to a file that stays live, and nothing checks
+	// that file for a concurrent DV, so replaying it could leave two live DVs
+	// on one file. Such deletes keep the no-replay behavior the DV removal
+	// gives them.
+	var droppedWithDV []iceberg.DataFile
+	for _, df := range filesToDelete {
+		if _, ok := dvs[df.FilePath()]; ok {
+			droppedWithDV = append(droppedWithDV, df)
+		}
+	}
+	if len(droppedWithDV) > 0 && len(withPartialDeletions) == 0 {
+		t.addValidator(rewriteValidator(droppedWithDV))
+		updater.markRemovedDVsValidated()
 	}
 
 	if len(withPartialDeletions) > 0 {
@@ -512,7 +538,8 @@ type liveDeletionVectors map[string]iceberg.ManifestEntry
 
 // removeDataFile removes df and, as the spec requires, the deletion vector that references it.
 //
-// Removing a deletion vector makes the commit non-replayable (see snapshotProducer.commitManifests).
+// Removing a deletion vector makes the commit non-replayable unless the caller also registers a
+// validator covering df and marks the producer (see snapshotProducer.dvRemovalsReplayable).
 // Position and equality delete files are left alone, since they can still apply to other files.
 func (dvs liveDeletionVectors) removeDataFile(updater *snapshotProducer, df iceberg.DataFile) {
 	updater.deleteDataFile(df)

@@ -22,7 +22,9 @@ package table_test
 // that commits carrying such removals fail on the first CAS conflict
 // (ErrCommitFailed, exactly one CommitTable attempt) instead of
 // entering doCommit's refresh-and-replay, and that removal-free
-// commits keep replaying.
+// commits keep replaying. The exception (#2195) is a deletion vector
+// removed together with its data file under a validator that rejects
+// concurrent deletes on that file: such commits replay.
 
 import (
 	"context"
@@ -427,16 +429,18 @@ func TestReplaceFilesDataOnlyStillReplays(t *testing.T) {
 		"the replay must inherit the peer's append alongside the compacted file")
 }
 
-// A copy-on-write delete that removes a deletion vector must fail on a concurrent append instead of retrying.
-// Without a deletion vector, the same delete still retries and both writes land.
-func TestCoWDeleteRemovingDVFailsInsteadOfReplaying(t *testing.T) {
+// A copy-on-write delete rewrites the data file and removes its deletion vector together, under a
+// validator that rejects concurrent deletes on the file, so it retries over a concurrent append
+// whether or not the file carried a deletion vector (#2195). Both writes land, and the rows the
+// old deletion vector deleted stay deleted.
+func TestCoWDeleteRemovingDVReplaysOverConcurrentAppend(t *testing.T) {
 	cases := []struct {
-		name         string
-		seededDVs    int
-		wantAttempts int32
+		name      string
+		seededDVs int
+		wantIDs   []int64
 	}{
-		{name: "file with a deletion vector fails on the first conflict", seededDVs: 1, wantAttempts: 1},
-		{name: "file without a deletion vector still retries", seededDVs: 0, wantAttempts: 2},
+		{name: "file with a deletion vector", seededDVs: 1, wantIDs: []int64{1, 3, 4, 5, 6, 8, 9, 10, 100}},
+		{name: "file without a deletion vector", seededDVs: 0, wantIDs: []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 100}},
 	}
 
 	for _, tc := range cases {
@@ -461,20 +465,303 @@ func TestCoWDeleteRemovingDVFailsInsteadOfReplaying(t *testing.T) {
 
 			attemptsBefore := cat.attempts.Load()
 			_, err = staleTxn.Commit(ctx)
-			assert.Equal(t, attemptsBefore+tc.wantAttempts, cat.attempts.Load())
+			require.NoError(t, err)
+			assert.Equal(t, attemptsBefore+2, cat.attempts.Load(),
+				"expected exactly one conflict followed by one successful replay")
 
 			committed, loadErr := cat.LoadTable(ctx, table.Identifier{"db", "no_replay_removals"})
 			require.NoError(t, loadErr)
-			if tc.seededDVs > 0 {
-				require.Error(t, err)
-				assert.ErrorIs(t, err, table.ErrCommitFailed)
-				assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 8, 9, 10, 100}, idsInTable(t, committed),
-					"only the peer's append landed; the stale delete of id 2 must not have")
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10, 100}, idsInTable(t, committed),
-					"the delete replays over the peer's append, so both writers land")
-			}
+			assert.Equal(t, tc.wantIDs, idsInTable(t, committed),
+				"the delete replays over the peer's append, so both writers land")
+			assert.Zero(t, liveDVCount(t, committed),
+				"the rewritten file must not keep the removed deletion vector")
 		})
 	}
+}
+
+// seedTwoFileTable returns a v3 merge-on-read table with ids 1-10 in one data
+// file and ids 100 and 101 in a second, so a filter on id >= 100 drops the
+// second file whole.
+func seedTwoFileTable(t *testing.T) (*table.Table, *concurrentTestCatalog) {
+	t.Helper()
+
+	tbl, cat := newNoReplayV3Table(t)
+	tbl = appendTenRows(t, tbl)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 100, 101)
+
+	return tbl, cat
+}
+
+// dataFilePathFor returns the path of the single data file holding id.
+func dataFilePathFor(t *testing.T, tbl *table.Table, id int64) string {
+	t.Helper()
+
+	tasks, err := tbl.Scan(table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), id))).PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	return tasks[0].File.FilePath()
+}
+
+func switchToCopyOnWrite(t *testing.T, tbl *table.Table) *table.Table {
+	t.Helper()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{table.WriteDeleteModeKey: table.WriteModeCopyOnWrite}))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	return tbl
+}
+
+func loadNoReplayTable(t *testing.T, cat *concurrentTestCatalog) *table.Table {
+	t.Helper()
+
+	committed, err := cat.LoadTable(t.Context(), table.Identifier{"db", "no_replay_removals"})
+	require.NoError(t, err)
+
+	return committed
+}
+
+var idAtLeast100 = iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(100))
+
+// Why: #2195. A copy-on-write delete that drops a whole file removes the file's
+// deletion vector with it, under rewriteValidator over the removed file, so a
+// concurrent unrelated append must not make it fail.
+// Condition: the second file carries a DV; a stale CoW delete drops that file
+// while a peer appends.
+// Assertion: the delete lands on the replay (two CommitTable attempts), the
+// peer's row survives, and no live DV is left.
+func TestCoWWholeFileDropWithDVReplaysOverConcurrentAppend(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	tbl = mergeOnReadDelete(t, tbl, 101)
+	require.Equal(t, 1, liveDVCount(t, tbl))
+	tbl = switchToCopyOnWrite(t, tbl)
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.Delete(ctx, idAtLeast100, nil))
+	appendRowsOnRef(t, tbl, table.MainBranch, 50)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err := staleTxn.Commit(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, attemptsBefore+2, cat.attempts.Load(), "expected one conflict and one successful replay")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50}, idsInTable(t, committed))
+	assert.Zero(t, liveDVCount(t, committed))
+}
+
+// Why: #2195. Overwrite shares the copy-on-write deletion path, so the same
+// replay applies when its filter drops a file that carries a DV.
+// Condition: the second file carries a DV; a stale overwrite of id >= 100
+// races a peer append.
+// Assertion: the overwrite lands on the replay with both writers' rows.
+func TestCoWOverwriteRemovingDVReplaysOverConcurrentAppend(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	tbl = mergeOnReadDelete(t, tbl, 101)
+	tbl = switchToCopyOnWrite(t, tbl)
+
+	staleTxn := tbl.NewTransaction()
+	rdr := idRecordReader(t, tbl, 150)
+	defer rdr.Release()
+	require.NoError(t, staleTxn.Overwrite(ctx, rdr, nil, table.WithOverwriteFilter(idAtLeast100)))
+	appendRowsOnRef(t, tbl, table.MainBranch, 50)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err := staleTxn.Commit(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, attemptsBefore+2, cat.attempts.Load(), "expected one conflict and one successful replay")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 150}, idsInTable(t, committed))
+	assert.Zero(t, liveDVCount(t, committed))
+}
+
+// Why: #2195. A merge-on-read delete that drops a whole file also takes the
+// file's DV with it. It now registers rewriteValidator over that file, so it
+// can replay over an unrelated append.
+// Condition: the second file carries a DV; a stale MoR delete of id >= 100
+// races a peer append.
+// Assertion: the delete lands on the replay and no DV references the dropped
+// file.
+func TestMoRWholeFileDropWithDVReplaysOverConcurrentAppend(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	tbl = mergeOnReadDelete(t, tbl, 101)
+	dropped := dataFilePathFor(t, tbl, 100)
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.Delete(ctx, idAtLeast100, nil))
+	appendRowsOnRef(t, tbl, table.MainBranch, 50)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err := staleTxn.Commit(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, attemptsBefore+2, cat.attempts.Load(), "expected one conflict and one successful replay")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50}, idsInTable(t, committed))
+	assert.Empty(t, deleteEntriesReferencing(t, committed, map[string]struct{}{dropped: {}}),
+		"no DV may reference the dropped file")
+}
+
+// Why: #2195. Replaying a whole-file drop is only safe because the validator
+// rejects a peer's new DV on the dropped file. Without it, the stale DV removal
+// would replay as a no-op and leave the peer's DV orphaned on a removed file.
+// Condition: the second file carries a DV; a peer supersedes it with its own
+// merged DV while a stale MoR delete drops the file.
+// Assertion: the stale commit is rejected without committing, and the table
+// is the peer's, with exactly one live DV on the second file.
+func TestMoRWholeFileDropRejectsConcurrentDVOnDroppedFile(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	tbl = mergeOnReadDelete(t, tbl, 101)
+	dropped := dataFilePathFor(t, tbl, 100)
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.Delete(ctx, idAtLeast100, nil))
+	mergeOnReadDelete(t, tbl, 100)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err := staleTxn.Commit(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(), "the replay must stop before the catalog")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, committed),
+		"the peer's merged DV deletes both rows of the second file")
+	assert.Len(t, deleteEntriesReferencing(t, committed, map[string]struct{}{dropped: {}}), 1,
+		"the second file keeps exactly one live DV: the peer's")
+}
+
+// Why: a delete that drops one file whole and merges a partial delete into
+// another file's existing DV removes a DV whose data file stays live. That
+// removal is still snapshot-relative, so the whole commit must stay
+// non-replayable even though the drop alone could replay.
+// Condition: both files carry a DV; a stale MoR delete drops the second file
+// and deletes id 3 from the first while a peer appends.
+// Assertion: exactly one CommitTable attempt, and only the peer's append lands.
+func TestMoRDeleteMixingWholeFileDropAndPartialMergeStaysNonReplayable(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	tbl = mergeOnReadDelete(t, tbl, 7)
+	tbl = mergeOnReadDelete(t, tbl, 101)
+	require.Equal(t, 2, liveDVCount(t, tbl))
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.Delete(ctx,
+		iceberg.NewOr(idAtLeast100, iceberg.EqualTo(iceberg.Reference("id"), int64(3))), nil))
+	appendRowsOnRef(t, tbl, table.MainBranch, 50)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err := staleTxn.Commit(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.Contains(t, err.Error(), "reload the table and rebuild the removals")
+	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(), "the commit must not replay")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 8, 9, 10, 50, 100}, idsInTable(t, committed))
+}
+
+// Why: a partial delete gives a file that stays live a new DV, and nothing
+// checks that file for a concurrent DV. When the same delete also drops a file
+// with a DV, that removal keeps the commit non-replayable, which is what stops
+// a replay from leaving two live DVs on the partially deleted file.
+// Condition: only the second file carries a DV; a stale MoR delete drops it and
+// gives the first file its first DV (id 3) while a peer gives the first file a
+// DV of its own (id 5).
+// Assertion: exactly one CommitTable attempt, and the table stays readable with
+// one live DV on the first file: the peer's.
+func TestMoRDeleteMixingWholeFileDropAndFirstDVStaysNonReplayable(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	tbl = mergeOnReadDelete(t, tbl, 101)
+	require.Equal(t, 1, liveDVCount(t, tbl))
+	partial := dataFilePathFor(t, tbl, 1)
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.Delete(ctx,
+		iceberg.NewOr(idAtLeast100, iceberg.EqualTo(iceberg.Reference("id"), int64(3))), nil))
+	mergeOnReadDelete(t, tbl, 5)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err := staleTxn.Commit(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.Contains(t, err.Error(), "reload the table and rebuild the removals")
+	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(), "the commit must not replay")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Len(t, deleteEntriesReferencing(t, committed, map[string]struct{}{partial: {}}), 1,
+		"the partially deleted file keeps exactly one live DV: the peer's")
+	assert.Equal(t, []int64{1, 2, 3, 4, 6, 7, 8, 9, 10, 100}, idsInTable(t, committed))
+}
+
+// Why: ReplaceDataFiles removes a data file and its DV but registers no
+// validator against concurrent deletes on that file, so replaying it could
+// bring back rows a peer deleted. It must stay non-replayable (#2195 review).
+// Condition: the second file carries a DV; a stale ReplaceDataFilesByPath
+// replaces it while a peer appends.
+// Assertion: exactly one CommitTable attempt, the no-replay hint, and only the
+// peer's append lands.
+func TestReplaceDataFilesRemovingDVStaysNonReplayable(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	tbl = mergeOnReadDelete(t, tbl, 101)
+	replaced := dataFilePathFor(t, tbl, 100)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	replacement := tbl.Location() + "/data/replacement.parquet"
+	writeParquetFile(t, replacement, arrowSc, `[{"id": 150}]`)
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.ReplaceDataFilesByPath(ctx, []string{replaced}, []string{replacement}, nil))
+	appendRowsOnRef(t, tbl, table.MainBranch, 50)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err = staleTxn.Commit(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.Contains(t, err.Error(), "reload the table and rebuild the removals")
+	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(), "the commit must not replay")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100}, idsInTable(t, committed))
+}
+
+// Why: rewriteValidator treats any concurrent equality delete as a conflict, so
+// the merge-on-read drop registers it only for files that carry a DV. A drop of
+// a file without a DV removes no DV and must keep replaying exactly as before.
+// Condition: no DVs; a stale MoR delete drops the second file while a peer
+// commits an equality delete for id 5.
+// Assertion: the drop lands on the replay and both deletes apply.
+func TestMoRWholeFileDropWithoutDVStillReplaysOverEqualityDelete(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := seedTwoFileTable(t)
+	require.Zero(t, liveDVCount(t, tbl))
+
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.Delete(ctx, idAtLeast100, nil))
+
+	records, release := makeEqDeleteRecords(t, idKeyArrowSchema(t), `[{"id": 5}]`)
+	defer release()
+	peerTxn := tbl.NewTransaction()
+	require.NoError(t, peerTxn.CommitEqualityDeletes(ctx, []int{1}, records, nil))
+	_, err := peerTxn.Commit(ctx)
+	require.NoError(t, err)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err = staleTxn.Commit(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, attemptsBefore+2, cat.attempts.Load(), "expected one conflict and one successful replay")
+
+	committed := loadNoReplayTable(t, cat)
+	assert.Equal(t, []int64{1, 2, 3, 4, 6, 7, 8, 9, 10}, idsInTable(t, committed))
 }

@@ -143,7 +143,10 @@ the transaction is unusable.
 After a conflict, calling `Commit` again refreshes the table and replays staged
 changes even with retries disabled. Each call gets the configured retry
 budget. A commit that removes delete files and cannot be replayed resubmits
-only if its branch has not moved.
+only if its branch has not moved. Copy-on-write deletes and overwrites, and
+merge-on-read deletes that only drop whole files, still replay when they remove
+a deletion vector together with its data file: they reject any delete a
+concurrent commit adds to the data files whose deletion vectors they remove.
 
 A staged change that cannot apply to the refreshed table makes the transaction
 unusable. For example, a staged format upgrade cannot apply if a peer has
