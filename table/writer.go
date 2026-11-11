@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -120,12 +121,6 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	if err != nil {
 		return nil, err
 	}
-	if fileFormat == iceberg.ParquetFile {
-		if err := tblutils.ValidateParquetWriteProperties(props); err != nil {
-			return nil, err
-		}
-	}
-
 	w := defaultDataFileWriter{
 		loc:            locProvider,
 		fs:             fs,
@@ -138,6 +133,12 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	}
 	for _, apply := range opts {
 		apply(&w)
+	}
+	if w.fileFormat == iceberg.ParquetFile {
+		w.props, err = parquetPropsFor(w.content, w.props)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	statsCols, err := computeStatsPlan(w.fileSchema, metricsPropsFor(w.content, meta.props))
@@ -268,6 +269,48 @@ func metricsPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 	}
 
 	return props
+}
+
+// parquetPropsFor mirrors Java's deleteContext: delete settings override the
+// corresponding data settings, while absent overrides inherit the data values.
+// Metrics use the original table properties independently of this writer config.
+func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Properties) (iceberg.Properties, error) {
+	if content == iceberg.EntryContentData {
+		return props, tblutils.ValidateParquetWriteProperties(props)
+	}
+
+	effective := maps.Clone(props)
+	overrides := map[string]string{
+		DeleteParquetRowGroupSizeBytesKey: ParquetRowGroupSizeBytesKey,
+		DeleteParquetPageSizeBytesKey:     ParquetPageSizeBytesKey,
+		DeleteParquetPageRowLimitKey:      ParquetPageRowLimitKey,
+		DeleteParquetDictSizeBytesKey:     ParquetDictSizeBytesKey,
+		DeleteParquetPageVersionKey:       ParquetPageVersionKey,
+		DeleteParquetCompressionKey:       ParquetCompressionKey,
+		DeleteParquetCompressionLevelKey:  ParquetCompressionLevelKey,
+	}
+	for deleteKey, dataKey := range overrides {
+		if value, ok := props[deleteKey]; ok {
+			effective[dataKey] = value
+		}
+	}
+	// Java does not apply data-column Bloom filters or dictionary overrides to
+	// delete files, whose schema may differ from the data schema.
+	maps.DeleteFunc(effective, func(key, _ string) bool {
+		return strings.HasPrefix(key, ParquetBloomFilterColumnEnabledKeyPrefix+".") ||
+			strings.HasPrefix(key, tblutils.ParquetDictEncodingColumnEnabledKeyPrefix+".")
+	})
+	if err := tblutils.ValidateParquetWriteProperties(effective); err != nil {
+		for deleteKey, dataKey := range overrides {
+			if _, overridden := props[deleteKey]; overridden && strings.Contains(err.Error(), dataKey) {
+				return nil, fmt.Errorf("%s: %w", deleteKey, err)
+			}
+		}
+
+		return nil, err
+	}
+
+	return effective, nil
 }
 
 func newPositionDeleteWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (*defaultDataFileWriter, error) {
