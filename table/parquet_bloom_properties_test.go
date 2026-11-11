@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
@@ -63,6 +64,7 @@ func TestParquetBloomLogicalPathsOnDisk(t *testing.T) {
 	}
 	// Logical settings take precedence over the legacy physical spelling.
 	props[ParquetBloomFilterColumnNDVKeyPrefix+".items.list.element"] = "100000"
+	props[ParquetCompressionColumnCodecKeyPrefix+".items.element"] = "gzip"
 	original := maps.Clone(props)
 	for _, rolling := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rolling=%t", rolling), func(t *testing.T) {
@@ -98,6 +100,9 @@ func TestParquetBloomLogicalPathsOnDisk(t *testing.T) {
 			reader, err := file.NewParquetReader(input)
 			require.NoError(t, err)
 			defer reader.Close()
+			column, err := reader.MetaData().RowGroup(0).ColumnChunk(0)
+			require.NoError(t, err)
+			require.Equal(t, compress.Codecs.Gzip, column.Compression())
 			blooms, err := reader.GetBloomFilterReader().RowGroup(0)
 			require.NoError(t, err)
 			for _, col := range []int{0, 1, 3} {
@@ -162,6 +167,31 @@ func TestParquetBloomPropertiesFollowSchemaChanges(t *testing.T) {
 				require.Equal(t, "kept", staged.props["unrelated"])
 			})
 		}
+	}
+}
+
+func TestParquetColumnPropertiesMoveTogether(t *testing.T) {
+	settings := []struct{ prefix, value string }{
+		{MetricsModeColumnConfPrefix, "full"},
+		{ParquetBloomFilterColumnEnabledKeyPrefix, "true"},
+		{ParquetBloomFilterColumnFPPKeyPrefix, "0.01"},
+		{ParquetBloomFilterColumnNDVKeyPrefix, "100"},
+		{ParquetCompressionColumnCodecKeyPrefix, "gzip"},
+		{ParquetCompressionColumnLevelKeyPrefix, "4"},
+	}
+	props := iceberg.Properties{}
+	for _, setting := range settings {
+		props[setting.prefix+".name"] = setting.value
+	}
+	meta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", props)
+	require.NoError(t, err)
+	tx := New([]string{"table"}, meta, "", nil, nil).NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, true).RenameColumn([]string{"name"}, "full_name").Commit())
+	staged, err := tx.txnMeta()
+	require.NoError(t, err)
+	for _, setting := range settings {
+		require.NotContains(t, staged.props, setting.prefix+".name")
+		require.Equal(t, setting.value, staged.props[setting.prefix+".full_name"])
 	}
 }
 
