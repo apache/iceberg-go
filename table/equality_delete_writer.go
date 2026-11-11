@@ -272,29 +272,7 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	cw := newConcurrentDataFileWriter(newEqualityDeleteWriterMaker(deleteSchema, equalityFieldIDs),
 		withSchemaSanitization(false))
 
-	nextCount, stopCount := iter.Pull(args.counter)
-	tasks := func(yield func(WriteTask) bool) {
-		defer stopCount()
-
-		fileCount := 0
-		for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
-			cnt, _ := nextCount()
-			fileCount++
-			t := WriteTask{
-				Uuid:        *args.writeUUID,
-				ID:          cnt,
-				PartitionID: iceberg.UnpartitionedSpec.ID(),
-				FileCount:   fileCount,
-				Schema:      deleteSchema,
-				Batches:     batch,
-			}
-			if !yield(t) {
-				return
-			}
-		}
-	}
-
-	return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks), nil
+	return cw.writeDeleteRecords(ctx, rootLocation, meta, deleteSchema, args, targetFileSize), nil
 }
 
 // equalityDeleteWriteSchema returns a schema containing the union of equality
