@@ -38,10 +38,10 @@ func TestMetricsAndBloomFilterPropertiesFollowSchemaChanges(t *testing.T) {
 		{
 			name: "rename leaf",
 			props: iceberg.Properties{
-				metrics + "name":    "full",
-				bloom + "name":      "true",
-				metrics + "age":     "counts",
-				bloom + "missing":   "true",
+				metrics + "name":  "full",
+				bloom + "name":    "true",
+				metrics + "age":   "counts",
+				bloom + "missing": "true",
 			},
 			change: func(u *UpdateSchema) *UpdateSchema {
 				return u.RenameColumn([]string{"name"}, "full_name")
