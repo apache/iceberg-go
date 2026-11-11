@@ -656,6 +656,7 @@ func MapExec[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn 
 // MapExecWithDiscard calls discard for queued inputs that no worker consumed.
 // Inputs passed to fn belong to fn, including when fn returns an error.
 // Completed results are delivered even after cancellation so callers can clean up.
+// Callers must consume the iterator to the end to receive every completed result.
 func MapExecWithDiscard[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn func(T) (S, error), discard func(T)) iter.Seq2[S, error] {
 	return mapExec(ctx, nWorkers, slice, fn, discard, true)
 }

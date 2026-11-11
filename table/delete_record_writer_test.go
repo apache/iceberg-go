@@ -131,7 +131,7 @@ func deleteWriterForTest(t *testing.T, kind string, location string, fs icebergi
 	t.Helper()
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
 	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, location,
-		iceberg.Properties{PropertyFormatVersion: "2", WriteTargetFileSizeBytesKey: "1"})
+		iceberg.Properties{PropertyFormatVersion: "2", WriteDeleteTargetFileSizeBytesKey: "1"})
 	require.NoError(t, err)
 	builder, err := MetadataBuilderFromBase(metadata, location+"/metadata/v1.metadata.json")
 	require.NoError(t, err)
