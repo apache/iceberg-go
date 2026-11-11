@@ -281,12 +281,21 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 func ResolveParquetStatsColumnPaths(props iceberg.Properties, tableSchema, fileSchema *iceberg.Schema, pathToID map[string]int, content iceberg.ManifestEntryContent) iceberg.Properties {
 	prefix := ParquetColumnStatsEnabledKeyPrefix + "."
 	var mapped iceberg.Properties
-	for key := range props {
-		if strings.HasPrefix(key, prefix) {
-			if mapped == nil {
-				mapped = maps.Clone(props)
+	var configured map[string]string
+	for key, value := range props {
+		name, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			continue
+		}
+		if mapped == nil {
+			mapped = maps.Clone(props)
+			if content == iceberg.EntryContentData {
+				configured = make(map[string]string)
 			}
-			delete(mapped, key)
+		}
+		delete(mapped, key)
+		if configured != nil {
+			configured[name] = value
 		}
 	}
 	if mapped == nil {
@@ -308,7 +317,8 @@ func ResolveParquetStatsColumnPaths(props iceberg.Properties, tableSchema, fileS
 		if !ok {
 			continue
 		}
-		if value, found := props[prefix+name]; found {
+		// Avoid building a prefixed property key for every Parquet column.
+		if value, found := configured[name]; found {
 			mapped[prefix+path] = value
 		}
 	}
