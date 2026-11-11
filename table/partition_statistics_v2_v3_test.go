@@ -248,7 +248,59 @@ func TestPartitionStatisticsV2DeleteMetrics(t *testing.T) {
 	require.Equal(t, []int32{1, 0, 0}, partitionStatsInt32(t, rows, "equality_delete_file_count").Int32Values())
 	require.Equal(t, 3, partitionStatsInt64(t, rows, "total_record_count").NullN())
 	require.Empty(t, rows.Schema().FieldIndices("dv_count"))
-	require.Equal(t, 3, partitionStatsInt64(t, rows, "last_updated_at").NullN())
+	require.Equal(t, []int64{1000, 1000, 1000}, partitionStatsInt64(t, rows, "last_updated_at").Int64Values())
+	require.Equal(t, []int64{10, 10, 10}, partitionStatsInt64(t, rows, "last_updated_snapshot_id").Int64Values())
+}
+
+func TestPartitionStatisticsLastUpdated(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			spec := partitionedSpec()
+			existing := func(path string, partition int32, snapshot int64) iceberg.ManifestEntry {
+				file := partitionStatsFile(t, spec, iceberg.EntryContentData, path, map[int]any{1000: partition}, 1).Build()
+				return iceberg.NewManifestEntry(iceberg.EntryStatusEXISTING, new(snapshot), new(int64(1)), new(int64(1)), file)
+			}
+			deleted := func(path string, partition int32) iceberg.ManifestEntry {
+				file := partitionStatsFile(t, spec, iceberg.EntryContentData, path, map[int]any{1000: partition}, 1).Build()
+				return partitionStatsEntry(file, iceberg.EntryStatusDELETED, 1)
+			}
+			deleteFile := partitionStatsFile(t, spec, iceberg.EntryContentPosDeletes, "pos.parquet", map[int]any{1000: int32(5)}, 2).Build()
+			tbl := partitionStatisticsTestTable(t, version,
+				partitionStatisticsTestManifest{spec: spec, content: iceberg.ManifestContentData, entries: []iceberg.ManifestEntry{
+					existing("a.parquet", 1, 11), existing("b.parquet", 1, 12), existing("c.parquet", 1, 13),
+					existing("expired-in-mixed.parquet", 1, 99),
+					existing("expired.parquet", 2, 99), deleted("deleted-only.parquet", 3),
+					existing("live.parquet", 4, 11), deleted("live.parquet", 4),
+				}},
+				partitionStatisticsTestManifest{spec: spec, content: iceberg.ManifestContentDeletes, entries: []iceberg.ManifestEntry{
+					iceberg.NewManifestEntry(iceberg.EntryStatusEXISTING, new(int64(12)), new(int64(1)), new(int64(1)), deleteFile),
+				}},
+			)
+			builder, err := MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+			require.NoError(t, err)
+			builder.snapshotList = append(builder.snapshotList,
+				Snapshot{SnapshotID: 11, TimestampMs: 600}, Snapshot{SnapshotID: 12, TimestampMs: 900},
+				Snapshot{SnapshotID: 13, TimestampMs: 900})
+			metadata, err := builder.Build()
+			require.NoError(t, err)
+			tbl = tbl.withMetadata(metadata, tbl.MetadataLocation())
+			rows := partitionStatsCompute(t, tbl)
+			require.EqualValues(t, 5, rows.NumRows())
+			require.Equal(t, []int64{4, 1, 0, 1, 0}, partitionStatsInt64(t, rows, "data_record_count").Int64Values())
+			timestamps := partitionStatsInt64(t, rows, "last_updated_at")
+			ids := partitionStatsInt64(t, rows, "last_updated_snapshot_id")
+			require.Equal(t, int64(900), timestamps.Value(0))
+			require.Equal(t, int64(12), ids.Value(0))
+			require.True(t, timestamps.IsNull(1))
+			require.True(t, ids.IsNull(1))
+			require.Equal(t, int64(1000), timestamps.Value(2))
+			require.Equal(t, int64(10), ids.Value(2))
+			require.Equal(t, int64(1000), timestamps.Value(3))
+			require.Equal(t, int64(10), ids.Value(3))
+			require.Equal(t, int64(900), timestamps.Value(4))
+			require.Equal(t, int64(12), ids.Value(4))
+		})
+	}
 }
 
 func TestPartitionStatisticsV2V3NoDeletesHaveExactTotals(t *testing.T) {
@@ -483,15 +535,14 @@ func TestPartitionStatisticsVectorTotalsValidateTargets(t *testing.T) {
 		missing, differentPartition  bool
 		dataSequence, vectorSequence int64
 		vectorCount                  int64
-		wantErr                      bool
 		wantUnknown                  bool
 	}{
 		{name: "valid", dataSequence: 1, vectorSequence: 2, vectorCount: 3},
 		{name: "same sequence", dataSequence: 2, vectorSequence: 2, vectorCount: 3},
-		{name: "dangling", missing: true, vectorCount: 3, wantErr: true},
-		{name: "other spec or partition", differentPartition: true, vectorCount: 3, wantErr: true},
-		{name: "too many deleted rows", dataSequence: 1, vectorSequence: 2, vectorCount: 11, wantErr: true},
-		{name: "older vector", dataSequence: 3, vectorSequence: 2, vectorCount: 3, wantErr: true},
+		{name: "dangling", missing: true, vectorCount: 3, wantUnknown: true},
+		{name: "other spec or partition", differentPartition: true, vectorCount: 3, wantUnknown: true},
+		{name: "too many deleted rows", dataSequence: 1, vectorSequence: 2, vectorCount: 11, wantUnknown: true},
+		{name: "older vector", dataSequence: 3, vectorSequence: 2, vectorCount: 3, wantUnknown: true},
 		{name: "unknown data sequence", dataSequence: -1, vectorSequence: 2, vectorCount: 3, wantUnknown: true},
 		{name: "unknown vector sequence", dataSequence: 1, vectorSequence: -1, vectorCount: 3, wantUnknown: true},
 	} {
@@ -505,23 +556,26 @@ func TestPartitionStatisticsVectorTotalsValidateTargets(t *testing.T) {
 			if !tt.missing {
 				data["data.parquet"] = partitionStatisticsDataFile{row: row, count: 10, sequence: tt.dataSequence}
 			}
-			vectors := map[string]partitionStatisticsVector{"data.parquet": {row: vectorRow, count: tt.vectorCount, sequence: tt.vectorSequence}}
-			err := finishPartitionStatistics(t.Context(), []*inspectPartitionAggregate{row}, data, vectors, true)
-			if tt.wantErr {
-				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			vectors := map[string][]partitionStatisticsVector{"data.parquet": {{row: vectorRow, count: tt.vectorCount, sequence: tt.vectorSequence}}}
+			unrelated := &inspectPartitionAggregate{dataRecordCount: 20}
+			allRows := []*inspectPartitionAggregate{row, unrelated}
+			if vectorRow != row {
+				allRows = append(allRows, vectorRow)
+			}
+			err := finishPartitionStatistics(t.Context(), allRows, data, vectors, true)
+			require.NoError(t, err)
+			require.Equal(t, int64(20), *unrelated.totalRecordCount)
+			if tt.wantUnknown {
+				require.Nil(t, row.totalRecordCount)
+				require.Nil(t, vectorRow.totalRecordCount)
 			} else {
-				require.NoError(t, err)
-				if tt.wantUnknown {
-					require.Nil(t, row.totalRecordCount)
-				} else {
-					require.Equal(t, int64(7), *row.totalRecordCount)
-				}
+				require.Equal(t, int64(7), *row.totalRecordCount)
 			}
 		})
 	}
 }
 
-func TestPartitionStatisticsRejectsMultipleVectorsForOneTarget(t *testing.T) {
+func TestPartitionStatisticsMultipleVectorsHaveUnknownTotal(t *testing.T) {
 	spec := partitionedSpec()
 	part := map[int]any{1000: int32(2)}
 	data := partitionStatsFile(t, spec, iceberg.EntryContentData, "data.parquet", part, 10).Build()
@@ -535,9 +589,41 @@ func TestPartitionStatisticsRejectsMultipleVectorsForOneTarget(t *testing.T) {
 		partitionStatisticsTestManifest{spec: spec, content: iceberg.ManifestContentData, entries: []iceberg.ManifestEntry{partitionStatsEntry(data, iceberg.EntryStatusADDED, 1)}},
 		partitionStatisticsTestManifest{spec: spec, content: iceberg.ManifestContentDeletes, entries: []iceberg.ManifestEntry{vector(4), vector(40)}},
 	)
-	_, err := tbl.NewTransaction().ComputePartitionStatistics(t.Context())
-	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
-	require.ErrorContains(t, err, "multiple deletion vectors")
+	rows := partitionStatsCompute(t, tbl)
+	require.EqualValues(t, 1, rows.NumRows())
+	require.Equal(t, 1, partitionStatsInt64(t, rows, "total_record_count").NullN())
+	require.Equal(t, []int64{6}, partitionStatsInt64(t, rows, "position_delete_record_count").Int64Values())
+	require.Equal(t, []int32{2}, partitionStatsInt32(t, rows, "dv_count").Int32Values())
+}
+
+func TestPartitionStatisticsInvalidVectorOnlyAffectsRelatedPartitions(t *testing.T) {
+	spec := partitionedSpec()
+	data := func(path string, part int32, count int64) iceberg.ManifestEntry {
+		file := partitionStatsFile(t, spec, iceberg.EntryContentData, path, map[int]any{1000: part}, count).Build()
+		return partitionStatsEntry(file, iceberg.EntryStatusADDED, 1)
+	}
+	vector := func(path, target string, part int32) iceberg.ManifestEntry {
+		file := partitionStatsFile(t, spec, iceberg.EntryContentPosDeletes, path, map[int]any{1000: part}, 3).
+			ReferencedDataFile(target).ContentOffset(4).ContentSizeInBytes(20).Build()
+		return partitionStatsEntry(file, iceberg.EntryStatusADDED, 2)
+	}
+	tbl := partitionStatisticsTestTable(t, 3,
+		partitionStatisticsTestManifest{spec: spec, content: iceberg.ManifestContentData, entries: []iceberg.ManifestEntry{
+			data("data.parquet", 1, 10), data("unrelated.parquet", 3, 20),
+		}},
+		partitionStatisticsTestManifest{spec: spec, content: iceberg.ManifestContentDeletes, entries: []iceberg.ManifestEntry{
+			vector("mismatched.puffin", "data.parquet", 2), vector("dangling.puffin", "missing.parquet", 4),
+		}},
+	)
+	rows := partitionStatsCompute(t, tbl)
+	require.EqualValues(t, 4, rows.NumRows())
+	totals := partitionStatsInt64(t, rows, "total_record_count")
+	require.True(t, totals.IsNull(0))
+	require.True(t, totals.IsNull(1))
+	require.Equal(t, int64(20), totals.Value(2))
+	require.True(t, totals.IsNull(3))
+	require.Equal(t, []int64{0, 3, 0, 3}, partitionStatsInt64(t, rows, "position_delete_record_count").Int64Values())
+	require.Equal(t, []int32{0, 1, 0, 1}, partitionStatsInt32(t, rows, "dv_count").Int32Values())
 }
 
 func partitionStatsAdvanceBranch(t *testing.T, base Metadata, branch string, childID int64) Metadata {

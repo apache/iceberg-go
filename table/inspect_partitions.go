@@ -50,6 +50,10 @@ type inspectPartitionAggregate struct {
 	// and expose an exact live-row total only when metadata proves it.
 	deletionVectorCount int32
 	totalRecordCount    *int64
+	// Partition statistics store timestamps in milliseconds, while the inspect
+	// Arrow output above uses microseconds.
+	statisticsUpdatedAt       *int64
+	statisticsUpdatedSnapshot *int64
 }
 
 type inspectPartitionAggregateTree struct {

@@ -55,7 +55,7 @@ func PartitionStatisticsSchemaV1(partitionType *iceberg.StructType) *iceberg.Sch
 // PartitionStatisticsSchema returns the partition statistics file schema for
 // format v1, v2, or v3. partitionType is the unified type across all specs.
 // V2 includes optional delete metrics; V3 requires them and adds dv_count.
-// The optional last-updated fields are not populated by ComputePartitionStatistics.
+// V2 and V3 include optional last-updated fields.
 func PartitionStatisticsSchema(partitionType *iceberg.StructType, formatVersion int) (*iceberg.Schema, error) {
 	if formatVersion < 1 || formatVersion > 3 {
 		return nil, fmt.Errorf("%w: partition statistics schema requires format version 1, 2, or 3", iceberg.ErrInvalidArgument)
@@ -121,8 +121,10 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // reference. The caller must Commit to publish the reference. It does not
 // rewrite any data files or create a new table snapshot.
 //
-// The statistics are derived from the live entries in the head's manifests,
-// grouped by both partition spec ID and partition tuple. The file is sorted by
+// The statistics are derived from the entries in the head's manifests,
+// grouped by both partition spec ID and partition tuple. Counts include only
+// live files. For v2 and v3, deleted entries also update the last-modified
+// fields and can produce a row with zero live files. The file is sorted by
 // the unified partition tuple (ascending, null first), then by spec ID for
 // deterministic ties. Only tables with at least one partition field are
 // currently supported.
@@ -131,7 +133,7 @@ func (t *Transaction) RemovePartitionStatistics(snapshotID int64) error {
 // with only validated deletion vectors. Any live classic position or equality
 // delete makes exact totals unknown for all partitions, including other specs.
 // Statistics are recomputed in full; data files and delete-file contents are
-// not read. Optional last-updated fields are left NULL.
+// not read. Last-updated fields are NULL when no entry's snapshot is retained.
 // Partition fields whose source was dropped or whose result type changed are
 // not yet supported. Embedded manifests may omit the v1 partition spec ID when the header
 // fields identify exactly one historical spec.
@@ -199,7 +201,11 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 	if err != nil {
 		return nil, err
 	}
-	rows, err := collectPartitionStatistics(ctx, fs, *snapshot, partitionType, t.tbl.Metadata().PartitionSpecs(), meta.formatVersion)
+	snapshotTimes := make(map[int64]int64)
+	for _, s := range t.tbl.Metadata().Snapshots() {
+		snapshotTimes[s.SnapshotID] = s.TimestampMs
+	}
+	rows, err := collectPartitionStatistics(ctx, fs, *snapshot, partitionType, t.tbl.Metadata().PartitionSpecs(), meta.formatVersion, snapshotTimes)
 	if err != nil {
 		return nil, fmt.Errorf("partition statistics: %w", err)
 	}
@@ -313,6 +319,7 @@ func collectPartitionStatistics(
 	partitionType *iceberg.StructType,
 	specs []iceberg.PartitionSpec,
 	formatVersion int,
+	snapshotTimes map[int64]int64,
 ) ([]*inspectPartitionAggregate, error) {
 	specByID := make(map[int32]iceberg.PartitionSpec, len(specs))
 	for _, spec := range specs {
@@ -329,7 +336,7 @@ func collectPartitionStatistics(
 	if formatVersion == 3 {
 		dataFiles = make(map[string]partitionStatisticsDataFile)
 	}
-	vectors := make(map[string]partitionStatisticsVector)
+	vectors := make(map[string][]partitionStatisticsVector)
 	exactTotals := true
 	rows := make([]*inspectPartitionAggregate, 0)
 	for _, manifest := range manifests {
@@ -353,7 +360,7 @@ func collectPartitionStatistics(
 			trees[specID] = tree
 		}
 
-		for entry, err := range manifest.Entries(ctx, fs, true) {
+		for entry, err := range manifest.Entries(ctx, fs, formatVersion == 1) {
 			if err != nil {
 				return nil, fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err)
 			}
@@ -379,9 +386,12 @@ func collectPartitionStatistics(
 				return nil, fmt.Errorf("%w: file %s has a negative count or size",
 					iceberg.ErrInvalidArgument, file.FilePath())
 			}
-			vector, err := files.add(file, manifest.FilePath(), formatVersion)
-			if err != nil {
-				return nil, err
+			var vector bool
+			if entry.Status() != iceberg.EntryStatusDELETED {
+				vector, err = files.add(file, manifest.FilePath(), formatVersion)
+				if err != nil {
+					return nil, err
+				}
 			}
 			values := dataFilePartition(file)
 			if err := validatePartitionStatisticsTuple(spec, file.FilePath(), values); err != nil {
@@ -416,6 +426,14 @@ func collectPartitionStatistics(
 				rows = append(rows, row)
 				tree.insert(newPartitionRecord(partition, partitionType), row)
 			}
+			if timestamp, ok := snapshotTimes[entry.SnapshotID()]; ok &&
+				(row.statisticsUpdatedAt == nil || timestamp > *row.statisticsUpdatedAt) {
+				row.statisticsUpdatedAt = new(timestamp)
+				row.statisticsUpdatedSnapshot = new(entry.SnapshotID())
+			}
+			if entry.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
 			if err := accumulatePartitionStatistics(row, file); err != nil {
 				return nil, err
 			}
@@ -427,10 +445,7 @@ func collectPartitionStatistics(
 			case iceberg.EntryContentPosDeletes:
 				if vector {
 					target := *file.ReferencedDataFile()
-					if _, duplicate := vectors[target]; duplicate {
-						return nil, fmt.Errorf("%w: multiple deletion vectors reference data file %q", iceberg.ErrInvalidArgument, target)
-					}
-					vectors[target] = partitionStatisticsVector{row: row, count: file.Count(), sequence: entry.DataSequenceNumber()}
+					vectors[target] = append(vectors[target], partitionStatisticsVector{row: row, count: file.Count(), sequence: entry.DataSequenceNumber()})
 				} else {
 					exactTotals = false
 				}
@@ -539,23 +554,36 @@ func accumulatePartitionStatistics(row *inspectPartitionAggregate, file iceberg.
 	return nil
 }
 
-func finishPartitionStatistics(ctx context.Context, rows []*inspectPartitionAggregate, dataFiles map[string]partitionStatisticsDataFile, vectors map[string]partitionStatisticsVector, exactTotals bool) error {
+func finishPartitionStatistics(ctx context.Context, rows []*inspectPartitionAggregate, dataFiles map[string]partitionStatisticsDataFile, vectors map[string][]partitionStatisticsVector, exactTotals bool) error {
 	for _, row := range rows {
 		row.totalRecordCount = nil
 		if exactTotals {
 			row.totalRecordCount = new(row.dataRecordCount)
 		}
 	}
-	for target, vector := range vectors {
+	for target, targetVectors := range vectors {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		data, found := dataFiles[target]
-		if !found || vector.row != data.row {
-			return fmt.Errorf("%w: deletion vector target %q must be live with the same spec and partition", iceberg.ErrInvalidArgument, target)
+		if !found || len(targetVectors) != 1 {
+			for _, vector := range targetVectors {
+				vector.row.totalRecordCount = nil
+			}
+			if found {
+				data.row.totalRecordCount = nil
+			}
+			continue
+		}
+		vector := targetVectors[0]
+		if vector.row != data.row {
+			vector.row.totalRecordCount = nil
+			data.row.totalRecordCount = nil
+			continue
 		}
 		if vector.count > data.count || (data.sequence >= 0 && vector.sequence >= 0 && data.sequence > vector.sequence) {
-			return fmt.Errorf("%w: invalid deletion vector count or sequence for %q", iceberg.ErrInvalidArgument, target)
+			data.row.totalRecordCount = nil
+			continue
 		}
 		if data.sequence < 0 || vector.sequence < 0 {
 			data.row.totalRecordCount = nil
@@ -827,8 +855,15 @@ func writePartitionStatisticsParquet(
 				} else {
 					total.Append(*row.totalRecordCount)
 				}
-				bldr.Field(10).(*array.Int64Builder).AppendNull()
-				bldr.Field(11).(*array.Int64Builder).AppendNull()
+				updatedAt := bldr.Field(10).(*array.Int64Builder)
+				updatedSnapshot := bldr.Field(11).(*array.Int64Builder)
+				if row.statisticsUpdatedAt == nil {
+					updatedAt.AppendNull()
+					updatedSnapshot.AppendNull()
+				} else {
+					updatedAt.Append(*row.statisticsUpdatedAt)
+					updatedSnapshot.Append(*row.statisticsUpdatedSnapshot)
+				}
 				if formatVersion == 3 {
 					bldr.Field(12).(*array.Int32Builder).Append(row.deletionVectorCount)
 				}
