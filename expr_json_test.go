@@ -696,9 +696,9 @@ func TestUnmarshalExpressionCaseSensitive(t *testing.T) {
 func TestMarshalBoundNestedReferencePreservesPath(t *testing.T) {
 	t.Parallel()
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "Nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
-		}}},
+		iceberg.NestedField{ID: 1, Name: "Nested", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
+		)},
 		iceberg.NestedField{ID: 3, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
 	)
 	ref := iceberg.Reference("nested.value")
@@ -740,9 +740,9 @@ func TestUnboundTransformRejectsWrappedReference(t *testing.T) {
 		iceberg.Reference
 	}
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "Nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
-		}}},
+		iceberg.NestedField{ID: 1, Name: "Nested", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "Value", Type: iceberg.PrimitiveTypes.Int32},
+		)},
 	)
 	term := iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 16},
 		wrappedReference{iceberg.Reference("Nested.Value")})

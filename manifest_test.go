@@ -5026,3 +5026,42 @@ func TestManifestEntriesPassContextToOpen(t *testing.T) {
 		})
 	}
 }
+
+func TestManifestWriterSignedZeroBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		typ                Type
+		values             []any
+		negative, positive Literal
+	}{
+		{"float positive then negative", PrimitiveTypes.Float32, []any{float32(0), math.Float32frombits(1 << 31)}, Float32Literal(math.Float32frombits(1 << 31)), Float32Literal(0)},
+		{"float negative then positive", PrimitiveTypes.Float32, []any{math.Float32frombits(1 << 31), float32(0)}, Float32Literal(math.Float32frombits(1 << 31)), Float32Literal(0)},
+		{"double positive then negative", PrimitiveTypes.Float64, []any{float64(0), math.Copysign(0, -1)}, Float64Literal(math.Copysign(0, -1)), Float64Literal(0)},
+		{"double negative then positive", PrimitiveTypes.Float64, []any{math.Copysign(0, -1), float64(0)}, Float64Literal(math.Copysign(0, -1)), Float64Literal(0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := NewSchema(0, NestedField{ID: 1, Name: "x", Type: tc.typ})
+			spec := NewPartitionSpec(PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "x_part", Transform: IdentityTransform{}})
+			writer, err := NewManifestWriter(2, io.Discard, spec, schema, 1)
+			require.NoError(t, err)
+			snapshot, seq := int64(1), int64(1)
+			for i, value := range tc.values {
+				builder, err := NewDataFileBuilder(spec, EntryContentData, fmt.Sprintf("file-%d.parquet", i), ParquetFile, map[int]any{1000: value}, nil, nil, 1, 1)
+				require.NoError(t, err)
+				require.NoError(t, writer.Add(NewManifestEntry(EntryStatusADDED, &snapshot, &seq, &seq, builder.Build())))
+			}
+			manifest, err := writer.ToManifestFile("manifest.avro", 0)
+			require.NoError(t, err)
+			summaries := manifest.Partitions()
+			require.Len(t, summaries, 1)
+			lower, err := tc.negative.MarshalBinary()
+			require.NoError(t, err)
+			upper, err := tc.positive.MarshalBinary()
+			require.NoError(t, err)
+			require.NotNil(t, summaries[0].LowerBound)
+			require.NotNil(t, summaries[0].UpperBound)
+			assert.Equal(t, lower, *summaries[0].LowerBound)
+			assert.Equal(t, upper, *summaries[0].UpperBound)
+		})
+	}
+}

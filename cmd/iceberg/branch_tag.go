@@ -37,6 +37,10 @@ func runBranch(ctx context.Context, output Output, cat catalog.Catalog, cmd *Bra
 		runBranchCreate(ctx, output, cat, cmd.Create)
 	case cmd.Delete != nil:
 		runBranchDelete(ctx, output, cat, cmd.Delete)
+	case cmd.FastForward != nil:
+		runBranchFastForward(ctx, output, cat, cmd.FastForward)
+	case cmd.Replace != nil:
+		runBranchReplace(ctx, output, cat, cmd.Replace)
 	}
 }
 
@@ -381,4 +385,104 @@ func (j jsonOutput) RefDeleted(result RefDeletedResult) {
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		j.Error(err)
 	}
+}
+
+func runBranchFastForward(ctx context.Context, output Output, cat catalog.Catalog, cmd *BranchFastForwardCmd) {
+	if err := validateRefName(cmd.BranchName); err != nil {
+		output.Error(fmt.Errorf("invalid target branch: %w", err))
+		osExit(1)
+
+		return
+	}
+	if err := validateRefName(cmd.SourceRef); err != nil {
+		output.Error(fmt.Errorf("invalid source ref: %w", err))
+		osExit(1)
+
+		return
+	}
+
+	tbl := loadTable(ctx, output, cat, cmd.TableID)
+	tx, err := tbl.NewTransactionOnBranch(cmd.BranchName)
+	if err != nil {
+		output.Error(fmt.Errorf("cannot begin branch transaction: %w", err))
+		osExit(1)
+
+		return
+	}
+	if err := tx.FastForwardBranch(cmd.BranchName, cmd.SourceRef); err != nil {
+		output.Error(fmt.Errorf("cannot fast-forward branch: %w", err))
+		osExit(1)
+
+		return
+	}
+
+	newHead := tbl.SnapshotByName(cmd.SourceRef)
+	oldHead := tbl.SnapshotByName(cmd.BranchName)
+	var prompt string
+	if oldHead == nil {
+		prompt = fmt.Sprintf("Create branch %q on %s at snapshot %d from ref %q?",
+			cmd.BranchName, tableIDString(tbl), newHead.SnapshotID, cmd.SourceRef)
+	} else {
+		prompt = fmt.Sprintf("Fast-forward branch %q on %s from snapshot %d to %d (ref %q)?",
+			cmd.BranchName, tableIDString(tbl), oldHead.SnapshotID, newHead.SnapshotID, cmd.SourceRef)
+	}
+	if err := confirmAction(prompt, cmd.Yes); err != nil {
+		output.Error(err)
+		osExit(1)
+
+		return
+	}
+
+	updated, err := tx.Commit(ctx)
+	if err != nil {
+		output.Error(fmt.Errorf("failed to fast-forward branch: %w", err))
+		osExit(1)
+
+		return
+	}
+	output.Text(fmt.Sprintf("Fast-forwarded branch %q on %s to snapshot %d",
+		cmd.BranchName, tableIDString(updated), updated.SnapshotByName(cmd.BranchName).SnapshotID))
+}
+
+func runBranchReplace(ctx context.Context, output Output, cat catalog.Catalog, cmd *BranchReplaceCmd) {
+	if err := validateRefName(cmd.BranchName); err != nil {
+		output.Error(fmt.Errorf("invalid branch name: %w", err))
+		osExit(1)
+
+		return
+	}
+
+	tbl := loadTable(ctx, output, cat, cmd.TableID)
+	tx, err := tbl.NewTransactionOnBranch(cmd.BranchName)
+	if err != nil {
+		output.Error(fmt.Errorf("cannot begin branch transaction: %w", err))
+		osExit(1)
+
+		return
+	}
+	if err := tx.ReplaceBranch(cmd.BranchName, cmd.SnapshotID); err != nil {
+		output.Error(fmt.Errorf("cannot replace branch: %w", err))
+		osExit(1)
+
+		return
+	}
+
+	oldHead := tbl.SnapshotByName(cmd.BranchName)
+	if err := confirmAction(fmt.Sprintf("Replace branch %q on %s from snapshot %d to %d?",
+		cmd.BranchName, tableIDString(tbl), oldHead.SnapshotID, cmd.SnapshotID), cmd.Yes); err != nil {
+		output.Error(err)
+		osExit(1)
+
+		return
+	}
+
+	updated, err := tx.Commit(ctx)
+	if err != nil {
+		output.Error(fmt.Errorf("failed to replace branch: %w", err))
+		osExit(1)
+
+		return
+	}
+	output.Text(fmt.Sprintf("Replaced branch %q on %s with snapshot %d",
+		cmd.BranchName, tableIDString(updated), cmd.SnapshotID))
 }
