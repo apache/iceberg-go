@@ -452,7 +452,8 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | Key | Default | Description |
 |---|---|---|
 | `write.format.default` | `parquet` | File format used when writing data files. Read in `table/writer.go` and `table/rolling_data_writer.go`. |
-| `write.target-file-size-bytes` | (set by writer) | Target size for newly written data files. Read in `table/arrow_utils.go` and `table/equality_delete_writer.go`. |
+| `write.target-file-size-bytes` | `536870912` (512 MB) | Target size for newly written data files. Read in `table/arrow_utils.go`. |
+| `write.delete.target-file-size-bytes` | `67108864` (64 MB) | Target size for equality-delete and v2 position-delete files where file rolling applies. Read in `table/equality_delete_writer.go` and `table/arrow_utils.go`. |
 
 ### Scan reads
 

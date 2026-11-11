@@ -2434,8 +2434,8 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		args.writeUUID = &u
 	}
 
-	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
-		WriteTargetFileSizeBytesDefault))
+	targetFileSize := int64(meta.props.GetInt(WriteDeleteTargetFileSizeBytesKey,
+		WriteDeleteTargetFileSizeBytesDefault))
 
 	if latestMetadata.PartitionSpec().IsUnpartitioned() {
 		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
