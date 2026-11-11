@@ -156,7 +156,7 @@ func BenchmarkResolveParquetStatsColumnPaths(b *testing.B) {
 			}
 			b.Run(strconv.Itoa(columnCount)+"/"+name, func(b *testing.B) {
 				b.ReportAllocs()
-				for i := 0; i < b.N; i++ {
+				for range b.N {
 					benchmarkMappedStatsProps = internal.ResolveParquetStatsColumnPaths(
 						props, schema, schema, mapping, iceberg.EntryContentData)
 				}
