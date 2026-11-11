@@ -17,7 +17,11 @@
 
 package internal
 
-import "math"
+import (
+	"math"
+
+	"github.com/apache/iceberg-go"
+)
 
 type (
 	binaryPartitionKey  string
@@ -51,6 +55,10 @@ func ComparablePartitionKey(value any) any {
 		}
 
 		return float64PartitionKey(rawBits)
+	case iceberg.DecimalLiteral:
+		// Manifests decode decimal partition values as DecimalLiteral, while
+		// writers and callers build iceberg.Decimal; compare them by value.
+		return iceberg.Decimal(value)
 	}
 
 	return value
