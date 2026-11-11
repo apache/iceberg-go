@@ -395,8 +395,8 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 		}
 	}
 
-	delete(u.identifierFieldNames, fullName)
-
+	// Identifier fields are left alone: Apply rejects a deleted identifier
+	// field unless SetIdentifierField replaces the identifier fields, as Java does.
 	u.deletes[field.ID] = struct{}{}
 
 	return nil
@@ -1135,7 +1135,7 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 			field, ok = newSchema.FindFieldByNameCaseInsensitive(name)
 		}
 		if !ok {
-			return nil, fmt.Errorf("identifier field not found: %s", name)
+			return nil, fmt.Errorf("identifier field not found: %s (to delete an identifier field, also update the identifier fields with SetIdentifierField)", name)
 		}
 		identifierFieldIDs = append(identifierFieldIDs, field.ID)
 	}

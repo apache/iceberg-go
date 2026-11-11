@@ -1261,6 +1261,46 @@ func TestSetIdentifierField(t *testing.T) {
 	})
 }
 
+func TestDeleteIdentifierColumn(t *testing.T) {
+	schemaWithIdentifiers := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	metadata, err := NewMetadata(schemaWithIdentifiers, nil, UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	newTxn := func() *Transaction {
+		return New([]string{"id"}, metadata, "", nil, nil).NewTransaction()
+	}
+
+	t.Run("deleting an identifier column fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"id"}).
+			Apply()
+		require.ErrorContains(t, err, "identifier field not found: id")
+	})
+
+	t.Run("delete then clear identifier fields", func(t *testing.T) {
+		newSchema, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"id"}).
+			SetIdentifierField([][]string{}).
+			Apply()
+		require.NoError(t, err)
+		assert.Empty(t, newSchema.IdentifierFieldIDs)
+		_, found := newSchema.FindFieldByName("id")
+		assert.False(t, found)
+	})
+
+	t.Run("replace identifier fields then delete", func(t *testing.T) {
+		newSchema, err := NewUpdateSchema(newTxn(), true, true).
+			SetIdentifierField([][]string{{"name"}}).
+			DeleteColumn([]string{"id"}).
+			Apply()
+		require.NoError(t, err)
+		assert.Equal(t, []int{2}, newSchema.IdentifierFieldIDs)
+	})
+}
+
 func TestSetIdentifierFieldDeterministicOrder(t *testing.T) {
 	t.Run("apply returns identifier field ids in sorted order", func(t *testing.T) {
 		const iterations = 50
