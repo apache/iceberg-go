@@ -250,6 +250,39 @@ func TestDeleteParquetCompressionLevelInheritance(t *testing.T) {
 	}
 }
 
+func TestDeleteParquetIgnoresDataBloomSettings(t *testing.T) {
+	props := iceberg.Properties{
+		ParquetBloomFilterMaxBytesKey:                       "0",
+		ParquetBloomFilterColumnEnabledKeyPrefix + ".value": "true",
+		"write.parquet.bloom-filter-fpp.column.value":       "invalid",
+		"write.parquet.bloom-filter-ndv.column.value":       "invalid",
+		"write.parquet.bloom-filter-adaptive-enabled":       "true",
+	}
+	original := maps.Clone(props)
+	for _, content := range []iceberg.ManifestEntryContent{iceberg.EntryContentEqDeletes, iceberg.EntryContentPosDeletes} {
+		t.Run(fmt.Sprint(content), func(t *testing.T) {
+			effective, err := parquetPropsFor(content, props)
+			require.NoError(t, err)
+			for key := range effective {
+				require.NotContains(t, key, "write.parquet.bloom-filter-")
+			}
+			meta := deleteParquetTestMetadata(t, props)
+			fs := iceio.NewMemFS()
+			_, err = newDataFileWriter("mem://delete-settings", fs, meta, props, withContent(content))
+			require.NoError(t, err)
+			id := uuid.New()
+			factory, err := newWriterFactory("mem://delete-settings", recordWritingArgs{
+				fs: fs, writeUUID: &id, counter: internal.Counter(0),
+			}, meta, meta.CurrentSchema(), 1048576, withContentType(content))
+			require.NoError(t, err)
+			factory.stopCount()
+		})
+	}
+	_, err := parquetPropsFor(iceberg.EntryContentData, props)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.Equal(t, original, props)
+}
+
 func TestDeleteParquetCodecOverrideWithoutLevelWrites(t *testing.T) {
 	for _, content := range []iceberg.ManifestEntryContent{iceberg.EntryContentEqDeletes, iceberg.EntryContentPosDeletes} {
 		t.Run(fmt.Sprint(content), func(t *testing.T) {

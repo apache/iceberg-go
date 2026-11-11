@@ -318,9 +318,10 @@ func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 		}
 	}
 	// Java does not apply data-column Bloom filters or dictionary overrides to
-	// delete files, whose schema may differ from the data schema.
+	// delete files, whose schema may differ from the data schema. Drop Bloom
+	// settings before validation, including settings supported by other writers.
 	maps.DeleteFunc(effective, func(key, _ string) bool {
-		return strings.HasPrefix(key, ParquetBloomFilterColumnEnabledKeyPrefix+".") ||
+		return strings.HasPrefix(key, "write.parquet.bloom-filter-") ||
 			strings.HasPrefix(key, tblutils.ParquetDictEncodingColumnEnabledKeyPrefix+".")
 	})
 	for deleteKey, dataKey := range overrides {
