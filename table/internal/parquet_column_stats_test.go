@@ -171,8 +171,8 @@ func TestGetWritePropertiesColumnStatisticsBooleanParsing(t *testing.T) {
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 	prefix := internal.ParquetColumnStatsEnabledKeyPrefix
 	cases := []struct {
-		name string
-		value string
+		name    string
+		value   string
 		enabled bool
 	}{
 		{"lowercase-true", "true", true},
