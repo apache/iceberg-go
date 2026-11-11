@@ -76,45 +76,40 @@ func TestSignedZeroBoundsDoNotPruneMatchingRows(t *testing.T) {
 			negativeFile := newFile(negativeBound)
 			positiveFile := newFile(positiveBound)
 
-			lessThanPositive := iceberg.LiteralPredicate(iceberg.OpLT, iceberg.Reference("x"), tt.positive)
-			inclusive, err := newInclusiveMetricsEvaluator(schema, lessThanPositive, true, false)
-			require.NoError(t, err)
-			matches, err := inclusive(negativeFile)
-			require.NoError(t, err)
-			require.True(t, matches, "-0 must match x < +0")
-
-			greaterThanNegative := iceberg.LiteralPredicate(iceberg.OpGT, iceberg.Reference("x"), tt.negative)
-			inclusive, err = newInclusiveMetricsEvaluator(schema, greaterThanNegative, true, false)
-			require.NoError(t, err)
-			matches, err = inclusive(positiveFile)
-			require.NoError(t, err)
-			require.True(t, matches, "+0 must match x > -0")
-
-			greaterEqualPositive := iceberg.LiteralPredicate(iceberg.OpGTEQ, iceberg.Reference("x"), tt.positive)
-			strict, err := newStrictMetricsEvaluator(schema, greaterEqualPositive, true, false)
-			require.NoError(t, err)
-			allMatch, err := strict(negativeFile)
-			require.NoError(t, err)
-			require.False(t, allMatch, "-0 does not satisfy x >= +0")
-
-			// Manifest summaries use the same floating-point comparator.
 			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-				SourceIDs: []int{1}, FieldID: 1000, Name: "x_part",
-				Transform: iceberg.IdentityTransform{},
+				SourceIDs: []int{1}, FieldID: 1000, Name: "x_part", Transform: iceberg.IdentityTransform{},
 			})
-			manifest := iceberg.NewManifestBuilder(1, "s3://bucket/manifest.avro", 100, 0, 1).
-				Partitions([]iceberg.FieldSummary{{
-					ContainsNull: false,
-					LowerBound:   &negativeBound,
-					UpperBound:   &negativeBound,
-				}}).
-				Build()
-			manifestFilter := iceberg.LiteralPredicate(iceberg.OpLT, iceberg.Reference("x_part"), tt.positive)
-			manifestEval, err := newManifestEvaluator(spec, schema, manifestFilter, true)
-			require.NoError(t, err)
-			matches, err = manifestEval(manifest)
-			require.NoError(t, err)
-			require.True(t, matches, "a manifest with -0 must not be pruned for x < +0")
+			for _, literal := range []iceberg.Literal{tt.negative, tt.positive} {
+				for _, file := range []iceberg.DataFile{negativeFile, positiveFile} {
+					for _, op := range []iceberg.Operation{iceberg.OpEQ, iceberg.OpNEQ, iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ} {
+						expected := op == iceberg.OpEQ || op == iceberg.OpLTEQ || op == iceberg.OpGTEQ
+						predicate := iceberg.LiteralPredicate(op, iceberg.Reference("x"), literal)
+						inclusive, err := newInclusiveMetricsEvaluator(schema, predicate, true, false)
+						require.NoError(t, err)
+						matches, err := inclusive(file)
+						require.NoError(t, err)
+						if expected {
+							require.True(t, matches, "%s must retain either zero", op)
+						}
+						strict, err := newStrictMetricsEvaluator(schema, predicate, true, false)
+						require.NoError(t, err)
+						allMatch, err := strict(file)
+						require.NoError(t, err)
+						require.Equal(t, expected, allMatch, "%s must follow Arrow zero equality", op)
+
+						bound := file.LowerBoundValues()[1]
+						manifest := iceberg.NewManifestBuilder(1, "s3://bucket/manifest.avro", 100, 0, 1).
+							Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: &bound, UpperBound: &bound}}).Build()
+						evaluator, err := newManifestEvaluator(spec, schema, iceberg.LiteralPredicate(op, iceberg.Reference("x_part"), literal), true)
+						require.NoError(t, err)
+						matches, err = evaluator(manifest)
+						require.NoError(t, err)
+						if expected {
+							require.True(t, matches, "%s must retain either zero in manifests", op)
+						}
+					}
+				}
+			}
 		})
 	}
 }

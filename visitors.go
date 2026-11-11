@@ -453,6 +453,20 @@ func typedCmp[T LiteralType](st StructLike, term BoundTerm, lit Literal) int {
 	return nullsFirstCmp(rhs.Comparator(), v, l)
 }
 
+// Ordinary predicates use the same signed-zero equality as Arrow row filters.
+func typedFloatCmp[T float32 | float64](st StructLike, term BoundTerm, lit Literal) int {
+	rhs := lit.(TypedLiteral[T])
+	compare := rhs.Comparator()
+
+	return nullsFirstCmp(func(a, b T) int {
+		if a == 0 && b == 0 {
+			return 0
+		}
+
+		return compare(a, b)
+	}, typedTermEval[T](st, term), Optional[T]{Valid: true, Val: rhs.Value()})
+}
+
 func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 	// we already properly casted and converted everything during binding
 	// so we can type assert based on the term type
@@ -464,9 +478,9 @@ func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 	case Int64Type:
 		return typedCmp[int64](st, term, lit)
 	case Float32Type:
-		return typedCmp[float32](st, term, lit)
+		return typedFloatCmp[float32](st, term, lit)
 	case Float64Type:
-		return typedCmp[float64](st, term, lit)
+		return typedFloatCmp[float64](st, term, lit)
 	case DateType:
 		return typedCmp[Date](st, term, lit)
 	case TimeType:

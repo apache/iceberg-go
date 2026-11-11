@@ -1344,3 +1344,30 @@ func TestSanitizeExpression(t *testing.T) {
 		assert.True(t, got.Equals(c))
 	}
 }
+
+func TestEvaluatorSignedZeroPredicates(t *testing.T) {
+	for _, typ := range []iceberg.Type{iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64} {
+		schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "x", Type: typ})
+		var values []iceberg.Literal
+		var rows []iceberg.StructLike
+		if typ.Equals(iceberg.PrimitiveTypes.Float32) {
+			values = []iceberg.Literal{iceberg.Float32Literal(0), iceberg.Float32Literal(math.Float32frombits(1 << 31))}
+			rows = []iceberg.StructLike{rowOf(float32(0)), rowOf(math.Float32frombits(1 << 31))}
+		} else {
+			values = []iceberg.Literal{iceberg.Float64Literal(0), iceberg.Float64Literal(math.Copysign(0, -1))}
+			rows = []iceberg.StructLike{rowOf(float64(0)), rowOf(math.Copysign(0, -1))}
+		}
+		for _, literal := range values {
+			for _, op := range []iceberg.Operation{iceberg.OpEQ, iceberg.OpNEQ, iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ} {
+				evaluator, err := iceberg.ExpressionEvaluator(schema, iceberg.LiteralPredicate(op, iceberg.Reference("x"), literal), true)
+				require.NoError(t, err)
+				for _, row := range rows {
+					matches, err := evaluator(row)
+					require.NoError(t, err)
+					expected := op == iceberg.OpEQ || op == iceberg.OpLTEQ || op == iceberg.OpGTEQ
+					require.Equal(t, expected, matches, "%s %s", typ, op)
+				}
+			}
+		}
+	}
+}
