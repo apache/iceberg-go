@@ -31,13 +31,44 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-// parquetColumnCompressionConfig defers per-column configuration until the
-// physical Parquet paths are known. Iceberg and Parquet paths differ for lists
-// and maps, so property names cannot be passed to Arrow unchanged.
+// parquetColumnCompressionConfig resolves logical Iceberg field names to physical
+// Parquet paths at write time. The path includes list/map wrappers that do not
+// appear in Iceberg property names.
 type parquetColumnCompressionConfig struct {
-	base   []parquet.WriterProperty
-	codecs map[string]string
-	levels map[string]string
+	base    []parquet.WriterProperty
+	columns map[string]parquetColumnCompressionOverride
+}
+
+// Keep presence separate from value: an explicitly empty codec or level must
+// fail validation instead of being treated as an absent override.
+type parquetColumnCompressionOverride struct {
+	codec     string
+	level     string
+	hasCodec  bool
+	hasLevel  bool
+}
+
+func columnCompressionWriteProperties(props iceberg.Properties, base []parquet.WriterProperty) any {
+	columns := make(map[string]parquetColumnCompressionOverride)
+	for key, value := range props {
+		if name, ok := strings.CutPrefix(key, ParquetCompressionColumnCodecKeyPrefix+"."); ok && name != "" {
+			override := columns[name]
+			override.codec = value
+			override.hasCodec = true
+			columns[name] = override
+		} else if name, ok := strings.CutPrefix(key, ParquetCompressionColumnLevelKeyPrefix+"."); ok && name != "" {
+			override := columns[name]
+			override.level = value
+			override.hasLevel = true
+			columns[name] = override
+		}
+	}
+
+	if len(columns) == 0 {
+		return base
+	}
+
+	return parquetColumnCompressionConfig{base: base, columns: columns}
 }
 
 func parquetCompressionCodec(value string) (compress.Compression, bool) {
@@ -63,6 +94,45 @@ func parquetCompressionCodec(value string) (compress.Compression, bool) {
 	}
 }
 
+func (override parquetColumnCompressionOverride) appendWriterProperties(
+	opts []parquet.WriterProperty, path, name string, defaultCodec compress.Compression,
+) ([]parquet.WriterProperty, error) {
+	codec := defaultCodec
+	if override.hasCodec {
+		var valid bool
+		codec, valid = parquetCompressionCodec(override.codec)
+		if !valid {
+			return nil, fmt.Errorf("%w: unsupported Parquet compression codec %q for column %q",
+				iceberg.ErrInvalidArgument, override.codec, name)
+		}
+		if _, err := compress.GetCodec(codec); err != nil {
+			return nil, fmt.Errorf("%w: Parquet compression codec %q for column %q: %v",
+				iceberg.ErrInvalidArgument, override.codec, name, err)
+		}
+
+		opts = append(opts, parquet.WithCompressionFor(path, codec))
+		if !override.hasLevel && codec != defaultCodec {
+			// A codec override cannot inherit a level meant for another codec.
+			opts = append(opts, parquet.WithCompressionLevelFor(path, compress.DefaultCompressionLevel))
+		}
+	}
+
+	if override.hasLevel {
+		level, err := strconv.ParseInt(override.level, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid Parquet compression level %q for column %q: %v",
+				iceberg.ErrInvalidArgument, override.level, name, err)
+		}
+		key := ParquetCompressionColumnLevelKeyPrefix + "." + name
+		if err := validateParquetCompressionLevel(key, strings.ToLower(codec.String()), int(level)); err != nil {
+			return nil, err
+		}
+		opts = append(opts, parquet.WithCompressionLevelFor(path, int(level)))
+	}
+
+	return opts, nil
+}
+
 func (config parquetColumnCompressionConfig) forSchema(
 	fileSchema *iceberg.Schema, arrowSchema *arrow.Schema, arrProps pqarrow.ArrowWriterProperties,
 ) ([]parquet.WriterProperty, error) {
@@ -77,7 +147,7 @@ func (config parquetColumnCompressionConfig) forSchema(
 	}
 
 	opts := slices.Clone(config.base)
-	matched := make(map[string]struct{})
+	matched := make(map[string]struct{}, len(config.columns))
 	for i := range physicalSchema.NumColumns() {
 		column := physicalSchema.Column(i)
 		name, found := fileSchema.FindColumnName(int(column.SchemaNode().FieldID()))
@@ -85,58 +155,21 @@ func (config parquetColumnCompressionConfig) forSchema(
 			continue
 		}
 
-		codecValue, hasCodec := config.codecs[name]
-		levelValue, hasLevel := config.levels[name]
-		if !hasCodec && !hasLevel {
+		override, ok := config.columns[name]
+		if !ok {
 			continue
 		}
 
 		matched[name] = struct{}{}
-		path := column.Path()
-		codec := defaults.Compression()
-		if hasCodec {
-			var valid bool
-			codec, valid = parquetCompressionCodec(codecValue)
-			if !valid {
-				return nil, fmt.Errorf("%w: unsupported Parquet compression codec %q for column %q",
-					iceberg.ErrInvalidArgument, codecValue, name)
-			}
-			if _, err := compress.GetCodec(codec); err != nil {
-				return nil, fmt.Errorf("%w: Parquet compression codec %q for column %q: %v",
-					iceberg.ErrInvalidArgument, codecValue, name, err)
-			}
-
-			opts = append(opts, parquet.WithCompressionFor(path, codec))
-			if !hasLevel && codec != defaults.Compression() {
-				// Do not inherit a compression level configured for a different codec.
-				opts = append(opts, parquet.WithCompressionLevelFor(path, compress.DefaultCompressionLevel))
-			}
-		}
-
-		if hasLevel {
-			level, err := strconv.ParseInt(levelValue, 10, 32)
-			if err != nil {
-				return nil, fmt.Errorf("%w: invalid Parquet compression level %q for column %q: %v",
-					iceberg.ErrInvalidArgument, levelValue, name, err)
-			}
-			key := ParquetCompressionColumnLevelKeyPrefix + "." + name
-			if err := validateParquetCompressionLevel(key, strings.ToLower(codec.String()), int(level)); err != nil {
-				return nil, err
-			}
-			opts = append(opts, parquet.WithCompressionLevelFor(path, int(level)))
+		opts, err = override.appendWriterProperties(opts, column.Path(), name, defaults.Compression())
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	for name := range config.codecs {
+	for name := range config.columns {
 		if _, ok := matched[name]; !ok {
 			slog.Warn("skipping per-column Parquet compression for missing field", "column", name)
-		}
-	}
-	for name := range config.levels {
-		if _, ok := matched[name]; !ok {
-			if _, alreadyLogged := config.codecs[name]; !alreadyLogged {
-				slog.Warn("skipping per-column Parquet compression for missing field", "column", name)
-			}
 		}
 	}
 

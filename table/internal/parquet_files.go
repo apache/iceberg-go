@@ -365,28 +365,7 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		writerProps = append(writerProps, parquet.WithDictionaryFor(colName, javaBool(val)))
 	}
 
-	config := parquetColumnCompressionConfig{}
-	for key, value := range props {
-		if column, ok := strings.CutPrefix(key, ParquetCompressionColumnCodecKeyPrefix+"."); ok && column != "" {
-			if config.codecs == nil {
-				config.codecs = make(map[string]string)
-			}
-			config.codecs[column] = value
-		}
-		if column, ok := strings.CutPrefix(key, ParquetCompressionColumnLevelKeyPrefix+"."); ok && column != "" {
-			if config.levels == nil {
-				config.levels = make(map[string]string)
-			}
-			config.levels[column] = value
-		}
-	}
-	if len(config.codecs) > 0 || len(config.levels) > 0 {
-		config.base = writerProps
-
-		return config
-	}
-
-	return writerProps
+	return columnCompressionWriteProperties(props, writerProps)
 }
 
 // javaBool matches Java's Boolean.parseBoolean, which Iceberg's Java writer uses

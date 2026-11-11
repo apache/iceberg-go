@@ -124,3 +124,69 @@ func TestParquetCompressionSchemaRenameKeepsCanonicalListPath(t *testing.T) {
 	require.Equal(t, "snappy", staged.props[codec+"items.value"])
 	require.NotContains(t, staged.props, codec+"items.element.value")
 }
+
+func TestParquetCompressionNestedPropertiesFollowRename(t *testing.T) {
+	const codec = ParquetCompressionColumnCodecKeyPrefix + "."
+	const level = ParquetCompressionColumnLevelKeyPrefix + "."
+
+	for _, tc := range []struct {
+		name   string
+		path   []string
+		new    string
+		before string
+		after  string
+	}{
+		{"list parent", []string{"tags"}, "labels", "tags.element", "labels.element"},
+		{"map parent", []string{"properties"}, "attributes", "properties.value", "attributes.value"},
+		{"struct leaf", []string{"address", "city"}, "town", "address.city", "address.town"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", iceberg.Properties{
+				codec + tc.before: "gzip",
+				level + tc.before: "5",
+				codec + "name":    "snappy",
+				codec + "unknown": "invalid",
+			})
+			require.NoError(t, err)
+			txn := New([]string{"table"}, meta, "", nil, nil).NewTransaction()
+			require.NoError(t, txn.UpdateSchema(true, false).RenameColumn(tc.path, tc.new).Commit())
+			staged, err := txn.txnMeta()
+			require.NoError(t, err)
+			require.Equal(t, "gzip", staged.props[codec+tc.after])
+			require.Equal(t, "5", staged.props[level+tc.after])
+			require.NotContains(t, staged.props, codec+tc.before)
+			require.NotContains(t, staged.props, level+tc.before)
+			require.Equal(t, "snappy", staged.props[codec+"name"])
+			require.Equal(t, "invalid", staged.props[codec+"unknown"])
+		})
+	}
+}
+
+func TestParquetCompressionDeleteNestedCollectionsRemovesOverrides(t *testing.T) {
+	const codec = ParquetCompressionColumnCodecKeyPrefix + "."
+	const level = ParquetCompressionColumnLevelKeyPrefix + "."
+	meta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", iceberg.Properties{
+		codec + "tags.element":    "gzip",
+		level + "tags.element":    "3",
+		codec + "properties.key":  "snappy",
+		level + "properties.value": "4",
+		codec + "name":            "zstd",
+	})
+	require.NoError(t, err)
+	txn := New([]string{"table"}, meta, "", nil, nil).NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		DeleteColumn([]string{"tags"}).
+		DeleteColumn([]string{"properties"}).
+		Commit())
+	staged, err := txn.txnMeta()
+	require.NoError(t, err)
+	for _, key := range []string{
+		codec + "tags.element",
+		level + "tags.element",
+		codec + "properties.key",
+		level + "properties.value",
+	} {
+		require.NotContains(t, staged.props, key)
+	}
+	require.Equal(t, "zstd", staged.props[codec+"name"])
+}

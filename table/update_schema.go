@@ -1105,28 +1105,24 @@ func compressionPropertyUpdates(props iceberg.Properties, oldSchema, newSchema *
 	var removals []string
 	set := make(iceberg.Properties)
 	for key, value := range props {
-		for _, prefix := range []string{ParquetCompressionColumnCodecKeyPrefix + ".", ParquetCompressionColumnLevelKeyPrefix + "."} {
-			name, ok := strings.CutPrefix(key, prefix)
-			if !ok {
-				continue
+		prefix, name, ok := compressionPropertyField(key)
+		if !ok {
+			continue
+		}
+		field, found := oldSchema.FindFieldByName(name)
+		if !found {
+			continue
+		}
+		oldName, _ := oldSchema.FindColumnName(field.ID)
+		if name != oldName {
+			continue
+		}
+		newName, exists := newSchema.FindColumnName(field.ID)
+		if !exists || oldName != newName {
+			removals = append(removals, key)
+			if exists {
+				set[prefix+newName] = value
 			}
-			field, found := oldSchema.FindFieldByName(name)
-			if !found {
-				break
-			}
-			oldName, _ := oldSchema.FindColumnName(field.ID)
-			if name != oldName {
-				break
-			}
-			newName, exists := newSchema.FindColumnName(field.ID)
-			if !exists || oldName != newName {
-				removals = append(removals, key)
-				if exists {
-					set[prefix+newName] = value
-				}
-			}
-
-			break
 		}
 	}
 	var updates []Update
@@ -1139,6 +1135,16 @@ func compressionPropertyUpdates(props iceberg.Properties, oldSchema, newSchema *
 	}
 
 	return updates
+}
+
+func compressionPropertyField(key string) (prefix, name string, ok bool) {
+	for _, prefix := range []string{ParquetCompressionColumnCodecKeyPrefix + ".", ParquetCompressionColumnLevelKeyPrefix + "."} {
+		if name, ok := strings.CutPrefix(key, prefix); ok && name != "" {
+			return prefix, name, true
+		}
+	}
+
+	return "", "", false
 }
 
 func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {

@@ -356,3 +356,145 @@ func TestParquetColumnCompressionIgnoredForDeleteFiles(t *testing.T) {
 		require.NoError(t, writer.Abort())
 	}
 }
+
+func TestParquetColumnCompressionExplicitEmptyOverrides(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+	arrowSchema := arrow.NewSchema([]arrow.Field{compressionField(1, "id", arrow.PrimitiveTypes.Int32)}, nil)
+
+	for _, tc := range []struct {
+		name  string
+		props iceberg.Properties
+		want  string
+	}{
+		{
+			name:  "empty codec",
+			props: iceberg.Properties{ParquetCompressionColumnCodecKeyPrefix + ".id": ""},
+			want:  "unsupported Parquet compression codec",
+		},
+		{
+			name:  "empty level",
+			props: iceberg.Properties{ParquetCompressionColumnLevelKeyPrefix + ".id": ""},
+			want:  "invalid Parquet compression level",
+		},
+		{
+			name: "explicit empty level with codec",
+			props: iceberg.Properties{
+				ParquetCompressionColumnCodecKeyPrefix + ".id": "gzip",
+				ParquetCompressionColumnLevelKeyPrefix + ".id": "",
+			},
+			want: "invalid Parquet compression level",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config, ok := (parquetFormat{}).GetWriteProperties(tc.props).(parquetColumnCompressionConfig)
+			require.True(t, ok)
+			_, err := config.forSchema(schema, arrowSchema, pqarrow.DefaultWriterProps())
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestParquetColumnCompressionIgnoresEmptyPropertySuffix(t *testing.T) {
+	props := iceberg.Properties{
+		ParquetCompressionKey:                        "gzip",
+		ParquetCompressionColumnCodecKeyPrefix + ".": "snappy",
+		ParquetCompressionColumnLevelKeyPrefix + ".": "4",
+	}
+	writeProps := (parquetFormat{}).GetWriteProperties(props)
+	_, isConfig := writeProps.(parquetColumnCompressionConfig)
+	require.False(t, isConfig)
+	require.Equal(t, compress.Codecs.Gzip, parquet.NewWriterProperties(writeProps.([]parquet.WriterProperty)...).Compression())
+}
+
+func TestParquetColumnCompressionMatchesFieldIDsWithSanitizedNames(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "customer name", Type: iceberg.PrimitiveTypes.String,
+	})
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		compressionField(1, "customer_x20name", arrow.BinaryTypes.String),
+	}, nil)
+	props := iceberg.Properties{
+		ParquetCompressionColumnCodecKeyPrefix + ".customer name": "snappy",
+		ParquetCompressionColumnLevelKeyPrefix + ".customer name": "0",
+	}
+	config := (parquetFormat{}).GetWriteProperties(props).(parquetColumnCompressionConfig)
+	opts, err := config.forSchema(schema, arrowSchema, pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	writerProps := parquet.NewWriterProperties(opts...)
+	require.Equal(t, compress.Codecs.Snappy, writerProps.CompressionFor("customer_x20name"))
+	require.Equal(t, 0, writerProps.CompressionLevelFor("customer_x20name"))
+	require.Equal(t, compress.Codecs.Zstd, writerProps.CompressionFor("customer name"))
+}
+
+func TestParquetColumnCompressionConfigReusableAcrossPhysicalSchemas(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "customer name", Type: iceberg.PrimitiveTypes.String,
+	})
+	props := iceberg.Properties{
+		ParquetCompressionKey:                                          "zstd",
+		ParquetCompressionColumnCodecKeyPrefix + ".customer name":       "gzip",
+		ParquetCompressionColumnLevelKeyPrefix + ".customer name":       "6",
+	}
+	config := (parquetFormat{}).GetWriteProperties(props).(parquetColumnCompressionConfig)
+	for _, name := range []string{"first", "second", "first"} {
+		t.Run(name, func(t *testing.T) {
+			arrowSchema := arrow.NewSchema([]arrow.Field{
+				compressionField(1, name, arrow.BinaryTypes.String),
+			}, nil)
+			opts, err := config.forSchema(schema, arrowSchema, pqarrow.DefaultWriterProps())
+			require.NoError(t, err)
+			writerProps := parquet.NewWriterProperties(opts...)
+			require.Equal(t, compress.Codecs.Gzip, writerProps.CompressionFor(name))
+			require.Equal(t, 6, writerProps.CompressionLevelFor(name))
+		})
+	}
+	require.Equal(t, compress.Codecs.Zstd, parquet.NewWriterProperties(config.base...).Compression())
+}
+
+func TestParquetColumnCompressionRequiresSchemas(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32,
+	})
+	arrowSchema := arrow.NewSchema([]arrow.Field{compressionField(1, "id", arrow.PrimitiveTypes.Int32)}, nil)
+	config := (parquetFormat{}).GetWriteProperties(iceberg.Properties{
+		ParquetCompressionColumnCodecKeyPrefix + ".id": "snappy",
+	}).(parquetColumnCompressionConfig)
+
+	for _, tc := range []struct {
+		name   string
+		schema *iceberg.Schema
+		arrow  *arrow.Schema
+	}{
+		{"nil Iceberg schema", nil, arrowSchema},
+		{"nil Arrow schema", schema, nil},
+		{"both nil", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := config.forSchema(tc.schema, tc.arrow, pqarrow.DefaultWriterProps())
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
+func TestParquetColumnCompressionCodecAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		codec compress.Compression
+		valid bool
+	}{
+		{"GZIP", compress.Codecs.Gzip, true},
+		{"lZ4RaW", compress.Codecs.Lz4Raw, true},
+		{"lz4_raw", compress.Codecs.Lz4Raw, true},
+		{"UNCOMPRESSED", compress.Codecs.Uncompressed, true},
+		{"invalid", compress.Codecs.Uncompressed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codec, ok := parquetCompressionCodec(tc.name)
+			require.Equal(t, tc.valid, ok)
+			if ok {
+				require.Equal(t, tc.codec, codec)
+			}
+		})
+	}
+}
