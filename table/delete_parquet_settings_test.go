@@ -70,6 +70,9 @@ func TestDeleteParquetSettingsOnDisk(t *testing.T) {
 					DeleteParquetPageVersionKey: "v1", DefaultWriteMetricsModeKey: "none",
 					ParquetBloomFilterColumnEnabledKeyPrefix + ".value":     "true",
 					ParquetBloomFilterColumnEnabledKeyPrefix + ".file_path": "true",
+					ParquetColumnStatsEnabledKeyPrefix + ".value":           "false",
+					ParquetColumnStatsEnabledKeyPrefix + ".file_path":       "false",
+					ParquetColumnStatsEnabledKeyPrefix + ".pos":             "false",
 				}
 				original := maps.Clone(props)
 				meta := deleteParquetTestMetadata(t, props)
@@ -164,6 +167,9 @@ func TestDeleteParquetSettingsOnDisk(t *testing.T) {
 						column, err := reader.MetaData().RowGroup(rg).ColumnChunk(col)
 						require.NoError(t, err)
 						assert.Equal(t, wantCodec, column.Compression())
+						statsSet, err := column.StatsSet()
+						require.NoError(t, err)
+						assert.Equal(t, content != iceberg.EntryContentData, statsSet)
 						if content != iceberg.EntryContentData {
 							assert.Zero(t, column.BloomFilterOffset())
 						}

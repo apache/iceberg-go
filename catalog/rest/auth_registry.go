@@ -32,9 +32,9 @@ import (
 // AuthProperties.AUTH_TYPE.
 const keyAuthType = "rest.auth.type"
 
-// Values of the rest.auth.type property. AuthTypeNone, AuthTypeBasic and
-// AuthTypeOAuth2 are built in; other values name an auth manager registered
-// with RegisterAuthManager.
+// Values of the rest.auth.type property. AuthTypeNone, AuthTypeBasic,
+// AuthTypeOAuth2 and AuthTypeSigV4 are built in; other values name an auth
+// manager registered with RegisterAuthManager.
 const (
 	// AuthTypeNone sends no authorization header, even when token or
 	// credential is set.
@@ -45,6 +45,10 @@ const (
 	// AuthTypeOAuth2 uses the token or credential properties. It is the
 	// default when rest.auth.type is unset.
 	AuthTypeOAuth2 = "oauth2"
+	// AuthTypeSigV4 signs requests with AWS SigV4 and authenticates with the
+	// auth type in rest.auth.sigv4.delegate-auth-type, oauth2 by default.
+	// Signing requires a blank import of the catalog/rest/sigv4 backend.
+	AuthTypeSigV4 = SignerNameSigV4
 	// AuthTypeGoogle is the name the googleauth backend registers under.
 	AuthTypeGoogle = "google"
 )
@@ -54,6 +58,10 @@ const (
 	keyBasicUsername = "rest.auth.basic.username"
 	keyBasicPassword = "rest.auth.basic.password"
 )
+
+// keySigV4DelegateAuthType names the auth type that rest.auth.type=sigv4
+// signs, as in Iceberg Java's AuthProperties.SIGV4_DELEGATE_AUTH_TYPE.
+const keySigV4DelegateAuthType = "rest.auth.sigv4.delegate-auth-type"
 
 // AuthManagerConfig carries what an auth manager backend may configure itself
 // from.
@@ -79,7 +87,7 @@ var (
 // It is intended to be called from a backend package's init function, so a
 // blank import of the backend is enough to enable it. Registering a name again
 // replaces the previous factory. It panics if factory is nil or if name is
-// empty or one of the built-in types: none, basic and oauth2.
+// empty or one of the built-in types: none, basic, oauth2 and sigv4.
 func RegisterAuthManager(name string, factory AuthManagerFactory) {
 	if factory == nil {
 		panic(fmt.Sprintf("rest: RegisterAuthManager: nil factory for %q", name))
@@ -87,7 +95,7 @@ func RegisterAuthManager(name string, factory AuthManagerFactory) {
 
 	key := strings.ToLower(name)
 	switch key {
-	case "", AuthTypeNone, AuthTypeBasic, AuthTypeOAuth2:
+	case "", AuthTypeNone, AuthTypeBasic, AuthTypeOAuth2, AuthTypeSigV4:
 		panic(fmt.Sprintf("rest: RegisterAuthManager: %q is reserved", name))
 	}
 
@@ -116,16 +124,42 @@ var authTypeImportHints = map[string]string{
 // WithAuthManager takes precedence over the property.
 //
 // Unset and oauth2 keep the token / credential flow. none disables it, and
-// basic sends the rest.auth.basic.* credentials. Any other value builds the
-// manager registered under that name. The chosen manager serves both the
-// /v1/config request and the catalog session.
+// basic sends the rest.auth.basic.* credentials. sigv4 signs every request
+// and authenticates with the type in rest.auth.sigv4.delegate-auth-type,
+// oauth2 by default. Any other value builds the manager registered under that
+// name. The chosen manager serves both the /v1/config request and the catalog
+// session.
 func resolveAuthType(ctx context.Context, ops *options, clientProps iceberg.Properties) error {
 	raw, ok := clientProps[keyAuthType]
-	if !ok || ops.authManager != nil {
+	if !ok {
 		return nil
 	}
 
+	return applyAuthType(ctx, ops, clientProps, keyAuthType, raw)
+}
+
+// applyAuthType applies the auth type raw, read from property key. It is
+// called again for the delegate of sigv4.
+func applyAuthType(ctx context.Context, ops *options, clientProps iceberg.Properties, key, raw string) error {
 	authType := strings.ToLower(strings.TrimSpace(raw))
+
+	// SigV4 is a signer around another auth type, so it applies even when
+	// WithAuthManager supplies that auth type's manager.
+	if authType == AuthTypeSigV4 {
+		if key != keyAuthType {
+			return fmt.Errorf("rest: %s=%s: cannot delegate a SigV4 auth manager to another SigV4 auth manager",
+				key, raw)
+		}
+		ops.authTypeSigV4 = true
+		delegate := clientProps.Get(keySigV4DelegateAuthType, AuthTypeOAuth2)
+
+		return applyAuthType(ctx, ops, clientProps, keySigV4DelegateAuthType, delegate)
+	}
+
+	if ops.authManager != nil {
+		return nil
+	}
+
 	switch authType {
 	case AuthTypeOAuth2:
 		return nil
@@ -136,7 +170,7 @@ func resolveAuthType(ctx context.Context, ops *options, clientProps iceberg.Prop
 	case AuthTypeBasic:
 		am, err := newBasicAuthManager(clientProps)
 		if err != nil {
-			return fmt.Errorf("rest: %s=%s: %w", keyAuthType, raw, err)
+			return fmt.Errorf("rest: %s=%s: %w", key, raw, err)
 		}
 		ops.authManager = am
 
@@ -145,25 +179,21 @@ func resolveAuthType(ctx context.Context, ops *options, clientProps iceberg.Prop
 
 	factory, ok := lookupAuthManager(authType)
 	if !ok {
-		if authType == SignerNameSigV4 {
-			return fmt.Errorf("rest: %s=%s is not supported; set %s=true to sign requests with SigV4",
-				keyAuthType, raw, keyRestSigV4)
-		}
 		if pkg, hint := authTypeImportHints[authType]; hint {
 			return fmt.Errorf("rest: %s=%s requires its backend; add a blank import: import _ %q",
-				keyAuthType, raw, pkg)
+				key, raw, pkg)
 		}
 
 		return fmt.Errorf("rest: unknown %s %q: no auth manager is registered under that name",
-			keyAuthType, raw)
+			key, raw)
 	}
 
 	am, err := factory(ctx, AuthManagerConfig{Props: maps.Clone(clientProps)})
 	if err != nil {
-		return fmt.Errorf("rest: %s=%s: %w", keyAuthType, raw, err)
+		return fmt.Errorf("rest: %s=%s: %w", key, raw, err)
 	}
 	if am == nil {
-		return fmt.Errorf("rest: %s=%s: auth manager factory returned nil", keyAuthType, raw)
+		return fmt.Errorf("rest: %s=%s: auth manager factory returned nil", key, raw)
 	}
 	ops.authManager = am
 
