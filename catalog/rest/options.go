@@ -243,5 +243,9 @@ type options struct {
 
 	oauthTLSConfig *tls.Config
 
+	// disableAuth is set by rest.auth.type=none: no AuthManager is built from
+	// token or credential.
+	disableAuth bool
+
 	additionalProps iceberg.Properties
 }

@@ -496,28 +496,24 @@ func TestPartitionType(t *testing.T) {
 		},
 	)
 
-	expected := &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 1000, Name: "str_truncate", Type: iceberg.PrimitiveTypes.String},
-			{ID: 1001, Name: "int_bucket", Type: iceberg.PrimitiveTypes.Int32},
-			{ID: 1002, Name: "bool_identity", Type: iceberg.PrimitiveTypes.Bool},
-			{ID: 1003, Name: "str_void", Type: iceberg.PrimitiveTypes.String},
-		},
-	}
+	expected := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "str_truncate", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 1001, Name: "int_bucket", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1002, Name: "bool_identity", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 1003, Name: "str_void", Type: iceberg.PrimitiveTypes.String},
+	)
 	actual := spec.PartitionType(tableSchemaSimple)
 	assert.Truef(t, expected.Equals(actual), "expected: %s, got: %s", expected, actual)
 
 	droppedSourceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 2, Name: "int", Type: iceberg.PrimitiveTypes.Int32},
 	)
-	expectedWithDroppedSources := &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 1000, Name: "str_truncate", Type: iceberg.UnknownType{}},
-			{ID: 1001, Name: "int_bucket", Type: iceberg.PrimitiveTypes.Int32},
-			{ID: 1002, Name: "bool_identity", Type: iceberg.UnknownType{}},
-			{ID: 1003, Name: "str_void", Type: iceberg.UnknownType{}},
-		},
-	}
+	expectedWithDroppedSources := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "str_truncate", Type: iceberg.UnknownType{}},
+		iceberg.NestedField{ID: 1001, Name: "int_bucket", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1002, Name: "bool_identity", Type: iceberg.UnknownType{}},
+		iceberg.NestedField{ID: 1003, Name: "str_void", Type: iceberg.UnknownType{}},
+	)
 	actual = spec.PartitionType(droppedSourceSchema)
 	assert.Truef(t, expectedWithDroppedSources.Equals(actual),
 		"expected: %s, got: %s", expectedWithDroppedSources, actual)
@@ -525,9 +521,9 @@ func TestPartitionType(t *testing.T) {
 
 func TestPartitionTypePreservesFieldOrderAndResultTypes(t *testing.T) {
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "nested", Type: iceberg.Int64Type{}, Required: true},
-		}}},
+		iceberg.NestedField{ID: 1, Name: "record", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "nested", Type: iceberg.Int64Type{}, Required: true},
+		)},
 		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.TimestampTzNsType{}, Required: true},
 		iceberg.NestedField{ID: 4, Name: "amount", Type: iceberg.MustDecimalTypeOf(12, 2)},
 	)
@@ -556,7 +552,7 @@ func TestPartitionTypePreservesFieldOrderAndResultTypes(t *testing.T) {
 		{ID: 1004, Name: "void", Type: iceberg.UnknownType{}},
 		{ID: 1000, Name: "custom", Type: iceberg.StringType{}},
 	}
-	require.Equal(t, want, spec.PartitionType(schema).FieldList)
+	require.Equal(t, want, spec.PartitionType(schema).Fields())
 
 	for i, field := range fields {
 		require.True(t, field.Equals(spec.Field(i)))
@@ -577,7 +573,7 @@ func TestPartitionTypeResolvesEachSchema(t *testing.T) {
 		for i, schema := range schemas {
 			require.Equal(t, []iceberg.NestedField{
 				{ID: 1000, Name: "value", Type: types[i]},
-			}, spec.PartitionType(schema).FieldList)
+			}, spec.PartitionType(schema).Fields())
 		}
 	}
 }
@@ -592,8 +588,8 @@ func TestPartitionTypeReturnsIndependentFields(t *testing.T) {
 	first.FieldList[0] = iceberg.NestedField{ID: 2000, Name: "changed", Type: iceberg.Int64Type{}, Required: true}
 
 	want := []iceberg.NestedField{{ID: 1000, Name: "value", Type: iceberg.StringType{}}}
-	require.Equal(t, want, second.FieldList)
-	require.Equal(t, want, spec.PartitionType(schema).FieldList)
+	require.Equal(t, want, second.Fields())
+	require.Equal(t, want, spec.PartitionType(schema).Fields())
 	require.Equal(t, "value", spec.Field(0).Name)
 	require.Equal(t, 1000, spec.Field(0).FieldID)
 }
@@ -602,8 +598,8 @@ func TestPartitionTypeUnpartitioned(t *testing.T) {
 	for _, spec := range []iceberg.PartitionSpec{{}, iceberg.NewPartitionSpec()} {
 		partitionType := spec.PartitionType(nil)
 		require.NotNil(t, partitionType)
-		require.NotNil(t, partitionType.FieldList)
-		require.Empty(t, partitionType.FieldList)
+		require.NotNil(t, partitionType.Fields())
+		require.Empty(t, partitionType.Fields())
 	}
 }
 
@@ -1309,6 +1305,44 @@ func TestUnboundPartitionSpecBindToSchema(t *testing.T) {
 	_, err = spec.BindToSchema(freshSchema, nil, nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 	assert.ErrorContains(t, err, "partition name floats matches schema column with field ID 2, but the field is sourced from 1")
+}
+
+func TestBindToSchemaPreservesMultipleSourceIDs(t *testing.T) {
+	transform, err := iceberg.ParseTransform("custom_two_arg")
+	require.NoError(t, err)
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 11, Name: "left", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 22, Name: "right", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{22, 11}, FieldID: 1000, Name: "combined", Transform: transform,
+	})
+
+	bound, err := spec.BindToSchema(schema, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{22, 11}, bound.Field(0).SourceIDs)
+	require.Equal(t, 1000, bound.Field(0).FieldID)
+}
+
+func TestAddPartitionFieldBySourceIDs(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 11, Name: "left", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 22, Name: "right", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	transform, err := iceberg.ParseTransform("custom_two_arg")
+	require.NoError(t, err)
+	sourceIDs := []int{22, 11}
+	option := iceberg.AddPartitionFieldBySourceIDs(sourceIDs, "combined", transform, schema, nil)
+	sourceIDs[0] = 11
+
+	spec, err := iceberg.NewPartitionSpecOpts(option)
+	require.NoError(t, err)
+	require.Equal(t, []int{22, 11}, spec.Field(0).SourceIDs)
+
+	encoded, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"source-ids":[22,11]`)
+	require.NotContains(t, string(encoded), `"source-id":`)
 }
 
 // NewPartitionSpecOpts used to accept a redundant field and emit a spec that

@@ -152,15 +152,19 @@ func (b *MetadataBuilder) addVersion(newVersion *Version) (int64, error) {
 		version.VersionID = newVersionID
 	}
 
-	// Check if this version was added in an update already
+	// The version already exists, either in the base metadata or from an
+	// earlier update in this builder. Reuse it instead of adding it again.
 	if _, ok := b.versionsById[newVersionID]; ok {
+		b.lastAddedVersionID = nil
 		for _, upd := range b.updates {
 			if vvu, ok := upd.(*addViewVersionUpdate); ok && vvu.Version.VersionID == newVersionID {
 				b.lastAddedVersionID = &newVersionID
 
-				return newVersionID, nil
+				break
 			}
 		}
+
+		return newVersionID, nil
 	}
 
 	// If the SchemaID of the version is unset (nil), we attach the lastAddedSchemaID to it.
@@ -419,7 +423,7 @@ func (b *MetadataBuilder) buildMetadata(retainedVersions []*Version, retainedHis
 		VersionList:           retainedVersions,
 		VersionLogList:        retainedHistory,
 		SchemaList:            b.schemaList,
-		Props:                 b.props,
+		Props:                 maps.Clone(b.props),
 	}
 	md.init()
 

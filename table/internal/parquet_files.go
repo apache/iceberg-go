@@ -53,24 +53,26 @@ import (
 )
 
 const (
-	ParquetRowGroupSizeBytesKey       = "write.parquet.row-group-size-bytes"
-	ParquetRowGroupSizeBytesDefault   = 128 * 1024 * 1024 // 128 MB
-	ParquetRowGroupLimitKey           = "write.parquet.row-group-limit"
-	ParquetRowGroupLimitDefault       = 1048576
-	ParquetPageSizeBytesKey           = "write.parquet.page-size-bytes"
-	ParquetPageSizeBytesDefault       = 1024 * 1024 // 1 MB
-	ParquetPageRowLimitKey            = "write.parquet.page-row-limit"
-	ParquetPageRowLimitDefault        = 20000
-	ParquetDictSizeBytesKey           = "write.parquet.dict-size-bytes"
-	ParquetDictSizeBytesDefault       = 2 * 1024 * 1024 // 2 MB
-	ParquetPageVersionKey             = "write.parquet.page-version"
-	ParquetPageVersionDefault         = "2"
-	ParquetCompressionKey             = "write.parquet.compression-codec"
-	ParquetCompressionDefault         = "zstd"
-	ParquetCompressionLevelKey        = "write.parquet.compression-level"
-	ParquetCompressionLevelDefault    = -1
-	ParquetBloomFilterMaxBytesKey     = "write.parquet.bloom-filter-max-bytes"
-	ParquetBloomFilterMaxBytesDefault = 1024 * 1024
+	ParquetRowGroupSizeBytesKey            = "write.parquet.row-group-size-bytes"
+	ParquetRowGroupSizeBytesDefault        = 128 * 1024 * 1024 // 128 MB
+	ParquetRowGroupLimitKey                = "write.parquet.row-group-limit"
+	ParquetRowGroupLimitDefault            = 1048576
+	ParquetPageSizeBytesKey                = "write.parquet.page-size-bytes"
+	ParquetPageSizeBytesDefault            = 1024 * 1024 // 1 MB
+	ParquetPageRowLimitKey                 = "write.parquet.page-row-limit"
+	ParquetPageRowLimitDefault             = 20000
+	ParquetDictSizeBytesKey                = "write.parquet.dict-size-bytes"
+	ParquetDictSizeBytesDefault            = 2 * 1024 * 1024 // 2 MB
+	ParquetPageVersionKey                  = "write.parquet.page-version"
+	ParquetPageVersionDefault              = "2"
+	ParquetCompressionKey                  = "write.parquet.compression-codec"
+	ParquetCompressionDefault              = "zstd"
+	ParquetCompressionLevelKey             = "write.parquet.compression-level"
+	ParquetCompressionLevelDefault         = -1
+	ParquetCompressionColumnCodecKeyPrefix = "write.parquet.compression-codec.column"
+	ParquetCompressionColumnLevelKeyPrefix = "write.parquet.compression-level.column"
+	ParquetBloomFilterMaxBytesKey          = "write.parquet.bloom-filter-max-bytes"
+	ParquetBloomFilterMaxBytesDefault      = 1024 * 1024
 	// These bounds mirror Arrow's public bloom-filter writer-property constraint.
 	parquetBloomFilterMaxBytesMin            = 32
 	parquetBloomFilterMaxBytesMax            = 128 * 1024 * 1024
@@ -275,10 +277,10 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	pageVersion := props.Get(ParquetPageVersionKey, ParquetPageVersionDefault)
 
 	var dpVersion parquet.DataPageVersion
-	switch pageVersion {
-	case "1":
+	switch strings.ToLower(pageVersion) {
+	case "1", "v1":
 		dpVersion = parquet.DataPageV1
-	case "2":
+	case "2", "v2":
 		dpVersion = parquet.DataPageV2
 	default:
 		slog.Warn("unrecognized data page version, falling back to v2", "version", pageVersion)
@@ -301,25 +303,8 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	compressionLevel := props.GetInt(ParquetCompressionLevelKey,
 		ParquetCompressionLevelDefault)
 
-	var codec compress.Compression
-	switch compression {
-	case "snappy":
-		codec = compress.Codecs.Snappy
-	case "zstd":
-		codec = compress.Codecs.Zstd
-	case "uncompressed":
-		codec = compress.Codecs.Uncompressed
-	case "gzip":
-		codec = compress.Codecs.Gzip
-	case "brotli":
-		codec = compress.Codecs.Brotli
-	case "lz4":
-		codec = compress.Codecs.Lz4
-	case "lz4raw":
-		codec = compress.Codecs.Lz4Raw
-	case "lzo":
-		codec = compress.Codecs.Lzo
-	default:
+	codec, validCodec := ParquetCompressionCodec(compression)
+	if !validCodec {
 		slog.Warn("unrecognized compression codec, falling back to uncompressed", "codec", compression)
 	}
 
@@ -363,7 +348,31 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		writerProps = append(writerProps, parquet.WithDictionaryFor(colName, javaBool(val)))
 	}
 
-	return writerProps
+	return columnCompressionWriteProperties(props, writerProps)
+}
+
+// ParquetCompressionCodec resolves the names accepted by the Parquet writer.
+func ParquetCompressionCodec(value string) (compress.Compression, bool) {
+	switch strings.ToLower(value) {
+	case "snappy":
+		return compress.Codecs.Snappy, true
+	case "zstd":
+		return compress.Codecs.Zstd, true
+	case "uncompressed":
+		return compress.Codecs.Uncompressed, true
+	case "gzip":
+		return compress.Codecs.Gzip, true
+	case "brotli":
+		return compress.Codecs.Brotli, true
+	case "lz4":
+		return compress.Codecs.Lz4, true
+	case "lz4raw", "lz4_raw":
+		return compress.Codecs.Lz4Raw, true
+	case "lzo":
+		return compress.Codecs.Lzo, true
+	default:
+		return compress.Codecs.Uncompressed, false
+	}
 }
 
 // javaBool matches Java's Boolean.parseBoolean, which Iceberg's Java writer uses
@@ -418,7 +427,7 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 		}
 
 		compression := props.Get(ParquetCompressionKey, ParquetCompressionDefault)
-		if err := validateParquetCompressionLevel(compression, level); err != nil {
+		if err := validateParquetCompressionLevel(ParquetCompressionLevelKey, compression, level); err != nil {
 			return err
 		}
 	}
@@ -426,9 +435,9 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 	return nil
 }
 
-func validateParquetCompressionLevel(compression string, level int) error {
+func validateParquetCompressionLevel(key, compression string, level int) error {
 	min, max := 0, 0
-	switch compression {
+	switch strings.ToLower(compression) {
 	case "gzip":
 		min, max = parquetGzipCompressionLevelMin, parquetGzipCompressionLevelMax
 	case "zstd":
@@ -448,7 +457,7 @@ func validateParquetCompressionLevel(compression string, level int) error {
 
 	if level < min || level > max {
 		return fmt.Errorf("%w: invalid %s value %d for %s; supported range is %d..%d (or %d for the default)",
-			iceberg.ErrInvalidArgument, ParquetCompressionLevelKey, level, compression, min, max,
+			iceberg.ErrInvalidArgument, key, level, compression, min, max,
 			ParquetCompressionLevelDefault)
 	}
 
@@ -623,17 +632,11 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 			iceberg.ErrInvalidArgument, rowGroupTargetSizeBytes)
 	}
 
-	fw, err := fs.Create(ctx, info.FileName)
-	if err != nil {
-		return nil, err
-	}
-
 	colMapping := info.ColMapping
 	if colMapping == nil {
+		var err error
 		colMapping, err = p.PathToIDMapping(info.FileSchema)
 		if err != nil {
-			fw.Close()
-
 			return nil, err
 		}
 	}
@@ -643,16 +646,34 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		variantFieldIDs = VariantFieldIDsFromSchema(info.FileSchema)
 	}
 
-	counter := &internal.CountingWriter{W: fw}
 	mem := compute.GetAllocator(ctx)
 	arrProps := writeArrowProps(mem)
-	writerProps, err := getWriteProperties(info.WriteProps, arrowSchema, arrProps)
+	writeProps := info.WriteProps
+	if config, ok := writeProps.(parquetColumnCompressionConfig); ok {
+		if info.Content == iceberg.EntryContentData {
+			propertySchema := info.FileSchema
+			if info.PropertySchema != nil {
+				propertySchema = info.PropertySchema
+			}
+			var err error
+			writeProps, err = config.forSchema(propertySchema, arrowSchema, arrProps)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			writeProps = config.base
+		}
+	}
+	writerProps, err := getWriteProperties(writeProps, arrowSchema, arrProps)
 	if err != nil {
-		fw.Close()
-
 		return nil, err
 	}
 
+	fw, err := fs.Create(ctx, info.FileName)
+	if err != nil {
+		return nil, err
+	}
+	counter := &internal.CountingWriter{W: fw}
 	writer, err := pqarrow.NewFileWriter(arrowSchema, counter, writerProps, arrProps)
 	if err != nil {
 		fw.Close()
@@ -700,37 +721,6 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}, nil
 }
 
-// arrowSchemaHasShreddedDecimal reports whether any top-level shredded variant's
-// typed_value carries a Decimal128 leaf (recursively).
-func arrowSchemaHasShreddedDecimal(sc *arrow.Schema) bool {
-	for _, f := range sc.Fields() {
-		if vt, ok := f.Type.(*extensions.VariantType); ok {
-			if tv := vt.TypedValue().Type; tv != nil && typeHasDecimal128(tv) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-func typeHasDecimal128(dt arrow.DataType) bool {
-	switch t := dt.(type) {
-	case *arrow.Decimal128Type:
-		return true
-	case *arrow.StructType:
-		for _, f := range t.Fields() {
-			if typeHasDecimal128(f.Type) {
-				return true
-			}
-		}
-	case *arrow.ListType:
-		return typeHasDecimal128(t.Elem())
-	}
-
-	return false
-}
-
 func writeArrowProps(mem memory.Allocator) pqarrow.ArrowWriterProperties {
 	return pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema())
 }
@@ -749,11 +739,9 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema, arrProps pqar
 
 	// Clone: WriteProps is shared across concurrent partition writers; appending in place races.
 	wp := slices.Clone(writerProperties)
-	// Shredded decimals need the spec's INT32/INT64/FLBA-by-precision types; arrow-go
-	// emits those only with StoreDecimalAsInteger, so gate it per file on one being present.
-	if arrowSchemaHasShreddedDecimal(arrowSchema) {
-		wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
-	}
+	// Iceberg stores decimals as INT32 through precision 9, INT64 through 18,
+	// and fixed-length byte arrays above 18, including nested and shredded leaves.
+	wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
 
 	// Match Iceberg Java: apply parquet-mr's cost-based dictionary fallback to every leaf
 	// column so high-cardinality columns fall back to PLAIN rather than keeping a dictionary.
@@ -2118,6 +2106,7 @@ func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaDa
 		perParent[e.parentID] = append(perParent[e.parentID], variantFieldBound{
 			jsonPath:    e.leaf.jsonPath,
 			icebergType: e.leaf.icebergType,
+			intWidth:    e.leaf.intWidth,
 			lower:       lo,
 			upper:       hi,
 		})

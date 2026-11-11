@@ -35,6 +35,11 @@ state. A failed validation surfaces as one of:
   retried after refreshing (see below).
 - `table.ErrCommitDiverged` — terminal. The base snapshot is no longer on the
   branch at all, so a retry cannot reconcile the change.
+- `table.ErrDataFilesMissing` — terminal. Data files that the operation
+  references, such as the target of a position delete or deletion vector, are
+  not live, so retrying the same delete cannot succeed. Rebuild the delete
+  against the current table. When `Transaction.Commit` returns it, the error
+  also matches `ErrTransactionUnusable`.
 - `table.ErrTransactionUnusable` — this transaction can't be committed again.
   If the error also matches `ErrCommitFailed`, retry in a new transaction from a
   reloaded table.
@@ -81,24 +86,41 @@ rejects when concurrent deletes touch the same files.
 
 ## Automatic retry
 
-iceberg-go can refresh the table and replay the operation against the latest
-snapshot between attempts. On each retry the table metadata is reloaded, the
-producer's validators re-run against the fresh snapshot, and the commit is
-re-submitted only if it is still valid. `RollbackToSnapshot` and
-`AssertRefSnapshotID` pin their refs, so retries do not rebase those assertions.
-If a pinned ref moved, the commit fails with `ErrCommitFailed` instead of
-retrying. `ExpireSnapshots` does not pin refs. Retries replan it as described in
+On each retry, iceberg-go reloads the table metadata, applies staged changes
+in order and runs the producer's validators against the fresh snapshot. It
+submits the commit only if it is still valid. An append staged after a rollback
+is rebuilt on the rollback target.
+
+`RollbackToSnapshot`, `AssertRefSnapshotID`, and `CherryPickSnapshot` pin the
+refs they guard. If a pinned ref moves, the commit fails instead of rewriting
+that assertion to the new head. Cherry-picks can retry table-level conflicts
+when their pinned refs stay unchanged. A divergent replay onto a new branch
+also pins main; a fast-forward onto a missing branch points directly to the
+source snapshot and does not depend on main.
+
+Each replayed snapshot from a staged write gets the current timestamp, or one
+millisecond after its parent if that is later. Its timestamp reflects the
+attempt that commits it, not staging time.
+
+`RollbackToSnapshot`, `AssertRefSnapshotID`, `FastForwardBranch`,
+`ReplaceBranchFromRef`, and `ReplaceBranch` pin the refs they guard.
+Promoting from a ref pins both the source and target. If the source points to
+a snapshot staged in the same transaction, promotion also pins the commit
+branch, preventing retry from rebuilding that source on a different history.
+If a pinned ref moves, the commit fails instead of rebasing a co-staged append.
+`ExpireSnapshots` does not pin refs. Retries replan it as described in
 [Snapshot expiration](#snapshot-expiration).
 
-Retry is **off by default** (`commit.retry.num-retries` is `0`). Opt in by
-setting the retry properties — see [Manifest and commit](./configuration.md#manifest-and-commit)
-in the configuration reference for the full list:
+`Commit` retries a conflict up to 4 times by default (`commit.retry.num-retries`
+is `4`, as in Java and PyIceberg). Set it to `0` to fail on the first conflict;
+see [Manifest and commit](./configuration.md#manifest-and-commit) in the
+configuration reference for the other retry properties:
 
 ```go
-// Opt in to retries (e.g. 4 attempts after the first) for a contended table.
+// Fail on the first conflict instead of retrying.
 _, err := cat.CreateTable(ctx, ident, schema,
     catalog.WithProperties(iceberg.Properties{
-        "commit.retry.num-retries": "4",
+        "commit.retry.num-retries": "0",
     }),
 )
 ```
@@ -109,18 +131,26 @@ _, err := cat.CreateTable(ctx, ident, schema,
 > commit on another branch that takes the staged snapshot's sequence number or
 > first-row-id is a conflict too, and the retry renumbers the snapshot.
 
+Snapshot-ID assertions cannot detect concurrent retention-only edits.
+REST catalogs also cannot detect a ref type change that leaves its snapshot ID
+unchanged. Avoid editing ref retention concurrently with branch promotion.
+
 Only the implicit assertion on the commit branch's head is rebased after a
 refresh. Other requirements, including the schema, spec, sort order, and pinned
 refs, must still hold. Otherwise, the commit fails without another attempt and
 the transaction is unusable.
 
-After a conflict, calling `Commit` again on the same transaction refreshes the
-table and replays the staged changes like the next retry attempt, so it can
-rebase onto a peer's commit even with retries disabled. Each call gets the
-configured retry budget. A commit carrying delete-file removals that cannot be
-replayed resubmits only if its branch has not moved. The rejections after a
-refresh that make the transaction unusable are listed on
-`ErrTransactionUnusable`.
+After a conflict, calling `Commit` again refreshes the table and replays staged
+changes even with retries disabled. Each call gets the configured retry
+budget. A commit that removes delete files and cannot be replayed resubmits
+only if its branch has not moved.
+
+A staged change that cannot apply to the refreshed table makes the transaction
+unusable. For example, a staged format upgrade cannot apply if a peer has
+already committed a higher format version. The error keeps its cause, so it
+also matches `ErrCommitFailed` when the cause is a conflict. See
+`ErrTransactionUnusable` for all conditions that end the transaction after
+refresh.
 
 A failed commit keeps the files it staged until a later commit lands. A
 transaction you abandon leaves them for orphan file removal, as one with
@@ -149,6 +179,8 @@ the ref.
 
 - Retries replan an expiry even if staging or an earlier attempt produced no
   expiry updates.
+- A retry stamps snapshots staged earlier in the transaction after the expiry's
+  cutoff, so the retry keeps them even if the staged plan expired them.
 - If no updates remain, for example because a concurrent commit already expired
   the same snapshots, `Commit` returns the refreshed table without committing.
 - A transaction containing only expiries with no updates makes no commit attempt

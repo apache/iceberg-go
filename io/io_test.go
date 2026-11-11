@@ -34,6 +34,12 @@ type recordingFS struct {
 	removed string
 }
 
+type contextReadRecordingFS struct {
+	files   fstest.MapFS
+	readCtx context.Context
+	read    string
+}
+
 func (f *recordingFS) Open(name string) (fs.File, error) {
 	f.opened = name
 
@@ -52,6 +58,20 @@ func (f *recordingFS) Remove(name string) error {
 	return nil
 }
 
+func (f *contextReadRecordingFS) Open(name string) (fs.File, error) {
+	return f.files.Open(name)
+}
+
+func (f *contextReadRecordingFS) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	f.readCtx = ctx
+	f.read = name
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return f.files.ReadFile(name)
+}
+
 func TestFSWithNamePreprocessorTransformsAllOperations(t *testing.T) {
 	underlying := &recordingFS{files: fstest.MapFS{
 		"rewritten/file.txt": &fstest.MapFile{Data: []byte("data")},
@@ -63,7 +83,7 @@ func TestFSWithNamePreprocessorTransformsAllOperations(t *testing.T) {
 	file, err := fsys.Open(context.Background(), "file://bucket/original.txt")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
-	_, err = fsys.(iceio.ReadFileIO).ReadFile("file://bucket/original.txt")
+	_, err = fsys.(iceio.ReadFileIO).ReadFile(context.Background(), "file://bucket/original.txt")
 	require.NoError(t, err)
 	require.NoError(t, fsys.Remove(context.Background(), "file://bucket/original.txt"))
 
@@ -93,7 +113,7 @@ func TestFSDefaultAndNilOptions(t *testing.T) {
 
 			reader, ok := fsys.(iceio.ReadFileIO)
 			require.True(t, ok)
-			data, err := reader.ReadFile("/plain.txt")
+			data, err := reader.ReadFile(context.Background(), "/plain.txt")
 			require.NoError(t, err)
 			require.Equal(t, []byte("data"), data)
 
@@ -120,4 +140,43 @@ func TestFSDoesNotAdvertiseUnsupportedReadFile(t *testing.T) {
 	file, err := fsys.Open(context.Background(), "unused")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
+}
+
+func TestFSContextReadFilePassesOperationContext(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "caller")
+	underlying := &contextReadRecordingFS{files: fstest.MapFS{
+		"rewritten/file.txt": &fstest.MapFile{Data: []byte("data")},
+	}}
+	fsys := iceio.FS(underlying, iceio.WithNamePreprocessor(func(string) string {
+		return "/rewritten/file.txt"
+	}))
+
+	reader, ok := fsys.(iceio.ReadFileIO)
+	require.True(t, ok)
+	data, err := reader.ReadFile(ctx, "file://bucket/original.txt")
+	require.NoError(t, err)
+	require.Equal(t, []byte("data"), data)
+	require.NotNil(t, underlying.readCtx)
+	require.Equal(t, "caller", underlying.readCtx.Value(key{}))
+	require.Equal(t, "rewritten/file.txt", underlying.read)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = reader.ReadFile(canceledCtx, "file://bucket/original.txt")
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, underlying.readCtx.Err(), context.Canceled)
+}
+
+func TestFSPlainReadFileIgnoresCancellation(t *testing.T) {
+	underlying := &recordingFS{files: fstest.MapFS{
+		"plain.txt": &fstest.MapFile{Data: []byte("data")},
+	}}
+	reader := iceio.FS(underlying).(iceio.ReadFileIO)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	data, err := reader.ReadFile(ctx, "plain.txt")
+	require.NoError(t, err)
+	require.Equal(t, []byte("data"), data)
 }

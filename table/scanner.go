@@ -2220,12 +2220,53 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 // single data file in tasks: rows that survive that task's own deletes are
 // kept only when they match addedDeletes. Normal scans pass nil.
 func (scan *Scan) readFileTasks(ctx context.Context, tasks []FileScanTask, addedDeletes *FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	var added []FileScanTask
+	if addedDeletes != nil {
+		added = []FileScanTask{*addedDeletes}
+	}
+
+	return scan.readFileTasksWithAddedDeletes(ctx, tasks, added, nil)
+}
+
+// readFileTasksWithAddedDeletes reads tasks while retaining rows matched by the
+// corresponding added-delete task for each data file. When positionSinks is
+// set, it records the original file positions and consumes the matched rows
+// internally instead of returning them to the caller.
+func (scan *Scan) readFileTasksWithAddedDeletes(
+	ctx context.Context,
+	tasks []FileScanTask,
+	addedDeletes []FileScanTask,
+	positionSinks map[string]func([]int64),
+) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	as, readTasks, releasePlanIO, err := scan.arrowScanForTasks(ctx, tasks)
 	if err != nil {
 		return nil, nil, err
 	}
-	if addedDeletes != nil {
-		as.added = &addedDeleteState{deletes: addedDeletes}
+	if len(addedDeletes) > 0 {
+		byPath := make(map[string]int, len(addedDeletes))
+		for i, task := range addedDeletes {
+			if task.File == nil || task.File.FilePath() == "" {
+				if releasePlanIO != nil {
+					releasePlanIO()
+				}
+
+				return nil, nil, fmt.Errorf("%w: added delete task %d has no data file", ErrInvalidOperation, i)
+			}
+			path := task.File.FilePath()
+			if _, ok := byPath[path]; ok {
+				if releasePlanIO != nil {
+					releasePlanIO()
+				}
+
+				return nil, nil, fmt.Errorf("%w: duplicate added delete task for data file %s", ErrInvalidOperation, path)
+			}
+			byPath[path] = i
+		}
+		as.added = &addedDeleteState{
+			deletes:          addedDeletes,
+			deleteTaskByPath: byPath,
+			positionSinks:    positionSinks,
+		}
 	}
 
 	readRecords := scan.readRecords

@@ -295,6 +295,48 @@ func TestUpdateSnapshotSummariesPreservesLargeTotals(t *testing.T) {
 	assert.Equal(t, "9000000000", result.Properties[totalFileSizeKey])
 }
 
+// A total that the previous snapshot does not carry is unknown, so the new
+// snapshot must not report one (Java SnapshotProducer.updateTotal). Treating
+// it as 0 records a wrong total.
+func TestUpdateSnapshotSummariesOmitsUnknownTotals(t *testing.T) {
+	t.Parallel()
+
+	result, err := updateSnapshotSummaries(Summary{Operation: OpAppend, Properties: iceberg.Properties{
+		addedDataFilesKey: "1",
+		addedRecordsKey:   "5",
+		addedFileSizeKey:  "100",
+	}}, iceberg.Properties{
+		// The parent only tracked the record total; the other totals are unknown.
+		totalRecordsKey: "1000",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "1005", result.Properties[totalRecordsKey])
+	for _, key := range []string{
+		totalDataFilesKey, totalFileSizeKey, totalDeleteFilesKey,
+		totalPosDeletesKey, totalEqDeletesKey,
+	} {
+		assert.NotContains(t, result.Properties, key, "unknown previous total must not be reported")
+	}
+}
+
+// An unparseable or negative previous total is also unknown, not 0.
+func TestUpdateSnapshotSummariesOmitsInvalidTotals(t *testing.T) {
+	t.Parallel()
+
+	result, err := updateSnapshotSummaries(Summary{Operation: OpAppend, Properties: iceberg.Properties{
+		addedRecordsKey:  "5",
+		addedFileSizeKey: "100",
+	}}, iceberg.Properties{
+		totalRecordsKey:  "not-a-number",
+		totalFileSizeKey: "-1",
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, result.Properties, totalRecordsKey)
+	assert.NotContains(t, result.Properties, totalFileSizeKey)
+}
+
 func TestSnapshotSummaryCollectorDeletionVectors(t *testing.T) {
 	var ssc SnapshotSummaryCollector
 	spec := *iceberg.UnpartitionedSpec

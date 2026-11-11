@@ -73,14 +73,20 @@ type IO interface {
 type ReadFileIO interface {
 	IO
 
-	// ReadFile reads the named file and returns its contents.
+	// ReadFile reads the named file and returns its contents. The context bounds
+	// remote reads; local implementations and those backed by fs.ReadFileFS may
+	// ignore it.
 	// A successful call returns a nil error, not io.EOF.
 	// (Because ReadFile reads the whole file, the expected EOF
 	// from the final Read is not treated as an error to be reported.)
 	//
 	// The caller is permitted to modify the returned byte slice.
 	// This method should return a copy of the underlying data.
-	ReadFile(name string) ([]byte, error)
+	ReadFile(ctx context.Context, name string) ([]byte, error)
+}
+
+type contextReadFileFS interface {
+	ReadFile(context.Context, string) ([]byte, error)
 }
 
 // WriteFileIO is the interface implemented by a file system that
@@ -194,7 +200,9 @@ type StatIO interface {
 type RenameIO interface {
 	IO
 
-	Rename(oldpath, newpath string) error
+	// Rename moves one file or object from oldpath to newpath. The context
+	// controls the operation where the implementation supports cancellation.
+	Rename(ctx context.Context, oldpath, newpath string) error
 }
 
 // RenameNoReplaceIO is an extension of IO interface that includes the
@@ -205,7 +213,9 @@ type RenameIO interface {
 type RenameNoReplaceIO interface {
 	IO
 
-	RenameNoReplace(oldpath, newpath string) error
+	// RenameNoReplace moves one file or object only if newpath does not exist.
+	// The context controls the operation where the implementation supports cancellation.
+	RenameNoReplace(ctx context.Context, oldpath, newpath string) error
 }
 
 // RemoveAllIO is an extension of IO interface that includes the RemoveAll
@@ -227,15 +237,19 @@ type MkdirAllIO interface {
 	MkdirAll(path string) error
 }
 
-// FS wraps an io/fs.FS as an IO interface. It implements ReadFileIO only
-// if the underlying fsys supports fs.ReadFileFS. Options can configure name
-// processing; see WithNamePreprocessor.
+// FS wraps an io/fs.FS as an IO interface. It implements ReadFileIO if the
+// underlying fsys supports fs.ReadFileFS or a context-aware ReadFile method.
+// Options can configure name processing; see WithNamePreprocessor.
 func FS(fsys fs.FS, opts ...FSOption) IO {
 	adapter := ioFS{fsys: fsys}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&adapter)
 		}
+	}
+
+	if _, ok := fsys.(contextReadFileFS); ok {
+		return readFileFS{adapter}
 	}
 
 	if _, ok := fsys.(fs.ReadFileFS); ok {
@@ -262,7 +276,11 @@ type readFileFS struct {
 	ioFS
 }
 
-func (r readFileFS) ReadFile(name string) ([]byte, error) {
+func (r readFileFS) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	if rfs, ok := r.fsys.(contextReadFileFS); ok {
+		return rfs.ReadFile(ctx, r.processName(name))
+	}
+
 	rfs, ok := r.fsys.(fs.ReadFileFS)
 	if !ok {
 		return nil, errMissingReadFile

@@ -1487,6 +1487,27 @@ func TestV2RefCreation(t *testing.T) {
 	}, meta.SnapshotRefs)
 }
 
+func TestParseMetadataRejectsMainTag(t *testing.T) {
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &fields))
+
+	var refs map[string]SnapshotRef
+	require.NoError(t, json.Unmarshal(fields["refs"], &refs))
+	main := refs[MainBranch]
+	main.Type = TagRef
+	refs[MainBranch] = main
+
+	refsJSON, err := json.Marshal(refs)
+	require.NoError(t, err)
+	fields["refs"] = refsJSON
+	metadataJSON, err := json.Marshal(fields)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(metadataJSON)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "main snapshot ref must be a branch")
+}
+
 func TestV1WriteMetadataToV2(t *testing.T) {
 	// https://iceberg.apache.org/spec/#version-2
 	//

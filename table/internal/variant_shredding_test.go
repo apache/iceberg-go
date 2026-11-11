@@ -127,6 +127,21 @@ func TestAnalyzeIntegerWidening(t *testing.T) {
 		"widening must pick Int64, got %s", f[0].Type)
 }
 
+func TestAnalyzeSmallIntegersShredAsInt32(t *testing.T) {
+	sample := mkVars(t,
+		map[string]any{"i8": int64(5), "i16": int64(1000)},
+		map[string]any{"i8": int64(6), "i16": int64(2000)},
+	)
+	dt, ok := AnalyzeVariantShredding(sample)
+	require.True(t, ok)
+
+	want := arrow.StructOf(
+		arrow.Field{Name: "i16", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		arrow.Field{Name: "i8", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+	)
+	assert.Truef(t, arrow.TypeEqual(want, dt), "want %s got %s", want, dt)
+}
+
 // TestAnalyzeMixedTypeNotShredded: a field mixing type families (int in 7 rows,
 // string in 3) is not uniform and must not shred - it is this object's only
 // field, so nothing shreds at all.
