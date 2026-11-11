@@ -981,6 +981,11 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, err
 	}
 
+	if err := tblutils.ValidateParquetReadProperties(meta.props); err != nil {
+		return nil, err
+	}
+	ctx = tblutils.WithTableProperties(ctx, meta.props)
+
 	// Rows that existing position deletes already removed must not be deleted
 	// again, so each task carries its file's position delete files from scan
 	// planning, which matches them by sequence number, partition and path. The

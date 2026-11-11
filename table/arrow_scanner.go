@@ -3410,6 +3410,18 @@ func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask)
 		}
 		tableProperties[ParquetBatchSizeKey] = batchSize
 	}
+	for _, key := range []string{ParquetMaxCompressedPageSizeBytesKey, ParquetMaxUncompressedPageSizeBytesKey} {
+		if value, ok := as.options[key]; ok {
+			tableProperties = maps.Clone(tableProperties)
+			if tableProperties == nil {
+				tableProperties = iceberg.Properties{}
+			}
+			tableProperties[key] = value
+		}
+	}
+	if err := tblutils.ValidateParquetReadProperties(tableProperties); err != nil {
+		return nil, nil, err
+	}
 	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{

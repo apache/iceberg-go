@@ -1457,6 +1457,8 @@ func WithMaxConcurrency(n int) ScanOption {
 	}
 }
 
+// WithOptions sets scan options. Parquet page limits in opts override table
+// properties for this scan without changing saved metadata.
 func WithOptions(opts iceberg.Properties) ScanOption {
 	if opts == nil {
 		return noopOption
