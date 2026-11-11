@@ -52,6 +52,12 @@ func TestRESTRemoteSigningLifecycle(t *testing.T) {
 	for _, operation := range []string{"load", "create", "register"} {
 		t.Run(operation, func(t *testing.T) {
 			var signs atomic.Int32
+			var legacySigns atomic.Int32
+			legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				legacySigns.Add(1)
+				http.Error(w, "legacy signer must not be used", http.StatusBadRequest)
+			}))
+			defer legacy.Close()
 			storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, "storage-auth", r.Header.Get("Authorization"))
 				assert.Empty(t, r.Header.Get("X-Table-Secret"))
@@ -74,7 +80,10 @@ func TestRESTRemoteSigningLifecycle(t *testing.T) {
 				w.Header().Set("ETag", `"table-1"`)
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"metadata-location": "s3://bucket/table/metadata/1.json", "metadata": meta,
-					"config":                map[string]string{iceio.S3RemoteSigningEnabled: "true", iceio.S3Region: "us-east-1", iceio.S3EndpointURL: storage.URL, "token": "table-token"},
+					"config": map[string]string{
+						iceio.S3RemoteSigningEnabled: "true", iceio.S3Region: "us-east-1", iceio.S3EndpointURL: storage.URL,
+						"token": "table-token", "signer.endpoint": "legacy/sign", "signer.uri": legacy.URL, iceio.S3SignerURI: legacy.URL,
+					},
 					"remote-signing-config": map[string]any{"properties": map[string]string{"tenant": "table"}, "headers": map[string][]string{"x-table-secret": {"one", "two"}}},
 				})
 			}
@@ -141,6 +150,7 @@ func TestRESTRemoteSigningLifecycle(t *testing.T) {
 			require.NoError(t, err)
 			read(loaded)
 			require.GreaterOrEqual(t, signs.Load(), int32(4))
+			require.Zero(t, legacySigns.Load())
 		})
 	}
 }

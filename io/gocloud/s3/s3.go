@@ -257,6 +257,7 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		if remoteSigningEnabled(props) {
 			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 			o.APIOptions = append(o.APIOptions, disableRemoteSigningUploadChecksums)
+			applyRemoteSigningOptions(o)
 		}
 		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
 		o.DisableLogOutputChecksumValidationSkipped = true

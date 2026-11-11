@@ -155,7 +155,7 @@ var allEndpoints = []endpoint{
 	endpointCommitTransaction,
 	endpointListTables, endpointLoadTable, endpointTableExists, endpointCreateTable,
 	endpointUpdateTable, endpointDeleteTable, endpointRenameTable, endpointRegisterTable,
-	endpointReportMetrics, endpointTableCredentials,
+	endpointRemoteSign, endpointReportMetrics, endpointTableCredentials,
 	endpointPlanTableScan, endpointFetchPlanResult, endpointCancelPlanning, endpointFetchScanTasks,
 	endpointListViews, endpointLoadView, endpointViewExists, endpointCreateView,
 	endpointUpdateView, endpointDeleteView, endpointRenameView, endpointRegisterView,

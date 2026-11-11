@@ -37,7 +37,10 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	smithy "github.com/aws/smithy-go"
+	smithyauth "github.com/aws/smithy-go/auth"
 	smithymiddleware "github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 func remoteSigningEnabled(props map[string]string) bool {
@@ -67,7 +70,6 @@ type remoteSigningClient struct {
 	storage  aws.HTTPClient
 	signer   *http.Client
 	endpoint string
-	region   string
 	config   remotesigning.Config
 	token    string
 	tokenSet bool
@@ -91,6 +93,10 @@ func configureRemoteSigning(ctx context.Context, props map[string]string, cfg *a
 		if err := json.Unmarshal([]byte(raw), &settings); err != nil {
 			return fmt.Errorf("invalid remote signing config: %w", err)
 		}
+	}
+	storage, err := remoteSigningStorageClient(cfg.HTTPClient)
+	if err != nil {
+		return err
 	}
 	signer := session.Client
 	token, tokenSet := props[remotesigning.TokenProperty]
@@ -116,27 +122,82 @@ func configureRemoteSigning(ctx context.Context, props map[string]string, cfg *a
 	if signer.Timeout == 0 {
 		signer.Timeout = 30 * time.Second
 	}
-	storage := cfg.HTTPClient
-	// Disable transport-level redirects too: the signature covers the exact
-	// returned URI and must not be replayed on a redirect target.
-	switch client := storage.(type) {
-	case *http.Client:
-		copyClient := *client
-		copyClient.CheckRedirect = noSigningRedirects
-		storage = &copyClient
-	case *awshttp.BuildableClient:
-		copyClient := *client.Freeze().(*http.Client)
-		copyClient.CheckRedirect = noSigningRedirects
-		storage = &copyClient
-	}
-
 	cfg.Credentials = aws.AnonymousCredentials{}
 	cfg.HTTPClient = &remoteSigningClient{
 		storage: storage, signer: signer, endpoint: endpoint,
-		region: cfg.Region, config: settings, token: token, tokenSet: tokenSet,
+		config: settings, token: token, tokenSet: tokenSet,
 	}
 
 	return nil
+}
+
+type (
+	remoteSigningRegionKey struct{}
+	remoteSigningRegion    struct{ value string }
+)
+
+// Let the SDK resolve the actual per-request SigV4 region without loading
+// local credentials or adding a local signature.
+type remoteSigningAuthScheme struct{}
+
+func (remoteSigningAuthScheme) SchemeID() string { return "aws.auth#sigv4" }
+
+func (remoteSigningAuthScheme) IdentityResolver(smithyauth.IdentityResolverOptions) smithyauth.IdentityResolver {
+	return &smithyauth.AnonymousIdentityResolver{}
+}
+
+func (remoteSigningAuthScheme) Signer() smithyhttp.Signer { return remoteSigningRegionSigner{} }
+
+type remoteSigningRegionSigner struct{}
+
+func (remoteSigningRegionSigner) SignRequest(ctx context.Context, _ *smithyhttp.Request, _ smithyauth.Identity, properties smithy.Properties) error {
+	region, ok := smithyhttp.GetSigV4SigningRegion(&properties)
+	if !ok || region == "" {
+		return errors.New("remote S3 signing requires a resolved SigV4 region")
+	}
+	carrier, ok := ctx.Value(remoteSigningRegionKey{}).(*remoteSigningRegion)
+	if !ok || carrier == nil {
+		return errors.New("remote S3 signing is missing the request region")
+	}
+	carrier.value = region
+
+	return nil
+}
+
+func applyRemoteSigningOptions(options *s3.Options) {
+	options.AuthSchemes = []smithyhttp.AuthScheme{remoteSigningAuthScheme{}}
+	options.APIOptions = append(options.APIOptions, func(stack *smithymiddleware.Stack) error {
+		return stack.Finalize.Insert(smithymiddleware.FinalizeMiddlewareFunc("remoteSigningRegion", func(ctx context.Context, input smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
+			return next.HandleFinalize(context.WithValue(ctx, remoteSigningRegionKey{}, &remoteSigningRegion{}), input)
+		}), "ResolveAuthScheme", smithymiddleware.Before)
+	})
+}
+
+// The signature covers the exact returned URI, so it must not be replayed by
+// an HTTP client that follows redirects internally.
+func remoteSigningStorageClient(client aws.HTTPClient) (aws.HTTPClient, error) {
+	switch client := client.(type) {
+	case nil:
+		return &http.Client{CheckRedirect: noSigningRedirects}, nil
+	case *http.Client:
+		if client == nil {
+			return nil, errors.New("remote signing requires a non-nil HTTP client")
+		}
+		copyClient := *client
+		copyClient.CheckRedirect = noSigningRedirects
+
+		return &copyClient, nil
+	case *awshttp.BuildableClient:
+		if client == nil {
+			return nil, errors.New("remote signing requires a non-nil HTTP client")
+		}
+		copyClient := *client.Freeze().(*http.Client)
+		copyClient.CheckRedirect = noSigningRedirects
+
+		return &copyClient, nil
+	default:
+		return nil, fmt.Errorf("remote signing cannot disable redirects for HTTP client %T", client)
+	}
 }
 
 func (c *remoteSigningClient) Do(req *http.Request) (*http.Response, error) {
@@ -151,11 +212,15 @@ func (c *remoteSigningClient) Do(req *http.Request) (*http.Response, error) {
 	if strings.Contains(strings.ToLower(strings.Join(request.Header.Values("Content-Encoding"), ",")), "aws-chunked") || strings.Contains(strings.Join(request.Header.Values("X-Amz-Content-Sha256"), ","), "STREAMING-") {
 		return nil, permanentSigningError(errors.New("remote S3 signing does not support aws-chunked payloads"))
 	}
+	region, ok := request.Context().Value(remoteSigningRegionKey{}).(*remoteSigningRegion)
+	if !ok || region == nil || region.value == "" {
+		return nil, permanentSigningError(errors.New("remote S3 signing requires a resolved SigV4 region"))
+	}
 	request.Header.Del("Authorization")
 	request.Header.Del("X-Amz-Security-Token")
 	request.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
 	payload := remoteSignRequest{
-		Region: c.region, URI: request.URL.String(), Method: request.Method,
+		Region: region.value, URI: request.URL.String(), Method: request.Method,
 		Headers: request.Header.Clone(), Properties: maps.Clone(c.config.Properties), Provider: "s3",
 	}
 	if request.Host != "" {

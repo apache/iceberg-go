@@ -57,43 +57,34 @@ func SessionFromContext(ctx context.Context) Session {
 	return session
 }
 
-// Endpoint resolves modern and legacy explicitly configured signing endpoints.
-// The caller supplies the default when it knows the table's catalog path.
+// Endpoint resolves the configured signing endpoint. When a modern signing
+// config is present, legacy signer endpoints are ignored. The caller supplies
+// the default when it knows the table's catalog path.
 func Endpoint(props map[string]string, fallback string) (string, error) {
 	endpoint := props[EndpointProperty]
-	if endpoint == "" {
+	base := props["uri"]
+	_, hasConfig := props[ConfigProperty]
+	if endpoint == "" && !hasConfig {
 		endpoint = props["signer.endpoint"]
-		base := props["signer.uri"]
-		if base == "" {
-			base = props["s3.signer.uri"]
+		legacyBase := props["signer.uri"]
+		if legacyBase == "" {
+			legacyBase = props["s3.signer.uri"]
 		}
-		if endpoint != "" || base != "" {
+		if legacyBase != "" {
+			base = legacyBase
 			if endpoint == "" {
 				endpoint = "v1/aws/s3/sign"
 			}
-			parsed, err := url.Parse(endpoint)
-			if err != nil {
-				return "", errors.New("invalid remote signing endpoint")
-			}
-			if !parsed.IsAbs() {
-				if base == "" {
-					base = props["uri"]
-				}
-				baseURL, err := url.Parse(base)
-				if err != nil {
-					return "", errors.New("invalid remote signing base URI")
-				}
-				// Iceberg relative endpoints are appended to the base URI.
-				if parsed.Host != "" {
-					return "", errors.New("remote signing endpoint must be a path or an absolute HTTP(S) URI")
-				}
-				joined := baseURL.JoinPath(parsed.EscapedPath())
-				joined.RawQuery, joined.ForceQuery = parsed.RawQuery, parsed.ForceQuery
-				joined.Fragment, joined.RawFragment = parsed.Fragment, parsed.RawFragment
-				endpoint = joined.String()
-			}
-		} else {
-			endpoint = fallback
+		}
+	}
+	if endpoint == "" {
+		endpoint = fallback
+	}
+	if endpoint != "" {
+		var err error
+		endpoint, err = resolveEndpoint(endpoint, base)
+		if err != nil {
+			return "", err
 		}
 	}
 	parsed, err := url.Parse(endpoint)
@@ -105,6 +96,29 @@ func Endpoint(props map[string]string, fallback string) (string, error) {
 	}
 
 	return parsed.String(), nil
+}
+
+func resolveEndpoint(endpoint, base string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", errors.New("invalid remote signing endpoint")
+	}
+	if parsed.IsAbs() {
+		return parsed.String(), nil
+	}
+	if parsed.Host != "" {
+		return "", errors.New("remote signing endpoint must be a path or an absolute HTTP(S) URI")
+	}
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", errors.New("invalid remote signing base URI")
+	}
+	// Iceberg relative endpoints are appended to the catalog or signer URI.
+	joined := baseURL.JoinPath(parsed.EscapedPath())
+	joined.RawQuery, joined.ForceQuery = parsed.RawQuery, parsed.ForceQuery
+	joined.Fragment, joined.RawFragment = parsed.Fragment, parsed.RawFragment
+
+	return joined.String(), nil
 }
 
 // CloneHeaders retains multiple values and explicit empty headers while

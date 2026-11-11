@@ -38,6 +38,7 @@ import (
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/assert"
@@ -114,7 +115,7 @@ func TestRemoteSigningFileIO(t *testing.T) {
 		return aws.Credentials{}, errors.New("unexpected credentials")
 	})}
 	ctx := utils.WithAWSConfig(t.Context(), shared)
-	props := map[string]string{io.S3EndpointURL: storage.URL, io.S3RemoteSigningEnabled: "true", io.S3SignerURI: signer.URL, remotesigning.ConfigProperty: settings, "token": "ignored"}
+	props := map[string]string{io.S3EndpointURL: storage.URL, io.S3RemoteSigningEnabled: "true", remotesigning.EndpointProperty: signer.URL, remotesigning.ConfigProperty: settings, "token": "ignored"}
 	parsed, _ := url.Parse("s3://bucket")
 	bucket, err := createS3Bucket(ctx, parsed, props)
 	require.NoError(t, err)
@@ -153,6 +154,7 @@ func remoteSigningSDKClient(t *testing.T, storage *httptest.Server, signer strin
 		o.UsePathStyle = true
 		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		o.APIOptions = append(o.APIOptions, disableRemoteSigningUploadChecksums)
+		applyRemoteSigningOptions(o)
 	})
 }
 
@@ -186,6 +188,7 @@ func TestRemoteSigningDeleteObjectsRetry(t *testing.T) {
 		if !assert.NotNil(t, req.Body) {
 			return
 		}
+		assert.Equal(t, "us-west-2", req.Region)
 		assert.Contains(t, *req.Body, "one &amp; two")
 		mu.Lock()
 		signedBodies = append(signedBodies, *req.Body)
@@ -344,6 +347,148 @@ func TestRemoteSigningDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
+type wrappedHTTPClient struct{ *http.Client }
+
+func TestRemoteSigningRejectsClientsWithUncontrolledRedirects(t *testing.T) {
+	t.Parallel()
+	custom := &wrappedHTTPClient{Client: &http.Client{}}
+	props := map[string]string{io.S3RemoteSigningEnabled: "true", remotesigning.EndpointProperty: "https://signer.example/sign"}
+	shared := &aws.Config{Region: "us-east-1", HTTPClient: custom}
+	ctx := utils.WithAWSConfig(t.Context(), shared)
+	parsed, err := url.Parse("s3://bucket")
+	require.NoError(t, err)
+	_, err = createS3Bucket(ctx, parsed, props)
+	require.ErrorContains(t, err, "cannot disable redirects")
+	require.Same(t, custom, shared.HTTPClient)
+
+	var nilHTTP *http.Client
+	var nilAWS *awshttp.BuildableClient
+	for _, client := range []aws.HTTPClient{nilHTTP, nilAWS} {
+		_, err := remoteSigningStorageClient(client)
+		require.ErrorContains(t, err, "non-nil HTTP client")
+	}
+	client, err := remoteSigningStorageClient(nil)
+	require.NoError(t, err)
+	require.IsType(t, &http.Client{}, client)
+}
+
+func TestRemoteSigningUsesResolvedSigV4Region(t *testing.T) {
+	for _, tc := range []struct {
+		name, configured, bucket, override, want, legacyRegion string
+	}{
+		{"regional", "us-west-2", "bucket-test-example", "", "us-west-2", ""},
+		{"global", "aws-global", "bucket-test-example", "", "us-east-1", ""},
+		{"cross-region access point", "us-east-1", "arn:aws:s3:eu-west-1:123456789012:accesspoint/test-ap", "", "eu-west-1", ""},
+		{"explicit override", "aws-global", "bucket-test-example", "us-west-1", "us-west-1", ""},
+		{"legacy resolver", "us-east-1", "bucket-test-example", "", "ca-central-1", "ca-central-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotRegion atomic.Value
+			signer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req remoteSignRequest
+				if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+					return
+				}
+				gotRegion.Store(req.Region)
+				_ = json.NewEncoder(w).Encode(remoteSignResponse{URI: req.URI, Headers: http.Header{}})
+			}))
+			defer signer.Close()
+			storage := &http.Client{Transport: remoteSigningRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: stdio.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			cfg := aws.Config{Region: tc.configured, HTTPClient: storage, Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+				t.Error("remote signing must not load local credentials")
+
+				return aws.Credentials{}, errors.New("unexpected credentials")
+			})}
+			if tc.legacyRegion != "" {
+				setLegacySigningRegion(&cfg, tc.legacyRegion)
+			}
+			ctx := remotesigning.WithSession(t.Context(), remotesigning.Session{Client: signer.Client()})
+			require.NoError(t, configureRemoteSigning(ctx, map[string]string{remotesigning.EndpointProperty: signer.URL}, &cfg))
+			client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+				o.UseARNRegion = true
+				applyRemoteSigningOptions(o)
+			})
+			var options []func(*s3.Options)
+			if tc.override != "" {
+				options = append(options, s3.WithSigV4SigningRegion(tc.override))
+			}
+			_, err := client.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(tc.bucket), Key: aws.String("key")}, options...)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, gotRegion.Load())
+		})
+	}
+}
+
+//nolint:staticcheck // Verify existing AWS endpoint resolvers that set a signing region.
+func setLegacySigningRegion(cfg *aws.Config, region string) {
+	cfg.EndpointResolverWithOptions = aws.EndpointResolverWithOptionsFunc(func(string, string, ...any) (aws.Endpoint, error) {
+		return aws.Endpoint{URL: "https://storage.example/base", SigningRegion: region, SigningName: "s3", HostnameImmutable: true}, nil
+	})
+}
+
+func TestRemoteSigningRejectsUnsupportedAuthScheme(t *testing.T) {
+	var signs, requests atomic.Int32
+	signer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { signs.Add(1) }))
+	defer signer.Close()
+	storage := &http.Client{Transport: remoteSigningRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+
+		return nil, errors.New("unexpected storage request")
+	})}
+	cfg := aws.Config{Region: "us-east-1", HTTPClient: storage}
+	ctx := remotesigning.WithSession(t.Context(), remotesigning.Session{Client: signer.Client()})
+	require.NoError(t, configureRemoteSigning(ctx, map[string]string{remotesigning.EndpointProperty: signer.URL}, &cfg))
+	client := s3.NewFromConfig(cfg, applyRemoteSigningOptions)
+	_, err := client.HeadObject(t.Context(), &s3.HeadObjectInput{
+		Bucket: aws.String("arn:aws:s3::123456789012:accesspoint/test.mrap"), Key: aws.String("key"),
+	})
+	require.ErrorContains(t, err, "requires a resolved SigV4 region")
+	require.Zero(t, signs.Load())
+	require.Zero(t, requests.Load())
+}
+
+func TestRemoteSigningKeepsConcurrentRegionsSeparate(t *testing.T) {
+	var mu sync.Mutex
+	regions := make(map[string]string)
+	signer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req remoteSignRequest
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+			return
+		}
+		u, err := url.Parse(req.URI)
+		if !assert.NoError(t, err) {
+			return
+		}
+		mu.Lock()
+		regions[strings.TrimPrefix(u.Path, "/")] = req.Region
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(remoteSignResponse{URI: req.URI, Headers: http.Header{}})
+	}))
+	defer signer.Close()
+	storage := &http.Client{Transport: remoteSigningRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: stdio.NopCloser(strings.NewReader("")), Request: req}, nil
+	})}
+	cfg := aws.Config{Region: "us-east-1", HTTPClient: storage}
+	ctx := remotesigning.WithSession(t.Context(), remotesigning.Session{Client: signer.Client()})
+	require.NoError(t, configureRemoteSigning(ctx, map[string]string{remotesigning.EndpointProperty: signer.URL}, &cfg))
+	client := s3.NewFromConfig(cfg, applyRemoteSigningOptions)
+	var wg sync.WaitGroup
+	for _, region := range []string{"us-east-1", "us-west-2", "eu-west-1", "ap-southeast-2"} {
+		wg.Go(func() {
+			_, err := client.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String("bucket-test-example"), Key: aws.String(region)}, s3.WithSigV4SigningRegion(region))
+			assert.NoError(t, err)
+		})
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, map[string]string{
+		"us-east-1": "us-east-1", "us-west-2": "us-west-2", "eu-west-1": "eu-west-1", "ap-southeast-2": "ap-southeast-2",
+	}, regions)
+}
+
 func TestRemoteSigningUnsignedStreamingUpload(t *testing.T) {
 	t.Parallel()
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -390,8 +535,9 @@ func TestRemoteSigningHostAndURI(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(remoteSignResponse{URI: storage.URL + "/rewritten%2Fobject?signature=a%2Bb", Headers: http.Header{"Host": {"virtual-storage.example"}, "X-Signed": {"first", "second"}}})
 	}))
 	defer signer.Close()
-	client := &remoteSigningClient{storage: storage.Client(), signer: signer.Client(), endpoint: signer.URL, region: "us-east-1", config: remotesigning.Config{Headers: http.Header{"host": {"virtual-signer.example"}}}}
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "https://unsigned.example/original", strings.NewReader("payload"))
+	client := &remoteSigningClient{storage: storage.Client(), signer: signer.Client(), endpoint: signer.URL, config: remotesigning.Config{Headers: http.Header{"host": {"virtual-signer.example"}}}}
+	ctx := context.WithValue(t.Context(), remoteSigningRegionKey{}, &remoteSigningRegion{value: "us-east-1"})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, "https://unsigned.example/original", strings.NewReader("payload"))
 	require.NoError(t, err)
 	request.Host = "virtual-input.example"
 	lowerAuth := strings.ToLower("Authorization")
@@ -428,8 +574,9 @@ func TestRemoteSigningRedactsTransportErrors(t *testing.T) {
 			if signerFailure {
 				signer = fail
 			}
-			client := &remoteSigningClient{storage: fail, signer: signer, endpoint: "https://signer.example/sign?token=signer-secret", region: "us-east-1"}
-			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://storage.example/object", nil)
+			client := &remoteSigningClient{storage: fail, signer: signer, endpoint: "https://signer.example/sign?token=signer-secret"}
+			ctx := context.WithValue(t.Context(), remoteSigningRegionKey{}, &remoteSigningRegion{value: "us-east-1"})
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://storage.example/object", nil)
 			require.NoError(t, err)
 			_, err = client.Do(request)
 			require.ErrorIs(t, err, cause)
