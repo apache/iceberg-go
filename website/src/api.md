@@ -323,6 +323,24 @@ Each batch is the scan projection followed by three columns:
 
 Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. `UPDATE` rows are not produced. Delete-file handling is iceberg-go behavior.
 
+Use `ToNormalizedArrowRecords` to remove matching DELETE/INSERT occurrences of unchanged rows within each snapshot. Set `ComputeUpdates` to label remaining rows with the same identifier as `UPDATE_BEFORE` and `UPDATE_AFTER`:
+
+```go
+schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields("id", "name"),
+).FromSnapshotExclusive(startSnapshotID).ToNormalizedArrowRecords(ctx,
+    table.ChangelogNormalizationOptions{
+        ComputeUpdates:   true,
+        IdentifierFields: []string{"id"},
+    })
+```
+
+The zero options value only removes carryovers. Update images use `IdentifierFields`, or the effective schema's identifier fields when the list is empty. Explicit identifiers may be nullable primitive columns, including paths through structs, and follow the scan's case sensitivity. After removing carryovers, an identifier must have at most one DELETE and one INSERT per snapshot. Duplicate identifiers return an error instead of selecting an ambiguous update image.
+
+Normalization compares complete rows before applying row filters, projection, and the output limit. Row-lineage columns do not affect matching. Variant values are compared by their encoded metadata/value bytes, with physical NULL distinct from an encoded Variant null. Changes from different snapshots are kept separate. Output follows snapshot and source-task order, with each UPDATE_AFTER immediately following its UPDATE_BEFORE. A batch boundary or row limit may split the pair. Callers release each returned batch.
+
+The reader buffers one snapshot at a time. `MaxBufferedBytes` defaults to 64 MiB of retained Arrow buffers and encoded matching keys, and `MaxBufferedRows` defaults to 1,000,000 input rows per snapshot. Exceeding either limit returns `ErrChangelogBufferLimit` through the iterator before emitting that snapshot. Decoding, temporary key encoding, output batches, and per-row indexes need additional memory. Temporary keys are individually capped at `MaxBufferedBytes`. `WithArrowBatchSize` also caps output batch rows; the default output batch size is 4096.
+
 ## Writing data
 
 The shortcut methods on `Table` open a transaction, perform the write, and commit. Use `NewTransaction` directly when you need to combine multiple operations.

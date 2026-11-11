@@ -631,9 +631,30 @@ func (i *Int64Literal) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// Java Float.compare distinguishes signed zeros and places NaNs after all
+// non-NaN values. Go's cmp.Compare does not, which is unsafe for Iceberg bounds.
+func compareFloat32Literal(left, right float32) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	}
+
+	leftBits, rightBits := math.Float32bits(left), math.Float32bits(right)
+	if math.IsNaN(float64(left)) {
+		leftBits = 0x7fc00000
+	}
+	if math.IsNaN(float64(right)) {
+		rightBits = 0x7fc00000
+	}
+
+	return cmp.Compare(int32(leftBits), int32(rightBits))
+}
+
 type Float32Literal float32
 
-func (Float32Literal) Comparator() Comparator[float32] { return cmp.Compare[float32] }
+func (Float32Literal) Comparator() Comparator[float32] { return compareFloat32Literal }
 func (f Float32Literal) Type() Type                    { return PrimitiveTypes.Float32 }
 func (f Float32Literal) Value() float32                { return float32(f) }
 func (f Float32Literal) Any() any                      { return f.Value() }
@@ -680,9 +701,29 @@ func (f *Float32Literal) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// Match Java Double.compare for signed zeros and canonical NaN ordering.
+func compareFloat64Literal(left, right float64) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	}
+
+	leftBits, rightBits := math.Float64bits(left), math.Float64bits(right)
+	if math.IsNaN(left) {
+		leftBits = 0x7ff8000000000000
+	}
+	if math.IsNaN(right) {
+		rightBits = 0x7ff8000000000000
+	}
+
+	return cmp.Compare(int64(leftBits), int64(rightBits))
+}
+
 type Float64Literal float64
 
-func (Float64Literal) Comparator() Comparator[float64] { return cmp.Compare[float64] }
+func (Float64Literal) Comparator() Comparator[float64] { return compareFloat64Literal }
 func (f Float64Literal) Type() Type                    { return PrimitiveTypes.Float64 }
 func (f Float64Literal) Value() float64                { return float64(f) }
 func (f Float64Literal) Any() any                      { return f.Value() }

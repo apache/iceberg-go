@@ -48,12 +48,12 @@ catalog:
 |---|---|
 | `default-catalog` | Name used when `--catalog-name` is not passed on the CLI. |
 | `max-workers` | Worker pool size for concurrent operations. Default `5`. |
-| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`. `dynamodb` is recognized by the CLI but not implemented yet. |
+| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`, `dynamodb`. |
 | `catalog.<name>.uri` | Catalog endpoint or DSN. |
 | `catalog.<name>.warehouse` | Warehouse identifier (REST/Glue) or location (Hive/SQL). |
 | `catalog.<name>.credential` | Credential string passed through to the catalog's auth handler. |
 | `catalog.<name>.output` | CLI output format (e.g. `text`, `json`). |
-| `catalog.<name>.aws-profile` | AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used. |
+| `catalog.<name>.aws-profile` | AWS named profile for Glue and DynamoDB catalogs. When unset, the AWS SDK default credential chain is used. |
 | `catalog.<name>.sql-driver` | `database/sql` driver name for the SQL catalog. Maps to the `sql.driver` property. The default CLI binary only compiles in `sqliteshim`; other drivers require a custom build. |
 | `catalog.<name>.sql-dialect` | SQL dialect for the SQL catalog (`postgres`, `mysql`, `sqlite`, `mssql`, `oracle`). Maps to the `sql.dialect` property. The default CLI binary only ships `sqlite` via `sqliteshim`; other dialects need a custom build with their drivers. |
 | `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. When enabled, requests are signed with the `s3.*` credential properties if set (`s3.access-key-id` / `s3.secret-access-key` / `s3.session-token`), otherwise with the AWS default credential chain. The Java-client names (`rest.access-key-id` / `rest.secret-access-key` / `rest.session-token`) are accepted as aliases, resolved per field with the `s3.*` keys taking precedence. |
@@ -452,7 +452,8 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | Key | Default | Description |
 |---|---|---|
 | `write.format.default` | `parquet` | File format used when writing data files. Read in `table/writer.go` and `table/rolling_data_writer.go`. |
-| `write.target-file-size-bytes` | (set by writer) | Target size for newly written data files. Read in `table/arrow_utils.go` and `table/equality_delete_writer.go`. |
+| `write.target-file-size-bytes` | `536870912` (512 MB) | Target size for newly written data files. Read in `table/arrow_utils.go`. |
+| `write.delete.target-file-size-bytes` | `67108864` (64 MB) | Target size for equality-delete and v2 position-delete files where file rolling applies. Read in `table/equality_delete_writer.go` and `table/arrow_utils.go`. |
 
 ### Scan reads
 
@@ -555,6 +556,8 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.page-version` | `2` |
 | `write.parquet.compression-codec` | `zstd` |
 | `write.parquet.compression-level` | `-1` (codec default) |
+| `write.parquet.compression-codec.column.<name>` | Global codec |
+| `write.parquet.compression-level.column.<name>` | Global level, or the column codec's default if the codecs differ |
 | `write.parquet.bloom-filter-max-bytes` | 1 MB |
 | `write.parquet.bloom-filter-enabled.column.<name>` | (per-column toggle, prefix-matched) |
 | `parquet.enable.dictionary` | `true` (global dictionary encoding switch; same key as Iceberg Java) |
@@ -563,6 +566,35 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
 The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`.
+
+Column compression keys use case-sensitive Iceberg leaf paths, such as
+`items.element` or `attributes.value.name`. They apply to data files and use
+the global settings for columns without overrides. An explicit column level
+must be an integer valid for its effective codec. Missing fields are ignored.
+Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
+these keys. Arrow does not register legacy `lz4` or `lzo` codecs by default;
+`lz4_raw` is supported.
+
+Equality-delete and v2 position-delete Parquet writers also support these
+overrides, defined in `table/properties.go`. Unset overrides inherit the
+corresponding `write.parquet.*` setting and its default. If the delete codec
+differs from the data codec and no delete level is set, the delete writer uses
+the codec's default level instead of inheriting the data codec's level.
+
+| Key | Overrides |
+|---|---|
+| `write.delete.parquet.row-group-size-bytes` | Row-group size target |
+| `write.delete.parquet.page-size-bytes` | Data page size |
+| `write.delete.parquet.page-row-limit` | Page write batch size |
+| `write.delete.parquet.dict-size-bytes` | Dictionary page size |
+| `write.delete.parquet.page-version` | Data page version: `v1` or `v2` (`1` and `2` also accepted) |
+| `write.delete.parquet.compression-codec` | Compression codec |
+| `write.delete.parquet.compression-level` | Compression level |
+
+As in Java, data-column Bloom filter and dictionary overrides do not apply to
+delete files. The global `parquet.enable.dictionary` switch still applies.
+Metrics configuration is independent: equality deletes use the table metrics
+settings, while position deletes always retain full `file_path` and `pos` bounds.
 
 ### Parquet reader
 
