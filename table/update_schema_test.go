@@ -1257,7 +1257,7 @@ func TestSetIdentifierField(t *testing.T) {
 			SetIdentifierField([][]string{{"name"}}).
 			Apply()
 		require.Error(t, err)
-		require.ErrorContains(t, err, "identifier field not found: name")
+		require.ErrorContains(t, err, "cannot delete identifier field name")
 	})
 }
 
@@ -1277,7 +1277,39 @@ func TestDeleteIdentifierColumn(t *testing.T) {
 		_, err := NewUpdateSchema(newTxn(), true, true).
 			DeleteColumn([]string{"id"}).
 			Apply()
-		require.ErrorContains(t, err, "identifier field not found: id")
+		require.ErrorContains(t, err, "cannot delete identifier field id")
+	})
+
+	t.Run("deleting an identifier column with different case fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), false, true).
+			DeleteColumn([]string{"ID"}).
+			Apply()
+		require.ErrorContains(t, err, "cannot delete identifier field id")
+	})
+
+	t.Run("delete then add a column with the same name fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"id"}).
+			AddColumn([]string{"id"}, iceberg.PrimitiveTypes.Int64, "", false, nil).
+			Apply()
+		require.ErrorContains(t, err, "cannot delete identifier field id")
+	})
+
+	t.Run("deleting a struct with a nested identifier field fails", func(t *testing.T) {
+		nested := iceberg.NewSchemaWithIdentifiers(1, []int{3},
+			iceberg.NestedField{ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+			iceberg.NestedField{ID: 2, Name: "key", Required: true, Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			)},
+		)
+		nestedMeta, err := NewMetadata(nested, nil, UnsortedSortOrder, "", nil)
+		require.NoError(t, err)
+		txn := New([]string{"id"}, nestedMeta, "", nil, nil).NewTransaction()
+
+		_, err = NewUpdateSchema(txn, true, true).
+			DeleteColumn([]string{"key"}).
+			Apply()
+		require.ErrorContains(t, err, "cannot delete field key as it will delete nested identifier field key.id")
 	})
 
 	t.Run("delete then clear identifier fields", func(t *testing.T) {
