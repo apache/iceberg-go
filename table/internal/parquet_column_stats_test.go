@@ -19,6 +19,7 @@ package internal_test
 
 import (
 	"maps"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/parquet"
@@ -129,3 +130,39 @@ func TestResolveParquetStatsColumnPathsForFileOnlyFields(t *testing.T) {
 		assert.Empty(t, internal.ResolveParquetStatsColumnPaths(props, tableSchema, fileSchema, mapping, content))
 	}
 }
+
+func BenchmarkResolveParquetStatsColumnPaths(b *testing.B) {
+	for _, columnCount := range []int{32, 1024} {
+		fields := make([]iceberg.NestedField, columnCount)
+		for i := range fields {
+			fields[i] = iceberg.NestedField{
+				ID:   i + 1,
+				Name: "col_" + strconv.Itoa(i),
+				Type: iceberg.PrimitiveTypes.Int32,
+			}
+		}
+		schema := iceberg.NewSchema(0, fields...)
+		mapping, err := internal.GetFileFormat(iceberg.ParquetFile).PathToIDMapping(schema)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		for _, configured := range []bool{false, true} {
+			props := iceberg.Properties{"unrelated": "kept"}
+			name := "default"
+			if configured {
+				props[internal.ParquetColumnStatsEnabledKeyPrefix+".col_0"] = "false"
+				name = "one-override"
+			}
+			b.Run(strconv.Itoa(columnCount)+"/"+name, func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					benchmarkMappedStatsProps = internal.ResolveParquetStatsColumnPaths(
+						props, schema, schema, mapping, iceberg.EntryContentData)
+				}
+			})
+		}
+	}
+}
+
+var benchmarkMappedStatsProps iceberg.Properties
