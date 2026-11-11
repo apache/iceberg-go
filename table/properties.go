@@ -108,6 +108,8 @@ const (
 	ParquetCompressionColumnLevelKeyPrefix   = internal.ParquetCompressionColumnLevelKeyPrefix
 	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
+	ParquetBloomFilterAdaptiveEnabledKey     = internal.ParquetBloomFilterAdaptiveEnabledKey
+	ParquetBloomFilterAdaptiveEnabledDefault = internal.ParquetBloomFilterAdaptiveEnabledDefault
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
 	ParquetBloomFilterColumnFPPKeyPrefix     = internal.ParquetBloomFilterColumnFPPKeyPrefix
 	ParquetBloomFilterColumnNDVKeyPrefix     = internal.ParquetBloomFilterColumnNDVKeyPrefix

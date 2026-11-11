@@ -229,7 +229,7 @@ func TestParquetBloomResolvedAdaptiveValidation(t *testing.T) {
 		{"explicit ndv", iceberg.Properties{enabled + "items.element": "true", fpp + "items.element": "0.9999999999999999", ndv + "items.list.element": "1"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.props["write.parquet.bloom-filter-adaptive-enabled"] = "true"
+			tc.props[ParquetBloomFilterAdaptiveEnabledKey] = "true"
 			meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://adaptive-validation", tc.props)
 			require.NoError(t, err)
 			builder, err := MetadataBuilderFromBase(meta, "")
