@@ -246,6 +246,10 @@ type options struct {
 	// disableAuth is set by rest.auth.type=none: no AuthManager is built from
 	// token or credential.
 	disableAuth bool
+	// authTypeSigV4 is set by rest.auth.type=sigv4. Unlike enableSigv4, which
+	// rest.sigv4-enabled sets, it is never read from /v1/config, so a server
+	// override can't turn the client's signing off.
+	authTypeSigV4 bool
 
 	additionalProps iceberg.Properties
 }
