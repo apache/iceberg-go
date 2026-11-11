@@ -630,9 +630,9 @@ func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 
 // ReplaceSortOrder stages order as the table's new default sort order,
 // the analogue of Java's Table.replaceSortOrder() / BaseReplaceSortOrder.
-// The metadata builder reuses the ID of an equivalent existing order or
-// assigns the next available one, so order's own ID is ignored. The
-// commit is fenced by AssertDefaultSortOrderID, matching
+// An equivalent historical order is reused without adding it again.
+// Otherwise the metadata builder assigns a fresh ID, so order's ID is
+// ignored. The commit is fenced by AssertDefaultSortOrderID, matching
 // UpdateRequirements.forUpdateTable on SetDefaultSortOrder. Replacing
 // the default with a field-identical order is a no-op.
 func (t *Transaction) ReplaceSortOrder(order SortOrder) error {
@@ -644,10 +644,19 @@ func (t *Transaction) ReplaceSortOrder(order SortOrder) error {
 		return nil
 	}
 
-	return t.apply(
-		[]Update{NewAddSortOrderUpdate(&order), NewSetDefaultSortOrderUpdate(-1)},
-		[]Requirement{AssertDefaultSortOrderID(t.tbl.Metadata().DefaultSortOrder())},
-	)
+	reqs := []Requirement{AssertDefaultSortOrderID(t.tbl.Metadata().DefaultSortOrder())}
+	orderID := meta.reuseOrCreateNewSortOrderID(&order)
+	if previous, err := meta.GetSortOrderByID(orderID); err == nil {
+		if err := order.CheckCompatibility(meta.CurrentSchema()); err != nil {
+			return err
+		}
+
+		// Reuse a concrete ID: -1 could refer to a different order added
+		// earlier in this transaction.
+		return t.apply([]Update{NewSetDefaultSortOrderUpdate(previous.OrderID())}, reqs)
+	}
+
+	return t.apply([]Update{NewAddSortOrderUpdate(&order), NewSetDefaultSortOrderUpdate(-1)}, reqs)
 }
 
 func sameSortFields(a, b SortOrder) bool {

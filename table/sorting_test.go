@@ -270,6 +270,7 @@ func TestSortOrderCheckCompatibilityRejectsMissingSourceIDInSchema(t *testing.T)
 
 	err := sortOrder.CheckCompatibility(schema)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.ErrorContains(t, err, "sort field with source id 999 not found in schema")
 }
 
