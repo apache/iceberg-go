@@ -30,6 +30,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1087,6 +1088,12 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	// resolved from the client's choice alone (see the reporterProps field).
 	r.reporterProps = toProps(ops)
 
+	// rest.auth.type is read from the same client-only properties, before the
+	// /v1/config request that it may need to authenticate.
+	if err = resolveAuthType(ctx, ops, r.reporterProps); err != nil {
+		return err
+	}
+
 	if ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
@@ -1129,9 +1136,21 @@ func builtinHeaderDefaults() []struct{ key, value string } {
 	return []struct{ key, value string }{
 		{"X-Client-Version", icebergRestSpecVersion},
 		{"Content-Type", "application/json"},
-		{"User-Agent", "GoIceberg/" + iceberg.Version()},
+		{"User-Agent", defaultUserAgent(iceberg.Version())},
 		{headerIcebergAccessDelegation, defaultAccessDelegation},
 	}
+}
+
+// defaultUserAgent returns the User-Agent recommended by the REST spec: the
+// library token followed by the Go version. iceberg.Version() returns
+// "(unknown version)" when the build has no module version.
+func defaultUserAgent(version string) string {
+	if version == "" || strings.ContainsAny(version, " ()") {
+		version = "unknown"
+	}
+
+	return "iceberg-go/" + strings.TrimPrefix(version, "v") +
+		" (go " + strings.TrimPrefix(runtime.Version(), "go") + ")"
 }
 
 // createSession returns a cleanup that closes only transports created by this
@@ -1170,7 +1189,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	// without storing it in opts. Bootstrap authentication must not leak into
 	// the final session after server configuration has been applied.
 	authManager := opts.authManager
-	if authManager == nil {
+	if authManager == nil && !opts.disableAuth {
 		var cleanupOAuth func()
 		authManager, cleanupOAuth = setupOAuthManager(r, cl, opts)
 		if cleanupOAuth != nil {

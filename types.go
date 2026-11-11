@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -366,15 +367,57 @@ func defaultValueToJSON(typ Type, value any) any {
 	return value
 }
 
+// decodeNestedFieldDefault preserves long values without converting them to float64.
+// Nested JSON defaults may contain long literals even for other field types.
+func decodeNestedFieldDefault(raw json.RawMessage, typ Type, allowExpression bool) (any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	trimmed := bytes.TrimSpace(raw)
+	if _, isLong := typ.(Int64Type); isLong && (!allowExpression || len(trimmed) == 0 || trimmed[0] != '{') {
+		var value *int64
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, fmt.Errorf("%w: invalid long default: %w", ErrInvalidSchema, err)
+		}
+		if value == nil {
+			return nil, nil
+		}
+
+		return *value, nil
+	}
+
+	// Preserve numbers in object and list defaults, including v4 expressions.
+	// Other scalar defaults retain their existing Go representations.
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("%w: invalid JSON default: %w", ErrInvalidSchema, err)
+		}
+
+		return value, nil
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		ID             *int      `json:"id"`
-		Name           string    `json:"name"`
-		Required       *bool     `json:"required"`
-		Type           typeIFace `json:"type"`
-		Doc            string    `json:"doc"`
-		InitialDefault any       `json:"initial-default"`
-		WriteDefault   any       `json:"write-default"`
+		ID             *int            `json:"id"`
+		Name           string          `json:"name"`
+		Required       *bool           `json:"required"`
+		Type           typeIFace       `json:"type"`
+		Doc            string          `json:"doc"`
+		InitialDefault json.RawMessage `json:"initial-default"`
+		WriteDefault   json.RawMessage `json:"write-default"`
 	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
@@ -397,10 +440,19 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
 	}
 
+	initialDefault, err := decodeNestedFieldDefault(aux.InitialDefault, aux.Type.Type, false)
+	if err != nil {
+		return fmt.Errorf("invalid initial-default for field %q: %w", aux.Name, err)
+	}
+	writeDefault, err := decodeNestedFieldDefault(aux.WriteDefault, aux.Type.Type, true)
+	if err != nil {
+		return fmt.Errorf("invalid write-default for field %q: %w", aux.Name, err)
+	}
+
 	*n = NestedField{
 		Type: aux.Type.Type,
 		ID:   *aux.ID, Name: aux.Name, Required: *aux.Required, Doc: aux.Doc,
-		InitialDefault: aux.InitialDefault, WriteDefault: aux.WriteDefault,
+		InitialDefault: initialDefault, WriteDefault: writeDefault,
 	}
 
 	return nil
