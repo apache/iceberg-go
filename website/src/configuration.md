@@ -577,6 +577,11 @@ must be an integer valid for its effective codec. Missing fields are ignored.
 Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
 these keys. Arrow does not register legacy `lz4` or `lzo` codecs by default;
 `lz4_raw` is supported.
+Bloom column settings use Iceberg names, including `items.element` and
+`lookup.value`. Writers resolve these to the physical Parquet paths. Existing
+physical-path settings remain supported; logical names take precedence when
+both are present. Logical settings follow column renames and are removed when
+the column is deleted. Data-column Bloom settings do not apply to delete files.
 
 ### Parquet reader
 

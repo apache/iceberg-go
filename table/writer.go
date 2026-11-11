@@ -120,11 +120,6 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	if err != nil {
 		return nil, err
 	}
-	if fileFormat == iceberg.ParquetFile {
-		if err := tblutils.ValidateParquetWriteProperties(props); err != nil {
-			return nil, err
-		}
-	}
 
 	w := defaultDataFileWriter{
 		loc:            locProvider,
@@ -167,19 +162,24 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 
 	var colMapping map[string]int
 	var variantFieldIDs map[int]struct{}
+	writeProps := w.props
 	if w.fileFormat == iceberg.ParquetFile {
 		colMapping, err = w.format.PathToIDMapping(w.fileSchema)
 		if err != nil {
 			return nil, err
 		}
 		variantFieldIDs = tblutils.VariantFieldIDsFromSchema(w.fileSchema)
+		writeProps = tblutils.ResolveParquetBloomColumnPaths(w.props, meta.CurrentSchema(), w.fileSchema, colMapping, w.content)
+		if err := tblutils.ValidateParquetWriteProperties(writeProps); err != nil {
+			return nil, err
+		}
 	}
 
 	w.invariants = dataWriterInvariants{
 		statsCols:       statsCols,
 		colMapping:      colMapping,
 		variantFieldIDs: variantFieldIDs,
-		writeProps:      w.format.GetWriteProperties(w.props),
+		writeProps:      w.format.GetWriteProperties(writeProps),
 		rowGroupBytes:   rowGroupBytes,
 		spec:            *currentSpec,
 		extension:       strings.ToLower(string(w.fileFormat)),
