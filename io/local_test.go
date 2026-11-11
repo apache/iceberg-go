@@ -271,7 +271,7 @@ func TestLocalFSRenameNoReplaceDoesNotOverwrite(t *testing.T) {
 	require.NoError(t, os.WriteFile(src, []byte("new"), 0o644))
 	require.NoError(t, os.WriteFile(dst, []byte("old"), 0o644))
 
-	err := LocalFS{}.RenameNoReplace(src, dst)
+	err := LocalFS{}.RenameNoReplace(context.Background(), src, dst)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, fs.ErrExist)
 
