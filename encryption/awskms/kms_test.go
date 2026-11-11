@@ -195,3 +195,64 @@ func TestRegistryUsesContextConfig(t *testing.T) {
 	require.Equal(t, "us-west-2", supplied.Region)
 	require.Contains(t, strings.Join(encryption.GetRegisteredKMSNames(), ","), "aws")
 }
+
+// TestRegistryUsesKMSEndpoint verifies that the registry forwards requests to
+// the configured KMS endpoint, not just that NewClient accepts an endpoint.
+func TestRegistryUsesKMSEndpoint(t *testing.T) {
+	targets := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Contains(t, r.Header.Get("Authorization"), "/eu-west-1/kms/aws4_request")
+		target := r.Header.Get("X-Amz-Target")
+		targets <- target
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		switch target {
+		case "TrentService.Encrypt":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"CiphertextBlob": []byte("wrapped")}))
+		case "TrentService.Decrypt":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"Plaintext": []byte("plain")}))
+		case "TrentService.GenerateDataKey":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"Plaintext": []byte("data"), "CiphertextBlob": []byte("generated"),
+			}))
+		default:
+			t.Errorf("unexpected AWS KMS operation %q", target)
+			http.Error(w, "unexpected operation", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	supplied := aws.Config{
+		Region: "us-east-1",
+		Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""),
+		RetryMaxAttempts: 1,
+	}
+	loaded, err := encryption.LoadKeyManagementClient(utils.WithAWSConfig(t.Context(), &supplied), map[string]string{
+		encryption.KMSTypeKey: "aws",
+		"client.region": "eu-west-1",
+		"kms.endpoint": server.URL,
+	})
+	require.NoError(t, err)
+	client, ok := loaded.(*Client)
+	require.True(t, ok)
+
+	wrapped, err := client.WrapKey(t.Context(), "alias/table", []byte("plain"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("wrapped"), wrapped)
+
+	plain, err := client.UnwrapKey(t.Context(), "alias/table", wrapped)
+	require.NoError(t, err)
+	require.Equal(t, []byte("plain"), plain)
+
+	plain, wrapped, err = client.GenerateKey(t.Context(), "alias/table", 4)
+	require.NoError(t, err)
+	require.Equal(t, []byte("data"), plain)
+	require.Equal(t, []byte("generated"), wrapped)
+
+	require.Equal(t, []string{
+		"TrentService.Encrypt",
+		"TrentService.Decrypt",
+		"TrentService.GenerateDataKey",
+	}, []string{<-targets, <-targets, <-targets})
+	require.Equal(t, "us-east-1", supplied.Region)
+}

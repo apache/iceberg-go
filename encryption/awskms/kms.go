@@ -17,7 +17,8 @@
 
 // Package awskms implements Iceberg key wrapping with AWS Key Management Service.
 // Import this package to register the "aws" KMS provider. The provider uses the
-// AWS SDK credential chain and accepts client.region when loaded by the registry.
+// AWS SDK credential chain and accepts client.region and kms.endpoint when loaded
+// by the registry.
 package awskms
 
 import (
@@ -69,6 +70,12 @@ func init() {
 		}
 		if region := props["client.region"]; region != "" {
 			cfg.Region = region
+		}
+
+		if endpoint := props["kms.endpoint"]; endpoint != "" {
+			return NewClient(cfg, func(options *kms.Options) {
+				options.BaseEndpoint = aws.String(endpoint)
+			}), nil
 		}
 
 		return NewClient(cfg), nil
