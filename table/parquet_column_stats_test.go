@@ -23,6 +23,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -134,6 +135,7 @@ func TestParquetColumnStatisticsWriterPaths(t *testing.T) {
 					prefix + "items.list.element": "true",
 					prefix + "properties.value":   "false",
 					prefix + "missing":            "false",
+					ParquetCompressionColumnCodecKeyPrefix + ".items.element": "gzip",
 				}
 			}
 			t.Run(name, func(t *testing.T) {
@@ -157,6 +159,9 @@ func TestParquetColumnStatisticsWriterPaths(t *testing.T) {
 					require.True(t, ok, "unexpected column %s", path)
 					chunk, err := rowGroup.ColumnChunk(col)
 					require.NoError(t, err)
+					if !enabled && path == "items.list.element" {
+						assert.Equal(t, compress.Codecs.Gzip, chunk.Compression())
+					}
 					statsSet, err := chunk.StatsSet()
 					require.NoError(t, err)
 					assert.Equal(t, expected, statsSet, path)
