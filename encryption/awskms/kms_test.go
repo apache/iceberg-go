@@ -196,8 +196,8 @@ func TestRegistryUsesContextConfig(t *testing.T) {
 	require.Contains(t, strings.Join(encryption.GetRegisteredKMSNames(), ","), "aws")
 }
 
-// TestRegistryUsesKMSEndpoint verifies that the registry forwards requests to
-// the configured KMS endpoint, not just that NewClient accepts an endpoint.
+// TestRegistryUsesKMSEndpoint verifies that registry-loaded clients use
+// kms.endpoint for KMS requests.
 func TestRegistryUsesKMSEndpoint(t *testing.T) {
 	targets := make(chan string, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -223,14 +223,14 @@ func TestRegistryUsesKMSEndpoint(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	supplied := aws.Config{
-		Region: "us-east-1",
-		Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""),
+		Region:           "us-east-1",
+		Credentials:      credentials.NewStaticCredentialsProvider("test", "test", ""),
 		RetryMaxAttempts: 1,
 	}
 	loaded, err := encryption.LoadKeyManagementClient(utils.WithAWSConfig(t.Context(), &supplied), map[string]string{
 		encryption.KMSTypeKey: "aws",
-		"client.region": "eu-west-1",
-		"kms.endpoint": server.URL,
+		"client.region":       "eu-west-1",
+		"kms.endpoint":        server.URL,
 	})
 	require.NoError(t, err)
 	client, ok := loaded.(*Client)
