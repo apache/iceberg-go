@@ -1088,6 +1088,12 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	// resolved from the client's choice alone (see the reporterProps field).
 	r.reporterProps = toProps(ops)
 
+	// rest.auth.type is read from the same client-only properties, before the
+	// /v1/config request that it may need to authenticate.
+	if err = resolveAuthType(ctx, ops, r.reporterProps); err != nil {
+		return err
+	}
+
 	if ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
@@ -1183,7 +1189,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	// without storing it in opts. Bootstrap authentication must not leak into
 	// the final session after server configuration has been applied.
 	authManager := opts.authManager
-	if authManager == nil {
+	if authManager == nil && !opts.disableAuth {
 		var cleanupOAuth func()
 		authManager, cleanupOAuth = setupOAuthManager(r, cl, opts)
 		if cleanupOAuth != nil {
