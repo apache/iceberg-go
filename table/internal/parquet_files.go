@@ -81,6 +81,7 @@ const (
 	ParquetBloomFilterColumnNDVKeyPrefix     = "write.parquet.bloom-filter-ndv.column"
 	ParquetBloomFilterAdaptiveEnabledKey     = "write.parquet.bloom-filter-adaptive-enabled"
 	ParquetBloomFilterAdaptiveEnabledDefault = false
+	ParquetColumnStatsEnabledKeyPrefix       = "write.parquet.stats-enabled.column"
 
 	// These bounds mirror the compression libraries used by Arrow's Parquet
 	// writers. -1 is the shared default level and is included in each range.
@@ -277,6 +278,58 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 	}
 }
 
+// ResolveParquetStatsColumnPaths maps Iceberg field names to the physical
+// Parquet paths in a data file. The schema used for writing may have sanitized
+// names or be a projection of the table schema. Java ignores these settings for
+// delete files, which also protects position-delete file_path and pos bounds.
+func ResolveParquetStatsColumnPaths(props iceberg.Properties, tableSchema, fileSchema *iceberg.Schema, pathToID map[string]int, content iceberg.ManifestEntryContent) iceberg.Properties {
+	prefix := ParquetColumnStatsEnabledKeyPrefix + "."
+	var mapped iceberg.Properties
+	var configured map[string]string
+	for key, value := range props {
+		name, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			continue
+		}
+		if mapped == nil {
+			mapped = maps.Clone(props)
+			if content == iceberg.EntryContentData {
+				configured = make(map[string]string)
+			}
+		}
+		delete(mapped, key)
+		if configured != nil {
+			configured[name] = value
+		}
+	}
+	if mapped == nil {
+		return props
+	}
+	if content != iceberg.EntryContentData {
+		return mapped
+	}
+
+	for path, fieldID := range pathToID {
+		var name string
+		var ok bool
+		if tableSchema != nil {
+			name, ok = tableSchema.FindColumnName(fieldID)
+		}
+		if !ok && fileSchema != nil {
+			name, ok = fileSchema.FindColumnName(fieldID)
+		}
+		if !ok {
+			continue
+		}
+		// Avoid building a prefixed property key for every Parquet column.
+		if value, found := configured[name]; found {
+			mapped[prefix+path] = value
+		}
+	}
+
+	return mapped
+}
+
 func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	pageVersion := props.Get(ParquetPageVersionKey, ParquetPageVersionDefault)
 
@@ -354,6 +407,16 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		}
 	}
 
+	// Column statistics are on by default; override only the named columns.
+	prefix = ParquetColumnStatsEnabledKeyPrefix + "."
+	for key, val := range props {
+		colName, ok := strings.CutPrefix(key, prefix)
+		if !ok || colName == "" {
+			continue
+		}
+		writerProps = append(writerProps, parquet.WithStatsFor(colName, javaBool(val)))
+	}
+
 	// Dictionary encoding is on unless parquet.enable.dictionary disables it;
 	// write.parquet.dict-encoding-enabled.column.<col-name> overrides per column.
 	dictEnabled := ParquetDictEnabledDefault
@@ -363,7 +426,7 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	writerProps = append(writerProps, parquet.WithDictionaryDefault(dictEnabled))
 
 	// Dictionary overrides use physical Parquet paths. Table writers resolve
-	// Bloom filter settings from logical names before building these properties.
+	// Bloom filter and statistics settings from logical names before building these properties.
 	prefix = ParquetDictEncodingColumnEnabledKeyPrefix + "."
 	for key, val := range props {
 		colName, ok := strings.CutPrefix(key, prefix)

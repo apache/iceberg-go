@@ -1096,6 +1096,7 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 			ParquetBloomFilterColumnEnabledKeyPrefix,
 			ParquetBloomFilterColumnFPPKeyPrefix,
 			ParquetBloomFilterColumnNDVKeyPrefix,
+			ParquetColumnStatsEnabledKeyPrefix,
 			ParquetCompressionColumnCodecKeyPrefix,
 			ParquetCompressionColumnLevelKeyPrefix,
 		})...)

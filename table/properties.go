@@ -120,6 +120,7 @@ const (
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
 	ParquetBloomFilterColumnFPPKeyPrefix     = internal.ParquetBloomFilterColumnFPPKeyPrefix
 	ParquetBloomFilterColumnNDVKeyPrefix     = internal.ParquetBloomFilterColumnNDVKeyPrefix
+	ParquetColumnStatsEnabledKeyPrefix       = internal.ParquetColumnStatsEnabledKeyPrefix
 
 	ParquetBatchSizeKey     = internal.ParquetBatchSizeKey
 	ParquetBatchSizeDefault = internal.ParquetBatchSizeDefault

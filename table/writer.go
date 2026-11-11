@@ -178,6 +178,7 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 		}
 		variantFieldIDs = tblutils.VariantFieldIDsFromSchema(w.fileSchema)
 		writeProps = tblutils.ResolveParquetBloomColumnPaths(w.props, meta.CurrentSchema(), w.fileSchema, colMapping, w.content)
+		writeProps = tblutils.ResolveParquetStatsColumnPaths(writeProps, meta.CurrentSchema(), w.fileSchema, colMapping, w.content)
 		if err := tblutils.ValidateParquetWriteProperties(writeProps); err != nil {
 			return nil, err
 		}

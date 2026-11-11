@@ -213,7 +213,15 @@ func TestAuthTypeErrors(t *testing.T) {
 	}{
 		{"unknown", "made-up", nil, `unknown rest.auth.type "made-up"`},
 		{"google without import", "google", nil, `import _ "github.com/apache/iceberg-go/catalog/rest/googleauth"`},
-		{"sigv4", "sigv4", nil, "set rest.sigv4-enabled=true"},
+		{
+			"sigv4 without backend", "sigv4", nil,
+			`rest.auth.type=sigv4) but no signer backend is registered; add a blank import: import _ "github.com/apache/iceberg-go/catalog/rest/sigv4"`,
+		},
+		{
+			"sigv4 delegating to sigv4", "sigv4",
+			iceberg.Properties{"rest.auth.sigv4.delegate-auth-type": "SigV4"},
+			"cannot delegate a SigV4 auth manager to another SigV4 auth manager",
+		},
 		{"factory error", "test-registry-failing", nil, "rest.auth.type=test-registry-failing: no credentials"},
 		{"nil manager", "test-registry-nil", nil, "factory returned nil"},
 		{
@@ -247,8 +255,133 @@ func TestRegisterAuthManagerRejectsReservedNames(t *testing.T) {
 	factory := func(context.Context, rest.AuthManagerConfig) (rest.AuthManager, error) {
 		return staticAuthManager{}, nil
 	}
-	for _, name := range []string{"", "none", "Basic", "OAuth2"} {
+	for _, name := range []string{"", "none", "Basic", "OAuth2", "SigV4"} {
 		assert.Panics(t, func() { rest.RegisterAuthManager(name, factory) }, name)
 	}
 	assert.Panics(t, func() { rest.RegisterAuthManager("test-registry-nil-factory", nil) })
+}
+
+// testSigner marks each request it signs, standing in for the AWS backend,
+// which the catalog/rest tests can't import.
+type testSigner struct{}
+
+func (testSigner) SignRequest(r *http.Request) error {
+	r.Header.Set("X-Test-Signature", "signed")
+
+	return nil
+}
+
+func withTestSigner() rest.Option {
+	return rest.WithSignerFactory(func(context.Context, rest.SignerConfig) (rest.RequestSigner, error) {
+		return testSigner{}, nil
+	})
+}
+
+// signedRequest is what the server saw on one request.
+type signedRequest struct{ auth, signature string }
+
+// newSigV4Recorder is a REST catalog that records the Authorization and test
+// signature headers of /v1/config and /v1/namespaces, and returns overrides
+// from /v1/config.
+func newSigV4Recorder(t *testing.T, overrides map[string]string) (*httptest.Server, func() map[string]signedRequest) {
+	t.Helper()
+
+	var (
+		mu   sync.Mutex
+		seen = map[string]signedRequest{}
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = signedRequest{r.Header.Get("Authorization"), r.Header.Get("X-Test-Signature")}
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]string{}, "overrides": overrides})
+		case "/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces": []}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv, func() map[string]signedRequest {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return maps.Clone(seen)
+	}
+}
+
+func TestSigV4AuthTypeSignsAndDelegates(t *testing.T) {
+	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:password"))
+	cases := []struct {
+		name     string
+		props    iceberg.Properties
+		opts     []rest.Option
+		wantAuth string
+	}{
+		{
+			name:     "default delegate is oauth2",
+			props:    iceberg.Properties{"rest.auth.type": "SigV4"},
+			opts:     []rest.Option{rest.WithOAuthToken("tok")},
+			wantAuth: "Bearer tok",
+		},
+		{
+			name: "basic delegate",
+			props: iceberg.Properties{
+				"rest.auth.type":                     "sigv4",
+				"rest.auth.sigv4.delegate-auth-type": "Basic",
+				"rest.auth.basic.username":           "user",
+				"rest.auth.basic.password":           "password",
+			},
+			wantAuth: basic,
+		},
+		{
+			name:     "none delegate",
+			props:    iceberg.Properties{"rest.auth.type": "sigv4", "rest.auth.sigv4.delegate-auth-type": "none"},
+			opts:     []rest.Option{rest.WithOAuthToken("tok")},
+			wantAuth: "",
+		},
+		{
+			name:     "WithAuthManager replaces the delegate but not signing",
+			props:    iceberg.Properties{"rest.auth.type": "sigv4", "rest.auth.sigv4.delegate-auth-type": "basic"},
+			opts:     []rest.Option{rest.WithAuthManager(staticAuthManager{value: "Explicit"})},
+			wantAuth: "Explicit",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, seen := newSigV4Recorder(t, nil)
+			opts := append([]rest.Option{withTestSigner(), rest.WithAdditionalProps(tc.props)}, tc.opts...)
+			cat, err := rest.NewCatalog(context.Background(), "test", srv.URL, opts...)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = cat.Close() })
+			_, err = cat.ListNamespaces(context.Background(), nil)
+			require.NoError(t, err)
+
+			want := signedRequest{tc.wantAuth, "signed"}
+			got := seen()
+			assert.Equal(t, want, got["/v1/config"], "the /v1/config request")
+			assert.Equal(t, want, got["/v1/namespaces"], "the catalog request")
+		})
+	}
+}
+
+func TestSigV4AuthTypeIgnoresServerOverrides(t *testing.T) {
+	srv, seen := newSigV4Recorder(t, map[string]string{
+		"rest.sigv4-enabled": "false",
+		"rest.auth.type":     "none",
+	})
+	cat, err := rest.NewCatalog(context.Background(), "test", srv.URL, withTestSigner(),
+		rest.WithOAuthToken("tok"), rest.WithAdditionalProps(iceberg.Properties{"rest.auth.type": "sigv4"}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+	_, err = cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, signedRequest{"Bearer tok", "signed"}, seen()["/v1/namespaces"],
+		"a server override must not turn off signing or the delegate the client chose")
 }
