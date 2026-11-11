@@ -3117,19 +3117,20 @@ func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.
 	selected, fields := []arrow.Field{}, field.Children
 	sameType := true
 
-	for i, t := range children {
-		field := fields[i]
-		if arrow.TypeEqual(field.Field.Type, t.Type) {
-			selected = append(selected, *field.Field)
-		} else if t.Type == nil {
+	for i, child := range children {
+		original := fields[i].Field
+		if child.Type == nil {
 			sameType = false
-			// type has changed, create a new field with the projected type
-			selected = append(selected, arrow.Field{
-				Name:     field.Field.Name,
-				Type:     field.Field.Type,
-				Nullable: field.Field.Nullable,
-				Metadata: field.Field.Metadata,
-			})
+
+			continue
+		}
+		if arrow.TypeEqual(original.Type, child.Type) {
+			selected = append(selected, *original)
+		} else {
+			sameType = false
+			projected := *original
+			projected.Type = child.Type
+			selected = append(selected, projected)
 		}
 	}
 
