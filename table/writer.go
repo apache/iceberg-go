@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/io"
@@ -272,7 +274,8 @@ func metricsPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 }
 
 // parquetPropsFor mirrors Java's deleteContext: delete settings override the
-// corresponding data settings, while absent overrides inherit the data values.
+// corresponding data settings. Absent overrides inherit the data values, except
+// that a different delete codec uses its own default compression level.
 // Metrics use the original table properties independently of this writer config.
 func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Properties) (iceberg.Properties, error) {
 	if content == iceberg.EntryContentData {
@@ -294,11 +297,17 @@ func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 			effective[dataKey] = value
 		}
 	}
-	if codec, overridden := props[DeleteParquetCompressionKey]; overridden {
-		switch strings.ToLower(codec) {
-		case "snappy", "zstd", "uncompressed", "gzip", "brotli", "lz4", "lz4raw", "lz4_raw", "lzo":
-		default:
-			return nil, fmt.Errorf("%w: unsupported %s value %q", iceberg.ErrInvalidArgument, DeleteParquetCompressionKey, codec)
+	if value, overridden := props[DeleteParquetCompressionKey]; overridden {
+		codec, ok := tblutils.ParquetCompressionCodec(value)
+		if !ok {
+			return nil, fmt.Errorf("%w: unsupported %s value %q", iceberg.ErrInvalidArgument, DeleteParquetCompressionKey, value)
+		}
+		if _, err := compress.GetCodec(codec); err != nil {
+			return nil, fmt.Errorf("%w: unsupported %s value %q: %v", iceberg.ErrInvalidArgument, DeleteParquetCompressionKey, value, err)
+		}
+		dataCodec, _ := tblutils.ParquetCompressionCodec(props.Get(ParquetCompressionKey, ParquetCompressionDefault))
+		if _, hasLevel := props[DeleteParquetCompressionLevelKey]; !hasLevel && codec != dataCodec {
+			effective[ParquetCompressionLevelKey] = strconv.Itoa(ParquetCompressionLevelDefault)
 		}
 	}
 	if version, overridden := props[DeleteParquetPageVersionKey]; overridden {
@@ -314,13 +323,20 @@ func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 		return strings.HasPrefix(key, ParquetBloomFilterColumnEnabledKeyPrefix+".") ||
 			strings.HasPrefix(key, tblutils.ParquetDictEncodingColumnEnabledKeyPrefix+".")
 	})
-	if err := tblutils.ValidateParquetWriteProperties(effective); err != nil {
-		for deleteKey, dataKey := range overrides {
-			if _, overridden := props[deleteKey]; overridden && strings.Contains(err.Error(), dataKey) {
-				return nil, fmt.Errorf("%s: %w", deleteKey, err)
-			}
+	for deleteKey, dataKey := range overrides {
+		value, overridden := props[deleteKey]
+		if !overridden || dataKey == ParquetCompressionKey || dataKey == ParquetPageVersionKey {
+			continue
 		}
-
+		setting := iceberg.Properties{dataKey: value}
+		if dataKey == ParquetCompressionLevelKey {
+			setting[ParquetCompressionKey] = effective.Get(ParquetCompressionKey, ParquetCompressionDefault)
+		}
+		if err := tblutils.ValidateParquetWriteProperties(setting); err != nil {
+			return nil, fmt.Errorf("%s: %w", deleteKey, err)
+		}
+	}
+	if err := tblutils.ValidateParquetWriteProperties(effective); err != nil {
 		return nil, err
 	}
 

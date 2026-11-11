@@ -226,6 +226,70 @@ func TestDeleteParquetSettingsInheritance(t *testing.T) {
 	assert.Equal(t, props, effective)
 }
 
+func TestDeleteParquetCompressionLevelInheritance(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		props     iceberg.Properties
+		wantLevel string
+	}{
+		{"different codec resets level", iceberg.Properties{ParquetCompressionKey: "zstd", ParquetCompressionLevelKey: "19", DeleteParquetCompressionKey: "gzip"}, "-1"},
+		{"implicit data codec resets level", iceberg.Properties{ParquetCompressionLevelKey: "19", DeleteParquetCompressionKey: "gzip"}, "-1"},
+		{"same codec inherits level", iceberg.Properties{ParquetCompressionKey: "GZIP", ParquetCompressionLevelKey: "3", DeleteParquetCompressionKey: "gzip"}, "3"},
+		{"raw lz4 aliases inherit level", iceberg.Properties{ParquetCompressionKey: "lz4_raw", ParquetCompressionLevelKey: "3", DeleteParquetCompressionKey: "LZ4RAW"}, "3"},
+		{"explicit delete level wins", iceberg.Properties{ParquetCompressionKey: "zstd", ParquetCompressionLevelKey: "19", DeleteParquetCompressionKey: "gzip", DeleteParquetCompressionLevelKey: "8"}, "8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := maps.Clone(tc.props)
+			for _, content := range []iceberg.ManifestEntryContent{iceberg.EntryContentEqDeletes, iceberg.EntryContentPosDeletes} {
+				effective, err := parquetPropsFor(content, tc.props)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantLevel, effective[ParquetCompressionLevelKey])
+			}
+			require.Equal(t, original, tc.props)
+		})
+	}
+}
+
+func TestDeleteParquetCodecOverrideWithoutLevelWrites(t *testing.T) {
+	for _, content := range []iceberg.ManifestEntryContent{iceberg.EntryContentEqDeletes, iceberg.EntryContentPosDeletes} {
+		t.Run(fmt.Sprint(content), func(t *testing.T) {
+			props := iceberg.Properties{ParquetCompressionKey: "zstd", ParquetCompressionLevelKey: "19", DeleteParquetCompressionKey: "gzip"}
+			meta := deleteParquetTestMetadata(t, props)
+			schema := meta.CurrentSchema()
+			var equalityIDs []int
+			data := `[{"value":"hello"}]`
+			if content == iceberg.EntryContentEqDeletes {
+				equalityIDs = []int{1}
+			} else {
+				schema = iceberg.PositionalDeleteSchema
+				data = `[{"file_path":"data.parquet","pos":1}]`
+			}
+			arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+			require.NoError(t, err)
+			record, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(data))
+			require.NoError(t, err)
+			defer record.Release()
+			fs := iceio.NewMemFS()
+			writer, err := newDataFileWriter("mem://delete-settings", fs, meta, props,
+				withContent(content), withFileSchema(schema), withEqualityFieldIDs(equalityIDs))
+			require.NoError(t, err)
+			record.Retain()
+			dataFile, err := writer.writeFile(t.Context(), nil, WriteTask{Uuid: uuid.New(), Schema: schema, Batches: []arrow.RecordBatch{record}, FileCount: 1})
+			require.NoError(t, err)
+			input, err := fs.Open(t.Context(), dataFile.FilePath())
+			require.NoError(t, err)
+			reader, err := file.NewParquetReader(input)
+			require.NoError(t, err)
+			defer reader.Close()
+			for col := range reader.MetaData().Schema.NumColumns() {
+				chunk, err := reader.MetaData().RowGroup(0).ColumnChunk(col)
+				require.NoError(t, err)
+				require.Equal(t, compress.Codecs.Gzip, chunk.Compression())
+			}
+		})
+	}
+}
+
 func TestDeleteParquetSettingsValidation(t *testing.T) {
 	for _, tt := range []struct{ key, value string }{
 		{DeleteParquetRowGroupSizeBytesKey, "0"},
@@ -238,6 +302,8 @@ func TestDeleteParquetSettingsValidation(t *testing.T) {
 		{DeleteParquetCompressionLevelKey, "10"},
 		{DeleteParquetCompressionKey, "unknown"},
 		{DeleteParquetCompressionKey, ""},
+		{DeleteParquetCompressionKey, "lz4"},
+		{DeleteParquetCompressionKey, "lzo"},
 		{DeleteParquetPageVersionKey, "v3"},
 	} {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
