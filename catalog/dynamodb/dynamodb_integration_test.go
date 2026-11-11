@@ -147,19 +147,32 @@ func TestDynamoDBNamespaceLocationAndHierarchy(t *testing.T) {
 }
 
 type transactionTransport struct {
-	enabled      atomic.Bool
-	once         sync.Once
-	staged       chan struct{}
-	release      chan struct{}
-	loseResponse bool
+	enabled                   atomic.Bool
+	once                      sync.Once
+	staged                    chan struct{}
+	release                   chan struct{}
+	loseResponse              bool
+	failBeforeWrite           bool
+	failReadsAfterTransaction bool
+	transactionFinished       atomic.Bool
 }
 
 func (tr *transactionTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if tr.enabled.Load() && tr.failReadsAfterTransaction && tr.transactionFinished.Load() &&
+		strings.HasSuffix(request.Header.Get("X-Amz-Target"), ".GetItem") {
+		return nil, errors.New("status lookup failed")
+	}
 	intercept := tr.enabled.Load() && strings.HasSuffix(request.Header.Get("X-Amz-Target"), ".TransactWriteItems")
 	if intercept && tr.staged != nil {
 		tr.once.Do(func() { close(tr.staged); <-tr.release })
 	}
+	if intercept && tr.failBeforeWrite {
+		return nil, errors.New("transaction response unavailable")
+	}
 	response, err := http.DefaultTransport.RoundTrip(request)
+	if intercept {
+		tr.transactionFinished.Store(true)
+	}
 	if intercept && tr.loseResponse && err == nil {
 		io.Copy(io.Discard, response.Body)
 		response.Body.Close()
@@ -170,40 +183,55 @@ func (tr *transactionTransport) RoundTrip(request *http.Request) (*http.Response
 	return response, err
 }
 
-func installTransport(c *Catalog, tr *transactionTransport) {
+func installTransport(c *Catalog, tr http.RoundTripper) {
 	cfg := c.awsConfig.Copy()
 	cfg.HTTPClient = &http.Client{Transport: tr}
 	c.client = sdk.NewFromConfig(cfg, func(o *sdk.Options) { o.BaseEndpoint = aws.String(c.props[EndpointKey]) })
 }
 
 func TestDynamoDBCompetingCommits(t *testing.T) {
-	c := localCatalog(t)
-	tbl := createLocalTable(t, c)
-	other, err := NewCatalog(t.Context(), "other", c.awsConfig, c.props)
-	require.NoError(t, err)
-	defer other.Close()
-	transport := &transactionTransport{staged: make(chan struct{}), release: make(chan struct{})}
-	installTransport(c, transport)
-	transport.enabled.Store(true)
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := c.CommitTable(t.Context(), tbl.Identifier(), nil, []table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"loser": "true"})})
-		done <- err
-	}()
-	select {
-	case <-transport.staged:
-	case <-time.After(10 * time.Second):
-		close(transport.release)
-		t.Fatal("commit did not reach conditional write")
+	for _, tc := range []struct {
+		name             string
+		failStatusLookup bool
+		metadataFiles    int
+	}{
+		{"confirmed failure removes staged metadata", false, 2},
+		{"unknown status keeps staged metadata", true, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := localCatalog(t)
+			tbl := createLocalTable(t, c)
+			metadataDir := filepath.Dir(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
+			other, err := NewCatalog(t.Context(), "other", c.awsConfig, c.props)
+			require.NoError(t, err)
+			defer other.Close()
+			transport := &transactionTransport{staged: make(chan struct{}), release: make(chan struct{}), failReadsAfterTransaction: tc.failStatusLookup}
+			installTransport(c, transport)
+			transport.enabled.Store(true)
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := c.CommitTable(t.Context(), tbl.Identifier(), nil, []table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"loser": "true"})})
+				done <- err
+			}()
+			select {
+			case <-transport.staged:
+			case <-time.After(10 * time.Second):
+				close(transport.release)
+				t.Fatal("commit did not reach conditional write")
+			}
+			_, _, err = other.CommitTable(t.Context(), tbl.Identifier(), nil, []table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"winner": "true"})})
+			close(transport.release)
+			require.NoError(t, err)
+			require.ErrorIs(t, <-done, table.ErrCommitFailed)
+			loaded, err := other.LoadTable(t.Context(), tbl.Identifier())
+			require.NoError(t, err)
+			require.Equal(t, "true", loaded.Properties()["winner"])
+			require.NotContains(t, loaded.Properties(), "loser")
+			files, err := os.ReadDir(metadataDir)
+			require.NoError(t, err)
+			require.Len(t, files, tc.metadataFiles)
+		})
 	}
-	_, _, err = other.CommitTable(t.Context(), tbl.Identifier(), nil, []table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"winner": "true"})})
-	close(transport.release)
-	require.NoError(t, err)
-	require.ErrorIs(t, <-done, table.ErrCommitFailed)
-	loaded, err := c.LoadTable(t.Context(), tbl.Identifier())
-	require.NoError(t, err)
-	require.Equal(t, "true", loaded.Properties()["winner"])
-	require.NotContains(t, loaded.Properties(), "loser")
 }
 
 func TestDynamoDBLostCommitResponse(t *testing.T) {
@@ -223,6 +251,90 @@ func TestDynamoDBLostCommitResponse(t *testing.T) {
 	file, err := fs.Open(t.Context(), location)
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
+}
+
+func TestDynamoDBUnknownCommitOutcomeKeepsMetadata(t *testing.T) {
+	c := localCatalog(t)
+	tbl := createLocalTable(t, c)
+	metadataDir := filepath.Dir(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
+	transport := &transactionTransport{failBeforeWrite: true}
+	installTransport(c, transport)
+	transport.enabled.Store(true)
+	_, _, err := c.CommitTable(t.Context(), tbl.Identifier(), nil, []table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"comment": "new"})})
+	require.ErrorContains(t, err, "transaction response unavailable")
+	loaded, err := c.LoadTable(t.Context(), tbl.Identifier())
+	require.NoError(t, err)
+	require.Equal(t, tbl.MetadataLocation(), loaded.MetadataLocation())
+	files, err := os.ReadDir(metadataDir)
+	require.NoError(t, err)
+	require.Len(t, files, 2)
+}
+
+type namespaceQueryTransport struct {
+	indexResponse string
+	indexQueries  atomic.Int32
+	scans         atomic.Int32
+}
+
+func (tr *namespaceQueryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	target := request.Header.Get("X-Amz-Target")
+	if strings.HasSuffix(target, ".Scan") {
+		tr.scans.Add(1)
+	}
+	if strings.HasSuffix(target, ".Query") {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		var input struct{ IndexName string }
+		if err := json.Unmarshal(body, &input); err != nil {
+			return nil, err
+		}
+		if input.IndexName == namespaceIndex {
+			tr.indexQueries.Add(1)
+			if tr.indexResponse != "" {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/x-amz-json-1.0"}},
+					Body: io.NopCloser(strings.NewReader(tr.indexResponse)), Request: request}, nil
+			}
+		}
+	}
+
+	return http.DefaultTransport.RoundTrip(request)
+}
+
+func TestDynamoDBDropNamespaceIndexAndConsistentScan(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		withTable     bool
+		indexResponse string
+		notEmpty      bool
+		wantScans     int32
+	}{
+		{"index finds live table", true, `{"Items":[{"identifier":{"S":"db.table"},"namespace":{"S":"db"}}]}`, true, 0},
+		{"index misses live table", true, `{"Items":[]}`, true, 1},
+		{"stale index entry", false, `{"Items":[{"identifier":{"S":"db.missing"},"namespace":{"S":"db"}}]}`, false, 1},
+		{"empty namespace", false, "", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := localCatalog(t)
+			if tc.withTable {
+				createLocalTable(t, c)
+			} else {
+				require.NoError(t, c.CreateNamespace(t.Context(), table.Identifier{"db"}, nil))
+			}
+			transport := &namespaceQueryTransport{indexResponse: tc.indexResponse}
+			installTransport(c, transport)
+			err := c.DropNamespace(t.Context(), table.Identifier{"db"})
+			if tc.notEmpty {
+				require.ErrorIs(t, err, catalog.ErrNamespaceNotEmpty)
+			} else {
+				require.NoError(t, err)
+			}
+			require.EqualValues(t, 1, transport.indexQueries.Load())
+			require.Equal(t, tc.wantScans, transport.scans.Load())
+		})
+	}
 }
 
 func TestDynamoDBNamespaceDropCreateRace(t *testing.T) {

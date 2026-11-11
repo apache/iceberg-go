@@ -178,6 +178,27 @@ func (c *Catalog) DropNamespace(ctx context.Context, ns table.Identifier) error 
 		return catalog.ErrNamespaceNotEmpty
 	}
 
+	// The index can cheaply find a table, but may return a recently deleted
+	// entry. Confirm it against the base table before rejecting the drop.
+	tables, err := c.client.Query(ctx, &dynamodb.QueryInput{
+		TableName: aws.String(c.tableName), IndexName: aws.String(namespaceIndex), Limit: aws.Int32(1),
+		KeyConditionExpression:    aws.String("#ns = :ns AND begins_with(#id, :prefix)"),
+		ExpressionAttributeNames:  map[string]string{"#ns": namespaceCol, "#id": identifierCol},
+		ExpressionAttributeValues: item{":ns": stringAttr(strings.Join(ns, ".")), ":prefix": stringAttr(strings.Join(ns, ".") + ".")},
+	})
+	if err != nil {
+		return err
+	}
+	if len(tables.Items) != 0 {
+		entry, err := c.get(ctx, item{identifierCol: tables.Items[0][identifierCol], namespaceCol: tables.Items[0][namespaceCol]})
+		if err != nil {
+			return err
+		}
+		if len(entry) != 0 {
+			return catalog.ErrNamespaceNotEmpty
+		}
+	}
+
 	// GSI reads are eventually consistent. Check emptiness through a consistent
 	// base-table scan, then guard the delete with the namespace version. Go
 	// create/register/rename operations update that version in their transaction.

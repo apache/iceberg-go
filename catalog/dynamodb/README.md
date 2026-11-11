@@ -44,6 +44,13 @@ also update namespace versions when creating tables or child namespaces, or
 registering and renaming tables. This protects namespace deletion against
 concurrent Go creation. Java writers do not update these namespace versions;
 namespace lifecycle changes shared with Java need external coordination.
+These version updates can conflict when many tables or child namespaces are
+created in the same namespace, or when its properties are updated concurrently.
+Creation retries a limited number of times and can return `ErrCommitFailed`.
+
+Dropping a namespace checks the index first, then scans the backing table with
+consistent reads to confirm that it is empty. A successful drop therefore uses
+read capacity proportional to the size of the whole catalog table.
 
 Run the local integration suite with:
 

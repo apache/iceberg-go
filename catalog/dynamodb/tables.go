@@ -253,37 +253,58 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 			TableName: aws.String(c.tableName), Item: updated, ConditionExpression: aws.String("#v = :base"),
 			ExpressionAttributeNames: map[string]string{"#v": versionCol}, ExpressionAttributeValues: item{":base": entry[versionCol]},
 		}}})
-		if err != nil && !c.commitSucceeded(ctx, ident, staged.MetadataLocation()) {
-			if conditionFailed(err) || transactionConflict(err) {
-				err = fmt.Errorf("%w: table metadata changed: %w", table.ErrCommitFailed, err)
-			}
+		if err != nil {
+			committed, statusErr := c.commitSucceeded(ctx, ident, staged.MetadataLocation())
+			if !committed {
+				if conditionFailed(err) || transactionConflict(err) {
+					err = fmt.Errorf("%w: table metadata changed: %w", table.ErrCommitFailed, err)
+					if statusErr == nil {
+						if cleanupErr := c.removeUncommittedMetadata(ctx, staged.MetadataLocation(), staged.FS); cleanupErr != nil {
+							err = errors.Join(err, cleanupErr)
+						}
+					}
+				}
 
-			// Retain the file on errors: a lost response can follow a successful
-			// commit, and later commits can already refer to this metadata.
-			return nil, "", err
+				// Keep the file if the commit outcome could not be determined.
+				return nil, "", err
+			}
 		}
 	}
 
 	return staged.Metadata(), staged.MetadataLocation(), nil
 }
 
-func (c *Catalog) commitSucceeded(ctx context.Context, ident table.Identifier, location string) bool {
+func (c *Catalog) commitSucceeded(ctx context.Context, ident table.Identifier, location string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	loaded, err := c.LoadTable(ctx, ident)
 	if err != nil {
-		return false
+		return false, err
 	}
 	if loaded.MetadataLocation() == location {
-		return true
+		return true, nil
 	}
 	for entry := range loaded.Metadata().PreviousFiles() {
 		if entry.MetadataFile == location {
-			return true
+			return true, nil
 		}
 	}
 
-	return false
+	return false, nil
+}
+
+func (c *Catalog) removeUncommittedMetadata(ctx context.Context, location string, loadFS table.FSysF) error {
+	cleanupCtx, cancel := context.WithTimeout(utils.WithAWSConfig(context.WithoutCancel(ctx), &c.awsConfig), 5*time.Second)
+	defer cancel()
+	fs, err := loadFS(cleanupCtx)
+	if err != nil {
+		return fmt.Errorf("load filesystem to remove uncommitted metadata %s: %w", location, err)
+	}
+	if err := fs.Remove(cleanupCtx, location); err != nil {
+		return fmt.Errorf("remove uncommitted metadata %s: %w", location, err)
+	}
+
+	return nil
 }
 
 func (c *Catalog) dropEntry(ctx context.Context, ident table.Identifier, entry item) error {
