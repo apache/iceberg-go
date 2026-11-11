@@ -141,8 +141,10 @@ const (
 	WriteFormatDefaultKey     = "write.format.default"
 	WriteFormatDefaultDefault = "parquet"
 
-	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
-	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
+	WriteTargetFileSizeBytesKey           = "write.target-file-size-bytes"
+	WriteTargetFileSizeBytesDefault       = 512 * 1024 * 1024 // 512 MB
+	WriteDeleteTargetFileSizeBytesKey     = "write.delete.target-file-size-bytes"
+	WriteDeleteTargetFileSizeBytesDefault = 64 * 1024 * 1024 // 64 MB
 
 	ParquetShredVariantsKey         = internal.ParquetShredVariantsKey
 	ParquetShredVariantsDefault     = internal.ParquetShredVariantsDefault
