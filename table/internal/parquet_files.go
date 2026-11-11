@@ -450,6 +450,17 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 				return fmt.Errorf("%w: invalid %s value %q: FPP must be between 0 and 1 (exclusive)",
 					iceberg.ErrInvalidArgument, key, value)
 			}
+
+			// Arrow's adaptive sizing can loop forever if the eighth root rounds
+			// to 1. Explicit NDV uses a different, non-adaptive sizing path.
+			_, hasNDV := props[ndvPrefix+colName]
+			if javaBool(props[ParquetBloomFilterAdaptiveEnabledKey]) &&
+				javaBool(props[ParquetBloomFilterColumnEnabledKeyPrefix+"."+colName]) && !hasNDV &&
+				props.GetInt(ParquetBloomFilterMaxBytesKey, ParquetBloomFilterMaxBytesDefault) > parquetBloomFilterMaxBytesMin &&
+				math.Pow(fpp, 1.0/8.0) == 1 {
+				return fmt.Errorf("%w: invalid %s value %q: FPP is too close to 1 for adaptive sizing",
+					iceberg.ErrInvalidArgument, key, value)
+			}
 		}
 		if colName, ok := strings.CutPrefix(key, ndvPrefix); ok && colName != "" {
 			ndv, err := strconv.ParseInt(value, 10, 64)

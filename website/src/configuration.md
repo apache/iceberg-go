@@ -568,7 +568,7 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.shred-variants` | `false` (opt-in shredding of top-level variant columns) |
 | `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
-The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`. Bloom filters remain disabled for a column unless its enabled toggle is set. When adaptive sizing is enabled, an explicitly configured column NDV takes precedence.
+The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`. Bloom filters remain disabled for a column unless its enabled toggle is set. When adaptive sizing is enabled, an explicitly configured column NDV takes precedence. Adaptive sizing rejects an FPP extremely close to 1 if it would cause the writer to hang.
 
 Column compression keys use case-sensitive Iceberg leaf paths, such as
 `items.element` or `attributes.value.name`. They apply to data files and use

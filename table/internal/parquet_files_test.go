@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	iofs "io/fs"
+	"maps"
 	"math"
 	"math/big"
 	"strconv"
@@ -1956,6 +1957,36 @@ func TestValidateParquetBloomFilterProperties(t *testing.T) {
 	}
 }
 
+func TestValidateAdaptiveBloomFilterFPPNearOne(t *testing.T) {
+	const fpp = "0.9999999999999999"
+	fppKey := internal.ParquetBloomFilterColumnFPPKeyPrefix + ".id"
+	enabledKey := internal.ParquetBloomFilterColumnEnabledKeyPrefix + ".id"
+	ndvKey := internal.ParquetBloomFilterColumnNDVKeyPrefix + ".id"
+	for _, tc := range []struct {
+		name    string
+		props   iceberg.Properties
+		wantErr bool
+	}{
+		{"adaptive enabled", iceberg.Properties{fppKey: fpp, enabledKey: "true", internal.ParquetBloomFilterAdaptiveEnabledKey: "true"}, true},
+		{"adaptive disabled", iceberg.Properties{fppKey: fpp, enabledKey: "true"}, false},
+		{"filter disabled", iceberg.Properties{fppKey: fpp, internal.ParquetBloomFilterAdaptiveEnabledKey: "true"}, false},
+		{"explicit NDV", iceberg.Properties{fppKey: fpp, enabledKey: "true", ndvKey: "1", internal.ParquetBloomFilterAdaptiveEnabledKey: "true"}, false},
+		{"other column NDV", iceberg.Properties{fppKey: fpp, enabledKey: "true", internal.ParquetBloomFilterColumnNDVKeyPrefix + ".other": "1", internal.ParquetBloomFilterAdaptiveEnabledKey: "true"}, true},
+		{"minimum filter size", iceberg.Properties{fppKey: fpp, enabledKey: "true", internal.ParquetBloomFilterAdaptiveEnabledKey: "true", internal.ParquetBloomFilterMaxBytesKey: "32"}, false},
+		{"ordinary FPP", iceberg.Properties{fppKey: "0.99", enabledKey: "true", internal.ParquetBloomFilterAdaptiveEnabledKey: "true"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := internal.ValidateParquetWriteProperties(tc.props)
+			if tc.wantErr {
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+				assert.Contains(t, err.Error(), fppKey)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // writeSizedBloomParquet uses the table's writer properties to produce a real
 // Parquet Bloom filter. It checks every inserted distinct value for false negatives.
 func writeSizedBloomParquet(t *testing.T, props iceberg.Properties, distinct, rows int) ([]byte, int64) {
@@ -1991,15 +2022,16 @@ func writeSizedBloomParquet(t *testing.T, props iceberg.Properties, distinct, ro
 	var size int64
 	err = rgBloom.VisitColumnBloomFilter(0, func(bf metadata.BloomFilter) error {
 		if bf == nil {
-			return fmt.Errorf("no bloom filter on id")
+			return errors.New("no bloom filter on id")
 		}
 		size = bf.Size()
 		hasher := bf.Hasher()
-		for v := int32(0); v < int32(distinct); v++ {
+		for v := range int32(distinct) {
 			if !bf.CheckHash(hasher.Sum64(int32PhysBytes(v))) {
 				return fmt.Errorf("bloom filter returned false for inserted value %d", v)
 			}
 		}
+
 		return nil
 	})
 	require.NoError(t, err)
@@ -2017,12 +2049,9 @@ func TestAdaptiveParquetBloomFilterSizing(t *testing.T) {
 	}
 	with := func(add iceberg.Properties) iceberg.Properties {
 		result := make(iceberg.Properties, len(base)+len(add))
-		for k, v := range base {
-			result[k] = v
-		}
-		for k, v := range add {
-			result[k] = v
-		}
+		maps.Copy(result, base)
+		maps.Copy(result, add)
+
 		return result
 	}
 	adaptive := with(iceberg.Properties{internal.ParquetBloomFilterAdaptiveEnabledKey: "true"})
@@ -2034,6 +2063,22 @@ func TestAdaptiveParquetBloomFilterSizing(t *testing.T) {
 	_, fixedSize := writeSizedBloomParquet(t, base, 100, rows)
 	assert.Equal(t, int64(maxBytes), fixedSize)
 	assert.Less(t, lowSize, fixedSize)
+
+	for _, tc := range []struct {
+		name  string
+		props iceberg.Properties
+	}{
+		{"explicit NDV", iceberg.Properties{internal.ParquetBloomFilterColumnNDVKeyPrefix + ".id": "10"}},
+		{"minimum filter size", iceberg.Properties{internal.ParquetBloomFilterMaxBytesKey: "32"}},
+	} {
+		t.Run("FPP near one/"+tc.name, func(t *testing.T) {
+			props := with(tc.props)
+			props[internal.ParquetBloomFilterAdaptiveEnabledKey] = "true"
+			props[internal.ParquetBloomFilterColumnFPPKeyPrefix+".id"] = "0.9999999999999999"
+			_, size := writeSizedBloomParquet(t, props, 10, 20)
+			assert.Equal(t, int64(32), size)
+		})
+	}
 
 	ndvProps := with(iceberg.Properties{
 		internal.ParquetBloomFilterAdaptiveEnabledKey:         "true",
