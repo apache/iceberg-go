@@ -175,6 +175,34 @@ func TestDynamicPartitionOverwriteAllowsOldSpecGlobalDeleteOutsideTouchedPartiti
 	}
 }
 
+func TestDynamicPartitionOverwriteAllowsRemovalOfOldSpecGlobalDelete(t *testing.T) {
+	for _, formatVersion := range []string{"2", "3"} {
+		t.Run("v"+formatVersion, func(t *testing.T) {
+			tbl := newDynamicOverwriteTableWithUnpartitionedHistory(t, formatVersion)
+			tbl = appendRowsOnRef(t, tbl, table.MainBranch, 7)
+			tbl = appendGlobalEqualityDelete(t, tbl, 9)
+
+			leader := tbl.NewTransaction()
+			replacement := idRecordReader(t, tbl, 7)
+			require.NoError(t, leader.DynamicPartitionOverwrite(t.Context(), replacement, nil))
+			replacement.Release()
+
+			builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+				tbl.Location()+"/data/global-equality-delete.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 256)
+			require.NoError(t, err)
+			peer := tbl.NewTransaction()
+			require.NoError(t, peer.ReplaceFiles(t.Context(), nil, nil,
+				[]iceberg.DataFile{builder.EqualityFieldIDs([]int{1}).Build()}, nil))
+			_, err = peer.Commit(t.Context())
+			require.NoError(t, err)
+
+			committed, err := leader.Commit(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, []int64{7}, idsOnRef(t, committed, table.MainBranch))
+		})
+	}
+}
+
 // An append staged in the same transaction must be visible to dynamic
 // overwrite planning: touched rows are replaced, and other rows survive.
 func TestDynamicPartitionOverwriteAfterAppendInSameTransaction(t *testing.T) {

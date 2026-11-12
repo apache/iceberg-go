@@ -214,7 +214,8 @@ func validateDynamicOverwriteConflicts(
 					return fmt.Errorf("%w: concurrent snapshot %d changed file %q during an unpartitioned overwrite",
 						conflict, snapshot.SnapshotID, file.FilePath())
 				}
-				if file.ContentType() == iceberg.EntryContentEqDeletes && replacesExistingData {
+				if entry.Status() == iceberg.EntryStatusADDED &&
+					file.ContentType() == iceberg.EntryContentEqDeletes && replacesExistingData {
 					deleteSpec := cc.current.PartitionSpecByID(int(file.SpecID()))
 					if deleteSpec == nil {
 						return fmt.Errorf("dynamic partition overwrite: %w: concurrent delete file %q references spec %d",
