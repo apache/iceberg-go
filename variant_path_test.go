@@ -145,7 +145,7 @@ func TestParseVariantPathRejects(t *testing.T) {
 }
 
 func TestParseVariantPathRejectsUnescapedControlBytes(t *testing.T) {
-	for c := byte(0); c < 0x20; c++ {
+	for c := range 0x20 {
 		for _, path := range []string{
 			"$['a" + string(c) + "b']",
 			"$['a\\n" + string(c) + "b']",
