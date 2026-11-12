@@ -1902,7 +1902,22 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	// Keep validator registration atomic with staging so Commit cannot run
+	// between the two.
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
+		// Replacing data files must preserve deletes committed after the
+		// replacement was planned. This is independent of overwrite isolation:
+		// a newer replacement file would otherwise stop an older equality
+		// delete from applying.
+		t.validators = append(t.validators, rewriteValidator(markedForDeletion))
+	}
+
+	return nil
 }
 
 // ReplaceFiles atomically replaces data files and removes associated delete files
@@ -2314,11 +2329,22 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		return err
 	}
 
-	if err := t.apply(updates, reqs); err != nil {
+	var validator conflictValidatorFunc
+	if len(rewriteValidationFiles) > 0 {
+		validator = rewriteValidatorWithReferencedDataFiles(rewriteValidationFiles, referencedDataFilePaths)
+	} else if cfg.rewriteSemantics && len(markedDataForDeletion) > 0 {
+		validator = rewriteValidator(markedDataForDeletion)
+	}
+
+	// Keep validator registration atomic with staging so Commit cannot run
+	// between the two.
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
-	if len(rewriteValidationFiles) > 0 {
-		t.addValidator(rewriteValidatorWithReferencedDataFiles(rewriteValidationFiles, referencedDataFilePaths))
+	if validator != nil {
+		t.validators = append(t.validators, validator)
 	}
 
 	return nil
