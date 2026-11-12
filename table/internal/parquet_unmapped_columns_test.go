@@ -108,7 +108,8 @@ func openParquetWithUnmappedColumn(t *testing.T, nested bool) internal.FileReade
 
 	var buf bytes.Buffer
 	writer := file.NewParquetWriter(&buf, root)
-	rowGroup := writer.AppendRowGroup()
+	rowGroup, err := writer.AppendRowGroupChecked()
+	require.NoError(t, err)
 	for _, value := range []int32{7, 99} {
 		column, err := rowGroup.NextColumn()
 		require.NoError(t, err)
