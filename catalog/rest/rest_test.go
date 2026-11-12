@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -4370,6 +4371,64 @@ func (r *RestCatalogSuite) TestCommitTableErrCommitStateUnknown() {
 				"%d should return ErrCommitStateUnknown, got: %v", code, err)
 		})
 	}
+}
+
+func lostCommitResponseHandler(mux *http.ServeMux, path string) chan struct{} {
+	applied := make(chan struct{}, 2)
+	mux.HandleFunc(path, func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		applied <- struct{}{}
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	})
+
+	return applied
+}
+
+func (r *RestCatalogSuite) TestCommitTableLostResponseIsUnknown() {
+	applied := lostCommitResponseHandler(r.mux, "/v1/namespaces/db/tables/tbl")
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, _, err = cat.CommitTable(context.Background(), table.Identifier{"db", "tbl"},
+		[]table.Requirement{}, []table.Update{})
+	r.ErrorIs(err, rest.ErrCommitStateUnknown)
+	r.Equal(1, len(applied), "the client must not resend a commit with an unknown outcome")
+}
+
+func (r *RestCatalogSuite) TestUpdateTableLostResponseIsUnknown() {
+	applied := lostCommitResponseHandler(r.mux, "/v1/namespaces/db/tables/tbl")
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.UpdateTable(context.Background(), table.Identifier{"db", "tbl"},
+		[]table.Requirement{}, []table.Update{})
+	r.ErrorIs(err, rest.ErrCommitStateUnknown)
+	r.Equal(1, len(applied), "the client must not resend a commit with an unknown outcome")
+}
+
+func (r *RestCatalogSuite) TestCommitTransactionLostResponseIsUnknown() {
+	applied := lostCommitResponseHandler(r.mux, "/v1/transactions/commit")
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{{
+		Identifier:   table.Identifier{"db", "tbl"},
+		Requirements: []table.Requirement{},
+		Updates:      []table.Update{},
+	}})
+	r.ErrorIs(err, rest.ErrCommitStateUnknown)
+	r.Equal(1, len(applied), "the client must not resend a transaction with an unknown outcome")
 }
 
 func (r *RestCatalogSuite) TestCommitTableErrorBodyKeepsCommitStateUnknown() {

@@ -1825,6 +1825,38 @@ func TestHandleNon200_StatusOverrideAppliesOnMalformedBody(t *testing.T) {
 	}
 }
 
+func TestIsPreSendConnectionFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "dial failure",
+			err: &url.Error{Op: http.MethodPost, URL: "http://catalog/commit", Err: &net.OpError{
+				Op: "dial", Net: "tcp", Err: errors.New("connection refused"),
+			}},
+			want: true,
+		},
+		{
+			name: "read failure after connect",
+			err: &url.Error{Op: http.MethodPost, URL: "http://catalog/commit", Err: &net.OpError{
+				Op: "read", Net: "tcp", Err: errors.New("connection reset"),
+			}},
+		},
+		{
+			name: "unclassified transport failure",
+			err:  errors.New("transport failed"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isPreSendConnectionFailure(tt.err))
+		})
+	}
+}
+
 func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
 	t.Parallel()
 
