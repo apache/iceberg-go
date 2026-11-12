@@ -962,8 +962,8 @@ func accumulateGroupMetricsWithDeletes(r *RewriteResult, gr CompactionGroupResul
 // rewriteValidator builds a conflictValidatorFunc that rejects the
 // commit if a concurrent snapshot added delete files targeting any of
 // the rewritten data files — by referenced-data-file path, by
-// file_path bounds, or by matching partitions. Unpartitioned equality
-// deletes remain global across partition specs.
+// file_path bounds, by partition overlap for partition-scoped
+// pos-deletes, or (conservatively) any eq-delete during the rewrite.
 // Always runs — no isolation gating, because rewrite is a structural
 // operation, not a user-facing isolation choice.
 func rewriteValidator(rewrittenFiles []iceberg.DataFile) conflictValidatorFunc {
@@ -1014,7 +1014,7 @@ func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, f
 	}
 	deletes := d.deletes
 	err = cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
-		added, err := newAddedDelete(snap, e.DataFile(), cc.current)
+		added, err := newAddedDelete(snap, e.DataFile())
 		if err != nil {
 			return err
 		}

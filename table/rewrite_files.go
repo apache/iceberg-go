@@ -42,8 +42,8 @@ import (
 //     is matched to a rewritten file via its referenced_data_file
 //     column, via equal file_path lower/upper bounds when that column
 //     is unset, or — when neither resolves a single path — via
-//     partition overlap with a rewritten file. Equality deletes conflict
-//     when their partition matches or their spec is unpartitioned.
+//     partition overlap with a rewritten file. Any concurrent equality
+//     delete is treated as a conflict.
 //
 // Distributed compaction coordinators construct one [RewriteFiles] on
 // the leader transaction, feed worker outputs in via [RewriteFiles.ApplyResult],
