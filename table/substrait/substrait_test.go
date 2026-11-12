@@ -164,7 +164,7 @@ func TestExprs(t *testing.T) {
 		{iceberg.LessThanEqual(ref, "hello"), tableSchemaSimple, "lte(.field(0) => string?, string(hello)) => boolean?"},
 		{iceberg.LessThan(ref, "hello"), tableSchemaSimple, "lt(.field(0) => string?, string(hello)) => boolean?"},
 		{iceberg.StartsWith(ref, "he"), tableSchemaSimple, "starts_with(.field(0) => string?, string(he)) => boolean?"},
-		{iceberg.NotStartsWith(ref, "he"), tableSchemaSimple, "not(starts_with(.field(0) => string?, string(he)) => boolean?) => boolean?"},
+		{iceberg.NotStartsWith(ref, "he"), tableSchemaSimple, "or(is_null(.field(0) => string?) => boolean, not(starts_with(.field(0) => string?, string(he)) => boolean?) => boolean?) => boolean?"},
 		{
 			iceberg.NotIn(ref, "hello", "world"), tableSchemaSimple,
 			"not(or(is_in(.field(0) => string?, list<string>([string(hello) string(world)])) => boolean?, and(is_null(.field(0) => string?) => boolean, null(boolean?)) => boolean?) => boolean?) => boolean?",
@@ -193,6 +193,24 @@ func TestExprs(t *testing.T) {
 			assert.Equal(t, tt.expected, result.String())
 		})
 	}
+}
+
+// Iceberg's NOT STARTS WITH matches null values. Preserve that behavior even
+// for nullable fields nested inside nullable structs.
+func TestNotStartsWithUsesNullSafeSubstraitForNestedField(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.String},
+		}}},
+	)
+	bound, err := iceberg.NotStartsWith(iceberg.Reference("nested.value"), "ab").Bind(schema, true)
+	require.NoError(t, err)
+
+	_, converted, err := substrait.ConvertExpr(schema, bound)
+	require.NoError(t, err)
+	assert.Equal(t,
+		"or(is_null(.field(0).field(0) => string?) => boolean, not(starts_with(.field(0).field(0) => string?, string(ab)) => boolean?) => boolean?) => boolean?",
+		converted.String())
 }
 
 func TestTransformPredicatesAreRejected(t *testing.T) {
