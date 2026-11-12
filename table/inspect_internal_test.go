@@ -1165,11 +1165,11 @@ func TestInspectManifestsSchema(t *testing.T) {
 	partitionSummary := fields[11].Type.(*iceberg.ListType).Element.(*iceberg.StructType)
 	require.Equal(t,
 		[]string{"contains_null", "contains_nan", "lower_bound", "upper_bound"},
-		testFieldNames(iceberg.NewSchema(0, partitionSummary.FieldList...)))
-	require.Equal(t, 10, partitionSummary.FieldList[0].ID)
-	require.Equal(t, 11, partitionSummary.FieldList[1].ID)
-	require.Equal(t, 12, partitionSummary.FieldList[2].ID)
-	require.Equal(t, 13, partitionSummary.FieldList[3].ID)
+		testFieldNames(iceberg.NewSchema(0, partitionSummary.Fields()...)))
+	require.Equal(t, 10, partitionSummary.Field(0).ID)
+	require.Equal(t, 11, partitionSummary.Field(1).ID)
+	require.Equal(t, 12, partitionSummary.Field(2).ID)
+	require.Equal(t, 13, partitionSummary.Field(3).ID)
 }
 
 func TestInspectAllManifestsSchema(t *testing.T) {
@@ -1918,9 +1918,9 @@ func TestInspectAllEntriesStopsOnContextCancellation(t *testing.T) {
 }
 
 func TestDataFilesSchema(t *testing.T) {
-	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	}})
+	sc := DataFilesSchema(iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	))
 
 	require.Equal(t, []string{
 		"content", "file_path", "file_format", "spec_id", "partition",
@@ -1939,14 +1939,14 @@ func TestDataFilesSchema(t *testing.T) {
 	require.Equal(t, 137, fields[10].ID)
 	require.Equal(t, 145, fields[len(fields)-1].ID)
 
-	unpartitioned := DataFilesSchema(&iceberg.StructType{})
+	unpartitioned := DataFilesSchema(iceberg.NewStructType())
 	require.NotContains(t, testFieldNames(unpartitioned), "partition")
 }
 
 func TestDeleteFilesSchema(t *testing.T) {
-	sc := DeleteFilesSchema(&iceberg.StructType{})
+	sc := DeleteFilesSchema(iceberg.NewStructType())
 	names := testFieldNames(sc)
-	require.Equal(t, testFieldNames(DataFilesSchema(&iceberg.StructType{})), names)
+	require.Equal(t, testFieldNames(DataFilesSchema(iceberg.NewStructType())), names)
 	require.Equal(t, "content", names[0])
 	require.Equal(t, "file_path", names[1])
 	require.Equal(t, "equality_ids", names[14])
@@ -2315,9 +2315,9 @@ func TestInspectAllFilesReadsManifestListsLazily(t *testing.T) {
 }
 
 func TestInspectAllFilesSchemasMatchFiles(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String, Required: false},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
 	want := DataFilesSchema(partitionType)
 	for _, schema := range []*iceberg.Schema{
 		FilesSchema(partitionType),
@@ -2486,7 +2486,7 @@ func TestInspectDataFilesAllocator(t *testing.T) {
 }
 
 func TestAppendContentFileRecordUsesFieldIDs(t *testing.T) {
-	fields := inspectContentFileFields(&iceberg.StructType{})
+	fields := inspectContentFileFields(iceberg.NewStructType())
 	reordered := make([]iceberg.NestedField, 0, len(fields))
 	reordered = append(reordered, fields[1:]...)
 	reordered = append(reordered, fields[0])
@@ -2498,7 +2498,7 @@ func TestAppendContentFileRecordUsesFieldIDs(t *testing.T) {
 	defer bldr.Release()
 	file := newTestDataFile(t, *iceberg.UnpartitionedSpec,
 		"mem://default/table-location/data/reordered.parquet", nil)
-	require.NoError(t, appendContentFileRecord(bldr, &iceberg.StructType{}, file))
+	require.NoError(t, appendContentFileRecord(bldr, iceberg.NewStructType(), file))
 
 	record := bldr.NewRecordBatch()
 	defer record.Release()
@@ -2509,13 +2509,13 @@ func TestAppendContentFileRecordUsesFieldIDs(t *testing.T) {
 }
 
 func TestAppendContentFileRecordUsesPartitionFieldIDs(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Int32},
-		{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Int32},
-	}}
-	reorderedPartitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		partitionType.FieldList[1], partitionType.FieldList[0],
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	reorderedPartitionType := iceberg.NewStructType(
+		partitionType.Field(1), partitionType.Field(0),
+	)
 	arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(reorderedPartitionType), nil, true, false)
 	require.NoError(t, err)
 
@@ -2565,12 +2565,12 @@ func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
 	partitionType, err := inspectPartitionType(meta)
 	require.NoError(t, err)
 	require.Equal(t, []int{1000, 1001}, []int{
-		partitionType.FieldList[0].ID,
-		partitionType.FieldList[1].ID,
+		partitionType.Field(0).ID,
+		partitionType.Field(1).ID,
 	})
 	require.Equal(t, []string{"region", "category"}, []string{
-		partitionType.FieldList[0].Name,
-		partitionType.FieldList[1].Name,
+		partitionType.Field(0).Name,
+		partitionType.Field(1).Name,
 	})
 }
 
@@ -2651,9 +2651,9 @@ func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 }
 
 func TestPartitionsSchema(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
 	sc := PartitionsSchema(partitionType)
 	require.Equal(t, []string{
 		"partition", "spec_id", "record_count", "file_count",
@@ -2666,7 +2666,7 @@ func TestPartitionsSchema(t *testing.T) {
 	require.Equal(t, 11, sc.Fields()[4].ID)
 	require.Equal(t, 10, sc.Fields()[10].ID)
 
-	unpartitioned := PartitionsSchema(&iceberg.StructType{})
+	unpartitioned := PartitionsSchema(iceberg.NewStructType())
 	require.Equal(t, []string{
 		"record_count", "file_count", "total_data_file_size_in_bytes",
 		"position_delete_record_count", "position_delete_file_count", "equality_delete_record_count",
@@ -2700,11 +2700,11 @@ func TestInspectPartitionAggregateTreeDistinguishesFloatWidthsAndSignedZero(t *t
 }
 
 func TestInspectPartitionAggregateTreeLookupPartition(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
-		{ID: 1001, Name: "payload", Type: iceberg.PrimitiveTypes.Binary},
-		{ID: 1002, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1001, Name: "payload", Type: iceberg.PrimitiveTypes.Binary},
+		iceberg.NestedField{ID: 1002, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
+	)
 	partition := map[int]any{
 		1000: int32(7),
 		1001: []byte{1, 2, 3},
@@ -2904,20 +2904,20 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 }
 
 func TestEntriesSchema(t *testing.T) {
-	sc := EntriesSchema(&iceberg.StructType{})
+	sc := EntriesSchema(iceberg.NewStructType())
 	require.Equal(t, []string{"status", "snapshot_id", "sequence_number", "file_sequence_number", "data_file"}, testFieldNames(sc))
 	require.Equal(t, 0, sc.Fields()[0].ID)
 	require.Equal(t, 2, sc.Fields()[4].ID)
 	require.True(t, sc.Fields()[4].Required)
 
 	dataFile := sc.Fields()[4].Type.(*iceberg.StructType)
-	require.Equal(t, 134, dataFile.FieldList[0].ID)
-	require.Equal(t, "file_path", dataFile.FieldList[1].Name)
-	require.Equal(t, 145, dataFile.FieldList[len(dataFile.FieldList)-1].ID)
+	require.Equal(t, 134, dataFile.Field(0).ID)
+	require.Equal(t, "file_path", dataFile.Field(1).Name)
+	require.Equal(t, 145, dataFile.Field(dataFile.NumFields()-1).ID)
 }
 
 func TestEntriesDataFileStructBuilderAppendsParent(t *testing.T) {
-	arrowSchema, err := SchemaToArrowSchema(EntriesSchema(&iceberg.StructType{}), nil, true, false)
+	arrowSchema, err := SchemaToArrowSchema(EntriesSchema(iceberg.NewStructType()), nil, true, false)
 	require.NoError(t, err)
 
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
@@ -2927,7 +2927,7 @@ func TestEntriesDataFileStructBuilderAppendsParent(t *testing.T) {
 	bldr.Field(2).(*array.Int64Builder).Append(8)
 	bldr.Field(3).(*array.Int64Builder).AppendNull()
 
-	err = appendContentFile(bldr.Field(4).(*array.StructBuilder), &iceberg.StructType{}, &mockDataFile{
+	err = appendContentFile(bldr.Field(4).(*array.StructBuilder), iceberg.NewStructType(), &mockDataFile{
 		path:        "data.parquet",
 		contentType: iceberg.EntryContentData,
 		format:      iceberg.ParquetFile,
@@ -2999,9 +2999,9 @@ func TestInspectEntriesIncludesDeletedEntries(t *testing.T) {
 }
 
 func TestAllEntriesSchemaMatchesEntries(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
 	require.True(t, EntriesSchema(partitionType).Equals(AllEntriesSchema(partitionType)))
 }
 
@@ -3311,18 +3311,8 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 
-	tableListType := &iceberg.ListType{
-		ElementID:       3,
-		Element:         iceberg.PrimitiveTypes.Int64,
-		ElementRequired: true,
-	}
-	tableMapType := &iceberg.MapType{
-		KeyID:         4,
-		KeyType:       iceberg.PrimitiveTypes.String,
-		ValueID:       5,
-		ValueType:     iceberg.PrimitiveTypes.Int64,
-		ValueRequired: false,
-	}
+	tableListType := iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, true)
+	tableMapType := iceberg.NewMapType(4, iceberg.PrimitiveTypes.String, 5, iceberg.PrimitiveTypes.Int64, false)
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "values", Type: tableListType, Required: true},
 		iceberg.NestedField{ID: 2, Name: "attributes", Type: tableMapType, Required: true},
@@ -3407,9 +3397,9 @@ func TestInspectPositionDeletesParquetUsesNameMappingAndInitialDefault(t *testin
 	memFS := iceio.NewMemFS()
 	intPtr := func(value int) *int { return &value }
 
-	tablePayloadType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 2, Name: "new_name", Type: iceberg.PrimitiveTypes.String, Required: true},
-	}}
+	tablePayloadType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 2, Name: "new_name", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "payload", Type: tablePayloadType, Required: true},
 		iceberg.NestedField{ID: 4, Name: "status", Type: iceberg.PrimitiveTypes.String, Required: false, InitialDefault: "active"},
@@ -3603,11 +3593,11 @@ func TestPositionDeleteRowProjection(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	sourceType := arrow.StructOf(arrow.Field{
@@ -3629,19 +3619,19 @@ func TestPositionDeleteRowProjection(t *testing.T) {
 }
 
 func TestPositionDeleteRowProjectionAllowsMissingRequiredNestedField(t *testing.T) {
-	tableDetailsType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 2, Name: "present", Type: iceberg.PrimitiveTypes.String, Required: true},
-		{ID: 3, Name: "missing", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	}}
+	tableDetailsType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 2, Name: "present", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "missing", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "details", Type: tableDetailsType, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
@@ -3680,11 +3670,11 @@ func TestPositionDeleteRowProjectionPromotesTypes(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	sourceType := arrow.StructOf(
@@ -3720,11 +3710,11 @@ func TestPositionDeleteRowProjectionPromotesLargeBinaryToBinary(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Binary, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	fieldID := arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})
@@ -3756,11 +3746,11 @@ func TestPositionDeleteRowProjectionPromotesDateInV3(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "created_at_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 3), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 3), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 3)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 3)
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
@@ -3809,11 +3799,11 @@ func TestPositionDeleteRowProjectionRejectsDatePromotionBeforeV3(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	row := scalar.NewStructScalar([]scalar.Scalar{scalar.NewDate32Scalar(arrow.Date32(20_000))},
@@ -3831,29 +3821,19 @@ func TestPositionDeleteRowProjectionRejectsDatePromotionBeforeV3(t *testing.T) {
 }
 
 func TestPositionDeleteRowProjectionPromotesNestedValues(t *testing.T) {
-	tableListType := &iceberg.ListType{
-		ElementID:       3,
-		Element:         iceberg.PrimitiveTypes.Int64,
-		ElementRequired: true,
-	}
-	tableMapType := &iceberg.MapType{
-		KeyID:         4,
-		KeyType:       iceberg.PrimitiveTypes.String,
-		ValueID:       5,
-		ValueType:     iceberg.PrimitiveTypes.Int64,
-		ValueRequired: false,
-	}
+	tableListType := iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, true)
+	tableMapType := iceberg.NewMapType(4, iceberg.PrimitiveTypes.String, 5, iceberg.PrimitiveTypes.Int64, false)
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "values", Type: tableListType, Required: true},
 		iceberg.NestedField{ID: 2, Name: "attributes", Type: tableMapType, Required: true},
 		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.MustDecimalTypeOf(18, 2), Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
@@ -3921,24 +3901,20 @@ func TestPositionDeleteRowProjectionPromotesNestedValues(t *testing.T) {
 }
 
 func TestPositionDeleteRowProjectionPromotesNestedStructValues(t *testing.T) {
-	tableElementType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 8, Name: "count", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		{ID: 9, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
-	}}
-	tableListType := &iceberg.ListType{
-		ElementID:       7,
-		Element:         tableElementType,
-		ElementRequired: true,
-	}
+	tableElementType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 8, Name: "count", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 9, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	tableListType := iceberg.NewListType(7, tableElementType, true)
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "items", Type: tableListType, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
@@ -3983,22 +3959,16 @@ func TestPositionDeleteRowProjectionPromotesNestedStructValues(t *testing.T) {
 }
 
 func TestPositionDeleteRowProjectionRejectsNullMapKey(t *testing.T) {
-	tableMapType := &iceberg.MapType{
-		KeyID:         2,
-		KeyType:       iceberg.PrimitiveTypes.String,
-		ValueID:       3,
-		ValueType:     iceberg.PrimitiveTypes.Int64,
-		ValueRequired: false,
-	}
+	tableMapType := iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int64, false)
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "attributes", Type: tableMapType, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
-	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
@@ -4156,7 +4126,7 @@ func TestInspectPositionDeletesDeletionVector(t *testing.T) {
 }
 
 func TestPositionDeletesSchema(t *testing.T) {
-	v2 := PositionDeletesSchema(simpleSchema(), &iceberg.StructType{}, 2)
+	v2 := PositionDeletesSchema(simpleSchema(), iceberg.NewStructType(), 2)
 	v2Fields := v2.Fields()
 	require.Equal(t,
 		[]string{"file_path", "pos", "row", "spec_id", "delete_file_path"},
@@ -4176,7 +4146,7 @@ func TestPositionDeletesSchema(t *testing.T) {
 		v2Fields[4].ID,
 	})
 
-	v3 := PositionDeletesSchema(simpleSchema(), &iceberg.StructType{}, 3)
+	v3 := PositionDeletesSchema(simpleSchema(), iceberg.NewStructType(), 3)
 	v3Fields := v3.Fields()
 	require.Equal(t,
 		[]string{"file_path", "pos", "row", "spec_id", "delete_file_path", "content_offset", "content_size_in_bytes"},
@@ -4193,7 +4163,7 @@ func TestPositionDeletesSchema(t *testing.T) {
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadata)
 	require.NoError(t, err)
 	require.Equal(t, map[int]int{1000: 2}, partitionIDs)
-	require.Equal(t, 2, partitionType.FieldList[0].ID)
+	require.Equal(t, 2, partitionType.Field(0).ID)
 	partitioned := PositionDeletesSchema(simpleSchema(), partitionType, 2)
 	require.Equal(t,
 		[]string{"file_path", "pos", "row", "partition", "spec_id", "delete_file_path"},

@@ -177,7 +177,7 @@ func newPositionDeleteRecordAppender(
 		formatVersion:    formatVersion,
 		projection:       projection,
 	}
-	if len(partitionType.FieldList) > 0 {
+	if partitionType.NumFields() > 0 {
 		partitionBuilder, err := newInspectPartitionBuilder(
 			bldr.Field(nextField).(*array.StructBuilder), partitionType)
 		if err != nil {
@@ -814,11 +814,11 @@ func positionDeletesPartitionType(
 		positionDeleteContentOffsetID: {},
 		positionDeleteContentSizeID:   {},
 	}
-	for _, field := range base.FieldList {
+	for _, field := range base.Fields() {
 		used[field.ID] = struct{}{}
 	}
-	fields := make([]iceberg.NestedField, len(base.FieldList))
-	idByOld := make(map[int]int, len(base.FieldList))
+	fields := make([]iceberg.NestedField, base.NumFields())
+	idByOld := make(map[int]int, base.NumFields())
 	maxFieldID := int64(math.MaxInt32)
 	nextID := int64(1)
 	wrapped := false
@@ -828,7 +828,7 @@ func positionDeletesPartitionType(
 	} else if int64(lastColumnID) >= maxFieldID {
 		wrapped = true
 	}
-	for index, field := range base.FieldList {
+	for index, field := range base.Fields() {
 		for {
 			if nextID > maxFieldID {
 				if wrapped {
@@ -854,7 +854,7 @@ func positionDeletesPartitionType(
 		nextID++
 	}
 
-	return &iceberg.StructType{FieldList: fields}, idByOld, nil
+	return iceberg.NewStructType(fields...), idByOld, nil
 }
 
 // PositionDeletesSchema returns the schema of the position_deletes metadata table.
@@ -863,7 +863,7 @@ func PositionDeletesSchema(
 	partitionType *iceberg.StructType,
 	formatVersion int,
 ) *iceberg.Schema {
-	rowType := iceberg.StructType{}
+	rowType := *iceberg.NewStructType()
 	if tableSchema != nil {
 		rowType = tableSchema.AsStruct()
 	}
@@ -872,7 +872,7 @@ func PositionDeletesSchema(
 		{ID: positionDeletePosID, Name: "pos", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		{ID: positionDeleteRowID, Name: "row", Type: &rowType, Required: false},
 	}
-	if len(partitionType.FieldList) > 0 {
+	if partitionType.NumFields() > 0 {
 		fields = append(fields, iceberg.NestedField{
 			ID:       positionDeletePartitionID,
 			Name:     "partition",
