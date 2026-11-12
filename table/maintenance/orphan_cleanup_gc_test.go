@@ -59,10 +59,11 @@ func TestOrphanCleanupRespectsGCDisabled(t *testing.T) {
 				}))
 			require.Zero(t, calls.Load())
 			require.ErrorContains(t, err, "GC is disabled")
-			_, err = DeleteOrphanFiles(t.Context(), tbl, WithCleanupDryRun(true))
-			require.ErrorContains(t, err, "GC is disabled")
-			_, err = PlanOrphanFiles(t.Context(), tbl)
-			require.ErrorContains(t, err, "GC is disabled")
+			_, err = DeleteOrphanFiles(t.Context(), tbl, WithCleanupDryRun(true), WithCleanupFilesOlderThan(0))
+			require.NoError(t, err)
+			plan, err := PlanOrphanFiles(t.Context(), tbl, WithCleanupFilesOlderThan(0))
+			require.NoError(t, err)
+			require.Equal(t, []string{orphan}, plan.Files())
 			file, err := fs.Open(t.Context(), orphan)
 			require.NoError(t, err)
 			require.NoError(t, file.Close())
@@ -84,8 +85,9 @@ func TestOrphanCleanupPlanRejectsExecutionAfterGCIsDisabled(t *testing.T) {
 	disabledTable := table.New(enabledTable.Identifier(), meta, enabledTable.MetadataLocation(),
 		func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
 
-	_, err = ExecuteOrphanCleanup(t.Context(), disabledTable, plan, WithCleanupDryRun(true))
-	require.ErrorContains(t, err, "GC is disabled")
+	result, err := ExecuteOrphanCleanup(t.Context(), disabledTable, plan, WithCleanupDryRun(true))
+	require.NoError(t, err)
+	require.Empty(t, result.DeletedFiles)
 
 	_, err = ExecuteOrphanCleanup(t.Context(), disabledTable, plan)
 	require.ErrorContains(t, err, "GC is disabled")
@@ -94,7 +96,7 @@ func TestOrphanCleanupPlanRejectsExecutionAfterGCIsDisabled(t *testing.T) {
 	require.NoError(t, file.Close())
 }
 
-func TestOrphanCleanupChecksGCBeforeLoadingFileSystem(t *testing.T) {
+func TestOrphanCleanupChecksGCBeforeDeletingOrphans(t *testing.T) {
 	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder,
 		"mem://gc/table", iceberg.Properties{table.GCEnabledKey: "false"})
 	require.NoError(t, err)
@@ -106,12 +108,13 @@ func TestOrphanCleanupChecksGCBeforeLoadingFileSystem(t *testing.T) {
 			return nil, errors.New("unexpected filesystem access")
 		}, nil)
 	_, err = PlanOrphanFiles(t.Context(), tbl)
-	require.ErrorContains(t, err, "GC is disabled")
+	require.ErrorContains(t, err, "unexpected filesystem access")
+	require.EqualValues(t, 1, calls.Load())
 	_, err = DeleteOrphanFiles(t.Context(), tbl)
 	require.ErrorContains(t, err, "GC is disabled")
 	_, err = ExecuteOrphanCleanup(t.Context(), tbl, OrphanCleanupPlan{})
 	require.ErrorContains(t, err, "GC is disabled")
-	require.Zero(t, calls.Load())
+	require.EqualValues(t, 1, calls.Load())
 }
 
 func TestOrphanCleanupAllowsGCEnabled(t *testing.T) {
