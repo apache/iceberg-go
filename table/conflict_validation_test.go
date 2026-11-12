@@ -125,6 +125,11 @@ func runPosDeleteConflictCheck(t *testing.T, rewrittenFiles []iceberg.DataFile, 
 
 	ctx := buildPartitionedContext(t, writerBaseMeta, listPath, writerBaseID, concSnapshotID)
 	require.Len(t, ctx.concurrent, 1)
+	// NewMetadata assigns the initial spec ID to zero. Preserve the manifest's
+	// spec ID here to model a delete written after partition evolution.
+	ctx.current = &countingPartitionConflictMetadata{
+		Metadata: ctx.current, specOverrides: map[int]*iceberg.PartitionSpec{spec.ID(): &spec},
+	}
 
 	return validateNoNewDeletesForRewrittenFiles(ctx, rewrittenFiles)
 }
@@ -753,6 +758,29 @@ func TestValidateNoNewDeletesForRewrittenFiles_EqDeletePartitionScope(t *testing
 			}
 		})
 	}
+}
+
+func TestValidateNoNewDeletesForRewrittenFiles_VoidSpecEqualityDeleteIsGlobal(t *testing.T) {
+	voidSpec := iceberg.NewPartitionSpecID(2, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.VoidTransform{},
+	})
+	dataSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	rewritten := newTestDataFile(t, dataSpec, "data.parquet", map[int]any{1000: int32(7)})
+	builder, err := iceberg.NewDataFileBuilder(voidSpec, iceberg.EntryContentEqDeletes,
+		"eq.parquet", iceberg.ParquetFile, map[int]any{1000: nil}, nil, nil, 1, 1)
+	require.NoError(t, err)
+	deleteFile := builder.EqualityFieldIDs([]int{1}).Build()
+	added, err := newAddedDelete(Snapshot{SnapshotID: 2}, deleteFile,
+		equalityDeleteIndexTestSpecLookup{2: voidSpec})
+	require.NoError(t, err)
+	set, err := newRewrittenFileSet([]iceberg.DataFile{rewritten})
+	require.NoError(t, err)
+	require.ErrorIs(t, set.conflict(added), ErrConflictingDeleteFiles)
+
+	_, err = newAddedDelete(Snapshot{SnapshotID: 2}, deleteFile, equalityDeleteIndexTestSpecLookup{})
+	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 }
 
 // TestValidateNoNewDeletesForRewrittenFiles_UnsupportedPartitionType

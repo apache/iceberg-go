@@ -1014,7 +1014,7 @@ func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, f
 	}
 	deletes := d.deletes
 	err = cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
-		added, err := newAddedDelete(snap, e.DataFile())
+		added, err := newAddedDelete(snap, e.DataFile(), cc.current)
 		if err != nil {
 			return err
 		}

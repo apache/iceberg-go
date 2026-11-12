@@ -1141,13 +1141,8 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 //     falls back to indexing partition-scoped deletes by (specId,
 //     partition).
 //
-//   - An equality-delete added by a concurrent snapshot — these apply
-//     by predicate, not by path, so we cannot precisely check overlap
-//     without the rewritten files' partition tuples. The conservative
-//     behavior is to reject any concurrent eq-delete, which matches
-//     Java's approach for RewriteFiles and avoids silently losing
-//     deletes. A follow-up PR will accept optional partition-overlap
-//     hints to narrow this check.
+//   - An equality-delete whose spec and partition match a rewritten file,
+//     or whose spec is unpartitioned and therefore applies globally.
 func validateNoNewDeletesForRewrittenFiles(cc *conflictContext, rewrittenFiles []iceberg.DataFile) error {
 	if len(rewrittenFiles) == 0 || len(cc.concurrent) == 0 {
 		return nil
@@ -1159,7 +1154,7 @@ func validateNoNewDeletesForRewrittenFiles(cc *conflictContext, rewrittenFiles [
 	}
 
 	return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
-		added, err := newAddedDelete(snap, e.DataFile())
+		added, err := newAddedDelete(snap, e.DataFile(), cc.current)
 		if err != nil {
 			return err
 		}
@@ -1184,7 +1179,7 @@ type addedDelete struct {
 	partitionKey string
 }
 
-func newAddedDelete(snap Snapshot, df iceberg.DataFile) (addedDelete, error) {
+func newAddedDelete(snap Snapshot, df iceberg.DataFile, specs partitionSpecLookup) (addedDelete, error) {
 	added := addedDelete{
 		snapshotID: snap.SnapshotID,
 		path:       df.FilePath(),
@@ -1195,7 +1190,12 @@ func newAddedDelete(snap Snapshot, df iceberg.DataFile) (addedDelete, error) {
 		// An unpartitioned equality delete applies across all partition
 		// specs. A partitioned equality delete only applies to matching
 		// spec-and-partition data files.
-		if len(dataFilePartition(df)) == 0 {
+		spec := specs.PartitionSpecByID(int(df.SpecID()))
+		if spec == nil {
+			return added, fmt.Errorf("concurrent equality delete %s: %w: id %d",
+				df.FilePath(), ErrPartitionSpecNotFound, df.SpecID())
+		}
+		if spec.IsUnpartitioned() {
 			return added, nil
 		}
 		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
@@ -1204,6 +1204,7 @@ func newAddedDelete(snap Snapshot, df iceberg.DataFile) (addedDelete, error) {
 				df.FilePath(), df.SpecID(), err)
 		}
 		added.partitionKey = key
+
 		return added, nil
 	}
 
@@ -1274,6 +1275,7 @@ func (s rewrittenFileSet) conflict(d addedDelete) error {
 				return nil
 			}
 		}
+
 		return fmt.Errorf("%w: snapshot %d added equality delete %s overlapping rewritten data",
 			ErrConflictingDeleteFiles, d.snapshotID, d.path)
 	}
