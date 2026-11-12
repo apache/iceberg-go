@@ -221,6 +221,100 @@ type Transform interface {
 	ToHumanString(typ Type, val any) string
 }
 
+// ValidatePartitionTransformSourceType reports whether a transform accepts
+// the source type used by a partition field. Built-in transforms accept
+// primitive types by value, so pointer forms of those types are normalized.
+// Custom transforms receive the source type unchanged.
+func ValidatePartitionTransformSourceType(transform Transform, sourceType Type) error {
+	if isNilTransform(transform) {
+		return fmt.Errorf("partition transform is nil")
+	}
+	if isBuiltInPartitionTransform(transform) {
+		if _, ok := sourceType.(PrimitiveType); ok {
+			sourceType = primitiveTypeValue(sourceType)
+		}
+	}
+	if !transform.CanTransform(sourceType) {
+		return fmt.Errorf("invalid source type %v for transform %s", sourceType, transform)
+	}
+
+	return nil
+}
+
+func isBuiltInPartitionTransform(transform Transform) bool {
+	switch transform.(type) {
+	case IdentityTransform, *IdentityTransform, VoidTransform, *VoidTransform,
+		BucketTransform, *BucketTransform, TruncateTransform, *TruncateTransform,
+		YearTransform, *YearTransform, MonthTransform, *MonthTransform,
+		DayTransform, *DayTransform, HourTransform, *HourTransform:
+		return true
+	default:
+		return false
+	}
+}
+
+func isVoidPartitionTransform(transform Transform) bool {
+	switch transform.(type) {
+	case VoidTransform, *VoidTransform:
+		return true
+	default:
+		return false
+	}
+}
+
+func primitiveTypeValue(sourceType Type) Type {
+	switch source := sourceType.(type) {
+	case *FixedType:
+		return primitiveTypeValueOf(source)
+	case *DecimalType:
+		return primitiveTypeValueOf(source)
+	case *BooleanType:
+		return primitiveTypeValueOf(source)
+	case *Int32Type:
+		return primitiveTypeValueOf(source)
+	case *Int64Type:
+		return primitiveTypeValueOf(source)
+	case *Float32Type:
+		return primitiveTypeValueOf(source)
+	case *Float64Type:
+		return primitiveTypeValueOf(source)
+	case *DateType:
+		return primitiveTypeValueOf(source)
+	case *TimeType:
+		return primitiveTypeValueOf(source)
+	case *TimestampType:
+		return primitiveTypeValueOf(source)
+	case *TimestampTzType:
+		return primitiveTypeValueOf(source)
+	case *StringType:
+		return primitiveTypeValueOf(source)
+	case *UUIDType:
+		return primitiveTypeValueOf(source)
+	case *BinaryType:
+		return primitiveTypeValueOf(source)
+	case *TimestampNsType:
+		return primitiveTypeValueOf(source)
+	case *TimestampTzNsType:
+		return primitiveTypeValueOf(source)
+	case *UnknownType:
+		return primitiveTypeValueOf(source)
+	case *GeometryType:
+		return primitiveTypeValueOf(source)
+	case *GeographyType:
+		return primitiveTypeValueOf(source)
+	}
+
+	return sourceType
+}
+
+func primitiveTypeValueOf[T Type](source *T) Type {
+	if source == nil {
+		return any(source).(Type)
+	}
+
+	return *source
+}
+
 // IdentityTransform uses the identity function, performing no transformation
 // but instead partitioning on the value itself.
 type IdentityTransform struct{}

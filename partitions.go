@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"iter"
 	"net/url"
-	"reflect"
 	"slices"
 	"strings"
 
@@ -430,22 +429,11 @@ func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, 
 	if err := validateTransform(transform); err != nil {
 		return err
 	}
-	var builtIn bool
-	switch transform.(type) {
-	case IdentityTransform, *IdentityTransform, VoidTransform, *VoidTransform,
-		BucketTransform, *BucketTransform, TruncateTransform, *TruncateTransform,
-		YearTransform, *YearTransform, MonthTransform, *MonthTransform,
-		DayTransform, *DayTransform, HourTransform, *HourTransform:
-		builtIn = true
-	}
+	builtIn := isBuiltInPartitionTransform(transform)
 	if builtIn && len(sourceFields) > 1 {
 		return fmt.Errorf("%w: transform %s requires a single source field", ErrInvalidArgument, transform)
 	}
-	var isVoid bool
-	switch transform.(type) {
-	case VoidTransform, *VoidTransform:
-		isVoid = true
-	}
+	isVoid := isVoidPartitionTransform(transform)
 	var parents map[int]int
 	if !isVoid {
 		var err error
@@ -477,19 +465,10 @@ func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, 
 	}
 	// CanTransform describes a single input type. Multi-source transforms may
 	// accept different types for their other inputs, so check the first only.
-	// Built-in transforms match primitive values; custom transforms receive the
-	// source type exactly as supplied by the caller.
-	sourceType := sourceFields[0].Type
-	if _, ok := sourceType.(PrimitiveType); builtIn && ok {
-		value := reflect.ValueOf(sourceType)
-		if value.Kind() == reflect.Pointer && !value.IsNil() {
-			if primitive, ok := reflect.TypeAssert[PrimitiveType](value.Elem()); ok {
-				sourceType = primitive
-			}
+	if !isVoid {
+		if err := ValidatePartitionTransformSourceType(transform, sourceFields[0].Type); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 		}
-	}
-	if !isVoid && !transform.CanTransform(sourceType) {
-		return fmt.Errorf("%w: invalid source type %s for transform %s", ErrInvalidArgument, sourceFields[0].Type, transform)
 	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {

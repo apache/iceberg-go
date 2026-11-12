@@ -2216,24 +2216,8 @@ type recordWritingArgs struct {
 }
 
 func checkPartitionSourceType(field iceberg.PartitionField, sourceType iceberg.Type) error {
-	// Built-in transforms match primitive values, but custom transforms may
-	// expect the original source type.
-	switch field.Transform.(type) {
-	case iceberg.IdentityTransform, *iceberg.IdentityTransform, iceberg.VoidTransform, *iceberg.VoidTransform,
-		iceberg.BucketTransform, *iceberg.BucketTransform, iceberg.TruncateTransform, *iceberg.TruncateTransform,
-		iceberg.YearTransform, *iceberg.YearTransform, iceberg.MonthTransform, *iceberg.MonthTransform,
-		iceberg.DayTransform, *iceberg.DayTransform, iceberg.HourTransform, *iceberg.HourTransform:
-		if _, ok := sourceType.(iceberg.PrimitiveType); ok {
-			value := reflect.ValueOf(sourceType)
-			if value.Kind() == reflect.Pointer && !value.IsNil() {
-				if primitive, ok := reflect.TypeAssert[iceberg.PrimitiveType](value.Elem()); ok {
-					sourceType = primitive
-				}
-			}
-		}
-	}
-	if !field.Transform.CanTransform(sourceType) {
-		return fmt.Errorf("%w: invalid source type %s for transform %s", iceberg.ErrInvalidTransform, sourceType, field.Transform)
+	if err := iceberg.ValidatePartitionTransformSourceType(field.Transform, sourceType); err != nil {
+		return fmt.Errorf("%w: %v", iceberg.ErrInvalidTransform, err)
 	}
 
 	return nil
