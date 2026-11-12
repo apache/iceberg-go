@@ -2002,6 +2002,30 @@ func TestAddSnapshotV3RejectsFirstRowIDAheadOfNextRowID(t *testing.T) {
 	require.Empty(t, meta.Snapshots())
 }
 
+func TestAddSnapshotV3RejectsForwardRowIDAfterAllocation(t *testing.T) {
+	builder := freshMetadataBuilder(t, 3)
+	now := time.Now().UnixMilli()
+	startRowID, addedRows := int64(0), int64(5)
+	committed := freshBuilderSnapshot(1, nil, 1, now)
+	committed.FirstRowID, committed.AddedRows = &startRowID, &addedRows
+	require.NoError(t, builder.AddSnapshot(&committed))
+	require.Equal(t, int64(5), builder.NextRowID())
+
+	parentID := int64(1)
+	forwardRowID, moreRows := int64(6), int64(1)
+	invalid := freshBuilderSnapshot(2, &parentID, 2, now+1)
+	invalid.FirstRowID, invalid.AddedRows = &forwardRowID, &moreRows
+	err := builder.AddSnapshot(&invalid)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.NotErrorIs(t, err, ErrCommitFailed)
+	require.Equal(t, int64(5), builder.NextRowID())
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 1)
+	require.Equal(t, int64(1), meta.Snapshots()[0].SnapshotID)
+}
+
 func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
 	builder := freshMetadataBuilder(t, 2)
 	parentSnapshotID := int64(1)
