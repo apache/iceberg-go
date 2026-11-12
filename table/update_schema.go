@@ -104,6 +104,7 @@ type UpdateSchema struct {
 	parentID             map[int]int
 
 	addedNameToID            map[string]int
+	renamedNameToID          map[string]int
 	allowIncompatibleChanges bool
 	caseSensitive            bool
 	nameMapping              iceberg.NameMapping
@@ -149,6 +150,7 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 		parentID:             make(map[int]int),
 
 		addedNameToID:            make(map[string]int),
+		renamedNameToID:          make(map[string]int),
 		allowIncompatibleChanges: allowIncompatibleChanges,
 		caseSensitive:            caseSensitive,
 		nameMapping:              nil,
@@ -244,10 +246,66 @@ func (u *UpdateSchema) assignNewColumnID() int {
 }
 
 func (u *UpdateSchema) findField(name string) (iceberg.NestedField, bool) {
+	var field iceberg.NestedField
+	var found bool
 	if u.caseSensitive {
-		return u.schema.FindFieldByName(name)
+		field, found = u.schema.FindFieldByName(name)
 	} else {
-		return u.schema.FindFieldByNameCaseInsensitive(name)
+		field, found = u.schema.FindFieldByNameCaseInsensitive(name)
+	}
+
+	if found && !u.isDeleted(field.ID) {
+		return field, true
+	}
+
+	if id, ok := u.renamedNameToID[u.schemaNameKey(name)]; ok {
+		if renamedField, ok := u.schema.FindFieldByID(id); ok {
+			return renamedField, true
+		}
+	}
+
+	return field, found
+}
+
+func (u *UpdateSchema) findFieldForUpdate(name string) (iceberg.NestedField, bool) {
+	field, ok := u.findField(name)
+	if !ok {
+		return field, false
+	}
+
+	parentID := u.findParentID(field.ID)
+	if updatedField, ok := u.updates[parentID][field.ID]; ok {
+		return updatedField, true
+	}
+
+	return field, true
+}
+
+func (u *UpdateSchema) schemaNameKey(name string) string {
+	if u.caseSensitive {
+		return name
+	}
+
+	return strings.ToLower(name)
+}
+
+func (u *UpdateSchema) rememberRenamedName(fieldID int, path []string, newName string) {
+	for name, id := range u.renamedNameToID {
+		if id == fieldID {
+			delete(u.renamedNameToID, name)
+		}
+	}
+
+	if len(path) > 0 {
+		newPath := slices.Clone(path)
+		newPath[len(newPath)-1] = newName
+		u.renamedNameToID[u.schemaNameKey(strings.Join(newPath, "."))] = fieldID
+	}
+
+	if originalName, ok := u.schema.FindColumnName(fieldID); ok {
+		originalPath := strings.Split(originalName, ".")
+		originalPath[len(originalPath)-1] = newName
+		u.renamedNameToID[u.schemaNameKey(strings.Join(originalPath, "."))] = fieldID
 	}
 }
 
@@ -429,7 +487,7 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 
 	fullName := strings.Join(path, ".")
 
-	field, ok := u.findField(fullName)
+	field, ok := u.findFieldForUpdate(fullName)
 	if !ok {
 		return fmt.Errorf("field not found: %s", fullName)
 	}
@@ -541,6 +599,9 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		updatedField.Doc = update.Doc.Val
 	}
 	u.updates[parentID][field.ID] = updatedField
+	if update.Name.Valid {
+		u.rememberRenamedName(field.ID, path, update.Name.Val)
+	}
 
 	return nil
 }

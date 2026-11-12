@@ -875,6 +875,79 @@ func TestRenameColumn(t *testing.T) {
 	})
 }
 
+func TestRenameThenUseNewColumnName(t *testing.T) {
+	t.Run("move renamed top level column", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"name"}, "full_name").
+			MoveFirst([]string{"full_name"}).Apply()
+		require.NoError(t, err)
+		require.Equal(t, "full_name", newSchema.Fields()[0].Name)
+	})
+
+	t.Run("update and move renamed nested column", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"address", "city"}, "town").
+			UpdateColumn([]string{"address", "town"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "the town"},
+			}).
+			MoveAfter([]string{"address", "town"}, []string{"address", "zip"}).Apply()
+		require.NoError(t, err)
+
+		address, ok := newSchema.FindFieldByName("address")
+		require.True(t, ok)
+		addressType, ok := address.Type.(*iceberg.StructType)
+		require.True(t, ok)
+		require.Equal(t, "zip", addressType.FieldList[0].Name)
+		assert.Equal(t, "town", addressType.FieldList[1].Name)
+		assert.Equal(t, "the town", addressType.FieldList[1].Doc)
+	})
+
+	t.Run("resolve renamed name case insensitively", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, false, true).
+			RenameColumn([]string{"NAME"}, "full_name").
+			MoveFirst([]string{"FULL_NAME"}).Apply()
+		require.NoError(t, err)
+		require.Equal(t, "full_name", newSchema.Fields()[0].Name)
+	})
+
+	t.Run("renamed name can reuse a deleted name", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			DeleteColumn([]string{"name"}).
+			RenameColumn([]string{"age"}, "name").
+			UpdateColumn([]string{"name"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "age under a new name"},
+			}).
+			MoveFirst([]string{"name"}).Apply()
+		require.NoError(t, err)
+
+		field, ok := newSchema.FindFieldByName("name")
+		require.True(t, ok)
+		assert.Equal(t, 3, field.ID)
+		assert.Equal(t, "age under a new name", field.Doc)
+	})
+
+	t.Run("superseded rename cannot be referenced", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		_, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"name"}, "full_name").
+			RenameColumn([]string{"name"}, "display_name").
+			MoveFirst([]string{"full_name"}).Apply()
+		require.ErrorContains(t, err, "field not found: full_name")
+	})
+
+	t.Run("renamed column uses its current name for validation", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		_, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"name"}, "full_name").
+			RenameColumn([]string{"full_name"}, "full_name").Apply()
+		require.ErrorContains(t, err, "cannot rename field to the same name: full_name")
+	})
+}
+
 func TestMoveColumn(t *testing.T) {
 	t.Run("test move column to first", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
