@@ -1292,6 +1292,7 @@ func convertPartitionInt32(value any) (int32, bool) {
 		if int64(value) < math.MinInt32 || int64(value) > math.MaxInt32 {
 			return 0, false
 		}
+
 		return int32(value), true
 	case int8:
 		return int32(value), true
@@ -1303,11 +1304,13 @@ func convertPartitionInt32(value any) (int32, bool) {
 		if value < math.MinInt32 || value > math.MaxInt32 {
 			return 0, false
 		}
+
 		return int32(value), true
 	case uint:
 		if uint64(value) > math.MaxInt32 {
 			return 0, false
 		}
+
 		return int32(value), true
 	case uint8:
 		return int32(value), true
@@ -1317,16 +1320,19 @@ func convertPartitionInt32(value any) (int32, bool) {
 		if value > math.MaxInt32 {
 			return 0, false
 		}
+
 		return int32(value), true
 	case uint64:
 		if value > math.MaxInt32 {
 			return 0, false
 		}
+
 		return int32(value), true
 	case uintptr:
 		if uint64(value) > math.MaxInt32 {
 			return 0, false
 		}
+
 		return int32(value), true
 	case float32:
 		return convertPartitionInt32(float64(value))
@@ -1334,6 +1340,7 @@ func convertPartitionInt32(value any) (int32, bool) {
 		if math.IsNaN(value) || value < math.MinInt32 || value >= float64(math.MaxInt32)+1 || math.Trunc(value) != value {
 			return 0, false
 		}
+
 		return int32(value), true
 	case Date:
 		return int32(value), true
