@@ -243,6 +243,18 @@ func TestStructTypeUnmarshalRequiresFields(t *testing.T) {
 	assert.Empty(t, empty.FieldList)
 }
 
+func TestStructTypeEmptyFieldsJSON(t *testing.T) {
+	typ := &iceberg.StructType{}
+	out, err := json.Marshal(typ)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"struct","fields":[]}`, string(out))
+
+	var decoded iceberg.StructType
+	require.NoError(t, json.Unmarshal(out, &decoded))
+	assert.NotNil(t, decoded.FieldList)
+	assert.Empty(t, decoded.FieldList)
+}
+
 func TestNestedStructUnmarshalRequiresFields(t *testing.T) {
 	for _, nested := range []string{
 		`{"type":"struct"}`,
