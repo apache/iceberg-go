@@ -4392,6 +4392,37 @@ func lostCommitResponseHandler(mux *http.ServeMux, path string) chan struct{} {
 	return applied
 }
 
+func (r *RestCatalogSuite) TestPreCanceledCommitIsNotUnknown() {
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r.Run("commit table", func() {
+		_, _, err := cat.CommitTable(ctx, table.Identifier{"db", "tbl"},
+			[]table.Requirement{}, []table.Update{})
+		r.ErrorIs(err, context.Canceled)
+		r.NotErrorIs(err, rest.ErrCommitStateUnknown)
+	})
+	r.Run("update table", func() {
+		_, err := cat.UpdateTable(ctx, table.Identifier{"db", "tbl"},
+			[]table.Requirement{}, []table.Update{})
+		r.ErrorIs(err, context.Canceled)
+		r.NotErrorIs(err, rest.ErrCommitStateUnknown)
+	})
+	r.Run("commit transaction", func() {
+		err := cat.CommitTransaction(ctx, []table.TableCommit{{
+			Identifier:   table.Identifier{"db", "tbl"},
+			Requirements: []table.Requirement{},
+			Updates:      []table.Update{},
+		}})
+		r.ErrorIs(err, context.Canceled)
+		r.NotErrorIs(err, rest.ErrCommitStateUnknown)
+	})
+}
+
 func (r *RestCatalogSuite) TestCommitTableLostResponseIsUnknown() {
 	applied := lostCommitResponseHandler(r.mux, "/v1/namespaces/db/tables/tbl")
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
