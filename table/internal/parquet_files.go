@@ -3233,9 +3233,7 @@ func (p *pruneParquetSchema) fieldID(field arrow.Field, mapping *iceberg.MappedF
 	}
 
 	if mapping != nil {
-		if mapping.FieldID != nil {
-			return *mapping.FieldID
-		}
+		return mapping.ID()
 	}
 
 	panic(fmt.Errorf("%w: cannot convert %s to Iceberg field, missing field_id",
