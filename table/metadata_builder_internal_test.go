@@ -2015,15 +2015,32 @@ func TestAddSnapshotV3RejectsForwardRowIDAfterAllocation(t *testing.T) {
 	forwardRowID, moreRows := int64(6), int64(1)
 	invalid := freshBuilderSnapshot(2, &parentID, 2, now+1)
 	invalid.FirstRowID, invalid.AddedRows = &forwardRowID, &moreRows
+	updateCount := len(builder.updates)
+	lastUpdated := builder.LastUpdatedMS()
+	lastSequence := builder.currentLastSequenceNumber()
 	err := builder.AddSnapshot(&invalid)
 	require.ErrorIs(t, err, ErrInvalidRowLineage)
 	require.NotErrorIs(t, err, ErrCommitFailed)
 	require.Equal(t, int64(5), builder.NextRowID())
+	require.Len(t, builder.updates, updateCount)
+	require.Equal(t, lastUpdated, builder.LastUpdatedMS())
+	require.Equal(t, lastSequence, builder.currentLastSequenceNumber())
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
 	require.Len(t, meta.Snapshots(), 1)
 	require.Equal(t, int64(1), meta.Snapshots()[0].SnapshotID)
+
+	firstRowID := builder.NextRowID()
+	invalid.FirstRowID = &firstRowID
+	require.NoError(t, builder.AddSnapshot(&invalid))
+	require.Equal(t, int64(6), builder.NextRowID())
+	require.Len(t, builder.updates, updateCount+1)
+
+	meta, err = builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 2)
+	require.Equal(t, int64(2), meta.Snapshots()[1].SnapshotID)
 }
 
 func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
