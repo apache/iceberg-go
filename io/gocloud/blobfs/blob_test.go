@@ -239,11 +239,11 @@ type writeContextKey struct{}
 
 type writeContextBucket struct {
 	driver.Bucket
-	writeCtx context.Context
+	writeContexts []context.Context
 }
 
 func (b *writeContextBucket) NewTypedWriter(ctx context.Context, _ string, _ string, _ *driver.WriterOptions) (driver.Writer, error) {
-	b.writeCtx = ctx
+	b.writeContexts = append(b.writeContexts, ctx)
 
 	return discardDriverWriter{}, nil
 }
@@ -266,8 +266,24 @@ func TestBlobFileIOWriteFilePassesOperationContext(t *testing.T) {
 
 	operationCtx := context.WithValue(context.Background(), writeContextKey{}, "operation")
 	require.NoError(t, fileIO.WriteFile(operationCtx, "s3://my-bucket/write-file", []byte("content")))
-	require.NotNil(t, driverBucket.writeCtx)
-	assert.Equal(t, "operation", driverBucket.writeCtx.Value(writeContextKey{}))
+	require.Len(t, driverBucket.writeContexts, 1)
+	assert.Equal(t, "operation", driverBucket.writeContexts[0].Value(writeContextKey{}))
+}
+
+func TestBlobFileIOMkdirAllPassesOperationContext(t *testing.T) {
+	driverBucket := &writeContextBucket{}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx := context.WithValue(context.Background(), writeContextKey{}, "lifetime")
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	operationCtx := context.WithValue(context.Background(), writeContextKey{}, "operation")
+
+	require.NoError(t, fileIO.MkdirAll(operationCtx, "s3://my-bucket/mkdir/all"))
+	require.Len(t, driverBucket.writeContexts, 2, "MkdirAll writes one marker for each path component")
+	for _, ctx := range driverBucket.writeContexts {
+		assert.Equal(t, "operation", ctx.Value(writeContextKey{}))
+	}
 }
 
 type statContextKey struct{}
