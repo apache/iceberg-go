@@ -138,11 +138,11 @@ type borrowedPartitionRecord struct {
 }
 
 func (p borrowedPartitionRecord) Size() int {
-	return len(p.partitionType.FieldList)
+	return p.partitionType.NumFields()
 }
 
 func (p borrowedPartitionRecord) Get(pos int) any {
-	return p.partition[p.partitionType.FieldList[pos].ID]
+	return p.partition[p.partitionType.Field(pos).ID]
 }
 
 func (borrowedPartitionRecord) Set(int, any) {
@@ -356,9 +356,9 @@ func flattenClassifiedManifestEntries(results []classifiedManifestEntries) *mani
 }
 
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
-	out := make(partitionRecord, len(partitionType.FieldList))
-	for i, f := range partitionType.FieldList {
-		value := partitionData[f.ID]
+	out := make(partitionRecord, partitionType.NumFields())
+	for i := range partitionType.NumFields() {
+		value := partitionData[partitionType.Field(i).ID]
 		if bytes, ok := value.([]byte); ok {
 			out[i] = slices.Clone(bytes)
 		} else {
@@ -920,7 +920,7 @@ func buildPartitionEvaluator(specID int, metadata Metadata, schema *iceberg.Sche
 	}
 
 	partType := spec.PartitionType(schema)
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema := iceberg.NewSchema(0, partType.Fields()...)
 
 	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilter, caseSensitive)
 	if err != nil {

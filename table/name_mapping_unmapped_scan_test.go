@@ -41,9 +41,9 @@ func TestScanWithIDLessNameMappingFields(t *testing.T) {
 
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "payload", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "known", Type: iceberg.PrimitiveTypes.String, Required: true},
-		}}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "known", Type: iceberg.PrimitiveTypes.String, Required: true},
+		), Required: true},
 	)
 	mapping := iceberg.NameMapping{
 		{FieldID: new(1), Names: []string{"id"}},

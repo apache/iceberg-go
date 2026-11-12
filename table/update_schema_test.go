@@ -31,24 +31,12 @@ var originalSchema = iceberg.NewSchema(1,
 	iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 	iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 	iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-	iceberg.NestedField{ID: 4, Name: "address", Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-			{ID: 6, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-		},
-	}, Required: false, Doc: ""},
-	iceberg.NestedField{ID: 7, Name: "tags", Type: &iceberg.ListType{
-		ElementID:       8,
-		Element:         iceberg.PrimitiveTypes.String,
-		ElementRequired: false,
-	}, Required: false, Doc: ""},
-	iceberg.NestedField{ID: 9, Name: "properties", Type: &iceberg.MapType{
-		KeyID:         10,
-		KeyType:       iceberg.PrimitiveTypes.String,
-		ValueID:       11,
-		ValueType:     iceberg.PrimitiveTypes.String,
-		ValueRequired: false,
-	}, Required: false, Doc: ""},
+	iceberg.NestedField{ID: 4, Name: "address", Type: iceberg.NewStructType(
+		iceberg.NestedField{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+		iceberg.NestedField{ID: 6, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+	), Required: false, Doc: ""},
+	iceberg.NestedField{ID: 7, Name: "tags", Type: iceberg.NewListType(8, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+	iceberg.NestedField{ID: 9, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 )
 
 var testMetadata, _ = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
@@ -128,24 +116,12 @@ func TestAddColumn(t *testing.T) {
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
-			{ID: 5, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       9,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 6, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			), Required: false, Doc: ""},
+			{ID: 5, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 6, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 			{
 				ID:             12,
 				Name:           "gender",
@@ -162,10 +138,7 @@ func TestAddColumn(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
 
-		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"files"}, &iceberg.ListType{
-			Element:         iceberg.PrimitiveTypes.String,
-			ElementRequired: false,
-		}, "", false, nil).Apply()
+		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"files"}, iceberg.NewListType(0, iceberg.PrimitiveTypes.String, false), "", false, nil).Apply()
 		assert.NoError(t, err)
 		assert.NotNil(t, newSchema)
 
@@ -173,29 +146,13 @@ func TestAddColumn(t *testing.T) {
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
-			{ID: 5, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       9,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 6, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 12, Name: "files", Type: &iceberg.ListType{
-				ElementID:       13,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			), Required: false, Doc: ""},
+			{ID: 5, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 6, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 12, Name: "files", Type: iceberg.NewListType(13, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 		}, newSchema.Fields())
 	})
 
@@ -203,11 +160,7 @@ func TestAddColumn(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
 
-		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"files"}, &iceberg.MapType{
-			KeyType:       iceberg.PrimitiveTypes.String,
-			ValueType:     iceberg.PrimitiveTypes.String,
-			ValueRequired: false,
-		}, "", false, nil).Apply()
+		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"files"}, iceberg.NewMapType(0, iceberg.PrimitiveTypes.String, 0, iceberg.PrimitiveTypes.String, false), "", false, nil).Apply()
 		assert.NoError(t, err)
 		assert.NotNil(t, newSchema)
 
@@ -215,31 +168,13 @@ func TestAddColumn(t *testing.T) {
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
-			{ID: 5, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       9,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 6, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 12, Name: "files", Type: &iceberg.MapType{
-				KeyID:         13,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       14,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			), Required: false, Doc: ""},
+			{ID: 5, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 6, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 12, Name: "files", Type: iceberg.NewMapType(13, iceberg.PrimitiveTypes.String, 14, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 		}, newSchema.Fields())
 	})
 
@@ -247,12 +182,10 @@ func TestAddColumn(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
 
-		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"files"}, &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 7, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				{ID: 8, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-			},
-		}, "", false, nil).Apply()
+		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"files"}, iceberg.NewStructType(
+			iceberg.NestedField{ID: 7, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			iceberg.NestedField{ID: 8, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+		), "", false, nil).Apply()
 		assert.NoError(t, err)
 		assert.NotNil(t, newSchema)
 
@@ -260,30 +193,16 @@ func TestAddColumn(t *testing.T) {
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
-			{ID: 5, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       9,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 6, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 12, Name: "files", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 13, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 14, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			), Required: false, Doc: ""},
+			{ID: 5, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 6, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 12, Name: "files", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 13, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 14, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			), Required: false, Doc: ""},
 		}, newSchema.Fields())
 	})
 
@@ -299,25 +218,13 @@ func TestAddColumn(t *testing.T) {
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 12, Name: "code", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
-			{ID: 5, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       9,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 6, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 12, Name: "code", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			), Required: false, Doc: ""},
+			{ID: 5, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 6, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 		}, newSchema.Fields())
 	})
 
@@ -325,12 +232,10 @@ func TestAddColumn(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
 
-		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"address", "code"}, &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 7, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				{ID: 8, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-			},
-		}, "", false, nil).Apply()
+		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"address", "code"}, iceberg.NewStructType(
+			iceberg.NestedField{ID: 7, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			iceberg.NestedField{ID: 8, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+		), "", false, nil).Apply()
 		assert.NoError(t, err)
 		assert.NotNil(t, newSchema)
 
@@ -338,30 +243,16 @@ func TestAddColumn(t *testing.T) {
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 12, Name: "code", Type: &iceberg.StructType{
-						FieldList: []iceberg.NestedField{
-							{ID: 13, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-							{ID: 14, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-						},
-					}, Required: false, Doc: ""},
-				},
-			}},
-			{ID: 5, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       9,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 6, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 12, Name: "code", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 13, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+					iceberg.NestedField{ID: 14, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				), Required: false, Doc: ""},
+			)},
+			{ID: 5, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 6, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 		}, newSchema.Fields())
 	})
 
@@ -369,15 +260,10 @@ func TestAddColumn(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
 
-		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"address", "code"}, &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 7, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				{ID: 8, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-			},
-		}, "", false, nil).AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).AddColumn([]string{"files"}, &iceberg.ListType{
-			Element:         iceberg.PrimitiveTypes.String,
-			ElementRequired: false,
-		}, "", false, nil).Apply()
+		newSchema, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"address", "code"}, iceberg.NewStructType(
+			iceberg.NestedField{ID: 7, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			iceberg.NestedField{ID: 8, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+		), "", false, nil).AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).AddColumn([]string{"files"}, iceberg.NewListType(0, iceberg.PrimitiveTypes.String, false), "", false, nil).Apply()
 		assert.NoError(t, err)
 		assert.NotNil(t, newSchema)
 
@@ -385,36 +271,18 @@ func TestAddColumn(t *testing.T) {
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 12, Name: "code", Type: &iceberg.StructType{
-						FieldList: []iceberg.NestedField{
-							{ID: 13, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-							{ID: 14, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-						},
-					}, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
-			{ID: 5, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       9,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 6, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 8, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 12, Name: "code", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 13, Name: "code-1", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+					iceberg.NestedField{ID: 14, Name: "code-2", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				), Required: false, Doc: ""},
+			), Required: false, Doc: ""},
+			{ID: 5, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 6, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 			{ID: 15, Name: "gender", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-			{ID: 16, Name: "files", Type: &iceberg.ListType{
-				ElementID:       17,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}},
+			{ID: 16, Name: "files", Type: iceberg.NewListType(17, iceberg.PrimitiveTypes.String, false)},
 		}, newSchema.Fields())
 	})
 
@@ -498,24 +366,12 @@ func TestApplyChanges(t *testing.T) {
 		assert.Equal(t, []iceberg.NestedField{
 			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: ""},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 6, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-					{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-				},
-			}, Required: false, Doc: ""},
-			{ID: 7, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       8,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			}, Required: false, Doc: ""},
-			{ID: 9, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         10,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       11,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			}, Required: false, Doc: ""},
+			{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 6, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				iceberg.NestedField{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			), Required: false, Doc: ""},
+			{ID: 7, Name: "tags", Type: iceberg.NewListType(8, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
+			{ID: 9, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.String, false), Required: false, Doc: ""},
 			{ID: 12, Name: "gender", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 		}, st.(*iceberg.StructType).Fields())
 	})
@@ -1432,11 +1288,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 	newListSchema := func(elementRequired bool, elementType iceberg.Type) *iceberg.Schema {
 		return iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-			iceberg.NestedField{ID: 2, Name: "tags", Type: &iceberg.ListType{
-				ElementID:       3,
-				Element:         elementType,
-				ElementRequired: elementRequired,
-			}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "tags", Type: iceberg.NewListType(3, elementType, elementRequired), Required: false},
 		)
 	}
 
@@ -1556,13 +1408,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 	newMapSchema := func(valueRequired bool, valueType iceberg.Type) *iceberg.Schema {
 		return iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-			iceberg.NestedField{ID: 2, Name: "properties", Type: &iceberg.MapType{
-				KeyID:         3,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       4,
-				ValueType:     valueType,
-				ValueRequired: valueRequired,
-			}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "properties", Type: iceberg.NewMapType(3, iceberg.PrimitiveTypes.String, 4, valueType, valueRequired), Required: false},
 		)
 	}
 
@@ -1830,20 +1676,16 @@ func TestUnionByNameAddedColumnsAreOptional(t *testing.T) {
 func TestUnionByNameAddNestedStructField(t *testing.T) {
 	current := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "address", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "address", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), Required: false},
 	)
 	incoming := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "address", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
-				{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "address", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
+			iceberg.NestedField{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), Required: false},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -1924,16 +1766,10 @@ func TestUnionByNameIgnoreNarrowingType(t *testing.T) {
 // An invalid (non-promotable) map value type change must error.
 func TestUnionByNameInvalidMapValueTypeChange(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.String, false), Required: false},
 	)
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int64, false), Required: false},
 	)
 
 	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -1942,14 +1778,10 @@ func TestUnionByNameInvalidMapValueTypeChange(t *testing.T) {
 
 func TestUnionByNamePromoteListElement(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
-			ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "vals", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, false), Required: false},
 	)
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
-			ElementID: 2, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "vals", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int64, false), Required: false},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2080,17 +1912,11 @@ func TestUnionByNameNilSchema(t *testing.T) {
 
 func TestUnionByNameRejectsMapKeyChange(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int32,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.Int32, 3, iceberg.PrimitiveTypes.String, false), Required: false},
 	)
 
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int64,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.Int64, 3, iceberg.PrimitiveTypes.String, false), Required: false},
 	)
 
 	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2099,17 +1925,11 @@ func TestUnionByNameRejectsMapKeyChange(t *testing.T) {
 
 func TestUnionByNameIgnoresNarrowingMapKey(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int64,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.Int64, 3, iceberg.PrimitiveTypes.String, false), Required: false},
 	)
 
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int32,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.Int32, 3, iceberg.PrimitiveTypes.String, false), Required: false},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2122,16 +1942,10 @@ func TestUnionByNameIgnoresNarrowingMapKey(t *testing.T) {
 
 func TestUnionByNamePromoteMapValue(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int32, false), Required: false},
 	)
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int64, false), Required: false},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2148,12 +1962,10 @@ func TestUnionByNameAddNewNestedStructWithChildren(t *testing.T) {
 	)
 	incoming := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "address", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
-				{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "address", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
+			iceberg.NestedField{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), Required: false},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2174,25 +1986,15 @@ func TestUnionByNameAddNewNestedStructWithChildren(t *testing.T) {
 
 func TestUnionByNameAddFieldToListOfStruct(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
-			ElementID: 2, ElementRequired: false,
-			Element: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-				},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "events", Type: iceberg.NewListType(2, iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		), false), Required: false},
 	)
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
-			ElementID: 2, ElementRequired: false,
-			Element: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-					{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
-				},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "events", Type: iceberg.NewListType(2, iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			iceberg.NestedField{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), false), Required: false},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2208,27 +2010,15 @@ func TestUnionByNameAddFieldToListOfStruct(t *testing.T) {
 
 func TestUnionByNameAddFieldToMapValueStruct(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueRequired: false,
-			ValueType: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-				},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		), false), Required: false},
 	)
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueRequired: false,
-			ValueType: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-					{ID: 5, Name: "b", Type: iceberg.PrimitiveTypes.String, Required: false},
-				},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			iceberg.NestedField{ID: 5, Name: "b", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), false), Required: false},
 	)
 
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2370,48 +2160,36 @@ func TestUnionByNameRejectsInvalidNestedAddedColumnDefault(t *testing.T) {
 
 	incomingStruct := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{
-					ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.Int32,
-					Required: false, InitialDefault: "not-an-int",
-				},
+		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: iceberg.NewStructType(
+			iceberg.NestedField{
+				ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.Int32,
+				Required: false, InitialDefault: "not-an-int",
 			},
-		}},
+		)},
 	)
 	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingStruct).Apply()
 	require.ErrorContains(t, err, "invalid initial-default for zip")
 
 	incomingMap := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "events", Required: false, Type: &iceberg.MapType{
-			KeyID: 3, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 4, ValueRequired: false, ValueType: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{
-						ID: 5, Name: "when", Type: iceberg.PrimitiveTypes.Date,
-						Required: false, WriteDefault: "not-a-date",
-					},
-				},
+		iceberg.NestedField{ID: 2, Name: "events", Required: false, Type: iceberg.NewMapType(3, iceberg.PrimitiveTypes.String, 4, iceberg.NewStructType(
+			iceberg.NestedField{
+				ID: 5, Name: "when", Type: iceberg.PrimitiveTypes.Date,
+				Required: false, WriteDefault: "not-a-date",
 			},
-		}},
+		), false)},
 	)
 	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingMap).Apply()
 	require.ErrorContains(t, err, "invalid write-default for when")
 
 	incomingMapKey := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "lookup", Required: false, Type: &iceberg.MapType{
-			KeyID: 3, KeyType: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{
-						ID: 4, Name: "code", Type: iceberg.PrimitiveTypes.Int32,
-						Required: false, InitialDefault: "not-an-int",
-					},
-				},
+		iceberg.NestedField{ID: 2, Name: "lookup", Required: false, Type: iceberg.NewMapType(3, iceberg.NewStructType(
+			iceberg.NestedField{
+				ID: 4, Name: "code", Type: iceberg.PrimitiveTypes.Int32,
+				Required: false, InitialDefault: "not-an-int",
 			},
-			ValueID: 5, ValueRequired: false, ValueType: iceberg.PrimitiveTypes.String,
-		}},
+		), 5, iceberg.PrimitiveTypes.String, false)},
 	)
 	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingMapKey).Apply()
 	require.ErrorContains(t, err, "invalid initial-default for code")
@@ -2459,11 +2237,9 @@ func TestUnionByNameAddedComplexColumnDefault(t *testing.T) {
 	)
 
 	structType := func() *iceberg.StructType {
-		return &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}
+		return iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+		)
 	}
 
 	valid := iceberg.NewSchema(1,
@@ -2497,19 +2273,15 @@ func TestUnionByNameCannotExtendStructAddedByPriorOp(t *testing.T) {
 
 	extend := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}},
+		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+		)},
 	)
 
 	_, err := NewUpdateSchema(unionTxn(t, current), true, true).
-		AddColumn([]string{"addr"}, &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}, "", false, nil).
+		AddColumn([]string{"addr"}, iceberg.NewStructType(
+			iceberg.NestedField{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), "", false, nil).
 		UnionByNameWith(extend).
 		Apply()
 	require.ErrorContains(t, err, "field already exists in adds: addr")
@@ -2517,20 +2289,16 @@ func TestUnionByNameCannotExtendStructAddedByPriorOp(t *testing.T) {
 
 func TestUnionByNameMirroredSchemas(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 9, Name: "s", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 8, Name: "inner", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 9, Name: "s", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 8, Name: "inner", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), Required: false},
 		iceberg.NestedField{ID: 5, Name: "a", Type: iceberg.PrimitiveTypes.String, Required: false},
 		iceberg.NestedField{ID: 4, Name: "b", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
 	mirrored := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "inner", Type: iceberg.PrimitiveTypes.String, Required: false},
-			},
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "inner", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), Required: false},
 		iceberg.NestedField{ID: 3, Name: "a", Type: iceberg.PrimitiveTypes.String, Required: false},
 		iceberg.NestedField{ID: 4, Name: "b", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
@@ -2546,14 +2314,10 @@ func TestUnionByNameMirroredSchemas(t *testing.T) {
 
 func TestUnionByNameInvalidListElementTypeChange(t *testing.T) {
 	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
-			ElementID: 2, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "vals", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.String, false), Required: false},
 	)
 	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
-			ElementID: 2, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 1, Name: "vals", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int64, false), Required: false},
 	)
 
 	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
@@ -2569,66 +2333,46 @@ func TestUnionByNameRejectsCrossKindChanges(t *testing.T) {
 		errContains string
 	}{
 		{
-			name: "list -> map",
-			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.ListType{
-				ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false,
-			}, Required: false},
-			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.MapType{
-				KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
-			}, Required: false},
+			name:        "list -> map",
+			existing:    iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, false), Required: false},
+			incoming:    iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int32, false), Required: false},
 			errContains: "cannot change column type",
 		},
 		{
 			name: "struct -> list",
-			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-				},
-			}, Required: false},
-			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.ListType{
-				ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false,
-			}, Required: false},
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			), Required: false},
+			incoming:    iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, false), Required: false},
 			errContains: "cannot change column type",
 		},
 		{
-			name: "map -> struct",
-			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.MapType{
-				KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
-			}, Required: false},
-			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-				},
-			}, Required: false},
+			name:     "map -> struct",
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int32, false), Required: false},
+			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			), Required: false},
 			errContains: "cannot change column type",
 		},
 		{
 			name:     "primitive -> struct",
 			existing: iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-				},
-			}, Required: false},
+			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			), Required: false},
 			errContains: "cannot change column type",
 		},
 		{
 			name: "struct -> primitive",
-			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-				},
-			}, Required: false},
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			), Required: false},
 			incoming:    iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 			errContains: "cannot change column type",
 		},
 		{
-			name: "list -> primitive",
-			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.ListType{
-				ElementID: 2, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
-			}, Required: false},
+			name:        "list -> primitive",
+			existing:    iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.String, false), Required: false},
 			incoming:    iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.PrimitiveTypes.String, Required: false},
 			errContains: "cannot change column type",
 		},
