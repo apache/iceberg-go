@@ -738,7 +738,7 @@ import _ &quot;github.com/apache/iceberg-go/io/gocloud/azure&quot; // abfs, abfs
 <p>Without a matching blank import, these schemes return <code>ErrIOSchemeNotFound</code> with a hint naming the package to import.</p>
 <p>All credential and tuning property keys are constants in <a href="https://github.com/apache/iceberg-go/blob/main/io/config.go"><code>io/config.go</code></a>. They can be supplied through table properties, catalog properties, or per-call <code>iceberg.Properties</code> arguments depending on context.</p>
 <h3 id="s3"><a class="header" href="#s3">S3</a></h3>
-<p>Authentication is resolved in this order (<code>io/gocloud/s3/s3.go</code>):</p>
+<p>When remote signing is disabled, authentication is resolved in this order (<code>io/gocloud/s3/s3.go</code>):</p>
 <ol>
 <li>Static credentials in properties: <code>s3.access-key-id</code> + <code>s3.secret-access-key</code> (+ optional <code>s3.session-token</code>).</li>
 <li>The standard AWS SDK v2 default credential chain - environment variables (<code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code>), <code>~/.aws/credentials</code>, container/IAM role.</li>
@@ -754,9 +754,33 @@ import _ &quot;github.com/apache/iceberg-go/io/gocloud/azure&quot; // abfs, abfs
 <tr><td><code>s3.connect-timeout</code> (<code>io.S3ConnectTimeout</code>)</td><td>Either a number of seconds (<code>&quot;60&quot;</code>, <code>&quot;60.0&quot;</code>) or a Go duration (<code>&quot;5s&quot;</code>).</td></tr>
 <tr><td><code>s3.force-virtual-addressing</code> (<code>io.S3ForceVirtualAddressing</code>)</td><td>Force virtual-host-style addressing.</td></tr>
 <tr><td><code>s3.compat-mode</code> (<code>io.S3CompatMode</code>)</td><td>Enable for non-AWS S3 endpoints. Defaults to off.</td></tr>
-<tr><td><code>s3.signer.uri</code> (<code>io.S3SignerURI</code>)</td><td>Reserved for remote-signing endpoint (not yet implemented).</td></tr>
+<tr><td><code>s3.remote-signing-enabled</code> (<code>io.S3RemoteSigningEnabled</code>)</td><td>Set to <code>true</code> to have a REST service sign S3 requests. Defaults to <code>false</code>.</td></tr>
+<tr><td><code>s3.signer.uri</code> (<code>io.S3SignerURI</code>)</td><td>Legacy signing service base URI. Requests use <code>&lt;base&gt;/v1/aws/s3/sign</code>.</td></tr>
 </tbody></table>
 </div>
+<p>With remote signing enabled, S3 uses anonymous SDK credentials and obtains each
+request's signature from the signing service. No local AWS credentials are needed.
+REST catalogs use the table's <code>/sign</code> endpoint by default and pass through the
+response's <code>remote-signing-config</code> headers and properties. When that config is
+present, legacy <code>signer.endpoint</code>, <code>signer.uri</code>, and <code>s3.signer.uri</code> settings
+are ignored. <code>rest.remote-signing.endpoint</code> can explicitly override the default.
+It may be an absolute URL or a path relative to the catalog URI.
+Legacy settings are supported when the response has no remote signing config.</p>
+<p>A table-specific token takes precedence over the catalog token. The catalog's
+refreshing authentication is reused only when the signer shares the catalog's
+origin. For a separate signing service, use the headers supplied in
+<code>remote-signing-config</code> or a table-specific token. For a standalone S3 FileIO,
+set <code>s3.signer.uri</code>, <code>s3.region</code>, and an optional <code>token</code> for the signing service.
+When also supplying <code>rest.remote-signing.config</code>, set
+<code>rest.remote-signing.endpoint</code> to the complete signing endpoint instead.</p>
+<p>Object uploads use unsigned payloads. Only bulk-delete XML bodies are sent to the
+signer. Streaming signatures (<code>aws-chunked</code>) are unsupported. Caller-supplied
+checksum values are preserved; an upload that sets <code>ChecksumAlgorithm</code> must also
+supply its checksum value. Signing requests use the caller's context and a
+30-second timeout unless the HTTP client has a configured timeout.
+Remote signing accepts a standard <code>*http.Client</code> or the AWS SDK's buildable client
+for S3 requests so redirects can be disabled. Other custom HTTP clients are rejected.
+S3 requests must resolve to SigV4; SigV4a and S3 Express signing are not supported.</p>
 <h3 id="google-cloud-storage"><a class="header" href="#google-cloud-storage">Google Cloud Storage</a></h3>
 <p>Authentication resolution (<code>io/gocloud/gcs/gcs.go</code>):</p>
 <ol>
@@ -977,6 +1001,9 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.compression-level.column.&lt;name&gt;</code></td><td>Global level, or the column codec's default if the codecs differ</td></tr>
 <tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
 <tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-fpp.column.&lt;name&gt;</code></td><td>0.01 (per-column false-positive probability, strictly between 0 and 1)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-ndv.column.&lt;name&gt;</code></td><td>unset (expected distinct values; positive integer up to 4,294,967,295)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-adaptive-enabled</code></td><td><code>false</code> (size enabled Bloom filters to observed NDV unless a per-column NDV is specified)</td></tr>
 <tr><td><code>write.parquet.stats-enabled.column.&lt;name&gt;</code></td><td><code>true</code> (per-column Parquet statistics toggle)</td></tr>
 <tr><td><code>parquet.enable.dictionary</code></td><td><code>true</code> (global dictionary encoding switch; same key as Iceberg Java)</td></tr>
 <tr><td><code>write.parquet.dict-encoding-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched; overrides the global switch)</td></tr>
@@ -984,14 +1011,26 @@ but are reserved for future task-group planning and are not currently read.</p>
 <tr><td><code>write.parquet.variant-inference-buffer-size</code></td><td>100 rows (buffered per file to infer the shredding schema)</td></tr>
 </tbody></table>
 </div>
-<p>The bloom filter, statistics, and dictionary toggles are parsed the way Iceberg Java parses them: only <code>true</code> (case-insensitive) enables, so any other value — including <code>1</code> — reads as <code>false</code>. Statistics settings apply to data files and use Iceberg field names, including nested paths such as <code>items.element</code>. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other metadata may still be recorded.</p>
+<p>The bloom filter, statistics, and dictionary toggles follow Iceberg Java parsing: only <code>true</code>
+(case-insensitive) enables a toggle; other values, including <code>1</code>, are false. Bloom filters remain
+disabled for a column unless its enabled toggle is set. When adaptive sizing is enabled, an explicit
+column NDV takes precedence. Adaptive sizing rejects FPP values extremely close to 1 that could make
+the writer hang.</p>
+<p>Statistics settings apply to data files and use Iceberg field names, including nested paths such as
+<code>items.element</code>. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other
+metadata may still be recorded.</p>
 <p>Column compression keys use case-sensitive Iceberg leaf paths, such as
 <code>items.element</code> or <code>attributes.value.name</code>. They apply to data files and use
 the global settings for columns without overrides. An explicit column level
 must be an integer valid for its effective codec. Missing fields are ignored.
 Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
 these keys. Arrow does not register legacy <code>lz4</code> or <code>lzo</code> codecs by default;
-<code>lz4_raw</code> is supported.</p>
+<code>lz4_raw</code> is supported.
+Bloom column settings use Iceberg names, including <code>items.element</code> and
+<code>lookup.value</code>. Writers resolve these to the physical Parquet paths. Existing
+physical-path settings remain supported; logical names take precedence when
+both are present. Logical settings follow column renames and are removed when
+the column is deleted. Data-column Bloom settings do not apply to delete files.</p>
 <p>Equality-delete and v2 position-delete Parquet writers also support these
 overrides, defined in <code>table/properties.go</code>. Unset overrides inherit the
 corresponding <code>write.parquet.*</code> setting and its default. If the delete codec
@@ -1867,6 +1906,33 @@ reported as issues rather than silently accepted.</p>
 <a href="https://iceberg.apache.org/spec/#content-file-uniqueness">Iceberg spec</a>
 and <a href="https://iceberg.apache.org/spec/#manifest-lists">manifest list spec</a>.</p>
 <h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
+<h3 id="partition-statistics-v1-v3"><a class="header" href="#partition-statistics-v1-v3">Partition statistics (v1-v3)</a></h3>
+<p><code>ComputePartitionStatistics</code> writes a Parquet statistics file for the transaction's
+current branch head and stages its registration. Use a fresh transaction and
+commit it to publish the reference:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+stats, err := txn.ComputePartitionStatistics(ctx)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>The operation recomputes statistics from live manifest entries without reading
+data files, delete-file contents, or Puffin blobs. It groups rows by partition
+spec ID and partition tuple and sorts by the unified tuple with NULL first.
+V2 includes position and equality delete metrics. V3 also counts deletion vectors
+in <code>dv_count</code>; their records contribute to <code>position_delete_record_count</code>, while
+<code>position_delete_file_count</code> counts classic files only, including V2 files
+retained after an upgrade.</p>
+<p><code>total_record_count</code> is exact for tables without deletes and for DV-only tables
+whose live targets, partitions, sequence numbers, and record counts can be
+validated from metadata. A live classic position or equality delete makes this
+field NULL for every partition, since deletes may apply across specs. Unknown DV
+sequence numbers also leave the affected total NULL. Optional last-updated
+fields are left NULL. <code>PartitionStatisticsSchema</code> exposes the versioned schema;
+<code>PartitionStatisticsSchemaV1</code> remains available.</p>
+<p>The table must have a snapshot and at least one partition field in its spec
+history. Dropped partition source fields and changed transform result types are
+not supported. A concurrent change to the target branch, current schema, or
+partition layout rejects the commit. Statistics do not create a new snapshot.</p>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
     &quot;time&quot;

@@ -777,6 +777,33 @@ reported as issues rather than silently accepted.</p>
 <a href="https://iceberg.apache.org/spec/#content-file-uniqueness">Iceberg spec</a>
 and <a href="https://iceberg.apache.org/spec/#manifest-lists">manifest list spec</a>.</p>
 <h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
+<h3 id="partition-statistics-v1-v3"><a class="header" href="#partition-statistics-v1-v3">Partition statistics (v1-v3)</a></h3>
+<p><code>ComputePartitionStatistics</code> writes a Parquet statistics file for the transaction's
+current branch head and stages its registration. Use a fresh transaction and
+commit it to publish the reference:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+stats, err := txn.ComputePartitionStatistics(ctx)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>The operation recomputes statistics from live manifest entries without reading
+data files, delete-file contents, or Puffin blobs. It groups rows by partition
+spec ID and partition tuple and sorts by the unified tuple with NULL first.
+V2 includes position and equality delete metrics. V3 also counts deletion vectors
+in <code>dv_count</code>; their records contribute to <code>position_delete_record_count</code>, while
+<code>position_delete_file_count</code> counts classic files only, including V2 files
+retained after an upgrade.</p>
+<p><code>total_record_count</code> is exact for tables without deletes and for DV-only tables
+whose live targets, partitions, sequence numbers, and record counts can be
+validated from metadata. A live classic position or equality delete makes this
+field NULL for every partition, since deletes may apply across specs. Unknown DV
+sequence numbers also leave the affected total NULL. Optional last-updated
+fields are left NULL. <code>PartitionStatisticsSchema</code> exposes the versioned schema;
+<code>PartitionStatisticsSchemaV1</code> remains available.</p>
+<p>The table must have a snapshot and at least one partition field in its spec
+history. Dropped partition source fields and changed transform result types are
+not supported. A concurrent change to the target branch, current schema, or
+partition layout rejects the commit. Statistics do not create a new snapshot.</p>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
     &quot;time&quot;
