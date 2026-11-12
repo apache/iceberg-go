@@ -701,9 +701,8 @@ func TestValidateNoNewDeletesForRewrittenFiles_PosDeleteMatching(t *testing.T) {
 	}
 }
 
-// TestValidateNoNewDeletesForRewrittenFiles_EqDeleteAlwaysConflicts pins
-// the pre-existing conservative eq-delete rule: any concurrent eq-delete
-// during a rewrite is a conflict, regardless of partition overlap.
+// TestValidateNoNewDeletesForRewrittenFiles_EqDeleteAlwaysConflicts
+// ensures an unpartitioned equality delete is always a global conflict.
 func TestValidateNoNewDeletesForRewrittenFiles_EqDeleteAlwaysConflicts(t *testing.T) {
 	unpart := *iceberg.UnpartitionedSpec
 	rewritten := newTestDataFile(t, unpart, "data-rewritten.parquet", nil)
@@ -716,6 +715,44 @@ func TestValidateNoNewDeletesForRewrittenFiles_EqDeleteAlwaysConflicts(t *testin
 	err = runPosDeleteConflictCheck(t, []iceberg.DataFile{rewritten}, eqDel)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrConflictingDeleteFiles)
+}
+
+func TestValidateNoNewDeletesForRewrittenFiles_EqDeletePartitionScope(t *testing.T) {
+	unpart := *iceberg.UnpartitionedSpec
+	spec0 := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	spec1 := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	rewritten := newTestDataFile(t, spec0, "data-part.parquet", map[int]any{1000: int32(7)})
+
+	tests := []struct {
+		name         string
+		spec         iceberg.PartitionSpec
+		partition    map[int]any
+		wantConflict bool
+	}{
+		{name: "same partition", spec: spec0, partition: map[int]any{1000: int32(7)}, wantConflict: true},
+		{name: "other partition", spec: spec0, partition: map[int]any{1000: int32(9)}},
+		{name: "other spec", spec: spec1, partition: map[int]any{1000: int32(7)}},
+		{name: "old unpartitioned spec is global", spec: unpart, wantConflict: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder, err := iceberg.NewDataFileBuilder(tt.spec, iceberg.EntryContentEqDeletes,
+				"eq.parquet", iceberg.ParquetFile, tt.partition, nil, nil, 1, 1)
+			require.NoError(t, err)
+			eqDelete := builder.EqualityFieldIDs([]int{1}).Build()
+
+			err = runPosDeleteConflictCheck(t, []iceberg.DataFile{rewritten}, eqDelete)
+			if tt.wantConflict {
+				require.ErrorIs(t, err, ErrConflictingDeleteFiles)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 // TestValidateNoNewDeletesForRewrittenFiles_UnsupportedPartitionType
