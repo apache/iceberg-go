@@ -28,8 +28,8 @@ import (
 	"testing"
 )
 
-// TestCatalogFileIOUsesScopedRegistry prevents adding global FileIO loaders
-// to catalog backends. REST is excluded until its scoped registry PR lands.
+// TestCatalogFileIOUsesScopedRegistry prevents catalog backends from bypassing
+// the shared registry helpers for FileIO loading.
 func TestCatalogFileIOUsesScopedRegistry(t *testing.T) {
 	root := ".."
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
@@ -37,10 +37,6 @@ func TestCatalogFileIOUsesScopedRegistry(t *testing.T) {
 			return walkErr
 		}
 		if d.IsDir() {
-			if d.Name() == "rest" {
-				return filepath.SkipDir
-			}
-
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||

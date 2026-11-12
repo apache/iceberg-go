@@ -24,6 +24,7 @@ import (
 	"iter"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -981,6 +982,11 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, err
 	}
 
+	if err := tblutils.ValidateParquetReadProperties(meta.props); err != nil {
+		return nil, err
+	}
+	ctx = tblutils.WithTableProperties(ctx, meta.props)
+
 	// Rows that existing position deletes already removed must not be deleted
 	// again, so each task carries its file's position delete files from scan
 	// planning, which matches them by sequence number, partition and path. The
@@ -1012,6 +1018,12 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 			Length:      f.FileSizeBytes(),
 		})
 	}
+	if meta.formatVersion == 2 {
+		// Position delete files must be ordered by file path, then row position.
+		slices.SortFunc(tasks, func(a, b FileScanTask) int {
+			return strings.Compare(a.File.FilePath(), b.File.FilePath())
+		})
+	}
 
 	boundFilter, err := iceberg.BindExpr(meta.CurrentSchema(), filter, caseSensitive)
 	if err != nil {
@@ -1023,11 +1035,24 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, fmt.Errorf("failed to build metadata: %w", err)
 	}
 
+	filterIDs, err := iceberg.ExtractFieldIDs(boundFilter)
+	if err != nil {
+		return nil, err
+	}
+	selected := make(map[int]iceberg.Void, len(filterIDs))
+	for _, id := range filterIDs {
+		selected[id] = iceberg.Void{}
+	}
+	projection, err := iceberg.PruneColumns(meta.CurrentSchema(), selected, false)
+	if err != nil {
+		return nil, err
+	}
+
 	scanner := &arrowScan{
 		metadata:        builtMeta,
 		fs:              fs,
 		scanSchema:      meta.CurrentSchema(),
-		projectedSchema: meta.CurrentSchema(),
+		projectedSchema: projection,
 		boundRowFilter:  boundFilter,
 		caseSensitive:   caseSensitive,
 		rowLimit:        -1, // No limit

@@ -30,7 +30,9 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/internal/adlsauth"
+	"github.com/apache/iceberg-go/internal/remotesigning"
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/semaphore"
 )
@@ -492,6 +494,10 @@ func mergeVendedCredentials(config, credentialConfig iceberg.Properties, locatio
 	}
 
 	maps.Copy(config, credentialConfig)
+	// Keep explicit vended signer tokens distinct from ambient catalog auth.
+	if token, ok := credentialConfig[keyOauthToken]; ok {
+		config[remotesigning.TokenProperty] = token
+	}
 }
 
 func scopedFilesystemKey(credentialIndex int, location string) string {
@@ -540,17 +546,13 @@ func (p *prefixScopedIO) Close() error {
 
 // loadRegistryFS preserves the global registry when none is configured.
 func loadRegistryFS(ctx context.Context, registry *iceio.Registry, props iceberg.Properties, location string) (iceio.IO, error) {
-	if registry == nil {
-		return iceio.LoadFS(ctx, props, location)
-	}
-
-	return registry.LoadFS(ctx, props, location)
+	return cataloginternal.LoadFSWithRegistry(ctx, registry, props, location)
 }
 
 // loadRegistryFSFunc preserves the global registry for lazy loads when none is configured.
 func loadRegistryFSFunc(registry *iceio.Registry, props iceberg.Properties, location string) func(context.Context) (iceio.IO, error) {
 	return func(ctx context.Context) (iceio.IO, error) {
-		fs, err := loadRegistryFS(ctx, registry, props, location)
+		fs, err := cataloginternal.LoadFSWithRegistry(ctx, registry, props, location)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load metadata file at %s: %w", location, err)
 		}

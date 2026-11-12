@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table/dv"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -133,6 +134,11 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		return nil, fmt.Errorf("%w: equality-delete to deletion-vector conversion requires a v3 table, got v%d",
 			iceberg.ErrNotImplemented, meta.formatVersion)
 	}
+
+	if err := tblutils.ValidateParquetReadProperties(meta.props); err != nil {
+		return nil, err
+	}
+	ctx = tblutils.WithTableProperties(ctx, meta.props)
 
 	snapshot := t.planningSnapshot(meta)
 	if snapshot == nil {

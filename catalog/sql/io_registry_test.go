@@ -138,6 +138,12 @@ func TestSQLViewUsesCatalogIOPropertiesWithIsolatedRegistry(t *testing.T) {
 	require.Equal(t, version.Representations, loaded.Metadata().CurrentVersion().Representations)
 	require.Equal(t, "isolated", loaded.Metadata().CurrentVersion().DefaultCatalog)
 	require.Empty(t, version.DefaultCatalog, "catalog defaults must not modify the caller's version")
+	updated, err := cat.UpdateView(t.Context(), ident, nil, []view.Update{
+		view.NewSetPropertiesUpdate(iceberg.Properties{"updated": "true"}),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "true", updated.Properties()["updated"])
+	require.Equal(t, "catalog-only", seen["storage-secret"], "view metadata updates must use the catalog registry")
 	require.NoError(t, cat.DropView(t.Context(), ident))
 }
 

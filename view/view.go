@@ -19,18 +19,13 @@ package view
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"net/url"
 	"slices"
 	"time"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
-	"github.com/google/uuid"
 )
 
 type View struct {
@@ -153,7 +148,8 @@ func CreateView(
 }
 
 // CreateViewWithIORegistry writes view metadata through the supplied
-// registry. A nil registry keeps the global FileIO behavior.
+// registry. A nil registry keeps the global FileIO behavior. The registry is
+// shared, not copied, so later Register and Unregister calls affect this write.
 func CreateViewWithIORegistry(
 	ctx context.Context, catalogName string, viewIdent table.Identifier,
 	schema *iceberg.Schema, representation Representation, defaultNS table.Identifier,
@@ -240,47 +236,10 @@ func CreateViewFromVersionWithRegistry(
 		return nil, err
 	}
 
-	metadataLocation, err := url.JoinPath(loc, "metadata", "view-"+uuid.New().String()+".metadata.json")
+	metadataLocation, _, err := WriteMetadataWithRegistry(ctx, viewMD.Metadata, ioProps, registry)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build view metadata location: %w", err)
-	}
-
-	viewMetadataBytes, err := json.Marshal(viewMD)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal view metadata: %w", err)
-	}
-
-	loadFS := io.LoadFS
-	if registry != nil {
-		loadFS = registry.LoadFS
-	}
-	fs, err := loadFS(ctx, ioProps, metadataLocation)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
-	}
-
-	wfs, ok := fs.(io.WriteFileIO)
-	if !ok {
-		return nil, errors.New("filesystem IO does not support writing")
-	}
-
-	if err := writeViewMetadata(ctx, wfs, metadataLocation, viewMetadataBytes); err != nil {
 		return nil, err
 	}
 
 	return New(viewIdent, viewMD, metadataLocation), nil
-}
-
-func writeViewMetadata(ctx context.Context, wfs io.WriteFileIO, metadataLocation string, data []byte) (err error) {
-	out, err := wfs.Create(ctx, metadataLocation)
-	if err != nil {
-		return fmt.Errorf("failed to create view metadata file: %w", err)
-	}
-	defer internal.CheckedClose(out, &err)
-
-	if _, err := out.Write(data); err != nil {
-		return fmt.Errorf("failed to write view metadata: %w", err)
-	}
-
-	return nil
 }

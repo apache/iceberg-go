@@ -19,11 +19,14 @@ package glue
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsglue "github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
@@ -97,4 +100,121 @@ func TestGlueCatalogsWithSameSchemeStayIsolated(t *testing.T) {
 		require.NotSame(t, filesystems[1-i], loaded)
 		clients[i].AssertExpectations(t)
 	}
+}
+
+func TestGlueCreateAndCommitTableUseCatalogIORegistry(t *testing.T) {
+	const scheme = "glue-create-commit-registry"
+	const warehouse = scheme + "://bucket/warehouse"
+	registry := &iceio.Registry{}
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+
+	cat, err := NewCatalog(
+		WithAWSConfig(aws.Config{Region: "us-east-1"}),
+		WithAWSProperties(AWSProperties{"warehouse": warehouse}),
+		WithIORegistry(registry),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cat.Close()) })
+	client := &mockGlueClient{}
+	cat.glueSvc = client
+
+	identifier := TableIdentifier("db", "tbl")
+	var glueTable types.Table
+	client.On("GetDatabase", mock.Anything, mock.Anything, mock.Anything).
+		Return(&awsglue.GetDatabaseOutput{Database: &types.Database{Name: aws.String("db")}}, nil).Once()
+	client.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			input := args.Get(1).(*awsglue.CreateTableInput)
+			glueTable = types.Table{
+				Name: aws.String("tbl"), DatabaseName: aws.String("db"),
+				TableType: aws.String(glueTableType), VersionId: aws.String("1"),
+				Parameters:        input.TableInput.Parameters,
+				StorageDescriptor: input.TableInput.StorageDescriptor,
+			}
+		}).Return(&awsglue.CreateTableOutput{}, nil).Once()
+	client.On("GetTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&awsglue.GetTableOutput{Table: &glueTable}, nil).Twice()
+	client.On("UpdateTable", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			input := args.Get(1).(*awsglue.UpdateTableInput)
+			glueTable.Parameters = input.TableInput.Parameters
+			glueTable.StorageDescriptor = input.TableInput.StorageDescriptor
+		}).Return(&awsglue.UpdateTableOutput{}, nil).Once()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+	created, err := cat.CreateTable(t.Context(), identifier, schema)
+	require.NoError(t, err)
+	loadedFS, err := created.FS(t.Context())
+	require.NoError(t, err)
+	require.Same(t, fs, loadedFS)
+
+	_, updatedLocation, err := cat.CommitTable(t.Context(), identifier, nil, []table.Update{
+		table.NewSetPropertiesUpdate(iceberg.Properties{"committed": "true"}),
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, created.MetadataLocation(), updatedLocation)
+	metadataFile, err := fs.Open(t.Context(), updatedLocation)
+	require.NoError(t, err)
+	require.NoError(t, metadataFile.Close())
+	_, err = iceio.LoadFS(t.Context(), nil, updatedLocation)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+	client.AssertExpectations(t)
+}
+
+type trackingGlueRegistryFS struct {
+	*iceio.MemFS
+	removed []string
+}
+
+func (fs *trackingGlueRegistryFS) Remove(ctx context.Context, path string) error {
+	fs.removed = append(fs.removed, path)
+
+	return fs.MemFS.Remove(ctx, path)
+}
+
+func TestGlueS3TablesCleanupUsesCatalogIORegistry(t *testing.T) {
+	const scheme = "glue-s3tables-cleanup-registry"
+	const managedLocation = scheme + "://bucket/table"
+	registry := &iceio.Registry{}
+	fs := &trackingGlueRegistryFS{MemFS: iceio.NewMemFS()}
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+
+	cat, err := NewCatalog(WithAWSConfig(aws.Config{Region: "us-east-1"}), WithIORegistry(registry))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cat.Close()) })
+	client := &mockGlueClient{}
+	cat.glueSvc = client
+	client.On("GetDatabase", mock.Anything, mock.Anything, mock.Anything).
+		Return(federatedDatabaseOutput("aws:s3tables"), nil).Once()
+	client.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&awsglue.CreateTableOutput{}, nil).Once()
+	client.On("GetTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&awsglue.GetTableOutput{Table: &types.Table{
+			Name: aws.String("tbl"), DatabaseName: aws.String("db"), VersionId: aws.String("1"),
+			StorageDescriptor: &types.StorageDescriptor{Location: aws.String(managedLocation)},
+		}}, nil).Once()
+	var metadataLocation string
+	client.On("UpdateTable", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			input := args.Get(1).(*awsglue.UpdateTableInput)
+			metadataLocation = input.TableInput.Parameters[tableParamMetadataLocation]
+		}).Return((*awsglue.UpdateTableOutput)(nil), errors.New("update failed")).Once()
+	client.On("DeleteTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&awsglue.DeleteTableOutput{}, nil).Once()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+	_, err = cat.CreateTable(t.Context(), TableIdentifier("db", "tbl"), schema)
+	require.ErrorContains(t, err, "update failed")
+	require.NotEmpty(t, metadataLocation)
+	require.Equal(t, []string{metadataLocation}, fs.removed)
+	_, err = fs.Open(t.Context(), metadataLocation)
+	require.Error(t, err)
+	_, err = iceio.LoadFS(t.Context(), nil, metadataLocation)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+	client.AssertExpectations(t)
 }

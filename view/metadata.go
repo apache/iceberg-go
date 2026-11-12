@@ -135,7 +135,7 @@ type Version struct {
 	DefaultCatalog string `json:"default-catalog,omitempty"`
 }
 
-// MarshalJSON keeps required collection fields non-null, including on hand-built versions.
+// MarshalJSON writes a nil DefaultNamespace as an empty list because the spec requires the field.
 func (v Version) MarshalJSON() ([]byte, error) {
 	type alias Version
 
