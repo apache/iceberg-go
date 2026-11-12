@@ -593,6 +593,7 @@ func (e *MetadataLogEntry) UnmarshalJSON(data []byte) error {
 	}
 
 	*e = MetadataLogEntry{MetadataFile: *wire.MetadataFile, TimestampMs: *wire.TimestampMs}
+
 	return nil
 }
 
@@ -618,6 +619,7 @@ func (e *SnapshotLogEntry) UnmarshalJSON(data []byte) error {
 	}
 
 	*e = SnapshotLogEntry{SnapshotID: *wire.SnapshotID, TimestampMs: *wire.TimestampMs}
+
 	return nil
 }
 
