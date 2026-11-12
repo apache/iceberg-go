@@ -28,7 +28,6 @@ import (
 	"iter"
 	"log/slog"
 	"maps"
-	"net"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -461,12 +460,6 @@ func unknownCommitStateOnTransport() reqOption {
 	return func(c *reqConfig) { c.unknownCommitStateOnTransport = true }
 }
 
-func isPreSendConnectionFailure(err error) bool {
-	var opErr *net.OpError
-
-	return errors.As(err, &opErr) && opErr.Op == "dial"
-}
-
 // requireBody rejects an HTTP 200 with an empty body rather than decoding it to
 // the zero result. Use it when a 200 must carry a payload, so a truncated or
 // proxy-stripped response cannot masquerade as a successful empty result (e.g.
@@ -631,13 +624,17 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	// If the caller canceled before dispatch, nothing could have been
 	// committed. Cancellation after dispatch is still outcome-unknown.
-	if err := ctx.Err(); err != nil {
-		return ret, err
+	if cfg.unknownCommitStateOnTransport {
+		if err := ctx.Err(); err != nil {
+			return ret, err
+		}
 	}
 
 	rsp, err = cl.Do(req)
 	if err != nil {
-		if cfg.unknownCommitStateOnTransport && !isPreSendConnectionFailure(err) {
+		if cfg.unknownCommitStateOnTransport {
+			// A dial failure may follow an earlier attempt whose response was
+			// lost when the HTTP transport retries the request.
 			return ret, fmt.Errorf("%w: %w", ErrCommitStateUnknown, err)
 		}
 

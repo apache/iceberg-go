@@ -1825,36 +1825,60 @@ func TestHandleNon200_StatusOverrideAppliesOnMalformedBody(t *testing.T) {
 	}
 }
 
-func TestIsPreSendConnectionFailure(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{
-			name: "dial failure",
-			err: &url.Error{Op: http.MethodPost, URL: "http://catalog/commit", Err: &net.OpError{
-				Op: "dial", Net: "tcp", Err: errors.New("connection refused"),
-			}},
-			want: true,
-		},
-		{
-			name: "read failure after connect",
-			err: &url.Error{Op: http.MethodPost, URL: "http://catalog/commit", Err: &net.OpError{
-				Op: "read", Net: "tcp", Err: errors.New("connection reset"),
-			}},
-		},
-		{
-			name: "unclassified transport failure",
-			err:  errors.New("transport failed"),
-		},
-	}
+func TestCommitRetryDialFailureHasUnknownState(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewUnstartedServer(mux)
+	mux.HandleFunc("/v1/config", serveEmptyConfig)
+	mux.HandleFunc("/warm", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	})
+	applied := make(chan struct{}, 2)
+	mux.HandleFunc("/v1/namespaces/db/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		applied <- struct{}{}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, isPreSendConnectionFailure(tt.err))
-		})
-	}
+		// Close the listener after receiving the commit so the transport's
+		// retry fails to dial even though the first request reached the server.
+		if err := srv.Listener.Close(); err != nil {
+			t.Errorf("close listener: %v", err)
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response does not support hijacking")
+
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack connection: %v", err)
+
+			return
+		}
+		_ = conn.Close()
+	})
+	srv.Start()
+	defer srv.Close()
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithOAuthToken("token"), WithHeaders(map[string]string{"Idempotency-Key": "some-key"}))
+	require.NoError(t, err)
+	defer cat.Close()
+
+	// The Go transport retries requests with an idempotency key when a
+	// response is lost on a reused connection. Warm this catalog's transport
+	// because initialization used a separate client.
+	resp, err := cat.cl.Get(srv.URL + "/warm")
+	require.NoError(t, err)
+	_, err = io.Copy(io.Discard, resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	_, _, err = cat.CommitTable(context.Background(), table.Identifier{"db", "tbl"}, nil, nil)
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	var opErr *net.OpError
+	require.ErrorAs(t, err, &opErr)
+	require.Equal(t, "dial", opErr.Op)
+	require.Len(t, applied, 1)
 }
 
 func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
