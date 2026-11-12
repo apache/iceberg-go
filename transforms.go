@@ -21,6 +21,7 @@ import (
 	"encoding"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -227,7 +228,7 @@ type Transform interface {
 // Custom transforms receive the source type unchanged.
 func ValidatePartitionTransformSourceType(transform Transform, sourceType Type) error {
 	if isNilTransform(transform) {
-		return fmt.Errorf("partition transform is nil")
+		return errors.New("partition transform is nil")
 	}
 	if isBuiltInPartitionTransform(transform) {
 		if _, ok := sourceType.(PrimitiveType); ok {
