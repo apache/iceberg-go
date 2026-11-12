@@ -1377,6 +1377,7 @@ func convertPartitionInt64(value any) (int64, bool) {
 		if uint64(value) > math.MaxInt64 {
 			return 0, false
 		}
+
 		return int64(value), true
 	case uint8:
 		return int64(value), true
@@ -1388,11 +1389,13 @@ func convertPartitionInt64(value any) (int64, bool) {
 		if value > math.MaxInt64 {
 			return 0, false
 		}
+
 		return int64(value), true
 	case uintptr:
 		if uint64(value) > math.MaxInt64 {
 			return 0, false
 		}
+
 		return int64(value), true
 	case float32:
 		return convertPartitionInt64(float64(value))
@@ -1401,6 +1404,7 @@ func convertPartitionInt64(value any) (int64, bool) {
 		if math.IsNaN(value) || value < -0x1p63 || value >= 0x1p63 || math.Trunc(value) != value {
 			return 0, false
 		}
+
 		return int64(value), true
 	case Date:
 		return int64(value), true
