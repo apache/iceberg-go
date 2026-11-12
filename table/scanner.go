@@ -1014,7 +1014,7 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 				ErrInvalidMetadata, file.FilePath())
 		}
 		if _, exists := dvIndex[*ref]; exists {
-			return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
+			return nil, fmt.Errorf("%w: can't index multiple deletion vectors for %s", ErrInvalidMetadata, *ref)
 		}
 		dvIndex[*ref] = del
 	}
