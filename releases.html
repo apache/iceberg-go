@@ -297,6 +297,9 @@
 <p><strong>Out-of-range nanosecond timestamp strings are rejected.</strong> String literals for <code>timestamp_ns</code> and <code>timestamptz_ns</code> outside the signed 64-bit nanosecond range now fail expression binding with <code>ErrBadCast</code>. Scans and <code>ExpressionEvaluator</code> return the error for these filters instead of comparing a wrapped value.</p>
 </li>
 <li>
+<p><strong>Empty string partition bounds are written as non-null bytes.</strong> New manifests preserve empty string lower and upper bounds, fixing filtered scans on identity partitions. Manifests written before this fix may retain null bounds for an empty string and can continue to skip matching rows until rewritten.</p>
+</li>
+<li>
 <p><strong>SQL view APIs align with <code>catalog.ViewCatalog</code>.</strong> <code>CreateView</code> now takes a <code>*view.Version</code>, schema and options, and returns <code>*view.View</code>. <code>LoadView</code> now returns <code>*view.View</code>; use <code>Metadata()</code> to access its metadata. If the caller leaves <code>DefaultCatalog</code> empty, SQL still sets it to the catalog name.</p>
 </li>
 <li>
