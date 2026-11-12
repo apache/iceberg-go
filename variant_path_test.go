@@ -143,3 +143,28 @@ func TestParseVariantPathRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestParseVariantPathRejectsUnescapedControlBytes(t *testing.T) {
+	for c := byte(0); c < 0x20; c++ {
+		for _, path := range []string{
+			"$['a" + string(c) + "b']",
+			"$['a\\n" + string(c) + "b']",
+		} {
+			_, err := parseVariantPath(path)
+			require.ErrorIs(t, err, ErrInvalidArgument, "path %q", path)
+		}
+	}
+
+	// Escaped controls remain valid and round-trip to their actual values.
+	for _, tc := range []struct {
+		path string
+		want []string
+	}{
+		{path: "$['a\\nb']", want: []string{"a\nb"}},
+		{path: "$['a\\u0001b']", want: []string{"a\x01b"}},
+	} {
+		got, err := parseVariantPath(tc.path)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got)
+	}
+}
