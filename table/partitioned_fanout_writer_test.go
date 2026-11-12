@@ -2196,7 +2196,7 @@ func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForInvalid
 	s.Nil(partitions[0].partitionRec.Get(0))
 }
 
-func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForUnsupportedSource() {
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingRejectsUnsupportedSource() {
 	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.FixedWidthTypes.Boolean}}, nil)
 	record := s.createCustomTestRecord(arrSchema, [][]any{{true}})
 	defer record.Release()
@@ -2210,9 +2210,50 @@ func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForUnsuppo
 	})
 
 	partitions, err := getRecordPartitions(spec, icebergSchema, record)
-	s.Require().NoError(err)
-	s.Require().Len(partitions, 1)
-	s.Nil(partitions[0].partitionRec.Get(0))
+	s.Require().ErrorIs(err, iceberg.ErrInvalidTransform)
+	s.ErrorContains(err, "invalid source type boolean for transform bucket[16]")
+	s.Nil(partitions)
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingRejectsMultipleSources() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "first", Type: arrow.BinaryTypes.String},
+		{Name: "second", Type: arrow.BinaryTypes.String},
+	}, nil)
+	record := s.createCustomTestRecord(arrSchema, [][]any{{"a", "b"}})
+	defer record.Release()
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1, 2}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{},
+	})
+
+	_, err := getRecordPartitions(spec, schema, record)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidTransform)
+	s.ErrorContains(err, "multiple source fields")
+}
+
+type pointerSourceTransform struct{ iceberg.IdentityTransform }
+
+func (pointerSourceTransform) CanTransform(source iceberg.Type) bool {
+	_, ok := source.(*iceberg.StringType)
+
+	return ok
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingAcceptsPointerSource() {
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "source", Type: arrow.BinaryTypes.String}}, nil)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "source", Type: &iceberg.StringType{}})
+	for _, transform := range []iceberg.Transform{iceberg.BucketTransform{NumBuckets: 8}, pointerSourceTransform{}} {
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: transform,
+		})
+
+		_, err := newPartitionExtractionPlan(spec, schema, arrSchema)
+		s.Require().NoError(err)
+	}
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {

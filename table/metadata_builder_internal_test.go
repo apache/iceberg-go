@@ -3278,9 +3278,11 @@ func TestNewMetadataRejectsDuplicateFieldIDs(t *testing.T) {
 			iceberg.NestedField{ID: createdAtID, Name: "created_at", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
 			iceberg.NestedField{ID: eventID, Name: "event", Type: iceberg.PrimitiveTypes.String, Required: true},
 		)
-		spec, err := iceberg.NewPartitionSpecOpts(
-			iceberg.AddPartitionFieldByName("created_at", "created_day", iceberg.DayTransform{}, sc, nil))
-		require.NoError(t, err)
+		// Keep the spec unbound: the duplicate IDs are intentionally invalid and
+		// must be detected when NewMetadata checks the submitted schema.
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{createdAtID}, FieldID: 1000, Name: "created_day", Transform: iceberg.DayTransform{},
+		})
 
 		return sc, spec
 	}

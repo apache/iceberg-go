@@ -2092,6 +2092,16 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	if err := checkNoUnknownTransform(&currentSpec); err != nil {
 		panic(err)
 	}
+	for _, field := range currentSpec.Fields() {
+		if len(field.SourceIDs) > 1 {
+			panic(fmt.Errorf("%w: cannot write partition transform %s with multiple source fields", iceberg.ErrInvalidTransform, field.Transform))
+		}
+		if sourceType, ok := currentSchema.FindTypeByID(field.FirstSourceID()); ok {
+			if err := checkPartitionSourceType(field, sourceType); err != nil {
+				panic(err)
+			}
+		}
+	}
 	if err := validateFilePartitionValues(currentSchema, currentSpec, supplied); err != nil {
 		panic(err)
 	}
@@ -2203,6 +2213,30 @@ type recordWritingArgs struct {
 	// into the newly written DV so a data file that already had a DV ends up
 	// with a single merged vector (the caller removes the superseded one).
 	existingDVs map[string]*dv.RoaringPositionBitmap
+}
+
+func checkPartitionSourceType(field iceberg.PartitionField, sourceType iceberg.Type) error {
+	// Built-in transforms match primitive values, but custom transforms may
+	// expect the original source type.
+	switch field.Transform.(type) {
+	case iceberg.IdentityTransform, *iceberg.IdentityTransform, iceberg.VoidTransform, *iceberg.VoidTransform,
+		iceberg.BucketTransform, *iceberg.BucketTransform, iceberg.TruncateTransform, *iceberg.TruncateTransform,
+		iceberg.YearTransform, *iceberg.YearTransform, iceberg.MonthTransform, *iceberg.MonthTransform,
+		iceberg.DayTransform, *iceberg.DayTransform, iceberg.HourTransform, *iceberg.HourTransform:
+		if _, ok := sourceType.(iceberg.PrimitiveType); ok {
+			value := reflect.ValueOf(sourceType)
+			if value.Kind() == reflect.Pointer && !value.IsNil() {
+				if primitive, ok := reflect.TypeAssert[iceberg.PrimitiveType](value.Elem()); ok {
+					sourceType = primitive
+				}
+			}
+		}
+	}
+	if !field.Transform.CanTransform(sourceType) {
+		return fmt.Errorf("%w: invalid source type %s for transform %s", iceberg.ErrInvalidTransform, sourceType, field.Transform)
+	}
+
+	return nil
 }
 
 // checkNoUnknownTransform rejects writes against a spec containing an unknown
