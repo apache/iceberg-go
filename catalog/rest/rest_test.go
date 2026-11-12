@@ -4495,6 +4495,7 @@ func (r *RestCatalogSuite) TestCommitEndpointsClassifyUnreadable200Bodies() {
 			call: func() error {
 				_, _, err := cat.CommitTable(context.Background(), table.Identifier{"db", "tbl"},
 					[]table.Requirement{}, []table.Update{})
+
 				return err
 			},
 		},
@@ -4503,6 +4504,7 @@ func (r *RestCatalogSuite) TestCommitEndpointsClassifyUnreadable200Bodies() {
 			call: func() error {
 				_, err := cat.UpdateTable(context.Background(), table.Identifier{"db", "tbl"},
 					[]table.Requirement{}, []table.Update{})
+
 				return err
 			},
 		},
@@ -4527,9 +4529,7 @@ func (r *RestCatalogSuite) TestCommitEndpointsClassifyUnreadable200Bodies() {
 	}
 
 	for _, operation := range operations {
-		operation := operation
 		for _, response := range responses {
-			response := response
 			r.Run(operation.name+"/"+response.name, func() {
 				responseBody = response.body
 				err := operation.call()
