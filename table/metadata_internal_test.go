@@ -196,7 +196,7 @@ const ExampleTableMetadataV1 = `{
 	"partition-spec": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}],
 	"properties": {},
 	"current-snapshot-id": -1,
-	"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
+	"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822, "manifests": []}]
 }`
 
 func TestMetadataV1Parsing(t *testing.T) {
@@ -829,7 +829,7 @@ func TestSerializeMetadataV1(t *testing.T) {
 		"default-spec-id": 0, 
 		"last-partition-id": 1000, 
 		"snapshots": [
-			{"snapshot-id": 1925, "sequence-number": 0, "timestamp-ms": 1602638573822}
+			{"snapshot-id": 1925, "timestamp-ms": 1602638573822, "manifests": []}
 		], 
 		"sort-orders": [{"order-id": 0, "fields": []}], 
 		"default-sort-order-id": 0,
@@ -1539,8 +1539,7 @@ func TestV1WriteMetadataToV2(t *testing.T) {
 		},
 		"partition-spec": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}],
 		"properties": {},
-		"current-snapshot-id": -1,
-		"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
+		"current-snapshot-id": -1
 	}`
 
 	meta, err := ParseMetadataString(minimalV1Example)
