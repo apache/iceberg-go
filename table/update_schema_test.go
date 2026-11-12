@@ -948,6 +948,61 @@ func TestRenameThenUseNewColumnName(t *testing.T) {
 	})
 }
 
+func TestRenameParentThenUseDescendantPaths(t *testing.T) {
+	t.Run("move and update a child after parent rename", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"address"}, "location").
+			UpdateColumn([]string{"location", "city"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "renamed parent's child"},
+			}).
+			MoveAfter([]string{"location", "city"}, []string{"location", "zip"}).Apply()
+		require.NoError(t, err)
+		field, ok := newSchema.FindFieldByName("location.city")
+		require.True(t, ok)
+		require.Equal(t, "renamed parent's child", field.Doc)
+	})
+
+	t.Run("rename child before parent", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"address", "city"}, "town").
+			RenameColumn([]string{"address"}, "location").
+			UpdateColumn([]string{"location", "town"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "new nested path"},
+			}).Apply()
+		require.NoError(t, err)
+		field, ok := newSchema.FindFieldByName("location.town")
+		require.True(t, ok)
+		require.Equal(t, "new nested path", field.Doc)
+	})
+
+	t.Run("superseded parent name cannot resolve children", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		_, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"address"}, "location").
+			RenameColumn([]string{"location", "city"}, "town").
+			RenameColumn([]string{"location"}, "residence").
+			MoveFirst([]string{"location", "town"}).Apply()
+		require.ErrorContains(t, err, "field not found: location.town")
+	})
+
+	t.Run("latest parent name resolves renamed child", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"address"}, "location").
+			RenameColumn([]string{"location", "city"}, "town").
+			RenameColumn([]string{"location"}, "residence").
+			UpdateColumn([]string{"residence", "town"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "latest path"},
+			}).Apply()
+		require.NoError(t, err)
+		field, ok := newSchema.FindFieldByName("residence.town")
+		require.True(t, ok)
+		require.Equal(t, "latest path", field.Doc)
+	})
+}
+
 func TestMoveColumn(t *testing.T) {
 	t.Run("test move column to first", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
