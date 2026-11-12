@@ -77,6 +77,10 @@ const (
 	parquetBloomFilterMaxBytesMin            = 32
 	parquetBloomFilterMaxBytesMax            = 128 * 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+	ParquetBloomFilterColumnFPPKeyPrefix     = "write.parquet.bloom-filter-fpp.column"
+	ParquetBloomFilterColumnNDVKeyPrefix     = "write.parquet.bloom-filter-ndv.column"
+	ParquetBloomFilterAdaptiveEnabledKey     = "write.parquet.bloom-filter-adaptive-enabled"
+	ParquetBloomFilterAdaptiveEnabledDefault = false
 	ParquetColumnStatsEnabledKeyPrefix       = "write.parquet.stats-enabled.column"
 
 	// These bounds mirror the compression libraries used by Arrow's Parquet
@@ -374,6 +378,13 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	bloomMaxBytes := props.GetInt(ParquetBloomFilterMaxBytesKey, ParquetBloomFilterMaxBytesDefault)
 	writerProps = append(writerProps, parquet.WithMaxBloomFilterBytes(int64(bloomMaxBytes)))
 
+	// Adaptive sizing applies to enabled columns without an explicit NDV.
+	adaptiveEnabled := ParquetBloomFilterAdaptiveEnabledDefault
+	if val, ok := props[ParquetBloomFilterAdaptiveEnabledKey]; ok {
+		adaptiveEnabled = javaBool(val)
+	}
+	writerProps = append(writerProps, parquet.WithAdaptiveBloomFilterEnabled(adaptiveEnabled))
+
 	// write.parquet.bloom-filter-enabled.column.<col-name> enables bloom filters
 	// for individual columns. Scan all properties for the prefix.
 	prefix := ParquetBloomFilterColumnEnabledKeyPrefix + "."
@@ -383,6 +394,22 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 			continue
 		}
 		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, javaBool(val)))
+	}
+
+	// Column-specific FPP and NDV apply to enabled bloom filters. Arrow uses
+	// the explicit NDV in preference to adaptive sizing for that column.
+	fppPrefix := ParquetBloomFilterColumnFPPKeyPrefix + "."
+	ndvPrefix := ParquetBloomFilterColumnNDVKeyPrefix + "."
+	for key, val := range props {
+		if colName, ok := strings.CutPrefix(key, fppPrefix); ok && colName != "" {
+			// Values have already been validated by ValidateParquetWriteProperties.
+			fpp, _ := strconv.ParseFloat(val, 64)
+			writerProps = append(writerProps, parquet.WithBloomFilterFPPFor(colName, fpp))
+		}
+		if colName, ok := strings.CutPrefix(key, ndvPrefix); ok && colName != "" {
+			ndv, _ := strconv.ParseInt(val, 10, 64)
+			writerProps = append(writerProps, parquet.WithBloomFilterNDVFor(colName, ndv))
+		}
 	}
 
 	// Column statistics are on by default; override only the named columns.
@@ -403,10 +430,8 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	}
 	writerProps = append(writerProps, parquet.WithDictionaryDefault(dictEnabled))
 
-	// The suffix is matched against the Parquet physical column path, not the
-	// Iceberg field name. These differ for nested fields (Iceberg `items.element`
-	// is `items.list.element` in Parquet), so a per-column override on one of
-	// those has no effect. Same for the bloom filter prefix above.
+	// Dictionary overrides use physical Parquet paths. Table writers resolve
+	// Bloom filter and statistics settings from logical names before building these properties.
 	prefix = ParquetDictEncodingColumnEnabledKeyPrefix + "."
 	for key, val := range props {
 		colName, ok := strings.CutPrefix(key, prefix)
@@ -484,6 +509,38 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 		// must fit the platform's int range.
 		if key != ParquetRowGroupSizeBytesKey && strconv.IntSize == 32 && parsed > int64(^uint(0)>>1) {
 			return fmt.Errorf("%w: %s value %d exceeds int range", iceberg.ErrInvalidArgument, key, parsed)
+		}
+	}
+
+	// Arrow's bloom-filter writer narrows NDV to uint32 when allocating the
+	// bitset, so reject values that would silently wrap.
+	fppPrefix := ParquetBloomFilterColumnFPPKeyPrefix + "."
+	ndvPrefix := ParquetBloomFilterColumnNDVKeyPrefix + "."
+	for key, value := range props {
+		if colName, ok := strings.CutPrefix(key, fppPrefix); ok && colName != "" {
+			fpp, err := strconv.ParseFloat(value, 64)
+			if err != nil || !(fpp > 0 && fpp < 1) {
+				return fmt.Errorf("%w: invalid %s value %q: FPP must be between 0 and 1 (exclusive)",
+					iceberg.ErrInvalidArgument, key, value)
+			}
+
+			// Arrow's adaptive sizing can loop forever if the eighth root rounds
+			// to 1. Explicit NDV uses a different, non-adaptive sizing path.
+			_, hasNDV := props[ndvPrefix+colName]
+			if javaBool(props[ParquetBloomFilterAdaptiveEnabledKey]) &&
+				javaBool(props[ParquetBloomFilterColumnEnabledKeyPrefix+"."+colName]) && !hasNDV &&
+				props.GetInt(ParquetBloomFilterMaxBytesKey, ParquetBloomFilterMaxBytesDefault) > parquetBloomFilterMaxBytesMin &&
+				math.Pow(fpp, 1.0/8.0) == 1 {
+				return fmt.Errorf("%w: invalid %s value %q: FPP is too close to 1 for adaptive sizing",
+					iceberg.ErrInvalidArgument, key, value)
+			}
+		}
+		if colName, ok := strings.CutPrefix(key, ndvPrefix); ok && colName != "" {
+			ndv, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || ndv <= 0 || ndv > int64(^uint32(0)) {
+				return fmt.Errorf("%w: invalid %s value %q: NDV must be between 1 and %d",
+					iceberg.ErrInvalidArgument, key, value, uint64(^uint32(0)))
+			}
 		}
 	}
 

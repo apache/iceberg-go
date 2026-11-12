@@ -235,7 +235,13 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 			return nil, err
 		}
 		f.variantFieldIDs = tblutils.VariantFieldIDsFromSchema(f.fileSchema)
+		writeProps = tblutils.ResolveParquetBloomColumnPaths(writeProps, meta.CurrentSchema(), f.fileSchema, f.colMapping, f.content)
 		writeProps = tblutils.ResolveParquetStatsColumnPaths(writeProps, meta.CurrentSchema(), f.fileSchema, f.colMapping, f.content)
+		if err := tblutils.ValidateParquetWriteProperties(writeProps); err != nil {
+			stopCount()
+
+			return nil, err
+		}
 	}
 	f.writeProps = f.format.GetWriteProperties(writeProps)
 

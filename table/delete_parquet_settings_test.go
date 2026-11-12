@@ -260,9 +260,9 @@ func TestDeleteParquetIgnoresDataBloomSettings(t *testing.T) {
 	props := iceberg.Properties{
 		ParquetBloomFilterMaxBytesKey:                       "0",
 		ParquetBloomFilterColumnEnabledKeyPrefix + ".value": "true",
-		"write.parquet.bloom-filter-fpp.column.value":       "invalid",
-		"write.parquet.bloom-filter-ndv.column.value":       "invalid",
-		"write.parquet.bloom-filter-adaptive-enabled":       "true",
+		ParquetBloomFilterColumnFPPKeyPrefix + ".value":     "invalid",
+		ParquetBloomFilterColumnNDVKeyPrefix + ".value":     "invalid",
+		ParquetBloomFilterAdaptiveEnabledKey:                "true",
 	}
 	original := maps.Clone(props)
 	for _, content := range []iceberg.ManifestEntryContent{iceberg.EntryContentEqDeletes, iceberg.EntryContentPosDeletes} {
@@ -284,7 +284,8 @@ func TestDeleteParquetIgnoresDataBloomSettings(t *testing.T) {
 			factory.stopCount()
 		})
 	}
-	_, err := parquetPropsFor(iceberg.EntryContentData, props)
+	meta := deleteParquetTestMetadata(t, props)
+	_, err := newDataFileWriter("mem://delete-settings", iceio.NewMemFS(), meta, props)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.Equal(t, original, props)
 }
