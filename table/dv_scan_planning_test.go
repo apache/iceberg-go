@@ -277,14 +277,16 @@ func TestDVMatchingToDataFiles(t *testing.T) {
 	// Match DVs against data-001 — should only get dv-001
 	dataEntry1 := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
-	matched := matchDVToData(dataEntry1, dvIndex)
+	matched, err := matchDVToData(dataEntry1, dvIndex)
+	assert.NoError(t, err)
 	assert.Len(t, matched, 1)
 	assert.Equal(t, dvForData1.path, matched[0].FilePath())
 
 	// Match DVs against data-002 — should only get dv-002
 	dataEntry2 := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: otherDataFilePath, contentType: iceberg.EntryContentData})
-	matched2 := matchDVToData(dataEntry2, dvIndex)
+	matched2, err := matchDVToData(dataEntry2, dvIndex)
+	assert.NoError(t, err)
 	assert.Len(t, matched2, 1)
 	assert.Equal(t, dvForData2.path, matched2[0].FilePath())
 }
@@ -312,8 +314,93 @@ func TestDVMatchingNoMatch(t *testing.T) {
 
 	dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: "s3://bucket/data/data-001.parquet", contentType: iceberg.EntryContentData})
-	matched := matchDVToData(dataEntry, dvIndex)
+	matched, err := matchDVToData(dataEntry, dvIndex)
+	assert.NoError(t, err)
 	assert.Empty(t, matched)
+}
+
+
+func TestMatchDVToDataValidatesPartition(t *testing.T) {
+	const dataPath = "s3://bucket/data/partitioned.parquet"
+	snapshotID, dvSeq := int64(1), int64(5)
+
+	tests := []struct {
+		name          string
+		dataSpecID    int32
+		dvSpecID      int32
+		dataPartition map[int]any
+		dvPartition   map[int]any
+		dataSeq       int64
+		wantError     bool
+	}{
+		{
+			name: "matching partition",
+			dataPartition: map[int]any{1000: int32(4)},
+			dvPartition:   map[int]any{1000: int32(4)},
+			dataSeq:       4,
+		},
+		{
+			name: "different partition values",
+			dataPartition: map[int]any{1000: int32(4)},
+			dvPartition:   map[int]any{1000: int32(5)},
+			dataSeq:       4,
+			wantError:     true,
+		},
+		{
+			name:       "different spec IDs",
+			dvSpecID:   1,
+			dataSeq:   4,
+			wantError: true,
+		},
+		{
+			name: "inapplicable older DV",
+			dataPartition: map[int]any{1000: int32(4)},
+			dvPartition:   map[int]any{1000: int32(5)},
+			dataSeq:       6,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dv := &dvMockDataFile{
+				mockDataFile: mockDataFile{
+					path:        "s3://bucket/data/dv.puffin",
+					contentType: iceberg.EntryContentPosDeletes,
+					specid:      tt.dvSpecID,
+					partition:   tt.dvPartition,
+				},
+				referencedDataFile: new(dataPath),
+				contentOffset:      new(int64(0)),
+				contentSizeInBytes: new(int64(128)),
+			}
+			data := &mockDataFile{
+				path:        dataPath,
+				contentType: iceberg.EntryContentData,
+				specid:      tt.dataSpecID,
+				partition:   tt.dataPartition,
+			}
+			dvEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &dvSeq, nil, dv)
+			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &tt.dataSeq, nil, data)
+			dvIndex, err := buildDVIndex([]iceberg.ManifestEntry{dvEntry})
+			assert.NoError(t, err)
+
+			matched, err := matchDVToData(dataEntry, dvIndex)
+			if tt.wantError {
+				assert.ErrorIs(t, err, ErrInvalidMetadata)
+				assert.Empty(t, matched)
+				// File scan task construction must fail before any DV is applied.
+				_, taskErr := fileScanTaskForDataEntry(dataEntry, nil, dvIndex, nil)
+				assert.ErrorIs(t, taskErr, ErrInvalidMetadata)
+			} else {
+				assert.NoError(t, err)
+				if tt.dataSeq <= dvSeq {
+					assert.Equal(t, []iceberg.DataFile{dv}, matched)
+				} else {
+					assert.Empty(t, matched)
+				}
+			}
+		})
+	}
 }
 
 func TestBuildDVIndex_RejectsMultipleDVsPerDataFile(t *testing.T) {
@@ -424,7 +511,8 @@ func TestMatchDVToData_SequenceNumberGuard(t *testing.T) {
 			seqNum := tt.dataSeqNum
 			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 				&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
-			matched := matchDVToData(dataEntry, dvIndex)
+			matched, err := matchDVToData(dataEntry, dvIndex)
+			assert.NoError(t, err)
 			if tt.expectDV {
 				assert.Len(t, matched, 1)
 				assert.Equal(t, dvFile.path, matched[0].FilePath())
@@ -478,7 +566,8 @@ func TestMatchDVToData_NilDVSequenceNumber(t *testing.T) {
 			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, tt.dataSeq, nil,
 				&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
 
-			matched := matchDVToData(dataEntry, dvIndex)
+			matched, err := matchDVToData(dataEntry, dvIndex)
+			assert.NoError(t, err)
 			if tt.expectDV {
 				assert.Len(t, matched, 1)
 				assert.Equal(t, dvFile.path, matched[0].FilePath())
