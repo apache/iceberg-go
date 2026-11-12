@@ -909,7 +909,6 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			props, withRewriteSemantics()); err != nil {
 			return result, cleanupBatch(fmt.Errorf("stage partial rewrite batch: %w", err))
 		}
-		groupTxn.addValidator(rewriteValidator(rewrittenFiles))
 
 		next, err := groupTxn.Commit(ctx)
 		if err != nil {

@@ -718,6 +718,25 @@ func TestValidateNoNewDeletesForRewrittenFiles_EqDeleteAlwaysConflicts(t *testin
 	assert.ErrorIs(t, err, ErrConflictingDeleteFiles)
 }
 
+func TestValidateNoNewDeletesForRewrittenFiles_EqDeleteOtherSpecConflicts(t *testing.T) {
+	oldSpec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	newSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	rewritten := newTestDataFile(t, oldSpec, "data.parquet", map[int]any{1000: int32(7)})
+	builder, err := iceberg.NewDataFileBuilder(newSpec, iceberg.EntryContentEqDeletes,
+		"eq.parquet", iceberg.ParquetFile, map[int]any{1000: int32(7)}, nil, nil, 1, 1)
+	require.NoError(t, err)
+
+	// A rewrite can move the rows to the delete's spec with an older data
+	// sequence number. The delete could then apply to the rewritten file.
+	err = runPosDeleteConflictCheck(t, []iceberg.DataFile{rewritten},
+		builder.EqualityFieldIDs([]int{1}).Build())
+	require.ErrorIs(t, err, ErrConflictingDeleteFiles)
+}
+
 // TestValidateNoNewDeletesForRewrittenFiles_UnsupportedPartitionType
 // pins the fail-closed contract: a rewritten file whose partition
 // carries a value type outside canonicalPartitionKey's closed set must
