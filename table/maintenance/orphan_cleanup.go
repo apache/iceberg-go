@@ -321,10 +321,14 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 //
 // The table filesystem must implement io.ListableIO so orphan cleanup can
 // fully enumerate candidate files before deciding what is safe to delete.
+// Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupResult{}, cfg.validationErr
+	}
+	if err := validateOrphanCleanupGC(tbl); err != nil {
+		return OrphanCleanupResult{}, err
 	}
 	plan, err := planOrphanFiles(ctx, tbl, cfg)
 	if err != nil {
@@ -340,10 +344,14 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 // PlanOrphanFiles identifies orphan files without deleting anything. The
 // returned plan can be shown to a user and passed to ExecuteOrphanCleanup to
 // delete exactly that set.
+// Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
 func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupPlan, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupPlan{}, cfg.validationErr
+	}
+	if err := validateOrphanCleanupGC(tbl); err != nil {
+		return OrphanCleanupPlan{}, err
 	}
 
 	return planOrphanFiles(ctx, tbl, cfg)
@@ -351,6 +359,7 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 
 // ExecuteOrphanCleanup deletes exactly the files in plan. It does not perform
 // another orphan scan, so files appearing after planning are not included.
+// Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
 func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
@@ -359,11 +368,22 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	if cfg.invalidPlanOption != nil {
 		return OrphanCleanupResult{}, cfg.invalidPlanOption
 	}
+	if err := validateOrphanCleanupGC(tbl); err != nil {
+		return OrphanCleanupResult{}, err
+	}
 	if cfg.dryRun {
 		return plan.result(), nil
 	}
 
 	return executeOrphanCleanup(ctx, tbl, plan, cfg)
+}
+
+func validateOrphanCleanupGC(tbl *table.Table) error {
+	if !table.IsGCEnabled(tbl.Properties()) {
+		return errors.New("cannot delete orphan files: GC is disabled (deleting files may corrupt other tables)")
+	}
+
+	return nil
 }
 
 type scannedFile struct {
