@@ -442,6 +442,7 @@ func Test_textOutput_DescribeTableSnapshotWithoutSchemaID(t *testing.T) {
             "snapshot-id": 100,
             "timestamp-ms": 1602638573590,
             "sequence-number": 1,
+            "manifest-list": "mem://default/table/metadata/snap-100.avro",
             "summary": {"operation": "append"}
         }
     ],
@@ -488,6 +489,7 @@ func Test_textOutput_FilesSnapshotWithoutSchemaID(t *testing.T) {
             "snapshot-id": 100,
             "timestamp-ms": 1602638573590,
             "sequence-number": 1,
+            "manifest-list": "mem://default/table/metadata/snap-100.avro",
             "summary": {"operation": "append"}
         }
     ],

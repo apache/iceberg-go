@@ -58,6 +58,7 @@ const filesTestMetadata = `{
             "snapshot-id": 100,
             "timestamp-ms": 1602638573590,
             "sequence-number": 1,
+            "manifest-list": "mem://default/table/metadata/snap-100.avro",
             "schema-id": 0,
             "summary": {"operation": "append"}
         }
