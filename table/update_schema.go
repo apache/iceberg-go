@@ -285,7 +285,7 @@ func (u *UpdateSchema) findField(name string) (iceberg.NestedField, bool) {
 		} else {
 			nested, ok = u.schema.FindFieldByNameCaseInsensitive(candidate)
 		}
-		if ok {
+		if ok && !u.hasRenamedDescendantOnPath(nested.ID, id) {
 			matchedPrefix, matchedField, matched = alias, nested, true
 		}
 	}
@@ -294,6 +294,24 @@ func (u *UpdateSchema) findField(name string) (iceberg.NestedField, bool) {
 	}
 
 	return field, found
+}
+
+// A new parent name cannot be combined with a superseded child name.
+// Original full paths remain usable when looking up fields in the base schema.
+func (u *UpdateSchema) hasRenamedDescendantOnPath(fieldID, ancestorID int) bool {
+	for id := fieldID; id != ancestorID; id = u.findParentID(id) {
+		if id == TableRootID {
+			return true
+		}
+		original, ok := u.schema.FindFieldByID(id)
+		if !ok {
+			return true
+		}
+		if updated, ok := u.updates[u.findParentID(id)][id]; ok && updated.Name != original.Name {
+			return true
+		}
+	}
+	return false
 }
 
 func (u *UpdateSchema) findFieldForUpdate(name string) (iceberg.NestedField, bool) {
