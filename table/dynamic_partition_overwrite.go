@@ -177,9 +177,16 @@ func mayHaveOldSpecData(manifests []iceberg.ManifestFile, currentSpecID int) boo
 
 // validateDynamicOverwriteConflicts uses exact stored partition tuples so
 // transformed and null partitions cannot become false-negative row predicates.
-// It rejects concurrent additions and removals in touched partitions while
+// It rejects concurrent additions and removals in touched partitions, plus
+// global equality deletes that could apply to data files being replaced, while
 // allowing unrelated partition appends during refresh-and-replay.
-func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, unpartitioned bool, touched map[string]struct{}) error {
+func validateDynamicOverwriteConflicts(
+	cc *conflictContext,
+	specID int,
+	unpartitioned bool,
+	touched map[string]struct{},
+	replacedDataFilePaths map[string]struct{},
+) error {
 	if cc == nil || len(cc.concurrent) == 0 {
 		return nil
 	}
@@ -206,6 +213,17 @@ func validateDynamicOverwriteConflicts(cc *conflictContext, specID int, unpartit
 				if unpartitioned {
 					return fmt.Errorf("%w: concurrent snapshot %d changed file %q during an unpartitioned overwrite",
 						conflict, snapshot.SnapshotID, file.FilePath())
+				}
+				if file.ContentType() == iceberg.EntryContentEqDeletes && len(replacedDataFilePaths) > 0 {
+					deleteSpec := cc.current.PartitionSpecByID(int(file.SpecID()))
+					if deleteSpec == nil {
+						return fmt.Errorf("dynamic partition overwrite: %w: concurrent delete file %q references spec %d",
+							ErrPartitionSpecNotFound, file.FilePath(), file.SpecID())
+					}
+					if deleteSpec.IsUnpartitioned() {
+						return fmt.Errorf("%w: concurrent snapshot %d added global equality delete %q while replacing data files",
+							ErrConflictingDeleteFiles, snapshot.SnapshotID, file.FilePath())
+					}
 				}
 				if int(file.SpecID()) != specID {
 					continue
@@ -305,6 +323,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 		return err
 	}
 	var toDelete, deleteFilesToRemove []iceberg.DataFile
+	replacedDataFilePaths := make(map[string]struct{})
 	unpartitioned := spec.IsUnpartitioned()
 	survivingDataPaths := make(map[string]struct{})
 	var hasSurvivingOldSpecData bool
@@ -402,6 +421,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 			// when existing files were written under older partition specs.
 			if unpartitioned {
 				toDelete = append(toDelete, df)
+				replacedDataFilePaths[df.FilePath()] = struct{}{}
 
 				continue
 			}
@@ -412,6 +432,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 			}
 			if _, touched := keys[key]; touched {
 				toDelete = append(toDelete, df)
+				replacedDataFilePaths[df.FilePath()] = struct{}{}
 			} else {
 				survivingDataPaths[df.FilePath()] = struct{}{}
 			}
@@ -545,7 +566,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 		return err
 	}
 	t.validators = append(t.validators, func(cc *conflictContext) error {
-		return validateDynamicOverwriteConflicts(cc, spec.ID(), unpartitioned, keys)
+		return validateDynamicOverwriteConflicts(cc, spec.ID(), unpartitioned, keys, replacedDataFilePaths)
 	})
 
 	return nil
