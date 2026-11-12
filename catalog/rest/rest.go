@@ -629,6 +629,12 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 		return ret, err
 	}
 
+	// If the caller canceled before dispatch, nothing could have been
+	// committed. Cancellation after dispatch is still outcome-unknown.
+	if err := ctx.Err(); err != nil {
+		return ret, err
+	}
+
 	rsp, err = cl.Do(req)
 	if err != nil {
 		if cfg.unknownCommitStateOnTransport && !isPreSendConnectionFailure(err) {
