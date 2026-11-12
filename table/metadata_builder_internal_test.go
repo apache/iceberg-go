@@ -1986,6 +1986,22 @@ func TestAddSnapshotStaleValuesAreCommitConflicts(t *testing.T) {
 	})
 }
 
+func TestAddSnapshotV3RejectsFirstRowIDAheadOfNextRowID(t *testing.T) {
+	builder := freshMetadataBuilder(t, 3)
+	firstRowID, addedRows := int64(1), int64(1)
+	snapshot := freshBuilderSnapshot(1, nil, 0, time.Now().UnixMilli())
+	snapshot.FirstRowID, snapshot.AddedRows = &firstRowID, &addedRows
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "first-row-id 1 is ahead of table next-row-id 0")
+	require.Zero(t, builder.NextRowID())
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Empty(t, meta.Snapshots())
+}
+
 func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
 	builder := freshMetadataBuilder(t, 2)
 	parentSnapshotID := int64(1)
