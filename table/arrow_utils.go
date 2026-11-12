@@ -2437,9 +2437,8 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	}
 
 	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, partitionContextByFilePath, args.itr, factory)
-	workers := config.EnvConfig.MaxWorkers
 
-	return partitionWriter.Write(ctx, workers)
+	return partitionWriter.Write(ctx)
 }
 
 // positionDeleteRecordsToDataFilesDV produces deletion-vector Puffin output
