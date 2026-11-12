@@ -977,6 +977,15 @@ func TestRenameParentThenUseDescendantPaths(t *testing.T) {
 		require.Equal(t, "new nested path", field.Doc)
 	})
 
+	t.Run("superseded child name cannot resolve through new parent", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+		_, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"address"}, "location").
+			RenameColumn([]string{"location", "city"}, "town").
+			MoveFirst([]string{"location", "city"}).Apply()
+		require.ErrorContains(t, err, "field not found: location.city")
+	})
+
 	t.Run("superseded parent name cannot resolve children", func(t *testing.T) {
 		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
 		_, err := NewUpdateSchema(txn, true, true).
