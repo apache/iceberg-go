@@ -3186,8 +3186,9 @@ func pruneParquetColumns(manifest *pqarrow.SchemaManifest, selected map[int]stru
 	visitor := &pruneParquetSchema{
 		selected:  selected,
 		manifest:  manifest,
-		fullTypes: selectFullTypes,
-		indices:   []int{},
+		fullTypes:      selectFullTypes,
+		hasNameMapping: mapping != nil,
+		indices:        []int{},
 	}
 
 	result, err := visitParquetManifest(manifest, visitor, &iceberg.MappedField{Fields: mapping})
@@ -3219,8 +3220,9 @@ func getFieldID(f arrow.Field) *int {
 
 type pruneParquetSchema struct {
 	selected  map[int]struct{}
-	fullTypes bool
-	manifest  *pqarrow.SchemaManifest
+	fullTypes      bool
+	hasNameMapping bool
+	manifest       *pqarrow.SchemaManifest
 
 	indices []int
 }
@@ -3234,6 +3236,12 @@ func (p *pruneParquetSchema) fieldID(field arrow.Field, mapping *iceberg.MappedF
 
 	if mapping != nil {
 		return mapping.ID()
+	}
+
+	// A name mapping may omit fields present only in the data file.
+	// Unmapped fields cannot match any projected Iceberg ID, so skip them.
+	if p.hasNameMapping {
+		return -1
 	}
 
 	panic(fmt.Errorf("%w: cannot convert %s to Iceberg field, missing field_id",
