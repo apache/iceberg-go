@@ -931,7 +931,7 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 // without a manifest list. Existing v1 snapshots may still use embedded
 // manifests after a table format upgrade, so this is a write-time check.
 func validateSnapshotManifestList(formatVersion int, snapshotID int64, manifestList string) error {
-	if formatVersion >= 2 && manifestList == "" {
+	if (formatVersion == 2 || formatVersion == 3) && manifestList == "" {
 		return fmt.Errorf("%w: snapshot %d: manifest-list is required for format version %d",
 			ErrInvalidMetadata, snapshotID, formatVersion)
 	}
