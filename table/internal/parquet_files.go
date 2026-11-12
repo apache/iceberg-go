@@ -3184,8 +3184,8 @@ func visitManifestField[T any](field pqarrow.SchemaField, visitor manifestVisito
 
 func pruneParquetColumns(manifest *pqarrow.SchemaManifest, selected map[int]struct{}, selectFullTypes bool, mapping iceberg.NameMapping) (*arrow.Schema, []int, error) {
 	visitor := &pruneParquetSchema{
-		selected:  selected,
-		manifest:  manifest,
+		selected:       selected,
+		manifest:       manifest,
 		fullTypes:      selectFullTypes,
 		hasNameMapping: mapping != nil,
 		indices:        []int{},
@@ -3219,7 +3219,7 @@ func getFieldID(f arrow.Field) *int {
 }
 
 type pruneParquetSchema struct {
-	selected  map[int]struct{}
+	selected       map[int]struct{}
 	fullTypes      bool
 	hasNameMapping bool
 	manifest       *pqarrow.SchemaManifest
