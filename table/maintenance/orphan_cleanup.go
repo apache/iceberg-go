@@ -351,6 +351,7 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 	if cfg.validationErr != nil {
 		return OrphanCleanupPlan{}, cfg.validationErr
 	}
+
 	return planOrphanFiles(ctx, tbl, cfg)
 }
 
