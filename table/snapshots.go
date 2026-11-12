@@ -320,6 +320,12 @@ func (s *Snapshot) UnmarshalJSON(data []byte) error {
 	// The pointer fields shadow Alias, so json.Unmarshal does not populate next.
 	next.SnapshotID, next.TimestampMs = *aux.SnapshotID, *aux.TimestampMs
 
+	// Without either manifest source, scans would treat a malformed snapshot as empty.
+	// An explicitly empty manifests array is valid for legacy v1 snapshots.
+	if next.ManifestList == "" && next.ManifestLocations == nil {
+		return fmt.Errorf("%w: snapshot requires manifest-list or manifests", ErrInvalidMetadata)
+	}
+
 	if next.ManifestList != "" {
 		next.ManifestLocations = nil
 	}
