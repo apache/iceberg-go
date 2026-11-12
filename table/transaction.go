@@ -1157,7 +1157,20 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	// Keep validator registration atomic with staging so Commit cannot run
+	// between the two.
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	if len(filesToAdd) > 0 {
+		// A replacement gets a newer data sequence number, so it would stop a
+		// concurrent equality delete from applying to the old file's rows.
+		t.validators = append(t.validators, rewriteValidator(markedForDeletion))
+	}
+
+	return nil
 }
 
 type partitionValidationField struct {

@@ -86,6 +86,29 @@ func TestReplaceDataFiles_RejectsConcurrentEqualityDelete(t *testing.T) {
 	}
 }
 
+func TestReplaceDataFilesByPath_RejectsConcurrentEqualityDelete(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			tbl, oldFile := replacementConflictFixture(t, version)
+			replacementPath := tbl.Location() + "/data/replacement-by-path.parquet"
+			arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+			require.NoError(t, err)
+			writeParquetFile(t, replacementPath, arrowSchema,
+				`[{"id":5,"data":"a"},{"id":6,"data":"b"},{"id":7,"data":"c"},{"id":8,"data":"d"},{"id":9,"data":"e"}]`)
+
+			leader := tbl.NewTransaction()
+			require.NoError(t, leader.ReplaceDataFilesByPath(t.Context(),
+				[]string{oldFile.FilePath()}, []string{replacementPath}, nil))
+
+			peer := appendEqualityDelete(t, tbl, []int{1}, `[{"id":7}]`)
+			assert.Equal(t, []int64{5, 6, 8, 9}, scanIDs(t, peer))
+
+			_, err = leader.Commit(t.Context())
+			require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+		})
+	}
+}
+
 func TestReplaceFiles_RejectsConcurrentEqualityDelete(t *testing.T) {
 	for _, version := range []int{2, 3} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
