@@ -176,6 +176,51 @@ func TestLazyNameToIDLowerRejectsOnlyAmbiguousNames(t *testing.T) {
 	}
 }
 
+func TestCaseInsensitiveFieldLookupRejectsNestedCollisions(t *testing.T) {
+	schema := NewSchema(0, NestedField{
+		ID: 1, Name: "person", Required: true,
+		Type: NewStructType(
+			NestedField{ID: 2, Name: "Age", Type: PrimitiveTypes.Int32, Required: true},
+			NestedField{ID: 3, Name: "age", Type: PrimitiveTypes.String, Required: true},
+			NestedField{ID: 4, Name: "City", Type: PrimitiveTypes.String},
+		),
+	})
+
+	for range 8 {
+		t.Run("concurrent lookups", func(t *testing.T) {
+			t.Parallel()
+			_, found, err := schema.findFieldByNameCaseInsensitive("PERSON.AGE")
+			if found || !errors.Is(err, ErrInvalidSchema) ||
+				!strings.Contains(err.Error(), `"person.Age" and "person.age"`) {
+				t.Errorf("findFieldByNameCaseInsensitive(PERSON.AGE) = %v, %v; want named collision", found, err)
+			}
+			if _, found := schema.FindTypeByNameCaseInsensitive("PERSON.AGE"); found {
+				t.Error("FindTypeByNameCaseInsensitive resolved an ambiguous child")
+			}
+			if _, err := schema.Select(false, "person.age"); !errors.Is(err, ErrInvalidSchema) {
+				t.Errorf("Select(false, person.age) = %v; want invalid schema", err)
+			}
+			if _, err := Reference("PERSON.AGE").Bind(schema, false); !errors.Is(err, ErrInvalidSchema) {
+				t.Errorf("Reference(PERSON.AGE).Bind() = %v; want invalid schema", err)
+			}
+
+			if parent, found := schema.FindFieldByNameCaseInsensitive("PERSON"); !found || parent.ID != 1 {
+				t.Errorf("FindFieldByNameCaseInsensitive(PERSON) = %v, %v; want field 1", parent, found)
+			}
+			if city, found := schema.FindFieldByNameCaseInsensitive("PERSON.CITY"); !found || city.ID != 4 {
+				t.Errorf("FindFieldByNameCaseInsensitive(PERSON.CITY) = %v, %v; want field 4", city, found)
+			}
+			selected, err := schema.Select(false, "PERSON.CITY")
+			if err != nil {
+				t.Fatalf("Select(false, PERSON.CITY) = %v; want success", err)
+			}
+			if _, found := selected.FindFieldByID(4); !found {
+				t.Error("Select(false, PERSON.CITY) did not select field 4")
+			}
+		})
+	}
+}
+
 func TestNameIndexPathEmptySegments(t *testing.T) {
 	var path nameIndexPath
 	path.push("")

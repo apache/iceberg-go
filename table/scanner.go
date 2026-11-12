@@ -1002,17 +1002,21 @@ func partitionsMatch(a, b map[int]any) bool {
 }
 
 // buildDVIndex indexes deletion vectors by the data file path they reference.
-// The spec requires at most one DV per data file; a second entry for the same
-// path is rejected with an error.
+// A missing reference must fail planning instead of silently exposing deleted
+// rows. The spec also requires at most one DV per data file.
 func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
 	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
 	for _, del := range dvEntries {
-		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(del.DataFile()); ref != nil {
-			if _, exists := dvIndex[*ref]; exists {
-				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
-			}
-			dvIndex[*ref] = del
+		file := del.DataFile()
+		ref := iceberginternal.BorrowedDataFileReferencedDataFile(file)
+		if ref == nil || *ref == "" {
+			return nil, fmt.Errorf("%w: deletion vector %q is missing referenced_data_file",
+				ErrInvalidMetadata, file.FilePath())
 		}
+		if _, exists := dvIndex[*ref]; exists {
+			return nil, fmt.Errorf("%w: can't index multiple deletion vectors for %s", ErrInvalidMetadata, *ref)
+		}
+		dvIndex[*ref] = del
 	}
 
 	return dvIndex, nil

@@ -352,6 +352,41 @@ func TestBuildDVIndex_RejectsMultipleDVsPerDataFile(t *testing.T) {
 	assert.Contains(t, err.Error(), dataFilePath)
 }
 
+// A v3 deletion vector must name its data file. Ignoring a malformed DV
+// would let scans return rows that the vector was meant to delete.
+func TestBuildDVIndexRejectsMissingReferencedDataFile(t *testing.T) {
+	snapshotID, seqNum := int64(1), int64(1)
+	const dvPath = "s3://bucket/data/dv.puffin"
+
+	for _, tt := range []struct {
+		name string
+		ref  *string
+	}{
+		{name: "nil", ref: nil},
+		{name: "empty", ref: new("")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dvFile := &dvMockDataFile{
+				mockDataFile: mockDataFile{
+					path:        dvPath,
+					contentType: iceberg.EntryContentPosDeletes,
+					format:      iceberg.PuffinFile,
+				},
+				referencedDataFile: tt.ref,
+			}
+			entries := []iceberg.ManifestEntry{
+				iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dvFile),
+			}
+
+			index, err := buildDVIndex(entries)
+			assert.ErrorIs(t, err, ErrInvalidMetadata)
+			assert.ErrorContains(t, err, "referenced_data_file")
+			assert.ErrorContains(t, err, dvPath)
+			assert.Nil(t, index)
+		})
+	}
+}
+
 func TestMatchDVToData_SequenceNumberGuard(t *testing.T) {
 	dataFilePath := "s3://bucket/data/data-001.parquet"
 	snapshotID := int64(1)

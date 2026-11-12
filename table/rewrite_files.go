@@ -42,9 +42,8 @@ import (
 //     is matched to a rewritten file via its referenced_data_file
 //     column, via equal file_path lower/upper bounds when that column
 //     is unset, or — when neither resolves a single path — via
-//     partition overlap with a rewritten file. Eq-deletes are matched
-//     conservatively: any concurrent eq-delete during the rewrite
-//     conflicts.
+//     partition overlap with a rewritten file. Any concurrent equality
+//     delete is treated as a conflict.
 //
 // Distributed compaction coordinators construct one [RewriteFiles] on
 // the leader transaction, feed worker outputs in via [RewriteFiles.ApplyResult],
@@ -344,10 +343,6 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
 		r.snapshotProps, opts...); err != nil {
 		return err
-	}
-
-	if len(r.dataFilesToDelete) > 0 && len(r.deleteFilesToAdd) == 0 {
-		r.txn.addValidator(rewriteValidator(r.dataFilesToDelete))
 	}
 
 	return nil

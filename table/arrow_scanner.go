@@ -2106,6 +2106,67 @@ func (as *arrowScan) projectEqualityDeleteFields(
 	return projectedIDs, nil
 }
 
+// positionDeleteFallbackProjection preserves physical row counts when none of
+// the predicate's fields exist in a Parquet file. Prefer retained table fields
+// so schema evolution cannot cause a dropped payload column to be read again.
+func positionDeleteFallbackProjection(rdr tblutils.FileReader, invariants *arrowScanInvariants) (*iceberg.Schema, []int, error) {
+	retainedIDs := set[int]{}
+	for _, field := range invariants.tableSchema.Fields() {
+		collectLeafIDs(field.Type, field.ID, retainedIDs)
+	}
+	physical, indices, err := rdr.PrunedSchema(retainedIDs, invariants.nameMapping)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(indices) == 0 {
+		physical, err = rdr.Schema()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	opts := ArrowToIcebergOptions{
+		NameMapping: invariants.nameMapping, TableSchema: invariants.tableSchema,
+		TableProperties: invariants.tableProperties,
+	}
+	physicalSchema, err := ArrowSchemaToIcebergWithOptions(physical, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	if physicalSchema.NumFields() == 0 {
+		return nil, nil, fmt.Errorf("%w: cannot read row positions from a parquet file without physical fields", iceberg.ErrInvalidSchema)
+	}
+	field, found := positionDeleteFallbackNumericField(physicalSchema.Fields())
+	if !found {
+		field = physicalSchema.Field(0)
+	}
+	fallbackIDs := set[int]{}
+	collectLeafIDs(field.Type, field.ID, fallbackIDs)
+	physical, indices, err = rdr.PrunedSchema(fallbackIDs, invariants.nameMapping)
+	if err != nil {
+		return nil, nil, err
+	}
+	schema, err := ArrowSchemaToIcebergWithOptions(physical, opts)
+
+	return schema, indices, err
+}
+
+// Prefer a small primitive field, including one inside a struct. A single
+// leaf preserves row counts without reading its unselected siblings.
+func positionDeleteFallbackNumericField(fields []iceberg.NestedField) (iceberg.NestedField, bool) {
+	for _, field := range fields {
+		switch typ := field.Type.(type) {
+		case iceberg.BooleanType, iceberg.Int32Type, iceberg.Int64Type, iceberg.Float32Type, iceberg.Float64Type:
+			return field, true
+		case *iceberg.StructType:
+			if nested, found := positionDeleteFallbackNumericField(typ.Fields()); found {
+				return nested, true
+			}
+		}
+	}
+
+	return iceberg.NestedField{}, false
+}
+
 func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema, rowFilter iceberg.BooleanExpression) (recProcessFn, bool, error) {
 	if rowFilter == nil || rowFilter.Equals(iceberg.AlwaysTrue{}) {
 		return nil, false, nil
@@ -3044,6 +3105,13 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		return err
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
+	if task.Value.File.FileFormat() == iceberg.ParquetFile && len(colIndices) == 0 {
+		iceSchema, colIndices, err = positionDeleteFallbackProjection(rdr, invariants)
+		if err != nil {
+			return err
+		}
+	}
+
 	filterPlans, err = as.cachedFileFilterPlans(
 		iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
 	if err != nil {
@@ -3417,6 +3485,18 @@ func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask)
 			tableProperties = iceberg.Properties{}
 		}
 		tableProperties[ParquetBatchSizeKey] = batchSize
+	}
+	for _, key := range []string{ParquetMaxCompressedPageSizeBytesKey, ParquetMaxUncompressedPageSizeBytesKey} {
+		if value, ok := as.options[key]; ok {
+			tableProperties = maps.Clone(tableProperties)
+			if tableProperties == nil {
+				tableProperties = iceberg.Properties{}
+			}
+			tableProperties[key] = value
+		}
+	}
+	if err := tblutils.ValidateParquetReadProperties(tableProperties); err != nil {
+		return nil, nil, err
 	}
 	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
