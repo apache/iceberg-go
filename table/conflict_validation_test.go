@@ -262,7 +262,7 @@ func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProp
 		SnapshotID:     *branchHead,
 		SequenceNumber: 1,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
-		ManifestList:   "s3://test/conflict-head-manifest-list.avro",
+		ManifestList:   writeTestManifestList(t, t.TempDir(), *branchHead, nil),
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snap))
@@ -295,7 +295,7 @@ func newConflictTestMetadataWithChain(t *testing.T, ids []int64) Metadata {
 			SnapshotID:     id,
 			SequenceNumber: int64(i + 1),
 			TimestampMs:    meta.LastUpdatedMillis() + int64(i+1),
-			ManifestList:   fmt.Sprintf("s3://test/conflict-chain-%d.avro", id),
+			ManifestList:   writeTestManifestList(t, t.TempDir(), id, nil),
 			Summary:        &Summary{Operation: OpAppend},
 		}
 		if i > 0 {

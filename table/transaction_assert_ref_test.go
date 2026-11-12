@@ -128,6 +128,7 @@ func TestTransactionAssertRefSnapshotID(t *testing.T) {
 			SnapshotID:     head,
 			SequenceNumber: 1,
 			TimestampMs:    base.LastUpdatedMillis() + 1,
+			ManifestList:   writeTestManifestList(t, t.TempDir(), head, nil),
 			Summary:        &Summary{Operation: OpAppend},
 		}))
 		require.NoError(t, builder.SetSnapshotRef(MainBranch, head, BranchRef))

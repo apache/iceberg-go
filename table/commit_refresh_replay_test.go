@@ -129,7 +129,7 @@ func graftSnapshotOnto(t *testing.T, base Metadata, branch string, childID int64
 		ParentSnapshotID: &parentID,
 		SequenceNumber:   parent.SequenceNumber + 1,
 		TimestampMs:      base.LastUpdatedMillis() + 1,
-		ManifestList:     "s3://test/replay-peer-manifest-list.avro",
+		ManifestList:     writeTestManifestList(t, t.TempDir(), childID, nil),
 		Summary:          &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef(branch, childID, BranchRef))
