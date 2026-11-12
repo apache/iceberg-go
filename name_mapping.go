@@ -28,9 +28,8 @@ import (
 
 type MappedField struct {
 	Names []string `json:"names"`
-	// iceberg spec says this is optional, but I don't see any examples
-	// of this being left empty. Does pyiceberg need to be updated or should
-	// the spec not say field-id is optional?
+	// FieldID is nil for fields that exist only in imported files, as the
+	// spec allows. ApplyNameMapping gives such fields ID -1.
 	FieldID *int          `json:"field-id,omitempty"`
 	Fields  []MappedField `json:"fields,omitempty"`
 }
@@ -453,7 +452,7 @@ func (n *nameMapProjectVisitor) Field(field NestedField, fieldPartner *MappedFie
 	}
 
 	return NestedField{
-		ID:             *fieldPartner.FieldID,
+		ID:             fieldPartner.ID(),
 		Name:           field.Name,
 		Type:           fieldResult.Type,
 		Required:       field.Required,

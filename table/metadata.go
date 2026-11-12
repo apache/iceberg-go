@@ -1028,6 +1028,10 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 		return fmt.Errorf("%w: %w: first-row-id %d is behind table next-row-id %d",
 			ErrCommitFailed, ErrInvalidRowLineage, *snapshot.FirstRowID, nextRowID)
 	}
+	if *snapshot.FirstRowID > nextRowID {
+		return fmt.Errorf("%w: first-row-id %d is ahead of table next-row-id %d",
+			ErrInvalidRowLineage, *snapshot.FirstRowID, nextRowID)
+	}
 
 	// next-row-id is non-decreasing across snapshots, not strictly increasing:
 	// zero-added-rows snapshots (delete-only or metadata-only commits) are

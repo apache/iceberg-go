@@ -61,18 +61,33 @@ func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, pa
 		return nil, err
 	}
 
-	return (&manifestEvalVisitor{partitionFilter: boundFilter}).Eval, nil
+	return (&manifestEvalVisitor{
+		partitionFilter:     boundFilter,
+		partitionFieldCount: spec.NumFields(),
+	}).Eval, nil
 }
 
 type manifestEvalVisitor struct {
-	partitionFields []iceberg.FieldSummary
-	partitionFilter iceberg.BooleanExpression
+	partitionFields     []iceberg.FieldSummary
+	partitionFilter     iceberg.BooleanExpression
+	partitionFieldCount int
 }
 
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
 	parts := manifestFilePartitions(manifest)
-	if len(parts) == 0 {
+	if len(parts) == 0 || len(parts) != m.partitionFieldCount {
+		// Summaries are positional. An incomplete or oversized list cannot
+		// safely exclude a data or delete manifest.
 		return rowsMightMatch, nil
+	}
+	for _, part := range parts {
+		missingNonNullBounds := part.LowerBound == nil && !part.ContainsNull &&
+			(part.ContainsNaN == nil || !*part.ContainsNaN)
+		if missingNonNullBounds || (part.LowerBound == nil) != (part.UpperBound == nil) {
+			// Legacy empty-string partitions can have missing bounds (#2407).
+			// Keep both data and delete manifests when the summary is inconclusive.
+			return rowsMightMatch, nil
+		}
 	}
 
 	// Use a per-call visitor so concurrent callers of the same cached Eval
@@ -232,9 +247,53 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	return rowsMightMatch
 }
 
+// uniqueValue returns a partition value only when the manifest summary proves
+// that every partition has that value. Unknown NaN information is not sufficient
+// for floating-point fields because NaNs are excluded from the bounds.
+func (m *manifestEvalVisitor) uniqueValue(term iceberg.BoundTerm) iceberg.Literal {
+	field := m.partitionFields[term.Ref().Pos()]
+	if field.ContainsNull || field.LowerBound == nil || field.UpperBound == nil {
+		return nil
+	}
+	// Different encodings may still compare equal, so keep those manifests.
+	if !slices.Equal(*field.LowerBound, *field.UpperBound) {
+		return nil
+	}
+
+	switch term.Ref().Type().(type) {
+	case iceberg.Float32Type, iceberg.Float64Type:
+		if field.ContainsNaN == nil || *field.ContainsNaN {
+			return nil
+		}
+	}
+
+	// Bounds are only an optimization here. If decoding fails, do not prune.
+	lower, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.LowerBound)
+	if err != nil {
+		return nil
+	}
+	// Go's literal set treats signed zeros as equal, but Arrow's is_in row
+	// filter can distinguish them. Keep zero-valued float partitions for the
+	// row filter to evaluate.
+	switch value := lower.(type) {
+	case iceberg.Float32Literal:
+		if value == 0 {
+			return nil
+		}
+	case iceberg.Float64Literal:
+		if value == 0 {
+			return nil
+		}
+	}
+
+	return lower
+}
+
 func (m *manifestEvalVisitor) VisitNotIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) bool {
-	// because the bounds are not necessarily a min or max value, this cannot be answered using them
-	// notIn(col, {X, ...}) with (X, Y) doesn't guarantee that X is a value in col
+	if value := m.uniqueValue(term); value != nil && literals.Contains(value) {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 
@@ -443,8 +502,10 @@ func (m *manifestEvalVisitor) VisitEqual(term iceberg.BoundTerm, lit iceberg.Lit
 }
 
 func (m *manifestEvalVisitor) VisitNotEqual(term iceberg.BoundTerm, lit iceberg.Literal) bool {
-	// because bounds are not necessarily a min or max, this cannot be answered
-	// using them. notEq(col, X) with (X, Y) doesn't guarantee X is a value in col
+	if value := m.uniqueValue(term); value != nil && getCmpLiteral(value)(value, lit) == 0 {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 

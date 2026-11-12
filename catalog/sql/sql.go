@@ -223,8 +223,9 @@ func init() {
 }
 
 var (
-	_ catalog.Catalog     = (*Catalog)(nil)
-	_ catalog.ViewCatalog = (*Catalog)(nil)
+	_ catalog.Catalog              = (*Catalog)(nil)
+	_ catalog.ViewCatalog          = (*Catalog)(nil)
+	_ catalog.RenamableViewCatalog = (*Catalog)(nil)
 )
 
 const namespaceExistsProperty = "exists"

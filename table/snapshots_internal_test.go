@@ -99,6 +99,23 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 	}, ssc.build())
 }
 
+func TestSnapshotSummaryCollectorTimePartitionPath(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "event_time", Type: iceberg.PrimitiveTypes.Time},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "event_time", Transform: iceberg.IdentityTransform{},
+	})
+	file, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+		"/path/to/file.parquet", iceberg.ParquetFile, map[int]any{1000: iceberg.Time(36_000_000_000)}, nil, nil, 1, 100)
+	require.NoError(t, err)
+
+	var collector SnapshotSummaryCollector
+	collector.setPartitionSummaryLimit(1)
+	require.NoError(t, collector.addFile(file.Build(), schema, spec))
+	assert.Contains(t, collector.build(), "partitions.event_time=10%3A00")
+}
+
 func TestSnapshotSummaryCollectorPartitionPathParity(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
