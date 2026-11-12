@@ -824,6 +824,16 @@ result, err := txn.RewriteDataFiles(ctx, groups /* from plan.Groups */, table.Re
 
 When every file of a group already records the order's `sort_order_id` (for example, files written by an earlier sort rewrite), every sort field is identity, and no partition of the group has more files than the scan concurrency (`table.WithCompactionScanConcurrency`, `GOMAXPROCS` by default), the files are streamed and merged, holding up to about five batches per file instead of the whole group. Otherwise a sort rewrite holds each group decoded in memory, and with the batches queued for the writer that can reach about twice the group's decoded size, so keep `compaction.Config.MaxGroupSizeBytes` within what one rewrite can hold. The first sort rewrite of a table always takes this in-memory path, since its files do not record the order yet. The CLI equivalent is `iceberg compact run --sort [--rewrite-all] [--max-group-size BYTES]`, which uses the table's default sort order.
 
+To cluster spatially instead, pass `table.WithCompactionGeometryHilbertOrder` with the name of a top-level geometry or geography column. Each partition of a group is ordered along a Hilbert curve over the centre of every geometry's XY bounding box, snapped to a grid of `2^bits` cells per axis (`table.WithHilbertBits`, 16 by default) over the extent of the data (`table.WithHilbertBounds` fixes the extent). Rows close in space tend to share the same file and row group, so per-file geometry bounds overlap little and spatial filters prune files. Rows with no location (a null or empty geometry) go last. Geography is accepted but ordered on planar x/y, with no antimeridian wrapping. This is not the multi-column `hilbert(c1, c2)` sort order of Java's rewrite procedure; it orders one geometry column by location. A Hilbert rewrite always holds the whole group decoded in memory, so keep `compaction.Config.MaxGroupSizeBytes` within what one rewrite can hold. The option cannot be combined with `table.WithCompactionSortOrder`, and because a Hilbert order is not an Iceberg sort order, output files record no `sort_order_id`:
+
+```go
+result, err := txn.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{
+    GroupOptions: []table.CompactionGroupOption{
+        table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(12)),
+    },
+})
+```
+
 ### Expiring snapshots
 
 ```go
