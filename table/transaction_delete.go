@@ -53,7 +53,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 		return nil, nil, err
 	}
 
-	if meta.NameMapping() == nil {
+	if _, exists := meta.props[DefaultNameMappingKey]; !exists {
 		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
@@ -142,7 +142,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		return nil, err
 	}
 
-	if meta.NameMapping() == nil {
+	if _, exists := meta.props[DefaultNameMappingKey]; !exists {
 		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
