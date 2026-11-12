@@ -2588,12 +2588,15 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	// Shallow copy for overriding certain attrs
-	newVersion := *version
-	version = &newVersion
+	// Clone before setting VersionID or the default namespace so the caller's
+	// version stays unchanged.
+	version = version.Clone()
 
 	// Enforce starting ID of 1
 	version.VersionID = 1
+	if version.DefaultNamespace == nil {
+		version.DefaultNamespace = slices.Clone(catalog.NamespaceFromIdent(identifier))
+	}
 
 	// Set default catalog unless set by caller
 	if len(version.DefaultCatalog) == 0 {
