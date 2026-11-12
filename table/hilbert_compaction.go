@@ -41,7 +41,7 @@ const (
 	maxHilbertBits = 32
 )
 
-// HilbertOption configures [WithCompactionHilbertOrder].
+// HilbertOption configures [WithCompactionGeometryHilbertOrder].
 type HilbertOption func(*hilbertConfig)
 
 // hilbertConfig holds the settings of one Hilbert compaction. Build it

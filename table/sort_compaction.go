@@ -562,7 +562,7 @@ func checkCompactionBatches(batches []arrow.RecordBatch) (int64, error) {
 	var total int64
 	for _, b := range batches {
 		if !b.Schema().Equal(sc) {
-			return 0, errors.New("sort compaction: scan produced batches with differing schemas")
+			return 0, errors.New("compaction: scan produced batches with differing schemas")
 		}
 		total += b.NumRows()
 	}
@@ -631,7 +631,7 @@ func yieldOrderedRows(
 		end := min(off+int(batchRows), len(refs))
 		out, err := gatherSortedRows(mem, takeFn, batches, refs[off:end])
 		if err != nil {
-			yield(nil, fmt.Errorf("sort compaction: gather sorted rows: %w", err))
+			yield(nil, fmt.Errorf("compaction: gather ordered rows: %w", err))
 
 			return false
 		}

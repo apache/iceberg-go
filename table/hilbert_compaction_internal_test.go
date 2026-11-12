@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"encoding/binary"
 	"math"
 	"testing"
 
@@ -31,7 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/twpayne/go-geom"
-	"github.com/twpayne/go-geom/encoding/ewkb"
 	"github.com/twpayne/go-geom/encoding/wkb"
 	"github.com/twpayne/go-geom/encoding/wkbcommon"
 	"github.com/twpayne/go-geom/encoding/wkt"
@@ -181,96 +179,28 @@ func TestHilbertGridCellForCoordEdgeCases(t *testing.T) {
 	}
 }
 
-func TestWKBCenter(t *testing.T) {
-	tests := []struct {
-		name     string
-		wkt      string
-		x, y     float64
-		location bool
-	}{
-		{"point", "POINT (3 4)", 3, 4, true},
-		{"negative point", "POINT (-122.5 37.25)", -122.5, 37.25, true},
-		{"linestring", "LINESTRING (0 0, 10 4)", 5, 2, true},
-		{"polygon", "POLYGON ((0 0, 8 0, 8 6, 0 6, 0 0))", 4, 3, true},
-		{"multipoint", "MULTIPOINT ((0 0), (10 20))", 5, 10, true},
-		{"point z ignores z", "POINT Z (1 2 99)", 1, 2, true},
-		{"collection", "GEOMETRYCOLLECTION (POINT (0 0), POINT (10 10))", 5, 5, true},
-		// geom.T.Bounds panics on a nested collection; the center must not.
-		{"nested collection", "GEOMETRYCOLLECTION (GEOMETRYCOLLECTION (POINT (3 4)))", 3, 4, true},
-		// Empty members must not poison the finite members' bounds.
-		{"collection with empty member", "GEOMETRYCOLLECTION (POINT (3 4), POINT EMPTY)", 3, 4, true},
-		{"multipoint with empty member", "MULTIPOINT ((3 4), EMPTY)", 3, 4, true},
-		{"empty point", "POINT EMPTY", 0, 0, false},
-		{"collection of only empty members", "GEOMETRYCOLLECTION (POINT EMPTY, POINT EMPTY)", 0, 0, false},
-		{"empty polygon", "POLYGON EMPTY", 0, 0, false},
-		{"empty collection", "GEOMETRYCOLLECTION EMPTY", 0, 0, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			x, y, err := wkbCenter(hilbertTestWKB(t, tc.wkt))
-			require.NoError(t, err)
-			if !tc.location {
-				assert.True(t, math.IsNaN(x) && math.IsNaN(y), "got (%v, %v)", x, y)
-
-				return
-			}
-			assert.Equal(t, tc.x, x)
-			assert.Equal(t, tc.y, y)
-		})
-	}
-}
-
-func TestWKBCenterExtremeAndNonFinite(t *testing.T) {
-	huge := math.MaxFloat64
-	b, err := wkb.Marshal(geom.NewLineStringFlat(geom.XY, []float64{huge, huge, huge, huge}), wkb.NDR)
-	require.NoError(t, err)
-	x, y, err := wkbCenter(b)
-	require.NoError(t, err)
-	assert.Equal(t, huge, x, "halving first keeps the sum finite")
-	assert.Equal(t, huge, y)
-
-	b, err = wkb.Marshal(geom.NewPointFlat(geom.XY, []float64{math.Inf(1), 1}), wkb.NDR)
-	require.NoError(t, err)
-	x, y, err = wkbCenter(b)
-	require.NoError(t, err)
-	assert.True(t, math.IsNaN(x) && math.IsNaN(y), "an infinite coordinate means no location")
-
-	b, err = wkb.Marshal(geom.NewPointFlat(geom.XY, []float64{math.NaN(), 1}), wkb.NDR)
-	require.NoError(t, err)
-	x, y, err = wkbCenter(b)
-	require.NoError(t, err)
-	assert.True(t, math.IsNaN(x) && math.IsNaN(y), "a NaN coordinate means no location")
-}
-
-func TestWKBCenterByteOrder(t *testing.T) {
-	g, err := wkt.Unmarshal("POINT (7 -3)")
-	require.NoError(t, err)
-	for _, order := range []struct {
-		name string
-		bo   binary.ByteOrder
-	}{{"little endian", wkb.NDR}, {"big endian", wkb.XDR}} {
-		b, err := wkb.Marshal(g, order.bo)
-		require.NoError(t, err)
-		x, y, err := wkbCenter(b)
-		require.NoError(t, err, order.name)
-		assert.Equal(t, 7.0, x, order.name)
-		assert.Equal(t, -3.0, y, order.name)
-	}
-}
-
+// wkbCenter is a thin wrapper over internal.WKBCenterXY, whose decoding
+// is covered in table/internal; these cases cover only the wrapper's own
+// behaviour: the empty-value error and the no-location NaN mapping.
 func TestWKBCenterErrors(t *testing.T) {
 	_, _, err := wkbCenter(nil)
-	require.Error(t, err, "empty value")
+	require.Error(t, err, "nil value")
 
 	_, _, err = wkbCenter([]byte{})
 	require.Error(t, err, "zero-length value")
+}
 
-	_, _, err = wkbCenter([]byte{0xff, 0x00, 0x01})
-	require.Error(t, err, "garbage")
+func TestWKBCenterNoLocationIsNaN(t *testing.T) {
+	for _, s := range []string{"POINT EMPTY", "GEOMETRYCOLLECTION (POINT EMPTY, POINT EMPTY)"} {
+		x, y, err := wkbCenter(hilbertTestWKB(t, s))
+		require.NoError(t, err, s)
+		assert.True(t, math.IsNaN(x) && math.IsNaN(y), "%s: got (%v, %v)", s, x, y)
+	}
 
-	full := hilbertTestWKB(t, "POINT (1 2)")
-	_, _, err = wkbCenter(full[:len(full)-4])
-	require.Error(t, err, "truncated value")
+	x, y, err := wkbCenter(hilbertTestWKB(t, "POINT (3 4)"))
+	require.NoError(t, err)
+	assert.Equal(t, 3.0, x)
+	assert.Equal(t, 4.0, y)
 }
 
 func TestAppendGeometryCenters(t *testing.T) {
@@ -525,24 +455,6 @@ func TestHilbertGridCellForCoordCellsAreEqualWidth(t *testing.T) {
 	for cell, n := range counts {
 		assert.Equal(t, 125, n, "cell %d", cell)
 	}
-}
-
-func TestWKBCenterAcceptsEWKB(t *testing.T) {
-	// The table writer accepts EWKB (an SRID or Z/M flags in the type
-	// word), so a rewrite of such data must not fail in the center.
-	b, err := ewkb.Marshal(geom.NewPointFlat(geom.XY, []float64{7, -3}).SetSRID(4326), ewkb.NDR)
-	require.NoError(t, err)
-	x, y, err := wkbCenter(b)
-	require.NoError(t, err)
-	assert.Equal(t, 7.0, x)
-	assert.Equal(t, -3.0, y)
-
-	b, err = ewkb.Marshal(geom.NewPointFlat(geom.XYZ, []float64{7, -3, 99}), ewkb.NDR)
-	require.NoError(t, err)
-	x, y, err = wkbCenter(b)
-	require.NoError(t, err)
-	assert.Equal(t, 7.0, x)
-	assert.Equal(t, -3.0, y)
 }
 
 func TestCurvePositionCompare(t *testing.T) {

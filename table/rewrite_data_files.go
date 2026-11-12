@@ -369,10 +369,14 @@ type hilbertSpec struct {
 	opts   []HilbertOption
 }
 
-// WithCompactionHilbertOrder switches the group rewrite from bin-pack to
-// spatial clustering: the rows of the group are ordered by the Hilbert
-// curve index of a top-level geometry or geography column, so
-// rows close in space land tend to more often share the same file and row group.
+// WithCompactionGeometryHilbertOrder switches the group rewrite from
+// bin-pack to spatial clustering: the rows of the group are ordered by
+// the Hilbert curve index of a top-level geometry or geography column,
+// so rows close in space tend to share the same file and row group.
+//
+// This is not the multi-column hilbert(c1, c2) sort order of Java's
+// rewrite_data_files procedure, which encodes primitive columns and
+// does not accept geometry; it orders one geometry column by location.
 //
 // Each geometry is represented by the center of its planar XY bounding
 // box and snapped to a grid of 2^bits cells per axis ([WithHilbertBits])
@@ -381,8 +385,8 @@ type hilbertSpec struct {
 // WKB and EWKB (with or without an SRID) are accepted, nested geometry
 // collections are walked, and empty members are ignored. Rows with a
 // null or empty geometry, or one made only of empty members, have no
-// location and go last. Coordinates are treated as planar x/y, so
-// geography across the antimeridian is not wrapped.
+// location and go last. Geography is accepted but ordered on planar
+// x/y, with no antimeridian wrapping.
 //
 // Rows are split by the table's current partition spec first and each
 // partition is ordered on its own. The whole group is held in memory
@@ -395,7 +399,7 @@ type hilbertSpec struct {
 // sort_order_id. The option cannot be combined with
 // [WithCompactionSortOrder]; [ExecuteCompactionGroup] rejects that, and
 // a column that is not a geometry or geography column.
-func WithCompactionHilbertOrder(column string, opts ...HilbertOption) CompactionGroupOption {
+func WithCompactionGeometryHilbertOrder(column string, opts ...HilbertOption) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.hilbert = &hilbertSpec{column: column, opts: opts}
 	}

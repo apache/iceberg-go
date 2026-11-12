@@ -204,7 +204,7 @@ func hilbertOutputIDs(t *testing.T, tbl *table.Table, opts ...table.CompactionGr
 
 	group := sortTestGroup(t, tbl)
 	result, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
-		append([]table.CompactionGroupOption{table.WithCompactionHilbertOrder("geom", table.WithHilbertBits(3))}, opts...)...)
+		append([]table.CompactionGroupOption{table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(3))}, opts...)...)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.NewDataFiles)
 
@@ -295,7 +295,7 @@ func TestExecuteCompactionGroup_HilbertOrderSplitsPartitions(t *testing.T) {
 
 	group := sortTestGroup(t, tbl)
 	result, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
-		table.WithCompactionHilbertOrder("geom", table.WithHilbertBits(3)))
+		table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(3)))
 	require.NoError(t, err)
 
 	got := map[string][]int64{}
@@ -397,7 +397,7 @@ func TestExecuteCompactionGroup_HilbertOrderAcceptsWriterInputs(t *testing.T) {
 			wantSet := readInt64Column(t, control.NewDataFiles[0].FilePath(), "id")
 
 			result, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
-				table.WithCompactionHilbertOrder("geom", table.WithHilbertBits(3)))
+				table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(3)))
 			require.NoError(t, err)
 			require.Len(t, result.NewDataFiles, 1)
 			got := readInt64Column(t, result.NewDataFiles[0].FilePath(), "id")
@@ -443,7 +443,7 @@ func TestExecuteCompactionGroup_HilbertOrderAppliesPositionDeletes(t *testing.T)
 	}
 
 	result, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
-		table.WithCompactionHilbertOrder("geom", table.WithHilbertBits(3)),
+		table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(3)),
 		table.WithCompactionArrowBatchSize(7),
 		table.WithCompactionTargetFileSize(1))
 	require.NoError(t, err)
@@ -490,7 +490,7 @@ func TestRewriteDataFiles_HilbertOrderPreservesRowLineage(t *testing.T) {
 	}
 	res, err := tbl.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{
 		GroupOptions: []table.CompactionGroupOption{
-			table.WithCompactionHilbertOrder("geom", table.WithHilbertBits(3)),
+			table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(3)),
 			table.WithCompactionArrowBatchSize(16),
 			table.WithCompactionTargetFileSize(1),
 		},
@@ -521,13 +521,13 @@ func TestExecuteCompactionGroup_HilbertOrderRejectsBadConfig(t *testing.T) {
 
 	order := idSortOrder(t, 1, iceberg.IdentityTransform{})
 	for name, opts := range map[string][]table.CompactionGroupOption{
-		"missing column":    {table.WithCompactionHilbertOrder("nope")},
-		"not a geo column":  {table.WithCompactionHilbertOrder("label")},
-		"zero bits":         {table.WithCompactionHilbertOrder("geom", table.WithHilbertBits(0))},
-		"too many bits":     {table.WithCompactionHilbertOrder("geom", table.WithHilbertBits(33))},
-		"inverted bounds":   {table.WithCompactionHilbertOrder("geom", table.WithHilbertBounds(5, 0, 1, 1))},
-		"with sort order":   {table.WithCompactionHilbertOrder("geom"), table.WithCompactionSortOrder(order)},
-		"non-finite bounds": {table.WithCompactionHilbertOrder("geom", table.WithHilbertBounds(0, 0, math.Inf(1), 1))},
+		"missing column":    {table.WithCompactionGeometryHilbertOrder("nope")},
+		"not a geo column":  {table.WithCompactionGeometryHilbertOrder("label")},
+		"zero bits":         {table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(0))},
+		"too many bits":     {table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(33))},
+		"inverted bounds":   {table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBounds(5, 0, 1, 1))},
+		"with sort order":   {table.WithCompactionGeometryHilbertOrder("geom"), table.WithCompactionSortOrder(order)},
+		"non-finite bounds": {table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBounds(0, 0, math.Inf(1), 1))},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := table.ExecuteCompactionGroup(t.Context(), tbl, group, opts...)
