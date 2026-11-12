@@ -3121,6 +3121,9 @@ make integration-external-rest
 <p><strong>Data-file replacements now reject concurrent deletes.</strong> Commits staged through <code>ReplaceDataFiles</code>, <code>ReplaceDataFilesByPath</code>, <code>ReplaceFiles</code>, or rewrite operations can return <code>table.ErrConflictingDeleteFiles</code> when a concurrent position delete targets a replaced file or any concurrent equality delete is added. Compaction on tables with streaming equality deletes may see additional conflicts.</p>
 </li>
 <li>
+<p><strong>Invalid name mappings now stop scans and add-files.</strong> Tables with an unparseable <code>schema.name-mapping.default</code> now return <code>ErrInvalidMetadata</code> on scans and add-files instead of ignoring the mapping. Fix the property with a valid mapping or remove it.</p>
+</li>
+<li>
 <p><strong>SigV4 keeps the token or credential as <code>Original-Authorization</code>.</strong> With <code>rest.sigv4-enabled=true</code> (or <code>rest.auth.type=sigv4</code>) and a <code>token</code> or <code>credential</code>, requests used to be signed with the token silently dropped, because the SigV4 signature replaced the <code>Authorization</code> header. They now carry it as <code>Original-Authorization</code>, included in the signed headers, as Iceberg Java does. A server behind SigV4 that ignores the header is unaffected.</p>
 </li>
 <li>
