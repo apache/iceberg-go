@@ -24,6 +24,7 @@ import (
 	"iter"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -1015,6 +1016,12 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 			DeleteFiles: existingDeletes[f.FilePath()],
 			Start:       0,
 			Length:      f.FileSizeBytes(),
+		})
+	}
+	if meta.formatVersion == 2 {
+		// Position delete files must be ordered by file path, then row position.
+		slices.SortFunc(tasks, func(a, b FileScanTask) int {
+			return strings.Compare(a.File.FilePath(), b.File.FilePath())
 		})
 	}
 
