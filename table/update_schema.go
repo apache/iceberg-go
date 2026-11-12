@@ -258,10 +258,39 @@ func (u *UpdateSchema) findField(name string) (iceberg.NestedField, bool) {
 		return field, true
 	}
 
-	if id, ok := u.renamedNameToID[u.schemaNameKey(name)]; ok {
+	nameKey := u.schemaNameKey(name)
+	if id, ok := u.renamedNameToID[nameKey]; ok {
 		if renamedField, ok := u.schema.FindFieldByID(id); ok {
 			return renamedField, true
 		}
+	}
+
+	// A renamed parent also changes the path used to reach its children.
+	// Resolve the longest renamed prefix against the original schema.
+	var matchedPrefix string
+	var matchedField iceberg.NestedField
+	var matched bool
+	for alias, id := range u.renamedNameToID {
+		if !strings.HasPrefix(nameKey, alias+".") || len(alias) <= len(matchedPrefix) {
+			continue
+		}
+		originalPath, ok := u.schema.FindColumnName(id)
+		if !ok {
+			continue
+		}
+		candidate := originalPath + nameKey[len(alias):]
+		var nested iceberg.NestedField
+		if u.caseSensitive {
+			nested, ok = u.schema.FindFieldByName(candidate)
+		} else {
+			nested, ok = u.schema.FindFieldByNameCaseInsensitive(candidate)
+		}
+		if ok {
+			matchedPrefix, matchedField, matched = alias, nested, true
+		}
+	}
+	if matched {
+		return matchedField, true
 	}
 
 	return field, found
@@ -290,22 +319,50 @@ func (u *UpdateSchema) schemaNameKey(name string) string {
 }
 
 func (u *UpdateSchema) rememberRenamedName(fieldID int, path []string, newName string) {
+	var oldAliases []string
 	for name, id := range u.renamedNameToID {
 		if id == fieldID {
+			oldAliases = append(oldAliases, name)
 			delete(u.renamedNameToID, name)
 		}
 	}
 
-	if len(path) > 0 {
-		newPath := slices.Clone(path)
-		newPath[len(newPath)-1] = newName
-		u.renamedNameToID[u.schemaNameKey(strings.Join(newPath, "."))] = fieldID
+	newPath := slices.Clone(path)
+	newPath[len(newPath)-1] = newName
+	newAliases := []string{u.schemaNameKey(strings.Join(newPath, "."))}
+	if parentID := u.findParentID(fieldID); parentID == TableRootID {
+		newAliases = append(newAliases, u.schemaNameKey(newName))
+	} else if parentPath, ok := u.schema.FindColumnName(parentID); ok {
+		// Use the original parent's ID, not a split dotted field name.
+		newAliases = append(newAliases, u.schemaNameKey(parentPath+"."+newName))
 	}
 
-	if originalName, ok := u.schema.FindColumnName(fieldID); ok {
-		originalPath := strings.Split(originalName, ".")
-		originalPath[len(originalPath)-1] = newName
-		u.renamedNameToID[u.schemaNameKey(strings.Join(originalPath, "."))] = fieldID
+	// When an ancestor is renamed, descendant aliases must follow its
+	// new name. Keep aliases using the original schema path, but drop
+	// intermediate names that were superseded by another rename.
+	originalPath, _ := u.schema.FindColumnName(fieldID)
+	originalKey := u.schemaNameKey(originalPath)
+	descendants := make(map[string]int)
+	for alias, id := range u.renamedNameToID {
+		prefixes := append(slices.Clone(oldAliases), originalKey)
+		for _, prefix := range prefixes {
+			if !strings.HasPrefix(alias, prefix+".") {
+				continue
+			}
+			for _, newAlias := range newAliases {
+				descendants[newAlias+alias[len(prefix):]] = id
+			}
+			if prefix != originalKey {
+				delete(u.renamedNameToID, alias)
+			}
+			break
+		}
+	}
+	for alias, id := range descendants {
+		u.renamedNameToID[alias] = id
+	}
+	for _, alias := range newAliases {
+		u.renamedNameToID[alias] = fieldID
 	}
 }
 
