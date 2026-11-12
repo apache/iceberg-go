@@ -1689,6 +1689,9 @@ func newSchemaEvolutionScan(t *testing.T, spec *iceberg.PartitionSpec, fs iceio.
 
 func newSchemaEvolutionScanWithSnapshot(t *testing.T, spec *iceberg.PartitionSpec, fs iceio.IO, manifestList string, snapshotSchemaID *int) (*Scan, *iceberg.Schema, int64) {
 	t.Helper()
+	if manifestList == "" {
+		manifestList = "mem://default/table/metadata/snap-7.avro"
+	}
 
 	oldSchema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID:   1,

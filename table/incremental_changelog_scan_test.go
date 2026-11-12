@@ -512,9 +512,9 @@ func incrementalChangelogDivergentTable(t *testing.T) *Table {
 
 	baseTimestamp := base.LastUpdatedMillis()
 	snapshots := []*Snapshot{
-		{SnapshotID: 1, TimestampMs: baseTimestamp + 1, SequenceNumber: 1, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: baseTimestamp + 2, SequenceNumber: 2, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 3, ParentSnapshotID: new(int64(1)), TimestampMs: baseTimestamp + 3, SequenceNumber: 3, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 1, TimestampMs: baseTimestamp + 1, SequenceNumber: 1, ManifestList: "mem://default/changelog-divergent/metadata/snap-1.avro", Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: new(int64(1)), TimestampMs: baseTimestamp + 2, SequenceNumber: 2, ManifestList: "mem://default/changelog-divergent/metadata/snap-2.avro", Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 3, ParentSnapshotID: new(int64(1)), TimestampMs: baseTimestamp + 3, SequenceNumber: 3, ManifestList: "mem://default/changelog-divergent/metadata/snap-3.avro", Summary: &Summary{Operation: OpAppend}},
 	}
 	for _, snapshot := range snapshots {
 		require.NoError(t, builder.AddSnapshot(snapshot))

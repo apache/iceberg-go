@@ -113,6 +113,7 @@ func runPosDeleteConflictCheck(t *testing.T, rewrittenFiles []iceberg.DataFile, 
 		SnapshotID:     writerBaseID,
 		SequenceNumber: 1,
 		TimestampMs:    baseMeta.LastUpdatedMillis() + 1,
+		ManifestList:   "s3://test/conflict-base-manifest-list.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, baseBuilder.AddSnapshot(&baseSnap))
@@ -261,6 +262,7 @@ func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProp
 		SnapshotID:     *branchHead,
 		SequenceNumber: 1,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		ManifestList:   "s3://test/conflict-head-manifest-list.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snap))
@@ -293,6 +295,7 @@ func newConflictTestMetadataWithChain(t *testing.T, ids []int64) Metadata {
 			SnapshotID:     id,
 			SequenceNumber: int64(i + 1),
 			TimestampMs:    meta.LastUpdatedMillis() + int64(i+1),
+			ManifestList:   fmt.Sprintf("s3://test/conflict-chain-%d.avro", id),
 			Summary:        &Summary{Operation: OpAppend},
 		}
 		if i > 0 {

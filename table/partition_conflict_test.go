@@ -66,6 +66,7 @@ func partitionedConflictMeta(t *testing.T, schema *iceberg.Schema, partColID int
 		SnapshotID:     *branchHead,
 		SequenceNumber: 1,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		ManifestList:   "s3://test/partition-conflict-head.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snap))
@@ -790,6 +791,7 @@ func TestRowDeltaValidate_UnpartitionedTableFallsBackToAlwaysTrue(t *testing.T) 
 		SnapshotID:     writerBaseID,
 		SequenceNumber: 1,
 		TimestampMs:    emptyMeta.LastUpdatedMillis() + 1,
+		ManifestList:   "s3://test/partition-conflict-base.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builderBase.AddSnapshot(&baseSnap))
@@ -862,6 +864,7 @@ func TestRowDeltaValidate_SpecEvolutionConflictDetected(t *testing.T) {
 		SnapshotID:     writerBaseID,
 		SequenceNumber: 1,
 		TimestampMs:    initialMeta.LastUpdatedMillis() + 1,
+		ManifestList:   "s3://test/partition-conflict-spec-base.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&baseSnap))
@@ -948,8 +951,9 @@ func TestRowDeltaValidate_BucketTransformFallsBackToAlwaysTrue(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, b.AddSnapshot(&Snapshot{
 		SnapshotID: writerBaseID, SequenceNumber: 1,
-		TimestampMs: meta.LastUpdatedMillis() + 1,
-		Summary:     &Summary{Operation: OpAppend},
+		TimestampMs:  meta.LastUpdatedMillis() + 1,
+		ManifestList: "s3://test/partition-conflict-bucket-base.avro",
+		Summary:      &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, b.SetSnapshotRef(MainBranch, writerBaseID, BranchRef))
 	baseMeta, err := b.Build()
@@ -1012,8 +1016,9 @@ func TestRowDeltaValidate_DayTransformFallsBackToAlwaysTrue(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, b.AddSnapshot(&Snapshot{
 		SnapshotID: writerBaseID, SequenceNumber: 1,
-		TimestampMs: meta.LastUpdatedMillis() + 1,
-		Summary:     &Summary{Operation: OpAppend},
+		TimestampMs:  meta.LastUpdatedMillis() + 1,
+		ManifestList: "s3://test/partition-conflict-day-base.avro",
+		Summary:      &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, b.SetSnapshotRef(MainBranch, writerBaseID, BranchRef))
 	baseMeta, err := b.Build()

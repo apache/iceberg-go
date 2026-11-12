@@ -526,6 +526,9 @@ func createTestMetadata(snapshots []Snapshot, snapshotLog []SnapshotLogEntry) (M
 
 		// Add snapshots if provided
 		for _, snapshot := range snapshots {
+			if snapshot.ManifestList == "" {
+				snapshot.ManifestList = "s3://bucket/table/metadata/test-manifest-list.avro"
+			}
 			if err = builder.AddSnapshot(&snapshot); err != nil {
 				return nil, err
 			}

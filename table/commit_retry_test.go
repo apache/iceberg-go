@@ -1231,6 +1231,7 @@ func TestTransactionCommit_ResumeRebuildsAfterPeerSnapshotOnAnotherBranch(t *tes
 		ParentSnapshotID: &mainHead,
 		SequenceNumber:   peerSeq,
 		TimestampMs:      cat.metadata.LastUpdatedMillis() + 1,
+		ManifestList:     "s3://test/commit-retry-peer-manifest-list.avro",
 		Summary:          &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef("other", mainHead+1, BranchRef))

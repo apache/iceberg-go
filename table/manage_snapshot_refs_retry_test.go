@@ -201,6 +201,7 @@ func testBranchPromotionAppendRetryKeepsAuditAncestry(t *testing.T, stage func(*
 		ParentSnapshotID: &diverged,
 		SequenceNumber:   base.LastSequenceNumber() + 1,
 		TimestampMs:      base.LastUpdatedMillis() + 1000,
+		ManifestList:     "s3://test/manage-refs-peer-901.avro",
 		Summary:          &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, peer.SetSnapshotRef("diverged", 901, BranchRef))
@@ -279,6 +280,7 @@ func testBranchPromotionRetryPreservesTableSequenceAcrossRefReset(t *testing.T, 
 		ParentSnapshotID: &diverged,
 		SequenceNumber:   base.LastSequenceNumber() + 1,
 		TimestampMs:      base.LastUpdatedMillis() + 1000,
+		ManifestList:     "s3://test/manage-refs-peer-901-v3.avro",
 		Summary:          &Summary{Operation: OpAppend},
 	}
 	if version == 3 {
@@ -387,6 +389,7 @@ func TestBranchPromotionRetryPromotesStagedSource(t *testing.T) {
 		TimestampMs:      base.LastUpdatedMillis() + 1000,
 		FirstRowID:       &peerFirst,
 		AddedRows:        &peerRows,
+		ManifestList:     "s3://test/manage-refs-peer-901-promote.avro",
 		Summary:          &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, peer.SetSnapshotRef("diverged", 901, BranchRef))
