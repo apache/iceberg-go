@@ -655,13 +655,22 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	if rsp.ContentLength == 0 {
 		if cfg.requireBody {
-			return ret, fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+			err = fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+			if cfg.unknownCommitStateOnTransport {
+				err = fmt.Errorf("%w: %w", ErrCommitStateUnknown, err)
+			}
+
+			return ret, err
 		}
 
 		return ret, err
 	}
 
 	if err = decodeJSONResponse(rsp.Body, &ret); err != nil {
+		if cfg.unknownCommitStateOnTransport {
+			return ret, fmt.Errorf("%w: %w", ErrCommitStateUnknown, err)
+		}
+
 		return ret, err
 	}
 
@@ -1898,7 +1907,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		}, r.mutationHeaders(), unknownCommitStateOnTransport())
+		}, r.mutationHeaders(), unknownCommitStateOnTransport(), requireBody())
 	if err != nil {
 		return nil, "", err
 	}
@@ -2132,7 +2141,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		}, r.mutationHeaders(), unknownCommitStateOnTransport())
+		}, r.mutationHeaders(), unknownCommitStateOnTransport(), requireBody())
 	if err != nil {
 		return nil, err
 	}
