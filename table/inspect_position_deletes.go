@@ -51,6 +51,10 @@ const (
 // vectors are exposed through the same schema.
 func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, error) {
 	props := i.tbl.Metadata().Properties()
+	nameMapping := i.tbl.Metadata().NameMapping()
+	if err := validateNameMappingProperty(props, nameMapping); err != nil {
+		return nil, err
+	}
 	if err := tblutils.ValidateParquetReadProperties(props); err != nil {
 		return nil, err
 	}
@@ -73,7 +77,7 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 	ctx = compute.WithAllocator(ctx, i.alloc)
 
 	return i.positionDeleteRecordReader(
-		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().FormatVersion()), nil
+		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().FormatVersion(), nameMapping), nil
 }
 
 func (i InspectTable) currentPositionDeleteManifests(
@@ -486,6 +490,7 @@ func (i InspectTable) positionDeleteRecordReader(
 	partitionType *iceberg.StructType,
 	partitionIDByOld map[int]int,
 	formatVersion int,
+	nameMapping iceberg.NameMapping,
 ) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		if err := ctx.Err(); err != nil {
@@ -502,7 +507,7 @@ func (i InspectTable) positionDeleteRecordReader(
 				ctx:             ctx,
 				formatVersion:   formatVersion,
 				tableSchema:     i.tbl.Metadata().CurrentSchema(),
-				nameMapping:     i.tbl.Metadata().NameMapping(),
+				nameMapping:     nameMapping,
 				tableProperties: i.tbl.Metadata().Properties(),
 			},
 		)
