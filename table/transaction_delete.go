@@ -938,6 +938,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	// The writer consumes this iterator in one feeder and joins it before the
 	// output iterator completes, so the map is read only after that join.
 	streamedPaths := make(map[string]struct{})
+	streamedPathOrder := make([]string, 0)
 	recordsWithPaths := func(yield func(arrow.RecordBatch, error) bool) {
 		for record, err := range posDeleteRecIter {
 			if err != nil {
@@ -973,7 +974,9 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 				}
 				path := values.Value(i)
 				if _, ok := streamedPaths[path]; !ok {
-					streamedPaths[strings.Clone(path)] = struct{}{}
+					ownedPath := strings.Clone(path)
+					streamedPaths[ownedPath] = struct{}{}
+					streamedPathOrder = append(streamedPathOrder, ownedPath)
 				}
 			}
 			more := yield(record, nil)
@@ -1028,7 +1031,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 			}
 		}
 	}
-	for ref := range streamedPaths {
+	for _, ref := range streamedPathOrder {
 		if _, ok := seen[ref]; !ok {
 			seen[ref] = struct{}{}
 			referenced = append(referenced, ref)
