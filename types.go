@@ -496,23 +496,15 @@ func (s *StructType) Fields() []NestedField { return slices.Clone(s.FieldList) }
 // which Go fields are exported.
 
 func (s *StructType) MarshalJSON() ([]byte, error) {
+	fields := s.FieldList
+	if fields == nil {
+		fields = []NestedField{}
+	}
+
 	return json.Marshal(struct {
 		Type   string        `json:"type"`
 		Fields []NestedField `json:"fields"`
-	}{Type: s.Type(), Fields: s.FieldList})
-}
-
-func (s *StructType) UnmarshalJSON(b []byte) error {
-	aux := struct {
-		Fields []NestedField `json:"fields"`
-	}{}
-	if err := json.Unmarshal(b, &aux); err != nil {
-		return err
-	}
-
-	s.FieldList = aux.Fields
-
-	return nil
+	}{Type: s.Type(), Fields: fields})
 }
 
 func (s *StructType) UnmarshalJSON(b []byte) error {
