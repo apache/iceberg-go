@@ -110,13 +110,13 @@ func decodePuffinProperties(data json.RawMessage) (map[string]string, error) {
 // Without this check, encoding/json silently substitutes zero values.
 func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
 	var wire struct {
-		Type             *BlobType         `json:"type"`
-		Fields           *[]int32          `json:"fields"`
-		SnapshotID       *int64            `json:"snapshot-id"`
-		SequenceNumber   *int64            `json:"sequence-number"`
-		Offset           *int64            `json:"offset"`
-		Length           *int64            `json:"length"`
-		CompressionCodec *string           `json:"compression-codec"`
+		Type             *BlobType       `json:"type"`
+		Fields           *[]int32        `json:"fields"`
+		SnapshotID       *int64          `json:"snapshot-id"`
+		SequenceNumber   *int64          `json:"sequence-number"`
+		Offset           *int64          `json:"offset"`
+		Length           *int64          `json:"length"`
+		CompressionCodec *string         `json:"compression-codec"`
 		Properties       json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
@@ -160,7 +160,7 @@ func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
 func (f *Footer) UnmarshalJSON(data []byte) error {
 	var wire struct {
 		Blobs      *[]json.RawMessage `json:"blobs"`
-		Properties json.RawMessage `json:"properties"`
+		Properties json.RawMessage    `json:"properties"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
