@@ -266,7 +266,7 @@ func TestSortOrderCheckCompatibilityRejectsMissingSourceIDInSchema(t *testing.T)
 		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 	var sortOrder table.SortOrder
-	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-ids": [19, 999], "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder))
+	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-ids": [19, 999], "transform": "future_multi", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder))
 
 	err := sortOrder.CheckCompatibility(schema)
 	require.Error(t, err)
@@ -628,7 +628,7 @@ func TestSortFieldUnmarshalIncludesJSONFieldInTypeErrors(t *testing.T) {
 
 func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 	t.Run("unmarshal with source-ids", func(t *testing.T) {
-		jsonData := `{"source-ids": [2, 3], "transform": "identity", "direction": "asc", "null-order": "nulls-first"}`
+		jsonData := `{"source-ids": [2, 3], "transform": "future_multi", "direction": "asc", "null-order": "nulls-first"}`
 		var field table.SortField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
@@ -687,9 +687,11 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 	})
 
 	t.Run("marshal multi-arg round-trip", func(t *testing.T) {
+		unknown, err := iceberg.ParseTransform("future_multi")
+		require.NoError(t, err)
 		field := table.SortField{
 			SourceIDs: []int{2, 3},
-			Transform: iceberg.IdentityTransform{},
+			Transform: unknown,
 			Direction: table.SortASC,
 			NullOrder: table.NullsFirst,
 		}

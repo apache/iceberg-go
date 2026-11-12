@@ -110,6 +110,10 @@ func (s *SortField) String() string {
 }
 
 func (s SortField) MarshalJSON() ([]byte, error) {
+	if err := validateSortTransformSources(s); err != nil {
+		return nil, err
+	}
+
 	direction := s.Direction
 	if direction == "" {
 		direction = SortASC
@@ -213,6 +217,9 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 	if next.Transform, err = iceberg.ParseTransform(transformString); err != nil {
 		return err
 	}
+	if err := validateSortTransformSources(next); err != nil {
+		return err
+	}
 
 	switch next.Direction {
 	case SortASC, SortDESC:
@@ -265,6 +272,27 @@ func validateSortSourceIDs(ids []int, binding orderBinding) error {
 	for _, id := range ids {
 		if err := validateSortSourceID(id, binding); err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// validateSortTransformSources rejects multiple sources for Iceberg's known
+// single-argument transforms. Unknown transforms may accept multiple inputs,
+// so their source IDs must remain readable for v3 forward compatibility.
+func validateSortTransformSources(field SortField) error {
+	switch field.Transform.(type) {
+	case iceberg.IdentityTransform, *iceberg.IdentityTransform,
+		iceberg.VoidTransform, *iceberg.VoidTransform,
+		iceberg.BucketTransform, *iceberg.BucketTransform,
+		iceberg.TruncateTransform, *iceberg.TruncateTransform,
+		iceberg.YearTransform, *iceberg.YearTransform,
+		iceberg.MonthTransform, *iceberg.MonthTransform,
+		iceberg.DayTransform, *iceberg.DayTransform,
+		iceberg.HourTransform, *iceberg.HourTransform:
+		if len(field.SourceIDs) != 1 {
+			return fmt.Errorf("%w: transform %s requires a single source ID", ErrInvalidSortSourceID, field.Transform)
 		}
 	}
 
@@ -431,6 +459,9 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 				return SortOrder{}, fmt.Errorf("%w: sort field at index %d: %w", ErrInvalidTransform, idx, err)
 			}
 		}
+		if err := validateSortTransformSources(field); err != nil {
+			return SortOrder{}, fmt.Errorf("sort field at index %d: %w", idx, err)
+		}
 		if field.Direction != SortASC && field.Direction != SortDESC {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidSortDirection, idx)
 		}
@@ -488,6 +519,9 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 
 		if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
 			return fmt.Errorf("sort field has invalid source IDs: %w", err)
+		}
+		if err := validateSortTransformSources(field); err != nil {
+			return fmt.Errorf("sort field has invalid transform sources: %w", err)
 		}
 
 		var firstField iceberg.NestedField
