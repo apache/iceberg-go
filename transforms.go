@@ -293,7 +293,18 @@ func (IdentityTransform) ToHumanString(typ Type, val any) string {
 	case Date:
 		return v.ToTime().Format("2006-01-02")
 	case Time:
-		return v.ToTime().Format("15:04:05.999999")
+		tm := v.ToTime()
+		micros := tm.Nanosecond() / 1000
+		switch {
+		case micros == 0 && tm.Second() == 0:
+			return tm.Format("15:04")
+		case micros == 0:
+			return tm.Format("15:04:05")
+		case micros%1000 == 0:
+			return tm.Format("15:04:05.000")
+		default:
+			return tm.Format("15:04:05.000000")
+		}
 	case Timestamp:
 		return v.ToTime().Format("2006-01-02T15:04:05.999999")
 	case TimestampNano:
