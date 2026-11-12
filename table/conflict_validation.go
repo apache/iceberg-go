@@ -1179,7 +1179,8 @@ type addedDelete struct {
 	// refPath is the data file a position delete targets, or "" when the
 	// delete is partition-scoped.
 	refPath string
-	// partitionKey is set only for partition-scoped position deletes.
+	// partitionKey scopes partitioned position and equality deletes.
+	// Empty for a global (unpartitioned) equality delete.
 	partitionKey string
 }
 
@@ -1190,10 +1191,25 @@ func newAddedDelete(snap Snapshot, df iceberg.DataFile) (addedDelete, error) {
 		specID:     df.SpecID(),
 		content:    df.ContentType(),
 	}
-	if added.content != iceberg.EntryContentPosDeletes {
+	if added.content == iceberg.EntryContentEqDeletes {
+		// An unpartitioned equality delete applies across all partition
+		// specs. A partitioned equality delete only applies to matching
+		// spec-and-partition data files.
+		if len(dataFilePartition(df)) == 0 {
+			return added, nil
+		}
+		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
+		if err != nil {
+			return added, fmt.Errorf("building partition conflict key for concurrent equality delete %s (spec %d): %w",
+				df.FilePath(), df.SpecID(), err)
+		}
+		added.partitionKey = key
 		return added, nil
 	}
 
+	if added.content != iceberg.EntryContentPosDeletes {
+		return added, nil
+	}
 	if added.refPath = referencedDataFilePath(df); added.refPath != "" {
 		return added, nil
 	}
@@ -1253,11 +1269,12 @@ func (s rewrittenFileSet) conflict(d addedDelete) error {
 		}
 
 	case iceberg.EntryContentEqDeletes:
-		// Conservative: any concurrent eq-delete is a conflict
-		// for a rewrite, because the predicate could cover a
-		// rewritten file. Follow-up: accept partition-overlap
-		// hints to narrow this.
-		return fmt.Errorf("%w: snapshot %d added equality delete %s during rewrite",
+		if d.partitionKey != "" {
+			if _, overlap := s.partitions[d.partitionKey]; !overlap {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: snapshot %d added equality delete %s overlapping rewritten data",
 			ErrConflictingDeleteFiles, d.snapshotID, d.path)
 	}
 
