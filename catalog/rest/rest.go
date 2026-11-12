@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"runtime"
 	"slices"
@@ -624,17 +625,26 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	// If the caller canceled before dispatch, nothing could have been
 	// committed. Cancellation after dispatch is still outcome-unknown.
+	var requestWritten atomic.Bool
 	if cfg.unknownCommitStateOnTransport {
 		if err := ctx.Err(); err != nil {
 			return ret, err
 		}
+
+		// Track writes across transport retries. Auth and signing failures happen
+		// before this callback and therefore leave the commit outcome known.
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+			WroteRequest: func(httptrace.WroteRequestInfo) {
+				requestWritten.Store(true)
+			},
+		}))
 	}
 
 	rsp, err = cl.Do(req)
 	if err != nil {
-		if cfg.unknownCommitStateOnTransport {
-			// A dial failure may follow an earlier attempt whose response was
-			// lost when the HTTP transport retries the request.
+		if cfg.unknownCommitStateOnTransport && requestWritten.Load() {
+			// A later retry may fail to dial after an earlier attempt wrote the
+			// request, so its error still has an unknown commit outcome.
 			return ret, fmt.Errorf("%w: %w", ErrCommitStateUnknown, err)
 		}
 

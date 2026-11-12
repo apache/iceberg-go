@@ -1444,6 +1444,14 @@ type staticAuthManager struct {
 
 func (s staticAuthManager) AuthHeader() (string, string, error) { return s.key, s.value, nil }
 
+type failingAuthManager struct {
+	err error
+}
+
+func (a failingAuthManager) AuthHeader() (string, string, error) {
+	return "", "", a.err
+}
+
 func TestRoundTripAuthManagerWinsOverPerRequestHeader(t *testing.T) {
 	t.Parallel()
 
@@ -1879,6 +1887,76 @@ func TestCommitRetryDialFailureHasUnknownState(t *testing.T) {
 	require.ErrorAs(t, err, &opErr)
 	require.Equal(t, "dial", opErr.Op)
 	require.Len(t, applied, 1)
+}
+
+func TestCommitPreDispatchFailuresHaveKnownState(t *testing.T) {
+	t.Parallel()
+
+	authErr := errors.New("auth manager failed")
+	signerErr := errors.New("signer failed")
+	baseURI, err := url.Parse("http://example.com")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		authManager AuthManager
+		signer      RequestSigner
+		wantErr     error
+	}{
+		{name: "auth", authManager: failingAuthManager{err: authErr}, wantErr: authErr},
+		{name: "signer", signer: signerFunc(func(*http.Request) error { return signerErr }), wantErr: signerErr},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var roundTripCalled bool
+			transport := &sessionTransport{
+				RoundTripper: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					roundTripCalled = true
+
+					return nil, errors.New("unexpected request dispatch")
+				}),
+				defaultHeaders: http.Header{},
+				catalogOrigin:  baseURI,
+				authManager:    tc.authManager,
+				signer:         tc.signer,
+			}
+			client := &http.Client{Transport: transport}
+
+			_, err := doPost[struct{}, struct{}](context.Background(), baseURI, []string{"commit"},
+				struct{}{}, client, nil, unknownCommitStateOnTransport())
+			require.ErrorIs(t, err, tc.wantErr)
+			require.NotErrorIs(t, err, ErrCommitStateUnknown)
+			require.False(t, roundTripCalled, "auth and signing failures must happen before dispatch")
+		})
+	}
+}
+
+func TestCommitFirstDialFailureHasKnownState(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	baseURI, err := url.Parse("http://" + address)
+	require.NoError(t, err)
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
+	_, err = doPost[struct{}, struct{}](context.Background(), baseURI, []string{"commit"},
+		struct{}{}, client, nil, withHeaders(map[string]string{"Idempotency-Key": "some-key"}),
+		unknownCommitStateOnTransport())
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrCommitStateUnknown)
+	var opErr *net.OpError
+	require.ErrorAs(t, err, &opErr)
+	require.Equal(t, "dial", opErr.Op)
 }
 
 func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
