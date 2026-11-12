@@ -2096,10 +2096,8 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		if len(field.SourceIDs) > 1 {
 			panic(fmt.Errorf("%w: cannot write partition transform %s with multiple source fields", iceberg.ErrInvalidTransform, field.Transform))
 		}
-		if sourceType, ok := currentSchema.FindTypeByID(field.FirstSourceID()); ok {
-			if err := checkPartitionSourceType(field, sourceType); err != nil {
-				panic(err)
-			}
+		if err := checkPartitionSource(field, currentSchema); err != nil {
+			panic(err)
 		}
 	}
 	if err := validateFilePartitionValues(currentSchema, currentSpec, supplied); err != nil {
@@ -2221,6 +2219,22 @@ func checkPartitionSourceType(field iceberg.PartitionField, sourceType iceberg.T
 	}
 
 	return nil
+}
+
+func checkPartitionSource(field iceberg.PartitionField, schema *iceberg.Schema) error {
+	sourceID := field.FirstSourceID()
+	sourceType, ok := schema.FindTypeByID(sourceID)
+	if !ok {
+		switch field.Transform.(type) {
+		case iceberg.VoidTransform, *iceberg.VoidTransform:
+			// A void partition field may refer to a column dropped from the schema.
+			return nil
+		default:
+			return fmt.Errorf("%w: partition source field %d not found in schema", iceberg.ErrInvalidSchema, sourceID)
+		}
+	}
+
+	return checkPartitionSourceType(field, sourceType)
 }
 
 // checkNoUnknownTransform rejects writes against a spec containing an unknown
