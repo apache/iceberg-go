@@ -124,32 +124,6 @@ func dynamicOverwriteManifestCandidates(
 			continue
 		}
 
-		// A field_summary is optional, and imported manifests can have
-		// incomplete bounds. Keep such manifests instead of letting the
-		// evaluator mistake unknown values for an empty partition range.
-		if summaries := manifest.Partitions(); len(summaries) != 0 {
-			if len(summaries) != spec.NumFields() {
-				candidates[idx] = true
-
-				continue
-			}
-			inconclusive := false
-			for _, summary := range summaries {
-				if (summary.LowerBound == nil) != (summary.UpperBound == nil) ||
-					(summary.LowerBound == nil && !summary.ContainsNull &&
-						(summary.ContainsNaN == nil || !*summary.ContainsNaN)) {
-					inconclusive = true
-
-					break
-				}
-			}
-			if inconclusive {
-				candidates[idx] = true
-
-				continue
-			}
-		}
-
 		use, err := eval(manifest)
 		if err != nil {
 			return nil, fmt.Errorf("dynamic partition overwrite: evaluate manifest %s: %w", manifest.FilePath(), err)

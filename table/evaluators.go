@@ -61,18 +61,33 @@ func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, pa
 		return nil, err
 	}
 
-	return (&manifestEvalVisitor{partitionFilter: boundFilter}).Eval, nil
+	return (&manifestEvalVisitor{
+		partitionFilter:     boundFilter,
+		partitionFieldCount: spec.NumFields(),
+	}).Eval, nil
 }
 
 type manifestEvalVisitor struct {
-	partitionFields []iceberg.FieldSummary
-	partitionFilter iceberg.BooleanExpression
+	partitionFields     []iceberg.FieldSummary
+	partitionFilter     iceberg.BooleanExpression
+	partitionFieldCount int
 }
 
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
 	parts := manifestFilePartitions(manifest)
-	if len(parts) == 0 {
+	if len(parts) == 0 || len(parts) != m.partitionFieldCount {
+		// Summaries are positional. An incomplete or oversized list cannot
+		// safely exclude a data or delete manifest.
 		return rowsMightMatch, nil
+	}
+	for _, part := range parts {
+		missingNonNullBounds := part.LowerBound == nil && !part.ContainsNull &&
+			(part.ContainsNaN == nil || !*part.ContainsNaN)
+		if missingNonNullBounds || (part.LowerBound == nil) != (part.UpperBound == nil) {
+			// Legacy empty-string partitions can have missing bounds (#2407).
+			// Keep both data and delete manifests when the summary is inconclusive.
+			return rowsMightMatch, nil
+		}
 	}
 
 	// Use a per-call visitor so concurrent callers of the same cached Eval
