@@ -880,7 +880,6 @@ type equalityDeletePartitionSpecInfo struct {
 type equalityDeleteSourceFieldInfo struct {
 	name      string
 	fieldType iceberg.Type
-	found     bool
 }
 
 // NaNs are not equal to themselves as Go map keys, while the existing
@@ -1043,11 +1042,18 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 					currentSchema = meta.CurrentSchema()
 				}
 				field, found := currentSchema.FindFieldByID(pf.FirstSourceID())
-				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, fieldType: field.Type, found: found}
+				if !found {
+					return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.FirstSourceID(), pf.Name)
+				}
+				name, ok := currentSchema.FindColumnName(pf.FirstSourceID())
+				resolvedField, resolved := currentSchema.FindFieldByName(name)
+				if !ok || !resolved || resolvedField.ID != pf.FirstSourceID() {
+					// A path that cannot uniquely name its source must not narrow
+					// conflict validation to a different field.
+					return iceberg.AlwaysTrue{}, nil
+				}
+				sourceField = equalityDeleteSourceFieldInfo{name: name, fieldType: field.Type}
 				specInfo.sourceFields[partFieldID] = sourceField
-			}
-			if !sourceField.found {
-				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.FirstSourceID(), pf.Name)
 			}
 
 			value := p[partFieldID]
