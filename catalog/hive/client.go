@@ -225,6 +225,7 @@ func (c *thriftClient) CheckLock(ctx context.Context, lockId int64) (*hive_metas
 
 func (c *thriftClient) Heartbeat(ctx context.Context, lockId int64) error {
 	txnID := int64(0)
+
 	return c.Client.Heartbeat(ctx, &hive_metastore.HeartbeatRequest{
 		Lockid: &lockId,
 		Txnid:  &txnID,
