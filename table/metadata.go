@@ -500,7 +500,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.uuid = metadata.TableUUID()
 	b.loc = metadata.Location()
 	b.lastUpdatedMS = 0
-	b.lastColumnId = metadata.LastColumnID()
+	b.lastColumnId = columnIDFloor(metadata.LastColumnID(), metadata.Schemas())
 
 	if source, ok := metadata.(metadataBuilderSource); ok {
 		common := source.metadataBuilderCommon()

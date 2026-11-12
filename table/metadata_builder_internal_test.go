@@ -3952,6 +3952,42 @@ func TestSetFormatVersionValidatesLastColumnID(t *testing.T) {
 	require.Equal(t, 1, builder.formatVersion)
 }
 
+func TestMetadataBuilderFromBaseRaisesStaleLastColumnID(t *testing.T) {
+	// Field "z" has ID 3, but the stale counter says 2. The upgrade
+	// must succeed and raise the counter to 3.
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-column-id": 3`, `"last-column-id": 2`, 1)
+	meta, err := ParseMetadataString(data)
+	require.NoError(t, err)
+	require.Equal(t, 2, meta.LastColumnID())
+
+	tbl := New([]string{"id"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpgradeFormatVersion(3))
+
+	b, err := txn.txnMeta()
+	require.NoError(t, err)
+	require.Equal(t, 3, b.LastColumnID())
+}
+
+func TestMetadataBuilderFromBaseRaisesStaleLastColumnIDWithoutSchemaChange(t *testing.T) {
+	// A commit that doesn't touch the schema should also raise the stale
+	// counter, not just a format upgrade.
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-column-id": 3`, `"last-column-id": 2`, 1)
+	meta, err := ParseMetadataString(data)
+	require.NoError(t, err)
+	require.Equal(t, 2, meta.LastColumnID())
+
+	tbl := New([]string{"id"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(map[string]string{"k": "v"}))
+
+	b, err := txn.txnMeta()
+	require.NoError(t, err)
+	require.Equal(t, 3, b.LastColumnID())
+}
+
 func TestSetFormatVersionV2ToV3PreservesSequenceNumber(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
