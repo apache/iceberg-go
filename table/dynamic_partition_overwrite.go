@@ -185,7 +185,7 @@ func validateDynamicOverwriteConflicts(
 	specID int,
 	unpartitioned bool,
 	touched map[string]struct{},
-	replacedDataFilePaths map[string]struct{},
+	replacesExistingData bool,
 ) error {
 	if cc == nil || len(cc.concurrent) == 0 {
 		return nil
@@ -214,7 +214,7 @@ func validateDynamicOverwriteConflicts(
 					return fmt.Errorf("%w: concurrent snapshot %d changed file %q during an unpartitioned overwrite",
 						conflict, snapshot.SnapshotID, file.FilePath())
 				}
-				if file.ContentType() == iceberg.EntryContentEqDeletes && len(replacedDataFilePaths) > 0 {
+				if file.ContentType() == iceberg.EntryContentEqDeletes && replacesExistingData {
 					deleteSpec := cc.current.PartitionSpecByID(int(file.SpecID()))
 					if deleteSpec == nil {
 						return fmt.Errorf("dynamic partition overwrite: %w: concurrent delete file %q references spec %d",
@@ -323,7 +323,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 		return err
 	}
 	var toDelete, deleteFilesToRemove []iceberg.DataFile
-	replacedDataFilePaths := make(map[string]struct{})
+	replacesExistingData := false
 	unpartitioned := spec.IsUnpartitioned()
 	survivingDataPaths := make(map[string]struct{})
 	var hasSurvivingOldSpecData bool
@@ -421,7 +421,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 			// when existing files were written under older partition specs.
 			if unpartitioned {
 				toDelete = append(toDelete, df)
-				replacedDataFilePaths[df.FilePath()] = struct{}{}
+				replacesExistingData = true
 
 				continue
 			}
@@ -432,7 +432,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 			}
 			if _, touched := keys[key]; touched {
 				toDelete = append(toDelete, df)
-				replacedDataFilePaths[df.FilePath()] = struct{}{}
+				replacesExistingData = true
 			} else {
 				survivingDataPaths[df.FilePath()] = struct{}{}
 			}
@@ -566,7 +566,7 @@ func (t *Transaction) dynamicPartitionOverwriteDataFiles(
 		return err
 	}
 	t.validators = append(t.validators, func(cc *conflictContext) error {
-		return validateDynamicOverwriteConflicts(cc, spec.ID(), unpartitioned, keys, replacedDataFilePaths)
+		return validateDynamicOverwriteConflicts(cc, spec.ID(), unpartitioned, keys, replacesExistingData)
 	})
 
 	return nil
