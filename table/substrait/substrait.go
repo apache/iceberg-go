@@ -490,7 +490,7 @@ func (t *toSubstraitExpr) VisitNotStartsWith(term iceberg.BoundTerm, lit iceberg
 
 	return t.bldr.ScalarFunc(orID).Args(
 		t.makeRefFunc(isNullID, term).(expr.FuncArgBuilder),
-		notStartsWith.(expr.FuncArgBuilder),
+		notStartsWith,
 	)
 }
 
