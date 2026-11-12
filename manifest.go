@@ -1289,6 +1289,9 @@ func convertPartitionBool(value any) (bool, bool) {
 func convertPartitionInt32(value any) (int32, bool) {
 	switch value := value.(type) {
 	case int:
+		if int64(value) < math.MinInt32 || int64(value) > math.MaxInt32 {
+			return 0, false
+		}
 		return int32(value), true
 	case int8:
 		return int32(value), true
@@ -1297,33 +1300,51 @@ func convertPartitionInt32(value any) (int32, bool) {
 	case int32:
 		return value, true
 	case int64:
+		if value < math.MinInt32 || value > math.MaxInt32 {
+			return 0, false
+		}
 		return int32(value), true
 	case uint:
+		if uint64(value) > math.MaxInt32 {
+			return 0, false
+		}
 		return int32(value), true
 	case uint8:
 		return int32(value), true
 	case uint16:
 		return int32(value), true
 	case uint32:
+		if value > math.MaxInt32 {
+			return 0, false
+		}
 		return int32(value), true
 	case uint64:
+		if value > math.MaxInt32 {
+			return 0, false
+		}
 		return int32(value), true
 	case uintptr:
+		if uint64(value) > math.MaxInt32 {
+			return 0, false
+		}
 		return int32(value), true
 	case float32:
-		return int32(value), true
+		return convertPartitionInt32(float64(value))
 	case float64:
+		if math.IsNaN(value) || value < math.MinInt32 || value >= float64(math.MaxInt32)+1 || math.Trunc(value) != value {
+			return 0, false
+		}
 		return int32(value), true
 	case Date:
 		return int32(value), true
 	case Time:
-		return int32(value), true
+		return convertPartitionInt32(int64(value))
 	case Timestamp:
-		return int32(value), true
+		return convertPartitionInt32(int64(value))
 	case TimestampNano:
-		return int32(value), true
+		return convertPartitionInt32(int64(value))
 	case time.Duration:
-		return int32(value), true
+		return convertPartitionInt32(int64(value))
 	default:
 		if literal, ok := partitionLiteralValue(value); ok {
 			return convertPartitionInt32(literal)
@@ -1346,6 +1367,9 @@ func convertPartitionInt64(value any) (int64, bool) {
 	case int64:
 		return value, true
 	case uint:
+		if uint64(value) > math.MaxInt64 {
+			return 0, false
+		}
 		return int64(value), true
 	case uint8:
 		return int64(value), true
@@ -1354,12 +1378,22 @@ func convertPartitionInt64(value any) (int64, bool) {
 	case uint32:
 		return int64(value), true
 	case uint64:
+		if value > math.MaxInt64 {
+			return 0, false
+		}
 		return int64(value), true
 	case uintptr:
+		if uint64(value) > math.MaxInt64 {
+			return 0, false
+		}
 		return int64(value), true
 	case float32:
-		return int64(value), true
+		return convertPartitionInt64(float64(value))
 	case float64:
+		// MaxInt64 rounds to 2^63 as float64, so the upper bound is exclusive.
+		if math.IsNaN(value) || value < -0x1p63 || value >= 0x1p63 || math.Trunc(value) != value {
+			return 0, false
+		}
 		return int64(value), true
 	case Date:
 		return int64(value), true
