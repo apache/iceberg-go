@@ -214,6 +214,47 @@ func TestStructType(t *testing.T) {
 	assert.True(t, typ.Equals(&actual))
 }
 
+func TestStructTypeUnmarshalRequiresFields(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"missing", `{"type":"struct"}`},
+		{"null", `{"type":"struct","fields":null}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			typ := &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 1, Name: "existing", Type: iceberg.PrimitiveTypes.String, Required: true},
+				},
+			}
+			err := json.Unmarshal([]byte(tt.data), typ)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, "fields")
+			assert.Len(t, typ.FieldList, 1)
+		})
+	}
+
+	var empty iceberg.StructType
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"struct","fields":[]}`), &empty))
+	assert.NotNil(t, empty.FieldList)
+	assert.Empty(t, empty.FieldList)
+}
+
+func TestNestedStructUnmarshalRequiresFields(t *testing.T) {
+	for _, nested := range []string{
+		`{"type":"struct"}`,
+		`{"type":"struct","fields":null}`,
+	} {
+		var schema iceberg.Schema
+		data := `{"type":"struct","fields":[{"id":1,"name":"nested","required":false,"type":` + nested + `}]}`
+		err := json.Unmarshal([]byte(data), &schema)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	}
+}
+
 func TestListType(t *testing.T) {
 	typ := iceberg.NewListType(1, iceberg.NewStructType(
 		iceberg.NestedField{ID: 2, Name: "required_field", Type: iceberg.MustDecimalTypeOf(8, 2), Required: true},
