@@ -223,7 +223,7 @@ type ViewCatalog interface {
 }
 
 // UpdatableViewCatalog is an optional capability for updating existing views.
-// The REST catalog implements it; discover support with As.
+// Discover support with As.
 type UpdatableViewCatalog interface {
 	// UpdateView applies requirements and updates and returns the updated view.
 	UpdateView(ctx context.Context, ident table.Identifier, requirements []view.Requirement, updates []view.Update) (*view.View, error)
