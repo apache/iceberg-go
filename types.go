@@ -515,6 +515,22 @@ func (s *StructType) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func (s *StructType) UnmarshalJSON(b []byte) error {
+	aux := struct {
+		Fields *[]NestedField `json:"fields"`
+	}{}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	if aux.Fields == nil {
+		return fmt.Errorf("%w: struct is missing required 'fields' array in JSON", ErrInvalidSchema)
+	}
+
+	s.FieldList = *aux.Fields
+
+	return nil
+}
+
 func (*StructType) Type() string { return "struct" }
 func (s *StructType) String() string {
 	var b strings.Builder
