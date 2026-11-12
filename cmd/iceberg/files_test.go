@@ -147,7 +147,7 @@ func newFilesTable(t *testing.T, planner *filesPlanner, opts filesTableOptions) 
 			if err := iceberg.WriteManifestList(2, &manifestList, 100, nil, &sequenceNumber, 0, nil); err != nil {
 				return nil, err
 			}
-			if err := wfs.WriteFile("mem://default/table/metadata/snap-100.avro", manifestList.Bytes()); err != nil {
+			if err := wfs.WriteFile(ctx, "mem://default/table/metadata/snap-100.avro", manifestList.Bytes()); err != nil {
 				return nil, err
 			}
 		}
