@@ -1055,16 +1055,29 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 // would never satisfy dataSeq <= -1 and would silently drop the DV,
 // resurfacing deleted rows; an unset data sequence likewise satisfies
 // -1 <= dvSeq for any known DV sequence.
-func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
-	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
+func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) ([]iceberg.DataFile, error) {
+	dataFile := dataEntry.DataFile()
+	dvEntry, ok := dvIndex[dataFile.FilePath()]
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	if dvSeq := dvEntry.DataSequenceNumber(); dvSeq < 0 || dataEntry.DataSequenceNumber() <= dvSeq {
-		return []iceberg.DataFile{dvEntry.DataFile()}
+	if dvSeq := dvEntry.DataSequenceNumber(); dvSeq >= 0 && dataEntry.DataSequenceNumber() > dvSeq {
+		return nil, nil
 	}
 
-	return nil
+	dvFile := dvEntry.DataFile()
+	// A path reference alone does not make a DV applicable: the partition
+	// spec and values must match the data file (Iceberg spec, Scan Planning).
+	if dvFile.SpecID() != dataFile.SpecID() {
+		return nil, fmt.Errorf("%w: deletion vector %s uses partition spec %d, but data file %s uses partition spec %d",
+			ErrInvalidMetadata, dvFile.FilePath(), dvFile.SpecID(), dataFile.FilePath(), dataFile.SpecID())
+	}
+	if !partitionsMatch(dataFilePartition(dataFile), dataFilePartition(dvFile)) {
+		return nil, fmt.Errorf("%w: deletion vector %s partition does not match data file %s",
+			ErrInvalidMetadata, dvFile.FilePath(), dataFile.FilePath())
+	}
+
+	return []iceberg.DataFile{dvFile}, nil
 }
 
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
@@ -1630,7 +1643,10 @@ func fileScanTaskForDataEntry(
 	// would be wasteful I/O, and on a buggy writer whose DV omits prior
 	// positions, applying both would over-delete. Mirrors Java's
 	// DeleteFileIndex.forDataFile.
-	dvFiles := matchDVToData(entry, dvIndex)
+	dvFiles, err := matchDVToData(entry, dvIndex)
+	if err != nil {
+		return FileScanTask{}, err
+	}
 	var deleteFiles []iceberg.DataFile
 	if len(dvFiles) == 0 {
 		var err error
