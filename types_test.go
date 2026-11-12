@@ -396,14 +396,16 @@ func TestNestedTypeJSONWireFormat(t *testing.T) {
 	})
 }
 
-// TestStructTypeUnmarshalMissingFieldsIsEmpty decodes into a populated type:
-// like the other nested types, a decode replaces the whole value.
-func TestStructTypeUnmarshalMissingFieldsIsEmpty(t *testing.T) {
+// TestStructTypeUnmarshalIntoPopulatedTypeRejectsMissingFields keeps the
+// existing value when required struct fields are absent.
+func TestStructTypeUnmarshalIntoPopulatedTypeRejectsMissingFields(t *testing.T) {
 	typ := *iceberg.NewStructType(
 		iceberg.NestedField{ID: 1, Name: "stale", Type: iceberg.PrimitiveTypes.String},
 	)
-	require.NoError(t, json.Unmarshal([]byte(`{"type":"struct"}`), &typ))
-	assert.Empty(t, typ.Fields())
+	original := typ
+	err := json.Unmarshal([]byte(`{"type":"struct"}`), &typ)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Equal(t, original, typ)
 }
 
 func TestStructTypeUnmarshalErrorLeavesTypeUnchanged(t *testing.T) {
