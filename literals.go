@@ -31,7 +31,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -992,6 +991,18 @@ func (s StringLiteral) Type() Type                   { return PrimitiveTypes.Str
 func (s StringLiteral) Value() string                { return string(s) }
 func (s StringLiteral) Any() any                     { return s.Value() }
 func (s StringLiteral) String() string               { return string(s) }
+
+// timestampNanoFromTime checks the signed 64-bit nanosecond range before
+// UnixNano, which otherwise silently wraps out-of-range timestamps.
+func timestampNanoFromTime(tm time.Time, source StringLiteral, typ Type) (Literal, error) {
+	if tm.Before(time.Unix(0, math.MinInt64)) || tm.After(time.Unix(0, math.MaxInt64)) {
+		return nil, fmt.Errorf("%w: casting '%s' to %s - timestamp is outside the nanosecond range",
+			ErrBadCast, source, typ)
+	}
+
+	return TimestampNsLiteral(TimestampNano(tm.UnixNano())), nil
+}
+
 func (s StringLiteral) To(typ Type) (Literal, error) {
 	switch t := typ.(type) {
 	case StringType:
@@ -1076,7 +1087,7 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 				ErrBadCast, s, err.Error())
 		}
 
-		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
+		return timestampNanoFromTime(tm, s, typ)
 	case TimestampTzNsType:
 		// Same as timestamptz but nanosecond precision.
 		tm, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", string(s))
@@ -1085,7 +1096,7 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 				ErrBadCast, s, err.Error())
 		}
 
-		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
+		return timestampNanoFromTime(tm, s, typ)
 	case UUIDType:
 		val, err := uuid.Parse(string(s))
 		if err != nil {
@@ -1136,19 +1147,15 @@ func (s StringLiteral) Equals(other Literal) bool {
 	return literalEq(s, other)
 }
 
-func (s StringLiteral) MarshalBinary() (data []byte, err error) {
-	// stored as UTF-8 bytes without length
-	// avoid copying by just returning a slice of the raw bytes
-	data = unsafe.Slice(unsafe.StringData(string(s)), len(s))
-
-	return data, err
+func (s StringLiteral) MarshalBinary() ([]byte, error) {
+	// Stored as UTF-8 bytes without length. Copy so callers cannot change the
+	// string, and so "" stays non-nil: a nil partition bound is written as null (#2407).
+	return []byte(s), nil
 }
 
 func (s *StringLiteral) UnmarshalBinary(data []byte) error {
-	// stored as UTF-8 bytes without length
-	// avoid copy, but this means that the passed in slice is being given
-	// to the literal for ownership
-	*s = StringLiteral(unsafe.String(unsafe.SliceData(data), len(data)))
+	// The input buffer may be reused, so the decoded string must own its bytes.
+	*s = StringLiteral(string(data))
 
 	return nil
 }

@@ -140,6 +140,55 @@ func TestRepresentationSQLJSON(t *testing.T) {
 	assert.Equal(t, repr, decoded)
 }
 
+func TestVersionMarshalJSONDefaultNamespace(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace table.Identifier
+		expected  string
+	}{
+		{name: "missing", namespace: nil, expected: `[]`},
+		{name: "empty", namespace: table.Identifier{}, expected: `[]`},
+		{name: "set", namespace: table.Identifier{"db", "schema"}, expected: `["db","schema"]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			version := &Version{DefaultNamespace: tt.namespace}
+			data, err := json.Marshal(version)
+			require.NoError(t, err)
+
+			var payload map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &payload))
+			assert.JSONEq(t, tt.expected, string(payload["default-namespace"]))
+			assert.Equal(t, tt.namespace, version.DefaultNamespace)
+		})
+	}
+}
+
+func TestMetadataMarshalJSONNormalizesMissingDefaultNamespace(t *testing.T) {
+	version, err := NewVersion(1, 0, []Representation{
+		NewRepresentation(Representation{SQL: "SELECT 1", Dialect: "spark"}),
+	}, nil)
+	require.NoError(t, err)
+
+	md, err := NewMetadata(version, newTestSchema(0), "location", nil)
+	require.NoError(t, err)
+
+	data, err := json.Marshal(md)
+	require.NoError(t, err)
+
+	var payload struct {
+		Versions []struct {
+			DefaultNamespace []string `json:"default-namespace"`
+		} `json:"versions"`
+	}
+	require.NoError(t, json.Unmarshal(data, &payload))
+	require.Len(t, payload.Versions, 1)
+	assert.NotNil(t, payload.Versions[0].DefaultNamespace)
+	assert.Empty(t, payload.Versions[0].DefaultNamespace)
+	assert.Nil(t, version.DefaultNamespace)
+}
+
 func TestNewMetadata(t *testing.T) {
 	// VersionID of 3 should be overridden by the ViewMD ctor
 	version := newTestVersion(3, LastAddedID,

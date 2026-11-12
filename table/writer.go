@@ -180,7 +180,11 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 			return nil, err
 		}
 		variantFieldIDs = tblutils.VariantFieldIDsFromSchema(w.fileSchema)
-		writeProps = tblutils.ResolveParquetStatsColumnPaths(w.props, meta.CurrentSchema(), w.fileSchema, colMapping, w.content)
+		writeProps = tblutils.ResolveParquetBloomColumnPaths(w.props, meta.CurrentSchema(), w.fileSchema, colMapping, w.content)
+		writeProps = tblutils.ResolveParquetStatsColumnPaths(writeProps, meta.CurrentSchema(), w.fileSchema, colMapping, w.content)
+		if err := tblutils.ValidateParquetWriteProperties(writeProps); err != nil {
+			return nil, err
+		}
 	}
 
 	w.invariants = dataWriterInvariants{
@@ -284,7 +288,7 @@ func metricsPropsFor(content iceberg.ManifestEntryContent, props iceberg.Propert
 // Metrics use the original table properties independently of this writer config.
 func parquetPropsFor(content iceberg.ManifestEntryContent, props iceberg.Properties) (iceberg.Properties, error) {
 	if content == iceberg.EntryContentData {
-		return props, tblutils.ValidateParquetWriteProperties(props)
+		return props, nil
 	}
 
 	effective := maps.Clone(props)

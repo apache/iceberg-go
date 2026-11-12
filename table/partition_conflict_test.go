@@ -409,6 +409,181 @@ func TestRowDeltaValidate_SamePartitionRejected(t *testing.T) {
 	assert.ErrorIs(t, err, ErrConflictingDataFiles)
 }
 
+func TestRowDeltaValidate_NestedPartitionSources(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+	)
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "root_id", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{FieldID: 1001, SourceIDs: []int{3}, Name: "device_id", Transform: iceberg.IdentityTransform{}},
+	)
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "file:///tmp/nested-conflict",
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	baseID := int64(199)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID: baseID, SequenceNumber: 1, TimestampMs: meta.LastUpdatedMillis() + 1,
+		Summary: &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, baseID, BranchRef))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+	spec = meta.PartitionSpec()
+	rootID, nestedID := spec.Field(0).FieldID, spec.Field(1).FieldID
+
+	for _, tc := range []struct {
+		name          string
+		deleteValue   any
+		appendedValue any
+		wantConflict  bool
+	}{
+		{name: "matching nested value", deleteValue: int64(7), appendedValue: int64(7), wantConflict: true},
+		{name: "different nested value", deleteValue: int64(7), appendedValue: int64(8)},
+		{name: "matching null", wantConflict: true},
+		{name: "null and non-null", appendedValue: int64(7)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.ToSlash(t.TempDir())
+			concurrentID := int64(200)
+			dataPartition := map[int]any{rootID: int64(9), nestedID: tc.appendedValue}
+			manifest := writeTestManifest(t, dir, spec, meta.CurrentSchema(), concurrentID, dataPartition, dir+"/data.parquet")
+			list := writeTestManifestList(t, dir, concurrentID, []iceberg.ManifestFile{manifest})
+			cc := buildPartitionedContext(t, meta, list, baseID, concurrentID)
+			deleteFile := equalityDeleteTestFile(t, spec, dir+"/delete.parquet",
+				map[int]any{rootID: int64(9), nestedID: tc.deleteValue})
+
+			err := validateNoConflictingDataFilesInPartitions(cc, []iceberg.DataFile{deleteFile}, IsolationSerializable)
+			if tc.wantConflict {
+				require.ErrorIs(t, err, ErrConflictingDataFiles)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestEqDeleteConflictGroupsNestedSourceValues(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		FieldID: 1000, SourceIDs: []int{3}, Name: "device_id", Transform: iceberg.IdentityTransform{},
+	})
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "file:///tmp/nested-conflict",
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	spec = meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+	files := []iceberg.DataFile{
+		equalityDeleteTestFile(t, spec, "first.parquet", map[int]any{fieldID: int64(7)}),
+		equalityDeleteTestFile(t, spec, "second.parquet", map[int]any{fieldID: int64(8)}),
+		equalityDeleteTestFile(t, spec, "null.parquet", map[int]any{fieldID: nil}),
+	}
+	filter, err := eqDeletePartitionsToFilter(files, meta)
+	require.NoError(t, err)
+	want := iceberg.NewOr(
+		iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("device.id"),
+			[]iceberg.Literal{iceberg.Int64Literal(7), iceberg.Int64Literal(8)}),
+		iceberg.IsNull(iceberg.Reference("device.id")),
+	)
+	require.True(t, filter.Equals(want), "got %s", filter)
+	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, true)
+	require.NoError(t, err)
+	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, false)
+	require.NoError(t, err)
+}
+
+type conflictSchemaOverride struct {
+	Metadata
+	schema *iceberg.Schema
+}
+
+func (m conflictSchemaOverride) CurrentSchema() *iceberg.Schema { return m.schema }
+
+func TestEqDeleteConflictAmbiguousSourceNameFallsBack(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "other", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+	)
+	meta := partitionedConflictMeta(t, schema, 3, nil)
+	spec := meta.PartitionSpec()
+	deleteFile := equalityDeleteTestFile(t, spec, "delete.parquet", map[int]any{spec.Field(0).FieldID: int64(7)})
+
+	// These two field IDs have the same dotted path, so a name predicate
+	// cannot safely distinguish the nested source from the top-level field.
+	ambiguous := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "device.id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+	)
+	filter, err := eqDeletePartitionsToFilter([]iceberg.DataFile{deleteFile}, conflictSchemaOverride{Metadata: meta, schema: ambiguous})
+	require.NoError(t, err)
+	require.True(t, filter.Equals(iceberg.AlwaysTrue{}), "got %s", filter)
+}
+
+func TestEqDeleteConflictUsesCurrentNestedName(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "device", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+	)
+	meta := partitionedConflictMeta(t, schema, 2, nil)
+	spec := meta.PartitionSpec()
+	deleteFile := equalityDeleteTestFile(t, spec, "delete.parquet", map[int]any{spec.Field(0).FieldID: int64(7)})
+
+	renamed := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "sensor", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+	)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSchema(renamed))
+	require.NoError(t, builder.SetCurrentSchemaID(1))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+
+	filter, err := eqDeletePartitionsToFilter([]iceberg.DataFile{deleteFile}, meta)
+	require.NoError(t, err)
+	want := iceberg.EqualTo(iceberg.Reference("sensor.id"), int64(7))
+	require.True(t, filter.Equals(want), "got %s", filter)
+}
+
+func TestEqDeleteConflictCaseInsensitiveAmbiguityFailsClosed(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "device", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+		iceberg.NestedField{ID: 3, Name: "DEVICE", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 4, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
+		}},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		FieldID: 1000, SourceIDs: []int{2}, Name: "device_id", Transform: iceberg.IdentityTransform{},
+	})
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "file:///tmp/nested-conflict",
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	spec = meta.PartitionSpec()
+	deleteFile := equalityDeleteTestFile(t, spec, "delete.parquet", map[int]any{spec.Field(0).FieldID: int64(7)})
+	filter, err := eqDeletePartitionsToFilter([]iceberg.DataFile{deleteFile}, meta)
+	require.NoError(t, err)
+
+	_, err = iceberg.BindExpr(meta.CurrentSchema(), filter, false)
+	require.Error(t, err, "case-insensitive ambiguity must not bind to the wrong field")
+}
+
 func TestRowDeltaValidate_NullIdentityPartitionRejected(t *testing.T) {
 	dir := filepath.ToSlash(t.TempDir())
 

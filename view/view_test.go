@@ -143,6 +143,7 @@ func TestCreateViewReturnsMetadataCloseError(t *testing.T) {
 	mockfs.Test(t)
 	mockfs.On("Create", mock.Anything).
 		Return(&iomock.MockFile{Contents: bytes.NewReader(nil), ErrOnClose: true}, nil)
+	mockfs.On("Remove", mock.Anything).Return(nil).Once()
 	defer mockfs.AssertExpectations(t)
 
 	const scheme = "view-close-error"

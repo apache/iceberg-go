@@ -880,7 +880,6 @@ type equalityDeletePartitionSpecInfo struct {
 type equalityDeleteSourceFieldInfo struct {
 	name      string
 	fieldType iceberg.Type
-	found     bool
 }
 
 // NaNs are not equal to themselves as Go map keys, while the existing
@@ -1043,11 +1042,18 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 					currentSchema = meta.CurrentSchema()
 				}
 				field, found := currentSchema.FindFieldByID(pf.FirstSourceID())
-				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, fieldType: field.Type, found: found}
+				if !found {
+					return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.FirstSourceID(), pf.Name)
+				}
+				name, ok := currentSchema.FindColumnName(pf.FirstSourceID())
+				resolvedField, resolved := currentSchema.FindFieldByName(name)
+				if !ok || !resolved || resolvedField.ID != pf.FirstSourceID() {
+					// A path that cannot uniquely name its source must not narrow
+					// conflict validation to a different field.
+					return iceberg.AlwaysTrue{}, nil
+				}
+				sourceField = equalityDeleteSourceFieldInfo{name: name, fieldType: field.Type}
 				specInfo.sourceFields[partFieldID] = sourceField
-			}
-			if !sourceField.found {
-				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.FirstSourceID(), pf.Name)
 			}
 
 			value := p[partFieldID]
@@ -1125,8 +1131,8 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 	return balancedConflictDisjunction(terms), nil
 }
 
-// validateNoNewDeletesForRewrittenFiles rejects the commit if any
-// concurrent snapshot added delete files that would be lost when the
+// validateNoNewDeletesForRewrittenFiles rejects the commit if a concurrent
+// snapshot added delete files that could change the rows visible after the
 // committer's rewrite replaces one of rewrittenFiles.
 //
 // Two cases are flagged:
@@ -1141,13 +1147,10 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 //     falls back to indexing partition-scoped deletes by (specId,
 //     partition).
 //
-//   - An equality-delete added by a concurrent snapshot — these apply
-//     by predicate, not by path, so we cannot precisely check overlap
-//     without the rewritten files' partition tuples. The conservative
-//     behavior is to reject any concurrent eq-delete, which matches
-//     Java's approach for RewriteFiles and avoids silently losing
-//     deletes. A follow-up PR will accept optional partition-overlap
-//     hints to narrow this check.
+//   - An equality-delete added by a concurrent snapshot. A rewrite can move
+//     rows to another partition spec while preserving an older data sequence
+//     number, so a delete that did not apply to the original file may apply
+//     to its replacement. Reject concurrent equality deletes conservatively.
 func validateNoNewDeletesForRewrittenFiles(cc *conflictContext, rewrittenFiles []iceberg.DataFile) error {
 	if len(rewrittenFiles) == 0 || len(cc.concurrent) == 0 {
 		return nil
