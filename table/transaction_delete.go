@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
@@ -897,11 +898,21 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	return result, nil
 }
 
+func isNullPositionDeletePath(values arrow.TypedArray[string], column arrow.Array, i int) bool {
+	if values.IsNull(i) {
+		return true
+	}
+	if dict, ok := column.(*array.Dictionary); ok {
+		return dict.Dictionary().IsNull(dict.GetValueIndex(i))
+	}
+
+	return false
+}
+
 // writePositionDeletesForFiles writes position-delete files for the rows in
 // files that match filter, appends them to updater, and returns the distinct
-// data-file paths those deletes reference. A position-delete that does not
-// record its referenced data file is omitted from the returned paths (it
-// cannot be existence-checked), matching RowDelta.referencedDataFiles.
+// data-file paths those deletes reference, including paths in v2 delete files
+// that cover more than one data file.
 func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -920,6 +931,57 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	partitionContextByFilePath := make(map[string]partitionContext, len(files))
 	for _, df := range files {
 		partitionContextByFilePath[df.FilePath()] = partitionContext{partitionData: df.Partition(), specID: df.SpecID()}
+	}
+
+	// A v2 output file can contain deletes for multiple data files and then
+	// has no referenced_data_file. Collect the paths while writing its rows.
+	// The writer consumes this iterator in one feeder and joins it before the
+	// output iterator completes, so the map is read only after that join.
+	streamedPaths := make(map[string]struct{})
+	recordsWithPaths := func(yield func(arrow.RecordBatch, error) bool) {
+		for record, err := range posDeleteRecIter {
+			if err != nil {
+				if record != nil {
+					record.Release()
+				}
+				yield(nil, err)
+
+				return
+			}
+			column := record.Column(0)
+			values, err := filePathValues(column)
+			if err != nil {
+				record.Release()
+				yield(nil, err)
+
+				return
+			}
+			for i := range values.Len() {
+				if i%positionalDeleteCancellationCheckInterval == 0 {
+					if err := ctx.Err(); err != nil {
+						record.Release()
+						yield(nil, err)
+
+						return
+					}
+				}
+				if isNullPositionDeletePath(values, column, i) || values.Value(i) == "" {
+					record.Release()
+					yield(nil, fmt.Errorf("%w: empty file_path in position delete", iceberg.ErrInvalidSchema))
+
+					return
+				}
+				path := values.Value(i)
+				if _, ok := streamedPaths[path]; !ok {
+					streamedPaths[strings.Clone(path)] = struct{}{}
+				}
+			}
+			more := yield(record, nil)
+			record.Release()
+			if !more {
+				return
+			}
+		}
 	}
 
 	// V3 tables store deletes as deletion vectors, and the spec allows at most
@@ -946,7 +1008,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
 		sc:          PositionalDeleteArrowSchema,
-		itr:         posDeleteRecIter,
+		itr:         recordsWithPaths,
 		writeUUID:   &commitUUID,
 		fs:          wfs,
 		existingDVs: existingDVBitmaps,
@@ -964,6 +1026,12 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 				seen[*ref] = struct{}{}
 				referenced = append(referenced, *ref)
 			}
+		}
+	}
+	for ref := range streamedPaths {
+		if _, ok := seen[ref]; !ok {
+			seen[ref] = struct{}{}
+			referenced = append(referenced, ref)
 		}
 	}
 
