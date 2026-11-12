@@ -199,16 +199,16 @@ func (c *viewUpdateTestClient) NewLockClient(context.Context) (HiveClient, error
 
 type viewRenewalTestClient struct {
 	HiveClient
-	check func(context.Context, int64) (*hive_metastore.LockResponse, error)
+	heartbeat func(context.Context, int64) error
 }
 
 func (*viewRenewalTestClient) Close() error { return nil }
-func (c *viewRenewalTestClient) CheckLock(ctx context.Context, id int64) (*hive_metastore.LockResponse, error) {
-	if c.check != nil {
-		return c.check(ctx, id)
+func (c *viewRenewalTestClient) Heartbeat(ctx context.Context, id int64) error {
+	if c.heartbeat != nil {
+		return c.heartbeat(ctx, id)
 	}
 
-	return &hive_metastore.LockResponse{Lockid: id, State: hive_metastore.LockState_ACQUIRED}, nil
+	return nil
 }
 
 func TestHiveUpdateViewRejectsLostLeaseBeforeAlter(t *testing.T) {
@@ -217,13 +217,13 @@ func TestHiveUpdateViewRejectsLostLeaseBeforeAlter(t *testing.T) {
 	expectImmediateTableLock(client, 1)
 	client.On("GetTable", mock.Anything, "db", "view").Return(old, nil).Once()
 	checks := 0
-	cat.client.(*viewUpdateTestClient).renewal = &viewRenewalTestClient{check: func(context.Context, int64) (*hive_metastore.LockResponse, error) {
+	cat.client.(*viewUpdateTestClient).renewal = &viewRenewalTestClient{heartbeat: func(context.Context, int64) error {
 		checks++
 		if checks > 1 {
-			return nil, errors.New("lock expired while another writer committed")
+			return errors.New("lock expired while another writer committed")
 		}
 
-		return &hive_metastore.LockResponse{State: hive_metastore.LockState_ACQUIRED}, nil
+		return nil
 	}}
 	_, err := cat.UpdateView(t.Context(), created.Identifier(), nil,
 		[]view.Update{view.NewSetPropertiesUpdate(iceberg.Properties{
@@ -246,13 +246,13 @@ func TestHiveUpdateViewPreservesUnknownOutcomeAfterLeaseLoss(t *testing.T) {
 	client.On("GetTable", mock.Anything, "db", "view").Return(old, nil).Once()
 	client.On("AlterTable", mock.Anything, "db", "view", mock.Anything).Return(nil).Once()
 	checks := 0
-	cat.client.(*viewUpdateTestClient).renewal = &viewRenewalTestClient{check: func(context.Context, int64) (*hive_metastore.LockResponse, error) {
+	cat.client.(*viewUpdateTestClient).renewal = &viewRenewalTestClient{heartbeat: func(context.Context, int64) error {
 		checks++
 		if checks > 2 {
-			return nil, errors.New("lock lost during alter")
+			return errors.New("lock lost during alter")
 		}
 
-		return &hive_metastore.LockResponse{State: hive_metastore.LockState_ACQUIRED}, nil
+		return nil
 	}}
 	_, err := cat.UpdateView(t.Context(), created.Identifier(), nil,
 		[]view.Update{view.NewSetPropertiesUpdate(iceberg.Properties{"comment": "changed"})})

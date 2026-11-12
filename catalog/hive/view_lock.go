@@ -22,11 +22,9 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/beltran/gohive/hive_metastore"
 )
 
-// CheckLock renews the HMS lock heartbeat. Use a dedicated connection because
+// Heartbeat renews the HMS lock lease. Use a dedicated connection because
 // Thrift clients cannot safely send overlapping RPCs on one connection.
 type viewLockLease struct {
 	client  HiveClient
@@ -70,11 +68,8 @@ func (l *viewLockLease) check(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	response, err := l.client.CheckLock(ctx, l.id)
-	if err != nil {
+	if err := l.client.Heartbeat(ctx, l.id); err != nil {
 		l.failure = fmt.Errorf("failed to renew Hive lock: %w", err)
-	} else if response == nil || response.State != hive_metastore.LockState_ACQUIRED {
-		l.failure = fmt.Errorf("%w: Hive view lock is no longer acquired", ErrLockAcquisitionFailed)
 	}
 
 	return l.failure

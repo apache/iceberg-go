@@ -221,55 +221,94 @@ func TestLockClientBinaryRoundTrip(t *testing.T) {
 	require.NoError(t, <-serverResult)
 }
 
+func TestLockClientHeartbeatBinaryRoundTrip(t *testing.T) {
+	conn, peer := net.Pipe()
+	client := &thriftClient{uri: "thrift://example.invalid", dialContext: func(context.Context, string, string) (net.Conn, error) {
+		return conn, nil
+	}}
+	serverResult := make(chan error, 1)
+	go func() {
+		serverResult <- func() error {
+			transport := thrift.NewTBufferedTransport(thrift.NewTSocketFromConnConf(peer, nil), 4096)
+			defer transport.Close()
+			protocol := thrift.NewTBinaryProtocolFactoryConf(nil).GetProtocol(transport)
+			ctx := t.Context()
+			name, messageType, sequence, err := protocol.ReadMessageBegin(ctx)
+			if err != nil {
+				return err
+			}
+			args := hive_metastore.NewThriftHiveMetastoreHeartbeatArgs()
+			if err := args.Read(ctx, protocol); err != nil {
+				return err
+			}
+			if err := protocol.ReadMessageEnd(ctx); err != nil {
+				return err
+			}
+			if name != "heartbeat" || messageType != thrift.CALL || args.Ids == nil ||
+				args.Ids.Lockid == nil || *args.Ids.Lockid != 42 ||
+				args.Ids.Txnid == nil || *args.Ids.Txnid != 0 {
+				return fmt.Errorf("unexpected heartbeat request: %s, %v, %v", name, messageType, args.Ids)
+			}
+			if err := protocol.WriteMessageBegin(ctx, name, thrift.REPLY, sequence); err != nil {
+				return err
+			}
+			if err := hive_metastore.NewThriftHiveMetastoreHeartbeatResult().Write(ctx, protocol); err != nil {
+				return err
+			}
+			if err := protocol.WriteMessageEnd(ctx); err != nil {
+				return err
+			}
+
+			return transport.Flush(ctx)
+		}()
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	lockClient, err := client.NewLockClient(ctx)
+	require.NoError(t, err)
+	defer lockClient.Close()
+	require.NoError(t, lockClient.Heartbeat(ctx, 42))
+	require.NoError(t, <-serverResult)
+}
+
 func TestViewLockLeaseRenewsAndStops(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var checks atomic.Int32
-		client := &viewRenewalTestClient{check: func(ctx context.Context, id int64) (*hive_metastore.LockResponse, error) {
-			checks.Add(1)
+		var heartbeats atomic.Int32
+		client := &viewRenewalTestClient{heartbeat: func(context.Context, int64) error {
+			heartbeats.Add(1)
 
-			return &hive_metastore.LockResponse{Lockid: id, State: hive_metastore.LockState_ACQUIRED}, nil
+			return nil
 		}}
 		lease := newViewLockLease(t.Context(), client, 7, time.Second)
 		synctest.Wait()
 		time.Sleep(3500 * time.Millisecond)
 		synctest.Wait()
-		require.EqualValues(t, 3, checks.Load())
+		require.EqualValues(t, 3, heartbeats.Load())
 		require.NoError(t, lease.check(t.Context()))
 		lease.stop()
-		count := checks.Load()
+		count := heartbeats.Load()
 		time.Sleep(3 * time.Second)
-		require.Equal(t, count, checks.Load())
+		require.Equal(t, count, heartbeats.Load())
 	})
 }
 
 func TestViewLockLeaseRemembersRenewalFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var checks atomic.Int32
+		var heartbeats atomic.Int32
 		cause := errors.New("lock disappeared")
-		client := &viewRenewalTestClient{check: func(context.Context, int64) (*hive_metastore.LockResponse, error) {
-			checks.Add(1)
+		client := &viewRenewalTestClient{heartbeat: func(context.Context, int64) error {
+			heartbeats.Add(1)
 
-			return nil, cause
+			return cause
 		}}
 		lease := newViewLockLease(t.Context(), client, 7, time.Second)
 		synctest.Wait()
 		time.Sleep(3500 * time.Millisecond)
 		synctest.Wait()
-		require.EqualValues(t, 1, checks.Load())
+		require.EqualValues(t, 1, heartbeats.Load())
 		require.ErrorIs(t, lease.check(t.Context()), cause)
 		lease.stop()
 	})
-}
-
-func TestViewLockLeaseRejectsNonAcquiredStates(t *testing.T) {
-	for _, state := range []hive_metastore.LockState{hive_metastore.LockState_WAITING, hive_metastore.LockState_NOT_ACQUIRED, hive_metastore.LockState_ABORT} {
-		client := &viewRenewalTestClient{check: func(context.Context, int64) (*hive_metastore.LockResponse, error) {
-			return &hive_metastore.LockResponse{State: state}, nil
-		}}
-		lease := newViewLockLease(t.Context(), client, 7, time.Second)
-		require.ErrorIs(t, lease.check(t.Context()), ErrLockAcquisitionFailed)
-		lease.stop()
-	}
 }
 
 func TestLockClientCancellationInterruptsStalledMetastore(t *testing.T) {
@@ -298,7 +337,7 @@ func TestLockClientCancellationInterruptsStalledMetastore(t *testing.T) {
 	require.NoError(t, err)
 	defer client.Close()
 	result := make(chan error, 1)
-	go func() { _, err := client.CheckLock(ctx, 1); result <- err }()
+	go func() { result <- client.Heartbeat(ctx, 1) }()
 	select {
 	case <-received:
 	case <-time.After(5 * time.Second):

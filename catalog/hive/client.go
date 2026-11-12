@@ -49,6 +49,7 @@ type HiveClient interface {
 
 	Lock(ctx context.Context, request *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error)
 	CheckLock(ctx context.Context, lockId int64) (*hive_metastore.LockResponse, error)
+	Heartbeat(ctx context.Context, lockId int64) error
 	Unlock(ctx context.Context, lockId int64) error
 }
 
@@ -219,6 +220,14 @@ func (c *thriftClient) Lock(ctx context.Context, request *hive_metastore.LockReq
 func (c *thriftClient) CheckLock(ctx context.Context, lockId int64) (*hive_metastore.LockResponse, error) {
 	return c.Client.CheckLock(ctx, &hive_metastore.CheckLockRequest{
 		Lockid: lockId,
+	})
+}
+
+func (c *thriftClient) Heartbeat(ctx context.Context, lockId int64) error {
+	txnID := int64(0)
+	return c.Client.Heartbeat(ctx, &hive_metastore.HeartbeatRequest{
+		Lockid: &lockId,
+		Txnid:  &txnID,
 	})
 }
 
