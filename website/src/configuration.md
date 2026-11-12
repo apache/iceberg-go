@@ -68,6 +68,17 @@ Each catalog package exposes its own functional `Option` set. The lists below re
 
 The most option-rich surface. Source: [`catalog/rest/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/options.go).
 
+When `GET /v1/config` returns a non-null `idempotency-key-lifetime`, the client
+sends fresh UUIDv7 `Idempotency-Key` headers on namespace, table, view and
+transaction mutations, including create view, and on scan cancellation. After
+negotiation, a configured default `Idempotency-Key` is dropped from all requests
+when the server advertises a lifetime; the initial `GET /v1/config` may still
+carry it because advertisement is not yet known. Scan plan and task requests
+send keys independently of this advertisement and have a separate retry policy.
+Go's standard HTTP transport may replay certain failed requests on reused
+connections with the same key. The advertised lifetime is not currently enforced,
+including zero or malformed values.
+
 | Group | Options |
 |---|---|
 | Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `NewOauth2AuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |

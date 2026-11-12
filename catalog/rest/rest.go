@@ -240,9 +240,10 @@ type createTableRequest struct {
 }
 
 type configResponse struct {
-	Defaults  iceberg.Properties `json:"defaults"`
-	Overrides iceberg.Properties `json:"overrides"`
-	Endpoints []string           `json:"endpoints,omitempty"`
+	Defaults               iceberg.Properties `json:"defaults"`
+	Overrides              iceberg.Properties `json:"overrides"`
+	Endpoints              []string           `json:"endpoints,omitempty"`
+	IdempotencyKeyLifetime *string            `json:"idempotency-key-lifetime"`
 }
 
 type sessionTransport struct {
@@ -393,6 +394,7 @@ type suppressHeadersKey struct{}
 type reqConfig struct {
 	headers           map[string]string
 	suppressHeaders   []string
+	idempotencyKey    bool
 	errorTypeOverride map[string]error
 	allowNoContent    bool
 	requireBody       bool
@@ -405,6 +407,10 @@ type reqConfig struct {
 }
 
 type reqOption func(*reqConfig)
+
+func (r *Catalog) mutationHeaders() reqOption {
+	return func(c *reqConfig) { c.idempotencyKey = r.idempotencyKeyLifetime != nil }
+}
 
 // withHeaders sets per-request headers, merging with any already set so options
 // compose. A per-request header takes precedence over a session default because
@@ -532,7 +538,9 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
 		return ret, err
 	}
-	setRequestHeaders(req, cfg.headers)
+	if err = setRequestHeaders(req, cfg); err != nil {
+		return ret, err
+	}
 
 	if rsp, err = cl.Do(req); err != nil {
 		return ret, err
@@ -603,7 +611,9 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	if err != nil {
 		return ret, err
 	}
-	setRequestHeaders(req, cfg.headers)
+	if err = setRequestHeaders(req, cfg); err != nil {
+		return ret, err
+	}
 
 	rsp, err = cl.Do(req)
 	if err != nil {
@@ -663,10 +673,19 @@ func rejectTrailingJSON(decoder *json.Decoder) error {
 	return nil
 }
 
-func setRequestHeaders(req *http.Request, headers map[string]string) {
-	for k, v := range headers {
+func setRequestHeaders(req *http.Request, cfg reqConfig) error {
+	for k, v := range cfg.headers {
 		req.Header.Set(k, v)
 	}
+	if cfg.idempotencyKey {
+		key, err := idempotencyHeaderValue(nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set(headerIdempotencyKey, key)
+	}
+
+	return nil
 }
 
 func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[string]error) error {
@@ -924,8 +943,9 @@ type Catalog struct {
 	name string
 	// Retained catalog properties are reused for table/view IO and may carry
 	// authentication material such as credential or token.
-	props     iceberg.Properties
-	endpoints endpointSet
+	props                  iceberg.Properties
+	endpoints              endpointSet
+	idempotencyKeyLifetime *string
 
 	namespaceSeparator string
 	snapshotMode       SnapshotMode
@@ -1217,6 +1237,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
+	if r.idempotencyKeyLifetime != nil {
+		session.defaultHeaders.Del(headerIdempotencyKey)
+	}
+
 	session.builtinHeaders = http.Header{}
 	for _, h := range builtins {
 		if v := session.defaultHeaders.Values(h.key); len(v) > 0 {
@@ -1258,6 +1282,8 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 	if err != nil {
 		return nil, err
 	}
+
+	r.idempotencyKeyLifetime = rsp.IdempotencyKeyLifetime
 
 	cfg := rsp.Defaults
 	if cfg == nil {
@@ -1741,7 +1767,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	ret, err := doPost[createTableRequest, loadTableResponse](ctx, r.baseURI, path, payload,
-		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists})
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists}, r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -1851,7 +1877,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		})
+		}, r.mutationHeaders())
 	if err != nil {
 		return nil, "", err
 	}
@@ -1941,7 +1967,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
 		},
 		allowNoContent(),
-	)
+		r.mutationHeaders())
 
 	return err
 }
@@ -1978,7 +2004,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, path,
 		payload{Name: identPath.rawName, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
-		})
+		}, r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -2085,7 +2111,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		})
+		}, r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -2127,7 +2153,7 @@ func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 	uri.RawQuery = v.Encode()
 
 	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, r.mutationHeaders())
 	r.tables.invalidate(identifier)
 
 	return err
@@ -2154,7 +2180,7 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	uri.RawQuery = v.Encode()
 
 	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, r.mutationHeaders())
 	r.tables.invalidate(identifier)
 
 	return err
@@ -2195,7 +2221,7 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	// status mapped here, so a 5xx or 401/403 carrying that type is unaffected.
 	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: catalog.ErrTableAlreadyExists},
-		allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}))
+		allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}), r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -2221,7 +2247,7 @@ func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 	_, err = doPost[map[string]any, struct{}](ctx, r.baseURI, path,
 		map[string]any{"namespace": namespace, "properties": props}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrNamespaceAlreadyExists,
-		})
+		}, r.mutationHeaders())
 
 	return err
 }
@@ -2244,7 +2270,7 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace,
 			http.StatusConflict: catalog.ErrNamespaceNotEmpty,
-		})
+		}, r.mutationHeaders())
 
 	return err
 }
@@ -2360,7 +2386,7 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 	}
 
 	return doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, path,
-		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace}, r.mutationHeaders())
 }
 
 func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
@@ -2490,7 +2516,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 	}
 
 	_, err = doDelete[struct{}](ctx, r.baseURI, path, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView}, r.mutationHeaders())
 
 	return err
 }
@@ -2620,7 +2646,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace,
 			http.StatusConflict: catalog.ErrViewAlreadyExists,
-		})
+		}, r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -2655,7 +2681,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 
 	ret, err := doPost[payload, viewResponse](ctx, r.baseURI, path,
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView, http.StatusConflict: ErrCommitFailed})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView, http.StatusConflict: ErrCommitFailed}, r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -2698,7 +2724,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, path,
 		payload{Name: identPath.rawName, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
-		})
+		}, r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -2780,7 +2806,7 @@ func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 		map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchView,
 			http.StatusConflict: catalog.ErrViewAlreadyExists,
-		}, allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}))
+		}, allowNoContent(), withErrorTypeOverride(map[string]error{errTypeNoSuchNamespace: catalog.ErrNoSuchNamespace}), r.mutationHeaders())
 	if err != nil {
 		return nil, err
 	}
