@@ -480,9 +480,6 @@ func validatePartitionNameAgainstSchema(schema *Schema, targetName string, sourc
 func validateTransform(transform Transform) error {
 	// A typed nil pointer still satisfies Transform, but calling its methods
 	// can panic. Reject it before any transform-specific validation.
-	if transform == nil {
-		return fmt.Errorf("%w: partition transform is nil", ErrInvalidTransform)
-	}
 	value := reflect.ValueOf(transform)
 	if value.Kind() == reflect.Pointer && value.IsNil() {
 		return fmt.Errorf("%w: partition transform is nil", ErrInvalidTransform)
