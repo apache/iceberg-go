@@ -147,8 +147,8 @@ func TestParseVariantPathRejects(t *testing.T) {
 func TestParseVariantPathRejectsUnescapedControlBytes(t *testing.T) {
 	for c := range 0x20 {
 		for _, path := range []string{
-			"$['a" + string(c) + "b']",
-			"$['a\\n" + string(c) + "b']",
+			"$['a" + string(rune(c)) + "b']",
+			"$['a\\n" + string(rune(c)) + "b']",
 		} {
 			_, err := parseVariantPath(path)
 			require.ErrorIs(t, err, ErrInvalidArgument, "path %q", path)
