@@ -235,6 +235,41 @@ func TestBlobFileIOWriteOperationsUseOperationContext(t *testing.T) {
 	}
 }
 
+type writeContextKey struct{}
+
+type writeContextBucket struct {
+	driver.Bucket
+	writeCtx context.Context
+}
+
+func (b *writeContextBucket) NewTypedWriter(ctx context.Context, _ string, _ string, _ *driver.WriterOptions) (driver.Writer, error) {
+	b.writeCtx = ctx
+
+	return discardDriverWriter{}, nil
+}
+
+func (*writeContextBucket) Close() error { return nil }
+
+type discardDriverWriter struct{}
+
+func (discardDriverWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (discardDriverWriter) Close() error                { return nil }
+
+func TestBlobFileIOWriteFilePassesOperationContext(t *testing.T) {
+	driverBucket := &writeContextBucket{}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	cancelLifetime()
+
+	operationCtx := context.WithValue(context.Background(), writeContextKey{}, "operation")
+	require.NoError(t, fileIO.WriteFile(operationCtx, "s3://my-bucket/write-file", []byte("content")))
+	require.NotNil(t, driverBucket.writeCtx)
+	assert.Equal(t, "operation", driverBucket.writeCtx.Value(writeContextKey{}))
+}
+
 type statContextKey struct{}
 
 type contextAwareAttributesBucket struct {
