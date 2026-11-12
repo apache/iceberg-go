@@ -264,10 +264,21 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 		return table.ScanPlanningResult{}, err
 	}
 
+	baseProps := r.planIOBaseProps(req)
 	result := table.ScanPlanningResult{
 		Tasks: tasks,
-		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req), r.ioRegistry),
+		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, baseProps, r.ioRegistry),
 	}
+	if result.IO != nil {
+		session, err := r.remoteSigningSession(req.Identifier)
+		if err != nil {
+			cleanup()
+
+			return table.ScanPlanningResult{}, err
+		}
+		result.IO = &remoteSigningPlanIO{PlanIO: result.IO, session: session}
+	}
+
 	if result.IO == nil {
 		// Without plan-scoped credentials, all task materialization is complete
 		// and the plan can be released before the caller reads the files.

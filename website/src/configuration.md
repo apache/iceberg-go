@@ -277,7 +277,7 @@ All credential and tuning property keys are constants in [`io/config.go`](https:
 
 ### S3
 
-Authentication is resolved in this order (`io/gocloud/s3/s3.go`):
+When remote signing is disabled, authentication is resolved in this order (`io/gocloud/s3/s3.go`):
 
 1. Static credentials in properties: `s3.access-key-id` + `s3.secret-access-key` (+ optional `s3.session-token`).
 2. The standard AWS SDK v2 default credential chain - environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), `~/.aws/credentials`, container/IAM role.
@@ -295,7 +295,34 @@ Tuning properties:
 | `s3.connect-timeout` (`io.S3ConnectTimeout`) | Either a number of seconds (`"60"`, `"60.0"`) or a Go duration (`"5s"`). |
 | `s3.force-virtual-addressing` (`io.S3ForceVirtualAddressing`) | Force virtual-host-style addressing. |
 | `s3.compat-mode` (`io.S3CompatMode`) | Enable for non-AWS S3 endpoints. Defaults to off. |
-| `s3.signer.uri` (`io.S3SignerURI`) | Reserved for remote-signing endpoint (not yet implemented). |
+| `s3.remote-signing-enabled` (`io.S3RemoteSigningEnabled`) | Set to `true` to have a REST service sign S3 requests. Defaults to `false`. |
+| `s3.signer.uri` (`io.S3SignerURI`) | Legacy signing service base URI. Requests use `<base>/v1/aws/s3/sign`. |
+
+With remote signing enabled, S3 uses anonymous SDK credentials and obtains each
+request's signature from the signing service. No local AWS credentials are needed.
+REST catalogs use the table's `/sign` endpoint by default and pass through the
+response's `remote-signing-config` headers and properties. When that config is
+present, legacy `signer.endpoint`, `signer.uri`, and `s3.signer.uri` settings
+are ignored. `rest.remote-signing.endpoint` can explicitly override the default.
+It may be an absolute URL or a path relative to the catalog URI.
+Legacy settings are supported when the response has no remote signing config.
+
+A table-specific token takes precedence over the catalog token. The catalog's
+refreshing authentication is reused only when the signer shares the catalog's
+origin. For a separate signing service, use the headers supplied in
+`remote-signing-config` or a table-specific token. For a standalone S3 FileIO,
+set `s3.signer.uri`, `s3.region`, and an optional `token` for the signing service.
+When also supplying `rest.remote-signing.config`, set
+`rest.remote-signing.endpoint` to the complete signing endpoint instead.
+
+Object uploads use unsigned payloads. Only bulk-delete XML bodies are sent to the
+signer. Streaming signatures (`aws-chunked`) are unsupported. Caller-supplied
+checksum values are preserved; an upload that sets `ChecksumAlgorithm` must also
+supply its checksum value. Signing requests use the caller's context and a
+30-second timeout unless the HTTP client has a configured timeout.
+Remote signing accepts a standard `*http.Client` or the AWS SDK's buildable client
+for S3 requests so redirects can be disabled. Other custom HTTP clients are rejected.
+S3 requests must resolve to SigV4; SigV4a and S3 Express signing are not supported.
 
 ### Google Cloud Storage
 
