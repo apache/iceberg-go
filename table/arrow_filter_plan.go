@@ -213,7 +213,7 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 		}
 		builder.WriteByte('s')
 		builder.WriteByte('{')
-		for _, field := range t.FieldList {
+		for _, field := range t.Fields() {
 			writePhysicalFieldKey(builder, field)
 		}
 		builder.WriteByte('}')
