@@ -3121,6 +3121,9 @@ make integration-external-rest
 <p><strong>Data-file replacements now reject concurrent deletes.</strong> Commits staged through <code>ReplaceDataFiles</code>, <code>ReplaceDataFilesByPath</code>, <code>ReplaceFiles</code>, or rewrite operations can return <code>table.ErrConflictingDeleteFiles</code> when a concurrent position delete targets a replaced file or any concurrent equality delete is added. Compaction on tables with streaming equality deletes may see additional conflicts.</p>
 </li>
 <li>
+<p><strong>Orphan cleanup now rejects <code>gc.enabled=false</code>.</strong> <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, and dry runs now return an error before filesystem access. The <code>iceberg clean-orphan-files</code> command is also affected.</p>
+</li>
+<li>
 <p><strong>Partition specs reject source types a transform cannot handle.</strong> Creating or updating a spec with an incompatible source, such as <code>day(string)</code>, now fails. Writes to existing incompatible specs return <code>ErrInvalidTransform</code> instead of writing null partition values.</p>
 </li>
 <li>
