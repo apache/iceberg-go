@@ -79,6 +79,7 @@ func TestStatisticsJSONRequiresFields(t *testing.T) {
 							var normalized map[string]json.RawMessage
 							require.NoError(t, json.Unmarshal(encoded, &normalized))
 							assert.JSONEq(t, "[]", string(normalized[field]))
+
 							return
 						}
 						require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
