@@ -32,13 +32,11 @@ var testSchema = iceberg.NewSchema(1,
 	iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
 	iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},
 	iceberg.NestedField{ID: 3, Name: "ts", Required: false, Type: iceberg.PrimitiveTypes.Timestamp},
-	iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
-			{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
-			{ID: 7, Name: "zip_code", Type: iceberg.PrimitiveTypes.Int64, Required: false},
-		},
-	}},
+	iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: iceberg.NewStructType(
+		iceberg.NestedField{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 7, Name: "zip_code", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+	)},
 )
 
 var partitionSpec = iceberg.NewPartitionSpec(
