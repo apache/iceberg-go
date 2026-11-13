@@ -60,6 +60,10 @@ const (
 	ArrowParquetFieldIDKey = "PARQUET:field_id"
 
 	defaultBinPackLookback = 20
+
+	// recordBatchSize is the number of rows per Arrow record batch produced by
+	// metadata tables and partition statistics.
+	recordBatchSize = 4096
 )
 
 // ArrowSchemaVisitor is an interface that can be implemented and used to
