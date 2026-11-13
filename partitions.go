@@ -423,15 +423,52 @@ func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, 
 	if len(sourceFields) == 0 {
 		return errors.New("cannot add partition field without source IDs")
 	}
+	if isNilTransform(transform) {
+		return fmt.Errorf("partition field %s has no transform", targetName)
+	}
 	if err := validateTransform(transform); err != nil {
 		return err
+	}
+	builtIn := isBuiltInPartitionTransform(transform)
+	if builtIn && len(sourceFields) > 1 {
+		return fmt.Errorf("%w: transform %s requires a single source field", ErrInvalidArgument, transform)
+	}
+	isVoid := isVoidPartitionTransform(transform)
+	var parents map[int]int
+	if !isVoid {
+		var err error
+		parents, err = schema.lazyIDToParent()
+		if err != nil {
+			return err
+		}
 	}
 	sourceIDs := make([]int, len(sourceFields))
 	for i, field := range sourceFields {
 		if _, ok := field.Type.(VariantType); ok {
 			return fmt.Errorf("%w: cannot partition by %s source field: %s", ErrInvalidArgument, field.Type, field.Name)
 		}
+		if !isVoid {
+			if _, ok := field.Type.(PrimitiveType); !ok {
+				return fmt.Errorf("%w: cannot partition by non-primitive source field: %s", ErrInvalidArgument, field.Name)
+			}
+			for parentID, ok := parents[field.ID]; ok; parentID, ok = parents[parentID] {
+				parent, found := schema.FindFieldByID(parentID)
+				if !found {
+					return fmt.Errorf("%w: cannot find parent field %d for %s", ErrInvalidArgument, parentID, field.Name)
+				}
+				if _, ok := parent.Type.(*StructType); !ok {
+					return fmt.Errorf("%w: partition source field %s cannot be nested in %s", ErrInvalidArgument, field.Name, parent.Name)
+				}
+			}
+		}
 		sourceIDs[i] = field.ID
+	}
+	// CanTransform describes a single input type. Multi-source transforms may
+	// accept different types for their other inputs, so check the first only.
+	if !isVoid {
+		if err := ValidatePartitionTransformSourceType(transform, sourceFields[0].Type); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+		}
 	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {

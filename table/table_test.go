@@ -464,17 +464,12 @@ func (t *TableWritingTestSuite) SetupSuite() {
 		iceberg.NestedField{ID: 1, Name: "long", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{
 			ID: 2, Name: "list",
-			Type:     &iceberg.ListType{ElementID: 4, Element: iceberg.PrimitiveTypes.Int64},
+			Type:     iceberg.NewListType(4, iceberg.PrimitiveTypes.Int64, false),
 			Required: true,
 		},
 		iceberg.NestedField{
 			ID: 3, Name: "map",
-			Type: &iceberg.MapType{
-				KeyID:     5,
-				KeyType:   iceberg.PrimitiveTypes.String,
-				ValueID:   6,
-				ValueType: iceberg.PrimitiveTypes.Int64,
-			},
+			Type:     iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.PrimitiveTypes.Int64, false),
 			Required: true,
 		},
 		iceberg.NestedField{ID: 7, Name: "double", Type: iceberg.PrimitiveTypes.Float64})
@@ -2392,14 +2387,12 @@ func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 		iceberg.NestedField{ID: 1, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
-		iceberg.NestedField{ID: 4, Name: "address", Required: true, Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
-				{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
-				{ID: 7, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-				{ID: 8, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String, Required: true},
-			},
-		}})
+		iceberg.NestedField{ID: 4, Name: "address", Required: true, Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+			iceberg.NestedField{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+			iceberg.NestedField{ID: 7, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			iceberg.NestedField{ID: 8, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String, Required: true},
+		)})
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{Name: colNameWithSpecialChar, Type: arrow.BinaryTypes.String, Nullable: true},
@@ -3210,13 +3203,7 @@ func TestWriteMapType(t *testing.T) {
 			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true,
 		},
 		iceberg.NestedField{
-			ID: 2, Name: "attrs", Required: true, Type: &iceberg.MapType{
-				KeyID:         3,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       4,
-				ValueType:     iceberg.PrimitiveTypes.String,
-				ValueRequired: false,
-			},
+			ID: 2, Name: "attrs", Required: true, Type: iceberg.NewMapType(3, iceberg.PrimitiveTypes.String, 4, iceberg.PrimitiveTypes.String, false),
 		})
 
 	ident := catalog.ToIdentifier("default", "repro_map")

@@ -50,7 +50,7 @@ func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, pa
 	}
 
 	partType := spec.PartitionType(schema)
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema := iceberg.NewSchema(0, partType.Fields()...)
 	filter, err := iceberg.RewriteNotExpr(partitionFilter)
 	if err != nil {
 		return nil, err

@@ -222,7 +222,7 @@ func TestPositionDeletesPartitionTypeAvoidsHistoricalSchemaFieldIDs(t *testing.T
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
 	require.Equal(t, map[int]int{1000: 3}, partitionIDs)
-	require.Equal(t, 3, partitionType.FieldList[0].ID)
+	require.Equal(t, 3, partitionType.Field(0).ID)
 }
 
 func TestPositionDeletesPartitionTypeAvoidsCurrentSchemaFieldIDs(t *testing.T) {
@@ -247,7 +247,7 @@ func TestPositionDeletesPartitionTypeAvoidsCurrentSchemaFieldIDs(t *testing.T) {
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
 	require.Equal(t, map[int]int{1000: 3}, partitionIDs)
-	require.Equal(t, 3, partitionType.FieldList[0].ID)
+	require.Equal(t, 3, partitionType.Field(0).ID)
 	require.NotPanics(t, func() {
 		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.FormatVersion())
 	})
@@ -278,7 +278,7 @@ func TestPositionDeletesPartitionTypeSkipsReservedIDsAfterLastColumnID(t *testin
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
 	require.Equal(t, map[int]int{1000: positionDeleteSpecID + 1}, partitionIDs)
-	require.Equal(t, positionDeleteSpecID+1, partitionType.FieldList[0].ID)
+	require.Equal(t, positionDeleteSpecID+1, partitionType.Field(0).ID)
 }
 
 func TestPositionDeletesPartitionTypeFallsBackWhenFieldIDsReachLimit(t *testing.T) {
@@ -313,10 +313,10 @@ func TestPositionDeletesPartitionTypeFallsBackWhenFieldIDsReachLimit(t *testing.
 
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
-	require.Len(t, partitionType.FieldList, partitionFieldCount)
+	require.Len(t, partitionType.Fields(), partitionFieldCount)
 	require.Equal(t, iceberg.MaxStructFieldID+1, partitionIDs[1000])
 	require.Equal(t, 194, partitionIDs[1000+partitionFieldCount-1])
-	for _, field := range partitionType.FieldList {
+	for _, field := range partitionType.Fields() {
 		require.GreaterOrEqual(t, field.ID, 1)
 		require.LessOrEqual(t, field.ID, math.MaxInt32)
 	}

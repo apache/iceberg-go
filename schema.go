@@ -64,6 +64,9 @@ func NewSchemaFromJSONFields(id int, jsonFieldsStr string) (*Schema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse schema JSON: %w", err)
 	}
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
+		return nil, err
+	}
 
 	return NewSchema(id, fields...), nil
 }
