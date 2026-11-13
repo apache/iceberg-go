@@ -72,8 +72,18 @@ func TestRenameViewCapability(t *testing.T) {
 }
 
 func TestRenameView(t *testing.T) {
-	for _, namespace := range []table.Identifier{{"db"}, {"other"}, {"db", "child"}, {"db.child"}} {
-		t.Run(strings.Join(namespace, "."), func(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace table.Identifier
+	}{
+		{name: "root", namespace: table.Identifier{"db"}},
+		{name: "other root", namespace: table.Identifier{"other"}},
+		{name: "nested", namespace: table.Identifier{"db", "child"}},
+		{name: "dotted component", namespace: table.Identifier{"db.child"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			namespace := tt.namespace
 			cat := newNamespaceRaceCatalog(t)
 			require.NoError(t, cat.CreateNamespace(t.Context(), table.Identifier{"db"}, nil))
 			if !slices.Equal(namespace, table.Identifier{"db"}) {

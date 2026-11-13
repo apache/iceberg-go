@@ -105,7 +105,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, schem
 	if _, err := c.loadNamespace(ctx, catalog.NamespaceFromIdent(ident)); err != nil {
 		return nil, err
 	}
-	staged, err := internal.CreateStagedTable(ctx, c.props, c.namespaceLocationProperties, ident, schema, opts...)
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.namespaceLocationProperties, ident, schema, nil, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 			return nil, "", err
 		}
 	}
-	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, ident, requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, ident, requirements, updates, c, nil)
 	if err != nil {
 		return nil, "", err
 	}
