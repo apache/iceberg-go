@@ -21,9 +21,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
+	"sync"
+	"time"
 
+	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/beltran/gohive"
 	"github.com/beltran/gohive/hive_metastore"
 )
@@ -48,19 +52,75 @@ type HiveClient interface {
 	Unlock(ctx context.Context, lockId int64) error
 }
 
-type thriftClient struct {
-	*gohive.HiveMetastoreClient
+// LockClient adds lock renewal to the existing HiveClient contract without
+// requiring all HiveClient implementations to support heartbeats.
+type LockClient interface {
+	HiveClient
+	Heartbeat(ctx context.Context, lockId int64) error
 }
 
-func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
+// LockClientProvider supplies a separate connection for renewing a metastore
+// lock during view updates. The returned client is owned and closed by the caller.
+// Its connection must be independent of concurrent catalog RPCs.
+type LockClientProvider interface {
+	NewLockClient(context.Context) (LockClient, error)
+}
+
+type thriftClient struct {
+	Client         *hive_metastore.ThriftHiveMetastoreClient
+	closeTransport func() error
+	uri            string
+	opts           *HiveOptions
+	dialContext    func(context.Context, string, string) (net.Conn, error)
+}
+
+func (c *thriftClient) NewLockClient(ctx context.Context) (LockClient, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	host, port, err := parseHiveURI(c.uri)
+	if err != nil {
+		return nil, err
+	}
+	dial := c.dialContext
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := dial(dialCtx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+
+		return nil, fmt.Errorf("failed to connect to metastore: %w", err)
+	}
+	if err := dialCtx.Err(); err != nil {
+		_ = conn.Close()
+
+		return nil, err
+	}
+	transport := thrift.NewTBufferedTransport(thrift.NewTSocketFromConnConf(conn, nil), 4096)
+	closeTransport := closeOnce(transport.Close)
+	protocols := thrift.NewTBinaryProtocolFactoryConf(nil)
+	client := thrift.NewTStandardClient(protocols.GetProtocol(transport), protocols.GetProtocol(transport))
+	generated := hive_metastore.NewThriftHiveMetastoreClient(&cancelableLockRPC{
+		client: client, close: func() { _ = closeTransport() },
+	})
+
+	return &thriftClient{Client: generated, closeTransport: closeTransport, uri: c.uri, opts: c.opts, dialContext: c.dialContext}, nil
+}
+
+func parseHiveURI(uri string) (string, int, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return nil, fmt.Errorf("invalid URI: %w", err)
+		return "", 0, fmt.Errorf("invalid URI: %w", err)
 	}
 
 	host := parsed.Hostname()
 	if host == "" {
-		return nil, errors.New("invalid URI: host is required")
+		return "", 0, errors.New("invalid URI: host is required")
 	}
 	portStr := parsed.Port()
 	if portStr == "" {
@@ -68,12 +128,20 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid port: %w", err)
+		return "", 0, fmt.Errorf("invalid port: %w", err)
 	}
 	if port < 1 || port > 65535 {
-		return nil, fmt.Errorf("invalid port: %d", port)
+		return "", 0, fmt.Errorf("invalid port: %d", port)
 	}
 
+	return host, port, nil
+}
+
+func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
+	host, port, err := parseHiveURI(uri)
+	if err != nil {
+		return nil, err
+	}
 	config := gohive.NewMetastoreConnectConfiguration()
 	config.TransportMode = "binary"
 
@@ -82,16 +150,33 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 		return nil, fmt.Errorf("failed to connect to metastore: %w", err)
 	}
 
-	return &thriftClient{HiveMetastoreClient: client}, nil
+	return &thriftClient{
+		Client: client.Client, uri: uri, opts: opts,
+		closeTransport: closeOnce(func() error {
+			client.Close()
+
+			return nil
+		}),
+	}, nil
 }
 
 func (c *thriftClient) Close() error {
-	if c.HiveMetastoreClient != nil {
-		c.HiveMetastoreClient.Close()
-		c.HiveMetastoreClient = nil
+	if c.closeTransport != nil {
+		return c.closeTransport()
 	}
 
 	return nil
+}
+
+func closeOnce(closeFn func() error) func() error {
+	var once sync.Once
+	var err error
+
+	return func() error {
+		once.Do(func() { err = closeFn() })
+
+		return err
+	}
 }
 
 func (c *thriftClient) GetDatabase(ctx context.Context, name string) (*hive_metastore.Database, error) {
@@ -144,8 +229,43 @@ func (c *thriftClient) CheckLock(ctx context.Context, lockId int64) (*hive_metas
 	})
 }
 
+func (c *thriftClient) Heartbeat(ctx context.Context, lockId int64) error {
+	txnID := int64(0)
+
+	return c.Client.Heartbeat(ctx, &hive_metastore.HeartbeatRequest{
+		Lockid: &lockId,
+		Txnid:  &txnID,
+	})
+}
+
 func (c *thriftClient) Unlock(ctx context.Context, lockId int64) error {
 	return c.Client.Unlock(ctx, &hive_metastore.UnlockRequest{
 		Lockid: lockId,
 	})
+}
+
+// The buffered Thrift transport does not apply context deadlines to socket
+// reads. Closing this dedicated connection interrupts a stalled renewal RPC.
+type cancelableLockRPC struct {
+	client thrift.TClient
+	close  func()
+}
+
+func (c *cancelableLockRPC) Call(ctx context.Context, method string, args, result thrift.TStruct) (thrift.ResponseMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return thrift.ResponseMeta{}, err
+	}
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { c.close(); close(closed) })
+	defer func() {
+		if !stop() {
+			<-closed
+		}
+	}()
+	metadata, err := c.client.Call(ctx, method, args, result)
+	if ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err())
+	}
+
+	return metadata, err
 }
