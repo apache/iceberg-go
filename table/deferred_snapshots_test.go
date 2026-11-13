@@ -554,6 +554,70 @@ func TestDeferredSnapshotsValidationMatchesEagerJSONSemantics(t *testing.T) {
 	}
 }
 
+func TestDeferredSnapshotsMissingManifestSourceErrorParity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "v1", data: ExampleTableMetadataV1},
+		{name: "v2", data: ExampleTableMetadataV2},
+		{name: "v3", data: ExampleTableMetadataV3},
+	} {
+		for _, variant := range []struct {
+			name   string
+			mutate func(map[string]json.RawMessage)
+		}{
+			{
+				name: "missing both",
+				mutate: func(snapshot map[string]json.RawMessage) {
+					delete(snapshot, "manifest-list")
+					delete(snapshot, "manifests")
+				},
+			},
+			{
+				name: "null manifests",
+				mutate: func(snapshot map[string]json.RawMessage) {
+					delete(snapshot, "manifest-list")
+					snapshot["manifests"] = json.RawMessage(`null`)
+				},
+			},
+			{
+				name: "empty manifest-list",
+				mutate: func(snapshot map[string]json.RawMessage) {
+					delete(snapshot, "manifests")
+					snapshot["manifest-list"] = json.RawMessage(`""`)
+				},
+			},
+		} {
+			t.Run(tc.name+"/"+variant.name, func(t *testing.T) {
+				var metadata map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(tc.data), &metadata))
+				// Ensure the malformed snapshot is neither current nor referenced.
+				metadata["refs"] = json.RawMessage(`{}`)
+				metadata["current-snapshot-id"] = json.RawMessage(`-1`)
+
+				var snapshots []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(metadata["snapshots"], &snapshots))
+				require.NotEmpty(t, snapshots)
+				id := string(snapshots[0]["snapshot-id"])
+				variant.mutate(snapshots[0])
+				var err error
+				metadata["snapshots"], err = json.Marshal(snapshots)
+				require.NoError(t, err)
+				data, err := json.Marshal(metadata)
+				require.NoError(t, err)
+
+				_, eagerErr := ParseMetadataBytes(data)
+				_, deferredErr := ParseMetadataBytesDeferredSnapshots(data)
+				require.ErrorIs(t, eagerErr, ErrInvalidMetadata)
+				require.ErrorIs(t, deferredErr, ErrInvalidMetadata)
+				assert.EqualError(t, deferredErr, eagerErr.Error())
+				assert.ErrorContains(t, deferredErr, "snapshot "+id+" requires manifest-list or manifests")
+			})
+		}
+	}
+}
+
 func TestDeferredSnapshotsMissingLastSequenceNumberErrorParity(t *testing.T) {
 	for _, tc := range []struct {
 		name string

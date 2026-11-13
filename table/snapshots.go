@@ -295,6 +295,16 @@ type Snapshot struct {
 	KeyID             *string  `json:"key-id,omitempty"`       // V3: Manifest list encryption key ID
 }
 
+// requireSnapshotManifestSource accepts the legacy v1 manifests array, even when empty.
+// A nil manifests array and an empty manifest-list do not identify any source.
+func requireSnapshotManifestSource(id int64, manifestList string, hasEmbeddedManifests bool) error {
+	if manifestList == "" && !hasEmbeddedManifests {
+		return fmt.Errorf("%w: snapshot %d requires manifest-list or manifests", ErrInvalidMetadata, id)
+	}
+
+	return nil
+}
+
 func (s *Snapshot) UnmarshalJSON(data []byte) error {
 	type Alias Snapshot
 	var next Alias
@@ -319,6 +329,10 @@ func (s *Snapshot) UnmarshalJSON(data []byte) error {
 	}
 	// The pointer fields shadow Alias, so json.Unmarshal does not populate next.
 	next.SnapshotID, next.TimestampMs = *aux.SnapshotID, *aux.TimestampMs
+
+	if err := requireSnapshotManifestSource(next.SnapshotID, next.ManifestList, next.ManifestLocations != nil); err != nil {
+		return err
+	}
 
 	if next.ManifestList != "" {
 		next.ManifestLocations = nil

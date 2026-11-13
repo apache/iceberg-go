@@ -166,7 +166,7 @@ func TestRemoveSnapshotsPostCommitSkippedWhenGCDisabled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			preMeta := buildMetaJSON(metaJSONOpts{
-				snapshots:  `{"snapshot-id":1,"timestamp-ms":1000}`,
+				snapshots:  `{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":"s3://bucket/meta/snap-1.avro"}`,
 				statistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
 			})
 			postMeta := buildMetaJSON(metaJSONOpts{})
@@ -201,7 +201,7 @@ func TestRemoveSnapshotsPostCommitDeletesStatisticsFiles(t *testing.T) {
 	// postTable has no snapshots and no statistics (snapshot 1 has been expired).
 	// PostCommit must delete the statistics paths that belonged to the expired snapshot.
 	preMeta := buildMetaJSON(metaJSONOpts{
-		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000}`,
+		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":"s3://bucket/meta/snap-1.avro"}`,
 		statistics:          `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
 		partitionStatistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50}`,
 	})
@@ -213,6 +213,7 @@ func TestRemoveSnapshotsPostCommitDeletesStatisticsFiles(t *testing.T) {
 	require.NoError(t, err)
 
 	tio := newTrackingIO()
+	writeManifestList(t, tio, 1, "s3://bucket/meta/snap-1.avro", nil)
 	tio.files["s3://bucket/stats/snap1.puffin"] = []byte("puffin")
 	tio.files["s3://bucket/stats/snap1-part.puffin"] = []byte("puffin")
 
@@ -242,7 +243,7 @@ func TestRemoveSnapshotsPostCommitDeletesEveryStatisticsFileOfSnapshot(t *testin
 		return `{"snapshot-id":1,"statistics-path":"` + path + `","file-size-in-bytes":50}`
 	}
 	pre, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
-		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000}`,
+		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":"s3://bucket/meta/snap-1.avro"}`,
 		statistics:          stat(paths[0]) + "," + stat(paths[1]),
 		partitionStatistics: partStat(paths[2]) + "," + partStat(paths[3]),
 	}))
@@ -251,6 +252,7 @@ func TestRemoveSnapshotsPostCommitDeletesEveryStatisticsFileOfSnapshot(t *testin
 	require.NoError(t, err)
 
 	tio := newTrackingIO()
+	writeManifestList(t, tio, 1, "s3://bucket/meta/snap-1.avro", nil)
 	for _, path := range paths {
 		tio.files[path] = []byte("puffin")
 	}
@@ -272,14 +274,15 @@ func TestRemoveSnapshotsPostCommitPreservesStatisticsOfSurvivingSnapshots(t *tes
 	// post: snapshot 1 expired, snapshot 2 kept with its statistics still present.
 	// PostCommit must delete only snap1's statistics files; snap2's must survive.
 	preMeta := buildMetaJSON(metaJSONOpts{
-		snapshots: `{"snapshot-id":1,"timestamp-ms":1000},{"snapshot-id":2,"timestamp-ms":2000}`,
+		snapshots: `{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":"s3://bucket/meta/snap-1.avro"},` +
+			`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":"s3://bucket/meta/snap-2.avro"}`,
 		statistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]},` +
 			`{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
 		partitionStatistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50},` +
 			`{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}`,
 	})
 	postMeta := buildMetaJSON(metaJSONOpts{
-		snapshots:           `{"snapshot-id":2,"timestamp-ms":2000}`,
+		snapshots:           `{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":"s3://bucket/meta/snap-2.avro"}`,
 		statistics:          `{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
 		partitionStatistics: `{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}`,
 	})
@@ -290,6 +293,8 @@ func TestRemoveSnapshotsPostCommitPreservesStatisticsOfSurvivingSnapshots(t *tes
 	require.NoError(t, err)
 
 	tio := newTrackingIO()
+	writeManifestList(t, tio, 1, "s3://bucket/meta/snap-1.avro", nil)
+	writeManifestList(t, tio, 2, "s3://bucket/meta/snap-2.avro", nil)
 	tio.files["s3://bucket/stats/snap1.puffin"] = []byte("puffin")
 	tio.files["s3://bucket/stats/snap1-part.puffin"] = []byte("puffin")
 	tio.files["s3://bucket/stats/snap2.puffin"] = []byte("puffin")
@@ -396,17 +401,18 @@ func TestRemoveSnapshotsPostCommitKeepsStatisticsOfSnapshotStillInPostTable(t *t
 		partStatsPath = "s3://bucket/stats/snap1-part.puffin"
 	)
 	pre, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
-		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000}`,
+		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":"s3://bucket/meta/snap-1.avro"}`,
 		statistics:          `{"snapshot-id":1,"statistics-path":"` + statsPath + `","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
 		partitionStatistics: `{"snapshot-id":1,"statistics-path":"` + partStatsPath + `","file-size-in-bytes":50}`,
 	}))
 	require.NoError(t, err)
 	post, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
-		snapshots: `{"snapshot-id":1,"timestamp-ms":1000}`,
+		snapshots: `{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":"s3://bucket/meta/snap-1.avro"}`,
 	}))
 	require.NoError(t, err)
 
 	tio := newTrackingIO()
+	writeManifestList(t, tio, 1, "s3://bucket/meta/snap-1.avro", nil)
 	tio.files[statsPath] = []byte("puffin")
 	tio.files[partStatsPath] = []byte("puffin")
 

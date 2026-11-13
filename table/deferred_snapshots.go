@@ -603,6 +603,12 @@ func prepareDeferredSnapshots(rawSnapshots json.RawMessage, common *commonMetada
 		if err := fields.validateHeavyFields(); err != nil {
 			return nil, nil, fmt.Errorf("%w: snapshot %d: %w", ErrInvalidMetadata, *fields.SnapshotID, err)
 		}
+		// A present, non-null manifests array is valid even when it is empty.
+		manifests := bytes.TrimSpace(fields.ManifestLocations)
+		hasEmbeddedManifests := len(manifests) > 0 && !bytes.Equal(manifests, []byte("null"))
+		if err := requireSnapshotManifestSource(*fields.SnapshotID, fields.ManifestList, hasEmbeddedManifests); err != nil {
+			return nil, nil, err
+		}
 		if metadata.FormatVersion() > 1 && fields.SequenceNumber > metadata.LastSequenceNumber() {
 			return nil, nil, fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
 				ErrInvalidMetadata, *fields.SnapshotID, fields.SequenceNumber, metadata.LastSequenceNumber())

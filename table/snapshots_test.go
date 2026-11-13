@@ -422,7 +422,7 @@ func TestValidateRowLineage(t *testing.T) {
 	}
 }
 
-func TestSnapshotUnmarshalRequiresSnapshotIDAndTimestamp(t *testing.T) {
+func TestSnapshotUnmarshalRequiresIDTimestampAndManifestSource(t *testing.T) {
 	tests := []struct {
 		name    string
 		data    string
@@ -453,6 +453,31 @@ func TestSnapshotUnmarshalRequiresSnapshotIDAndTimestamp(t *testing.T) {
 			data:    `{"manifests": []}`,
 			wantErr: "snapshot-id is absent or null",
 		},
+		{
+			name:    "missing both manifest sources",
+			data:    `{"snapshot-id": 25, "timestamp-ms": 1602638573590}`,
+			wantErr: "snapshot 25 requires manifest-list or manifests",
+		},
+		{
+			name:    "null manifest-list",
+			data:    `{"snapshot-id": 25, "timestamp-ms": 1602638573590, "manifest-list": null}`,
+			wantErr: "snapshot 25 requires manifest-list or manifests",
+		},
+		{
+			name:    "empty manifest-list",
+			data:    `{"snapshot-id": 25, "timestamp-ms": 1602638573590, "manifest-list": ""}`,
+			wantErr: "snapshot 25 requires manifest-list or manifests",
+		},
+		{
+			name:    "null manifests",
+			data:    `{"snapshot-id": 25, "timestamp-ms": 1602638573590, "manifests": null}`,
+			wantErr: "snapshot 25 requires manifest-list or manifests",
+		},
+		{
+			name:    "both sources null",
+			data:    `{"snapshot-id": 25, "timestamp-ms": 1602638573590, "manifest-list": null, "manifests": null}`,
+			wantErr: "snapshot 25 requires manifest-list or manifests",
+		},
 	}
 
 	for _, tt := range tests {
@@ -478,6 +503,16 @@ func TestSnapshotUnmarshalAcceptsExplicitZeroValues(t *testing.T) {
 	assert.Zero(t, snapshot.SnapshotID)
 	assert.Zero(t, snapshot.TimestampMs)
 	assert.NotNil(t, snapshot.ManifestLocations)
+
+	// The v1 empty array must not disappear during JSON serialization.
+	encoded, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.JSONEq(t, `[]`, string(fields["manifests"]))
+	var roundTripped table.Snapshot
+	require.NoError(t, json.Unmarshal(encoded, &roundTripped))
+	require.NotNil(t, roundTripped.ManifestLocations)
 }
 
 func TestSnapshotUnmarshalPreservesRequiredFields(t *testing.T) {
@@ -510,6 +545,10 @@ func TestSnapshotUnmarshalFailureLeavesSnapshotUnchanged(t *testing.T) {
 				"snapshot-id": 26,
 				"manifest-list": "s3:/a/b/new.avro"
 			}`,
+		},
+		{
+			name: "missing manifest source",
+			data: `{"snapshot-id": 26, "timestamp-ms": 1602638573590}`,
 		},
 	}
 

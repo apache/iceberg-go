@@ -58,6 +58,7 @@ const filesTestMetadata = `{
             "snapshot-id": 100,
             "timestamp-ms": 1602638573590,
             "sequence-number": 1,
+            "manifest-list": "mem://default/table/metadata/snap-100.avro",
             "schema-id": 0,
             "summary": {"operation": "append"}
         }
@@ -132,7 +133,26 @@ func newFilesTable(t *testing.T, planner *filesPlanner, opts filesTableOptions) 
 			t.Error("files read the table's manifests locally")
 		}
 
-		return iceio.LoadFS(ctx, nil, "mem://default/table")
+		fs, err := iceio.LoadFS(ctx, nil, "mem://default/table")
+		if err != nil {
+			return nil, err
+		}
+		if opts.readManifests {
+			wfs, ok := fs.(iceio.WriteFileIO)
+			if !ok {
+				return nil, errors.New("test filesystem does not support writing manifest lists")
+			}
+			var manifestList bytes.Buffer
+			sequenceNumber := int64(1)
+			if err := iceberg.WriteManifestList(2, &manifestList, 100, nil, &sequenceNumber, 0, nil); err != nil {
+				return nil, err
+			}
+			if err := wfs.WriteFile(ctx, "mem://default/table/metadata/snap-100.avro", manifestList.Bytes()); err != nil {
+				return nil, err
+			}
+		}
+
+		return fs, nil
 	}
 
 	return table.New([]string{"db", "events"}, meta, "", fsF, planner,
