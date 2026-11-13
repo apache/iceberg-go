@@ -1077,9 +1077,12 @@ func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, 
 func visitStructPreOrder[T any](obj StructType, visitor PreOrderSchemaVisitor[T]) T {
 	results := make([]func() T, len(obj.FieldList))
 
-	for i, f := range obj.FieldList {
+	for i := range obj.FieldList {
+		// Capture the field by pointer: a closure holding a NestedField
+		// copies all of it to the heap.
+		f := &obj.FieldList[i]
 		results[i] = func() T {
-			return visitFieldPreOrder(f, visitor)
+			return visitFieldPreOrder(*f, visitor)
 		}
 	}
 
