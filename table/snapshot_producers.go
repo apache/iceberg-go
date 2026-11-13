@@ -810,8 +810,12 @@ type snapshotProducer struct {
 	deletedFiles            map[string]iceberg.DataFile
 	deletedDeleteFiles      map[string]iceberg.DataFile
 	deletedDVsByRef         map[string]iceberg.DataFile
-	snapshotProps           iceberg.Properties
-	written                 writtenManifests
+	// removedDVsValidated records that the operation registered a conflict
+	// validator covering every data file whose deletion vector this
+	// producer removes. See dvRemovalsReplayable.
+	removedDVsValidated bool
+	snapshotProps       iceberg.Properties
+	written             writtenManifests
 }
 
 // deleteFileAddition carries the data sequence number of a rewritten delete
@@ -912,6 +916,36 @@ func (sp *snapshotProducer) removeDeletionVector(df iceberg.DataFile) *snapshotP
 	sp.deletedDVsByRef[*ref] = df
 
 	return sp
+}
+
+// markRemovedDVsValidated records that the caller has registered a conflict
+// validator rejecting any concurrent delete against every data file whose
+// deletion vector this producer removes. Only call it after registering that
+// validator: it lets the commit replay on a CAS conflict when each removed
+// deletion vector leaves with its data file (see dvRemovalsReplayable).
+func (sp *snapshotProducer) markRemovedDVsValidated() {
+	sp.removedDVsValidated = true
+}
+
+// dvRemovalsReplayable reports whether this producer's deletion-vector
+// removals are safe to refresh and replay. The danger in replaying a DV
+// removal is a peer that replaced or added a DV for the same data file: the
+// stale removal replays as a no-op and two live DVs strand on one file. That
+// cannot happen when the commit also removes the data file and a validator
+// rejects any concurrent delete on it, so both must hold for every removed
+// DV. A DV removed while its data file stays live (a merge-on-read partial
+// delete) keeps the commit non-replayable.
+func (sp *snapshotProducer) dvRemovalsReplayable() bool {
+	if !sp.removedDVsValidated {
+		return false
+	}
+	for ref := range sp.deletedDVsByRef {
+		if _, removed := sp.deletedFiles[ref]; !removed {
+			return false
+		}
+	}
+
+	return true
 }
 
 // deleteFileRemoved reports whether a delete-file entry is being expunged in
@@ -1727,7 +1761,10 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 	// snapshot and retries. Data-file removals (deletedFiles) stay
 	// replayable: they are path-keyed and checkRemovedFiles fails the
 	// rebuild terminally when the path is gone from the fresh base.
-	if len(sp.deletedDeleteFiles) > 0 || len(sp.deletedDVsByRef) > 0 {
+	// Deletion-vector removals that leave together with their data file,
+	// under a validator rejecting concurrent deletes on that file, stay
+	// replayable too (see dvRemovalsReplayable).
+	if len(sp.deletedDeleteFiles) > 0 || (len(sp.deletedDVsByRef) > 0 && !sp.dvRemovalsReplayable()) {
 		sp.txn.noReplay = true
 	}
 

@@ -610,8 +610,8 @@ type commitOpts struct {
 
 	// noReplay makes a CAS conflict terminal: doCommit returns the
 	// ErrCommitFailed error instead of entering refresh-and-replay.
-	// Set for commits carrying delete-file removals; see the flag site in
-	// snapshotProducer.commitManifests for the rationale.
+	// Set for commits carrying delete-file removals that a replay could
+	// get wrong; see the flag site in snapshotProducer.commitManifests.
 	noReplay bool
 
 	// pinnedRefs names refs whose assertions guard the commit and must
