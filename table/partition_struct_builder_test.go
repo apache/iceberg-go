@@ -25,11 +25,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
 
-func TestInspectPartitionBuilderAppendsTypedAndFallbackValues(t *testing.T) {
+func TestPartitionStructBuilderAppendsTypedAndFallbackValues(t *testing.T) {
 	tests := []struct {
 		name  string
 		typ   iceberg.Type
@@ -148,7 +149,7 @@ func TestInspectPartitionBuilderAppendsTypedAndFallbackValues(t *testing.T) {
 		fields[i] = iceberg.NestedField{ID: i + 2, Name: tt.name, Type: tt.typ}
 		values[i+2] = tt.value
 	}
-	builder, partitionBuilder := newInspectPartitionBuilderForTest(t, fields)
+	builder, partitionBuilder := newPartitionStructBuilderForTest(t, fields)
 	require.NoError(t, partitionBuilder.append(values))
 
 	partition := builder.NewArray().(*array.Struct)
@@ -160,8 +161,8 @@ func TestInspectPartitionBuilderAppendsTypedAndFallbackValues(t *testing.T) {
 	}
 }
 
-func TestInspectPartitionBuilderAppendsNullValues(t *testing.T) {
-	builder, partitionBuilder := newInspectPartitionBuilderForTest(t, []iceberg.NestedField{
+func TestPartitionStructBuilderAppendsNullValues(t *testing.T) {
+	builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{
 		{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int32},
 	})
 	require.NoError(t, partitionBuilder.append(nil))
@@ -171,7 +172,7 @@ func TestInspectPartitionBuilderAppendsNullValues(t *testing.T) {
 	require.True(t, partition.Field(0).IsNull(0))
 }
 
-func TestInspectPartitionBuilderScalarFallbackPreservesValidation(t *testing.T) {
+func TestPartitionStructBuilderScalarFallbackPreservesValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		typ     iceberg.Type
@@ -186,7 +187,7 @@ func TestInspectPartitionBuilderScalarFallbackPreservesValidation(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			builder, partitionBuilder := newInspectPartitionBuilderForTest(t, []iceberg.NestedField{
+			builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{
 				{ID: 2, Name: "value", Type: tt.typ},
 			})
 			err := partitionBuilder.append(map[int]any{2: tt.value})
@@ -203,10 +204,10 @@ func TestInspectPartitionBuilderScalarFallbackPreservesValidation(t *testing.T) 
 	}
 }
 
-func newInspectPartitionBuilderForTest(
+func newPartitionStructBuilderForTest(
 	t *testing.T,
 	fields []iceberg.NestedField,
-) (*array.StructBuilder, *inspectPartitionBuilder) {
+) (*array.StructBuilder, *partitionStructBuilder) {
 	t.Helper()
 	partitionType := iceberg.NewStructType(fields...)
 	schema, err := SchemaToArrowSchema(iceberg.NewSchema(0, iceberg.NestedField{
@@ -217,13 +218,13 @@ func newInspectPartitionBuilderForTest(
 	require.True(t, ok)
 	builder := array.NewStructBuilder(memory.DefaultAllocator, structType)
 	t.Cleanup(builder.Release)
-	partitionBuilder, err := newInspectPartitionBuilder(builder, partitionType)
+	partitionBuilder, err := newPartitionStructBuilder(builder, partitionType)
 	require.NoError(t, err)
 
 	return builder, partitionBuilder
 }
 
-func TestInspectPartitionBuilderPreservesEmptyAndSpecialValues(t *testing.T) {
+func TestPartitionStructBuilderPreservesEmptyAndSpecialValues(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		typ   iceberg.Type
@@ -236,7 +237,7 @@ func TestInspectPartitionBuilderPreservesEmptyAndSpecialValues(t *testing.T) {
 		{"float64 NaN", iceberg.PrimitiveTypes.Float64, math.NaN(), func(t *testing.T, a arrow.Array) { require.True(t, math.IsNaN(a.(*array.Float64).Value(0))) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			builder, partitionBuilder := newInspectPartitionBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: tt.typ}})
+			builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: tt.typ}})
 			require.NoError(t, partitionBuilder.append(map[int]any{2: tt.value}))
 			require.NoError(t, partitionBuilder.append(nil))
 			partition := builder.NewArray().(*array.Struct)
@@ -248,12 +249,45 @@ func TestInspectPartitionBuilderPreservesEmptyAndSpecialValues(t *testing.T) {
 	}
 }
 
-func TestInspectPartitionBuilderCopiesBinaryValues(t *testing.T) {
-	builder, partitionBuilder := newInspectPartitionBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Binary}})
+func TestPartitionStructBuilderCopiesBinaryValues(t *testing.T) {
+	builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Binary}})
 	value := []byte("abc")
 	require.NoError(t, partitionBuilder.append(map[int]any{2: value}))
 	value[0] = 'x'
 	partition := builder.NewArray().(*array.Struct)
 	defer partition.Release()
 	require.Equal(t, []byte("abc"), partition.Field(0).(*array.Binary).Value(0))
+}
+
+func TestPartitionValueScalarDecimal(t *testing.T) {
+	typ := iceberg.MustDecimalTypeOf(10, 2)
+	arrowType := &arrow.Decimal128Type{Precision: 10, Scale: 2}
+	value := iceberg.DecimalLiteral{Val: decimal128.FromI64(123), Scale: 2}
+
+	got, err := partitionValueScalar(value, typ, arrowType)
+	require.NoError(t, err)
+	require.Equal(t, value.Val, got.(*scalar.Decimal128).Value)
+}
+
+func TestPartitionValueScalarRejectsMismatchedPartitionValues(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     any
+		typ       iceberg.Type
+		arrowType arrow.DataType
+		want      string
+	}{
+		{name: "date", value: int64(1), typ: iceberg.PrimitiveTypes.Date, arrowType: arrow.FixedWidthTypes.Date32, want: "unsupported date"},
+		{name: "time", value: int64(1), typ: iceberg.PrimitiveTypes.Time, arrowType: arrow.FixedWidthTypes.Time64us, want: "unsupported time"},
+		{name: "timestamp", value: int64(1), typ: iceberg.PrimitiveTypes.Timestamp, arrowType: arrow.FixedWidthTypes.Timestamp_us, want: "unsupported timestamp"},
+		{name: "timestamp nanos", value: int64(1), typ: iceberg.PrimitiveTypes.TimestampNs, arrowType: arrow.FixedWidthTypes.Timestamp_ns, want: "unsupported nanosecond timestamp"},
+		{name: "UUID", value: []byte("not-a-UUID"), typ: iceberg.PrimitiveTypes.UUID, arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 16}, want: "unsupported UUID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := partitionValueScalar(tt.value, tt.typ, tt.arrowType)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
 }

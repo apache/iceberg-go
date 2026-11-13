@@ -104,7 +104,7 @@ type positionDeleteRecordAppender struct {
 	filePath         *array.StringBuilder
 	pos              *array.Int64Builder
 	row              *array.StructBuilder
-	partition        *inspectPartitionBuilder
+	partition        *partitionStructBuilder
 	specID           *array.Int32Builder
 	deleteFilePath   *array.StringBuilder
 	contentOffset    *array.Int64Builder
@@ -182,7 +182,7 @@ func newPositionDeleteRecordAppender(
 		projection:       projection,
 	}
 	if partitionType.NumFields() > 0 {
-		partitionBuilder, err := newInspectPartitionBuilder(
+		partitionBuilder, err := newPartitionStructBuilder(
 			bldr.Field(nextField).(*array.StructBuilder), partitionType)
 		if err != nil {
 			return out, err
@@ -537,7 +537,7 @@ func (i InspectTable) positionDeleteRecordReader(
 				return false, err
 			}
 			rows++
-			if rows == inspectRecordBatchSize {
+			if rows == recordBatchSize {
 				return emit(), nil
 			}
 
@@ -804,7 +804,7 @@ func positionDeletesPartitionType(
 	metadata Metadata,
 ) (*iceberg.StructType, map[int]int, error) {
 	currentSchema := metadata.CurrentSchema()
-	base, err := inspectPartitionTypeWithSchema(metadata, currentSchema)
+	base, err := unifiedPartitionTypeWithSchema(metadata, currentSchema)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -171,7 +171,7 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 	if err := validatePartitionStatisticsSourceTypes(t.tbl.Metadata()); err != nil {
 		return nil, err
 	}
-	partitionType, err := inspectPartitionType(t.tbl.Metadata())
+	partitionType, err := unifiedPartitionType(t.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("partition statistics: %w", err)
 	}
@@ -320,7 +320,7 @@ func collectPartitionStatistics(
 	specs []iceberg.PartitionSpec,
 	formatVersion int,
 	snapshotTimes map[int64]int64,
-) ([]*inspectPartitionAggregate, error) {
+) ([]*partitionAggregate, error) {
 	specByID := make(map[int32]iceberg.PartitionSpec, len(specs))
 	for _, spec := range specs {
 		specByID[int32(spec.ID())] = spec
@@ -330,7 +330,7 @@ func collectPartitionStatistics(
 		return nil, err
 	}
 
-	trees := make(map[int32]*inspectPartitionAggregateTree)
+	trees := make(map[int32]*partitionAggregateTree)
 	files := partitionStatisticsFileIndex{paths: make(map[string]string)}
 	var dataFiles map[string]partitionStatisticsDataFile
 	if formatVersion == 3 {
@@ -338,7 +338,7 @@ func collectPartitionStatistics(
 	}
 	vectors := make(map[string][]partitionStatisticsVector)
 	exactTotals := true
-	rows := make([]*inspectPartitionAggregate, 0)
+	rows := make([]*partitionAggregate, 0)
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -356,7 +356,7 @@ func collectPartitionStatistics(
 		}
 		tree := trees[specID]
 		if tree == nil {
-			tree = newInspectPartitionAggregateTree()
+			tree = newPartitionAggregateTree()
 			trees[specID] = tree
 		}
 
@@ -397,7 +397,7 @@ func collectPartitionStatistics(
 			if err := validatePartitionStatisticsTuple(spec, file.FilePath(), values); err != nil {
 				return nil, err
 			}
-			partition := inspectCoercePartition(values, partitionType)
+			partition := coercePartition(values, partitionType)
 			for i := range partitionType.NumFields() {
 				field := partitionType.Field(i)
 				value := partition[field.ID]
@@ -420,9 +420,9 @@ func collectPartitionStatistics(
 			}
 			row := tree.lookupPartition(partition, partitionType)
 			if row == nil {
-				row = &inspectPartitionAggregate{
+				row = &partitionAggregate{
 					specID:    specID,
-					partition: cloneInspectPartition(partition),
+					partition: clonePartition(partition),
 				}
 				rows = append(rows, row)
 				tree.insert(newPartitionRecord(partition, partitionType), row)
@@ -464,7 +464,7 @@ func collectPartitionStatistics(
 }
 
 type partitionStatisticsDataFile struct {
-	row      *inspectPartitionAggregate
+	row      *partitionAggregate
 	count    int64
 	sequence int64
 }
@@ -526,7 +526,7 @@ func (i *partitionStatisticsFileIndex) add(file iceberg.DataFile, manifest strin
 	return vector, nil
 }
 
-func accumulatePartitionStatistics(row *inspectPartitionAggregate, file iceberg.DataFile) error {
+func accumulatePartitionStatistics(row *partitionAggregate, file iceberg.DataFile) error {
 	var records *int64
 	var files *int32
 	switch file.ContentType() {
@@ -555,7 +555,7 @@ func accumulatePartitionStatistics(row *inspectPartitionAggregate, file iceberg.
 	return nil
 }
 
-func finishPartitionStatistics(ctx context.Context, rows []*inspectPartitionAggregate, dataFiles map[string]partitionStatisticsDataFile, vectors map[string][]partitionStatisticsVector, exactTotals bool) error {
+func finishPartitionStatistics(ctx context.Context, rows []*partitionAggregate, dataFiles map[string]partitionStatisticsDataFile, vectors map[string][]partitionStatisticsVector, exactTotals bool) error {
 	for _, row := range rows {
 		row.totalRecordCount = nil
 		if exactTotals {
@@ -612,11 +612,11 @@ func validatePartitionStatisticsTuple(spec iceberg.PartitionSpec, path string, v
 // sortPartitionStatistics obeys the spec's NULL FIRST tuple ordering, not
 // inspectPartitionKey's text ordering (where "10" sorts before "2").
 // A spec ID only breaks equal tuple ties; it is not the primary sort key.
-func sortPartitionStatistics(rows []*inspectPartitionAggregate, partitionType *iceberg.StructType) error {
+func sortPartitionStatistics(rows []*partitionAggregate, partitionType *iceberg.StructType) error {
 	// Collection already validates each partition value before using it as
 	// an aggregate key. Do not repeat that validation for every output row.
 	var sortErr error
-	slices.SortStableFunc(rows, func(a, b *inspectPartitionAggregate) int {
+	slices.SortStableFunc(rows, func(a, b *partitionAggregate) int {
 		for i := range partitionType.NumFields() {
 			field := partitionType.Field(i)
 			comp, err := comparePartitionStatisticValues(a.partition[field.ID], b.partition[field.ID])
@@ -790,7 +790,7 @@ func writePartitionStatisticsParquet(
 	fs iceio.WriteFileIO,
 	path string,
 	partitionType *iceberg.StructType,
-	rows []*inspectPartitionAggregate,
+	rows []*partitionAggregate,
 	formatVersion int,
 ) (_ int64, err error) {
 	statsSchema, err := PartitionStatisticsSchema(partitionType, formatVersion)
@@ -821,21 +821,21 @@ func writePartitionStatisticsParquet(
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, sc)
 	defer bldr.Release()
 
-	part, err := newInspectPartitionBuilder(bldr.Field(0).(*array.StructBuilder), partitionType)
+	part, err := newPartitionStructBuilder(bldr.Field(0).(*array.StructBuilder), partitionType)
 	if err != nil {
 		_ = writer.Close()
 		_ = fw.Close()
 
 		return 0, err
 	}
-	for start := 0; start < len(rows); start += inspectRecordBatchSize {
+	for start := 0; start < len(rows); start += recordBatchSize {
 		if err := ctx.Err(); err != nil {
 			_ = writer.Close()
 			_ = fw.Close()
 
 			return 0, err
 		}
-		end := min(start+inspectRecordBatchSize, len(rows))
+		end := min(start+recordBatchSize, len(rows))
 		for _, row := range rows[start:end] {
 			if err := part.append(row.partition); err != nil {
 				_ = writer.Close()

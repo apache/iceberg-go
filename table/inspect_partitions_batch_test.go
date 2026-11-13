@@ -32,7 +32,7 @@ import (
 func inspectPartitionBatchFixture(
 	tb testing.TB,
 	count int,
-) (*iceberg.StructType, *arrow.Schema, []*inspectPartitionAggregate) {
+) (*iceberg.StructType, *arrow.Schema, []*partitionAggregate) {
 	tb.Helper()
 
 	partitionType := iceberg.NewStructType(
@@ -43,9 +43,9 @@ func inspectPartitionBatchFixture(
 		tb.Fatal(err)
 	}
 
-	aggregates := make([]*inspectPartitionAggregate, count)
+	aggregates := make([]*partitionAggregate, count)
 	for i := range aggregates {
-		aggregates[i] = &inspectPartitionAggregate{
+		aggregates[i] = &partitionAggregate{
 			partition:       map[int]any{1000: int32(i)},
 			dataRecordCount: int64(i + 1),
 			dataFileCount:   1,
@@ -57,8 +57,8 @@ func inspectPartitionBatchFixture(
 
 func TestInspectPartitionAggregateReaderBoundedBatches(t *testing.T) {
 	for _, count := range []int{
-		0, 1, inspectRecordBatchSize - 1, inspectRecordBatchSize,
-		inspectRecordBatchSize + 1, 2*inspectRecordBatchSize + 1,
+		0, 1, recordBatchSize - 1, recordBatchSize,
+		recordBatchSize + 1, 2*recordBatchSize + 1,
 	} {
 		t.Run(fmt.Sprintf("partitions=%d", count), func(t *testing.T) {
 			partitionType, arrowSchema, aggregates := inspectPartitionBatchFixture(t, count)
@@ -74,7 +74,7 @@ func TestInspectPartitionAggregateReaderBoundedBatches(t *testing.T) {
 			for reader.Next() {
 				batch := reader.RecordBatch()
 				batchSizes = append(batchSizes, int(batch.NumRows()))
-				require.LessOrEqual(t, batch.NumRows(), int64(inspectRecordBatchSize))
+				require.LessOrEqual(t, batch.NumRows(), int64(recordBatchSize))
 
 				partition := batch.Column(0).(*array.Struct).Field(0).(*array.Int32)
 				recordCount := batch.Column(2).(*array.Int64)
@@ -89,9 +89,9 @@ func TestInspectPartitionAggregateReaderBoundedBatches(t *testing.T) {
 			if count == 0 {
 				require.Equal(t, []int{0}, batchSizes)
 			} else {
-				want := make([]int, 0, (count+inspectRecordBatchSize-1)/inspectRecordBatchSize)
-				for remaining := count; remaining > 0; remaining -= inspectRecordBatchSize {
-					want = append(want, min(remaining, inspectRecordBatchSize))
+				want := make([]int, 0, (count+recordBatchSize-1)/recordBatchSize)
+				for remaining := count; remaining > 0; remaining -= recordBatchSize {
+					want = append(want, min(remaining, recordBatchSize))
 				}
 				require.Equal(t, want, batchSizes)
 			}
@@ -102,7 +102,7 @@ func TestInspectPartitionAggregateReaderBoundedBatches(t *testing.T) {
 // Exercise the public metadata-table reader across a real manifest, including
 // the boundary between two Arrow batches.
 func TestInspectPartitionsAcrossRecordBatchBoundary(t *testing.T) {
-	const count = inspectRecordBatchSize + 1
+	const count = recordBatchSize + 1
 
 	spec := partitionedSpec()
 	const snapshotID = int64(1)
@@ -146,12 +146,12 @@ func TestInspectPartitionsAcrossRecordBatchBoundary(t *testing.T) {
 	}
 	require.NoError(t, reader.Err())
 	require.Len(t, seen, count)
-	require.Equal(t, []int{inspectRecordBatchSize, 1}, batchSizes)
+	require.Equal(t, []int{recordBatchSize, 1}, batchSizes)
 }
 
 func TestInspectPartitionAggregateReaderCancellation(t *testing.T) {
 	partitionType, arrowSchema, aggregates := inspectPartitionBatchFixture(
-		t, 2*inspectRecordBatchSize)
+		t, 2*recordBatchSize)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -160,7 +160,7 @@ func TestInspectPartitionAggregateReaderCancellation(t *testing.T) {
 	defer reader.Release()
 
 	require.True(t, reader.Next())
-	require.EqualValues(t, inspectRecordBatchSize, reader.RecordBatch().NumRows())
+	require.EqualValues(t, recordBatchSize, reader.RecordBatch().NumRows())
 	cancel()
 	require.False(t, reader.Next())
 	require.ErrorIs(t, reader.Err(), context.Canceled)

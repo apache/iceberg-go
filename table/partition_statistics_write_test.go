@@ -112,7 +112,7 @@ func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
 
 func TestSortPartitionStatisticsByTupleThenSpecID(t *testing.T) {
 	pt := statsTestPartitionType()
-	rows := []*inspectPartitionAggregate{
+	rows := []*partitionAggregate{
 		{partition: map[int]any{1000: int32(10), 1001: "z"}, specID: 3},
 		{partition: map[int]any{1000: int32(2), 1001: "z"}, specID: 4},
 		{partition: map[int]any{1000: int32(-1), 1001: "a"}, specID: 1},
@@ -135,7 +135,7 @@ func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
 		pt := iceberg.NewStructType(
 			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
 		)
-		rows := []*inspectPartitionAggregate{
+		rows := []*partitionAggregate{
 			{partition: map[int]any{1000: math.NaN()}, specID: 6},
 			{partition: map[int]any{1000: float64(0)}, specID: 3},
 			{partition: map[int]any{1000: math.Inf(1)}, specID: 5},
@@ -156,7 +156,7 @@ func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
 		pt := iceberg.NewStructType(
 			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.UUID},
 		)
-		rows := []*inspectPartitionAggregate{
+		rows := []*partitionAggregate{
 			{partition: map[int]any{1000: uuid.MustParse("7fffffff-ffff-ffff-0000-000000000000")}, specID: 4},
 			{partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-7fff-ffffffffffff")}, specID: 3},
 			{partition: map[int]any{1000: uuid.MustParse("80000000-0000-0000-0000-000000000000")}, specID: 1},
@@ -173,7 +173,7 @@ func TestPartitionStatisticsParquetWrite(t *testing.T) {
 	ctx := t.Context()
 	fs := iceio.NewMemFS()
 	path := "mem://bucket/table/metadata/v1-stats.parquet"
-	rows := []*inspectPartitionAggregate{
+	rows := []*partitionAggregate{
 		{
 			specID: 0, partition: map[int]any{1000: int32(-3), 1001: "a"},
 			dataRecordCount: 17, dataFileCount: 2, dataFileSize: 2048,
@@ -245,7 +245,7 @@ func TestCollectPartitionStatisticsFromLiveManifests(t *testing.T) {
 	ctx := t.Context()
 	fs, err := tbl.FS(ctx)
 	require.NoError(t, err)
-	pt, err := inspectPartitionType(tbl.Metadata())
+	pt, err := unifiedPartitionType(tbl.Metadata())
 	require.NoError(t, err)
 
 	rows, err := collectPartitionStatistics(ctx, fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs(), 1, nil)
@@ -464,7 +464,7 @@ func TestCollectPartitionStatisticsRejectsDuplicateLiveFiles(t *testing.T) {
 	})
 	fs, err := tbl.FS(t.Context())
 	require.NoError(t, err)
-	pt, err := inspectPartitionType(tbl.Metadata())
+	pt, err := unifiedPartitionType(tbl.Metadata())
 	require.NoError(t, err)
 
 	_, err = collectPartitionStatistics(t.Context(), fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs(), 1, nil)

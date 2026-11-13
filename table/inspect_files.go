@@ -21,14 +21,11 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"slices"
-	"sort"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
-	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 )
 
@@ -81,7 +78,7 @@ func (i InspectTable) inspectFiles(
 	allSnapshots bool,
 	includeManifest func(iceberg.ManifestFile) bool,
 ) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.Metadata())
+	partitionType, err := unifiedPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
@@ -106,8 +103,6 @@ func (i InspectTable) inspectFiles(
 
 	return rr, nil
 }
-
-const inspectRecordBatchSize = 4096
 
 // manifestEntryReader streams manifest entries into bounded Arrow record
 // batches. It keeps only the current batch and manifest decoder state in
@@ -238,7 +233,7 @@ func (i InspectTable) manifestEntryReaderFromManifestSource(
 					return
 				}
 				rows++
-				if rows == inspectRecordBatchSize && !emit() {
+				if rows == recordBatchSize && !emit() {
 					return
 				}
 			}
@@ -259,112 +254,5 @@ func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.
 
 		batch := bldr.NewRecordBatch()
 		_ = yield(batch, nil)
-	}
-}
-
-// inspectPartitionType returns the table-wide partition type. It contains the
-// union of partition fields from every spec, which lets metadata tables
-// represent live files written before partition evolution.
-func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
-	return inspectPartitionTypeWithSchema(metadata, metadata.CurrentSchema())
-}
-
-func inspectPartitionTypeWithSchema(
-	metadata Metadata,
-	currentSchema *iceberg.Schema,
-) (*iceberg.StructType, error) {
-	specs := metadata.PartitionSpecs()
-	sort.Slice(specs, func(left, right int) bool {
-		return specs[left].ID() > specs[right].ID()
-	})
-
-	selected := make(map[int]iceberg.PartitionField)
-	fieldsByID := make(map[int]iceberg.NestedField)
-	for _, spec := range specs {
-		for _, field := range spec.Fields() {
-			if isInspectUnknownTransform(field.Transform) {
-				return nil, fmt.Errorf("%w: cannot build metadata partition type for field %d with unknown transform %s",
-					iceberg.ErrInvalidPartitionSpec, field.FieldID, field.Transform)
-			}
-		}
-
-		partitionType := spec.PartitionType(currentSchema)
-		for idx, field := range spec.Fields() {
-			active := true
-			for _, sourceID := range field.SourceIDs {
-				// This is an existence check only. FindTypeByID clones the
-				// complete nested type on every call, which is wasteful while
-				// building the union of position-delete partition fields.
-				if _, ok := currentSchema.FindFieldByIDRef(sourceID, iceinternal.SchemaRef{}); !ok {
-					active = false
-
-					break
-				}
-			}
-			if !active || idx >= partitionType.NumFields() {
-				continue
-			}
-
-			if previous, exists := selected[field.FieldID]; exists {
-				if !slices.Equal(previous.SourceIDs, field.SourceIDs) {
-					return nil, fmt.Errorf("%w: partition field ID %d has incompatible source IDs %v and %v",
-						iceberg.ErrInvalidPartitionSpec, field.FieldID, previous.SourceIDs, field.SourceIDs)
-				}
-
-				previousVoid := isInspectVoidTransform(previous.Transform)
-				fieldVoid := isInspectVoidTransform(field.Transform)
-				if previousVoid || fieldVoid {
-					if previousVoid && !fieldVoid {
-						selected[field.FieldID] = field
-						old := fieldsByID[field.FieldID]
-						old.Type = partitionType.Field(idx).Type
-						fieldsByID[field.FieldID] = old
-					}
-
-					continue
-				}
-
-				if !previous.Transform.Equals(field.Transform) {
-					return nil, fmt.Errorf("%w: partition field ID %d has incompatible transforms %q and %q",
-						iceberg.ErrInvalidPartitionSpec, field.FieldID, previous.Transform, field.Transform)
-				}
-
-				continue
-			}
-
-			selected[field.FieldID] = field
-			fieldsByID[field.FieldID] = iceberg.NestedField{
-				ID:       field.FieldID,
-				Name:     field.Name,
-				Type:     partitionType.Field(idx).Type,
-				Required: false,
-			}
-		}
-	}
-
-	fields := make([]iceberg.NestedField, 0, len(fieldsByID))
-	for _, field := range fieldsByID {
-		fields = append(fields, field)
-	}
-	sort.Slice(fields, func(left, right int) bool { return fields[left].ID < fields[right].ID })
-
-	return iceberg.NewStructType(fields...), nil
-}
-
-func isInspectVoidTransform(transform iceberg.Transform) bool {
-	switch transform.(type) {
-	case iceberg.VoidTransform, *iceberg.VoidTransform:
-		return true
-	default:
-		return false
-	}
-}
-
-func isInspectUnknownTransform(transform iceberg.Transform) bool {
-	switch transform.(type) {
-	case iceberg.UnknownTransform, *iceberg.UnknownTransform:
-		return true
-	default:
-		return false
 	}
 }

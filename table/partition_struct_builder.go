@@ -27,12 +27,12 @@ import (
 	"github.com/google/uuid"
 )
 
-type inspectPartitionBuilder struct {
+type partitionStructBuilder struct {
 	builder *array.StructBuilder
-	fields  []inspectPartitionFieldBuilder
+	fields  []partitionFieldBuilder
 }
 
-type inspectPartitionFieldBuilder struct {
+type partitionFieldBuilder struct {
 	id          int
 	name        string
 	typ         iceberg.Type
@@ -41,15 +41,15 @@ type inspectPartitionFieldBuilder struct {
 	appendValue func(any) error
 }
 
-func newInspectPartitionBuilder(
+func newPartitionStructBuilder(
 	builder *array.StructBuilder,
 	partitionType *iceberg.StructType,
-) (*inspectPartitionBuilder, error) {
+) (*partitionStructBuilder, error) {
 	arrowType, ok := builder.Type().(*arrow.StructType)
 	if !ok {
 		return nil, fmt.Errorf("partition builder has type %T, want struct", builder.Type())
 	}
-	lookup, err := newInspectBuilderLookup("partition", arrowType.Fields(), builder.FieldBuilder)
+	lookup, err := newBuilderLookup("partition", arrowType.Fields(), builder.FieldBuilder)
 	if err != nil {
 		return nil, err
 	}
@@ -57,28 +57,28 @@ func newInspectPartitionBuilder(
 	for _, field := range partitionType.Fields() {
 		expected[field.ID] = struct{}{}
 	}
-	if err := validateInspectBuilderLookup("partition", lookup, expected); err != nil {
+	if err := validateBuilderLookup("partition", lookup, expected); err != nil {
 		return nil, err
 	}
 
-	fields := make([]inspectPartitionFieldBuilder, 0, partitionType.NumFields())
+	fields := make([]partitionFieldBuilder, 0, partitionType.NumFields())
 	for _, field := range partitionType.Fields() {
 		fieldBuilder := lookup[field.ID]
-		partitionField := inspectPartitionFieldBuilder{
+		partitionField := partitionFieldBuilder{
 			id:        field.ID,
 			name:      field.Name,
 			typ:       field.Type,
 			arrowType: fieldBuilder.Type(),
 			builder:   fieldBuilder,
 		}
-		partitionField.appendValue = newInspectPartitionFieldAppender(partitionField)
+		partitionField.appendValue = newPartitionFieldAppender(partitionField)
 		fields = append(fields, partitionField)
 	}
 
-	return &inspectPartitionBuilder{builder: builder, fields: fields}, nil
+	return &partitionStructBuilder{builder: builder, fields: fields}, nil
 }
 
-func (b *inspectPartitionBuilder) append(values map[int]any) error {
+func (b *partitionStructBuilder) append(values map[int]any) error {
 	b.builder.Append(true)
 	for _, field := range b.fields {
 		if err := field.appendValue(values[field.id]); err != nil {
@@ -89,9 +89,9 @@ func (b *inspectPartitionBuilder) append(values map[int]any) error {
 	return nil
 }
 
-func newInspectPartitionFieldAppender(field inspectPartitionFieldBuilder) func(any) error {
+func newPartitionFieldAppender(field partitionFieldBuilder) func(any) error {
 	appendScalar := func(value any) error {
-		sc, err := inspectValueScalar(value, field.typ, field.arrowType)
+		sc, err := partitionValueScalar(value, field.typ, field.arrowType)
 		if err != nil {
 			return fmt.Errorf("partition field %q: %w", field.name, err)
 		}
@@ -105,31 +105,31 @@ func newInspectPartitionFieldAppender(field inspectPartitionFieldBuilder) func(a
 	switch field.typ.(type) {
 	case iceberg.BooleanType:
 		if builder, ok := field.builder.(*array.BooleanBuilder); ok {
-			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+			return newTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
 		}
 	case iceberg.Int32Type:
 		if builder, ok := field.builder.(*array.Int32Builder); ok {
-			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+			return newTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
 		}
 	case iceberg.Int64Type:
 		if builder, ok := field.builder.(*array.Int64Builder); ok {
-			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+			return newTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
 		}
 	case iceberg.Float32Type:
 		if builder, ok := field.builder.(*array.Float32Builder); ok {
-			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+			return newTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
 		}
 	case iceberg.Float64Type:
 		if builder, ok := field.builder.(*array.Float64Builder); ok {
-			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+			return newTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
 		}
 	case iceberg.StringType:
 		if builder, ok := field.builder.(*array.StringBuilder); ok {
-			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+			return newTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
 		}
 	case iceberg.BinaryType:
 		if builder, ok := field.builder.(*array.BinaryBuilder); ok {
-			return newInspectTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
+			return newTypedPartitionAppender(builder.Append, builder.AppendNull, appendScalar)
 		}
 	}
 
@@ -144,7 +144,7 @@ func newInspectPartitionFieldAppender(field inspectPartitionFieldBuilder) func(a
 	}
 }
 
-func newInspectTypedPartitionAppender[T any](
+func newTypedPartitionAppender[T any](
 	appendValue func(T),
 	appendNull func(),
 	appendScalar func(any) error,
@@ -165,7 +165,7 @@ func newInspectTypedPartitionAppender[T any](
 	}
 }
 
-func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
+func partitionValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
 	switch typ.(type) {
 	case iceberg.DateType:
 		switch value := value.(type) {
@@ -212,4 +212,38 @@ func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (
 	}
 
 	return scalar.MakeScalarParam(value, arrowType)
+}
+
+func newBuilderLookup(scope string, fields []arrow.Field, builder func(int) array.Builder) (map[int]array.Builder, error) {
+	lookup := make(map[int]array.Builder, len(fields))
+	for idx, field := range fields {
+		id := getFieldID(field)
+		if id == nil {
+			return nil, fmt.Errorf("%s field %q is missing a valid field ID", scope, field.Name)
+		}
+		if _, exists := lookup[*id]; exists {
+			return nil, fmt.Errorf("%s schema contains duplicate field ID %d", scope, *id)
+		}
+		lookup[*id] = builder(idx)
+	}
+
+	return lookup, nil
+}
+
+func validateBuilderLookup(scope string, lookup map[int]array.Builder, expected map[int]struct{}) error {
+	if len(lookup) != len(expected) {
+		return fmt.Errorf("%s schema has %d fields, want %d", scope, len(lookup), len(expected))
+	}
+	for id := range lookup {
+		if _, ok := expected[id]; !ok {
+			return fmt.Errorf("%s schema contains unexpected field ID %d", scope, id)
+		}
+	}
+	for id := range expected {
+		if _, ok := lookup[id]; !ok {
+			return fmt.Errorf("%s schema is missing field ID %d", scope, id)
+		}
+	}
+
+	return nil
 }

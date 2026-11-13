@@ -24,9 +24,9 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-const inspectSnapshotManifestPrefetch = 8
+const snapshotManifestPrefetch = 8
 
-type inspectSnapshotManifestRead struct {
+type snapshotManifestRead struct {
 	set snapshotManifestSet
 	err error
 }
@@ -85,8 +85,8 @@ func streamSnapshotManifests(
 	if cached != nil {
 		start := 0
 		for start < len(snapshots) {
-			count := min(inspectSnapshotManifestPrefetch, len(snapshots)-start)
-			var sets [inspectSnapshotManifestPrefetch]snapshotManifestSet
+			count := min(snapshotManifestPrefetch, len(snapshots)-start)
+			var sets [snapshotManifestPrefetch]snapshotManifestSet
 			allCached := true
 			for i := range count {
 				set, ok := cached(snapshots[start+i])
@@ -145,10 +145,10 @@ func streamSnapshotManifests(
 		workers.Wait()
 	}()
 
-	window := min(len(snapshots), inspectSnapshotManifestPrefetch)
-	results := make([]chan inspectSnapshotManifestRead, window)
+	window := min(len(snapshots), snapshotManifestPrefetch)
+	results := make([]chan snapshotManifestRead, window)
 	ready := make([]bool, window)
-	readyResults := make([]inspectSnapshotManifestRead, window)
+	readyResults := make([]snapshotManifestRead, window)
 
 	startRead := func(index int) {
 		if cancel == nil {
@@ -157,12 +157,12 @@ func streamSnapshotManifests(
 		slot := index % window
 		if results[slot] == nil {
 			// Buffer one result so a cancelled worker never blocks sending it.
-			results[slot] = make(chan inspectSnapshotManifestRead, 1)
+			results[slot] = make(chan snapshotManifestRead, 1)
 		}
 		ready[slot] = false
 		workers.Go(func() {
 			set, err := load(readCtx, snapshots[index])
-			results[slot] <- inspectSnapshotManifestRead{set: set, err: err}
+			results[slot] <- snapshotManifestRead{set: set, err: err}
 		})
 	}
 
@@ -170,7 +170,7 @@ func streamSnapshotManifests(
 		if cached != nil {
 			if set, ok := cached(snapshots[i]); ok {
 				ready[i] = true
-				readyResults[i] = inspectSnapshotManifestRead{set: set}
+				readyResults[i] = snapshotManifestRead{set: set}
 
 				continue
 			}
@@ -186,7 +186,7 @@ func streamSnapshotManifests(
 		}
 
 		slot := i % window
-		var result inspectSnapshotManifestRead
+		var result snapshotManifestRead
 		if ready[slot] {
 			result = readyResults[slot]
 			ready[slot] = false
@@ -212,7 +212,7 @@ func streamSnapshotManifests(
 			if cached != nil {
 				if set, ok := cached(snapshots[next]); ok {
 					ready[slot] = true
-					readyResults[slot] = inspectSnapshotManifestRead{set: set}
+					readyResults[slot] = snapshotManifestRead{set: set}
 				} else {
 					startRead(next)
 				}

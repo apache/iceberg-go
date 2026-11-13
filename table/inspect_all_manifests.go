@@ -53,7 +53,7 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 
 		rows := 0
 		emitted := false
-		chunk := make([]iceberg.ManifestFile, 0, inspectRecordBatchSize)
+		chunk := make([]iceberg.ManifestFile, 0, recordBatchSize)
 		emit := func() bool {
 			if rows == 0 {
 				return true
@@ -90,7 +90,7 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 			}
 
 			// Gather manifests into a reused chunk so each record batch is
-			// filled to inspectRecordBatchSize across snapshot boundaries.
+			// filled to recordBatchSize across snapshot boundaries.
 			referenceSnapshotID := snapshot.SnapshotID
 			appendChunk := func() bool {
 				if err := i.appendManifestRows(ctx, bldr, slices.Values(chunk), &referenceSnapshotID); err != nil {
@@ -105,7 +105,7 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 			}
 			for manifest := range manifests {
 				chunk = append(chunk, manifest)
-				if rows+len(chunk) < inspectRecordBatchSize {
+				if rows+len(chunk) < recordBatchSize {
 					continue
 				}
 				if !appendChunk() || !emit() {
