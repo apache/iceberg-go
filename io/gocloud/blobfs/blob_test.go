@@ -221,11 +221,68 @@ func TestBlobFileIOWriteOperationsUseOperationContext(t *testing.T) {
 	_, err = writer.Write(content)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
+	require.NoError(t, fileIO.MkdirAll(ctx, "s3://my-bucket/mkdir/all"))
 
 	for _, key := range []string{"write-file", "create-file"} {
 		got, err := bucket.ReadAll(ctx, key)
 		require.NoError(t, err)
 		assert.Equal(t, content, got)
+	}
+	for _, key := range []string{"mkdir/", "mkdir/all/"} {
+		exists, err := bucket.Exists(ctx, key)
+		require.NoError(t, err)
+		assert.True(t, exists, "%s should exist", key)
+	}
+}
+
+type writeContextKey struct{}
+
+type writeContextBucket struct {
+	driver.Bucket
+	writeContexts []context.Context
+}
+
+func (b *writeContextBucket) NewTypedWriter(ctx context.Context, _ string, _ string, _ *driver.WriterOptions) (driver.Writer, error) {
+	b.writeContexts = append(b.writeContexts, ctx)
+
+	return discardDriverWriter{}, nil
+}
+
+func (*writeContextBucket) Close() error { return nil }
+
+type discardDriverWriter struct{}
+
+func (discardDriverWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (discardDriverWriter) Close() error                { return nil }
+
+func TestBlobFileIOWriteFilePassesOperationContext(t *testing.T) {
+	driverBucket := &writeContextBucket{}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	cancelLifetime()
+
+	operationCtx := context.WithValue(context.Background(), writeContextKey{}, "operation")
+	require.NoError(t, fileIO.WriteFile(operationCtx, "s3://my-bucket/write-file", []byte("content")))
+	require.Len(t, driverBucket.writeContexts, 1)
+	assert.Equal(t, "operation", driverBucket.writeContexts[0].Value(writeContextKey{}))
+}
+
+func TestBlobFileIOMkdirAllPassesOperationContext(t *testing.T) {
+	driverBucket := &writeContextBucket{}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx := context.WithValue(context.Background(), writeContextKey{}, "lifetime")
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	operationCtx := context.WithValue(context.Background(), writeContextKey{}, "operation")
+
+	require.NoError(t, fileIO.MkdirAll(operationCtx, "s3://my-bucket/mkdir/all"))
+	require.Len(t, driverBucket.writeContexts, 2, "MkdirAll writes one marker for each path component")
+	for _, ctx := range driverBucket.writeContexts {
+		assert.Equal(t, "operation", ctx.Value(writeContextKey{}))
 	}
 }
 
@@ -268,7 +325,8 @@ func TestBlobFileIOStatUsesOperationContext(t *testing.T) {
 
 type statListContextBucket struct {
 	driver.Bucket
-	listCtx context.Context
+	listCtx   context.Context
+	deleteCtx []context.Context
 }
 
 func (*statListContextBucket) ErrorCode(err error) gcerrors.ErrorCode {
@@ -289,6 +347,12 @@ func (b *statListContextBucket) ListPaged(ctx context.Context, _ *driver.ListOpt
 	return &driver.ListPage{
 		Objects: []*driver.ListObject{{Key: "data/child.parquet"}},
 	}, nil
+}
+
+func (b *statListContextBucket) Delete(ctx context.Context, _ string, _ *driver.DeleteOptions) error {
+	b.deleteCtx = append(b.deleteCtx, ctx)
+
+	return nil
 }
 
 func (*statListContextBucket) Close() error { return nil }
@@ -1102,7 +1166,7 @@ func TestBlobFileIOStat(t *testing.T) {
 	assert.Equal(t, "data", dirInfo.Name())
 	assert.True(t, dirInfo.IsDir())
 
-	require.NoError(t, bfs.MkdirAll("s3://test-bucket/foo"))
+	require.NoError(t, bfs.MkdirAll(ctx, "s3://test-bucket/foo"))
 	markerInfoWithSlash, err := bfs.Stat(ctx, "s3://test-bucket/foo/")
 	require.NoError(t, err)
 	assert.Equal(t, "foo", markerInfoWithSlash.Name())
@@ -1346,12 +1410,34 @@ func TestBlobFileIOMkdirAll(t *testing.T) {
 
 	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
-	require.NoError(t, bfs.MkdirAll("s3://test-bucket/a/b/c"))
+	require.NoError(t, bfs.MkdirAll(ctx, "s3://test-bucket/a/b/c"))
 
 	for _, key := range []string{"a/", "a/b/", "a/b/c/"} {
 		exists, err := bucket.Exists(ctx, key)
 		require.NoError(t, err)
 		assert.True(t, exists, "%s should exist", key)
+	}
+	require.NoError(t, bfs.MkdirAll(ctx, "s3://test-bucket/a/b/c"))
+}
+
+func TestBlobFileIOMkdirAllUsesOperationContext(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	opCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err := bfs.MkdirAll(opCtx, "s3://test-bucket/canceled/nested")
+	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "mkdir", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/canceled/nested", pathErr.Path)
+	for _, key := range []string{"canceled/", "canceled/nested/"} {
+		exists, err := bucket.Exists(ctx, key)
+		require.NoError(t, err)
+		assert.False(t, exists)
 	}
 }
 
@@ -1364,7 +1450,7 @@ func TestBlobFileIOWalkDirSkipsDirectoryMarker(t *testing.T) {
 
 	// MkdirAll leaves only a "warehouse/ns/" marker for an empty namespace.
 	// Walking "warehouse/ns" should not report that marker as a child file.
-	require.NoError(t, bfs.MkdirAll("s3://test-bucket/warehouse/ns"))
+	require.NoError(t, bfs.MkdirAll(ctx, "s3://test-bucket/warehouse/ns"))
 
 	var paths []string
 	require.NoError(t, bfs.WalkDir(context.Background(), "s3://test-bucket/warehouse/ns", func(path string, d fs.DirEntry, err error) error {
@@ -1466,12 +1552,12 @@ func TestBlobFileIORemoveAll(t *testing.T) {
 
 	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
-	require.NoError(t, bfs.RemoveAll("s3://test-bucket/data/file.parquet"))
+	require.NoError(t, bfs.RemoveAll(ctx, "s3://test-bucket/data/file.parquet"))
 	exists, err := bucket.Exists(ctx, "data/file.parquet")
 	require.NoError(t, err)
 	assert.False(t, exists)
 
-	require.NoError(t, bfs.RemoveAll("s3://test-bucket/warehouse/ns"))
+	require.NoError(t, bfs.RemoveAll(ctx, "s3://test-bucket/warehouse/ns"))
 	for _, key := range []string{
 		"warehouse/ns/",
 		"warehouse/ns/tbl/metadata/v1.metadata.json",
@@ -1486,7 +1572,45 @@ func TestBlobFileIORemoveAll(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, exists)
 
-	require.NoError(t, bfs.RemoveAll("s3://test-bucket/missing"))
+	require.NoError(t, bfs.RemoveAll(ctx, "s3://test-bucket/missing"))
+}
+
+func TestBlobFileIORemoveAllHonorsOperationCancellation(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+	require.NoError(t, bucket.WriteAll(ctx, "data/file.parquet", []byte("content"), nil))
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	opCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err := bfs.RemoveAll(opCtx, "s3://test-bucket/data")
+	require.ErrorIs(t, err, context.Canceled)
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "RemoveAll", pathErr.Op)
+	assert.Equal(t, "s3://test-bucket/data", pathErr.Path)
+	exists, err := bucket.Exists(ctx, "data/file.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists)
+}
+
+func TestBlobFileIORemoveAllPassesOperationContext(t *testing.T) {
+	driverBucket := &statListContextBucket{}
+	bucket := blob.NewBucket(driverBucket)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+	lifetimeCtx := context.WithValue(context.Background(), statContextKey{}, "lifetime")
+	fileIO := New(lifetimeCtx, bucket, DefaultObjectLocationExtractor("my-bucket"))
+	operationCtx := context.WithValue(context.Background(), statContextKey{}, "operation")
+
+	require.NoError(t, fileIO.RemoveAll(operationCtx, "s3://my-bucket/data"))
+	require.NotNil(t, driverBucket.listCtx, "RemoveAll should list children with the operation context")
+	assert.Equal(t, "operation", driverBucket.listCtx.Value(statContextKey{}))
+	require.Len(t, driverBucket.deleteCtx, 2, "RemoveAll should delete the path and its listed child")
+	for _, ctx := range driverBucket.deleteCtx {
+		assert.Equal(t, "operation", ctx.Value(statContextKey{}))
+	}
 }
 
 func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
