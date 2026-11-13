@@ -309,9 +309,7 @@ func TestIncrementalChangelogReadListColumn(t *testing.T) {
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "tags", Type: &iceberg.ListType{
-			ElementID: 3, Element: iceberg.PrimitiveTypes.String,
-		}},
+		iceberg.NestedField{ID: 2, Name: "tags", Type: iceberg.NewListType(3, iceberg.PrimitiveTypes.String, false)},
 	)
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
 		iceberg.Properties{table.PropertyFormatVersion: "2"})

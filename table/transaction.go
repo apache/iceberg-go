@@ -1119,16 +1119,13 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 		}
 	}
 
-	if meta.NameMapping() == nil {
-		nameMapping := meta.CurrentSchema().NameMapping()
-		mappingJson, err := json.Marshal(nameMapping)
-		if err != nil {
+	if len(filesToAdd) > 0 {
+		if err := validateNameMappingProperty(meta.props, meta.NameMapping()); err != nil {
 			return err
 		}
-		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
-		if err != nil {
-			return err
-		}
+	}
+	if err := t.ensureNameMapping(); err != nil {
+		return err
 	}
 
 	commitUUID := uuid.New()
@@ -1670,7 +1667,7 @@ func (t *Transaction) ensureNameMapping() error {
 		return err
 	}
 
-	if meta.NameMapping() == nil {
+	if _, exists := meta.props[DefaultNameMappingKey]; !exists {
 		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
@@ -2462,16 +2459,13 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		}
 	}
 
-	if meta.NameMapping() == nil {
-		nameMapping := meta.CurrentSchema().NameMapping()
-		mappingJson, err := json.Marshal(nameMapping)
-		if err != nil {
+	if len(filePaths) > 0 {
+		if err := validateNameMappingProperty(meta.props, meta.NameMapping()); err != nil {
 			return err
 		}
-		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
-		if err != nil {
-			return err
-		}
+	}
+	if err := t.ensureNameMapping(); err != nil {
+		return err
 	}
 
 	// SetProperties above may have staged a name mapping, rebuilding t.meta;

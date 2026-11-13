@@ -267,9 +267,9 @@ func TestProcessEqualityDeletesSingleInt32AndInt64Sets(t *testing.T) {
 
 func TestProcessEqualityDeletesSingleInt32SkipsNestedField(t *testing.T) {
 	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 2, Name: "person", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
-		}},
+		ID: 2, Name: "person", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		),
 	})
 	del := singleInt32EqualityDeleteTestSet(7)
 	del.colNames[0] = "person.id"

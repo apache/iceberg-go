@@ -175,7 +175,7 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 	if err != nil {
 		return nil, fmt.Errorf("partition statistics: %w", err)
 	}
-	if partitionType == nil || len(partitionType.FieldList) == 0 {
+	if partitionType == nil || partitionType.NumFields() == 0 {
 		return nil, fmt.Errorf("%w: partition statistics for unpartitioned tables",
 			iceberg.ErrNotImplemented)
 	}
@@ -398,7 +398,8 @@ func collectPartitionStatistics(
 				return nil, err
 			}
 			partition := inspectCoercePartition(values, partitionType)
-			for _, field := range partitionType.FieldList {
+			for i := range partitionType.NumFields() {
+				field := partitionType.Field(i)
 				value := partition[field.ID]
 				// Manifest decoding uses DecimalLiteral, while callers can
 				// supply Decimal. Normalize before building aggregate keys
@@ -616,7 +617,8 @@ func sortPartitionStatistics(rows []*inspectPartitionAggregate, partitionType *i
 	// an aggregate key. Do not repeat that validation for every output row.
 	var sortErr error
 	slices.SortStableFunc(rows, func(a, b *inspectPartitionAggregate) int {
-		for _, field := range partitionType.FieldList {
+		for i := range partitionType.NumFields() {
+			field := partitionType.Field(i)
 			comp, err := comparePartitionStatisticValues(a.partition[field.ID], b.partition[field.ID])
 			if err != nil {
 				sortErr = fmt.Errorf("partition field %q: %w", field.Name, err)
