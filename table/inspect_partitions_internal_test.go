@@ -25,10 +25,10 @@ import (
 )
 
 func TestInspectPartitionAggregateTreeBinaryKeys(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Binary},
-		{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Binary},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Binary},
+		iceberg.NestedField{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Binary},
+	)
 	tree := newInspectPartitionAggregateTree()
 
 	check := func(first, second any, want *inspectPartitionAggregate) {

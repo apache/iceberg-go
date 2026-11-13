@@ -2117,9 +2117,7 @@ func TestBuildExtractColumnDottedName(t *testing.T) {
 func TestBuildExtractColumnNested(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 3, Name: "wrapper", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 2, Name: "payload", Type: iceberg.VariantType{}}},
-		}},
+		iceberg.NestedField{ID: 3, Name: "wrapper", Type: iceberg.NewStructType(iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}})},
 	)
 
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())

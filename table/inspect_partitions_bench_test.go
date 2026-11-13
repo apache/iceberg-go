@@ -164,7 +164,7 @@ func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
 			ID: 1000 + i, Name: fmt.Sprintf("part_%d", i), Type: iceberg.PrimitiveTypes.Binary,
 		}
 	}
-	partitionType := &iceberg.StructType{FieldList: fields}
+	partitionType := iceberg.NewStructType(fields...)
 
 	tree := newInspectPartitionAggregateTree()
 	partitions := make([]map[int]any, partitionCount)

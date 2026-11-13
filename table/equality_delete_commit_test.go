@@ -230,11 +230,9 @@ func TestRowDeltaConcurrentAppendWithNestedPartition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			schema := iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-				iceberg.NestedField{ID: 2, Name: "device", Required: true, Type: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-					},
-				}},
+				iceberg.NestedField{ID: 2, Name: "device", Required: true, Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				)},
 			)
 			spec := iceberg.NewPartitionSpec(
 				iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "root_id", Transform: iceberg.IdentityTransform{}},
