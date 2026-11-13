@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
@@ -103,4 +104,58 @@ func TestScanFillsIdentityPartitionColumnMissingFromDataFile(t *testing.T) {
 	require.NoError(t, err)
 	defer filtered.Release()
 	require.EqualValues(t, 1, filtered.NumRows())
+}
+
+// Partition values come back from the manifest as literals; a decimal one
+// must still fill the column rather than fail the scan.
+func TestScanFillsDecimalIdentityPartitionColumnMissingFromDataFile(t *testing.T) {
+	ctx := context.Background()
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "amount", Type: iceberg.MustDecimalTypeOf(9, 2)},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{},
+	})
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "identity_decimal"}, meta, location+"/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, &countingCatalog{metadata: meta})
+
+	idOnly := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int64,
+		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"1"}),
+	}}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, idOnly, []string{`[{"id":1},{"id":2}]`})
+	require.NoError(t, err)
+	defer data.Release()
+	path := location + "/data/amount.parquet"
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(data, f, 1024, nil, pqarrow.DefaultWriterProps()))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	value := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
+	b, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, path, iceberg.ParquetFile,
+		map[int]any{1000: value}, nil, nil, data.NumRows(), info.Size())
+	require.NoError(t, err)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFiles(ctx, []iceberg.DataFile{b.Build()}, nil))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	result, err := tbl.Scan().ToArrowTable(ctx)
+	require.NoError(t, err)
+	defer result.Release()
+	require.EqualValues(t, 2, result.NumRows())
+	for _, chunk := range result.Column(1).Data().Chunks() {
+		amounts := chunk.(*array.Decimal128)
+		for i := range amounts.Len() {
+			require.False(t, amounts.IsNull(i))
+			require.Equal(t, "12.34", amounts.ValueStr(i))
+		}
+	}
 }

@@ -2653,10 +2653,6 @@ func pruningFilterHasMissingInitialDefault(
 	return false, nil
 }
 
-// canReuseFlatProjection detects the common case of flat, already-typed
-// batches. Full schema projection still handles nested types, schema evolution,
-// promotions, defaults, and changed column ordering. A matching Arrow type alone
-// is not enough: the file field ID and Iceberg type must also agree.
 // identityPartitionConstants returns the data file's identity partition
 // values keyed by source field ID. A writer may leave an identity partition
 // column out of its data files, as Delta and Hive-style layouts do; the spec's
@@ -2684,6 +2680,11 @@ func identityPartitionConstants(meta Metadata, file iceberg.DataFile) map[int]an
 		if !ok {
 			continue
 		}
+		// Partition() returns decimals as DecimalLiteral; the projection's
+		// default path takes the Decimal it wraps.
+		if d, ok := value.(iceberg.DecimalLiteral); ok {
+			value = iceberg.Decimal(d)
+		}
 		if constants == nil {
 			constants = make(map[int]any)
 		}
@@ -2693,6 +2694,10 @@ func identityPartitionConstants(meta Metadata, file iceberg.DataFile) map[int]an
 	return constants
 }
 
+// canReuseFlatProjection detects the common case of flat, already-typed
+// batches. Full schema projection still handles nested types, schema evolution,
+// promotions, defaults, and changed column ordering. A matching Arrow type alone
+// is not enough: the file field ID and Iceberg type must also agree.
 func canReuseFlatProjection(requested, fileSchema *iceberg.Schema, input, output *arrow.Schema) bool {
 	if requested == nil || fileSchema == nil || input == nil || output == nil {
 		return false
