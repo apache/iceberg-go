@@ -21,6 +21,7 @@ import (
 	"context"
 	dbsql "database/sql"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -93,9 +94,12 @@ func newNamespaceRaceCatalog(t *testing.T) *Catalog {
 	_, err = db.Exec("PRAGMA journal_mode=WAL")
 	require.NoError(t, err)
 
+	// Encode the path: subtest temp dirs can contain URI delimiters such as
+	// '#' (duplicate subtest names get a "#01" suffix), which a raw
+	// "file://" + path would turn into a fragment.
 	warehouse := filepath.Join(t.TempDir(), "warehouse")
 	cat, err := NewCatalog("default", db, SQLite, iceberg.Properties{
-		"warehouse": "file://" + filepath.ToSlash(warehouse),
+		"warehouse": (&url.URL{Scheme: "file", Path: filepath.ToSlash(warehouse)}).String(),
 	})
 	require.NoError(t, err)
 
