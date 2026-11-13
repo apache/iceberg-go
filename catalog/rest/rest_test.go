@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -4370,6 +4371,179 @@ func (r *RestCatalogSuite) TestCommitTableErrCommitStateUnknown() {
 				"%d should return ErrCommitStateUnknown, got: %v", code, err)
 		})
 	}
+}
+
+func lostCommitResponseHandler(mux *http.ServeMux, path string) chan struct{} {
+	applied := make(chan struct{}, 2)
+	mux.HandleFunc(path, func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		applied <- struct{}{}
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	})
+
+	return applied
+}
+
+func (r *RestCatalogSuite) TestPreCanceledCommitIsNotUnknown() {
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r.Run("commit table", func() {
+		_, _, err := cat.CommitTable(ctx, table.Identifier{"db", "tbl"},
+			[]table.Requirement{}, []table.Update{})
+		r.ErrorIs(err, context.Canceled)
+		r.NotErrorIs(err, rest.ErrCommitStateUnknown)
+	})
+	r.Run("update table", func() {
+		_, err := cat.UpdateTable(ctx, table.Identifier{"db", "tbl"},
+			[]table.Requirement{}, []table.Update{})
+		r.ErrorIs(err, context.Canceled)
+		r.NotErrorIs(err, rest.ErrCommitStateUnknown)
+	})
+	r.Run("commit transaction", func() {
+		err := cat.CommitTransaction(ctx, []table.TableCommit{{
+			Identifier:   table.Identifier{"db", "tbl"},
+			Requirements: []table.Requirement{},
+			Updates:      []table.Update{},
+		}})
+		r.ErrorIs(err, context.Canceled)
+		r.NotErrorIs(err, rest.ErrCommitStateUnknown)
+	})
+}
+
+func (r *RestCatalogSuite) TestCommitTableLostResponseIsUnknown() {
+	applied := lostCommitResponseHandler(r.mux, "/v1/namespaces/db/tables/tbl")
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, _, err = cat.CommitTable(context.Background(), table.Identifier{"db", "tbl"},
+		[]table.Requirement{}, []table.Update{})
+	r.ErrorIs(err, rest.ErrCommitStateUnknown)
+	r.Equal(1, len(applied), "the client must not resend a commit with an unknown outcome")
+}
+
+func (r *RestCatalogSuite) TestUpdateTableLostResponseIsUnknown() {
+	applied := lostCommitResponseHandler(r.mux, "/v1/namespaces/db/tables/tbl")
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.UpdateTable(context.Background(), table.Identifier{"db", "tbl"},
+		[]table.Requirement{}, []table.Update{})
+	r.ErrorIs(err, rest.ErrCommitStateUnknown)
+	r.Equal(1, len(applied), "the client must not resend a commit with an unknown outcome")
+}
+
+func (r *RestCatalogSuite) TestCommitTransactionLostResponseIsUnknown() {
+	applied := lostCommitResponseHandler(r.mux, "/v1/transactions/commit")
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{{
+		Identifier:   table.Identifier{"db", "tbl"},
+		Requirements: []table.Requirement{},
+		Updates:      []table.Update{},
+	}})
+	r.ErrorIs(err, rest.ErrCommitStateUnknown)
+	r.Equal(1, len(applied), "the client must not resend a transaction with an unknown outcome")
+}
+
+func (r *RestCatalogSuite) TestCommitEndpointsClassifyUnreadable200Bodies() {
+	var responseBody []byte
+	requests := make(chan struct{}, 6)
+	writeResponse := func(w http.ResponseWriter, req *http.Request) {
+		requests <- struct{}{}
+		r.Equal(http.MethodPost, req.Method)
+		_, err := io.Copy(io.Discard, req.Body)
+		r.NoError(err)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+		if len(responseBody) > 0 {
+			_, err = w.Write(responseBody)
+			r.NoError(err)
+		}
+	}
+	r.mux.HandleFunc("/v1/namespaces/db/tables/tbl", writeResponse)
+	r.mux.HandleFunc("/v1/transactions/commit", writeResponse)
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+	defer cat.Close()
+
+	operations := []struct {
+		name              string
+		allowEmptySuccess bool
+		call              func() error
+	}{
+		{
+			name: "commit table",
+			call: func() error {
+				_, _, err := cat.CommitTable(context.Background(), table.Identifier{"db", "tbl"},
+					[]table.Requirement{}, []table.Update{})
+
+				return err
+			},
+		},
+		{
+			name: "update table",
+			call: func() error {
+				_, err := cat.UpdateTable(context.Background(), table.Identifier{"db", "tbl"},
+					[]table.Requirement{}, []table.Update{})
+
+				return err
+			},
+		},
+		{
+			name:              "commit transaction",
+			allowEmptySuccess: true,
+			call: func() error {
+				return cat.CommitTransaction(context.Background(), []table.TableCommit{{
+					Identifier:   table.Identifier{"db", "tbl"},
+					Requirements: []table.Requirement{},
+					Updates:      []table.Update{},
+				}})
+			},
+		},
+	}
+	responses := []struct {
+		name string
+		body []byte
+	}{
+		{name: "truncated JSON", body: []byte(`{"metadata":`)},
+		{name: "empty body"},
+	}
+
+	for _, operation := range operations {
+		for _, response := range responses {
+			r.Run(operation.name+"/"+response.name, func() {
+				responseBody = response.body
+				err := operation.call()
+				if response.name == "empty body" && operation.allowEmptySuccess {
+					r.NoError(err)
+
+					return
+				}
+				r.ErrorIs(err, rest.ErrCommitStateUnknown)
+			})
+		}
+	}
+
+	r.Len(requests, len(operations)*len(responses))
 }
 
 func (r *RestCatalogSuite) TestCommitTableErrorBodyKeepsCommitStateUnknown() {

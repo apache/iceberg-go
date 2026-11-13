@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"runtime"
 	"slices"
@@ -392,13 +393,14 @@ type suppressHeadersKey struct{}
 // headers to set, session-default headers to suppress, a body error.type ->
 // error override, and whether an HTTP 204 is a valid empty result.
 type reqConfig struct {
-	headers           map[string]string
-	suppressHeaders   []string
-	idempotencyKey    bool
-	errorTypeOverride map[string]error
-	allowNoContent    bool
-	requireBody       bool
-	queryParams       url.Values
+	headers                       map[string]string
+	suppressHeaders               []string
+	idempotencyKey                bool
+	errorTypeOverride             map[string]error
+	allowNoContent                bool
+	unknownCommitStateOnTransport bool
+	requireBody                   bool
+	queryParams                   url.Values
 	// allowNotModified turns a 304 into errNotModified. withIfNoneMatch sets it
 	// together with the header, so a 304 to a request that sent no ETag stays an
 	// error.
@@ -451,6 +453,12 @@ func withErrorTypeOverride(byType map[string]error) reqOption {
 // rather than trying to decode a body.
 func allowNoContent() reqOption {
 	return func(c *reqConfig) { c.allowNoContent = true }
+}
+
+// unknownCommitStateOnTransport marks POST requests that can commit state
+// before a transport error prevents the client from receiving the response.
+func unknownCommitStateOnTransport() reqOption {
+	return func(c *reqConfig) { c.unknownCommitStateOnTransport = true }
 }
 
 // requireBody rejects an HTTP 200 with an empty body rather than decoding it to
@@ -615,8 +623,31 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 		return ret, err
 	}
 
+	// If the caller canceled before dispatch, nothing could have been
+	// committed. Cancellation after dispatch is still outcome-unknown.
+	var requestWritten atomic.Bool
+	if cfg.unknownCommitStateOnTransport {
+		if err := ctx.Err(); err != nil {
+			return ret, err
+		}
+
+		// Track writes across transport retries. Auth and signing failures happen
+		// before this callback and therefore leave the commit outcome known.
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+			WroteRequest: func(httptrace.WroteRequestInfo) {
+				requestWritten.Store(true)
+			},
+		}))
+	}
+
 	rsp, err = cl.Do(req)
 	if err != nil {
+		if cfg.unknownCommitStateOnTransport && requestWritten.Load() {
+			// A later retry may fail to dial after an earlier attempt wrote the
+			// request, so its error still has an unknown commit outcome.
+			return ret, fmt.Errorf("%w: %w", ErrCommitStateUnknown, err)
+		}
+
 		return ret, err
 	}
 	defer func() {
@@ -634,13 +665,22 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	if rsp.ContentLength == 0 {
 		if cfg.requireBody {
-			return ret, fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+			err = fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+			if cfg.unknownCommitStateOnTransport {
+				err = fmt.Errorf("%w: %w", ErrCommitStateUnknown, err)
+			}
+
+			return ret, err
 		}
 
 		return ret, err
 	}
 
 	if err = decodeJSONResponse(rsp.Body, &ret); err != nil {
+		if cfg.unknownCommitStateOnTransport {
+			return ret, fmt.Errorf("%w: %w", ErrCommitStateUnknown, err)
+		}
+
 		return ret, err
 	}
 
@@ -1877,7 +1917,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		}, r.mutationHeaders())
+		}, r.mutationHeaders(), unknownCommitStateOnTransport(), requireBody())
 	if err != nil {
 		return nil, "", err
 	}
@@ -1967,7 +2007,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
 		},
 		allowNoContent(),
-		r.mutationHeaders())
+		r.mutationHeaders(), unknownCommitStateOnTransport())
 
 	return err
 }
@@ -2111,7 +2151,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		}, r.mutationHeaders())
+		}, r.mutationHeaders(), unknownCommitStateOnTransport(), requireBody())
 	if err != nil {
 		return nil, err
 	}
