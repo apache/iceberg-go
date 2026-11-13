@@ -208,7 +208,7 @@ func newInspectPartitionBuilderForTest(
 	fields []iceberg.NestedField,
 ) (*array.StructBuilder, *inspectPartitionBuilder) {
 	t.Helper()
-	partitionType := &iceberg.StructType{FieldList: fields}
+	partitionType := iceberg.NewStructType(fields...)
 	schema, err := SchemaToArrowSchema(iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "partition", Type: partitionType, Required: true,
 	}), nil, true, false)

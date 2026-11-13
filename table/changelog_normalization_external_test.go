@@ -284,17 +284,12 @@ func TestNormalizedChangelogEmptyTableAndValidation(t *testing.T) {
 func TestNormalizedChangelogNestedValuesAndOwnership(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "values", Type: &iceberg.ListType{
-			ElementID: 3, Element: iceberg.PrimitiveTypes.Binary, ElementRequired: true,
-		}},
-		iceberg.NestedField{ID: 4, Name: "attributes", Type: &iceberg.MapType{
-			KeyID: 5, KeyType: iceberg.PrimitiveTypes.String, ValueID: 6,
-			ValueType: &iceberg.ListType{ElementID: 7, Element: iceberg.PrimitiveTypes.Binary}, ValueRequired: true,
-		}},
-		iceberg.NestedField{ID: 8, Name: "details", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 9, Name: "name", Type: iceberg.PrimitiveTypes.String},
-			{ID: 10, Name: "items", Type: &iceberg.ListType{ElementID: 11, Element: iceberg.PrimitiveTypes.String}},
-		}}},
+		iceberg.NestedField{ID: 2, Name: "values", Type: iceberg.NewListType(3, iceberg.PrimitiveTypes.Binary, true)},
+		iceberg.NestedField{ID: 4, Name: "attributes", Type: iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.NewListType(7, iceberg.PrimitiveTypes.Binary, false), true)},
+		iceberg.NestedField{ID: 8, Name: "details", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 9, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 10, Name: "items", Type: iceberg.NewListType(11, iceberg.PrimitiveTypes.String, false)},
+		)},
 	)
 	tbl := newChangelogTable(t, 2, schema, iceberg.UnpartitionedSpec)
 	tbl = writeNormalizationRows(t, tbl, `[
@@ -427,9 +422,9 @@ func TestNormalizedChangelogEmptyResultsStillValidateRange(t *testing.T) {
 func TestNormalizedChangelogNestedCompositeIdentifiers(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "identity", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "code", Type: iceberg.PrimitiveTypes.String},
-		}}},
+		iceberg.NestedField{ID: 2, Name: "identity", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "code", Type: iceberg.PrimitiveTypes.String},
+		)},
 		iceberg.NestedField{ID: 4, Name: "tenant", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 5, Name: "data", Type: iceberg.PrimitiveTypes.String},
 	)

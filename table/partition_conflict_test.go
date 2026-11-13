@@ -412,9 +412,7 @@ func TestRowDeltaValidate_SamePartitionRejected(t *testing.T) {
 func TestRowDeltaValidate_NestedPartitionSources(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
+		iceberg.NestedField{ID: 2, Name: "device", Type: iceberg.NewStructType(iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
 	)
 	spec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "root_id", Transform: iceberg.IdentityTransform{}},
@@ -470,9 +468,7 @@ func TestRowDeltaValidate_NestedPartitionSources(t *testing.T) {
 func TestEqDeleteConflictGroupsNestedSourceValues(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
+		iceberg.NestedField{ID: 2, Name: "device", Type: iceberg.NewStructType(iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
 	)
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		FieldID: 1000, SourceIDs: []int{3}, Name: "device_id", Transform: iceberg.IdentityTransform{},
@@ -511,9 +507,7 @@ func (m conflictSchemaOverride) CurrentSchema() *iceberg.Schema { return m.schem
 func TestEqDeleteConflictAmbiguousSourceNameFallsBack(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "other", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
+		iceberg.NestedField{ID: 2, Name: "device", Type: iceberg.NewStructType(iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
 	)
 	meta := partitionedConflictMeta(t, schema, 3, nil)
 	spec := meta.PartitionSpec()
@@ -523,9 +517,7 @@ func TestEqDeleteConflictAmbiguousSourceNameFallsBack(t *testing.T) {
 	// cannot safely distinguish the nested source from the top-level field.
 	ambiguous := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "device.id", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 2, Name: "device", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
+		iceberg.NestedField{ID: 2, Name: "device", Type: iceberg.NewStructType(iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
 	)
 	filter, err := eqDeletePartitionsToFilter([]iceberg.DataFile{deleteFile}, conflictSchemaOverride{Metadata: meta, schema: ambiguous})
 	require.NoError(t, err)
@@ -534,18 +526,14 @@ func TestEqDeleteConflictAmbiguousSourceNameFallsBack(t *testing.T) {
 
 func TestEqDeleteConflictUsesCurrentNestedName(t *testing.T) {
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "device", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
+		iceberg.NestedField{ID: 1, Name: "device", Type: iceberg.NewStructType(iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
 	)
 	meta := partitionedConflictMeta(t, schema, 2, nil)
 	spec := meta.PartitionSpec()
 	deleteFile := equalityDeleteTestFile(t, spec, "delete.parquet", map[int]any{spec.Field(0).FieldID: int64(7)})
 
 	renamed := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "sensor", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
+		iceberg.NestedField{ID: 1, Name: "sensor", Type: iceberg.NewStructType(iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
 	)
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -562,12 +550,8 @@ func TestEqDeleteConflictUsesCurrentNestedName(t *testing.T) {
 
 func TestEqDeleteConflictCaseInsensitiveAmbiguityFailsClosed(t *testing.T) {
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "device", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
-		iceberg.NestedField{ID: 3, Name: "DEVICE", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 4, Name: "id", Type: iceberg.PrimitiveTypes.Int64}},
-		}},
+		iceberg.NestedField{ID: 1, Name: "device", Type: iceberg.NewStructType(iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
+		iceberg.NestedField{ID: 3, Name: "DEVICE", Type: iceberg.NewStructType(iceberg.NestedField{ID: 4, Name: "id", Type: iceberg.PrimitiveTypes.Int64})},
 	)
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		FieldID: 1000, SourceIDs: []int{2}, Name: "device_id", Transform: iceberg.IdentityTransform{},
