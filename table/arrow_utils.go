@@ -495,6 +495,9 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 type ArrowToIcebergOptions struct {
 	DowncastNsTimestamp bool
 	NameMapping         iceberg.NameMapping
+	// AllowUnmappedFields assigns ID -1 to physical fields absent from the
+	// name mapping. Use it only for file schemas needed to retain row counts.
+	AllowUnmappedFields bool
 	TableSchema         *iceberg.Schema
 	TableProperties     iceberg.Properties
 }
@@ -533,11 +536,51 @@ func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOption
 			return nil, err
 		}
 
-		return iceberg.ApplyNameMapping(schemaWithoutIDs, opts.NameMapping)
+		mapping := opts.NameMapping
+		if opts.AllowUnmappedFields {
+			mapping = includeUnmappedArrowFields(sc.Fields(), mapping)
+		}
+
+		return iceberg.ApplyNameMapping(schemaWithoutIDs, mapping)
 	default:
 		return nil, fmt.Errorf("%w: arrow schema does not have field-ids and no name mapping provided",
 			iceberg.ErrInvalidSchema)
 	}
+}
+
+// includeUnmappedArrowFields supplements a temporary mapping without changing
+// the table mapping. Unmapped physical columns receive the existing -1 sentinel.
+func includeUnmappedArrowFields(fields []arrow.Field, mapping iceberg.NameMapping) iceberg.NameMapping {
+	result := slices.Clone(mapping)
+	for _, field := range fields {
+		idx := slices.IndexFunc(result, func(mapped iceberg.MappedField) bool {
+			return slices.Contains(mapped.Names, field.Name)
+		})
+		if idx < 0 {
+			result = append(result, iceberg.MappedField{Names: []string{field.Name}})
+			idx = len(result) - 1
+		}
+
+		entry := result[idx]
+		if id := getFieldID(field); id != nil {
+			entry.FieldID = id
+		}
+		switch typ := field.Type.(type) {
+		case *arrow.StructType:
+			entry.Fields = includeUnmappedArrowFields(typ.Fields(), entry.Fields)
+		case arrow.ListLikeType:
+			element := typ.ElemField()
+			element.Name = "element"
+			entry.Fields = includeUnmappedArrowFields([]arrow.Field{element}, entry.Fields)
+		case *arrow.MapType:
+			key, value := typ.KeyField(), typ.ItemField()
+			key.Name, value.Name = "key", "value"
+			entry.Fields = includeUnmappedArrowFields([]arrow.Field{key, value}, entry.Fields)
+		}
+		result[idx] = entry
+	}
+
+	return result
 }
 
 func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
