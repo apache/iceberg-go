@@ -1113,7 +1113,87 @@ func TestSetIdentifierField(t *testing.T) {
 			SetIdentifierField([][]string{{"name"}}).
 			Apply()
 		require.Error(t, err)
-		require.ErrorContains(t, err, "identifier field not found: name")
+		require.ErrorContains(t, err, "cannot delete identifier field name")
+	})
+}
+
+func TestDeleteIdentifierColumn(t *testing.T) {
+	schemaWithIdentifiers := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	metadata, err := NewMetadata(schemaWithIdentifiers, nil, UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	newTxn := func() *Transaction {
+		return New([]string{"id"}, metadata, "", nil, nil).NewTransaction()
+	}
+
+	t.Run("deleting an identifier column fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"id"}).
+			Apply()
+		require.ErrorContains(t, err, "cannot delete identifier field id")
+	})
+
+	t.Run("deleting an identifier column with different case fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), false, true).
+			DeleteColumn([]string{"ID"}).
+			Apply()
+		require.ErrorContains(t, err, "cannot delete identifier field id")
+	})
+
+	t.Run("delete then add a column with the same name fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"id"}).
+			AddColumn([]string{"id"}, iceberg.PrimitiveTypes.Int64, "", false, nil).
+			Apply()
+		require.ErrorContains(t, err, "cannot delete identifier field id")
+	})
+
+	t.Run("delete then rename the identifier onto the deleted name fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"name"}).
+			RenameColumn([]string{"id"}, "name").
+			Apply()
+		require.ErrorContains(t, err, "cannot delete identifier field name")
+	})
+
+	t.Run("deleting a struct with a nested identifier field fails", func(t *testing.T) {
+		nested := iceberg.NewSchemaWithIdentifiers(1, []int{3},
+			iceberg.NestedField{ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+			iceberg.NestedField{ID: 2, Name: "key", Required: true, Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			)},
+		)
+		nestedMeta, err := NewMetadata(nested, nil, UnsortedSortOrder, "", nil)
+		require.NoError(t, err)
+		txn := New([]string{"id"}, nestedMeta, "", nil, nil).NewTransaction()
+
+		_, err = NewUpdateSchema(txn, true, true).
+			DeleteColumn([]string{"key"}).
+			Apply()
+		require.ErrorContains(t, err, "cannot delete field key as it will delete nested identifier field key.id")
+	})
+
+	t.Run("delete then clear identifier fields", func(t *testing.T) {
+		newSchema, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"id"}).
+			SetIdentifierField([][]string{}).
+			Apply()
+		require.NoError(t, err)
+		assert.Empty(t, newSchema.IdentifierFieldIDs)
+		_, found := newSchema.FindFieldByName("id")
+		assert.False(t, found)
+	})
+
+	t.Run("replace identifier fields then delete", func(t *testing.T) {
+		newSchema, err := NewUpdateSchema(newTxn(), true, true).
+			SetIdentifierField([][]string{{"name"}}).
+			DeleteColumn([]string{"id"}).
+			Apply()
+		require.NoError(t, err)
+		assert.Equal(t, []int{2}, newSchema.IdentifierFieldIDs)
 	})
 }
 

@@ -257,6 +257,37 @@ func (u *UpdateSchema) isDeleted(fieldID int) bool {
 	return ok
 }
 
+// checkIdentifierNotDeleted returns an error if the identifier field with the
+// given name in the original schema, or one of its parents, is being deleted.
+// A name that is not in the original schema (an added or renamed field) is
+// skipped, as in Java's SchemaUpdate.
+func (u *UpdateSchema) checkIdentifierNotDeleted(name string) error {
+	var field iceberg.NestedField
+	var ok bool
+	if u.caseSensitive {
+		field, ok = u.schema.FindFieldByName(name)
+	} else {
+		field, ok = u.schema.FindFieldByNameCaseInsensitive(name)
+	}
+	if !ok {
+		return nil
+	}
+
+	if _, deleted := u.deletes[field.ID]; deleted {
+		return fmt.Errorf("cannot delete identifier field %s: to force deletion, also update the identifier fields with SetIdentifierField", name)
+	}
+
+	for parentID, ok := u.parentID[field.ID]; ok; parentID, ok = u.parentID[parentID] {
+		if _, deleted := u.deletes[parentID]; deleted {
+			parentName, _ := u.schema.FindColumnName(parentID)
+
+			return fmt.Errorf("cannot delete field %s as it will delete nested identifier field %s", parentName, name)
+		}
+	}
+
+	return nil
+}
+
 func (u *UpdateSchema) findParentID(fieldID int) int {
 	parentID, ok := u.parentID[fieldID]
 	if !ok {
@@ -395,8 +426,8 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 		}
 	}
 
-	delete(u.identifierFieldNames, fullName)
-
+	// Identifier fields are left alone: Apply rejects a deleted identifier
+	// field unless SetIdentifierField replaces the identifier fields, as Java does.
 	u.deletes[field.ID] = struct{}{}
 
 	return nil
@@ -1193,6 +1224,14 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 	identifierFieldIDs := make([]int, 0)
 	newSchema := iceberg.NewSchema(0, st.(*iceberg.StructType).Fields()...)
 	for name := range u.identifierFieldNames {
+		// As in Java, check the identifier fields against the original schema
+		// first, so deleting one (or a struct that contains one) is reported as
+		// such, and a new column that reuses a deleted identifier's name does not
+		// silently become the identifier.
+		if err := u.checkIdentifierNotDeleted(name); err != nil {
+			return nil, err
+		}
+
 		var field iceberg.NestedField
 		var ok bool
 		if u.caseSensitive {
