@@ -482,8 +482,15 @@ func (t *toSubstraitExpr) VisitStartsWith(term iceberg.BoundTerm, lit iceberg.Li
 }
 
 func (t *toSubstraitExpr) VisitNotStartsWith(term iceberg.BoundTerm, lit iceberg.Literal) expr.Builder {
-	return t.bldr.ScalarFunc(notID).Args(
+	// Iceberg treats a null value as not starting with any prefix. Substrait's
+	// starts_with returns null for null input, so NOT alone would drop the row.
+	notStartsWith := t.bldr.ScalarFunc(notID).Args(
 		t.makeLitFunc(startsWithID, term, lit).(expr.FuncArgBuilder),
+	)
+
+	return t.bldr.ScalarFunc(orID).Args(
+		t.makeRefFunc(isNullID, term).(expr.FuncArgBuilder),
+		notStartsWith,
 	)
 }
 
