@@ -190,10 +190,10 @@ func TestHiveUpdateViewRetainsMetadataAfterUnknownCommit(t *testing.T) {
 
 type viewUpdateTestClient struct {
 	*mockHiveClient
-	renewal HiveClient
+	renewal LockClient
 }
 
-func (c *viewUpdateTestClient) NewLockClient(context.Context) (HiveClient, error) {
+func (c *viewUpdateTestClient) NewLockClient(context.Context) (LockClient, error) {
 	return c.renewal, nil
 }
 

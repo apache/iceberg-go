@@ -27,7 +27,7 @@ import (
 // Heartbeat renews the HMS lock lease. Use a dedicated connection because
 // Thrift clients cannot safely send overlapping RPCs on one connection.
 type viewLockLease struct {
-	client  HiveClient
+	client  LockClient
 	id      int64
 	mu      sync.Mutex
 	failure error
@@ -35,7 +35,7 @@ type viewLockLease struct {
 	done    chan struct{}
 }
 
-func newViewLockLease(ctx context.Context, client HiveClient, id int64, interval time.Duration) *viewLockLease {
+func newViewLockLease(ctx context.Context, client LockClient, id int64, interval time.Duration) *viewLockLease {
 	if interval <= 0 {
 		interval = DefaultLockHeartbeatInterval
 	}

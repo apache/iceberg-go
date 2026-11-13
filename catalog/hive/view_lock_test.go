@@ -40,7 +40,7 @@ type viewDialTestClient struct {
 	dialer *thriftClient
 }
 
-func (c *viewDialTestClient) NewLockClient(ctx context.Context) (HiveClient, error) {
+func (c *viewDialTestClient) NewLockClient(ctx context.Context) (LockClient, error) {
 	return c.dialer.NewLockClient(ctx)
 }
 

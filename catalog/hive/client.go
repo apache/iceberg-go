@@ -49,15 +49,21 @@ type HiveClient interface {
 
 	Lock(ctx context.Context, request *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error)
 	CheckLock(ctx context.Context, lockId int64) (*hive_metastore.LockResponse, error)
-	Heartbeat(ctx context.Context, lockId int64) error
 	Unlock(ctx context.Context, lockId int64) error
+}
+
+// LockClient adds lock renewal to the existing HiveClient contract without
+// requiring all HiveClient implementations to support heartbeats.
+type LockClient interface {
+	HiveClient
+	Heartbeat(ctx context.Context, lockId int64) error
 }
 
 // LockClientProvider supplies a separate connection for renewing a metastore
 // lock during view updates. The returned client is owned and closed by the caller.
 // Its connection must be independent of concurrent catalog RPCs.
 type LockClientProvider interface {
-	NewLockClient(context.Context) (HiveClient, error)
+	NewLockClient(context.Context) (LockClient, error)
 }
 
 type thriftClient struct {
@@ -68,7 +74,7 @@ type thriftClient struct {
 	dialContext    func(context.Context, string, string) (net.Conn, error)
 }
 
-func (c *thriftClient) NewLockClient(ctx context.Context) (HiveClient, error) {
+func (c *thriftClient) NewLockClient(ctx context.Context) (LockClient, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
