@@ -3121,6 +3121,9 @@ make integration-external-rest
 <p><strong>Data-file replacements now reject concurrent deletes.</strong> Commits staged through <code>ReplaceDataFiles</code>, <code>ReplaceDataFilesByPath</code>, <code>ReplaceFiles</code>, or rewrite operations can return <code>table.ErrConflictingDeleteFiles</code> when a concurrent position delete targets a replaced file or any concurrent equality delete is added. Compaction on tables with streaming equality deletes may see additional conflicts.</p>
 </li>
 <li>
+<p><strong>Partition specs reject source types a transform cannot handle.</strong> Creating or updating a spec with an incompatible source, such as <code>day(string)</code>, now fails. Writes to existing incompatible specs return <code>ErrInvalidTransform</code> instead of writing null partition values.</p>
+</li>
+<li>
 <p><strong>Invalid name mappings now stop scans and add-files.</strong> Tables with an unparseable <code>schema.name-mapping.default</code> now return <code>ErrInvalidMetadata</code> on scans and add-files instead of ignoring the mapping. Fix the property with a valid mapping or remove it.</p>
 </li>
 <li>
@@ -3148,6 +3151,9 @@ make integration-external-rest
 <p><strong>Schema reads now reject invalid identifier fields.</strong> Table and view metadata with <code>identifier-field-ids</code> referring to an optional, float/double, missing, non-primitive, or improperly nested field now fails to load with <code>invalid schema</code> (for example, <code>invalid schema: identifier field &quot;foo&quot; must be required</code> or <code>invalid schema: identifier field &quot;foo&quot; cannot be float or double</code>). Older iceberg-go releases could load such metadata, but Java Iceberg already rejects it. To recover an affected table, back up its metadata and use an atomic catalog metadata repair to remove the invalid identifier IDs or replace them with IDs of existing, required, non-floating primitive fields nested only in required structs. Do not edit the currently referenced metadata file in place. Repeated identifier IDs are deduplicated on read.</p>
 </li>
 <li>
+<p><strong><code>UpdateSchema</code> rejects deleting an identifier field.</strong> <code>DeleteColumn</code> on an identifier column used to succeed and quietly drop the column from the table's identifier fields. Now <code>Apply</code> (and <code>Commit</code>) fails with <code>cannot delete identifier field …</code>, as in Java. Deleting a struct that contains one already failed, and now reports <code>cannot delete field … as it will delete nested identifier field …</code>. To delete the column anyway, also call <code>SetIdentifierField</code> with the identifier fields the schema should keep (for example <code>SetIdentifierField([][]string{})</code> to clear them). This also stops a new column that reuses a deleted identifier column's name from becoming the identifier.</p>
+</li>
+<li>
 <p><strong>Schema JSON defaults preserve integer precision.</strong> <code>long</code> defaults now decode as <code>int64</code> instead of <code>float64</code>; non-integral, non-numeric, or out-of-range values now fail to parse. Numeric literals inside object and list defaults decode as <code>json.Number</code> rather than <code>float64</code>.</p>
 </li>
 <li>
@@ -3173,6 +3179,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Empty string partition bounds are written as non-null bytes.</strong> New manifests preserve empty string lower and upper bounds, fixing filtered scans on identity partitions. Manifests written before this fix may retain null bounds for an empty string and can continue to skip matching rows until rewritten.</p>
+</li>
+<li>
+<p><strong>Name mapping rejects ambiguous aliases and duplicate field IDs.</strong> Scans of files without field IDs now return <code>ErrInvalidSchema</code> when the same name belongs to multiple mapped fields at one level, instead of silently choosing the first. Repeated names on one mapping entry and same names under separate structs remain valid. Reusing a field ID returns <code>ErrInvalidSchema</code> instead of panicking.</p>
 </li>
 <li>
 <p><strong>SQL view APIs align with <code>catalog.ViewCatalog</code>.</strong> <code>CreateView</code> now takes a <code>*view.Version</code>, schema and options, and returns <code>*view.View</code>. <code>LoadView</code> now returns <code>*view.View</code>; use <code>Metadata()</code> to access its metadata. If the caller leaves <code>DefaultCatalog</code> empty, SQL still sets it to the catalog name.</p>
