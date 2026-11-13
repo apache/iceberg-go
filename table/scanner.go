@@ -803,6 +803,24 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 		ErrInvalidMetadata, snap.SnapshotID, *snap.SchemaID)
 }
 
+// validateRowFilter binds the filter against the schema this scan will use.
+// Local planning normally binds it while building evaluators, but empty scans
+// can return before those evaluators are created. Remote planning calls this
+// before delegating the filter to its planner.
+func (scan *Scan) validateRowFilter(schema *iceberg.Schema) error {
+	if scan.rowFilter == nil || schema == nil {
+		return nil
+	}
+
+	rewritten, err := iceberg.RewriteNotExpr(scan.rowFilter)
+	if err != nil {
+		return err
+	}
+
+	_, err = iceberg.BindExpr(schema, rewritten, scan.caseSensitive)
+	return err
+}
+
 type metadataSchemaByID interface {
 	schemaByID(int) *iceberg.Schema
 }
@@ -1759,8 +1777,11 @@ func (scan *Scan) planFilesLocal(
 	}()
 
 	snap, err := scan.ResolveSnapshot()
-	if err != nil || snap == nil {
+	if err != nil {
 		return nil, err
+	}
+	if snap == nil {
+		return nil, scan.validateRowFilter(schema)
 	}
 	// Keep the projection cache alive across both local planning phases. The
 	// manifest and data-file evaluators need the same per-spec projections.
@@ -1769,8 +1790,11 @@ func (scan *Scan) planFilesLocal(
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
 		ctx, snap, schema, acc, partitionFilters)
-	if err != nil || len(manifestList) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(manifestList) == 0 {
+		return nil, scan.validateRowFilter(schema)
 	}
 	if scan.canLimitLocalPlanning(acc) {
 		// The manifest counters above describe partition pruning. Keep them
@@ -1917,6 +1941,9 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		var err error
 		schema, err = scan.effectiveSchema()
 		if err != nil {
+			return nil, err
+		}
+		if err := scan.validateRowFilter(schema); err != nil {
 			return nil, err
 		}
 	}
