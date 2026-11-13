@@ -172,6 +172,11 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		return nil, err
 	}
 	format := tblutils.GetFileFormat(fileFormat)
+	if format == nil {
+		stopCount()
+
+		return nil, fmt.Errorf("%w: writing %s files is not supported", iceberg.ErrNotImplemented, fileFormat)
+	}
 
 	arrowSchema, err := SchemaToArrowSchemaWithOptions(fileSchema, ArrowSchemaOptions{
 		IncludeFieldIDs: true,

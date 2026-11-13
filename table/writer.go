@@ -136,6 +136,9 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	for _, apply := range opts {
 		apply(&w)
 	}
+	if w.format == nil {
+		return nil, fmt.Errorf("%w: writing %s files is not supported", iceberg.ErrNotImplemented, w.fileFormat)
+	}
 	if w.fileFormat == iceberg.ParquetFile {
 		w.props, err = parquetPropsFor(w.content, w.props)
 		if err != nil {
