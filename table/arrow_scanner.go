@@ -1792,7 +1792,7 @@ func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
 		collectLeafIDs(t.Element, t.ElementID, idset)
 	case *iceberg.StructType:
 		// For structs, collect leaf IDs from all fields
-		for _, field := range t.FieldList {
+		for _, field := range t.Fields() {
 			collectLeafIDs(field.Type, field.ID, idset)
 		}
 	default:
@@ -1847,12 +1847,16 @@ func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowS
 	if err != nil {
 		return nil, err
 	}
+	nameMapping := as.metadata.NameMapping()
+	if err := validateNameMappingProperty(tableProperties, nameMapping); err != nil {
+		return nil, err
+	}
 
 	return &arrowScanInvariants{
 		tableSchema:     as.metadata.CurrentSchema(),
 		tableProperties: tableProperties,
 		projectedIDs:    projectedIDs,
-		nameMapping:     as.metadata.NameMapping(),
+		nameMapping:     nameMapping,
 	}, nil
 }
 
@@ -3466,7 +3470,7 @@ type taskReads struct {
 }
 
 // prepareTaskReads resolves the projected Arrow schema and the state to
-// read tasks with. It returns nil reads when the row limit is zero.
+// read tasks with. It returns nil reads when the row limit is zero or there are no tasks.
 func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, *taskReads, error) {
 	var err error
 	as.useLargeTypes, err = strconv.ParseBool(as.options.Get(ScanOptionArrowUseLargeTypes, "false"))
@@ -3508,7 +3512,7 @@ func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask)
 		return nil, nil, err
 	}
 
-	if as.rowLimit == 0 {
+	if as.rowLimit == 0 || len(tasks) == 0 {
 		return resultSchema, nil, nil
 	}
 

@@ -3540,18 +3540,11 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 func TestWriteDataFileNestedGeoNullCount(t *testing.T) {
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-		iceberg.NestedField{ID: 2, Name: "s", Required: false, Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "g", Type: iceberg.GeometryType{}, Required: false},
-			},
-		}},
-		iceberg.NestedField{ID: 4, Name: "l", Required: false, Type: &iceberg.ListType{
-			ElementID: 5, Element: iceberg.GeometryType{}, ElementRequired: false,
-		}},
-		iceberg.NestedField{ID: 6, Name: "m", Required: false, Type: &iceberg.MapType{
-			KeyID: 7, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 8, ValueType: iceberg.GeometryType{}, ValueRequired: false,
-		}},
+		iceberg.NestedField{ID: 2, Name: "s", Required: false, Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "g", Type: iceberg.GeometryType{}, Required: false},
+		)},
+		iceberg.NestedField{ID: 4, Name: "l", Required: false, Type: iceberg.NewListType(5, iceberg.GeometryType{}, false)},
+		iceberg.NestedField{ID: 6, Name: "m", Required: false, Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.GeometryType{}, false)},
 	)
 
 	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)

@@ -126,7 +126,7 @@ func newInspectContentFileBuilderFromFields(
 	if out.specID, err = inspectBuilderAs[*array.Int32Builder](lookup, inspectContentFieldIDSpecID, "spec_id"); err != nil {
 		return out, err
 	}
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
+	if partitionType != nil && partitionType.NumFields() > 0 {
 		partitionBuilder, bindErr := inspectBuilderAs[*array.StructBuilder](lookup, inspectContentFieldIDPartition, "partition")
 		if bindErr != nil {
 			return out, bindErr
@@ -262,7 +262,7 @@ func inspectContentFileFieldIDs(partitionType *iceberg.StructType) map[int]struc
 		inspectContentFieldIDContentOffset:      {},
 		inspectContentFieldIDContentSize:        {},
 	}
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
+	if partitionType != nil && partitionType.NumFields() > 0 {
 		ids[inspectContentFieldIDPartition] = struct{}{}
 	}
 
