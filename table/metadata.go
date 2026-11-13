@@ -500,7 +500,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.uuid = metadata.TableUUID()
 	b.loc = metadata.Location()
 	b.lastUpdatedMS = 0
-	b.lastColumnId = columnIDFloor(metadata.LastColumnID(), metadata.Schemas())
+	b.lastColumnId = metadata.LastColumnID()
 
 	if source, ok := metadata.(metadataBuilderSource); ok {
 		common := source.metadataBuilderCommon()
@@ -586,6 +586,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 		b.partitionStatsList = slices.Collect(metadata.PartitionStatistics())
 		b.encryptionKeyList = slices.Collect(metadata.EncryptionKeys())
 	}
+	b.lastColumnId = columnIDFloor(b.lastColumnId, b.schemaList)
 	b.schemaIndex = buildSchemaIndex(b.schemaList)
 
 	b.partitionSpecIndex = buildPartitionSpecIndex(b.specs)
