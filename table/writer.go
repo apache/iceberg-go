@@ -123,13 +123,18 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	if err != nil {
 		return nil, err
 	}
+	format := tblutils.GetFileFormat(fileFormat)
+	if format == nil {
+		return nil, fmt.Errorf("%w: writing %s files requires a supported reader", iceberg.ErrNotImplemented, fileFormat)
+	}
+
 	w := defaultDataFileWriter{
 		loc:            locProvider,
 		fs:             fs,
 		fileSchema:     meta.CurrentSchema(),
 		propertySchema: meta.CurrentSchema(),
 		fileFormat:     fileFormat,
-		format:         tblutils.GetFileFormat(fileFormat),
+		format:         format,
 		content:        iceberg.EntryContentData,
 		props:          props,
 	}
