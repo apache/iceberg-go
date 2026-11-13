@@ -818,6 +818,7 @@ func (scan *Scan) validateRowFilter(schema *iceberg.Schema) error {
 	}
 
 	_, err = iceberg.BindExpr(schema, rewritten, scan.caseSensitive)
+
 	return err
 }
 
