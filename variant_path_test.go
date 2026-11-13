@@ -78,6 +78,8 @@ func TestParseVariantPath(t *testing.T) {
 		{"bracket empty quoted member", "$['']", []string{""}},
 		{"bracket plain unicode", "$['naïve_東京']", []string{"naïve_東京"}},
 		{"bracket literal delimiters", "$['a.b[0]']", []string{"a.b[0]"}},
+		{"bracket raw space", "$['a b']", []string{"a b"}},
+		{"bracket raw DEL", "$['a\x7fb']", []string{"a\x7fb"}},
 		{"bracket two different escapes", "$['a\\nb\\tc']", []string{"a\nb\tc"}},
 		{"bracket mixed escaped and plain runs", "$['pre\\'mid\\\\end']", []string{"pre'mid\\end"}},
 		{"bracket nested", "$['location']['latitude']", []string{"location", "latitude"}},
