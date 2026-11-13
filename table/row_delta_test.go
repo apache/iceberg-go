@@ -28,6 +28,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -2276,4 +2277,192 @@ func TestRowDeltaDeleteForDataFileRemovedInSameTransaction(t *testing.T) {
 			})
 		}
 	}
+}
+
+// newPartitionedRowDeltaTable returns a table partitioned by identity(data).
+func newPartitionedRowDeltaTable(t *testing.T, formatVersion int) *table.Table {
+	t.Helper()
+
+	return newRowDeltaTableWithType(t, formatVersion, iceberg.PrimitiveTypes.String)
+}
+
+// newRowDeltaTableWithType returns a table partitioned by identity(data),
+// where data has the given type.
+func newRowDeltaTableWithType(t *testing.T, formatVersion int, dataType iceberg.Type) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: dataType, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "data",
+	})
+
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: formatVersionStr(formatVersion)})
+	require.NoError(t, err)
+
+	return table.New(
+		table.Identifier{"db", "row_delta_partitioned_test"},
+		meta, location+"/metadata/v1.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return iceio.LocalFS{}, nil
+		},
+		&rowDeltaCatalog{meta},
+	)
+}
+
+func buildPartitionedDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any) iceberg.DataFile {
+	t.Helper()
+
+	b, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, partition, nil, nil, 10, 1024)
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func buildPartitionedDV(t *testing.T, spec iceberg.PartitionSpec, path, refDataFile string, partition map[int]any) iceberg.DataFile {
+	t.Helper()
+
+	b, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+		path, iceberg.PuffinFile, partition, nil, nil, 2, 128)
+	require.NoError(t, err)
+
+	return b.ReferencedDataFile(refDataFile).ContentOffset(4).ContentSizeInBytes(64).Build()
+}
+
+// commitPartitionedDataFile commits a data file in partition data=a and
+// returns the updated table and the file's path.
+func commitPartitionedDataFile(t *testing.T, tbl *table.Table) (*table.Table, string) {
+	t.Helper()
+
+	dataPath := tbl.Location() + "/data/data=a/insert.parquet"
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).
+		AddRows(buildPartitionedDataFile(t, tbl.Spec(), dataPath, map[int]any{1000: "a"})).
+		Commit(t.Context()))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	return tbl, dataPath
+}
+
+// Why: the spec requires a delete file to carry the partition of the data
+// file it references, and scans match deletion vectors by path only.
+// Condition: a DV for a committed data file in data=a declares data=b.
+// Assertion: Commit rejects it; the same DV with data=a commits.
+func TestRowDeltaDVPartitionMustMatchDataFile(t *testing.T) {
+	t.Run("mismatched partition", func(t *testing.T) {
+		tbl, dataPath := commitPartitionedDataFile(t, newPartitionedRowDeltaTable(t, 3))
+
+		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath, map[int]any{1000: "b"})
+		err := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+		require.ErrorContains(t, err, "partition does not match")
+	})
+
+	t.Run("matching partition", func(t *testing.T) {
+		tbl, dataPath := commitPartitionedDataFile(t, newPartitionedRowDeltaTable(t, 3))
+
+		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath, map[int]any{1000: "a"})
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv).Commit(t.Context()))
+		_, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+	})
+
+	t.Run("data file added in the same row delta", func(t *testing.T) {
+		tbl := newPartitionedRowDeltaTable(t, 3)
+		dataPath := tbl.Location() + "/data/data=a/insert.parquet"
+
+		err := tbl.NewTransaction().NewRowDelta(nil).
+			AddRows(buildPartitionedDataFile(t, tbl.Spec(), dataPath, map[int]any{1000: "a"})).
+			AddDeletes(buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath, map[int]any{1000: "b"})).
+			Commit(t.Context())
+		require.ErrorContains(t, err, "partition does not match")
+	})
+}
+
+// Why: after partition evolution a caller can build a DV with the current
+// spec instead of the older spec its data file was written with.
+// Condition: the data file uses spec 0, the DV uses the evolved spec 1.
+// Assertion: Commit rejects the spec mismatch.
+func TestRowDeltaDVSpecMustMatchDataFileAfterEvolution(t *testing.T) {
+	tbl, dataPath := commitPartitionedDataFile(t, newPartitionedRowDeltaTable(t, 3))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSpec(false).AddIdentity("id").Commit())
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	spec := tbl.Spec()
+	require.Equal(t, 1, spec.ID())
+
+	dv := buildPartitionedDV(t, spec, tbl.Location()+"/data/dv.puffin", dataPath,
+		map[int]any{1000: "a", 1001: int64(1)})
+	err = tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+	require.ErrorContains(t, err, "uses partition spec 1")
+}
+
+// Why: manifests decode decimal partition values as DecimalLiteral while
+// callers and writers build iceberg.Decimal; the commit check must compare
+// them by value.
+// Condition: a decimal(9,2) data file is committed, then a DV for it.
+// Assertion: a DV with the same decimal partition commits; one with a
+// different decimal is rejected.
+func TestRowDeltaDVDecimalPartitionComparedByValue(t *testing.T) {
+	commitDecimalDataFile := func(t *testing.T) (*table.Table, string) {
+		t.Helper()
+
+		tbl := newRowDeltaTableWithType(t, 3, iceberg.MustDecimalTypeOf(9, 2))
+		dataPath := tbl.Location() + "/data/insert.parquet"
+		partition := map[int]any{1000: iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}}
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).
+			AddRows(buildPartitionedDataFile(t, tbl.Spec(), dataPath, partition)).
+			Commit(t.Context()))
+		tbl, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		return tbl, dataPath
+	}
+
+	t.Run("same decimal", func(t *testing.T) {
+		tbl, dataPath := commitDecimalDataFile(t)
+
+		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath,
+			map[int]any{1000: iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}})
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv).Commit(t.Context()))
+		_, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+	})
+
+	t.Run("different decimal", func(t *testing.T) {
+		tbl, dataPath := commitDecimalDataFile(t)
+
+		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath,
+			map[int]any{1000: iceberg.Decimal{Val: decimal128.FromI64(9999), Scale: 2}})
+		err := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+		require.ErrorContains(t, err, "partition does not match")
+	})
+}
+
+// Why: v2 position deletes that set referenced_data_file are bound to one
+// data file the same way DVs are, and iceberg-go's scan rejects a mismatch.
+// Condition: a v2 position delete for a data=a file declares data=b.
+// Assertion: Commit rejects it instead of committing an unscannable table.
+func TestRowDeltaV2PosDeletePartitionMustMatchReferencedDataFile(t *testing.T) {
+	tbl, dataPath := commitPartitionedDataFile(t, newPartitionedRowDeltaTable(t, 2))
+
+	b, err := iceberg.NewDataFileBuilder(tbl.Spec(), iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/pos-del.parquet", iceberg.ParquetFile, map[int]any{1000: "b"}, nil, nil, 5, 512)
+	require.NoError(t, err)
+
+	err = tbl.NewTransaction().NewRowDelta(nil).
+		AddDeletes(b.ReferencedDataFile(dataPath).Build()).
+		Commit(t.Context())
+	require.ErrorContains(t, err, "partition does not match")
 }
